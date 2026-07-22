@@ -114,8 +114,9 @@ members = [
     "codex-client",
     "codex-api",
     "state",
-    "telegram",
     "terminal-detection",
+    "tasknode-client",
+    "telegram",
     "test-binary-support",
     "thread-manager-sample",
     "thread-store",
@@ -224,6 +225,7 @@ codex-skills-extension = { path = "ext/skills" }
 codex-skills = { path = "skills" }
 codex-state = { path = "state" }
 codex-stdio-to-uds = { path = "stdio-to-uds" }
+codex-tasknode-client = { path = "tasknode-client" }
 codex-telegram = { path = "telegram" }
 codex-terminal-detection = { path = "terminal-detection" }
 codex-test-binary-support = { path = "test-binary-support" }
