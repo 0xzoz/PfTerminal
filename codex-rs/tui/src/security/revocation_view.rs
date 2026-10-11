@@ -473,14 +473,14 @@ fn review_text(choice: &Choice, level: SecurityLevel) -> (String, Vec<String>) {
         Choice::Core(HumanRevocation::KillSwitchOn) => (
             "Turn the kill switch on?".to_string(),
             vec![
-                "Everything \"Revoke all\" ends, and until you turn it off here: no grant can be issued, protected actions after untrusted content are refused, the browser and memory writes are refused, and the credential broker stays closed.".to_string(),
+                "Everything \"Revoke all\" ends, and until you turn it off here: nothing is sent to the model (each turn is refused with a message saying so), no grant can be issued, protected actions after untrusted content are refused, the browser and memory writes are refused, and the credential broker stays closed.".to_string(),
                 format!("Saved in security_state.json: it holds after a restart. The level stays {level}."),
             ],
         ),
         Choice::Core(HumanRevocation::KillSwitchOff) => (
             "Turn the kill switch off?".to_string(),
             vec![
-                "Protected actions can be approved again and grants can be issued. Revoked grants and approvals do not come back.".to_string(),
+                "Turns are sent to the model again, protected actions can be approved again and grants can be issued. Revoked grants and approvals do not come back.".to_string(),
                 format!("The level stays {level}: turning the kill switch off never lowers it."),
             ],
         ),

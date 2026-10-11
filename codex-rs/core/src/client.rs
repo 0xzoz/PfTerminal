@@ -302,6 +302,9 @@ impl RequestRouteTelemetry {
     }
 }
 
+/// Issue #445: why a model request was not sent while the kill switch is on.
+pub(crate) const KILL_SWITCH_REFUSAL: &str = "Not sent: the security kill switch is on, so nothing is sent to the model. To turn it off, open /security, press g, choose \"Turn the kill switch off\" and confirm.";
+
 /// A session-scoped client for model-provider API calls.
 ///
 /// This holds configuration and state that should be shared across turns within a Codex session
@@ -891,7 +894,24 @@ impl ModelClient {
         Ok(level)
     }
 
+    /// Issue #445: with the security kill switch on, no model request is
+    /// sent (a turn, compaction, memory summary or realtime call); a turn is
+    /// also refused before its input is recorded (`session::turn`). A policy
+    /// that cannot be read is refused by the source admission check instead.
+    pub(crate) fn refuse_under_kill_switch(&self) -> Result<()> {
+        let Some(policy) = &self.ingress_policy else {
+            return Ok(());
+        };
+        match policy.0.snapshot_for_agent(self.state.thread_id) {
+            Ok(snapshot) if snapshot.kill_switch_active => {
+                Err(CodexErr::InvalidRequest(KILL_SWITCH_REFUSAL.to_string()))
+            }
+            Ok(_) | Err(_) => Ok(()),
+        }
+    }
+
     pub(crate) fn check_source_admission(&self, prompt: &Prompt) -> Result<()> {
+        self.refuse_under_kill_switch()?;
         crate::security::ingress::check_native_request(
             self.source_admission_level()?,
             &prompt.input,
@@ -904,6 +924,7 @@ impl ModelClient {
         prompt: &Prompt,
         use_responses_lite: bool,
     ) -> Result<Vec<ResponseItem>> {
+        self.refuse_under_kill_switch()?;
         if self.source_admission_level()? == codex_security_policy::SecurityLevel::Permissive {
             return Ok(prompt.get_formatted_input_for_request(use_responses_lite));
         }
