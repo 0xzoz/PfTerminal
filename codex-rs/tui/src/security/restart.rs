@@ -33,14 +33,16 @@ pub fn restarted() -> bool {
 /// erases it before it draws.
 pub(crate) fn clear_restart_banner() {
     use std::io::IsTerminal as _;
-    use std::io::Write as _;
     if !restarted() || !std::io::stdout().is_terminal() {
         return;
     }
-    let mut stdout = std::io::stdout();
-    // Carriage return, then erase the whole line.
-    let _ = stdout.write_all(b"\r\x1b[2K");
-    let _ = stdout.flush();
+    // Back to the start of the line, then erase it (crossterm also handles
+    // consoles without escape-code processing).
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        crossterm::cursor::MoveToColumn(0),
+        crossterm::terminal::Clear(crossterm::terminal::ClearType::CurrentLine)
+    );
 }
 
 /// Printed, without a newline, just before "restart now" replaces the

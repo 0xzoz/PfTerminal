@@ -302,7 +302,7 @@ pub(crate) fn audit_at_launch(codex_home: &Path, config: &Config) -> Boundary {
 fn not_denied_at_launch(line: &str, config_layer: bool) -> String {
     if config_layer {
         format!(
-            "{line}; this config file holds a secret, and config files are read only after the sandbox is set up, so it could not be denied. Move the secret into the vault (or remove it) and restart"
+            "{line}; this config file holds a secret, and config files are read only after the sandbox is set up, so it was not denied. Move the secret into the vault (or remove it) and restart"
         )
     } else {
         format!(

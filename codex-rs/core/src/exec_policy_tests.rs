@@ -2799,8 +2799,9 @@ prefix_rule(pattern = ["rm"], decision = "forbidden")"#,
 /// #444 (AGG-30): "don't ask again" for `python3 src/notes.py list` must not
 /// carry a chained command. Under Aggressive's approval policy (untrusted) a
 /// chained command that is not read-only still asks, and a chained read-only
-/// one (`cat .env`) runs without a prompt but never outside the sandbox,
-/// whose denied reads keep `.env` closed.
+/// one (`cat .env`) runs without a prompt but never bypasses the sandbox
+/// (whether `.env` itself is readable there is the sandbox profile's
+/// protected-path rules, not tested here).
 #[tokio::test]
 async fn sec_444_remembered_prefix_does_not_cover_a_chained_command() {
     let policy_src = r#"

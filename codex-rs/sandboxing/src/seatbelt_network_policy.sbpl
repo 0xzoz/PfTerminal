@@ -11,7 +11,9 @@
 )
 
 (allow mach-lookup
-    ; User directory lookups (dirhelper, membership) are in the base policy.
+    ; Used by platform helpers that resolve user directory locations.
+    (global-name "com.apple.bsd.dirhelper")
+    (global-name "com.apple.system.opendirectoryd.membership")
 
     ; Communicate with the security server for TLS certificate information.
     (global-name "com.apple.SecurityServer")

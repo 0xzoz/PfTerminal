@@ -14,6 +14,6 @@ expression: terminal.backend().vt100().screen().contents()
   2. Yes, and don't ask again for commands that start with `echo hello world`
   3. No, and tell Corbanu Terminal what to do differently (esc)
 
-  A key in brackets highlights its option; enter confirms it. Options that last beyond this request:
-  choose with ↑/↓, then enter.                                                                      
+  A letter in brackets only highlights its option; enter confirms it. Options that last beyond this 
+  request: choose with ↑/↓, then enter.                                                             
   Press enter to confirm or esc to cancel
