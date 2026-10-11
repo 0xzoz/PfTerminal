@@ -88,7 +88,7 @@ fn a_credential_file_created_meanwhile_stops_the_command() {
             .unwrap()
             .unwrap();
         let mut child = sleeper();
-        let monitor = watcher.start(child.id() as libc::pid_t, Vec::new());
+        let monitor = watcher.start(child.id() as libc::pid_t, &[]);
         std::fs::create_dir_all(work.join(folder)).unwrap();
         std::fs::write(work.join(folder).join(name), "API_KEY=dummy").unwrap();
         assert!(killed(&mut child), "{folder}/{name}");
@@ -103,7 +103,7 @@ fn a_folder_moved_in_with_a_credential_file_stops_the_command() {
     let dir = tempfile::tempdir().unwrap();
     let work = root(&dir);
     std::fs::create_dir(work.join("in")).unwrap();
-    let outside = tempfile::tempdir_in(&work.join("..")).unwrap();
+    let outside = tempfile::tempdir_in(work.join("..")).unwrap();
     std::fs::create_dir_all(outside.path().join("pkg")).unwrap();
     std::fs::write(outside.path().join("pkg/.env"), "API_KEY=dummy").unwrap();
     let policy = deny_globs(credential_file_globs(&work.join("in").to_string_lossy()));
@@ -111,7 +111,7 @@ fn a_folder_moved_in_with_a_credential_file_stops_the_command() {
         .unwrap()
         .unwrap();
     let mut child = sleeper();
-    let monitor = watcher.start(child.id() as libc::pid_t, Vec::new());
+    let monitor = watcher.start(child.id() as libc::pid_t, &[]);
     std::fs::rename(outside.path().join("pkg"), work.join("in/pkg")).unwrap();
     assert!(killed(&mut child));
     assert!(monitor.stop().expect("stopped").ends_with("pkg/.env"));
@@ -127,7 +127,7 @@ fn other_names_and_placeholders_do_not_stop_the_command() {
         .unwrap()
         .unwrap();
     let mut child = sleeper();
-    let monitor = watcher.start(child.id() as libc::pid_t, vec![work.join(".env")]);
+    let monitor = watcher.start(child.id() as libc::pid_t, &[work.join(".env")]);
     for name in ["env", "x.env", ".environment", ".env"] {
         std::fs::write(work.join(name), "").unwrap();
     }
@@ -154,4 +154,63 @@ fn link_targets_are_reported() {
         .unwrap()
         .unwrap();
     assert_eq!(watcher.link_targets(), [work.join("shared.secret")]);
+}
+
+/// A credential name that is not a plain file refuses the command: what the
+/// person writes to it would land where the command can read it.
+#[test]
+fn unsafe_credential_entries_refuse_the_command() {
+    let cases: [(&str, fn(&Path)); 3] = [
+        ("is a link to nothing", |work| {
+            std::os::unix::fs::symlink("planted", work.join(".env")).unwrap();
+        }),
+        ("has other hard links", |work| {
+            std::fs::write(work.join("notes"), "").unwrap();
+            std::fs::hard_link(work.join("notes"), work.join(".env.local")).unwrap();
+        }),
+        ("is a pipe or socket", |work| {
+            let path = std::ffi::CString::new(work.join(".envrc").as_os_str().as_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        }),
+    ];
+    for (reason, plant) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let work = root(&dir);
+        std::fs::create_dir(work.join("app")).unwrap();
+        plant(&work.join("app"));
+        let policy = deny_globs(credential_file_globs(&work.to_string_lossy()));
+        let Err(refusal) = CredentialWatcher::for_policy(&policy, &work) else {
+            panic!("{reason}: not refused");
+        };
+        assert!(refusal.contains(reason), "{refusal}");
+        assert!(refused_message(&refusal).starts_with("Operation not permitted"));
+    }
+}
+
+/// Folders with a credential name (a `.env` virtualenv) and short-lived
+/// build folders do not stop the command.
+#[test]
+fn credential_named_and_temporary_folders_do_not_stop_the_command() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = root(&dir);
+    let policy = deny_globs(credential_file_globs(&work.to_string_lossy()));
+    let watcher = CredentialWatcher::for_policy(&policy, &work)
+        .unwrap()
+        .unwrap();
+    let mut child = sleeper();
+    let monitor = watcher.start(child.id() as libc::pid_t, &[]);
+    std::fs::create_dir_all(work.join(".env/bin")).unwrap();
+    std::fs::write(work.join(".env/bin/activate"), "").unwrap();
+    for round in 0..200 {
+        let tmp = work.join(format!("tmp{round}"));
+        std::fs::create_dir_all(tmp.join("a/b")).unwrap();
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+    std::fs::create_dir(work.join("old")).unwrap();
+    std::fs::rename(work.join("old"), work.join("new")).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(child.try_wait().unwrap(), None);
+    assert_eq!(monitor.stop(), None);
+    child.kill().unwrap();
+    child.wait().unwrap();
 }

@@ -42,7 +42,7 @@ const SECRET_ENV_PATTERNS: [&str; 4] = ["*VAULT*", "*PASSWORD*", "*PASSPHRASE*",
 pub(crate) const ROWS: [(&str, &str); 6] = [
     (
         "Sandbox",
-        "write only in the current folder (where the Corbanu home and the nested-launch registry stay read-only): no extra writable folders, no /tmp or $TMPDIR; approved commands stay inside it too; escalation and permission-request tools are off; the project's .codex and .agents stay read-only, even with Grant once; reading credential files (.env, .env.* and .envrc files, also ones created later; SSH, cloud and CLI tokens) or Corbanu's sign-in, vault, config and history is denied to agent commands and is never granted, not even once (switch to Permissive in /security to allow it)",
+        "write only in the current folder (where the Corbanu home and the nested-launch registry stay read-only): no extra writable folders, no /tmp or $TMPDIR; approved commands stay inside it too; escalation and permission-request tools are off; the project's .codex and .agents stay read-only, even with Grant once; reading credential files (.env, .env.* and .envrc files, also ones created later, on Windows from the next command on; SSH, cloud and CLI tokens) or Corbanu's sign-in, vault, config and history is denied to agent commands and is never granted, not even once (switch to Permissive in /security to allow it)",
     ),
     (
         "Approvals",
@@ -444,6 +444,16 @@ fn verify_credential_names(
     cwd: &Path,
     failures: &mut Vec<String>,
 ) {
+    if cwd
+        .to_string_lossy()
+        .contains(['*', '?', '[', ']', '{', '}'])
+    {
+        failures.push(format!(
+            "Sandbox: the current folder's path ({}) contains glob characters, so credential files created later cannot be denied by name; start from another folder",
+            cwd.display()
+        ));
+        return;
+    }
     let globs = file_system.get_unreadable_globs_with_cwd(cwd);
     let mut expected = credential_file_globs(&cwd.to_string_lossy());
     if cfg!(target_os = "macos") {

@@ -440,7 +440,7 @@ fn pf_41_s01_children_grants_taint_and_denials_are_correlated() {
             "main session: one command without the write protections; expires in 4m; used 1 of 2"
                 .to_string(),
             // #442: what a grant never lifts.
-            "Protected reads: never granted under Aggressive, not even once: credential files (.env, .env.* and .envrc files, also ones created later; SSH, cloud and CLI tokens) and Corbanu's sign-in, vault, config and history stay unreadable to agent commands; switch to Permissive in /security to allow them"
+            "Protected reads: never granted under Aggressive, not even once: credential files (.env, .env.* and .envrc files, also ones created later, on Windows from the next command on; SSH, cloud and CLI tokens) and Corbanu's sign-in, vault, config and history stay unreadable to agent commands; switch to Permissive in /security to allow them"
                 .to_string(),
             "Agent settings: always read-only under Aggressive, even with Grant once: the project's .codex and .agents (they set agent policy and can run code later)"
                 .to_string(),

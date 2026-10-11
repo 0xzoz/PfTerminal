@@ -10,9 +10,10 @@ Your own settings from config apply instead of each of these.
     or $TMPDIR; approved commands stay inside it too; escalation and permission-
     request tools are off; the project's .codex and .agents stay read-only, even
     with Grant once; reading credential files (.env, .env.* and .envrc files,
-    also ones created later; SSH, cloud and CLI tokens) or Corbanu's sign-in,
-    vault, config and history is denied to agent commands and is never granted,
-    not even once (switch to Permissive in /security to allow it)
+    also ones created later, on Windows from the next command on; SSH, cloud and
+    CLI tokens) or Corbanu's sign-in, vault, config and history is denied to
+    agent commands and is never granted, not even once (switch to Permissive
+    in /security to allow it)
 • Approvals: untrusted: you approve every command that is not known read-only
     (reviewer: you, never auto-review)
 • Network: off for agent commands; web search off

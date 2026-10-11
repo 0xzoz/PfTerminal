@@ -426,7 +426,7 @@ pub(crate) fn sections(
         grants.rows.push(row(
             "Protected reads",
             State::Enforcing,
-            "never granted under Aggressive, not even once: credential files (.env, .env.* and .envrc files, also ones created later; SSH, cloud and CLI tokens) and Corbanu's sign-in, vault, config and history stay unreadable to agent commands; switch to Permissive in /security to allow them",
+            "never granted under Aggressive, not even once: credential files (.env, .env.* and .envrc files, also ones created later, on Windows from the next command on; SSH, cloud and CLI tokens) and Corbanu's sign-in, vault, config and history stay unreadable to agent commands; switch to Permissive in /security to allow them",
             "resolved: level",
         ));
         grants.rows.push(row(

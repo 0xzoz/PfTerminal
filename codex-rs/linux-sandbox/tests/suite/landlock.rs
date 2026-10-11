@@ -1626,13 +1626,60 @@ async fn issue_442_env_created_while_a_command_runs_stops_it() {
     };
     let running = {
         let work = work.clone();
-        tokio::spawn(async move { run_in(&work, "sleep 3; cat .env.later; echo later=$?").await })
+        tokio::spawn(async move {
+            run_in(
+                &work,
+                "touch started; sleep 4; cat .env.later; echo later=$?",
+            )
+            .await
+        })
     };
-    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+    // Once the command is running inside the sandbox.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !work.join("started").exists() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(work.join("started").exists(), "the command did not start");
     std::fs::write(work.join(".env.later"), "API_KEY=dummy-442-later").unwrap();
     let later = running.await.unwrap();
     let text = format!("{}{}", later.stdout.text, later.stderr.text);
     assert!(!text.contains("dummy-442"), "{text}");
     assert!(!text.contains("later="), "{text}");
     assert!(text.contains("the sandbox stopped this command"), "{text}");
+}
+
+/// #442, real bubblewrap: a link planted under a credential name stops the
+/// command that plants it, and later commands are refused until it is
+/// removed, so the person's `.env` can never be written through it.
+#[tokio::test]
+async fn issue_442_a_planted_env_link_refuses_later_commands() {
+    let Some((_tmpdir, work)) = credential_workspace().await else {
+        return;
+    };
+    let planted = run_in(&work, "ln -s notes-later .env; sleep 2; echo planted=$?").await;
+    assert!(!planted.stdout.text.contains("planted="), "{planted:?}");
+    assert!(
+        planted
+            .stderr
+            .text
+            .contains("the sandbox stopped this command"),
+        "{planted:?}"
+    );
+    // While the link points nowhere, commands are refused.
+    let refused = run_in(&work, "cat notes.txt; echo notes=$?").await;
+    let text = format!("{}{}", refused.stdout.text, refused.stderr.text);
+    assert!(!text.contains("notes="), "{text}");
+    assert!(text.contains("is a link to nothing"), "{text}");
+    // The person writes the key through the link: its target is hidden too.
+    std::fs::write(work.join(".env"), "API_KEY=dummy-442-planted").unwrap();
+    let read = run_in(
+        &work,
+        "cat notes-later; echo target=$?; cat .env; echo link=$?",
+    )
+    .await;
+    let text = format!("{}{}", read.stdout.text, read.stderr.text);
+    assert!(!text.contains("dummy-442"), "{text}");
+    for line in ["target=1", "link=1"] {
+        assert!(read.stdout.text.contains(line), "{line} not in {text}");
+    }
 }

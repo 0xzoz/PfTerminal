@@ -358,7 +358,7 @@ fn run_bwrap_with_proc_fallback(
         sandbox_policy_cwd,
     )
     .unwrap_or_else(|err| {
-        eprintln!("error building bubblewrap command: {err}; refusing to run the command");
+        eprintln!("{}", crate::credential_watch::refused_message(&err));
         std::process::exit(1);
     });
     let mut file_system_sandbox_policy = file_system_sandbox_policy.clone();
@@ -565,11 +565,17 @@ fn run_bwrap_in_child_with_synthetic_mount_cleanup(
     }
 
     close_child_exec_start_read(exec_start_pipe[0]);
-    let credential_monitor = credential_watcher.map(|watcher| watcher.start(pid, placeholders));
+    let credential_monitor = credential_watcher.map(|watcher| watcher.start(pid, &placeholders));
     let protected_create_monitor = ProtectedCreateMonitor::start(&protected_create_targets);
     let signal_forwarders = install_bwrap_signal_forwarders(pid);
     release_child_exec_start(exec_start_pipe[1]);
     setup_signal_mask.restore();
+    // Stop the credential watcher while the child is still unreaped, so a
+    // late stop can never signal a reused pid.
+    let credential_stop = credential_monitor.and_then(|monitor| {
+        wait_for_bwrap_child_exit_without_reaping(pid);
+        monitor.stop()
+    });
     let status = wait_for_bwrap_child(pid);
     let cleanup_signal_mask = ForwardedSignalMask::block();
     BWRAP_CHILD_PID.store(0, Ordering::SeqCst);
@@ -579,8 +585,6 @@ fn run_bwrap_in_child_with_synthetic_mount_cleanup(
     cleanup_synthetic_mount_targets(&synthetic_mount_registrations);
     let protected_create_violation = protected_create_monitor_violation
         || cleanup_protected_create_targets(&protected_create_registrations);
-    let credential_stop =
-        credential_monitor.and_then(crate::credential_watch::CredentialMonitor::stop);
     signal_forwarders.restore();
     cleanup_signal_mask.restore();
     if let Some(found) = credential_stop {
@@ -897,6 +901,23 @@ fn reset_forwarded_signal_handlers_to_default() {
                 let err = std::io::Error::last_os_error();
                 panic!("failed to reset bubblewrap signal handler for {signal}: {err}");
             }
+        }
+    }
+}
+
+/// Returns once `pid` has exited, leaving it to be reaped.
+fn wait_for_bwrap_child_exit_without_reaping(pid: libc::pid_t) {
+    let Ok(id) = libc::id_t::try_from(pid) else {
+        return;
+    };
+    loop {
+        // SAFETY: `info` is a valid out pointer for `waitid`.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: plain syscall on this process's own child.
+        let res =
+            unsafe { libc::waitid(libc::P_PID, id, &mut info, libc::WEXITED | libc::WNOWAIT) };
+        if res == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            return;
         }
     }
 }

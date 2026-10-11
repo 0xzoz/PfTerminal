@@ -291,7 +291,9 @@ async fn pf_25_s01_declined_approval_drops_the_confirmed_grant() -> anyhow::Resu
 
 /// #442 (Travis, 2026-10-11): the project's `.codex` and `.agents` stay
 /// read-only under Aggressive even with "Grant once"; the grant still lifts
-/// the other write protections (a git hook here) for the same run.
+/// Core's other write protections (a git hook here) for the same run. This
+/// is Core's layer, under a plain workspace-write profile: the real
+/// Aggressive profile also keeps `.git` read-only, whatever the grant.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn issue_442_a_confirmed_grant_never_lifts_codex_or_agents() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));

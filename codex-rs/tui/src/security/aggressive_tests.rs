@@ -911,10 +911,11 @@ fn seatbelt_run(config: &Config, script: &str) -> String {
 }
 
 /// #442 (Travis, 2026-10-11), real `sandbox-exec`: under the Aggressive
-/// profile, `.env` files created after launch, by one agent command or by
-/// the person, cannot be read by the next agent command, in the workspace or
-/// elsewhere; the `.env` the preflight found keeps its explicit denial, and
-/// other files stay readable. Under Permissive nothing changes.
+/// profile an agent command cannot create a credential file, and ones the
+/// person creates after launch cannot be read (or overwritten) by the next
+/// agent command, in the workspace or elsewhere; the `.env` the preflight
+/// found keeps its explicit denial, and other files stay readable. Under
+/// Permissive nothing changes.
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn issue_442_credential_files_created_later_stay_unreadable_under_seatbelt() {
@@ -935,24 +936,30 @@ async fn issue_442_credential_files_created_later_stay_unreadable_under_seatbelt
         Vec::<String>::new()
     );
 
-    // One agent command creates credential files mid-session.
+    // An agent command cannot create credential files mid-session (so it
+    // cannot plant a link the person's file would be written through).
     let made = seatbelt_run(
         &config,
-        "mkdir -p app && printf API_KEY=dummy-made-by-agent > .env.local && \
-         printf API_KEY=dummy-made-by-agent > app/.env && \
-         printf 'export API_KEY=dummy-made-by-agent' > .envrc; echo made=$?",
+        "mkdir -p app; printf API_KEY=dummy-made-by-agent > .env.local; echo local=$?; \
+         printf API_KEY=dummy-made-by-agent > app/.env; echo app=$?; \
+         ln -s notes.txt .envrc; echo link=$?",
     );
-    assert!(made.contains("made=0"), "{made}");
-    // The person creates more, here and in another project.
+    for line in ["local=1", "app=1", "link=1"] {
+        assert!(made.contains(line), "{line} not in {made}");
+    }
+    // The person creates them, here and in another project.
+    std::fs::write(cwd.join(".env.local"), "API_KEY=dummy-made-by-person").unwrap();
+    std::fs::write(cwd.join("app/.env"), "API_KEY=dummy-made-by-person").unwrap();
+    std::fs::write(cwd.join(".envrc"), "export API_KEY=dummy-made-by-person").unwrap();
     std::fs::write(cwd.join(".env.production"), "API_KEY=dummy-made-by-person").unwrap();
     std::fs::write(elsewhere.join(".env"), "API_KEY=dummy-elsewhere").unwrap();
-
     // The next agent command can read none of them, in any spelling.
     let script = format!(
         "for f in .env .env.local app/.env .envrc .env.production '{}/.env' ./app/../.env.local; do \
          cat \"$f\"; echo \"$f=$?\"; done; cp .env.local copy; echo copy=$?; \
          ln .env.local hard; echo hard=$?; ln -s .env.local soft; cat soft; echo soft=$?; \
-         mv .env.local moved; echo moved=$?; cat notes.txt; echo notes=$?",
+         mv .env.local moved; echo moved=$?; printf x > .env.production; echo over=$?; \
+         cat notes.txt; echo notes=$?",
         elsewhere.display()
     );
     let read = seatbelt_run(&config, &script);
@@ -967,6 +974,7 @@ async fn issue_442_credential_files_created_later_stay_unreadable_under_seatbelt
         "copy=1",
         "soft=1",
         "moved=1",
+        "over=1",
         "plain-notes",
         "notes=0",
     ] {

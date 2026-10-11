@@ -758,9 +758,10 @@ async fn issue_442_aggressive_denied_protected_read_is_explained() -> anyhow::Re
     Ok(())
 }
 
-/// #442 (Travis, 2026-10-11): under Aggressive's credential-name rules, a
-/// `.env` file one agent command creates mid-session cannot be read by the
-/// next, and that denial is explained like any other protected read.
+/// #442 (Travis, 2026-10-11): under Aggressive's credential-name rules an
+/// agent command cannot create a `.env` file, and one the person created
+/// (in no deny list, only matched by name) cannot be read; that denial is
+/// explained like any other protected read.
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn issue_442_env_file_created_mid_session_is_denied_and_explained() -> anyhow::Result<()> {
@@ -779,7 +780,7 @@ async fn issue_442_env_file_created_mid_session_is_denied_and_explained() -> any
         vec![
             shell_step(
                 "call-make",
-                "printf API_KEY=dummy-442-new > .env.local; echo made=$?",
+                "printf API_KEY=dummy-442-agent > .env.new; echo made=$?",
             ),
             shell_step("call-read", "cat .env.local"),
             done_step(),
@@ -787,6 +788,8 @@ async fn issue_442_env_file_created_mid_session_is_denied_and_explained() -> any
         |config| {
             // Aggressive's profile: write in the workspace, credential names
             // denied below it (`tui::security::aggressive`).
+            std::fs::write(config.cwd.join(".env.local"), "API_KEY=dummy-442-new")
+                .expect("the person's .env.local");
             let cwd = config.cwd.to_string_lossy().into_owned();
             let (mut file_system, network) =
                 PermissionProfile::workspace_write().to_runtime_permissions();
@@ -829,7 +832,8 @@ async fn issue_442_env_file_created_mid_session_is_denied_and_explained() -> any
     .await;
     let requests = captured.requests();
     let made = output_text(&requests[requests.len() - 2], "call-make");
-    assert!(made.contains("made=0"), "{made}");
+    assert!(made.contains("made=1"), "{made}");
+    assert!(!test.cwd_path().join(".env.new").exists());
     let output = output_text(&requests[requests.len() - 1], "call-read");
     assert!(!output.contains("dummy-442-new"), "{output}");
     assert!(output.contains("Operation not permitted"), "{output}");

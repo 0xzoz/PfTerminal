@@ -115,7 +115,7 @@ impl GrantReview {
         let offer = &self.offer;
         let mut lines: Vec<Line<'static>> = vec!["Grant this command?".bold().into()];
         lines.extend(wrap(
-            "Under Aggressive an approval never lifts the write protections (shell and git startup files, git hooks and config). This grant lets exactly this command run without them; a file written this way can run code later, outside the sandbox. Credential files and the Corbanu home stay unreadable, and Corbanu's own files and the project's .codex and .agents read-only: that is never granted under Aggressive.",
+            "Under Aggressive an approval never lifts the write protections (shell and git startup files, git hooks and config outside the project's .git). This grant lets exactly this command run without them; a file written this way can run code later, outside the sandbox. Credential files and the Corbanu home stay unreadable, and Corbanu's own files and the project's .git, .codex and .agents read-only: that is never granted under Aggressive.",
         ));
         lines.push(Line::default());
         let label_width = 12;

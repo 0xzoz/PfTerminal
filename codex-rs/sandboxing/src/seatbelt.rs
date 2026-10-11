@@ -6,6 +6,7 @@ use codex_network_proxy::proxy_url_env_value;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::permissions::PROTECTED_METADATA_PATH_NAMES;
+use codex_protocol::permissions::credential_file_glob_root;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::WritableRoot;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -699,10 +700,20 @@ fn build_seatbelt_unreadable_glob_policy(
         {
             regexes.insert(regex);
         }
+        // #442: a credential file name is also never created, linked, renamed
+        // to or written by an agent command (folders aside, such as a `.env`
+        // virtualenv). Otherwise a command could plant a link or pipe under the
+        // name and read what the person later writes through it.
+        let credential_name = credential_file_glob_root(&pattern).is_some();
         for regex in regexes {
             let regex = regex.replace('"', "\\\"");
             policy_components.push(format!(r#"(deny file-read* (regex #"{regex}"))"#));
             policy_components.push(format!(r#"(deny file-write-unlink (regex #"{regex}"))"#));
+            if credential_name {
+                policy_components.push(format!(
+                    r#"(deny file-write* (require-all (regex #"{regex}") (require-not (vnode-type DIRECTORY))))"#
+                ));
+            }
         }
     }
 

@@ -6,13 +6,17 @@
 //! denies the credential names ([`CREDENTIAL_FILE_NAME_PATTERNS`]) below a
 //! folder:
 //! - every command hides the matches that exist when it starts (the policy's
-//!   glob expansion), whoever created them and whenever;
+//!   glob expansion, plus what a credential-named link points to);
+//! - a credential name that is not a plain file (a link to nothing, a pipe or
+//!   device, a file with other hard links) refuses the command: whatever the
+//!   person writes to it would land somewhere the command can read;
 //! - this watcher covers the rest: it watches every folder below that folder
-//!   (inotify) from before that expansion until the command ends, and a file
-//!   with such a name created, linked or moved in meanwhile stops the command
-//!   at once (SIGKILL). Later commands hide the file.
-//! - Fail closed: a folder that cannot be watched refuses the command, and
-//!   lost events (queue overflow) stop it.
+//!   (inotify) from before that expansion until the command ends, and a
+//!   non-folder with such a name created, linked or moved in meanwhile stops
+//!   the command at once (SIGKILL). Later commands hide the file.
+//! - Fail closed: a folder that cannot be watched, or one on a filesystem
+//!   whose changes from elsewhere inotify does not see (network, FUSE, 9p),
+//!   refuses the command; after lost events everything is scanned again.
 //!
 //! Limits: the stop follows the create event, so a process already waiting
 //! for the file could read it in that moment; a folder reached through a
@@ -21,12 +25,15 @@
 //! unknown, so it may be the person's own).
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::ffi::CString;
 use std::ffi::OsStr;
 use std::os::fd::AsRawFd;
 use std::os::fd::FromRawFd;
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::FileTypeExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -43,16 +50,35 @@ use codex_protocol::permissions::is_credential_file_name;
 /// Folders watched for one command, at most. Past it the command is refused.
 const MAX_WATCHED_FOLDERS: usize = 100_000;
 
-const WATCH_MASK: u32 = libc::IN_CREATE | libc::IN_MOVED_TO | libc::IN_ONLYDIR;
+const WATCH_MASK: u32 =
+    libc::IN_CREATE | libc::IN_MOVED_TO | libc::IN_ONLYDIR | libc::IN_DONT_FOLLOW;
 
-/// The folders whose credential names the policy denies, existing, outermost
-/// only. The filesystem root is left out: its glob is not expanded either.
+/// Filesystems where a change made elsewhere (the server, the host, another
+/// client) raises no inotify event here.
+const UNWATCHABLE_FILESYSTEMS: &[(i64, &str)] = &[
+    (0x6969, "NFS"),
+    (0x517B, "SMB"),
+    (0xFF53_4D42, "CIFS"),
+    (0xFE53_4D42, "SMB2"),
+    (0x0102_1997, "9p"),
+    (0x6573_5546, "FUSE"),
+    (0x564c, "NCP"),
+    (0x7346_7461, "Ceph"),
+    (0x0bd0_0bd0, "Lustre"),
+    (0x6a65_6a63, "AFS"),
+];
+
+/// The folders whose credential names the policy denies, existing, by their
+/// real path, outermost only. The filesystem root is left out: its glob is
+/// not expanded either.
 pub(crate) fn credential_watch_roots(policy: &FileSystemSandboxPolicy, cwd: &Path) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = policy
         .get_unreadable_globs_with_cwd(cwd)
         .iter()
         .filter_map(|pattern| credential_file_glob_root(pattern))
-        .filter(|root| root != Path::new("/") && root.is_dir())
+        .filter(|root| root != Path::new("/"))
+        .filter_map(|root| std::fs::canonicalize(root).ok())
+        .filter(|root| root.is_dir())
         .collect();
     roots.sort();
     roots.dedup();
@@ -67,12 +93,26 @@ pub(crate) fn credential_watch_roots(policy: &FileSystemSandboxPolicy, cwd: &Pat
         .collect()
 }
 
+/// How [`CredentialWatcher::watch_tree`] treats what it finds.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Scan {
+    /// Before the command: existing credential files are hidden, unsafe ones
+    /// refuse it.
+    Start,
+    /// While it runs: any credential file not seen at the start stops it.
+    Running,
+}
+
 /// Watches set up before the command's view is built.
 pub(crate) struct CredentialWatcher {
     fd: OwnedFd,
+    roots: Vec<PathBuf>,
     folders: HashMap<libc::c_int, PathBuf>,
+    /// Credential files present at the start (hidden by the glob
+    /// expansion), with their inode.
+    known: HashMap<PathBuf, u64>,
     /// Mount points bubblewrap itself creates (empty placeholders).
-    placeholders: Vec<PathBuf>,
+    placeholders: HashSet<PathBuf>,
     /// What existing links with a credential name point to.
     link_targets: Vec<PathBuf>,
 }
@@ -85,7 +125,9 @@ pub(crate) struct CredentialMonitor {
 }
 
 impl CredentialWatcher {
-    /// `None` when the policy denies no credential names below a folder.
+    /// `None` when the policy denies no credential names below a folder;
+    /// `Err` (the command must not run) explains why it cannot be protected
+    /// ([`refused_message`]).
     pub(crate) fn for_policy(
         policy: &FileSystemSandboxPolicy,
         cwd: &Path,
@@ -94,10 +136,27 @@ impl CredentialWatcher {
         if roots.is_empty() {
             return Ok(None);
         }
-        let mut watcher = Self::new()?;
+        // SAFETY: plain syscall; the returned descriptor is owned below.
+        let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+        if fd < 0 {
+            return Err(format!(
+                "cannot watch for credential files created while the command runs: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let mut watcher = Self {
+            // SAFETY: `fd` is a fresh descriptor nothing else owns.
+            fd: unsafe { OwnedFd::from_raw_fd(fd) },
+            roots: roots.clone(),
+            folders: HashMap::new(),
+            known: HashMap::new(),
+            placeholders: HashSet::new(),
+            link_targets: Vec::new(),
+        };
         for root in &roots {
-            // Matches that exist now are hidden by the glob expansion.
-            watcher.watch_tree(root, /*report_matches*/ false)?;
+            if let Some(refusal) = watcher.watch_tree(root, Scan::Start) {
+                return Err(refusal);
+            }
         }
         Ok(Some(watcher))
     }
@@ -108,49 +167,54 @@ impl CredentialWatcher {
         &self.link_targets
     }
 
-    fn new() -> Result<Self, String> {
-        let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
-        if fd < 0 {
-            return Err(format!(
-                "cannot watch for credential files created while the command runs: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        Ok(Self {
-            fd: unsafe { OwnedFd::from_raw_fd(fd) },
-            folders: HashMap::new(),
-            placeholders: Vec::new(),
-            link_targets: Vec::new(),
-        })
-    }
-
     /// Watches `root` and every folder below it (each before it is listed,
-    /// so nothing created meanwhile is missed). With `report_matches`, an
-    /// existing credential name found on the way is returned.
-    fn watch_tree(&mut self, root: &Path, report_matches: bool) -> Result<Option<String>, String> {
-        let mut pending = vec![root.to_path_buf()];
-        while let Some(folder) = pending.pop() {
+    /// so nothing created meanwhile is missed). Returns why the command must
+    /// not run ([`Scan::Start`]) or must stop ([`Scan::Running`]).
+    fn watch_tree(&mut self, root: &Path, scan: Scan) -> Option<String> {
+        let parent_device = root
+            .parent()
+            .and_then(|parent| std::fs::metadata(parent).ok())
+            .map(|metadata| metadata.dev());
+        let mut pending = vec![(root.to_path_buf(), parent_device)];
+        while let Some((folder, parent_device)) = pending.pop() {
+            // Only the starting folders must exist; the others may be gone
+            // (temporary build folders) or renamed (their new name raises its
+            // own event).
+            let required = scan == Scan::Start && self.roots.contains(&folder);
+            let device = match std::fs::symlink_metadata(&folder) {
+                Ok(metadata) if metadata.is_dir() => metadata.dev(),
+                Ok(_) | Err(_) if !required => continue,
+                Ok(_) => return Some(format!("{} is not a folder", folder.display())),
+                Err(err) => return Some(format!("cannot read {}: {err}", folder.display())),
+            };
+            if parent_device != Some(device)
+                && let Some(kind) = unwatchable_filesystem(&folder)
+            {
+                return Some(format!(
+                    "{} is on a {kind} filesystem, where credential files created from elsewhere \
+                     cannot be seen",
+                    folder.display()
+                ));
+            }
             if self.folders.len() >= MAX_WATCHED_FOLDERS {
-                return Err(format!(
+                return Some(format!(
                     "more than {MAX_WATCHED_FOLDERS} folders to watch for credential files below {}",
                     root.display()
                 ));
             }
             let Ok(path) = CString::new(folder.as_os_str().as_bytes()) else {
-                return Err(format!("cannot watch {}", folder.display()));
+                return Some(format!("cannot watch {}", folder.display()));
             };
+            // SAFETY: `path` is a valid NUL-terminated string and the
+            // descriptor is open.
             let wd =
                 unsafe { libc::inotify_add_watch(self.fd.as_raw_fd(), path.as_ptr(), WATCH_MASK) };
             if wd < 0 {
                 let err = std::io::Error::last_os_error();
-                // Removed (or replaced by a file or link) since it was
-                // listed: nothing below it to watch.
-                if folder != root
-                    && matches!(err.raw_os_error(), Some(libc::ENOENT | libc::ENOTDIR))
-                {
+                if !required && matches!(err.raw_os_error(), Some(libc::ENOENT | libc::ENOTDIR)) {
                     continue;
                 }
-                return Err(format!(
+                return Some(format!(
                     "cannot watch {} for credential files: {err}",
                     folder.display()
                 ));
@@ -158,39 +222,74 @@ impl CredentialWatcher {
             self.folders.insert(wd, folder.clone());
             let entries = match std::fs::read_dir(&folder) {
                 Ok(entries) => entries,
-                Err(err) if folder != root && err.kind() == std::io::ErrorKind::NotFound => {
-                    continue;
-                }
-                Err(err) => {
-                    return Err(format!("cannot list {}: {err}", folder.display()));
-                }
+                Err(err) if !required && err.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(err) => return Some(format!("cannot list {}: {err}", folder.display())),
             };
             for entry in entries {
-                let entry =
-                    entry.map_err(|err| format!("cannot list {}: {err}", folder.display()))?;
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(err) => return Some(format!("cannot list {}: {err}", folder.display())),
+                };
                 let name = entry.file_name();
                 let path = folder.join(&name);
-                let kind = entry.file_type().ok();
-                if is_credential_file_name(&name) {
-                    if report_matches && !self.placeholders.contains(&path) {
-                        return Ok(Some(path.display().to_string()));
-                    }
-                    // The glob expansion lists no links: hide what a link
-                    // with a credential name points to instead.
-                    if kind.is_some_and(|kind| kind.is_symlink())
-                        && let Ok(target) = std::fs::canonicalize(&path)
-                        && !target.is_dir()
-                    {
-                        self.link_targets.push(target);
-                    }
-                }
                 // Links are not followed, as in the glob expansion.
-                if kind.is_some_and(|kind| kind.is_dir()) {
-                    pending.push(path);
+                let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                    continue;
+                };
+                if metadata.is_dir() {
+                    pending.push((path, Some(device)));
+                    continue;
+                }
+                if !is_credential_file_name(&name) || self.placeholders.contains(&path) {
+                    continue;
+                }
+                match scan {
+                    Scan::Start => {
+                        if let Some(refusal) = self.check_existing(&path, &metadata) {
+                            return Some(refusal);
+                        }
+                        self.known.insert(path, metadata.ino());
+                    }
+                    Scan::Running if self.known.get(&path) != Some(&metadata.ino()) => {
+                        return Some(path.display().to_string());
+                    }
+                    Scan::Running => {}
                 }
             }
         }
-        Ok(None)
+        None
+    }
+
+    /// An existing credential-named entry the command can be protected from:
+    /// a plain file (hidden by the glob expansion) or a link to an existing
+    /// file (its target is hidden too) or folder.
+    fn check_existing(&mut self, path: &Path, metadata: &std::fs::Metadata) -> Option<String> {
+        let kind = metadata.file_type();
+        if kind.is_file() && metadata.nlink() <= 1 {
+            return None;
+        }
+        if kind.is_symlink()
+            && let Ok(target) = std::fs::canonicalize(path)
+        {
+            if target.is_file() {
+                self.link_targets.push(target);
+            }
+            return None;
+        }
+        let what = if kind.is_file() {
+            "has other hard links"
+        } else if kind.is_symlink() {
+            "is a link to nothing"
+        } else if kind.is_fifo() || kind.is_socket() {
+            "is a pipe or socket"
+        } else {
+            "is not a regular file"
+        };
+        Some(format!(
+            "the credential file {} {what}, so what is written to it could be read under another \
+             name; remove or rename it",
+            path.display()
+        ))
     }
 
     /// Starts watching beside the command `child`, which is killed as soon
@@ -199,9 +298,12 @@ impl CredentialWatcher {
     pub(crate) fn start(
         mut self,
         child: libc::pid_t,
-        placeholders: Vec<PathBuf>,
+        placeholders: &[PathBuf],
     ) -> CredentialMonitor {
-        self.placeholders = placeholders;
+        self.placeholders = placeholders
+            .iter()
+            .map(|path| real_spelling(path))
+            .collect();
         let stop = Arc::new(AtomicBool::new(false));
         let found = Arc::new(Mutex::new(None));
         let (thread_stop, thread_found) = (Arc::clone(&stop), Arc::clone(&found));
@@ -210,6 +312,9 @@ impl CredentialWatcher {
                 let Some(event) = self.next_match() else {
                     continue;
                 };
+                // SAFETY: plain syscall. The child is not reaped before this
+                // thread is stopped (`waitid` with `WNOWAIT`), so its pid
+                // cannot have been reused.
                 unsafe {
                     libc::kill(child, libc::SIGKILL);
                 }
@@ -234,10 +339,12 @@ impl CredentialWatcher {
             events: libc::POLLIN,
             revents: 0,
         };
+        // SAFETY: one valid pollfd.
         if unsafe { libc::poll(&mut poll_fd, 1, 20) } <= 0 {
             return None;
         }
         let mut buffer = [0_u8; 64 * 1024];
+        // SAFETY: reads at most `buffer.len()` bytes into `buffer`.
         let read = unsafe {
             libc::read(
                 self.fd.as_raw_fd(),
@@ -258,32 +365,40 @@ impl CredentialWatcher {
     fn matches_in(&mut self, mut events: &[u8]) -> Option<String> {
         const HEADER: usize = std::mem::size_of::<libc::inotify_event>();
         while events.len() >= HEADER {
+            // SAFETY: at least `HEADER` bytes remain; the read is unaligned.
             let event: libc::inotify_event =
                 unsafe { std::ptr::read_unaligned(events.as_ptr().cast()) };
-            let end = HEADER + event.len as usize;
-            let name = events.get(HEADER..end)?;
-            events = &events[end.min(events.len())..];
+            let end = HEADER.saturating_add(usize::try_from(event.len).unwrap_or(usize::MAX));
+            let Some(name) = events.get(HEADER..end) else {
+                return Some("a truncated credential file watch event".to_string());
+            };
+            events = &events[end..];
             if event.mask & libc::IN_Q_OVERFLOW != 0 {
-                return Some("events were lost while watching for credential files".to_string());
+                // Events were lost: look at everything again.
+                for root in self.roots.clone() {
+                    if let Some(found) = self.watch_tree(&root, Scan::Running) {
+                        return Some(found);
+                    }
+                }
+                continue;
             }
             let name = name.split(|byte| *byte == 0).next().unwrap_or_default();
             if name.is_empty() {
                 continue;
             }
             let name = OsStr::from_bytes(name);
-            let folder = self.folders.get(&event.wd).cloned().unwrap_or_default();
+            let Some(folder) = self.folders.get(&event.wd).cloned() else {
+                continue;
+            };
             let path = folder.join(name);
-            if is_credential_file_name(name) && !self.placeholders.contains(&path) {
-                return Some(path.display().to_string());
-            }
             if event.mask & libc::IN_ISDIR != 0 {
                 // A folder created or moved in: watch it, and anything
                 // already inside it counts as created now.
-                match self.watch_tree(&path, /*report_matches*/ true) {
-                    Ok(None) => {}
-                    Ok(Some(found)) => return Some(found),
-                    Err(err) => return Some(err),
+                if let Some(found) = self.watch_tree(&path, Scan::Running) {
+                    return Some(found);
                 }
+            } else if is_credential_file_name(name) && !self.placeholders.contains(&path) {
+                return Some(path.display().to_string());
             }
         }
         None
@@ -291,7 +406,8 @@ impl CredentialWatcher {
 }
 
 impl CredentialMonitor {
-    /// What stopped the command, if anything did.
+    /// What stopped the command, if anything did. Call it before the
+    /// command is reaped.
     pub(crate) fn stop(self) -> Option<String> {
         self.stop.store(true, Ordering::SeqCst);
         if self.handle.join().is_err() {
@@ -302,6 +418,45 @@ impl CredentialMonitor {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
     }
+}
+
+/// `path` with its folder resolved, the way the watcher spells paths.
+fn real_spelling(path: &Path) -> PathBuf {
+    match (
+        path.parent()
+            .and_then(|parent| std::fs::canonicalize(parent).ok()),
+        path.file_name(),
+    ) {
+        (Some(parent), Some(name)) => parent.join(name),
+        _ => path.to_path_buf(),
+    }
+}
+
+/// The kind of filesystem `folder` is on, when inotify there misses changes
+/// made from elsewhere.
+fn unwatchable_filesystem(folder: &Path) -> Option<&'static str> {
+    let path = CString::new(folder.as_os_str().as_bytes()).ok()?;
+    // SAFETY: `statfs` writes into the zeroed struct.
+    let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: valid path and out pointer.
+    if unsafe { libc::statfs(path.as_ptr(), &mut stat) } != 0 {
+        return None;
+    }
+    #[allow(clippy::useless_conversion)]
+    let kind = i64::from(stat.f_type);
+    UNWATCHABLE_FILESYSTEMS
+        .iter()
+        .find(|(magic, _)| *magic == kind)
+        .map(|(_, name)| *name)
+}
+
+/// What the person and the model see when a command is refused.
+pub(crate) fn refused_message(reason: &str) -> String {
+    format!(
+        "Operation not permitted: the sandbox refuses to run this command because it cannot keep \
+         credential files ({}) hidden from it: {reason}.",
+        CREDENTIAL_FILE_NAME_PATTERNS.join(", ")
+    )
 }
 
 /// What the person and the model see when a command was stopped.
