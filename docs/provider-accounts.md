@@ -57,8 +57,9 @@ account of the current provider, as the provider reported them. It covers the
 whole session, so a spawned agent on another account counts toward that
 account. Only token counts are shown: no prices and no cost records.
 
-- One account is one line: `work · 35,100 input · 12,000 cached input · 6,247
-  output (300 reasoning)`. Before the first reply it reads `no usage yet`.
+- One account is one line, such as
+  `work · 35,100 input · 12,000 cached input · 6,247 output (300 reasoning)`.
+  Before the first reply it reads `no usage yet`.
 - Several accounts are a short table with the session's account marked
   `(active)`.
 - **Input** is the uncached part, as on the **Token usage** line; cached input

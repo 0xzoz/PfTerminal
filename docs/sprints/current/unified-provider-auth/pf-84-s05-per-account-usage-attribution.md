@@ -65,20 +65,13 @@ Paths are under `codex-rs/`, at `63ea3d0cbd`.
   provider, account and model, in this conversation (coordinator and spawned agents) and in
   other conversations (`corbanu exec` workers) of the same home, reconciling exactly.
 - [x] Merged behind `named_accounts` with gate evidence: [gate](../../../../qa/provider-auth/pf-84/s05-gate.md).
+- [x] Follow-up (Travis, 2026-10-11, option b): release `/status` shows token totals per account,
+  no cost records ([#528](https://github.com/CorbanuCore/CorbanuTerminal/pull/528), [gate](../../../../qa/provider-auth/pf-84/s05-status-tokens-gate.md)).
 
 ## Remaining
 
 - [ ] Code-blind functional acceptance (independent; not the implementer's), then Travis's sign-off.
-- [ ] Known limit (gate): a named account's throttle row is keyed by name, so a replaced key
-  keeps an active cooldown.
-
-## Follow-up: token usage per account in release builds
-
-Travis chose option (b) on 2026-10-11: `/status` shows this session's token totals per account of
-the current provider (spawned agents count toward their own account), with no prices or cost records;
-`/cost` stays developer-accounting only. Behind `named_accounts`; with it off `/status` is unchanged.
-Its counts match `/cost` for the same session. Branch `pf-84-status-account-tokens`; gate:
-[s05-status-tokens-gate.md](../../../../qa/provider-auth/pf-84/s05-status-tokens-gate.md).
+- [ ] Known limit: a named account's throttle row is keyed by name; a replaced key keeps its cooldown.
 
 ## Verification
 
