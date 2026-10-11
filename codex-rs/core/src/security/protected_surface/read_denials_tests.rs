@@ -853,3 +853,55 @@ fn issue_518_sandboxed_commands_cannot_read_the_key_through_a_linked_home() {
         assert!(stdout.contains(line), "{line} not in {stdout}");
     }
 }
+
+/// #518 review: a dangling link whose target climbs through another link
+/// (`d/../.ssh/id_new` with `d -> ../Documents`) is checked where the
+/// system would resolve it, and a chain too long to follow is not readable.
+#[test]
+fn issue_518_dangling_links_resolve_through_the_folders_they_name() {
+    let fx = linked_home_with_agents_link_to_key();
+    let cwd = fx.cwd.as_path();
+    std::fs::create_dir_all(fx.real_home.join("Documents")).unwrap();
+    std::os::unix::fs::symlink("../Documents", cwd.join("d")).unwrap();
+    std::fs::remove_file(cwd.join(".agents")).unwrap();
+    std::os::unix::fs::symlink("d/../.ssh/id_new", cwd.join(".agents")).unwrap();
+    for hop in 0..9 {
+        let next = if hop == 8 {
+            "missing".to_string()
+        } else {
+            format!("chain{}", hop + 1)
+        };
+        std::os::unix::fs::symlink(&next, cwd.join(format!("chain{hop}"))).unwrap();
+    }
+    let denials = ReadDenials::collect(&fx.codex_home, Some(&fx.linked_home), None, &[abs(cwd)]);
+    let policy = denials
+        .apply(&PermissionProfile::Disabled)
+        .unwrap()
+        .file_system_sandbox_policy();
+    assert!(!readable_under(&policy, &cwd.join(".agents"), cwd));
+    assert!(!readable_under(&policy, &cwd.join("chain0"), cwd));
+    assert!(readable_under(&policy, &cwd.join("not-yet.txt"), cwd));
+}
+
+/// #518 review: a home name whose real folder only holds the active home
+/// (`~/.corbanu -> ~/.codex/corbanu`) stays denied whole: its own stores
+/// are not the active home's.
+#[test]
+fn issue_518_a_home_name_above_the_active_home_stays_denied() {
+    let dir = tempfile::tempdir().unwrap();
+    let user_home = dir.path().canonicalize().unwrap();
+    let legacy = user_home.join(".codex");
+    let codex_home = legacy.join("corbanu");
+    std::fs::create_dir_all(codex_home.join("tmp")).unwrap();
+    std::fs::write(legacy.join("auth.json"), "DUMMY").unwrap();
+    std::os::unix::fs::symlink(&codex_home, user_home.join(".corbanu")).unwrap();
+    let active = user_home.join(".corbanu");
+    let cwd = user_home.join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let denials = ReadDenials::collect(&active, Some(&user_home), None, &[abs(&cwd)]);
+    let policy = denials
+        .apply(&workspace(&cwd))
+        .unwrap()
+        .file_system_sandbox_policy();
+    assert!(!readable_under(&policy, &legacy.join("auth.json"), &cwd));
+}

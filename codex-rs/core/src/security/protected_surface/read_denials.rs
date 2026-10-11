@@ -180,11 +180,12 @@ impl ReadDenials {
             for other in OTHER_CORBANU_HOMES {
                 let other = home.join(other);
                 // The active home is handled entry by entry above, also
-                // when another home name links to it or above it.
+                // when another home name is a link to it. A name whose real
+                // folder only holds the active home stays denied whole.
                 if codex_home.as_path().starts_with(other.as_path())
                     || real_location(&codex_home)
                         .zip(real_location(&other))
-                        .is_some_and(|(home, other)| home.as_path().starts_with(other.as_path()))
+                        .is_some_and(|(home, other)| home == other)
                 {
                     continue;
                 }
@@ -583,14 +584,13 @@ impl<'a> Readability<'a> {
             return false;
         }
         // A dangling link (or a path not created yet) is checked where it
-        // would lead.
-        let real = std::fs::canonicalize(path)
+        // would lead; when that cannot be told, it is not readable.
+        let Some(real) = std::fs::canonicalize(path)
             .ok()
-            .or_else(|| {
-                real_location(&AbsolutePathBuf::resolve_path_against_base(path, "/"))
-                    .map(AbsolutePathBuf::into_path_buf)
-            })
-            .unwrap_or_else(|| path.to_path_buf());
+            .or_else(|| missing_target(path))
+        else {
+            return false;
+        };
         self.cwds
             .iter()
             .zip(&self.resolved_patterns)
@@ -602,6 +602,30 @@ impl<'a> Readability<'a> {
                         .is_some_and(|matcher| matcher.is_read_denied(&real))
             })
     }
+}
+
+/// Where a missing `path` would lead once created: each dangling link on
+/// the way resolved by the system one hop at a time (a target's `..` is
+/// resolved through the folders it names, not lexically). `None` when that
+/// cannot be told (too many links).
+fn missing_target(path: &Path) -> Option<std::path::PathBuf> {
+    let mut path = path.to_path_buf();
+    for _ in 0..8 {
+        let mut existing = path.as_path();
+        let mut tail = Vec::new();
+        while std::fs::symlink_metadata(existing).is_err() {
+            tail.push(existing.file_name()?);
+            existing = existing.parent()?;
+        }
+        let next = match std::fs::canonicalize(existing) {
+            Ok(real) => {
+                return Some(tail.iter().rev().fold(real, |path, name| path.join(name)));
+            }
+            Err(_) => existing.parent()?.join(std::fs::read_link(existing).ok()?),
+        };
+        path = tail.iter().rev().fold(next, |path, name| path.join(name));
+    }
+    None
 }
 
 /// The pattern (glob) denials of `policy`, or `None` without any. A
