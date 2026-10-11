@@ -180,6 +180,10 @@ impl ToolOrchestrator {
         // Issue #245: additional permissions never reopen a protected path.
         // Refused before anyone is asked where no approval can lift the
         // rules for this run; checked again below once the rules are known.
+        // Issue #513: nor a runtime entry of the Corbanu home (`tmp` holds
+        // the sandbox launchers) for writing, even where an approval lifts
+        // the other rules. Other write protections wait for the second
+        // check: an Aggressive grant confirmed in the approval may lift them.
         // A forbidden request keeps its own refusal; an external sandbox
         // takes no protected-path rules and ignores additional permissions.
         if let Some(state) = tool_ctx
@@ -188,8 +192,6 @@ impl ToolOrchestrator {
             .model_client()
             .post_taint_state()
             .filter(crate::security::tainted_action::PostTaintState::protected_paths_apply)
-            && !(state.moderate_bound()
-                && (post_taint.is_some() || moderate_escalation_before_taint(tool, req, tool_ctx)))
             && !matches!(requirement, ExecApprovalRequirement::Forbidden { .. })
             && !matches!(
                 permission_profile,
@@ -197,16 +199,47 @@ impl ToolOrchestrator {
             )
             && let Some(additional) = tool.additional_permissions(req)
         {
+            let reads = !(state.moderate_bound()
+                && (post_taint.is_some() || moderate_escalation_before_taint(tool, req, tool_ctx)));
             #[allow(deprecated)]
             let turn_cwd = turn_ctx.cwd.clone();
-            let denials = crate::security::protected_surface::ReadDenials::for_turn(
-                tool_ctx.turn.config.codex_home.as_path(),
-                &turn_cwd,
-                &materialized_workspace_roots,
-                &permissions,
-            );
             let cwds = resolution_folders(tool, req, &turn_cwd, &materialized_workspace_roots);
-            refuse_protected_additional(additional, &denials, &cwds, state.level, tool_ctx).await?;
+            let codex_home = tool_ctx.turn.config.codex_home.to_path_buf();
+            let (roots, profile, additional) = (
+                materialized_workspace_roots.clone(),
+                permissions.clone(),
+                additional.clone(),
+            );
+            // Issue #524: building the denials reads folders; off the async
+            // thread. A failed check refuses (fail closed).
+            let opened = tokio::task::spawn_blocking(move || {
+                use crate::security::protected_additional;
+                let denials = crate::security::protected_surface::ReadDenials::for_turn(
+                    &codex_home,
+                    &turn_cwd,
+                    &roots,
+                    &profile,
+                );
+                let protected = denials
+                    .apply(&profile)
+                    .map(|protected| protected.file_system_sandbox_policy());
+                let check = protected_additional::Check {
+                    denials: &denials,
+                    protected: protected.as_ref(),
+                    reads,
+                    writes: protected_additional::ReadOnlyScope::Runtime,
+                };
+                let cwds: Vec<&std::path::Path> = cwds.iter().map(AsRef::as_ref).collect();
+                protected_additional::opened(check, &additional, &cwds)
+            })
+            .await
+            .unwrap_or_else(|_| {
+                Some(crate::security::protected_additional::Opened::Write {
+                    path: tool_ctx.turn.config.codex_home.display().to_string(),
+                    grantable: false,
+                })
+            });
+            refuse_opened(opened, state.level, tool_ctx).await?;
         }
         if let Some(action) = &post_taint {
             if let Some(refusal) = action.refused_up_front() {
@@ -443,13 +476,27 @@ impl ToolOrchestrator {
             Some((exec_server, materialized, denials, level)) => {
                 // Issue #245: the rules apply to this run, so its additional
                 // permissions may not reopen what they deny.
+                // Issue #513: nor make a read-only path writable: the
+                // runtime entries always, and under Aggressive every one a
+                // grant for this run did not lift.
                 if let Some(additional) = tool.additional_permissions(req) {
                     #[allow(deprecated)]
                     let turn_cwd = turn_ctx.cwd.clone();
                     let cwds =
                         resolution_folders(tool, req, &turn_cwd, &materialized_workspace_roots);
-                    refuse_protected_additional(additional, &denials, &cwds, level, tool_ctx)
-                        .await?;
+                    let protected = materialized.file_system_sandbox_policy();
+                    let check = crate::security::protected_additional::Check {
+                        denials: &denials,
+                        protected: Some(&protected),
+                        reads: true,
+                        writes: crate::security::protected_additional::ReadOnlyScope::for_level(
+                            level,
+                        ),
+                    };
+                    let cwds: Vec<&std::path::Path> = cwds.iter().map(AsRef::as_ref).collect();
+                    let opened =
+                        crate::security::protected_additional::opened(check, additional, &cwds);
+                    refuse_opened(opened, level, tool_ctx).await?;
                 }
                 (Some(exec_server), materialized)
             }
@@ -1121,18 +1168,15 @@ where
     folders
 }
 
-/// Issue #245: refuses a run whose additional permissions would open a path
-/// `denials` protects, and explains why to the person and the model.
-async fn refuse_protected_additional(
-    additional: &codex_protocol::models::AdditionalPermissionProfile,
-    denials: &crate::security::protected_surface::ReadDenials,
-    cwds: &[codex_utils_absolute_path::AbsolutePathBuf],
+/// Issues #245 and #513: refuses a run whose additional permissions would
+/// open a protected path or reopen a read-only one, and explains why to the
+/// person and the model.
+async fn refuse_opened(
+    opened: Option<crate::security::protected_additional::Opened>,
     level: codex_security_policy::SecurityLevel,
     tool_ctx: &ToolCtx,
 ) -> Result<(), ToolError> {
-    use crate::security::protected_additional;
-    let cwds: Vec<&std::path::Path> = cwds.iter().map(AsRef::as_ref).collect();
-    let Some(path) = protected_additional::opened_protected_path(denials, additional, &cwds) else {
+    let Some(opened) = opened else {
         return Ok(());
     };
     tracing::warn!(
@@ -1140,7 +1184,7 @@ async fn refuse_protected_additional(
         call_id = %tool_ctx.call_id,
         "additional permissions would open a protected path; refused"
     );
-    let refusal = protected_additional::refusal(level, &path);
+    let refusal = opened.refusal(level);
     crate::security::protected_reads::notify(&tool_ctx.session, &tool_ctx.turn, refusal.clone())
         .await;
     Err(ToolError::Rejected(refusal))

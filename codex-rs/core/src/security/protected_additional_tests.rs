@@ -24,6 +24,7 @@ fn fixture() -> Fixture {
     let project = user_home.join("project");
     for folder in [
         &codex_home.join("wallet"),
+        &codex_home.join("tmp"),
         &user_home.join(".ssh"),
         &project,
     ] {
@@ -232,4 +233,204 @@ fn issue_245_refusals_name_the_level_and_the_way_forward() {
     assert!(!moderate.contains('\u{1b}'), "{moderate}");
     assert!(moderate.contains("protected files"), "{moderate}");
     assert!(moderate.contains("Permissive in /security"), "{moderate}");
+}
+
+/// The run's policy with the rules applied, for a profile that reads
+/// everything and writes `writable`.
+fn protected_policy(
+    denials: &ReadDenials,
+    writable: &[&std::path::Path],
+) -> FileSystemSandboxPolicy {
+    let mut entries = vec![FileSystemSandboxEntry::new(
+        FileSystemPath::Special {
+            value: FileSystemSpecialPath::Root,
+        },
+        FileSystemAccessMode::Read,
+    )];
+    entries.extend(
+        writable
+            .iter()
+            .map(|path| entry(path, FileSystemAccessMode::Write)),
+    );
+    let profile = codex_protocol::models::PermissionProfile::from_runtime_permissions(
+        &FileSystemSandboxPolicy::restricted(entries),
+        codex_protocol::permissions::NetworkSandboxPolicy::Restricted,
+    );
+    denials
+        .apply(&profile)
+        .expect("restricted profile")
+        .file_system_sandbox_policy()
+}
+
+fn write(path: &std::path::Path) -> AdditionalPermissionProfile {
+    additional(vec![entry(path, FileSystemAccessMode::Write)])
+}
+
+#[test]
+fn issue_513_a_write_never_reopens_the_runtime_entries() {
+    let f = fixture();
+    let runtime = f.codex_home.join("tmp");
+    let launcher = runtime.join("launcher");
+    let link = f.project.join("helpers");
+    std::os::unix::fs::symlink(&runtime, &link).unwrap();
+    let protected = protected_policy(&f.denials, &[f.project.as_path()]);
+    let root = additional(vec![FileSystemSandboxEntry::new(
+        FileSystemPath::Special {
+            value: FileSystemSpecialPath::Root,
+        },
+        FileSystemAccessMode::Write,
+    )]);
+    for (name, request) in [
+        ("equal", write(&runtime)),
+        ("narrower", write(&launcher)),
+        // Above it, where the profile itself could not write it.
+        ("broader", write(&f.codex_home)),
+        ("root", root),
+        ("through a link", write(&link.join("launcher"))),
+    ] {
+        for scope in [ReadOnlyScope::Runtime, ReadOnlyScope::Kept] {
+            assert!(
+                opened_read_only_path(
+                    &f.denials,
+                    Some(&protected),
+                    &request,
+                    &[f.project.as_path()],
+                    scope
+                )
+                .is_some(),
+                "{name} {scope:?}"
+            );
+        }
+    }
+    // Reads never write; the rule holds where the profile could write.
+    let read = additional(vec![entry(&runtime, FileSystemAccessMode::Read)]);
+    let writes_home = protected_policy(&f.denials, &[f.project.as_path(), f.codex_home.as_path()]);
+    for (name, request, protected) in [
+        ("read", read, &protected),
+        (
+            "broader, profile writes it",
+            write(&f.codex_home),
+            &writes_home,
+        ),
+        ("project", write(&f.project.join("notes.txt")), &protected),
+    ] {
+        assert_eq!(
+            opened_read_only_path(
+                &f.denials,
+                Some(protected),
+                &request,
+                &[f.project.as_path()],
+                ReadOnlyScope::Kept
+            ),
+            None,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn issue_513_other_write_protections_count_under_aggressive_until_a_grant_lifts_them() {
+    let f = fixture();
+    let agents = f.project.join(".agents");
+    let protected = protected_policy(&f.denials, &[f.project.as_path()]);
+    let check = |denials: &ReadDenials, writes| {
+        opened(
+            Check {
+                denials,
+                protected: Some(&protected),
+                reads: true,
+                writes,
+            },
+            &write(&agents.join("skill.md")),
+            &[f.project.as_path()],
+        )
+    };
+    assert_eq!(
+        check(&f.denials, ReadOnlyScope::Kept),
+        Some(Opened::Write {
+            path: agents.display().to_string(),
+            grantable: true,
+        })
+    );
+    // Moderate: unchanged (#513 decision).
+    assert_eq!(check(&f.denials, ReadOnlyScope::Runtime), None);
+    // An Aggressive grant lifts it; never the runtime entries.
+    let mut granted = ReadDenials::collect(
+        &f.codex_home,
+        Some(&f.user_home),
+        /*claude_config_dir*/ None,
+        &[AbsolutePathBuf::from_absolute_path(&f.project).unwrap()],
+    );
+    granted.lift_write_rules();
+    assert_eq!(check(&granted, ReadOnlyScope::Kept), None);
+    let runtime = f.codex_home.join("tmp");
+    assert_eq!(
+        opened(
+            Check {
+                denials: &granted,
+                protected: Some(&protected),
+                reads: true,
+                writes: ReadOnlyScope::Kept,
+            },
+            &write(&runtime),
+            &[f.project.as_path()],
+        ),
+        Some(Opened::Write {
+            path: runtime.display().to_string(),
+            grantable: false,
+        })
+    );
+}
+
+#[test]
+fn issue_513_grants_drop_entries_that_reopen_a_write_protection() {
+    let f = fixture();
+    let notes = entry(&f.project.join("notes.txt"), FileSystemAccessMode::Write);
+    let launcher = entry(
+        &f.codex_home.join("tmp/launcher"),
+        FileSystemAccessMode::Write,
+    );
+    let protected = protected_policy(&f.denials, &[f.project.as_path()]);
+    let check = Check {
+        denials: &f.denials,
+        protected: Some(&protected),
+        reads: true,
+        writes: ReadOnlyScope::Runtime,
+    };
+    assert_eq!(
+        without_opened(
+            check,
+            Some(additional(vec![notes.clone(), launcher])),
+            &[f.project.as_path()]
+        ),
+        Some(additional(vec![notes]))
+    );
+}
+
+#[test]
+fn issue_513_write_refusals_say_whether_a_grant_can_lift_them() {
+    let runtime = write_refusal(
+        SecurityLevel::Moderate,
+        "/home/u/.corbanu/tmp\u{1b}[2J",
+        false,
+    );
+    assert!(
+        runtime.starts_with("Security level Moderate blocked writing to `/home/u/.corbanu/tmp"),
+        "{runtime}"
+    );
+    assert!(!runtime.contains('\u{1b}'), "{runtime}");
+    assert!(runtime.contains("cannot be granted"), "{runtime}");
+    assert!(runtime.contains("Permissive in /security"), "{runtime}");
+    let hook = write_refusal(SecurityLevel::Aggressive, "/p/.git/hooks", true);
+    assert!(hook.starts_with("Security level Aggressive"), "{hook}");
+    assert!(hook.contains("\"Grant once\""), "{hook}");
+    assert!(!hook.contains("cannot be granted"), "{hook}");
+    assert_eq!(
+        ReadOnlyScope::for_level(SecurityLevel::Aggressive),
+        ReadOnlyScope::Kept
+    );
+    assert_eq!(
+        ReadOnlyScope::for_level(SecurityLevel::Moderate),
+        ReadOnlyScope::Runtime
+    );
 }
