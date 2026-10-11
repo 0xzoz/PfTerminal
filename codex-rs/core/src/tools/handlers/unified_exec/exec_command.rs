@@ -385,22 +385,22 @@ impl ExecCommandHandler {
                 let original_token_count =
                     original_token_count.unwrap_or_else(|| approx_token_count(&output_text));
                 Ok((
-                ExecCommandToolOutput {
-                    event_call_id: context.call_id.clone(),
-                    chunk_id: generate_chunk_id(),
-                    wall_time: output.duration,
-                    raw_output: output_text.into_bytes(),
-                    truncation_policy: turn.model_info.truncation_policy.into(),
-                    max_output_tokens,
-                    // Sandbox denial is terminal, so there is no live
-                    // process for write_stdin to resume.
-                    process_id: None,
-                    exit_code: Some(output.exit_code),
-                    original_token_count: Some(original_token_count),
-                    output_omitted_bytes,
-                    hook_command: Some(hook_command),
-                },
-                /*sandbox_denied*/ true,
+                    ExecCommandToolOutput {
+                        event_call_id: context.call_id.clone(),
+                        chunk_id: generate_chunk_id(),
+                        wall_time: output.duration,
+                        raw_output: output_text.into_bytes(),
+                        truncation_policy: turn.model_info.truncation_policy.into(),
+                        max_output_tokens,
+                        // Sandbox denial is terminal, so there is no live
+                        // process for write_stdin to resume.
+                        process_id: None,
+                        exit_code: Some(output.exit_code),
+                        original_token_count: Some(original_token_count),
+                        output_omitted_bytes,
+                        hook_command: Some(hook_command),
+                    },
+                    /*sandbox_denied*/ true,
                 ))
             }
             // #439: a refusal reads as its own message, not as a debug dump.
@@ -440,12 +440,9 @@ impl ExecCommandHandler {
             output
                 .raw_output
                 .extend_from_slice(format!("\n{explanation}\n").as_bytes());
-        } else if let Some(blocked) = refusal_notice::blocked(
-            &turn.config,
-            sandbox_denied,
-            output.exit_code,
-            &output_text,
-        ) {
+        } else if let Some(blocked) =
+            refusal_notice::blocked(&turn.config, sandbox_denied, output.exit_code, &output_text)
+        {
             notify_blocked(&context, blocked).await;
             output
                 .raw_output
