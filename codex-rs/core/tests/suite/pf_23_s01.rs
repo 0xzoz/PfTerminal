@@ -741,7 +741,7 @@ async fn issue_442_aggressive_denied_protected_read_is_explained() -> anyhow::Re
         other => panic!("no warning before the turn ended: {other:?}"),
     };
     assert!(
-        warning.starts_with("Security level Aggressive blocked reading"),
+        warning.starts_with("Security level Aggressive blocked access to"),
         "{warning}"
     );
     assert!(warning.contains("not even once"), "{warning}");

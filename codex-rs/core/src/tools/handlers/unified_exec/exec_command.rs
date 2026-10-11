@@ -404,7 +404,7 @@ impl ExecCommandHandler {
         let mut output = result?;
         // #442: a protected read the Aggressive rules denied is explained
         // where it failed, to the person and to the model.
-        if let Some(cwd) = native_cwd.as_ref()
+        if let Some(cwd) = native_cwd.as_ref().filter(|_| !environment.is_remote())
             && let Some(explanation) = crate::security::protected_reads::denial_explanation(
                 session.as_ref(),
                 turn.as_ref(),
@@ -413,6 +413,7 @@ impl ExecCommandHandler {
                 output.exit_code,
                 &String::from_utf8_lossy(&output.raw_output),
             )
+            .await
         {
             crate::security::protected_reads::notify(
                 session.as_ref(),

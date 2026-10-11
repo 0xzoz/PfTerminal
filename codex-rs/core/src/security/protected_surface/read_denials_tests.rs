@@ -592,4 +592,21 @@ fn issue_442_a_grant_keeps_every_read_denial() {
         );
     }
     assert!(policy.can_write_path_with_cwd(&cwd.join(".git/hooks/pre-commit"), &cwd));
+    // The Corbanu home's runtime entries (sandbox launchers in `tmp`) stay
+    // read-only even with a grant, wherever the command could write.
+    let full = denials
+        .apply(&PermissionProfile::Disabled)
+        .unwrap()
+        .file_system_sandbox_policy();
+    for runtime in [
+        fx.codex_home.join("tmp/arg0/codex-linux-sandbox"),
+        fx.codex_home.join("skills/x/SKILL.md"),
+        fx.codex_home.join("shell_snapshots/s.sh"),
+    ] {
+        assert!(
+            !full.can_write_path_with_cwd(&runtime, &cwd),
+            "{}",
+            runtime.display()
+        );
+    }
 }

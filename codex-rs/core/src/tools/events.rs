@@ -375,61 +375,37 @@ impl ToolEmitter {
         super::format_exec_output_for_model(output, ctx.turn.model_info.truncation_policy.into())
     }
 
-    /// #442: a shell command that failed because the Aggressive rules denied
-    /// a protected read carries the explanation in its output, and the
-    /// person is shown it too.
+    /// #442: the explanation for a shell command that failed because the
+    /// Aggressive rules denied a protected read it names, shown to the person
+    /// as a warning beside it; the caller adds it to the model's output.
     async fn explain_protected_read(
         &self,
         ctx: ToolEventCtx<'_>,
-        out: Result<ExecToolCallOutput, ToolError>,
-    ) -> Result<ExecToolCallOutput, ToolError> {
+        out: &Result<ExecToolCallOutput, ToolError>,
+    ) -> Option<String> {
         let Self::Shell { command, cwd, .. } = self else {
-            return out;
+            return None;
         };
-        let Ok(cwd) = cwd.to_abs_path() else {
-            return out;
-        };
-        let output = match &out {
+        let cwd = cwd.to_abs_path().ok()?;
+        let output = match out {
             Ok(output) => output,
             Err(ToolError::Codex(err)) => match err.details() {
                 CodexErrorDetails::Sandbox(SandboxErr::Denied { output, .. }) => output.as_ref(),
-                _ => return out,
+                _ => return None,
             },
-            Err(ToolError::Rejected(_)) => return out,
+            Err(ToolError::Rejected(_)) => return None,
         };
-        let Some(explanation) = crate::security::protected_reads::denial_explanation(
+        let explanation = crate::security::protected_reads::denial_explanation(
             ctx.session,
             ctx.turn,
             command,
             cwd.as_path(),
             Some(output.exit_code),
             &output.aggregated_output.text,
-        ) else {
-            return out;
-        };
+        )
+        .await?;
         crate::security::protected_reads::notify(ctx.session, ctx.turn, explanation.clone()).await;
-        let explain = |mut output: ExecToolCallOutput| {
-            let line = format!("\n{explanation}\n");
-            output.aggregated_output.text.push_str(&line);
-            output.stderr.text.push_str(&line);
-            output
-        };
-        match out {
-            Ok(output) => Ok(explain(output)),
-            Err(ToolError::Codex(err)) => match err.details() {
-                CodexErrorDetails::Sandbox(SandboxErr::Denied {
-                    output,
-                    network_policy_decision,
-                }) => Err(ToolError::Codex(codex_protocol::error::CodexErr::Sandbox(
-                    SandboxErr::Denied {
-                        output: Box::new(explain(output.as_ref().clone())),
-                        network_policy_decision: network_policy_decision.clone(),
-                    },
-                ))),
-                _ => Err(ToolError::Codex(err)),
-            },
-            other => other,
-        }
+        Some(explanation)
     }
 
     pub async fn finish(
@@ -438,7 +414,7 @@ impl ToolEmitter {
         out: Result<ExecToolCallOutput, ToolError>,
         applied_patch_delta: Option<&AppliedPatchDelta>,
     ) -> Result<String, FunctionCallError> {
-        let out = self.explain_protected_read(ctx, out).await;
+        let explanation = self.explain_protected_read(ctx, &out).await;
         let (event, result) = match out {
             Ok(output) => {
                 let content = self.format_exec_output_for_model(&output, ctx);
@@ -515,7 +491,13 @@ impl ToolEmitter {
             }
         };
         self.emit(ctx, event).await;
-        result
+        match (explanation, result) {
+            (Some(explanation), Err(FunctionCallError::RespondToModel(content))) => Err(
+                FunctionCallError::RespondToModel(format!("{content}\n{explanation}")),
+            ),
+            (Some(explanation), Ok(content)) => Ok(format!("{content}\n{explanation}")),
+            (_, result) => result,
+        }
     }
 }
 

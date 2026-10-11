@@ -4,10 +4,10 @@ expression: "render(&view, 100)"
 ---
 
  Grant this command?
- Under Aggressive an approval never lifts the write protections (shell and git startup files,
- git hooks and config, Corbanu skills and plugins). This grant lets exactly this command run
- without them. Credential files and the Corbanu home stay unreadable: that is never granted under
- Aggressive.
+ Under Aggressive an approval never lifts the write protections (shell and git startup files, git
+ hooks and config). This grant lets exactly this command run without them; a file written this way
+ can run code later, outside the sandbox. Credential files and the Corbanu home stay unreadable,
+ and Corbanu's own files read-only: that is never granted under Aggressive.
 
    Agent       human:human → agent:019a0000-0000-7000-8000-000000000001
    Session     019a0000-0000-7000-8000-000000000001

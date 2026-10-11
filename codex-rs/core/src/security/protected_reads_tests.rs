@@ -22,7 +22,16 @@ fn issue_442_finds_the_denied_path_the_command_names() {
         .iter()
         .any(|denied| path.starts_with(denied))
     };
-    let word = |script: &str| denied_word(&shell(script), cwd, Some(user_home), codex_home, denied);
+    let word = |script: &str| {
+        denied_word(
+            &shell(script),
+            cwd,
+            Some(user_home),
+            codex_home,
+            denied,
+            None,
+        )
+    };
     assert_eq!(word("cat .env"), Some(".env".to_string()));
     assert_eq!(word("head -3 '.env' | sort"), Some(".env".to_string()));
     assert_eq!(word("wc -l <.env;"), Some(".env".to_string()));
@@ -38,6 +47,32 @@ fn issue_442_finds_the_denied_path_the_command_names() {
     );
     assert_eq!(word("cat notes.txt"), None);
     assert_eq!(word("cat $UNKNOWN/.env.example"), None);
+    // Tied to the denial the output reports: an unrelated failure in a
+    // command that also names `.env` is not attributed to it.
+    let lines = ["grep: ./other.txt: Permission denied".to_string()];
+    assert_eq!(
+        denied_word(
+            &shell("grep -r x . --exclude=.env"),
+            cwd,
+            Some(user_home),
+            codex_home,
+            denied,
+            Some(&lines),
+        ),
+        None
+    );
+    let lines = ["cat: .env: Operation not permitted".to_string()];
+    assert_eq!(
+        denied_word(
+            &shell("cat .env"),
+            cwd,
+            Some(user_home),
+            codex_home,
+            denied,
+            Some(&lines)
+        ),
+        Some(".env".to_string())
+    );
 }
 
 /// #442 (milestone AGG-09): under Aggressive a denied read of a protected
@@ -54,7 +89,7 @@ async fn issue_442_denied_protected_read_is_explained_under_aggressive() {
     std::fs::write(home.join("auth.json"), "x").unwrap();
     let command = shell(&format!("cat '{}'", home.join("auth.json").display()));
     let denial = "cat: auth.json: Operation not permitted\n";
-    let explain = |exit_code, output: &str| {
+    let explain = async |exit_code, output: &str| {
         denial_explanation(
             &session,
             &turn,
@@ -63,17 +98,20 @@ async fn issue_442_denied_protected_read_is_explained_under_aggressive() {
             Some(exit_code),
             output,
         )
+        .await
     };
-    assert_eq!(explain(1, denial), None, "Permissive: unchanged");
+    assert_eq!(explain(1, denial).await, None, "Permissive: unchanged");
 
     let client = (*session.services.model_client())
         .clone()
         .with_ingress_level(SecurityLevel::Aggressive)
         .with_source_envelopes(true);
     session.services.replace_model_client(client);
-    let explanation = explain(1, denial).expect("explained under Aggressive");
+    let explanation = explain(1, denial)
+        .await
+        .expect("explained under Aggressive");
     assert!(
-        explanation.starts_with("Security level Aggressive blocked reading"),
+        explanation.starts_with("Security level Aggressive blocked access to"),
         "{explanation}"
     );
     assert!(
@@ -84,9 +122,13 @@ async fn issue_442_denied_protected_read_is_explained_under_aggressive() {
         explanation.contains("switch to Permissive in /security"),
         "{explanation}"
     );
-    assert_eq!(explain(0, denial), None);
+    assert_eq!(explain(0, denial).await, None);
     assert_eq!(
-        explain(1, "cat: auth.json: No such file or directory\n"),
+        explain(1, "cat: auth.json: No such file or directory\n").await,
         None
+    );
+    assert_eq!(
+        protected_path_in_command(&session, &turn, &command, cwd.as_path()).await,
+        Some(home.join("auth.json").display().to_string())
     );
 }

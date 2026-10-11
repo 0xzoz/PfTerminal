@@ -37,8 +37,9 @@ Grants
   Held: none. Grants are never saved: a restart, level change, revocation or the kill switch ends
       them [observed: Core policy]
   [on] Protected reads: never granted under Aggressive, not even once: credential files (.env files
-      found at start, SSH, cloud and CLI tokens) and the Corbanu home stay unreadable to agent
-      commands; switch to Permissive in /security to allow them [resolved: level]
+      found at start, SSH, cloud and CLI tokens) and the Corbanu home (apart from its skills and
+      plugins) stay unreadable to agent commands; switch to Permissive in /security to allow them
+      [resolved: level]
 
 Agents
   [on] main session: Aggressive [observed: Core policy]

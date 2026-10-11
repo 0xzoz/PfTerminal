@@ -169,6 +169,24 @@ impl ToolOrchestrator {
         // PF-25-S01: while its approval is open, the human may grant it once
         // in the TUI; the offer ends with the approval.
         let grant_operation = aggressive_grant_operation(tool, req, tool_ctx);
+        // #442: under Aggressive, a command that names a protected path
+        // (credential files, the Corbanu home) is never granted: no grant is
+        // offered for it, and its approval prompt says why.
+        let protected_read = match grant_operation.as_ref() {
+            Some((_, Some((command, cwd)))) => {
+                crate::security::protected_reads::protected_path_in_command(
+                    &tool_ctx.session,
+                    turn_ctx,
+                    command,
+                    std::path::Path::new(cwd),
+                )
+                .await
+            }
+            _ => None,
+        };
+        let protected_read_note = protected_read
+            .as_deref()
+            .map(crate::security::protected_reads::explanation);
         // Registered just before the user (not an automatic reviewer) is
         // asked. A cached approval or a permission hook may still answer
         // without them; then no review is shown and nothing is confirmed.
@@ -199,13 +217,16 @@ impl ToolOrchestrator {
                 session: &tool_ctx.session,
                 turn: &tool_ctx.turn,
                 call_id: &tool_ctx.call_id,
-                retry_reason: Some(action.approval_reason()),
+                retry_reason: Some(match &protected_read_note {
+                    Some(note) => format!("{} {note}", action.approval_reason()),
+                    None => action.approval_reason(),
+                }),
                 network_approval_context: None,
                 fresh_human_authority: true,
             };
             let asked = Instant::now();
             // #442: no grant for an action whose reads stay denied anyway.
-            if !action.reads_stay_denied() {
+            if !action.reads_stay_denied() && protected_read.is_none() {
                 grant_offer = aggressive_grant_offer(grant_operation.as_ref(), tool_ctx);
             }
             let mut pending = crate::security::inspection::PendingProtectedAction::new(
@@ -333,7 +354,11 @@ impl ToolOrchestrator {
                     session: &tool_ctx.session,
                     turn: &tool_ctx.turn,
                     call_id: &tool_ctx.call_id,
-                    retry_reason: reason.clone(),
+                    retry_reason: match (reason, &protected_read_note) {
+                        (Some(reason), Some(note)) => Some(format!("{reason} {note}")),
+                        (None, Some(note)) => Some(note.clone()),
+                        (reason, None) => reason.clone(),
+                    },
                     network_approval_context: None,
                     fresh_human_authority: false,
                 };
@@ -342,7 +367,7 @@ impl ToolOrchestrator {
                 } else {
                     ApprovalReviewer::for_turn(turn_ctx)
                 };
-                if reviewer == ApprovalReviewer::User {
+                if reviewer == ApprovalReviewer::User && protected_read.is_none() {
                     grant_offer = aggressive_grant_offer(grant_operation.as_ref(), tool_ctx);
                 }
                 resolve_tool_apporval(

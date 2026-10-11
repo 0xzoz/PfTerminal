@@ -198,24 +198,62 @@ async fn pf_25_s01_confirmed_grant_lifts_the_write_protections_for_the_approved_
 
 /// #442 (Travis, 2026-10-11): under Aggressive a read of the Corbanu home
 /// (like a credential file) is never granted, not even once: a grant
-/// confirmed and approved for it still leaves the read denied.
+/// confirmed and approved for it, for one run or held until it expires,
+/// still leaves the read denied. (The command hides the path, so a grant is
+/// offered; one that names it is offered none, below.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn issue_442_a_confirmed_grant_never_lifts_protected_reads() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
-    let (home, read) = canary_home()?;
-    let (test, captured) =
-        start(home, vec![shell_step("call-granted", &read), done_step()]).await?;
+    for uses in [GrantUses::Once, GrantUses::UntilExpiry] {
+        let (home, read) = canary_home()?;
+        let (test, captured) =
+            start(home, vec![shell_step("call-granted", &read), done_step()]).await?;
+        let thread = test.session_configured.thread_id;
+        let approval = next_approval(&test).await.expect("the read asks first");
+        let offer =
+            security_grant::offer(thread, &approval.effective_approval_id()).expect("offer");
+        security_grant::confirm(&offer, uses)?;
+        approve(&test, &approval).await?;
+        assert!(next_approval(&test).await.is_none());
+        let requests = captured.requests();
+        let granted = output_text(&requests[requests.len() - 1], "call-granted");
+        assert!(!granted.contains(CANARY), "{uses:?}: {granted}");
+        assert!(
+            granted.contains("Operation not permitted"),
+            "{uses:?}: {granted}"
+        );
+    }
+    Ok(())
+}
+
+/// #442: a command that names a protected path (here it copies a Corbanu
+/// home file) is offered no grant under Aggressive; its approval prompt says
+/// why and how to change the level.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_442_no_grant_is_offered_for_a_named_protected_read() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let home = Arc::new(TempDir::new()?);
+    let path = home.path().canonicalize()?.join("pf25-notes.txt");
+    std::fs::write(&path, CANARY)?;
+    let copy = format!("cp '{}' copy.txt", path.display());
+    let (test, captured) = start(home, vec![shell_step("call-copy", &copy), done_step()]).await?;
     let thread = test.session_configured.thread_id;
-    let approval = next_approval(&test).await.expect("the read asks first");
-    let offer = security_grant::offer(thread, &approval.effective_approval_id()).expect("offer");
-    security_grant::confirm(&offer, GrantUses::Once)?;
+    let approval = next_approval(&test).await.expect("the copy asks first");
+    assert!(security_grant::offer(thread, &approval.effective_approval_id()).is_none());
+    let reason = approval.reason.clone().unwrap_or_default();
+    assert!(
+        reason.contains("cannot be granted, not even once"),
+        "{reason}"
+    );
+    assert!(reason.contains("Permissive in /security"), "{reason}");
     approve(&test, &approval).await?;
     assert!(next_approval(&test).await.is_none());
     let requests = captured.requests();
-    let granted = output_text(&requests[requests.len() - 1], "call-granted");
-    assert!(!granted.contains(CANARY), "{granted}");
-    assert!(granted.contains("Operation not permitted"), "{granted}");
+    let output = output_text(&requests[requests.len() - 1], "call-copy");
+    assert!(!output.contains(CANARY), "{output}");
+    assert!(!test.cwd_path().join("copy.txt").exists());
     Ok(())
 }
 

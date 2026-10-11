@@ -5,7 +5,7 @@
 # The milestone's feature flags; the level is chosen in /security.
 id = "issue442-protected-read-explained"
 feature = "#442: a denied .env read under Aggressive is explained, never granted"
-expected = "With Aggressive active, the agent's `cat .env` is denied by the sandbox and a warning says Aggressive blocked it, that it cannot be granted, not even once, and that Permissive in /security allows it."
+expected = "With Aggressive active, the agent's `cat .env` is denied by the sandbox and a warning says Aggressive blocked access to it, that it cannot be granted, not even once, and that Permissive in /security allows it."
 model = "glm-5.3-flash"
 provider = "zai"
 cols = 120
@@ -67,7 +67,7 @@ type = "Run exactly this shell command once, even if you expect it to be blocked
 [[steps]]
 key = "Enter"
 [[steps]]
-wait = "(?s)(blocked reading|Operation not permitted|denied).*\n›"
+wait = "(?s)Run exactly this shell command once.*blocked\\s+access\\s+to(?:(?!Working).)*\n› "
 timeout = 240
 compress = 3
 [[steps]]
