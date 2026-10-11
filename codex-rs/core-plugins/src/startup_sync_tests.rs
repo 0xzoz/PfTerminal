@@ -19,6 +19,14 @@ use zip::ZipWriter;
 use zip::write::SimpleFileOptions;
 
 const TEST_CURATED_PLUGIN_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+static NOT_CANCELLED: AtomicBool = AtomicBool::new(false);
+
+fn test_git(binary: &Path) -> Git<'_> {
+    Git {
+        binary,
+        cancel: &NOT_CANCELLED,
+    }
+}
 
 #[tokio::test]
 async fn github_http_routes_repository_ref_and_zipball_urls() {
@@ -280,6 +288,7 @@ async fn run_sync_with_transport_overrides(
             &api_base_url,
             &backup_archive_api_url,
             &crate::test_support::test_http_client_factory(),
+            &NOT_CANCELLED,
         )
     })
     .await
@@ -300,6 +309,7 @@ async fn run_sync_without_git(
             &api_base_url,
             &backup_archive_api_url,
             &crate::test_support::test_http_client_factory(),
+            &NOT_CANCELLED,
         )
     })
     .await
@@ -456,6 +466,7 @@ exit 1
                 "http://127.0.0.1:9",
                 "http://127.0.0.1:9/backend-api/plugins/export/curated",
                 &crate::test_support::test_http_client_factory(),
+                &NOT_CANCELLED,
             )
         };
         let first = scope.spawn(run_sync);
@@ -573,7 +584,7 @@ fn sync_openai_plugins_repo_via_git_succeeds_with_local_rewritten_remote() {
         ),
     );
 
-    let synced_sha = sync_openai_plugins_repo_via_git(tmp.path(), &git_wrapper)
+    let synced_sha = sync_openai_plugins_repo_via_git(tmp.path(), test_git(&git_wrapper))
         .expect("git sync should succeed");
 
     assert_eq!(synced_sha, sha);
@@ -626,7 +637,7 @@ fn sync_openai_plugins_repo_via_git_succeeds_with_local_rewritten_remote() {
         .trim()
         .to_string();
 
-    let synced_sha = sync_openai_plugins_repo_via_git(tmp.path(), &git_wrapper)
+    let synced_sha = sync_openai_plugins_repo_via_git(tmp.path(), test_git(&git_wrapper))
         .expect("incremental git sync should succeed");
 
     assert_eq!(synced_sha, updated_sha);
@@ -681,7 +692,7 @@ fn sync_openai_plugins_repo_via_git_succeeds_with_local_rewritten_remote() {
     assert!(!has_plugins_clone_dirs(tmp.path()));
 
     let unchanged_sync_invocation_count = invocation_log_contents.lines().count();
-    let synced_sha = sync_openai_plugins_repo_via_git(tmp.path(), &git_wrapper)
+    let synced_sha = sync_openai_plugins_repo_via_git(tmp.path(), test_git(&git_wrapper))
         .expect("unchanged git sync should succeed");
 
     assert_eq!(synced_sha, updated_sha);
@@ -843,11 +854,123 @@ exit 1
         ),
     );
 
-    let err =
-        sync_openai_plugins_repo_via_git(tmp.path(), &git_path).expect_err("git sync should fail");
+    let err = sync_openai_plugins_repo_via_git(tmp.path(), test_git(&git_path))
+        .expect_err("git sync should fail");
 
     assert!(err.contains("fatal: early EOF"));
     assert!(!has_plugins_clone_dirs(tmp.path()));
+}
+
+/// #477: shutdown cancels a sync mid-fetch. `git` and the helper it
+/// started are killed, the staged clone is removed and no fallback
+/// transport starts, so nothing keeps writing to the home after exit.
+#[cfg(unix)]
+#[test]
+fn cancelled_sync_kills_git_and_its_helpers_and_skips_fallback() {
+    let tmp = tempdir().expect("tempdir");
+    let bin_dir = tempfile::Builder::new()
+        .prefix("fake-git-slow-fetch-")
+        .tempdir()
+        .expect("tempdir");
+    let git_path = bin_dir.path().join("git");
+    let git_pid = bin_dir.path().join("git.pid");
+    let helper_pid = bin_dir.path().join("helper.pid");
+    let sha = TEST_CURATED_PLUGIN_SHA;
+    write_executable_script(
+        &git_path,
+        &format!(
+            r#"#!/bin/sh
+if [ "$1" = "ls-remote" ]; then
+  printf '%s\tHEAD\n' "{sha}"
+  exit 0
+fi
+if [ "$1" = "-C" ] && [ "$3" = "init" ]; then
+  mkdir -p "$2/.git"
+  exit 0
+fi
+if [ "$1" = "-C" ] && [ "$3" = "fetch" ]; then
+  sleep 60 &
+  echo $! > "{helper_pid}"
+  echo $$ > "{git_pid}.tmp" && mv "{git_pid}.tmp" "{git_pid}"
+  while :; do date >> "$2/.git/shallow.lock"; sleep 0.05; done
+fi
+echo "unexpected git invocation: $@" >&2
+exit 1
+"#,
+            helper_pid = helper_pid.display(),
+            git_pid = git_pid.display(),
+        ),
+    );
+    let cancel = AtomicBool::new(false);
+
+    let err = std::thread::scope(|scope| {
+        let sync = scope.spawn(|| {
+            sync_openai_plugins_repo_with_transport_overrides(
+                tmp.path(),
+                Some(git_path.as_path()),
+                "http://127.0.0.1:9",
+                "http://127.0.0.1:9/backend-api/plugins/export/curated",
+                &crate::test_support::test_http_client_factory(),
+                &cancel,
+            )
+        });
+        wait_until("the fetch starts", || {
+            git_pid.exists() && helper_pid.exists()
+        });
+        let cancelled_at = std::time::Instant::now();
+        cancel.store(true, Ordering::SeqCst);
+        let result = sync.join().expect("sync thread");
+        assert!(cancelled_at.elapsed() < Duration::from_secs(5));
+        result.expect_err("cancelled sync fails")
+    });
+
+    assert!(err.starts_with(SYNC_CANCELLED), "{err}");
+    for pid_file in [&git_pid, &helper_pid] {
+        let pid: libc::pid_t = std::fs::read_to_string(pid_file)
+            .expect("pid")
+            .trim()
+            .parse()
+            .expect("pid number");
+        // SAFETY: signal 0 only checks that the process exists.
+        wait_until("git and its helper exit", || unsafe {
+            libc::kill(pid, 0) != 0
+        });
+    }
+    assert!(!has_plugins_clone_dirs(tmp.path()));
+}
+
+/// #477: once cancelled, the sync starts no further `git`.
+#[cfg(unix)]
+#[test]
+fn cancelled_sync_spawns_no_git() {
+    let bin_dir = tempdir().expect("tempdir");
+    let marker = bin_dir.path().join("ran");
+    let git_path = bin_dir.path().join("git");
+    write_executable_script(
+        &git_path,
+        &format!("#!/bin/sh\ntouch \"{}\"\n", marker.display()),
+    );
+    let cancel = AtomicBool::new(true);
+
+    let err = run_git_command_with_timeout(
+        &mut git_command(&git_path),
+        "git test",
+        CURATED_PLUGINS_GIT_TIMEOUT,
+        &cancel,
+    )
+    .expect_err("cancelled");
+
+    assert!(err.ends_with(SYNC_CANCELLED), "{err}");
+    assert!(!marker.exists());
+}
+
+#[cfg(unix)]
+fn wait_until(what: &str, done: impl Fn() -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !done() {
+        assert!(std::time::Instant::now() < deadline, "timed out: {what}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 #[cfg(unix)]
@@ -908,7 +1031,7 @@ exit 1
         ),
     );
 
-    let err = sync_openai_plugins_repo_via_git(tmp.path(), &git_path)
+    let err = sync_openai_plugins_repo_via_git(tmp.path(), test_git(&git_path))
         .expect_err("invalid staged checkout should fail");
 
     assert!(err.contains("curated plugins archive missing marketplace manifest"));

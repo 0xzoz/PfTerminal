@@ -414,3 +414,85 @@ fn creating_an_existing_account_changes_nothing() {
         .create_provider_account("kimi", &work, ProviderAccountKind::ApiKey, "k")
         .expect("create kimi");
 }
+
+/// Every file under `dir`, with its bytes.
+fn snapshot(dir: &std::path::Path) -> BTreeMap<std::path::PathBuf, Vec<u8>> {
+    let mut files = BTreeMap::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read dir") {
+            let path = entry.expect("entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                files.insert(path.clone(), std::fs::read(&path).expect("read"));
+            }
+        }
+    }
+    files
+}
+
+/// #474: a vault whose accounts predate fingerprints has no salt. Reading a
+/// fingerprint never writes the vault: the account reads as name-only until
+/// the next account write adds the salt in that same write.
+#[test]
+fn reading_a_fingerprint_never_writes_the_vault() {
+    let (dir, vault) = test_vault();
+    let work = name("work");
+    vault
+        .write_provider_account("zai", &work, ProviderAccountKind::ApiKey, "key")
+        .expect("write");
+    // What a vault made before fingerprints existed looks like.
+    assert!(
+        vault
+            .secrets
+            .delete(&VAULT_SCOPE, &fingerprint_salt_name().expect("name"))
+            .expect("delete salt")
+    );
+    let before = snapshot(dir.path());
+    for _ in 0..2 {
+        assert_eq!(
+            vault
+                .provider_account_fingerprint("zai", &work)
+                .expect("fp"),
+            None
+        );
+    }
+    assert_eq!(snapshot(dir.path()), before, "a read changed the vault");
+
+    // The next account write brings the salt; renames do too.
+    vault
+        .create_provider_account("zai", &name("other"), ProviderAccountKind::ApiKey, "k2")
+        .expect("create");
+    let fingerprint = vault
+        .provider_account_fingerprint("zai", &work)
+        .expect("fp")
+        .expect("salted now");
+    assert_eq!(fingerprint.len(), 12);
+    vault
+        .secrets
+        .delete(&VAULT_SCOPE, &fingerprint_salt_name().expect("name"))
+        .expect("delete salt");
+    vault
+        .rename_provider_account("zai", &name("other"), &name("third"))
+        .expect("rename");
+    assert!(
+        vault
+            .provider_account_fingerprint("zai", &work)
+            .expect("fp")
+            .is_some()
+    );
+    // An existing salt is kept by later writes.
+    let kept = vault
+        .provider_account_fingerprint("zai", &work)
+        .expect("fp");
+    vault
+        .write_provider_account("zai", &name("fourth"), ProviderAccountKind::ApiKey, "k4")
+        .expect("write");
+    assert_eq!(
+        vault
+            .provider_account_fingerprint("zai", &work)
+            .expect("fp"),
+        kept
+    );
+}

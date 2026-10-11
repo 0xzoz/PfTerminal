@@ -360,7 +360,10 @@ fn create_bwrap_flags(
 /// 3. Unreadable ancestors of writable roots are masked before their child
 ///    mounts are rebound so nested writable carveouts can be reopened safely.
 /// 4. `--bind <root> <root>` re-enables writes for allowed roots, including
-///    writable subpaths under `/dev` (for example, `/dev/shm`).
+///    writable subpaths under `/dev` (for example, `/dev/shm`). A writable
+///    root above `/dev` (the `/` of a full-write profile) is followed by a
+///    fresh `--dev /dev`: its bind would otherwise cover the minimal `/dev`
+///    with the host's, mounted `nodev`, so even `/dev/null` fails (#493).
 /// 5. `--ro-bind <subpath> <subpath>` re-applies read-only protections under
 ///    those writable roots so protected subpaths win.
 /// 6. Nested unreadable carveouts under a writable root are masked after that
@@ -563,6 +566,11 @@ fn create_filesystem_args(
     for writable_root in &sorted_writable_roots {
         let root = writable_root.root.as_path();
         let symlink_target = canonical_target_if_symlinked_path(root);
+        // #473: placeholders are deduplicated within this pass only. Its
+        // `--bind` puts the live host folder back over every mount an earlier
+        // (broader) pass made below it.
+        let earlier_synthetic_mount_targets =
+            std::mem::take(&mut bwrap_args.synthetic_mount_targets);
         // If a denied ancestor was already masked, recreate any missing mount
         // target parents before binding the narrower writable descendant.
         if let Some(masking_root) = unreadable_roots
@@ -578,6 +586,13 @@ fn create_filesystem_args(
         bwrap_args.args.push("--bind".to_string());
         bwrap_args.args.push(path_to_string(mount_root));
         bwrap_args.args.push(path_to_string(mount_root));
+        // #493: restore the minimal `/dev` (step 2) before the deny masks of
+        // this pass and before deeper `/dev/*` writable roots (sorted later).
+        let dev = Path::new("/dev");
+        if dev.starts_with(mount_root) && mount_root != dev {
+            bwrap_args.args.push("--dev".to_string());
+            bwrap_args.args.push("/dev".to_string());
+        }
 
         let mut read_only_subpaths: Vec<PathBuf> = writable_root
             .read_only_subpaths
@@ -615,8 +630,53 @@ fn create_filesystem_args(
             &read_only_subpaths,
         );
         read_only_subpaths.sort_by_key(|path| path_depth(path));
-        for subpath in read_only_subpaths {
-            append_read_only_subpath_args(&mut bwrap_args, &subpath, &allowed_write_paths)?;
+        let mut nested_unreadable_roots: Vec<PathBuf> = unreadable_roots
+            .iter()
+            .filter(|path| path.starts_with(root))
+            .cloned()
+            .collect();
+        if let Some(target) = &symlink_target {
+            nested_unreadable_roots =
+                remap_paths_for_symlink_target(nested_unreadable_roots, root, target);
+        }
+        nested_unreadable_roots.sort_by_key(|path| path_depth(path));
+        // #473: denied paths missing below a read-only folder, by the folder
+        // that gets a snapshot (see `append_read_only_snapshot_dir_args`).
+        let mut snapshot_dirs: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
+        let mut snapshot_covered: HashSet<PathBuf> = HashSet::new();
+        for unreadable_root in &nested_unreadable_roots {
+            if let Some(missing) = missing_component_below_read_only_path(
+                unreadable_root,
+                &read_only_subpaths,
+                &allowed_write_paths,
+            ) && let Some(dir) = missing.parent()
+            {
+                snapshot_dirs
+                    .entry(dir.to_path_buf())
+                    .or_default()
+                    .push(missing.clone());
+                snapshot_covered.insert(unreadable_root.clone());
+            }
+        }
+        for subpath in &read_only_subpaths {
+            if missing_component_below_read_only_path(
+                subpath,
+                &read_only_subpaths,
+                &allowed_write_paths,
+            )
+            .is_some()
+            {
+                // #473: the read-only folder above already stops the command
+                // creating it, and bubblewrap cannot create a mount target
+                // in a read-only mount.
+                continue;
+            }
+            append_read_only_subpath_args(&mut bwrap_args, subpath, &allowed_write_paths)?;
+        }
+        let mut snapshot_dirs: Vec<(PathBuf, Vec<PathBuf>)> = snapshot_dirs.into_iter().collect();
+        snapshot_dirs.sort_by_key(|(dir, _)| path_depth(dir));
+        for (dir, hidden) in &snapshot_dirs {
+            append_read_only_snapshot_dir_args(&mut bwrap_args, dir, hidden)?;
         }
         // Protect the registry only where a writable bind exposes it. Apply
         // this before deny masks so a denied parent stays hidden, rather than
@@ -635,19 +695,20 @@ fn create_filesystem_args(
             bwrap_args.args.push(path_to_string(registry_mount));
             bwrap_args.args.push(path_to_string(registry_mount));
         }
-        let mut nested_unreadable_roots: Vec<PathBuf> = unreadable_roots
-            .iter()
-            .filter(|path| path.starts_with(root))
-            .cloned()
-            .collect();
-        if let Some(target) = &symlink_target {
-            nested_unreadable_roots =
-                remap_paths_for_symlink_target(nested_unreadable_roots, root, target);
-        }
-        nested_unreadable_roots.sort_by_key(|path| path_depth(path));
         for unreadable_root in nested_unreadable_roots {
+            if snapshot_covered.contains(&unreadable_root) {
+                // Hidden by the snapshot above, also if it is created later.
+                continue;
+            }
             append_unreadable_root_args(&mut bwrap_args, &unreadable_root, &allowed_write_paths)?;
         }
+        let pass_synthetic_mount_targets = std::mem::replace(
+            &mut bwrap_args.synthetic_mount_targets,
+            earlier_synthetic_mount_targets,
+        );
+        bwrap_args
+            .synthetic_mount_targets
+            .extend(pass_synthetic_mount_targets);
     }
 
     let mut rootless_unreadable_roots: Vec<PathBuf> = unreadable_roots
@@ -1099,6 +1160,9 @@ fn append_empty_directory_args(bwrap_args: &mut BwrapArgs, path: &Path) {
 }
 
 fn append_missing_read_only_subpath_args(bwrap_args: &mut BwrapArgs, path: &Path) -> Result<()> {
+    if has_synthetic_mount_target(bwrap_args, path) {
+        return Ok(());
+    }
     if path.file_name().is_some_and(is_protected_metadata_name) {
         append_empty_directory_args(bwrap_args, path);
         bwrap_args
@@ -1111,10 +1175,99 @@ fn append_missing_read_only_subpath_args(bwrap_args: &mut BwrapArgs, path: &Path
 }
 
 fn append_missing_empty_file_bind_data_args(bwrap_args: &mut BwrapArgs, path: &Path) -> Result<()> {
+    if has_synthetic_mount_target(bwrap_args, path) {
+        return Ok(());
+    }
     append_empty_file_bind_data_args(bwrap_args, path)?;
     bwrap_args
         .synthetic_mount_targets
         .push(SyntheticMountTarget::missing(path));
+    Ok(())
+}
+
+/// #473: several denied paths can share their first missing component
+/// (`~/.config` for `~/.config/gh` and `~/.config/gcloud`). One empty
+/// placeholder there already stops the whole tree being created, and
+/// bubblewrap fails to mount a second one over the first. Only this
+/// writable-root pass's targets are listed (see `create_filesystem_args`).
+fn has_synthetic_mount_target(bwrap_args: &BwrapArgs, path: &Path) -> bool {
+    bwrap_args
+        .synthetic_mount_targets
+        .iter()
+        .any(|target| target.path() == path)
+}
+
+/// #473: the first missing component of `path` when the folder it would be
+/// created in sits at or below an existing read-only path. That folder is
+/// bound read-only, so the command cannot create it, and neither can
+/// bubblewrap create a mount target there. `None` when `path` exists, is not
+/// below a writable root, or crosses a writable symlink (masking it then
+/// fails closed as before).
+fn missing_component_below_read_only_path(
+    path: &Path,
+    read_only_subpaths: &[PathBuf],
+    allowed_write_paths: &[PathBuf],
+) -> Option<PathBuf> {
+    if first_writable_symlink_component_in_path(path, allowed_write_paths).is_some() {
+        return None;
+    }
+    let missing = find_first_non_existent_component(path)?;
+    if !is_within_allowed_write_paths(&missing, allowed_write_paths) {
+        return None;
+    }
+    let parent = missing.parent()?;
+    let parent_is_dir = fs::symlink_metadata(parent).is_ok_and(|metadata| metadata.is_dir());
+    (parent_is_dir
+        && read_only_subpaths
+            .iter()
+            .any(|read_only| parent.starts_with(read_only)))
+    .then_some(missing)
+}
+
+/// #473: hides denied paths that are missing in `dir`, a read-only folder,
+/// for the whole run. A placeholder cannot be created there, and a live
+/// read-only bind would still show a credential file the host writes while
+/// the command runs. So `dir` becomes a read-only tmpfs that holds what it
+/// has at launch (folders and files bound read-only, links recreated),
+/// without `hidden`: nothing created after launch appears inside. Entries
+/// that vanish before bubblewrap runs are skipped; names that are not UTF-8
+/// are left out.
+fn append_read_only_snapshot_dir_args(
+    bwrap_args: &mut BwrapArgs,
+    dir: &Path,
+    hidden: &[PathBuf],
+) -> Result<()> {
+    let mut entries = fs::read_dir(dir)?.collect::<io::Result<Vec<_>>>()?;
+    entries.sort_by_key(fs::DirEntry::file_name);
+    bwrap_args.args.push("--perms".to_string());
+    bwrap_args.args.push("555".to_string());
+    bwrap_args.args.push("--tmpfs".to_string());
+    bwrap_args.args.push(path_to_string(dir));
+    for entry in entries {
+        let path = entry.path();
+        if hidden.contains(&path) || path.to_str().is_none() {
+            continue;
+        }
+        if entry
+            .file_type()
+            .is_ok_and(|file_type| file_type.is_symlink())
+        {
+            let Ok(target) = fs::read_link(&path) else {
+                continue;
+            };
+            let Some(target) = target.to_str() else {
+                continue;
+            };
+            bwrap_args.args.push("--symlink".to_string());
+            bwrap_args.args.push(target.to_string());
+        } else {
+            bwrap_args.args.push("--ro-bind-try".to_string());
+            bwrap_args.args.push(path_to_string(&path));
+        }
+        bwrap_args.args.push(path_to_string(&path));
+    }
+    bwrap_args.args.push("--remount-ro".to_string());
+    bwrap_args.args.push(path_to_string(dir));
     Ok(())
 }
 
@@ -1949,6 +2102,70 @@ mod tests {
             !args.args.iter().any(|arg| arg == &missing_root),
             "missing writable root should be skipped",
         );
+        assert_eq!(
+            args.args.iter().filter(|arg| *arg == "--dev").count(),
+            1,
+            "a writable root below `/dev`'s parent keeps the single minimal `/dev`",
+        );
+    }
+
+    /// #493: the writable `/` of a full-write profile with denials is
+    /// followed by a fresh minimal `/dev`, before the deny masks and before a
+    /// deeper writable `/dev/shm`.
+    #[test]
+    fn full_write_root_bind_is_followed_by_minimal_dev() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let denied = temp_dir.path().join("secret");
+        std::fs::create_dir(&denied).expect("create denied dir");
+        let entry = |path: &Path, access| FileSystemSandboxEntry {
+            path: FileSystemPath::Path {
+                path: AbsolutePathBuf::try_from(path).expect("absolute path"),
+            },
+            access,
+            missing_path_behavior: None,
+        };
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                access: FileSystemAccessMode::Write,
+                missing_path_behavior: None,
+            },
+            entry(&denied, FileSystemAccessMode::Deny),
+            entry(Path::new("/dev/full"), FileSystemAccessMode::Deny),
+            entry(Path::new("/dev/shm"), FileSystemAccessMode::Write),
+        ]);
+
+        let args =
+            create_filesystem_args(&policy, temp_dir.path(), NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
+                .expect("filesystem args");
+        let position = |window: &[&str]| {
+            args.args
+                .windows(window.len())
+                .position(|candidate| candidate == window)
+        };
+        let root_bind = position(&["--bind", "/", "/", "--dev", "/dev"])
+            .expect("writable `/` should be followed by `--dev /dev`");
+        let denied = path_to_string(&denied);
+        let deny_mask = args
+            .args
+            .iter()
+            .rposition(|arg| arg == &denied)
+            .expect("denied path should be masked");
+        assert!(root_bind < deny_mask, "{:?}", args.args);
+        // A denied `/dev` node is masked on top of the fresh `/dev`.
+        let dev_mask = args
+            .args
+            .iter()
+            .rposition(|arg| arg == "/dev/full")
+            .expect("denied /dev/full should be masked");
+        assert!(root_bind < dev_mask, "{:?}", args.args);
+        if Path::new("/dev/shm").exists() {
+            let shm_bind = position(&["--bind", "/dev/shm", "/dev/shm"])
+                .expect("writable `/dev/shm` should be rebound");
+            assert!(root_bind < shm_bind, "{:?}", args.args);
+        }
     }
 
     #[test]
@@ -2144,6 +2361,10 @@ mod tests {
                 "--bind".to_string(),
                 "/".to_string(),
                 "/".to_string(),
+                // #493: the `/` bind covers the minimal /dev with the host's,
+                // mounted `nodev`; mount a fresh one over it.
+                "--dev".to_string(),
+                "/dev".to_string(),
                 // Mask the default metadata path names under the writable root.
                 // Because the root is `/` in this test, these carveout paths
                 // appear directly below `/`.
@@ -2168,8 +2389,8 @@ mod tests {
                 "--ro-bind".to_string(),
                 path_to_string(&synthetic_mount_registry_root()),
                 path_to_string(&synthetic_mount_registry_root()),
-                // Rebind /dev after the root bind so device nodes remain
-                // writable/usable inside the writable root.
+                // The explicit writable /dev root binds the host /dev over
+                // the fresh one (still `nodev`, as before #493).
                 "--bind".to_string(),
                 "/dev".to_string(),
                 "/dev".to_string(),
@@ -2763,6 +2984,184 @@ mod tests {
             .arg("--version")
             .output()
             .is_ok_and(|output| output.status.success())
+    }
+
+    fn path_entry(
+        path: &Path,
+        access: FileSystemAccessMode,
+        skip_missing: bool,
+    ) -> FileSystemSandboxEntry {
+        let path = FileSystemPath::Path {
+            path: AbsolutePathBuf::from_absolute_path(path).expect("absolute path"),
+        };
+        if skip_missing {
+            FileSystemSandboxEntry::skip_missing_path(path, access)
+        } else {
+            FileSystemSandboxEntry::new(path, access)
+        }
+    }
+
+    /// #473: `~/.claude` read-only (it runs hooks) with no
+    /// `.credentials.json` yet. A placeholder cannot be made in the
+    /// read-only folder, so the folder becomes a snapshot of what it holds.
+    #[test]
+    fn missing_denied_path_below_read_only_folder_gets_a_snapshot() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let home = temp_dir.path().join("home");
+        let claude = home.join(".claude");
+        std::fs::create_dir_all(claude.join("projects")).expect("create .claude");
+        std::fs::write(claude.join("settings.json"), "{}").expect("settings");
+        std::os::unix::fs::symlink("settings.json", claude.join("link")).expect("link");
+        let credentials = claude.join(".credentials.json");
+        let secret = claude.join("secret.json");
+        std::fs::write(&secret, "secret").expect("secret");
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            path_entry(&home, FileSystemAccessMode::Write, false),
+            path_entry(&claude, FileSystemAccessMode::Read, true),
+            path_entry(&credentials, FileSystemAccessMode::Deny, true),
+            path_entry(&secret, FileSystemAccessMode::Deny, true),
+        ]);
+
+        let args = create_filesystem_args(&policy, &home, NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
+            .expect("filesystem args")
+            .args;
+
+        let claude_arg = path_to_string(&claude);
+        let position = |window: &[&str]| {
+            args.windows(window.len())
+                .position(|candidate| candidate == window)
+                .unwrap_or_else(|| panic!("expected {window:?} in {args:#?}"))
+        };
+        let read_only_bind = position(&["--ro-bind", &claude_arg, &claude_arg]);
+        let snapshot = position(&["--perms", "555", "--tmpfs", &claude_arg]);
+        let remount = position(&["--remount-ro", &claude_arg]);
+        assert!(read_only_bind < snapshot && snapshot < remount, "{args:#?}");
+        for child in ["projects", "secret.json", "settings.json"] {
+            let child = path_to_string(&claude.join(child));
+            let bind = position(&["--ro-bind-try", &child, &child]);
+            assert!(snapshot < bind && bind < remount, "{args:#?}");
+        }
+        // An existing denied entry stays masked over its snapshot bind.
+        let secret_arg = path_to_string(&secret);
+        let secret_mask = args
+            .windows(5)
+            .position(|window| {
+                window[0] == "--perms"
+                    && window[1] == "000"
+                    && window[2] == "--ro-bind-data"
+                    && window[4] == secret_arg
+            })
+            .unwrap_or_else(|| panic!("expected a mask for {secret_arg}: {args:#?}"));
+        assert!(remount < secret_mask, "{args:#?}");
+        position(&[
+            "--symlink",
+            "settings.json",
+            &path_to_string(&claude.join("link")),
+        ]);
+        assert!(
+            !args.contains(&path_to_string(&credentials)),
+            "nothing is mounted at the missing file: {args:#?}"
+        );
+        assert!(!credentials.exists(), "no placeholder on the host");
+    }
+
+    /// #473: `~/.config/gh` and `~/.config/gcloud` with no `~/.config`
+    /// share one placeholder; bubblewrap cannot mount a second over it.
+    #[test]
+    fn missing_denied_paths_sharing_a_missing_folder_mask_it_once() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let home = temp_dir.path().join("home");
+        std::fs::create_dir_all(&home).expect("create home");
+        let config = home.join(".config");
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            path_entry(&home, FileSystemAccessMode::Write, false),
+            path_entry(&config.join("gh"), FileSystemAccessMode::Deny, true),
+            path_entry(&config.join("gcloud"), FileSystemAccessMode::Deny, true),
+        ]);
+
+        let args = create_filesystem_args(&policy, &home, NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
+            .expect("filesystem args");
+
+        let config_arg = path_to_string(&config);
+        assert_eq!(
+            args.args
+                .windows(3)
+                .filter(|window| window[0] == "--ro-bind-data" && window[2] == config_arg)
+                .count(),
+            1,
+            "{:#?}",
+            args.args
+        );
+        assert_eq!(
+            synthetic_mount_target_paths(&args)
+                .into_iter()
+                .filter(|path| path == &config)
+                .count(),
+            1
+        );
+    }
+
+    /// #473 review: a broader writable root's pass leaves an empty
+    /// placeholder on the host; the nested root's `--bind` shows that live
+    /// file again, so its own pass must mask the path again.
+    #[test]
+    fn missing_denied_path_is_masked_again_after_a_nested_writable_bind() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let home = temp_dir.path().join("home");
+        let work = home.join("work");
+        std::fs::create_dir_all(&work).expect("create work");
+        let secret = work.join("secret");
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            path_entry(&home, FileSystemAccessMode::Write, false),
+            path_entry(&work, FileSystemAccessMode::Write, false),
+            path_entry(&secret, FileSystemAccessMode::Deny, true),
+        ]);
+
+        let args = create_filesystem_args(&policy, &home, NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
+            .expect("filesystem args")
+            .args;
+
+        let work_arg = path_to_string(&work);
+        let secret_arg = path_to_string(&secret);
+        let inner_bind = args
+            .windows(3)
+            .position(|window| window == ["--bind", work_arg.as_str(), work_arg.as_str()])
+            .unwrap_or_else(|| panic!("expected a bind of {work_arg}: {args:#?}"));
+        let masks: Vec<usize> = args
+            .windows(3)
+            .enumerate()
+            .filter(|(_, window)| window[0] == "--ro-bind-data" && window[2] == secret_arg)
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(masks.len(), 2, "{args:#?}");
+        assert!(masks[0] < inner_bind && inner_bind < masks[1], "{args:#?}");
+    }
+
+    /// #473: a missing read-only path below a read-only folder needs no
+    /// placeholder; the folder already stops it being created.
+    #[test]
+    fn missing_read_only_path_below_read_only_folder_is_left_to_the_folder() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let home = temp_dir.path().join("home");
+        let claude = home.join(".claude");
+        std::fs::create_dir_all(&claude).expect("create .claude");
+        let hooks = claude.join("missing/hooks");
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            path_entry(&home, FileSystemAccessMode::Write, false),
+            path_entry(&claude, FileSystemAccessMode::Read, true),
+            path_entry(&hooks, FileSystemAccessMode::Read, true),
+        ]);
+
+        let args = create_filesystem_args(&policy, &home, NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
+            .expect("filesystem args");
+
+        let missing = path_to_string(&claude.join("missing"));
+        assert!(
+            !args.args.iter().any(|arg| arg.starts_with(&missing)),
+            "{:#?}",
+            args.args
+        );
+        assert!(!synthetic_mount_target_paths(&args).contains(&claude.join("missing")));
     }
 
     /// Assert that `path` is masked due to a bwrap arg sequence like:

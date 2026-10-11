@@ -23,12 +23,26 @@ off no attempt names an account and nothing below changes.
   creates a vault, key or salt, and is limited to 2 s. If the fingerprint can't be read in time,
   the account is recorded by name alone and the request is never held up.
 
+  Follow-up #474: the read used to create the salt on a vault made before S05, rewriting it on
+  the first named request. The salt is now created only when an account is added or renamed, in
+  that same write; until then such a vault's accounts are recorded by name alone.
+
   A sampling refuses a rebound mode on another account. A fingerprint is reused only for the
   same provider and account. Requests reported by another client (the Claude panes bridge)
   record no account.
 - **Rate-limit state.** The throttle row for the 429 cooldown and request lease is keyed by
   `account:<name>` for a named account, so account B's 429 never blocks account A. The default
-  account keeps today's key byte for byte.
+  account's key is fingerprinted with a per-home salt kept in the state DB (#482, follow-up); an
+  older unsalted row moves to it on the key's next request, and idle ones are deleted.
+
+  Follow-up #476: until then only a leased request recorded its result, so no human-driven
+  session ever recorded a 429. Every turn sampling request now records it: a 429 holds that key
+  back in every session on the home for the provider's `Retry-After` (else 30 s, 60 s, 120 s, up to
+  5 min; a burst of 429s counts once), and no result shortens an active cooldown. Compaction, the
+  turn-completion check and memory extraction call the model outside that path and still neither
+  check nor record it. The request lease is taken only by a spawned sub-agent sending a large
+  request (32k input tokens or 128 KiB) whose cache hit is unknown or under 70%; human-driven
+  sessions never wait on it.
 
   A named account is keyed by name rather than by credential (review note 5), so replacing its
   key under the same name keeps an active cooldown.
@@ -36,6 +50,10 @@ off no attempt names an account and nothing below changes.
   The "Other conversations" rows are grouped the same way. Accounts are named, `default`
   included, only when the view holds work from a named account. The per-account rows add up
   exactly to the provider totals.
+
+  Follow-up #475: a request the provider refuses with 401 or 403 before any response (a fake key)
+  is recorded as refused (ledger format 5, written only with the first refusal). `/cost` shows it
+  as refused with no charge, not as incomplete usage that sends the user to the provider's bill.
 - **`/status`** names the session's account, which S04 already did.
 
 ## Tests (final tree, macOS, `just test`, isolated profile)
