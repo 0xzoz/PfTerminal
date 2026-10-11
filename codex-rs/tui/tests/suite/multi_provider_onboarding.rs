@@ -628,6 +628,127 @@ async fn tmux_locked_wallet_api_unlocks_and_cancels() -> Result<()> {
     Ok(())
 }
 
+/// #461: onboarding text fields take every printable key. Values typed key by key (as a
+/// non-bracketed paste or typing arrives) that contain `q`, even as the first character, must
+/// not quit the TUI and spill the rest of a secret onto the shell.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tmux_onboarding_text_fields_type_q_without_quitting() -> Result<()> {
+    if !TmuxServer::should_run("PF-84 #461 onboarding text fields type q")? {
+        return Ok(());
+    }
+    let repo_root = codex_utils_cargo_bin::repo_root()?;
+    let binary = codex_binary(&repo_root)?;
+    let home = tempdir()?;
+    let server = MockServer::start().await;
+    write_config(home.path(), &repo_root, &server.uri())?;
+    let config_path = home.path().join("config.toml");
+    let mut config = fs::read_to_string(&config_path)?;
+    config.push_str("\n[features]\nnamed_accounts = true\n");
+    fs::write(&config_path, config)?;
+
+    let tmux = TmuxServer::start("pf84_461_onboarding_q")?;
+    register_evidence(&tmux, home.path(), &binary)?;
+    let session = tmux.new_session(session_spec(
+        "pf84-461-onboarding-q",
+        &binary,
+        &repo_root,
+        home.path(),
+    ))?;
+    let pane = session.primary_pane();
+    pane.wait_stable_contains("Provider: OpenAI Codex Account", READY_TIMEOUT)?;
+
+    // The default-key field, with `q` as its first character.
+    let default_key = format!("q{}", synthetic_canary("q-default"));
+    configure_api_key(pane, "Provider: Z.AI API Key", &default_key)?;
+    ensure!(session.is_running(), "typing the default key quit the TUI");
+
+    select_label(pane, "Provider: Z.AI")?;
+    // The chooser's "> Z.AI" header defeats `select_label`; the action is one row down.
+    pane.wait_stable_contains("> Use configured credentials", READY_TIMEOUT)?;
+    pane.send_key(TmuxKey::Down)?;
+    pane.wait_stable_contains("> Add another account", READY_TIMEOUT)?;
+    pane.send_key(TmuxKey::Enter)?;
+    pane.wait_stable_contains("Name it:", READY_TIMEOUT)?;
+    pane.send_literal("qa-quota")?;
+    pane.wait_stable_contains("qa-quota", READY_TIMEOUT)?;
+    ensure!(session.is_running(), "typing the account name quit the TUI");
+    pane.send_key(TmuxKey::Enter)?;
+    pane.wait_stable_contains("never shown.", READY_TIMEOUT)?;
+
+    let account_key = format!("q{}-qqq", synthetic_canary("q-account"));
+    pane.send_secret_literal(&account_key)?;
+    pane.wait_stable_until("the masked value", READY_TIMEOUT, |capture| {
+        capture.matches('•').count() >= 8
+    })?;
+    ensure!(session.is_running(), "typing the account key quit the TUI");
+    pane.send_key(TmuxKey::Enter)?;
+    pane.wait_stable_contains("--account qa-quota", READY_TIMEOUT)?;
+    pane.send_key(TmuxKey::Enter)?;
+    pane.wait_stable_contains("Choose a provider account", READY_TIMEOUT)?;
+    select_label(pane, "Done")?;
+    wait_chat_ready(pane)?;
+
+    let scrollback = pane.capture_scrollback_tail(/*lines*/ 4_000)?;
+    for canary in [default_key.as_str(), account_key.as_str()] {
+        ensure!(
+            !scrollback.contains(canary.strip_prefix('q').unwrap_or(canary)),
+            "a typed secret appeared in the terminal"
+        );
+        ensure!(
+            !tree_contains_except_custody(home.path(), canary.as_bytes())?,
+            "a typed secret appeared in plain text under the isolated home"
+        );
+    }
+    exit_tui(pane)?;
+    session.wait_for_exit(READY_TIMEOUT)?;
+    Ok(())
+}
+
+/// #462: when config already names the provider, onboarding opens on that provider's key
+/// entry. Saving the key must continue to chat instead of looping back to key entry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tmux_preset_provider_key_entry_continues_to_chat() -> Result<()> {
+    if !TmuxServer::should_run("PF-84 #462 preset provider onboarding")? {
+        return Ok(());
+    }
+    let repo_root = codex_utils_cargo_bin::repo_root()?;
+    let binary = codex_binary(&repo_root)?;
+    let home = tempdir()?;
+    let server = MockServer::start().await;
+    let _reply = responses::mount_sse_once(&server, response("pf84 preset reply")).await;
+    write_config(home.path(), &repo_root, &server.uri())?;
+    let config_path = home.path().join("config.toml");
+    let config = fs::read_to_string(&config_path)?
+        .replace("model = \"gpt-5.4\"", "model = \"pf84-preset\"")
+        // A built-in API-key provider (Kimi, Z.AI) named in config forces the API path;
+        // the loopback provider stands in for it without a real endpoint.
+        .replace(
+            "model_provider = \"openai\"",
+            "model_provider = \"pf53-loopback\"\nforced_login_method = \"api\"",
+        );
+    fs::write(&config_path, config)?;
+
+    let tmux = TmuxServer::start("pf84_462_preset_provider")?;
+    register_evidence(&tmux, home.path(), &binary)?;
+    let session = tmux.new_session(session_spec(
+        "pf84-462-preset-provider",
+        &binary,
+        &repo_root,
+        home.path(),
+    ))?;
+    let pane = session.primary_pane();
+    pane.wait_stable_contains("Use your PF53 Loopback API key", READY_TIMEOUT)?;
+    let key = synthetic_canary("preset");
+    pane.send_secret_literal(&key)?;
+    pane.send_key(TmuxKey::Enter)?;
+    pane.wait_stable_contains("API key configured", READY_TIMEOUT)?;
+    pane.send_key(TmuxKey::Enter)?;
+    submit_and_wait(pane, "PF84 preset request", "pf84 preset reply")?;
+    exit_tui(pane)?;
+    session.wait_for_exit(READY_TIMEOUT)?;
+    Ok(())
+}
+
 fn configure_api_key(pane: &TmuxPane<'_>, label: &str, secret: &str) -> Result<()> {
     select_label(pane, label)?;
     pane.wait_stable_contains("never adds it to chat.", READY_TIMEOUT)?;

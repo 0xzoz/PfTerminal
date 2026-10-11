@@ -546,27 +546,49 @@ impl AuthModeWidget {
         self.error.read().unwrap().clone()
     }
 
-    /// Returns whether the auth flow is currently in API-key entry mode.
-    pub(crate) fn is_api_key_entry_active(&self) -> bool {
-        self.sign_in_state.read().is_ok_and(|guard| {
-            matches!(
-                &*guard,
-                SignInState::ApiKeyEntry(_)
-                    | SignInState::ClaudeManagedTokenEntry(_)
-                    | SignInState::ClaudeCodeLoginCodeEntry { .. }
-            )
+    /// Returns whether a text field (an API key, a Claude token or code, or a
+    /// named account's name or value) has focus. While it does, every printable
+    /// key is text, never a shortcut.
+    pub(crate) fn is_text_entry_active(&self) -> bool {
+        // Exhaustive on purpose: a new state must decide whether it takes text.
+        self.sign_in_state.read().is_ok_and(|guard| match &*guard {
+            SignInState::ApiKeyEntry(_)
+            | SignInState::ClaudeManagedTokenEntry(_)
+            | SignInState::ClaudeCodeLoginCodeEntry { .. }
+            | SignInState::AccountNameEntry { .. }
+            | SignInState::AccountValueEntry { .. } => true,
+            SignInState::PickMode
+            | SignInState::ChatGptContinueInBrowser(_)
+            | SignInState::ChatGptDeviceCode(_)
+            | SignInState::ChatGptSuccessMessage
+            | SignInState::ChatGptSuccess
+            | SignInState::ApiKeySaving
+            | SignInState::ApiKeyConfigured { .. }
+            | SignInState::ClaudeAuthMethodChoice { .. }
+            | SignInState::ClaudeManagedTokenSaving
+            | SignInState::ClaudeCodeLoginChecking
+            | SignInState::ClaudeCodeLoginPending { .. }
+            | SignInState::ClaudeCodeLoginReady { .. }
+            | SignInState::ClaudeAccountConfigured { .. }
+            | SignInState::ConfiguredProviderChoice { .. }
+            | SignInState::AccountSaving
+            | SignInState::AccountSaved { .. }
+            | SignInState::Complete => false,
         })
     }
 
-    /// Returns whether the API-key entry field currently contains any text.
-    pub(crate) fn api_key_entry_has_text(&self) -> bool {
-        self.sign_in_state.read().is_ok_and(|guard| match &*guard {
+    /// The focused text field's current value, for tests.
+    #[cfg(test)]
+    pub(crate) fn text_entry_value(&self) -> Option<String> {
+        match &*self.sign_in_state.read().unwrap() {
             SignInState::ApiKeyEntry(state) | SignInState::ClaudeManagedTokenEntry(state) => {
-                !state.value.is_empty()
+                Some(state.value.clone())
             }
-            SignInState::ClaudeCodeLoginCodeEntry { value, .. } => !value.is_empty(),
-            _ => false,
-        })
+            SignInState::ClaudeCodeLoginCodeEntry { value, .. }
+            | SignInState::AccountNameEntry { value, .. } => Some(value.clone()),
+            SignInState::AccountValueEntry { value, .. } => Some(value.to_string()),
+            _ => None,
+        }
     }
 
     fn confirm_binding(&self) -> KeyBinding {
@@ -688,7 +710,7 @@ impl AuthModeWidget {
             }
             SignInOption::ApiKey => {
                 if self.is_api_login_allowed() {
-                    self.begin_provider(OPENAI_PROVIDER_ID);
+                    self.begin_provider(&self.api_key_entry_provider_id());
                     self.start_api_key_entry();
                 } else {
                     self.disallow_api_login();
@@ -733,6 +755,26 @@ impl AuthModeWidget {
                 }
                 self.request_frame.schedule_frame();
             }
+        }
+    }
+
+    /// The catalog provider the API-key field saves to. Setup must begin for
+    /// this provider, or its completion is ignored and onboarding loops (#462).
+    fn api_key_entry_provider_id(&self) -> String {
+        self.selected_api_key_option.as_ref().map_or_else(
+            || OPENAI_PROVIDER_ID.to_string(),
+            |option| option.target.provider_id.as_str().to_string(),
+        )
+    }
+
+    /// Begins provider setup when onboarding opens straight on API-key entry
+    /// (config already names the provider), as choosing the row would.
+    pub(crate) fn begin_initial_api_key_entry(&self) {
+        if matches!(
+            &*self.sign_in_state.read().unwrap(),
+            SignInState::ApiKeyEntry(_)
+        ) {
+            self.begin_provider(&self.api_key_entry_provider_id());
         }
     }
 
@@ -2372,7 +2414,7 @@ pub(super) fn maybe_open_auth_url_in_browser(request_handle: &AppServerRequestHa
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::legacy_core::config::ConfigBuilder;
     use codex_app_server_client::AppServerRequestHandle;
@@ -2403,7 +2445,7 @@ mod tests {
         "originator=codex_cli_rs"
     );
 
-    pub(super) async fn widget_forced_chatgpt() -> (AuthModeWidget, TempDir) {
+    pub(crate) async fn widget_forced_chatgpt() -> (AuthModeWidget, TempDir) {
         let codex_home = TempDir::new().unwrap();
         let codex_home_path = codex_home.path().to_path_buf();
         let config = ConfigBuilder::default()
