@@ -114,8 +114,8 @@ static CHECK_KEY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 struct Upstream {
     port: u16,
     /// Every request it received: its path and which credential headers it
-    /// carried (#504).
-    #[cfg(unix)]
+    /// carried (#504). Read only by unix tests.
+    #[cfg_attr(not(unix), allow(dead_code))]
     seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     _ca_dir: TempDir,
     ca_path: PathBuf,
@@ -204,7 +204,6 @@ async fn start_upstream_for(tls_host: &str) -> Upstream {
     tokio::spawn(listener.serve(service));
     Upstream {
         port,
-        #[cfg(unix)]
         seen,
         _ca_dir: ca_dir,
         ca_path,
