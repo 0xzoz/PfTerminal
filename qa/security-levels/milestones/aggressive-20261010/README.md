@@ -167,3 +167,6 @@ The plan's "verify on the next candidate" rows all pass on this candidate:
 ## Restore
 
 [harness/restore.sh](harness/restore.sh) and [common/restore-record.txt](common/restore-record.txt).
+
+Note: each run's end-state copy of the test project is under `runs/<label>/collected/fixture/workspace/`. Its git
+directory is stored as `dot-git/` (renamed only so the outer repository keeps the files).
