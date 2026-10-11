@@ -20,8 +20,9 @@ pub(crate) enum UnifiedExecError {
     StdinClosed,
     #[error("missing command line for unified exec request")]
     MissingCommandLine,
-    /// An approval, exec policy or security level refused the command; the
-    /// message says why (#439).
+    /// The command did not start: an approval, exec policy or security level
+    /// refused it, or its launch failed. The message says why (#439: never a
+    /// debug dump).
     #[error("{message}")]
     Rejected { message: String },
     /// PF-27-S02: the secretless launch contract refused the input.
