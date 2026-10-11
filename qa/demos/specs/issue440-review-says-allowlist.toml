@@ -41,6 +41,6 @@ key = "Up"
 [[steps]]
 key = "Enter"
 [[steps]]
-wait = "(?s)Vault now:.*(outside an allowlist|are\\s+removed, and login)"
+wait = "(?s)Aggressive: the vault store.*outside\\s+an\\s+allowlist"
 [[steps]]
 pause = 5.0

@@ -164,23 +164,7 @@ pub(crate) fn current_values(config: &Config) -> CurrentValues {
         if config.features.enabled(Feature::SecretlessAgentLaunch)
             || codex_protocol::secretless_launch::is_armed()
         {
-            let mut set_secret = config
-                .permissions
-                .shell_environment_policy
-                .r#set
-                .keys()
-                .filter(|name| is_secret_name(name))
-                .cloned()
-                .collect::<Vec<_>>();
-            set_secret.sort();
-            let mut text = "only allowlisted environment variables reach agent commands (for example PATH, HOME, locale, terminal, proxy and tool locations; secretless_agent_launch); set others explicitly in shell_environment_policy.set".to_string();
-            if !set_secret.is_empty() {
-                text.push_str(&format!(
-                    "; secret-like names set there are passed: {}",
-                    set_secret.join(", ")
-                ));
-            }
-            text
+            "only allowlisted environment variables reach agent commands (for example PATH, HOME, locale, terminal, proxy and tool locations; secretless_agent_launch); set others explicitly in shell_environment_policy.set".to_string()
         } else if kept.is_empty() {
             "secret-like environment variables are removed".to_string()
         } else {

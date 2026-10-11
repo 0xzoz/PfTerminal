@@ -360,9 +360,10 @@ pub const NESTED_AGENT_SUBCOMMANDS: [&str; 3] = ["exec", "e", "review"];
 
 /// Justification of the nested-launch rules. The exec policy's strict
 /// matching (the vault rule's net for wrapped and quoted forms) skips rules
-/// with it: they only refuse earlier what the launch check refuses anyway,
-/// so text such as `git commit -m "fix codex review"` must not match them.
-pub const NESTED_LAUNCH_JUSTIFICATION: &str = "Security level Aggressive: nested agent launches are set to refuse; a person can let `corbanu exec` and `corbanu review` run with Aggressive enforced in /security.";
+/// with it: they refuse earlier what the launch check refuses (until a
+/// thread started under "refuse" ends; `--help` included), so text such as
+/// `git commit -m "fix codex review"` must not match them.
+pub const NESTED_LAUNCH_JUSTIFICATION: &str = "Security level Aggressive: nested agent launches are set to refuse; a person can let `corbanu exec` and `corbanu review` run with Aggressive enforced in /security (from the next session).";
 
 pub fn rules_contents_for(nested: NestedAgents) -> String {
     let mut contents = String::from(

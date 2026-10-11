@@ -2798,7 +2798,8 @@ prefix_rule(pattern = ["rm"], decision = "forbidden")"#,
 
 /// #441 (milestone AGG-19): with nested agents set to refuse, the Aggressive
 /// rule file refuses an agent's `corbanu exec` / `review` before any prompt,
-/// through absolute paths and shell wrappers, under strict rules. The
+/// through absolute paths and `bash -lc` scripts, under strict rules. Forms
+/// only the launch check sees (`env corbanu exec`) still prompt first. The
 /// nested-launch rules match exactly: text that only mentions them (a commit
 /// message, a search) is not refused, unlike the vault rule.
 #[tokio::test]
@@ -2852,6 +2853,8 @@ async fn issue_441_nested_launch_rules_refuse_launches_but_not_text() -> anyhow:
         "rg \"codex exec\" docs",
         "corbanu --help | grep review",
         "corbanu --version",
+        // Accepted gap: the launch check refuses it after the prompt.
+        "env corbanu exec hi",
     ] {
         assert!(
             !matches!(
