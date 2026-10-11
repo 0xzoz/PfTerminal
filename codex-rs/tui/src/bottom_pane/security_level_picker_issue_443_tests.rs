@@ -143,18 +143,7 @@ fn issue_443_review_without_a_live_tree_waits_for_the_restart() {
 fn issue_443_screen_07_names_what_applies_now_and_at_restart() {
     let root = tempfile::tempdir().unwrap();
     let mut picker = picker(&root, /*live*/ true);
-    raised_live(&mut picker);
-    picker.stored = StoredLevel::Chosen(ChosenLevel::Aggressive);
-    picker.screen = Screen::Saved(Ok(TransitionOutcome {
-        level: ChosenLevel::Aggressive,
-        core: Some(LevelChangeReport {
-            kind: LevelChangeKind::Stricter,
-            in_force: SecurityLevel::Aggressive,
-            next_start: SecurityLevel::Aggressive,
-            live: true,
-            not_saved: None,
-        }),
-    }));
+    saved_live(&mut picker);
     let saved = text(&picker);
     assert!(!saved.contains("stays Permissive"), "{saved}");
     assert!(
@@ -162,6 +151,10 @@ fn issue_443_screen_07_names_what_applies_now_and_at_restart() {
         "{saved}"
     );
     assert!(saved.contains("Starts when you restart:"), "{saved}");
+    assert!(
+        saved.contains("commands already running keep the permissions they started with"),
+        "{saved}"
+    );
     insta::assert_snapshot!("issue_443_saved_aggressive_live", render(&picker, 80));
 
     // Esc, then /security again: the list says the same.
@@ -173,4 +166,64 @@ fn issue_443_screen_07_names_what_applies_now_and_at_restart() {
     );
     assert!(!list.contains("It takes effect when you restart"), "{list}");
     assert_eq!(picker.active, ChosenLevel::Permissive);
+}
+
+/// Screen 07 as a running session's tree reports it after the commit.
+fn saved_live(picker: &mut SecurityLevelPicker) {
+    raised_live(picker);
+    picker.stored = StoredLevel::Chosen(ChosenLevel::Aggressive);
+    picker.screen = Screen::Saved(Ok(TransitionOutcome {
+        level: ChosenLevel::Aggressive,
+        core: Some(LevelChangeReport {
+            kind: LevelChangeKind::Stricter,
+            in_force: SecurityLevel::Aggressive,
+            next_start: SecurityLevel::Aggressive,
+            live: true,
+            not_saved: None,
+        }),
+    }));
+}
+
+/// Without the untrusted-content labels the protected-path denials do not
+/// run, so only the vault refusal is claimed as active now.
+#[test]
+fn issue_443_screen_07_claims_only_the_vault_rule_without_source_envelopes() {
+    let root = tempfile::tempdir().unwrap();
+    let mut picker = picker(&root, /*live*/ true);
+    if let Some(input) = picker.preflight_input.as_mut() {
+        input.flags.untrusted_content = false;
+    }
+    saved_live(&mut picker);
+    let saved = text(&picker);
+    assert!(
+        saved
+            .contains("Active now in this session: agent commands cannot run `corbanu vault …`.\n"),
+        "{saved}"
+    );
+    assert!(!saved.contains("protected paths"), "{saved}");
+    picker.screen = Screen::List { note: None };
+    let list = text(&picker);
+    assert!(
+        list.contains("Core's protections (vault refusal) apply"),
+        "{list}"
+    );
+}
+
+/// Returning to Permissive before the restart: Core's Aggressive level stays
+/// in force in this session, so the review does not call it Permissive.
+#[test]
+fn issue_443_permissive_review_before_restart_keeps_core_protections() {
+    let root = tempfile::tempdir().unwrap();
+    let mut picker = picker(&root, /*live*/ true);
+    saved_live(&mut picker);
+    picker.screen = Screen::Review(ChosenLevel::Permissive);
+    let review = text(&picker);
+    assert!(
+        review.contains("Core's Aggressive protections stay on in this session until you restart"),
+        "{review}"
+    );
+    assert!(
+        !review.contains("This session is already Permissive"),
+        "{review}"
+    );
 }

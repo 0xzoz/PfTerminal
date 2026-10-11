@@ -46,7 +46,12 @@ fn fake_bin() -> anyhow::Result<tempfile::TempDir> {
 /// A Permissive session (approvals off, so nothing waits for a person); with
 /// `confirm`, the person confirms Aggressive before the turn, as `/security`
 /// does. Each vault command and the output the model got back for it.
-async fn vault_commands_after(confirm: bool) -> anyhow::Result<Vec<(String, String)>> {
+/// With `unified`, the model uses `exec_command` (unified exec) instead of
+/// `shell_command`.
+async fn vault_commands_after(
+    confirm: bool,
+    unified: bool,
+) -> anyhow::Result<Vec<(String, String)>> {
     let bin = fake_bin()?;
     let bin = bin.path().display();
     let commands = [
@@ -60,11 +65,15 @@ async fn vault_commands_after(confirm: bool) -> anyhow::Result<Vec<(String, Stri
         let id = format!("call-{index}");
         steps.push(sse(vec![
             ev_response_created(&id),
-            ev_function_call(
-                &id,
-                "shell_command",
-                &json!({ "command": command }).to_string(),
-            ),
+            if unified {
+                ev_function_call(&id, "exec_command", &json!({ "cmd": command }).to_string())
+            } else {
+                ev_function_call(
+                    &id,
+                    "shell_command",
+                    &json!({ "command": command }).to_string(),
+                )
+            },
             ev_completed(&id),
         ]));
     }
@@ -76,13 +85,20 @@ async fn vault_commands_after(confirm: bool) -> anyhow::Result<Vec<(String, Stri
     let captured = mount_sse_sequence(&server, steps).await;
     let test = test_codex()
         .with_model("test-gpt-5.1-codex")
-        .with_config(|config| {
+        .with_config(move |config| {
             config.security_level = SecurityLevel::Permissive;
             config.permissions.approval_policy = Constrained::allow_any(AskForApproval::Never);
             config
                 .features
                 .enable(Feature::SourceEnvelopes)
                 .expect("enable source envelopes");
+            if unified {
+                config.use_experimental_unified_exec_tool = true;
+                config
+                    .features
+                    .enable(Feature::UnifiedExec)
+                    .expect("enable unified exec");
+            }
         })
         .build_with_auto_env(&server)
         .await?;
@@ -137,9 +153,17 @@ async fn vault_commands_after(confirm: bool) -> anyhow::Result<Vec<(String, Stri
 async fn issue_443_vault_commands_are_refused_as_soon_as_aggressive_is_confirmed()
 -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
-    for (command, output) in vault_commands_after(/*confirm*/ true).await? {
-        assert!(output.contains(REFUSAL), "{command}: {output}");
-        assert!(!output.contains(RAN), "{command}: {output}");
+    for unified in [false, true] {
+        for (command, output) in vault_commands_after(/*confirm*/ true, unified).await? {
+            assert!(
+                output.contains(REFUSAL),
+                "unified={unified} {command}: {output}"
+            );
+            assert!(
+                !output.contains(RAN),
+                "unified={unified} {command}: {output}"
+            );
+        }
     }
     Ok(())
 }
@@ -147,9 +171,17 @@ async fn issue_443_vault_commands_are_refused_as_soon_as_aggressive_is_confirmed
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn issue_443_permissive_sessions_keep_their_vault_commands() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
-    for (command, output) in vault_commands_after(/*confirm*/ false).await? {
-        assert!(!output.contains(REFUSAL), "{command}: {output}");
-        assert!(output.contains(RAN), "{command}: {output}");
+    for unified in [false, true] {
+        for (command, output) in vault_commands_after(/*confirm*/ false, unified).await? {
+            assert!(
+                !output.contains(REFUSAL),
+                "unified={unified} {command}: {output}"
+            );
+            assert!(
+                output.contains(RAN),
+                "unified={unified} {command}: {output}"
+            );
+        }
     }
     Ok(())
 }

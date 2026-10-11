@@ -893,18 +893,18 @@ impl ModelClient {
 
     /// Issue #443: whether Aggressive is in force for this session now: in
     /// its config, or in the live policy (also right after a person confirms
-    /// Aggressive in `/security`, before a restart). Without a readable live
-    /// policy only the config counts.
+    /// Aggressive in `/security`, before a restart). A bound policy that
+    /// cannot be read counts as Aggressive, as for source admission.
     pub(crate) fn live_level_is_aggressive(&self) -> bool {
-        let live = self.ingress_policy.as_ref().and_then(|policy| {
-            policy
+        use codex_security_policy::SecurityLevel;
+        let live = match &self.ingress_policy {
+            None => SecurityLevel::Permissive,
+            Some(policy) => policy
                 .0
                 .snapshot_for_agent(self.state.thread_id)
-                .ok()
-                .map(|snapshot| snapshot.level)
-        });
-        self.ingress_level.max(live.unwrap_or_default())
-            == codex_security_policy::SecurityLevel::Aggressive
+                .map_or(SecurityLevel::Aggressive, |snapshot| snapshot.level),
+        };
+        self.ingress_level.max(live) == SecurityLevel::Aggressive
     }
 
     pub(crate) fn check_source_admission(&self, prompt: &Prompt) -> Result<()> {
