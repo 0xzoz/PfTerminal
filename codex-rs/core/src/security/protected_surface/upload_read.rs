@@ -43,7 +43,7 @@ fn read_opened(
             format!("path `{}` is not a file", path.display()),
         ));
     }
-    let opened = opened_path(&file, canonical, &metadata)?;
+    let opened = opened_path(&file)?;
     if !readable_under(policy, &opened, cwd) {
         return Err(blocked());
     }
@@ -80,8 +80,9 @@ fn open_no_follow(path: &Path) -> io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
     std::fs::OpenOptions::new()
         .read(true)
-        // A FIFO swapped in would block the open.
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        // A FIFO swapped in would block the open; a terminal must not
+        // become the process's controlling terminal.
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC | libc::O_NOCTTY)
         .open(path)
 }
 
@@ -90,62 +91,39 @@ fn open_no_follow(path: &Path) -> io::Result<std::fs::File> {
     std::fs::File::open(path)
 }
 
-/// Where the opened file is. macOS and Linux ask the kernel; elsewhere the
-/// checked path must still resolve to itself and name the opened file.
-fn opened_path(
-    file: &std::fs::File,
-    canonical: &Path,
-    metadata: &std::fs::Metadata,
-) -> io::Result<PathBuf> {
-    if let Some(path) = kernel_path(file)? {
-        return Ok(path);
-    }
-    let again = std::fs::canonicalize(canonical)?;
-    if again != canonical || !same_file(&std::fs::metadata(&again)?, metadata) {
-        return Err(io::Error::other("the file changed while it was opened"));
-    }
-    Ok(again)
+/// Where the opened file is, as the kernel reports it. Platforms without
+/// such a report refuse the read (fail closed).
+fn opened_path(file: &std::fs::File) -> io::Result<PathBuf> {
+    kernel_path(file)
 }
 
 #[cfg(target_os = "macos")]
-fn kernel_path(file: &std::fs::File) -> io::Result<Option<PathBuf>> {
-    use std::ffi::CStr;
+fn kernel_path(file: &std::fs::File) -> io::Result<PathBuf> {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::io::AsRawFd;
-    let mut buffer = vec![0 as libc::c_char; libc::PATH_MAX as usize];
+    let mut buffer = vec![0u8; libc::PATH_MAX as usize];
     // SAFETY: `F_GETPATH` writes a NUL-terminated path of at most
     // `PATH_MAX` bytes into `buffer`, which holds that many.
     let result = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETPATH, buffer.as_mut_ptr()) };
     if result == -1 {
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: on success the buffer holds a NUL-terminated string.
-    let path = unsafe { CStr::from_ptr(buffer.as_ptr()) };
-    Ok(Some(PathBuf::from(std::ffi::OsStr::from_bytes(
-        path.to_bytes(),
-    ))))
+    let path = std::ffi::CStr::from_bytes_until_nul(&buffer).map_err(io::Error::other)?;
+    Ok(PathBuf::from(std::ffi::OsStr::from_bytes(path.to_bytes())))
 }
 
 #[cfg(target_os = "linux")]
-fn kernel_path(file: &std::fs::File) -> io::Result<Option<PathBuf>> {
+fn kernel_path(file: &std::fs::File) -> io::Result<PathBuf> {
     use std::os::unix::io::AsRawFd;
-    std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd())).map(Some)
+    std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn kernel_path(_file: &std::fs::File) -> io::Result<Option<PathBuf>> {
-    Ok(None)
-}
-
-#[cfg(unix)]
-fn same_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    a.dev() == b.dev() && a.ino() == b.ino()
-}
-
-#[cfg(not(unix))]
-fn same_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
-    a.len() == b.len() && a.modified().ok() == b.modified().ok()
+fn kernel_path(_file: &std::fs::File) -> io::Result<PathBuf> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "this platform cannot check which file was opened",
+    ))
 }
 
 #[cfg(test)]

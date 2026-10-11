@@ -749,6 +749,63 @@ fn issue_518_read_only_entries_never_reopen_a_denial_through_a_linked_home() {
         );
         assert!(readable_under(&policy, &cwd.join("README.md"), cwd));
     }
+    // Nothing else is narrowed: the runtime entries stay read-only, not
+    // denied, in both spellings.
+    let policy = denials
+        .apply(&PermissionProfile::Disabled)
+        .unwrap()
+        .file_system_sandbox_policy();
+    for runtime in [fx.codex_home.join("tmp"), fx.real_home.join(".corbanu/tmp")] {
+        assert!(
+            readable_under(&policy, &runtime.join("arg0"), cwd),
+            "{runtime:?}"
+        );
+        assert!(!policy.can_write_path_with_cwd(&runtime.join("arg0"), cwd));
+    }
+}
+
+/// #518 review: a workspace link to a key that does not exist yet is
+/// checked where it would lead, so it never becomes readable when created.
+#[test]
+fn issue_518_a_dangling_link_to_a_denied_folder_stays_denied() {
+    let fx = linked_home_with_agents_link_to_key();
+    let cwd = fx.cwd.as_path();
+    std::fs::remove_file(cwd.join(".agents")).unwrap();
+    std::os::unix::fs::symlink("../.ssh/id_new", cwd.join(".agents")).unwrap();
+    let denials = ReadDenials::collect(&fx.codex_home, Some(&fx.linked_home), None, &[abs(cwd)]);
+    let policy = denials
+        .apply(&PermissionProfile::Disabled)
+        .unwrap()
+        .file_system_sandbox_policy();
+    assert!(!readable_under(&policy, &cwd.join(".agents"), cwd));
+    let new_key = fx.real_home.join(".ssh/id_new");
+    assert!(!policy.entries.iter().any(|entry| entry.access.can_read()
+        && matches!(&entry.path, FileSystemPath::Path { path } if path.as_path() == new_key)));
+    std::fs::write(&new_key, "DUMMY").unwrap();
+    assert!(!readable_under(&policy, &cwd.join(".agents"), cwd));
+    assert!(!readable_under(&policy, &new_key, cwd));
+}
+
+/// #518 review: another Corbanu home name linking to the active home is
+/// the active home: its runtime entries stay readable, its stores denied.
+#[test]
+fn issue_518_a_home_alias_link_keeps_runtime_entries_readable() {
+    let fx = fixture();
+    let alias = fx.user_home.join(".codex");
+    std::os::unix::fs::symlink(&fx.codex_home, &alias).unwrap();
+    let cwd = fx.user_home.join("project");
+    let denials = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)]);
+    assert!(!denials.paths().any(|path| path.as_path() == alias));
+    let policy = denials
+        .apply(&PermissionProfile::Disabled)
+        .unwrap()
+        .file_system_sandbox_policy();
+    for runtime in [fx.codex_home.join("tmp/arg0"), alias.join("tmp/arg0")] {
+        assert!(readable_under(&policy, &runtime, &cwd), "{runtime:?}");
+    }
+    for store in [fx.codex_home.join("auth.json"), alias.join("auth.json")] {
+        assert!(!readable_under(&policy, &store, &cwd), "{store:?}");
+    }
 }
 
 /// #518 with the real macOS sandbox: a full-write command could `cat` the

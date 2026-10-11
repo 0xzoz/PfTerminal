@@ -179,8 +179,13 @@ impl ReadDenials {
         {
             for other in OTHER_CORBANU_HOMES {
                 let other = home.join(other);
-                // The active home is handled entry by entry above.
-                if codex_home.as_path().starts_with(other.as_path()) {
+                // The active home is handled entry by entry above, also
+                // when another home name links to it or above it.
+                if codex_home.as_path().starts_with(other.as_path())
+                    || real_location(&codex_home)
+                        .zip(real_location(&other))
+                        .is_some_and(|(home, other)| home.as_path().starts_with(other.as_path()))
+                {
                     continue;
                 }
                 denials.push_fixed(other, keep);
@@ -377,6 +382,7 @@ impl ReadDenials {
             .cwd
             .as_ref()
             .map_or_else(|| Path::new("/"), AbsolutePathBuf::as_path);
+        let readable = Readability::new(&file_system, cwd);
         let read_only: Vec<FileSystemSandboxEntry> = self
             .read_only_paths()
             .filter(|path| file_system.can_write_path_with_cwd(path.as_path(), cwd))
@@ -385,7 +391,7 @@ impl ReadDenials {
                 // reopen it. A read-only path that is denied in any spelling
                 // (its real location under a denial spelled through a linked
                 // home, or a link to a denied file) is denied here too.
-                let access = if readable_under(&file_system, path.as_path(), cwd) {
+                let access = if readable.allows(path.as_path()) {
                     FileSystemAccessMode::Read
                 } else {
                     FileSystemAccessMode::Deny
@@ -535,24 +541,72 @@ pub(crate) fn post_taint_read_policy(
 /// real location too) apply as well (#519). This only adds checks: it never
 /// makes a path readable.
 pub(crate) fn readable_under(policy: &FileSystemSandboxPolicy, path: &Path, cwd: &Path) -> bool {
-    if !policy.can_read_path_with_cwd(path, cwd) || pattern_denied(policy, path, cwd) {
-        return false;
-    }
-    let Ok(canonical) = std::fs::canonicalize(path) else {
-        return true;
-    };
-    let resolved = with_real_locations(policy);
-    let real_cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
-    [cwd, real_cwd.as_path()].into_iter().all(|cwd| {
-        policy.can_read_path_with_cwd(&canonical, cwd)
-            && resolved.can_read_path_with_cwd(&canonical, cwd)
-            && !pattern_denied(&resolved, &canonical, cwd)
-    })
+    Readability::new(policy, cwd).allows(path)
 }
 
-/// Whether a pattern (glob) denial of `policy` matches `path` or what it
-/// resolves to. A malformed pattern matches everything (fails closed).
-fn pattern_denied(policy: &FileSystemSandboxPolicy, path: &Path, cwd: &Path) -> bool {
+/// [`readable_under`] for one policy and folder, built once for many paths.
+struct Readability<'a> {
+    policy: &'a FileSystemSandboxPolicy,
+    resolved: FileSystemSandboxPolicy,
+    cwds: [std::path::PathBuf; 2],
+    patterns: Option<ReadDenyMatcher>,
+    resolved_patterns: [Option<ReadDenyMatcher>; 2],
+}
+
+impl<'a> Readability<'a> {
+    fn new(policy: &'a FileSystemSandboxPolicy, cwd: &Path) -> Self {
+        let resolved = with_real_locations(policy);
+        let real_cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+        let cwds = [cwd.to_path_buf(), real_cwd];
+        Self {
+            patterns: pattern_matcher(policy, cwd),
+            resolved_patterns: [
+                pattern_matcher(&resolved, &cwds[0]),
+                pattern_matcher(&resolved, &cwds[1]),
+            ],
+            policy,
+            resolved,
+            cwds,
+        }
+    }
+
+    fn allows(&self, path: &Path) -> bool {
+        let cwd = self.cwds[0].as_path();
+        let path = AbsolutePathBuf::resolve_path_against_base(path, cwd);
+        let path = path.as_path();
+        if !self.policy.can_read_path_with_cwd(path, cwd)
+            || self
+                .patterns
+                .as_ref()
+                .is_some_and(|matcher| matcher.is_read_denied(path))
+        {
+            return false;
+        }
+        // A dangling link (or a path not created yet) is checked where it
+        // would lead.
+        let real = std::fs::canonicalize(path)
+            .ok()
+            .or_else(|| {
+                real_location(&AbsolutePathBuf::resolve_path_against_base(path, "/"))
+                    .map(AbsolutePathBuf::into_path_buf)
+            })
+            .unwrap_or_else(|| path.to_path_buf());
+        self.cwds
+            .iter()
+            .zip(&self.resolved_patterns)
+            .all(|(cwd, patterns)| {
+                self.policy.can_read_path_with_cwd(&real, cwd)
+                    && self.resolved.can_read_path_with_cwd(&real, cwd)
+                    && !patterns
+                        .as_ref()
+                        .is_some_and(|matcher| matcher.is_read_denied(&real))
+            })
+    }
+}
+
+/// The pattern (glob) denials of `policy`, or `None` without any. A
+/// malformed pattern matches every path (fails closed).
+fn pattern_matcher(policy: &FileSystemSandboxPolicy, cwd: &Path) -> Option<ReadDenyMatcher> {
     let patterns: Vec<FileSystemSandboxEntry> = policy
         .entries
         .iter()
@@ -563,10 +617,9 @@ fn pattern_denied(policy: &FileSystemSandboxPolicy, path: &Path, cwd: &Path) -> 
         .cloned()
         .collect();
     if patterns.is_empty() {
-        return false;
+        return None;
     }
     ReadDenyMatcher::new(&FileSystemSandboxPolicy::restricted(patterns), cwd)
-        .is_some_and(|matcher| matcher.is_read_denied(path))
 }
 
 /// `policy` with each path entry also under its real location, with the
