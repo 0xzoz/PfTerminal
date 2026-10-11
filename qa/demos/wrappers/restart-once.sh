@@ -10,4 +10,7 @@ export PATH="$BIN_DIR:$PATH"
 "$REAL" "$@"
 printf '\n[demo] restarting Corbanu Terminal with the same profile...\n'
 sleep 1
-exec "$REAL" "$@"
+"$REAL" "$@"
+status=$?
+rm -r "$BIN_DIR"
+exit $status
