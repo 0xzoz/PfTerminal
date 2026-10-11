@@ -674,13 +674,19 @@ fn attempt_text(q: &ObservationQuote) -> Vec<String> {
             "Retry predecessor: {}",
             a.retry_of.map_or("none".into(), |v| v.to_string())
         ),
-        "Completion/billing status: not recorded. Literal wire/endpoint and usage observation wall time: unavailable"
-            .into(),
+        match q.usage.refused_status {
+            Some(status) => format!(
+                "Completion/billing status: refused by the provider (HTTP {status}) before any response; no tokens, no charge. Literal wire/endpoint and usage observation wall time: unavailable"
+            ),
+            None => "Completion/billing status: not recorded. Literal wire/endpoint and usage observation wall time: unavailable"
+                .into(),
+        },
     ];
     // Zero counts quote as zero under a record with no rates; any money at
     // all means a rate applied.
     if per_use(q)
         && no_rates(q)
+        && q.usage.refused_status.is_none()
         && !q.buckets.iter().any(
             |bucket| matches!(bucket, BucketQuote::Priced(amount) if *amount != Decimal::default()),
         )
@@ -1734,9 +1740,37 @@ fn states_charges(provider_id: &str) -> bool {
 }
 
 /// Whether an attempt can appear on a provider's bill: not subscription work,
-/// and not a model run on the user's own machine.
+/// not a model run on the user's own machine, and not one the provider
+/// refused before any response (#475).
 fn has_bill(quote: &ObservationQuote) -> bool {
-    !quote.is_plan() && quote.basis() != codex_state::accounting::Basis::Local
+    !quote.is_plan()
+        && quote.basis() != codex_state::accounting::Basis::Local
+        && quote.usage.refused_status.is_none()
+}
+
+/// #475: "1 attempt refused by the provider (HTTP 401) — no charge" for the
+/// refused attempts among `quotes`, so a refusal reads as a failure that cost
+/// nothing rather than as missing usage.
+fn refusal_note(quotes: &[&ObservationQuote]) -> Option<String> {
+    let mut statuses: Vec<u16> = quotes
+        .iter()
+        .filter_map(|quote| quote.usage.refused_status)
+        .collect();
+    let count = statuses.len();
+    if count == 0 {
+        return None;
+    }
+    statuses.sort_unstable();
+    statuses.dedup();
+    let statuses = statuses
+        .iter()
+        .map(|status| format!("HTTP {status}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "{count} {} refused by the provider ({statuses}) — no charge",
+        if count == 1 { "attempt" } else { "attempts" }
+    ))
 }
 
 /// Display names in provider-id order, as the route lines list them.
@@ -1947,6 +1981,7 @@ fn plain_header(quotes: &[&ObservationQuote], named: bool) -> Vec<String> {
                 lines.push(format!("Billed by provider: {billed}"));
             }
             lines.push(format!("Tokens: {}", plain_tokens(&t)));
+            lines.extend(refusal_note(quotes).map(|note| format!("Refused: {note}")));
             lines.extend(scope::overflow_note(quotes.iter().copied()));
         }
         Err(_) => lines.push("Cost unavailable".to_string()),
@@ -1995,19 +2030,20 @@ fn route_line(quotes: &[&ObservationQuote], named: bool) -> String {
         Ok(t) => {
             let (billing, cost) = plain_billing(&t, EstimateGaps::of(quotes.iter().copied()));
             let provider = provider_name(&quotes[0].attempt.provider);
+            let refused = refusal_note(quotes).map_or_else(String::new, |note| format!(" {note}."));
             match leading_charge(quotes, &t).ok_or_else(|| billed_charge(quotes)) {
                 // Every request carries the provider's own charge, but the
                 // published prices cannot reproduce it (the provider omits a
                 // counter the estimate needs): the charge is the figure, and a
                 // partial estimate would only mislead.
                 Ok(billed) => format!(
-                    "• {route} — {billing}. {}, {}. Billed by {provider}: {}.",
+                    "• {route} — {billing}. {}, {}. Billed by {provider}: {}.{refused}",
                     request_count(quotes),
                     plain_tokens(&t),
                     billed.text()
                 ),
                 Err(billed) => format!(
-                    "• {route} — {billing}. {}, {}. {cost}.{}",
+                    "• {route} — {billing}. {}, {}. {cost}.{}{refused}",
                     request_count(quotes),
                     plain_tokens(&t),
                     billed.map_or_else(String::new, |billed| format!(

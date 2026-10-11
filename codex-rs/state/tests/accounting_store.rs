@@ -1786,6 +1786,99 @@ fn attempt_account_is_validated() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// #475: a refused attempt (HTTP 401 before any response) records the refusal
+/// through ledger format 5 and reads as zero tokens and an exact $0, never as
+/// incomplete usage. Earlier records keep their bytes.
+#[tokio::test]
+async fn a_refused_attempt_is_an_exact_zero_through_format_5() -> anyhow::Result<()> {
+    let path = home();
+    let runtime = open(&path).await?;
+    let price = snapshot()?;
+    let ok = attempt(1, 0)?;
+    native(&runtime, ok.thread_id).await?;
+    let store = AccountingStore::open(&runtime, 0).await?;
+    store
+        .admit(ok.thread_id, &ok, std::slice::from_ref(&price), 0)
+        .await?;
+    store
+        .observe(ok.thread_id, &ok, &[observation(&ok, 1, 10)?], 0)
+        .await?;
+    let formats = |runtime: Arc<StateRuntime>| async move {
+        let mut conn = connection(&runtime).await?;
+        let format: Vec<i64> =
+            sqlx::query_scalar("SELECT version FROM _accounting_migrations ORDER BY version")
+                .fetch_all(&mut conn)
+                .await?;
+        let observations: Vec<String> =
+            sqlx::query_scalar("SELECT payload FROM draft_accounting_observations")
+                .fetch_all(&mut conn)
+                .await?;
+        conn.close().await?;
+        anyhow::Ok((format, observations))
+    };
+    let (before, earlier) = formats(runtime.clone()).await?;
+    assert_eq!(before, vec![1]);
+
+    let refused = attempt(2, 1)?;
+    store
+        .admit(refused.thread_id, &refused, std::slice::from_ref(&price), 1)
+        .await?;
+    let refusal = Observation {
+        revision: 1.try_into()?,
+        source: refused.attempt_id,
+        sequence: 1.try_into()?,
+        patch: Patch {
+            refused_status: Some(401),
+            ..Patch::default()
+        },
+    };
+    let quote = store
+        .observe(
+            refused.thread_id,
+            &refused,
+            std::slice::from_ref(&refusal),
+            1,
+        )
+        .await?;
+    assert_eq!(quote.usage.refused_status, Some(401));
+    assert_eq!(quote.usage.total, Some(0));
+    assert_eq!(quote.all_buckets_priced, Some(Decimal::default()));
+    let (after, observations) = formats(runtime.clone()).await?;
+    assert_eq!(after, vec![1, 2, 3, 4, 5]);
+    assert!(observations.iter().any(|payload| payload == &earlier[0]));
+
+    let view = ready(AccountingStore::inspect_day(&runtime, ok.thread_id, 0, 2).await?);
+    assert_eq!(view.totals.attempts, 2);
+    // Only the first attempt, which reported input alone, is incomplete.
+    assert_eq!(view.totals.per_use_unknown(), 1);
+    // A refusal states nothing else, and nothing follows it.
+    let mut bad = refusal.clone();
+    bad.patch.input = Presence::Number(1.try_into()?);
+    let other = attempt(3, 2)?;
+    store
+        .admit(other.thread_id, &other, std::slice::from_ref(&price), 2)
+        .await?;
+    assert!(
+        store
+            .observe(other.thread_id, &other, &[bad], 2)
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .observe(
+                refused.thread_id,
+                &refused,
+                &[observation(&refused, 2, 5)?],
+                2
+            )
+            .await
+            .is_err()
+    );
+    runtime.close().await;
+    Ok(())
+}
+
 /// A ledger in a format newer than this build's is refused by name, for reads
 /// and writes alike, and left untouched.
 #[tokio::test]

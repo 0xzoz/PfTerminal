@@ -76,8 +76,22 @@ async fn accounting_chat_native_api_key_401_no_invented_refresh() -> anyhow::Res
     );
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
     let db = test.codex.state_db().unwrap();
-    assert_eq!(attempts(&db).await?.len(), 1);
-    assert!(observations(&db).await?.is_empty());
+    let records = attempts(&db).await?;
+    assert_eq!(records.len(), 1);
+    // #475: the refusal is recorded, so the attempt reads as refused with no
+    // tokens and no charge, not as one with incomplete usage.
+    let recorded = observations(&db).await?;
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(
+        recorded[0].patch,
+        Patch {
+            refused_status: Some(401),
+            ..Patch::default()
+        }
+    );
+    let day = totals(&db, &records[0]).await?;
+    assert_eq!((day.attempts, day.per_use_unknown()), (1, 0));
+    assert_eq!(day.known_usd, Decimal::default());
     stop(&test).await;
     Ok(())
 }

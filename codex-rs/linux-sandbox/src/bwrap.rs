@@ -360,7 +360,10 @@ fn create_bwrap_flags(
 /// 3. Unreadable ancestors of writable roots are masked before their child
 ///    mounts are rebound so nested writable carveouts can be reopened safely.
 /// 4. `--bind <root> <root>` re-enables writes for allowed roots, including
-///    writable subpaths under `/dev` (for example, `/dev/shm`).
+///    writable subpaths under `/dev` (for example, `/dev/shm`). A writable
+///    root above `/dev` (the `/` of a full-write profile) is followed by a
+///    fresh `--dev /dev`: its bind would otherwise cover the minimal `/dev`
+///    with the host's, mounted `nodev`, so even `/dev/null` fails (#493).
 /// 5. `--ro-bind <subpath> <subpath>` re-applies read-only protections under
 ///    those writable roots so protected subpaths win.
 /// 6. Nested unreadable carveouts under a writable root are masked after that
@@ -583,6 +586,13 @@ fn create_filesystem_args(
         bwrap_args.args.push("--bind".to_string());
         bwrap_args.args.push(path_to_string(mount_root));
         bwrap_args.args.push(path_to_string(mount_root));
+        // #493: restore the minimal `/dev` (step 2) before the deny masks of
+        // this pass and before deeper `/dev/*` writable roots (sorted later).
+        let dev = Path::new("/dev");
+        if dev.starts_with(mount_root) && mount_root != dev {
+            bwrap_args.args.push("--dev".to_string());
+            bwrap_args.args.push("/dev".to_string());
+        }
 
         let mut read_only_subpaths: Vec<PathBuf> = writable_root
             .read_only_subpaths
@@ -2160,6 +2170,70 @@ mod tests {
             !args.args.iter().any(|arg| arg == &missing_root),
             "missing writable root should be skipped",
         );
+        assert_eq!(
+            args.args.iter().filter(|arg| *arg == "--dev").count(),
+            1,
+            "a writable root below `/dev`'s parent keeps the single minimal `/dev`",
+        );
+    }
+
+    /// #493: the writable `/` of a full-write profile with denials is
+    /// followed by a fresh minimal `/dev`, before the deny masks and before a
+    /// deeper writable `/dev/shm`.
+    #[test]
+    fn full_write_root_bind_is_followed_by_minimal_dev() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let denied = temp_dir.path().join("secret");
+        std::fs::create_dir(&denied).expect("create denied dir");
+        let entry = |path: &Path, access| FileSystemSandboxEntry {
+            path: FileSystemPath::Path {
+                path: AbsolutePathBuf::try_from(path).expect("absolute path"),
+            },
+            access,
+            missing_path_behavior: None,
+        };
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                access: FileSystemAccessMode::Write,
+                missing_path_behavior: None,
+            },
+            entry(&denied, FileSystemAccessMode::Deny),
+            entry(Path::new("/dev/full"), FileSystemAccessMode::Deny),
+            entry(Path::new("/dev/shm"), FileSystemAccessMode::Write),
+        ]);
+
+        let args =
+            create_filesystem_args(&policy, temp_dir.path(), NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
+                .expect("filesystem args");
+        let position = |window: &[&str]| {
+            args.args
+                .windows(window.len())
+                .position(|candidate| candidate == window)
+        };
+        let root_bind = position(&["--bind", "/", "/", "--dev", "/dev"])
+            .expect("writable `/` should be followed by `--dev /dev`");
+        let denied = path_to_string(&denied);
+        let deny_mask = args
+            .args
+            .iter()
+            .rposition(|arg| arg == &denied)
+            .expect("denied path should be masked");
+        assert!(root_bind < deny_mask, "{:?}", args.args);
+        // A denied `/dev` node is masked on top of the fresh `/dev`.
+        let dev_mask = args
+            .args
+            .iter()
+            .rposition(|arg| arg == "/dev/full")
+            .expect("denied /dev/full should be masked");
+        assert!(root_bind < dev_mask, "{:?}", args.args);
+        if Path::new("/dev/shm").exists() {
+            let shm_bind = position(&["--bind", "/dev/shm", "/dev/shm"])
+                .expect("writable `/dev/shm` should be rebound");
+            assert!(root_bind < shm_bind, "{:?}", args.args);
+        }
     }
 
     #[test]
@@ -2355,6 +2429,10 @@ mod tests {
                 "--bind".to_string(),
                 "/".to_string(),
                 "/".to_string(),
+                // #493: the `/` bind covers the minimal /dev with the host's,
+                // mounted `nodev`; mount a fresh one over it.
+                "--dev".to_string(),
+                "/dev".to_string(),
                 // Mask the default metadata path names under the writable root.
                 // Because the root is `/` in this test, these carveout paths
                 // appear directly below `/`.
@@ -2379,8 +2457,8 @@ mod tests {
                 "--ro-bind".to_string(),
                 path_to_string(&synthetic_mount_registry_root()),
                 path_to_string(&synthetic_mount_registry_root()),
-                // Rebind /dev after the root bind so device nodes remain
-                // writable/usable inside the writable root.
+                // The explicit writable /dev root binds the host /dev over
+                // the fresh one (still `nodev`, as before #493).
                 "--bind".to_string(),
                 "/dev".to_string(),
                 "/dev".to_string(),

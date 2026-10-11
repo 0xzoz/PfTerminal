@@ -842,12 +842,23 @@ async fn pf_27_s04_pf_27_s01_externally_terminated_broker_is_detected_and_cleane
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(!client.socket_path().exists());
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // #495: the broker revokes every reference and removes its socket
+    // directory before it exits, so the process can outlive the directory
+    // (by hundreds of milliseconds on a loaded runner). Wait, bounded, for
+    // the client to observe the exit instead of sleeping a fixed time.
+    while client.is_alive() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!client.is_alive());
 
     assert_eq!(
         route(&broker, upstream.port, "/echo", &dummy).err(),
         Some(ScopedCredentialInjectionError::IsolatedBrokerUnavailable)
     );
+    // The dead broker was not silently replaced.
+    let current = broker.current_isolated_client().expect("broker client");
+    assert!(std::sync::Arc::ptr_eq(&current, &client));
+    assert_eq!(current.pid_for_test(), Some(pid));
 }
 
 #[cfg(unix)]

@@ -406,6 +406,7 @@ pub(super) fn patch(
         output: presence(usage.output_tokens)?,
         reasoning: presence(usage.reasoning_tokens)?,
         total: presence(usage.total_tokens)?,
+        refused_status: None,
     })
 }
 

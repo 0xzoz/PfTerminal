@@ -312,7 +312,20 @@ async fn accounting_anthropic_401_and_429_are_terminal_and_preflight_schema_faul
         );
         if !schema_fault {
             assert_eq!(attempts(&db).await?.len(), 1);
-            assert_eq!(observations(&db).await?, vec![]);
+            // #475: a 401 records the refusal; a 429 records nothing.
+            let refused: Vec<_> = observations(&db)
+                .await?
+                .into_iter()
+                .map(|observation| observation.patch.refused_status)
+                .collect();
+            assert_eq!(
+                refused,
+                if status == 401 {
+                    vec![Some(401)]
+                } else {
+                    vec![]
+                }
+            );
         }
         stop(&test).await;
     }

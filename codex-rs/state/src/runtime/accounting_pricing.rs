@@ -463,7 +463,12 @@ fn quote_observations_under(
     {
         *bucket = match (count, rate) {
             (None, _) => BucketQuote::MissingUsage,
-            (Some(0), _) if selected.is_some() => BucketQuote::Priced(Decimal::default()),
+            // A refused attempt (#475) is an exact zero even with no price
+            // bound: it exists only in ledger format 5, so no recorded quote
+            // changes.
+            (Some(0), _) if selected.is_some() || usage.refused_status.is_some() => {
+                BucketQuote::Priced(Decimal::default())
+            }
             (Some(n), Some(rate)) => BucketQuote::Priced(rate.price(n)?),
             (Some(_), None) if undecided => BucketQuote::MissingUsage,
             (Some(_), None) => BucketQuote::MissingRate,

@@ -75,7 +75,10 @@ async fn accounting_responses_native_api_key_401() -> anyhow::Result<()> {
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
     let db = test.codex.state_db().unwrap();
     assert_eq!(attempts(&db).await?.len(), 1);
-    assert!(observations(&db).await?.is_empty());
+    // #475: the refusal is recorded; the attempt used no tokens.
+    let recorded = observations(&db).await?;
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].patch.refused_status, Some(401));
     stop(&test).await;
     Ok(())
 }
