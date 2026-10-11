@@ -1167,7 +1167,8 @@ impl McpServerElicitationOverlay {
     fn approval_notice(&self) -> Option<&'static str> {
         let notice = self.typing_guard.notice()?;
         if !self.is_approval() {
-            return (notice == Notice::ChooseFirst).then_some(FORM_FIRST_NOTICE);
+            return matches!(notice, Notice::ChooseFirst | Notice::TypedText)
+                .then_some(FORM_FIRST_NOTICE);
         }
         Some(match notice {
             Notice::TypedText => TYPED_TEXT_NOTICE,
@@ -1176,15 +1177,20 @@ impl McpServerElicitationOverlay {
         })
     }
 
-    /// Enter, or a configured accept key that cannot be typed text.
+    /// Accept keys that cannot be typed text, as in the main approval
+    /// prompt: Enter stands in when no such accept key is configured.
     fn is_accept(&self, key_event: KeyEvent) -> bool {
-        (key_event.code == KeyCode::Enter && !key_hint::has_ctrl_or_alt(key_event.modifiers))
-            || self
-                .list_keymap
-                .accept
-                .iter()
-                .filter(|binding| !matches!(binding.parts(), (KeyCode::Char(_), _)))
-                .any(|binding| binding.is_press(key_event))
+        let mut bindings = self
+            .list_keymap
+            .accept
+            .iter()
+            .filter(|binding| !matches!(binding.parts(), (KeyCode::Char(_), _)))
+            .peekable();
+        if bindings.peek().is_none() {
+            return key_event.code == KeyCode::Enter
+                && !key_hint::has_ctrl_or_alt(key_event.modifiers);
+        }
+        bindings.any(|binding| binding.is_press(key_event))
     }
 
     /// Deliberate navigation (as in the main approval prompt): the arrow,
@@ -1671,6 +1677,12 @@ impl Renderable for McpServerElicitationOverlay {
 impl BottomPaneView for McpServerElicitationOverlay {
     fn prefer_esc_to_handle_key_event(&self) -> bool {
         true
+    }
+
+    /// #192: back from under another prompt or view, whose double or held
+    /// Enter must not answer this request.
+    fn on_revealed(&mut self) {
+        self.require_fresh_choice();
     }
 
     fn handle_key_event(&mut self, key_event: KeyEvent) {
@@ -2753,17 +2765,16 @@ mod tests {
         );
     }
 
-    /// #192: Shift+Enter confirms like Enter; Tab, Backspace and Space are
+    /// #192: as in the main approval prompt, only the accept key (plain
+    /// Enter by default) confirms; Shift+Enter, Tab, Backspace and Space are
     /// typed text; Page and End keys navigate.
     #[test]
     fn issue_192_other_keys_follow_the_main_approval_prompt() {
         let (mut overlay, mut rx) = persist_tool_approval_overlay();
-        press(&mut overlay, KeyCode::Char('4'));
         overlay.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
-        assert_eq!(
-            resolved_decisions(&mut rx),
-            vec![(McpServerElicitationAction::Cancel, None)]
-        );
+        press(&mut overlay, KeyCode::Enter);
+        assert_eq!(resolved_decisions(&mut rx), Vec::new());
+        assert_eq!(overlay.approval_notice(), Some(TYPED_TEXT_NOTICE));
 
         for key in [KeyCode::Tab, KeyCode::Backspace, KeyCode::Char(' ')] {
             let (mut overlay, mut rx) = persist_tool_approval_overlay();
