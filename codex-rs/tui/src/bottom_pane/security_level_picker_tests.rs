@@ -846,6 +846,37 @@ mod pf_24_s02 {
         ));
     }
 
+    /// #436 (AGG-26): back to Permissive from an Aggressive session whose
+    /// provider key came from the environment. The broker holds the key and
+    /// the restarted process would not get it, so "restart now" is not
+    /// offered; the review lists every Aggressive protection.
+    #[test]
+    fn security_confirm_downgrade_never_restarts_without_the_environment_key() {
+        let machine = Machine::new();
+        machine.confirmed_aggressive();
+        let (mut picker, mut rx) = machine.picker(ChosenLevel::Aggressive);
+        picker.restart_blocked =
+            crate::security::restart::restart_blocker_for(&["ZAI_API_KEY".to_string()]);
+        picker.handle_key_event(key(KeyCode::Down));
+        picker.handle_key_event(key(KeyCode::Enter));
+        let review = machine.text(&picker);
+        for removed in ["• Nested agents:", "• Protected paths:"] {
+            assert!(review.contains(removed), "{removed} missing: {review}");
+        }
+        picker.handle_key_event(key(KeyCode::Enter));
+        assert_eq!(saved_level(&picker), Some(ChosenLevel::Permissive));
+        let saved = machine.text(&picker);
+        assert!(
+            saved.contains("Restart now is not available: this session moved ZAI_API_KEY"),
+            "{saved}"
+        );
+        assert!(!saved.contains("Press r to restart now"), "{saved}");
+        assert!(!picker.footer().contains("restart"), "{}", picker.footer());
+        picker.handle_key_event(key(KeyCode::Char('r')));
+        assert!(rx.try_recv().is_err());
+        assert!(!picker.closed);
+    }
+
     #[test]
     fn security_confirm_write_failure_keeps_the_view_open() {
         let machine = Machine::new();

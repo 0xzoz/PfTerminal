@@ -164,6 +164,15 @@ impl ProviderAccountKind {
         matches!(self, Self::ClaudeOauthToken | Self::ChatgptAuth)
     }
 
+    /// Whether the stored value is a secret (an API key, token or sign-in),
+    /// not a folder, profile name or marker.
+    pub fn is_secret(self) -> bool {
+        matches!(
+            self,
+            Self::ApiKey | Self::ClaudeOauthToken | Self::ChatgptAuth
+        )
+    }
+
     fn credential_type(self) -> CredentialType {
         match self {
             Self::ApiKey => CredentialType::ApiKey,
@@ -328,6 +337,7 @@ impl Vault {
         if value.trim().is_empty() {
             return Err(VaultError::EmptySecret);
         }
+        crate::protect_stored(&label, kind.credential_type(), value)?;
         self.with_storage_lock(|| {
             let mut index = self.load_index()?;
             if refuse_if_any.is_some_and(|labels| {

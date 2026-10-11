@@ -151,6 +151,31 @@ pub async fn install_for_config(config: &Config) {
         .await;
 }
 
+/// #436: provider-key variables this process removed from its own
+/// environment (handed to the broker, or dropped when it did not start).
+static REMOVED_ENV_KEYS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn note_removed_env_keys(names: impl IntoIterator<Item = String>) {
+    let mut removed = REMOVED_ENV_KEYS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for name in names {
+        if !removed.contains(&name) {
+            removed.push(name);
+        }
+    }
+}
+
+/// #436: names (never values) of the provider-key variables this process
+/// removed from its environment. A restart of this process ("restart now")
+/// would start without them, since the broker never hands a value back.
+pub fn removed_environment_keys() -> Vec<String> {
+    REMOVED_ENV_KEYS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
 #[derive(Clone, Debug)]
 #[cfg_attr(
     not(any(unix, windows)),
@@ -417,6 +442,15 @@ impl CoreModelKeyBroker {
     fn start(settings: BrokerSettings) -> Self {
         use codex_network_proxy::model_auth::ModelCredentialBroker;
         use codex_network_proxy::model_auth::ModelCredentialBrokerOptions;
+        // Every set variable below leaves this process's environment, whatever
+        // happens next.
+        note_removed_env_keys(
+            settings
+                .env_names
+                .iter()
+                .filter(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
+                .cloned(),
+        );
         let spawned = ModelCredentialBroker::spawn(ModelCredentialBrokerOptions {
             runtime_dir: Some(settings.runtime_dir),
             scrub_responses: settings.scrub_responses,
