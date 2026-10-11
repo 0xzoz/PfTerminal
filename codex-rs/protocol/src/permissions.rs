@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::canonicalize_preserving_symlinks;
+use codex_utils_absolute_path::resolve_symlinks_lossy;
 use globset::GlobBuilder;
 use globset::GlobMatcher;
 use schemars::JsonSchema;
@@ -720,6 +721,35 @@ impl FileSystemSandboxPolicy {
 
     pub fn can_read_path_with_cwd(&self, path: &Path, cwd: &Path) -> bool {
         self.resolve_access_with_cwd(path, cwd).can_read()
+    }
+
+    /// Like [`Self::can_read_path_with_cwd`], with every link resolved in
+    /// the policy's paths and in `path` alike, as Seatbelt and bubblewrap
+    /// enforce them: one file reached through a link (`/tmp` and
+    /// `/private/tmp` on macOS) gets one answer.
+    pub fn can_read_resolved_path_with_cwd(&self, path: &Path, cwd: &Path) -> bool {
+        match self.kind {
+            FileSystemSandboxKind::Unrestricted | FileSystemSandboxKind::ExternalSandbox => {
+                return true;
+            }
+            FileSystemSandboxKind::Restricted => {}
+        }
+        let Some(path) = resolve_candidate_path(path, cwd) else {
+            return false;
+        };
+        let path = resolve_symlinks_lossy(path.as_path());
+        self.resolved_entries_with_cwd(cwd)
+            .into_iter()
+            .map(|entry| ResolvedFileSystemEntry {
+                path: AbsolutePathBuf::from_absolute_path(resolve_symlinks_lossy(
+                    entry.path.as_path(),
+                ))
+                .unwrap_or(entry.path),
+                access: entry.access,
+            })
+            .filter(|entry| path.starts_with(entry.path.as_path()))
+            .max_by_key(resolved_entry_precedence)
+            .is_some_and(|entry| entry.access.can_read())
     }
 
     pub fn can_write_path_with_cwd(&self, path: &Path, cwd: &Path) -> bool {
@@ -2686,6 +2716,51 @@ mod tests {
                 .read_only_subpaths
                 .contains(&expected_codex)
         );
+    }
+
+    /// #467: a workspace opened through a link and a rule spelled through
+    /// the resolved path (or the other way round) name one file.
+    #[cfg(unix)]
+    #[test]
+    fn can_read_resolved_path_matches_through_links() {
+        let root = TempDir::new().expect("tempdir");
+        let real = root.path().join("real");
+        std::fs::create_dir(&real).expect("real");
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+        std::fs::write(real.join(".env"), "x").expect(".env");
+        let policy_denying = |denied: &Path| {
+            FileSystemSandboxPolicy::restricted(vec![
+                FileSystemSandboxEntry {
+                    path: FileSystemPath::Special {
+                        value: FileSystemSpecialPath::project_roots(/*subpath*/ None),
+                    },
+                    access: FileSystemAccessMode::Write,
+                    missing_path_behavior: None,
+                },
+                FileSystemSandboxEntry {
+                    path: FileSystemPath::Path {
+                        path: AbsolutePathBuf::from_absolute_path(denied).expect("absolute"),
+                    },
+                    access: FileSystemAccessMode::Deny,
+                    missing_path_behavior: None,
+                },
+            ])
+        };
+        for (denied, cwd) in [(&real, &link), (&link, &real), (&real, &real)] {
+            let policy = policy_denying(&denied.join(".env"));
+            for path in [link.join(".env"), real.join(".env"), PathBuf::from(".env")] {
+                assert!(
+                    !policy.can_read_resolved_path_with_cwd(&path, cwd),
+                    "{path:?} readable with {denied:?}/.env denied, cwd {cwd:?}"
+                );
+            }
+            // Not yet created: still denied once resolved.
+            let later = policy_denying(&denied.join("later.key"));
+            assert!(!later.can_read_resolved_path_with_cwd(&link.join("later.key"), cwd));
+            assert!(policy.can_read_resolved_path_with_cwd(&link.join("other"), cwd));
+            assert!(policy.can_read_resolved_path_with_cwd(&real.join("other"), cwd));
+        }
     }
 
     #[test]

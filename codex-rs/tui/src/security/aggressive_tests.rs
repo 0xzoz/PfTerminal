@@ -218,6 +218,44 @@ async fn codex_home_inside_the_workspace_stays_read_only() {
     );
 }
 
+/// #467: a workspace opened through a link (`/tmp` on macOS) and denied by
+/// its resolved path, or the other way round, is isolated; a path no rule
+/// denies is still reported.
+#[cfg(unix)]
+#[tokio::test]
+async fn isolation_is_verified_through_a_linked_workspace() {
+    let root = tempfile::tempdir().unwrap();
+    let real = root.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    std::fs::write(real.join(".env"), "API_KEY=x").unwrap();
+    let link = root.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let home = tempfile::tempdir().unwrap();
+    for (denied_in, opened_in) in [(&real, &link), (&link, &real)] {
+        let mut cli = base_overrides(home.path(), home.path());
+        deny_reads(&mut cli, &[denied_in.join(".env")]);
+        let config = load_with(home.path(), opened_in, "", cli).await;
+        for env in [link.join(".env"), real.join(".env")] {
+            assert_eq!(
+                crate::security::preflight::verify_isolation(&config, std::slice::from_ref(&env)),
+                Vec::<String>::new(),
+                "{} denied, opened in {}",
+                denied_in.display(),
+                opened_in.display()
+            );
+        }
+        for other in [link.join("other.key"), real.join("other.key")] {
+            assert_eq!(
+                crate::security::preflight::verify_isolation(&config, std::slice::from_ref(&other))
+                    .len(),
+                1,
+                "{} is not denied",
+                other.display()
+            );
+        }
+    }
+}
+
 /// A workspace that is the account home cannot delete the Aggressive-homes
 /// registry's entries, and a profile that would let it fails verification.
 #[tokio::test]
@@ -241,7 +279,8 @@ async fn registry_inside_the_workspace_stays_read_only() {
         writable_roots.iter().any(|root| root
             .read_only_subpaths
             .iter()
-            .any(|path| path.as_path() == registry)),
+            .any(|path| path.as_path() == registry
+                || path.as_path() == dunce::canonicalize(&registry).unwrap())),
         "{writable_roots:?}"
     );
     let origin = config.codex_home.to_path_buf();
