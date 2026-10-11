@@ -248,10 +248,9 @@ impl CredentialWatcher {
                 let metadata = match std::fs::symlink_metadata(&path) {
                     Ok(metadata) => metadata,
                     Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-                    Err(err) if is_credential_file_name(&name) => {
-                        return Some(format!("cannot read {}: {err}", path.display()));
-                    }
-                    Err(_) => continue,
+                    // An entry that cannot be examined could be a folder that
+                    // is never watched: fail closed.
+                    Err(err) => return Some(format!("cannot read {}: {err}", path.display())),
                 };
                 if metadata.is_dir() {
                     pending.push((path, Some(device)));
@@ -418,6 +417,9 @@ impl CredentialMonitor {
 fn unsafe_entry_message(path: &Path, problem: &str) -> String {
     let target = std::fs::read_link(path)
         .map(|target| {
+            let target = path
+                .parent()
+                .map_or(target.clone(), |parent| parent.join(&target));
             format!(
                 "; anything written to it went to {}, so check or delete that file too",
                 target.display()

@@ -540,6 +540,7 @@ fn unsafe_credential_entries(cwd: &Path) -> Vec<String> {
             {
                 let target = std::fs::read_link(&path)
                     .map(|target| {
+                        let target = folder.join(target);
                         format!(
                             "; anything written to it went to {}, so check or delete that file too",
                             target.display()
