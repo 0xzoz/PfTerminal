@@ -2439,7 +2439,6 @@ impl TokenUsage {
             .round() as i64
     }
 
-    /// In-place element-wise sum of token counts.
     /// Each count less `other`'s, never below zero.
     pub fn saturating_sub(&self, other: &TokenUsage) -> TokenUsage {
         let less = |now: i64, then: i64| (now - then).max(0);
@@ -2459,6 +2458,7 @@ impl TokenUsage {
         }
     }
 
+    /// In-place element-wise sum of token counts.
     pub fn add_assign(&mut self, other: &TokenUsage) {
         self.input_tokens += other.input_tokens;
         self.cached_input_tokens += other.cached_input_tokens;

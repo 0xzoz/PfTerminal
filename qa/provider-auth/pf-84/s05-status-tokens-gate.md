@@ -61,7 +61,7 @@ developer-accounting.
 Script: [`s05-status-tokens/scripts/tmux-check.sh`](s05-status-tokens/scripts/tmux-check.sh). Two named Z.AI
 accounts, `work` and `personal`, both enrolled with the real key from `provider/zai_api_key` (read only inside
 the consuming command). The session ran with `--account work`; a spawned agent ran on `personal`; then the
-conversation was resumed. Captures are from the final tree (`20528c9d78`).
+conversation was resumed. Captures are from the final tree (`20528c9d78`; later commits change only a doc comment and docs).
 
 - **Release-path build** (debug, no developer-accounting) ([captures](s05-status-tokens/captures/release/)):
   `work · no usage yet` → after a turn `work · 7,432 input · 19 output (16 reasoning)` → after the spawned
@@ -78,8 +78,14 @@ conversation was resumed. Captures are from the final tree (`20528c9d78`).
   with no default key, opens the API-key screen before the thread's account applies.
 - Leak scan: no capture, log or disposable home holds the key in plain text.
 
-Video (leak-scanned, 0 hits): `pf84-status-account-tokens`, session on `default` and a spawned agent on `work`;
-see the [demo index](../../demos/index/PF-84-S05.md).
+Video (leak-scanned, 0 hits): [`pf84-status-account-tokens`](https://github.com/CorbanuCore/CorbanuTerminal/releases/download/demos/pf-84-s05-pf84-status-account-tokens-20528c9d785e-2026-10-11.mp4),
+session on `default` and a spawned agent on `work` ([demo index](../../demos/index/PF-84-S05.md)).
+
+## Review (Opus 5.5 High, read-only, installed `corbanu exec`)
+
+Round 1: REQUEST CHANGES (flag-off resume still sent `account_usage`; guardian, `/review` and stage-one memory
+usage missing from `/status`). Round 2: REQUEST CHANGES (gate evidence predated the fixes). Round 3 on
+`1a7c976a47`: **APPROVE**; its doc-comment nit is fixed, its other two notes are listed below.
 
 ## Known limits
 
@@ -87,3 +93,6 @@ see the [demo index](../../demos/index/PF-84-S05.md).
   under the conversation but not shown in `/status`. Stage-one memory extraction outside a turn shows with the
   next count.
 - A remote app server older than this change sends no `accountUsage`, so the line reads `no usage yet`.
+- A side conversation discarded in the background before it ever reported loses a request that finishes in
+  that gap (the ledger keeps it).
+- Review round 3 (APPROVE) suggested a test that delegated usage is sent on the active turn; not added.
