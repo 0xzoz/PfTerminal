@@ -363,7 +363,10 @@ fn exact(value: Decimal) -> String {
 /// quoted for, or that the turn ran on a service tier the rates are not quoted
 /// for. Naming the rows is actionable; guessing the cause would send the
 /// operator to fix the wrong thing.
-fn unpriced_rows<'a>(quotes: impl IntoIterator<Item = &'a ObservationQuote>) -> Vec<String> {
+fn unpriced_rows<'a>(
+    quotes: impl IntoIterator<Item = &'a ObservationQuote>,
+    named: bool,
+) -> Vec<String> {
     let mut rows: Vec<(String, u64)> = Vec::new();
     for quote in quotes.into_iter().filter(|quote| has_no_price(quote)) {
         let attributed = |value: &str| {
@@ -375,7 +378,7 @@ fn unpriced_rows<'a>(quotes: impl IntoIterator<Item = &'a ObservationQuote>) -> 
         };
         let row = format!(
             "{} ({}/{})",
-            route_name(quote),
+            route_name_in(quote, named),
             attributed(&quote.attempt.provider),
             attributed(&quote.attempt.model)
         );
@@ -957,6 +960,16 @@ fn inspection_pages_for(
             .push("Snapshot is not current; newer activity is unverified".into());
     }
     let freshness = pages[0].text.clone();
+    // PF-84-S05: one decision for the whole view, the other conversations'
+    // rows included, so every row and page names accounts the same way.
+    let named = names_accounts(
+        ready.requests.values().flatten().chain(
+            ready
+                .other_conversations
+                .iter()
+                .flat_map(|others| others.requests.values().flatten()),
+        ),
+    );
     // The plain overview already says when costs are estimates; the details
     // add the provider's own charge only where it stated one.
     let all: Vec<&ObservationQuote> = ready.requests.values().flatten().collect();
@@ -974,7 +987,7 @@ fn inspection_pages_for(
     );
     pages[0]
         .text
-        .extend(unpriced_rows(ready.requests.values().flatten()));
+        .extend(unpriced_rows(ready.requests.values().flatten(), named));
     pages[0].text.extend([
         format!(
             "{DAY_COVERED} {}",
@@ -1041,12 +1054,12 @@ fn inspection_pages_for(
         // Attempts in the order they were sent, so attempt 1 is the original.
         let mut attempts: Vec<&ObservationQuote> = quotes.iter().collect();
         attempts.sort_by_key(|q| (i64::from(q.attempt.dispatched_at_ms), q.attempt.attempt_id));
-        let label = match request_route(quotes) {
+        let label = match request_route(quotes, named) {
             Some(route) => format!("Request {number} · {route} · {}", short_cost(&attempts)),
             None => format!("Request {number}"),
         };
         pages[0].links.push((label, request_page));
-        let mut text = plain_header(&attempts);
+        let mut text = plain_header(&attempts, named);
         text.push(format!("Request: {request}"));
         pages.push(InspectorPage {
             title: "Request".into(),
@@ -1060,7 +1073,7 @@ fn inspection_pages_for(
             pages[request_page]
                 .links
                 .push((format!("Technical details (attempt {})", index + 1), target));
-            let mut text = plain_header(&[quote]);
+            let mut text = plain_header(&[quote], named);
             text.extend(
                 attempt_text(quote)
                     .into_iter()
@@ -1098,7 +1111,6 @@ fn inspection_pages_for(
     ];
     // PF-84-S05: grouped by provider, account and model; accounts are named
     // only in a view that holds named-account work.
-    let named = names_accounts(ready.requests.values().flatten());
     let mut providers = std::collections::BTreeMap::new();
     for quote in ready.requests.values().flatten() {
         let key = (
@@ -1139,7 +1151,7 @@ fn inspection_pages_for(
     for (title, quotes) in groups {
         let provider_group = title.starts_with("Provider: ") && !quotes.is_empty();
         let mut text = if provider_group {
-            plain_header(&quotes)
+            plain_header(&quotes, named)
         } else {
             Vec::new()
         };
@@ -1284,7 +1296,7 @@ fn inspection_pages_for(
         || day_heading(ready.utc_day, Utc::now().timestamp() / 86_400),
         |period| format!("This conversation, {period} (UTC):"),
     );
-    let outside = scope::other_conversations_lines(ready.other_conversations.as_ref());
+    let outside = scope::other_conversations_lines(ready.other_conversations.as_ref(), named);
     let next_step = scope::no_price_next_step(
         ready.requests.values().flatten().chain(
             ready
@@ -1306,6 +1318,7 @@ fn inspection_pages_for(
         .any(ObservationQuote::is_plan);
     let overview = plain_overview(
         heading,
+        named,
         ready.requests.values().flatten(),
         outside,
         (outside_per_use, outside_plan),
@@ -1376,10 +1389,6 @@ fn model_name(slug: &str) -> String {
         .unwrap_or_else(|| slug.to_string())
 }
 
-fn route_name(quote: &ObservationQuote) -> String {
-    route_name_in(quote, quote.attempt.account.is_some())
-}
-
 /// "Provider · Model", or "Provider · account NAME · Model" where the view
 /// names accounts (`default` included).
 fn route_name_in(quote: &ObservationQuote, named: bool) -> String {
@@ -1409,9 +1418,9 @@ fn names_accounts<'a>(quotes: impl IntoIterator<Item = &'a ObservationQuote>) ->
 
 /// The route of a request's attempts, or every distinct route when a retry
 /// moved to another one.
-fn request_route(quotes: &[ObservationQuote]) -> Option<String> {
+fn request_route(quotes: &[ObservationQuote], named: bool) -> Option<String> {
     let mut routes: Vec<String> = Vec::new();
-    for route in quotes.iter().map(route_name) {
+    for route in quotes.iter().map(|quote| route_name_in(quote, named)) {
         if !routes.contains(&route) {
             routes.push(route);
         }
@@ -1885,8 +1894,7 @@ fn leading_charge(
 /// The plain header of a provider, request or attempt page: what served the
 /// work, how it is paid for and what it cost, then a divider above the
 /// auditing detail.
-fn plain_header(quotes: &[&ObservationQuote]) -> Vec<String> {
-    let named = names_accounts(quotes.iter().copied());
+fn plain_header(quotes: &[&ObservationQuote], named: bool) -> Vec<String> {
     let mut routes: Vec<(String, String, String)> = Vec::new();
     for quote in quotes {
         let route = (
@@ -2019,6 +2027,7 @@ fn route_line(quotes: &[&ObservationQuote], named: bool) -> String {
 /// rather than showing nothing, so it never reads as a zero-cost day.
 fn plain_overview<'a>(
     heading: String,
+    named: bool,
     quotes: impl IntoIterator<Item = &'a ObservationQuote>,
     outside: Vec<String>,
     (outside_per_use, outside_plan): (Vec<&ObservationQuote>, bool),
@@ -2030,7 +2039,6 @@ fn plain_overview<'a>(
     } else {
         vec![heading]
     };
-    let named = names_accounts(groups.values().flatten().copied());
     lines.extend(groups.values().map(|quotes| route_line(quotes, named)));
     let all: Vec<&ObservationQuote> = groups.values().flatten().copied().collect();
     if let Ok(t) = codex_state::accounting::DayTotals::from_quotes(all.iter().copied()) {
@@ -2295,9 +2303,9 @@ fn range_pages(
         parent: None,
         selected: Arc::default(),
     }];
-    pages[0]
-        .text
-        .extend(scope::other_conversations_lines(/*others*/ None));
+    pages[0].text.extend(scope::other_conversations_lines(
+        /*others*/ None, /*named*/ false,
+    ));
     let complete = buckets.iter().zip(&progress).all(|(b, progress)| {
         progress.is_some()
             || (!b.partial && b.days.iter().all(|d| matches!(d, InspectionDay::Ready(_))))
@@ -2321,7 +2329,7 @@ fn range_pages(
                 _ => None,
             })
             .flat_map(|v| v.requests.values().flatten());
-        let mut named = unpriced_rows(quotes.clone());
+        let mut named = unpriced_rows(quotes.clone(), names_accounts(quotes.clone()));
         named.extend(scope::no_price_next_step(quotes.clone()));
         named.extend(billed_line(&quotes.clone().collect::<Vec<_>>()));
         named.extend(scope::overflow_note(quotes.clone()));

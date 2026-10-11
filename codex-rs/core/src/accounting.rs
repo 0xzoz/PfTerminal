@@ -607,6 +607,7 @@ pub(crate) fn turn_mode(
 ) -> AccountingMode {
     let AccountingMode::Provider {
         scope,
+        provider_id: bound_provider,
         account: bound_account,
         ..
     } = mode
@@ -700,7 +701,12 @@ pub(crate) fn turn_mode(
         approved_query: canonical_query(provider),
         pricing,
         basis_source,
-        account: attempt_account(provider, bound_account.as_ref()),
+        account: attempt_account(
+            bound_provider,
+            provider_id,
+            provider,
+            bound_account.as_ref(),
+        ),
     }
 }
 
@@ -708,21 +714,26 @@ pub(crate) fn turn_mode(
 /// it, keeping a fingerprint already bound for that same account. `None` for
 /// the `default` account.
 fn attempt_account(
+    bound_provider: &str,
+    provider_id: &str,
     provider: &codex_model_provider_info::ModelProviderInfo,
     bound: Option<&codex_state::accounting::AttemptAccount>,
 ) -> Option<codex_state::accounting::AttemptAccount> {
     let selected = provider.account.as_ref()?;
     Some(codex_state::accounting::AttemptAccount {
         name: selected.name.clone(),
+        // Kept only for the same account of the same provider.
         fingerprint: bound
-            .filter(|bound| bound.name == selected.name)
+            .filter(|bound| bound.name == selected.name && bound_provider == provider_id)
             .and_then(|bound| bound.fingerprint.clone()),
     })
 }
 
-/// Binds the account's per-home fingerprint once per turn. Vault metadata and a
-/// salted hash only; an account whose fingerprint cannot be read is recorded by
-/// name alone rather than left unrecorded.
+/// Binds the account's per-home fingerprint once per turn. The vault decrypts
+/// the account's material to hash it, and only the salted hash is kept. A
+/// fingerprint that cannot be read within `FINGERPRINT_BUDGET` (a busy vault
+/// lock, no vault) is left out and the account recorded by name alone: the
+/// request is never held for it.
 pub(crate) async fn bind_account_fingerprint(
     mode: &mut AccountingMode,
     provider: &codex_model_provider_info::ModelProviderInfo,
@@ -741,7 +752,8 @@ pub(crate) async fn bind_account_fingerprint(
     let Some(selected) = provider.account.clone() else {
         return;
     };
-    let fingerprint = tokio::task::spawn_blocking(move || {
+    const FINGERPRINT_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+    let lookup = tokio::task::spawn_blocking(move || {
         let name = codex_vault::ProviderAccountName::parse(&selected.name).ok()?;
         let vault = codex_vault::Vault::new(codex_home);
         // Never initialise a vault (or its key) just to fingerprint.
@@ -752,10 +764,12 @@ pub(crate) async fn bind_account_fingerprint(
             .provider_account_fingerprint(&selected.provider_id, &name)
             .ok()
             .flatten()
-    })
-    .await
-    .ok()
-    .flatten();
+    });
+    let fingerprint = tokio::time::timeout(FINGERPRINT_BUDGET, lookup)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .flatten();
     if fingerprint.is_none() {
         tracing::warn!(
             target: LOG_TARGET,
@@ -1275,6 +1289,18 @@ impl Sampling {
             failed: AtomicBool::new(false),
             halted: AtomicBool::new(false),
         }))
+    }
+
+    /// PF-84: whether `mode` sends on the account this sampling records.
+    pub(crate) fn same_account(&self, mode: &AccountingMode) -> bool {
+        let name = |account: Option<&codex_state::accounting::AttemptAccount>| {
+            account.map(|account| account.name.clone())
+        };
+        let bound = match mode {
+            AccountingMode::Provider { account, .. } => account.as_ref(),
+            _ => None,
+        };
+        name(bound) == name(self.account.as_ref())
     }
 
     pub(crate) fn check(&self) -> Result<(), CodexErr> {

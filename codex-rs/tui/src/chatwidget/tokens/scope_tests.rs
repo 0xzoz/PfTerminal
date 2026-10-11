@@ -1185,6 +1185,16 @@ fn named_account_day_groups_by_provider_and_account_and_reconciles() {
             "Provider: zai; Account: work; Model: glm-5.3-flash",
         ]
     );
+    // Every request link names its account, default included.
+    let requests: Vec<String> = link_labels(&pages)
+        .into_iter()
+        .filter(|label| label.starts_with("Request "))
+        .collect();
+    assert_eq!(requests.len(), 3);
+    assert!(
+        requests.iter().all(|label| label.contains(" · account ")),
+        "{requests:?}"
+    );
     // Exact reconciliation: the per-account rows partition the provider's work.
     let groups = super::super::by_route(all.iter());
     let total = DayTotals::from_quotes(all.iter()).unwrap();

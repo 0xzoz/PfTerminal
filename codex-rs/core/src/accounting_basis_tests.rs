@@ -480,6 +480,18 @@ async fn admission_records_the_named_account() -> anyhow::Result<()> {
             .and_then(|account| account.fingerprint),
         None
     );
+    // Nor does a same-named account of another provider.
+    assert_eq!(
+        account_of(&turn_mode(
+            &named_mode,
+            "other-llm",
+            &provider,
+            None,
+            endpoint
+        ))
+        .and_then(|account| account.fingerprint),
+        None
+    );
 
     let db = StateRuntime::init(
         SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(home.path())?),
@@ -516,13 +528,15 @@ async fn admission_records_the_named_account() -> anyhow::Result<()> {
         .admit("some-model", &route)
         .await?;
     assert_eq!(default_attempt.account, None);
-    assert!(!formats().await?.contains(&4));
-    let named_attempt = Sampling::start(db.clone(), owner, "named".into(), &named_mode)
-        .await?
-        .admit("some-model", &route)
-        .await?;
+    assert_eq!(formats().await?, vec![1]);
+    let named_sampling = Sampling::start(db.clone(), owner, "named".into(), &named_mode).await?;
+    // A rebound mode on another account is not this sampling's account.
+    assert!(named_sampling.same_account(&rebound));
+    assert!(!named_sampling.same_account(&default_mode));
+    let named_attempt = named_sampling.admit("some-model", &route).await?;
     assert_eq!(named_attempt.account, Some(expected.clone()));
-    assert_eq!(formats().await?.last(), Some(&4));
+    // A format-1 ledger goes straight to format 4 with the named attempt.
+    assert_eq!(formats().await?, vec![1, 2, 3, 4]);
     let day = chrono::Utc::now().timestamp_millis() / 86_400_000;
     let codex_state::accounting::InspectionDay::Ready(view) =
         codex_state::accounting::AccountingStore::inspect_day(
@@ -565,4 +579,40 @@ async fn admission_records_the_named_account() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// PF-84-S05: with no vault in the home, the account is recorded by name only
+/// and nothing is created (no vault, key or salt).
+#[tokio::test(flavor = "current_thread")]
+async fn account_fingerprint_without_a_vault_is_name_only_and_creates_nothing() {
+    let home = tempfile::tempdir().expect("home");
+    let endpoint = "https://llm.example.com/v1";
+    let mut provider = ModelProviderInfo {
+        base_url: Some(endpoint.into()),
+        wire_api: codex_model_provider_info::WireApi::Chat,
+        ..ModelProviderInfo::create_zai_provider()
+    };
+    provider.account = Some(codex_model_provider_info::NamedProviderAccount {
+        provider_id: "my-llm".into(),
+        name: "work".into(),
+    });
+    let mut bound = turn_mode(
+        &mode(PriceAuthority::Unavailable, BasisSource::BuiltIn),
+        "my-llm",
+        &provider,
+        None,
+        endpoint,
+    );
+    bind_account_fingerprint(&mut bound, &provider, home.path().to_path_buf()).await;
+    let AccountingMode::Provider { account, .. } = bound else {
+        panic!("{bound:?}");
+    };
+    assert_eq!(
+        account,
+        Some(codex_state::accounting::AttemptAccount {
+            name: "work".into(),
+            fingerprint: None,
+        })
+    );
+    assert_eq!(std::fs::read_dir(home.path()).expect("home").count(), 0);
 }

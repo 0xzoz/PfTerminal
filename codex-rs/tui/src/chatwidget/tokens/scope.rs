@@ -34,7 +34,10 @@ fn counted(n: usize, noun: &str) -> String {
 
 /// Same-day requests of other conversations: never part of this conversation's
 /// total, and never left out silently. `None` means the view did not read them.
-pub(super) fn other_conversations_lines(others: Option<&OtherConversations>) -> Vec<String> {
+pub(super) fn other_conversations_lines(
+    others: Option<&OtherConversations>,
+    named: bool,
+) -> Vec<String> {
     let Some(others) = others else {
         return vec![
             "Other conversations are not included in this view; /cost covers only the open conversation.".into(),
@@ -61,7 +64,6 @@ pub(super) fn other_conversations_lines(others: Option<&OtherConversations>) -> 
             request_count(&quotes)
         )
     }];
-    let named = super::names_accounts(quotes.iter().copied());
     lines.extend(
         by_route(quotes.iter().copied())
             .values()

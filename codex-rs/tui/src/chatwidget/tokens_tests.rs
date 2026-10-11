@@ -2315,20 +2315,23 @@ fn accounting_inspect_names_the_rows_whose_tokens_have_no_price() {
         BucketQuote::MissingRate,
     ];
 
-    let lines = super::unpriced_rows([
-        &priced,
-        &unpriced,
-        &also_unpriced,
-        &duplicate,
-        &no_usage,
-        &zero_bucket,
-        &zero_usage,
-        &plan_attempt,
-        &zero_rate,
-        &mixed_priced,
-        &mixed_unpriced,
-        &partly_priced,
-    ]);
+    let lines = super::unpriced_rows(
+        [
+            &priced,
+            &unpriced,
+            &also_unpriced,
+            &duplicate,
+            &no_usage,
+            &zero_bucket,
+            &zero_usage,
+            &plan_attempt,
+            &zero_rate,
+            &mixed_priced,
+            &mixed_unpriced,
+            &partly_priced,
+        ],
+        /*named*/ false,
+    );
 
     assert_eq!(
         lines.len(),
@@ -2400,7 +2403,7 @@ fn accounting_inspect_names_the_rows_whose_tokens_have_no_price() {
     );
 
     // Nothing to say when everything carried a rate.
-    assert!(super::unpriced_rows([&priced]).is_empty());
+    assert!(super::unpriced_rows([&priced], /*named*/ false).is_empty());
 }
 
 /// The line has to land on the page the operator actually reads - the one
@@ -2615,11 +2618,11 @@ fn accounting_inspect_plain_wording_counts_attempts_and_names_every_route() {
         )
     );
     assert_eq!(
-        request_route(&quotes).as_deref(),
+        request_route(&quotes, /*named*/ false).as_deref(),
         Some("several routes (synthetic · synthetic-model, synthetic · other-model)")
     );
     assert_eq!(
-        request_route(&quotes[..1]).as_deref(),
+        request_route(&quotes[..1], /*named*/ false).as_deref(),
         Some("synthetic · synthetic-model")
     );
     // Real routes read by their display names.
