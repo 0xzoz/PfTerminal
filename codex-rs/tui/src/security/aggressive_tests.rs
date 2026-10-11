@@ -256,8 +256,9 @@ async fn isolation_is_verified_through_tmp_on_macos() {
 }
 
 /// The sandbox matches a denial to the workspace by its spelling with
-/// nested links kept, so a rule reached only through a nested link is still
-/// reported rather than claimed.
+/// nested links kept, so a file spelled through a nested link that the rule
+/// names without it is still reported rather than claimed. (The rule's own
+/// spelling, `real/.env` here, can be readable under Seatbelt: #488.)
 #[cfg(unix)]
 #[tokio::test]
 async fn isolation_through_a_nested_link_is_still_reported() {
@@ -272,10 +273,6 @@ async fn isolation_through_a_nested_link_is_still_reported() {
     deny_reads(&mut cli, &[real.join(".env")]);
     let config = load_with(home.path(), &link, "", cli).await;
     assert_eq!(isolation_problems(&config, &link.join(".env")).len(), 1);
-    assert_eq!(
-        isolation_problems(&config, &real.join(".env")),
-        Vec::<String>::new()
-    );
 }
 
 /// A workspace that is the account home cannot delete the Aggressive-homes
@@ -298,11 +295,15 @@ async fn registry_inside_the_workspace_stays_read_only() {
     assert!(file_system.can_write_path_with_cwd(&cwd.join("other"), cwd));
     let writable_roots = file_system.get_writable_roots_with_cwd(cwd);
     assert!(
-        writable_roots.iter().any(|root| root
-            .read_only_subpaths
-            .iter()
-            .any(|path| path.as_path() == registry
-                || path.as_path() == dunce::canonicalize(&registry).unwrap())),
+        writable_roots.iter().any(
+            |root| root
+                .read_only_subpaths
+                .iter()
+                .any(|path| path.as_path() == registry
+                    || path.as_path()
+                        == codex_utils_absolute_path::canonicalize_preserving_symlinks(&registry)
+                            .unwrap())
+        ),
         "{writable_roots:?}"
     );
     let origin = config.codex_home.to_path_buf();
