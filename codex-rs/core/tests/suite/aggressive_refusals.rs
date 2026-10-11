@@ -104,15 +104,12 @@ async fn run(aggressive: bool) -> Result<Outcome> {
         .await?;
 
     let mut warnings = Vec::new();
-    loop {
-        match wait_for_event(&test.codex, |event| {
-            matches!(event, EventMsg::Warning(_) | EventMsg::TurnComplete(_))
-        })
-        .await
-        {
-            EventMsg::Warning(warning) => warnings.push(warning.message),
-            _ => break,
-        }
+    while let EventMsg::Warning(warning) = wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::Warning(_) | EventMsg::TurnComplete(_))
+    })
+    .await
+    {
+        warnings.push(warning.message);
     }
     let output = second
         .single_request()
