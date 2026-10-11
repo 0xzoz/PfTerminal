@@ -102,8 +102,19 @@ key = "Enter"
 [[steps]]
 wait = "Kill switch on"
 [[steps]]
+pause = 1.5
+[[steps]]
 key = "Escape"
-repeat = 2
+[[steps]]
+wait = "esc back to the levels"
+[[steps]]
+key = "Escape"
+[[steps]]
+wait = "Security level"
+[[steps]]
+key = "Escape"
+[[steps]]
+pause = 0.5
 [[steps]]
 wait = "security kill switch was turned on"
 timeout = 60
