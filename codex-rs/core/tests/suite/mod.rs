@@ -149,6 +149,7 @@ mod rollout_budget;
 mod rollout_list_find;
 mod safety_buffering;
 mod safety_check_downgrade;
+mod sandbox_denied_at_start;
 mod search_tool;
 mod shell_command;
 mod shell_serialization;
