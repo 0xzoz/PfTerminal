@@ -218,6 +218,63 @@ async fn codex_home_inside_the_workspace_stays_read_only() {
     );
 }
 
+fn isolation_problems(config: &Config, path: &Path) -> Vec<String> {
+    crate::security::preflight::verify_isolation(config, &[path.to_path_buf()])
+}
+
+/// #467: a workspace opened through `/tmp` on macOS and denied by its
+/// `/private/tmp` path (as launch does from `current_dir()`), or the other
+/// way round, is isolated; a path no rule denies is still reported.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn isolation_is_verified_through_tmp_on_macos() {
+    let root = tempfile::tempdir_in("/tmp").unwrap();
+    let logical = root.path().to_path_buf();
+    let physical = logical.canonicalize().unwrap();
+    assert!(physical.starts_with("/private/tmp"), "{physical:?}");
+    std::fs::write(physical.join(".env"), "API_KEY=x").unwrap();
+    let home = tempfile::tempdir().unwrap();
+    for (denied_in, opened_in) in [(&physical, &logical), (&logical, &physical)] {
+        let mut cli = base_overrides(home.path(), home.path());
+        deny_reads(&mut cli, &[denied_in.join(".env")]);
+        let config = load_with(home.path(), opened_in, "", cli).await;
+        for spelling in [&logical, &physical] {
+            assert_eq!(
+                isolation_problems(&config, &spelling.join(".env")),
+                Vec::<String>::new(),
+                "{} denied, opened in {}",
+                denied_in.display(),
+                opened_in.display()
+            );
+            assert_eq!(
+                isolation_problems(&config, &spelling.join("other.key")).len(),
+                1,
+                "other.key is not denied"
+            );
+        }
+    }
+}
+
+/// The sandbox matches a denial to the workspace by its spelling with
+/// nested links kept, so a file spelled through a nested link that the rule
+/// names without it is still reported rather than claimed. (The rule's own
+/// spelling, `real/.env` here, can be readable under Seatbelt: #488.)
+#[cfg(unix)]
+#[tokio::test]
+async fn isolation_through_a_nested_link_is_still_reported() {
+    let root = tempfile::tempdir().unwrap();
+    let real = root.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    std::fs::write(real.join(".env"), "API_KEY=x").unwrap();
+    let link = root.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let mut cli = base_overrides(home.path(), home.path());
+    deny_reads(&mut cli, &[real.join(".env")]);
+    let config = load_with(home.path(), &link, "", cli).await;
+    assert_eq!(isolation_problems(&config, &link.join(".env")).len(), 1);
+}
+
 /// A workspace that is the account home cannot delete the Aggressive-homes
 /// registry's entries, and a profile that would let it fails verification.
 #[tokio::test]
@@ -238,10 +295,15 @@ async fn registry_inside_the_workspace_stays_read_only() {
     assert!(file_system.can_write_path_with_cwd(&cwd.join("other"), cwd));
     let writable_roots = file_system.get_writable_roots_with_cwd(cwd);
     assert!(
-        writable_roots.iter().any(|root| root
-            .read_only_subpaths
-            .iter()
-            .any(|path| path.as_path() == registry)),
+        writable_roots.iter().any(
+            |root| root
+                .read_only_subpaths
+                .iter()
+                .any(|path| path.as_path() == registry
+                    || path.as_path()
+                        == codex_utils_absolute_path::canonicalize_preserving_symlinks(&registry)
+                            .unwrap())
+        ),
         "{writable_roots:?}"
     );
     let origin = config.codex_home.to_path_buf();

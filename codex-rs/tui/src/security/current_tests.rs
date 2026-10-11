@@ -60,7 +60,12 @@ async fn workspace_write_rows_name_the_escape_route() {
     let home = tempfile::tempdir().unwrap();
     let cwd = tempfile::tempdir().unwrap();
     let extra = tempfile::tempdir().unwrap();
-    let extra_path = extra.path().display().to_string();
+    // Writable roots are shown with top-level aliases resolved (#467: `/tmp`
+    // on macOS).
+    let extra_path = codex_utils_absolute_path::canonicalize_preserving_symlinks(extra.path())
+        .unwrap()
+        .display()
+        .to_string();
 
     let open = build(
         home.path(),
