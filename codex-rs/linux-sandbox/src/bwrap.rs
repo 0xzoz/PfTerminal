@@ -446,6 +446,9 @@ fn create_filesystem_args(
     unreadable_roots.sort();
     unreadable_roots.dedup();
 
+    // Read-only roots reached through a link and mounted at the link's path
+    // (restricted reads), with their real targets (#501).
+    let mut logical_link_roots: Vec<(PathBuf, PathBuf)> = Vec::new();
     let args = if file_system_sandbox_policy.has_full_disk_read_access() {
         // Read-only root, then mount a minimal device tree.
         // In bubblewrap (`bubblewrap.c`, `SETUP_MOUNT_DEV`), `--dev /dev`
@@ -509,6 +512,9 @@ fn create_filesystem_args(
                 {
                     canonical_target_if_symlinked_path(&root).unwrap_or(root)
                 } else {
+                    if let Some(target) = canonical_target_if_symlinked_path(&root) {
+                        logical_link_roots.push((root.clone(), target));
+                    }
                     root
                 };
                 args.push("--ro-bind".to_string());
@@ -533,7 +539,38 @@ fn create_filesystem_args(
             allowed_write_paths.push(target);
         }
     }
-    let unreadable_paths: HashSet<PathBuf> = unreadable_roots.iter().cloned().collect();
+    let mut unreadable_paths: HashSet<PathBuf> = unreadable_roots.iter().cloned().collect();
+    // #502: a denial spelled through a link the command cannot change is
+    // masked where the link leads. Bubblewrap cannot create a mount point
+    // through an absolute link (every command would fail), and inside the
+    // sandbox the link leads to the same masked file. Links a command could
+    // change still fail closed below.
+    // #501: under restricted reads, a read-only root reached through a link
+    // is mounted at the link's path, so a denial below its target is masked
+    // there too.
+    let unreadable_roots = {
+        let mut resolved = Vec::with_capacity(unreadable_roots.len());
+        for path in unreadable_roots {
+            let path = if first_writable_symlink_component_in_path(&path, &allowed_write_paths)
+                .is_none()
+                && let Some(real) = real_path_through_links(&path)
+            {
+                real
+            } else {
+                path
+            };
+            for (root, target) in &logical_link_roots {
+                if let Ok(relative) = path.strip_prefix(target) {
+                    resolved.push(root.join(relative));
+                }
+            }
+            resolved.push(path);
+        }
+        resolved.sort();
+        resolved.dedup();
+        unreadable_paths.extend(resolved.iter().cloned());
+        resolved
+    };
     // #503: order by the bound (canonical) path, so a symlink to `/` is bound
     // first like `/` itself instead of covering shallower roots' masks. The
     // target is resolved once, so the order and the binds agree.
@@ -1107,6 +1144,22 @@ fn canonical_target_if_symlinked_path(path: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// `path` with links resolved up to its nearest existing component (the
+/// rest appended as written), when that differs from `path`.
+fn real_path_through_links(path: &Path) -> Option<PathBuf> {
+    let mut existing = path;
+    let mut tail = Vec::new();
+    while fs::symlink_metadata(existing).is_err() {
+        tail.push(existing.file_name()?);
+        existing = existing.parent()?;
+    }
+    let mut real = fs::canonicalize(existing).ok()?;
+    for name in tail.iter().rev() {
+        real.push(name);
+    }
+    (real != path).then_some(real)
 }
 
 fn remap_paths_for_symlink_target(paths: Vec<PathBuf>, root: &Path, target: &Path) -> Vec<PathBuf> {
@@ -1857,6 +1910,103 @@ mod tests {
             "masked once: {:?}",
             args.args
         );
+    }
+
+    /// #502: a denial spelled through an absolute link to the workspace is
+    /// masked at the link's target after the workspace bind; bubblewrap is
+    /// never asked to create a mount point through the link.
+    #[cfg(unix)]
+    #[test]
+    fn denials_spelled_through_a_read_only_link_mask_the_target() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let real_root = temp_dir.path().join("real");
+        let link_root = temp_dir.path().join("link");
+        std::fs::create_dir_all(&real_root).expect("create real root");
+        std::fs::write(real_root.join(".env"), "x").expect("create .env");
+        std::os::unix::fs::symlink(&real_root, &link_root).expect("create link");
+        let entry = |path: &Path, access| FileSystemSandboxEntry {
+            path: FileSystemPath::Path {
+                path: AbsolutePathBuf::from_absolute_path(path).expect("absolute"),
+            },
+            access,
+            missing_path_behavior: None,
+        };
+        // Existing, and not created yet.
+        for name in [".env", "later.key"] {
+            let policy = FileSystemSandboxPolicy::restricted(vec![
+                entry(&real_root, FileSystemAccessMode::Write),
+                entry(&link_root.join(name), FileSystemAccessMode::Deny),
+            ]);
+            let args =
+                create_filesystem_args(&policy, temp_dir.path(), NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
+                    .expect("filesystem args");
+            let real_root_str = path_to_string(&real_root);
+            let masked = path_to_string(&real_root.join(name));
+            let bind = args
+                .args
+                .windows(3)
+                .position(|window| {
+                    window == ["--bind", real_root_str.as_str(), real_root_str.as_str()]
+                })
+                .expect("bind");
+            let mask = args
+                .args
+                .iter()
+                .position(|arg| arg == &masked)
+                .expect("masked at the target");
+            assert!(bind < mask, "{name}: {:?}", args.args);
+            let through_link = path_to_string(&link_root.join(name));
+            assert!(
+                !args.args.contains(&through_link),
+                "{name}: {:?}",
+                args.args
+            );
+        }
+    }
+
+    /// #501: under restricted reads, a read-only root reached through a link
+    /// is mounted at the link's path; a denial below its target, spelled
+    /// either way, is masked at that path too.
+    #[cfg(unix)]
+    #[test]
+    fn restricted_reads_mask_denials_below_a_linked_read_only_root() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let real_root = temp_dir.path().join("real");
+        let link_root = temp_dir.path().join("link");
+        std::fs::create_dir_all(&real_root).expect("create real root");
+        std::fs::write(real_root.join("secret"), "x").expect("create secret");
+        std::os::unix::fs::symlink(&real_root, &link_root).expect("create link");
+        let entry = |path: &Path, access| FileSystemSandboxEntry {
+            path: FileSystemPath::Path {
+                path: AbsolutePathBuf::from_absolute_path(path).expect("absolute"),
+            },
+            access,
+            missing_path_behavior: None,
+        };
+        let link_root_str = path_to_string(&link_root);
+        let link_secret = path_to_string(&link_root.join("secret"));
+        for denied in [real_root.join("secret"), link_root.join("secret")] {
+            let policy = FileSystemSandboxPolicy::restricted(vec![
+                entry(&link_root, FileSystemAccessMode::Read),
+                entry(&denied, FileSystemAccessMode::Deny),
+            ]);
+            let args =
+                create_filesystem_args(&policy, temp_dir.path(), NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
+                    .expect("filesystem args");
+            let bind = args
+                .args
+                .windows(3)
+                .position(|window| {
+                    window == ["--ro-bind", link_root_str.as_str(), link_root_str.as_str()]
+                })
+                .expect("linked root mounted at its path");
+            let mask = args
+                .args
+                .iter()
+                .rposition(|arg| arg == &link_secret)
+                .expect("masked through the mounted link");
+            assert!(bind < mask, "{denied:?}: {:?}", args.args);
+        }
     }
 
     #[cfg(unix)]
