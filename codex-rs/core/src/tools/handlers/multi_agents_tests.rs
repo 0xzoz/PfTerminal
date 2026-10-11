@@ -6608,6 +6608,7 @@ async fn spawn_with_account(
         parent_account,
         extra,
         /*answer*/ None,
+        /*raised_level*/ None,
     )
     .await;
     (result, children)
@@ -6622,6 +6623,7 @@ async fn spawn_with_account_answering(
     parent_account: Option<&str>,
     extra: serde_json::Value,
     answer: Option<&str>,
+    raised_level: Option<codex_security_policy::SecurityLevel>,
 ) -> (Result<(), FunctionCallError>, Vec<Option<String>>, bool) {
     let (mut session, mut turn) = make_session_and_context().await;
     let mut provider_info = ModelProviderInfo::create_zai_provider();
@@ -6665,6 +6667,19 @@ async fn spawn_with_account_answering(
     // The root's own control plane carries its security policy binding.
     session.services.agent_control = root.thread.session.services.agent_control.clone();
     session.thread_id = root.thread_id;
+    if let Some(level) = raised_level {
+        let controller = session
+            .services
+            .agent_control
+            .trusted_security_controller()
+            .expect("root security controller");
+        let change = controller
+            .confirm_level_change(level, codex_security_policy::RevocationState::new())
+            .expect("confirm level change");
+        controller
+            .apply_confirmed_change(change)
+            .expect("apply level change");
+    }
     let mut arguments = json!({
         "message": "say pong",
         "task_name": "worker",
@@ -6921,6 +6936,7 @@ async fn tui_aggressive_spawn_account_switch_asks_the_human() {
             /*parent_account*/ None,
             json!({"account": "work"}),
             Some(answer),
+            /*raised_level*/ None,
         )
         .await;
         assert_eq!(outcome, expected, "{answer}");
@@ -6939,11 +6955,40 @@ async fn permissive_spawn_account_switch_asks_nothing_even_when_it_could() {
         /*parent_account*/ None,
         json!({"account": "work"}),
         Some("Cancel"),
+        /*raised_level*/ None,
     )
     .await;
     assert_eq!(
         (result, children, asked),
         (Ok(()), vec![Some("zai:work".to_string())], false)
+    );
+}
+
+/// PF-84-S03 follow-up: D3 checks the level in force at spawn time, so a
+/// session started Permissive and raised to Aggressive mid-session needs the
+/// approval too.
+#[tokio::test]
+async fn spawn_account_switch_after_a_mid_session_raise_needs_an_approval() {
+    let (result, children, _asked) = spawn_with_account_answering(
+        /*named_accounts*/ true,
+        |config, turn| {
+            config.security_level = codex_security_policy::SecurityLevel::Permissive;
+            turn.approval_policy
+                .set(AskForApproval::Never)
+                .expect("approval policy should be set");
+        },
+        /*parent_account*/ None,
+        json!({"account": "work"}),
+        /*answer*/ None,
+        Some(codex_security_policy::SecurityLevel::Aggressive),
+    )
+    .await;
+    assert_eq!(children, Vec::<Option<String>>::new());
+    assert_eq!(
+        result,
+        Err(FunctionCallError::RespondToModel(
+            "Running a spawned agent on account `work` of `zai` needs the user's approval under the Aggressive security level, and approvals are off.".to_string()
+        ))
     );
 }
 
