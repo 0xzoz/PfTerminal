@@ -7,8 +7,8 @@
 //!
 //! In particular, onboarding quit handling has a text-entry guard: while any
 //! text field has focus (an API key, a Claude token or code, or a named
-//! account's name or value), the printable `q` quit key is text, even in an
-//! empty field. Control chords (Ctrl+C, Ctrl+D) remain explicit exits. Quitting
+//! account's name or value) or its value is saving, the printable `q` quit key
+//! is text, even in an empty field. Control chords (Ctrl+C, Ctrl+D) remain explicit exits. Quitting
 //! on a printable key mid-entry would drop the rest of a typed or non-bracketed
 //! pasted secret onto the user's shell (#461).
 
@@ -224,23 +224,20 @@ impl OnboardingScreen {
         let mut api_key_provider_name = config.model_provider.name.clone();
         let mut api_key_env_var = config.model_provider.env_key.clone();
         let api_key_provider_options = provider_api_key_options(&provider_status_host);
-        let selected_provider_index = if api_key_provider_options.is_empty() {
-            None
-        } else {
-            Some(
-                api_key_provider_options
-                    .iter()
-                    .position(|provider| {
-                        provider.target.provider_id.as_str() == api_key_provider_id
-                    })
-                    .unwrap_or(0),
-            )
-        };
+        // The first option stands in only when the screen will name that option too (the
+        // override below). Otherwise the screen names the configured provider, and saving the
+        // key to another provider would report success for the wrong one.
+        let first_option_stands_in =
+            api_key_env_var.is_none() || config.model_provider.requires_openai_auth;
+        let selected_provider_index = api_key_provider_options
+            .iter()
+            .position(|provider| provider.target.provider_id.as_str() == api_key_provider_id)
+            .or_else(|| first_option_stands_in.then_some(0));
         let selected_api_key_option = selected_provider_index
             .and_then(|index| api_key_provider_options.get(index))
             .cloned();
         if let Some(provider) = selected_api_key_option.as_ref()
-            && (api_key_env_var.is_none() || config.model_provider.requires_openai_auth)
+            && first_option_stands_in
         {
             api_key_provider_id = provider.target.provider_id.as_str().to_string();
             api_key_provider_name = provider.name.clone();
@@ -1196,6 +1193,25 @@ mod tests {
                 panic!("auth step");
             };
             assert_eq!(widget.text_entry_value().as_deref(), Some(typed), "{field}");
+        }
+    }
+
+    /// A non-bracketed paste with a newline starts the save while the rest of
+    /// the value is still arriving; those keys must not quit either.
+    #[tokio::test]
+    async fn saving_a_typed_value_does_not_quit_on_q() {
+        use crate::onboarding::auth::SignInState;
+
+        for state in [
+            SignInState::ApiKeySaving,
+            SignInState::ClaudeManagedTokenSaving,
+            SignInState::AccountSaving,
+        ] {
+            let (widget, _home) = crate::onboarding::auth::tests::widget_forced_chatgpt().await;
+            *widget.sign_in_state.write().unwrap() = state;
+            let mut screen = auth_screen(widget);
+            screen.handle_key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+            assert!(!screen.is_done() && !screen.should_exit());
         }
     }
 

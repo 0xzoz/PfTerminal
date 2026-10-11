@@ -677,8 +677,9 @@ async fn tmux_onboarding_text_fields_type_q_without_quitting() -> Result<()> {
 
     let account_key = format!("q{}-qqq", synthetic_canary("q-account"));
     pane.send_secret_literal(&account_key)?;
-    pane.wait_stable_until("the masked value", READY_TIMEOUT, |capture| {
-        capture.matches('•').count() >= 8
+    let masked = account_key.chars().count();
+    pane.wait_stable_until("the whole masked value", READY_TIMEOUT, |capture| {
+        capture.matches('•').count() >= masked
     })?;
     ensure!(session.is_running(), "typing the account key quit the TUI");
     pane.send_key(TmuxKey::Enter)?;
@@ -714,9 +715,9 @@ async fn tmux_preset_provider_key_entry_continues_to_chat() -> Result<()> {
     let repo_root = codex_utils_cargo_bin::repo_root()?;
     let binary = codex_binary(&repo_root)?;
     let home = tempdir()?;
-    let server = MockServer::start().await;
-    let _reply = responses::mount_sse_once(&server, response("pf84 preset reply")).await;
-    write_config(home.path(), &repo_root, &server.uri())?;
+    // Nothing listens here, so the provider never looks reachable before its setup completes;
+    // a reachable endpoint let a status refresh hide the loop. No request is made.
+    write_config(home.path(), &repo_root, "http://127.0.0.1:9")?;
     let config_path = home.path().join("config.toml");
     let config = fs::read_to_string(&config_path)?
         .replace("model = \"gpt-5.4\"", "model = \"pf84-preset\"")
@@ -738,12 +739,31 @@ async fn tmux_preset_provider_key_entry_continues_to_chat() -> Result<()> {
     ))?;
     let pane = session.primary_pane();
     pane.wait_stable_contains("Use your PF53 Loopback API key", READY_TIMEOUT)?;
+    // Type at a person's pace: background provider discovery finishes first, as it does for a
+    // person. When it finished after the save instead, its refresh hid the loop.
+    std::thread::sleep(Duration::from_secs(3));
     let key = synthetic_canary("preset");
     pane.send_secret_literal(&key)?;
     pane.send_key(TmuxKey::Enter)?;
     pane.wait_stable_contains("API key configured", READY_TIMEOUT)?;
     pane.send_key(TmuxKey::Enter)?;
-    submit_and_wait(pane, "PF84 preset request", "pf84 preset reply")?;
+    let after_save = pane.wait_stable_until(
+        "chat, or the key-entry loop, after the key is saved",
+        READY_TIMEOUT,
+        |capture| {
+            capture.contains("/model to change")
+                || capture.contains("Provide your PF53 Loopback API key")
+        },
+    )?;
+    ensure!(
+        !after_save.contains("Provide your PF53 Loopback API key"),
+        "onboarding looped back to key entry:\n{after_save}"
+    );
+    wait_chat_ready(pane)?;
+    ensure!(
+        !tree_contains_except_custody(home.path(), key.as_bytes())?,
+        "the saved key appeared in plain text under the isolated home"
+    );
     exit_tui(pane)?;
     session.wait_for_exit(READY_TIMEOUT)?;
     Ok(())

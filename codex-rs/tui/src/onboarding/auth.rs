@@ -547,31 +547,33 @@ impl AuthModeWidget {
     }
 
     /// Returns whether a text field (an API key, a Claude token or code, or a
-    /// named account's name or value) has focus. While it does, every printable
-    /// key is text, never a shortcut.
+    /// named account's name or value) has focus, or its value is being saved.
+    /// While it does, every printable key is text, never a shortcut: a
+    /// non-bracketed paste with a newline starts the save while the rest of
+    /// the value is still arriving.
     pub(crate) fn is_text_entry_active(&self) -> bool {
         // Exhaustive on purpose: a new state must decide whether it takes text.
         self.sign_in_state.read().is_ok_and(|guard| match &*guard {
             SignInState::ApiKeyEntry(_)
+            | SignInState::ApiKeySaving
             | SignInState::ClaudeManagedTokenEntry(_)
+            | SignInState::ClaudeManagedTokenSaving
             | SignInState::ClaudeCodeLoginCodeEntry { .. }
             | SignInState::AccountNameEntry { .. }
-            | SignInState::AccountValueEntry { .. } => true,
+            | SignInState::AccountValueEntry { .. }
+            | SignInState::AccountSaving => true,
             SignInState::PickMode
             | SignInState::ChatGptContinueInBrowser(_)
             | SignInState::ChatGptDeviceCode(_)
             | SignInState::ChatGptSuccessMessage
             | SignInState::ChatGptSuccess
-            | SignInState::ApiKeySaving
             | SignInState::ApiKeyConfigured { .. }
             | SignInState::ClaudeAuthMethodChoice { .. }
-            | SignInState::ClaudeManagedTokenSaving
             | SignInState::ClaudeCodeLoginChecking
             | SignInState::ClaudeCodeLoginPending { .. }
             | SignInState::ClaudeCodeLoginReady { .. }
             | SignInState::ClaudeAccountConfigured { .. }
             | SignInState::ConfiguredProviderChoice { .. }
-            | SignInState::AccountSaving
             | SignInState::AccountSaved { .. }
             | SignInState::Complete => false,
         })
@@ -2748,6 +2750,42 @@ pub(crate) mod tests {
             SignInState::PickMode
         ));
         assert_eq!(widget.login_status, LoginStatus::NotAuthenticated);
+    }
+
+    /// #462: with the picker off (config names an API-key provider), the
+    /// "Provide your ... API key" row begins setup for that provider, so the
+    /// saved key's completion is not ignored.
+    #[tokio::test]
+    async fn api_key_row_begins_setup_for_the_selected_provider() {
+        let (mut widget, _tmp) = widget_forced_chatgpt().await;
+        widget.forced_login_method = Some(ForcedLoginMethod::Api);
+        let option = api_key_option("zai", "Z.AI", "ZAI_API_KEY");
+        widget.api_key_provider_options = vec![option.clone()];
+        widget.selected_api_key_option = Some(option);
+        assert!(!widget.provider_picker_enabled());
+
+        widget.handle_sign_in_option(SignInOption::ApiKey);
+
+        let entry = widget
+            .provider_status_host
+            .catalog()
+            .get("zai")
+            .expect("Z.AI catalog entry");
+        assert_eq!(
+            widget
+                .provider_setup_session
+                .read()
+                .unwrap()
+                .snapshot()
+                .phase,
+            crate::onboarding::provider_setup::ProviderSetupPhase::Authenticating {
+                provider_id: entry.id.clone(),
+            }
+        );
+        assert!(matches!(
+            &*widget.sign_in_state.read().unwrap(),
+            SignInState::ApiKeyEntry(_)
+        ));
     }
 
     #[tokio::test]
