@@ -1,9 +1,7 @@
 //! Native owner selection and main-state deletion for explicitly installed accounting.
 use super::*;
 use codex_protocol::ThreadId;
-use sqlx::Sqlite;
 use sqlx::SqlitePool;
-use sqlx::Transaction;
 
 impl Journal<'_> {
     pub(super) async fn store_on_connection(
@@ -67,7 +65,7 @@ impl Journal<'_> {
         batch: &[Observation],
         as_of_ms: i64,
     ) -> anyhow::Result<()> {
-        let mut tx = self.runtime.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = crate::runtime::db_lock::begin_immediate(&self.runtime.pool).await?;
         match Self::append_native_on_connection(&mut tx, owner, attempt, batch, as_of_ms).await {
             Ok(()) => tx.commit().await?,
             Err(error) => {
@@ -137,8 +135,8 @@ async fn installed(conn: &mut SqliteConnection) -> anyhow::Result<bool> {
 /// No concurrent install or ordinary write can invalidate the deletion snapshot.
 pub(in crate::runtime) async fn begin_delete(
     pool: &SqlitePool,
-) -> anyhow::Result<Transaction<'_, Sqlite>> {
-    Ok(pool.begin_with("BEGIN IMMEDIATE").await?)
+) -> anyhow::Result<crate::runtime::db_lock::WriteTx> {
+    Ok(crate::runtime::db_lock::begin_immediate(pool).await?)
 }
 
 pub(in crate::runtime) async fn delete_on_connection(

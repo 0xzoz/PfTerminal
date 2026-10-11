@@ -177,12 +177,7 @@ impl<'a> Lifecycle<'a> {
 
     #[cfg_attr(not(test), allow(dead_code))]
     async fn refresh_current(&self, id: Uuid) -> anyhow::Result<Current<()>> {
-        let mut tx = self
-            .estimates
-            .journal
-            .runtime
-            .pool
-            .begin_with("BEGIN IMMEDIATE")
+        let mut tx = crate::runtime::db_lock::begin_immediate(&self.estimates.journal.runtime.pool)
             .await?;
         let result = Journal::refresh_contribution_on_connection(&mut tx, id).await;
         match result {
@@ -244,12 +239,7 @@ impl<'a> Lifecycle<'a> {
     #[cfg_attr(not(test), allow(dead_code))]
     async fn delete_recorded_thread(&self, thread: ThreadId, as_of_ms: i64) -> anyhow::Result<()> {
         ensure!(as_of_ms >= 0, "negative deletion time");
-        let mut tx = self
-            .estimates
-            .journal
-            .runtime
-            .pool
-            .begin_with("BEGIN IMMEDIATE")
+        let mut tx = crate::runtime::db_lock::begin_immediate(&self.estimates.journal.runtime.pool)
             .await?;
         let result = async {
             if !matches!(retention_fixture_on_connection(&mut tx).await?, RetentionFixture::Absent) {

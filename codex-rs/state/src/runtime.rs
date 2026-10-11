@@ -45,6 +45,7 @@ pub(crate) mod accounting;
 mod agent_mailbox;
 mod backfill;
 mod busy_retry;
+pub(crate) mod db_lock;
 mod external_agent_config_imports;
 mod goals;
 mod gpu_rentals;

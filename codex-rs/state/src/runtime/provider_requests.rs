@@ -84,7 +84,7 @@ impl StateRuntime {
         preflight: &ProviderRequestPreflight,
         now_ms: i64,
     ) -> anyhow::Result<Option<ProviderRequestBlock>> {
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = crate::runtime::db_lock::begin_immediate(&self.pool).await?;
 
         sqlx::query(
             r#"
@@ -168,7 +168,7 @@ WHERE provider_id = ? AND model = ? AND key_fingerprint = ?
         now_ms: i64,
     ) -> anyhow::Result<ProviderRequestLeaseDecision> {
         let lease_until_ms = now_ms.saturating_add(lease_ttl_ms.max(1));
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = crate::runtime::db_lock::begin_immediate(&self.pool).await?;
 
         sqlx::query(
             r#"
@@ -295,7 +295,7 @@ WHERE provider_id = ? AND model = ? AND key_fingerprint = ?
         result: ProviderRequestResult,
         now_ms: i64,
     ) -> anyhow::Result<u64> {
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = crate::runtime::db_lock::begin_immediate(&self.pool).await?;
         let released = sqlx::query(
             r#"
 UPDATE provider_request_state
@@ -331,7 +331,7 @@ WHERE provider_id = ? AND model = ? AND key_fingerprint = ? AND lease_owner = ?
         result: &ProviderRequestResult,
         now_ms: i64,
     ) -> anyhow::Result<()> {
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = crate::runtime::db_lock::begin_immediate(&self.pool).await?;
         record_result_on_connection(&mut tx, key, result, now_ms).await?;
         tx.commit().await?;
         Ok(())
@@ -533,7 +533,7 @@ impl StateRuntime {
         let started = Instant::now();
         let adopt = || async {
             let now_ms = since(now_ms, started);
-            let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+            let mut tx = crate::runtime::db_lock::begin_immediate(&self.pool).await?;
             sqlx::query(
                 "UPDATE OR IGNORE provider_request_state SET key_fingerprint = ? WHERE key_fingerprint = ?",
             )

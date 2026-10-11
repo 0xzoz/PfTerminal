@@ -391,7 +391,7 @@ impl<'a> AccountingStore<'a> {
         bundle: &[RetainedImport],
         as_of_ms: i64,
     ) -> anyhow::Result<Vec<RetainedImportOutcome>> {
-        let mut tx = self.runtime.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = crate::runtime::db_lock::begin_immediate(&self.runtime.pool).await?;
         match Journal::import_retained_on_connection(&mut tx, owner, bundle, as_of_ms).await {
             Ok(outcomes) => {
                 tx.commit().await?;
@@ -426,7 +426,7 @@ impl<'a> AccountingStore<'a> {
         if let AsOf::At(as_of_ms) = as_of {
             ensure!(as_of_ms >= 0, "negative accounting time");
         }
-        let mut tx = runtime.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = crate::runtime::db_lock::begin_immediate(&runtime.pool).await?;
         match install_on_connection(&mut tx).await {
             Ok(()) => tx.commit().await?,
             Err(error) => {
@@ -480,7 +480,7 @@ impl<'a> AccountingStore<'a> {
         as_of: AsOf,
     ) -> anyhow::Result<ObservationQuote> {
         let validated_at_ms = self.prepare_write(as_of).await?;
-        let mut tx = self.runtime.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = crate::runtime::db_lock::begin_immediate(&self.runtime.pool).await?;
         let as_of_ms = match as_of.sample_on(&mut tx).await {
             Ok(as_of_ms) => as_of_ms,
             Err(error) => {
@@ -574,7 +574,7 @@ impl<'a> AccountingStore<'a> {
             return Ok(());
         }
         loop {
-            let mut tx = self.runtime.pool.begin_with("BEGIN IMMEDIATE").await?;
+            let mut tx = crate::runtime::db_lock::begin_immediate(&self.runtime.pool).await?;
             let held = std::time::Instant::now();
             let result = async {
                 validate_on_connection(&mut tx).await?;
@@ -612,7 +612,7 @@ impl<'a> AccountingStore<'a> {
     }
 
     pub async fn maintain(&self, as_of_ms: i64) -> anyhow::Result<()> {
-        let mut tx = self.runtime.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = crate::runtime::db_lock::begin_immediate(&self.runtime.pool).await?;
         let result = async {
             validate_on_connection(&mut tx).await?;
             Journal::maintain_native_on_connection(&mut tx, as_of_ms).await
@@ -636,7 +636,7 @@ impl<'a> AccountingStore<'a> {
     /// advances the checkpoint (see `maintain_for_write_on_connection`).
     async fn maintain_for_write(&self, as_of: AsOf) -> anyhow::Result<()> {
         let validated_at_ms = self.prepare_write(as_of).await?;
-        let mut tx = self.runtime.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = crate::runtime::db_lock::begin_immediate(&self.runtime.pool).await?;
         let result = async {
             validate_on_connection(&mut tx).await?;
             let as_of_ms = as_of.sample_on(&mut tx).await?;

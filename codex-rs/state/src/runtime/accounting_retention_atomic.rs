@@ -109,12 +109,7 @@ pub enum RetainedDay {
 impl Lifecycle<'_> {
     #[cfg_attr(not(test), allow(dead_code))]
     async fn maintain_retention(&self, as_of_ms: i64) -> anyhow::Result<()> {
-        let mut tx = self
-            .estimates
-            .journal
-            .runtime
-            .pool
-            .begin_with("BEGIN IMMEDIATE")
+        let mut tx = crate::runtime::db_lock::begin_immediate(&self.estimates.journal.runtime.pool)
             .await?;
         match maintain_on_connection(&mut tx, as_of_ms).await {
             Ok(()) => tx.commit().await?,

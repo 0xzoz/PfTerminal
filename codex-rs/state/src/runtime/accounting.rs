@@ -61,7 +61,7 @@ impl<'a> Journal<'a> {
     ) -> anyhow::Result<()> {
         attempt.validate()?;
         ensure!(batch.len() <= 256, "observation batch too large");
-        let mut tx = self.runtime.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = crate::runtime::db_lock::begin_immediate(&self.runtime.pool).await?;
         match Self::append_on_connection(&mut tx, attempt, batch).await {
             Ok(()) => tx.commit().await?,
             Err(error) => {
