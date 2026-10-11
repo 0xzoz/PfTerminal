@@ -9,7 +9,7 @@ expression: "render(&view, 100)"
 
 › 1. Yes, proceed (y)
   2. No, and tell Corbanu Terminal what to do differently (esc)
-  3. Grant once: run without the Aggressive protected-path rules (review first) (g)
+  3. Grant once: run without the Aggressive write protections (review first) (g)
 
   A letter in brackets only highlights its option; enter confirms it.
   Press enter to confirm or esc to cancel

@@ -1499,3 +1499,51 @@ fn pf_23_s02_persistence_writes_are_protected() {
         assert_eq!(script(command), None, "{command}");
     }
 }
+
+/// #442 (milestone evidence r6): `$CORBANU_HOME` and `$PFTERMINAL_HOME` name
+/// the Corbanu home as `$CODEX_HOME` does, so reading through them is a
+/// protected action too (it drew no approval prompt before).
+#[test]
+fn issue_442_corbanu_home_variables_name_the_home() {
+    use ProtectedActionKind::SecurityPolicy;
+    for command in [
+        "ls -la \"$CORBANU_HOME\"",
+        "head -3 \"$CORBANU_HOME/config.toml\"",
+        "head -3 ${CORBANU_HOME}/config.toml",
+        "cat $PFTERMINAL_HOME/config.toml",
+    ] {
+        assert_eq!(script(command), Some(SecurityPolicy), "{command}");
+    }
+}
+
+/// #442 (Travis, 2026-10-11): under Aggressive, credential and vault reads are
+/// never grantable, so the prompt says so (and no grant is offered); under
+/// Moderate, and for other protected actions, nothing changes.
+#[test]
+fn issue_442_aggressive_credential_reads_say_they_are_never_granted() {
+    let action = |kind, level| PostTaintAction {
+        kind,
+        state: PostTaintState {
+            taint_generation: 1,
+            policy: PolicyBinding::Unbound,
+            level,
+        },
+    };
+    for kind in [ProtectedActionKind::Credentials, ProtectedActionKind::Vault] {
+        let aggressive = action(kind, SecurityLevel::Aggressive);
+        assert!(aggressive.reads_stay_denied(), "{kind:?}");
+        let reason = aggressive.approval_reason();
+        assert!(reason.contains("never granted, not even once"), "{reason}");
+        assert!(reason.contains("/security"), "{reason}");
+        assert!(!action(kind, SecurityLevel::Moderate).reads_stay_denied());
+    }
+    for kind in [
+        ProtectedActionKind::Persistence,
+        ProtectedActionKind::SecurityPolicy,
+        ProtectedActionKind::UnseenCode,
+    ] {
+        let aggressive = action(kind, SecurityLevel::Aggressive);
+        assert!(!aggressive.reads_stay_denied(), "{kind:?}");
+        assert!(!aggressive.approval_reason().contains("never granted"));
+    }
+}

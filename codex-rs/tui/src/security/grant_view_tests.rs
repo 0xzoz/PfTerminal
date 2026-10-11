@@ -24,9 +24,9 @@ fn pf_25_s01_held_grants_show_scope_uses_and_expiry() {
     assert_eq!(
         held_lines(&[grant(Some(1)), grant(Some(2)), grant(None)]),
         vec![
-            "Grant: `cat ../home/team-notes.txt` without the protected-path rules · 1 run left · expires 14:32",
-            "Grant: `cat ../home/team-notes.txt` without the protected-path rules · 2 runs left · expires 14:32",
-            "Grant: `cat ../home/team-notes.txt` without the protected-path rules · any run · expires 14:32",
+            "Grant: `cat ../home/team-notes.txt` without the write protections · 1 run left · expires 14:32",
+            "Grant: `cat ../home/team-notes.txt` without the write protections · 2 runs left · expires 14:32",
+            "Grant: `cat ../home/team-notes.txt` without the write protections · any run · expires 14:32",
         ]
     );
     assert_eq!(held_lines(&[]), Vec::<String>::new());

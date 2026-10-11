@@ -2796,6 +2796,82 @@ prefix_rule(pattern = ["rm"], decision = "forbidden")"#,
     Ok(())
 }
 
+/// #441 (milestone AGG-19): with nested agents set to refuse, the Aggressive
+/// rule file refuses an agent's `corbanu exec` / `review` before any prompt,
+/// through absolute paths and `bash -lc` scripts, under strict rules. Forms
+/// only the launch check sees (`env corbanu exec`) still prompt first. The
+/// nested-launch rules match exactly: text that only mentions them (a commit
+/// message, a search) is not refused, unlike the vault rule.
+#[tokio::test]
+async fn issue_441_nested_launch_rules_refuse_launches_but_not_text() -> anyhow::Result<()> {
+    let temp_dir = tempdir()?;
+    let policy_dir = temp_dir.path().join(RULES_DIR_NAME);
+    fs::create_dir_all(&policy_dir)?;
+    fs::write(
+        policy_dir.join("aggressive.rules"),
+        codex_security_level::level::rules_contents_for(
+            codex_security_level::level::NestedAgents::Refuse,
+        ),
+    )?;
+    let config_stack = config_stack_for_dot_codex_folder(temp_dir.path());
+    let strict = ExecPolicyManager::load(&config_stack, /*strict_rules*/ true).await?;
+    let requirement = |script: &'static str| {
+        let strict = &strict;
+        async move {
+            let command = vec!["bash".to_string(), "-lc".to_string(), script.to_string()];
+            strict
+                .create_exec_approval_requirement_for_command(ExecApprovalRequest {
+                    command: &command,
+                    approval_policy: AskForApproval::UnlessTrusted,
+                    permission_profile: PermissionProfile::read_only(),
+                    windows_sandbox_level: WindowsSandboxLevel::Disabled,
+                    sandbox_permissions: SandboxPermissions::UseDefault,
+                    prefix_rule: None,
+                })
+                .await
+        }
+    };
+    for script in [
+        "corbanu exec \"say hi\"",
+        "corbanu review",
+        "corbanu e hi",
+        "/opt/bin/corbanu exec hi",
+        "cd /tmp && corbanu exec hi",
+        "codex exec hi",
+    ] {
+        assert!(
+            matches!(
+                requirement(script).await,
+                ExecApprovalRequirement::Forbidden { ref reason }
+                    if reason.contains("nested agent launches are set to refuse")
+            ),
+            "refused before any prompt: {script}"
+        );
+    }
+    for script in [
+        "git commit -m \"fix codex review flow\"",
+        "rg \"codex exec\" docs",
+        "corbanu --help | grep review",
+        "corbanu --version",
+        // Accepted gap: the launch check refuses it after the prompt.
+        "env corbanu exec hi",
+    ] {
+        assert!(
+            !matches!(
+                requirement(script).await,
+                ExecApprovalRequirement::Forbidden { .. }
+            ),
+            "not refused: {script}"
+        );
+    }
+    // The vault rule keeps its strict net.
+    assert!(matches!(
+        requirement("env corbanu vault list").await,
+        ExecApprovalRequirement::Forbidden { .. }
+    ));
+    Ok(())
+}
+
 /// Issue #443: while the session's live level is Aggressive (right after
 /// `/security` confirms it, before the restart that loads the rules file),
 /// the vault rule is part of the policy: wrapped forms, other paths and a

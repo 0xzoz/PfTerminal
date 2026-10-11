@@ -487,6 +487,57 @@ async fn exec_policy_must_load_and_forbid_vault_commands() {
     );
 }
 
+/// #441 (milestone AGG-19): with nested agents set to refuse, an agent's
+/// `corbanu exec` or `corbanu review` is forbidden by the session's exec
+/// policy, so it is refused before any approval prompt. With "pass" it is
+/// not forbidden: it runs with Aggressive enforced once a person approves.
+#[tokio::test]
+async fn issue_441_nested_agent_launches_are_forbidden_before_approval_when_set_to_refuse() {
+    use super::super::level::ChosenLevel;
+    use super::super::level::NestedAgents;
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let decision = |policy: &codex_execpolicy::Policy, command: &[&str]| {
+        let command = command.iter().map(ToString::to_string).collect::<Vec<_>>();
+        policy.check(&command, &|_| Decision::Prompt).decision
+    };
+    let nested = [
+        vec!["corbanu", "exec", "say hi"],
+        vec!["corbanu", "review"],
+        vec!["corbanu", "e", "say hi"],
+        vec!["codex", "exec", "say hi"],
+        vec!["pfterminal", "review"],
+    ];
+
+    super::super::level::save(home.path(), ChosenLevel::Aggressive, NestedAgents::Refuse).unwrap();
+    let config = load(home.path(), cwd.path(), "").await;
+    let policy = load_exec_policy(&config.config_layer_stack).await.unwrap();
+    for command in &nested {
+        assert_eq!(
+            decision(&policy, command),
+            Decision::Forbidden,
+            "{command:?}"
+        );
+    }
+    // Other `corbanu` commands are untouched.
+    assert_eq!(
+        decision(&policy, &["corbanu", "--version"]),
+        Decision::Prompt
+    );
+    assert_eq!(verify_exec_policy(&config).await, Vec::<String>::new());
+
+    super::super::level::save(home.path(), ChosenLevel::Aggressive, NestedAgents::Pass).unwrap();
+    let config = load(home.path(), cwd.path(), "").await;
+    let policy = load_exec_policy(&config.config_layer_stack).await.unwrap();
+    for command in &nested {
+        assert_eq!(decision(&policy, command), Decision::Prompt, "{command:?}");
+    }
+    assert_eq!(
+        decision(&policy, &["corbanu", "vault", "list"]),
+        Decision::Forbidden
+    );
+}
+
 /// New threads must fail rather than drop the vault rule when a `.rules` file
 /// breaks after launch; a user `strict_rules = false` cannot turn that off.
 #[tokio::test]

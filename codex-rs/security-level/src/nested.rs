@@ -134,7 +134,7 @@ pub fn nested_origins(homes: Vec<PathBuf>) -> Vec<(PathBuf, NestedAgents)> {
         // its rule file, until it restarts.
         let aggressive = stored.enforced() == ChosenLevel::Aggressive
             || std::fs::read_to_string(level::rules_path(&home))
-                .is_ok_and(|contents| contents == level::rules_contents());
+                .is_ok_and(|contents| level::is_rules_contents(&contents));
         if aggressive && sandboxed_away_from(&home) {
             let nested = match stored {
                 level::StoredLevel::Chosen(ChosenLevel::Aggressive) => nested,
