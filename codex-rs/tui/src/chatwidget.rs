@@ -1067,7 +1067,7 @@ impl ChatWidget {
             self.app_event_tx.clone(),
             self.bottom_pane.list_keymap(),
         );
-        self.bottom_pane.show_view(Box::new(view));
+        self.bottom_pane.show_app_link_view(view);
         self.request_redraw();
     }
 

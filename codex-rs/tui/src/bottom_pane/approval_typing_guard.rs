@@ -71,6 +71,19 @@ impl TypingGuard {
         matches!(self.state, State::Idle | State::Fresh { .. })
     }
 
+    /// #523: whether only navigation may act now: the prompt opened while
+    /// the user typed or over another view (or was revealed), and nothing
+    /// but typed text came since. A form's text fields take no keys then.
+    pub(super) fn awaits_navigation(&self) -> bool {
+        matches!(
+            self.state,
+            State::Fresh {
+                keys_arm: false,
+                ..
+            } | State::Typed
+        )
+    }
+
     pub(super) fn notice(&self) -> Option<Notice> {
         match self.state {
             State::Typed => Some(Notice::TypedText),
