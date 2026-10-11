@@ -226,8 +226,9 @@ done
     std::fs::write(
         test.home_path().join("config.toml"),
         format!(
-            "[mcp_servers.gate]\ncommand = {:?}\nrequired = true\nstartup_timeout_sec = 30\n",
-            mcp.display().to_string()
+            "[mcp_servers.gate]\ncommand = {}\nrequired = true\nstartup_timeout_sec = 30\n",
+            // A JSON string is a valid TOML basic string.
+            serde_json::to_string(&mcp.display().to_string()).expect("serialize path")
         ),
     )
     .expect("write config.toml");
@@ -242,8 +243,10 @@ done
         .output()
         .expect("run codex-exec");
 
-    assert!(!output.status.success(), "exec succeeded: {output:?}");
+    // Report only the stderr tail: the summary echoes the 1 MiB prompt.
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("turn/start"), "{stderr}");
+    let tail = &stderr[stderr.floor_char_boundary(stderr.len().saturating_sub(2000))..];
+    assert!(!output.status.success(), "exec succeeded: {tail}");
+    assert!(stderr.contains("turn/start"), "{tail}");
     git.assert_stopped(test.home_path());
 }
