@@ -78,6 +78,18 @@ impl EventProcessorWithHumanOutput {
         }
     }
 
+    /// The error lines for a failed turn: the error, then (#480) the named
+    /// account it was rejected on and how to replace its credential.
+    fn failed_turn_lines(&self, error: &codex_app_server_protocol::TurnError) -> Vec<String> {
+        let rejected = error
+            .codex_error_info
+            .as_ref()
+            .is_some_and(codex_app_server_protocol::CodexErrorInfo::is_credential_rejection);
+        std::iter::once(error.to_string())
+            .chain(self.rejected_account_message.clone().filter(|_| rejected))
+            .collect()
+    }
+
     fn render_item_started(&self, item: &ThreadItem) {
         match item {
             ThreadItem::CommandExecution { command, cwd, .. } => {
@@ -337,16 +349,8 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                     self.final_message_rendered = false;
                     self.emit_final_message_on_shutdown = false;
                     if let Some(error) = notification.turn.error {
-                        let rejected = error.codex_error_info.as_ref().is_some_and(
-                            codex_app_server_protocol::CodexErrorInfo::is_credential_rejection,
-                        );
-                        eprintln!("{} {}", "ERROR:".style(self.red).style(self.bold), error);
-                        if let Some(message) = self
-                            .rejected_account_message
-                            .as_deref()
-                            .filter(|_| rejected)
-                        {
-                            eprintln!("{} {message}", "ERROR:".style(self.red).style(self.bold));
+                        for line in self.failed_turn_lines(&error) {
+                            eprintln!("{} {line}", "ERROR:".style(self.red).style(self.bold));
                         }
                     }
                     CodexStatus::InitiateShutdown

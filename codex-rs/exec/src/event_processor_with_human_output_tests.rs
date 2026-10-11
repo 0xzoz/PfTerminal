@@ -596,3 +596,49 @@ async fn a_rejected_named_account_is_named_with_its_recovery() {
     assert_eq!(rejected_account_message(&config, "zai:default"), None);
     assert_eq!(rejected_account_message(&config, "zai"), None);
 }
+
+/// #480: a failed turn whose credential was rejected names the account the
+/// session runs on, including a resumed thread's recorded account; any other
+/// failure, or the default account, prints only the error.
+#[tokio::test]
+async fn a_rejected_turn_prints_the_account_line() {
+    let codex_home = tempfile::tempdir().expect("create codex home");
+    let config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .build()
+        .await
+        .expect("build default config");
+    let mut processor = EventProcessorWithHumanOutput::create_with_ansi(
+        /*with_ansi*/ false, &config, /*last_message_path*/ None,
+    );
+    let error = |info| codex_app_server_protocol::TurnError {
+        message: "unexpected status 401 Unauthorized".to_string(),
+        codex_error_info: info,
+        additional_details: None,
+    };
+    let unauthorized = error(Some(
+        codex_app_server_protocol::CodexErrorInfo::Unauthorized,
+    ));
+    assert_eq!(
+        processor.failed_turn_lines(&unauthorized).len(),
+        1,
+        "the default account adds nothing"
+    );
+    processor.set_provider_account(&config, "zai:fake");
+    let lines = processor.failed_turn_lines(&unauthorized);
+    assert_eq!(lines.len(), 2);
+    assert!(
+        lines[1].starts_with("Z.AI (zai) account `fake` was rejected."),
+        "{lines:?}"
+    );
+    assert_eq!(
+        processor
+            .failed_turn_lines(&error(Some(
+                codex_app_server_protocol::CodexErrorInfo::BadRequest
+            )))
+            .len(),
+        1
+    );
+    processor.set_provider_account(&config, "zai:default");
+    assert_eq!(processor.failed_turn_lines(&unauthorized).len(), 1);
+}
