@@ -163,6 +163,28 @@ fn curated_repo_sync_stays_deferred_for_remote_chatgpt_catalog() {
     assert!(!CURATED_REPO_SYNC_STARTED.load(std::sync::atomic::Ordering::SeqCst));
 }
 
+/// #477: after shutdown a manager starts no curated repo sync.
+#[test]
+fn curated_repo_sync_does_not_start_after_shutdown() {
+    let tmp = TempDir::new().unwrap();
+    let config = PluginsConfigInput::new(
+        unrestricted_config_layer_stack(),
+        "openai".to_string(),
+        /*plugins_enabled*/ true,
+        /*remote_plugin_enabled*/ false,
+        "https://chatgpt.com".to_string(),
+        test_http_client_factory(),
+    );
+    let manager = Arc::new(PluginsManager::new(tmp.path().to_path_buf()));
+
+    manager.cancel_curated_repo_sync();
+    manager.maybe_start_curated_repo_sync_for_config(
+        &config, /*on_effective_plugins_changed*/ None,
+    );
+
+    assert!(manager.curated_repo_sync.lock().unwrap().is_none());
+}
+
 #[test]
 fn marketplace_source_refresh_notifies_only_after_installed_cache_changes() {
     let tmp = TempDir::new().unwrap();
