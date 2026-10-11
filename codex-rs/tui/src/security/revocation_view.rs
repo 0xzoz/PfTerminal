@@ -308,7 +308,9 @@ impl RevocationView {
                         |report| {
                             let message = outcome_line(revocation, &report);
                             Outcome {
-                                restartable: message.is_ok() && report.not_saved.is_none(),
+                                restartable: message.is_ok()
+                                    && report.not_saved.is_none()
+                                    && super::restart::restart_blocker().is_none(),
                                 message,
                             }
                         },

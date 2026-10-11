@@ -1327,6 +1327,11 @@ impl App {
                 }
             },
             AppEvent::RestartForSecurityLevel => {
+                // #436: never restart into a session without its provider key.
+                if let Some(blocked) = crate::security::restart::restart_blocker() {
+                    self.chat_widget.add_error_message(blocked);
+                    return Ok(AppRunControl::Continue);
+                }
                 self.show_shutdown_feedback(tui)?;
                 let _ = self
                     .handle_exit_mode(app_server, ExitMode::ShutdownFirst)
