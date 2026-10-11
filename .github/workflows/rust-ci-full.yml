@@ -145,6 +145,16 @@ jobs:
       use_sccache: true
     secrets: inherit
 
+  # Linux runs codex-core's security tests in the suite above; macOS runs
+  # no other codex-core tests (#512).
+  core_security_tests_macos:
+    name: Core security tests — macos-15
+    uses: ./.github/workflows/rust-ci-core-security.yml
+    with:
+      runner: macos-15
+      target: aarch64-apple-darwin
+    secrets: inherit
+
   # --- Gatherer job for the full post-merge workflow --------------------------
   results:
     name: Full CI results
@@ -155,6 +165,7 @@ jobs:
         argument_comment_lint_package,
         lint_build,
         tests_linux_x64,
+        core_security_tests_macos,
       ]
     if: always()
     runs-on: ubuntu-24.04
@@ -167,11 +178,13 @@ jobs:
           echo "shear  : ${{ needs.cargo_shear.result }}"
           echo "lint   : ${{ needs.lint_build.result }}"
           echo "test linux : ${{ needs.tests_linux_x64.result }}"
+          echo "core security macos : ${{ needs.core_security_tests_macos.result }}"
           [[ '${{ needs.argument_comment_lint_package.result }}' == 'success' ]] || { echo 'argument_comment_lint_package failed'; exit 1; }
           [[ '${{ needs.general.result }}' == 'success' ]] || { echo 'general failed'; exit 1; }
           [[ '${{ needs.cargo_shear.result }}' == 'success' ]] || { echo 'cargo_shear failed'; exit 1; }
           [[ '${{ needs.lint_build.result }}' == 'success' ]] || { echo 'lint_build failed'; exit 1; }
           [[ '${{ needs.tests_linux_x64.result }}' == 'success' ]] || { echo 'tests_linux_x64 failed'; exit 1; }
+          [[ '${{ needs.core_security_tests_macos.result }}' == 'success' ]] || { echo 'core_security_tests_macos failed'; exit 1; }
 
       - name: sccache summary note
         if: always()

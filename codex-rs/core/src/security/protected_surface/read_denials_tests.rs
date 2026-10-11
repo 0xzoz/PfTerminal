@@ -610,3 +610,66 @@ fn issue_442_a_grant_keeps_every_read_denial() {
         );
     }
 }
+
+/// #512: the upload check resolves links on both sides. A Corbanu home
+/// reached through a link (`/tmp` and `/var` on macOS, a linked home) spells
+/// its denials through the link; neither a link to a denied file nor the
+/// file's real name may pass. A more specific allow inside a denied folder
+/// still applies under either spelling, and nothing outside is narrowed.
+#[test]
+fn issue_512_upload_reads_resolve_links_on_both_sides() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let real_home = base.join("real-home");
+    std::fs::create_dir_all(real_home.join("vault")).unwrap();
+    std::fs::write(real_home.join("auth.json"), "x").unwrap();
+    std::fs::write(real_home.join("vault/key"), "x").unwrap();
+    std::fs::write(real_home.join("vault/open.txt"), "x").unwrap();
+    let linked_home = base.join("linked-home");
+    std::os::unix::fs::symlink(&real_home, &linked_home).unwrap();
+    let outside = base.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    let to_auth = outside.join("innocent.txt");
+    std::os::unix::fs::symlink(linked_home.join("auth.json"), &to_auth).unwrap();
+    let plain = outside.join("plain.txt");
+    std::fs::write(&plain, "x").unwrap();
+
+    let entry = |path: &Path, access| {
+        FileSystemSandboxEntry::new(FileSystemPath::Path { path: abs(path) }, access)
+    };
+    let policy = FileSystemSandboxPolicy::restricted(vec![
+        FileSystemSandboxEntry::new(
+            FileSystemPath::Special {
+                value: codex_protocol::permissions::FileSystemSpecialPath::Root,
+            },
+            FileSystemAccessMode::Read,
+        ),
+        entry(&linked_home.join("auth.json"), FileSystemAccessMode::Deny),
+        entry(&linked_home.join("vault"), FileSystemAccessMode::Deny),
+        entry(
+            &linked_home.join("vault/open.txt"),
+            FileSystemAccessMode::Read,
+        ),
+    ]);
+    let cwd = outside.as_path();
+    for denied in [
+        linked_home.join("auth.json"),
+        real_home.join("auth.json"),
+        to_auth,
+        linked_home.join("vault/key"),
+        real_home.join("vault/key"),
+    ] {
+        assert!(
+            !readable_under(&policy, &denied, cwd),
+            "{}",
+            denied.display()
+        );
+    }
+    for open in [
+        plain,
+        linked_home.join("vault/open.txt"),
+        real_home.join("vault/open.txt"),
+    ] {
+        assert!(readable_under(&policy, &open, cwd), "{}", open.display());
+    }
+}

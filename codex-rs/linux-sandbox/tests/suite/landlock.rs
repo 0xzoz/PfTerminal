@@ -1419,3 +1419,160 @@ async fn full_write_profile_with_denial_keeps_dev_null_usable() {
         "ok\n"
     );
 }
+
+/// #488: a workspace opened through a nested link keeps a denied file
+/// unreadable whichever spelling denies or reads it. Bubblewrap binds the
+/// workspace at its real path, so a denial spelled by the real path must be
+/// masked after that bind.
+#[tokio::test]
+async fn sandbox_denies_reads_through_a_nested_link_workspace() {
+    if should_skip_bwrap_tests().await {
+        eprintln!("skipping bwrap test: bwrap sandbox prerequisites are unavailable");
+        return;
+    }
+
+    let tmpdir = tempfile::tempdir().expect("tempdir");
+    let real = tmpdir.path().join("real");
+    let link = tmpdir.path().join("link");
+    std::fs::create_dir(&real).expect("real");
+    std::fs::write(real.join(".env"), "API_KEY=x\n").expect(".env");
+    std::fs::write(real.join("other"), "ok\n").expect("other");
+    std::os::unix::fs::symlink(&real, &link).expect("link");
+    let script = format!(
+        "cat .env; echo dot=$?; cat {real}/.env; echo real=$?; cat {link}/.env; echo link=$?; \
+         cat other; echo other=$?",
+        real = real.display(),
+        link = link.display(),
+    );
+    for (denied, cwd) in [(&real, &link), (&link, &real)] {
+        let file_system_sandbox_policy = FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                access: FileSystemAccessMode::Read,
+                missing_path_behavior: None,
+            },
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Special {
+                    value: FileSystemSpecialPath::project_roots(/*subpath*/ None),
+                },
+                access: FileSystemAccessMode::Write,
+                missing_path_behavior: None,
+            },
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Path {
+                    path: AbsolutePathBuf::try_from(denied.join(".env").as_path())
+                        .expect("absolute .env"),
+                },
+                access: FileSystemAccessMode::Deny,
+                missing_path_behavior: None,
+            },
+        ]);
+        let permission_profile = PermissionProfile::from_runtime_permissions(
+            &file_system_sandbox_policy,
+            NetworkSandboxPolicy::Restricted,
+        );
+        let output = run_cmd_result_with_permission_profile_for_cwd(
+            &["bash", "-c", &script],
+            AbsolutePathBuf::try_from(cwd.as_path()).expect("absolute cwd"),
+            permission_profile,
+            create_env_from_core_vars(),
+            LONG_TIMEOUT_MS,
+            /*use_legacy_landlock*/ false,
+        )
+        .await
+        .expect("sandboxed command should execute");
+        let stdout = &output.stdout.text;
+        let report = format!(
+            "{denied:?} denied: exit {}, stdout {stdout}, stderr {}",
+            output.exit_code, output.stderr.text
+        );
+        assert!(!stdout.contains("API_KEY"), "{report}");
+        if denied == &link {
+            // Masking a path spelled through an absolute link fails closed:
+            // bubblewrap cannot create the mount point, so nothing runs.
+            assert_ne!(output.exit_code, 0, "{report}");
+            continue;
+        }
+        for line in ["dot=1", "real=1", "link=1", "other=0"] {
+            assert!(stdout.contains(line), "{line} missing: {report}");
+        }
+    }
+}
+
+/// #503: in a full-write profile (`:root = write` plus a denial), an extra
+/// writable root that is a symlink to `/` is treated as `/`: it is bound before
+/// shallower writable roots, so their protections (a read-only `.git`, a
+/// denied file) are not covered by a later `/` bind; read-only paths outside
+/// every workspace stay read-only; and it asks for no mount points at the
+/// filesystem root.
+#[tokio::test]
+async fn writable_symlink_to_root_keeps_shallower_root_protections() {
+    if should_skip_bwrap_tests().await {
+        eprintln!("skipping bwrap test: bwrap sandbox prerequisites are unavailable");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base = dir.path().canonicalize().expect("canonical");
+    let workspace = base.join("ws");
+    std::fs::create_dir_all(workspace.join(".git")).expect("workspace .git");
+    let secret = workspace.join("secret.txt");
+    std::fs::write(&secret, "secret-503\n").expect("secret");
+    let read_only = base.join("ro");
+    std::fs::create_dir(&read_only).expect("read-only dir");
+    let link = base.join("a").join("b").join("c").join("root-link");
+    std::fs::create_dir_all(link.parent().expect("link parent")).expect("link parent");
+    std::os::unix::fs::symlink("/", &link).expect("symlink to /");
+    let entry = |path: &std::path::Path, access| FileSystemSandboxEntry {
+        path: FileSystemPath::Path {
+            path: AbsolutePathBuf::from_absolute_path(path).expect("absolute path"),
+        },
+        access,
+        missing_path_behavior: None,
+    };
+    let policy = FileSystemSandboxPolicy::restricted(vec![
+        FileSystemSandboxEntry {
+            path: FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            },
+            access: FileSystemAccessMode::Write,
+            missing_path_behavior: None,
+        },
+        entry(&workspace, FileSystemAccessMode::Write),
+        entry(&link, FileSystemAccessMode::Write),
+        entry(&secret, FileSystemAccessMode::Deny),
+        entry(&read_only, FileSystemAccessMode::Read),
+    ]);
+    let script = "echo hi > /dev/null; echo null=$?; \
+                  touch ../ro/probe; echo ro=$?; \
+                  touch .git/probe; echo git=$?; \
+                  cat secret.txt; echo cat=$?; \
+                  echo ok > other.txt; echo other=$?; \
+                  echo ok > ../outside.txt; echo outside=$?";
+    let output = run_cmd_result_with_permission_profile_for_cwd(
+        &["bash", "-c", script],
+        AbsolutePathBuf::from_absolute_path(&workspace).expect("absolute workspace"),
+        PermissionProfile::from_runtime_permissions(&policy, NetworkSandboxPolicy::Restricted),
+        create_env_from_core_vars(),
+        LONG_TIMEOUT_MS,
+        /*use_legacy_landlock*/ false,
+    )
+    .await
+    .expect("symlinked root profile runs under bubblewrap");
+    let stdout = output.stdout.text;
+    let stderr = output.stderr.text;
+    for expected in ["null=0", "ro=1", "git=1", "cat=1", "other=0", "outside=0"] {
+        assert!(
+            stdout.contains(expected),
+            "{expected}: {stdout}\nstderr: {stderr}"
+        );
+    }
+    assert!(!stdout.contains("secret-503"), "{stdout}");
+    assert!(!workspace.join(".git").join("probe").exists());
+    assert!(!read_only.join("probe").exists());
+    assert_eq!(
+        std::fs::read_to_string(base.join("outside.txt")).expect("outside"),
+        "ok\n"
+    );
+}
