@@ -1504,8 +1504,9 @@ async fn sandbox_denies_reads_through_a_nested_link_workspace() {
 /// #503: in a full-write profile (`:root = write` plus a denial), an extra
 /// writable root that is a symlink to `/` is treated as `/`: it is bound before
 /// shallower writable roots, so their protections (a read-only `.git`, a
-/// denied file) are not covered by a later `/` bind, and it asks for no mount
-/// points at the filesystem root.
+/// denied file) are not covered by a later `/` bind; read-only paths outside
+/// every workspace stay read-only; and it asks for no mount points at the
+/// filesystem root.
 #[tokio::test]
 async fn writable_symlink_to_root_keeps_shallower_root_protections() {
     if should_skip_bwrap_tests().await {
@@ -1518,6 +1519,8 @@ async fn writable_symlink_to_root_keeps_shallower_root_protections() {
     std::fs::create_dir_all(workspace.join(".git")).expect("workspace .git");
     let secret = workspace.join("secret.txt");
     std::fs::write(&secret, "secret-503\n").expect("secret");
+    let read_only = base.join("ro");
+    std::fs::create_dir(&read_only).expect("read-only dir");
     let link = base.join("a").join("b").join("c").join("root-link");
     std::fs::create_dir_all(link.parent().expect("link parent")).expect("link parent");
     std::os::unix::fs::symlink("/", &link).expect("symlink to /");
@@ -1539,8 +1542,10 @@ async fn writable_symlink_to_root_keeps_shallower_root_protections() {
         entry(&workspace, FileSystemAccessMode::Write),
         entry(&link, FileSystemAccessMode::Write),
         entry(&secret, FileSystemAccessMode::Deny),
+        entry(&read_only, FileSystemAccessMode::Read),
     ]);
     let script = "echo hi > /dev/null; echo null=$?; \
+                  touch ../ro/probe; echo ro=$?; \
                   touch .git/probe; echo git=$?; \
                   cat secret.txt; echo cat=$?; \
                   echo ok > other.txt; echo other=$?; \
@@ -1557,7 +1562,7 @@ async fn writable_symlink_to_root_keeps_shallower_root_protections() {
     .expect("symlinked root profile runs under bubblewrap");
     let stdout = output.stdout.text;
     let stderr = output.stderr.text;
-    for expected in ["null=0", "git=1", "cat=1", "other=0", "outside=0"] {
+    for expected in ["null=0", "ro=1", "git=1", "cat=1", "other=0", "outside=0"] {
         assert!(
             stdout.contains(expected),
             "{expected}: {stdout}\nstderr: {stderr}"
@@ -1565,6 +1570,7 @@ async fn writable_symlink_to_root_keeps_shallower_root_protections() {
     }
     assert!(!stdout.contains("secret-503"), "{stdout}");
     assert!(!workspace.join(".git").join("probe").exists());
+    assert!(!read_only.join("probe").exists());
     assert_eq!(
         std::fs::read_to_string(base.join("outside.txt")).expect("outside"),
         "ok\n"
