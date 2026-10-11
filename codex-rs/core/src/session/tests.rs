@@ -6752,7 +6752,6 @@ async fn record_granted_request_permissions_for_turn_uses_originating_turn() {
                 strict_auto_review: false,
             },
             codex_exec_server::LOCAL_ENVIRONMENT_ID,
-            /*cwd*/ None,
             Some(&originating_turn_state),
         )
         .await;
@@ -6800,7 +6799,6 @@ async fn request_permission_grants_are_environment_keyed() {
                 strict_auto_review: false,
             },
             "remote",
-            /*cwd*/ None,
             Some(&originating_turn_state),
         )
         .await;
@@ -6822,7 +6820,6 @@ async fn request_permission_grants_are_environment_keyed() {
                 strict_auto_review: false,
             },
             "remote",
-            /*cwd*/ None,
             /*originating_turn_state*/ None,
         )
         .await;
@@ -6855,7 +6852,6 @@ async fn enable_strict_auto_review_for_turn_uses_originating_turn() {
                 strict_auto_review: true,
             },
             codex_exec_server::LOCAL_ENVIRONMENT_ID,
-            /*cwd*/ None,
             Some(&originating_turn_state),
         )
         .await;
@@ -13987,5 +13983,74 @@ async fn pf_30_s02_token_budget_mcp_hint_is_mcp_data_with_the_flag() {
     assert_eq!(
         client.message_origin(&items[0]),
         Some(MessageOrigin::External(SourceKind::Mcp))
+    );
+}
+
+/// Review r2: a grant stored while no rules applied (the level raised later
+/// in the session) never reopens a protected path for later commands or
+/// file tools.
+#[tokio::test]
+async fn issue_245_a_grant_stored_before_the_rules_applied_drops_protected_paths() {
+    use codex_protocol::permissions::FileSystemAccessMode;
+    use codex_protocol::permissions::FileSystemPath;
+    use codex_protocol::permissions::FileSystemSandboxEntry;
+    use codex_security_policy::SecurityLevel;
+    let (session, turn) = make_session_and_context().await;
+    let entry = |path: &std::path::Path| {
+        FileSystemSandboxEntry::new(
+            FileSystemPath::Path {
+                path: AbsolutePathBuf::from_absolute_path(path).unwrap(),
+            },
+            FileSystemAccessMode::Read,
+        )
+    };
+    let additional = |entries| AdditionalPermissionProfile {
+        network: None,
+        file_system: Some(codex_protocol::models::FileSystemPermissions {
+            entries,
+            glob_scan_max_depth: None,
+        }),
+    };
+    let environment_id = turn
+        .environments
+        .primary()
+        .expect("a primary environment")
+        .environment_id
+        .clone();
+    #[allow(deprecated)]
+    let notes = turn.cwd.join("notes.txt");
+    let auth = turn.config.codex_home.join("auth.json");
+    let notes_only = additional(vec![entry(notes.as_path())]);
+    let grant = additional(vec![entry(notes.as_path()), entry(auth.as_path())]);
+    session
+        .state
+        .lock()
+        .await
+        .record_granted_permissions(&environment_id, grant.clone());
+    // Permissive: as stored.
+    assert_eq!(
+        session.granted_session_permissions(&environment_id).await,
+        Some(grant)
+    );
+
+    let control = session
+        .services
+        .agent_control
+        .clone()
+        .with_effective_security_policy(
+            SecurityLevel::Moderate,
+            session.thread_id,
+            /*inherits_from_spawn_parent*/ false,
+        )
+        .expect("policy");
+    let client = (*session.services.model_client())
+        .clone()
+        .with_ingress_policy(SecurityLevel::Moderate, control.effective_security_policy())
+        .with_source_envelopes(true);
+    session.services.replace_model_client(client);
+
+    assert_eq!(
+        session.granted_session_permissions(&environment_id).await,
+        Some(notes_only)
     );
 }

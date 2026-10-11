@@ -6,8 +6,8 @@
 //!
 //! Under Moderate and Aggressive, wherever the protected-path rules apply to
 //! a run, a request whose additional permissions open a protected path is
-//! refused and explained, and a permission grant (`request_permissions`) is
-//! recorded without such entries, so it cannot reach later commands. Where
+//! refused and explained, and a permission grant (`request_permissions`)
+//! never carries such entries into later commands or file tools. Where
 //! Moderate lets a person's approval lift the rules for one command (issue
 //! #239), nothing changes. Permissive has no rules and is unchanged.
 
@@ -85,39 +85,42 @@ pub(crate) fn without_protected_paths(
     (!additional.is_empty()).then_some(additional)
 }
 
-/// A `request_permissions` grant as it is recorded for the turn or session:
-/// once the protected-path rules apply (Moderate, Aggressive), without the
-/// entries that would open a protected path. Every later command and file
-/// tool carries the recorded grant, and such an entry would only get them
-/// refused. `cwd` is the folder the grant was made for.
-pub(crate) fn recordable_grant(
+/// Issue #245: a permission grant (`request_permissions`) without the
+/// entries that would open a protected path, while the protected-path rules
+/// apply (Moderate, Aggressive), and the refusal to show when any were
+/// dropped. Every later command and file tool carries the grant. `cwd` is
+/// the folder it is resolved against.
+pub(crate) fn strip_grant(
     session: &crate::session::session::Session,
     config: &crate::config::Config,
     cwd: &codex_utils_absolute_path::AbsolutePathBuf,
     grant: AdditionalPermissionProfile,
-) -> Option<AdditionalPermissionProfile> {
-    if session
+) -> (Option<AdditionalPermissionProfile>, Option<String>) {
+    let Some(state) = session
         .services
         .model_client()
         .post_taint_state()
-        .is_none_or(|state| !state.protected_paths_apply())
-    {
-        return Some(grant);
-    }
+        .filter(crate::security::tainted_action::PostTaintState::protected_paths_apply)
+    else {
+        return (Some(grant), None);
+    };
     let denials = ReadDenials::for_turn(
         config.codex_home.as_path(),
         cwd,
         &[],
         config.permissions.permission_profile(),
     );
-    let kept = without_protected_paths(&denials, Some(grant.clone()), &[cwd.as_path()]);
-    if kept.as_ref() != Some(&grant) {
-        tracing::warn!(
-            target: "codex_core::security::tainted_action",
-            "a permission grant would open a protected path; recorded without it"
-        );
-    }
-    kept
+    let Some(path) = opened_protected_path(&denials, &grant, &[cwd.as_path()]) else {
+        return (Some(grant), None);
+    };
+    tracing::warn!(
+        target: "codex_core::security::tainted_action",
+        "a permission grant would open a protected path; dropped from it"
+    );
+    (
+        without_protected_paths(&denials, Some(grant), &[cwd.as_path()]),
+        Some(refusal(state.level, &path)),
+    )
 }
 
 /// The refusal for an additional permission that would open `path`, in the

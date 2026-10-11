@@ -2964,10 +2964,16 @@ impl Session {
                 response,
                 native_environment_cwd.as_path(),
             );
+            let response = self
+                .without_protected_grant(
+                    response,
+                    &native_environment_cwd,
+                    Some(turn_context.as_ref()),
+                )
+                .await;
             self.record_granted_request_permissions_for_turn(
                 &response,
                 &environment.environment_id,
-                Some(&native_environment_cwd),
                 originating_turn_state.as_ref(),
             )
             .await;
@@ -3149,13 +3155,20 @@ impl Session {
         match entry {
             Some(entry) => {
                 // TODO(anp): Migrate request_permissions to support paths from foreign environments.
-                let native_cwd = entry.environment.cwd.to_abs_path().ok();
                 let response = match entry.environment.cwd.to_abs_path() {
-                    Ok(native_environment_cwd) => Self::normalize_request_permissions_response(
-                        entry.requested_permissions,
-                        response,
-                        native_environment_cwd.as_path(),
-                    ),
+                    Ok(native_environment_cwd) => {
+                        let response = Self::normalize_request_permissions_response(
+                            entry.requested_permissions,
+                            response,
+                            native_environment_cwd.as_path(),
+                        );
+                        self.without_protected_grant(
+                            response,
+                            &native_environment_cwd,
+                            /*turn_context*/ None,
+                        )
+                        .await
+                    }
                     Err(err) => {
                         warn!(
                             cwd = %entry.environment.cwd,
@@ -3172,7 +3185,6 @@ impl Session {
                 self.record_granted_request_permissions_for_turn(
                     &response,
                     &entry.environment.environment_id,
-                    native_cwd.as_ref(),
                     originating_turn_state.as_ref(),
                 )
                 .await;
@@ -3213,31 +3225,56 @@ impl Session {
         }
     }
 
+    /// Issue #245: once the protected-path rules apply, a permission grant
+    /// never names a protected path. Such entries are dropped from the answer
+    /// the model gets and from what is recorded, and the person is told why.
+    async fn without_protected_grant(
+        &self,
+        response: RequestPermissionsResponse,
+        cwd: &AbsolutePathBuf,
+        turn_context: Option<&TurnContext>,
+    ) -> RequestPermissionsResponse {
+        if response.permissions.is_empty() {
+            return response;
+        }
+        let config = self.get_config().await;
+        let (kept, refusal) = crate::security::protected_additional::strip_grant(
+            self,
+            &config,
+            cwd,
+            response.permissions.clone().into(),
+        );
+        let Some(refusal) = refusal else {
+            return response;
+        };
+        match turn_context {
+            Some(turn_context) => {
+                crate::security::protected_reads::notify(self, turn_context, refusal).await;
+            }
+            None => {
+                if let Some((turn_context, _)) =
+                    self.active_turn_context_and_cancellation_token().await
+                {
+                    crate::security::protected_reads::notify(self, &turn_context, refusal).await;
+                }
+            }
+        }
+        RequestPermissionsResponse {
+            permissions: kept.map(Into::into).unwrap_or_default(),
+            ..response
+        }
+    }
+
     async fn record_granted_request_permissions_for_turn(
         &self,
         response: &RequestPermissionsResponse,
         environment_id: &str,
-        cwd: Option<&AbsolutePathBuf>,
         originating_turn_state: Option<&Arc<Mutex<crate::state::TurnState>>>,
     ) {
         if response.permissions.is_empty() {
             return;
         }
-        let mut permissions: AdditionalPermissionProfile = response.permissions.clone().into();
-        // Issue #245: a grant never carries a protected path into later
-        // commands once the protected-path rules apply.
-        if let Some(cwd) = cwd {
-            let config = self.get_config().await;
-            match crate::security::protected_additional::recordable_grant(
-                self,
-                &config,
-                cwd,
-                permissions,
-            ) {
-                Some(kept) => permissions = kept,
-                None => return,
-            }
-        }
+        let permissions: AdditionalPermissionProfile = response.permissions.clone().into();
         match response.scope {
             PermissionGrantScope::Turn => {
                 if let Some(turn_state) = originating_turn_state {
@@ -3263,10 +3300,26 @@ impl Session {
         &self,
         environment_id: &str,
     ) -> Option<AdditionalPermissionProfile> {
-        let active = self.active_turn.lock().await;
-        let active = active.as_ref()?;
-        let ts = active.turn_state.lock().await;
-        ts.granted_permissions(environment_id)
+        let granted = {
+            let active = self.active_turn.lock().await;
+            let active = active.as_ref()?;
+            let ts = active.turn_state.lock().await;
+            ts.granted_permissions(environment_id)
+        };
+        self.usable_grant(granted).await
+    }
+
+    /// Issue #245: a stored grant as later commands and file tools may use
+    /// it: without protected paths while the protected-path rules apply. A
+    /// grant recorded before they applied (the level raised mid-session)
+    /// cannot reopen one either.
+    async fn usable_grant(
+        &self,
+        granted: Option<AdditionalPermissionProfile>,
+    ) -> Option<AdditionalPermissionProfile> {
+        let granted = granted?;
+        let config = self.get_config().await;
+        crate::security::protected_additional::strip_grant(self, &config, &config.cwd, granted).0
     }
 
     #[expect(
@@ -3286,8 +3339,11 @@ impl Session {
         &self,
         environment_id: &str,
     ) -> Option<AdditionalPermissionProfile> {
-        let state = self.state.lock().await;
-        state.granted_permissions(environment_id)
+        let granted = {
+            let state = self.state.lock().await;
+            state.granted_permissions(environment_id)
+        };
+        self.usable_grant(granted).await
     }
 
     #[expect(
