@@ -28,6 +28,7 @@ use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::FileSystemSandboxEntry;
 use codex_protocol::permissions::FileSystemSandboxKind;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
+use codex_protocol::permissions::ReadDenyMatcher;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use std::path::Path;
 
@@ -304,6 +305,35 @@ impl ReadDenials {
     /// Every path made read-only.
     pub(crate) fn read_only_paths(&self) -> impl Iterator<Item = &AbsolutePathBuf> {
         self.never_lifted.iter().chain(&self.read_only)
+    }
+
+    /// Issue #245: these read denials alone, without the profile's own
+    /// entries, as a matcher (subtrees and patterns): what a command's
+    /// additional permissions may never open. A malformed pattern matches
+    /// every path (fail closed).
+    pub(crate) fn matcher(&self) -> Option<ReadDenyMatcher> {
+        let entries: Vec<FileSystemSandboxEntry> = self
+            .paths()
+            .map(|path| {
+                FileSystemSandboxEntry::new(
+                    FileSystemPath::Path { path: path.clone() },
+                    FileSystemAccessMode::Deny,
+                )
+            })
+            .chain(self.globs.iter().map(|pattern| {
+                FileSystemSandboxEntry::new(
+                    FileSystemPath::GlobPattern {
+                        pattern: pattern.clone(),
+                    },
+                    FileSystemAccessMode::Deny,
+                )
+            }))
+            .collect();
+        let cwd = self
+            .cwd
+            .as_ref()
+            .map_or_else(|| Path::new("/"), AbsolutePathBuf::as_path);
+        ReadDenyMatcher::new(&FileSystemSandboxPolicy::restricted(entries), cwd)
     }
 
     /// Every denied path, existing first.
