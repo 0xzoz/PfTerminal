@@ -370,6 +370,7 @@ use codex_protocol::models::LocalImagePreparation;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
+use codex_protocol::protocol::AccountTokenUsage;
 use codex_protocol::protocol::ApplyPatchApprovalRequestEvent;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::CodexErrorInfo;
@@ -1312,13 +1313,9 @@ impl Session {
 
     /// PF-84: usage of requests made for this conversation outside its own
     /// turn loop (a guardian or `/review` delegate, stage-one memory
-    /// extraction), which the accounting ledger also records under it. With a
-    /// turn context the update is sent at once; otherwise with the next count.
-    pub(crate) async fn record_delegated_account_usage(
-        &self,
-        turn_context: Option<&TurnContext>,
-        usage: &[codex_protocol::protocol::AccountTokenUsage],
-    ) {
+    /// extraction), which the accounting ledger also records under it. Sent
+    /// at once on the active turn, if any; otherwise with the next count.
+    pub(crate) async fn record_delegated_account_usage(&self, usage: &[AccountTokenUsage]) {
         if usage.is_empty() || !self.features().enabled(Feature::NamedAccounts) {
             return;
         }
@@ -1328,16 +1325,14 @@ impl Session {
                 state.record_account_token_usage(&entry.provider_id, &entry.account, &entry.usage);
             }
         }
-        if let Some(turn_context) = turn_context {
-            self.send_token_count_event(turn_context).await;
+        if let Some((turn_context, _)) = self.active_turn_context_and_cancellation_token().await {
+            self.send_token_count_event(&turn_context).await;
         }
     }
 
     /// PF-84: this thread's provider-reported usage per named account, for
     /// replay to a client that attaches after resume.
-    pub(crate) async fn account_token_usage(
-        &self,
-    ) -> Option<Vec<codex_protocol::protocol::AccountTokenUsage>> {
+    pub(crate) async fn account_token_usage(&self) -> Option<Vec<AccountTokenUsage>> {
         let state = self.state.lock().await;
         state.account_token_usage()
     }
@@ -1669,7 +1664,7 @@ impl Session {
 
     fn last_account_token_usage_from_rollout(
         rollout_items: &[RolloutItem],
-    ) -> Option<Vec<codex_protocol::protocol::AccountTokenUsage>> {
+    ) -> Option<Vec<AccountTokenUsage>> {
         rollout_items.iter().rev().find_map(|item| match item {
             RolloutItem::EventMsg(EventMsg::TokenCount(ev)) => ev.account_usage.clone(),
             _ => None,

@@ -2308,29 +2308,11 @@ impl AccountTokenUsage {
         current
             .iter()
             .filter_map(|entry| {
-                let before = previous
-                    .iter()
-                    .find(|old| {
-                        old.provider_id == entry.provider_id && old.account == entry.account
-                    })
-                    .map(|old| &old.usage);
-                let less = |now: i64, then: Option<i64>| (now - then.unwrap_or(0)).max(0);
-                let usage = TokenUsage {
-                    input_tokens: less(entry.usage.input_tokens, before.map(|u| u.input_tokens)),
-                    cached_input_tokens: less(
-                        entry.usage.cached_input_tokens,
-                        before.map(|u| u.cached_input_tokens),
-                    ),
-                    cache_write_input_tokens: less(
-                        entry.usage.cache_write_input_tokens,
-                        before.map(|u| u.cache_write_input_tokens),
-                    ),
-                    output_tokens: less(entry.usage.output_tokens, before.map(|u| u.output_tokens)),
-                    reasoning_output_tokens: less(
-                        entry.usage.reasoning_output_tokens,
-                        before.map(|u| u.reasoning_output_tokens),
-                    ),
-                    total_tokens: less(entry.usage.total_tokens, before.map(|u| u.total_tokens)),
+                let usage = match previous.iter().find(|old| {
+                    old.provider_id == entry.provider_id && old.account == entry.account
+                }) {
+                    Some(old) => entry.usage.saturating_sub(&old.usage),
+                    None => entry.usage.clone(),
                 };
                 (usage != TokenUsage::default()).then(|| AccountTokenUsage {
                     provider_id: entry.provider_id.clone(),
@@ -2458,6 +2440,25 @@ impl TokenUsage {
     }
 
     /// In-place element-wise sum of token counts.
+    /// Each count less `other`'s, never below zero.
+    pub fn saturating_sub(&self, other: &TokenUsage) -> TokenUsage {
+        let less = |now: i64, then: i64| (now - then).max(0);
+        TokenUsage {
+            input_tokens: less(self.input_tokens, other.input_tokens),
+            cached_input_tokens: less(self.cached_input_tokens, other.cached_input_tokens),
+            cache_write_input_tokens: less(
+                self.cache_write_input_tokens,
+                other.cache_write_input_tokens,
+            ),
+            output_tokens: less(self.output_tokens, other.output_tokens),
+            reasoning_output_tokens: less(
+                self.reasoning_output_tokens,
+                other.reasoning_output_tokens,
+            ),
+            total_tokens: less(self.total_tokens, other.total_tokens),
+        }
+    }
+
     pub fn add_assign(&mut self, other: &TokenUsage) {
         self.input_tokens += other.input_tokens;
         self.cached_input_tokens += other.cached_input_tokens;

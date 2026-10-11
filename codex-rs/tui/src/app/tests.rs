@@ -15684,7 +15684,22 @@ async fn thread_account_usage_reaches_status_and_resets_with_the_session() {
             .map(|(account, usage)| (account, usage.total_tokens))
             .collect::<Vec<_>>()
     };
-    let expected = vec![("default".to_string(), 9), ("work".to_string(), 7)];
+    assert_eq!(
+        totals(&app),
+        vec![("default".to_string(), 9), ("work".to_string(), 7)]
+    );
+
+    // A thread that already reported still counts after it leaves the picker
+    // (a discarded side conversation finishing its interrupted turn).
+    app.agent_navigation.remove(worker);
+    app.handle_app_server_event(
+        &app_server,
+        codex_app_server_client::AppServerEvent::ServerNotification(Box::new(report(
+            worker, "work", /*total_tokens*/ 8,
+        ))),
+    )
+    .await;
+    let expected = vec![("default".to_string(), 9), ("work".to_string(), 8)];
     assert_eq!(totals(&app), expected);
 
     // A thread switch rebuilds the chat widget and keeps the session's totals.

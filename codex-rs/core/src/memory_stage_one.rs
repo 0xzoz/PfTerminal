@@ -36,6 +36,7 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::protocol::AccountTokenUsage;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::TokenUsage;
 use codex_rollout_trace::InferenceTraceContext;
@@ -595,8 +596,7 @@ impl StageOneMemoryClient {
     }
 
     /// PF-84: extraction is recorded under the owning conversation, so its
-    /// usage counts toward that conversation's account (shown with the
-    /// owner's next token count).
+    /// usage counts toward that conversation's account.
     async fn record_account_usage(&self, usage: Option<&TokenUsage>) {
         let (Some(usage), Some(owner)) = (usage, self.binding.owner.upgrade()) else {
             return;
@@ -610,14 +610,11 @@ impl StageOneMemoryClient {
                 account.name.as_str()
             });
         owner
-            .record_delegated_account_usage(
-                /*turn_context*/ None,
-                &[codex_protocol::protocol::AccountTokenUsage {
-                    provider_id: self.accounting_provider_id.clone(),
-                    account: account.to_string(),
-                    usage: usage.clone(),
-                }],
-            )
+            .record_delegated_account_usage(&[AccountTokenUsage {
+                provider_id: self.accounting_provider_id.clone(),
+                account: account.to_string(),
+                usage: usage.clone(),
+            }])
             .await;
     }
 

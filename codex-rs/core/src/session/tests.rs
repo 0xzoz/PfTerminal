@@ -14041,7 +14041,7 @@ async fn token_usage_is_attributed_per_account_only_with_named_accounts() {
     }
 }
 
-async fn pf84_session(named_accounts: bool) -> (Arc<Session>, Arc<TurnContext>) {
+pub(crate) async fn pf84_session(named_accounts: bool) -> (Arc<Session>, Arc<TurnContext>) {
     let (session, turn_context, _rx) = make_session_and_context_with_auth_and_config_and_rx(
         CodexAuth::from_api_key("Test API Key"),
         Vec::new(),
@@ -14142,13 +14142,12 @@ async fn resuming_a_fork_before_its_first_reply_has_no_account_usage() {
 #[tokio::test]
 async fn delegated_usage_counts_toward_the_parent_only_with_named_accounts() {
     for named_accounts in [false, true] {
-        let (session, turn_context) = pf84_session(named_accounts).await;
-        session
-            .record_delegated_account_usage(Some(&turn_context), &pf84_parent_usage())
-            .await;
-        session
-            .record_delegated_account_usage(/*turn_context*/ None, &pf84_parent_usage())
-            .await;
+        let (session, _turn_context) = pf84_session(named_accounts).await;
+        for _ in 0..2 {
+            session
+                .record_delegated_account_usage(&pf84_parent_usage())
+                .await;
+        }
         let expected = named_accounts.then(|| {
             vec![codex_protocol::protocol::AccountTokenUsage {
                 usage: pf84_usage(200, 20),

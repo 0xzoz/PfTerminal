@@ -29,6 +29,11 @@ impl SessionAccountUsage {
         self.by_thread.insert(thread_id, usage);
     }
 
+    /// Whether `thread_id` has reported in this session.
+    pub(crate) fn has_thread(&self, thread_id: ThreadId) -> bool {
+        self.by_thread.contains_key(&thread_id)
+    }
+
     pub(crate) fn clear(&mut self) {
         self.by_thread.clear();
     }
