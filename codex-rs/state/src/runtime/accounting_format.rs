@@ -5,6 +5,7 @@
 //! `Local` or `Undeclared` basis and where its basis came from, and lets a
 //! compact day count that work. Format 3 lets a price record state a
 //! long-context tier (rates for an attempt whose input is above a threshold).
+//! Format 4 lets an attempt name the provider account it was sent on (PF-84).
 //! A build reads every format up to its own, and
 //! upgrades a ledger only when it first writes a record the ledger's format
 //! cannot express (so an older build sharing the state DB keeps working until

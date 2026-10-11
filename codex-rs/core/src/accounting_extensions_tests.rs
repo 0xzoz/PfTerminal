@@ -51,6 +51,7 @@ async fn accounting_extension_client_records_its_own_request() -> anyhow::Result
         approved_query: None,
         pricing: crate::config::PriceAuthority::Unavailable,
         basis_source: Default::default(),
+        account: None,
     };
     config.features.enable(Feature::Sqlite)?;
     let provider = config.model_provider.clone();
@@ -187,6 +188,7 @@ async fn accounting_extension_client_without_its_session_records_nothing() -> an
         approved_query: None,
         pricing: crate::config::PriceAuthority::Unavailable,
         basis_source: Default::default(),
+        account: None,
     };
     config.features.enable(Feature::Sqlite)?;
     let provider = config.model_provider.clone();
@@ -286,6 +288,7 @@ async fn accounting_extension_client_binds_the_route_it_actually_sends_to() -> a
         approved_query: None,
         pricing: crate::config::PriceAuthority::Unavailable,
         basis_source: Default::default(),
+        account: None,
     };
     config.features.enable(Feature::Sqlite)?;
 
@@ -378,6 +381,7 @@ async fn accounting_records_a_request_another_client_already_sent() -> anyhow::R
         approved_query: None,
         pricing: crate::config::PriceAuthority::Unavailable,
         basis_source: Default::default(),
+        account: None,
     };
     config.features.enable(Feature::Sqlite)?;
 
@@ -627,6 +631,7 @@ async fn accounting_store_failure_never_fails_search_or_image() -> anyhow::Resul
                 approved_query: None,
                 pricing: crate::config::PriceAuthority::Unavailable,
                 basis_source: Default::default(),
+                account: None,
             };
             config.features.enable(Feature::Sqlite)?;
             let provider = config.model_provider.clone();

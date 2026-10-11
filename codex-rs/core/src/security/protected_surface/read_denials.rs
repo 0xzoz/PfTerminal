@@ -114,6 +114,9 @@ pub(crate) struct ReadDenials {
     globs: Vec<String>,
     /// Readable but never writable (PF-23-S02), even before they exist.
     read_only: Vec<AbsolutePathBuf>,
+    /// The same for the Corbanu home's runtime entries (`tmp` holds the
+    /// sandbox launchers): never writable, not even with a grant (#442).
+    runtime_read_only: Vec<AbsolutePathBuf>,
     /// Where the profile's relative entries resolve (the turn's folder).
     cwd: Option<AbsolutePathBuf>,
     /// Denials dropped because they hold the command's folder or a writable
@@ -140,6 +143,7 @@ impl ReadDenials {
         for entry in CORBANU_READ_ONLY {
             denials.push_home_read_only(codex_home.join(entry), keep);
         }
+        denials.runtime_read_only = std::mem::take(&mut denials.read_only);
         for root in keep {
             for entry in WORKSPACE_PERSISTENCE {
                 denials.push_read_only(root.join(entry), keep);
@@ -278,9 +282,16 @@ impl ReadDenials {
         }
     }
 
+    /// #442: an Aggressive grant lifts the write protections of files that
+    /// run later (start-up files, git hooks and config) only. Every read
+    /// denial stays, and so do the Corbanu home's read-only entries.
+    pub(crate) fn lift_write_rules(&mut self) {
+        self.read_only.clear();
+    }
+
     /// Every path made read-only.
     pub(crate) fn read_only_paths(&self) -> impl Iterator<Item = &AbsolutePathBuf> {
-        self.read_only.iter()
+        self.runtime_read_only.iter().chain(&self.read_only)
     }
 
     /// Every denied path, existing first.
@@ -320,7 +331,7 @@ impl ReadDenials {
                 )
             }))
             .collect();
-        if entries.is_empty() && self.read_only.is_empty() {
+        if entries.is_empty() && self.read_only.is_empty() && self.runtime_read_only.is_empty() {
             return Some(profile.clone());
         }
         // Turns an unrestricted policy into full write access plus the
@@ -337,8 +348,7 @@ impl ReadDenials {
             .as_ref()
             .map_or_else(|| Path::new("/"), AbsolutePathBuf::as_path);
         let read_only: Vec<FileSystemSandboxEntry> = self
-            .read_only
-            .iter()
+            .read_only_paths()
             .filter(|path| file_system.can_write_path_with_cwd(path.as_path(), cwd))
             .map(|path| {
                 FileSystemSandboxEntry::skip_missing_path(

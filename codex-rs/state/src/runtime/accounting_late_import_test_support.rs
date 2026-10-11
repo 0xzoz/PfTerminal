@@ -63,6 +63,7 @@ pub(super) fn entry(id: u128, time: i64) -> anyhow::Result<RetainedImport> {
             scope: Uuid::nil(),
             dialect: Dialect::NativeAnthropic,
             dispatched_at_ms: time.try_into()?,
+            account: None,
         },
         observations: vec![Observation {
             revision: 1.try_into()?,

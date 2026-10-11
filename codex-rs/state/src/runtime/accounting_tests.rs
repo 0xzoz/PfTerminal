@@ -36,6 +36,7 @@ fn attempt() -> Attempt {
         scope: Uuid::from_u128(4),
         dialect: Dialect::Inclusive,
         dispatched_at_ms: Count::try_from(1_700_000_000_000).unwrap(),
+        account: None,
     }
 }
 

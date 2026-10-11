@@ -204,6 +204,16 @@ pub(crate) async fn run_turn(
 ) -> CodexResult<Option<String>> {
     let turn_started_at = Instant::now();
     trace_turn_timing("run_turn_start", turn_started_at);
+    // Issue #445: with the kill switch on, the turn is refused before its
+    // input is recorded, so nothing of it reaches the model later either.
+    if let Err(err) = sess.services.model_client().refuse_under_kill_switch() {
+        sess.track_turn_codex_error(turn_context.as_ref(), &err);
+        sess.emit_turn_error_lifecycle(turn_context.as_ref(), err.to_codex_protocol_error())
+            .await;
+        let event = EventMsg::Error(err.to_error_event(/*message_prefix*/ None));
+        sess.send_event(&turn_context, event).await;
+        return Ok(None);
+    }
     let provider_info = turn_context.provider.info();
     let mut client_session = prewarmed_client_session
         .filter(|session| ModelClient::session_matches_provider(session, provider_info))
@@ -3139,8 +3149,27 @@ fn provider_request_error_retry_after_ms(err: &CodexErr) -> Option<i64> {
 }
 
 fn provider_request_key(sess: &Session, turn_context: &TurnContext) -> ProviderRequestKey {
-    let provider = turn_context.provider.info();
-    let key_fingerprint = if let Some(env_key) = provider.env_key.as_deref() {
+    ProviderRequestKey {
+        provider_id: turn_context.config.model_provider_id.clone(),
+        model: turn_context.model_info.slug.clone(),
+        key_fingerprint: provider_request_key_fingerprint(turn_context.provider.info(), || {
+            sess.services.auth_manager.auth_mode()
+        }),
+    }
+}
+
+/// The credential identity a provider's throttle state is kept under.
+fn provider_request_key_fingerprint<A: std::fmt::Debug>(
+    provider: &codex_model_provider_info::ModelProviderInfo,
+    auth_mode: impl FnOnce() -> A,
+) -> String {
+    // PF-84: each named account has throttle state of its own, so one
+    // account's 429 or lease never blocks another. A named account never uses
+    // the provider's environment key, so that key is not part of its identity.
+    // The `default` account keeps today's key.
+    if let Some(account) = provider.account.as_ref() {
+        format!("account:{}", account.name)
+    } else if let Some(env_key) = provider.env_key.as_deref() {
         match std::env::var(env_key)
             .ok()
             .filter(|value| !value.trim().is_empty())
@@ -3158,13 +3187,7 @@ fn provider_request_key(sess: &Session, turn_context: &TurnContext) -> ProviderR
     } else if provider.aws.is_some() {
         "config:aws".to_string()
     } else {
-        format!("auth-mode:{:?}", sess.services.auth_manager.auth_mode())
-    };
-
-    ProviderRequestKey {
-        provider_id: turn_context.config.model_provider_id.clone(),
-        model: turn_context.model_info.slug.clone(),
-        key_fingerprint,
+        format!("auth-mode:{:?}", auth_mode())
     }
 }
 

@@ -115,7 +115,7 @@ impl GrantReview {
         let offer = &self.offer;
         let mut lines: Vec<Line<'static>> = vec!["Grant this command?".bold().into()];
         lines.extend(wrap(
-            "Under Aggressive an approval never lifts the protected-path rules (credential files, the Corbanu home, shell and git startup files). This grant lets exactly this command run without them.",
+            "Under Aggressive an approval never lifts the write protections (shell and git startup files, git hooks and config, the project's .codex and .agents). This grant lets exactly this command run without them; a file written this way can run code later, outside the sandbox. Credential files and the Corbanu home stay unreadable, and Corbanu's own files read-only: that is never granted under Aggressive.",
         ));
         lines.push(Line::default());
         let label_width = 12;
@@ -228,9 +228,7 @@ pub(crate) fn held_lines(grants: &[HeldGrant]) -> Vec<String> {
             } else {
                 escape_controls(&strip_bash_lc_and_escape(&grant.command))
             };
-            format!(
-                "Grant: `{command}` without the protected-path rules · {uses} · expires {expires}"
-            )
+            format!("Grant: `{command}` without the write protections · {uses} · expires {expires}")
         })
         .collect()
 }

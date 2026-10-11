@@ -1198,6 +1198,7 @@ fn attempt(id: u128, time: i64) -> anyhow::Result<Attempt> {
         scope: Uuid::nil(),
         dialect: Dialect::NativeAnthropic,
         dispatched_at_ms: time.try_into()?,
+        account: None,
     })
 }
 
@@ -1715,7 +1716,73 @@ async fn ledger_written_before_plan_basis_validates_and_reads() -> anyhow::Resul
     .await?;
     conn.close().await?;
     assert_eq!(serde_json::from_str::<Snapshot>(&stored)?, price);
+    // PF-84-S05: an attempt sent on a named account needs format 4. The ledger
+    // is upgraded as it is written, the attempt reads back with its account,
+    // and every earlier attempt still reads as the default account with its
+    // bytes unchanged.
+    let mut conn = connection(&runtime).await?;
+    let before: Vec<String> =
+        sqlx::query_scalar("SELECT payload FROM draft_accounting_attempts ORDER BY attempt_id")
+            .fetch_all(&mut conn)
+            .await?;
+    conn.close().await?;
+    let named_at = later + 1_000;
+    let mut named = attempt(12, named_at)?;
+    named.thread_id = owner;
+    named.account = Some(AttemptAccount {
+        name: "work".into(),
+        fingerprint: Some("0123456789ab".into()),
+    });
+    AccountingStore::open(&runtime, named_at)
+        .await?
+        .admit(owner, &named, std::slice::from_ref(&price), named_at)
+        .await?;
+    assert_eq!(formats(runtime.clone()).await?, vec![1, 2, 3, 4]);
+    let mut conn = connection(&runtime).await?;
+    let after: Vec<String> =
+        sqlx::query_scalar("SELECT payload FROM draft_accounting_attempts ORDER BY attempt_id")
+            .fetch_all(&mut conn)
+            .await?;
+    conn.close().await?;
+    assert_eq!(after.len(), before.len() + 1);
+    assert!(after.iter().take(before.len()).eq(before.iter()));
+    let view =
+        ready(AccountingStore::inspect_day(&runtime, owner, named_at / DAY, named_at).await?);
+    let accounts: Vec<(u128, &str)> = view
+        .requests
+        .values()
+        .flatten()
+        .map(|quote| {
+            (
+                quote.attempt.attempt_id.as_u128(),
+                quote.attempt.account_name(),
+            )
+        })
+        .collect();
+    assert_eq!(accounts, vec![(11, DEFAULT_ACCOUNT), (12, "work")]);
     runtime.close().await;
+    Ok(())
+}
+
+/// PF-84-S05: an account record is validated like the rest of the identity.
+#[test]
+fn attempt_account_is_validated() -> anyhow::Result<()> {
+    let with = |name: &str, fingerprint: Option<&str>| -> anyhow::Result<bool> {
+        let mut attempt = attempt(1, 1_789_473_600_000)?;
+        attempt.account = Some(AttemptAccount {
+            name: name.into(),
+            fingerprint: fingerprint.map(str::to_string),
+        });
+        Ok(attempt.validate().is_ok())
+    };
+    assert!(with("work", Some("0123456789ab"))?);
+    assert!(with("work", None)?);
+    // `default` is the absence of an account, never a second spelling of it.
+    assert!(!with(DEFAULT_ACCOUNT, None)?);
+    assert!(!with("", None)?);
+    assert!(!with("two words", None)?);
+    assert!(!with("work", Some("0123456789AB"))?);
+    assert!(!with("work", Some("0123"))?);
     Ok(())
 }
 

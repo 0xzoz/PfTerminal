@@ -40,6 +40,10 @@ Runtime controls
 
 Grants
   Held: none: no live policy for this session [observed: Core policy]
+  [on] Protected reads: never granted under Aggressive, not even once: credential files (.env files
+      found at start, SSH, cloud and CLI tokens) and Corbanu's sign-in, vault, config and history
+      stay unreadable to agent commands; switch to Permissive in /security to allow them [resolved:
+      level]
 
 Agents
   [set] Nested agents: refuse (default): agent commands that start another agent (`corbanu exec`,

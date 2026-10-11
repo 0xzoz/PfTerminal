@@ -148,6 +148,50 @@ async fn model_keys_row_reports_the_broker_setting() {
     );
 }
 
+/// #440 (milestone AGG-15): with the secretless launch on, ordinary
+/// variables outside its allowlist (`PLAIN_VAR`) are removed too, so the
+/// review says the environment is allowlisted, not only that secret-like
+/// variables are removed.
+#[tokio::test]
+async fn issue_440_vault_row_says_the_environment_is_allowlisted_under_secretless_launch() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let extra = tempfile::tempdir().unwrap();
+    let mut config = build(
+        home.path(),
+        cwd.path(),
+        &workspace_write(extra.path(), true),
+        true,
+    )
+    .await;
+    // Enabled after loading, so this test process is not armed.
+    config
+        .features
+        .enable(Feature::SecretlessAgentLaunch)
+        .expect("enable the secretless launch");
+    let vault = &current_values(&config)[3];
+    assert!(
+        vault.contains("only allowlisted environment variables reach agent commands"),
+        "{vault}"
+    );
+    // What the launch does: an ordinary name outside the allowlist goes.
+    let mut env = std::collections::HashMap::from([
+        ("PLAIN_VAR".to_string(), "visible".to_string()),
+        ("PATH".to_string(), "/bin".to_string()),
+    ]);
+    codex_protocol::secretless_launch::retain_launch_env(&mut env, |_| false);
+    assert_eq!(env.keys().collect::<Vec<_>>(), vec!["PATH"]);
+    let vault_row = aggressive::ROWS
+        .iter()
+        .find(|(label, _)| *label == "Vault")
+        .expect("vault row");
+    assert!(
+        vault_row
+            .1
+            .contains("so is every other variable outside an allowlist")
+    );
+}
+
 /// Names the user lists explicitly are reported, not just the fixed probes.
 #[test]
 fn secret_kinds_include_named_variables_from_the_environment() {

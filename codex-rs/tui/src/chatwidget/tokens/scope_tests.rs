@@ -81,6 +81,7 @@ fn unpriced(id: u128, owner: ThreadId, provider: &str, model: &str) -> Observati
             scope: Uuid::from_u128(5),
             dialect: Dialect::Inclusive,
             dispatched_at_ms: (utc_day() * DAY_MS + DAY_MS / 2).try_into().unwrap(),
+            account: None,
         },
         observations: vec![],
         snapshot: None,
@@ -1125,4 +1126,116 @@ fn only_pay_per_use_work_can_lack_a_price() {
         super::super::attempt_text(&old)
             .contains(&"Billing basis: not recorded (recorded before billing bases)".to_string())
     );
+}
+
+/// PF-84-S05: work on two accounts of one provider (the coordinator on
+/// `default`, a spawned agent on `work`) shows one row per account, and the
+/// rows add up exactly to the provider's totals. A worker in another
+/// conversation is listed by account as well.
+#[test]
+fn named_account_day_groups_by_provider_and_account_and_reconciles() {
+    let named = |mut quote: ObservationQuote, name: &str| {
+        quote.attempt.account = Some(codex_state::accounting::AttemptAccount {
+            name: name.into(),
+            fingerprint: Some("0123456789ab".into()),
+        });
+        quote
+    };
+    let own = vec![
+        unpriced(/*id*/ 1, thread(/*n*/ 1), "zai", "glm-5.3-flash"),
+        unpriced(/*id*/ 2, thread(/*n*/ 1), "zai", "glm-5.3-flash"),
+        named(
+            unpriced(/*id*/ 3, thread(/*n*/ 4), "zai", "glm-5.3-flash"),
+            "work",
+        ),
+    ];
+    let others = OtherConversations {
+        conversations: 1,
+        unavailable: 0,
+        requests: by_request(vec![named(
+            unpriced(/*id*/ 13, thread(/*n*/ 3), "zai", "glm-5.3-flash"),
+            "work",
+        )]),
+        deleted_attempts: DeletedAttempts::Counted(0),
+    };
+    // Every own row and the other conversation's row name their account.
+    let all: Vec<ObservationQuote> = own.clone();
+    let pages = inspection_pages(Ok(day(own, Some(others))));
+    let screen = first_screen(&pages[0]).join("\n");
+    let rows: Vec<&str> = screen
+        .lines()
+        .filter(|line| line.starts_with("• "))
+        .collect();
+    assert_eq!(rows.len(), 3, "{screen}");
+    assert!(
+        rows[0].contains(" · account default · ") && rows[0].contains("2 requests, 110 tokens")
+    );
+    assert!(rows[1].contains(" · account work · ") && rows[1].contains("1 request, 55 tokens"));
+    assert!(rows[2].contains(" · account work · ") && rows[2].contains("1 request, 55 tokens"));
+    // One provider page per account.
+    let titles: Vec<&str> = pages
+        .iter()
+        .map(|page| page.title.as_str())
+        .filter(|title| title.starts_with("Provider: "))
+        .collect();
+    assert_eq!(
+        titles,
+        vec![
+            "Provider: zai; Account: default; Model: glm-5.3-flash",
+            "Provider: zai; Account: work; Model: glm-5.3-flash",
+        ]
+    );
+    // Every request link names its account, default included.
+    let requests: Vec<String> = link_labels(&pages)
+        .into_iter()
+        .filter(|label| label.starts_with("Request "))
+        .collect();
+    assert_eq!(requests.len(), 3);
+    assert!(
+        requests.iter().all(|label| label.contains(" · account ")),
+        "{requests:?}"
+    );
+    // Exact reconciliation: the per-account rows partition the provider's work.
+    let groups = super::super::by_route(all.iter());
+    let total = DayTotals::from_quotes(all.iter()).unwrap();
+    let parts: Vec<DayTotals> = groups
+        .values()
+        .map(|quotes| DayTotals::from_quotes(quotes.iter().copied()).unwrap())
+        .collect();
+    assert_eq!(
+        parts.iter().map(|t| t.attempts).sum::<i64>(),
+        total.attempts
+    );
+    for metric in 0..7 {
+        assert_eq!(
+            parts.iter().map(|t| t.measured[metric].known).sum::<i64>(),
+            total.measured[metric].known
+        );
+        assert_eq!(
+            parts
+                .iter()
+                .map(|t| t.measured[metric].unknown)
+                .sum::<i64>(),
+            total.measured[metric].unknown
+        );
+    }
+    assert_never_zero(&pages);
+}
+
+/// A day with only default-account work never mentions accounts.
+#[test]
+fn default_account_day_does_not_name_accounts() {
+    let pages = own_day(vec![unpriced(
+        /*id*/ 1,
+        thread(/*n*/ 1),
+        "zai",
+        "glm-5.3-flash",
+    )]);
+    assert!(!pages.iter().any(|page| {
+        page.title.contains("Account")
+            || page
+                .text
+                .iter()
+                .any(|line| line.contains("account default"))
+    }));
 }

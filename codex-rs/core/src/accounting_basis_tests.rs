@@ -29,6 +29,7 @@ fn bound(
         approved_query: None,
         pricing: PriceAuthority::Unavailable,
         basis_source: Default::default(),
+        account: None,
     };
     let AccountingMode::Provider {
         pricing,
@@ -200,6 +201,7 @@ fn mode(pricing: PriceAuthority, basis_source: BasisSource) -> AccountingMode {
         approved_query: None,
         pricing,
         basis_source,
+        account: None,
     }
 }
 
@@ -372,6 +374,7 @@ async fn image_generation_rates_apply_only_to_openai_api_key_rates() -> anyhow::
             approved_query: None,
             pricing,
             basis_source: BasisSource::BuiltIn,
+            account: None,
         };
         let sampling = Sampling::start_at_path(
             db.clone(),
@@ -410,4 +413,206 @@ async fn image_generation_rates_apply_only_to_openai_api_key_rates() -> anyhow::
         assert_eq!(rates, Some(expected), "{turn}");
     }
     Ok(())
+}
+
+/// PF-84-S05: a turn on a named account binds the account's name and per-home
+/// fingerprint (never its key), keeps them when the mode is rebound for the
+/// same account, and records them on every attempt; the default account
+/// records none. The ledger moves to format 4 only once a named attempt lands.
+#[tokio::test(flavor = "current_thread")]
+async fn admission_records_the_named_account() -> anyhow::Result<()> {
+    const CANARY: &str = "canary-pf84-s05-work-key";
+    let home = tempfile::tempdir()?;
+    let name = codex_vault::ProviderAccountName::parse("work")?;
+    let vault = codex_vault::Vault::new(home.path().to_path_buf());
+    vault.write_provider_account(
+        "my-llm",
+        &name,
+        codex_vault::ProviderAccountKind::ApiKey,
+        CANARY,
+    )?;
+    let fingerprint = vault
+        .provider_account_fingerprint("my-llm", &name)?
+        .expect("fingerprint");
+    let endpoint = "https://llm.example.com/v1";
+    let mut provider = ModelProviderInfo {
+        base_url: Some(endpoint.into()),
+        wire_api: codex_model_provider_info::WireApi::Chat,
+        ..ModelProviderInfo::create_zai_provider()
+    };
+    let default_mode = turn_mode(
+        &mode(PriceAuthority::Unavailable, BasisSource::BuiltIn),
+        "my-llm",
+        &provider,
+        None,
+        endpoint,
+    );
+    provider.account = Some(codex_model_provider_info::NamedProviderAccount {
+        provider_id: "my-llm".into(),
+        name: "work".into(),
+    });
+    let mut named_mode = turn_mode(&default_mode, "my-llm", &provider, None, endpoint);
+    let account_of = |mode: &AccountingMode| match mode {
+        AccountingMode::Provider { account, .. } => account.clone(),
+        _ => panic!("{mode:?}"),
+    };
+    assert_eq!(account_of(&default_mode), None);
+    assert_eq!(
+        account_of(&named_mode),
+        Some(codex_state::accounting::AttemptAccount {
+            name: "work".into(),
+            fingerprint: None,
+        })
+    );
+    bind_account_fingerprint(&mut named_mode, &provider, home.path().to_path_buf()).await;
+    let expected = codex_state::accounting::AttemptAccount {
+        name: "work".into(),
+        fingerprint: Some(fingerprint),
+    };
+    assert_eq!(account_of(&named_mode), Some(expected.clone()));
+    // Rebinding the same account keeps its fingerprint; another account's does not.
+    let rebound = turn_mode(&named_mode, "my-llm", &provider, None, endpoint);
+    assert_eq!(account_of(&rebound), Some(expected.clone()));
+    let mut other = provider.clone();
+    other.account.as_mut().unwrap().name = "other".into();
+    assert_eq!(
+        account_of(&turn_mode(&named_mode, "my-llm", &other, None, endpoint))
+            .and_then(|account| account.fingerprint),
+        None
+    );
+    // Nor does a same-named account of another provider.
+    assert_eq!(
+        account_of(&turn_mode(
+            &named_mode,
+            "other-llm",
+            &provider,
+            None,
+            endpoint
+        ))
+        .and_then(|account| account.fingerprint),
+        None
+    );
+
+    let db = StateRuntime::init(
+        SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(home.path())?),
+        "my-llm".into(),
+    )
+    .await?;
+    let owner = ThreadId::new();
+    db.upsert_thread(
+        &ThreadMetadataBuilder::new(
+            owner,
+            home.path().join("account.jsonl"),
+            chrono::Utc::now(),
+            SessionSource::Cli,
+        )
+        .build("my-llm"),
+    )
+    .await?;
+    let formats = || async {
+        let pool = db
+            .sqlite()
+            .open_read_write_pool(&db.sqlite().state_db_path())
+            .await?;
+        let mut conn = pool.acquire().await?.detach();
+        pool.close().await;
+        let applied: Vec<i64> =
+            sqlx::query_scalar("SELECT version FROM _accounting_migrations ORDER BY version")
+                .fetch_all(&mut conn)
+                .await?;
+        anyhow::Ok(applied)
+    };
+    let route = format!("{endpoint}/chat/completions");
+    let named_sampling = Sampling::start(db.clone(), owner, "named".into(), &named_mode).await?;
+    assert_eq!(formats().await?, vec![1]);
+    // A rebound mode on another account is not this sampling's account.
+    assert!(named_sampling.same_account(&rebound));
+    assert!(!named_sampling.same_account(&default_mode));
+    let named_attempt = named_sampling.admit("some-model", &route).await?;
+    assert_eq!(named_attempt.account, Some(expected.clone()));
+    // A format-1 ledger goes straight to format 4 with the named attempt.
+    assert_eq!(formats().await?, vec![1, 2, 3, 4]);
+    let default_attempt = Sampling::start(db.clone(), owner, "default".into(), &default_mode)
+        .await?
+        .admit("some-model", &route)
+        .await?;
+    assert_eq!(default_attempt.account, None);
+    let day = chrono::Utc::now().timestamp_millis() / 86_400_000;
+    let codex_state::accounting::InspectionDay::Ready(view) =
+        codex_state::accounting::AccountingStore::inspect_day(
+            &db,
+            owner,
+            day,
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .await?
+    else {
+        panic!("expected the day");
+    };
+    let mut accounts: Vec<(String, Option<codex_state::accounting::AttemptAccount>)> = view
+        .requests
+        .values()
+        .flatten()
+        .map(|quote| (quote.attempt.turn.clone(), quote.attempt.account.clone()))
+        .collect();
+    accounts.sort();
+    assert_eq!(
+        accounts,
+        vec![("default".into(), None), ("named".into(), Some(expected))]
+    );
+    db.close().await;
+    // No file in the home (state DB, its WAL, the encrypted vault) holds the key.
+    let mut pending = vec![home.path().to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                let bytes = std::fs::read(&path)?;
+                assert!(
+                    !bytes.windows(CANARY.len()).any(|w| w == CANARY.as_bytes()),
+                    "{}",
+                    path.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// PF-84-S05: with no vault in the home, the account is recorded by name only
+/// and nothing is created (no vault, key or salt).
+#[tokio::test(flavor = "current_thread")]
+async fn account_fingerprint_without_a_vault_is_name_only_and_creates_nothing() {
+    let home = tempfile::tempdir().expect("home");
+    let endpoint = "https://llm.example.com/v1";
+    let mut provider = ModelProviderInfo {
+        base_url: Some(endpoint.into()),
+        wire_api: codex_model_provider_info::WireApi::Chat,
+        ..ModelProviderInfo::create_zai_provider()
+    };
+    provider.account = Some(codex_model_provider_info::NamedProviderAccount {
+        provider_id: "my-llm".into(),
+        name: "work".into(),
+    });
+    let mut bound = turn_mode(
+        &mode(PriceAuthority::Unavailable, BasisSource::BuiltIn),
+        "my-llm",
+        &provider,
+        None,
+        endpoint,
+    );
+    bind_account_fingerprint(&mut bound, &provider, home.path().to_path_buf()).await;
+    let AccountingMode::Provider { account, .. } = bound else {
+        panic!("{bound:?}");
+    };
+    assert_eq!(
+        account,
+        Some(codex_state::accounting::AttemptAccount {
+            name: "work".into(),
+            fingerprint: None,
+        })
+    );
+    assert_eq!(std::fs::read_dir(home.path()).expect("home").count(), 0);
 }
