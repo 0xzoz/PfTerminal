@@ -76,7 +76,7 @@ wait = "Active in this session: Aggressive"
 [[steps]]
 key = "i"
 [[steps]]
-wait = "launch check passed for the session rows"
+wait = "passed the launch check"
 [[steps]]
 pause = 3.0
 [[steps]]
