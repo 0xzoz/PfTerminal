@@ -204,6 +204,16 @@ pub(crate) async fn run_turn(
 ) -> CodexResult<Option<String>> {
     let turn_started_at = Instant::now();
     trace_turn_timing("run_turn_start", turn_started_at);
+    // Issue #445: with the kill switch on, the turn is refused before its
+    // input is recorded, so nothing of it reaches the model later either.
+    if let Err(err) = sess.services.model_client().refuse_under_kill_switch() {
+        sess.track_turn_codex_error(turn_context.as_ref(), &err);
+        sess.emit_turn_error_lifecycle(turn_context.as_ref(), err.to_codex_protocol_error())
+            .await;
+        let event = EventMsg::Error(err.to_error_event(/*message_prefix*/ None));
+        sess.send_event(&turn_context, event).await;
+        return Ok(None);
+    }
     let provider_info = turn_context.provider.info();
     let mut client_session = prewarmed_client_session
         .filter(|session| ModelClient::session_matches_provider(session, provider_info))

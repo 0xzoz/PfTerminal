@@ -339,6 +339,51 @@ fn fail_process_with_message(process: &UnifiedExecProcess, message: String) -> U
     UnifiedExecError::process_failed(process.failure_message().unwrap_or(message))
 }
 
+/// Issue #443: the command ran, and the sandbox stopped it so quickly that it
+/// ended while starting, before the begin event. Show it like any other
+/// command that ran (begin, then end with its output and exit code).
+async fn emit_denied_at_start(
+    context: &UnifiedExecContext,
+    request: &ExecCommandRequest,
+    cwd: PathUri,
+    output: &codex_protocol::exec_output::ExecToolCallOutput,
+) {
+    let plugin_attribution = cwd.to_abs_path().ok().and_then(|abs_cwd| {
+        context
+            .turn
+            .plugin_attribution_for_command(&request.command, &abs_cwd)
+    });
+    let event_ctx = ToolEventCtx::new(
+        context.session.as_ref(),
+        context.turn.as_ref(),
+        &context.call_id,
+        /*turn_diff_tracker*/ None,
+    );
+    ToolEmitter::unified_exec(
+        &request.command,
+        cwd.clone(),
+        ExecCommandSource::UnifiedExecStartup,
+        Some(request.process_id.to_string()),
+        plugin_attribution.clone(),
+    )
+    .emit(event_ctx, ToolEventStage::Begin)
+    .await;
+    emit_exec_end_for_unified_exec(
+        Arc::clone(&context.session),
+        Arc::clone(&context.turn),
+        context.call_id.clone(),
+        request.command.clone(),
+        cwd,
+        Some(request.process_id.to_string()),
+        plugin_attribution,
+        Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default())),
+        output.aggregated_output.text.clone(),
+        output.exit_code,
+        output.duration,
+    )
+    .await;
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn emit_failed_initial_exec_end_if_unstored(
     process_started_alive: bool,
@@ -448,6 +493,9 @@ impl UnifiedExecProcessManager {
             }
             Err(err) => {
                 self.release_process_id(request.process_id).await;
+                if let UnifiedExecError::SandboxDenied { output, .. } = &err {
+                    emit_denied_at_start(context, &request, cwd, output).await;
+                }
                 return Err(err);
             }
         };
@@ -1210,22 +1258,30 @@ impl UnifiedExecProcessManager {
         };
         let mut orchestrator = ToolOrchestrator::new();
         let mut runtime = UnifiedExecRuntime::new(self, request.shell_mode.clone());
+        let live_aggressive = context
+            .session
+            .services
+            .model_client()
+            .live_level_is_aggressive();
         let exec_approval_requirement = context
             .session
             .services
             .exec_policy
-            .create_exec_approval_requirement_for_command(ExecApprovalRequest {
-                command: &request.command,
-                approval_policy: context.turn.approval_policy.value(),
-                permission_profile: context.turn.permission_profile(),
-                windows_sandbox_level: context.turn.windows_sandbox_level,
-                sandbox_permissions: if request.additional_permissions_preapproved {
-                    crate::sandboxing::SandboxPermissions::UseDefault
-                } else {
-                    request.sandbox_permissions
+            .create_exec_approval_requirement(
+                ExecApprovalRequest {
+                    command: &request.command,
+                    approval_policy: context.turn.approval_policy.value(),
+                    permission_profile: context.turn.permission_profile(),
+                    windows_sandbox_level: context.turn.windows_sandbox_level,
+                    sandbox_permissions: if request.additional_permissions_preapproved {
+                        crate::sandboxing::SandboxPermissions::UseDefault
+                    } else {
+                        request.sandbox_permissions
+                    },
+                    prefix_rule: request.prefix_rule.clone(),
                 },
-                prefix_rule: request.prefix_rule.clone(),
-            })
+                live_aggressive,
+            )
             .await;
         let req = UnifiedExecToolRequest {
             command: request.command.clone(),
@@ -1292,9 +1348,9 @@ impl UnifiedExecProcessManager {
                         };
                         UnifiedExecError::sandbox_denied(message, output)
                     }
-                    _ => UnifiedExecError::create_process(format!("{err:?}")),
+                    _ => UnifiedExecError::create_process(err.to_string()),
                 },
-                other => UnifiedExecError::create_process(format!("{other:?}")),
+                ToolError::Rejected(message) => UnifiedExecError::Rejected { message },
             })
     }
 
