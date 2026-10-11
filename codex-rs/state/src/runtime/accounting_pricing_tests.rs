@@ -809,3 +809,16 @@ fn long_context_tier_prices_whole_attempt_above_threshold() {
             .contains("long_context")
     );
 }
+
+/// #475 (review S6): a refused attempt is an exact $0 with or without a price
+/// bound at dispatch, so it is never "had no price" either.
+#[test]
+fn a_refused_attempt_is_an_exact_zero_without_a_price() {
+    let refused = vec![row(1, json!({"refused_status": 401}))];
+    for snapshots in [vec![], vec![snapshot()]] {
+        let quote = quote_observations(&attempt(), &refused, &snapshots).unwrap();
+        assert_eq!(quote.buckets, [BucketQuote::Priced(Decimal::default()); 4]);
+        assert_eq!(quote.all_buckets_priced, Some(Decimal::default()));
+        assert_eq!(quote.usage.refused_status, Some(401));
+    }
+}

@@ -506,6 +506,7 @@ fn a_refusal_replays_to_zero_usage() {
     }
     for invalid in [
         vec![observation(1, r#"{"refused_status":429}"#)],
+        vec![observation(1, r#"{"refused_status":400}"#)],
         vec![observation(1, r#"{"refused_status":200}"#)],
         vec![observation(1, r#"{"refused_status":401,"output":0}"#)],
         vec![

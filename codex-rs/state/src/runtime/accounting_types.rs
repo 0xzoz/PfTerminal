@@ -244,10 +244,7 @@ pub(super) fn replay(dialect: Dialect, observations: &[Observation]) -> anyhow::
                 },
             "a refusal states no usage"
         );
-        ensure!(
-            (400..500).contains(&refused) && refused != 429,
-            "invalid refusal status"
-        );
+        ensure!(matches!(refused, 401 | 403), "invalid refusal status");
         return Ok(Usage {
             input: Some(0),
             noncached: Some(0),

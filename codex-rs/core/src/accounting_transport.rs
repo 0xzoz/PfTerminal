@@ -369,7 +369,10 @@ impl<T: HttpTransport> AccountingTransport<T> {
 
     /// #475: the provider refused the admitted attempt before any response
     /// (401 or 403): record that, so the attempt reads as refused with no
-    /// tokens and no charge rather than as one with incomplete usage.
+    /// tokens and no charge rather than as one with incomplete usage. The
+    /// error is the whole response and no usage was streamed. A gateway that
+    /// answers 403 to moderated input (OpenRouter) generated nothing either;
+    /// that it never bills such a refusal is assumed, not confirmed.
     async fn refused(
         evidence: &ResponseEvidence,
         attempt: Option<Attempt>,

@@ -686,6 +686,7 @@ fn attempt_text(q: &ObservationQuote) -> Vec<String> {
     // all means a rate applied.
     if per_use(q)
         && no_rates(q)
+        && q.usage.refused_status.is_none()
         && !q.buckets.iter().any(
             |bucket| matches!(bucket, BucketQuote::Priced(amount) if *amount != Decimal::default()),
         )
