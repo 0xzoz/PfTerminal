@@ -56,6 +56,9 @@ use codex_utils_path_uri::PathUri;
 use futures::future::BoxFuture;
 use std::collections::HashMap;
 use std::io;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
@@ -104,6 +107,10 @@ pub struct UnifiedExecApprovalKey {
 pub struct UnifiedExecRuntime<'a> {
     manager: &'a UnifiedExecProcessManager,
     shell_mode: UnifiedExecShellMode,
+    /// #466: whether the last approval prompt for this command was approved.
+    /// The prompt shows the command as running, so it must end even when the
+    /// command then fails to start.
+    prompt_approved: Arc<AtomicBool>,
 }
 
 fn unified_exec_options(
@@ -145,7 +152,14 @@ impl<'a> UnifiedExecRuntime<'a> {
         Self {
             manager,
             shell_mode,
+            prompt_approved: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Whether the person approved this command in a prompt (the last one,
+    /// when a retry asked again). A cached approval shows no prompt.
+    pub(crate) fn prompt_approved(&self) -> bool {
+        self.prompt_approved.load(Ordering::Acquire)
     }
 }
 
@@ -188,6 +202,7 @@ impl Approvable<UnifiedExecRequest> for UnifiedExecRuntime<'_> {
             .retry_reason
             .clone()
             .or_else(|| req.justification.clone());
+        let prompt_approved = Arc::clone(&self.prompt_approved);
         Box::pin(async move {
             let native_cwd = match req.cwd.to_abs_path() {
                 Ok(c) => c,
@@ -206,7 +221,7 @@ impl Approvable<UnifiedExecRequest> for UnifiedExecRuntime<'_> {
                 fresh,
                 || async move {
                     let available_decisions = None;
-                    session
+                    let decision = session
                         .request_command_approval(
                             turn,
                             call_id,
@@ -226,7 +241,21 @@ impl Approvable<UnifiedExecRequest> for UnifiedExecRuntime<'_> {
                             available_decisions,
                             /*plugin_attribution_override*/ None,
                         )
-                        .await
+                        .await;
+                    // Only a command prompt (not a network one) shows the
+                    // command as running.
+                    if ctx.network_approval_context.is_none() {
+                        prompt_approved.store(
+                            matches!(
+                                decision,
+                                ReviewDecision::Approved
+                                    | ReviewDecision::ApprovedExecpolicyAmendment { .. }
+                                    | ReviewDecision::ApprovedForSession
+                            ),
+                            Ordering::Release,
+                        );
+                    }
+                    decision
                 },
             )
             .await

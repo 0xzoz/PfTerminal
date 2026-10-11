@@ -234,6 +234,13 @@ struct PreparedProcessHandles {
     tty: bool,
 }
 
+/// Why a unified-exec command did not start, and whether the person had
+/// approved it in a prompt (which already shows it as running, #466).
+pub(super) struct StartFailure {
+    pub(super) error: UnifiedExecError,
+    pub(super) prompt_approved: bool,
+}
+
 struct InitialExecCommandGuard {
     active: Arc<AtomicBool>,
 }
@@ -348,26 +355,7 @@ async fn emit_denied_at_start(
     cwd: PathUri,
     output: &codex_protocol::exec_output::ExecToolCallOutput,
 ) {
-    let plugin_attribution = cwd.to_abs_path().ok().and_then(|abs_cwd| {
-        context
-            .turn
-            .plugin_attribution_for_command(&request.command, &abs_cwd)
-    });
-    let event_ctx = ToolEventCtx::new(
-        context.session.as_ref(),
-        context.turn.as_ref(),
-        &context.call_id,
-        /*turn_diff_tracker*/ None,
-    );
-    ToolEmitter::unified_exec(
-        &request.command,
-        cwd.clone(),
-        ExecCommandSource::UnifiedExecStartup,
-        Some(request.process_id.to_string()),
-        plugin_attribution.clone(),
-    )
-    .emit(event_ctx, ToolEventStage::Begin)
-    .await;
+    let plugin_attribution = emit_begin_at_start(context, request, cwd.clone()).await;
     emit_exec_end_for_unified_exec(
         Arc::clone(&context.session),
         Arc::clone(&context.turn),
@@ -382,6 +370,59 @@ async fn emit_denied_at_start(
         output.duration,
     )
     .await;
+}
+
+/// #466: a command the person approved that then could not start (a
+/// protected-launch refusal, a spawn error) ends as failed with the reason.
+async fn emit_failed_at_start(
+    context: &UnifiedExecContext,
+    request: &ExecCommandRequest,
+    cwd: PathUri,
+    message: String,
+) {
+    let plugin_attribution = emit_begin_at_start(context, request, cwd.clone()).await;
+    emit_failed_exec_end_for_unified_exec(
+        Arc::clone(&context.session),
+        Arc::clone(&context.turn),
+        context.call_id.clone(),
+        request.command.clone(),
+        cwd,
+        Some(request.process_id.to_string()),
+        plugin_attribution,
+        Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default())),
+        String::new(),
+        message,
+        Duration::ZERO,
+    )
+    .await;
+}
+
+async fn emit_begin_at_start(
+    context: &UnifiedExecContext,
+    request: &ExecCommandRequest,
+    cwd: PathUri,
+) -> Option<PluginCommandAttribution> {
+    let plugin_attribution = cwd.to_abs_path().ok().and_then(|abs_cwd| {
+        context
+            .turn
+            .plugin_attribution_for_command(&request.command, &abs_cwd)
+    });
+    let event_ctx = ToolEventCtx::new(
+        context.session.as_ref(),
+        context.turn.as_ref(),
+        &context.call_id,
+        /*turn_diff_tracker*/ None,
+    );
+    ToolEmitter::unified_exec(
+        &request.command,
+        cwd,
+        ExecCommandSource::UnifiedExecStartup,
+        Some(request.process_id.to_string()),
+        plugin_attribution.clone(),
+    )
+    .emit(event_ctx, ToolEventStage::Begin)
+    .await;
+    plugin_attribution
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -491,12 +532,19 @@ impl UnifiedExecProcessManager {
             Ok((process, deferred_network_approval)) => {
                 (Arc::new(process), deferred_network_approval)
             }
-            Err(err) => {
+            Err(StartFailure {
+                error,
+                prompt_approved,
+            }) => {
                 self.release_process_id(request.process_id).await;
-                if let UnifiedExecError::SandboxDenied { output, .. } = &err {
+                if let UnifiedExecError::SandboxDenied { output, .. } = &error {
                     emit_denied_at_start(context, &request, cwd, output).await;
+                } else if prompt_approved {
+                    // #466: the approval prompt showed this command as
+                    // running; end it, or it stays "Running" for good.
+                    emit_failed_at_start(context, &request, cwd, error.to_string()).await;
                 }
-                return Err(err);
+                return Err(error);
             }
         };
         let network_denial_monitor = deferred_network_approval.as_ref().map(|deferred| {
@@ -1232,7 +1280,7 @@ impl UnifiedExecProcessManager {
         request: &ExecCommandRequest,
         cwd: PathUri,
         context: &UnifiedExecContext,
-    ) -> Result<(UnifiedExecProcess, Option<DeferredNetworkApproval>), UnifiedExecError> {
+    ) -> Result<(UnifiedExecProcess, Option<DeferredNetworkApproval>), StartFailure> {
         let shell_policy = &context.turn.config.permissions.shell_environment_policy;
         let provider_env_keys = provider_env_keys(&context.turn.config);
         let local_policy_env = create_shell_tool_env(
@@ -1319,7 +1367,7 @@ impl UnifiedExecProcessManager {
             call_id: context.call_id.clone(),
             tool_name: ToolName::plain("exec_command"),
         };
-        orchestrator
+        let result = orchestrator
             .run(
                 &mut runtime,
                 &req,
@@ -1327,7 +1375,9 @@ impl UnifiedExecProcessManager {
                 &context.turn,
                 context.turn.approval_policy.value(),
             )
-            .await
+            .await;
+        let prompt_approved = runtime.prompt_approved();
+        result
             .map(|result| (result.output, result.deferred_network_approval))
             .map_err(|err| match err {
                 ToolError::Codex(err) => match err.details() {
@@ -1351,6 +1401,10 @@ impl UnifiedExecProcessManager {
                     _ => UnifiedExecError::create_process(err.to_string()),
                 },
                 ToolError::Rejected(message) => UnifiedExecError::Rejected { message },
+            })
+            .map_err(|error| StartFailure {
+                error,
+                prompt_approved,
             })
     }
 
