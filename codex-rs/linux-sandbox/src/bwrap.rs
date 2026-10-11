@@ -2406,6 +2406,7 @@ mod tests {
         let git = workspace.join(".git");
         let link = temp_dir.path().join("l");
         std::fs::create_dir_all(&git).expect("create .git");
+        std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").expect("write HEAD");
         std::os::unix::fs::symlink(&git, &link).expect("create link");
         let entry = |path: &Path| FileSystemSandboxEntry {
             path: FileSystemPath::Path {
