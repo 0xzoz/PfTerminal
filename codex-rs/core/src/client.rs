@@ -302,6 +302,9 @@ impl RequestRouteTelemetry {
     }
 }
 
+/// Issue #445: why a model request was not sent while the kill switch is on.
+pub(crate) const KILL_SWITCH_REFUSAL: &str = "Not sent: the security kill switch is on, so Corbanu sends nothing to the model, and this message was not kept. To turn it off, open /security, press g, choose \"Turn the kill switch off\" and confirm.";
+
 /// A session-scoped client for model-provider API calls.
 ///
 /// This holds configuration and state that should be shared across turns within a Codex session
@@ -907,7 +910,33 @@ impl ModelClient {
         self.ingress_level.max(live) == SecurityLevel::Aggressive
     }
 
+    /// Issue #445: whether the security kill switch a person turned on in
+    /// `/security` is on for this session. Only that switch: a session
+    /// started from unreadable state or a cold-resumed child agent is denied
+    /// protected actions too, but its turns still run.
+    pub(crate) fn kill_switch_on(&self) -> bool {
+        self.ingress_policy.as_ref().is_some_and(|policy| {
+            policy
+                .0
+                .snapshot_for_agent(self.state.thread_id)
+                .is_ok_and(|snapshot| snapshot.authority_kill_switch_active)
+        })
+    }
+
+    /// Issue #445: with the kill switch on, no model request is sent (a
+    /// turn, compaction, memory summary or realtime call); a turn is also
+    /// refused before its input is recorded (`session::turn`). A policy that
+    /// cannot be read is refused by the source admission check instead.
+    pub(crate) fn refuse_under_kill_switch(&self) -> Result<()> {
+        if self.kill_switch_on() {
+            Err(CodexErr::InvalidRequest(KILL_SWITCH_REFUSAL.to_string()))
+        } else {
+            Ok(())
+        }
+    }
+
     pub(crate) fn check_source_admission(&self, prompt: &Prompt) -> Result<()> {
+        self.refuse_under_kill_switch()?;
         crate::security::ingress::check_native_request(
             self.source_admission_level()?,
             &prompt.input,
@@ -920,6 +949,7 @@ impl ModelClient {
         prompt: &Prompt,
         use_responses_lite: bool,
     ) -> Result<Vec<ResponseItem>> {
+        self.refuse_under_kill_switch()?;
         if self.source_admission_level()? == codex_security_policy::SecurityLevel::Permissive {
             return Ok(prompt.get_formatted_input_for_request(use_responses_lite));
         }
