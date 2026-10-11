@@ -810,7 +810,7 @@ fn unlistable_directories_by_pass(
         let Ok(directory) = directory.as_path().canonicalize() else {
             continue;
         };
-        if !directory.is_dir() || mount_roots.iter().any(|root| *root == directory) {
+        if !directory.is_dir() || mount_roots.contains(&directory) {
             continue;
         }
         let pass = mount_roots
