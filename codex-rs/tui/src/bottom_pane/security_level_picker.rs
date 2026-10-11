@@ -128,6 +128,8 @@ pub(crate) struct SecurityLevelPicker {
     pub(super) commit_inline: bool,
     /// Sends the "restart now" request.
     app_event_tx: Option<AppEventSender>,
+    /// #436: why "restart now" would lose provider keys, if it would.
+    pub(super) restart_blocked: Option<String>,
     /// PF-25-S02: `g` asked for the grants and kill switch view.
     pub(super) open_revocations: bool,
 }
@@ -184,6 +186,7 @@ impl SecurityLevelPicker {
             pending: None,
             commit_inline: cfg!(test),
             app_event_tx: None,
+            restart_blocked: crate::security::restart::restart_blocker(),
             open_revocations: false,
         }
     }
@@ -584,6 +587,10 @@ impl SecurityLevelPicker {
     /// A restart activates what was saved, or ends this session's
     /// Core state that only a new start clears.
     fn restart_useful(&self) -> bool {
+        self.restart_pending() && self.restart_blocked.is_none()
+    }
+
+    fn restart_pending(&self) -> bool {
         let pending =
             self.stored.enforced() != self.active || self.basis.in_force != self.basis.next_start;
         match &self.screen {
@@ -866,7 +873,23 @@ impl SecurityLevelPicker {
                             .map(Stylize::dim),
                     );
                     let hanging = if width < 20 { "" } else { "    " };
-                    for (control, value) in aggressive::ROWS {
+                    // #436: every Aggressive protection, also those outside
+                    // the mapping rows.
+                    let mut removed = aggressive::ROWS
+                        .iter()
+                        .map(|(control, value)| (*control, *value))
+                        .collect::<Vec<_>>();
+                    removed.push((
+                        "Nested agents",
+                        "agent commands can start other agents (`corbanu exec`, `review`, a new session, `app-server` or `mcp-server`) without Aggressive enforced",
+                    ));
+                    if self.preflight_input.is_some() {
+                        removed.push((
+                            "Protected paths",
+                            "credential files (such as .env and keychains) and Corbanu's history and state are no longer denied to agent commands; your own sandbox settings decide",
+                        ));
+                    }
+                    for (control, value) in removed {
                         lines.extend(word_wrap_lines(
                             [Line::from(vec![
                                 format!("• {control}:").bold(),
@@ -947,6 +970,12 @@ impl SecurityLevelPicker {
                     } else {
                         "Press r to restart now: Corbanu Terminal closes this session and starts again in this folder with the same options. Resume this conversation with /resume afterwards."
                     }));
+                } else if let Some(blocked) = self
+                    .restart_blocked
+                    .as_deref()
+                    .filter(|_| self.restart_pending())
+                {
+                    lines.extend(wrap(blocked));
                 }
                 if let Some(non_user) = self.outside_user_config_floor(level) {
                     lines.extend(wrap(&non_user).into_iter().map(Stylize::red));

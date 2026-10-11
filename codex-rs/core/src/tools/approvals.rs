@@ -188,6 +188,9 @@ impl ApprovalResolution {
     }
 }
 
+/// `record_decline`: list a refusal under the inspector's recent denials
+/// (#437). The caller that records a refusal itself passes `false`.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn resolve_tool_apporval<Rq, Out, T>(
     tool: &mut T,
     req: &Rq,
@@ -196,7 +199,71 @@ pub(super) async fn resolve_tool_apporval<Rq, Out, T>(
     tool_ctx: &ToolCtx,
     reviewer: ApprovalReviewer,
     otel: &codex_otel::SessionTelemetry,
+    record_decline: bool,
 ) -> Result<ReviewDecision, ToolError>
+where
+    T: ToolRuntime<Rq, Out>,
+{
+    let what = approval_kind(&flat_tool_name(&tool_ctx.tool_name));
+    let thread = tool_ctx.session.thread_id();
+    let mut pending =
+        record_decline.then(|| crate::security::inspection::PendingApproval::new(thread, what));
+    let resolution = resolve(
+        tool,
+        req,
+        permission_request_run_id,
+        ctx,
+        tool_ctx,
+        reviewer,
+        otel,
+    )
+    .await;
+    if let Some(pending) = pending.as_mut() {
+        pending.answered();
+        if let Some(outcome) = decline_outcome(&resolution) {
+            crate::security::inspection::record_declined_approval(thread, what, outcome);
+        }
+    }
+    resolution.into_tool_result()
+}
+
+/// What the inspector says about a refused approval, or `None` when it was
+/// approved.
+fn decline_outcome(resolution: &ApprovalResolution) -> Option<&'static str> {
+    let refused = match &resolution.decision {
+        ReviewDecision::NetworkPolicyAmendment {
+            network_policy_amendment,
+        } => network_policy_amendment.action == NetworkPolicyRuleAction::Deny,
+        ReviewDecision::Denied { .. } | ReviewDecision::Abort => true,
+        ReviewDecision::TimedOut => return Some("not answered in time"),
+        _ => false,
+    };
+    refused.then_some(match resolution.source {
+        ApprovalResolutionSource::User => "declined by you",
+        ApprovalResolutionSource::Hook => "declined by a permission hook",
+        ApprovalResolutionSource::Guardian => "declined by the automatic reviewer",
+    })
+}
+
+fn approval_kind(tool_name: &str) -> &'static str {
+    match tool_name {
+        "exec_command" | "shell" | "shell_command" | "local_shell" | "container.exec" => {
+            "command approval"
+        }
+        "apply_patch" => "file edit approval",
+        _ => "tool approval",
+    }
+}
+
+async fn resolve<Rq, Out, T>(
+    tool: &mut T,
+    req: &Rq,
+    permission_request_run_id: &str,
+    ctx: ApprovalCtx<'_>,
+    tool_ctx: &ToolCtx,
+    reviewer: ApprovalReviewer,
+    otel: &codex_otel::SessionTelemetry,
+) -> ApprovalResolution
 where
     T: ToolRuntime<Rq, Out>,
 {
@@ -218,7 +285,7 @@ where
                     source: ApprovalResolutionSource::Hook,
                 };
                 record_resolution(otel, tool_ctx, &resolution);
-                return resolution.into_tool_result();
+                return resolution;
             }
             Some(PermissionRequestDecision::Deny { message }) => {
                 let resolution = ApprovalResolution {
@@ -226,7 +293,7 @@ where
                     source: ApprovalResolutionSource::Hook,
                 };
                 record_resolution(otel, tool_ctx, &resolution);
-                return resolution.into_tool_result();
+                return resolution;
             }
             None => {}
         }
@@ -254,7 +321,7 @@ where
                         source: ApprovalResolutionSource::Guardian,
                     };
                     record_resolution(otel, tool_ctx, &resolution);
-                    return resolution.into_tool_result();
+                    return resolution;
                 }
             };
             review_approval_request(
@@ -277,7 +344,7 @@ where
         source,
     };
     record_resolution(otel, tool_ctx, &resolution);
-    resolution.into_tool_result()
+    resolution
 }
 
 fn record_resolution(

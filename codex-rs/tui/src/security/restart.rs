@@ -48,6 +48,25 @@ pub(crate) fn clear_restart_banner() {
 /// Printed, without a newline, just before "restart now" replaces the
 /// process.
 pub const RESTART_BANNER: &str = "Restarting Corbanu Terminal to apply the saved security level…";
+/// #436: why "restart now" cannot be used, or `None`. Provider keys this
+/// process handed from its environment to the credential broker are gone
+/// from the environment a restart inherits (the broker never hands a value
+/// back), so a restarted session would start without them.
+pub(crate) fn restart_blocker() -> Option<String> {
+    restart_blocker_for(&crate::legacy_core::broker_removed_environment_keys())
+}
+
+pub(crate) fn restart_blocker_for(removed_env_keys: &[String]) -> Option<String> {
+    if removed_env_keys.is_empty() {
+        return None;
+    }
+    let names = removed_env_keys.join(", ");
+    Some(format!(
+        "Restart now is not available: this session moved {names} from your environment into \
+         the credential broker, so starting again from here would start without it. Quit \
+         Corbanu Terminal (/quit) and start it again from your shell to apply the saved level."
+    ))
+}
 
 /// The program and arguments to start again with.
 fn restart_command(args: Vec<OsString>) -> std::io::Result<std::process::Command> {

@@ -450,6 +450,80 @@ async fn execpolicy_blocks_shell_invocation() -> Result<()> {
     Ok(())
 }
 
+/// #439 (AGG-14): a command an exec-policy rule forbids reads as the rule's
+/// justification, not as `CreateProcess { message: "Rejected(..)" }`.
+#[tokio::test]
+async fn unified_exec_forbidden_command_reads_as_the_rule_justification() -> Result<()> {
+    let mut builder = test_codex().with_config(|config| {
+        config
+            .features
+            .enable(Feature::UnifiedExec)
+            .expect("test config should allow feature update");
+        let policy_path = config.codex_home.join("rules").join("policy.rules");
+        fs::create_dir_all(
+            policy_path
+                .parent()
+                .expect("policy directory must have a parent"),
+        )
+        .expect("create policy directory");
+        fs::write(
+            &policy_path,
+            r#"prefix_rule(pattern=["echo"], decision="forbidden", justification="Security level Aggressive: no echo.")"#,
+        )
+        .expect("write policy file");
+    });
+    let server = start_mock_server().await;
+    let test = builder.build(&server).await?;
+    let call_id = "unified-exec-forbidden";
+    let args = json!({
+        "cmd": "echo blocked",
+        "yield_time_ms": 1_000,
+    });
+    mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-forbidden-1"),
+            ev_function_call(call_id, "exec_command", &serde_json::to_string(&args)?),
+            ev_completed("resp-forbidden-1"),
+        ]),
+    )
+    .await;
+    let results_mock = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_assistant_message("msg-forbidden-1", "done"),
+            ev_completed("resp-forbidden-2"),
+        ]),
+    )
+    .await;
+
+    submit_user_turn(
+        &test,
+        "run a forbidden command",
+        AskForApproval::OnRequest,
+        PermissionProfile::read_only(),
+        None,
+    )
+    .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let output_item = results_mock.single_request().function_call_output(call_id);
+    let output = output_item
+        .get("output")
+        .and_then(Value::as_str)
+        .expect("function call output should include a string output payload");
+    assert!(
+        output.contains("Security level Aggressive: no echo.")
+            && !output.contains("CreateProcess")
+            && !output.contains("Rejected("),
+        "unexpected output: {output}",
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn malformed_custom_rules_preserve_managed_forbidden_prefix() -> Result<()> {
     skip_if_target_windows!(
