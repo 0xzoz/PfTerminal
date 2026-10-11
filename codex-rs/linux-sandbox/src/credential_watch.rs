@@ -56,7 +56,7 @@ pub(crate) fn credential_watch_roots(policy: &FileSystemSandboxPolicy, cwd: &Pat
         .collect();
     roots.sort();
     roots.dedup();
-    let outermost = roots
+    roots
         .iter()
         .filter(|root| {
             !roots
@@ -64,8 +64,7 @@ pub(crate) fn credential_watch_roots(policy: &FileSystemSandboxPolicy, cwd: &Pat
                 .any(|other| other != *root && root.starts_with(other))
         })
         .cloned()
-        .collect();
-    outermost
+        .collect()
 }
 
 /// Watches set up before the command's view is built.
