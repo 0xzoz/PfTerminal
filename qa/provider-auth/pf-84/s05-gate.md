@@ -144,4 +144,4 @@ Not done:
 - Rate-limit snapshots shown in `/status` come only from ChatGPT sign-ins, which get named
   accounts in S06.
 
-<a id="pr"></a>PR: see the sprint record.
+<a id="pr"></a>PR: [#469](https://github.com/CorbanuCore/CorbanuTerminal/pull/469); final merged-tree results in its comments.

@@ -92,7 +92,7 @@ Paths are under `codex-rs/`, at `63ea3d0cbd`.
 
 ## Exit evidence
 
-- [x] Implementation commit and PR recorded (branch `feat/pf-84-s05-usage-by-account`; PR in the index row).
+- [x] Implementation commit and PR recorded (branch `feat/pf-84-s05-usage-by-account`, PR [#469](https://github.com/CorbanuCore/CorbanuTerminal/pull/469)).
 - [x] Test output, tmux log and video path linked ([gate](../../../../qa/provider-auth/pf-84/s05-gate.md)).
 - [ ] Code-blind handoff checker passes, or limited-testing agreement recorded.
 - [x] `Done` and `Remaining` ledgers reflect reality.
