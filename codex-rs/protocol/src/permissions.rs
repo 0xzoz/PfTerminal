@@ -3611,7 +3611,8 @@ mod tests {
     #[test]
     fn issue_506_directory_listing_denial_only_denies_listing() {
         let temp = TempDir::new().expect("tempdir");
-        let home = AbsolutePathBuf::from_absolute_path(temp.path().join("home")).expect("home");
+        let base = temp.path().canonicalize().expect("canonical");
+        let home = AbsolutePathBuf::from_absolute_path(base.join("home")).expect("home");
         std::fs::create_dir_all(home.join("tmp")).expect("tmp");
         let entry = FileSystemSandboxEntry::deny_directory_listing(&home);
         assert_eq!(entry.unlistable_directory(), Some(home.clone()));
@@ -3628,7 +3629,7 @@ mod tests {
             ),
             entry,
         ]);
-        let cwd = temp.path();
+        let cwd = base.as_path();
         assert_eq!(policy.get_unlistable_directories(), vec![home.clone()]);
         assert!(policy.has_full_disk_write_access());
         assert!(policy.get_unreadable_roots_with_cwd(cwd).is_empty());

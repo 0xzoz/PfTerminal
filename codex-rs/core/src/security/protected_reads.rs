@@ -196,11 +196,15 @@ pub(crate) async fn denial_explanation(
             .or_else(|| {
                 word(&|path| matcher.is_listing_denied(path)).map(|word| listing_explanation(&word))
             })
-            // #506: `ls` run in the Corbanu home itself.
+            // #506: `ls` run in the Corbanu home itself (the denial names the
+            // folder as `.` or by its name).
             .or_else(|| {
-                matcher
-                    .is_listing_denied(&cwd)
-                    .then(|| listing_explanation(&cwd.display().to_string()))
+                let name = cwd.file_name()?.to_str()?.to_string();
+                (matcher.is_listing_denied(&cwd)
+                    && denial_lines.iter().any(|line| {
+                        line.contains(&name) || line.contains(" .:") || line.contains("'.'")
+                    }))
+                .then(|| listing_explanation(&cwd.display().to_string()))
             })
     })
     .await
@@ -208,6 +212,7 @@ pub(crate) async fn denial_explanation(
 
 /// #442: the protected path `command` names, under Aggressive: a grant for
 /// it would never apply, so none is offered.
+#[cfg(test)]
 pub(crate) async fn protected_path_in_command(
     session: &Session,
     turn: &TurnContext,

@@ -48,6 +48,8 @@ struct Run {
 enum Command {
     /// List the Corbanu home.
     ListHome,
+    /// List it as agents usually spell it: `"$CODEX_HOME"`.
+    ListHomeVariable,
     /// List and read the home's `skills` folder (a runtime entry).
     UseSkills,
 }
@@ -69,6 +71,7 @@ async fn run(
     let path = path.display();
     let command = match command {
         Command::ListHome => format!("ls -a '{path}'"),
+        Command::ListHomeVariable => "ls -a \"$CODEX_HOME\"".to_string(),
         Command::UseSkills => format!("ls '{path}/skills' && cat '{path}/skills/note.md'"),
     };
     let server = start_mock_server().await;
@@ -199,6 +202,21 @@ async fn assert_listing_denied(
         listed.output.contains(warning.as_str()),
         "{context}: {}",
         listed.output
+    );
+    // As agents usually spell it.
+    let variable = run(level, confirm, unified, Command::ListHomeVariable).await?;
+    assert!(
+        !variable.output.contains(CANARY),
+        "{context}: {}",
+        variable.output
+    );
+    assert!(
+        variable
+            .warnings
+            .iter()
+            .any(|warning| warning.starts_with(&format!("{EXPLANATION} `$CODEX_HOME`"))),
+        "{context}: {:?}",
+        variable.warnings
     );
     let skills = run(level, confirm, unified, Command::UseSkills).await?;
     assert!(
