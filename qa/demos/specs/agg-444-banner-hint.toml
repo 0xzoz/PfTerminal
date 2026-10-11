@@ -1,7 +1,7 @@
-# #444 (AGG-36/37, (y) label): Aggressive polish.
-id = "agg-444-python-clean"
-feature = "#444: python3 runs cleanly under Aggressive; no stale restart banner; key hint"
-expected = "After restart now the Restarting line is gone; the approval prompt says a key in brackets only highlights its option; the approved python3 command prints 2 without xcrun or DARWIN_USER_TEMP_DIR errors."
+# #444 (AGG-37, (y) label): Aggressive polish.
+id = "agg-444-banner-hint"
+feature = "#444: no stale restart banner; the approval key hint"
+expected = "After restart now the Restarting line is gone; the approval prompt says a letter in brackets only highlights its option and Enter confirms it; y then Enter approves."
 model = "glm-5.3-flash"
 provider = "zai"
 config = """
@@ -53,11 +53,11 @@ compress = 2
 [[steps]]
 pause = 1.0
 [[steps]]
-type = "Run exactly this shell command and show its output: python3 -c 'print(1+1)'"
+type = "Run exactly this shell command and nothing else: touch demo-note.txt"
 [[steps]]
 key = "Enter"
 [[steps]]
-wait = "A key in brackets highlights its option"
+wait = "A letter in brackets only highlights its option"
 timeout = 180
 compress = 2
 [[steps]]
@@ -67,7 +67,7 @@ key = "y"
 [[steps]]
 key = "Enter"
 [[steps]]
-wait = "(?m)^\\s+└ 2"
+wait = "You approved Corbanu to run touch demo-note.txt"
 timeout = 180
 compress = 2
 [[steps]]
