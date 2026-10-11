@@ -343,6 +343,7 @@ pub fn expected_rules(codex_home: &Path) -> String {
 }
 
 /// Whether `contents` is a rule file this module writes (either setting).
+/// The "pass" form is also the file earlier versions wrote.
 pub fn is_rules_contents(contents: &str) -> bool {
     [NestedAgents::Refuse, NestedAgents::Pass]
         .into_iter()
@@ -352,15 +353,16 @@ pub fn is_rules_contents(contents: &str) -> bool {
 /// Subcommands that start an agent without a person (`exec`, its alias `e`,
 /// and `review`). Under nested-agents "refuse" the rule file forbids them,
 /// so an agent's request is refused before anyone is asked to approve a
-/// command that would only refuse (#441). The launch-time check stays: forms
-/// the rule cannot see (global flags before the subcommand) still refuse.
+/// command that would only refuse (#441). The launch-time check stays the
+/// boundary: launches built at run time or not named on the command line
+/// still refuse when they start.
 pub const NESTED_AGENT_SUBCOMMANDS: [&str; 3] = ["exec", "e", "review"];
 
-/// Subcommands an agent command can never start under Aggressive, whatever
-/// the nested-launch setting (another interactive session, or a server that
-/// reaches the person's sessions): forbidden by the rule file too, so they
-/// are refused before any approval prompt (#441).
-pub const REFUSED_SESSION_SUBCOMMANDS: [&str; 4] = ["resume", "fork", "app-server", "mcp-server"];
+/// Justification of the nested-launch rules. The exec policy's strict
+/// matching (the vault rule's net for wrapped and quoted forms) skips rules
+/// with it: they only refuse earlier what the launch check refuses anyway,
+/// so text such as `git commit -m "fix codex review"` must not match them.
+pub const NESTED_LAUNCH_JUSTIFICATION: &str = "Security level Aggressive: nested agent launches are set to refuse; a person can let `corbanu exec` and `corbanu review` run with Aggressive enforced in /security.";
 
 pub fn rules_contents_for(nested: NestedAgents) -> String {
     let mut contents = String::from(
@@ -371,18 +373,11 @@ pub fn rules_contents_for(nested: NestedAgents) -> String {
             "prefix_rule(pattern = [\"{program}\", \"vault\"], decision = \"forbidden\", justification = \"Security level Aggressive: agents cannot use the Corbanu vault.\")\n"
         ));
     }
-    for program in VAULT_PROGRAMS {
-        for subcommand in REFUSED_SESSION_SUBCOMMANDS {
-            contents.push_str(&format!(
-                "prefix_rule(pattern = [\"{program}\", \"{subcommand}\"], decision = \"forbidden\", justification = \"Security level Aggressive: agents cannot start another interactive or server Corbanu session.\")\n"
-            ));
-        }
-    }
     if nested == NestedAgents::Refuse {
         for program in VAULT_PROGRAMS {
             for subcommand in NESTED_AGENT_SUBCOMMANDS {
                 contents.push_str(&format!(
-                    "prefix_rule(pattern = [\"{program}\", \"{subcommand}\"], decision = \"forbidden\", justification = \"Security level Aggressive: nested agent launches are set to refuse; a person can let `corbanu exec` and `corbanu review` run with Aggressive enforced in /security.\")\n"
+                    "prefix_rule(pattern = [\"{program}\", \"{subcommand}\"], decision = \"forbidden\", justification = \"{NESTED_LAUNCH_JUSTIFICATION}\")\n"
                 ));
             }
         }

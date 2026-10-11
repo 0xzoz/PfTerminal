@@ -519,19 +519,6 @@ async fn issue_441_nested_agent_launches_are_forbidden_before_approval_when_set_
             "{command:?}"
         );
     }
-    // Sessions an agent can never start are refused before any prompt too.
-    for command in [
-        vec!["corbanu", "resume", "--last"],
-        vec!["corbanu", "fork"],
-        vec!["corbanu", "app-server"],
-        vec!["codex", "mcp-server"],
-    ] {
-        assert_eq!(
-            decision(&policy, &command),
-            Decision::Forbidden,
-            "{command:?}"
-        );
-    }
     // Other `corbanu` commands are untouched.
     assert_eq!(
         decision(&policy, &["corbanu", "--version"]),
@@ -547,10 +534,6 @@ async fn issue_441_nested_agent_launches_are_forbidden_before_approval_when_set_
     }
     assert_eq!(
         decision(&policy, &["corbanu", "vault", "list"]),
-        Decision::Forbidden
-    );
-    assert_eq!(
-        decision(&policy, &["corbanu", "resume", "--last"]),
         Decision::Forbidden
     );
 }

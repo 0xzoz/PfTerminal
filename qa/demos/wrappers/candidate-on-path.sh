@@ -6,4 +6,7 @@ REAL="${DEMO_CANDIDATE:?set DEMO_CANDIDATE to the candidate corbanu binary}"
 BIN_DIR="$(mktemp -d)"
 ln -s "$REAL" "$BIN_DIR/corbanu"
 export PATH="$BIN_DIR:$PATH"
-exec "$REAL" "$@"
+"$REAL" "$@"
+status=$?
+rm -r "$BIN_DIR"
+exit $status

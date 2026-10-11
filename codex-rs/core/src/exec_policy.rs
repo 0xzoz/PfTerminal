@@ -913,6 +913,11 @@ fn strict_forbidden_matches(policy: &Policy, command: &[String]) -> Vec<RuleMatc
         if let Some(rule) = rule.as_any().downcast_ref::<PrefixRule>()
             && rule.decision == Decision::Forbidden
             && !rule.pattern.rest.is_empty()
+            // #441: the nested-launch rules only refuse earlier what the
+            // launch check refuses anyway; they match exactly, never loose
+            // text such as a commit message.
+            && rule.justification.as_deref()
+                != Some(codex_security_level::level::NESTED_LAUNCH_JUSTIFICATION)
         {
             rules_by_program
                 .entry(rule.pattern.first.to_ascii_lowercase())

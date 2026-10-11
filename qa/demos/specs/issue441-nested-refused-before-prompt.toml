@@ -63,7 +63,7 @@ type = "Run exactly this shell command once, without changing it: corbanu exec \
 [[steps]]
 key = "Enter"
 [[steps]]
-wait = "(?s)(nested\\s+agent\\s+launches\\s+are\\s+set\\s+to\\s+refuse|Would you like to run).*"
+wait = "(?s)nested\\s+agent\\s+launches\\s+are\\s+set\\s+to\\s+refuse"
 timeout = 240
 compress = 3
 [[steps]]

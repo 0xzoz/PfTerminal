@@ -174,12 +174,19 @@ async fn issue_440_vault_row_says_the_environment_is_allowlisted_under_secretles
         vault.contains("only allowlisted environment variables reach agent commands"),
         "{vault}"
     );
+    // What the launch does: an ordinary name outside the allowlist goes.
+    let mut env = std::collections::HashMap::from([
+        ("PLAIN_VAR".to_string(), "visible".to_string()),
+        ("PATH".to_string(), "/bin".to_string()),
+    ]);
+    codex_protocol::secretless_launch::retain_launch_env(&mut env, |_| false);
+    assert_eq!(env.keys().collect::<Vec<_>>(), vec!["PATH"]);
+    let vault_row = aggressive::ROWS
+        .iter()
+        .find(|(label, _)| *label == "Vault")
+        .expect("vault row");
     assert!(
-        !codex_protocol::secretless_launch::is_launch_env_name_allowed("PLAIN_VAR"),
-        "the row describes what the launch does"
-    );
-    assert!(
-        aggressive::ROWS[3]
+        vault_row
             .1
             .contains("so is every other variable outside an allowlist")
     );
