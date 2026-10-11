@@ -40,7 +40,8 @@ jobs:
     env:
       # sccache cannot cache incremental compilations.
       CARGO_INCREMENTAL: "0"
-      SCCACHE_CACHE_SIZE: 10G
+      # Bounded: each runner keeps one cache within the repository quota.
+      SCCACHE_CACHE_SIZE: 2G
       # Tests must never reach the runner's OS keyring.
       CORBANU_TEST_NO_NATIVE_KEYRING: "1"
       RUST_BACKTRACE: "1"
@@ -82,8 +83,9 @@ jobs:
             echo "SCCACHE_DIR=${CI_BUILD_ROOT}/sccache"
             echo "RUSTC_WRAPPER=$(command -v sccache)"
           } >> "$GITHUB_ENV"
-          echo "lockhash=$(shasum -a 256 Cargo.lock | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "lockhash=$(cat Cargo.lock rust-toolchain.toml | shasum -a 256 | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
       - name: Restore sccache cache
+        id: sccache_restore
         uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: ${{ env.SCCACHE_DIR }}
@@ -107,8 +109,11 @@ jobs:
         run: |
           cargo test --locked --target ${{ inputs.target }} -p codex-core --lib -- security::
 
+      # Main keeps the cache warm; a PR saves only when nothing was restored.
       - name: Save sccache cache
-        if: always() && !cancelled()
+        if: >-
+          always() && !cancelled() &&
+          (github.event_name != 'pull_request' || steps.sccache_restore.outputs.cache-matched-key == '')
         continue-on-error: true
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
