@@ -231,7 +231,8 @@ impl SyntheticMountTarget {
 /// When the policy grants full disk write access and full network access, this
 /// returns `command` unchanged so we avoid unnecessary sandboxing overhead.
 /// If network isolation is requested, we still wrap with bubblewrap so network
-/// namespace restrictions apply while preserving full filesystem access.
+/// namespace restrictions apply while preserving full filesystem access, except
+/// that `/dev` is a fresh minimal device tree (#498).
 pub(crate) fn create_bwrap_command_args(
     command: Vec<String>,
     file_system_sandbox_policy: &FileSystemSandboxPolicy,
@@ -272,6 +273,10 @@ fn create_bwrap_flags_full_filesystem(command: Vec<String>, options: BwrapOption
         "--bind".to_string(),
         "/".to_string(),
         "/".to_string(),
+        // #498: bubblewrap binds `nodev`, so the host's `/dev/null` cannot be
+        // opened under `--bind / /`. Mount a fresh minimal `/dev` (#493).
+        "--dev".to_string(),
+        "/dev".to_string(),
         // Always enter a fresh user namespace so root inside a container does
         // not need ambient CAP_SYS_ADMIN to create the remaining namespaces.
         "--unshare-user".to_string(),
@@ -1571,6 +1576,8 @@ mod tests {
                 "--bind".to_string(),
                 "/".to_string(),
                 "/".to_string(),
+                "--dev".to_string(),
+                "/dev".to_string(),
                 "--unshare-user".to_string(),
                 "--unshare-pid".to_string(),
                 "--unshare-net".to_string(),
