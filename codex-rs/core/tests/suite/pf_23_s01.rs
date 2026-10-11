@@ -758,6 +758,103 @@ async fn issue_442_aggressive_denied_protected_read_is_explained() -> anyhow::Re
     Ok(())
 }
 
+/// Issue #245: a command's additional permissions never reopen a protected
+/// path. An additional read of a file inside a denied folder (the home's
+/// `wallet`) is refused under Aggressive and Moderate, before and after
+/// untrusted content, even when approved; Permissive is unchanged. Most
+/// commands hide the path, so only the sandbox and this check see it.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_245_additional_permissions_never_reopen_a_protected_read() -> anyhow::Result<()> {
+    use codex_protocol::protocol::ReviewDecision;
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let mut wrong = Vec::new();
+    for (level, tainted, requests_on, literal, readable) in [
+        (SecurityLevel::Aggressive, false, true, false, false),
+        (SecurityLevel::Aggressive, true, true, false, false),
+        (SecurityLevel::Aggressive, true, true, true, false),
+        // As Corbanu Terminal launches Aggressive: permission requests off.
+        // Refused with the explanation, not a pointer to the feature flag.
+        (SecurityLevel::Aggressive, false, false, false, false),
+        (SecurityLevel::Moderate, false, true, false, false),
+        (SecurityLevel::Moderate, true, true, false, false),
+        // Unchanged by design (#239): under Moderate a person's fresh
+        // approval of a command that names the protected path lifts the
+        // rules for that command.
+        (SecurityLevel::Moderate, true, true, true, true),
+        (SecurityLevel::Permissive, false, true, false, true),
+        (SecurityLevel::Permissive, true, true, false, true),
+    ] {
+        let home = Arc::new(TempDir::new()?);
+        let root = home.path().canonicalize()?;
+        let wallet = root.join("wallet");
+        std::fs::create_dir_all(&wallet)?;
+        let dummy = wallet.join("pf23-notes.txt");
+        std::fs::write(&dummy, CANARY)?;
+        // Split inside the home folder's own name: neither part names it.
+        let folder = root.to_string_lossy().into_owned();
+        let (head, tail) = folder.split_at(folder.len() - 2);
+        let command = if literal {
+            format!("cat '{}'", dummy.display())
+        } else {
+            format!("cat \"$(printf '{head}%s/wallet/pf23-notes.txt' {tail})\"")
+        };
+        let read = call(
+            "call-read",
+            "shell_command",
+            json!({
+                "command": command,
+                "sandbox_permissions": "with_additional_permissions",
+                "additional_permissions": {
+                    "file_system": { "read": [dummy.to_string_lossy()] },
+                },
+                "justification": "read the notes",
+            }),
+        );
+        let mut steps = vec![read, done_step()];
+        if tainted {
+            steps.insert(0, injected_step());
+        }
+        let (test, captured) = start_turn_in(
+            Some(home),
+            level,
+            AskForApproval::OnRequest,
+            steps,
+            move |config| {
+                if requests_on {
+                    config
+                        .features
+                        .enable(Feature::ExecPermissionApprovals)
+                        .expect("enable exec permission approvals");
+                }
+            },
+        )
+        .await?;
+        // Approved where asked; under Moderate and Aggressive it may be
+        // refused before anyone is asked.
+        while let Some(approval) = next_exec_approval(&test).await {
+            test.codex
+                .submit(Op::ExecApproval {
+                    id: approval.effective_approval_id(),
+                    turn_id: None,
+                    decision: ReviewDecision::Approved,
+                })
+                .await?;
+        }
+        let requests = captured.requests();
+        let output = output_text(&requests[requests.len() - 1], "call-read");
+        let explained = output.contains("protected files") && output.contains("/security");
+        if output.contains(CANARY) != readable || (!readable && !explained) {
+            wrong.push(format!(
+                "{level:?} tainted={tainted} requests_on={requests_on} literal={literal}: {output}"
+            ));
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
 /// PF-23-S03: a level confirmed earlier and stored in `security_state.json`
 /// is enforced after a restart even when the configured level is lower.
 #[cfg(target_os = "macos")]

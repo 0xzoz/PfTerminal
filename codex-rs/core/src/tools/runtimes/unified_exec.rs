@@ -306,6 +306,13 @@ impl Approvable<UnifiedExecRequest> for UnifiedExecRuntime<'_> {
     fn sandbox_permissions(&self, req: &UnifiedExecRequest) -> SandboxPermissions {
         req.sandbox_permissions
     }
+
+    fn additional_permissions<'r>(
+        &self,
+        req: &'r UnifiedExecRequest,
+    ) -> Option<&'r codex_protocol::models::AdditionalPermissionProfile> {
+        req.additional_permissions.as_ref()
+    }
 }
 
 impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecProcess> for UnifiedExecRuntime<'a> {
