@@ -2675,7 +2675,8 @@ impl PluginsManager {
             .curated_repo_sync
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        self.curated_repo_sync_shut_down.store(true, Ordering::SeqCst);
+        self.curated_repo_sync_shut_down
+            .store(true, Ordering::SeqCst);
         if let Some(sync) = slot.as_ref() {
             sync.cancel.store(true, Ordering::SeqCst);
         }
