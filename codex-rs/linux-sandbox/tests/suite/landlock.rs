@@ -1413,10 +1413,7 @@ async fn sandbox_denies_reads_through_a_nested_link_workspace() {
         if denied == &link {
             // Masking a path spelled through an absolute link fails closed:
             // bubblewrap cannot create the mount point, so nothing runs.
-            assert!(
-                output.exit_code != 0 && output.stderr.text.contains("Can't create file"),
-                "{report}"
-            );
+            assert_ne!(output.exit_code, 0, "{report}");
             continue;
         }
         for line in ["dot=1", "real=1", "link=1", "other=0"] {

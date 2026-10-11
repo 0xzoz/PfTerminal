@@ -1833,6 +1833,59 @@ fn denials_hold_through_links_and_nothing_allowed_is_denied() {
     }
 }
 
+/// A more specific allow under a denied folder keeps its own clause, also
+/// when the two are spelled through different sides of a link; a denied
+/// link to a folder denies that folder's clause, as the denial requires.
+#[test]
+fn allows_inside_denied_folders_survive_across_links() {
+    let base = TempDir::new().expect("tempdir");
+    let base = base.path().canonicalize().expect("canonical");
+    let real = base.join("real");
+    let link = base.join("link");
+    fs::create_dir_all(real.join("secret/public")).expect("dirs");
+    fs::write(real.join("secret/key"), "x").expect("key");
+    fs::write(real.join("secret/public/notes"), "ok").expect("notes");
+    std::os::unix::fs::symlink(&real, &link).expect("link");
+    let entry = |path: PathBuf, access| FileSystemSandboxEntry {
+        path: FileSystemPath::Path {
+            path: AbsolutePathBuf::from_absolute_path(path).expect("absolute"),
+        },
+        access,
+        missing_path_behavior: None,
+    };
+    for (denied, public) in [
+        (real.join("secret"), link.join("secret/public")),
+        (link.join("secret"), real.join("secret/public")),
+    ] {
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            entry(base.clone(), FileSystemAccessMode::Read),
+            entry(denied.clone(), FileSystemAccessMode::Deny),
+            entry(public.clone(), FileSystemAccessMode::Read),
+        ]);
+        let args = seatbelt_args(&policy, &base, vec!["/bin/true".to_string()]);
+        let read = generated_clauses(&args, "READABLE_ROOT");
+        for dir in [&real, &link] {
+            assert!(
+                clauses_allow(&read, &dir.join("secret/public/notes")),
+                "{denied:?}: {dir:?}/secret/public/notes"
+            );
+            assert!(
+                !clauses_allow(&read, &dir.join("secret/key")),
+                "{denied:?}: {dir:?}/secret/key"
+            );
+        }
+        assert!(clauses_allow(&read, &base.join("other")), "{denied:?}");
+    }
+    // A denied link to a readable folder denies the folder itself.
+    let policy = FileSystemSandboxPolicy::restricted(vec![
+        entry(real.clone(), FileSystemAccessMode::Read),
+        entry(link.clone(), FileSystemAccessMode::Deny),
+    ]);
+    let args = seatbelt_args(&policy, &base, vec!["/bin/true".to_string()]);
+    let read = generated_clauses(&args, "READABLE_ROOT");
+    assert!(!clauses_allow(&read, &real.join("secret/public/notes")));
+}
+
 /// Without denials (Permissive's shape) reads stay unrestricted.
 #[test]
 fn policies_without_denials_keep_full_read_access() {
@@ -1860,9 +1913,10 @@ fn sandboxed_commands_cannot_read_denied_files_through_a_nested_link() {
     let tmp = tempfile::tempdir_in("/tmp").expect("tempdir in /tmp");
     let real = base.join("real");
     let link = base.join("link");
+    // Missing denied paths are covered by the creation check below.
     for scenario in link_scenarios(&base, tmp.path())
         .into_iter()
-        .filter(|scenario| scenario.cwd == link)
+        .filter(|scenario| scenario.name == "nested link workspace")
     {
         let name = scenario.name;
         let policy = workspace_policy_denying(&scenario.denied);
