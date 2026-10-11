@@ -1256,9 +1256,10 @@ async fn pf_23_s02_full_write_profile_keeps_protected_files_read_only() {
     );
 }
 
-/// #488 parity: bubblewrap masks denied paths after binding the workspace,
-/// and mounts follow links, so a workspace opened through a nested link
-/// keeps a denied file unreadable whichever spelling denies or reads it.
+/// #488: a workspace opened through a nested link keeps a denied file
+/// unreadable whichever spelling denies or reads it. Bubblewrap binds the
+/// workspace at its real path, so a denial spelled by the real path must be
+/// masked after that bind.
 #[tokio::test]
 async fn sandbox_denies_reads_through_a_nested_link_workspace() {
     if should_skip_bwrap_tests().await {
