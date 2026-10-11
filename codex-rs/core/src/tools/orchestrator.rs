@@ -225,6 +225,7 @@ impl ToolOrchestrator {
                 tool_ctx,
                 ApprovalReviewer::User,
                 &otel,
+                /*record_decline*/ false,
             )
             .await;
             pending.answered();
@@ -295,6 +296,7 @@ impl ToolOrchestrator {
                     tool_ctx,
                     ApprovalReviewer::User,
                     &otel,
+                    /*record_decline*/ true,
                 )
                 .await?;
                 already_approved = true;
@@ -318,6 +320,7 @@ impl ToolOrchestrator {
                         tool_ctx,
                         ApprovalReviewer::Guardian,
                         &otel,
+                        /*record_decline*/ true,
                     )
                     .await?;
                     already_approved = true;
@@ -367,6 +370,7 @@ impl ToolOrchestrator {
                     tool_ctx,
                     reviewer,
                     &otel,
+                    /*record_decline*/ true,
                 )
                 .await?;
                 already_approved = true;
@@ -626,6 +630,7 @@ impl ToolOrchestrator {
                             ApprovalReviewer::for_turn(turn_ctx)
                         },
                         &otel,
+                        /*record_decline*/ true,
                     )
                     .await?;
                     if let Some(action) = &post_taint {

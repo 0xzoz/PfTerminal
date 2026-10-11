@@ -1327,6 +1327,11 @@ impl App {
                 }
             },
             AppEvent::RestartForSecurityLevel => {
+                // #436: never restart into a session without its provider key.
+                if let Some(blocked) = crate::security::restart::restart_blocker() {
+                    self.chat_widget.add_error_message(blocked);
+                    return Ok(AppRunControl::Continue);
+                }
                 self.show_shutdown_feedback(tui)?;
                 let _ = self
                     .handle_exit_mode(app_server, ExitMode::ShutdownFirst)
@@ -2763,12 +2768,18 @@ impl App {
                 generation,
                 status_host,
                 statuses,
+                accounts,
             } => self.provider_manager_statuses_resolved(
                 generation,
                 status_host,
                 statuses,
+                accounts,
                 app_server,
             ),
+            AppEvent::ProviderAccount(event) => {
+                self.handle_provider_account_event(tui, app_server, event)
+                    .await;
+            }
             AppEvent::ProviderManagerMetadataResolved {
                 generation,
                 metadata,
@@ -5051,6 +5062,7 @@ impl App {
                         return Ok(AppRunControl::Continue);
                     }
                 };
+                let mut started_crew_root = false;
                 let (agent_class, prepared_root_crew_id) = if role
                     == crate::spawn_orchestration::SpawnRole::Nazgul
                 {
@@ -5080,8 +5092,11 @@ impl App {
                         }
                     }
                 } else {
-                    match self.custom_spawn_member_agent_class(role) {
-                        Ok(agent_class) => (agent_class, None),
+                    match self.custom_spawn_member_agent_class_under(role, &logical_parent_node_id) {
+                        Ok((agent_class, started)) => {
+                            started_crew_root = started;
+                            (agent_class, None)
+                        }
                         Err(err) => {
                             self.chat_widget.add_error_message(err.to_string());
                             return Ok(AppRunControl::Continue);
@@ -5180,6 +5195,9 @@ impl App {
                     Err(err) => {
                         if let Some(crew_id) = prepared_root_crew_id.as_deref() {
                             self.abort_prepared_custom_spawn_root(crew_id);
+                        }
+                        if started_crew_root {
+                            self.abort_started_custom_spawn_root();
                         }
                         tracing::error!(
                             error = ?err,

@@ -9,6 +9,7 @@ use codex_app_server_protocol::ThreadSettings;
 use codex_app_server_protocol::ThreadSettingsUpdateParams;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ModeKind;
+use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::PermissionProfile;
 
 impl App {
@@ -188,6 +189,36 @@ impl App {
     }
 }
 
+/// #437: [`ThreadSettings`] carries only the legacy sandbox projection of a
+/// thread's permissions, which drops denied reads (the protected paths of the
+/// Aggressive profile). Rebuilding the profile from it after every turn made
+/// `/security` claim that approved commands leave the sandbox and that the
+/// vault is readable. The profile already known is kept while its projection
+/// and active profile match the update.
+/// `materialized` is `current` with the runtime workspace roots applied, the
+/// form the app server projects.
+pub(crate) fn permission_profile_for_thread_settings(
+    current: &PermissionProfile,
+    materialized: Option<&PermissionProfile>,
+    current_active: Option<&ActivePermissionProfile>,
+    settings: &ThreadSettings,
+) -> PermissionProfile {
+    let sandbox_policy = settings.sandbox_policy.to_core();
+    let active = settings.active_permission_profile.clone().map(Into::into);
+    let unchanged = |profile: &PermissionProfile| {
+        codex_sandboxing::compatibility_sandbox_policy_for_permission_profile(
+            profile,
+            settings.cwd.as_path(),
+        ) == sandbox_policy
+    };
+    if current_active == active.as_ref()
+        && (unchanged(current) || materialized.is_some_and(unchanged))
+    {
+        return current.clone();
+    }
+    PermissionProfile::from_legacy_sandbox_policy_for_cwd(&sandbox_policy, settings.cwd.as_path())
+}
+
 fn apply_thread_settings_to_session(session: &mut ThreadSessionState, settings: &ThreadSettings) {
     if settings.collaboration_mode.mode == ModeKind::Default {
         session.model = settings.model.clone();
@@ -197,9 +228,11 @@ fn apply_thread_settings_to_session(session: &mut ThreadSessionState, settings: 
     session.service_tier = settings.service_tier.clone();
     session.approval_policy = settings.approval_policy;
     session.approvals_reviewer = settings.approvals_reviewer.to_core();
-    session.permission_profile = PermissionProfile::from_legacy_sandbox_policy_for_cwd(
-        &settings.sandbox_policy.to_core(),
-        settings.cwd.as_path(),
+    session.permission_profile = permission_profile_for_thread_settings(
+        &session.permission_profile,
+        /*materialized*/ None,
+        session.active_permission_profile.as_ref(),
+        settings,
     );
     session.active_permission_profile = settings.active_permission_profile.clone().map(Into::into);
     session.set_cwd_retargeting_implicit_runtime_workspace_root(settings.cwd.clone());

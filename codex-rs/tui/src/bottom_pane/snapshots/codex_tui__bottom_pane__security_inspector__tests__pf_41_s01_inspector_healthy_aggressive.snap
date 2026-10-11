@@ -9,7 +9,8 @@ Observed 0s ago, policy generation 2.1
 Level
   Saved: Aggressive [configured: /security]
   Core config: Permissive [configured: config layers]
-  [set] Active this run: Aggressive, every row verified at launch [resolved: launch check]
+  [set] Active this run: Aggressive; the launch check passed for the session rows (runtime controls
+      below show what is observed now) [resolved: launch check]
   [on] Live policy: Aggressive in force; next start Aggressive; kill switch off; generation 2.1
       [observed: Core policy]
 
@@ -26,7 +27,8 @@ This session
 
 Runtime controls
   [on] Secretless launch: environment allowlist and launch checks armed [observed: this process]
-  [on] Output gate: managed secrets are removed from output [observed: this process]
+  [on] Output gate: managed secrets and stored vault credentials are removed from output (values
+      added from another terminal: from the next turn) [observed: this process]
   [unobserved] Model key broker: installed; its health is not probed [installed: this process]
   [off] Credential broker: off (isolated_credential_broker) [resolved: features]
   [on] Untrusted content: labelled; none in this session yet [observed: session]
@@ -43,8 +45,9 @@ Grants
 
 Agents
   [on] main session: Aggressive [observed: Core policy]
-  [set] Nested agents: refuse (default): agent commands that start `corbanu exec` or `review` are
-      refused while Aggressive is enforced [configured: /security]
+  [set] Nested agents: refuse (default): agent commands that start another agent (`corbanu exec`,
+      `review`, `resume`, `fork`, a new session, `app-server` or `mcp-server`) are refused while
+      Aggressive is enforced [configured: /security]
 
 Not contained
   [not contained] MCP servers: docs run outside the OS sandbox with the environment allowlist;

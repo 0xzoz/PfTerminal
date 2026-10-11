@@ -188,6 +188,7 @@ pub use provider_accounts::other_provider_account_error;
 pub use provider_accounts::session_account_error;
 pub use provider_accounts::split_account_selection;
 pub(crate) use provider_accounts::stamp_provider_account;
+pub use provider_accounts::supports_named_accounts;
 pub use provider_accounts::unused_other_provider_account_error;
 mod requirements;
 mod resolved_permission_profile;
@@ -3802,6 +3803,7 @@ impl Config {
             }
             crate::security::disclosure_gate::arm(codex_home.as_path())
                 .map_err(|err| std::io::Error::new(std::io::ErrorKind::PermissionDenied, err))?;
+            crate::security::disclosure_gate::watch_vault(codex_home.as_path());
             if !features.enabled(Feature::SecretlessAgentLaunch) {
                 startup_warnings.push(
                     "secret_output_gate: without secretless_agent_launch, agent commands can read the vault themselves (for example `corbanu vault auth-helper`); values revealed outside Core are not gated"

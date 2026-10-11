@@ -1883,6 +1883,7 @@ async fn collab_receiver_notification_caches_thread_without_app_server_read() {
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
+                provider_account: None,
                 agents_states: HashMap::new(),
             },
         }),
@@ -1923,6 +1924,7 @@ async fn collab_receiver_notification_does_not_cache_not_found_thread() {
                 prompt: Some("hello".to_string()),
                 model: None,
                 reasoning_effort: None,
+                provider_account: None,
                 agents_states: HashMap::from([(
                     receiver_thread_id.to_string(),
                     codex_app_server_protocol::CollabAgentState {
@@ -1963,6 +1965,7 @@ async fn collab_receiver_notification_caches_result_preview() {
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
+                provider_account: None,
                 agents_states: HashMap::from([(
                     receiver_thread_id.to_string(),
                     codex_app_server_protocol::CollabAgentState {
@@ -3957,6 +3960,55 @@ async fn custom_spawn_core_classes_match_persisted_crew_identity() {
     assert_eq!(crew.spec.crew_id, crew_id);
 }
 
+/// #435 (AGG-20, G12/G12b): `/spawn` → Troll before any Nazgul ended with
+/// "Custom crew root was not created." and no reason. The Troll now starts the
+/// crew rooted at its parent (the main pane), and a spawn that fails drops it.
+#[tokio::test]
+async fn sec_435_first_troll_starts_the_crew_at_its_parent() {
+    use crate::spawn_orchestration::SpawnRole;
+    let mut app = make_test_app().await;
+    // The milestone failure.
+    let err = app
+        .custom_spawn_member_agent_class(SpawnRole::Troll)
+        .expect_err("no crew yet");
+    assert!(err.to_string().contains("spawn a Nazgul first"), "{err}");
+
+    // The parent `/spawn` gives a Troll: the root node, `pane:codex-main`.
+    let root = app.spawn_root_node_id();
+    assert_eq!(root, format!("pane:{CODEX_MAIN_PANE_ID}"));
+    let (class, started) = app
+        .custom_spawn_member_agent_class_under(SpawnRole::Troll, &root)
+        .expect("a first Troll starts the crew");
+    assert!(started);
+    let codex_protocol::crew::AgentClass::CrewMember {
+        logical_member_id, ..
+    } = class
+    else {
+        panic!("a Troll is a crew member");
+    };
+    assert_eq!(logical_member_id, "troll-1");
+    let crew = app.spawn_crew.as_ref().expect("crew started");
+    assert_eq!(
+        crew.member_node_by_id.get("nazgul").map(String::as_str),
+        Some(root.as_str())
+    );
+
+    // The spawn failed: the crew it started is dropped, so a Nazgul can
+    // still be created afterwards.
+    app.abort_started_custom_spawn_root();
+    assert!(app.spawn_crew.is_none());
+    app.preflight_new_custom_spawn_root()
+        .expect("a Nazgul can still be created");
+
+    // With a crew already present nothing new is started.
+    app.ensure_custom_spawn_root(CODEX_MAIN_PANE_ID)
+        .expect("bind custom root");
+    let (_, started) = app
+        .custom_spawn_member_agent_class_under(SpawnRole::Troll, CODEX_MAIN_PANE_ID)
+        .expect("second Troll");
+    assert!(!started);
+}
+
 #[tokio::test]
 async fn native_task_agent_role_does_not_make_it_a_persistent_spawn_crew_member() {
     let mut app = make_test_app().await;
@@ -4775,6 +4827,7 @@ async fn stale_receiver_running_status_does_not_hide_completed_orc_report() {
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
+                provider_account: None,
                 agents_states: HashMap::from([(
                     orc_thread_id.to_string(),
                     codex_app_server_protocol::CollabAgentState {
@@ -14076,6 +14129,7 @@ async fn replace_chat_widget_reseeds_collab_agent_metadata_for_replay() {
                             prompt: None,
                             model: None,
                             reasoning_effort: None,
+                            provider_account: None,
                             agents_states: HashMap::new(),
                         },
                     },
@@ -14947,6 +15001,7 @@ async fn stale_provider_manager_claude_recovery_source_is_inert() -> Result<()> 
                 generation,
                 status_host,
                 statuses,
+                ..
             }) = app_event_rx.recv().await
             {
                 break (generation, status_host, statuses);
@@ -14955,7 +15010,13 @@ async fn stale_provider_manager_claude_recovery_source_is_inert() -> Result<()> 
     })
     .await
     .expect("timed out waiting for provider statuses");
-    app.provider_manager_statuses_resolved(generation, status_host, statuses, &app_server);
+    app.provider_manager_statuses_resolved(
+        generation,
+        status_host,
+        statuses,
+        /*accounts*/ None,
+        &app_server,
+    );
     let (provider_id, target, mut status) = {
         let host = app.provider_management_host.as_ref().unwrap();
         let entry = host
@@ -15036,6 +15097,7 @@ async fn provider_manager_stale_api_key_completion_is_inert_and_current_settles(
                 generation,
                 status_host,
                 statuses,
+                ..
             }) = app_event_rx.recv().await
             {
                 break (generation, status_host, statuses);
@@ -15044,7 +15106,13 @@ async fn provider_manager_stale_api_key_completion_is_inert_and_current_settles(
     })
     .await
     .expect("timed out waiting for provider statuses");
-    app.provider_manager_statuses_resolved(generation, status_host.clone(), statuses, &app_server);
+    app.provider_manager_statuses_resolved(
+        generation,
+        status_host.clone(),
+        statuses,
+        /*accounts*/ None,
+        &app_server,
+    );
     let initial_status_count = app
         .provider_management_host
         .as_ref()
@@ -15055,6 +15123,7 @@ async fn provider_manager_stale_api_key_completion_is_inert_and_current_settles(
         generation.wrapping_add(1),
         status_host.clone(),
         Vec::new(),
+        /*accounts*/ None,
         &app_server,
     );
     assert_eq!(
@@ -15102,6 +15171,7 @@ async fn provider_manager_stale_api_key_completion_is_inert_and_current_settles(
         generation,
         status_host.clone(),
         Vec::new(),
+        /*accounts*/ None,
         &app_server,
     );
     assert!(matches!(
@@ -15164,7 +15234,13 @@ async fn provider_manager_stale_api_key_completion_is_inert_and_current_settles(
         app.provider_management_host.as_ref().unwrap().phase(),
         codex_provider_auth::ProviderManagementPhase::Persisting { .. }
     ));
-    app.provider_manager_statuses_resolved(generation, status_host, Vec::new(), &app_server);
+    app.provider_manager_statuses_resolved(
+        generation,
+        status_host,
+        Vec::new(),
+        /*accounts*/ None,
+        &app_server,
+    );
     assert!(matches!(
         app.provider_management_host.as_ref().unwrap().phase(),
         codex_provider_auth::ProviderManagementPhase::Persisting { .. }
