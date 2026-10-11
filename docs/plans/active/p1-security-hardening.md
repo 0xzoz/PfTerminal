@@ -12,7 +12,7 @@ activation_basis: "Travis Good's 2026-10-06 decision 3 (deferred security featur
 target_release: "TBD"
 deadline: "TBD"
 created: 2026-10-06
-updated: 2026-10-10
+updated: 2026-10-11
 product_spec:
   file: docs/corbanu-product-spec.md
   heading: "P0 /security levels"
@@ -21,6 +21,9 @@ implementation_worktrees:
   - path: "/Volumes/CorbanuDrive/Corbanu/worktrees/pf13-s07-20261007"
     branch: "feat/pf-13-s07-qualification-20261007"
     base_commit: "64137b71894fb15fb9d6bf754dc69c41d4cb0406"
+  - path: "/Volumes/CorbanuDrive/Corbanu/worktrees/aggressive-ms-20261010"
+    branch: "qa/aggressive-milestone-20261010"
+    base_commit: "9ead7a57558f8f0639511cc5cbcc8ec726756ed3"
 ---
 
 # P1 security hardening
@@ -49,7 +52,7 @@ Open when P0 closed on 2026-10-08. Nothing here is done; each item names where i
 | Item | From | Next step |
 | --- | --- | --- |
 | [PF-13-S07](../../sprints/current/p1-security-hardening/pf-13-s07-integrated-credential-boundary-qualification.md) final archive | P0 convergence | Rerun the Linux canary on the current candidate; archive after the Aggressive milestone sign-off |
-| Milestone **Aggressive ships** | P0 delivery gate | Isolated code-blind VM run (root `AGENTS.md`) plus named human sign-off; not run yet |
+| Milestone **Aggressive ships** | P0 delivery gate | Code-blind VM run done 2026-10-10/11 on `9ead7a5755` ([record](../../../qa/security-levels/milestones/aggressive-20261010/README.md)): 17 passed, 15 failed, 7 blocked of 39; defects #434–#445. Not passed; Travis's sign-off decision requested |
 | Milestone **Moderate ships** | P0 delivery gate | Same; covers PF-28-S02, PF-23 and the Moderate picker entry |
 | Milestone **flag removal** | P0 delivery gate | Code-blind run, sign-off, PF-21 Permissive compatibility against `3c1b2f6cbe11657ff4e3b72b11db029c9e7a92eb`, no critical finding open; then PF-26 |
 | [PF-28-S02](../../sprints/archive/p0-security-levels/pf-28-s02-reflected-secret-response-scrubbing.md) items | archived 2026-10-08 | Latency targets (need product authority); per-type scrubbing; per-session stream state; recorded encoding/HEAD/HTTP2 limits |
@@ -57,10 +60,10 @@ Open when P0 closed on 2026-10-08. Nothing here is done; each item names where i
 | [PF-29-S01](../../sprints/archive/p0-security-levels/pf-29-s01-protected-mode-inventory.md) items | archived 2026-10-08 | MCP servers, hooks and notify "not contained"; Claude panes not inventoried; exec-provider sign-in consent; `.env` in another `-C` folder |
 | [PF-29-S02](../../sprints/archive/p0-security-levels/pf-29-s02-human-secret-migration.md) items | archived 2026-10-08 | Migrate config literals, env variables and memories; revoke broker leases on migration |
 | [PF-41-S01](../../sprints/archive/p0-security-levels/pf-41-s01-effective-security-inspector.md) items | archived 2026-10-08 | Full core/TUI suites in post-merge CI; observe both broker healths (never shown green until then); thread for launch-contract denials |
-| PF-83 TUI bug: typed text can approve an open prompt with "don't ask again" | P0 TUI lane | Open; fix before Aggressive ships |
-| PF-83 TUI bug: "Enable full access?" defaults to Cancel, no message when cancelled | P0 TUI lane | Message fix on main (`6c003827ad`); verify both parts on the next candidate |
-| PF-83 TUI bug: declined request renders "You canceled…" and "Ran … (no output)" | P0 TUI lane | Fix pf83-unran-18 on main; verify on the next candidate |
-| PF-83 TUI bug: `zai-anthropic` `glm-5.2` lacked a max-output limit | P0 TUI lane | Catalog fix on main (`fa4d24eafb`); verify on the next candidate |
+| PF-83 TUI bug: typed text can approve an open prompt with "don't ask again" | P0 TUI lane | Fixed by #174 (PR #187); verified on `9ead7a5755` by AGG-07 ([record](../../../qa/security-levels/milestones/aggressive-20261010/README.md)) |
+| PF-83 TUI bug: "Enable full access?" defaults to Cancel, no message when cancelled | P0 TUI lane | Verified on `9ead7a5755` by AGG-31: Cancel is the default, and cancelling says "Full access was not enabled; permissions are unchanged." ([record](../../../qa/security-levels/milestones/aggressive-20261010/README.md)) |
+| PF-83 TUI bug: declined request renders "You canceled…" and "Ran … (no output)" | P0 TUI lane | Verified fixed on `9ead7a5755` by AGG-08: "Did not run … / Approval declined", no "Ran" line ([record](../../../qa/security-levels/milestones/aggressive-20261010/README.md)) |
+| PF-83 TUI bug: `zai-anthropic` `glm-5.2` lacked a max-output limit | P0 TUI lane | Verified fixed on `9ead7a5755` by AGG-A01: turns complete under Permissive and Aggressive ([record](../../../qa/security-levels/milestones/aggressive-20261010/README.md)) |
 | PF-27-S06 unplaced follow-ups | [PF-27-S06](../../sprints/archive/p1-security-hardening/pf-27-s06-windows-broker-and-launch.md) (archived 2026-10-08) | File tools other than patches under the Windows launch contract; elevated-sandbox profile reads (`~/.git-credentials`, `.ssh`, `.npmrc`, `.config/gh`) |
 | PF-27-S06/S07 Windows follow-ups | [S06](../../sprints/archive/p1-security-hardening/pf-27-s06-windows-broker-and-launch.md), [S07](../../sprints/archive/p1-security-hardening/pf-27-s07-windows-hardening-follow-ups.md) (archived 2026-10-08, accepted with known limits) | #300 decided fail closed, being implemented; #301/#304 decided rule-driven removal, draft PR #326; #323 open; #307 and #320 fixed (PRs #321, #327); PF-27-S08/S09 planned |
 | PF-27-S09 follow-ups | [PF-27-S09](../../sprints/archive/p1-security-hardening/pf-27-s09-windows-model-client-auth.md) (archived 2026-10-10, accepted with known limits) | #389 passed with limits (PR #395); #390 fixed (PR #399); #391: `broker_model_auth` is on by default under Aggressive on macOS, Linux and Windows, an explicit setting wins, and it fails closed ([evidence](../../../qa/security/issue-391/README.md)). The flag stays default off for Permissive and Moderate, a separate later decision |
@@ -217,7 +220,7 @@ PF-35's qualification baseline, carried from the P0 plan. Changing a target need
 
 ## Implementation sequence
 
-1. Qualification lane: Aggressive milestone (code-blind run, sign-off), then PF-13-S07 archive; Moderate milestone.
+1. Qualification lane: Aggressive milestone (code-blind run done 2026-10-11, not passed; sign-off decision pending), then PF-13-S07 archive; Moderate milestone.
 2. Broker lane: PF-27-S06 to S09 completed (S06 and S07 2026-10-08, S08 2026-10-09, S09 2026-10-10); free.
 3. The deferred features in the map order above, each under the per-sprint gate.
 4. Flag removal milestone, then PF-26-S04 → S02 → S03.
@@ -248,7 +251,7 @@ Windows records need a real Windows machine for this step.
 
 | Milestone | Tester | Result |
 | --- | --- | --- |
-| Aggressive ships | named by release owner | pending |
+| Aggressive ships | Travis Good (requested 2026-10-11) | pending: code-blind run not passed ([record](../../../qa/security-levels/milestones/aggressive-20261010/README.md)) |
 | Moderate ships | named by release owner | pending |
 | Flag removal | named by release owner | pending |
 
