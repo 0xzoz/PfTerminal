@@ -47,6 +47,7 @@ use codex_network_proxy::NetworkProxy;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::SandboxErr;
 use codex_protocol::models::AdditionalPermissionProfile;
+use codex_protocol::protocol::NetworkPolicyRuleAction;
 use codex_protocol::protocol::ReviewDecision;
 use codex_sandboxing::SandboxCommand;
 use codex_sandboxing::SandboxablePreference;
@@ -104,6 +105,11 @@ pub struct UnifiedExecApprovalKey {
 pub struct UnifiedExecRuntime<'a> {
     manager: &'a UnifiedExecProcessManager,
     shell_mode: UnifiedExecShellMode,
+    /// #466: whether the command is shown as running because of a review
+    /// that approved it. A review shows it (the app server starts its item);
+    /// a refusal ends it there. An approved one must end even when the
+    /// command then fails to start.
+    shown_by_review: bool,
 }
 
 fn unified_exec_options(
@@ -145,7 +151,17 @@ impl<'a> UnifiedExecRuntime<'a> {
         Self {
             manager,
             shell_mode,
+            shown_by_review: false,
         }
+    }
+
+    /// Whether the last review of this command (the person's or the
+    /// automatic reviewer's) approved it, leaving it shown as running. A
+    /// permission hook shows nothing and leaves this as it was; a cached
+    /// session approval counts as approved (the command then ends on screen
+    /// even if no prompt showed it).
+    pub(crate) fn shown_by_review(&self) -> bool {
+        self.shown_by_review
     }
 }
 
@@ -171,6 +187,26 @@ impl Approvable<UnifiedExecRequest> for UnifiedExecRuntime<'_> {
             sandbox_permissions: req.sandbox_permissions,
             additional_permissions: req.additional_permissions.clone(),
         }]
+    }
+
+    fn note_review_decision(&mut self, decision: &ReviewDecision, ctx: &ApprovalCtx<'_>) {
+        // A person's network review neither shows nor ends the command.
+        // (Unified exec never retries with a network context today, so an
+        // automatic review never gets one either.)
+        if ctx.network_approval_context.is_some() {
+            return;
+        }
+        self.shown_by_review = match decision {
+            ReviewDecision::Denied { .. } | ReviewDecision::TimedOut | ReviewDecision::Abort => {
+                false
+            }
+            ReviewDecision::NetworkPolicyAmendment {
+                network_policy_amendment,
+            } => network_policy_amendment.action != NetworkPolicyRuleAction::Deny,
+            ReviewDecision::Approved
+            | ReviewDecision::ApprovedExecpolicyAmendment { .. }
+            | ReviewDecision::ApprovedForSession => true,
+        };
     }
 
     fn start_approval_async<'b>(
@@ -625,6 +661,52 @@ mod tests {
             }
             other => panic!("expected timeout-or-cancellation expiration, got {other:?}"),
         }
+    }
+
+    /// #466: the last review of the command decides whether Core must end
+    /// it; a network review neither shows nor ends it.
+    #[tokio::test]
+    async fn the_last_command_review_decides_whether_core_ends_it() {
+        use codex_protocol::approvals::NetworkApprovalContext;
+        use codex_protocol::approvals::NetworkApprovalProtocol;
+        use codex_protocol::approvals::NetworkPolicyAmendment;
+        let (session, turn, _rx) = crate::session::tests::make_session_and_context_with_rx().await;
+        let ctx = |network: bool| ApprovalCtx {
+            session: &session,
+            turn: &turn,
+            call_id: "call-466",
+            retry_reason: None,
+            network_approval_context: network.then(|| NetworkApprovalContext {
+                host: "example.com".to_string(),
+                protocol: NetworkApprovalProtocol::Https,
+            }),
+            fresh_human_authority: false,
+        };
+        let amendment = |action| ReviewDecision::NetworkPolicyAmendment {
+            network_policy_amendment: NetworkPolicyAmendment {
+                host: "example.com".to_string(),
+                action,
+            },
+        };
+        let manager = UnifiedExecProcessManager::default();
+        let mut runtime = UnifiedExecRuntime::new(&manager, UnifiedExecShellMode::Direct);
+        assert!(!runtime.shown_by_review());
+        for (decision, shown) in [
+            (ReviewDecision::Approved, true),
+            (ReviewDecision::denied("no"), false),
+            (ReviewDecision::ApprovedForSession, true),
+            (ReviewDecision::TimedOut, false),
+            (amendment(NetworkPolicyRuleAction::Allow), true),
+            (ReviewDecision::Abort, false),
+            (amendment(NetworkPolicyRuleAction::Deny), false),
+        ] {
+            runtime.note_review_decision(&decision, &ctx(/*network*/ false));
+            assert_eq!(runtime.shown_by_review(), shown, "{decision:?}");
+        }
+        // A network review after an approval leaves the command shown.
+        runtime.note_review_decision(&ReviewDecision::Approved, &ctx(/*network*/ false));
+        runtime.note_review_decision(&ReviewDecision::denied("no"), &ctx(/*network*/ true));
+        assert!(runtime.shown_by_review());
     }
 
     #[tokio::test]
