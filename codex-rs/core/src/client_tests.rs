@@ -3234,6 +3234,42 @@ fn chat_freeform_tool_wrappers_are_never_strict() {
 }
 
 #[test]
+fn namespaced_calls_replay_under_their_flat_names() {
+    let call = ResponseItem::FunctionCall {
+        id: None,
+        name: "lookup".to_string(),
+        namespace: Some("mcp__orders".to_string()),
+        arguments: "{}".to_string(),
+        call_id: "call-mcp".to_string(),
+        encrypted_function_args: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+
+    let mut chat_messages = Vec::new();
+    super::append_chat_messages_for_response_items(
+        vec![call.clone()],
+        &mut chat_messages,
+        &mut std::collections::HashSet::new(),
+        ChatReasoningProtocol::Independent,
+    );
+    assert_eq!(
+        chat_messages[0].tool_calls[0].function.name,
+        "mcp__orders__lookup"
+    );
+
+    let mut anthropic_messages = Vec::new();
+    super::append_anthropic_message_for_response_item(
+        call,
+        &mut anthropic_messages,
+        &mut std::collections::HashSet::new(),
+    );
+    assert_eq!(
+        anthropic_messages[0]["content"][0]["name"],
+        "mcp__orders__lookup"
+    );
+}
+
+#[test]
 fn chat_replay_keeps_malformed_tool_calls_and_their_errors_visible() {
     let call = |arguments: &str, call_id: &str| ResponseItem::FunctionCall {
         id: None,

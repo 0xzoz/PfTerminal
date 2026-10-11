@@ -134,6 +134,7 @@ impl ToolCallRuntime {
         source: ToolCallSource,
         cancellation_token: CancellationToken,
     ) -> impl std::future::Future<Output = Result<AnyToolResult, FunctionCallError>> {
+        let call = self.router.resolve_flat_tool_call(call);
         if self
             .step_context
             .turn

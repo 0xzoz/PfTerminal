@@ -4866,6 +4866,17 @@ fn chat_replay_function_arguments(arguments: String) -> String {
     json!({ "malformed_arguments": raw }).to_string()
 }
 
+/// Chat Completions and Anthropic Messages have no namespaces, so a namespaced
+/// call recorded on the Responses wire is replayed under its flat name.
+fn replay_tool_name(namespace: Option<String>, name: String) -> String {
+    match namespace {
+        Some(namespace) => crate::tools::flat_tool_names::preferred_flat_tool_name(
+            &codex_tools::ToolName::namespaced(namespace, name),
+        ),
+        None => name,
+    }
+}
+
 fn push_chat_tool_call(
     messages: &mut Vec<ChatMessage>,
     call_id: String,
@@ -5007,19 +5018,27 @@ fn append_chat_message_for_response_item(
         }
         ResponseItem::FunctionCall {
             name,
+            namespace,
             arguments,
             call_id,
             ..
         } => {
             let arguments = chat_replay_function_arguments(arguments);
-            push_chat_tool_call(messages, call_id, name, arguments);
+            push_chat_tool_call(
+                messages,
+                call_id,
+                replay_tool_name(namespace, name),
+                arguments,
+            );
         }
         ResponseItem::CustomToolCall {
             name,
+            namespace,
             input,
             call_id,
             ..
         } => {
+            let name = replay_tool_name(namespace, name);
             // Chat Completions exposes freeform tools as `{"input": string}`
             // functions, so replay custom calls in that same shape.
             let arguments = json!({ "input": input }).to_string();
@@ -5328,16 +5347,19 @@ fn append_anthropic_message_for_response_item(
         }
         ResponseItem::FunctionCall {
             name,
+            namespace,
             arguments,
             call_id,
             ..
         }
         | ResponseItem::CustomToolCall {
             name,
+            namespace,
             input: arguments,
             call_id,
             ..
         } => {
+            let name = replay_tool_name(namespace, name);
             let input = match serde_json::from_str::<Value>(&arguments) {
                 Ok(input) => input,
                 Err(_) => {

@@ -3,12 +3,15 @@ use crate::agent::next_thread_spawn_depth;
 use crate::connectors::AppInfo;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::mcp_tool_exposure::build_mcp_tool_runtimes;
+use crate::security::protected_surface::ToolOrigin;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::tools::code_mode::default_exec_yield_time_override_ms;
 use crate::tools::code_mode::execute_spec::create_code_mode_tool;
 use crate::tools::context::ToolInvocation;
 use crate::tools::effective_tool_mode;
+use crate::tools::flat_tool_names::FlatToolNames;
+use crate::tools::flat_tool_names::flatten_namespaced_tools;
 use crate::tools::handlers::ApplyPatchHandler;
 use crate::tools::handlers::CodeModeExecuteHandler;
 use crate::tools::handlers::CodeModeWaitHandler;
@@ -277,9 +280,9 @@ pub(crate) fn finalize_tool_router(
 
     let code_mode_tool_names = register_code_mode_executors(turn_context, &mut registry);
 
-    let model_visible_specs =
+    let (model_visible_specs, flat_tool_names) =
         build_model_visible_specs(turn_context, &registry, &code_mode_tool_names, hosted_specs);
-    ToolRouter::from_parts(registry, model_visible_specs)
+    ToolRouter::from_parts(registry, model_visible_specs).with_flat_tool_names(flat_tool_names)
 }
 
 fn apply_direct_model_only_namespace_overrides(
@@ -310,31 +313,65 @@ fn build_model_visible_specs(
     registry: &ToolRegistry,
     code_mode_tool_names: &BTreeMap<String, ToolName>,
     hosted_specs: Vec<ToolSpec>,
-) -> Vec<ToolSpec> {
+) -> (Vec<ToolSpec>, FlatToolNames) {
+    let namespace_tools = namespace_tools_enabled(turn_context);
     let mut specs = Vec::new();
+    // Without namespace support, MCP tools are offered under flat names instead
+    // of being dropped with their namespace (#515, #227).
+    let mut flattened_mcp_tools = Vec::new();
     for runtime in registry.runtimes() {
         let tool_name = runtime.tool_name();
         let exposure = runtime.exposure();
         if exposure.is_direct() && !is_hidden_by_code_mode_only(turn_context, &tool_name, exposure)
         {
-            let spec = runtime.spec();
-            specs.push(spec_for_model_request(
+            let spec = spec_for_model_request(
                 turn_context,
                 exposure,
                 &tool_name,
                 code_mode_tool_names,
-                spec,
-            ));
+                runtime.spec(),
+            );
+            match spec {
+                ToolSpec::Namespace(namespace)
+                    if !namespace_tools && runtime.tool_origin() == ToolOrigin::Mcp =>
+                {
+                    flattened_mcp_tools.extend(namespace.tools.into_iter().map(|tool| {
+                        let ResponsesApiNamespaceTool::Function(tool) = tool;
+                        (
+                            ToolName::namespaced(namespace.name.clone(), tool.name.clone()),
+                            tool,
+                        )
+                    }));
+                }
+                spec => specs.push(spec),
+            }
         }
     }
     specs.extend(hosted_specs);
 
-    merge_into_namespaces(specs)
+    let mut specs: Vec<ToolSpec> = merge_into_namespaces(specs)
         .into_iter()
-        .filter(|spec| {
-            namespace_tools_enabled(turn_context) || !matches!(spec, ToolSpec::Namespace(_))
-        })
-        .collect()
+        .filter(|spec| namespace_tools || !matches!(spec, ToolSpec::Namespace(_)))
+        .collect();
+    if flattened_mcp_tools.is_empty() {
+        return (specs, FlatToolNames::default());
+    }
+    // A flat name must not shadow any visible tool or any registered plain tool,
+    // because the router resolves registered plain names first.
+    let reserved = specs
+        .iter()
+        .map(|spec| spec.name().to_string())
+        .chain(
+            registry
+                .runtimes()
+                .map(|runtime| runtime.tool_name())
+                .filter(|tool_name| tool_name.namespace.is_none())
+                .map(|tool_name| tool_name.name),
+        )
+        .collect();
+    let (tools, flat_tool_names) = flatten_namespaced_tools(flattened_mcp_tools, &reserved);
+    specs.extend(tools.into_iter().map(ToolSpec::Function));
+    (specs, flat_tool_names)
 }
 
 fn spec_for_model_request(

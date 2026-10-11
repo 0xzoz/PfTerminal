@@ -95,6 +95,7 @@ mod live_cli;
 mod log_redaction;
 mod mcp_auth_elicitation;
 mod mcp_auth_refresh;
+mod mcp_chat_completions;
 #[cfg(unix)]
 mod mcp_refresh_cleanup;
 mod mcp_startup_refresh_http_proxy;
