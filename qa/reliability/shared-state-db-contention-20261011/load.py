@@ -23,6 +23,7 @@ import os
 import re
 import shutil
 import socket
+import sqlite3
 import statistics
 import subprocess
 import sys
@@ -64,6 +65,18 @@ def summary(values: list[float]) -> dict[str, float]:
     }
 
 
+def ledger_attempts(home: Path) -> int:
+    """Attempts the mock provider's requests left in the ledger."""
+    con = sqlite3.connect(home / "pfterminal_state_5.sqlite", timeout=60)
+    try:
+        return con.execute(
+            "SELECT count(*) FROM draft_accounting_attempts "
+            "WHERE json_extract(payload, '$.provider') = 'mock'"
+        ).fetchone()[0]
+    finally:
+        con.close()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--bin", required=True)
@@ -73,6 +86,13 @@ def main() -> int:
     parser.add_argument("--turns", type=int, default=3)
     parser.add_argument("--tool-calls", type=int, default=4)
     parser.add_argument("--latency", type=float, default=0.2)
+    parser.add_argument(
+        "--hold-seconds",
+        type=float,
+        default=0.0,
+        help="hold the state DB's write lock this long, 5 s into the run, as a "
+        "long maintenance or a backup in another process would",
+    )
     args = parser.parse_args()
 
     out = Path(args.out)
@@ -176,7 +196,21 @@ trust_level = "trusted"
             if session_id is None:
                 return
 
+    held: dict[str, float] = {}
+
+    def hold() -> None:
+        time.sleep(5)
+        con = sqlite3.connect(home / "pfterminal_state_5.sqlite", timeout=60)
+        con.execute("BEGIN IMMEDIATE")
+        held["from"] = time.time()
+        time.sleep(args.hold_seconds)
+        con.rollback()
+        held["to"] = time.time()
+        con.close()
+
     threads = [threading.Thread(target=session, args=(i,)) for i in range(args.sessions)]
+    if args.hold_seconds > 0:
+        threads.append(threading.Thread(target=hold))
     for thread in threads:
         thread.start()
     for thread in threads:
@@ -230,6 +264,8 @@ trust_level = "trusted"
         "bad_stderr_lines": len(bad_lines),
         "bad_examples": sorted(set(line[:300] for line in bad_lines))[:10],
         "exec_seconds": summary([r["seconds"] for r in results]),
+        "lock_held_by_another_process_s": round(held["to"] - held["from"], 1) if held else 0,
+        "ledger_attempts_recorded": ledger_attempts(home),
     }
     (out / "report.json").write_text(json.dumps(report, indent=2))
     print(json.dumps(report, indent=2))

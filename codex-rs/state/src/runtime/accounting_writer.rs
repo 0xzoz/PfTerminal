@@ -136,6 +136,8 @@ type Waiter = oneshot::Sender<Result<(), Settled>>;
 enum Command {
     Write(Entry),
     Flush(Flush),
+    /// Open (install or check) the ledger; answered like a record.
+    Open(Waiter),
 }
 
 /// Answered once nothing is queued, or, with `until_blocked`, as soon as the
@@ -151,6 +153,8 @@ struct Entry {
     queued_at: Instant,
     file: Option<PathBuf>,
     waiter: Option<Waiter>,
+    /// Taken from an exited process.
+    adopted: bool,
 }
 
 /// Records for one attempt, applied in one ledger write.
@@ -166,6 +170,8 @@ struct Job {
     tries: u32,
     /// How many handed-over entries this job holds; see `Shared::pending`.
     entries: usize,
+    /// Taken from an exited process, whose rows may be still to come.
+    adopted: bool,
 }
 
 impl Job {
@@ -175,6 +181,7 @@ impl Job {
             queued_at,
             file,
             waiter,
+            adopted,
         } = entry;
         let (owner, attempt, prices, observations) = match write {
             LedgerWrite::Admit {
@@ -199,6 +206,7 @@ impl Job {
             not_before: None,
             tries: 0,
             entries: 1,
+            adopted,
         }
     }
 
@@ -239,8 +247,10 @@ impl Job {
             write,
             file,
             waiter,
+            adopted,
             ..
         } = entry;
+        self.adopted &= adopted;
         match write {
             LedgerWrite::Admit { prices, .. } => self.prices = Some(prices),
             LedgerWrite::Observe { observations, .. } => {
@@ -364,6 +374,7 @@ fn orphans(spool: &Spool, seq: &AtomicU64) -> Vec<Entry> {
                 queued_at: Instant::now(),
                 file: Some(own),
                 waiter: None,
+                adopted: true,
             }),
             Ok(_) | Err(_) => {
                 tracing::warn!(
@@ -521,6 +532,7 @@ impl StateRuntime {
             queued_at: Instant::now(),
             file,
             waiter: Some(waiter),
+            adopted: false,
         };
         let ahead = refs.shared.pending.fetch_add(1, Ordering::AcqRel);
         if commands.send(Command::Write(entry)).is_err() {
@@ -546,9 +558,25 @@ impl StateRuntime {
         }
     }
 
+    /// Open (install or check) the ledger for a sampling about to record,
+    /// waiting as for a record: not at all while the writer is held up, and at
+    /// most `WAIT_CAP`. A ledger that cannot be opened now is opened by the
+    /// first record that needs it, which reports a failure.
+    pub async fn open_accounting(self: &Arc<Self>) {
+        let (commands, refs) = self.accounting_writer();
+        if refs.shared.waiting.load(Ordering::Acquire) || self.state_db_contended() {
+            return;
+        }
+        let (waiter, settled) = oneshot::channel();
+        if commands.send(Command::Open(waiter)).is_err() {
+            return;
+        }
+        let _ = tokio::time::timeout(WAIT_CAP, settled).await;
+    }
+
     /// Wait until this process's writer has nothing queued, at most `timeout`.
     /// Returns whether it got there. For tests.
-    pub async fn flush_accounting(self: &Arc<Self>, timeout: Duration) -> bool {
+    pub async fn flush_accounting(&self, timeout: Duration) -> bool {
         self.flush(timeout, /*until_blocked*/ false).await
     }
 
@@ -556,11 +584,11 @@ impl StateRuntime {
     /// has written what it can, i.e. nothing is queued or what is left waits
     /// for another process (the write lock, or the hour's validation, held
     /// elsewhere). What is left stays saved for the next writer on the home.
-    pub async fn settle_accounting(self: &Arc<Self>, timeout: Duration) -> bool {
+    pub async fn settle_accounting(&self, timeout: Duration) -> bool {
         self.flush(timeout, /*until_blocked*/ true).await
     }
 
-    async fn flush(self: &Arc<Self>, timeout: Duration, until_blocked: bool) -> bool {
+    async fn flush(&self, timeout: Duration, until_blocked: bool) -> bool {
         let commands = {
             let slot = self
                 .accounting_writer
@@ -604,10 +632,10 @@ struct Opened {
 enum Failure {
     /// Retry after the pause; the DB was busy or read-only.
     Busy(Duration),
-    /// A row it refers to is not there yet: the conversation's (its metadata
-    /// write put off) or the admission (still queued, maybe in another
-    /// process's writer).
-    OwnerMissing,
+    /// A row it refers to is not there: the conversation's (its metadata
+    /// write may have been put off) or the admission's (maybe still queued in
+    /// another process's writer).
+    Waiting(anyhow::Error),
     /// The ledger refused the record.
     Refused(anyhow::Error),
 }
@@ -621,7 +649,7 @@ fn classify(error: anyhow::Error) -> Failure {
         .chain()
         .any(|cause| cause.is::<OwnerMissing>() || cause.is::<NotAdmitted>())
     {
-        Failure::OwnerMissing
+        Failure::Waiting(error)
     } else {
         Failure::Refused(error)
     }
@@ -633,8 +661,7 @@ async fn run(
     spool: Option<Arc<Spool>>,
     shared: Arc<Shared>,
 ) {
-    let mut queue: VecDeque<Job> = VecDeque::new();
-    let mut flushes: Vec<Flush> = Vec::new();
+    let mut inbox = Inbox::default();
     let mut opened = Opened::default();
     let mut next_sweep = Instant::now();
     let mut pause = RETRY_FIRST;
@@ -653,58 +680,95 @@ async fn run(
             }
             for entry in adopted {
                 shared.pending.fetch_add(1, Ordering::AcqRel);
-                enqueue(&mut queue, entry);
+                enqueue(&mut inbox.queue, entry);
             }
         }
-        if queue.is_empty() {
-            for flush in flushes.drain(..) {
+        if inbox.queue.is_empty() && inbox.opens.is_empty() {
+            for flush in inbox.flushes.drain(..) {
                 let _ = flush.done.send(());
             }
             let wake = tokio::time::Instant::from_std(next_sweep);
             tokio::select! {
                 command = commands.recv() => match command {
-                    Some(command) => accept(command, &mut queue, &mut flushes),
+                    Some(command) => inbox.accept(command),
                     None => return,
                 },
-                () = tokio::time::sleep_until(wake) => continue,
+                () = tokio::time::sleep_until(wake) => {}
             }
+            continue;
         }
         while let Ok(command) = commands.try_recv() {
-            accept(command, &mut queue, &mut flushes);
+            inbox.accept(command);
         }
         let now = Instant::now();
-        let Some(index) = queue
+        let ready = inbox
+            .queue
             .iter()
-            .position(|job| job.not_before.is_none_or(|at| at <= now))
-        else {
+            .position(|job| job.not_before.is_none_or(|at| at <= now));
+        if ready.is_none() && inbox.opens.is_empty() {
             // Only parked jobs: wait for the first, or for a new record.
-            let wake = queue
+            let wake = inbox
+                .queue
                 .iter()
                 .filter_map(|job| job.not_before)
                 .min()
                 .unwrap_or(now + RETRY_MAX);
             tokio::select! {
                 command = commands.recv() => match command {
-                    Some(command) => accept(command, &mut queue, &mut flushes),
+                    Some(command) => inbox.accept(command),
                     None => return,
                 },
                 () = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {}
             }
             continue;
-        };
+        }
         let Some(state) = runtime.upgrade() else {
             return;
         };
         // The hour's whole-ledger validation runs in one process at a time,
         // before any write needs it; meanwhile records are put off.
         let lease = spool.as_ref().map(|spool| spool.dir.join(VALIDATION_LEASE));
-        if !ensure_validated(&state, lease.as_deref(), &mut queue, &shared).await {
+        if !ensure_validated(&state, lease.as_deref(), &mut inbox, &shared).await {
             drop(state);
-            answer_blocked(&mut flushes);
+            inbox.answer_blocked();
             tokio::time::sleep(VALIDATION_POLL).await;
             continue;
         }
-        let Some(job) = queue.get_mut(index) else {
+        if !inbox.opens.is_empty() {
+            // A sampling starting: install or check the ledger now, so the
+            // first record does not wait for it.
+            let result = open_ledger(state.quick(), &mut opened).await;
+            match result.map_err(classify) {
+                Ok(()) => {
+                    state.note_state_db_written();
+                    for waiter in inbox.opens.drain(..) {
+                        let _ = waiter.send(Ok(()));
+                    }
+                }
+                Err(Failure::Busy(wait)) => {
+                    state.note_state_db_contended();
+                    for waiter in inbox.opens.drain(..) {
+                        let _ = waiter.send(Err(Settled::Deferred));
+                    }
+                    drop(state);
+                    inbox.answer_blocked();
+                    tokio::time::sleep(wait.max(pause)).await;
+                    pause = (pause * 2).min(RETRY_MAX);
+                    continue;
+                }
+                Err(Failure::Waiting(_) | Failure::Refused(_)) => {
+                    // Reported by the first record that needs the ledger.
+                    for waiter in inbox.opens.drain(..) {
+                        let _ = waiter.send(Err(Settled::Deferred));
+                    }
+                }
+            }
+            continue;
+        }
+        let Some(index) = ready else {
+            continue;
+        };
+        let Some(job) = inbox.queue.get_mut(index) else {
             continue;
         };
         // The first try waits at most `QUICK_BUSY_TIMEOUT` for the lock, so a
@@ -721,7 +785,7 @@ async fn run(
                 shared.waiting.store(false, Ordering::Release);
                 state.note_state_db_written();
                 pause = RETRY_FIRST;
-                if let Some(mut job) = queue.remove(index) {
+                if let Some(mut job) = inbox.queue.remove(index) {
                     for file in &job.files {
                         let _ = tokio::fs::remove_file(file).await;
                     }
@@ -739,17 +803,19 @@ async fn run(
                 state.note_state_db_contended();
                 job.settle(|| Err(Settled::Deferred));
                 drop(state);
-                answer_blocked(&mut flushes);
+                inbox.answer_blocked();
                 tokio::time::sleep(wait.max(pause)).await;
                 pause = (pause * 2).min(RETRY_MAX);
             }
-            Err(Failure::OwnerMissing) if job.queued_at.elapsed() < OWNER_WAIT => {
+            Err(Failure::Waiting(_))
+                if job.queued_at.elapsed() < OWNER_WAIT
+                    && (job.adopted || state.thread_row_put_off(job.owner)) =>
+            {
                 job.settle(|| Err(Settled::Deferred));
                 job.not_before = Some(Instant::now() + RETRY_MAX);
             }
-            Err(Failure::OwnerMissing) => {
-                let cause = "the record's conversation or admission never appeared".into();
-                refuse(&mut queue, index, &shared, cause).await;
+            Err(Failure::Waiting(error)) => {
+                refuse(&mut inbox.queue, index, &shared, format!("{error:#}")).await;
             }
             Err(Failure::Refused(error)) => {
                 opened.store = false;
@@ -757,32 +823,46 @@ async fn run(
                 let cause = format!("{error:#}");
                 if keep {
                     // A newer build can write it; leave the file for it.
-                    if let Some(mut job) = queue.remove(index) {
+                    if let Some(mut job) = inbox.queue.remove(index) {
                         shared.pending.fetch_sub(job.entries, Ordering::AcqRel);
                         job.settle(|| Err(Settled::Failed(cause.clone())));
                     }
                 } else {
-                    refuse(&mut queue, index, &shared, cause).await;
+                    refuse(&mut inbox.queue, index, &shared, cause).await;
                 }
             }
         }
     }
 }
 
-fn accept(command: Command, queue: &mut VecDeque<Job>, flushes: &mut Vec<Flush>) {
-    match command {
-        Command::Write(entry) => enqueue(queue, entry),
-        Command::Flush(flush) => flushes.push(flush),
-    }
+/// What the writer has been handed and not finished.
+#[derive(Default)]
+struct Inbox {
+    queue: VecDeque<Job>,
+    flushes: Vec<Flush>,
+    /// Samplings waiting for the ledger to be opened.
+    opens: Vec<Waiter>,
 }
 
-/// Answer the flushes that wait only until the writer is blocked.
-fn answer_blocked(flushes: &mut Vec<Flush>) {
-    let (blocked, rest): (Vec<Flush>, Vec<Flush>) =
-        flushes.drain(..).partition(|flush| flush.until_blocked);
-    *flushes = rest;
-    for flush in blocked {
-        let _ = flush.done.send(());
+impl Inbox {
+    fn accept(&mut self, command: Command) {
+        match command {
+            Command::Write(entry) => enqueue(&mut self.queue, entry),
+            Command::Flush(flush) => self.flushes.push(flush),
+            Command::Open(waiter) => self.opens.push(waiter),
+        }
+    }
+
+    /// Answer the flushes that wait only until the writer is blocked.
+    fn answer_blocked(&mut self) {
+        let (blocked, rest): (Vec<Flush>, Vec<Flush>) = self
+            .flushes
+            .drain(..)
+            .partition(|flush| flush.until_blocked);
+        self.flushes = rest;
+        for flush in blocked {
+            let _ = flush.done.send(());
+        }
     }
 }
 
@@ -831,7 +911,7 @@ async fn refuse(queue: &mut VecDeque<Job>, index: usize, shared: &Shared, cause:
 async fn ensure_validated(
     runtime: &StateRuntime,
     lease: Option<&Path>,
-    queue: &mut VecDeque<Job>,
+    inbox: &mut Inbox,
     shared: &Shared,
 ) -> bool {
     let store = AccountingStore { runtime };
@@ -839,8 +919,11 @@ async fn ensure_validated(
         return true;
     }
     shared.waiting.store(true, Ordering::Release);
-    for job in queue.iter_mut() {
+    for job in inbox.queue.iter_mut() {
         job.settle(|| Err(Settled::Deferred));
+    }
+    for waiter in inbox.opens.drain(..) {
+        let _ = waiter.send(Err(Settled::Deferred));
     }
     let _lease = match lease.map(take_lease) {
         Some(Ok(Some(file))) => Some(file),
@@ -884,7 +967,8 @@ fn take_lease(path: &Path) -> std::io::Result<Option<std::fs::File>> {
     }
 }
 
-async fn apply(runtime: &StateRuntime, opened: &mut Opened, job: &Job) -> anyhow::Result<()> {
+/// Install or check the ledger once per writer, then its lookup indexes.
+async fn open_ledger(runtime: &StateRuntime, opened: &mut Opened) -> anyhow::Result<()> {
     if !opened.store {
         AccountingStore::open(runtime, AsOf::Now).await?;
         opened.store = true;
@@ -893,6 +977,11 @@ async fn apply(runtime: &StateRuntime, opened: &mut Opened, job: &Job) -> anyhow
         opened.indexes = super::indexes::ensure(runtime).await;
         opened.index_retry_at = Some(Instant::now() + SWEEP_EVERY);
     }
+    Ok(())
+}
+
+async fn apply(runtime: &StateRuntime, opened: &mut Opened, job: &Job) -> anyhow::Result<()> {
+    open_ledger(runtime, opened).await?;
     let store = AccountingStore { runtime };
     store
         .write(

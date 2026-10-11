@@ -269,8 +269,9 @@ async fn a_record_waits_for_its_conversation_row() -> anyhow::Result<()> {
     let path = home();
     let owner = ThreadId::new();
     let runtime = runtime_with_owner(&path, owner).await?;
-    // A conversation whose metadata write was put off has no row yet.
+    // A conversation whose row the thread store put off writing.
     let late = ThreadId::new();
+    runtime.note_thread_row_put_off(late, /*put_off*/ true);
     let first = attempt(late);
     assert_eq!(
         runtime.record_accounting(admit(late, &first)).await?,
@@ -291,31 +292,53 @@ async fn a_record_waits_for_its_conversation_row() -> anyhow::Result<()> {
     add_owner(&runtime, late).await?;
     assert!(runtime.flush_accounting(Duration::from_secs(30)).await);
     assert_eq!(recorded(&runtime, &first).await?, (1, 0));
+    // Any other conversation without a row is refused at once, as before.
+    let unknown = ThreadId::new();
+    let error = runtime
+        .record_accounting(admit(unknown, &attempt(unknown)))
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("native owner missing"),
+        "{error:#}"
+    );
     runtime.close().await;
     Ok(())
 }
 
-/// Usage can reach a writer before its admission does, when two writers
-/// take an exited process's records: it waits for the admission.
+/// Usage can reach a writer before its admission does when the records of an
+/// exited process without a lock file are split between two writers: an
+/// adopted record waits for the admission.
 #[tokio::test]
-async fn usage_waits_for_an_admission_another_writer_has() -> anyhow::Result<()> {
+async fn adopted_usage_waits_for_its_admission() -> anyhow::Result<()> {
     let path = home();
     let owner = ThreadId::new();
-    let runtime = runtime_with_owner(&path, owner).await?;
+    let setup = runtime_with_owner(&path, owner).await?;
     let first = attempt(owner);
+    let dir = path.join(PENDING_DIR);
+    std::fs::create_dir_all(&dir)?;
+    let exited = Uuid::new_v4().to_string();
+    let saved = Saved {
+        version: 1,
+        queued_at_ms: 0,
+        write: observe(owner, &first, 1),
+    };
+    std::fs::write(
+        dir.join(format!("{exited}-{:020}.json", 1)),
+        serde_json::to_vec(&saved)?,
+    )?;
+    // A fresh runtime's writer adopts it at start.
+    let runtime = StateRuntime::init_for_testing(path.to_path_buf(), "synthetic".into()).await?;
+    runtime.open_accounting().await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(recorded(&runtime, &first).await?, (0, 0));
     assert_eq!(
-        runtime.record_accounting(observe(owner, &first, 1)).await?,
-        WriteOutcome::Deferred
-    );
-    // The other writer: another runtime on the same home.
-    let other = StateRuntime::init_for_testing(path.to_path_buf(), "synthetic".into()).await?;
-    assert_eq!(
-        other.record_accounting(admit(owner, &first)).await?,
+        setup.record_accounting(admit(owner, &first)).await?,
         WriteOutcome::Written
     );
     assert!(runtime.flush_accounting(Duration::from_secs(30)).await);
     assert_eq!(recorded(&runtime, &first).await?, (1, 1));
-    other.close().await;
+    setup.close().await;
     runtime.close().await;
     Ok(())
 }

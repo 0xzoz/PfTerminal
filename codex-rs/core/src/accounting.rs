@@ -1158,8 +1158,9 @@ impl Sampling {
                 .into(),
             ));
         }
-        // Nothing to write yet: the first record starts this process's ledger
-        // writer, which installs or validates the ledger.
+        // The ledger writer installs or checks the ledger now, unless the state
+        // DB is busy: then the first record does, and a request never waits.
+        runtime.open_accounting().await;
         Ok(Arc::new(Self {
             runtime,
             owner,

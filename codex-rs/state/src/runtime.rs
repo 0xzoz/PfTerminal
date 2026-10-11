@@ -126,6 +126,9 @@ pub struct StateRuntime {
     quick: Option<Arc<StateRuntime>>,
     /// This process's accounting writer, started on first use.
     accounting_writer: Arc<std::sync::Mutex<Option<accounting::store::AccountingWriter>>>,
+    /// Conversations whose `threads` row this process put off writing while
+    /// the state DB was busy; their ledger records wait for the row.
+    thread_rows_put_off: Arc<std::sync::Mutex<std::collections::HashSet<ThreadId>>>,
 }
 
 /// How long a write a model request waits on (see [`StateRuntime::quick`])
@@ -317,6 +320,7 @@ impl StateRuntime {
             contention: Arc::default(),
             quick: None,
             accounting_writer: Arc::default(),
+            thread_rows_put_off: Arc::default(),
         };
         runtime.quick = quick_pool.map(|quick_pool| Arc::new(runtime.on_pool(quick_pool)));
         let runtime = Arc::new(runtime);
@@ -347,6 +351,7 @@ impl StateRuntime {
             contention: Arc::clone(&self.contention),
             quick: None,
             accounting_writer: Arc::clone(&self.accounting_writer),
+            thread_rows_put_off: Arc::clone(&self.thread_rows_put_off),
         }
     }
 
@@ -373,6 +378,28 @@ impl StateRuntime {
     /// Record that a write got through.
     pub fn note_state_db_written(&self) {
         self.contention.clear();
+    }
+
+    /// Record whether this process put off writing `thread`'s `threads` row
+    /// (`put_off`) or has written it. Ledger records for a conversation whose
+    /// row was put off wait for it instead of being refused.
+    pub fn note_thread_row_put_off(&self, thread: ThreadId, put_off: bool) {
+        let mut rows = self
+            .thread_rows_put_off
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if put_off {
+            rows.insert(thread);
+        } else {
+            rows.remove(&thread);
+        }
+    }
+
+    pub(crate) fn thread_row_put_off(&self, thread: ThreadId) -> bool {
+        self.thread_rows_put_off
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&thread)
     }
 
     /// Return the SQLite configuration for this runtime.

@@ -927,7 +927,7 @@ async fn accounting_policy_busy_state_db_never_holds_a_request_up_and_loses_noth
     };
     fixture
         .sampling
-        .observe(&first, Uuid::new_v4(), /*position*/ 0, usage)
+        .observe(&first, Uuid::new_v4(), /*position*/ 1, usage)
         .await?;
     let second = fresh.admit(MODEL, ENDPOINT).await?;
     assert!(
@@ -1001,7 +1001,7 @@ async fn accounting_policy_cancel_in_operation_closes_the_sampling_and_keeps_the
                     .observe(
                         &attempt,
                         Uuid::new_v4(),
-                        /*position*/ 0,
+                        /*position*/ 1,
                         AnthropicUsagePatch {
                             input_tokens: AnthropicTokenPresence::Number(7),
                             ..Default::default()

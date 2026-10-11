@@ -317,6 +317,8 @@ async fn apply_metadata_update(
     let state_db = store.state_db().await;
     // Set when a write met another connection's write lock.
     let busy = std::sync::atomic::AtomicBool::new(false);
+    // Set when the update would create the thread's row.
+    let creating = std::sync::atomic::AtomicBool::new(false);
     let note_busy = |err: &_| {
         if codex_state::is_state_db_busy(err) {
             busy.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -333,6 +335,7 @@ async fn apply_metadata_update(
                     .map_err(|err| ThreadStoreError::Internal {
                         message: format!("failed to read thread metadata for {thread_id}: {err}"),
                     })?;
+            creating.store(existing.is_none(), std::sync::atomic::Ordering::Relaxed);
             // An existing row's best-effort update may be put off; a new row is
             // written now, since other records (the ledger's) refer to it.
             let put_off = busy_db == BusyDb::PutOff && !require_sqlite_write && existing.is_some();
@@ -517,6 +520,7 @@ async fn apply_metadata_update(
         Ok(Written::Now) => {
             if let Some(state_db) = state_db.as_ref() {
                 state_db.note_state_db_written();
+                state_db.note_thread_row_put_off(thread_id, /*put_off*/ false);
             }
         }
         Ok(Written::PutOff) => {
@@ -532,6 +536,10 @@ async fn apply_metadata_update(
             // Applied with the next update; a turn does not wait the lock out.
             if let Some(state_db) = state_db.as_ref() {
                 state_db.note_state_db_contended();
+                if creating.load(std::sync::atomic::Ordering::Relaxed) {
+                    // Its ledger records wait for the row instead of failing.
+                    state_db.note_thread_row_put_off(thread_id, /*put_off*/ true);
+                }
             }
             tracing::debug!("state db busy; put off the metadata update for {thread_id}: {err}");
             store.defer_metadata(thread_id, patch);
