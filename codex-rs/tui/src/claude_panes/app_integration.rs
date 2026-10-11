@@ -1237,8 +1237,8 @@ impl App {
         self.send_next_held_claude_task(&pane_id);
     }
 
-    /// #507: the kill switch was turned off: each Claude pane gets the first
-    /// task held for it now, and the rest as its turns end.
+    /// #507: the kill switch was turned off: each idle Claude pane gets the
+    /// task held for it now; a busy one when its turn ends.
     pub(crate) fn send_held_claude_tasks(&mut self) {
         let mut panes: Vec<String> = Vec::new();
         for (pane_id, _) in &self.kill_switch_held_claude_tasks {

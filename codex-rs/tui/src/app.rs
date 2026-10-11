@@ -849,8 +849,8 @@ pub(crate) struct App {
         HashMap<String, crate::spawn_orchestration::SpawnAutoLoopState>,
     /// False after resume until a live operator/non-auto turn proves current intent.
     pub(crate) spawn_operator_input_seen: bool,
-    /// #507: tasks other agents sent to Claude panes while the kill switch
-    /// was on, by pane, in order; sent once it is turned off.
+    /// #507: the task another agent last sent to each Claude pane while the
+    /// kill switch was on (one per pane); sent once it is turned off.
     pub(crate) kill_switch_held_claude_tasks: Vec<(String, String)>,
     pub(crate) spawn_quarantine_notified_by_node: HashSet<String>,
     pub(crate) spawn_context_left_by_thread: HashMap<ThreadId, i64>,
