@@ -346,6 +346,7 @@ where
         }
         ApprovalReviewer::User => tool.start_approval_async(req, ctx.clone()).await,
     };
+    tool.note_review_decision(&resolution, &ctx);
     let source = match reviewer {
         ApprovalReviewer::Guardian => ApprovalResolutionSource::Guardian,
         ApprovalReviewer::User => ApprovalResolutionSource::User,

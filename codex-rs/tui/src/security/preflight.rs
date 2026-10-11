@@ -230,8 +230,11 @@ pub(crate) fn verify_isolation(config: &Config, paths: &[PathBuf]) -> Vec<String
             let covered = if path.as_os_str().to_string_lossy() == glob {
                 databases_denied
             } else {
+                // #467: both sides normalized as the sandbox normalizes
+                // them; a workspace opened through `/tmp` on macOS spells
+                // its paths unlike the launch that denied them.
                 (databases_denied && is_database_file(codex_home, path))
-                    || !policy.can_read_path_with_cwd(path, cwd)
+                    || !policy.can_read_effective_path_with_cwd(path, cwd)
             };
             !covered
         })

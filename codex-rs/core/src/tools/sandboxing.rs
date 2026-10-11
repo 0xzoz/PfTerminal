@@ -370,6 +370,11 @@ pub(crate) trait Approvable<Req> {
         None
     }
 
+    /// Called with each decision the person or the automatic reviewer gave
+    /// on this request (not permission hooks, which show nothing). Clients
+    /// show the command as running while it is reviewed (#466).
+    fn note_review_decision(&mut self, _decision: &ReviewDecision, _ctx: &ApprovalCtx<'_>) {}
+
     /// Return hook input for approval-time policy hooks when this runtime wants
     /// hook evaluation to run before guardian or user approval.
     fn permission_request_payload(&self, _req: &Req) -> Option<PermissionRequestPayload> {
