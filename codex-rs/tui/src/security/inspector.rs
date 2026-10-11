@@ -319,7 +319,9 @@ pub(crate) fn sections(
                 "Active this run",
                 State::Resolved,
                 if launch_checked {
-                    "Aggressive, every row verified at launch"
+                    // #437: the launch check covers the session rows, not the
+                    // runtime controls (which say what is observed).
+                    "Aggressive; the launch check passed for the session rows (runtime controls below show what is observed now)"
                 } else {
                     "Permissive"
                 },
@@ -449,10 +451,10 @@ pub(crate) fn sections(
         State::Resolved,
         match saved.nested {
             NestedAgents::Refuse => {
-                "refuse (default): agent commands that start `corbanu exec` or `review` are refused while Aggressive is enforced"
+                "refuse (default): agent commands that start another agent (`corbanu exec`, `review`, `resume`, `fork`, a new session, `app-server` or `mcp-server`) are refused while Aggressive is enforced"
             }
             NestedAgents::Pass => {
-                "pass: `corbanu exec` and `review` started by agent commands run with Aggressive enforced"
+                "pass: `corbanu exec` and `review` started by agent commands run with Aggressive enforced; interactive sessions, `app-server` and `mcp-server` stay refused"
             }
         },
         "configured: /security",
