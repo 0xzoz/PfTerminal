@@ -87,6 +87,18 @@ async fn run_exec_like(args: RunExecLikeArgs) -> Result<FunctionToolOutput, Func
         .r#set
         .clone();
     crate::exec_env::inject_tasknode_profile_env(&mut explicit_env_overrides, &turn.config);
+    // Issue #245: under Aggressive a protected path is never opened.
+    if let Some(refusal) = crate::security::protected_reads::additional_permission_refusal(
+        &session,
+        &turn,
+        additional_permissions.as_ref(),
+        exec_params.cwd.as_path(),
+    )
+    .await
+    {
+        crate::security::protected_reads::notify(&session, &turn, refusal.clone()).await;
+        return Err(FunctionCallError::RespondToModel(refusal));
+    }
     let exec_permission_approvals_enabled =
         session.features().enabled(Feature::ExecPermissionApprovals);
     let requested_additional_permissions = additional_permissions.clone();

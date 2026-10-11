@@ -37,6 +37,10 @@ pub(crate) trait BottomPaneView: Renderable {
     /// The view is the active one again after the view above it closed.
     fn on_uncovered(&mut self) {}
 
+    /// Like [`Self::on_uncovered`], but only when the view was already in the
+    /// stack under the view that closed, never when it was just pushed.
+    fn on_revealed(&mut self) {}
+
     /// Try to queue a contained Claude pane's tool request; return it if not
     /// consumed.
     fn try_consume_claude_approval(
