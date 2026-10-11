@@ -23,6 +23,7 @@ use super::EventProcessorWithHumanOutput;
 use super::config_summary_entries;
 use super::final_message_from_turn_items;
 use super::reasoning_text;
+use super::rejected_account_message;
 use super::should_print_final_message_to_stdout;
 use super::should_print_final_message_to_tty;
 use crate::event_processor::EventProcessor;
@@ -306,6 +307,7 @@ fn turn_completed_recovers_final_message_from_turn_items() {
         emit_final_message_on_shutdown: false,
         last_total_token_usage: None,
         shown_config_warnings: Vec::new(),
+        rejected_account_message: None,
     };
 
     let status = processor.process_server_notification(ServerNotification::TurnCompleted(
@@ -355,6 +357,7 @@ fn turn_completed_overwrites_stale_final_message_from_turn_items() {
         emit_final_message_on_shutdown: false,
         last_total_token_usage: None,
         shown_config_warnings: Vec::new(),
+        rejected_account_message: None,
     };
 
     let status = processor.process_server_notification(ServerNotification::TurnCompleted(
@@ -405,6 +408,7 @@ fn turn_completed_preserves_streamed_final_message_when_turn_items_are_empty() {
         emit_final_message_on_shutdown: false,
         last_total_token_usage: None,
         shown_config_warnings: Vec::new(),
+        rejected_account_message: None,
     };
 
     let status = processor.process_server_notification(ServerNotification::TurnCompleted(
@@ -450,6 +454,7 @@ fn turn_failed_clears_stale_final_message() {
         emit_final_message_on_shutdown: true,
         last_total_token_usage: None,
         shown_config_warnings: Vec::new(),
+        rejected_account_message: None,
     };
 
     let status = processor.process_server_notification(ServerNotification::TurnCompleted(
@@ -496,6 +501,7 @@ fn turn_interrupted_clears_stale_final_message() {
         emit_final_message_on_shutdown: true,
         last_total_token_usage: None,
         shown_config_warnings: Vec::new(),
+        rejected_account_message: None,
     };
 
     let status = processor.process_server_notification(ServerNotification::TurnCompleted(
@@ -544,6 +550,7 @@ fn session_repeat_of_a_config_warning_is_consumed_once() {
         emit_final_message_on_shutdown: false,
         last_total_token_usage: None,
         shown_config_warnings: Vec::new(),
+        rejected_account_message: None,
     };
     let warning = "`[provider_accounts]` is ignored".to_string();
     processor.process_server_notification(ServerNotification::ConfigWarning(
@@ -562,4 +569,30 @@ fn session_repeat_of_a_config_warning_is_consumed_once() {
         },
     ));
     assert!(processor.shown_config_warnings.is_empty());
+}
+
+/// PF-84 (#480): a rejected named account is named with its recovery, as in
+/// the TUI; the default account adds nothing.
+#[tokio::test]
+async fn a_rejected_named_account_is_named_with_its_recovery() {
+    let codex_home = tempfile::tempdir().expect("create codex home");
+    let config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .build()
+        .await
+        .expect("build default config");
+    assert_eq!(
+        rejected_account_message(&config, "zai:fake").as_deref(),
+        Some(
+            "Z.AI (zai) account `fake` was rejected. Replace its key with `corbanu account add zai fake` (reads stdin), or choose another account. The default Z.AI credential is unchanged."
+        )
+    );
+    let claude = rejected_account_message(&config, "claude-plan:cpfake").expect("message");
+    assert!(
+        claude.contains("account `cpfake` was rejected")
+            && claude.contains("corbanu account add claude-plan cpfake --kind claude-token"),
+        "{claude}"
+    );
+    assert_eq!(rejected_account_message(&config, "zai:default"), None);
+    assert_eq!(rejected_account_message(&config, "zai"), None);
 }

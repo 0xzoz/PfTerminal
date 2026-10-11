@@ -977,6 +977,31 @@ impl std::fmt::Display for NamedProviderAccount {
     }
 }
 
+/// PF-84 (#416, #480): what to say when a provider rejected named account
+/// `name`'s credential: which account, and how to replace its credential.
+/// `/providers` recovery manages only the default credential, so a named
+/// account is recovered with `corbanu account add`. `provider` is the
+/// account's provider, when known.
+pub fn named_account_rejection_message(
+    display_name: &str,
+    provider_id: &str,
+    name: &str,
+    provider: Option<&ModelProviderInfo>,
+) -> String {
+    let recovery = if provider.is_some_and(ModelProviderInfo::is_claude_plan) {
+        format!(
+            "Replace its token with `corbanu account add {provider_id} {name} --kind claude-token` (reads stdin) or sign in again in its Claude Code config directory"
+        )
+    } else if provider.is_some_and(|provider| provider.auth.is_some()) {
+        format!("Check what the provider's auth command returns for account `{name}`")
+    } else {
+        format!("Replace its key with `corbanu account add {provider_id} {name}` (reads stdin)")
+    };
+    format!(
+        "{display_name} ({provider_id}) account `{name}` was rejected. {recovery}, or choose another account. The default {display_name} credential is unchanged."
+    )
+}
+
 /// AWS SigV4 auth configuration for a model provider.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
