@@ -27,9 +27,7 @@
 //! released by the next step that reaches the DB.
 use super::busy_retry::is_busy;
 use super::busy_retry::is_read_only;
-use super::provider_requests::RATE_LIMIT_STATUS;
 use super::provider_requests::UnleasedRow;
-use super::provider_requests::default_cooldown_ms;
 use super::provider_requests::since;
 use super::*;
 use crate::ProviderRequestBlock;
@@ -200,57 +198,16 @@ impl MemoryRow {
         }
     }
 
-    /// The in-memory `record_provider_request_result_once`.
-    /// The cooldown it sets is this process's alone until the state DB has
-    /// recorded the same result. Whether `owner` held the lease.
+    /// The in-memory `record_provider_request_result_once`: whether `owner`
+    /// held the lease. The cooldown it sets is this process's alone until the
+    /// state DB has recorded the same result.
     fn record(&mut self, owner: &str, result: &ProviderRequestResult, now_ms: i64) -> bool {
         if self.lease_owner.as_deref() != Some(owner) {
             return false;
         }
         self.lease_owner = None;
         self.lease_until_ms = 0;
-        match result {
-            ProviderRequestResult::Success {
-                input_tokens,
-                cached_input_tokens,
-            } => {
-                self.cooldown_until_ms = 0;
-                self.last_status = Some(200);
-                self.last_request_id = None;
-                if let Some(tokens) = input_tokens {
-                    self.last_provider_input_tokens = (*tokens).max(0);
-                }
-                if let Some(tokens) = cached_input_tokens {
-                    self.last_provider_cached_input_tokens = (*tokens).max(0);
-                }
-                self.consecutive_429_count = 0;
-            }
-            ProviderRequestResult::Failed {
-                status,
-                request_id,
-                retry_after_ms,
-            } => {
-                let status = status.map(i64::from);
-                let is_rate_limit = status == Some(RATE_LIMIT_STATUS);
-                self.consecutive_429_count = if is_rate_limit {
-                    self.consecutive_429_count.saturating_add(1)
-                } else {
-                    0
-                };
-                self.cooldown_until_ms = if is_rate_limit {
-                    now_ms.saturating_add(
-                        retry_after_ms
-                            .filter(|ms| *ms > 0)
-                            .unwrap_or_else(|| default_cooldown_ms(self.consecutive_429_count)),
-                    )
-                } else {
-                    0
-                };
-                self.cooldown_in_state_db = false;
-                self.last_status = status;
-                self.last_request_id.clone_from(request_id);
-            }
-        }
+        self.record_unleased(result, now_ms);
         true
     }
 
@@ -330,7 +287,7 @@ impl ProviderRequestMemory {
         None
     }
 
-    fn pause(&self, operation: &'static str, error: &anyhow::Error) -> StateDbFallback {
+    pub(super) fn pause(&self, operation: &'static str, error: &anyhow::Error) -> StateDbFallback {
         let reason = if is_busy(error) {
             StateDbFallback::Busy
         } else if is_read_only(error) {
@@ -354,7 +311,10 @@ impl ProviderRequestMemory {
 impl StateRuntime {
     /// `Some` when this step must not use the state DB: it is paused, or lease
     /// releases left over from an earlier failure still don't land.
-    async fn provider_request_state_db_unready(&self, now_ms: i64) -> Option<StateDbFallback> {
+    pub(super) async fn provider_request_state_db_unready(
+        &self,
+        now_ms: i64,
+    ) -> Option<StateDbFallback> {
         let memory = &self.provider_request_memory;
         if let Some(reason) = memory.paused() {
             return Some(reason);
@@ -591,7 +551,9 @@ impl StateRuntime {
                 .record_provider_request_unleased_result(key, &result, now_ms)
                 .await
             {
-                // The DB's cooldown is at least the one recorded here.
+                // The DB now holds this cooldown or a later one, unless it
+                // counted fewer 429s than this process; either way it decides
+                // while it answers.
                 Ok(()) => memory.with_row(key, |row| {
                     if cooldown.is_some_and(|until| until == row.cooldown_until_ms) {
                         row.cooldown_in_state_db = true;

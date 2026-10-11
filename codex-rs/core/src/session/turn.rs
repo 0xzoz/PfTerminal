@@ -3232,6 +3232,7 @@ async fn provider_request_key(
                         .adopt_legacy_provider_request_key(
                             &legacy_env_key_fingerprint(&env_key, &secret),
                             &salted,
+                            now_unix_timestamp_ms(),
                         )
                         .await;
                     salted
@@ -3251,12 +3252,28 @@ async fn provider_request_key(
 }
 
 /// The credential identity a provider's throttle state is kept under.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 enum ProviderKeyIdentity {
     /// A label that holds no credential material.
     Label(String),
     /// An API key from the environment, fingerprinted with the home's salt.
-    EnvSecret { env_key: String, secret: String },
+    EnvSecret {
+        env_key: String,
+        secret: zeroize::Zeroizing<String>,
+    },
+}
+
+/// Never shows the key.
+impl std::fmt::Debug for ProviderKeyIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Label(label) => f.debug_tuple("Label").field(label).finish(),
+            Self::EnvSecret { env_key, .. } => f
+                .debug_struct("EnvSecret")
+                .field("env_key", env_key)
+                .finish_non_exhaustive(),
+        }
+    }
 }
 
 fn provider_request_key_identity<A: std::fmt::Debug>(
@@ -3276,7 +3293,7 @@ fn provider_request_key_identity<A: std::fmt::Debug>(
             Some(secret) => {
                 return ProviderKeyIdentity::EnvSecret {
                     env_key: env_key.to_string(),
-                    secret,
+                    secret: zeroize::Zeroizing::new(secret),
                 };
             }
             // Do not hit the vault on the hot path just to fingerprint throttle state.

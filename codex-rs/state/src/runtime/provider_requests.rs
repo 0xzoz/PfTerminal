@@ -285,110 +285,40 @@ WHERE provider_id = ? AND model = ? AND key_fingerprint = ?
         ))
     }
 
+    /// End `lease` and record how its request ended. Since unleased requests
+    /// record results too (#476), a cooldown can start while a lease is held,
+    /// so a leased result follows the same rules as an unleased one: it never
+    /// shortens an active cooldown (`UnleasedRow::apply`).
     async fn record_provider_request_result_once(
         &self,
         lease: &ProviderRequestLease,
         result: ProviderRequestResult,
         now_ms: i64,
     ) -> anyhow::Result<u64> {
-        let rows_affected = match result {
-            ProviderRequestResult::Success {
-                input_tokens,
-                cached_input_tokens,
-            } => sqlx::query(
-                r#"
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let released = sqlx::query(
+            r#"
 UPDATE provider_request_state
 SET lease_owner = NULL,
     lease_until_ms = 0,
-    cooldown_until_ms = 0,
-    last_status = 200,
-    last_request_id = NULL,
-    last_provider_input_tokens = COALESCE(?, last_provider_input_tokens),
-    last_provider_cached_input_tokens = COALESCE(?, last_provider_cached_input_tokens),
-    consecutive_429_count = 0,
     updated_at_ms = ?
 WHERE provider_id = ? AND model = ? AND key_fingerprint = ? AND lease_owner = ?
-                    "#,
-            )
-            .bind(input_tokens.map(|tokens| tokens.max(0)))
-            .bind(cached_input_tokens.map(|tokens| tokens.max(0)))
-            .bind(now_ms)
-            .bind(lease.key.provider_id.as_str())
-            .bind(lease.key.model.as_str())
-            .bind(lease.key.key_fingerprint.as_str())
-            .bind(lease.owner.as_str())
-            .execute(self.pool.as_ref())
-            .await?
-            .rows_affected(),
-            ProviderRequestResult::Failed {
-                status,
-                request_id,
-                retry_after_ms,
-            } => {
-                let status_i64 = status.map(i64::from);
-                let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-                let existing_count = sqlx::query_scalar::<_, i64>(
-                    r#"
-SELECT consecutive_429_count
-FROM provider_request_state
-WHERE provider_id = ? AND model = ? AND key_fingerprint = ?
-                    "#,
-                )
-                .bind(lease.key.provider_id.as_str())
-                .bind(lease.key.model.as_str())
-                .bind(lease.key.key_fingerprint.as_str())
-                .fetch_optional(&mut *tx)
-                .await?
-                .unwrap_or(0);
-
-                let is_rate_limit = status_i64 == Some(RATE_LIMIT_STATUS);
-                let consecutive_429_count = if is_rate_limit {
-                    existing_count.saturating_add(1)
-                } else {
-                    0
-                };
-                let cooldown_until_ms = if is_rate_limit {
-                    now_ms.saturating_add(
-                        retry_after_ms
-                            .filter(|ms| *ms > 0)
-                            .unwrap_or_else(|| default_cooldown_ms(consecutive_429_count)),
-                    )
-                } else {
-                    0
-                };
-
-                let rows_affected = sqlx::query(
-                    r#"
-UPDATE provider_request_state
-SET lease_owner = NULL,
-    lease_until_ms = 0,
-    cooldown_until_ms = ?,
-    last_status = ?,
-    last_request_id = ?,
-    consecutive_429_count = ?,
-    updated_at_ms = ?
-WHERE provider_id = ? AND model = ? AND key_fingerprint = ? AND lease_owner = ?
-                    "#,
-                )
-                .bind(cooldown_until_ms)
-                .bind(status_i64)
-                .bind(request_id.as_deref())
-                .bind(consecutive_429_count)
-                .bind(now_ms)
-                .bind(lease.key.provider_id.as_str())
-                .bind(lease.key.model.as_str())
-                .bind(lease.key.key_fingerprint.as_str())
-                .bind(lease.owner.as_str())
-                .execute(&mut *tx)
-                .await?
-                .rows_affected();
-
-                tx.commit().await?;
-                rows_affected
-            }
-        };
-
-        Ok(rows_affected)
+            "#,
+        )
+        .bind(now_ms)
+        .bind(lease.key.provider_id.as_str())
+        .bind(lease.key.model.as_str())
+        .bind(lease.key.key_fingerprint.as_str())
+        .bind(lease.owner.as_str())
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        // Not this lease's row any more: record nothing under its name.
+        if released > 0 {
+            record_result_on_connection(&mut tx, &lease.key, &result, now_ms).await?;
+        }
+        tx.commit().await?;
+        Ok(released)
     }
 
     /// Record how a request sent without a lease ended (#476). Unlike a leased
@@ -402,64 +332,7 @@ WHERE provider_id = ? AND model = ? AND key_fingerprint = ? AND lease_owner = ?
         now_ms: i64,
     ) -> anyhow::Result<()> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        sqlx::query(
-            r#"
-INSERT INTO provider_request_state (provider_id, model, key_fingerprint, updated_at_ms)
-VALUES (?, ?, ?, ?)
-ON CONFLICT(provider_id, model, key_fingerprint) DO NOTHING
-            "#,
-        )
-        .bind(key.provider_id.as_str())
-        .bind(key.model.as_str())
-        .bind(key.key_fingerprint.as_str())
-        .bind(now_ms)
-        .execute(&mut *tx)
-        .await?;
-        let row = sqlx::query(
-            r#"
-SELECT consecutive_429_count, cooldown_until_ms
-FROM provider_request_state
-WHERE provider_id = ? AND model = ? AND key_fingerprint = ?
-            "#,
-        )
-        .bind(key.provider_id.as_str())
-        .bind(key.model.as_str())
-        .bind(key.key_fingerprint.as_str())
-        .fetch_one(&mut *tx)
-        .await?;
-        let existing = UnleasedRow {
-            consecutive_429_count: row.try_get("consecutive_429_count")?,
-            cooldown_until_ms: row.try_get("cooldown_until_ms")?,
-        };
-        let Some(update) = existing.apply(result, now_ms) else {
-            tx.commit().await?;
-            return Ok(());
-        };
-        sqlx::query(
-            r#"
-UPDATE provider_request_state
-SET cooldown_until_ms = ?,
-    last_status = ?,
-    last_request_id = ?,
-    last_provider_input_tokens = COALESCE(?, last_provider_input_tokens),
-    last_provider_cached_input_tokens = COALESCE(?, last_provider_cached_input_tokens),
-    consecutive_429_count = ?,
-    updated_at_ms = ?
-WHERE provider_id = ? AND model = ? AND key_fingerprint = ?
-            "#,
-        )
-        .bind(update.cooldown_until_ms)
-        .bind(update.last_status)
-        .bind(update.last_request_id)
-        .bind(update.provider_input_tokens)
-        .bind(update.provider_cached_input_tokens)
-        .bind(update.consecutive_429_count)
-        .bind(now_ms)
-        .bind(key.provider_id.as_str())
-        .bind(key.model.as_str())
-        .bind(key.key_fingerprint.as_str())
-        .execute(&mut *tx)
-        .await?;
+        record_result_on_connection(&mut tx, key, result, now_ms).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -632,19 +505,34 @@ impl StateRuntime {
     }
 
     /// Move the throttle rows an older build kept under `legacy` (an unsalted
-    /// key fingerprint) to `salted`, keeping their cooldown and lease (#482).
-    /// Done once per key and process; a row already kept under `salted` wins.
-    pub async fn adopt_legacy_provider_request_key(&self, legacy: &str, salted: &str) {
-        if self
-            .provider_request_memory
+    /// key fingerprint) to `salted`, keeping their cooldown and lease, and
+    /// delete every idle unsalted row, such as one an older build sharing the
+    /// state DB wrote since migration 0053 (#482). A salted row that already
+    /// exists wins.
+    ///
+    /// Tried once per key and process, and never while the throttle leaves the
+    /// DB alone: a busy DB costs one wait, then pauses the DB as the other
+    /// throttle steps do, and the rows are adopted by a later process.
+    pub async fn adopt_legacy_provider_request_key(&self, legacy: &str, salted: &str, now_ms: i64) {
+        let memory = &self.provider_request_memory;
+        if !memory
             .adopted_legacy_keys
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains(salted)
+            .insert(salted.to_string())
         {
             return;
         }
+        if self
+            .provider_request_state_db_unready(now_ms)
+            .await
+            .is_some()
+        {
+            return;
+        }
+        let started = Instant::now();
         let adopt = || async {
+            let now_ms = since(now_ms, started);
             let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
             sqlx::query(
                 "UPDATE OR IGNORE provider_request_state SET key_fingerprint = ? WHERE key_fingerprint = ?",
@@ -657,27 +545,24 @@ impl StateRuntime {
                 .bind(legacy)
                 .execute(&mut *tx)
                 .await?;
+            sqlx::query(
+                "DELETE FROM provider_request_state WHERE key_fingerprint LIKE 'env:%' AND cooldown_until_ms <= ? AND lease_until_ms <= ?",
+            )
+            .bind(now_ms)
+            .bind(now_ms)
+            .execute(&mut *tx)
+            .await?;
             tx.commit().await?;
             anyhow::Ok(())
         };
-        match retry_busy_within(
+        if let Err(error) = retry_busy_within(
             "adopt legacy provider request key",
             PROVIDER_REQUEST_BUSY_WAIT,
             adopt,
         )
         .await
         {
-            Ok(()) => {
-                self.provider_request_memory
-                    .adopted_legacy_keys
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(salted.to_string());
-            }
-            // Tried again on the key's next request.
-            Err(error) => {
-                warn!(error = %format!("{error:#}"), "failed to adopt a legacy provider request key")
-            }
+            memory.pause("adopt legacy provider request key", &error);
         }
     }
 
@@ -724,7 +609,75 @@ fn block_from_row(
     })
 }
 
-/// The fields an unleased result reads, in the state DB or this process's copy.
+/// Record how a request on `key` ended (`UnleasedRow::apply`), leaving any
+/// lease alone. Caller owns the write transaction.
+async fn record_result_on_connection(
+    conn: &mut sqlx::SqliteConnection,
+    key: &ProviderRequestKey,
+    result: &ProviderRequestResult,
+    now_ms: i64,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+INSERT INTO provider_request_state (provider_id, model, key_fingerprint, updated_at_ms)
+VALUES (?, ?, ?, ?)
+ON CONFLICT(provider_id, model, key_fingerprint) DO NOTHING
+        "#,
+    )
+    .bind(key.provider_id.as_str())
+    .bind(key.model.as_str())
+    .bind(key.key_fingerprint.as_str())
+    .bind(now_ms)
+    .execute(&mut *conn)
+    .await?;
+    let row = sqlx::query(
+        r#"
+SELECT consecutive_429_count, cooldown_until_ms
+FROM provider_request_state
+WHERE provider_id = ? AND model = ? AND key_fingerprint = ?
+        "#,
+    )
+    .bind(key.provider_id.as_str())
+    .bind(key.model.as_str())
+    .bind(key.key_fingerprint.as_str())
+    .fetch_one(&mut *conn)
+    .await?;
+    let existing = UnleasedRow {
+        consecutive_429_count: row.try_get("consecutive_429_count")?,
+        cooldown_until_ms: row.try_get("cooldown_until_ms")?,
+    };
+    let Some(update) = existing.apply(result, now_ms) else {
+        return Ok(());
+    };
+    sqlx::query(
+        r#"
+UPDATE provider_request_state
+SET cooldown_until_ms = ?,
+    last_status = ?,
+    last_request_id = ?,
+    last_provider_input_tokens = COALESCE(?, last_provider_input_tokens),
+    last_provider_cached_input_tokens = COALESCE(?, last_provider_cached_input_tokens),
+    consecutive_429_count = ?,
+    updated_at_ms = ?
+WHERE provider_id = ? AND model = ? AND key_fingerprint = ?
+        "#,
+    )
+    .bind(update.cooldown_until_ms)
+    .bind(update.last_status)
+    .bind(update.last_request_id)
+    .bind(update.provider_input_tokens)
+    .bind(update.provider_cached_input_tokens)
+    .bind(update.consecutive_429_count)
+    .bind(now_ms)
+    .bind(key.provider_id.as_str())
+    .bind(key.model.as_str())
+    .bind(key.key_fingerprint.as_str())
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// The fields a request's result reads, in the state DB or this process's copy.
 pub(super) struct UnleasedRow {
     pub(super) consecutive_429_count: i64,
     pub(super) cooldown_until_ms: i64,
@@ -757,7 +710,14 @@ impl UnleasedRow {
                 request_id,
                 retry_after_ms,
             } if i64::from(*status) == RATE_LIMIT_STATUS => {
-                let consecutive_429_count = self.consecutive_429_count.saturating_add(1);
+                // 429s from requests already in flight when a cooldown began
+                // are one burst, not consecutive refusals: they extend the
+                // cooldown without escalating it.
+                let consecutive_429_count = if cooling {
+                    self.consecutive_429_count.max(1)
+                } else {
+                    self.consecutive_429_count.saturating_add(1)
+                };
                 let cooldown = retry_after_ms
                     .filter(|ms| *ms > 0)
                     .unwrap_or_else(|| default_cooldown_ms(consecutive_429_count));

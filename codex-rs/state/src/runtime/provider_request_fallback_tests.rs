@@ -537,7 +537,11 @@ async fn a_legacy_row_moves_to_its_salted_key() -> anyhow::Result<()> {
     // A fresh process (no memory of the legacy cooldown) adopts the row.
     let process = StateRuntime::init_for_testing(home.clone(), "zai".into()).await?;
     process
-        .adopt_legacy_provider_request_key(&legacy.key_fingerprint, &salted.key_fingerprint)
+        .adopt_legacy_provider_request_key(
+            &legacy.key_fingerprint,
+            &salted.key_fingerprint,
+            /*now_ms*/ 2_500,
+        )
         .await;
     assert_eq!(
         check_reason(
@@ -554,6 +558,179 @@ async fn a_legacy_row_moves_to_its_salted_key() -> anyhow::Result<()> {
     assert_eq!(keys, vec![salted.key_fingerprint.clone()]);
 
     process.close().await;
+    runtime.close().await;
+    let _ = std::fs::remove_dir_all(home);
+    Ok(())
+}
+
+/// Review S1: 429s from requests already in flight when a cooldown began are
+/// one burst: they extend the cooldown without escalating it.
+#[tokio::test]
+async fn a_burst_of_429s_does_not_escalate_the_cooldown() -> anyhow::Result<()> {
+    let home = unique_temp_dir();
+    let runtime = StateRuntime::init_for_testing(home.clone(), "zai".into()).await?;
+    let no_retry_after = ProviderRequestResult::Failed {
+        status: Some(429),
+        request_id: None,
+        retry_after_ms: None,
+    };
+    for now_ms in [1_000, 1_100, 1_200] {
+        runtime
+            .record_provider_request_throttle_outcome(&key(), no_retry_after.clone(), now_ms)
+            .await;
+    }
+    assert_eq!(
+        check_reason(
+            &runtime
+                .check_provider_request_throttle(&key(), &preflight(), 2_000)
+                .await
+        ),
+        Some((ProviderRequestBlockReason::Cooldown, 31_200, Some(429)))
+    );
+    // The next 429 after the cooldown escalates once.
+    runtime
+        .record_provider_request_throttle_outcome(&key(), no_retry_after, 40_000)
+        .await;
+    assert_eq!(
+        check_reason(
+            &runtime
+                .check_provider_request_throttle(&key(), &preflight(), 40_001)
+                .await
+        ),
+        Some((ProviderRequestBlockReason::Cooldown, 100_000, Some(429)))
+    );
+    runtime.close().await;
+    let _ = std::fs::remove_dir_all(home);
+    Ok(())
+}
+
+/// Review S2: a leased request that succeeds never ends a cooldown an
+/// unleased 429 started while it held the lease.
+#[tokio::test]
+async fn a_leased_success_never_ends_an_unleased_cooldown() -> anyhow::Result<()> {
+    let home = unique_temp_dir();
+    let runtime = StateRuntime::init_for_testing(home.clone(), "zai".into()).await?;
+    let other_process = StateRuntime::init_for_testing(home.clone(), "zai".into()).await?;
+    let lease = acquired(acquire(&runtime, "worker-a", /*now_ms*/ 1_000).await);
+    other_process
+        .record_provider_request_throttle_outcome(&key(), rate_limited(), 2_000)
+        .await;
+    let recorded = runtime
+        .record_provider_request_throttle_result(
+            &lease,
+            ProviderRequestResult::Success {
+                input_tokens: Some(1),
+                cached_input_tokens: None,
+            },
+            3_000,
+        )
+        .await;
+    assert_eq!(recorded.decision, true);
+    for process in [&runtime, &other_process] {
+        assert_eq!(
+            check_reason(
+                &process
+                    .check_provider_request_throttle(&key(), &preflight(), 4_000)
+                    .await
+            ),
+            Some((ProviderRequestBlockReason::Cooldown, 62_000, Some(429)))
+        );
+    }
+    // The lease itself ended.
+    assert_eq!(
+        blocked_reason(&acquire(&other_process, "worker-b", 70_000).await),
+        None
+    );
+    other_process.close().await;
+    runtime.close().await;
+    let _ = std::fs::remove_dir_all(home);
+    Ok(())
+}
+
+/// Review S4: adoption keeps an existing salted row, and deletes every idle
+/// unsalted row (another key's, or one an older build wrote since).
+#[tokio::test]
+async fn adoption_keeps_the_salted_row_and_deletes_idle_unsalted_rows() -> anyhow::Result<()> {
+    let home = unique_temp_dir();
+    let runtime = StateRuntime::init_for_testing(home.clone(), "zai".into()).await?;
+    let row = |fingerprint: &str, cooldown_until_ms: i64| {
+        let pool = runtime.pool.clone();
+        let fingerprint = fingerprint.to_string();
+        async move {
+            sqlx::query(
+                "INSERT INTO provider_request_state (provider_id, model, key_fingerprint, cooldown_until_ms, last_status, updated_at_ms) VALUES ('zai', 'glm-5.2', ?, ?, 429, 0)",
+            )
+            .bind(fingerprint)
+            .bind(cooldown_until_ms)
+            .execute(pool.as_ref())
+            .await
+        }
+    };
+    row("env:ZAI_API_KEY:aaaaaaaaaaaaaaaa", 50_000).await?;
+    row("env-salted:ZAI_API_KEY:1111111111111111", 9_000).await?;
+    row("env:OTHER_KEY:bbbbbbbbbbbbbbbb", 0).await?;
+    row("env:OTHER_KEY:cccccccccccccccc", 80_000).await?;
+    runtime
+        .adopt_legacy_provider_request_key(
+            "env:ZAI_API_KEY:aaaaaaaaaaaaaaaa",
+            "env-salted:ZAI_API_KEY:1111111111111111",
+            /*now_ms*/ 10_000,
+        )
+        .await;
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT key_fingerprint, cooldown_until_ms FROM provider_request_state ORDER BY key_fingerprint",
+    )
+    .fetch_all(runtime.pool.as_ref())
+    .await?;
+    assert_eq!(
+        rows,
+        vec![
+            ("env-salted:ZAI_API_KEY:1111111111111111".to_string(), 9_000),
+            ("env:OTHER_KEY:cccccccccccccccc".to_string(), 80_000),
+        ]
+    );
+    runtime.close().await;
+    let _ = std::fs::remove_dir_all(home);
+    Ok(())
+}
+
+/// Review B1: a busy state DB costs adoption one wait, then pauses the DB as
+/// the other throttle steps do; it is not tried again in this process.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn adoption_waits_out_a_busy_db_once() -> anyhow::Result<()> {
+    let home = unique_temp_dir();
+    let runtime = StateRuntime::init_for_testing(home.clone(), "zai".into()).await?;
+    let held = hold_write_lock(&runtime.sqlite().state_db_path()).await?;
+    let adopt = || {
+        runtime.adopt_legacy_provider_request_key(
+            "env:ZAI_API_KEY:aaaaaaaaaaaaaaaa",
+            "env-salted:ZAI_API_KEY:1111111111111111",
+            /*now_ms*/ 1_000,
+        )
+    };
+    let started = Instant::now();
+    adopt().await;
+    assert!(
+        started.elapsed() >= Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        runtime.provider_request_memory.paused(),
+        Some(StateDbFallback::Busy)
+    );
+    let started = Instant::now();
+    adopt().await;
+    let check = runtime
+        .check_provider_request_throttle(&key(), &preflight(), 2_000)
+        .await;
+    assert_eq!(check.state_db_fallback, Some(StateDbFallback::Busy));
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        started.elapsed()
+    );
+    held.rollback().await?;
     runtime.close().await;
     let _ = std::fs::remove_dir_all(home);
     Ok(())

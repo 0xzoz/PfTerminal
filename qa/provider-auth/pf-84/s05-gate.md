@@ -32,10 +32,13 @@ off no attempt names an account and nothing below changes.
   older unsalted row moves to it on the key's next request, and idle ones are deleted.
 
   Follow-up #476: until then only a leased request recorded its result, so no human-driven
-  session ever recorded a 429. Every request now records it: a 429 holds that key back in every
-  session on the home for the provider's `Retry-After` (else 30 s, 60 s, 120 s, up to 5 min). The
-  request lease is taken only by a spawned sub-agent sending a large request (32k input tokens or
-  128 KiB) whose cache hit is unknown or under 70%; human-driven sessions never wait on it.
+  session ever recorded a 429. Every turn sampling request now records it: a 429 holds that key
+  back in every session on the home for the provider's `Retry-After` (else 30 s, 60 s, 120 s, up to
+  5 min; a burst of 429s counts once), and no result shortens an active cooldown. Compaction, the
+  turn-completion check and memory extraction call the model outside that path and still neither
+  check nor record it. The request lease is taken only by a spawned sub-agent sending a large
+  request (32k input tokens or 128 KiB) whose cache hit is unknown or under 70%; human-driven
+  sessions never wait on it.
 
   A named account is keyed by name rather than by credential (review note 5), so replacing its
   key under the same name keeps an active cooldown.
