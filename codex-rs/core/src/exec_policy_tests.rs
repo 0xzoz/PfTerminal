@@ -2870,6 +2870,7 @@ async fn issue_441_nested_launch_rules_refuse_launches_but_not_text() -> anyhow:
         ExecApprovalRequirement::Forbidden { .. }
     ));
     Ok(())
+}
 
 /// Issue #443: while the session's live level is Aggressive (right after
 /// `/security` confirms it, before the restart that loads the rules file),
