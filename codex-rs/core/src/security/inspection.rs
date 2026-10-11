@@ -294,6 +294,52 @@ impl Drop for PendingProtectedAction {
     }
 }
 
+/// #437: a person, hook or automatic reviewer refused an approval request
+/// (a protected action after untrusted content is recorded above instead).
+pub(crate) fn record_declined_approval(
+    thread: ThreadId,
+    what: &'static str,
+    outcome: &'static str,
+) {
+    record(Some(thread), what, outcome);
+}
+
+/// #437: held while an approval request waits. Esc on the prompt interrupts
+/// the turn, which drops the waiting request before any answer arrives; the
+/// request did not run and is recorded as declined.
+pub(crate) struct PendingApproval {
+    thread: ThreadId,
+    what: &'static str,
+    answered: bool,
+}
+
+impl PendingApproval {
+    pub(crate) fn new(thread: ThreadId, what: &'static str) -> Self {
+        Self {
+            thread,
+            what,
+            answered: false,
+        }
+    }
+
+    /// The answer arrived; the caller records a refusal itself.
+    pub(crate) fn answered(&mut self) {
+        self.answered = true;
+    }
+}
+
+impl Drop for PendingApproval {
+    fn drop(&mut self) {
+        if !self.answered {
+            record(
+                Some(self.thread),
+                self.what,
+                "declined by you (turn interrupted)",
+            );
+        }
+    }
+}
+
 /// The secretless launch contract refused a command or input.
 pub(crate) fn record_launch_denial(denied: &LaunchDenied) {
     let reason = match denied {

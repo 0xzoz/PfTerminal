@@ -175,21 +175,25 @@ async fn run_exec_like(args: RunExecLikeArgs) -> Result<FunctionToolOutput, Func
     );
     emitter.begin(event_ctx).await;
 
+    let live_aggressive = session.services.model_client().live_level_is_aggressive();
     let exec_approval_requirement = session
         .services
         .exec_policy
-        .create_exec_approval_requirement_for_command(ExecApprovalRequest {
-            command: &exec_params.command,
-            approval_policy: turn.approval_policy.value(),
-            permission_profile: turn.permission_profile(),
-            windows_sandbox_level: turn.windows_sandbox_level,
-            sandbox_permissions: if effective_additional_permissions.permissions_preapproved {
-                codex_protocol::models::SandboxPermissions::UseDefault
-            } else {
-                effective_additional_permissions.sandbox_permissions
+        .create_exec_approval_requirement(
+            ExecApprovalRequest {
+                command: &exec_params.command,
+                approval_policy: turn.approval_policy.value(),
+                permission_profile: turn.permission_profile(),
+                windows_sandbox_level: turn.windows_sandbox_level,
+                sandbox_permissions: if effective_additional_permissions.permissions_preapproved {
+                    codex_protocol::models::SandboxPermissions::UseDefault
+                } else {
+                    effective_additional_permissions.sandbox_permissions
+                },
+                prefix_rule,
             },
-            prefix_rule,
-        })
+            live_aggressive,
+        )
         .await;
 
     let req = ShellRequest {

@@ -371,7 +371,7 @@ pub fn rules_contents_for(nested: NestedAgents) -> String {
     );
     for program in VAULT_PROGRAMS {
         contents.push_str(&format!(
-            "prefix_rule(pattern = [\"{program}\", \"vault\"], decision = \"forbidden\", justification = \"Security level Aggressive: agents cannot use the Corbanu vault.\")\n"
+            "prefix_rule(pattern = [\"{program}\", \"vault\"], decision = \"forbidden\", justification = \"Security level Aggressive: agents cannot use the Corbanu vault. Run vault commands yourself outside Corbanu Terminal, or choose another level with /security.\")\n"
         ));
     }
     if nested == NestedAgents::Refuse {

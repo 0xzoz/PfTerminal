@@ -171,8 +171,18 @@ pub(super) async fn try_run_zsh_fork(
         req.timeout_ms
             .unwrap_or(crate::exec::DEFAULT_EXEC_COMMAND_TIMEOUT_MS),
     );
+    let live_aggressive = ctx
+        .session
+        .services
+        .model_client()
+        .live_level_is_aggressive();
     let exec_policy = Arc::new(RwLock::new(
-        ctx.session.services.exec_policy.current().as_ref().clone(),
+        ctx.session
+            .services
+            .exec_policy
+            .current_for(live_aggressive)
+            .as_ref()
+            .clone(),
     ));
     // TODO(anp): Keep PathUri through the shell escalation boundary.
     let sandbox_cwd = sandbox_cwd
@@ -228,7 +238,11 @@ pub(super) async fn try_run_zsh_fork(
     );
     let escalation_policy = CoreShellActionProvider {
         policy: Arc::clone(&exec_policy),
-        strict_rules: ctx.session.services.exec_policy.strict_rules(),
+        strict_rules: ctx
+            .session
+            .services
+            .exec_policy
+            .strict_rules_for(live_aggressive),
         session: Arc::clone(&ctx.session),
         turn: Arc::clone(&ctx.turn),
         call_id: ctx.call_id.clone(),
@@ -280,8 +294,18 @@ pub(crate) async fn prepare_unified_exec_zsh_fork(
         return Ok(None);
     }
 
+    let live_aggressive = ctx
+        .session
+        .services
+        .model_client()
+        .live_level_is_aggressive();
     let exec_policy = Arc::new(RwLock::new(
-        ctx.session.services.exec_policy.current().as_ref().clone(),
+        ctx.session
+            .services
+            .exec_policy
+            .current_for(live_aggressive)
+            .as_ref()
+            .clone(),
     ));
     // TODO(anp): Keep PathUri through the zsh-fork executor boundary.
     let cwd = exec_request
@@ -310,7 +334,11 @@ pub(crate) async fn prepare_unified_exec_zsh_fork(
     };
     let escalation_policy = CoreShellActionProvider {
         policy: Arc::clone(&exec_policy),
-        strict_rules: ctx.session.services.exec_policy.strict_rules(),
+        strict_rules: ctx
+            .session
+            .services
+            .exec_policy
+            .strict_rules_for(live_aggressive),
         session: Arc::clone(&ctx.session),
         turn: Arc::clone(&ctx.turn),
         call_id: ctx.call_id.clone(),
