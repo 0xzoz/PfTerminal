@@ -3970,8 +3970,11 @@ async fn sec_435_first_troll_starts_the_crew_at_its_parent() {
         .expect_err("no crew yet");
     assert!(err.to_string().contains("spawn a Nazgul first"), "{err}");
 
+    // The parent `/spawn` gives a Troll: the root node, `pane:codex-main`.
+    let root = app.spawn_root_node_id();
+    assert_eq!(root, format!("pane:{CODEX_MAIN_PANE_ID}"));
     let (class, started) = app
-        .custom_spawn_member_agent_class_under(SpawnRole::Troll, CODEX_MAIN_PANE_ID)
+        .custom_spawn_member_agent_class_under(SpawnRole::Troll, &root)
         .expect("a first Troll starts the crew");
     assert!(started);
     let codex_protocol::crew::AgentClass::CrewMember {
@@ -3984,7 +3987,7 @@ async fn sec_435_first_troll_starts_the_crew_at_its_parent() {
     let crew = app.spawn_crew.as_ref().expect("crew started");
     assert_eq!(
         crew.member_node_by_id.get("nazgul").map(String::as_str),
-        Some(CODEX_MAIN_PANE_ID)
+        Some(root.as_str())
     );
 
     // The spawn failed: the crew it started is dropped, so a Nazgul can

@@ -294,7 +294,10 @@ impl App {
         if let Some(runtime) = self.spawn_native_runtime_by_node.get(node_id) {
             return Ok(runtime.clone());
         }
-        if node_id == CODEX_MAIN_PANE_ID {
+        // #435: the spawn tree names the main pane `pane:codex-main`.
+        if node_id == CODEX_MAIN_PANE_ID
+            || node_id.strip_prefix("pane:") == Some(CODEX_MAIN_PANE_ID)
+        {
             return Ok(SavedNativeSpawnRuntime {
                 model: self.chat_widget.current_model().to_string(),
                 provider: self.config.model_provider_id.clone(),
