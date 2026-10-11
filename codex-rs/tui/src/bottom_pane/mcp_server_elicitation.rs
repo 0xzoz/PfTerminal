@@ -77,8 +77,8 @@ const PERSISTENT_OPTION_KEY_ERROR: &str =
     "That option lasts beyond this request; choose it with ↑/↓, then enter";
 const TYPED_TEXT_NOTICE: &str = "Typed text is not sent while this request is open; \
      use ↑/↓ and enter to answer, or esc to cancel";
-const CHOOSE_FIRST_NOTICE: &str =
-    "This is a new request; choose an option with ↑/↓ or its number, then enter";
+const CHOOSE_FIRST_NOTICE: &str = "This is a new request; choose an option with ↑/↓, then enter";
+const FORM_FIRST_NOTICE: &str = "This is a new request; review it, then press enter";
 const TOOL_TYPE_KEY: &str = "tool_type";
 const TOOL_ID_KEY: &str = "tool_id";
 const TOOL_SUGGEST_SUGGEST_TYPE_KEY: &str = "suggest_type";
@@ -1156,21 +1156,67 @@ impl McpServerElicitationOverlay {
         self.request.response_mode == McpServerElicitationResponseMode::ApprovalAction
     }
 
-    /// Require a fresh choice before Enter confirms: the prompt opened while
-    /// the user was typing, so their next Enter may be meant for their draft.
+    /// Require a deliberate choice before Enter confirms: the form opened
+    /// while the user was typing, or over another view, so their next keys
+    /// may be meant for that. Until they navigate, a number key is typed text
+    /// too (as after a character command key in the main approval prompt).
     pub(crate) fn require_fresh_choice(&mut self) {
-        self.typing_guard.on_request_changed();
+        self.typing_guard.on_command_key();
     }
 
     fn approval_notice(&self) -> Option<&'static str> {
+        let notice = self.typing_guard.notice()?;
         if !self.is_approval() {
-            return None;
+            return (notice == Notice::ChooseFirst).then_some(FORM_FIRST_NOTICE);
         }
-        Some(match self.typing_guard.notice()? {
+        Some(match notice {
             Notice::TypedText => TYPED_TEXT_NOTICE,
             Notice::ChooseFirst => CHOOSE_FIRST_NOTICE,
             Notice::PersistentNeedsArrows => PERSISTENT_OPTION_KEY_ERROR,
         })
+    }
+
+    /// Enter, or a configured accept key that cannot be typed text.
+    fn is_accept(&self, key_event: KeyEvent) -> bool {
+        (key_event.code == KeyCode::Enter && !key_hint::has_ctrl_or_alt(key_event.modifiers))
+            || self
+                .list_keymap
+                .accept
+                .iter()
+                .filter(|binding| !matches!(binding.parts(), (KeyCode::Char(_), _)))
+                .any(|binding| binding.is_press(key_event))
+    }
+
+    /// Deliberate navigation (as in the main approval prompt): the arrow,
+    /// Page, Home and End keys and configured list keys that are neither a
+    /// character nor a chord. Returns where it moves the highlight.
+    fn navigation_target(&self, key_event: KeyEvent) -> Option<usize> {
+        if key_hint::is_plain_text_key_event(key_event)
+            || key_hint::has_ctrl_or_alt(key_event.modifiers)
+        {
+            return None;
+        }
+        let len = self.options_len();
+        let last = len.checked_sub(1)?;
+        let current = self.selected_option_index().unwrap_or(0);
+        let keymap = &self.list_keymap;
+        if key_event.code == KeyCode::Up || keymap.move_up.is_pressed(key_event) {
+            Some(current.checked_sub(1).unwrap_or(last))
+        } else if key_event.code == KeyCode::Down || keymap.move_down.is_pressed(key_event) {
+            Some(if current >= last { 0 } else { current + 1 })
+        } else if matches!(key_event.code, KeyCode::PageUp | KeyCode::Home)
+            || keymap.page_up.is_pressed(key_event)
+            || keymap.jump_top.is_pressed(key_event)
+        {
+            Some(0)
+        } else if matches!(key_event.code, KeyCode::PageDown | KeyCode::End)
+            || keymap.page_down.is_pressed(key_event)
+            || keymap.jump_bottom.is_pressed(key_event)
+        {
+            Some(last)
+        } else {
+            None
+        }
     }
 
     /// #192: keys for an approval, routed through `TypingGuard` as in the
@@ -1179,36 +1225,30 @@ impl McpServerElicitationOverlay {
     /// and never answers. Options that last beyond this request are chosen
     /// only with the arrows and Enter.
     fn handle_approval_key(&mut self, key_event: KeyEvent) {
-        let options_len = self.options_len();
+        if self.is_accept(key_event) {
+            // A held Enter repeats; only a fresh press confirms.
+            if key_event.kind == KeyEventKind::Repeat {
+                return;
+            }
+            let idx = match self.typing_guard.on_confirm() {
+                Confirm::Option(idx) => idx,
+                Confirm::Highlighted => match self.selected_option_index() {
+                    Some(idx) => idx,
+                    None => return,
+                },
+                Confirm::Blocked => return,
+            };
+            self.highlight_option(idx);
+            self.select_current_option(/*committed*/ true);
+            self.submit_answers();
+            return;
+        }
+        if let Some(idx) = self.navigation_target(key_event) {
+            self.typing_guard.reset();
+            self.highlight_option(idx);
+            return;
+        }
         match key_event.code {
-            KeyCode::Enter if !key_hint::has_ctrl_or_alt(key_event.modifiers) => {
-                // A held Enter repeats; only a fresh press confirms.
-                if key_event.kind == KeyEventKind::Repeat {
-                    return;
-                }
-                let idx = match self.typing_guard.on_confirm() {
-                    Confirm::Option(idx) => idx,
-                    Confirm::Highlighted => match self.selected_option_index() {
-                        Some(idx) => idx,
-                        None => return,
-                    },
-                    Confirm::Blocked => return,
-                };
-                self.highlight_option(idx);
-                self.select_current_option(/*committed*/ true);
-                self.submit_answers();
-            }
-            KeyCode::Up | KeyCode::Down if key_event.modifiers == KeyModifiers::NONE => {
-                self.typing_guard.reset();
-                if let Some(answer) = self.current_answer_mut() {
-                    if key_event.code == KeyCode::Up {
-                        answer.selection.move_up_wrap(options_len);
-                    } else {
-                        answer.selection.move_down_wrap(options_len);
-                    }
-                    answer.answer_committed = false;
-                }
-            }
             KeyCode::Char(ch)
                 if key_hint::is_plain_text_key_event(key_event)
                     && key_event.kind != KeyEventKind::Repeat =>
@@ -1648,6 +1688,18 @@ impl BottomPaneView for McpServerElicitationOverlay {
             self.validation_error = None;
             self.handle_approval_key(key_event);
             return;
+        }
+        // #192: a form reached by answering the previous request (or opened
+        // while the user was typing) ignores a double or held Enter; any
+        // other key first.
+        if key_event.code == KeyCode::Enter {
+            if key_event.kind == KeyEventKind::Repeat
+                || matches!(self.typing_guard.on_confirm(), Confirm::Blocked)
+            {
+                return;
+            }
+        } else {
+            self.typing_guard.reset();
         }
 
         match key_event {
@@ -2686,12 +2738,114 @@ mod tests {
         assert_eq!(resolved_decisions(&mut rx), Vec::new());
         assert_eq!(overlay.approval_notice(), Some(CHOOSE_FIRST_NOTICE));
 
+        // A digit may be the rest of the draft: typed text, not a choice.
         press(&mut overlay, KeyCode::Char('1'));
+        press(&mut overlay, KeyCode::Enter);
+        assert_eq!(resolved_decisions(&mut rx), Vec::new());
+        assert_eq!(overlay.approval_notice(), Some(TYPED_TEXT_NOTICE));
+
+        press(&mut overlay, KeyCode::End);
+        press(&mut overlay, KeyCode::Home);
         press(&mut overlay, KeyCode::Enter);
         assert_eq!(
             resolved_decisions(&mut rx),
             vec![(McpServerElicitationAction::Accept, None)]
         );
+    }
+
+    /// #192: Shift+Enter confirms like Enter; Tab, Backspace and Space are
+    /// typed text; Page and End keys navigate.
+    #[test]
+    fn issue_192_other_keys_follow_the_main_approval_prompt() {
+        let (mut overlay, mut rx) = persist_tool_approval_overlay();
+        press(&mut overlay, KeyCode::Char('4'));
+        overlay.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        assert_eq!(
+            resolved_decisions(&mut rx),
+            vec![(McpServerElicitationAction::Cancel, None)]
+        );
+
+        for key in [KeyCode::Tab, KeyCode::Backspace, KeyCode::Char(' ')] {
+            let (mut overlay, mut rx) = persist_tool_approval_overlay();
+            press(&mut overlay, key);
+            press(&mut overlay, KeyCode::Enter);
+            assert_eq!(resolved_decisions(&mut rx), Vec::new(), "{key:?}");
+            assert_eq!(overlay.approval_notice(), Some(TYPED_TEXT_NOTICE));
+        }
+
+        let (mut overlay, mut rx) = persist_tool_approval_overlay();
+        press(&mut overlay, KeyCode::End);
+        assert_eq!(overlay.selected_option_index(), Some(3));
+        press(&mut overlay, KeyCode::PageUp);
+        assert_eq!(overlay.selected_option_index(), Some(0));
+        press(&mut overlay, KeyCode::PageDown);
+        press(&mut overlay, KeyCode::Enter);
+        assert_eq!(
+            resolved_decisions(&mut rx),
+            vec![(McpServerElicitationAction::Cancel, None)]
+        );
+    }
+
+    /// #192: a request resolved elsewhere while an option is highlighted
+    /// leaves the next one needing a fresh choice.
+    #[test]
+    fn issue_192_a_request_resolved_elsewhere_needs_a_fresh_choice_next() {
+        let (mut overlay, mut rx) = persist_tool_approval_overlay();
+        let mut second = persist_tool_approval_overlay().0.request;
+        second.request_id = request_id("request-2");
+        overlay.try_consume_mcp_server_elicitation_request(second);
+
+        press(&mut overlay, KeyCode::Char('1'));
+        overlay.dismiss_app_server_request(&ResolvedAppServerRequest::McpElicitation {
+            server_name: "server-1".to_string(),
+            request_id: request_id("request-1"),
+        });
+        press(&mut overlay, KeyCode::Enter);
+        assert_eq!(resolved_decisions(&mut rx), Vec::new());
+        assert!(!overlay.is_complete());
+    }
+
+    /// #192: a form reached by answering an approval ignores a double or
+    /// held Enter.
+    #[test]
+    fn issue_192_a_queued_form_ignores_a_double_enter() {
+        let (mut overlay, mut rx) = persist_tool_approval_overlay();
+        let form = from_form_request(
+            ThreadId::default(),
+            form_request(
+                "Confirm?",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "confirmed": { "type": "boolean", "title": "Confirm", "default": true }
+                    },
+                    "required": ["confirmed"],
+                }),
+                /*meta*/ None,
+            ),
+        )
+        .expect("expected supported form");
+        overlay.try_consume_mcp_server_elicitation_request(form);
+
+        press(&mut overlay, KeyCode::Enter);
+        overlay.handle_key_event(KeyEvent::new_with_kind(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+            KeyEventKind::Repeat,
+        ));
+        press(&mut overlay, KeyCode::Enter);
+        assert_eq!(
+            resolved_decisions(&mut rx),
+            vec![(McpServerElicitationAction::Accept, None)]
+        );
+        assert!(!overlay.is_complete());
+        assert_eq!(overlay.approval_notice(), Some(FORM_FIRST_NOTICE));
+
+        press(&mut overlay, KeyCode::Down);
+        press(&mut overlay, KeyCode::Up);
+        press(&mut overlay, KeyCode::Enter);
+        assert_eq!(resolved_decisions(&mut rx).len(), 1);
+        assert!(overlay.is_complete());
     }
 
     /// #192: in a form, a number key chooses an option without submitting.
@@ -2740,11 +2894,14 @@ mod tests {
         // #192: letters are typed text, so Enter waits for the arrow keys.
         press(&mut overlay, KeyCode::Enter);
         assert_eq!(resolved_meta(&mut rx), Vec::<Option<Value>>::new());
-        press(&mut overlay, KeyCode::Up);
         press(&mut overlay, KeyCode::Down);
         press(&mut overlay, KeyCode::Up);
+        assert_eq!(overlay.selected_option_index(), Some(0));
         press(&mut overlay, KeyCode::Enter);
-        assert_eq!(resolved_meta(&mut rx), vec![None]);
+        assert_eq!(
+            resolved_decisions(&mut rx),
+            vec![(McpServerElicitationAction::Accept, None)]
+        );
     }
 
     #[test]

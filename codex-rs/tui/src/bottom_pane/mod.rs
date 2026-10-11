@@ -1694,10 +1694,12 @@ impl BottomPane {
             self.disable_paste_burst,
             self.keymap.list.clone(),
         );
-        // #192: the user was typing; their next Enter may be meant for their draft.
-        if self
-            .approval_prompt_delay_remaining(Instant::now())
-            .is_some()
+        // #192: the user was typing, or another view is open; their next keys
+        // may be meant for their draft or for that view.
+        if !self.view_stack.is_empty()
+            || self
+                .approval_prompt_delay_remaining(Instant::now())
+                .is_some()
         {
             modal.require_fresh_choice();
         }
@@ -2279,14 +2281,7 @@ mod tests {
         assert!(pane.delayed_approval_requests.is_empty());
     }
 
-    /// #192: an MCP approval that opens while the user is typing ignores the
-    /// Enter meant for their draft until a fresh choice.
-    #[test]
-    fn mcp_approval_after_recent_typing_needs_a_fresh_choice() {
-        let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
-        let tx = AppEventSender::new(tx_raw);
-        let mut pane = test_pane(tx);
-        pane.last_composer_activity_at = Some(Instant::now());
+    fn mcp_approval_request() -> McpServerElicitationFormRequest {
         let params = codex_app_server_protocol::McpServerElicitationRequestParams {
             thread_id: "thread-1".to_string(),
             turn_id: Some("turn-1".to_string()),
@@ -2301,37 +2296,59 @@ mod tests {
                 .expect("schema"),
             },
         };
-        let request = McpServerElicitationFormRequest::from_app_server_request(
+        McpServerElicitationFormRequest::from_app_server_request(
             codex_protocol::ThreadId::default(),
             codex_app_server_protocol::RequestId::String("request-1".to_string()),
             &params,
         )
-        .expect("approval request");
-        pane.push_mcp_server_elicitation_request(request);
+        .expect("approval request")
+    }
 
-        pane.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(
-            !std::iter::from_fn(|| rx.try_recv().ok()).any(|event| matches!(
+    fn elicitation_resolved(rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>) -> bool {
+        std::iter::from_fn(|| rx.try_recv().ok()).any(|event| {
+            matches!(
                 event,
                 AppEvent::SubmitThreadOp {
                     op: Op::ResolveElicitation { .. },
                     ..
                 }
-            )),
-            "Enter answered the approval"
-        );
+            )
+        })
+    }
 
-        pane.handle_key_event(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
-        pane.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(
-            std::iter::from_fn(|| rx.try_recv().ok()).any(|event| matches!(
-                event,
-                AppEvent::SubmitThreadOp {
-                    op: Op::ResolveElicitation { .. },
-                    ..
-                }
-            ))
-        );
+    /// #192: an MCP approval that opens while the user is typing, or over
+    /// another view, takes neither the Enter nor the next digit and Enter
+    /// meant for the draft or that view; the arrow keys then Enter answer.
+    #[test]
+    fn mcp_approval_opened_mid_typing_or_over_a_view_needs_a_deliberate_choice() {
+        for over_view in [false, true] {
+            let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
+            let tx = AppEventSender::new(tx_raw);
+            let mut pane = test_pane(tx);
+            if over_view {
+                pane.show_selection_view(SelectionViewParams {
+                    title: Some("Some picker".to_string()),
+                    items: vec![SelectionItem {
+                        name: "Item".to_string(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                });
+            } else {
+                pane.last_composer_activity_at = Some(Instant::now());
+            }
+            pane.push_mcp_server_elicitation_request(mcp_approval_request());
+
+            for key in [KeyCode::Enter, KeyCode::Char('1'), KeyCode::Enter] {
+                pane.handle_key_event(KeyEvent::new(key, KeyModifiers::NONE));
+            }
+            assert!(!elicitation_resolved(&mut rx), "over_view={over_view}");
+
+            for key in [KeyCode::Down, KeyCode::Up, KeyCode::Enter] {
+                pane.handle_key_event(KeyEvent::new(key, KeyModifiers::NONE));
+            }
+            assert!(elicitation_resolved(&mut rx), "over_view={over_view}");
+        }
     }
 
     /// PF-83 F05: choosing a permission while an approval is pending must not
