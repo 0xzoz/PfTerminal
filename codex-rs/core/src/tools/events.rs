@@ -376,8 +376,9 @@ impl ToolEmitter {
     }
 
     /// #442: the explanation for a shell command that failed because the
-    /// Aggressive rules denied a protected read it names, shown to the person
-    /// as a warning beside it; the caller adds it to the model's output.
+    /// Aggressive rules denied a protected read it names. The caller shows it
+    /// to the person after the command's end event and adds it to the
+    /// model's output.
     async fn explain_protected_read(
         &self,
         ctx: ToolEventCtx<'_>,
@@ -395,7 +396,7 @@ impl ToolEmitter {
             },
             Err(ToolError::Rejected(_)) => return None,
         };
-        let explanation = crate::security::protected_reads::denial_explanation(
+        crate::security::protected_reads::denial_explanation(
             ctx.session,
             ctx.turn,
             command,
@@ -403,9 +404,7 @@ impl ToolEmitter {
             Some(output.exit_code),
             &output.aggregated_output.text,
         )
-        .await?;
-        crate::security::protected_reads::notify(ctx.session, ctx.turn, explanation.clone()).await;
-        Some(explanation)
+        .await
     }
 
     pub async fn finish(
@@ -491,6 +490,10 @@ impl ToolEmitter {
             }
         };
         self.emit(ctx, event).await;
+        if let Some(explanation) = &explanation {
+            crate::security::protected_reads::notify(ctx.session, ctx.turn, explanation.clone())
+                .await;
+        }
         match (explanation, result) {
             (Some(explanation), Err(FunctionCallError::RespondToModel(content))) => Err(
                 FunctionCallError::RespondToModel(format!("{content}\n{explanation}")),

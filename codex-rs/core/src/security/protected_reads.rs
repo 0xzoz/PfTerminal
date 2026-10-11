@@ -34,14 +34,22 @@ const LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The explanation shown when `path` could not be accessed.
 pub(crate) fn explanation(path: &str) -> String {
+    // The path is the command's own spelling: shown escaped and bounded.
+    let mut path = super::grant_offer::escape_controls(path);
+    if path.chars().count() > MAX_SHOWN_PATH_CHARS {
+        path = path.chars().take(MAX_SHOWN_PATH_CHARS).collect::<String>() + "…";
+    }
     format!(
         "Security level Aggressive blocked access to `{path}`: agent commands can never read \
-         protected files (credential files such as .env, SSH, cloud and CLI tokens, and the \
-         Corbanu home apart from its skills and plugins), and this cannot be granted, not even \
+         protected files (credential files such as .env, SSH, cloud and CLI tokens, and \
+         Corbanu's sign-in, vault, config and history), and this cannot be granted, not even \
          once. To allow it, a person can switch to Permissive in /security (it applies after a \
          restart)."
     )
 }
+
+/// Longest path shown in an explanation.
+const MAX_SHOWN_PATH_CHARS: usize = 200;
 
 /// What the session's read policy is built from, captured on the async
 /// thread; building it reads folders, so that happens off it.
@@ -65,6 +73,14 @@ impl ReadPolicyInputs {
                 state.level == SecurityLevel::Aggressive
                     && !matches!(state.policy, PolicyBinding::Unavailable)
             })?;
+        // Local paths only: a remote command's paths are not this host's.
+        if turn
+            .environments
+            .primary()
+            .is_some_and(|environment| environment.environment.is_remote())
+        {
+            return None;
+        }
         #[allow(deprecated)]
         let turn_cwd = turn.cwd.clone();
         let workspace_roots = turn
@@ -97,7 +113,8 @@ impl ReadPolicyInputs {
             &self.profile,
         );
         let policy = denials.apply(&self.profile)?.file_system_sandbox_policy();
-        ReadDenyMatcher::new(&policy, cwd)
+        // A malformed pattern denies every path; explain nothing then.
+        ReadDenyMatcher::try_new(&policy, cwd).ok().flatten()
     }
 }
 

@@ -186,6 +186,7 @@ impl PostTaintAction {
     /// is offered for it.
     pub(crate) fn reads_stay_denied(&self) -> bool {
         self.state.level == SecurityLevel::Aggressive
+            && !matches!(self.state.policy, PolicyBinding::Unavailable)
             && matches!(
                 self.kind,
                 ProtectedActionKind::Credentials | ProtectedActionKind::Vault

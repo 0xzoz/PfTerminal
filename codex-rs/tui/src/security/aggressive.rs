@@ -39,7 +39,7 @@ const SECRET_ENV_PATTERNS: [&str; 4] = ["*VAULT*", "*PASSWORD*", "*PASSPHRASE*",
 pub(crate) const ROWS: [(&str, &str); 6] = [
     (
         "Sandbox",
-        "write only in the current folder (where the Corbanu home and the nested-launch registry stay read-only): no extra writable folders, no /tmp or $TMPDIR; approved commands stay inside it too; escalation and permission-request tools are off; reading credential files (.env files found at start, SSH, cloud and CLI tokens) or the Corbanu home is denied to agent commands and is never granted, not even once (switch to Permissive in /security to allow it)",
+        "write only in the current folder (where the Corbanu home and the nested-launch registry stay read-only): no extra writable folders, no /tmp or $TMPDIR; approved commands stay inside it too; escalation and permission-request tools are off; reading credential files (.env files found at start, SSH, cloud and CLI tokens) or Corbanu's sign-in, vault, config and history is denied to agent commands and is never granted, not even once (switch to Permissive in /security to allow it)",
     ),
     (
         "Approvals",
