@@ -113,22 +113,10 @@ static CHECK_KEY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 struct Upstream {
     port: u16,
+    /// Every request it received: path and credential headers (#504).
+    seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     _ca_dir: TempDir,
     ca_path: PathBuf,
-}
-
-/// Every Authorization header an upstream received, by upstream port.
-static UPSTREAM_SEEN: std::sync::Mutex<Vec<(u16, String)>> = std::sync::Mutex::new(Vec::new());
-
-#[cfg(unix)]
-fn upstream_seen(port: u16) -> Vec<String> {
-    UPSTREAM_SEEN
-        .lock()
-        .expect("upstream log")
-        .iter()
-        .filter(|(seen_port, _)| *seen_port == port)
-        .map(|(_, authorization)| authorization.clone())
-        .collect()
 }
 
 /// Local TLS upstream that echoes the Authorization header it received.
@@ -147,65 +135,75 @@ async fn start_upstream_for(tls_host: &str) -> Upstream {
         .await
         .expect("bind upstream");
     let port = listener.local_addr().expect("upstream addr").port();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen_by_service = seen.clone();
     let service = TlsAcceptorLayer::new(acceptor).into_layer(HttpServer::http1().service(
-        service_fn(move |request: Request| async move {
-            if let Some(authorization) = request
-                .headers()
-                .get(AUTHORIZATION)
-                .and_then(|value| value.to_str().ok())
-            {
-                UPSTREAM_SEEN
-                    .lock()
-                    .expect("upstream log")
-                    .push((port, authorization.to_string()));
-            }
-            let echoed = if request.uri().path().ends_with("/xkey") {
-                rama_http::header::HeaderName::from_static("x-api-key")
-            } else {
-                AUTHORIZATION
+        service_fn(move |request: Request| {
+            let header = |name: &str| {
+                request
+                    .headers()
+                    .get(name)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("<none>")
+                    .to_string()
             };
-            let authorization = request
-                .headers()
-                .get(echoed)
-                .and_then(|value| value.to_str().ok())
-                .unwrap_or("<none>")
-                .to_string();
-            if request.uri().path().ends_with("/check") {
-                // PF-27-S05: confirm the key arrived without echoing it.
-                let expected = CHECK_KEY.get().map(|key| format!("Bearer {key}"));
-                let verdict = if expected.as_deref() == Some(authorization.as_str()) {
-                    "ok"
+            let line = format!(
+                "{} authorization={} x-api-key={}",
+                request.uri().path(),
+                header(AUTHORIZATION.as_str()),
+                header("x-api-key")
+            );
+            seen_by_service.lock().expect("upstream log").push(line);
+            async move {
+                let echoed = if request.uri().path().ends_with("/xkey") {
+                    rama_http::header::HeaderName::from_static("x-api-key")
                 } else {
-                    "mismatch"
+                    AUTHORIZATION
                 };
-                return Ok::<_, Infallible>(Response::new(Body::from(verdict)));
+                let authorization = request
+                    .headers()
+                    .get(echoed)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("<none>")
+                    .to_string();
+                if request.uri().path().ends_with("/check") {
+                    // PF-27-S05: confirm the key arrived without echoing it.
+                    let expected = CHECK_KEY.get().map(|key| format!("Bearer {key}"));
+                    let verdict = if expected.as_deref() == Some(authorization.as_str()) {
+                        "ok"
+                    } else {
+                        "mismatch"
+                    };
+                    return Ok::<_, Infallible>(Response::new(Body::from(verdict)));
+                }
+                if request.uri().path().ends_with("/redirect") {
+                    let mut response = Response::new(Body::empty());
+                    *response.status_mut() = rama_http::StatusCode::FOUND;
+                    response.headers_mut().insert(
+                        rama_http::header::LOCATION,
+                        HeaderValue::from_static("https://elsewhere.invalid/v1/steal"),
+                    );
+                    return Ok::<_, Infallible>(response);
+                }
+                let body = if request.uri().path() == STREAM_PATH {
+                    let first = rama_core::futures::stream::iter([Ok::<_, Infallible>(
+                        Bytes::from("first-chunk\n"),
+                    )]);
+                    Body::from_stream(rama_core::futures::StreamExt::chain(
+                        first,
+                        rama_core::futures::stream::pending(),
+                    ))
+                } else {
+                    Body::from(authorization)
+                };
+                Ok::<_, Infallible>(Response::new(body))
             }
-            if request.uri().path().ends_with("/redirect") {
-                let mut response = Response::new(Body::empty());
-                *response.status_mut() = rama_http::StatusCode::FOUND;
-                response.headers_mut().insert(
-                    rama_http::header::LOCATION,
-                    HeaderValue::from_static("https://elsewhere.invalid/v1/steal"),
-                );
-                return Ok::<_, Infallible>(response);
-            }
-            let body = if request.uri().path() == STREAM_PATH {
-                let first = rama_core::futures::stream::iter([Ok::<_, Infallible>(Bytes::from(
-                    "first-chunk\n",
-                ))]);
-                Body::from_stream(rama_core::futures::StreamExt::chain(
-                    first,
-                    rama_core::futures::stream::pending(),
-                ))
-            } else {
-                Body::from(authorization)
-            };
-            Ok::<_, Infallible>(Response::new(body))
         }),
     ));
     tokio::spawn(listener.serve(service));
     Upstream {
         port,
+        seen,
         _ca_dir: ca_dir,
         ca_path,
     }
@@ -942,7 +940,10 @@ async fn issue_504_forwarding_in_the_exit_window_fails_closed() {
         Some(IsolatedBrokerError::Unavailable)
     );
     assert!(client.is_alive(), "still in the exit window");
-    assert_eq!(upstream_seen(upstream.port), Vec::<String>::new());
+    assert_eq!(
+        *upstream.seen.lock().expect("upstream log"),
+        Vec::<String>::new()
+    );
     client.kill_for_test();
 }
 

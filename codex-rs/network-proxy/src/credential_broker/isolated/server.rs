@@ -389,53 +389,70 @@ async fn run_broker(
     });
     drop(hello);
 
-    let mut accept = None;
-    let served = async {
-        write_json_line(
-            &mut control_write,
-            &ControlResponse::Ready {
-                protocol_version: CONTROL_PROTOCOL_VERSION,
-                broker_instance,
-                socket_path: endpoint.data_name(),
-                run_generation: 1,
-                containment,
-            },
-        )
-        .await?;
+    // #504: every exit from here on revokes first, a panic included.
+    let mut exit = RevokeOnExit {
+        broker: broker.clone(),
+        accept: None,
+    };
 
-        accept = Some(endpoint.serve(broker.clone()));
-        let parent_gone = transport::shutdown_requested(parent)?;
-        tokio::pin!(parent_gone);
-        loop {
-            let line = tokio::select! {
-                line = read_control_line(&mut control) => line?,
-                () = &mut parent_gone => None,
-            };
-            let Some(line) = line else {
-                break;
-            };
-            let response = match serde_json::from_slice::<ControlRequest>(&line) {
-                // A stored-key read may block on the vault and the OS keyring.
-                Ok(request) => tokio::task::block_in_place(|| broker.control(request)),
-                Err(_) => ControlResponse::Error {
-                    code: ControlErrorCode::Malformed,
-                },
-            };
-            write_json_line(&mut control_write, &response).await?;
-        }
-        anyhow::Ok(())
+    write_json_line(
+        &mut control_write,
+        &ControlResponse::Ready {
+            protocol_version: CONTROL_PROTOCOL_VERSION,
+            broker_instance,
+            socket_path: endpoint.data_name(),
+            run_generation: 1,
+            containment,
+        },
+    )
+    .await?;
+
+    exit.accept = Some(endpoint.serve(broker.clone()));
+    let parent_gone = transport::shutdown_requested(parent)?;
+    tokio::pin!(parent_gone);
+    loop {
+        let line = tokio::select! {
+            line = read_control_line(&mut control) => line?,
+            () = &mut parent_gone => None,
+        };
+        let Some(line) = line else {
+            break;
+        };
+        let response = match serde_json::from_slice::<ControlRequest>(&line) {
+            // A stored-key read may block on the vault and the OS keyring.
+            Ok(request) => tokio::task::block_in_place(|| broker.control(request)),
+            Err(_) => ControlResponse::Error {
+                code: ControlErrorCode::Malformed,
+            },
+        };
+        write_json_line(&mut control_write, &response).await?;
     }
-    .await;
-    // Every exit once the broker exists: controller EOF, controller death, a
-    // termination signal, and (#504) a broken control channel. Close every
+    // Controller EOF, controller death or a termination signal: close every
     // outstanding channel by revoking, then remove the private socket
     // directory before exiting.
-    broker.revoke();
-    if let Some(accept) = accept {
-        accept.abort();
-    }
+    drop(exit);
     drop(endpoint);
-    served
+    Ok(())
+}
+
+/// #504: revokes every reference (clears the credentials and the env stash,
+/// bumps the run generation, wakes in-flight requests), then stops
+/// accepting, however `run_broker` leaves once the broker exists: a return,
+/// an error (such as a broken control channel) or a panic. Declared after
+/// the endpoint, so it runs before the endpoint removes the socket
+/// directory.
+struct RevokeOnExit {
+    broker: Arc<Broker>,
+    accept: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for RevokeOnExit {
+    fn drop(&mut self) {
+        self.broker.revoke();
+        if let Some(accept) = self.accept.take() {
+            accept.abort();
+        }
+    }
 }
 
 /// True when binding failed because another process holds a pipe name
@@ -824,6 +841,7 @@ impl Broker {
                 let mut state = poisoned.into_inner();
                 state.credentials.clear();
                 state.env_stash.clear();
+                state.replay = ReplayWindow::default();
                 state.run_generation = state.run_generation.saturating_add(1);
                 state.run_generation
             }
