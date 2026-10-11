@@ -359,6 +359,7 @@ fn accounting_pricing_authority_follows_auth_mode_at_the_default_endpoint() {
             approved_query: None,
             pricing: PriceAuthority::Unavailable,
             basis_source: Default::default(),
+            account: None,
         };
         let bound = super::turn_mode(&mode, id, &provider, Some(AuthMode::ApiKey), endpoint);
         let crate::config::AccountingMode::Provider {
@@ -405,6 +406,7 @@ fn accounting_pricing_authority_follows_auth_mode_at_the_default_endpoint() {
         approved_query: None,
         pricing: PriceAuthority::Unavailable,
         basis_source: Default::default(),
+        account: None,
     };
     // Each credential is checked at the route that credential actually resolves
     // to: a ChatGPT plan turn goes to the Codex route, an API key to the API one.
@@ -644,6 +646,7 @@ fn accounting_compaction_label_stays_recordable() -> Result<()> {
             scope: uuid::Uuid::new_v4(),
             dialect: codex_state::accounting::Dialect::Inclusive,
             dispatched_at_ms: 1i64.try_into()?,
+            account: None,
         };
         assert!(
             attempt.validate().is_ok(),
@@ -1221,6 +1224,7 @@ fn claude_plan_states_the_plan_side_whatever_openai_credential_exists() {
         approved_query: super::canonical_query(&provider),
         pricing: PriceAuthority::Unavailable,
         basis_source: Default::default(),
+        account: None,
     };
 
     for auth_mode in [

@@ -1,7 +1,7 @@
 ---
 sprint_id: "PF-84-S05"
 title: "Per-account usage and rate-limit attribution"
-status: in_progress
+status: ready
 plan_file: "docs/plans/active/unified-provider-auth.md"
 plan_feature: "PF-84"
 execution_order: 27
@@ -56,24 +56,33 @@ Paths are under `codex-rs/`, at `63ea3d0cbd`.
 ## Done
 
 - [x] Sprint record created and linked to one plan feature.
+- [x] Accounted attempts record `account: {name, fingerprint}` (12 hex, salted per home)
+  through ledger format 4 (`0004_account_dimension.sql`). Default-account attempts omit it,
+  keep their bytes and read as `default`, and never upgrade the ledger.
+- [x] Throttle state (429 cooldown, request lease) is per (provider, account); account B's 429
+  never blocks A.
+- [x] `/status` names the account (S04); `/cost` groups rows, pages and request links by
+  provider, account and model, in this conversation (coordinator and spawned agents) and in
+  other conversations (`corbanu exec` workers) of the same home, reconciling exactly.
+- [x] Merged behind `named_accounts` with gate evidence: [gate](../../../../qa/provider-auth/pf-84/s05-gate.md).
 
 ## Remaining
 
-- [ ] Add `account_name` and `account_fingerprint` (12 hex, non-reversible) to
-  accounting rows through an additive migration; old rows read as `default`.
-- [ ] Rate-limit state per (provider, account); account B's 429 never blocks A.
-- [ ] `/status` and usage views show and group by account.
-- [ ] Code-blind functional design frozen before test-result disclosure, or non-user-facing N/A reason recorded.
+- [ ] Code-blind functional acceptance (independent; not the implementer's), then Travis's sign-off.
+- [ ] Known limits (gate): usage views exist only in developer-accounting builds; a named
+  account's throttle row is keyed by name, so a replaced key keeps an active cooldown.
 
 ## Verification
 
-- [ ] Focused: `just test -p codex-core -p codex-state -p codex-tui` (accounting, migration, snapshot).
-- [ ] tmux SOP: a coordinator on account A and a spawned worker on account B each make
-  requests, and the usage view shows two rows with the right counts.
-- [ ] GLM run: `-m glm-5.3-flash -c model_provider="zai"` on two ZAI accounts (one real,
-  one fake). Only the real one accrues tokens, and the fake one records the failure.
-- [ ] Video: `pf84-usage-by-account.toml` (`--sprint PF-84-S05 --publish`).
-- [ ] One independent review (Opus 5.5 High).
+- [x] Focused: `just test` on codex-state, codex-core and codex-tui (accounting, migration,
+  throttle, `/cost`), with and without developer-accounting; Linux clippy `-D warnings` on glitch.
+- [x] tmux SOP: coordinator on `default`, spawned agents on `work` and `fake`, `corbanu exec`
+  workers and Kimi; `/cost` shows one row per account with counts equal to provider-reported usage.
+- [x] GLM run (`glm-5.3-flash`, `zai`): `work` (real key under a second name) accrues tokens;
+  `fake` records one failed request with no tokens and no spend.
+- [x] Video: `pf84-usage-by-account.toml` ([mp4](https://github.com/CorbanuCore/CorbanuTerminal/releases/download/demos/pf-84-s05-pf84-usage-by-account-a1921d736bfa-2026-10-11.mp4)).
+- [x] One independent review (Opus 5.5 High): APPROVE, non-blocking items handled (gate).
+- [ ] Independent code-blind functional execution (acceptance step, not the implementer).
 
 ## Security notes
 
@@ -83,8 +92,8 @@ Paths are under `codex-rs/`, at `63ea3d0cbd`.
 
 ## Exit evidence
 
-- [ ] Implementation commit and PR recorded.
-- [ ] Test output, tmux log and video path linked.
+- [x] Implementation commit and PR recorded (branch `feat/pf-84-s05-usage-by-account`, PR [#469](https://github.com/CorbanuCore/CorbanuTerminal/pull/469)).
+- [x] Test output, tmux log and video path linked ([gate](../../../../qa/provider-auth/pf-84/s05-gate.md)).
 - [ ] Code-blind handoff checker passes, or limited-testing agreement recorded.
-- [ ] `Done` and `Remaining` ledgers reflect reality.
+- [x] `Done` and `Remaining` ledgers reflect reality.
 - [ ] Completed record moved to `docs/sprints/archive/unified-provider-auth/`.

@@ -29,6 +29,7 @@ async fn accounting_chatgpt_subscription_off_route_collects_without_economics() 
         approved_query: None,
         pricing: PriceAuthority::Unavailable,
         basis_source: Default::default(),
+        account: None,
     };
     let test = builder(endpoint, mode)
         .with_auth(codex_login::CodexAuth::from_external_chatgpt_tokens(
@@ -728,6 +729,7 @@ async fn accounting_agent_identity_session_collects() -> anyhow::Result<()> {
         approved_query: None,
         pricing: PriceAuthority::Unavailable,
         basis_source: Default::default(),
+        account: None,
     };
     let test = builder(endpoint.clone(), mode)
         .with_auth(auth)

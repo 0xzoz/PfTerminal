@@ -125,6 +125,12 @@ impl<'a> Journal<'a> {
                 "invalid retry predecessor"
             );
         }
+        // A record a format-1 ledger cannot express upgrades the ledger in the
+        // same transaction that writes it.
+        let format = attempt.ledger_format();
+        if format > 1 {
+            crate::runtime::accounting::store::require_format_on_connection(conn, format).await?;
+        }
         sqlx::query("INSERT INTO draft_accounting_attempts VALUES (?, ?, ?) ON CONFLICT(attempt_id) DO NOTHING")
             .bind(attempt.attempt_id.to_string())
             .bind(attempt.request_id.to_string())

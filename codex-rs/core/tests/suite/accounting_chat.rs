@@ -28,6 +28,7 @@ async fn accounting_chat_custom_provider_collects_with_real_identity() -> anyhow
         approved_query: None,
         pricing: PriceAuthority::Unavailable,
         basis_source: Default::default(),
+        account: None,
     };
     let test = builder(endpoint, mode)
         .with_config(|config| {
@@ -49,9 +50,23 @@ async fn accounting_chat_custom_provider_collects_with_real_identity() -> anyhow
         vec![codex_state::accounting::Basis::Undeclared]
     );
     assert_eq!(observations(&db).await?.len(), 1);
+    // The default account is recorded by its absence: the attempt keeps the
+    // bytes it had before named accounts, and the ledger its format.
+    assert_eq!(records[0].account, None);
+    assert!(!ledger_has_format_4(&db).await?);
     posts(&server, /*expected*/ 1).await;
     stop(&test).await;
     Ok(())
+}
+
+async fn ledger_has_format_4(db: &codex_state::StateRuntime) -> anyhow::Result<bool> {
+    let mut connection = connection(db).await?;
+    let present: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = 'draft_accounting_ledger_format_4')",
+    )
+    .fetch_one(&mut connection)
+    .await?;
+    Ok(present)
 }
 
 #[tokio::test]
@@ -564,6 +579,7 @@ async fn accounting_chat_completion_assessment_collects() -> anyhow::Result<()> 
         approved_query: None,
         pricing: PriceAuthority::Unavailable,
         basis_source: Default::default(),
+        account: None,
     };
     let test = builder(endpoint.clone(), mode)
         .with_config(|config| {

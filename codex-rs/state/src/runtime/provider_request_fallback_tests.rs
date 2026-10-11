@@ -275,3 +275,47 @@ async fn a_read_only_state_db_falls_back_to_this_process() -> anyhow::Result<()>
     let _ = std::fs::remove_dir_all(home);
     Ok(())
 }
+
+/// PF-84-S05: throttle state is kept per account. Account `fake`'s 429
+/// cooldown never blocks account `work` of the same provider and model.
+#[tokio::test]
+async fn one_accounts_cooldown_never_blocks_another() -> anyhow::Result<()> {
+    let home = unique_temp_dir();
+    let runtime = StateRuntime::init_for_testing(home.clone(), "zai".into()).await?;
+    let account = |name: &str| ProviderRequestKey {
+        key_fingerprint: format!("account:{name}"),
+        ..key()
+    };
+    let lease = |key: ProviderRequestKey, owner: &'static str, now_ms: i64| {
+        let runtime = &runtime;
+        async move {
+            runtime
+                .acquire_provider_request_throttle_lease(
+                    &key,
+                    &preflight(),
+                    owner,
+                    /*lease_ttl_ms*/ 600_000,
+                    now_ms,
+                )
+                .await
+        }
+    };
+    let fake = acquired(lease(account("fake"), "fake-worker", 1_000).await);
+    runtime
+        .record_provider_request_throttle_result(&fake, rate_limited(), /*now_ms*/ 2_000)
+        .await;
+    let blocked = runtime
+        .check_provider_request_throttle(&account("fake"), &preflight(), 3_000)
+        .await;
+    assert_eq!(
+        blocked.decision.map(|block| block.reason),
+        Some(ProviderRequestBlockReason::Cooldown)
+    );
+    let work = runtime
+        .check_provider_request_throttle(&account("work"), &preflight(), 3_000)
+        .await;
+    assert_eq!(work.decision, None);
+    acquired(lease(account("work"), "work-worker", 3_001).await);
+    runtime.close().await;
+    Ok(())
+}

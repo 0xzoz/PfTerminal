@@ -533,7 +533,7 @@ OpenAI schema, provider authorization or credential format is rewritten.
 | `PF-84` | Named account registry, storage and resolution | [PF-84-S02](../../sprints/archive/unified-provider-auth/pf-84-s02-account-registry-and-resolution.md) | completed; accepted 2026-10-11 behind `named_accounts` (flag off); S02-15 open ([gate](../../../qa/provider-auth/pf-84/s02-gate.md)) |
 | `PF-84` | Account selection per session, CLI and worker | [PF-84-S03](../../sprints/archive/unified-provider-auth/pf-84-s03-account-selection-and-propagation.md) | completed; accepted 2026-10-11 behind `named_accounts` with limits: #425, #426 and #428 must be resolved before the flag is removed ([gate](../../../qa/provider-auth/pf-84/s03-gate.md), [acceptance](../../../qa/provider-auth/pf-84/independent-acceptance-s03-20261010/README.md)) |
 | `PF-84` | `/providers` account management; duplicate-row fix | [PF-84-S04](../../sprints/current/unified-provider-auth/pf-84-s04-provider-account-management-ui.md) | ready (lane account-ui) |
-| `PF-84` | Per-account usage and rate-limit attribution | [PF-84-S05](../../sprints/current/unified-provider-auth/pf-84-s05-per-account-usage-attribution.md) | in progress (lane account-usage) |
+| `PF-84` | Per-account usage and rate-limit attribution | [PF-84-S05](../../sprints/current/unified-provider-auth/pf-84-s05-per-account-usage-attribution.md) | ready (lane account-usage; [gate](../../../qa/provider-auth/pf-84/s05-gate.md)) |
 | `PF-84` | Named AWS profile and ChatGPT/OpenAI sign-in accounts | [PF-84-S06](../../sprints/current/unified-provider-auth/pf-84-s06-aws-and-chatgpt-accounts.md) | draft; unallocated (D4) |
 
 ## Hard dependency graph

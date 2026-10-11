@@ -46,6 +46,7 @@ async fn accounting_plan_identity_zero_usage_and_provider_switch() -> anyhow::Re
             approved_query: None,
             pricing: PriceAuthority::Unavailable,
             basis_source: Default::default(),
+            account: None,
         };
         let test = builder(endpoint, mode)
             .with_config(move |config| {
@@ -1199,6 +1200,7 @@ async fn accounting_plan_turn_records_the_identity_the_catalogue_prices() -> any
         approved_query: None,
         pricing: PriceAuthority::Unavailable,
         basis_source: Default::default(),
+        account: None,
     };
     let test = builder(endpoint, mode)
         .with_config(|config| {
@@ -1269,6 +1271,7 @@ async fn accounting_ephemeral_session_runs_turns_without_collecting() -> anyhow:
         approved_query: None,
         pricing: PriceAuthority::Unavailable,
         basis_source: Default::default(),
+        account: None,
     };
     let test = builder(endpoint, mode)
         .with_config(|config| {

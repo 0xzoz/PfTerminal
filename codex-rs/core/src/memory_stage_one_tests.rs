@@ -544,6 +544,7 @@ async fn pf_60_s03_stage_one_extraction_records_its_own_turn() -> anyhow::Result
         approved_query: None,
         pricing: crate::config::PriceAuthority::Unavailable,
         basis_source: Default::default(),
+        account: None,
     };
     config.features.enable(Feature::Sqlite)?;
 

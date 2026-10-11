@@ -99,7 +99,7 @@ impl ExtensionAccounting {
         let (accounting, provider_id) = owner.accounting_binding().await;
         let auth = owner.services.auth_manager.auth().await;
         let auth_mode = auth.as_ref().map(codex_login::CodexAuth::auth_mode);
-        let mode = if matches!(accounting, AccountingMode::Provider { .. }) {
+        let mut mode = if matches!(accounting, AccountingMode::Provider { .. }) {
             crate::accounting::turn_mode(&accounting, &provider_id, provider, auth_mode, endpoint)
         } else {
             accounting
@@ -107,6 +107,12 @@ impl ExtensionAccounting {
         if !crate::accounting::collects(&mode, &provider_id, provider, provider.wire_api) {
             return None;
         }
+        crate::accounting::bind_account_fingerprint(
+            &mut mode,
+            provider,
+            owner.get_config().await.codex_home.to_path_buf(),
+        )
+        .await;
         // Recorded where the session's turns are: its own thread, or the
         // conversation it works for, labelled as such.
         let recorded = crate::accounting::collecting_owner(&owner).await.ok()?;
@@ -210,6 +216,8 @@ impl ExtensionAccounting {
             approved_query: None,
             pricing,
             basis_source,
+            // The reporting client's credential, not an account of this session.
+            account: None,
         };
         let Ok(recorded) = crate::accounting::collecting_owner(&owner).await else {
             return false;

@@ -515,6 +515,7 @@ async fn pf_60_s03_realtime_call_is_recorded() -> anyhow::Result<()> {
         approved_query: None,
         pricing: crate::config::PriceAuthority::Unavailable,
         basis_source: Default::default(),
+        account: None,
     };
     config
         .features
