@@ -61,10 +61,11 @@ pub(super) fn other_conversations_lines(others: Option<&OtherConversations>) -> 
             request_count(&quotes)
         )
     }];
+    let named = super::names_accounts(quotes.iter().copied());
     lines.extend(
         by_route(quotes.iter().copied())
             .values()
-            .map(|q| route_line(q)),
+            .map(|q| route_line(q, named)),
     );
     if !quotes.is_empty() {
         lines.push(match DayTotals::from_quotes(quotes.iter().copied()) {

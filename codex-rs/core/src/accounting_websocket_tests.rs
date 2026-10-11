@@ -35,6 +35,7 @@ async fn accounting_responses_ws_subscription_uses_resolved_endpoint_without_api
         approved_query: None,
         pricing: PriceAuthority::Unavailable,
         basis_source: Default::default(),
+        account: None,
     };
     let fixture = Fixture::new(mode).await?;
     let provenance = Provenance::capture(&provider, Some(&auth), &api);
@@ -108,6 +109,7 @@ async fn accounting_subscription_without_a_price_stays_subscription() -> anyhow:
         approved_query: None,
         pricing: PriceAuthority::Unavailable,
         basis_source: Default::default(),
+        account: None,
     };
     let fixture = Fixture::new(mode).await?;
     let sampling = fixture

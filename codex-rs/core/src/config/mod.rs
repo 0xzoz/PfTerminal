@@ -716,6 +716,9 @@ pub enum AccountingMode {
         pricing: PriceAuthority,
         /// Where the basis behind `pricing` was declared.
         basis_source: codex_state::accounting::BasisSource,
+        /// PF-84: the named account of the serving provider this turn's
+        /// requests use; `None` is the `default` account. Rebound per turn.
+        account: Option<codex_state::accounting::AttemptAccount>,
     },
     DirectAnthropic {
         scope: uuid::Uuid,

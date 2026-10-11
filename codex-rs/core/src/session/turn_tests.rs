@@ -201,3 +201,26 @@ async fn plan_mode_uses_contributed_turn_item_for_last_agent_message() {
         Some("plan contributed assistant text")
     );
 }
+
+#[test]
+fn named_accounts_have_their_own_throttle_state() {
+    let default = codex_model_provider_info::ModelProviderInfo::create_zai_provider();
+    let named = |name: &str| {
+        let mut provider = default.clone();
+        provider.account = Some(codex_model_provider_info::NamedProviderAccount {
+            provider_id: "zai".to_string(),
+            name: name.to_string(),
+        });
+        provider
+    };
+    let key = |provider: &codex_model_provider_info::ModelProviderInfo| {
+        provider_request_key_fingerprint(provider, || "unused")
+    };
+    // The default account keeps today's key; each named account gets its own,
+    // so account B's 429 cooldown never blocks account A.
+    assert!(key(&default).starts_with("env:ZAI_API_KEY:") || key(&default) == "stored:ZAI_API_KEY");
+    assert_eq!(key(&named("work")), "account:work");
+    assert_eq!(key(&named("fake")), "account:fake");
+    assert_ne!(key(&named("work")), key(&named("fake")));
+    assert_ne!(key(&named("work")), key(&default));
+}

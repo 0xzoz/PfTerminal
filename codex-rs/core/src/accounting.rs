@@ -74,6 +74,7 @@ pub(crate) fn developer_accounting_mode(
         approved_query: canonical_query(provider),
         pricing: PriceAuthority::Unavailable,
         basis_source: Default::default(),
+        account: None,
     }
 }
 
@@ -443,7 +444,7 @@ pub(crate) async fn attach_scopes(
     // left uncollected - named once in the log - and its turns run.
     // A ledger that cannot be reached leaves this turn's requests unrecorded;
     // it never stops them.
-    let candidate = match accounting {
+    let mut candidate = match accounting {
         AccountingMode::Provider { .. } => turn_mode(
             accounting,
             provider_id,
@@ -482,6 +483,12 @@ pub(crate) async fn attach_scopes(
         Some(_) | None => turn,
     };
     let mode = if owner.is_some() {
+        bind_account_fingerprint(
+            &mut candidate,
+            provider,
+            session.get_config().await.codex_home.to_path_buf(),
+        )
+        .await;
         candidate
     } else {
         AccountingMode::Disabled
@@ -598,7 +605,12 @@ pub(crate) fn turn_mode(
     auth_mode: Option<codex_protocol::auth::AuthMode>,
     resolved_endpoint: &str,
 ) -> AccountingMode {
-    let AccountingMode::Provider { scope, .. } = mode else {
+    let AccountingMode::Provider {
+        scope,
+        account: bound_account,
+        ..
+    } = mode
+    else {
         return mode.clone();
     };
     if route_refusal(provider).is_some() {
@@ -688,7 +700,69 @@ pub(crate) fn turn_mode(
         approved_query: canonical_query(provider),
         pricing,
         basis_source,
+        account: attempt_account(provider, bound_account.as_ref()),
     }
+}
+
+/// PF-84: the serving provider's selected named account as the ledger records
+/// it, keeping a fingerprint already bound for that same account. `None` for
+/// the `default` account.
+fn attempt_account(
+    provider: &codex_model_provider_info::ModelProviderInfo,
+    bound: Option<&codex_state::accounting::AttemptAccount>,
+) -> Option<codex_state::accounting::AttemptAccount> {
+    let selected = provider.account.as_ref()?;
+    Some(codex_state::accounting::AttemptAccount {
+        name: selected.name.clone(),
+        fingerprint: bound
+            .filter(|bound| bound.name == selected.name)
+            .and_then(|bound| bound.fingerprint.clone()),
+    })
+}
+
+/// Binds the account's per-home fingerprint once per turn. Vault metadata and a
+/// salted hash only; an account whose fingerprint cannot be read is recorded by
+/// name alone rather than left unrecorded.
+pub(crate) async fn bind_account_fingerprint(
+    mode: &mut AccountingMode,
+    provider: &codex_model_provider_info::ModelProviderInfo,
+    codex_home: std::path::PathBuf,
+) {
+    let AccountingMode::Provider {
+        account: Some(account),
+        ..
+    } = mode
+    else {
+        return;
+    };
+    if account.fingerprint.is_some() {
+        return;
+    }
+    let Some(selected) = provider.account.clone() else {
+        return;
+    };
+    let fingerprint = tokio::task::spawn_blocking(move || {
+        let name = codex_vault::ProviderAccountName::parse(&selected.name).ok()?;
+        let vault = codex_vault::Vault::new(codex_home);
+        // Never initialise a vault (or its key) just to fingerprint.
+        if vault.key_storage() == codex_vault::VaultKeyStorage::NotInitialized {
+            return None;
+        }
+        vault
+            .provider_account_fingerprint(&selected.provider_id, &name)
+            .ok()
+            .flatten()
+    })
+    .await
+    .ok()
+    .flatten();
+    if fingerprint.is_none() {
+        tracing::warn!(
+            target: LOG_TARGET,
+            "account fingerprint unavailable; recording the account by name only"
+        );
+    }
+    account.fingerprint = fingerprint;
 }
 
 pub(crate) fn collects(
@@ -1000,6 +1074,8 @@ pub(crate) struct Sampling {
     scope: Uuid,
     endpoint: String,
     provider: String,
+    /// PF-84: the named account the requests are sent on; `None` is `default`.
+    account: Option<codex_state::accounting::AttemptAccount>,
     dialect: Dialect,
     pricing: Pricing,
     /// Pinned to OpenAI's image generation endpoint under API-key rates: priced
@@ -1185,6 +1261,10 @@ impl Sampling {
                 path_override.unwrap_or(path),
             ),
             provider: provider.into(),
+            account: match mode {
+                AccountingMode::Provider { account, .. } => account.clone(),
+                _ => None,
+            },
             dialect,
             pricing: pricing_for(mode),
             image_generation: path_override == Some(prices::IMAGE_GENERATIONS_PATH)
@@ -1280,6 +1360,7 @@ impl Sampling {
             scope: self.scope,
             dialect: self.dialect,
             dispatched_at_ms: dispatched_at.try_into()?,
+            account: self.account.clone(),
         };
         use codex_state::accounting::Basis;
         let basis_only = |basis| {

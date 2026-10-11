@@ -87,6 +87,52 @@ pub struct Attempt {
     pub scope: Uuid,
     pub dialect: Dialect,
     pub dispatched_at_ms: Count,
+    /// PF-84: the named provider account the attempt was sent on. Absent for
+    /// the `default` account, so every attempt recorded before named accounts,
+    /// and every default-account attempt since, keeps its exact bytes and the
+    /// ledger's format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<AttemptAccount>,
+}
+
+/// A named provider account as the ledger records it: its name and, when the
+/// vault could compute it, a 12-hex fingerprint salted per home. Never a
+/// credential value.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttemptAccount {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
+}
+
+/// The account name every attempt without a recorded account was sent on.
+pub const DEFAULT_ACCOUNT: &str = "default";
+
+impl AttemptAccount {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        // `default` is the absence of an account, never a second spelling of it.
+        ensure!(
+            !self.name.trim().is_empty()
+                && self.name.len() <= 64
+                && self.name != DEFAULT_ACCOUNT
+                && !self
+                    .name
+                    .chars()
+                    .any(|c| c.is_control() || c.is_whitespace()),
+            "invalid account name"
+        );
+        if let Some(fingerprint) = &self.fingerprint {
+            ensure!(
+                fingerprint.len() == 12
+                    && fingerprint
+                        .chars()
+                        .all(|c| c.is_ascii_digit() || matches!(c, 'a'..='f')),
+                "invalid account fingerprint"
+            );
+        }
+        Ok(())
+    }
 }
 
 impl Attempt {
@@ -98,7 +144,23 @@ impl Attempt {
             );
         }
         ensure!(self.retry_of != Some(self.attempt_id), "self retry");
+        if let Some(account) = &self.account {
+            account.validate()?;
+        }
         Ok(())
+    }
+
+    /// The account name this attempt was sent on, `default` when none is recorded.
+    pub fn account_name(&self) -> &str {
+        self.account
+            .as_ref()
+            .map_or(DEFAULT_ACCOUNT, |account| account.name.as_str())
+    }
+
+    /// The ledger format this attempt needs: 4 when it names an account,
+    /// otherwise 1. `append_on_connection` upgrades the ledger to it first.
+    pub(crate) fn ledger_format(&self) -> i64 {
+        if self.account.is_some() { 4 } else { 1 }
     }
 
     pub fn same_owner(&self, other: &Self) -> bool {

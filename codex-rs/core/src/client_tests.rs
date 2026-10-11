@@ -3036,6 +3036,7 @@ async fn pf_60_s03_memory_summarize_is_recorded() -> anyhow::Result<()> {
         approved_query: None,
         pricing: crate::config::PriceAuthority::Unavailable,
         basis_source: Default::default(),
+        account: None,
     };
     config
         .features

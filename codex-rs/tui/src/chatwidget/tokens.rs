@@ -650,6 +650,16 @@ fn attempt_text(q: &ObservationQuote) -> Vec<String> {
         format!("Thread: {}", a.thread_id),
         format!("Turn: {}", a.turn),
         format!("Provider: {}", a.provider),
+        format!(
+            "Account: {}",
+            a.account.as_ref().map_or_else(
+                || codex_state::accounting::DEFAULT_ACCOUNT.to_string(),
+                |account| match &account.fingerprint {
+                    Some(fingerprint) => format!("{} (fingerprint {fingerprint})", account.name),
+                    None => format!("{} (fingerprint unavailable)", account.name),
+                }
+            )
+        ),
         format!("Model: {}", a.model),
         format!("Opaque scope: {}", a.scope),
         format!("Arithmetic dialect: {:?}", a.dialect),
@@ -1086,13 +1096,20 @@ fn inspection_pages_for(
                 .collect::<Vec<_>>(),
         ),
     ];
+    // PF-84-S05: grouped by provider, account and model; accounts are named
+    // only in a view that holds named-account work.
+    let named = names_accounts(ready.requests.values().flatten());
     let mut providers = std::collections::BTreeMap::new();
     for quote in ready.requests.values().flatten() {
-        let key = (&quote.attempt.provider, &quote.attempt.model);
+        let key = (
+            &quote.attempt.provider,
+            quote.attempt.account_name(),
+            &quote.attempt.model,
+        );
         providers.entry(key).or_insert_with(Vec::new).push(quote);
     }
     let mut groups = root_groups.to_vec();
-    for ((provider, model), quotes) in providers {
+    for ((provider, account, model), quotes) in providers {
         let provider = if provider.trim().is_empty() {
             "unknown (attribution absent)"
         } else {
@@ -1103,7 +1120,12 @@ fn inspection_pages_for(
         } else {
             model
         };
-        groups.push((format!("Provider: {provider}; Model: {model}"), quotes));
+        let title = if named {
+            format!("Provider: {provider}; Account: {account}; Model: {model}")
+        } else {
+            format!("Provider: {provider}; Model: {model}")
+        };
+        groups.push((title, quotes));
     }
     // Keep missing attribution visible even when this schema has no such rows.
     if !ready
@@ -1161,7 +1183,7 @@ fn inspection_pages_for(
         let label = if provider_group {
             format!(
                 "{} — {} ({})",
-                route_name(quotes[0]),
+                route_name_in(quotes[0], named),
                 short_cost(&quotes),
                 request_count(&quotes)
             )
@@ -1355,11 +1377,34 @@ fn model_name(slug: &str) -> String {
 }
 
 fn route_name(quote: &ObservationQuote) -> String {
-    format!(
-        "{} · {}",
-        provider_name(&quote.attempt.provider),
-        model_name(&quote.attempt.model)
-    )
+    route_name_in(quote, quote.attempt.account.is_some())
+}
+
+/// "Provider · Model", or "Provider · account NAME · Model" where the view
+/// names accounts (`default` included).
+fn route_name_in(quote: &ObservationQuote, named: bool) -> String {
+    if named {
+        format!(
+            "{} · account {} · {}",
+            provider_name(&quote.attempt.provider),
+            quote.attempt.account_name(),
+            model_name(&quote.attempt.model)
+        )
+    } else {
+        format!(
+            "{} · {}",
+            provider_name(&quote.attempt.provider),
+            model_name(&quote.attempt.model)
+        )
+    }
+}
+
+/// PF-84-S05: whether any attempt here was sent on a named account. Only such
+/// a view names accounts, so default-account work reads as it always has.
+fn names_accounts<'a>(quotes: impl IntoIterator<Item = &'a ObservationQuote>) -> bool {
+    quotes
+        .into_iter()
+        .any(|quote| quote.attempt.account.is_some())
 }
 
 /// The route of a request's attempts, or every distinct route when a retry
@@ -1841,10 +1886,12 @@ fn leading_charge(
 /// work, how it is paid for and what it cost, then a divider above the
 /// auditing detail.
 fn plain_header(quotes: &[&ObservationQuote]) -> Vec<String> {
-    let mut routes: Vec<(String, String)> = Vec::new();
+    let named = names_accounts(quotes.iter().copied());
+    let mut routes: Vec<(String, String, String)> = Vec::new();
     for quote in quotes {
         let route = (
             provider_name(&quote.attempt.provider),
+            quote.attempt.account_name().to_string(),
             model_name(&quote.attempt.model),
         );
         if !routes.contains(&route) {
@@ -1852,12 +1899,28 @@ fn plain_header(quotes: &[&ObservationQuote]) -> Vec<String> {
         }
     }
     let mut lines = match routes.as_slice() {
-        [(provider, model)] => vec![format!("Provider: {provider}"), format!("Model: {model}")],
+        [(provider, account, model)] => {
+            let mut lines = vec![format!("Provider: {provider}")];
+            if named {
+                lines.push(format!("Account: {account}"));
+            }
+            lines.push(format!("Model: {model}"));
+            lines
+        }
         _ => vec![format!(
-            "Providers and models: {}",
+            "{}: {}",
+            if named {
+                "Providers, accounts and models"
+            } else {
+                "Providers and models"
+            },
             routes
                 .iter()
-                .map(|(provider, model)| format!("{provider} · {model}"))
+                .map(|(provider, account, model)| if named {
+                    format!("{provider} · account {account} · {model}")
+                } else {
+                    format!("{provider} · {model}")
+                })
                 .collect::<Vec<_>>()
                 .join(", ")
         )],
@@ -1897,15 +1960,19 @@ fn day_heading(utc_day: i64, today: i64) -> String {
     )
 }
 
-/// Attempts grouped by provider and model, in a stable order.
+/// Attempts grouped by provider, account and model, in a stable order.
 fn by_route<'a>(
     quotes: impl IntoIterator<Item = &'a ObservationQuote>,
-) -> std::collections::BTreeMap<(String, String), Vec<&'a ObservationQuote>> {
-    let mut groups: std::collections::BTreeMap<(String, String), Vec<&ObservationQuote>> =
+) -> std::collections::BTreeMap<(String, String, String), Vec<&'a ObservationQuote>> {
+    let mut groups: std::collections::BTreeMap<(String, String, String), Vec<&ObservationQuote>> =
         std::collections::BTreeMap::new();
     for quote in quotes {
         groups
-            .entry((quote.attempt.provider.clone(), quote.attempt.model.clone()))
+            .entry((
+                quote.attempt.provider.clone(),
+                quote.attempt.account_name().to_string(),
+                quote.attempt.model.clone(),
+            ))
             .or_default()
             .push(quote);
     }
@@ -1914,8 +1981,8 @@ fn by_route<'a>(
 
 /// One provider and model on a first screen: how it is paid for, then its
 /// requests, tokens and cost.
-fn route_line(quotes: &[&ObservationQuote]) -> String {
-    let route = route_name(quotes[0]);
+fn route_line(quotes: &[&ObservationQuote], named: bool) -> String {
+    let route = route_name_in(quotes[0], named);
     match codex_state::accounting::DayTotals::from_quotes(quotes.iter().copied()) {
         Ok(t) => {
             let (billing, cost) = plain_billing(&t, EstimateGaps::of(quotes.iter().copied()));
@@ -1963,7 +2030,8 @@ fn plain_overview<'a>(
     } else {
         vec![heading]
     };
-    lines.extend(groups.values().map(|quotes| route_line(quotes)));
+    let named = names_accounts(groups.values().flatten().copied());
+    lines.extend(groups.values().map(|quotes| route_line(quotes, named)));
     let all: Vec<&ObservationQuote> = groups.values().flatten().copied().collect();
     if let Ok(t) = codex_state::accounting::DayTotals::from_quotes(all.iter().copied()) {
         let billed = t.per_use_attempts();

@@ -176,6 +176,7 @@ impl Fixture {
                     scope: Uuid::from_u128(scope),
                     dialect,
                     dispatched_at_ms: at(time)?.try_into()?,
+                    account: None,
                 },
                 observations: Vec::new(),
                 original_price: match price {

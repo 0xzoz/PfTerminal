@@ -252,6 +252,7 @@ fn quote() -> ObservationQuote {
             scope: Uuid::from_u128(5),
             dialect: Dialect::Inclusive,
             dispatched_at_ms: 0.try_into().unwrap(),
+            account: None,
         },
         observations: vec![],
         snapshot: None,
