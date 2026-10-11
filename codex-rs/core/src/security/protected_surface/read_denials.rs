@@ -144,8 +144,13 @@ impl ReadDenials {
         let Ok(codex_home) = AbsolutePathBuf::from_absolute_path(codex_home) else {
             return denials;
         };
-        // Listing a folder the command works in stays allowed.
-        if !keep.contains(&codex_home) {
+        // Listing a folder the command works in stays allowed (by any
+        // spelling: the sandboxes compare real locations).
+        let real_home = std::fs::canonicalize(codex_home.as_path()).ok();
+        if !keep.iter().any(|kept| {
+            *kept == codex_home
+                || real_home.is_some() && std::fs::canonicalize(kept.as_path()).ok() == real_home
+        }) {
             denials.home = Some(codex_home.clone());
         }
         for entry in CORBANU_READ_ONLY {

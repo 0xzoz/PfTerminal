@@ -196,6 +196,12 @@ pub(crate) async fn denial_explanation(
             .or_else(|| {
                 word(&|path| matcher.is_listing_denied(path)).map(|word| listing_explanation(&word))
             })
+            // #506: `ls` run in the Corbanu home itself.
+            .or_else(|| {
+                matcher
+                    .is_listing_denied(&cwd)
+                    .then(|| listing_explanation(&cwd.display().to_string()))
+            })
     })
     .await
 }
@@ -208,22 +214,57 @@ pub(crate) async fn protected_path_in_command(
     command: &[String],
     cwd: &Path,
 ) -> Option<String> {
+    match protected_note_in_command(session, turn, command, cwd).await? {
+        ProtectedNote::Read(path) => Some(path),
+        ProtectedNote::Listing(_) => None,
+    }
+}
+
+/// What a command names that no grant opens under Aggressive.
+pub(crate) enum ProtectedNote {
+    /// A protected path it reads (#442).
+    Read(String),
+    /// A folder it lists that may not be listed (#506).
+    Listing(String),
+}
+
+impl ProtectedNote {
+    /// The explanation for the approval prompt.
+    pub(crate) fn explanation(&self) -> String {
+        match self {
+            Self::Read(path) => explanation(path),
+            Self::Listing(path) => listing_explanation(path),
+        }
+    }
+}
+
+/// [`protected_path_in_command`], and the home listing denial (#506).
+pub(crate) async fn protected_note_in_command(
+    session: &Session,
+    turn: &TurnContext,
+    command: &[String],
+    cwd: &Path,
+) -> Option<ProtectedNote> {
     let inputs = ReadPolicyInputs::capture(session, turn)?;
     let (command, cwd) = (command.to_vec(), cwd.to_path_buf());
     off_thread(move || {
         let matcher = inputs.matcher(&cwd)?;
         if matcher.is_read_denied(&cwd) {
-            return Some(cwd.display().to_string());
+            return Some(ProtectedNote::Read(cwd.display().to_string()));
         }
-        // #506: a grant never lifts the home's listing denial either.
-        denied_word(
-            &command,
-            &cwd,
-            inputs.user_home.as_deref(),
-            &inputs.codex_home,
-            |path| matcher.is_listing_denied(path),
-            /*denial_lines*/ None,
-        )
+        let word = |denied: &dyn Fn(&Path) -> bool| {
+            denied_word(
+                &command,
+                &cwd,
+                inputs.user_home.as_deref(),
+                &inputs.codex_home,
+                denied,
+                /*denial_lines*/ None,
+            )
+        };
+        word(&|path| matcher.is_read_denied(path))
+            .map(ProtectedNote::Read)
+            .or_else(|| word(&|path| matcher.is_listing_denied(path)).map(ProtectedNote::Listing))
     })
     .await
 }
@@ -268,16 +309,31 @@ pub(super) fn denied_word(
             parts
         })
         .filter(|word| !word.is_empty() && !word.starts_with('-'))
-        .filter(|word| {
-            denial_lines.is_none_or(|lines| {
+        .find(|word| {
+            let Some(path) = resolve(word, cwd, user_home, codex_home) else {
+                return false;
+            };
+            // As spelled, or as resolved (`$CODEX_HOME`, `dir/..`; #506).
+            let resolved = AbsolutePathBuf::from_absolute_path(&path)
+                .ok()
+                .and_then(|path| {
+                    path.as_path()
+                        .file_name()
+                        .map(std::ffi::OsStr::to_os_string)
+                });
+            let names = [
                 Path::new(word)
                     .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| lines.iter().any(|line| line.contains(name)))
-            })
-        })
-        .find(|word| {
-            resolve(word, cwd, user_home, codex_home).is_some_and(|path| denied(path.as_path()))
+                    .map(std::ffi::OsStr::to_os_string),
+                resolved,
+            ];
+            denial_lines.is_none_or(|lines| {
+                names
+                    .iter()
+                    .flatten()
+                    .filter_map(|name| name.to_str())
+                    .any(|name| lines.iter().any(|line| line.contains(name)))
+            }) && denied(path.as_path())
         })
 }
 

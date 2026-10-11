@@ -550,13 +550,12 @@ fn create_filesystem_args(
     );
     let mut unlisted = Vec::new();
     for (pass, directory) in &unlistable_directories {
-        if pass.is_none()
-            && append_unlistable_directory_args(
+        if pass.is_none() {
+            append_unlistable_directory_args(
                 &mut bwrap_args.args,
                 directory,
                 /*writable*/ false,
-            )
-        {
+            )?;
             unlisted.push(directory.clone());
         }
     }
@@ -621,19 +620,6 @@ fn create_filesystem_args(
         if dev.starts_with(mount_root) && mount_root != dev {
             bwrap_args.args.push("--dev".to_string());
             bwrap_args.args.push("/dev".to_string());
-        }
-        // #506: before this pass's read-only and deny mounts, which then
-        // apply to the rebound entries as they would to the originals.
-        for (pass, directory) in &unlistable_directories {
-            if pass.as_deref() == Some(mount_root)
-                && append_unlistable_directory_args(
-                    &mut bwrap_args.args,
-                    directory,
-                    /*writable*/ true,
-                )
-            {
-                unlisted.push(directory.clone());
-            }
         }
 
         let mut read_only_subpaths: Vec<PathBuf> = writable_root
@@ -710,7 +696,41 @@ fn create_filesystem_args(
                 snapshot_covered.insert(unreadable_root.clone());
             }
         }
+        // #506: this pass's unlistable directories go among its read-only
+        // mounts so that none of those binds the real folder back over them:
+        // after every read-only folder at or above them and before the ones
+        // below (deny masks come later still); after a snapshot folder above
+        // them. A snapshot of the folder itself is made unlistable instead.
+        let pass_unlistable: Vec<&PathBuf> = unlistable_directories
+            .iter()
+            .filter(|(pass, _)| pass.as_deref() == Some(mount_root))
+            .map(|(_, directory)| directory)
+            .collect();
+        let under_snapshot = |directory: &Path| {
+            snapshot_dirs
+                .keys()
+                .any(|dir| directory.starts_with(dir) && directory != dir)
+        };
+        let mut pending_unlistable: Vec<(&PathBuf, bool)> = pass_unlistable
+            .iter()
+            .filter(|directory| {
+                !snapshot_dirs.contains_key(**directory) && !under_snapshot(directory)
+            })
+            .map(|directory| {
+                let read_only = read_only_subpaths
+                    .iter()
+                    .any(|read_only| directory.starts_with(read_only));
+                (*directory, read_only)
+            })
+            .collect();
         for subpath in &read_only_subpaths {
+            let depth = path_depth(subpath);
+            for (directory, read_only) in
+                pending_unlistable.extract_if(.., |(directory, _)| depth > path_depth(directory))
+            {
+                append_unlistable_directory_args(&mut bwrap_args.args, directory, !read_only)?;
+                unlisted.push(directory.clone());
+            }
             if missing_component_below_read_only_path(
                 subpath,
                 &read_only_subpaths,
@@ -725,10 +745,37 @@ fn create_filesystem_args(
             }
             append_read_only_subpath_args(&mut bwrap_args, subpath, &allowed_write_paths)?;
         }
+        for (directory, read_only) in pending_unlistable {
+            append_unlistable_directory_args(&mut bwrap_args.args, directory, !read_only)?;
+            unlisted.push(directory.clone());
+        }
+        let after_snapshots: Vec<PathBuf> = pass_unlistable
+            .iter()
+            .filter(|directory| under_snapshot(directory))
+            .map(|directory| (*directory).clone())
+            .collect();
         let mut snapshot_dirs: Vec<(PathBuf, Vec<PathBuf>)> = snapshot_dirs.into_iter().collect();
         snapshot_dirs.sort_by_key(|(dir, _)| path_depth(dir));
         for (dir, hidden) in &snapshot_dirs {
-            append_read_only_snapshot_dir_args(&mut bwrap_args, dir, hidden)?;
+            let unlistable = pass_unlistable.contains(&dir);
+            append_read_only_snapshot_dir_args(
+                &mut bwrap_args,
+                dir,
+                hidden,
+                if unlistable { "111" } else { "555" },
+            )?;
+            if unlistable {
+                unlisted.push(dir.clone());
+            }
+        }
+        // Inside a read-only snapshot: read-only too.
+        for directory in after_snapshots {
+            append_unlistable_directory_args(
+                &mut bwrap_args.args,
+                &directory,
+                /*writable*/ false,
+            )?;
+            unlisted.push(directory);
         }
         // Protect the registry only where a writable bind exposes it. Apply
         // this before deny masks so a denied parent stays hidden, rather than
@@ -804,13 +851,21 @@ fn unlistable_directories_by_pass(
                 .unwrap_or_else(|| root.root.to_path_buf())
         })
         .collect();
-    let readable_roots = file_system_sandbox_policy.get_readable_roots_with_cwd(cwd);
+    let readable_roots: Vec<PathBuf> = file_system_sandbox_policy
+        .get_readable_roots_with_cwd(cwd)
+        .into_iter()
+        .map(|root| {
+            root.as_path()
+                .canonicalize()
+                .unwrap_or_else(|_| root.to_path_buf())
+        })
+        .collect();
     let mut directories = Vec::new();
     for directory in file_system_sandbox_policy.get_unlistable_directories() {
         let Ok(directory) = directory.as_path().canonicalize() else {
             continue;
         };
-        if !directory.is_dir() || mount_roots.contains(&directory) {
+        if !directory.is_dir() {
             continue;
         }
         let pass = mount_roots
@@ -829,7 +884,7 @@ fn unlistable_directories_by_pass(
             || file_system_sandbox_policy.has_full_disk_read_access()
             || readable_roots
                 .iter()
-                .any(|root| directory.starts_with(root.as_path()));
+                .any(|root| directory.starts_with(root));
         if !hidden && exposed && !directories.iter().any(|(_, known)| *known == directory) {
             directories.push((pass, directory));
         }
@@ -840,18 +895,23 @@ fn unlistable_directories_by_pass(
 /// #506: replace `directory` with an empty folder only its owner can pass
 /// through (mode 0111: no listing), and put each entry back as it was:
 /// links as links, everything else bound from the host. The folder is made
-/// read-only at the end (see [`create_filesystem_args`]). Returns whether the
-/// mounts were added (`false`: the directory could not be read).
+/// read-only at the end (see [`create_filesystem_args`]). A directory that
+/// cannot be read fails the command rather than staying listable.
 fn append_unlistable_directory_args(
     args: &mut Vec<String>,
     directory: &Path,
     writable: bool,
-) -> bool {
-    let Ok(entries) = fs::read_dir(directory) else {
-        return false;
-    };
+) -> Result<()> {
+    let entries = fs::read_dir(directory)
+        .and_then(|entries| entries.collect::<io::Result<Vec<_>>>())
+        .map_err(|err| {
+            CodexErr::Fatal(format!(
+                "cannot keep {} from being listed: {err}",
+                directory.display()
+            ))
+        })?;
     let mut children: Vec<(PathBuf, Option<PathBuf>)> = entries
-        .flatten()
+        .into_iter()
         .map(|entry| {
             let path = entry.path();
             let link = entry
@@ -885,7 +945,7 @@ fn append_unlistable_directory_args(
             ]),
         }
     }
-    true
+    Ok(())
 }
 
 fn append_protected_create_targets_for_writable_root(
@@ -1395,11 +1455,12 @@ fn append_read_only_snapshot_dir_args(
     bwrap_args: &mut BwrapArgs,
     dir: &Path,
     hidden: &[PathBuf],
+    perms: &str,
 ) -> Result<()> {
     let mut entries = fs::read_dir(dir)?.collect::<io::Result<Vec<_>>>()?;
     entries.sort_by_key(fs::DirEntry::file_name);
     bwrap_args.args.push("--perms".to_string());
-    bwrap_args.args.push("555".to_string());
+    bwrap_args.args.push(perms.to_string());
     bwrap_args.args.push("--tmpfs".to_string());
     bwrap_args.args.push(path_to_string(dir));
     for entry in entries {
@@ -3528,5 +3589,101 @@ mod tests {
         .expect("bwrap args");
         assert_ne!(args.args, command);
         assert!(args.args.iter().any(|arg| arg == "--remount-ro"));
+    }
+
+    /// #506 review: a home named `.codex` (or `.agents`) directly under a
+    /// writable root is also a read-only subpath of that root. Its read-only
+    /// bind must come before the unlistable folder (not over it), the entries
+    /// go back read-only, and a missing denied entry's read-only snapshot of
+    /// the home is made unlistable itself.
+    #[test]
+    fn issue_506_unlistable_home_under_a_writable_root_stays_unlistable() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let base = temp_dir.path().canonicalize().expect("canonical");
+        let workspace = base.join("ws");
+        let home = workspace.join(".codex");
+        std::fs::create_dir_all(home.join("tmp")).expect("tmp");
+        let home_path = AbsolutePathBuf::from_absolute_path(&home).expect("absolute");
+        let home_str = path_to_string(&home);
+        let tmp_str = path_to_string(&home.join("tmp"));
+        let entries = |missing_denied: bool| {
+            let mut entries = vec![
+                FileSystemSandboxEntry::new(
+                    FileSystemPath::Special {
+                        value: FileSystemSpecialPath::Root,
+                    },
+                    FileSystemAccessMode::Read,
+                ),
+                FileSystemSandboxEntry::new(
+                    FileSystemPath::Path {
+                        path: AbsolutePathBuf::from_absolute_path(&workspace).expect("ws"),
+                    },
+                    FileSystemAccessMode::Write,
+                ),
+                FileSystemSandboxEntry::new(
+                    FileSystemPath::Path {
+                        path: home_path.clone(),
+                    },
+                    FileSystemAccessMode::Read,
+                ),
+                FileSystemSandboxEntry::deny_directory_listing(&home_path),
+            ];
+            if missing_denied {
+                entries.push(FileSystemSandboxEntry::skip_missing_path(
+                    FileSystemPath::Path {
+                        path: home_path.join("wallet"),
+                    },
+                    FileSystemAccessMode::Deny,
+                ));
+            }
+            FileSystemSandboxPolicy::restricted(entries)
+        };
+        let find = |args: &[String], window: &[&str]| {
+            args.windows(window.len())
+                .position(|candidate| candidate.iter().zip(window).all(|(a, b)| a == b))
+        };
+
+        let args = create_filesystem_args(&entries(false), &workspace, None)
+            .expect("filesystem args")
+            .args;
+        let read_only = find(&args, &["--ro-bind", &home_str, &home_str]).expect("ro bind");
+        let tmpfs = find(&args, &["--perms", "111", "--tmpfs", &home_str]).expect("tmpfs");
+        assert!(read_only < tmpfs, "{args:?}");
+        assert!(
+            find(&args, &["--ro-bind-try", &tmp_str, &tmp_str]).is_some(),
+            "{args:?}"
+        );
+        assert!(
+            find(&args, &["--bind-try", &tmp_str, &tmp_str]).is_none(),
+            "{args:?}"
+        );
+        assert_eq!(
+            find(&args, &["--remount-ro", &home_str]),
+            Some(args.len() - 2),
+            "{args:?}"
+        );
+
+        let args = create_filesystem_args(&entries(true), &workspace, None)
+            .expect("filesystem args")
+            .args;
+        assert!(
+            find(&args, &["--perms", "555", "--tmpfs", &home_str]).is_none(),
+            "{args:?}"
+        );
+        let snapshot = find(&args, &["--perms", "111", "--tmpfs", &home_str]).expect("snapshot");
+        assert!(read_only_after(&args, snapshot, &home_str), "{args:?}");
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg == &path_to_string(&home.join("wallet"))),
+            "{args:?}"
+        );
+    }
+
+    /// Nothing binds the real folder back over `dir` after `from`.
+    fn read_only_after(args: &[String], from: usize, dir: &str) -> bool {
+        !args[from..]
+            .windows(3)
+            .any(|window| window[0].contains("bind") && window[2] == dir)
     }
 }
