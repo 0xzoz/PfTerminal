@@ -1533,7 +1533,12 @@ async fn restricted_reads_deny_through_a_read_only_linked_root() {
         "cat {link}/secret; echo link=$?; cat {link}/other; echo other=$?",
         link = link.display(),
     );
-    for denied in [real.join("secret"), link.join("secret")] {
+    // The last denial holds the linked root's whole target.
+    for (denied, other) in [
+        (real.join("secret"), "other=0"),
+        (link.join("secret"), "other=0"),
+        (real.clone(), "other=1"),
+    ] {
         let file_system_sandbox_policy = FileSystemSandboxPolicy::restricted(vec![
             FileSystemSandboxEntry {
                 path: FileSystemPath::Special {
@@ -1567,7 +1572,7 @@ async fn restricted_reads_deny_through_a_read_only_linked_root() {
             output.exit_code, output.stderr.text
         );
         assert!(!stdout.contains("API_KEY"), "{report}");
-        for line in ["link=1", "other=0"] {
+        for line in ["link=1", other] {
             assert!(stdout.contains(line), "{line} missing: {report}");
         }
     }

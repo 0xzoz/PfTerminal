@@ -553,14 +553,17 @@ fn create_filesystem_args(
         for path in unreadable_roots {
             let path = if first_writable_symlink_component_in_path(&path, &allowed_write_paths)
                 .is_none()
-                && let Some(real) = real_path_through_links(&path)
+                && let Some(real) = real_path_through_links(&path, &allowed_write_paths)
             {
                 real
             } else {
                 path
             };
             for (root, target) in &logical_link_roots {
-                if let Ok(relative) = path.strip_prefix(target) {
+                if target.starts_with(&path) {
+                    // The denial holds the whole linked root.
+                    resolved.push(root.clone());
+                } else if let Ok(relative) = path.strip_prefix(target) {
                     resolved.push(root.join(relative));
                 }
             }
@@ -568,7 +571,26 @@ fn create_filesystem_args(
         }
         resolved.sort();
         resolved.dedup();
+        // A denial inside a denied folder that is masked whole, with no
+        // writable root between them, is already hidden; bubblewrap could
+        // not create its mount point in the folder's read-only mask.
+        let hidden: Vec<PathBuf> = resolved
+            .iter()
+            .filter(|path| {
+                resolved.iter().any(|folder| {
+                    *path != folder
+                        && path.starts_with(folder)
+                        && folder.is_dir()
+                        && !allowed_write_paths
+                            .iter()
+                            .any(|root| root.starts_with(folder) && path.starts_with(root))
+                })
+            })
+            .cloned()
+            .collect();
+        resolved.retain(|path| !hidden.contains(path));
         unreadable_paths.extend(resolved.iter().cloned());
+        unreadable_paths.extend(hidden);
         resolved
     };
     // #503: order by the bound (canonical) path, so a symlink to `/` is bound
@@ -1147,17 +1169,39 @@ fn canonical_target_if_symlinked_path(path: &Path) -> Option<PathBuf> {
 }
 
 /// `path` with links resolved up to its nearest existing component (the
-/// rest appended as written), when that differs from `path`.
-fn real_path_through_links(path: &Path) -> Option<PathBuf> {
-    let mut existing = path;
-    let mut tail = Vec::new();
-    while fs::symlink_metadata(existing).is_err() {
-        tail.push(existing.file_name()?);
-        existing = existing.parent()?;
-    }
-    let mut real = fs::canonicalize(existing).ok()?;
-    for name in tail.iter().rev() {
-        real.push(name);
+/// rest appended as written), when that differs from `path`. `None` too
+/// when a link on the way lies inside a writable root (by its real
+/// location): the command could change it, so the path keeps today's
+/// handling.
+fn real_path_through_links(path: &Path, allowed_write_paths: &[PathBuf]) -> Option<PathBuf> {
+    use std::path::Component;
+    let mut real = PathBuf::from("/");
+    let mut components = path.components();
+    while let Some(component) = components.next() {
+        let Component::Normal(name) = component else {
+            if component == Component::ParentDir {
+                real.pop();
+            }
+            continue;
+        };
+        let candidate = real.join(name);
+        let Ok(metadata) = fs::symlink_metadata(&candidate) else {
+            real = candidate;
+            real.extend(components);
+            break;
+        };
+        if !metadata.file_type().is_symlink() {
+            real = candidate;
+            continue;
+        }
+        if allowed_write_paths
+            .iter()
+            .any(|root| candidate.starts_with(root) && candidate != *root)
+        {
+            return None;
+        }
+        // A dangling link keeps today's handling too.
+        real = fs::canonicalize(&candidate).ok()?;
     }
     (real != path).then_some(real)
 }
@@ -2007,6 +2051,135 @@ mod tests {
                 .expect("masked through the mounted link");
             assert!(bind < mask, "{denied:?}: {:?}", args.args);
         }
+    }
+
+    /// #501 review: a denial holding a linked read-only root's target masks
+    /// the whole root at its link path; a missing denial below it runs.
+    #[cfg(unix)]
+    #[test]
+    fn restricted_reads_mask_a_linked_root_inside_a_denied_folder() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let parent = temp_dir.path().join("parent");
+        let real_root = parent.join("real");
+        let link_root = temp_dir.path().join("link");
+        std::fs::create_dir_all(&real_root).expect("create real root");
+        std::fs::write(real_root.join("secret"), "x").expect("create secret");
+        std::os::unix::fs::symlink(&real_root, &link_root).expect("create link");
+        let entry = |path: &Path, access| FileSystemSandboxEntry {
+            path: FileSystemPath::Path {
+                path: AbsolutePathBuf::from_absolute_path(path).expect("absolute"),
+            },
+            access,
+            missing_path_behavior: None,
+        };
+        let link_root_str = path_to_string(&link_root);
+        for denied in [parent, real_root.clone()] {
+            let policy = FileSystemSandboxPolicy::restricted(vec![
+                entry(&link_root, FileSystemAccessMode::Read),
+                entry(&denied, FileSystemAccessMode::Deny),
+            ]);
+            let args =
+                create_filesystem_args(&policy, temp_dir.path(), NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
+                    .expect("filesystem args");
+            let bind = args
+                .args
+                .windows(3)
+                .position(|window| {
+                    window == ["--ro-bind", link_root_str.as_str(), link_root_str.as_str()]
+                })
+                .expect("linked root mounted at its path");
+            let mask = args
+                .args
+                .windows(2)
+                .rposition(|window| window == ["--tmpfs", link_root_str.as_str()])
+                .expect("linked root masked whole");
+            assert!(bind < mask, "{denied:?}: {:?}", args.args);
+        }
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            entry(&link_root, FileSystemAccessMode::Read),
+            entry(&real_root.join("later.key"), FileSystemAccessMode::Deny),
+        ]);
+        create_filesystem_args(&policy, temp_dir.path(), NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
+            .expect("a missing denial below a linked root runs");
+    }
+
+    /// A denial that is itself a read-only link is masked at its target; a
+    /// denial inside a folder masked whole is not masked again (bubblewrap
+    /// could not create it in the read-only mask); a link inside a writable
+    /// root reached through a read-only link keeps today's handling.
+    #[cfg(unix)]
+    #[test]
+    fn denials_through_links_mask_once_and_keep_writable_links() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let base = temp_dir.path();
+        let secrets = base.join("secrets");
+        std::fs::create_dir_all(&secrets).expect("secrets");
+        std::fs::write(secrets.join("key"), "x").expect("key");
+        std::os::unix::fs::symlink(secrets.join("key"), base.join("key-link")).expect("link");
+        std::os::unix::fs::symlink(&secrets, base.join("secrets-link")).expect("link");
+        let entry = |path: &Path, access| FileSystemSandboxEntry {
+            path: FileSystemPath::Path {
+                path: AbsolutePathBuf::from_absolute_path(path).expect("absolute"),
+            },
+            access,
+            missing_path_behavior: None,
+        };
+        let key = path_to_string(&secrets.join("key"));
+        let secrets_str = path_to_string(&secrets);
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                access: FileSystemAccessMode::Read,
+                missing_path_behavior: None,
+            },
+            entry(&base.join("key-link"), FileSystemAccessMode::Deny),
+        ]);
+        let args = create_filesystem_args(&policy, base, NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
+            .expect("filesystem args");
+        assert!(args.args.contains(&key), "{:?}", args.args);
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                access: FileSystemAccessMode::Read,
+                missing_path_behavior: None,
+            },
+            entry(&base.join("secrets-link"), FileSystemAccessMode::Deny),
+            entry(&secrets.join("key"), FileSystemAccessMode::Deny),
+        ]);
+        let args = create_filesystem_args(&policy, base, NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
+            .expect("filesystem args");
+        assert!(
+            args.args
+                .windows(2)
+                .any(|window| window == ["--tmpfs", secrets_str.as_str()]),
+            "{:?}",
+            args.args
+        );
+        assert!(!args.args.contains(&key), "{:?}", args.args);
+
+        // `/w/link -> /w/real` is read-only; `/w/real/sub` is a link inside
+        // the writable `real`: not resolved, so it still fails closed or
+        // masks as before rather than snapshotting the writable link.
+        let real = base.join("w").join("real");
+        std::fs::create_dir_all(&real).expect("real");
+        std::fs::create_dir_all(base.join("t")).expect("t");
+        std::os::unix::fs::symlink(base.join("t"), real.join("sub")).expect("sub");
+        std::os::unix::fs::symlink(&real, base.join("w").join("link")).expect("link");
+        assert_eq!(
+            real_path_through_links(
+                &base.join("w").join("link").join("sub").join(".env"),
+                std::slice::from_ref(&real)
+            ),
+            None
+        );
+        assert_eq!(
+            real_path_through_links(&base.join("w").join("link").join(".env"), &[]),
+            Some(real.join(".env"))
+        );
     }
 
     #[cfg(unix)]
