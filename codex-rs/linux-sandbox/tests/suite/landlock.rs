@@ -1255,3 +1255,88 @@ async fn pf_23_s02_full_write_profile_keeps_protected_files_read_only() {
         "ok\n"
     );
 }
+
+/// #473: under a full-write profile `~/.claude` is read-only (it runs hooks)
+/// and `~/.claude/.credentials.json` is denied. Without that file, and with
+/// no `~/.config` for the denied `~/.config/gh` and `~/.config/gcloud`, every
+/// command still runs; the folder stays readable; and a credential file the
+/// host writes while the command runs stays hidden from it.
+#[tokio::test]
+async fn missing_denied_paths_below_read_only_or_missing_folders_run_and_stay_hidden() {
+    if should_skip_bwrap_tests().await {
+        eprintln!("skipping bwrap test: bwrap sandbox prerequisites are unavailable");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base = dir.path().canonicalize().expect("canonical");
+    let claude = base.join(".claude");
+    std::fs::create_dir_all(&claude).expect(".claude");
+    std::fs::write(claude.join("settings.json"), "settings-ok\n").expect("settings");
+    let credentials = claude.join(".credentials.json");
+    let secret = claude.join("secret.json");
+    std::fs::write(&secret, "secret-existing-473\n").expect("secret");
+    let entry = |path: &std::path::Path, access| {
+        FileSystemSandboxEntry::skip_missing_path(
+            FileSystemPath::Path {
+                path: AbsolutePathBuf::from_absolute_path(path).expect("absolute"),
+            },
+            access,
+        )
+    };
+    // As `ReadDenials` builds it on Linux for a full-write profile.
+    let policy = FileSystemSandboxPolicy::restricted(vec![
+        FileSystemSandboxEntry {
+            path: FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            },
+            access: FileSystemAccessMode::Write,
+            missing_path_behavior: None,
+        },
+        entry(&claude, FileSystemAccessMode::Read),
+        entry(&credentials, FileSystemAccessMode::Deny),
+        entry(&secret, FileSystemAccessMode::Deny),
+        entry(&base.join(".config/gh"), FileSystemAccessMode::Deny),
+        entry(&base.join(".config/gcloud"), FileSystemAccessMode::Deny),
+    ]);
+    let script = "cat .claude/settings.json; echo settings=$?; \
+                  cat .claude/secret.json; echo secret=$?; \
+                  touch started; i=0; \
+                  while [ ! -e go ] && [ $i -lt 100 ]; do sleep 0.05; i=$((i+1)); done; \
+                  cat .claude/.credentials.json; echo read=$?; \
+                  echo x > .claude/.credentials.json; echo write=$?; true";
+    let command = ["bash", "-c", script];
+    let run = run_cmd_result_with_permission_profile_for_cwd(
+        &command,
+        AbsolutePathBuf::from_absolute_path(&base).expect("absolute base"),
+        PermissionProfile::from_runtime_permissions(&policy, NetworkSandboxPolicy::Restricted),
+        create_env_from_core_vars(),
+        NETWORK_TIMEOUT_MS,
+        /*use_legacy_landlock*/ false,
+    );
+    // The host signs in while the command runs.
+    let host = async {
+        for _ in 0..200 {
+            if base.join("started").exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        std::fs::write(&credentials, "secret-473\n").expect("host writes credentials");
+        std::fs::write(base.join("go"), "").expect("go");
+    };
+    let (output, ()) = tokio::join!(run, host);
+    let output = output.expect("full-write profile runs under bubblewrap");
+    let stdout = output.stdout.text;
+    let stderr = output.stderr.text;
+    assert_eq!(output.exit_code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    for held in ["settings-ok", "settings=0", "secret=1", "read=1", "write=1"] {
+        assert!(stdout.contains(held), "{held}: {stdout}\nstderr: {stderr}");
+    }
+    assert!(!stdout.contains("secret-473"), "{stdout}");
+    assert!(!stdout.contains("secret-existing-473"), "{stdout}");
+    assert_eq!(
+        std::fs::read_to_string(&credentials).expect("credentials"),
+        "secret-473\n"
+    );
+    assert!(!base.join(".config").exists(), "placeholder removed");
+}
