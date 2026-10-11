@@ -340,3 +340,46 @@ async fn managed_proxy_mode_denies_af_unix_socket_but_allows_socketpair() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// #498: full disk write with proxy-only network wraps the command in
+/// `--bind / /`, which bubblewrap mounts `nodev`; a fresh minimal `/dev` keeps
+/// `/dev/null` usable.
+#[tokio::test]
+async fn managed_proxy_full_write_keeps_dev_null_usable() {
+    if let Some(skip_reason) = managed_proxy_skip_reason().await {
+        eprintln!("skipping managed proxy test: {skip_reason}");
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let other = dir.path().join("other.txt");
+    let mut env = create_env_from_core_vars();
+    strip_proxy_env(&mut env);
+    env.insert("HTTP_PROXY".to_string(), "http://127.0.0.1:9".to_string());
+    env.insert("OTHER".to_string(), other.to_string_lossy().to_string());
+
+    let output = run_linux_sandbox_direct(
+        &[
+            "bash",
+            "-c",
+            "echo hi > /dev/null; echo null=$?; \
+             head -c 1 /dev/urandom > /dev/null; echo urandom=$?; \
+             echo ok > \"$OTHER\"; echo other=$?",
+        ],
+        &PermissionProfile::Disabled,
+        /*allow_network_for_proxy*/ true,
+        env,
+        NETWORK_TIMEOUT_MS,
+    )
+    .await;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for expected in ["null=0", "urandom=0", "other=0"] {
+        assert!(
+            stdout.contains(expected),
+            "{expected}: {stdout}\nstderr: {stderr}"
+        );
+    }
+    assert_eq!(std::fs::read_to_string(&other).expect("other"), "ok\n");
+}
