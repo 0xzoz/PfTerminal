@@ -1320,12 +1320,22 @@ async fn sandbox_denies_reads_through_a_nested_link_workspace() {
         .await
         .expect("sandboxed command should execute");
         let stdout = &output.stdout.text;
-        assert!(!stdout.contains("API_KEY"), "{denied:?} denied: {stdout}");
-        for line in ["dot=1", "real=1", "link=1", "other=0"] {
+        let report = format!(
+            "{denied:?} denied: exit {}, stdout {stdout}, stderr {}",
+            output.exit_code, output.stderr.text
+        );
+        assert!(!stdout.contains("API_KEY"), "{report}");
+        if denied == &link {
+            // Masking a path spelled through an absolute link fails closed:
+            // bubblewrap cannot create the mount point, so nothing runs.
             assert!(
-                stdout.contains(line),
-                "{denied:?} denied: {line} not in {stdout}"
+                output.exit_code != 0 && output.stderr.text.contains("Can't create file"),
+                "{report}"
             );
+            continue;
+        }
+        for line in ["dot=1", "real=1", "link=1", "other=0"] {
+            assert!(stdout.contains(line), "{line} missing: {report}");
         }
     }
 }
