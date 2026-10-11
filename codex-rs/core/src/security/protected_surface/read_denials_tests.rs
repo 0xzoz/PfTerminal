@@ -749,19 +749,21 @@ fn issue_518_read_only_entries_never_reopen_a_denial_through_a_linked_home() {
         );
         assert!(readable_under(&policy, &cwd.join("README.md"), cwd));
     }
-    // Nothing else is narrowed: the runtime entries stay read-only, not
-    // denied, in both spellings.
+    // Nothing else is narrowed: the runtime entries stay readable in both
+    // spellings, and read-only at their real location (where every
+    // platform keeps the entry; macOS also keeps the link spelling).
     let policy = denials
         .apply(&PermissionProfile::Disabled)
         .unwrap()
         .file_system_sandbox_policy();
-    for runtime in [fx.codex_home.join("tmp"), fx.real_home.join(".corbanu/tmp")] {
+    let real_runtime = fx.real_home.join(".corbanu/tmp");
+    for runtime in [fx.codex_home.join("tmp"), real_runtime.clone()] {
         assert!(
             readable_under(&policy, &runtime.join("arg0"), cwd),
             "{runtime:?}"
         );
-        assert!(!policy.can_write_path_with_cwd(&runtime.join("arg0"), cwd));
     }
+    assert!(!policy.can_write_path_with_cwd(&real_runtime.join("arg0"), cwd));
 }
 
 /// #518 review: a workspace link to a key that does not exist yet is
