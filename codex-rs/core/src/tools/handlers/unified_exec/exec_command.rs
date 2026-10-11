@@ -344,7 +344,8 @@ impl ExecCommandHandler {
         }
 
         emit_unified_exec_tty_metric(&turn.session_telemetry, tty);
-        match manager
+        let explained_command = command.clone();
+        let result = match manager
             .exec_command(
                 ExecCommandRequest {
                     command,
@@ -370,7 +371,7 @@ impl ExecCommandHandler {
             )
             .await
         {
-            Ok(response) => Ok(boxed_tool_output(response)),
+            Ok(response) => Ok(response),
             Err(UnifiedExecError::SandboxDenied {
                 output,
                 original_token_count,
@@ -380,7 +381,7 @@ impl ExecCommandHandler {
                 let output_text = output.aggregated_output.text;
                 let original_token_count =
                     original_token_count.unwrap_or_else(|| approx_token_count(&output_text));
-                Ok(boxed_tool_output(ExecCommandToolOutput {
+                Ok(ExecCommandToolOutput {
                     event_call_id: context.call_id.clone(),
                     chunk_id: generate_chunk_id(),
                     wall_time: output.duration,
@@ -394,12 +395,36 @@ impl ExecCommandHandler {
                     original_token_count: Some(original_token_count),
                     output_omitted_bytes,
                     hook_command: Some(hook_command),
-                }))
+                })
             }
             Err(err) => Err(FunctionCallError::RespondToModel(format!(
                 "exec_command failed for `{command_for_display}`: {err:?}"
             ))),
+        };
+        let mut output = result?;
+        // #442: a protected read the Aggressive rules denied is explained
+        // where it failed, to the person and to the model.
+        if let Some(cwd) = native_cwd.as_ref()
+            && let Some(explanation) = crate::security::protected_reads::denial_explanation(
+                session.as_ref(),
+                turn.as_ref(),
+                &explained_command,
+                cwd.as_path(),
+                output.exit_code,
+                &String::from_utf8_lossy(&output.raw_output),
+            )
+        {
+            crate::security::protected_reads::notify(
+                session.as_ref(),
+                turn.as_ref(),
+                explanation.clone(),
+            )
+            .await;
+            output
+                .raw_output
+                .extend_from_slice(format!("\n{explanation}\n").as_bytes());
         }
+        Ok(boxed_tool_output(output))
     }
 }
 

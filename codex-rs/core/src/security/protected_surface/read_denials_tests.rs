@@ -564,3 +564,32 @@ async fn issue_239_read_denials_apply_under_protected_level_before_taint() {
         "issue #239: upload read policy must deny credentials before taint"
     );
 }
+
+/// #442: under Aggressive a grant lifts the write protections only. Reads of
+/// credential files and the Corbanu home stay denied, not even once granted.
+#[test]
+fn issue_442_a_grant_keeps_every_read_denial() {
+    let fx = fixture();
+    let cwd = fx.user_home.join("project");
+    std::fs::create_dir_all(cwd.join(".git/hooks")).unwrap();
+    let mut denials = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)]);
+    denials.lift_write_rules();
+    let policy = denials
+        .apply(&PermissionProfile::Disabled)
+        .unwrap()
+        .file_system_sandbox_policy();
+    for denied in [
+        fx.user_home.join(".ssh/id_ed25519"),
+        fx.user_home.join(".aws/credentials"),
+        fx.codex_home.join("auth.json"),
+        fx.codex_home.join("config.toml"),
+        fx.codex_home.join("secrets/local.age"),
+    ] {
+        assert!(
+            !policy.can_read_path_with_cwd(&denied, &cwd),
+            "{}",
+            denied.display()
+        );
+    }
+    assert!(policy.can_write_path_with_cwd(&cwd.join(".git/hooks/pre-commit"), &cwd));
+}

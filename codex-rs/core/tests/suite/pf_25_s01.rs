@@ -1,7 +1,8 @@
 //! PF-25-S01: an Aggressive grant confirmed for a command approval lifts the
-//! protected-path rules for that run only, end to end through the
-//! orchestrator (offer key = the approval id the TUI answers, digest at
-//! offer = digest at run).
+//! write protections for that run only, end to end through the orchestrator
+//! (offer key = the approval id the TUI answers, digest at offer = digest at
+//! run). #442: reads of credential files and the Corbanu home are never
+//! granted.
 #![cfg(target_os = "macos")]
 
 use std::sync::Arc;
@@ -10,6 +11,7 @@ use codex_core::config::Constrained;
 use codex_core::security_grant;
 use codex_core::security_grant::GrantUses;
 use codex_features::Feature;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ExecApprovalRequestEvent;
@@ -81,6 +83,11 @@ async fn start(home: Arc<TempDir>, steps: Vec<Step>) -> anyhow::Result<(TestCode
             config.security_level = SecurityLevel::Aggressive;
             config.permissions.approval_policy =
                 Constrained::allow_any(AskForApproval::UnlessTrusted);
+            // Aggressive's own sandbox: writes only in the current folder.
+            config
+                .permissions
+                .set_permission_profile(PermissionProfile::workspace_write())
+                .expect("workspace write");
             config
                 .features
                 .enable(Feature::SourceEnvelopes)
@@ -135,26 +142,31 @@ fn output_text(request: &ResponsesRequest, call_id: &str) -> String {
         .unwrap_or_default()
 }
 
-/// The first run, granted "1 run" in the review and approved, reads the
-/// file; the same command again, only approved, gets the rules.
+/// The first run, granted "1 run" in the review and approved, writes a git
+/// hook (a write protection); the same command again, only approved, gets
+/// the rules.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn pf_25_s01_confirmed_grant_lifts_the_rules_for_the_approved_run_only() -> anyhow::Result<()>
-{
+async fn pf_25_s01_confirmed_grant_lifts_the_write_protections_for_the_approved_run_only()
+-> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
-    let (home, read) = canary_home()?;
+    let home = Arc::new(TempDir::new()?);
+    let write = "printf pf25 > .git/hooks/pf25-hook";
     let (test, captured) = start(
         home,
         vec![
-            shell_step("call-granted", &read),
-            shell_step("call-again", &read),
+            shell_step("call-granted", write),
+            shell_step("call-again", write),
             done_step(),
         ],
     )
     .await?;
     let thread = test.session_configured.thread_id;
+    // Before the command runs (it waits for the approval).
+    let hooks = test.cwd_path().join(".git/hooks");
+    std::fs::create_dir_all(&hooks)?;
 
-    let first = next_approval(&test).await.expect("the read asks first");
+    let first = next_approval(&test).await.expect("the write asks first");
     let offer = security_grant::offer(thread, &first.effective_approval_id())
         .expect("Core offers a grant for the approval the TUI answers");
     assert_eq!(offer.command, first.command);
@@ -163,23 +175,47 @@ async fn pf_25_s01_confirmed_grant_lifts_the_rules_for_the_approved_run_only() -
 
     let second = next_approval(&test)
         .await
-        .expect("the same read asks again");
+        .expect("the same write asks again");
+    // The granted run wrote the hook before the second command ran.
+    assert_eq!(std::fs::read_to_string(hooks.join("pf25-hook"))?, "pf25");
+    std::fs::remove_file(hooks.join("pf25-hook"))?;
     assert!(security_grant::offer(thread, &second.effective_approval_id()).is_some());
     approve(&test, &second).await?;
     assert!(next_approval(&test).await.is_none());
 
     let requests = captured.requests();
-    let granted = output_text(&requests[requests.len() - 2], "call-granted");
-    assert!(granted.contains(CANARY), "{granted}");
     let again = output_text(&requests[requests.len() - 1], "call-again");
-    assert!(!again.contains(CANARY), "{again}");
     assert!(again.contains("Operation not permitted"), "{again}");
+    assert!(!hooks.join("pf25-hook").exists());
     assert!(
         security_grant::held_grants()
             .iter()
             .all(|grant| grant.thread != thread),
         "a 1-run grant is never held"
     );
+    Ok(())
+}
+
+/// #442 (Travis, 2026-10-11): under Aggressive a read of the Corbanu home
+/// (like a credential file) is never granted, not even once: a grant
+/// confirmed and approved for it still leaves the read denied.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_442_a_confirmed_grant_never_lifts_protected_reads() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let (home, read) = canary_home()?;
+    let (test, captured) =
+        start(home, vec![shell_step("call-granted", &read), done_step()]).await?;
+    let thread = test.session_configured.thread_id;
+    let approval = next_approval(&test).await.expect("the read asks first");
+    let offer = security_grant::offer(thread, &approval.effective_approval_id()).expect("offer");
+    security_grant::confirm(&offer, GrantUses::Once)?;
+    approve(&test, &approval).await?;
+    assert!(next_approval(&test).await.is_none());
+    let requests = captured.requests();
+    let granted = output_text(&requests[requests.len() - 1], "call-granted");
+    assert!(!granted.contains(CANARY), "{granted}");
+    assert!(granted.contains("Operation not permitted"), "{granted}");
     Ok(())
 }
 

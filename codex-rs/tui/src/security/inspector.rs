@@ -381,7 +381,7 @@ pub(crate) fn sections(
         rows: runtime_rows(input, facts),
     };
 
-    let grants = Section {
+    let mut grants = Section {
         title: "Grants",
         rows: match tree {
             None => vec![row(
@@ -419,6 +419,15 @@ pub(crate) fn sections(
                 .collect(),
         },
     };
+    // #442: what a grant can never lift, at the point grants are reviewed.
+    if in_force(input, facts) == SecurityLevel::Aggressive {
+        grants.rows.push(row(
+            "Protected reads",
+            State::Enforcing,
+            "never granted under Aggressive, not even once: credential files (.env files found at start, SSH, cloud and CLI tokens) and the Corbanu home stay unreadable to agent commands; switch to Permissive in /security to allow them",
+            "resolved: level",
+        ));
+    }
 
     let mut agents = tree.map_or_else(Vec::new, |tree| {
         tree.agents

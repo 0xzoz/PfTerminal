@@ -204,7 +204,10 @@ impl ToolOrchestrator {
                 fresh_human_authority: true,
             };
             let asked = Instant::now();
-            grant_offer = aggressive_grant_offer(grant_operation.as_ref(), tool_ctx);
+            // #442: no grant for an action whose reads stay denied anyway.
+            if !action.reads_stay_denied() {
+                grant_offer = aggressive_grant_offer(grant_operation.as_ref(), tool_ctx);
+            }
             let mut pending = crate::security::inspection::PendingProtectedAction::new(
                 tool_ctx.session.thread_id(),
                 action.kind,
@@ -893,9 +896,11 @@ fn aggressive_grant_offer(
 /// untrusted content, of this exact protected command; before it, of this
 /// command's request to run outside the sandbox. `human_approved_at` is the
 /// taint generation that approval was given under; new taint since voids it.
-/// Under Aggressive an approval never does; only a matching human grant for
-/// this exact command (`security::aggressive`). Lifting only leaves these rules out: every
-/// denial of the profile itself stays. An external sandbox cannot take the
+/// Under Aggressive an approval never does; a matching human grant for this
+/// exact command (`security::aggressive`) lifts the write protections only:
+/// reads of credential files and the Corbanu home stay denied (#442).
+/// Lifting only leaves these rules out: every denial of the profile itself
+/// stays. An external sandbox cannot take the
 /// rules and keeps its own.
 #[allow(clippy::too_many_arguments)]
 fn post_taint_read_denials(
@@ -929,6 +934,9 @@ fn post_taint_read_denials(
         );
         return None;
     }
+    // #442: a grant lifts the write protections only. Reads of credential
+    // files and the Corbanu home are never granted under Aggressive.
+    let mut granted = false;
     if let (Some(operation), Some(confirmed)) = (grant_operation, confirmed_grant) {
         match crate::security::grant_offer::apply(
             thread,
@@ -942,9 +950,9 @@ fn post_taint_read_denials(
                     target: "codex_core::security::tainted_action",
                     grant_id = grant_id.as_str(),
                     call_id = %tool_ctx.call_id,
-                    "protected-path rules lifted by the grant the human confirmed for this command"
+                    "write protections lifted by the grant the human confirmed for this command; protected reads stay denied"
                 );
-                return None;
+                granted = true;
             }
             Err(reason) => tracing::warn!(
                 target: "codex_core::security::tainted_action",
@@ -954,7 +962,8 @@ fn post_taint_read_denials(
             ),
         }
     }
-    if let Some(operation) = grant_operation
+    if !granted
+        && let Some(operation) = grant_operation
         && let Some(grant_id) = aggressive::admit(
             thread,
             &state,
@@ -967,16 +976,19 @@ fn post_taint_read_denials(
             target: "codex_core::security::tainted_action",
             grant_id = grant_id.as_str(),
             call_id = %tool_ctx.call_id,
-            "protected-path rules lifted by an Aggressive grant for this command"
+            "write protections lifted by an Aggressive grant for this command; protected reads stay denied"
         );
-        return None;
+        granted = true;
     }
-    let denials = ReadDenials::for_turn(
+    let mut denials = ReadDenials::for_turn(
         tool_ctx.turn.config.codex_home.as_path(),
         &cwd,
         workspace_roots,
         materialized,
     );
+    if granted {
+        denials.lift_write_rules();
+    }
     let (Some(exec_server), Some(materialized)) =
         (denials.apply(exec_server), denials.apply(materialized))
     else {

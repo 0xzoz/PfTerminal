@@ -22,6 +22,7 @@ pub(crate) mod launch_contract;
 pub mod level_change;
 pub mod migration;
 pub mod preflight;
+pub(crate) mod protected_reads;
 mod protected_runtime;
 pub(crate) mod protected_surface;
 pub(crate) mod recovery;

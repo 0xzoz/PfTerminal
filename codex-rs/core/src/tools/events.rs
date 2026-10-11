@@ -375,12 +375,70 @@ impl ToolEmitter {
         super::format_exec_output_for_model(output, ctx.turn.model_info.truncation_policy.into())
     }
 
+    /// #442: a shell command that failed because the Aggressive rules denied
+    /// a protected read carries the explanation in its output, and the
+    /// person is shown it too.
+    async fn explain_protected_read(
+        &self,
+        ctx: ToolEventCtx<'_>,
+        out: Result<ExecToolCallOutput, ToolError>,
+    ) -> Result<ExecToolCallOutput, ToolError> {
+        let Self::Shell { command, cwd, .. } = self else {
+            return out;
+        };
+        let Ok(cwd) = cwd.to_abs_path() else {
+            return out;
+        };
+        let output = match &out {
+            Ok(output) => output,
+            Err(ToolError::Codex(err)) => match err.details() {
+                CodexErrorDetails::Sandbox(SandboxErr::Denied { output, .. }) => output.as_ref(),
+                _ => return out,
+            },
+            Err(ToolError::Rejected(_)) => return out,
+        };
+        let Some(explanation) = crate::security::protected_reads::denial_explanation(
+            ctx.session,
+            ctx.turn,
+            command,
+            cwd.as_path(),
+            Some(output.exit_code),
+            &output.aggregated_output.text,
+        ) else {
+            return out;
+        };
+        crate::security::protected_reads::notify(ctx.session, ctx.turn, explanation.clone()).await;
+        let explain = |mut output: ExecToolCallOutput| {
+            let line = format!("\n{explanation}\n");
+            output.aggregated_output.text.push_str(&line);
+            output.stderr.text.push_str(&line);
+            output
+        };
+        match out {
+            Ok(output) => Ok(explain(output)),
+            Err(ToolError::Codex(err)) => match err.details() {
+                CodexErrorDetails::Sandbox(SandboxErr::Denied {
+                    output,
+                    network_policy_decision,
+                }) => Err(ToolError::Codex(codex_protocol::error::CodexErr::Sandbox(
+                    SandboxErr::Denied {
+                        output: Box::new(explain(output.as_ref().clone())),
+                        network_policy_decision: network_policy_decision.clone(),
+                    },
+                ))),
+                _ => Err(ToolError::Codex(err)),
+            },
+            other => other,
+        }
+    }
+
     pub async fn finish(
         &self,
         ctx: ToolEventCtx<'_>,
         out: Result<ExecToolCallOutput, ToolError>,
         applied_patch_delta: Option<&AppliedPatchDelta>,
     ) -> Result<String, FunctionCallError> {
+        let out = self.explain_protected_read(ctx, out).await;
         let (event, result) = match out {
             Ok(output) => {
                 let content = self.format_exec_output_for_model(&output, ctx);

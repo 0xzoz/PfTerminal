@@ -711,6 +711,53 @@ async fn pf_23_s02_aggressive_denies_home_reads_before_untrusted_content() -> an
     Ok(())
 }
 
+/// #442 (milestone AGG-09): under Aggressive a protected read the sandbox
+/// denies is explained where it failed, to the model in the command output
+/// and to the person as a warning: it names the level, says it is never
+/// granted, and says how to change the level. Under Permissive nothing is
+/// added.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_442_aggressive_denied_protected_read_is_explained() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let (home, _, literal) = canary_home()?;
+    let (test, captured) = start_turn_in(
+        Some(home),
+        SecurityLevel::Aggressive,
+        AskForApproval::Never,
+        vec![shell_step("call-read", &literal), done_step()],
+        |_| {},
+    )
+    .await?;
+    let warning = match wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+            || matches!(event, EventMsg::Warning(warning)
+                if warning.message.starts_with("Security level Aggressive"))
+    })
+    .await
+    {
+        EventMsg::Warning(warning) => warning.message,
+        other => panic!("no warning before the turn ended: {other:?}"),
+    };
+    assert!(
+        warning.starts_with("Security level Aggressive blocked reading"),
+        "{warning}"
+    );
+    assert!(warning.contains("not even once"), "{warning}");
+    assert!(warning.contains("Permissive in /security"), "{warning}");
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    let requests = captured.requests();
+    let output = output_text(&requests[requests.len() - 1], "call-read");
+    assert!(!output.contains(CANARY), "{output}");
+    assert!(output.contains("Operation not permitted"), "{output}");
+    assert!(output.contains(&warning), "{output}");
+    Ok(())
+}
+
 /// PF-23-S03: a level confirmed earlier and stored in `security_state.json`
 /// is enforced after a restart even when the configured level is lower.
 #[cfg(target_os = "macos")]

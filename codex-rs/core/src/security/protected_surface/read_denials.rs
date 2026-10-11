@@ -278,6 +278,12 @@ impl ReadDenials {
         }
     }
 
+    /// #442: an Aggressive grant lifts the write protections only; every
+    /// read denial stays.
+    pub(crate) fn lift_write_rules(&mut self) {
+        self.read_only.clear();
+    }
+
     /// Every path made read-only.
     pub(crate) fn read_only_paths(&self) -> impl Iterator<Item = &AbsolutePathBuf> {
         self.read_only.iter()
