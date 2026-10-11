@@ -107,8 +107,8 @@ async fn a_lock_held_past_the_wait_falls_back_to_this_process() -> anyhow::Resul
             Some("req-1".to_string())
         )
     );
-    // A step on the turn's path waits about `QUICK_BUSY_TIMEOUT`, not
-    // SQLite's 5 s busy timeout.
+    // A step on the turn's path waits about a second (two short-wait
+    // attempts), not SQLite's 5 s busy timeout.
     assert!(
         first_wait >= crate::QUICK_BUSY_TIMEOUT / 2 && first_wait < Duration::from_secs(2),
         "{first_wait:?}"

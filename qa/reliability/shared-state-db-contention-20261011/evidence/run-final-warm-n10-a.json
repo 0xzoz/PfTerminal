@@ -1,0 +1,60 @@
+{
+ "bin": "corbanu-final",
+ "sessions": 10,
+ "turns": 3,
+ "tool_calls": 4,
+ "wall_seconds": 15.2,
+ "warmup_seconds": 122.8,
+ "execs": 30,
+ "failed_execs": 0,
+ "requests": 150,
+ "client_gap_ms": {
+  "n": 120,
+  "p50": 147.5,
+  "p90": 324.0,
+  "p99": 875.3,
+  "max": 910.4,
+  "mean": 196.8
+ },
+ "lock_wait_ms": {
+  "n": 794,
+  "p50": 0.0,
+  "p90": 37.0,
+  "p99": 206.0,
+  "max": 562.0,
+  "mean": 14.9
+ },
+ "lock_hold_ms": {
+  "n": 791,
+  "p50": 5.0,
+  "p90": 15.0,
+  "p99": 69.0,
+  "max": 444.0,
+  "mean": 7.9
+ },
+ "holds_over_250ms_by_site": {
+  "state/src/runtime/accounting_store.rs:494:22": {
+   "n": 2,
+   "p50": 251.0,
+   "p90": 444.0,
+   "p99": 444.0,
+   "max": 444.0,
+   "mean": 347.5
+  }
+ },
+ "bad_stderr_lines": 1,
+ "bad_examples": [
+  "2026-10-11T23:35:56.713615Z  WARN codex_state::runtime::provider_request_fallback: state DB unavailable; the provider request throttle uses this process's state operation=\"check provider request cooldown\" reason=Busy error=error returned from database: (code: 5) database is locked: (code: 5) databas"
+ ],
+ "exec_seconds": {
+  "n": 30,
+  "p50": 4.9,
+  "p90": 5.6,
+  "p99": 5.6,
+  "max": 5.6,
+  "mean": 4.8
+ },
+ "lock_held_by_another_process_s": 0,
+ "ledger_attempts_recorded": 150,
+ "records_still_saved_for_a_later_writer": 0
+}

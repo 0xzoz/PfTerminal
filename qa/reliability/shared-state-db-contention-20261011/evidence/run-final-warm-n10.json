@@ -1,0 +1,74 @@
+{
+ "bin": "corbanu-final",
+ "sessions": 10,
+ "turns": 3,
+ "tool_calls": 4,
+ "wall_seconds": 20.6,
+ "warmup_seconds": 48.1,
+ "execs": 30,
+ "failed_execs": 0,
+ "requests": 150,
+ "client_gap_ms": {
+  "n": 120,
+  "p50": 315.5,
+  "p90": 861.9,
+  "p99": 1555.1,
+  "max": 2363.7,
+  "mean": 399.7
+ },
+ "lock_wait_ms": {
+  "n": 797,
+  "p50": 4.0,
+  "p90": 102.0,
+  "p99": 577.0,
+  "max": 603.0,
+  "mean": 38.7
+ },
+ "lock_hold_ms": {
+  "n": 785,
+  "p50": 6.0,
+  "p90": 28.0,
+  "p99": 117.0,
+  "max": 1231.0,
+  "mean": 15.7
+ },
+ "holds_over_250ms_by_site": {
+  "state/src/runtime/accounting_store.rs:494:22": {
+   "n": 2,
+   "p50": 1181.0,
+   "p90": 1231.0,
+   "p99": 1231.0,
+   "max": 1231.0,
+   "mean": 1206.0
+  },
+  "state/src/runtime/provider_requests.rs:335:22": {
+   "n": 1,
+   "p50": 1147.0,
+   "p90": 1147.0,
+   "p99": 1147.0,
+   "max": 1147.0,
+   "mean": 1147.0
+  }
+ },
+ "bad_stderr_lines": 7,
+ "bad_examples": [
+  "2026-10-11T23:42:11.913455Z  WARN codex_state::busy_retry: state DB busy; retrying operation=\"check provider request cooldown\" retries=1 waited_ms=570 error=error returned from database: (code: 5) database is locked: (code: 5) database is locked",
+  "2026-10-11T23:42:11.927311Z  WARN codex_state::busy_retry: state DB busy; retrying operation=\"check provider request cooldown\" retries=1 waited_ms=583 error=error returned from database: (code: 5) database is locked: (code: 5) database is locked",
+  "2026-10-11T23:42:12.091420Z  WARN codex_state::busy_retry: state DB busy; retrying operation=\"record provider request result\" retries=1 waited_ms=591 error=error returned from database: (code: 5) database is locked: (code: 5) database is locked",
+  "2026-10-11T23:42:12.218159Z  WARN codex_state::busy_retry: state DB busy; retrying operation=\"record provider request result\" retries=1 waited_ms=603 error=error returned from database: (code: 5) database is locked: (code: 5) database is locked",
+  "2026-10-11T23:42:12.735677Z  WARN codex_state::busy_retry: state DB write failed after retrying operation=\"record provider request result\" retries=1 waited_ms=1235 error=error returned from database: (code: 5) database is locked: (code: 5) database is locked",
+  "2026-10-11T23:42:12.735831Z  WARN codex_state::runtime::provider_request_fallback: state DB unavailable; the provider request throttle uses this process's state operation=\"record provider request result\" reason=Busy error=error returned from database: (code: 5) database is locked: (code: 5) database",
+  "2026-10-11T23:42:14.384783Z  WARN codex_state::busy_retry: state DB busy; retrying operation=\"record provider request result\" retries=1 waited_ms=567 error=error returned from database: (code: 5) database is locked: (code: 5) database is locked"
+ ],
+ "exec_seconds": {
+  "n": 30,
+  "p50": 6.0,
+  "p90": 7.6,
+  "p99": 8.5,
+  "max": 8.5,
+  "mean": 6.4
+ },
+ "lock_held_by_another_process_s": 0,
+ "ledger_attempts_recorded": 150,
+ "records_still_saved_for_a_later_writer": 0
+}

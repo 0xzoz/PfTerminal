@@ -1,0 +1,56 @@
+{
+ "bin": "corbanu-final",
+ "sessions": 10,
+ "turns": 3,
+ "tool_calls": 4,
+ "wall_seconds": 40.6,
+ "execs": 30,
+ "failed_execs": 0,
+ "requests": 150,
+ "client_gap_ms": {
+  "n": 120,
+  "p50": 61.5,
+  "p90": 89.3,
+  "p99": 182.5,
+  "max": 223.5,
+  "mean": 61.0
+ },
+ "lock_wait_ms": {
+  "n": 412,
+  "p50": 0.0,
+  "p90": 0.0,
+  "p99": 3.0,
+  "max": 11.0,
+  "mean": 0.1
+ },
+ "lock_hold_ms": {
+  "n": 412,
+  "p50": 0.0,
+  "p90": 4.0,
+  "p99": 145.0,
+  "max": 1893.0,
+  "mean": 8.0
+ },
+ "holds_over_250ms_by_site": {
+  "state/src/runtime/accounting_store.rs:494:22": {
+   "n": 1,
+   "p50": 1893.0,
+   "p90": 1893.0,
+   "p99": 1893.0,
+   "max": 1893.0,
+   "mean": 1893.0
+  }
+ },
+ "bad_stderr_lines": 0,
+ "bad_examples": [],
+ "exec_seconds": {
+  "n": 30,
+  "p50": 3.6,
+  "p90": 4.5,
+  "p99": 31.6,
+  "max": 31.6,
+  "mean": 4.5
+ },
+ "lock_held_by_another_process_s": 0,
+ "ledger_attempts_recorded": 135
+}

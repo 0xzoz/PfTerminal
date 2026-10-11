@@ -69,6 +69,11 @@ def ledger_attempts(home: Path) -> int:
     """Attempts the mock provider's requests left in the ledger."""
     con = sqlite3.connect(home / "pfterminal_state_5.sqlite", timeout=60)
     try:
+        has_ledger = con.execute(
+            "SELECT count(*) FROM sqlite_schema WHERE name = 'draft_accounting_attempts'"
+        ).fetchone()[0]
+        if not has_ledger:
+            return 0
         return con.execute(
             "SELECT count(*) FROM draft_accounting_attempts "
             "WHERE json_extract(payload, '$.provider') = 'mock'"
@@ -92,6 +97,13 @@ def main() -> int:
         default=0.0,
         help="hold the state DB's write lock this long, 5 s into the run, as a "
         "long maintenance or a backup in another process would",
+    )
+    parser.add_argument(
+        "--warmup",
+        action="store_true",
+        help="run one exec first, alone, so the home's other runtime DBs exist "
+        "(ten first launches at once race creating them; a separate issue) and "
+        "the ledger's hourly validation is done, as on a home in use",
     )
     args = parser.parse_args()
 
@@ -147,6 +159,20 @@ trust_level = "trusted"
     env["RUST_LOG"] = "warn,codex_state::db_lock=debug,codex_core::accounting=info"
     results: list[dict] = []
     lock = threading.Lock()
+    warmup_seconds = 0.0
+    if args.warmup:
+        t0 = time.time()
+        subprocess.run(
+            [args.bin, "exec", "--skip-git-repo-check", "warm-up: reply"],
+            cwd=work,
+            env=env,
+            capture_output=True,
+            timeout=900,
+        )
+        warmup_seconds = round(time.time() - t0, 1)
+        mock_log.rename(out / "mock-warmup.jsonl")
+        started = time.time()
+    recorded_before = ledger_attempts(home) if args.warmup else 0
 
     def session(index: int) -> None:
         session_id = None
@@ -196,16 +222,16 @@ trust_level = "trusted"
             if session_id is None:
                 return
 
-    held: dict[str, float] = {}
+    holder: dict[str, float] = {}
 
     def hold() -> None:
         time.sleep(5)
         con = sqlite3.connect(home / "pfterminal_state_5.sqlite", timeout=60)
         con.execute("BEGIN IMMEDIATE")
-        held["from"] = time.time()
+        holder["from"] = time.time()
         time.sleep(args.hold_seconds)
         con.rollback()
-        held["to"] = time.time()
+        holder["to"] = time.time()
         con.close()
 
     threads = [threading.Thread(target=session, args=(i,)) for i in range(args.sessions)]
@@ -252,6 +278,7 @@ trust_level = "trusted"
         "turns": args.turns,
         "tool_calls": args.tool_calls,
         "wall_seconds": round(time.time() - started, 1),
+        "warmup_seconds": warmup_seconds,
         "execs": len(results),
         "failed_execs": len(failed),
         "requests": len(requests),
@@ -264,8 +291,11 @@ trust_level = "trusted"
         "bad_stderr_lines": len(bad_lines),
         "bad_examples": sorted(set(line[:300] for line in bad_lines))[:10],
         "exec_seconds": summary([r["seconds"] for r in results]),
-        "lock_held_by_another_process_s": round(held["to"] - held["from"], 1) if held else 0,
-        "ledger_attempts_recorded": ledger_attempts(home),
+        "lock_held_by_another_process_s": round(holder["to"] - holder["from"], 1) if holder else 0,
+        "ledger_attempts_recorded": ledger_attempts(home) - recorded_before,
+        "records_still_saved_for_a_later_writer": len(
+            list((home / "accounting-pending").glob("*.json"))
+        ),
     }
     (out / "report.json").write_text(json.dumps(report, indent=2))
     print(json.dumps(report, indent=2))

@@ -779,8 +779,12 @@ async fn load_bootstrap_config_or_exit(
 }
 
 /// The longest `exec` waits at exit for this process's ledger writer; see
-/// `StateRuntime::settle_accounting`.
-const ACCOUNTING_EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+/// `StateRuntime::settle_accounting`. It waits only while the writer makes
+/// progress itself: usually for its last records, once an hour possibly for
+/// the ledger's whole-ledger validation if this process took that on (tens of
+/// seconds on a large ledger in a debug build). Records waiting on another
+/// process are left for the next writer at once.
+const ACCOUNTING_EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
 
 async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     let exec_session_started_at = std::time::Instant::now();

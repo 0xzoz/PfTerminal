@@ -469,8 +469,10 @@ async fn ten_sessions_on_one_home_wait_briefly_and_lose_no_record() -> anyhow::R
     }
     holder.await??;
     waits.sort();
+    let p50 = waits[waits.len() / 2];
     let p99 = waits[waits.len() * 99 / 100];
     let max = waits[waits.len() - 1];
+    eprintln!("request waits: p50 {p50:?}, p99 {p99:?}, max {max:?}");
     // One short wait on the lock (`QUICK_BUSY_TIMEOUT`) plus the work of
     // ten sessions sharing four test threads.
     assert!(
