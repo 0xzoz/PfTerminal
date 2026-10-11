@@ -208,7 +208,7 @@ fn pf_41_s01_grants_show_expiry_and_uses_without_ids_and_end_on_expiry() {
         facts.grants,
         vec![GrantFacts {
             thread: root,
-            surface: "one command without the protected-path rules",
+            surface: "one command without the write protections",
             expires_at: NOW + 300,
             used: 0,
             limit: Some(2),

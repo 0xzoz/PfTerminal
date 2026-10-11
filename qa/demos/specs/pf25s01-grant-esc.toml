@@ -1,3 +1,5 @@
+# Superseded by #442 (2026-10-11): a grant no longer lifts protected reads and
+# its option reads "write protections"; kept as the PF-25-S01 record.
 # PF-25-S01: Esc in the grant review grants nothing (GLM 5.2).
 id = "pf25s01-grant-esc"
 feature = "Esc in the grant review grants nothing"
