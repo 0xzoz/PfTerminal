@@ -647,15 +647,19 @@ fn create_filesystem_args(
             symlink_target.as_deref(),
             &read_only_subpaths,
         );
-        read_only_subpaths.extend(
-            earlier_read_only_subpaths
-                .iter()
-                .filter(|path| path.starts_with(mount_root) && path.as_path() != mount_root)
-                .cloned(),
-        );
-        read_only_subpaths.sort();
-        read_only_subpaths.dedup();
-        earlier_read_only_subpaths.extend(read_only_subpaths.iter().cloned());
+        for path in &earlier_read_only_subpaths {
+            if path.starts_with(mount_root)
+                && path.as_path() != mount_root
+                && !read_only_subpaths.contains(path)
+            {
+                read_only_subpaths.push(path.clone());
+            }
+        }
+        for path in &read_only_subpaths {
+            if !earlier_read_only_subpaths.contains(path) {
+                earlier_read_only_subpaths.push(path.clone());
+            }
+        }
         read_only_subpaths.sort_by_key(|path| path_depth(path));
         // A root reached through a link is bound at its target, so a denied
         // path spelled under the target is nested too (#488); the rootless
