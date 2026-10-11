@@ -347,6 +347,14 @@ fn is_plain_file(file: &File) -> Result<bool> {
 /// Whether `file` (open with `READ_CONTROL`) is owned by Administrators or
 /// SYSTEM (or, with `trust_this_user`, by this user).
 fn owner_is_trusted(file: &File, trust_this_user: bool) -> Result<bool> {
+    let owner = owner_sid(file)?;
+    Ok(owner == ADMINISTRATORS
+        || owner == SYSTEM
+        || (trust_this_user && current_user_sid().is_ok_and(|user| user == owner)))
+}
+
+/// The owner of `file` (open with `READ_CONTROL`), as a SID string.
+fn owner_sid(file: &File) -> Result<String> {
     use windows_sys::Win32::Foundation::ERROR_SUCCESS;
     use windows_sys::Win32::Security::Authorization::GetSecurityInfo;
     use windows_sys::Win32::Security::Authorization::SE_FILE_OBJECT;
@@ -378,10 +386,7 @@ fn owner_is_trusted(file: &File, trust_this_user: bool) -> Result<bool> {
     });
     // SAFETY: allocated by GetSecurityInfo; `owner` is not used after this.
     unsafe { LocalFree(descriptor as HLOCAL) };
-    let owner = owner.context("no owner")?.map_err(anyhow::Error::msg)?;
-    Ok(owner == ADMINISTRATORS
-        || owner == SYSTEM
-        || (trust_this_user && current_user_sid().is_ok_and(|user| user == owner)))
+    owner.context("no owner")?.map_err(anyhow::Error::msg)
 }
 
 fn current_user_sid() -> Result<String> {
