@@ -174,12 +174,15 @@ impl Homes {
         self.user_home_raw.as_deref()
     }
 
-    /// Expand `~`, `~user`, `$HOME` and `$CODEX_HOME` spellings and make a
+    /// Expand `~`, `~user`, `$HOME` and `$CODEX_HOME` (or `$CORBANU_HOME`,
+    /// `$PFTERMINAL_HOME`) spellings and make a
     /// relative word absolute against `cwd`. Keeps the word's case.
     pub(super) fn resolve(&self, word: &str, cwd: &str) -> String {
         let mut word = word.to_string();
         for (name, value) in [
             ("CODEX_HOME", Some(&self.codex_home_raw)),
+            ("CORBANU_HOME", Some(&self.codex_home_raw)),
+            ("PFTERMINAL_HOME", Some(&self.codex_home_raw)),
             ("HOME", self.user_home_raw.as_ref()),
         ] {
             if let Some(value) = value {

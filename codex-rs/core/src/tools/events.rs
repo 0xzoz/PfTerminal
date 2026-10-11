@@ -375,12 +375,45 @@ impl ToolEmitter {
         super::format_exec_output_for_model(output, ctx.turn.model_info.truncation_policy.into())
     }
 
+    /// #442: the explanation for a shell command that failed because the
+    /// Aggressive rules denied a protected read it names. The caller shows it
+    /// to the person after the command's end event and adds it to the
+    /// model's output.
+    async fn explain_protected_read(
+        &self,
+        ctx: ToolEventCtx<'_>,
+        out: &Result<ExecToolCallOutput, ToolError>,
+    ) -> Option<String> {
+        let Self::Shell { command, cwd, .. } = self else {
+            return None;
+        };
+        let cwd = cwd.to_abs_path().ok()?;
+        let output = match out {
+            Ok(output) => output,
+            Err(ToolError::Codex(err)) => match err.details() {
+                CodexErrorDetails::Sandbox(SandboxErr::Denied { output, .. }) => output.as_ref(),
+                _ => return None,
+            },
+            Err(ToolError::Rejected(_)) => return None,
+        };
+        crate::security::protected_reads::denial_explanation(
+            ctx.session,
+            ctx.turn,
+            command,
+            cwd.as_path(),
+            Some(output.exit_code),
+            &output.aggregated_output.text,
+        )
+        .await
+    }
+
     pub async fn finish(
         &self,
         ctx: ToolEventCtx<'_>,
         out: Result<ExecToolCallOutput, ToolError>,
         applied_patch_delta: Option<&AppliedPatchDelta>,
     ) -> Result<String, FunctionCallError> {
+        let explanation = self.explain_protected_read(ctx, &out).await;
         let (event, result) = match out {
             Ok(output) => {
                 let content = self.format_exec_output_for_model(&output, ctx);
@@ -457,7 +490,17 @@ impl ToolEmitter {
             }
         };
         self.emit(ctx, event).await;
-        result
+        if let Some(explanation) = &explanation {
+            crate::security::protected_reads::notify(ctx.session, ctx.turn, explanation.clone())
+                .await;
+        }
+        match (explanation, result) {
+            (Some(explanation), Err(FunctionCallError::RespondToModel(content))) => Err(
+                FunctionCallError::RespondToModel(format!("{content}\n{explanation}")),
+            ),
+            (Some(explanation), Ok(content)) => Ok(format!("{content}\n{explanation}")),
+            (_, result) => result,
+        }
     }
 }
 

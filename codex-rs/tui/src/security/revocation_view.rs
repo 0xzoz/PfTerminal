@@ -273,7 +273,7 @@ impl RevocationView {
             Choice::Grant(grant) => {
                 let message = if revoke_grant(&grant.grant_id) {
                     Ok(format!(
-                        "Grant revoked: `{}` now runs with the protected-path rules again.",
+                        "Grant revoked: `{}` now runs with the write protections again.",
                         grant.label
                     ))
                 } else {
@@ -462,7 +462,7 @@ fn review_text(choice: &Choice, level: SecurityLevel) -> (String, Vec<String>) {
             vec![
                 held_lines(std::slice::from_ref(grant)).concat(),
                 format!("Agent session: {}", grant.thread),
-                "It ends now: the command runs with the protected-path rules again. Other grants stay.".to_string(),
+                "It ends now: the command runs with the write protections again. Other grants stay.".to_string(),
             ],
         ),
         Choice::Core(HumanRevocation::AllActiveAuthority) => (

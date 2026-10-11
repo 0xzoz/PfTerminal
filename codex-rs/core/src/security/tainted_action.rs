@@ -165,11 +165,32 @@ pub(crate) struct PostTaintAction {
 impl PostTaintAction {
     /// Shown in the approval prompt so the human sees why it was asked again.
     pub(crate) fn approval_reason(&self) -> String {
-        format!(
+        let mut reason = format!(
             "Security level: this is {} after untrusted content entered the session. \
              Approve only if you asked for it; a cached or automatic approval does not count.",
             self.kind.describe()
-        )
+        );
+        if self.reads_stay_denied() {
+            reason.push_str(
+                " Under security level Aggressive, credential files, the vault and the Corbanu \
+                 home stay unreadable to agent commands even if you approve, and that is never \
+                 granted, not even once; to allow it, switch to Permissive in /security (it \
+                 applies after a restart).",
+            );
+        }
+        reason
+    }
+
+    /// #442: under Aggressive, what this action protects is denied by the
+    /// sandbox whatever the person answers, and no grant lifts it, so none
+    /// is offered for it.
+    pub(crate) fn reads_stay_denied(&self) -> bool {
+        self.state.level == SecurityLevel::Aggressive
+            && !matches!(self.state.policy, PolicyBinding::Unavailable)
+            && matches!(
+                self.kind,
+                ProtectedActionKind::Credentials | ProtectedActionKind::Vault
+            )
     }
 
     pub(crate) fn approvals_off_rejection(&self) -> String {
@@ -563,6 +584,9 @@ impl Classifier {
             ("PWD", Some(cwd)),
             ("HOME", self.homes.user_home()),
             ("CODEX_HOME", Some(self.homes.codex_home())),
+            // #442: the same home under its other names.
+            ("CORBANU_HOME", Some(self.homes.codex_home())),
+            ("PFTERMINAL_HOME", Some(self.homes.codex_home())),
         ] {
             if let Some(value) = value {
                 variables.insert(name.to_string(), value.to_string());

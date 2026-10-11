@@ -347,7 +347,8 @@ impl ExecCommandHandler {
         }
 
         emit_unified_exec_tty_metric(&turn.session_telemetry, tty);
-        match manager
+        let explained_command = command.clone();
+        let result = match manager
             .exec_command(
                 ExecCommandRequest {
                     command,
@@ -373,55 +374,34 @@ impl ExecCommandHandler {
             )
             .await
         {
-            Ok(mut response) => {
-                let blocked = refusal_notice::blocked(
-                    &turn.config,
-                    /*sandbox_denied*/ false,
-                    response.exit_code,
-                    &String::from_utf8_lossy(&response.raw_output),
-                );
-                if let Some(blocked) = blocked {
-                    notify_blocked(&context, blocked).await;
-                    response
-                        .raw_output
-                        .extend_from_slice(blocked.model_note().as_bytes());
-                }
-                Ok(boxed_tool_output(response))
-            }
+            Ok(response) => Ok((response, /*sandbox_denied*/ false)),
             Err(UnifiedExecError::SandboxDenied {
                 output,
                 original_token_count,
                 output_omitted_bytes,
                 ..
             }) => {
-                let mut output_text = output.aggregated_output.text;
+                let output_text = output.aggregated_output.text;
                 let original_token_count =
                     original_token_count.unwrap_or_else(|| approx_token_count(&output_text));
-                // #439: say when security level Aggressive stopped it.
-                if let Some(blocked) = refusal_notice::blocked(
-                    &turn.config,
+                Ok((
+                    ExecCommandToolOutput {
+                        event_call_id: context.call_id.clone(),
+                        chunk_id: generate_chunk_id(),
+                        wall_time: output.duration,
+                        raw_output: output_text.into_bytes(),
+                        truncation_policy: turn.model_info.truncation_policy.into(),
+                        max_output_tokens,
+                        // Sandbox denial is terminal, so there is no live
+                        // process for write_stdin to resume.
+                        process_id: None,
+                        exit_code: Some(output.exit_code),
+                        original_token_count: Some(original_token_count),
+                        output_omitted_bytes,
+                        hook_command: Some(hook_command),
+                    },
                     /*sandbox_denied*/ true,
-                    Some(output.exit_code),
-                    &output_text,
-                ) {
-                    notify_blocked(&context, blocked).await;
-                    output_text.push_str(&blocked.model_note());
-                }
-                Ok(boxed_tool_output(ExecCommandToolOutput {
-                    event_call_id: context.call_id.clone(),
-                    chunk_id: generate_chunk_id(),
-                    wall_time: output.duration,
-                    raw_output: output_text.into_bytes(),
-                    truncation_policy: turn.model_info.truncation_policy.into(),
-                    max_output_tokens,
-                    // Sandbox denial is terminal, so there is no live
-                    // process for write_stdin to resume.
-                    process_id: None,
-                    exit_code: Some(output.exit_code),
-                    original_token_count: Some(original_token_count),
-                    output_omitted_bytes,
-                    hook_command: Some(hook_command),
-                }))
+                ))
             }
             // #439: a refusal reads as its own message, not as a debug dump.
             Err(UnifiedExecError::Rejected { message }) => {
@@ -430,7 +410,45 @@ impl ExecCommandHandler {
             Err(err) => Err(FunctionCallError::RespondToModel(format!(
                 "exec_command failed for `{command_for_display}`: {err}"
             ))),
+        };
+        let (mut output, sandbox_denied) = result?;
+        let output_text = String::from_utf8_lossy(&output.raw_output).into_owned();
+        // #442: a protected read the Aggressive rules denied is explained
+        // where it failed, to the person and to the model (it is never
+        // granted). Otherwise #439: say when Aggressive stopped the command.
+        let protected_read = match native_cwd.as_ref().filter(|_| !environment.is_remote()) {
+            Some(cwd) => {
+                crate::security::protected_reads::denial_explanation(
+                    session.as_ref(),
+                    turn.as_ref(),
+                    &explained_command,
+                    cwd.as_path(),
+                    output.exit_code,
+                    &output_text,
+                )
+                .await
+            }
+            None => None,
+        };
+        if let Some(explanation) = protected_read {
+            crate::security::protected_reads::notify(
+                session.as_ref(),
+                turn.as_ref(),
+                explanation.clone(),
+            )
+            .await;
+            output
+                .raw_output
+                .extend_from_slice(format!("\n{explanation}\n").as_bytes());
+        } else if let Some(blocked) =
+            refusal_notice::blocked(&turn.config, sandbox_denied, output.exit_code, &output_text)
+        {
+            notify_blocked(&context, blocked).await;
+            output
+                .raw_output
+                .extend_from_slice(blocked.model_note().as_bytes());
         }
+        Ok(boxed_tool_output(output))
     }
 }
 
