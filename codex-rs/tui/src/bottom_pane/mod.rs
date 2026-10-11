@@ -1686,7 +1686,7 @@ impl BottomPane {
             return;
         }
 
-        let modal = McpServerElicitationOverlay::new_with_keymap(
+        let mut modal = McpServerElicitationOverlay::new_with_keymap(
             request,
             self.app_event_tx.clone(),
             self.has_input_focus,
@@ -1694,6 +1694,13 @@ impl BottomPane {
             self.disable_paste_burst,
             self.keymap.list.clone(),
         );
+        // #192: the user was typing; their next Enter may be meant for their draft.
+        if self
+            .approval_prompt_delay_remaining(Instant::now())
+            .is_some()
+        {
+            modal.require_fresh_choice();
+        }
         self.pause_status_timer_for_modal();
         self.set_composer_input_enabled(
             /*enabled*/ false,
@@ -2270,6 +2277,61 @@ mod tests {
         pane.pre_draw_tick_at(now + APPROVAL_PROMPT_TYPING_IDLE_DELAY);
         assert_eq!(pane.view_stack.len(), 1);
         assert!(pane.delayed_approval_requests.is_empty());
+    }
+
+    /// #192: an MCP approval that opens while the user is typing ignores the
+    /// Enter meant for their draft until a fresh choice.
+    #[test]
+    fn mcp_approval_after_recent_typing_needs_a_fresh_choice() {
+        let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+        let mut pane = test_pane(tx);
+        pane.last_composer_activity_at = Some(Instant::now());
+        let params = codex_app_server_protocol::McpServerElicitationRequestParams {
+            thread_id: "thread-1".to_string(),
+            turn_id: Some("turn-1".to_string()),
+            server_name: "server-1".to_string(),
+            request: codex_app_server_protocol::McpServerElicitationRequest::Form {
+                meta: None,
+                message: "Allow this request?".to_string(),
+                requested_schema: serde_json::from_value(serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                }))
+                .expect("schema"),
+            },
+        };
+        let request = McpServerElicitationFormRequest::from_app_server_request(
+            codex_protocol::ThreadId::default(),
+            codex_app_server_protocol::RequestId::String("request-1".to_string()),
+            &params,
+        )
+        .expect("approval request");
+        pane.push_mcp_server_elicitation_request(request);
+
+        pane.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            !std::iter::from_fn(|| rx.try_recv().ok()).any(|event| matches!(
+                event,
+                AppEvent::SubmitThreadOp {
+                    op: Op::ResolveElicitation { .. },
+                    ..
+                }
+            )),
+            "Enter answered the approval"
+        );
+
+        pane.handle_key_event(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
+        pane.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            std::iter::from_fn(|| rx.try_recv().ok()).any(|event| matches!(
+                event,
+                AppEvent::SubmitThreadOp {
+                    op: Op::ResolveElicitation { .. },
+                    ..
+                }
+            ))
+        );
     }
 
     /// PF-83 F05: choosing a permission while an approval is pending must not
