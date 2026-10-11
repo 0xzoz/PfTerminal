@@ -47,10 +47,7 @@ const WATCH_MASK: u32 = libc::IN_CREATE | libc::IN_MOVED_TO | libc::IN_ONLYDIR;
 
 /// The folders whose credential names the policy denies, existing, outermost
 /// only. The filesystem root is left out: its glob is not expanded either.
-pub(crate) fn credential_watch_roots(
-    policy: &FileSystemSandboxPolicy,
-    cwd: &Path,
-) -> Vec<PathBuf> {
+pub(crate) fn credential_watch_roots(policy: &FileSystemSandboxPolicy, cwd: &Path) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = policy
         .get_unreadable_globs_with_cwd(cwd)
         .iter()
@@ -170,7 +167,8 @@ impl CredentialWatcher {
                 }
             };
             for entry in entries {
-                let entry = entry.map_err(|err| format!("cannot list {}: {err}", folder.display()))?;
+                let entry =
+                    entry.map_err(|err| format!("cannot list {}: {err}", folder.display()))?;
                 let name = entry.file_name();
                 let path = folder.join(&name);
                 let kind = entry.file_type().ok();
@@ -199,7 +197,11 @@ impl CredentialWatcher {
     /// Starts watching beside the command `child`, which is killed as soon
     /// as a credential name appears. `placeholders` are the empty mount
     /// points bubblewrap creates for it; they are not credential files.
-    pub(crate) fn start(mut self, child: libc::pid_t, placeholders: Vec<PathBuf>) -> CredentialMonitor {
+    pub(crate) fn start(
+        mut self,
+        child: libc::pid_t,
+        placeholders: Vec<PathBuf>,
+    ) -> CredentialMonitor {
         self.placeholders = placeholders;
         let stop = Arc::new(AtomicBool::new(false));
         let found = Arc::new(Mutex::new(None));

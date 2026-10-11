@@ -1525,7 +1525,10 @@ fn credential_name_profile(work: &std::path::Path) -> PermissionProfile {
     PermissionProfile::from_runtime_permissions(&file_system, network)
 }
 
-async fn run_in(work: &std::path::Path, script: &str) -> codex_protocol::exec_output::ExecToolCallOutput {
+async fn run_in(
+    work: &std::path::Path,
+    script: &str,
+) -> codex_protocol::exec_output::ExecToolCallOutput {
     let result = run_cmd_result_with_permission_profile_for_cwd(
         &["bash", "-c", script],
         AbsolutePathBuf::try_from(work).unwrap(),
@@ -1546,23 +1549,26 @@ async fn run_in(work: &std::path::Path, script: &str) -> codex_protocol::exec_ou
     }
 }
 
-/// #442 (Travis, 2026-10-11), real bubblewrap: a `.env` created mid-session
-/// stays unreadable. One a sandboxed command creates stops that command, and
-/// the next command cannot read it; nor one the person creates between
-/// commands, nor what a `.env` link points to; one created while a command
-/// runs stops that command before it reads it. Other files stay readable.
-#[tokio::test]
-async fn issue_442_env_files_created_mid_session_stay_unreadable() {
+/// A workspace for the #442 cases, or `None` when bwrap cannot run here.
+async fn credential_workspace() -> Option<(tempfile::TempDir, std::path::PathBuf)> {
     if should_skip_bwrap_tests().await {
         eprintln!("skipping bwrap test: bwrap sandbox prerequisites are unavailable");
-        return;
+        return None;
     }
     let tmpdir = tempfile::tempdir().expect("tempdir");
     let work = tmpdir.path().canonicalize().unwrap();
     std::fs::create_dir_all(work.join("app")).unwrap();
     std::fs::write(work.join("notes.txt"), "plain-notes").unwrap();
+    Some((tmpdir, work))
+}
 
-    // A sandboxed command creates `.env.local`: it is stopped.
+/// #442 (Travis, 2026-10-11), real bubblewrap: a sandboxed command that
+/// creates a `.env` is stopped, and the next command cannot read the file.
+#[tokio::test]
+async fn issue_442_env_created_by_a_sandboxed_command_stops_it_and_stays_hidden() {
+    let Some((_tmpdir, work)) = credential_workspace().await else {
+        return;
+    };
     let made = run_in(
         &work,
         "printf API_KEY=dummy-442-agent > .env.local; sleep 2; echo made=$?",
@@ -1571,35 +1577,56 @@ async fn issue_442_env_files_created_mid_session_stay_unreadable() {
     assert_ne!(made.exit_code, 0, "{made:?}");
     assert!(!made.stdout.text.contains("made="), "{made:?}");
     assert!(
-        made.stderr.text.contains("the sandbox stopped this command"),
+        made.stderr
+            .text
+            .contains("the sandbox stopped this command"),
         "{made:?}"
     );
-
-    // The person creates more between commands, one behind a link.
-    std::fs::write(work.join("app/.env"), "API_KEY=dummy-442-person").unwrap();
-    std::fs::write(work.join("shared.secret"), "API_KEY=dummy-442-linked").unwrap();
-    std::os::unix::fs::symlink("shared.secret", work.join(".envrc")).unwrap();
-
-    // The next command reads none of them.
     let read = run_in(
         &work,
-        "for f in .env.local app/.env .envrc; do cat \"$f\"; echo \"$f=$?\"; done; \
-         cp app/.env copy; echo copy=$?; cat notes.txt; echo notes=$?",
+        "cat .env.local; echo env=$?; cp .env.local copy; echo copy=$?; cat notes.txt",
     )
     .await;
     let text = format!("{}{}", read.stdout.text, read.stderr.text);
     assert!(!text.contains("dummy-442"), "{text}");
-    for line in [".env.local=1", "app/.env=1", ".envrc=1", "copy=1", "plain-notes", "notes=0"] {
+    for line in ["env=1", "copy=1", "plain-notes"] {
         assert!(read.stdout.text.contains(line), "{line} not in {text}");
     }
+}
 
-    // A long-running command: a `.env` created while it runs stops it
-    // before it gets to read it.
+/// #442, real bubblewrap: files the person creates between commands, and
+/// what a `.env` link points to, are unreadable to the next command.
+#[tokio::test]
+async fn issue_442_env_created_between_commands_and_env_links_stay_hidden() {
+    let Some((_tmpdir, work)) = credential_workspace().await else {
+        return;
+    };
+    std::fs::write(work.join("app/.env"), "API_KEY=dummy-442-person").unwrap();
+    std::fs::write(work.join("shared.secret"), "API_KEY=dummy-442-linked").unwrap();
+    std::os::unix::fs::symlink("shared.secret", work.join(".envrc")).unwrap();
+    let read = run_in(
+        &work,
+        "for f in app/.env .envrc; do cat \"$f\"; echo \"$f=$?\"; done; cat notes.txt",
+    )
+    .await;
+    let text = format!("{}{}", read.stdout.text, read.stderr.text);
+    assert!(!text.contains("dummy-442"), "{text}");
+    for line in ["app/.env=1", ".envrc=1", "plain-notes"] {
+        assert!(read.stdout.text.contains(line), "{line} not in {text}");
+    }
+}
+
+/// #442, real bubblewrap: a `.env` created while a command runs stops that
+/// command before it reads it (the command waits, as a later read in a
+/// long-lived shell would).
+#[tokio::test]
+async fn issue_442_env_created_while_a_command_runs_stops_it() {
+    let Some((_tmpdir, work)) = credential_workspace().await else {
+        return;
+    };
     let running = {
         let work = work.clone();
-        tokio::spawn(async move {
-            run_in(&work, "sleep 3; cat .env.later; echo later=$?").await
-        })
+        tokio::spawn(async move { run_in(&work, "sleep 3; cat .env.later; echo later=$?").await })
     };
     tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
     std::fs::write(work.join(".env.later"), "API_KEY=dummy-442-later").unwrap();

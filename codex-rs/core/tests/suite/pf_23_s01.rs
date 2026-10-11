@@ -833,9 +833,7 @@ async fn issue_442_env_file_created_mid_session_is_denied_and_explained() -> any
     let output = output_text(&requests[requests.len() - 1], "call-read");
     assert!(!output.contains("dummy-442-new"), "{output}");
     assert!(output.contains("Operation not permitted"), "{output}");
-    assert!(
-        std::fs::read_to_string(test.cwd_path().join(".env.local"))?.contains("dummy-442-new")
-    );
+    assert!(std::fs::read_to_string(test.cwd_path().join(".env.local"))?.contains("dummy-442-new"));
     Ok(())
 }
 

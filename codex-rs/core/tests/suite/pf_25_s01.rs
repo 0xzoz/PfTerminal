@@ -300,7 +300,8 @@ async fn issue_442_a_confirmed_grant_never_lifts_codex_or_agents() -> anyhow::Re
     let write = "printf pf25 > .git/hooks/pf25-hook; echo hook=$?; \
                  printf pf25 > .codex/pf25.toml; echo codex=$?; \
                  printf pf25 > .agents/pf25.md; echo agents=$?";
-    let (test, captured) = start(home, vec![shell_step("call-granted", write), done_step()]).await?;
+    let (test, captured) =
+        start(home, vec![shell_step("call-granted", write), done_step()]).await?;
     let thread = test.session_configured.thread_id;
     let cwd = test.cwd_path();
     for folder in [".git/hooks", ".codex", ".agents"] {

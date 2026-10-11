@@ -625,7 +625,12 @@ fn issue_442_a_grant_keeps_codex_and_agents_read_only() {
         .apply(&PermissionProfile::Disabled)
         .unwrap()
         .file_system_sandbox_policy();
-    for kept in [".codex/config.toml", ".codex", ".agents/skills/x/SKILL.md", ".agents"] {
+    for kept in [
+        ".codex/config.toml",
+        ".codex",
+        ".agents/skills/x/SKILL.md",
+        ".agents",
+    ] {
         assert!(
             !policy.can_write_path_with_cwd(&cwd.join(kept), &cwd),
             "{kept}"

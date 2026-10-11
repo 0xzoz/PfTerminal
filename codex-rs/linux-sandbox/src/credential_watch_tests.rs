@@ -27,7 +27,10 @@ fn root(dir: &tempfile::TempDir) -> PathBuf {
 
 /// A child that only waits to be stopped.
 fn sleeper() -> std::process::Child {
-    std::process::Command::new("sleep").arg("30").spawn().unwrap()
+    std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap()
 }
 
 /// Waits for `child` to exit, up to a few seconds; whether it was killed.
@@ -50,9 +53,13 @@ fn watch_roots_are_the_existing_outermost_credential_folders() {
     let work = root(&dir);
     std::fs::create_dir_all(work.join("nested")).unwrap();
     let mut globs = credential_file_globs(&work.to_string_lossy());
-    globs.extend(credential_file_globs(&work.join("nested").to_string_lossy()));
+    globs.extend(credential_file_globs(
+        &work.join("nested").to_string_lossy(),
+    ));
     globs.extend(credential_file_globs("/"));
-    globs.extend(credential_file_globs(&work.join("missing").to_string_lossy()));
+    globs.extend(credential_file_globs(
+        &work.join("missing").to_string_lossy(),
+    ));
     globs.push(format!("{}/**/*.pem", work.display()));
     assert_eq!(
         credential_watch_roots(&deny_globs(globs), &work),

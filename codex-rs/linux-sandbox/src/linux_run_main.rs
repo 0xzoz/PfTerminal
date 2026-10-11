@@ -579,7 +579,8 @@ fn run_bwrap_in_child_with_synthetic_mount_cleanup(
     cleanup_synthetic_mount_targets(&synthetic_mount_registrations);
     let protected_create_violation = protected_create_monitor_violation
         || cleanup_protected_create_targets(&protected_create_registrations);
-    let credential_stop = credential_monitor.and_then(crate::credential_watch::CredentialMonitor::stop);
+    let credential_stop =
+        credential_monitor.and_then(crate::credential_watch::CredentialMonitor::stop);
     signal_forwarders.restore();
     cleanup_signal_mask.restore();
     if let Some(found) = credential_stop {
