@@ -913,16 +913,41 @@ pub fn create_seatbelt_command_args(
                 )
             }
         } else {
+            let writable_roots =
+                file_system_sandbox_policy.get_writable_roots_with_cwd(sandbox_policy_cwd);
+            // #529: Seatbelt allows a write any writable root allows, so a
+            // read-only path one root protects stayed writable through another
+            // root reaching it (a writable link to a workspace's `.git`, or
+            // `/tmp` holding the workspace). Each root also excludes the other
+            // roots' read-only paths it reaches, as Linux does since #511; a
+            // path that is itself a writable root stays writable there. Like
+            // the rename guard, only once the policy denies reads: a policy
+            // without denied paths keeps today's rules.
+            let other_read_only: Vec<AbsolutePathBuf> = if unreadable_roots.is_empty() {
+                Vec::new()
+            } else {
+                writable_roots
+                    .iter()
+                    .flat_map(|root| root.read_only_subpaths.iter().cloned())
+                    .collect()
+            };
             build_seatbelt_access_policy(
                 "file-write*",
                 "WRITABLE_ROOT",
-                file_system_sandbox_policy
-                    .get_writable_roots_with_cwd(sandbox_policy_cwd)
+                writable_roots
                     .into_iter()
                     .map(|root| {
                         // Denied paths the root reaches only through a link
                         // are excluded too (#488); the rest already are.
                         let mut excluded_subpaths = root.read_only_subpaths.clone();
+                        for path in &other_read_only {
+                            if *path != root.root
+                                && !excluded_subpaths.contains(path)
+                                && reached_through_root(path, &root.root)
+                            {
+                                excluded_subpaths.push(path.clone());
+                            }
+                        }
                         excluded_subpaths.extend(
                             unreadable_roots
                                 .iter()
