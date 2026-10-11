@@ -615,8 +615,53 @@ fn create_filesystem_args(
             &read_only_subpaths,
         );
         read_only_subpaths.sort_by_key(|path| path_depth(path));
-        for subpath in read_only_subpaths {
-            append_read_only_subpath_args(&mut bwrap_args, &subpath, &allowed_write_paths)?;
+        let mut nested_unreadable_roots: Vec<PathBuf> = unreadable_roots
+            .iter()
+            .filter(|path| path.starts_with(root))
+            .cloned()
+            .collect();
+        if let Some(target) = &symlink_target {
+            nested_unreadable_roots =
+                remap_paths_for_symlink_target(nested_unreadable_roots, root, target);
+        }
+        nested_unreadable_roots.sort_by_key(|path| path_depth(path));
+        // #473: denied paths missing below a read-only folder, by the folder
+        // that gets a snapshot (see `append_read_only_snapshot_dir_args`).
+        let mut snapshot_dirs: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
+        let mut snapshot_covered: HashSet<PathBuf> = HashSet::new();
+        for unreadable_root in &nested_unreadable_roots {
+            if let Some(missing) = missing_component_below_read_only_path(
+                unreadable_root,
+                &read_only_subpaths,
+                &allowed_write_paths,
+            ) && let Some(dir) = missing.parent()
+            {
+                snapshot_dirs
+                    .entry(dir.to_path_buf())
+                    .or_default()
+                    .push(missing.clone());
+                snapshot_covered.insert(unreadable_root.clone());
+            }
+        }
+        for subpath in &read_only_subpaths {
+            if missing_component_below_read_only_path(
+                subpath,
+                &read_only_subpaths,
+                &allowed_write_paths,
+            )
+            .is_some()
+            {
+                // #473: the read-only folder above already stops the command
+                // creating it, and bubblewrap cannot create a mount target
+                // in a read-only mount.
+                continue;
+            }
+            append_read_only_subpath_args(&mut bwrap_args, subpath, &allowed_write_paths)?;
+        }
+        let mut snapshot_dirs: Vec<(PathBuf, Vec<PathBuf>)> = snapshot_dirs.into_iter().collect();
+        snapshot_dirs.sort_by_key(|(dir, _)| path_depth(dir));
+        for (dir, hidden) in &snapshot_dirs {
+            append_read_only_snapshot_dir_args(&mut bwrap_args, dir, hidden)?;
         }
         // Protect the registry only where a writable bind exposes it. Apply
         // this before deny masks so a denied parent stays hidden, rather than
@@ -635,17 +680,11 @@ fn create_filesystem_args(
             bwrap_args.args.push(path_to_string(registry_mount));
             bwrap_args.args.push(path_to_string(registry_mount));
         }
-        let mut nested_unreadable_roots: Vec<PathBuf> = unreadable_roots
-            .iter()
-            .filter(|path| path.starts_with(root))
-            .cloned()
-            .collect();
-        if let Some(target) = &symlink_target {
-            nested_unreadable_roots =
-                remap_paths_for_symlink_target(nested_unreadable_roots, root, target);
-        }
-        nested_unreadable_roots.sort_by_key(|path| path_depth(path));
         for unreadable_root in nested_unreadable_roots {
+            if snapshot_covered.contains(&unreadable_root) {
+                // Hidden by the snapshot above, also if it is created later.
+                continue;
+            }
             append_unreadable_root_args(&mut bwrap_args, &unreadable_root, &allowed_write_paths)?;
         }
     }
@@ -1099,6 +1138,9 @@ fn append_empty_directory_args(bwrap_args: &mut BwrapArgs, path: &Path) {
 }
 
 fn append_missing_read_only_subpath_args(bwrap_args: &mut BwrapArgs, path: &Path) -> Result<()> {
+    if has_synthetic_mount_target(bwrap_args, path) {
+        return Ok(());
+    }
     if path.file_name().is_some_and(is_protected_metadata_name) {
         append_empty_directory_args(bwrap_args, path);
         bwrap_args
@@ -1111,10 +1153,98 @@ fn append_missing_read_only_subpath_args(bwrap_args: &mut BwrapArgs, path: &Path
 }
 
 fn append_missing_empty_file_bind_data_args(bwrap_args: &mut BwrapArgs, path: &Path) -> Result<()> {
+    if has_synthetic_mount_target(bwrap_args, path) {
+        return Ok(());
+    }
     append_empty_file_bind_data_args(bwrap_args, path)?;
     bwrap_args
         .synthetic_mount_targets
         .push(SyntheticMountTarget::missing(path));
+    Ok(())
+}
+
+/// #473: several denied paths can share their first missing component
+/// (`~/.config` for `~/.config/gh` and `~/.config/gcloud`). One empty
+/// placeholder there already stops the whole tree being created, and
+/// bubblewrap fails to mount a second one over the first.
+fn has_synthetic_mount_target(bwrap_args: &BwrapArgs, path: &Path) -> bool {
+    bwrap_args
+        .synthetic_mount_targets
+        .iter()
+        .any(|target| target.path() == path)
+}
+
+/// #473: the first missing component of `path` when the folder it would be
+/// created in sits at or below an existing read-only path. That folder is
+/// bound read-only, so the command cannot create it, and neither can
+/// bubblewrap create a mount target there. `None` when `path` exists, is not
+/// below a writable root, or crosses a writable symlink (masking it then
+/// fails closed as before).
+fn missing_component_below_read_only_path(
+    path: &Path,
+    read_only_subpaths: &[PathBuf],
+    allowed_write_paths: &[PathBuf],
+) -> Option<PathBuf> {
+    if first_writable_symlink_component_in_path(path, allowed_write_paths).is_some() {
+        return None;
+    }
+    let missing = find_first_non_existent_component(path)?;
+    if !is_within_allowed_write_paths(&missing, allowed_write_paths) {
+        return None;
+    }
+    let parent = missing.parent()?;
+    let parent_is_dir = fs::symlink_metadata(parent).is_ok_and(|metadata| metadata.is_dir());
+    (parent_is_dir
+        && read_only_subpaths
+            .iter()
+            .any(|read_only| parent.starts_with(read_only)))
+    .then_some(missing)
+}
+
+/// #473: hides denied paths that are missing in `dir`, a read-only folder,
+/// for the whole run. A placeholder cannot be created there, and a live
+/// read-only bind would still show a credential file the host writes while
+/// the command runs. So `dir` becomes a read-only tmpfs that holds what it
+/// has at launch (folders and files bound read-only, links recreated),
+/// without `hidden`: nothing created after launch appears inside. Entries
+/// that vanish before bubblewrap runs are skipped; names that are not UTF-8
+/// are left out.
+fn append_read_only_snapshot_dir_args(
+    bwrap_args: &mut BwrapArgs,
+    dir: &Path,
+    hidden: &[PathBuf],
+) -> Result<()> {
+    let mut entries = fs::read_dir(dir)?.collect::<io::Result<Vec<_>>>()?;
+    entries.sort_by_key(fs::DirEntry::file_name);
+    bwrap_args.args.push("--perms".to_string());
+    bwrap_args.args.push("555".to_string());
+    bwrap_args.args.push("--tmpfs".to_string());
+    bwrap_args.args.push(path_to_string(dir));
+    for entry in entries {
+        let path = entry.path();
+        if hidden.contains(&path) || path.to_str().is_none() {
+            continue;
+        }
+        if entry
+            .file_type()
+            .is_ok_and(|file_type| file_type.is_symlink())
+        {
+            let Ok(target) = fs::read_link(&path) else {
+                continue;
+            };
+            let Some(target) = target.to_str() else {
+                continue;
+            };
+            bwrap_args.args.push("--symlink".to_string());
+            bwrap_args.args.push(target.to_string());
+        } else {
+            bwrap_args.args.push("--ro-bind-try".to_string());
+            bwrap_args.args.push(path_to_string(&path));
+        }
+        bwrap_args.args.push(path_to_string(&path));
+    }
+    bwrap_args.args.push("--remount-ro".to_string());
+    bwrap_args.args.push(path_to_string(dir));
     Ok(())
 }
 
@@ -2763,6 +2893,133 @@ mod tests {
             .arg("--version")
             .output()
             .is_ok_and(|output| output.status.success())
+    }
+
+    fn path_entry(
+        path: &Path,
+        access: FileSystemAccessMode,
+        skip_missing: bool,
+    ) -> FileSystemSandboxEntry {
+        let path = FileSystemPath::Path {
+            path: AbsolutePathBuf::from_absolute_path(path).expect("absolute path"),
+        };
+        if skip_missing {
+            FileSystemSandboxEntry::skip_missing_path(path, access)
+        } else {
+            FileSystemSandboxEntry::new(path, access)
+        }
+    }
+
+    /// #473: `~/.claude` read-only (it runs hooks) with no
+    /// `.credentials.json` yet. A placeholder cannot be made in the
+    /// read-only folder, so the folder becomes a snapshot of what it holds.
+    #[test]
+    fn missing_denied_path_below_read_only_folder_gets_a_snapshot() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let home = temp_dir.path().join("home");
+        let claude = home.join(".claude");
+        std::fs::create_dir_all(claude.join("projects")).expect("create .claude");
+        std::fs::write(claude.join("settings.json"), "{}").expect("settings");
+        std::os::unix::fs::symlink("settings.json", claude.join("link")).expect("link");
+        let credentials = claude.join(".credentials.json");
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            path_entry(&home, FileSystemAccessMode::Write, false),
+            path_entry(&claude, FileSystemAccessMode::Read, true),
+            path_entry(&credentials, FileSystemAccessMode::Deny, true),
+        ]);
+
+        let args = create_filesystem_args(&policy, &home, NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
+            .expect("filesystem args")
+            .args;
+
+        let claude_arg = path_to_string(&claude);
+        let position = |window: &[&str]| {
+            args.windows(window.len())
+                .position(|candidate| candidate == window)
+                .unwrap_or_else(|| panic!("expected {window:?} in {args:#?}"))
+        };
+        let read_only_bind = position(&["--ro-bind", &claude_arg, &claude_arg]);
+        let snapshot = position(&["--perms", "555", "--tmpfs", &claude_arg]);
+        let remount = position(&["--remount-ro", &claude_arg]);
+        assert!(read_only_bind < snapshot && snapshot < remount, "{args:#?}");
+        for child in ["projects", "settings.json"] {
+            let child = path_to_string(&claude.join(child));
+            let bind = position(&["--ro-bind-try", &child, &child]);
+            assert!(snapshot < bind && bind < remount, "{args:#?}");
+        }
+        position(&[
+            "--symlink",
+            "settings.json",
+            &path_to_string(&claude.join("link")),
+        ]);
+        assert!(
+            !args.contains(&path_to_string(&credentials)),
+            "nothing is mounted at the missing file: {args:#?}"
+        );
+        assert!(!credentials.exists(), "no placeholder on the host");
+    }
+
+    /// #473: `~/.config/gh` and `~/.config/gcloud` with no `~/.config`
+    /// share one placeholder; bubblewrap cannot mount a second over it.
+    #[test]
+    fn missing_denied_paths_sharing_a_missing_folder_mask_it_once() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let home = temp_dir.path().join("home");
+        std::fs::create_dir_all(&home).expect("create home");
+        let config = home.join(".config");
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            path_entry(&home, FileSystemAccessMode::Write, false),
+            path_entry(&config.join("gh"), FileSystemAccessMode::Deny, true),
+            path_entry(&config.join("gcloud"), FileSystemAccessMode::Deny, true),
+        ]);
+
+        let args = create_filesystem_args(&policy, &home, NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
+            .expect("filesystem args");
+
+        let config_arg = path_to_string(&config);
+        assert_eq!(
+            args.args
+                .windows(3)
+                .filter(|window| window[0] == "--ro-bind-data" && window[2] == config_arg)
+                .count(),
+            1,
+            "{:#?}",
+            args.args
+        );
+        assert_eq!(
+            synthetic_mount_target_paths(&args)
+                .into_iter()
+                .filter(|path| path == &config)
+                .count(),
+            1
+        );
+    }
+
+    /// #473: a missing read-only path below a read-only folder needs no
+    /// placeholder; the folder already stops it being created.
+    #[test]
+    fn missing_read_only_path_below_read_only_folder_is_left_to_the_folder() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let home = temp_dir.path().join("home");
+        let claude = home.join(".claude");
+        std::fs::create_dir_all(&claude).expect("create .claude");
+        let hooks = claude.join("missing/hooks");
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            path_entry(&home, FileSystemAccessMode::Write, false),
+            path_entry(&claude, FileSystemAccessMode::Read, true),
+            path_entry(&hooks, FileSystemAccessMode::Read, true),
+        ]);
+
+        let args = create_filesystem_args(&policy, &home, NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
+            .expect("filesystem args");
+
+        let missing = path_to_string(&claude.join("missing"));
+        assert!(
+            !args.args.iter().any(|arg| arg.starts_with(&missing)),
+            "{:#?}",
+            args.args
+        );
+        assert!(!synthetic_mount_target_paths(&args).contains(&claude.join("missing")));
     }
 
     /// Assert that `path` is masked due to a bwrap arg sequence like:
