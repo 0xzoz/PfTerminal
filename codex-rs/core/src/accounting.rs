@@ -13,12 +13,13 @@ use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
 use codex_state::StateRuntime;
 use codex_state::accounting::AccountingStore;
-use codex_state::accounting::AsOf;
 use codex_state::accounting::Attempt;
 use codex_state::accounting::Dialect;
+use codex_state::accounting::LedgerWrite;
 use codex_state::accounting::Observation;
 use codex_state::accounting::Patch;
 use codex_state::accounting::Presence;
+use codex_state::accounting::WriteOutcome;
 use sha2::Digest;
 use sha2::Sha256;
 use std::sync::Arc;
@@ -850,126 +851,27 @@ pub(crate) const GAP_WARNING: &str = "Developer accounting could not record one 
      They were sent anyway; /cost does not include them. \
      The cause is in the log (target codex_core::accounting).";
 
-/// How long one accounting operation - opening a sampling, an admission or an
-/// observation, each with every store call it makes - waits out contention on
-/// the shared state DB before it gives up and the request goes unrecorded.
-///
-/// The state DB is shared by every Corbanu process on a home: the TUI, `exec`
-/// workers, owner-loop workers. Another process's write can hold its lock for
-/// seconds, and SQLite gives up after its 5 s busy timeout. A contended write
-/// wrote nothing, so it is retried. The wait holds up the send (admission) or
-/// the stream (observation), and giving up only leaves a gap, so it stays
-/// short: about three busy timeouts.
-const CONTENTION_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
-
-/// Run one idempotent store call, retrying while the state DB is contended and
-/// `deadline` - shared by every call of one operation - has not passed.
-///
-/// Only contention is retried (`is_contention`); any other error returns at
-/// once, with `step` in its chain. Whatever finally comes back, the caller
-/// sends the request unrecorded.
-async fn store_call<T, F, Fut>(
-    step: &'static str,
-    deadline: std::time::Instant,
-    mut call: F,
-) -> anyhow::Result<T>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = anyhow::Result<T>>,
-{
-    use std::time::Duration;
-    let started = std::time::Instant::now();
-    let mut delay = Duration::from_millis(50);
-    let mut retries = 0_u32;
-    loop {
-        match call().await {
-            Ok(value) => {
-                if retries > 0 {
-                    tracing::info!(
-                        target: LOG_TARGET,
-                        step,
-                        retries,
-                        waited_ms = started.elapsed().as_millis() as u64,
-                        "accounting write succeeded after state DB contention"
-                    );
-                }
-                return Ok(value);
-            }
-            Err(error)
-                if codex_state::accounting::is_contention(&error)
-                    && std::time::Instant::now() + delay < deadline =>
-            {
-                retries += 1;
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    step,
-                    retries,
-                    waited_ms = started.elapsed().as_millis() as u64,
-                    cause = %format_args!("{error:#}"),
-                    "accounting: state DB busy; retrying"
-                );
-                // Spread retries so contending processes do not wake together.
-                let jitter = Duration::from_millis(u64::from(Uuid::new_v4().as_u128() as u8) % 50);
-                tokio::time::sleep(delay + jitter).await;
-                delay = (delay * 2).min(Duration::from_secs(2));
-            }
-            Err(error) => {
-                let error = error.context(step);
-                return Err(if retries > 0 {
-                    error.context(format!(
-                        "after {retries} contended retries over {} ms",
-                        started.elapsed().as_millis()
-                    ))
-                } else {
-                    error
-                });
-            }
-        }
-    }
-}
-pub(crate) type Slot = Arc<Mutex<Option<Arc<Sampling>>>>;
-
-// The facade accepts explicit as-of values. Serialize this process's collector
-// transactions before sampling time so concurrent native children cannot commit
-// a later checkpoint ahead of an older local operation. Never hold across HTTP;
-// external writers still use the store's fail-visible validation contract.
-#[cfg(not(test))]
-static WRITES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
-
-// Unit tests run many accounting tests in one process, and several assert on
-// this gate's permits. Give each test thread its own gate; these tests use
-// current-thread runtimes, so each test still sees exactly one gate.
+/// Fixtures shared by the accounting unit tests.
 #[cfg(test)]
-thread_local! {
-    static WRITES: &'static tokio::sync::Semaphore =
-        Box::leak(Box::new(tokio::sync::Semaphore::const_new(1)));
-}
-
-/// This process's accounting write gate, waited for within `deadline`: the
-/// contention budget covers the whole operation, including the wait behind
-/// this process's other accounting writes.
-async fn write_gate(
-    deadline: std::time::Instant,
-) -> anyhow::Result<tokio::sync::SemaphorePermit<'static>> {
-    Ok(
-        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), writes().acquire())
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!("accounting write gate busy past the contention budget")
-            })??,
-    )
-}
-
-fn writes() -> &'static tokio::sync::Semaphore {
-    #[cfg(not(test))]
-    {
-        &WRITES
-    }
-    #[cfg(test)]
-    {
-        WRITES.with(|gate| *gate)
+pub(crate) mod tests_support {
+    /// Take the state DB's write lock on a connection of another pool, as
+    /// another Corbanu process would. `ROLLBACK` on it releases the lock.
+    pub(crate) async fn hold_write_lock(
+        db: &codex_state::StateRuntime,
+    ) -> anyhow::Result<sqlx::pool::PoolConnection<sqlx::Sqlite>> {
+        let pool = db
+            .sqlite()
+            .open_read_write_pool(&db.sqlite().state_db_path())
+            .await?;
+        let mut connection = pool.acquire().await?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *connection)
+            .await?;
+        Ok(connection)
     }
 }
+
+pub(crate) type Slot = Arc<Mutex<Option<Arc<Sampling>>>>;
 
 /// The sampling this request is recorded on, if any. A closed sampling or a
 /// poisoned slot records nothing, so the request goes out unrecorded on the
@@ -1099,13 +1001,17 @@ pub(crate) struct Sampling {
     image_generation: bool,
     basis_source: codex_state::accounting::BasisSource,
     previous: Mutex<Option<Uuid>>,
+    /// Held from reading `previous` until this admission replaces it, so
+    /// concurrent admissions chain as retries one after another.
+    admission: tokio::sync::Mutex<()>,
     failed: AtomicBool,
     /// The turn must stop: see `halt`.
     halted: AtomicBool,
 }
 
-// A cancelled SQL future may already have committed. Never reuse that sampling
-// with a guessed predecessor; release the permit normally and fail it closed.
+// A record handed to the ledger writer is written even if the request that
+// handed it over is cancelled. Never reuse that sampling with a guessed
+// predecessor; fail it closed.
 struct Completion<'a> {
     sampling: &'a Sampling,
     complete: bool,
@@ -1252,17 +1158,8 @@ impl Sampling {
                 .into(),
             ));
         }
-        let deadline = std::time::Instant::now() + CONTENTION_BUDGET;
-        let _write = write_gate(deadline)
-            .await
-            .map_err(|error| CodexErr::Fatal(failure("open sampling", error).into()))?;
-        store_call("open accounting store", deadline, || {
-            AccountingStore::open(&runtime, AsOf::Now)
-        })
-        .await
-        .map_err(|error| {
-            CodexErr::Fatal(failure("open sampling", format_args!("{error:#}")).into())
-        })?;
+        // Nothing to write yet: the first record starts this process's ledger
+        // writer, which installs or validates the ledger.
         Ok(Arc::new(Self {
             runtime,
             owner,
@@ -1286,6 +1183,7 @@ impl Sampling {
                 && provider == codex_model_provider_info::OPENAI_PROVIDER_ID,
             basis_source: basis_source_for(mode),
             previous: Mutex::new(None),
+            admission: tokio::sync::Mutex::new(()),
             failed: AtomicBool::new(false),
             halted: AtomicBool::new(false),
         }))
@@ -1356,8 +1254,7 @@ impl Sampling {
             canonical_route(endpoint) == canonical_route(&self.endpoint),
             "accounting route mismatch"
         );
-        let deadline = std::time::Instant::now() + CONTENTION_BUDGET;
-        let _write = write_gate(deadline).await?;
+        let _admission = self.admission.lock().await;
         self.check()?;
         let mut completion = Completion {
             sampling: self,
@@ -1367,13 +1264,7 @@ impl Sampling {
             self.reject();
             anyhow::anyhow!("previous-attempt lock poisoned")
         })?;
-        // The facade borrows its runtime. Reopening validates/maintains through
-        // its public contract; never fabricate an attached or Active handle.
-        let store = store_call("open accounting store", deadline, || {
-            AccountingStore::open(&self.runtime, AsOf::Now)
-        })
-        .await?;
-        // Read once: a contended retry re-sends this same, idempotent admission.
+        // Read once: a deferred admission is written later with this same time.
         let dispatched_at = now();
         let attempt = Attempt {
             attempt_id: Uuid::new_v4(),
@@ -1442,9 +1333,14 @@ impl Sampling {
         for snapshot in &mut prices {
             snapshot.basis_source = self.basis_source;
         }
-        store_call("admit attempt", deadline, || {
-            store.admit(self.owner, &attempt, &prices, AsOf::Now)
-        })
+        self.record(
+            "admit attempt",
+            LedgerWrite::Admit {
+                owner: self.owner,
+                attempt: attempt.clone(),
+                prices,
+            },
+        )
         .await?;
         *self.previous.lock().map_err(|_| {
             self.reject();
@@ -1493,27 +1389,44 @@ impl Sampling {
             sequence: position,
             patch,
         };
-        let deadline = std::time::Instant::now() + CONTENTION_BUDGET;
-        let _write = write_gate(deadline).await?;
         self.check()?;
         let mut completion = Completion {
             sampling: self,
             complete: false,
         };
-        let store = store_call("open accounting store", deadline, || {
-            AccountingStore::open(&self.runtime, AsOf::Now)
-        })
-        .await?;
-        store_call("observe usage", deadline, || {
-            store.observe(
-                self.owner,
-                attempt,
-                std::slice::from_ref(&observation),
-                AsOf::Now,
-            )
-        })
+        self.record(
+            "observe usage",
+            LedgerWrite::Observe {
+                owner: self.owner,
+                attempt: attempt.clone(),
+                observations: vec![observation],
+            },
+        )
         .await?;
         completion.complete = true;
+        Ok(())
+    }
+}
+
+impl Sampling {
+    /// Hand `write` to this process's ledger writer. It waits only while the
+    /// write meets no other connection's lock; a record put off for a busy
+    /// state DB is written later and the request goes ahead. An error is a
+    /// record the ledger refused.
+    async fn record(&self, step: &'static str, write: LedgerWrite) -> anyhow::Result<()> {
+        match self
+            .runtime
+            .record_accounting(write)
+            .await
+            .map_err(|error| error.context(step))?
+        {
+            WriteOutcome::Written => {}
+            WriteOutcome::Deferred => tracing::debug!(
+                target: LOG_TARGET,
+                step,
+                "accounting: state DB busy; record queued and the request goes ahead"
+            ),
+        }
         Ok(())
     }
 }

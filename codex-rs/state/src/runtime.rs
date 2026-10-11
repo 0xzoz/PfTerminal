@@ -119,6 +119,23 @@ pub struct StateRuntime {
     /// This process's copy of the provider-request throttle, used when the
     /// state DB is busy or read-only; see `provider_request_fallback`.
     provider_request_memory: Arc<provider_request_fallback::ProviderRequestMemory>,
+    /// Whether this process recently found the state DB's write lock taken.
+    contention: Arc<busy_retry::Contention>,
+    /// This runtime on a pool whose connections wait at most
+    /// `QUICK_BUSY_TIMEOUT` for the write lock; `None` on that view itself.
+    quick: Option<Arc<StateRuntime>>,
+    /// This process's accounting writer, started on first use.
+    accounting_writer: Arc<std::sync::Mutex<Option<accounting::store::AccountingWriter>>>,
+}
+
+/// How long a write a model request waits on (see [`StateRuntime::quick`])
+/// waits for another connection's write lock before giving up.
+pub const QUICK_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Whether `error` is SQLITE_BUSY: the shared state DB's write lock was held by
+/// another connection, usually another Corbanu process, past the wait.
+pub fn is_state_db_busy(error: &anyhow::Error) -> bool {
+    busy_retry::is_busy(error)
 }
 
 impl StateRuntime {
@@ -276,7 +293,17 @@ impl StateRuntime {
             };
         let thread_updated_at_millis = thread_updated_at_millis.unwrap_or(0);
         let thread_recency_at_millis = thread_recency_at_millis.unwrap_or(0);
-        let runtime = Arc::new(Self {
+        let quick_pool = match sqlite.open_state_db_quick(QUICK_BUSY_TIMEOUT).await {
+            Ok(quick_pool) => Some(Arc::new(quick_pool)),
+            Err(err) => {
+                warn!(
+                    "failed to open the short-wait state db pool at {}; using the main pool: {err}",
+                    state_path.display()
+                );
+                None
+            }
+        };
+        let mut runtime = Self {
             thread_goals: GoalStore::new(Arc::clone(&goals_pool)),
             memories: MemoryStore::new(Arc::clone(&memories_pool), Arc::clone(&pool)),
             pool,
@@ -287,7 +314,12 @@ impl StateRuntime {
             thread_recency_at_millis: Arc::new(AtomicI64::new(thread_recency_at_millis)),
             accounting_validated_at_millis: Arc::new(AtomicI64::new(i64::MIN)),
             provider_request_memory: Arc::default(),
-        });
+            contention: Arc::default(),
+            quick: None,
+            accounting_writer: Arc::default(),
+        };
+        runtime.quick = quick_pool.map(|quick_pool| Arc::new(runtime.on_pool(quick_pool)));
+        let runtime = Arc::new(runtime);
         if let Err(err) = runtime.run_logs_startup_maintenance().await {
             warn!(
                 "failed to run startup maintenance for logs db at {}: {err}",
@@ -296,6 +328,51 @@ impl StateRuntime {
         }
         log_scrub::start(&runtime.logs_pool, &logs_path, logs_db_is_new).await;
         Ok(runtime)
+    }
+
+    /// This runtime with `pool` as its state DB pool; everything else, the
+    /// process-wide clocks and caches included, is shared.
+    fn on_pool(&self, pool: Arc<SqlitePool>) -> Self {
+        Self {
+            sqlite: self.sqlite.clone(),
+            default_provider: self.default_provider.clone(),
+            pool,
+            logs_pool: Arc::clone(&self.logs_pool),
+            thread_goals: self.thread_goals.clone(),
+            memories: self.memories.clone(),
+            thread_updated_at_millis: Arc::clone(&self.thread_updated_at_millis),
+            thread_recency_at_millis: Arc::clone(&self.thread_recency_at_millis),
+            accounting_validated_at_millis: Arc::clone(&self.accounting_validated_at_millis),
+            provider_request_memory: Arc::clone(&self.provider_request_memory),
+            contention: Arc::clone(&self.contention),
+            quick: None,
+            accounting_writer: Arc::clone(&self.accounting_writer),
+        }
+    }
+
+    /// This runtime, with state DB writes that wait at most
+    /// `QUICK_BUSY_TIMEOUT` for another connection's write lock instead of
+    /// SQLite's 5 s busy timeout. For writes a model request waits on and that
+    /// can be put off when the lock is taken.
+    pub fn quick(&self) -> &StateRuntime {
+        self.quick.as_deref().unwrap_or(self)
+    }
+
+    /// Whether this process recently found the state DB's write lock held by
+    /// another connection (`is_state_db_busy`) and no write got through since.
+    /// A write that can be put off should then be, without trying.
+    pub fn state_db_contended(&self) -> bool {
+        self.contention.active()
+    }
+
+    /// Record that a write found the state DB's write lock held.
+    pub fn note_state_db_contended(&self) {
+        self.contention.note();
+    }
+
+    /// Record that a write got through.
+    pub fn note_state_db_written(&self) {
+        self.contention.clear();
     }
 
     /// Return the SQLite configuration for this runtime.
@@ -316,6 +393,9 @@ impl StateRuntime {
         self.memories.close().await;
         self.thread_goals.close().await;
         self.logs_pool.close().await;
+        if let Some(quick) = self.quick.as_ref() {
+            quick.pool.close().await;
+        }
         self.pool.close().await;
     }
 

@@ -85,7 +85,7 @@ def main() -> int:
     shutil.copyfile(args.db, home / "pfterminal_state_5.sqlite")
     port = free_port()
     (home / "config.toml").write_text(
-        f"""model = "mock-claude"
+        f"""model = "claude-opus-5-5"
 model_provider = "mock"
 approval_policy = "never"
 sandbox_mode = "danger-full-access"

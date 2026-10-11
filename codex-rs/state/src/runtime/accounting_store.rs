@@ -37,8 +37,19 @@ pub use super::types::Usage;
 pub use scope::DeletedAttempts;
 pub use scope::OtherConversations;
 
+pub use writer::AccountingWriter;
+pub use writer::LedgerWrite;
+pub use writer::PENDING_DIR;
+pub use writer::WriteOutcome;
+
 #[path = "accounting_scope.rs"]
 mod scope;
+
+#[path = "accounting_indexes.rs"]
+mod indexes;
+
+#[path = "accounting_writer.rs"]
+mod writer;
 
 /// One UTC day's immutable, recorded-only explanation. No collection coverage claim.
 #[derive(Debug, PartialEq, Eq)]
@@ -536,6 +547,34 @@ impl<'a> AccountingStore<'a> {
         result
     }
 
+    /// Whether the next write at `as_of` would first run the hour's
+    /// whole-ledger validation (`validate_hour`): this process has not run it
+    /// this hour and no write moved the checkpoint into this hour yet. Reads
+    /// the checkpoint only; no lock.
+    async fn validation_due(&self, as_of: AsOf) -> anyhow::Result<bool> {
+        let now = as_of.sample();
+        let hour_start = now - now.rem_euclid(Journal::VALIDATION_INTERVAL_MS);
+        let cached = self
+            .runtime
+            .accounting_validated_at_millis
+            .load(std::sync::atomic::Ordering::Acquire);
+        if (hour_start..=now).contains(&cached) {
+            return Ok(false);
+        }
+        let mut conn = self.runtime.pool.acquire().await?;
+        if !ledger_exists(&mut conn).await? {
+            return Ok(false);
+        }
+        Ok(
+            match super::retention_fixture_on_connection(&mut conn).await? {
+                super::RetentionFixture::Active(checkpoint) => {
+                    checkpoint < hour_start && checkpoint <= now
+                }
+                super::RetentionFixture::Absent | super::RetentionFixture::Staging => false,
+            },
+        )
+    }
+
     /// Everything ahead of a write's own transaction: the hour's validation on a
     /// read snapshot, then retiring what is due in short batches. Repeated if
     /// the UTC hour turned meanwhile, since the write would otherwise find its
@@ -609,6 +648,24 @@ impl<'a> AccountingStore<'a> {
             let pause = held.elapsed().clamp(EXPIRY_YIELD_MIN, EXPIRY_YIELD_MAX) + jitter;
             tokio::time::sleep(pause).await;
         }
+    }
+
+    /// What a conversation deletion does before it takes the write lock: the
+    /// hour's validation on a read snapshot and the due expiries in short
+    /// batches, as ahead of a write (`prepare_write`). Returns when the
+    /// validation ran; `None` when there is no ledger.
+    pub(in crate::runtime) async fn prepare_delete(
+        runtime: &'a StateRuntime,
+        as_of: AsOf,
+    ) -> anyhow::Result<Option<i64>> {
+        let exists = {
+            let mut conn = runtime.pool.acquire().await?;
+            ledger_exists(&mut conn).await?
+        };
+        if !exists {
+            return Ok(None);
+        }
+        Self { runtime }.prepare_write(as_of).await
     }
 
     pub async fn maintain(&self, as_of_ms: i64) -> anyhow::Result<()> {

@@ -307,7 +307,13 @@ async fn accounting_chat_native_cancellation_and_two_reopens() -> anyhow::Result
     terminal(&test).await?;
     sqlx::query("ROLLBACK").execute(&mut lock).await?;
     gate.no_pending();
-    assert!(attempts(&db).await.unwrap_or_default().is_empty());
+    // The admission was handed to the ledger writer before the interrupt, so
+    // it is recorded once the lock is free: an attempt with no usage, as for
+    // any request cancelled after its admission.
+    assert!(db.flush_accounting(Duration::from_secs(30)).await);
+    let recorded = attempts(&db).await?;
+    assert_eq!(recorded.len(), 1);
+    assert!(observations(&db).await?.is_empty());
     stop(&test).await;
     for prefix in [false, true] {
         let server = MockServer::start().await;

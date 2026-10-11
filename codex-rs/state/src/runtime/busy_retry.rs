@@ -114,6 +114,43 @@ where
     }
 }
 
+/// How long the state DB counts as busy after a write met another
+/// connection's lock, unless a write gets through first.
+pub(crate) const CONTENDED_FOR: Duration = Duration::from_secs(10);
+
+/// Whether this process recently found the shared state DB's write lock held
+/// by someone else. Writes that may be put off (thread metadata, accounting)
+/// skip their attempt while it is set and are applied later instead, so a
+/// model request does not wait the lock out again and again.
+#[derive(Debug, Default)]
+pub(crate) struct Contention {
+    until: std::sync::Mutex<Option<Instant>>,
+}
+
+impl Contention {
+    pub(crate) fn note(&self) {
+        let until = Instant::now() + CONTENDED_FOR;
+        *self
+            .until
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(until);
+    }
+
+    pub(crate) fn clear(&self) {
+        *self
+            .until
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
+    pub(crate) fn active(&self) -> bool {
+        self.until
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some_and(|until| Instant::now() < until)
+    }
+}
+
 #[cfg(test)]
 #[path = "busy_retry_tests.rs"]
 mod tests;

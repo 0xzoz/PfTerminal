@@ -57,17 +57,24 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             body = {}
         messages = body.get("messages") or []
-        first_user = next(
-            (text_of(m.get("content")) for m in messages if m.get("role") == "user"), ""
-        )
-        session = hashlib.sha1(first_user.encode()).hexdigest()[:10]
+        # Tool calls made since the turn's own user message (not tool results).
+        last_prompt = 0
+        for index, message in enumerate(messages):
+            content = message.get("content")
+            if message.get("role") == "user" and not (
+                isinstance(content, list)
+                and any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
+            ):
+                last_prompt = index
         calls = sum(
             1
-            for m in messages
+            for m in messages[last_prompt:]
             if m.get("role") == "assistant" and isinstance(m.get("content"), list)
             for block in m["content"]
             if isinstance(block, dict) and block.get("type") == "tool_use"
         )
+        prompt = text_of(messages[last_prompt].get("content")) if messages else ""
+        session = hashlib.sha1(prompt.encode()).hexdigest()[:10]
         tools = [t.get("name") for t in body.get("tools") or [] if isinstance(t, dict)]
         tool = next((n for n in ("exec_command", "shell_command", "shell") if n in tools), None)
         self.send_response(200)

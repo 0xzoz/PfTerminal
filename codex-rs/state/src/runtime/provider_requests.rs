@@ -6,9 +6,10 @@ use std::time::Duration;
 pub(super) const RATE_LIMIT_STATUS: i64 = 429;
 const DEFAULT_COOLDOWN_CAP_MS: i64 = 5 * 60 * 1000;
 /// About how long a throttle step on the turn's path waits for a busy state DB
-/// before the turn goes on with this process's in-memory throttle. An attempt
-/// started just before the deadline still waits out SQLite's 5 s busy timeout.
-const PROVIDER_REQUEST_BUSY_WAIT: Duration = Duration::from_secs(10);
+/// before the turn goes on with this process's in-memory throttle. These steps
+/// run on the short-wait pool (`StateRuntime::quick`), so one attempt waits at
+/// most `QUICK_BUSY_TIMEOUT` and none starts after this.
+const PROVIDER_REQUEST_BUSY_WAIT: Duration = super::QUICK_BUSY_TIMEOUT;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ProviderRequestKey {
@@ -386,7 +387,13 @@ impl StateRuntime {
         retry_busy_within(
             "check provider request cooldown",
             PROVIDER_REQUEST_BUSY_WAIT,
-            || self.check_provider_request_cooldown_once(key, preflight, since(now_ms, started)),
+            || {
+                self.quick().check_provider_request_cooldown_once(
+                    key,
+                    preflight,
+                    since(now_ms, started),
+                )
+            },
         )
         .await
     }
@@ -404,7 +411,7 @@ impl StateRuntime {
             "acquire provider request lease",
             PROVIDER_REQUEST_BUSY_WAIT,
             || {
-                self.try_acquire_provider_request_lease_once(
+                self.quick().try_acquire_provider_request_lease_once(
                     key,
                     preflight,
                     owner,
@@ -427,7 +434,7 @@ impl StateRuntime {
             "record provider request result",
             PROVIDER_REQUEST_BUSY_WAIT,
             || {
-                self.record_provider_request_result_once(
+                self.quick().record_provider_request_result_once(
                     lease,
                     result.clone(),
                     since(now_ms, started),
@@ -460,7 +467,7 @@ impl StateRuntime {
             "record provider request result",
             PROVIDER_REQUEST_BUSY_WAIT,
             || {
-                self.record_provider_request_unleased_result_once(
+                self.quick().record_provider_request_unleased_result_once(
                     key,
                     result,
                     since(now_ms, started),
@@ -533,7 +540,7 @@ impl StateRuntime {
         let started = Instant::now();
         let adopt = || async {
             let now_ms = since(now_ms, started);
-            let mut tx = crate::runtime::db_lock::begin_immediate(&self.pool).await?;
+            let mut tx = crate::runtime::db_lock::begin_immediate(&self.quick().pool).await?;
             sqlx::query(
                 "UPDATE OR IGNORE provider_request_state SET key_fingerprint = ? WHERE key_fingerprint = ?",
             )
@@ -562,7 +569,7 @@ impl StateRuntime {
         )
         .await
         {
-            memory.pause("adopt legacy provider request key", &error);
+            self.pause_state_db("adopt legacy provider request key", &error);
         }
     }
 
@@ -577,7 +584,10 @@ impl StateRuntime {
         retry_busy_within(
             "release provider request lease",
             PROVIDER_REQUEST_BUSY_WAIT,
-            || self.release_provider_request_lease_once(lease, since(now_ms, started)),
+            || {
+                self.quick()
+                    .release_provider_request_lease_once(lease, since(now_ms, started))
+            },
         )
         .await
     }

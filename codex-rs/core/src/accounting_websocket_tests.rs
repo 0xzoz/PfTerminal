@@ -555,13 +555,6 @@ async fn accounting_responses_ws_original_price_binding() -> anyhow::Result<()> 
 async fn accounting_responses_ws_failure_and_cancellation_latch() -> anyhow::Result<()> {
     let fixture = Fixture::new(mode()).await?;
     let admission = fixture.admission().await?;
-    let permit = crate::accounting::writes().acquire().await?;
-    let mut pending = admission.admit("gpt-5.6-sol".into(), /*tier*/ None);
-    assert!(poll!(&mut pending).is_pending());
-    drop(pending);
-    drop(permit);
-    // Cancellation before the write permit cannot have committed an intent.
-    assert!(fixture.deferred.check().is_ok());
     let observer = admission.admit("gpt-5.6-sol".into(), /*tier*/ None).await?;
     assert!(
         observer
@@ -593,19 +586,13 @@ async fn accounting_responses_ws_failure_and_cancellation_latch() -> anyhow::Res
     drop(scope);
     assert!(super::super::responses::read(&slot)?.is_none());
 
+    // Opening a sampling writes nothing, so another connection holding the
+    // state DB's write lock does not hold it up.
     let fresh = Fixture::new(mode()).await?;
-    let permit = crate::accounting::writes().acquire().await?;
-    let mut bootstrap = Box::pin(fresh.resolve());
-    assert!(poll!(&mut bootstrap).is_pending());
-    drop(bootstrap);
-    drop(permit);
-    assert!(fresh.deferred.check().is_err());
-    assert!(
-        fresh
-            .rows::<Attempt>("draft_accounting_attempts")
-            .await
-            .is_err()
-    );
+    let mut lock = crate::accounting::tests_support::hold_write_lock(&fresh.db).await?;
+    tokio::time::timeout(std::time::Duration::from_secs(5), fresh.resolve()).await??;
+    fresh.deferred.check()?;
+    sqlx::query("ROLLBACK").execute(&mut *lock).await?;
     let (mut session, _) = crate::session::tests::make_session_and_context().await;
     session.services.state_db = None;
     let failed = DeferredResponsesSampling::new(Arc::new(session), "missing-state".into(), mode());

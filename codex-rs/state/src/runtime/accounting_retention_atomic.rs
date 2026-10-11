@@ -75,12 +75,21 @@ impl Journal<'_> {
         validate_hour_on_connection(conn, as_of_ms, previous_validation_ms).await
     }
 
-    pub(in crate::runtime::accounting) async fn delete_native_on_connection(
+    /// Delete every owner's records after one maintenance at `as_of_ms`, the
+    /// write path's (`maintain_for_write_on_connection`): bounded once the
+    /// ledger was validated this hour (`validated_at_ms`, or the checkpoint),
+    /// the full sweep otherwise.
+    pub(in crate::runtime::accounting) async fn delete_native_owners_on_connection(
         conn: &mut SqliteConnection,
-        owner: ThreadId,
+        owners: &[ThreadId],
         as_of_ms: i64,
+        validated_at_ms: Option<i64>,
     ) -> anyhow::Result<()> {
-        delete_on_connection(conn, owner, as_of_ms).await
+        maintain_for_write_on_connection(conn, as_of_ms, validated_at_ms).await?;
+        for owner in owners {
+            remove_owner_on_connection(conn, *owner, as_of_ms).await?;
+        }
+        gc_snapshots(conn).await
     }
 }
 
@@ -109,8 +118,8 @@ pub enum RetainedDay {
 impl Lifecycle<'_> {
     #[cfg_attr(not(test), allow(dead_code))]
     async fn maintain_retention(&self, as_of_ms: i64) -> anyhow::Result<()> {
-        let mut tx = crate::runtime::db_lock::begin_immediate(&self.estimates.journal.runtime.pool)
-            .await?;
+        let mut tx =
+            crate::runtime::db_lock::begin_immediate(&self.estimates.journal.runtime.pool).await?;
         match maintain_on_connection(&mut tx, as_of_ms).await {
             Ok(()) => tx.commit().await?,
             Err(error) => {
@@ -312,12 +321,17 @@ async fn retention_due_on_connection(
 ) -> anyhow::Result<bool> {
     Ok(sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM draft_accounting_attempts
-                WHERE json_extract(payload, '$.dispatched_at_ms') + ? <= ?)
+                WHERE json_extract(payload, '$.dispatched_at_ms') <= ?)
             OR EXISTS(SELECT 1 FROM draft_accounting_compact_days WHERE utc_day * ? + ? <= ?)
             OR EXISTS(SELECT 1 FROM draft_accounting_tombstones WHERE expires_at_ms <= ?)",
     )
-    .bind(DETAIL_MS)
-    .bind(as_of_ms)
+    // `dispatched + DETAIL_MS <= as_of`, with the arithmetic on the bound so
+    // the dispatch index (`accounting_indexes.rs`) answers it.
+    .bind(
+        as_of_ms
+            .checked_sub(DETAIL_MS)
+            .context("detail expiry underflow")?,
+    )
     .bind(DAY_MS)
     .bind(REPLAY_MS)
     .bind(as_of_ms)
@@ -371,6 +385,19 @@ pub(in crate::runtime::accounting::pricing::storage::lifecycle) async fn delete_
     as_of_ms: i64,
 ) -> anyhow::Result<()> {
     maintain_on_connection(conn, as_of_ms).await?;
+    remove_owner_on_connection(conn, thread, as_of_ms).await?;
+    gc_snapshots(conn).await
+}
+
+/// Caller holds the write transaction and has maintained retention at
+/// `as_of_ms`. Removes `thread`'s raw and compact records, leaving tombstones
+/// for attempts still inside the replay window; price snapshots are collected
+/// by the caller.
+async fn remove_owner_on_connection(
+    conn: &mut SqliteConnection,
+    thread: ThreadId,
+    as_of_ms: i64,
+) -> anyhow::Result<()> {
     for (attempt, _) in owned_attempts(conn, thread).await? {
         let expiry = i64::from(attempt.dispatched_at_ms)
             .checked_add(REPLAY_MS)
@@ -386,7 +413,7 @@ pub(in crate::runtime::accounting::pricing::storage::lifecycle) async fn delete_
             .execute(&mut *conn)
             .await?;
     }
-    gc_snapshots(conn).await
+    Ok(())
 }
 
 async fn remove_raw(

@@ -491,7 +491,8 @@ async fn native_two_real_writer_orders_and_joint_read_snapshots() -> anyhow::Res
                     StateRuntime::delete_threads_on_connection(
                         &mut tx,
                         &[owner(/*id*/ 7)],
-                        DETAIL_MS
+                        DETAIL_MS,
+                        /*validated_at_ms*/ None,
                     )
                     .await?,
                     1

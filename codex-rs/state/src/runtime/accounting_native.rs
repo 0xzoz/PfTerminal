@@ -21,7 +21,9 @@ impl Journal<'_> {
             .bind(attempt.attempt_id.to_string())
             .fetch_one(&mut *conn)
             .await?;
-            ensure!(bound, "attempt not admitted");
+            if !bound {
+                return Err(NotAdmitted.into());
+            }
         }
         Self::append_validated_on_connection(
             conn,
@@ -106,11 +108,39 @@ impl Journal<'_> {
             .bind(owner.to_string())
             .fetch_one(&mut *conn)
             .await?;
-        ensure!(exists, "native owner missing");
+        if !exists {
+            return Err(OwnerMissing.into());
+        }
         Self::maintain_for_write_on_connection(conn, as_of_ms, validated_at_ms).await?;
         Self::append_on_connection(conn, attempt, batch).await
     }
 }
+
+/// The conversation a record belongs to has no row in `threads` (yet): its
+/// metadata write may have been put off while the state DB was busy.
+#[derive(Debug)]
+pub(crate) struct OwnerMissing;
+
+impl std::fmt::Display for OwnerMissing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("native owner missing")
+    }
+}
+
+impl std::error::Error for OwnerMissing {}
+
+/// Usage evidence for an attempt whose admission is not in the ledger (yet):
+/// it may still be queued in another process's ledger writer.
+#[derive(Debug)]
+pub(crate) struct NotAdmitted;
+
+impl std::fmt::Display for NotAdmitted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("attempt not admitted")
+    }
+}
+
+impl std::error::Error for NotAdmitted {}
 
 async fn require_active(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure!(
@@ -139,10 +169,13 @@ pub(in crate::runtime) async fn begin_delete(
     Ok(crate::runtime::db_lock::begin_immediate(pool).await?)
 }
 
+/// `validated_at_ms`: when this process validated the ledger this hour, from
+/// `AccountingStore::prepare_delete`; maintenance then stays bounded.
 pub(in crate::runtime) async fn delete_on_connection(
     conn: &mut SqliteConnection,
     owners: &[ThreadId],
     as_of_ms: i64,
+    validated_at_ms: Option<i64>,
 ) -> anyhow::Result<()> {
     if installed(conn).await? {
         if super::store::ledger_exists(conn).await? {
@@ -154,9 +187,10 @@ pub(in crate::runtime) async fn delete_on_connection(
             #[cfg(test)]
             require_active(conn).await?;
         }
-        for owner in owners {
-            Journal::delete_native_on_connection(conn, *owner, as_of_ms).await?;
-        }
+        // One maintenance for the whole deletion, not one per owner: each is
+        // a sweep under the write lock (#324).
+        Journal::delete_native_owners_on_connection(conn, owners, as_of_ms, validated_at_ms)
+            .await?;
     }
     Ok(())
 }
