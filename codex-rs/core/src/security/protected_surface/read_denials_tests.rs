@@ -645,7 +645,7 @@ fn issue_506_home_listing_denial_is_added_only_when_asked() {
     assert_eq!(full.get_unlistable_directories(), vec![home.clone()]);
 
     let mut in_home =
-        ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[home.clone()]);
+        ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[home]);
     in_home.deny_home_listing();
     assert_eq!(in_home.unlistable_home(), None);
 }
