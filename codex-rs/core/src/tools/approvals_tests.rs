@@ -38,3 +38,41 @@ fn guardian_cwd_rejects_foreign_remote_path() {
 
     assert!(guardian_cwd(codex_exec_server::REMOTE_ENVIRONMENT_ID, cwd).is_err());
 }
+
+/// #437: what the inspector lists for each refused approval.
+#[test]
+fn sec_437_refused_approvals_are_described_for_the_inspector() {
+    let resolution = |decision, source| ApprovalResolution { decision, source };
+    for (decision, source, expected) in [
+        (
+            ReviewDecision::Abort,
+            ApprovalResolutionSource::User,
+            Some("declined by you"),
+        ),
+        (
+            ReviewDecision::denied("no"),
+            ApprovalResolutionSource::Hook,
+            Some("declined by a permission hook"),
+        ),
+        (
+            ReviewDecision::denied("no"),
+            ApprovalResolutionSource::Guardian,
+            Some("declined by the automatic reviewer"),
+        ),
+        (
+            ReviewDecision::TimedOut,
+            ApprovalResolutionSource::Guardian,
+            Some("not answered in time"),
+        ),
+        (
+            ReviewDecision::Approved,
+            ApprovalResolutionSource::User,
+            None,
+        ),
+    ] {
+        assert_eq!(decline_outcome(&resolution(decision, source)), expected);
+    }
+    assert_eq!(approval_kind("exec_command"), "command approval");
+    assert_eq!(approval_kind("apply_patch"), "file edit approval");
+    assert_eq!(approval_kind("mcp__x__y"), "tool approval");
+}

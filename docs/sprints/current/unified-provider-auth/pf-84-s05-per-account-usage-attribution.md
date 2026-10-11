@@ -1,20 +1,20 @@
 ---
 sprint_id: "PF-84-S05"
 title: "Per-account usage and rate-limit attribution"
-status: draft
+status: in_progress
 plan_file: "docs/plans/active/unified-provider-auth.md"
 plan_feature: "PF-84"
 execution_order: 27
-owner: "UNALLOCATED"
-parallel_lane: "UNALLOCATED"
-write_scope: "UNALLOCATED"
-integration_gate: "UNALLOCATED"
-worktree: "UNALLOCATED"
-branch: "UNALLOCATED"
-base_commit: "UNALLOCATED"
+owner: "Codex PF-84 lane owner"
+parallel_lane: "account-usage"
+write_scope: "codex-rs/state/, codex-rs/core/, codex-rs/tui/, codex-rs/model-provider/, codex-rs/model-provider-info/, codex-rs/vault/, codex-rs/login/, codex-rs/Cargo.lock, qa/provider-auth/pf-84/s05-gate.md, qa/provider-auth/pf-84/s05/, qa/demos/specs/pf84-usage-by-account.toml, qa/demos/specs/pf84-rate-limit-by-account.toml, qa/demos/index/PF-84-S05.md, docs/sprints/current/unified-provider-auth/pf-84-s05-per-account-usage-attribution.md, docs/sprints/current/unified-provider-auth/index.md"
+integration_gate: "Codex PF-84 lane owner merges to main after just test -p codex-state -p codex-core -p codex-tui (plus touched crates) with and without developer-accounting, Linux clippy -D warnings on glitch, the tmux/GLM run and one Opus 5.5 High review"
+worktree: "/Volumes/CorbanuDrive/Corbanu/worktrees/pf84-s05-usage"
+branch: "feat/pf-84-s05-usage-by-account"
+base_commit: "c7e6e07cbc629b8fa366de30cfacefae23b06b69"
 depends_on: "PF-84-S03, PF-60-S04"
 created: 2026-10-08
-updated: 2026-10-08
+updated: 2026-10-11
 ---
 
 # PF-84-S05 — Per-account usage and rate-limit attribution
@@ -48,10 +48,10 @@ Paths are under `codex-rs/`, at `63ea3d0cbd`.
 
 ## Preconditions
 
-- [ ] Plan is active.
-- [ ] Dependencies are completed (PF-60-S04 settles the accounting schema).
-- [ ] Worktree, branch, and base commit are exact and match the plan.
-- [ ] If parallel, owner/lane/scopes are disjoint and the receiving integration gate is recorded.
+- [x] Plan is active.
+- [x] Dependencies are completed (PF-60-S04 archived 2026-10-10; PF-84-S03 archived; S04 `ready` behind the flag).
+- [x] Worktree, branch, and base commit are exact and match the plan.
+- [x] Serial in the PF-84 lane; the integration gate is recorded above.
 
 ## Done
 

@@ -108,7 +108,7 @@ impl Session {
             let permission_profile = turn_context.permission_profile();
             let model_messages = turn_context.model_info.model_messages.as_ref();
             let exec_policy = self.services.exec_policy.current();
-            world_state.add_section(PermissionsState::new(
+            let permissions = PermissionsState::new(
                 &permission_profile,
                 turn_context.approval_policy.value(),
                 ApprovalPromptContext::new(
@@ -127,7 +127,14 @@ impl Session {
                     .config
                     .features
                     .enabled(Feature::RequestPermissionsTool),
-            ));
+            );
+            world_state.add_section(
+                if turn_context.config.permissions.launch_enforces_aggressive() {
+                    permissions.with_note(crate::security::refusal_notice::AGGRESSIVE_INSTRUCTIONS)
+                } else {
+                    permissions
+                },
+            );
         }
         if turn_context.config.include_collaboration_mode_instructions
             && let Some(collaboration_mode) =
