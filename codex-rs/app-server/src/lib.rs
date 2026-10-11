@@ -1168,6 +1168,7 @@ pub async fn run_main_with_transport_options(
                 }
             };
 
+            processor.cancel_plugin_sync();
             if !shutdown_state.forced() {
                 futures::future::join_all(
                     connections

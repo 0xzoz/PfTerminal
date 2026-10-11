@@ -517,6 +517,12 @@ impl MessageProcessor {
         }
     }
 
+    /// #477: stops the plugin sync's `git` without waiting; call first on
+    /// every shutdown path, forced ones included.
+    pub(crate) fn cancel_plugin_sync(&self) {
+        self.plugins_manager.cancel_curated_repo_sync();
+    }
+
     pub(crate) fn clear_runtime_references(&self) {
         self.account_processor.clear_external_auth();
         self.apps_processor.shutdown();

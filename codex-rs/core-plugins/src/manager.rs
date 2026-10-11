@@ -450,6 +450,7 @@ pub struct PluginsManager {
     analytics_events_client: RwLock<Option<AnalyticsEventsClient>>,
     plugin_install_source: PluginInstallSource,
     curated_repo_sync: Mutex<Option<CuratedRepoSync>>,
+    curated_repo_sync_shut_down: AtomicBool,
 }
 
 /// The curated repo sync this manager started, so shutdown can cancel it.
@@ -563,6 +564,7 @@ impl PluginsManager {
             analytics_events_client: RwLock::new(None),
             plugin_install_source: PluginInstallSource::Manual,
             curated_repo_sync: Mutex::new(None),
+            curated_repo_sync_shut_down: AtomicBool::new(false),
         }
     }
 
@@ -2586,7 +2588,15 @@ impl PluginsManager {
         http_client_factory: HttpClientFactory,
         on_effective_plugins_changed: Option<EffectivePluginsChangedCallback>,
     ) {
-        if CURATED_REPO_SYNC_STARTED.swap(true, Ordering::SeqCst) {
+        // Hold the slot while starting, so shutdown cannot run between the
+        // spawn and storing the handle (#477).
+        let mut slot = self
+            .curated_repo_sync
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if self.curated_repo_sync_shut_down.load(Ordering::SeqCst)
+            || CURATED_REPO_SYNC_STARTED.swap(true, Ordering::SeqCst)
+        {
             return;
         }
         let on_effective_plugins_changed =
@@ -2614,6 +2624,9 @@ impl PluginsManager {
                     http_client_factory,
                     &thread_cancel,
                 ) {
+                    Ok(_) if thread_cancel.load(Ordering::SeqCst) => {
+                        CURATED_REPO_SYNC_STARTED.store(false, Ordering::SeqCst);
+                    }
                     Ok(curated_plugin_version) => {
                         let configured_curated_plugin_ids =
                             configured_curated_plugin_ids_from_codex_home(codex_home.as_path());
@@ -2637,18 +2650,16 @@ impl PluginsManager {
                     }
                     Err(err) => {
                         CURATED_REPO_SYNC_STARTED.store(false, Ordering::SeqCst);
-                        warn!("failed to sync curated plugins repo: {err}");
+                        if thread_cancel.load(Ordering::SeqCst) {
+                            tracing::debug!("curated plugins repo sync stopped at shutdown: {err}");
+                        } else {
+                            warn!("failed to sync curated plugins repo: {err}");
+                        }
                     }
                 }
             });
         match spawned {
-            Ok(thread) => {
-                *self
-                    .curated_repo_sync
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner) =
-                    Some(CuratedRepoSync { cancel, thread });
-            }
+            Ok(thread) => *slot = Some(CuratedRepoSync { cancel, thread }),
             Err(err) => {
                 CURATED_REPO_SYNC_STARTED.store(false, Ordering::SeqCst);
                 warn!("failed to start curated plugins repo sync task: {err}");
@@ -2656,10 +2667,25 @@ impl PluginsManager {
         }
     }
 
-    /// #477: cancels the curated repo sync this manager started and waits up
-    /// to `timeout` for it to stop, killing any `git` it runs, so nothing it
-    /// started outlives the process or writes to the home after exit.
+    /// #477: tells the curated repo sync this manager started to stop (it
+    /// kills any `git` it runs within 100 ms) and starts no new one. Does not
+    /// wait; see [`Self::shutdown_curated_repo_sync`].
+    pub fn cancel_curated_repo_sync(&self) {
+        let slot = self
+            .curated_repo_sync
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        self.curated_repo_sync_shut_down.store(true, Ordering::SeqCst);
+        if let Some(sync) = slot.as_ref() {
+            sync.cancel.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// #477: cancels the curated repo sync and waits up to `timeout` for it
+    /// to stop, so nothing it started outlives the process or writes to the
+    /// home after exit.
     pub async fn shutdown_curated_repo_sync(&self, timeout: std::time::Duration) {
+        self.cancel_curated_repo_sync();
         let Some(sync) = self
             .curated_repo_sync
             .lock()
@@ -2668,7 +2694,6 @@ impl PluginsManager {
         else {
             return;
         };
-        sync.cancel.store(true, Ordering::SeqCst);
         let deadline = tokio::time::Instant::now() + timeout;
         while !sync.thread.is_finished() {
             if tokio::time::Instant::now() >= deadline {

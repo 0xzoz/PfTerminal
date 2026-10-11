@@ -891,7 +891,7 @@ fi
 if [ "$1" = "-C" ] && [ "$3" = "fetch" ]; then
   sleep 60 &
   echo $! > "{helper_pid}"
-  echo $$ > "{git_pid}"
+  echo $$ > "{git_pid}.tmp" && mv "{git_pid}.tmp" "{git_pid}"
   while :; do date >> "$2/.git/shallow.lock"; sleep 0.05; done
 fi
 echo "unexpected git invocation: $@" >&2

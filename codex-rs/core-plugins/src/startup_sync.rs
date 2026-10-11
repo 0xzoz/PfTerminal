@@ -143,10 +143,8 @@ fn sync_openai_plugins_repo_with_transport_overrides(
         Some(binary) => sync_openai_plugins_repo_via_git(codex_home, Git { binary, cancel }),
         None => Err("git executable is unavailable".to_string()),
     };
-    if let Err(err) = &git_sync_result
-        && cancel.load(Ordering::SeqCst)
-    {
-        return Err(format!("{SYNC_CANCELLED}: {err}"));
+    if git_sync_result.is_err() && cancel.load(Ordering::SeqCst) {
+        return Err(SYNC_CANCELLED.to_string());
     }
 
     match git_sync_result {
@@ -161,6 +159,9 @@ fn sync_openai_plugins_repo_with_transport_overrides(
                 error = %err,
                 "git sync failed for curated plugin sync; falling back to GitHub HTTP"
             );
+            if cancel.load(Ordering::SeqCst) {
+                return Err(format!("{SYNC_CANCELLED}: {err}"));
+            }
             match sync_openai_plugins_repo_via_http(codex_home, api_base_url, http_client_factory) {
                 Ok(remote_sha) => {
                     emit_curated_plugins_startup_sync_metric("http", "success");
@@ -178,6 +179,8 @@ fn sync_openai_plugins_repo_with_transport_overrides(
                         Err(format!(
                             "git sync failed for curated plugin sync: {err}; GitHub HTTP sync failed for curated plugin sync: {http_err}; export archive fallback skipped because a local curated plugins snapshot already exists"
                         ))
+                    } else if cancel.load(Ordering::SeqCst) {
+                        Err(format!("{SYNC_CANCELLED}: {http_err}"))
                     } else {
                         // The export archive is a lagging backup path. Only use it to bootstrap a
                         // missing local curated snapshot, never to refresh an existing one.
@@ -709,7 +712,10 @@ impl Git<'_> {
 
 fn git_command(git_binary: &Path) -> Command {
     let mut command = Command::new(git_binary);
-    command.env("GIT_OPTIONAL_LOCKS", "0");
+    // In its own process group `git` must never wait on the terminal.
+    command
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_TERMINAL_PROMPT", "0");
     for name in REPOSITORY_LOCAL_GIT_ENVIRONMENT_VARIABLES {
         command.env_remove(name);
     }
@@ -747,6 +753,9 @@ fn run_git_command_with_timeout(
 ) -> Result<Output, String> {
     // Its own process group, so cancelling also stops the helpers `git`
     // starts (`index-pack`, `remote-https`) before the clone is removed.
+    if cancel.load(Ordering::SeqCst) {
+        return Err(format!("{context}: {SYNC_CANCELLED}"));
+    }
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(command, 0);
     let mut child = command
