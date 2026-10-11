@@ -243,7 +243,8 @@ impl ProtectedNote {
     }
 }
 
-/// [`protected_path_in_command`], and the home listing denial (#506).
+/// The protected path `command` names (#442), or else the folder it lists
+/// that may not be listed (#506).
 pub(crate) async fn protected_note_in_command(
     session: &Session,
     turn: &TurnContext,

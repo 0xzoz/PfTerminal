@@ -888,8 +888,7 @@ fn unlistable_directories_by_pass(
         // Passes run in this order; a later one binds over an earlier one.
         let pass = mount_roots
             .iter()
-            .filter(|root| source.starts_with(root))
-            .next_back()
+            .rfind(|root| source.starts_with(root))
             .cloned();
         // Hidden by a deny mask no writable root below it reopens.
         let hidden = unreadable_roots.iter().any(|unreadable| {
@@ -912,7 +911,13 @@ fn unlistable_directories_by_pass(
                     source
                         .strip_prefix(real)
                         .ok()
-                        .map(|rest| logical.join(rest))
+                        .map(|rest| {
+                            if rest.as_os_str().is_empty() {
+                                logical.clone()
+                            } else {
+                                logical.join(rest)
+                            }
+                        })
                 })
         };
         if let Some(target) = target {
