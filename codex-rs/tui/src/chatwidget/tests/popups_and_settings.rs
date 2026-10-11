@@ -4709,6 +4709,9 @@ async fn ultra_reasoning_selection_skips_warning_below_threshold() {
 async fn spawn_advanced_reasoning_spawns_instead_of_saving_session_model() {
     for advanced in [ReasoningEffortConfig::Max, ReasoningEffortConfig::Ultra] {
         let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+        chat.config
+            .multi_agent_v2
+            .max_concurrent_threads_per_session = 8;
         let mut preset = get_available_model(&chat, "gpt-5.4");
         preset.default_reasoning_effort = ReasoningEffortConfig::Low;
         preset.supported_reasoning_efforts = vec![
@@ -4760,6 +4763,45 @@ async fn spawn_advanced_reasoning_spawns_instead_of_saving_session_model() {
                     | AppEvent::ApplyAdvancedReasoning { .. }
             )),
             "{advanced:?} for a spawn must not touch the session model: {events:?}"
+        );
+        // Ultra still warns about multi-agent concurrency for the new pane.
+        assert_eq!(
+            events
+                .iter()
+                .any(|event| matches!(event, AppEvent::InsertHistoryCell(_))),
+            advanced == ReasoningEffortConfig::Ultra,
+            "{events:?}"
+        );
+
+        // A new Corbanu Terminal pane gets the effort the same way.
+        let pane = ModelSelectionPurpose::CodexPane {
+            default_model: "gpt-5.4".to_string(),
+        };
+        let mut preset = get_available_model(&chat, "gpt-5.4");
+        preset.supported_reasoning_efforts = vec![ReasoningEffortPreset {
+            effort: advanced.clone(),
+            description: "Advanced reasoning".to_string(),
+        }];
+        chat.open_advanced_reasoning_popup_for_purpose(preset, pane);
+        chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+        let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AppEvent::OpenCodexPaneNamePrompt { model, effort: Some(effort), .. }
+                    if model == "gpt-5.4" && *effort == advanced
+            )),
+            "{advanced:?} must open the pane prompt: {events:?}"
+        );
+        assert!(
+            events.iter().all(|event| !matches!(
+                event,
+                AppEvent::PersistModelSelection { .. }
+                    | AppEvent::UpdateModelSelection { .. }
+                    | AppEvent::UpdateReasoningEffort(_)
+                    | AppEvent::ApplyAdvancedReasoning { .. }
+            )),
+            "{advanced:?} for a pane must not touch the session model: {events:?}"
         );
     }
 }

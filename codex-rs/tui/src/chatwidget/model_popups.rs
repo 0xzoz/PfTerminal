@@ -830,6 +830,7 @@ impl ChatWidget {
         effort: Option<ReasoningEffortConfig>,
     ) {
         match purpose {
+            // The session's own choice goes through `model_selection_actions`.
             ModelSelectionPurpose::Session => {}
             ModelSelectionPurpose::CodexPane { .. } => {
                 tx.send(AppEvent::OpenCodexPaneNamePrompt {
@@ -1354,6 +1355,8 @@ impl ChatWidget {
                     let purpose = purpose.clone();
                     let provider = provider.clone();
                     let model = model_slug.clone();
+                    // Ultra may use more agents in the new pane too.
+                    let warning = self.ultra_reasoning_concurrency_warning(&effort);
                     let effort = Some(effort.clone());
                     let action: SelectionAction = Box::new(move |tx| {
                         Self::send_pane_selection(
@@ -1363,6 +1366,11 @@ impl ChatWidget {
                             model.clone(),
                             effort.clone(),
                         );
+                        if let Some(warning) = warning.clone() {
+                            tx.send(AppEvent::InsertHistoryCell(Box::new(
+                                history_cell::new_warning_event(warning),
+                            )));
+                        }
                     });
                     vec![action]
                 }
