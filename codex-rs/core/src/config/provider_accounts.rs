@@ -84,13 +84,17 @@ pub(crate) fn apply_explicit_provider_account(
             return Ok(());
         }
         let message = if recorded {
-            "named accounts need the `named_accounts` feature (`--enable named_accounts`); \
-             resume with `--account default` to use the default credentials instead"
+            format!(
+                "named accounts need the `named_accounts` feature (`--enable named_accounts`); \
+                 resume with `--account {provider_id}:default` to use the default credentials \
+                 instead"
+            )
         } else {
             "named accounts need the `named_accounts` feature (`--enable named_accounts`); \
              `--account default` uses the default credentials"
+                .to_string()
         };
-        return Err(invalid(message.to_string()));
+        return Err(invalid(message));
     }
     let provider = model_providers
         .get_mut(provider_id)
@@ -109,7 +113,7 @@ pub(crate) fn apply_explicit_provider_account(
 
 /// Why the account an explicit `--account` names cannot be used, whether it
 /// belongs to the session's provider or another one.
-pub fn explicit_account_error(config: &super::Config) -> Option<String> {
+fn explicit_account_error(config: &super::Config) -> Option<String> {
     let (provider_id, _) = config
         .provider_account_override
         .as_deref()?
@@ -525,7 +529,7 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "the thread's recorded account zai:main: named accounts need the `named_accounts` \
-             feature (`--enable named_accounts`); resume with `--account default` to use the \
+             feature (`--enable named_accounts`); resume with `--account zai:default` to use the \
              default credentials instead"
         );
     }

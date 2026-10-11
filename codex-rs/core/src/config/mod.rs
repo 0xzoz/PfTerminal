@@ -184,7 +184,6 @@ mod permissions;
 mod provider_accounts;
 pub use codex_model_provider::selected_account_error;
 pub(crate) use provider_accounts::configured_account_names;
-pub use provider_accounts::explicit_account_error;
 pub use provider_accounts::other_provider_account_error;
 pub use provider_accounts::session_account_error;
 pub use provider_accounts::split_account_selection;
@@ -4242,11 +4241,13 @@ impl Config {
             .map(str::trim)
             .filter(|selection| !selection.is_empty())
         {
+            // Only the thread's own provider: a recorded or parent account of
+            // another provider is never what this thread runs on.
             let (inherited_provider, _) = split_account_selection(inherited, &model_provider_id);
             let replaced = explicit_account.is_some_and(|selection| {
                 split_account_selection(selection, &model_provider_id).0 == inherited_provider
             });
-            if !replaced {
+            if inherited_provider == model_provider_id && !replaced {
                 provider_accounts::apply_explicit_provider_account(
                     &mut model_providers,
                     &model_provider_id,

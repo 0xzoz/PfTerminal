@@ -82,18 +82,19 @@ fn collect_resume_override_mismatches(
             config_snapshot.model_provider_id
         ));
     }
-    if let Some(requested_account) = request.provider_account.as_deref().map(|selection| {
-        let (provider_id, name) = codex_core::config::split_account_selection(
-            selection,
-            &config_snapshot.model_provider_id,
-        );
-        format!("{provider_id}:{name}")
-    }) && config_snapshot.provider_account.as_deref() != Some(requested_account.as_str())
+    // Only an account of the thread's own provider can mismatch; another
+    // provider's account applies to agents on that provider (#425).
+    if let Some((provider_id, name)) = request.provider_account.as_deref().map(|selection| {
+        codex_core::config::split_account_selection(selection, &config_snapshot.model_provider_id)
+    }) && provider_id == config_snapshot.model_provider_id
     {
-        mismatch_details.push(format!(
-            "provider_account requested={requested_account} active={:?}",
-            config_snapshot.provider_account
-        ));
+        let requested_account = format!("{provider_id}:{name}");
+        if config_snapshot.provider_account.as_deref() != Some(requested_account.as_str()) {
+            mismatch_details.push(format!(
+                "provider_account requested={requested_account} active={:?}",
+                config_snapshot.provider_account
+            ));
+        }
     }
     if let Some(requested_service_tier) = request.service_tier.as_ref()
         && requested_service_tier != &config_snapshot.service_tier

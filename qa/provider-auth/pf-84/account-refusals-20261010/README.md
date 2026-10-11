@@ -14,7 +14,7 @@ product decision and is not touched here.
 | --- | --- |
 | #425 | `--account <other-provider>:<name>` is checked at thread start like the session provider's account: a missing one is refused with the same "not configured … `corbanu account add …`" text. Meaning (now in `--help` and [docs/provider-accounts.md](../../../../docs/provider-accounts.md)): it selects that provider's account for whatever in the session runs on it (spawned agents and workers given that provider, a TUI switch to it). `corbanu exec` cannot switch providers, so it refuses such an account when no spawned agent can run there (`agents.enabled = false`, or `agents.provider_allowlist` excludes it); `<provider>:default` is never refused. The account a resumed thread recorded (or a worker's parent runs on) now has its own override slot, so another provider's `--account` no longer drops it. |
 | #426 | The TUI checks the selected accounts (session provider and an explicit other provider) after loading its config and exits with that text before any onboarding screen, also on resume (onboarding cannot use the recorded account; `--account` is the recovery). A remote app server checks its own home at thread start instead. |
-| #427 | `thread/resume` returns the account the thread runs on (`providerAccount`, experimental). The TUI uses it for the 401 hint, so a resumed thread on a recorded named account names that account. A flag-off resume of a thread recorded on a named account now says "the thread's recorded account zai:main: … resume with `--account default` …" instead of blaming `--account`. |
+| #427 | `thread/resume` returns the account the thread runs on (`providerAccount`, experimental). The TUI uses it for the 401 hint, so a resumed thread on a recorded named account names that account. A flag-off resume of a thread recorded on a named account now says "the thread's recorded account zai:main: … resume with `--account zai:default` …" instead of blaming `--account`. A running thread no longer reports a `provider_account` mismatch for another provider's account. |
 
 ## Live checks
 
@@ -41,7 +41,7 @@ Attribution: in `hZ` the only Z.AI credentials are the default key (env) and nam
 | R8 `exec resume --account kimi-code:kmain <thread recorded on fake>` | `pong` from the **default** Z.AI key (recorded `fake` dropped) | 401 on `fake` (recorded account kept) |
 | S2 `--account kimi-code:kmain`, `multi_agent_v2` spawn on `kimi-code`/`k3` | – | `child-ok`; child rollout `model_provider=kimi-code provider_account=kmain` |
 | S3 control: same spawn without `--account` | – | child fails: "Missing environment variable: `KIMI_API_KEY`" |
-| R7 `exec resume --disable named_accounts` of a `main` thread | "--account zai:main: named accounts need …" | "the thread's recorded account zai:main: … resume with `--account default` …" |
+| R7 `exec resume --disable named_accounts` of a `main` thread | "--account zai:main: named accounts need …" | "the thread's recorded account zai:main: … resume with `--account zai:default` …" |
 | R7b same with `--account default` | `pong` | `pong` |
 | T1 TUI `--account ghost` | default-key onboarding screen | exits 1 with the "not configured" text |
 | T2 TUI `resume --account ghost <id>` | onboarding screen | exits 1, same text |

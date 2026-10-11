@@ -22,7 +22,9 @@ worker's parent runs on), `[provider_accounts] <provider> = "<name>"`,
   own provider keeps its own selection. `corbanu exec` cannot switch
   providers, so it refuses such an account when no spawned agent can run on
   that provider (`agents.enabled = false`, or `agents.provider_allowlist`
-  excludes it).
+  excludes it). It cannot see the model's catalog, so with both
+  `multi_agent` features off it accepts the account even when the model
+  enables no spawn tool.
 - `--account default` always means today's credentials, also with the feature
   off.
 
@@ -43,6 +45,6 @@ account `ghost` of provider `zai` is not configured; add it with
 before any sign-in screen, also when resuming (choose the account with
 `--account`); with a remote app server, the server refuses at thread start.
 A resumed thread runs on its recorded account; with the feature off, the
-resume is refused and names the recorded account (`--account default`
-resumes on the default credentials). A rejected key names the account and
+resume is refused and names the recorded account (`--account
+<provider>:default` resumes on the default credentials). A rejected key names the account and
 its `corbanu account add` recovery; the default credential is unchanged.
