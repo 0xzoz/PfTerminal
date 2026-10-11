@@ -146,6 +146,13 @@ impl Sandboxable for ApplyPatchRuntime {
 impl Approvable<ApplyPatchRequest> for ApplyPatchRuntime {
     type ApprovalKey = ApplyPatchApprovalKey;
 
+    fn additional_permissions<'r>(
+        &self,
+        req: &'r ApplyPatchRequest,
+    ) -> Option<&'r AdditionalPermissionProfile> {
+        req.additional_permissions.as_ref()
+    }
+
     fn approval_keys(&self, req: &ApplyPatchRequest) -> Vec<Self::ApprovalKey> {
         req.file_paths
             .iter()
