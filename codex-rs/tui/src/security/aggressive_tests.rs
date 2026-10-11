@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+#[cfg(unix)]
+use std::path::PathBuf;
 
 use codex_protocol::config_types::ShellEnvironmentPolicyFilter;
 use pretty_assertions::assert_eq;
@@ -255,24 +257,126 @@ async fn isolation_is_verified_through_tmp_on_macos() {
     }
 }
 
-/// The sandbox matches a denial to the workspace by its spelling with
-/// nested links kept, so a file spelled through a nested link that the rule
-/// names without it is still reported rather than claimed. (The rule's own
-/// spelling, `real/.env` here, can be readable under Seatbelt: #488.)
+/// A real `…/real` and a nested `…/link -> real`, with a `.env` and an
+/// `other` file in it.
 #[cfg(unix)]
+fn nested_link_workspace(root: &Path) -> (PathBuf, PathBuf) {
+    let real = root.join("real");
+    std::fs::create_dir(&real).unwrap();
+    std::fs::write(real.join(".env"), "API_KEY=x").unwrap();
+    std::fs::write(real.join("other"), "ok").unwrap();
+    let link = root.join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    (real, link)
+}
+
+/// Off macOS the check matches a denial by its spelling with nested links
+/// kept, so a file spelled through a nested link that the rule names
+/// without it is reported rather than claimed.
+#[cfg(all(unix, not(target_os = "macos")))]
 #[tokio::test]
 async fn isolation_through_a_nested_link_is_still_reported() {
     let root = tempfile::tempdir().unwrap();
-    let real = root.path().join("real");
-    std::fs::create_dir(&real).unwrap();
-    std::fs::write(real.join(".env"), "API_KEY=x").unwrap();
-    let link = root.path().join("link");
-    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let (real, link) = nested_link_workspace(root.path());
     let home = tempfile::tempdir().unwrap();
     let mut cli = base_overrides(home.path(), home.path());
     deny_reads(&mut cli, &[real.join(".env")]);
     let config = load_with(home.path(), &link, "", cli).await;
     assert_eq!(isolation_problems(&config, &link.join(".env")).len(), 1);
+    assert_eq!(isolation_problems(&config, &real.join(".env")).len(), 0);
+}
+
+/// #488: in a workspace opened through a nested link, the Aggressive check's
+/// verdict on each spelling of a denied file is exactly what the generated
+/// Seatbelt clauses enforce, and agent commands cannot read it.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn isolation_check_matches_seatbelt_through_a_nested_link() {
+    use codex_protocol::permissions::NetworkSandboxPolicy;
+    use codex_sandboxing::seatbelt::CreateSeatbeltCommandArgsParams;
+    use codex_sandboxing::seatbelt::MACOS_PATH_TO_SEATBELT_EXECUTABLE;
+    use codex_sandboxing::seatbelt::create_seatbelt_command_args;
+
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let (real, link) = nested_link_workspace(&root);
+    let home = tempfile::tempdir().unwrap();
+    for (denied, opened_in) in [(&real, &link), (&link, &real), (&real, &real)] {
+        let mut cli = base_overrides(home.path(), home.path());
+        deny_reads(&mut cli, &[denied.join(".env")]);
+        let config = load_with(home.path(), opened_in, "", cli).await;
+        let policy = config.permissions.file_system_sandbox_policy();
+        let cwd = config.cwd.as_path();
+        let args = |command: &str| {
+            create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
+                command: vec!["/bin/sh".to_string(), "-c".to_string(), command.to_string()],
+                file_system_sandbox_policy: &policy,
+                network_sandbox_policy: NetworkSandboxPolicy::Restricted,
+                sandbox_policy_cwd: cwd,
+                enforce_managed_network: false,
+                managed_network: None,
+                environment_id: None,
+                network: None,
+                extra_allow_unix_sockets: &[],
+            })
+            .unwrap()
+        };
+        // The read clauses, read back from the generated arguments.
+        let generated = args("true");
+        let params: BTreeMap<&str, PathBuf> = generated
+            .iter()
+            .filter_map(|arg| arg.strip_prefix("-D")?.split_once('='))
+            .map(|(key, value)| (key, PathBuf::from(value)))
+            .collect();
+        let clauses: Vec<(PathBuf, Vec<PathBuf>)> = (0..)
+            .map_while(|index| {
+                let key = format!("READABLE_ROOT_{index}");
+                let root = params.get(key.as_str())?.clone();
+                let excluded = (0..)
+                    .map_while(|n| params.get(format!("{key}_EXCLUDED_{n}").as_str()).cloned())
+                    .collect();
+                Some((root, excluded))
+            })
+            .collect();
+        assert!(!clauses.is_empty(), "{generated:#?}");
+        let label = format!(
+            "{} denied, opened in {}",
+            denied.display(),
+            opened_in.display()
+        );
+        for dir in [&real, &link] {
+            for name in [".env", "other"] {
+                let path = dir.join(name);
+                let seen = path.canonicalize().unwrap();
+                let readable = clauses.iter().any(|(root, excluded)| {
+                    seen.starts_with(root) && !excluded.iter().any(|e| seen.starts_with(e))
+                });
+                assert_eq!(readable, name == "other", "{label}: {path:?}");
+                assert_eq!(
+                    isolation_problems(&config, &path).len(),
+                    usize::from(readable),
+                    "{label}: {path:?}"
+                );
+            }
+        }
+        // And the sandbox enforces them.
+        let script = format!(
+            "cat .env; echo dot=$?; cat '{}/.env'; echo real=$?; cat '{}/.env'; echo link=$?; \
+             cat other; echo other=$?",
+            real.display(),
+            link.display()
+        );
+        let output = std::process::Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
+            .args(args(&script))
+            .current_dir(opened_in)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(!stdout.contains("API_KEY"), "{label}: {stdout}");
+        for line in ["dot=1", "real=1", "link=1", "other=0"] {
+            assert!(stdout.contains(line), "{label}: {line} not in {stdout}");
+        }
+    }
 }
 
 /// A workspace that is the account home cannot delete the Aggressive-homes
