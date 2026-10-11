@@ -13,6 +13,8 @@ pub(super) struct TurnLifecycleState {
     pub(super) last_turn_id: Option<String>,
     pub(super) budget_limited_turn_ids: HashSet<String>,
     pub(super) goal_status_active_turn_started_at: Option<Instant>,
+    /// #507: Core said the kill switch stopped the turn in progress.
+    pub(super) kill_switch_stopped: bool,
 }
 
 impl TurnLifecycleState {
@@ -23,6 +25,7 @@ impl TurnLifecycleState {
             last_turn_id: None,
             budget_limited_turn_ids: HashSet::new(),
             goal_status_active_turn_started_at: None,
+            kill_switch_stopped: false,
         }
     }
 
@@ -49,6 +52,7 @@ impl TurnLifecycleState {
         self.finish();
         self.last_turn_id = None;
         self.budget_limited_turn_ids.clear();
+        self.kill_switch_stopped = false;
     }
 
     pub(super) fn set_prevent_idle_sleep(&mut self, enabled: bool) {

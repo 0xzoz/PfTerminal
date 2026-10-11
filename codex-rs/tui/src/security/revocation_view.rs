@@ -288,6 +288,7 @@ impl RevocationView {
             Choice::Core(revocation) => {
                 let target = self.target.clone();
                 let reviewed = self.basis.clone();
+                let app_event_tx = self.app_event_tx.clone();
                 let run = move || {
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -306,6 +307,14 @@ impl RevocationView {
                             restartable: false,
                         },
                         |report| {
+                            // #507: Core stopped its sessions; the Claude
+                            // panes are the app's to stop.
+                            if revocation == HumanRevocation::KillSwitchOn
+                                && report.kill_switch_active
+                                && let Some(tx) = &app_event_tx
+                            {
+                                tx.send(AppEvent::KillSwitchTurnedOn);
+                            }
                             let message = outcome_line(revocation, &report);
                             Outcome {
                                 restartable: message.is_ok()
@@ -475,14 +484,15 @@ fn review_text(choice: &Choice, level: SecurityLevel) -> (String, Vec<String>) {
         Choice::Core(HumanRevocation::KillSwitchOn) => (
             "Turn the kill switch on?".to_string(),
             vec![
-                "Everything \"Revoke all\" ends, and until you turn it off here: Corbanu sends nothing new to the model (each turn is refused with a message saying so; a reply already in progress finishes, and Claude panes are not covered), no grant can be issued, protected actions after untrusted content are refused, the browser and memory writes are refused, and the credential broker stays closed.".to_string(),
+                "Everything \"Revoke all\" ends, and it stops what is running now, in every pane, Claude panes included: a reply in progress is cancelled and the commands it is running are ended, and so are background terminals.".to_string(),
+                "Until you turn it off here: Corbanu sends nothing to the model (each new turn is refused with a message saying so), messages from other agents wait and are delivered with the first turn after you turn it off, no grant can be issued, protected actions after untrusted content are refused, the browser and memory writes are refused, and the credential broker stays closed.".to_string(),
                 format!("Saved in security_state.json: it holds after a restart. The level stays {level}."),
             ],
         ),
         Choice::Core(HumanRevocation::KillSwitchOff) => (
             "Turn the kill switch off?".to_string(),
             vec![
-                "Turns are sent to the model again, protected actions can be approved again and grants can be issued. Revoked grants and approvals do not come back.".to_string(),
+                "Turns are sent to the model again, in Codex and Claude panes; messages from other agents that waited are delivered with the next turn (turning it off does not start one). Protected actions can be approved again and grants can be issued. Revoked grants and approvals do not come back; stopped replies and commands do not restart.".to_string(),
                 format!("The level stays {level}: turning the kill switch off never lowers it."),
             ],
         ),

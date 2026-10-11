@@ -303,7 +303,7 @@ impl RequestRouteTelemetry {
 }
 
 /// Issue #445: why a model request was not sent while the kill switch is on.
-pub(crate) const KILL_SWITCH_REFUSAL: &str = "Not sent: the security kill switch is on, so Corbanu sends nothing to the model, and this message was not kept. To turn it off, open /security, press g, choose \"Turn the kill switch off\" and confirm.";
+pub const KILL_SWITCH_REFUSAL: &str = "Not sent: the security kill switch is on, so Corbanu sends nothing to the model, and this message was not kept. To turn it off, open /security, press g, choose \"Turn the kill switch off\" and confirm.";
 
 /// A session-scoped client for model-provider API calls.
 ///

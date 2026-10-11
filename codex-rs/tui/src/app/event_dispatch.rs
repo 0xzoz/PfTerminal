@@ -1338,6 +1338,9 @@ impl App {
                     .await;
                 return Ok(AppRunControl::Exit(ExitReason::Restart));
             }
+            AppEvent::KillSwitchTurnedOn => {
+                self.stop_claude_panes_for_kill_switch();
+            }
             AppEvent::FatalExitRequest(message) => {
                 return Ok(AppRunControl::Exit(ExitReason::Fatal(message)));
             }

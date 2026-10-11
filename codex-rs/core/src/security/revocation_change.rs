@@ -148,6 +148,24 @@ pub fn commit_human_revocation(
     })
 }
 
+/// #507: shown in a session whose work the kill switch stopped.
+pub use super::kill_switch_stop::KILL_SWITCH_STOPPED;
+/// #507: the refusal shown for a turn that was not sent, in Codex and Claude
+/// panes alike.
+pub use crate::client::KILL_SWITCH_REFUSAL;
+
+/// #507: whether a person's kill switch is on for `codex_home`: in this
+/// process's sessions on it, or as saved in `security_state.json` when none
+/// runs here. An unreadable saved state is not a switch a person turned on.
+pub fn kill_switch_on(codex_home: &Path) -> bool {
+    super::transition::live_kill_switch(codex_home).unwrap_or_else(|| {
+        super::recovery::load(codex_home)
+            .ok()
+            .flatten()
+            .is_some_and(|state| state.revocations.kill_switch_active)
+    })
+}
+
 /// End the grant `grant_id` now. Returns whether one was held.
 pub fn revoke_grant(grant_id: &str) -> bool {
     super::aggressive::revoke_grant(grant_id)

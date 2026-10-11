@@ -391,6 +391,12 @@ impl ClaudePaneRegistry {
         if let Some(reason) = crate::security::level::external_agent_block_reason() {
             return Err(anyhow!(reason));
         }
+        // #507: with the kill switch on, Claude panes send nothing either.
+        if crate::legacy_core::security_revocation::kill_switch_on(codex_home) {
+            return Err(anyhow!(
+                crate::legacy_core::security_revocation::KILL_SWITCH_REFUSAL
+            ));
+        }
         let pane = self
             .panes
             .iter_mut()

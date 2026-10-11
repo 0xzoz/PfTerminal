@@ -906,6 +906,34 @@ impl App {
         true
     }
 
+    /// #507: the kill switch was turned on: every running Claude pane turn
+    /// is interrupted (its Claude process and the commands it runs end), with
+    /// the reason in that pane.
+    pub(crate) fn stop_claude_panes_for_kill_switch(&mut self) {
+        let running: Vec<String> = self
+            .claude_panes
+            .panes()
+            .iter()
+            .map(|pane| pane.id.clone())
+            .filter(|pane_id| self.claude_panes.claude_pane_is_running(pane_id))
+            .collect();
+        for pane_id in running {
+            if let Err(err) = self.claude_panes.interrupt_turn(&pane_id) {
+                tracing::warn!(pane_id, %err, "kill switch: could not interrupt the Claude pane");
+                continue;
+            }
+            let message = crate::legacy_core::security_revocation::KILL_SWITCH_STOPPED;
+            if self.claude_panes.active_claude_pane_id() == Some(pane_id.as_str()) {
+                self.chat_widget.add_warning_message(message.to_string());
+            } else {
+                self.append_inactive_claude_pane_transcript_cell(
+                    &pane_id,
+                    Arc::new(crate::history_cell::new_warning_event(message.to_string())),
+                );
+            }
+        }
+    }
+
     /// PF-84: the named Claude Plan account panes must use, if one is selected.
     fn claude_plan_account(&self) -> Option<String> {
         self.config

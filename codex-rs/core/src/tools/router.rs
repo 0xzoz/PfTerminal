@@ -275,6 +275,9 @@ impl ToolRouter {
         source: ToolCallSource,
         terminal_outcome_reached: Option<Arc<AtomicBool>>,
     ) -> Result<AnyToolResult, FunctionCallError> {
+        // #507: a tool call streamed before the kill switch was turned on
+        // does not run.
+        crate::security::kill_switch_stop::refuse_tool_call(&session)?;
         let ToolCall {
             tool_name,
             call_id,
