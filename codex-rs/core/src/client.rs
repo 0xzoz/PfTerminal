@@ -894,6 +894,22 @@ impl ModelClient {
         Ok(level)
     }
 
+    /// Issue #443: whether Aggressive is in force for this session now: in
+    /// its config, or in the live policy (also right after a person confirms
+    /// Aggressive in `/security`, before a restart). A bound policy that
+    /// cannot be read counts as Aggressive, as for source admission.
+    pub(crate) fn live_level_is_aggressive(&self) -> bool {
+        use codex_security_policy::SecurityLevel;
+        let live = match &self.ingress_policy {
+            None => SecurityLevel::Permissive,
+            Some(policy) => policy
+                .0
+                .snapshot_for_agent(self.state.thread_id)
+                .map_or(SecurityLevel::Aggressive, |snapshot| snapshot.level),
+        };
+        self.ingress_level.max(live) == SecurityLevel::Aggressive
+    }
+
     /// Issue #445: whether the security kill switch a person turned on in
     /// `/security` is on for this session. Only that switch: a session
     /// started from unreadable state or a cold-resumed child agent is denied

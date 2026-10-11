@@ -96,6 +96,8 @@ pub mod legacy_core {
     // under the secretless launch contract armed there.
     pub use codex_core::external_agent_contract_armed;
     pub use codex_core::protect_external_agent_launch;
+    // #436: "restart now" cannot bring back provider keys the broker holds.
+    pub use codex_core::broker_removed_environment_keys;
 
     pub mod config {
         pub use codex_core::config::*;

@@ -1435,6 +1435,11 @@ fn is_reference(value: &str) -> bool {
 
 fn is_secret_config_key(key: &str) -> bool {
     let lower = key.to_ascii_lowercase();
+    // #438: settings whose names contain a secret-like word but whose values
+    // are modes (`file`, `keyring`, ...), never credentials.
+    if NON_SECRET_SETTINGS.contains(&lower.as_str()) {
+        return false;
+    }
     ["token", "secret", "password", "passphrase", "api_key", "apikey", "credential"]
         .iter()
         .any(|fragment| lower.contains(fragment))
@@ -1446,6 +1451,13 @@ fn is_secret_config_key(key: &str) -> bool {
         // Path keys (permission profiles) are not secrets.
         && !lower.contains('/')
 }
+
+/// Config settings named like secrets that only choose a mode.
+const NON_SECRET_SETTINGS: &[&str] = &[
+    "cli_auth_credentials_store",
+    "mcp_oauth_credentials_store",
+    "model_auto_compact_token_limit_scope",
+];
 
 /// Variable names and paths stored under a secret-looking key are references.
 fn looks_like_name_or_path(text: &str) -> bool {
