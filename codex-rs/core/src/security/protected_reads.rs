@@ -34,11 +34,7 @@ const LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The explanation shown when `path` could not be accessed.
 pub(crate) fn explanation(path: &str) -> String {
-    // The path is the command's own spelling: shown escaped and bounded.
-    let mut path = super::grant_offer::escape_controls(path);
-    if path.chars().count() > MAX_SHOWN_PATH_CHARS {
-        path = path.chars().take(MAX_SHOWN_PATH_CHARS).collect::<String>() + "…";
-    }
+    let path = shown_path(path);
     format!(
         "Security level Aggressive blocked access to `{path}`: agent commands can never read \
          protected files (credential files such as .env, SSH, cloud and CLI tokens, and \
@@ -59,8 +55,9 @@ pub(crate) fn listing_explanation(path: &str) -> String {
     )
 }
 
-/// `path` as the command spelled it, escaped and bounded for display.
-fn shown_path(path: &str) -> String {
+/// `path` as an explanation shows it: it is the command's own spelling, so
+/// escaped and bounded.
+pub(crate) fn shown_path(path: &str) -> String {
     let mut path = super::grant_offer::escape_controls(path);
     if path.chars().count() > MAX_SHOWN_PATH_CHARS {
         path = path.chars().take(MAX_SHOWN_PATH_CHARS).collect::<String>() + "…";
@@ -271,6 +268,34 @@ pub(crate) async fn protected_note_in_command(
         word(&|path| matcher.is_read_denied(path))
             .map(ProtectedNote::Read)
             .or_else(|| word(&|path| matcher.is_listing_denied(path)).map(ProtectedNote::Listing))
+    })
+    .await
+}
+
+/// Issue #245: under Aggressive, the explanation for a request whose own
+/// additional permissions would open a protected path. Checked before the
+/// request is validated, so it is refused with this explanation even where
+/// permission requests are off (as Aggressive keeps them).
+pub(crate) async fn additional_permission_refusal(
+    session: &Session,
+    turn: &TurnContext,
+    additional: Option<&codex_protocol::models::AdditionalPermissionProfile>,
+    cwd: &Path,
+) -> Option<String> {
+    let additional = additional?.clone();
+    let inputs = ReadPolicyInputs::capture(session, turn)?;
+    let cwd = cwd.to_path_buf();
+    off_thread(move || {
+        let denials = ReadDenials::for_turn(
+            &inputs.codex_home,
+            &inputs.turn_cwd,
+            &inputs.workspace_roots,
+            &inputs.profile,
+        );
+        let mut cwds = vec![cwd.as_path(), inputs.turn_cwd.as_path()];
+        cwds.extend(inputs.workspace_roots.iter().map(AbsolutePathBuf::as_path));
+        super::protected_additional::opened_protected_path(&denials, &additional, &cwds)
+            .map(|path| explanation(&path))
     })
     .await
 }

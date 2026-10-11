@@ -137,6 +137,26 @@ jobs:
       timeout_minutes: 20
     secrets: inherit
 
+  # codex-core security unit tests, Linux and macOS (#512): before this no PR
+  # job ran codex-core tests, and no job at all ran them on macOS.
+  core_security_tests:
+    name: Core security tests — ${{ matrix.runner }}
+    needs: changed
+    if: ${{ needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' }}
+    uses: ./.github/workflows/rust-ci-core-security.yml
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: macos-15
+            target: aarch64-apple-darwin
+    with:
+      runner: ${{ matrix.runner }}
+      target: ${{ matrix.target }}
+    secrets: inherit
+
   argument_comment_lint_package:
     name: Argument comment lint package
     runs-on: ubuntu-24.04
@@ -261,6 +281,7 @@ jobs:
         general,
         cargo_shear,
         lint_build_linux,
+        core_security_tests,
         argument_comment_lint_package,
         argument_comment_lint_prebuilt,
       ]
@@ -275,6 +296,7 @@ jobs:
           echo "general: ${{ needs.general.result }}"
           echo "shear  : ${{ needs.cargo_shear.result }}"
           echo "lint   : ${{ needs.lint_build_linux.result }}"
+          echo "coresec: ${{ needs.core_security_tests.result }}"
 
           # If nothing relevant changed (PR touching only root README, etc.),
           # declare success regardless of other jobs.
@@ -295,6 +317,7 @@ jobs:
             [[ '${{ needs.general.result }}' == 'success' ]] || { echo 'general failed'; exit 1; }
             [[ '${{ needs.cargo_shear.result }}' == 'success' ]] || { echo 'cargo_shear failed'; exit 1; }
             [[ '${{ needs.lint_build_linux.result }}' == 'success' ]] || { echo 'lint_build_linux failed'; exit 1; }
+            [[ '${{ needs.core_security_tests.result }}' == 'success' ]] || { echo 'core_security_tests failed'; exit 1; }
           fi
         env:
           NEEDS_CHANGED_OUTPUTS_ARGUMENT_COMMENT_LINT: ${{ needs.changed.outputs.argument_comment_lint }}

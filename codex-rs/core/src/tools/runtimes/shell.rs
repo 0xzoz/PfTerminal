@@ -218,6 +218,13 @@ impl Approvable<ShellRequest> for ShellRuntime {
     fn sandbox_permissions(&self, req: &ShellRequest) -> SandboxPermissions {
         req.sandbox_permissions
     }
+
+    fn additional_permissions<'r>(
+        &self,
+        req: &'r ShellRequest,
+    ) -> Option<&'r codex_protocol::models::AdditionalPermissionProfile> {
+        req.additional_permissions.as_ref()
+    }
 }
 
 impl ToolRuntime<ShellRequest, ExecToolCallOutput> for ShellRuntime {

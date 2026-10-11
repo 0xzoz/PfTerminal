@@ -356,6 +356,14 @@ pub(crate) trait Approvable<Req> {
         SandboxPermissions::UseDefault
     }
 
+    /// The permissions this request adds to the sandbox for its run (issue
+    /// #245: checked against the protected paths before it runs). Required,
+    /// so a new runtime cannot skip the check by accident.
+    fn additional_permissions<'a>(
+        &self,
+        req: &'a Req,
+    ) -> Option<&'a codex_protocol::models::AdditionalPermissionProfile>;
+
     fn should_bypass_approval(&self, policy: AskForApproval, already_approved: bool) -> bool {
         if already_approved {
             // We do not ask one more time

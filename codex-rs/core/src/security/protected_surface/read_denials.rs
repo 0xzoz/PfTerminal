@@ -27,6 +27,7 @@ use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::FileSystemSandboxEntry;
 use codex_protocol::permissions::FileSystemSandboxKind;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
+use codex_protocol::permissions::ReadDenyMatcher;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use std::path::Path;
 
@@ -319,6 +320,35 @@ impl ReadDenials {
         self.runtime_read_only.iter().chain(&self.read_only)
     }
 
+    /// Issue #245: these read denials alone, without the profile's own
+    /// entries, as a matcher (subtrees and patterns): what a command's
+    /// additional permissions may never open. A malformed pattern matches
+    /// every path (fail closed).
+    pub(crate) fn matcher(&self) -> Option<ReadDenyMatcher> {
+        let entries: Vec<FileSystemSandboxEntry> = self
+            .paths()
+            .map(|path| {
+                FileSystemSandboxEntry::new(
+                    FileSystemPath::Path { path: path.clone() },
+                    FileSystemAccessMode::Deny,
+                )
+            })
+            .chain(self.globs.iter().map(|pattern| {
+                FileSystemSandboxEntry::new(
+                    FileSystemPath::GlobPattern {
+                        pattern: pattern.clone(),
+                    },
+                    FileSystemAccessMode::Deny,
+                )
+            }))
+            .collect();
+        let cwd = self
+            .cwd
+            .as_ref()
+            .map_or_else(|| Path::new("/"), AbsolutePathBuf::as_path);
+        ReadDenyMatcher::new(&FileSystemSandboxPolicy::restricted(entries), cwd)
+    }
+
     /// Every denied path, existing first.
     pub(crate) fn paths(&self) -> impl Iterator<Item = &AbsolutePathBuf> {
         self.existing.iter().chain(&self.fixed)
@@ -521,11 +551,39 @@ pub(crate) fn post_taint_read_policy(
 }
 
 /// Whether `path` (and what it resolves to) may be read under `policy`.
+///
+/// What `path` resolves to is also checked against the policy's paths with
+/// links resolved alike (#512): a denial spelled through a link (`/tmp` and
+/// `/var` on macOS, a linked home) never names the resolved target, so a
+/// link to a denied file, or the file under its real name, passed. This
+/// only adds a check: it never makes a path readable.
 pub(crate) fn readable_under(policy: &FileSystemSandboxPolicy, path: &Path, cwd: &Path) -> bool {
-    policy.can_read_path_with_cwd(path, cwd)
-        && std::fs::canonicalize(path).map_or(true, |canonical| {
-            policy.can_read_path_with_cwd(&canonical, cwd)
-        })
+    if !policy.can_read_path_with_cwd(path, cwd) {
+        return false;
+    }
+    let Ok(canonical) = std::fs::canonicalize(path) else {
+        return true;
+    };
+    policy.can_read_path_with_cwd(&canonical, cwd)
+        && with_real_locations(policy).can_read_path_with_cwd(&canonical, cwd)
+}
+
+/// `policy` with each path entry also under its real location, with the
+/// same access, so the most specific entry still wins once links resolve.
+fn with_real_locations(policy: &FileSystemSandboxPolicy) -> FileSystemSandboxPolicy {
+    let mut resolved = policy.clone();
+    for entry in &policy.entries {
+        if let FileSystemPath::Path { path } = &entry.path
+            && let Some(real) = real_location(path)
+            && real != *path
+        {
+            resolved.entries.push(FileSystemSandboxEntry {
+                path: FileSystemPath::Path { path: real },
+                ..entry.clone()
+            });
+        }
+    }
+    resolved
 }
 
 #[cfg(test)]
