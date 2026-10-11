@@ -212,25 +212,6 @@ pub fn canonicalize_existing_preserving_symlinks(path: &Path) -> std::io::Result
     }
 }
 
-/// Resolve every symlink in `path`, nested ones included, the way the
-/// kernel (and so an OS sandbox) sees the file. A path that does not exist
-/// yet resolves through its nearest existing ancestor and keeps the rest as
-/// written, so a file created later still matches.
-pub fn resolve_symlinks_lossy(path: &Path) -> PathBuf {
-    for ancestor in path.ancestors() {
-        if let Ok(resolved) = dunce::canonicalize(ancestor)
-            && let Ok(rest) = path.strip_prefix(ancestor)
-        {
-            return if rest.as_os_str().is_empty() {
-                resolved
-            } else {
-                resolved.join(rest)
-            };
-        }
-    }
-    path.to_path_buf()
-}
-
 fn should_preserve_logical_path(logical: &Path) -> bool {
     logical.ancestors().any(|ancestor| {
         let Ok(metadata) = std::fs::symlink_metadata(ancestor) else {

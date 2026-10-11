@@ -218,12 +218,49 @@ async fn codex_home_inside_the_workspace_stays_read_only() {
     );
 }
 
-/// #467: a workspace opened through a link (`/tmp` on macOS) and denied by
-/// its resolved path, or the other way round, is isolated; a path no rule
-/// denies is still reported.
+fn isolation_problems(config: &Config, path: &Path) -> Vec<String> {
+    crate::security::preflight::verify_isolation(config, &[path.to_path_buf()])
+}
+
+/// #467: a workspace opened through `/tmp` on macOS and denied by its
+/// `/private/tmp` path (as launch does from `current_dir()`), or the other
+/// way round, is isolated; a path no rule denies is still reported.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn isolation_is_verified_through_tmp_on_macos() {
+    let root = tempfile::tempdir_in("/tmp").unwrap();
+    let logical = root.path().to_path_buf();
+    let physical = logical.canonicalize().unwrap();
+    assert!(physical.starts_with("/private/tmp"), "{physical:?}");
+    std::fs::write(physical.join(".env"), "API_KEY=x").unwrap();
+    let home = tempfile::tempdir().unwrap();
+    for (denied_in, opened_in) in [(&physical, &logical), (&logical, &physical)] {
+        let mut cli = base_overrides(home.path(), home.path());
+        deny_reads(&mut cli, &[denied_in.join(".env")]);
+        let config = load_with(home.path(), opened_in, "", cli).await;
+        for spelling in [&logical, &physical] {
+            assert_eq!(
+                isolation_problems(&config, &spelling.join(".env")),
+                Vec::<String>::new(),
+                "{} denied, opened in {}",
+                denied_in.display(),
+                opened_in.display()
+            );
+            assert_eq!(
+                isolation_problems(&config, &spelling.join("other.key")).len(),
+                1,
+                "other.key is not denied"
+            );
+        }
+    }
+}
+
+/// The sandbox matches a denial to the workspace by its spelling with
+/// nested links kept, so a rule reached only through a nested link is still
+/// reported rather than claimed.
 #[cfg(unix)]
 #[tokio::test]
-async fn isolation_is_verified_through_a_linked_workspace() {
+async fn isolation_through_a_nested_link_is_still_reported() {
     let root = tempfile::tempdir().unwrap();
     let real = root.path().join("real");
     std::fs::create_dir(&real).unwrap();
@@ -231,29 +268,14 @@ async fn isolation_is_verified_through_a_linked_workspace() {
     let link = root.path().join("link");
     std::os::unix::fs::symlink(&real, &link).unwrap();
     let home = tempfile::tempdir().unwrap();
-    for (denied_in, opened_in) in [(&real, &link), (&link, &real)] {
-        let mut cli = base_overrides(home.path(), home.path());
-        deny_reads(&mut cli, &[denied_in.join(".env")]);
-        let config = load_with(home.path(), opened_in, "", cli).await;
-        for env in [link.join(".env"), real.join(".env")] {
-            assert_eq!(
-                crate::security::preflight::verify_isolation(&config, std::slice::from_ref(&env)),
-                Vec::<String>::new(),
-                "{} denied, opened in {}",
-                denied_in.display(),
-                opened_in.display()
-            );
-        }
-        for other in [link.join("other.key"), real.join("other.key")] {
-            assert_eq!(
-                crate::security::preflight::verify_isolation(&config, std::slice::from_ref(&other))
-                    .len(),
-                1,
-                "{} is not denied",
-                other.display()
-            );
-        }
-    }
+    let mut cli = base_overrides(home.path(), home.path());
+    deny_reads(&mut cli, &[real.join(".env")]);
+    let config = load_with(home.path(), &link, "", cli).await;
+    assert_eq!(isolation_problems(&config, &link.join(".env")).len(), 1);
+    assert_eq!(
+        isolation_problems(&config, &real.join(".env")),
+        Vec::<String>::new()
+    );
 }
 
 /// A workspace that is the account home cannot delete the Aggressive-homes

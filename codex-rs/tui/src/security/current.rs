@@ -72,7 +72,8 @@ pub(crate) fn current_values(config: &Config) -> CurrentValues {
         }
         FileSystemSandboxKind::Restricted => {
             let mut roots = file_system.get_writable_roots_with_cwd(cwd);
-            // Roots come back with links resolved (#467: `/tmp` on macOS).
+            // Roots come back with top-level aliases resolved (#467: `/tmp`
+            // on macOS); nested links stay as written.
             let resolved_cwd = codex_utils_absolute_path::canonicalize_preserving_symlinks(cwd)
                 .unwrap_or_else(|_| cwd.to_path_buf());
             let is_cwd = |root: &Path| root == cwd || root == resolved_cwd;

@@ -6,7 +6,6 @@ use std::path::PathBuf;
 
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::canonicalize_preserving_symlinks;
-use codex_utils_absolute_path::resolve_symlinks_lossy;
 use globset::GlobBuilder;
 use globset::GlobMatcher;
 use schemars::JsonSchema;
@@ -723,11 +722,14 @@ impl FileSystemSandboxPolicy {
         self.resolve_access_with_cwd(path, cwd).can_read()
     }
 
-    /// Like [`Self::can_read_path_with_cwd`], with every link resolved in
-    /// the policy's paths and in `path` alike, as Seatbelt and bubblewrap
-    /// enforce them: one file reached through a link (`/tmp` and
-    /// `/private/tmp` on macOS) gets one answer.
-    pub fn can_read_resolved_path_with_cwd(&self, path: &Path, cwd: &Path) -> bool {
+    /// Like [`Self::can_read_path_with_cwd`], with the policy's paths and
+    /// `path` normalized alike, the way the sandboxes normalize their roots
+    /// before matching denials to them: top-level aliases resolve (`/tmp`
+    /// and `/private/tmp` on macOS name one file), nested links stay as
+    /// written. Seatbelt attaches a denial to a readable root only when the
+    /// normalized spellings match, so a denial reached only through a nested
+    /// link is not counted.
+    pub fn can_read_effective_path_with_cwd(&self, path: &Path, cwd: &Path) -> bool {
         match self.kind {
             FileSystemSandboxKind::Unrestricted | FileSystemSandboxKind::ExternalSandbox => {
                 return true;
@@ -737,17 +739,14 @@ impl FileSystemSandboxPolicy {
         let Some(path) = resolve_candidate_path(path, cwd) else {
             return false;
         };
-        let path = resolve_symlinks_lossy(path.as_path());
+        let path = normalize_effective_absolute_path(path);
         self.resolved_entries_with_cwd(cwd)
             .into_iter()
             .map(|entry| ResolvedFileSystemEntry {
-                path: AbsolutePathBuf::from_absolute_path(resolve_symlinks_lossy(
-                    entry.path.as_path(),
-                ))
-                .unwrap_or(entry.path),
+                path: normalize_effective_absolute_path(entry.path),
                 access: entry.access,
             })
-            .filter(|entry| path.starts_with(entry.path.as_path()))
+            .filter(|entry| path.as_path().starts_with(entry.path.as_path()))
             .max_by_key(resolved_entry_precedence)
             .is_some_and(|entry| entry.access.can_read())
     }
@@ -2718,48 +2717,78 @@ mod tests {
         );
     }
 
-    /// #467: a workspace opened through a link and a rule spelled through
-    /// the resolved path (or the other way round) name one file.
-    #[cfg(unix)]
+    fn deny_in_workspace(denied: &Path) -> FileSystemSandboxPolicy {
+        FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Special {
+                    value: FileSystemSpecialPath::project_roots(/*subpath*/ None),
+                },
+                access: FileSystemAccessMode::Write,
+                missing_path_behavior: None,
+            },
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Path {
+                    path: AbsolutePathBuf::from_absolute_path(denied).expect("absolute"),
+                },
+                access: FileSystemAccessMode::Deny,
+                missing_path_behavior: None,
+            },
+        ])
+    }
+
+    /// #467: `/tmp` and `/private/tmp` name one file to the sandbox, so a
+    /// rule and a workspace spelled differently through that alias agree.
+    #[cfg(target_os = "macos")]
     #[test]
-    fn can_read_resolved_path_matches_through_links() {
-        let root = TempDir::new().expect("tempdir");
-        let real = root.path().join("real");
-        std::fs::create_dir(&real).expect("real");
-        let link = root.path().join("link");
-        std::os::unix::fs::symlink(&real, &link).expect("symlink");
-        std::fs::write(real.join(".env"), "x").expect(".env");
-        let policy_denying = |denied: &Path| {
-            FileSystemSandboxPolicy::restricted(vec![
-                FileSystemSandboxEntry {
-                    path: FileSystemPath::Special {
-                        value: FileSystemSpecialPath::project_roots(/*subpath*/ None),
-                    },
-                    access: FileSystemAccessMode::Write,
-                    missing_path_behavior: None,
-                },
-                FileSystemSandboxEntry {
-                    path: FileSystemPath::Path {
-                        path: AbsolutePathBuf::from_absolute_path(denied).expect("absolute"),
-                    },
-                    access: FileSystemAccessMode::Deny,
-                    missing_path_behavior: None,
-                },
-            ])
-        };
-        for (denied, cwd) in [(&real, &link), (&link, &real), (&real, &real)] {
-            let policy = policy_denying(&denied.join(".env"));
-            for path in [link.join(".env"), real.join(".env"), PathBuf::from(".env")] {
+    fn can_read_effective_path_matches_through_top_level_aliases() {
+        let root = tempfile::tempdir_in("/tmp").expect("tempdir in /tmp");
+        let logical = root.path().to_path_buf();
+        assert!(logical.starts_with("/tmp"), "{logical:?}");
+        let physical = logical.canonicalize().expect("canonical");
+        assert!(physical.starts_with("/private/tmp"), "{physical:?}");
+        fs::write(physical.join(".env"), "x").expect(".env");
+        for (denied, cwd) in [(&physical, &logical), (&logical, &physical)] {
+            let policy = deny_in_workspace(&denied.join(".env"));
+            for path in [
+                logical.join(".env"),
+                physical.join(".env"),
+                PathBuf::from(".env"),
+            ] {
                 assert!(
-                    !policy.can_read_resolved_path_with_cwd(&path, cwd),
+                    !policy.can_read_effective_path_with_cwd(&path, cwd),
                     "{path:?} readable with {denied:?}/.env denied, cwd {cwd:?}"
                 );
             }
-            // Not yet created: still denied once resolved.
-            let later = policy_denying(&denied.join("later.key"));
-            assert!(!later.can_read_resolved_path_with_cwd(&link.join("later.key"), cwd));
-            assert!(policy.can_read_resolved_path_with_cwd(&link.join("other"), cwd));
-            assert!(policy.can_read_resolved_path_with_cwd(&real.join("other"), cwd));
+            // Not created yet: still denied.
+            let later = deny_in_workspace(&denied.join("later.key"));
+            assert!(!later.can_read_effective_path_with_cwd(&logical.join("later.key"), cwd));
+            assert!(policy.can_read_effective_path_with_cwd(&logical.join("other"), cwd));
+        }
+        // The literal check is what #467 reported.
+        let policy = deny_in_workspace(&physical.join(".env"));
+        assert!(policy.can_read_path_with_cwd(&logical.join(".env"), &logical));
+    }
+
+    /// Seatbelt matches a denial to a readable root by its normalized
+    /// spelling, which keeps nested links: a rule reached only through one
+    /// is not counted, so the check stays on the safe side.
+    #[cfg(unix)]
+    #[test]
+    fn can_read_effective_path_keeps_nested_links_apart() {
+        let root = TempDir::new().expect("tempdir");
+        let real = root.path().join("real");
+        fs::create_dir(&real).expect("real");
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+        fs::write(real.join(".env"), "x").expect(".env");
+        for (denied, cwd) in [(&real, &link), (&link, &real)] {
+            let policy = deny_in_workspace(&denied.join(".env"));
+            let other = if denied == &real { &link } else { &real };
+            assert!(
+                policy.can_read_effective_path_with_cwd(&other.join(".env"), cwd),
+                "{other:?}/.env counted as denied by {denied:?}/.env"
+            );
+            assert!(!policy.can_read_effective_path_with_cwd(&denied.join(".env"), denied));
         }
     }
 
