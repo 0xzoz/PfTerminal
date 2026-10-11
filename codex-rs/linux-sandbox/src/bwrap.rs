@@ -635,15 +635,25 @@ fn create_filesystem_args(
             &read_only_subpaths,
         );
         read_only_subpaths.sort_by_key(|path| path_depth(path));
+        // A root reached through a link is bound at its target, so a denied
+        // path spelled under the target is nested too (#488); the rootless
+        // pass below skips it because the target is an allowed write path.
         let mut nested_unreadable_roots: Vec<PathBuf> = unreadable_roots
             .iter()
-            .filter(|path| path.starts_with(root))
+            .filter(|path| {
+                path.starts_with(root)
+                    || symlink_target
+                        .as_ref()
+                        .is_some_and(|target| path.starts_with(target))
+            })
             .cloned()
             .collect();
         if let Some(target) = &symlink_target {
             nested_unreadable_roots =
                 remap_paths_for_symlink_target(nested_unreadable_roots, root, target);
         }
+        nested_unreadable_roots.sort();
+        nested_unreadable_roots.dedup();
         nested_unreadable_roots.sort_by_key(|path| path_depth(path));
         // #473: denied paths missing below a read-only folder, by the folder
         // that gets a snapshot (see `append_read_only_snapshot_dir_args`).
@@ -1740,6 +1750,64 @@ mod tests {
                     real_blocked_str.as_str(),
                 ]
         }));
+    }
+
+    /// #488: a denial spelled by the real path is masked after the
+    /// symlinked root is bound, not skipped as already inside a writable
+    /// root.
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_writable_roots_mask_denials_spelled_by_the_target() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let real_root = temp_dir.path().join("real");
+        let link_root = temp_dir.path().join("link");
+        let blocked = real_root.join("blocked");
+        std::fs::create_dir_all(&blocked).expect("create blocked dir");
+        std::os::unix::fs::symlink(&real_root, &link_root).expect("create symlinked root");
+
+        let real_root_str = path_to_string(&real_root);
+        let real_blocked_str = path_to_string(&blocked);
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Path {
+                    path: AbsolutePathBuf::from_absolute_path(&link_root).expect("absolute"),
+                },
+                access: FileSystemAccessMode::Write,
+                missing_path_behavior: None,
+            },
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Path {
+                    path: AbsolutePathBuf::from_absolute_path(&blocked).expect("absolute"),
+                },
+                access: FileSystemAccessMode::Deny,
+                missing_path_behavior: None,
+            },
+        ]);
+
+        let args =
+            create_filesystem_args(&policy, temp_dir.path(), NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
+                .expect("filesystem args");
+
+        let bind = args
+            .args
+            .windows(3)
+            .position(|window| window == ["--bind", real_root_str.as_str(), real_root_str.as_str()])
+            .expect("bind");
+        let mask = args
+            .args
+            .windows(4)
+            .position(|window| window == ["--perms", "000", "--tmpfs", real_blocked_str.as_str()])
+            .expect("mask");
+        assert!(bind < mask, "{:?}", args.args);
+        assert_eq!(
+            args.args
+                .iter()
+                .filter(|arg| arg.as_str() == real_blocked_str)
+                .count(),
+            2,
+            "masked once: {:?}",
+            args.args
+        );
     }
 
     #[cfg(unix)]

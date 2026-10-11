@@ -224,17 +224,23 @@ pub(crate) fn verify_isolation(config: &Config, paths: &[PathBuf]) -> Vec<String
     // the policy for the files it covers to count as denied.
     let glob = database_glob(codex_home).to_string_lossy().into_owned();
     let databases_denied = policy.get_unreadable_globs_with_cwd(cwd).contains(&glob);
+    // macOS: the Seatbelt clauses agent commands run under, built by the
+    // sandbox's own code, so the check cannot drift from it (#488).
+    #[cfg(target_os = "macos")]
+    let readable =
+        |path: &Path| codex_sandboxing::seatbelt::seatbelt_allows_file_read(&policy, cwd, path);
+    // #467: both sides normalized as the sandbox normalizes them; a
+    // workspace opened through `/tmp` spells its paths unlike the launch
+    // that denied them.
+    #[cfg(not(target_os = "macos"))]
+    let readable = |path: &Path| policy.can_read_effective_path_with_cwd(path, cwd);
     paths
         .iter()
         .filter(|path| {
             let covered = if path.as_os_str().to_string_lossy() == glob {
                 databases_denied
             } else {
-                // #467: both sides normalized as the sandbox normalizes
-                // them; a workspace opened through `/tmp` on macOS spells
-                // its paths unlike the launch that denied them.
-                (databases_denied && is_database_file(codex_home, path))
-                    || !policy.can_read_effective_path_with_cwd(path, cwd)
+                (databases_denied && is_database_file(codex_home, path)) || !readable(path)
             };
             !covered
         })
