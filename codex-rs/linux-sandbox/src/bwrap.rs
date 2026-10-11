@@ -940,7 +940,7 @@ fn append_unlistable_directory_args(
     let Unlistable { source, target, .. } = unlistable;
     let directory = source.as_path();
     let entries = fs::read_dir(directory)
-        .and_then(|entries| entries.collect::<io::Result<Vec<_>>>())
+        .and_then(Iterator::collect::<io::Result<Vec<_>>>)
         .map_err(|err| {
             CodexErr::Fatal(format!(
                 "cannot keep {} from being listed: {err}",
