@@ -231,7 +231,8 @@ impl SyntheticMountTarget {
 /// When the policy grants full disk write access and full network access, this
 /// returns `command` unchanged so we avoid unnecessary sandboxing overhead.
 /// If network isolation is requested, we still wrap with bubblewrap so network
-/// namespace restrictions apply while preserving full filesystem access.
+/// namespace restrictions apply while preserving full filesystem access, except
+/// that `/dev` is a fresh minimal device tree (#498).
 pub(crate) fn create_bwrap_command_args(
     command: Vec<String>,
     file_system_sandbox_policy: &FileSystemSandboxPolicy,
