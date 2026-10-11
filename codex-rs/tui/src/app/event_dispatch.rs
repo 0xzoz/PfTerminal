@@ -5609,7 +5609,13 @@ impl App {
                     self.chat_widget.add_error_message(detail);
                     return Ok(AppRunControl::Continue);
                 }
-                if self.claude_panes.claude_pane_is_running(&pane_id) {
+                // #507: with the kill switch on the task waits, also for a
+                // pane still stopping.
+                if self.claude_panes.claude_pane_is_running(&pane_id)
+                    && !crate::legacy_core::security_revocation::kill_switch_on(
+                        self.config.codex_home.as_ref(),
+                    )
+                {
                     let acks = self.take_spawn_dispatch_acks_for_task(&target, &task);
                     self.release_spawn_dispatch_origins(&acks);
                     self.record_spawn_dispatch_acks(

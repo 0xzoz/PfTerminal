@@ -963,8 +963,8 @@ impl App {
         // as agent messages to Codex panes do, and is sent once it is off.
         if crate::legacy_core::security_revocation::kill_switch_on(self.config.codex_home.as_ref())
         {
-            let node_key = crate::spawn_orchestration::pane_node_id(&pane_id);
-            self.abort_spawn_auto_processing_turn(&node_key);
+            // An auto-processing turn stays pending, so the task keeps its
+            // place in the loop breaker when it is sent.
             let title = self
                 .claude_panes
                 .panes()
@@ -974,7 +974,7 @@ impl App {
             self.kill_switch_held_claude_tasks.push((pane_id, task));
             self.chat_widget.add_info_message(
                 format!(
-                    "A task for Claude pane `{title}` waits: the security kill switch is on. It is sent when the switch is turned off."
+                    "A task for Claude pane `{title}` waits: the security kill switch is on. It is sent when the switch is turned off (it is lost if Corbanu Terminal exits first)."
                 ),
                 /*hint*/ None,
             );
@@ -1232,22 +1232,23 @@ impl App {
     }
 
     fn send_next_held_claude_task(&mut self, pane_id: &str) {
-        let Some(index) = self
+        // A task that does not start a turn (refused, or the pane is gone)
+        // must not strand the ones behind it.
+        while let Some(index) = self
             .kill_switch_held_claude_tasks
             .iter()
             .position(|(held, _)| held == pane_id)
-        else {
-            return;
-        };
-        if self.claude_panes.claude_pane_is_running(pane_id)
-            || crate::legacy_core::security_revocation::kill_switch_on(
-                self.config.codex_home.as_ref(),
-            )
         {
-            return;
+            if self.claude_panes.claude_pane_is_running(pane_id)
+                || crate::legacy_core::security_revocation::kill_switch_on(
+                    self.config.codex_home.as_ref(),
+                )
+            {
+                return;
+            }
+            let (pane_id, task) = self.kill_switch_held_claude_tasks.remove(index);
+            self.submit_claude_pane_task(pane_id, task);
         }
-        let (pane_id, task) = self.kill_switch_held_claude_tasks.remove(index);
-        self.submit_claude_pane_task(pane_id, task);
     }
 
     fn user_pane_items(&self) -> Vec<SelectionItem> {

@@ -114,7 +114,10 @@ async fn stop(session: &Arc<Session>) {
         session.abort_all_tasks(TurnAbortReason::Interrupted).await;
     }
     session.close_unified_exec_processes().await;
-    let _ = session.conversation.shutdown().await;
+    if session.conversation.running_state().await.is_some() {
+        let sub_id = session.next_internal_sub_id();
+        crate::realtime_conversation::handle_close(session, sub_id).await;
+    }
 }
 
 /// A tool call is not run while the kill switch is on (anywhere in the
