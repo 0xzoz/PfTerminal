@@ -45,8 +45,7 @@ pub(crate) fn blocked(
     exit_code: Option<i32>,
     output: &str,
 ) -> Option<Blocked> {
-    if !config.permissions.launch_enforces_aggressive() || exit_code.is_none_or(|code| code == 0)
-    {
+    if !config.permissions.launch_enforces_aggressive() || exit_code.is_none_or(|code| code == 0) {
         return None;
     }
     let lower = output.to_lowercase();

@@ -31,7 +31,12 @@ async fn sec_439_aggressive_refusals_name_the_level_and_the_way_forward() {
     let (_home, aggressive) = config(/*marker*/ true).await;
     let cases = [
         // AGG-05: writes outside the project.
-        (true, 1, "touch: /tmp/agg-probe: Operation not permitted", Some(Blocked::Files)),
+        (
+            true,
+            1,
+            "touch: /tmp/agg-probe: Operation not permitted",
+            Some(Blocked::Files),
+        ),
         (
             true,
             1,
@@ -39,7 +44,12 @@ async fn sec_439_aggressive_refusals_name_the_level_and_the_way_forward() {
             Some(Blocked::Files),
         ),
         // AGG-09: a protected read.
-        (true, 1, "cat: .env: Operation not permitted", Some(Blocked::Files)),
+        (
+            true,
+            1,
+            "cat: .env: Operation not permitted",
+            Some(Blocked::Files),
+        ),
         // AGG-12: no network (no sandbox keyword in the output).
         (
             false,
@@ -78,7 +88,11 @@ async fn sec_439_aggressive_refusals_name_the_level_and_the_way_forward() {
 
     for blocked in [Blocked::Files, Blocked::Network] {
         let notice = blocked.notice();
-        for expected in ["security level Aggressive", "even when you approve", "/security"] {
+        for expected in [
+            "security level Aggressive",
+            "even when you approve",
+            "/security",
+        ] {
             assert!(
                 notice.to_lowercase().contains(&expected.to_lowercase()),
                 "{expected}: {notice}"
@@ -95,11 +109,21 @@ async fn sec_439_aggressive_refusals_name_the_level_and_the_way_forward() {
 async fn sec_439_other_levels_are_not_attributed() {
     let (_home, permissive) = config(/*marker*/ false).await;
     assert_eq!(
-        blocked(&permissive, true, Some(1), "touch: /tmp/x: Operation not permitted"),
+        blocked(
+            &permissive,
+            true,
+            Some(1),
+            "touch: /tmp/x: Operation not permitted"
+        ),
         None
     );
     assert_eq!(
-        blocked(&permissive, false, Some(6), "curl: (6) Could not resolve host: x"),
+        blocked(
+            &permissive,
+            false,
+            Some(6),
+            "curl: (6) Could not resolve host: x"
+        ),
         None
     );
 }
