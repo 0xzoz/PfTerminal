@@ -372,7 +372,7 @@ async fn emit_denied_at_start(
     .await;
 }
 
-/// #466: a command the person approved that then could not start (a
+/// #466: a command a review approved that then could not start (a
 /// protected-launch refusal, a spawn error) ends as failed with the reason.
 async fn emit_failed_at_start(
     context: &UnifiedExecContext,
@@ -540,8 +540,8 @@ impl UnifiedExecProcessManager {
                 if let UnifiedExecError::SandboxDenied { output, .. } = &error {
                     emit_denied_at_start(context, &request, cwd, output).await;
                 } else if shown_by_review {
-                    // #466: the approval prompt showed this command as
-                    // running; end it, or it stays "Running" for good.
+                    // #466: the review showed this command as running;
+                    // end it, or it stays "Running" for good.
                     emit_failed_at_start(context, &request, cwd, error.to_string()).await;
                 }
                 return Err(error);

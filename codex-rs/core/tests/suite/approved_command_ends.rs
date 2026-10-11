@@ -1,6 +1,7 @@
-//! Issue #466: an approval prompt shows its command as running, so a
-//! command the person approved must end on screen even when it then fails
-//! to start; a declined one is ended by the prompt's owner, not here.
+//! Issue #466: a review (the person's prompt or the automatic reviewer)
+//! shows its command as running, so an approved command must end on screen
+//! even when it then fails to start; a declined one is ended by the
+//! review's owner (the app server), not here.
 #![cfg(unix)]
 
 use codex_core::config::Constrained;
