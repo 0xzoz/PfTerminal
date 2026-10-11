@@ -652,7 +652,7 @@ fn pf_29_s01_credential_store_modes_are_not_secrets() {
         r#"
 cli_auth_credentials_store = "keyring"
 mcp_oauth_credentials_store = "auto"
-model_auto_compact_token_limit_scope = "after_prefix"
+model_auto_compact_token_limit_scope = "body_after_prefix"
 "#,
     );
     let mut sources = fixture.sources();
@@ -665,12 +665,16 @@ model_auto_compact_token_limit_scope = "after_prefix"
     assert_eq!(preflight.inventory.isolation_paths(), Vec::<PathBuf>::new());
     assert!(preflight.is_clean(), "{:?}", preflight.blockers());
 
-    // A real credential under a launch flag still blocks.
-    let mut sources = fixture.sources();
-    sources.config_layers = vec![layer(
-        "launch flags",
-        None,
+    // Only the top-level settings, and only their choices: the same name
+    // under another table, or a value that is not a choice, still blocks.
+    for flag in [
+        r#"shell_environment_policy.set.CLI_AUTH_CREDENTIALS_STORE = "hunter2-plain-password""#,
+        r#"shell_environment_policy.set.cli_auth_credentials_store = "hunter2-plain-password""#,
+        r#"cli_auth_credentials_store = "hunter2-plain-password""#,
         &format!(r#"shell_environment_policy.set.DEPLOY_TOKEN = "{FAKE_CORE_VALUE}""#),
-    )];
-    assert!(!fixture.run(&sources).is_clean());
+    ] {
+        let mut sources = fixture.sources();
+        sources.config_layers = vec![layer("launch flags", None, flag)];
+        assert!(!fixture.run(&sources).is_clean(), "{flag}");
+    }
 }
