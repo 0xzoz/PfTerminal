@@ -1273,6 +1273,8 @@ async fn missing_denied_paths_below_read_only_or_missing_folders_run_and_stay_hi
     std::fs::create_dir_all(&claude).expect(".claude");
     std::fs::write(claude.join("settings.json"), "settings-ok\n").expect("settings");
     let credentials = claude.join(".credentials.json");
+    let secret = claude.join("secret.json");
+    std::fs::write(&secret, "secret-existing-473\n").expect("secret");
     let entry = |path: &std::path::Path, access| {
         FileSystemSandboxEntry::skip_missing_path(
             FileSystemPath::Path {
@@ -1292,10 +1294,12 @@ async fn missing_denied_paths_below_read_only_or_missing_folders_run_and_stay_hi
         },
         entry(&claude, FileSystemAccessMode::Read),
         entry(&credentials, FileSystemAccessMode::Deny),
+        entry(&secret, FileSystemAccessMode::Deny),
         entry(&base.join(".config/gh"), FileSystemAccessMode::Deny),
         entry(&base.join(".config/gcloud"), FileSystemAccessMode::Deny),
     ]);
     let script = "cat .claude/settings.json; echo settings=$?; \
+                  cat .claude/secret.json; echo secret=$?; \
                   touch started; i=0; \
                   while [ ! -e go ] && [ $i -lt 100 ]; do sleep 0.05; i=$((i+1)); done; \
                   cat .claude/.credentials.json; echo read=$?; \
@@ -1325,10 +1329,11 @@ async fn missing_denied_paths_below_read_only_or_missing_folders_run_and_stay_hi
     let stdout = output.stdout.text;
     let stderr = output.stderr.text;
     assert_eq!(output.exit_code, 0, "stdout: {stdout}\nstderr: {stderr}");
-    for held in ["settings-ok", "settings=0", "read=1", "write=1"] {
+    for held in ["settings-ok", "settings=0", "secret=1", "read=1", "write=1"] {
         assert!(stdout.contains(held), "{held}: {stdout}\nstderr: {stderr}");
     }
     assert!(!stdout.contains("secret-473"), "{stdout}");
+    assert!(!stdout.contains("secret-existing-473"), "{stdout}");
     assert_eq!(
         std::fs::read_to_string(&credentials).expect("credentials"),
         "secret-473\n"

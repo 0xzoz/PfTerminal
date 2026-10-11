@@ -563,6 +563,11 @@ fn create_filesystem_args(
     for writable_root in &sorted_writable_roots {
         let root = writable_root.root.as_path();
         let symlink_target = canonical_target_if_symlinked_path(root);
+        // #473: placeholders are deduplicated within this pass only. Its
+        // `--bind` puts the live host folder back over every mount an earlier
+        // (broader) pass made below it.
+        let earlier_synthetic_mount_targets =
+            std::mem::take(&mut bwrap_args.synthetic_mount_targets);
         // If a denied ancestor was already masked, recreate any missing mount
         // target parents before binding the narrower writable descendant.
         if let Some(masking_root) = unreadable_roots
@@ -687,6 +692,13 @@ fn create_filesystem_args(
             }
             append_unreadable_root_args(&mut bwrap_args, &unreadable_root, &allowed_write_paths)?;
         }
+        let pass_synthetic_mount_targets = std::mem::replace(
+            &mut bwrap_args.synthetic_mount_targets,
+            earlier_synthetic_mount_targets,
+        );
+        bwrap_args
+            .synthetic_mount_targets
+            .extend(pass_synthetic_mount_targets);
     }
 
     let mut rootless_unreadable_roots: Vec<PathBuf> = unreadable_roots
@@ -1166,7 +1178,8 @@ fn append_missing_empty_file_bind_data_args(bwrap_args: &mut BwrapArgs, path: &P
 /// #473: several denied paths can share their first missing component
 /// (`~/.config` for `~/.config/gh` and `~/.config/gcloud`). One empty
 /// placeholder there already stops the whole tree being created, and
-/// bubblewrap fails to mount a second one over the first.
+/// bubblewrap fails to mount a second one over the first. Only this
+/// writable-root pass's targets are listed (see `create_filesystem_args`).
 fn has_synthetic_mount_target(bwrap_args: &BwrapArgs, path: &Path) -> bool {
     bwrap_args
         .synthetic_mount_targets
@@ -2922,10 +2935,13 @@ mod tests {
         std::fs::write(claude.join("settings.json"), "{}").expect("settings");
         std::os::unix::fs::symlink("settings.json", claude.join("link")).expect("link");
         let credentials = claude.join(".credentials.json");
+        let secret = claude.join("secret.json");
+        std::fs::write(&secret, "secret").expect("secret");
         let policy = FileSystemSandboxPolicy::restricted(vec![
             path_entry(&home, FileSystemAccessMode::Write, false),
             path_entry(&claude, FileSystemAccessMode::Read, true),
             path_entry(&credentials, FileSystemAccessMode::Deny, true),
+            path_entry(&secret, FileSystemAccessMode::Deny, true),
         ]);
 
         let args = create_filesystem_args(&policy, &home, NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
@@ -2942,11 +2958,23 @@ mod tests {
         let snapshot = position(&["--perms", "555", "--tmpfs", &claude_arg]);
         let remount = position(&["--remount-ro", &claude_arg]);
         assert!(read_only_bind < snapshot && snapshot < remount, "{args:#?}");
-        for child in ["projects", "settings.json"] {
+        for child in ["projects", "secret.json", "settings.json"] {
             let child = path_to_string(&claude.join(child));
             let bind = position(&["--ro-bind-try", &child, &child]);
             assert!(snapshot < bind && bind < remount, "{args:#?}");
         }
+        // An existing denied entry stays masked over its snapshot bind.
+        let secret_arg = path_to_string(&secret);
+        let secret_mask = args
+            .windows(5)
+            .position(|window| {
+                window[0] == "--perms"
+                    && window[1] == "000"
+                    && window[2] == "--ro-bind-data"
+                    && window[4] == secret_arg
+            })
+            .unwrap_or_else(|| panic!("expected a mask for {secret_arg}: {args:#?}"));
+        assert!(remount < secret_mask, "{args:#?}");
         position(&[
             "--symlink",
             "settings.json",
@@ -2993,6 +3021,42 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    /// #473 review: a broader writable root's pass leaves an empty
+    /// placeholder on the host; the nested root's `--bind` shows that live
+    /// file again, so its own pass must mask the path again.
+    #[test]
+    fn missing_denied_path_is_masked_again_after_a_nested_writable_bind() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let home = temp_dir.path().join("home");
+        let work = home.join("work");
+        std::fs::create_dir_all(&work).expect("create work");
+        let secret = work.join("secret");
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            path_entry(&home, FileSystemAccessMode::Write, false),
+            path_entry(&work, FileSystemAccessMode::Write, false),
+            path_entry(&secret, FileSystemAccessMode::Deny, true),
+        ]);
+
+        let args = create_filesystem_args(&policy, &home, NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
+            .expect("filesystem args")
+            .args;
+
+        let work_arg = path_to_string(&work);
+        let secret_arg = path_to_string(&secret);
+        let inner_bind = args
+            .windows(3)
+            .position(|window| window == ["--bind", work_arg.as_str(), work_arg.as_str()])
+            .unwrap_or_else(|| panic!("expected a bind of {work_arg}: {args:#?}"));
+        let masks: Vec<usize> = args
+            .windows(3)
+            .enumerate()
+            .filter(|(_, window)| window[0] == "--ro-bind-data" && window[2] == secret_arg)
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(masks.len(), 2, "{args:#?}");
+        assert!(masks[0] < inner_bind && inner_bind < masks[1], "{args:#?}");
     }
 
     /// #473: a missing read-only path below a read-only folder needs no
