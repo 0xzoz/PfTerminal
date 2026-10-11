@@ -633,3 +633,44 @@ fn pf_29_s01_devices_and_pipes_neither_hang_nor_exhaust_memory() {
             .any(|finding| finding.location == "~/.bashrc (not readable)")
     );
 }
+
+/// #438 (AGG-25): `-c cli_auth_credentials_store="file"` chooses where sign-in
+/// is stored; it is not a secret, so it neither blocks Aggressive nor makes
+/// its config file a "credential file".
+#[test]
+fn pf_29_s01_credential_store_modes_are_not_secrets() {
+    let fixture = Fixture::new();
+    let system_path = fixture.root.path().join("etc/codex/config.toml");
+    let flags = layer(
+        "launch flags",
+        None,
+        r#"cli_auth_credentials_store = "file""#,
+    );
+    let system = layer(
+        "system config",
+        Some(system_path),
+        r#"
+cli_auth_credentials_store = "keyring"
+mcp_oauth_credentials_store = "auto"
+model_auto_compact_token_limit_scope = "after_prefix"
+"#,
+    );
+    let mut sources = fixture.sources();
+    sources.config_layers = vec![flags, system];
+    let preflight = fixture.run(&sources);
+    assert_eq!(
+        find(&preflight, FindingKind::ConfigLiteral),
+        Vec::<&Finding>::new()
+    );
+    assert_eq!(preflight.inventory.isolation_paths(), Vec::<PathBuf>::new());
+    assert!(preflight.is_clean(), "{:?}", preflight.blockers());
+
+    // A real credential under a launch flag still blocks.
+    let mut sources = fixture.sources();
+    sources.config_layers = vec![layer(
+        "launch flags",
+        None,
+        &format!(r#"shell_environment_policy.set.DEPLOY_TOKEN = "{FAKE_CORE_VALUE}""#),
+    )];
+    assert!(!fixture.run(&sources).is_clean());
+}
