@@ -731,6 +731,20 @@ impl SecurityLevelPicker {
             StoredLevel::Invalid(reason) => lines.push(format!(
                 "Stored level is unreadable or was changed outside /security ({reason}); Aggressive is enforced. Choose a level to repair it."
             )),
+            StoredLevel::Absent | StoredLevel::Chosen(_)
+                if saved == ChosenLevel::Aggressive
+                    && saved != self.active
+                    && self.core_aggressive_now() =>
+            {
+                lines.push(format!(
+                    "Saved: Aggressive. Core's protections ({}) apply in this session now; the sandbox, approval, network, environment, model-key and child-agent rows take effect when you restart Corbanu Terminal.",
+                    if self.core_effects_now() == CORE_EFFECTS {
+                        "vault refusal, protected paths"
+                    } else {
+                        "vault refusal"
+                    }
+                ));
+            }
             StoredLevel::Absent | StoredLevel::Chosen(_) if saved != self.active => lines.push(
                 format!(
                     "Saved: {}. It takes effect when you restart Corbanu Terminal.",
@@ -856,6 +870,8 @@ impl SecurityLevelPicker {
                 lines.extend(wrap(aggressive::UNCHANGED));
                 lines.extend(wrap(if self.active == ChosenLevel::Aggressive {
                     "This session is already Aggressive; saving keeps it after restart. Your config.toml is not modified."
+                } else if self.core_aggressive_on_confirm() {
+                    "Core's protections below apply as soon as you confirm. The rest of the rows above take effect when you restart Corbanu Terminal (you can restart right after saving); until then this session keeps its current sandbox, approval, network, environment, model-key and child-agent settings, apart from Core's protected-path denials, and commands already running keep the permissions they started with. Your config.toml is not modified."
                 } else {
                     "The rows above take effect when you restart Corbanu Terminal (you can restart right after saving); this session keeps its current settings until then. Your config.toml is not modified."
                 }));
@@ -907,6 +923,8 @@ impl SecurityLevelPicker {
                 ));
                 lines.extend(wrap(if self.active == ChosenLevel::Aggressive {
                     "Takes effect when you restart Corbanu Terminal; this session stays Aggressive until then, and its pending approvals end with it."
+                } else if self.core_aggressive_now() {
+                    "Core's Aggressive protections stay on in this session until you restart; saving cancels the Aggressive level saved for the next start."
                 } else {
                     "This session is already Permissive; saving cancels the Aggressive level saved for the next start."
                 }));
@@ -934,6 +952,14 @@ impl SecurityLevelPicker {
                         "{} is active in this session.",
                         level.name()
                     )));
+                } else if level == ChosenLevel::Aggressive && self.core_aggressive_now() {
+                    // Issue #443: say which protections hold now and which
+                    // wait for the restart.
+                    lines.extend(wrap(&format!(
+                        "Active now in this session: {}.",
+                        self.core_effects_now()
+                    )));
+                    lines.extend(wrap(AT_RESTART));
                 } else {
                     lines.extend(wrap(&format!(
                         "Restart Corbanu Terminal to activate {}. Until then this session stays {}.",
@@ -1109,7 +1135,42 @@ impl SecurityLevelPicker {
     }
 }
 
+/// What Core's Aggressive level does in a running session (PF-23, #443).
+const CORE_EFFECTS: &str = "agent commands cannot run `corbanu vault …` and cannot open protected paths (the vault store, sign-in and credential files, and Corbanu's config, history and state), sensitive surfaces need a grant, external content reaches the model labelled untrusted, and memory summaries stop";
+
+/// Issue #443: what only the restart applies after Aggressive is saved.
+const AT_RESTART: &str = "Starts when you restart: the Aggressive sandbox (writes only in the current folder, approved commands stay inside it), approval for every command that is not known read-only, network and web search off, secret-like environment variables removed and login profiles and shell snapshots unused, model keys held by the credential broker, and the child-agent rules. Until then this session keeps your own settings for these, and commands already running keep the permissions they started with until they end.";
+
+/// Core's Aggressive effects without the untrusted-content labels
+/// (`source_envelopes` off): only the vault rule is sure to hold now.
+const CORE_EFFECTS_VAULT_ONLY: &str = "agent commands cannot run `corbanu vault …`";
+
 impl SecurityLevelPicker {
+    /// Issue #443: Core's level is Aggressive in this session's live policy
+    /// now, so its protections (vault refusal, protected paths) hold.
+    fn core_aggressive_now(&self) -> bool {
+        self.basis.live && self.basis.in_force == SecurityLevel::Aggressive
+    }
+
+    /// What Core's Aggressive level enforces now: protected paths need the
+    /// untrusted-content labels (`source_envelopes`) too.
+    fn core_effects_now(&self) -> &'static str {
+        if self
+            .preflight_input
+            .as_ref()
+            .is_some_and(|input| input.flags.untrusted_content)
+        {
+            CORE_EFFECTS
+        } else {
+            CORE_EFFECTS_VAULT_ONLY
+        }
+    }
+
+    /// Confirming Aggressive raises Core's level in this session at once.
+    fn core_aggressive_on_confirm(&self) -> bool {
+        self.preflight_input.is_some() && self.basis.live
+    }
+
     /// What confirming Aggressive does to Core's level (PF-23).
     fn core_lines_for_aggressive(&self) -> Vec<String> {
         if self.preflight_input.is_none() {
@@ -1121,7 +1182,7 @@ impl SecurityLevelPicker {
         if !confirm::core_commit_needed(&self.basis, ChosenLevel::Aggressive, /*raise*/ true) {
             return Vec::new();
         }
-        let effects = "agent commands cannot open protected paths, sensitive surfaces need a grant, external content reaches the model labelled untrusted, and memory summaries stop";
+        let effects = CORE_EFFECTS;
         vec![
             if self.basis.live && self.basis.in_force == SecurityLevel::Aggressive {
                 "Core's level is already Aggressive in this session; confirming saves it for every start and raises the other sessions of this Corbanu Terminal that are below it.".to_string()
@@ -1253,3 +1314,7 @@ fn core_outcome_line(
 #[cfg(test)]
 #[path = "security_level_picker_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "security_level_picker_issue_443_tests.rs"]
+mod issue_443_tests;
