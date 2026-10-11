@@ -939,6 +939,31 @@ exit 1
     assert!(!has_plugins_clone_dirs(tmp.path()));
 }
 
+/// #477: once cancelled, the sync starts no further `git`.
+#[cfg(unix)]
+#[test]
+fn cancelled_sync_spawns_no_git() {
+    let bin_dir = tempdir().expect("tempdir");
+    let marker = bin_dir.path().join("ran");
+    let git_path = bin_dir.path().join("git");
+    write_executable_script(
+        &git_path,
+        &format!("#!/bin/sh\ntouch \"{}\"\n", marker.display()),
+    );
+    let cancel = AtomicBool::new(true);
+
+    let err = run_git_command_with_timeout(
+        &mut git_command(&git_path),
+        "git test",
+        CURATED_PLUGINS_GIT_TIMEOUT,
+        &cancel,
+    )
+    .expect_err("cancelled");
+
+    assert!(err.ends_with(SYNC_CANCELLED), "{err}");
+    assert!(!marker.exists());
+}
+
 #[cfg(unix)]
 fn wait_until(what: &str, done: impl Fn() -> bool) {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);

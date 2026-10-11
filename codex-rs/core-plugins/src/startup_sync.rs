@@ -159,9 +159,6 @@ fn sync_openai_plugins_repo_with_transport_overrides(
                 error = %err,
                 "git sync failed for curated plugin sync; falling back to GitHub HTTP"
             );
-            if cancel.load(Ordering::SeqCst) {
-                return Err(format!("{SYNC_CANCELLED}: {err}"));
-            }
             match sync_openai_plugins_repo_via_http(codex_home, api_base_url, http_client_factory) {
                 Ok(remote_sha) => {
                     emit_curated_plugins_startup_sync_metric("http", "success");
