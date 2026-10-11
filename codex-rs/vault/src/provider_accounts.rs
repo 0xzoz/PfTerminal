@@ -161,6 +161,15 @@ impl ProviderAccountKind {
         matches!(self, Self::ClaudeOauthToken | Self::ChatgptAuth)
     }
 
+    /// Whether the stored value is a secret (an API key, token or sign-in),
+    /// not a folder, profile name or marker.
+    pub fn is_secret(self) -> bool {
+        matches!(
+            self,
+            Self::ApiKey | Self::ClaudeOauthToken | Self::ChatgptAuth
+        )
+    }
+
     fn credential_type(self) -> CredentialType {
         match self {
             Self::ApiKey => CredentialType::ApiKey,

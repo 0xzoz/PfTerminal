@@ -591,19 +591,34 @@ fn pf_28_s01_escaped_value_inside_a_string_is_found_in_the_serialized_item() {
 }
 
 /// #434 (milestone AGG-16): a vault value reached a tool result verbatim
-/// under Aggressive. Values stored before the session started (restart) and
-/// values added mid-session through `/vault` are both removed. Runs in a
-/// child process: it needs a gate armed by config load, with no vault value
-/// registered beforehand, and never reaches the OS keyring.
+/// under Aggressive. Values stored before the session started (restart),
+/// added mid-session through `/vault` in this process, and added by another
+/// process are all removed. Custody material and the non-secret parts of a
+/// provider account are not loaded. Runs in a child process: it needs a gate
+/// armed by config load, with no vault value registered beforehand, and
+/// never reaches the OS keyring.
 #[cfg(debug_assertions)]
 #[tokio::test]
 async fn issue_434_vault_values_are_gated_after_restart_and_when_added_mid_session() {
     const CHILD_ENV: &str = "CODEX_CORE_ISSUE_434_CHILD";
+    const WRITER_ENV: &str = "CODEX_CORE_ISSUE_434_WRITER";
     const TEST: &str = "security::disclosure_gate::tests::issue_434_vault_values_are_gated_after_restart_and_when_added_mid_session";
-    if std::env::var_os(CHILD_ENV).is_none() {
+    let add = |home: &Path, label: &str, credential_type, secret: &str| {
+        codex_vault::Vault::new(home.to_path_buf())
+            .add(codex_vault::AddCredential {
+                label: label.to_string(),
+                credential_type,
+                provider: None,
+                notes: None,
+                revocation_notes: None,
+                secret: secret.to_string(),
+            })
+            .expect("vault add");
+    };
+    let run_self = |env: &str, value: &Path| {
         let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
             .args(["--exact", TEST, "--nocapture"])
-            .env(CHILD_ENV, "1")
+            .env(env, value)
             .env("CORBANU_TEST_NO_NATIVE_KEYRING", "1")
             .output()
             .expect("run child test");
@@ -613,24 +628,53 @@ async fn issue_434_vault_values_are_gated_after_restart_and_when_added_mid_sessi
             "{stdout}\n{}",
             String::from_utf8_lossy(&output.stderr)
         );
+    };
+    // Another process adding a value to the same vault (`corbanu vault` in
+    // another terminal): no gate is armed there.
+    if let Some(home) = std::env::var_os(WRITER_ENV) {
+        add(
+            Path::new(&home),
+            "synthetic/agg16-other",
+            codex_vault::CredentialType::ApiKey,
+            "AGG16OTHERPROCESS789",
+        );
+        return;
+    }
+    if std::env::var_os(CHILD_ENV).is_none() {
+        run_self(CHILD_ENV, Path::new("1"));
         return;
     }
     let home = tempfile::tempdir().expect("home");
     let cwd = tempfile::tempdir().expect("cwd");
-    let add = |label: &str, secret: &str| {
-        codex_vault::Vault::new(home.path().to_path_buf())
-            .add(codex_vault::AddCredential {
-                label: label.to_string(),
-                credential_type: codex_vault::CredentialType::ApiKey,
-                provider: None,
-                notes: None,
-                revocation_notes: None,
-                secret: secret.to_string(),
-            })
-            .expect("vault add");
-    };
+    let seed = "agg16 legal winner thank year wave sausage worth useful legal winner thank yellow";
+    let claude_dir = "/tmp/issue434-claude-config-folder";
     // Stored before this session started (the "after restart" half).
-    add("synthetic/agg16", "AGG16SYNTH123");
+    add(
+        home.path(),
+        "synthetic/agg16",
+        codex_vault::CredentialType::ApiKey,
+        "AGG16SYNTH123",
+    );
+    add(
+        home.path(),
+        "synthetic/agg16-seed",
+        codex_vault::CredentialType::SeedPhrase,
+        seed,
+    );
+    add(
+        home.path(),
+        "synthetic/agg16-short",
+        codex_vault::CredentialType::ManualSecret,
+        "q7",
+    );
+    codex_vault::Vault::new(home.path().to_path_buf())
+        .write_provider_account(
+            "claude-plan",
+            &codex_vault::ProviderAccountName::parse("issue434").expect("name"),
+            codex_vault::ProviderAccountKind::ClaudeConfigDir,
+            claude_dir,
+        )
+        .expect("provider account");
     std::fs::write(
         home.path().join("config.toml"),
         "[features]\nsecret_output_gate = true\n",
@@ -654,20 +698,43 @@ async fn issue_434_vault_values_are_gated_after_restart_and_when_added_mid_sessi
             )),
             internal_chat_message_metadata_passthrough: None,
         };
-        let gated = gate_values(OutputSink::ToolResult, &[item]).expect("value is gated");
-        serde_json::to_string(&gated).expect("json")
+        gate_values(OutputSink::ToolResult, &[item])
+            .map(|gated| serde_json::to_string(&gated).expect("json"))
     };
-    let text = read_notes("AGG16SYNTH123");
+    // The first task's start reads the vault.
+    let warning = refresh_vault_values().expect("the short value is reported");
+    assert!(warning.contains("synthetic/agg16-short"), "{warning}");
+    assert!(!warning.contains("issue434"), "{warning}");
+    let text = read_notes("AGG16SYNTH123").expect("gated after restart");
     assert!(!text.contains("AGG16SYNTH123"), "{text}");
     assert!(text.contains("[REDACTED:vault:synthetic/agg16]"), "{text}");
     assert!(text.contains("review budget"), "{text}");
+    assert_eq!(read_notes(claude_dir), None, "not a secret");
+    assert_eq!(read_notes(seed), None, "custody material is not loaded");
+    assert_eq!(refresh_vault_values(), None, "unchanged vault: no reread");
 
-    // Added mid-session through `/vault`, as in the milestone run.
-    add("synthetic/agg16-mid", "AGG16MIDSESSION456");
-    let text = read_notes("AGG16MIDSESSION456");
+    // Added mid-session through `/vault` in this process, as in the
+    // milestone run: protected at once.
+    add(
+        home.path(),
+        "synthetic/agg16-mid",
+        codex_vault::CredentialType::ApiKey,
+        "AGG16MIDSESSION456",
+    );
+    let text = read_notes("AGG16MIDSESSION456").expect("gated mid-session");
     assert!(!text.contains("AGG16MIDSESSION456"), "{text}");
     assert!(
         text.contains("[REDACTED:vault:synthetic/agg16-mid]"),
+        "{text}"
+    );
+
+    // Added by another process: protected from the next task's start.
+    run_self(WRITER_ENV, home.path());
+    assert_eq!(read_notes("AGG16OTHERPROCESS789"), None);
+    let _ = refresh_vault_values();
+    let text = read_notes("AGG16OTHERPROCESS789").expect("gated after the next task start");
+    assert!(
+        text.contains("[REDACTED:vault:synthetic/agg16-other]"),
         "{text}"
     );
 }

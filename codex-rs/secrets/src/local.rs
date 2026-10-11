@@ -170,6 +170,15 @@ impl LocalSecretsBackend {
         Ok(file.secrets.get(&canonical_key).cloned())
     }
 
+    /// Several values from one read of the store, in the order asked.
+    pub fn get_many(&self, entries: &[(SecretScope, SecretName)]) -> Result<Vec<Option<String>>> {
+        let file = self.load_file()?;
+        Ok(entries
+            .iter()
+            .map(|(scope, name)| file.secrets.get(&scope.canonical_key(name)).cloned())
+            .collect())
+    }
+
     pub fn delete(&self, scope: &SecretScope, name: &SecretName) -> Result<bool> {
         let canonical_key = scope.canonical_key(name);
         let mut file = self.load_file()?;
@@ -622,6 +631,10 @@ impl SecretsBackend for LocalSecretsBackend {
 
     fn delete(&self, scope: &SecretScope, name: &SecretName) -> Result<bool> {
         LocalSecretsBackend::delete(self, scope, name)
+    }
+
+    fn get_many(&self, entries: &[(SecretScope, SecretName)]) -> Result<Vec<Option<String>>> {
+        LocalSecretsBackend::get_many(self, entries)
     }
 
     fn delete_many(&self, entries: &[(SecretScope, SecretName)]) -> Result<usize> {

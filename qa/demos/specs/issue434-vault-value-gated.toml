@@ -79,6 +79,7 @@ key = "Enter"
 wait = "Secret value"
 [[steps]]
 type = "AGG16SYNTH123"
+verify = false
 [[steps]]
 key = "Enter"
 [[steps]]
@@ -103,7 +104,7 @@ type = "/exit"
 [[steps]]
 key = "Enter"
 [[steps]]
-wait = "restarting Corbanu Terminal(?s).*Corbanu Terminal \\(v"
+wait = "(?s)\\[demo\\] restarting.*Corbanu Terminal \\(v"
 timeout = 60
 [[steps]]
 pause = 1.5

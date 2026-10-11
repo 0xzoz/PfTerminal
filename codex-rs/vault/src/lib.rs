@@ -629,31 +629,55 @@ impl Vault {
 
     /// #434: registers every stored value with the armed output gate, so a
     /// value stored before this process started (or by another process) is
-    /// removed from output although this process never revealed it. Returns
-    /// the labels that could not be protected (for example a value too short
-    /// to tell apart from ordinary text). Does nothing while the gate is not armed or
-    /// the vault does not exist.
+    /// removed from output although this process never revealed it. Custody
+    /// material (seed phrases, private keys, keystores) and the non-secret
+    /// parts of provider accounts are not loaded ([`protected_while_stored`]).
+    /// The vault file is decrypted once. Returns the labels that could not be
+    /// protected (for example a value too short to tell apart from ordinary
+    /// text). Does nothing while the gate is not armed or the vault does not
+    /// exist.
     pub fn protect_stored_values(&self) -> Result<Vec<String>, VaultError> {
         if codex_secret_broker::output_gate::active().is_none()
             || self.key_storage() == VaultKeyStorage::NotInitialized
         {
             return Ok(Vec::new());
         }
-        self.with_storage_lock(|| {
+        let values = self.with_storage_lock(|| {
             let index = self.load_index()?;
-            let mut unprotected = Vec::new();
-            for (label, meta) in &index.credentials {
-                let Some(secret) = self.read_secret(label)?.map(Zeroizing::new) else {
-                    continue;
-                };
-                // One value the gate cannot admit does not leave the others
-                // unprotected; it is reported by label.
-                if register_with_output_gate(label, meta.credential_type, &secret).is_err() {
-                    unprotected.push(label.clone());
-                }
-            }
-            Ok(unprotected)
-        })
+            let wanted = index
+                .credentials
+                .values()
+                .filter(|meta| protected_while_stored(&meta.label, meta.credential_type))
+                .map(|meta| {
+                    Ok((
+                        meta.label.clone(),
+                        meta.credential_type,
+                        secret_name_for(&meta.label)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, VaultError>>()?;
+            let names = wanted
+                .iter()
+                .map(|(_, _, name)| (VAULT_SCOPE.clone(), name.clone()))
+                .collect::<Vec<_>>();
+            let secrets = self.secrets.get_many(&names)?;
+            Ok(wanted
+                .into_iter()
+                .zip(secrets)
+                .filter_map(|((label, credential_type, _), secret)| {
+                    secret.map(|secret| (label, credential_type, Zeroizing::new(secret)))
+                })
+                .collect::<Vec<_>>())
+        })?;
+        // Registered outside the vault lock. One value the gate cannot admit
+        // does not leave the others unprotected; it is reported by label.
+        Ok(values
+            .iter()
+            .filter(|(label, credential_type, secret)| {
+                register_with_output_gate(label, *credential_type, secret).is_err()
+            })
+            .map(|(label, _, _)| label.clone())
+            .collect())
     }
 
     /// Whether a credential with the given label exists.
@@ -813,12 +837,30 @@ pub(crate) fn protect_stored(
     secret: &str,
 ) -> Result<(), VaultError> {
     use codex_secret_broker::output_gate::RegisterError;
+    if !protected_while_stored(label, credential_type) {
+        return Ok(());
+    }
     match register_with_output_gate(label, credential_type, secret) {
         Ok(()) | Err(RegisterError::TooShort) => Ok(()),
         Err(err) => Err(VaultError::Storage(anyhow::anyhow!(
             "vault:{label} was not stored because the secret output gate cannot protect it: {err}"
         ))),
     }
+}
+
+/// #434: whether a stored value is protected by the output gate while it is
+/// stored, not only once revealed. Not custody material: seed phrases,
+/// private keys and keystores are never released to agents and are not kept
+/// in this process unless a person reveals them. Not the non-secret parts of
+/// a provider account (a Claude config folder, an AWS profile name, a
+/// command account marker), which would hide ordinary text.
+fn protected_while_stored(label: &str, credential_type: CredentialType) -> bool {
+    !matches!(
+        credential_type,
+        CredentialType::SeedPhrase
+            | CredentialType::CryptoPrivateKey
+            | CredentialType::KeystoreJson
+    ) && parse_provider_account_label(label).is_none_or(|(_, _, kind)| kind.is_secret())
 }
 
 fn register_with_output_gate(

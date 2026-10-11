@@ -361,6 +361,10 @@ impl Session {
         mailbox_parent_provenance: MailboxParentProvenance,
         agent_execution_guard: Option<AgentExecutionGuard>,
     ) {
+        // #434: vault values stored since the vault was last read (before
+        // this process started, or by another process) are protected before
+        // this task produces output.
+        crate::security::disclosure_gate::refresh_vault_values_for_task(self, &turn_context).await;
         let task: Arc<dyn AnySessionTask> = Arc::new(task);
         let task_kind = task.kind();
         let span_name = task.span_name();

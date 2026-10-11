@@ -10,12 +10,13 @@
 //! in their own crates through the same registry.
 //!
 //! Managed values are captured at arm time (secret-looking environment
-//! variables, URL passwords, sign-in files, secret-named config values and,
-//! #434, every value in the vault), whenever the sign-in store loads or saves
-//! tokens (login, refresh, keyring), when this process stores or reveals a
-//! vault credential, and at the start of each turn when the vault file has
-//! changed since it was last read (a value added by another process). Raw
-//! values stay in this process.
+//! variables, URL passwords, sign-in files and secret-named config values),
+//! whenever the sign-in store loads or saves tokens (login, refresh, keyring),
+//! when this process stores or reveals a vault credential and (#434) at the
+//! start of every task, every stored vault credential when the vault file
+//! changed since it was last read (values stored before this process started
+//! or by another process; not custody material). Raw values stay in this
+//! process.
 
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::secretless_launch;
@@ -34,6 +35,8 @@ use std::path::PathBuf;
 use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::sync::OnceLock;
+use std::sync::PoisonError;
+use std::time::Duration;
 use std::time::SystemTime;
 use zeroize::Zeroizing;
 
@@ -128,71 +131,99 @@ struct VaultWatch {
     read: Option<VaultFileState>,
 }
 
-type VaultFileState = (u64, SystemTime);
+/// Size, modification time and (on Unix) inode of the vault file: the vault
+/// is rewritten by an atomic rename, so a new value means a new inode.
+type VaultFileState = (u64, SystemTime, u64);
 
 static VAULT_WATCH: Mutex<Option<VaultWatch>> = Mutex::new(None);
 
+/// How long a task waits for the vault to be read before it starts anyway.
+const VAULT_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
+
 fn vault_file_state(codex_home: &Path) -> Option<VaultFileState> {
     let metadata = std::fs::metadata(codex_home.join("secrets").join("local.age")).ok()?;
-    Some((metadata.len(), metadata.modified().ok()?))
+    #[cfg(unix)]
+    let inode = std::os::unix::fs::MetadataExt::ino(&metadata);
+    #[cfg(not(unix))]
+    let inode = 0;
+    Some((metadata.len(), metadata.modified().ok()?, inode))
 }
 
-/// #434: registers every value in the vault under `codex_home` with the
-/// armed gate, so values stored before this process started are removed from
-/// output too. Later calls (and [`refresh_vault_values`]) reread the vault
-/// only when its file has changed. Returns a startup warning when a value
-/// cannot be protected or the vault cannot be read.
-pub(crate) fn protect_vault_values(codex_home: &Path) -> Option<String> {
-    active()?;
-    let mut watch = match VAULT_WATCH.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    // One process protects one vault: the first home it armed with.
-    let watch = watch.get_or_insert_with(|| VaultWatch {
+/// #434: the armed gate protects the vault under `codex_home` (the first
+/// home this process armed with): its values are read and registered at the
+/// start of the next task, and again whenever the vault file changes.
+pub(crate) fn watch_vault(codex_home: &Path) {
+    if active().is_none() {
+        return;
+    }
+    let mut watch = VAULT_WATCH.lock().unwrap_or_else(PoisonError::into_inner);
+    watch.get_or_insert_with(|| VaultWatch {
         codex_home: codex_home.to_path_buf(),
         read: None,
     });
-    if watch.codex_home != codex_home {
-        return None;
-    }
+}
+
+/// #434: registers every value in the watched vault with the gate when the
+/// vault file changed since it was last read (or was never read), so values
+/// stored before this process started, or by another process, are removed
+/// from output too. A failed read is not retried until the file changes.
+/// Returns a warning for the person when values are not protected.
+pub(crate) fn refresh_vault_values() -> Option<String> {
+    active()?;
+    let mut watch = VAULT_WATCH.lock().unwrap_or_else(PoisonError::into_inner);
+    let watch = watch.as_mut()?;
     let state = vault_file_state(&watch.codex_home)?;
     if watch.read == Some(state) {
         return None;
     }
+    watch.read = Some(state);
     match codex_vault::Vault::new(watch.codex_home.clone()).protect_stored_values() {
-        Ok(unprotected) => {
-            watch.read = Some(state);
-            (!unprotected.is_empty()).then(|| {
-                format!(
-                    "secret_output_gate: these vault credentials cannot be protected (too short or not admitted), so they are not removed from output: {}",
-                    unprotected.join(", ")
-                )
-            })
-        }
+        Ok(unprotected) => (!unprotected.is_empty()).then(|| {
+            format!(
+                "secret_output_gate: these vault credentials cannot be protected (too short or not admitted), so they are not removed from output: {}",
+                unprotected.join(", ")
+            )
+        }),
         Err(err) => {
-            tracing::warn!(error = %err, "PF-28-S01: vault values not protected");
+            tracing::warn!(error = %err, "#434: vault values not protected");
             Some(format!(
-                "secret_output_gate: vault values could not be read, so they are not removed from output until revealed: {err}"
+                "secret_output_gate: the vault could not be read, so its values are removed from output only once revealed: {err}"
             ))
         }
     }
 }
 
-/// #434: at the start of a turn, protects values added to the vault since it
-/// was last read (for example by `corbanu vault` in another terminal).
-pub(crate) fn refresh_vault_values() {
-    let codex_home = match VAULT_WATCH.lock() {
-        Ok(guard) => guard.as_ref().map(|watch| watch.codex_home.clone()),
-        Err(poisoned) => poisoned
-            .into_inner()
-            .as_ref()
-            .map(|watch| watch.codex_home.clone()),
+/// #434: at the start of every task (a turn, a review, a compaction or a
+/// `!` command), before it produces output, protects values added to the
+/// vault since it was last read. Waits at most [`VAULT_REFRESH_TIMEOUT`];
+/// a warning is shown to the person.
+pub(crate) async fn refresh_vault_values_for_task(
+    session: &crate::session::session::Session,
+    turn: &crate::session::turn_context::TurnContext,
+) {
+    if active().is_none() {
+        return;
+    }
+    let refresh = tokio::task::spawn_blocking(refresh_vault_values);
+    let warning = match tokio::time::timeout(VAULT_REFRESH_TIMEOUT, refresh).await {
+        Ok(Ok(warning)) => warning,
+        Ok(Err(err)) => Some(format!(
+            "secret_output_gate: the vault could not be read, so its values are removed from output only once revealed: {err}"
+        )),
+        Err(_) => Some(
+            "secret_output_gate: the vault is taking long to read; values added to it since it was last read are removed from output once the read finishes"
+                .to_string(),
+        ),
     };
-    if let Some(codex_home) = codex_home
-        && let Some(warning) = protect_vault_values(&codex_home)
-    {
-        tracing::warn!("{warning}");
+    if let Some(message) = warning {
+        session
+            .send_event(
+                turn,
+                codex_protocol::protocol::EventMsg::Warning(
+                    codex_protocol::protocol::WarningEvent { message },
+                ),
+            )
+            .await;
     }
 }
 
