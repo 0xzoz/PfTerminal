@@ -227,3 +227,38 @@ fn smoke_runs_without_a_launch_context_read_the_stored_level() {
     save(home.path(), ChosenLevel::Aggressive, NestedAgents::Refuse).unwrap();
     assert!(external_agent_block_reason_for_home(home.path()).is_some());
 }
+
+/// #441: the rule file follows the nested-launch setting, and both forms are
+/// recognised as Corbanu's own.
+#[test]
+fn issue_441_rules_follow_the_nested_agents_setting() {
+    let home = tempfile::tempdir().unwrap();
+    save(home.path(), ChosenLevel::Aggressive, NestedAgents::Pass).unwrap();
+    let pass = std::fs::read_to_string(rules_path(home.path())).unwrap();
+    assert!(!pass.contains("\"exec\""), "{pass}");
+    save(home.path(), ChosenLevel::Aggressive, NestedAgents::Refuse).unwrap();
+    let refuse = std::fs::read_to_string(rules_path(home.path())).unwrap();
+    assert_eq!(refuse, rules_contents());
+    for program in VAULT_PROGRAMS {
+        for subcommand in ["exec", "e", "review"] {
+            assert!(
+                refuse.contains(&format!(
+                    "pattern = [\"{program}\", \"{subcommand}\"], decision = \"forbidden\""
+                )),
+                "{program} {subcommand}"
+            );
+        }
+    }
+    // Saving Permissive leaves the file to the next launch; a session still
+    // enforcing Aggressive recognises it either way.
+    save(home.path(), ChosenLevel::Aggressive, NestedAgents::Pass).unwrap();
+    save(home.path(), ChosenLevel::Permissive, NestedAgents::Refuse).unwrap();
+    let kept = std::fs::read_to_string(rules_path(home.path())).unwrap();
+    assert_eq!(kept, pass);
+    assert!(codex_security_level::level::is_rules_contents(&kept));
+    // The vault-only file earlier versions wrote is the "pass" form.
+    assert!(!pass.contains("nested agent launches"), "{pass}");
+    assert!(codex_security_level::level::is_rules_contents(&pass));
+    assert!(codex_security_level::level::is_rules_contents(&refuse));
+    assert!(!codex_security_level::level::is_rules_contents("# mine\n"));
+}

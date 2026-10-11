@@ -606,7 +606,11 @@ fn aggressive_vault_policy() -> &'static Policy {
         let mut parser = PolicyParser::new();
         match parser.parse(
             codex_security_level::level::RULES_FILE,
-            &codex_security_level::level::rules_contents(),
+            // The vault rule only (#441's nested-launch rules follow the
+            // stored setting and apply from the next start).
+            &codex_security_level::level::rules_contents_for(
+                codex_security_level::level::NestedAgents::Pass,
+            ),
         ) {
             Ok(()) => parser.build(),
             Err(err) => {
@@ -958,6 +962,11 @@ fn strict_forbidden_matches(policy: &Policy, command: &[String]) -> Vec<RuleMatc
         if let Some(rule) = rule.as_any().downcast_ref::<PrefixRule>()
             && rule.decision == Decision::Forbidden
             && !rule.pattern.rest.is_empty()
+            // #441: the nested-launch rules only refuse earlier what the
+            // launch check refuses anyway; they match exactly, never loose
+            // text such as a commit message.
+            && rule.justification.as_deref()
+                != Some(codex_security_level::level::NESTED_LAUNCH_JUSTIFICATION)
         {
             rules_by_program
                 .entry(rule.pattern.first.to_ascii_lowercase())

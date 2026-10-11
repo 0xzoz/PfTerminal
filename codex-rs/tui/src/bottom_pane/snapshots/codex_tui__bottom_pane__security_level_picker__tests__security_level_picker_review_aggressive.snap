@@ -26,7 +26,10 @@ at launch.
   Aggressive: the vault store and sign-in file are unreadable to agent commands,
     and direct `corbanu vault …` commands are refused; secret-like environment
     variables (KEY, SECRET, TOKEN, VAULT, PASSWORD, PASSPHRASE, CREDENTIAL) are
-    removed, and login profiles and shell snapshots are not used
+    removed, and with secretless_agent_launch on so is every other variable
+    outside an allowlist (for example PATH, HOME, locale, terminal, proxy and
+    tool locations; set others explicitly in shell_environment_policy.set);
+    login profiles and shell snapshots are not used
 • Model keys now: Corbanu reads provider keys itself (broker_model_auth off)
   Aggressive: provider API keys from the environment or the vault are held by
     the isolated credential broker, which sends model requests for Corbanu
