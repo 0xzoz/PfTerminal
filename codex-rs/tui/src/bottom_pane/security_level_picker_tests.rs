@@ -867,7 +867,7 @@ mod pf_24_s02 {
         assert_eq!(saved_level(&picker), Some(ChosenLevel::Permissive));
         let saved = machine.text(&picker);
         assert!(
-            saved.contains("Restart now is not available: this session moved ZAI_API_KEY"),
+            saved.contains("Restart now is not available: this session removed ZAI_API_KEY"),
             "{saved}"
         );
         assert!(!saved.contains("Press r to restart now"), "{saved}");
