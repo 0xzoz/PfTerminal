@@ -340,10 +340,10 @@ impl ApprovalOverlay {
 
         // Enter on an untouched prompt must never choose a persistent option.
         let initial_selected_idx = options.iter().position(|opt| !opt.persistent);
-        let footer_note = options
-            .iter()
-            .any(|opt| opt.persistent)
-            .then(|| persistent_options_hint(list_keymap));
+        let footer_note = Some(options_hint(
+            list_keymap,
+            options.iter().any(|opt| opt.persistent),
+        ));
         let params = SelectionViewParams {
             footer_note,
             footer_hint: Some(approval_footer_hint(request, approval_keymap, list_keymap)),
@@ -1025,14 +1025,21 @@ fn non_text_key_label(bindings: &[KeyBinding], fallback: &str) -> String {
         .map_or_else(|| fallback.to_string(), KeyBinding::display_label)
 }
 
-fn persistent_options_hint(list_keymap: &ListKeymap) -> Line<'static> {
+/// #444: a letter shown in brackets, such as "(y)", only highlights its
+/// option (contract 3), so "Yes, proceed (y)" must not read as if y answers.
+/// Esc and chord shortcuts still answer at once; they are not letters.
+fn options_hint(list_keymap: &ListKeymap, persistent: bool) -> Line<'static> {
     let up = non_text_key_label(&list_keymap.move_up, "↑");
     let down = non_text_key_label(&list_keymap.move_down, "↓");
     let accept = non_text_key_label(&list_keymap.accept, "enter");
-    Line::from(format!(
-        "Options that last beyond this request: choose with {up}/{down}, then {accept}."
-    ))
-    .dim()
+    let mut hint =
+        format!("A letter in brackets only highlights its option; {accept} confirms it.");
+    if persistent {
+        hint.push_str(&format!(
+            " Options that last beyond this request: choose with {up}/{down}, then {accept}."
+        ));
+    }
+    Line::from(hint).dim()
 }
 
 fn approval_footer_hint(

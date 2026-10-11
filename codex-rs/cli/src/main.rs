@@ -876,9 +876,11 @@ fn handle_app_exit(exit_info: AppExitInfo) -> anyhow::Result<()> {
             true
         }
         ExitReason::Restart => {
-            println!("Restarting Corbanu Terminal to apply the saved security level…");
+            // No newline: the restarted process erases this line (#444).
+            print!("{}", codex_tui::RESTART_BANNER);
             std::io::stdout().flush()?;
             let err = codex_tui::restart_process();
+            println!();
             anyhow::bail!("could not restart Corbanu Terminal ({err}); start it again yourself");
         }
         ExitReason::UserRequested => false,

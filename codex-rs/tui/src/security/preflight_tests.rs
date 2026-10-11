@@ -153,3 +153,16 @@ fn pf_29_s01_resume_refused_for_conversations_before_activation() {
     permissive.active = ChosenLevel::Permissive;
     assert_eq!(refusal_for(&permissive, &fresh), None);
 }
+
+/// #444 (AGG-32): a config layer present at start was reported as "not
+/// found when Corbanu Terminal started".
+#[test]
+fn sec_444_undenied_config_layer_is_not_called_missing_at_start() {
+    let line = "Isolation: agent commands can still read /etc/codex/config.toml";
+    let layer = super::not_denied_at_launch(line, /*config_layer*/ true);
+    assert!(!layer.contains("not found"), "{layer}");
+    assert!(!layer.contains("not there"), "{layer}");
+    assert!(layer.contains("config files are read only after the sandbox is set up"));
+    let file = super::not_denied_at_launch(line, /*config_layer*/ false);
+    assert!(file.contains("it was not there when Corbanu Terminal started"));
+}

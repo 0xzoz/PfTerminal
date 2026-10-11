@@ -2931,3 +2931,50 @@ async fn issue_443_live_aggressive_adds_the_vault_rule() {
         ExecApprovalRequirement::Forbidden { .. }
     ));
 }
+
+/// #444 (AGG-30): "don't ask again" for `python3 src/notes.py list` must not
+/// carry a chained command. Under Aggressive's approval policy (untrusted) a
+/// chained command that is not read-only still asks, and a chained read-only
+/// one (`cat .env`) runs without a prompt but never bypasses the sandbox
+/// (whether `.env` itself is readable there is the sandbox profile's
+/// protected-path rules, not tested here).
+#[tokio::test]
+async fn sec_444_remembered_prefix_does_not_cover_a_chained_command() {
+    let policy_src = r#"
+prefix_rule(pattern=["python3", "src/notes.py", "list"], decision="allow")
+"#;
+    let chained = |script: &str| vec!["bash".to_string(), "-lc".to_string(), script.to_string()];
+    assert_exec_approval_requirement_for_command(
+        ExecApprovalRequirementScenario {
+            policy_src: Some(policy_src.to_string()),
+            command: chained("python3 src/notes.py list; rm notes.txt"),
+            approval_policy: AskForApproval::UnlessTrusted,
+            permission_profile: PermissionProfile::workspace_write(),
+            sandbox_permissions: SandboxPermissions::UseDefault,
+            prefix_rule: None,
+        },
+        ExecApprovalRequirement::NeedsApproval {
+            reason: None,
+            proposed_execpolicy_amendment: Some(ExecPolicyAmendment::new(vec![
+                "rm".to_string(),
+                "notes.txt".to_string(),
+            ])),
+        },
+    )
+    .await;
+    assert_exec_approval_requirement_for_command(
+        ExecApprovalRequirementScenario {
+            policy_src: Some(policy_src.to_string()),
+            command: chained("python3 src/notes.py list; cat .env"),
+            approval_policy: AskForApproval::UnlessTrusted,
+            permission_profile: PermissionProfile::workspace_write(),
+            sandbox_permissions: SandboxPermissions::UseDefault,
+            prefix_rule: None,
+        },
+        ExecApprovalRequirement::Skip {
+            bypass_sandbox: false,
+            proposed_execpolicy_amendment: None,
+        },
+    )
+    .await;
+}

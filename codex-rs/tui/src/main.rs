@@ -81,10 +81,10 @@ fn main() -> anyhow::Result<()> {
                 true
             }
             ExitReason::Restart => {
-                println!("Restarting to apply the saved security level…");
+                print!("{}", codex_tui::RESTART_BANNER);
                 std::io::stdout().flush()?;
                 let err = codex_tui::restart_process();
-                eprintln!("ERROR: could not restart ({err}); start it again yourself");
+                eprintln!("\nERROR: could not restart ({err}); start it again yourself");
                 std::process::exit(1);
             }
             ExitReason::UserRequested => false,

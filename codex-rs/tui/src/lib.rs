@@ -268,6 +268,7 @@ pub use security::nested::apply_aggressive_launch_overrides;
 pub use security::nested::nested_launch;
 pub use security::nested::prepare_nested_exec;
 pub use security::nested::verify_aggressive_config;
+pub use security::restart::RESTART_BANNER;
 pub use security::restart::restart_process;
 pub use security::restart::take_restart_marker;
 // (tests access modules directly within the crate)
@@ -1512,6 +1513,7 @@ async fn run_ratatui_app(
 
     install_panic_hook();
     tui::configure_panic_diagnostics(initial_config.log_dir.clone());
+    security::restart::clear_restart_banner();
     let mut initialized_terminal = tui::init()?;
     initialized_terminal.terminal.clear()?;
 

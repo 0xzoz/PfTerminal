@@ -28,6 +28,26 @@ pub fn restarted() -> bool {
     RESTARTED.get().copied().unwrap_or(false)
 }
 
+/// #444 (AGG-37): the line printed before a restart (without a newline, see
+/// [`RESTART_BANNER`]) stayed above the new session. The restarted process
+/// erases it before it draws.
+pub(crate) fn clear_restart_banner() {
+    use std::io::IsTerminal as _;
+    if !restarted() || !std::io::stdout().is_terminal() {
+        return;
+    }
+    // Back to the start of the line, then erase it (crossterm also handles
+    // consoles without escape-code processing).
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        crossterm::cursor::MoveToColumn(0),
+        crossterm::terminal::Clear(crossterm::terminal::ClearType::CurrentLine)
+    );
+}
+
+/// Printed, without a newline, just before "restart now" replaces the
+/// process.
+pub const RESTART_BANNER: &str = "Restarting Corbanu Terminal to apply the saved security level…";
 /// #436: why "restart now" cannot be used, or `None`. Provider keys this
 /// process handed from its environment to the credential broker are gone
 /// from the environment a restart inherits (the broker never hands a value
