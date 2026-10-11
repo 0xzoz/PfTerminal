@@ -256,19 +256,24 @@ pub(crate) fn audit_at_launch(codex_home: &Path, config: &Config) -> Boundary {
         }
         Err(reason) => return Boundary::Unverified(reason),
     };
-    let preflight = Preflight::run(
-        &crate::legacy_core::protected_preflight::sources_from_config(config),
-        ReadinessFlags::from_config(config),
-    );
+    let sources = crate::legacy_core::protected_preflight::sources_from_config(config);
+    let preflight = Preflight::run(&sources, ReadinessFlags::from_config(config));
     let mut blockers = preflight.blockers();
-    // Found now (another folder, a new file) but not denied at launch.
+    // Found now but not denied at launch.
+    let layers = sources
+        .config_layers
+        .iter()
+        .filter_map(|layer| layer.path.clone())
+        .collect::<Vec<_>>();
     blockers.extend(
-        verify_isolation(config, &preflight.inventory.isolation_paths())
-            .into_iter()
-            .map(|line| {
-                format!(
-                    "{line}; it was not found when Corbanu Terminal started (another folder or config layer, or a new file). Remove it, or restart from the folder that holds it"
-                )
+        preflight
+            .inventory
+            .isolation_paths()
+            .iter()
+            .flat_map(|path| {
+                verify_isolation(config, std::slice::from_ref(path))
+                    .into_iter()
+                    .map(|line| not_denied_at_launch(&line, layers.contains(path)))
             }),
     );
     if !blockers.is_empty() {
@@ -289,6 +294,21 @@ pub(crate) fn audit_at_launch(codex_home: &Path, config: &Config) -> Boundary {
         }
     };
     Boundary::Clean { activated_at }
+}
+
+/// #444 (AGG-32): why a credential path found now was not denied when
+/// Corbanu Terminal started. A config layer is read only after the sandbox
+/// is set up, so it was there, just not checked.
+fn not_denied_at_launch(line: &str, config_layer: bool) -> String {
+    if config_layer {
+        format!(
+            "{line}; this config file holds a secret, and config files are read only after the sandbox is set up, so it could not be denied. Move the secret into the vault (or remove it) and restart"
+        )
+    } else {
+        format!(
+            "{line}; it was not there when Corbanu Terminal started (another folder, or a new file). Remove it, or restart from the folder that holds it"
+        )
+    }
 }
 
 /// Why resuming or forking `thread_id` is refused, if it is.

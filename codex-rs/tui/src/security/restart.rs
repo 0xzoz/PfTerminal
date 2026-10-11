@@ -28,6 +28,25 @@ pub fn restarted() -> bool {
     RESTARTED.get().copied().unwrap_or(false)
 }
 
+/// #444 (AGG-37): the line printed before a restart (without a newline, see
+/// [`RESTART_BANNER`]) stayed above the new session. The restarted process
+/// erases it before it draws.
+pub(crate) fn clear_restart_banner() {
+    use std::io::IsTerminal as _;
+    use std::io::Write as _;
+    if !restarted() || !std::io::stdout().is_terminal() {
+        return;
+    }
+    let mut stdout = std::io::stdout();
+    // Carriage return, then erase the whole line.
+    let _ = stdout.write_all(b"\r\x1b[2K");
+    let _ = stdout.flush();
+}
+
+/// Printed, without a newline, just before "restart now" replaces the
+/// process.
+pub const RESTART_BANNER: &str = "Restarting Corbanu Terminal to apply the saved security level…";
+
 /// The program and arguments to start again with.
 fn restart_command(args: Vec<OsString>) -> std::io::Result<std::process::Command> {
     let mut command = std::process::Command::new(std::env::current_exe()?);
