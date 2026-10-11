@@ -543,6 +543,11 @@ impl Session {
         {
             return;
         }
+        // Issue #445: no turn is started for agent messages while the kill
+        // switch is on; they wait until a person turns it off and a turn runs.
+        if self.services.model_client().kill_switch_on() {
+            return;
+        }
 
         let turn_context = self.new_default_turn_with_sub_id(sub_id.clone()).await;
         let agent_execution_guard = match self.services.agent_control.try_execution_guard(

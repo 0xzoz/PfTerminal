@@ -303,7 +303,7 @@ impl RequestRouteTelemetry {
 }
 
 /// Issue #445: why a model request was not sent while the kill switch is on.
-pub(crate) const KILL_SWITCH_REFUSAL: &str = "Not sent: the security kill switch is on, so nothing is sent to the model. To turn it off, open /security, press g, choose \"Turn the kill switch off\" and confirm.";
+pub(crate) const KILL_SWITCH_REFUSAL: &str = "Not sent: the security kill switch is on, so Corbanu sends nothing to the model, and this message was not kept. To turn it off, open /security, press g, choose \"Turn the kill switch off\" and confirm.";
 
 /// A session-scoped client for model-provider API calls.
 ///
@@ -894,19 +894,28 @@ impl ModelClient {
         Ok(level)
     }
 
-    /// Issue #445: with the security kill switch on, no model request is
-    /// sent (a turn, compaction, memory summary or realtime call); a turn is
-    /// also refused before its input is recorded (`session::turn`). A policy
-    /// that cannot be read is refused by the source admission check instead.
+    /// Issue #445: whether the security kill switch a person turned on in
+    /// `/security` is on for this session. Only that switch: a session
+    /// started from unreadable state or a cold-resumed child agent is denied
+    /// protected actions too, but its turns still run.
+    pub(crate) fn kill_switch_on(&self) -> bool {
+        self.ingress_policy.as_ref().is_some_and(|policy| {
+            policy
+                .0
+                .snapshot_for_agent(self.state.thread_id)
+                .is_ok_and(|snapshot| snapshot.authority_kill_switch_active)
+        })
+    }
+
+    /// Issue #445: with the kill switch on, no model request is sent (a
+    /// turn, compaction, memory summary or realtime call); a turn is also
+    /// refused before its input is recorded (`session::turn`). A policy that
+    /// cannot be read is refused by the source admission check instead.
     pub(crate) fn refuse_under_kill_switch(&self) -> Result<()> {
-        let Some(policy) = &self.ingress_policy else {
-            return Ok(());
-        };
-        match policy.0.snapshot_for_agent(self.state.thread_id) {
-            Ok(snapshot) if snapshot.kill_switch_active => {
-                Err(CodexErr::InvalidRequest(KILL_SWITCH_REFUSAL.to_string()))
-            }
-            Ok(_) | Err(_) => Ok(()),
+        if self.kill_switch_on() {
+            Err(CodexErr::InvalidRequest(KILL_SWITCH_REFUSAL.to_string()))
+        } else {
+            Ok(())
         }
     }
 

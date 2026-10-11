@@ -207,6 +207,7 @@ pub(crate) async fn run_turn(
     // Issue #445: with the kill switch on, the turn is refused before its
     // input is recorded, so nothing of it reaches the model later either.
     if let Err(err) = sess.services.model_client().refuse_under_kill_switch() {
+        sess.track_turn_codex_error(turn_context.as_ref(), &err);
         sess.emit_turn_error_lifecycle(turn_context.as_ref(), err.to_codex_protocol_error())
             .await;
         let event = EventMsg::Error(err.to_error_event(/*message_prefix*/ None));
