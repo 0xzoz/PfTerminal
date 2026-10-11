@@ -1879,7 +1879,7 @@ fn allows_inside_denied_folders_survive_across_links() {
     // A denied link to a readable folder denies the folder itself.
     let policy = FileSystemSandboxPolicy::restricted(vec![
         entry(real.clone(), FileSystemAccessMode::Read),
-        entry(link.clone(), FileSystemAccessMode::Deny),
+        entry(link, FileSystemAccessMode::Deny),
     ]);
     let args = seatbelt_args(&policy, &base, vec!["/bin/true".to_string()]);
     let read = generated_clauses(&args, "READABLE_ROOT");
