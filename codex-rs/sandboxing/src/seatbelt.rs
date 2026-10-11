@@ -420,6 +420,30 @@ fn reached_through_root(path: &AbsolutePathBuf, root: &AbsolutePathBuf) -> bool 
         .any(|spelling| spelling.as_path().starts_with(root.as_path()))
 }
 
+/// Whether `path` (another root's protected path) is the explicit writable
+/// root `root` itself, which stays writable (#529): spelled alike once links
+/// resolve, with no link in `root` below its top-level folder. A root that
+/// is (or passes through) such a link, like a writable link to a
+/// workspace's `.git`, reopens nothing.
+fn is_explicit_root(path: &AbsolutePathBuf, root: &AbsolutePathBuf) -> bool {
+    if has_nested_link(root.as_path()) {
+        return false;
+    }
+    let root_spelling = normalize_path_for_sandbox(root.as_path()).unwrap_or_else(|| root.clone());
+    path == root || exclusion_spellings(path).contains(&root_spelling)
+}
+
+/// Whether a folder of `path` below its top-level one is a link (`/tmp` and
+/// `/var` on macOS are top-level aliases).
+fn has_nested_link(path: &Path) -> bool {
+    path.ancestors()
+        .filter(|ancestor| ancestor.parent().and_then(Path::parent).is_some())
+        .any(|ancestor| {
+            std::fs::symlink_metadata(ancestor)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        })
+}
+
 /// File-read access as the Seatbelt profile grants it.
 enum SeatbeltReadAccess {
     /// `(allow file-read*)`.
@@ -879,16 +903,72 @@ pub fn create_seatbelt_command_args(
     // path and every read-only path inside a writable root except the default
     // `.git`/`.codex`/`.agents` carve-outs at the root itself.
     let mut rename_guarded = unreadable_roots.clone();
+    let writable_roots = if file_system_sandbox_policy.has_full_disk_write_access() {
+        Vec::new()
+    } else {
+        file_system_sandbox_policy.get_writable_roots_with_cwd(sandbox_policy_cwd)
+    };
+    // #529: each root's protected paths (read-only paths and protected
+    // metadata names, also not created yet), once the policy denies reads.
+    let protected_by_root: Vec<Vec<AbsolutePathBuf>> = if unreadable_roots.is_empty() {
+        Vec::new()
+    } else {
+        writable_roots
+            .iter()
+            .map(|root| {
+                let mut protected = root.read_only_subpaths.clone();
+                for name in protected_metadata_names_for_writable_root(
+                    file_system_sandbox_policy,
+                    root,
+                    sandbox_policy_cwd,
+                ) {
+                    let path = root.root.join(name);
+                    if !protected.contains(&path) {
+                        protected.push(path);
+                    }
+                }
+                protected
+            })
+            .collect()
+    };
+    // The paths another writable root reaches: `(index of that root, path)`.
+    let reached_from_other_roots: Vec<(usize, AbsolutePathBuf)> = writable_roots
+        .iter()
+        .enumerate()
+        .flat_map(|(index, root)| {
+            protected_by_root
+                .iter()
+                .enumerate()
+                .filter(move |(owner, _)| *owner != index)
+                .flat_map(|(_, protected)| protected.iter())
+                .filter(|path| {
+                    reached_through_root(path, &root.root) && !is_explicit_root(path, &root.root)
+                })
+                .map(move |path| (index, path.clone()))
+        })
+        .collect();
     if !unreadable_roots.is_empty() && !file_system_sandbox_policy.has_full_disk_write_access() {
-        for root in file_system_sandbox_policy.get_writable_roots_with_cwd(sandbox_policy_cwd) {
-            rename_guarded.extend(root.read_only_subpaths.into_iter().filter(|subpath| {
-                !(subpath.as_path().parent() == Some(root.root.as_path())
-                    && subpath
-                        .as_path()
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .is_some_and(|name| PROTECTED_METADATA_PATH_NAMES.contains(&name)))
-            }));
+        for root in &writable_roots {
+            rename_guarded.extend(
+                root.read_only_subpaths
+                    .iter()
+                    .filter(|subpath| {
+                        !(subpath.as_path().parent() == Some(root.root.as_path())
+                            && subpath
+                                .as_path()
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .is_some_and(|name| PROTECTED_METADATA_PATH_NAMES.contains(&name)))
+                    })
+                    .cloned(),
+            );
+        }
+        // #529: a root's own `.git`/`.codex`/`.agents` may not be renamed
+        // with it (nor created) through another root that holds it.
+        for (_, path) in &reached_from_other_roots {
+            if !rename_guarded.contains(path) {
+                rename_guarded.push(path.clone());
+            }
         }
     }
     let (rename_guard_policy, rename_guard_params) =
@@ -913,38 +993,29 @@ pub fn create_seatbelt_command_args(
                 )
             }
         } else {
-            let writable_roots =
-                file_system_sandbox_policy.get_writable_roots_with_cwd(sandbox_policy_cwd);
             // #529: Seatbelt allows a write any writable root allows, so a
-            // read-only path one root protects stayed writable through another
-            // root reaching it (a writable link to a workspace's `.git`, or
-            // `/tmp` holding the workspace). Each root also excludes the other
-            // roots' read-only paths it reaches, as Linux does since #511; a
-            // path that is itself a writable root stays writable there. Like
-            // the rename guard, only once the policy denies reads: a policy
+            // protected path of one root stayed writable through another root
+            // reaching it (a writable link to a workspace's `.git`, or `/tmp`
+            // holding the workspace). Each root also excludes the other
+            // roots' protected paths it reaches, as Linux does since #511,
+            // except a path that is itself an explicit writable root. Like the
+            // rename guard, only once the policy denies reads: a policy
             // without denied paths keeps today's rules.
-            let other_read_only: Vec<AbsolutePathBuf> = if unreadable_roots.is_empty() {
-                Vec::new()
-            } else {
-                writable_roots
-                    .iter()
-                    .flat_map(|root| root.read_only_subpaths.iter().cloned())
-                    .collect()
-            };
             build_seatbelt_access_policy(
                 "file-write*",
                 "WRITABLE_ROOT",
                 writable_roots
                     .into_iter()
-                    .map(|root| {
+                    .enumerate()
+                    .map(|(index, root)| {
                         // Denied paths the root reaches only through a link
                         // are excluded too (#488); the rest already are.
                         let mut excluded_subpaths = root.read_only_subpaths.clone();
-                        for path in &other_read_only {
-                            if *path != root.root
-                                && !excluded_subpaths.contains(path)
-                                && reached_through_root(path, &root.root)
-                            {
+                        for (_, path) in reached_from_other_roots
+                            .iter()
+                            .filter(|(reaching, _)| *reaching == index)
+                        {
+                            if !excluded_subpaths.contains(path) {
                                 excluded_subpaths.push(path.clone());
                             }
                         }

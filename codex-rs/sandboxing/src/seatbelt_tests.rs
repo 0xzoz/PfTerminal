@@ -2144,9 +2144,10 @@ fn writable_links_cannot_reopen_read_only_paths_of_other_roots() {
         workspace = workspace.display(),
     );
     let stdout = run_in_seatbelt(&policy, &workspace, &script);
-    for line in ["git=1", "gitlink=1", "ro=1", "linkro=1", "ws=0", "link=0"] {
-        assert!(stdout.contains(line), "{line} not in {stdout}");
-    }
+    assert_lines(
+        &stdout,
+        &["git=1", "gitlink=1", "ro=1", "linkro=1", "ws=0", "link=0"],
+    );
     assert_eq!(
         fs::read_to_string(git.join("HEAD")).expect("HEAD"),
         "ref: refs/heads/main\n"
@@ -2192,4 +2193,90 @@ fn writable_link_clauses_are_unchanged_without_denials() {
     let write = generated_clauses(&args, "WRITABLE_ROOT");
     assert!(!clauses_allow(&write, &workspace.join(".git/HEAD")));
     assert!(clauses_allow(&write, &workspace.join("file")));
+}
+
+fn assert_lines(stdout: &str, expected: &[&str]) {
+    for line in expected {
+        assert!(
+            stdout.lines().any(|got| got == *line),
+            "{line} not in {stdout}"
+        );
+    }
+}
+
+fn root_read_entry() -> FileSystemSandboxEntry {
+    FileSystemSandboxEntry {
+        path: FileSystemPath::Special {
+            value: FileSystemSpecialPath::Root,
+        },
+        access: FileSystemAccessMode::Read,
+        missing_path_behavior: None,
+    }
+}
+
+/// #529 review: a writable folder holding the workspace (like `/tmp`)
+/// cannot write, create or rename-around the workspace's protected
+/// metadata, whether it exists or not.
+#[test]
+fn an_outer_writable_root_keeps_the_workspace_metadata_protected() {
+    let base = TempDir::new().expect("tempdir");
+    let base = base.path().canonicalize().expect("canonical");
+    let outer = base.join("outer");
+    let workspace = outer.join("ws");
+    fs::create_dir_all(workspace.join(".git")).expect(".git");
+    fs::write(workspace.join(".git/HEAD"), "ref\n").expect("HEAD");
+    let policy = FileSystemSandboxPolicy::restricted(vec![
+        root_read_entry(),
+        path_entry(&outer, FileSystemAccessMode::Write),
+        path_entry(&workspace, FileSystemAccessMode::Write),
+        path_entry(&base.join("denied"), FileSystemAccessMode::Deny),
+    ]);
+    let script = format!(
+        "echo x >> '{ws}/.git/HEAD'; echo git=$?; mkdir '{ws}/.agents'; echo agents=$?; \
+         mkdir '{ws}/.codex'; echo codex=$?; mv '{ws}' '{outer}/moved'; echo moved=$?; \
+         mv '{ws}/.git' '{outer}/git'; echo gitmoved=$?; echo x > '{ws}/file'; echo ws=$?; \
+         echo x > '{outer}/file'; echo outer=$?",
+        ws = workspace.display(),
+        outer = outer.display(),
+    );
+    let stdout = run_in_seatbelt(&policy, &workspace, &script);
+    assert_lines(
+        &stdout,
+        &[
+            "git=1",
+            "agents=1",
+            "codex=1",
+            "moved=1",
+            "gitmoved=1",
+            "ws=0",
+            "outer=0",
+        ],
+    );
+    assert!(workspace.join(".git/HEAD").exists() && !workspace.join(".agents").exists());
+}
+
+/// #529 review: an explicit writable root stays writable when another root
+/// spells its folder through a link (the workspace opened through a nested
+/// link, its real `.git` granted).
+#[test]
+fn an_explicit_writable_root_stays_writable_under_another_spelling() {
+    let base = TempDir::new().expect("tempdir");
+    let base = base.path().canonicalize().expect("canonical");
+    let real = base.join("real");
+    fs::create_dir_all(real.join(".git")).expect(".git");
+    let link = base.join("link");
+    std::os::unix::fs::symlink(&real, &link).expect("link");
+    let policy = FileSystemSandboxPolicy::restricted(vec![
+        root_read_entry(),
+        path_entry(&link, FileSystemAccessMode::Write),
+        path_entry(&real.join(".git"), FileSystemAccessMode::Write),
+        path_entry(&base.join("denied"), FileSystemAccessMode::Deny),
+    ]);
+    let script = format!(
+        "echo x > '{real}/.git/HEAD'; echo git=$?; echo x > '{link}/.git/config'; echo linkgit=$?",
+        real = real.display(),
+        link = link.display(),
+    );
+    let stdout = run_in_seatbelt(&policy, &link, &script);
+    assert_lines(&stdout, &["git=0", "linkgit=0"]);
 }
