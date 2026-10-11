@@ -2115,8 +2115,9 @@ impl App {
                 self.chat_widget
                     .open_reasoning_popup_for_purpose(model, purpose);
             }
-            AppEvent::OpenAdvancedReasoningPopup { model } => {
-                self.chat_widget.open_advanced_reasoning_popup(model);
+            AppEvent::OpenAdvancedReasoningPopup { model, purpose } => {
+                self.chat_widget
+                    .open_advanced_reasoning_popup_for_purpose(model, purpose);
             }
             AppEvent::ApplyAdvancedReasoning { model, effort } => {
                 let default_effort =

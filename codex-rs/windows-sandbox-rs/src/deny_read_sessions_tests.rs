@@ -148,7 +148,7 @@ fn sec_win_323_a_linked_or_foreign_owned_registry_is_refused() {
     // Administrators or SYSTEM own is.
     let owned = dir.path().join("owned");
     std::fs::create_dir(&owned).expect("owned");
-    set_owner_to_this_user(&owned);
+    make_this_user_the_owner(&owned);
     let production = DenyReadSessions {
         registry: Some(owned.clone()),
         own: None,
@@ -169,12 +169,37 @@ fn sec_win_323_a_linked_or_foreign_owned_registry_is_refused() {
     );
 }
 
-fn set_owner_to_this_user(path: &Path) {
+fn owner_of(path: &Path) -> String {
+    let file = super::open_no_follow(
+        path,
+        super::READ_CONTROL | super::FILE_READ_ATTRIBUTES,
+        super::FILE_FLAG_BACKUP_SEMANTICS,
+    )
+    .expect("open to read the owner");
+    super::owner_sid(&file).expect("read the owner")
+}
+
+/// #446: a folder this process creates is owned by its token's owner: this
+/// user in a normal session (the medium-integrity CI run sets it so), and
+/// Administrators when elevated. Change the owner only when it isn't this
+/// user already: that needs WRITE_OWNER on the folder, which a normal
+/// session doesn't always get from the inherited temp-folder ACL. Either
+/// way the folder must end up owned by this user.
+fn make_this_user_the_owner(path: &Path) {
+    let user = super::current_user_sid().expect("this user");
+    let before = owner_of(path);
+    eprintln!("sec-win-323: the new folder's owner is {before}; this user is {user}");
+    if before != user {
+        set_owner(path, &user, &before);
+    }
+    assert_eq!(owner_of(path), user, "the folder is owned by this user");
+}
+
+fn set_owner(path: &Path, user: &str, before: &str) {
     use windows_sys::Win32::Security::Authorization::SE_FILE_OBJECT;
     use windows_sys::Win32::Security::Authorization::SetNamedSecurityInfoW;
     use windows_sys::Win32::Security::OWNER_SECURITY_INFORMATION;
-    let user = super::current_user_sid().expect("this user");
-    let sid = crate::LocalSid::from_string(&user).expect("SID");
+    let sid = crate::LocalSid::from_string(user).expect("SID");
     let wide = crate::winutil::to_wide(path);
     // SAFETY: valid path and SID.
     let status = unsafe {
@@ -188,7 +213,7 @@ fn set_owner_to_this_user(path: &Path) {
             std::ptr::null_mut(),
         )
     };
-    assert_eq!(status, 0, "set the owner");
+    assert_eq!(status, 0, "set the owner (was {before}) to {user}");
 }
 
 /// Review M3: once a process has launched with two rule sets (a launch
