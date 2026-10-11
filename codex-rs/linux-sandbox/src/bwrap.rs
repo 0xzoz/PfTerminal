@@ -2168,6 +2168,62 @@ mod tests {
         }
     }
 
+    /// #503: a writable root that is a symlink to `/` is ordered by its
+    /// target, so it is bound before shallower roots instead of covering
+    /// them (and their masks) afterwards, and is followed by a fresh `/dev`.
+    #[cfg(unix)]
+    #[test]
+    fn writable_symlink_to_filesystem_root_is_bound_first() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let workspace = temp_dir.path().join("ws");
+        let denied_ancestor = temp_dir.path().join("a");
+        let link = denied_ancestor.join("b").join("c").join("root-link");
+        let denied = workspace.join("secret");
+        std::fs::create_dir_all(link.parent().expect("link parent")).expect("create link parent");
+        std::fs::create_dir(&workspace).expect("create workspace");
+        std::fs::write(&denied, "secret").expect("create denied file");
+        std::os::unix::fs::symlink("/", &link).expect("create symlink to /");
+        let entry = |path: &Path, access| FileSystemSandboxEntry {
+            path: FileSystemPath::Path {
+                path: AbsolutePathBuf::try_from(path).expect("absolute path"),
+            },
+            access,
+            missing_path_behavior: None,
+        };
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            entry(&workspace, FileSystemAccessMode::Write),
+            entry(&link, FileSystemAccessMode::Write),
+            entry(&denied, FileSystemAccessMode::Deny),
+            entry(&denied_ancestor, FileSystemAccessMode::Deny),
+        ]);
+
+        let args =
+            create_filesystem_args(&policy, temp_dir.path(), NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
+                .expect("filesystem args");
+        let position = |window: &[&str]| {
+            args.args
+                .windows(window.len())
+                .position(|candidate| candidate == window)
+        };
+        let root_bind = position(&["--bind", "/", "/", "--dev", "/dev"])
+            .expect("the symlink to `/` should bind `/` followed by `--dev /dev`");
+        let workspace = path_to_string(&workspace);
+        let workspace_bind = position(&["--bind", workspace.as_str(), workspace.as_str()])
+            .expect("workspace should be bound");
+        assert!(root_bind < workspace_bind, "{:?}", args.args);
+        let denied = path_to_string(&denied);
+        let deny_mask = args
+            .args
+            .iter()
+            .rposition(|arg| arg == &denied)
+            .expect("denied file should be masked");
+        assert!(workspace_bind < deny_mask, "{:?}", args.args);
+        // The bind target is `/`, so no mount point is created at the link
+        // spelling below its denied ancestor.
+        let link = path_to_string(&link);
+        assert!(!args.args.iter().any(|arg| arg == &link), "{:?}", args.args);
+    }
+
     #[test]
     fn missing_project_root_metadata_carveouts_use_metadata_path_masks() {
         let temp_dir = TempDir::new().expect("temp dir");
