@@ -957,7 +957,7 @@ async fn accounting_policy_busy_state_db_never_holds_a_request_up_and_loses_noth
 async fn accounting_policy_serial_retry_identity_and_time_sample_after_the_admission_lock()
 -> Result<()> {
     let fixture = Fixture::new().await?;
-    let admission = fixture.sampling.admission.lock().await;
+    let admission = fixture.sampling.admission.acquire().await?;
     let mut first = Box::pin(fixture.sampling.admit(MODEL, ENDPOINT));
     let mut second = Box::pin(fixture.sampling.admit(MODEL, ENDPOINT));
     assert!(poll!(&mut first).is_pending());

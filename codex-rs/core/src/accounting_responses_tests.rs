@@ -18,7 +18,6 @@ use codex_state::accounting::Observation;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use futures::FutureExt;
 use futures::StreamExt;
-use futures::poll;
 use pretty_assertions::assert_eq;
 use std::sync::atomic::AtomicUsize;
 

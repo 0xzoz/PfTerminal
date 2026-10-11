@@ -134,7 +134,7 @@ enum Settled {
 type Waiter = oneshot::Sender<Result<(), Settled>>;
 
 enum Command {
-    Write(Entry),
+    Write(Box<Entry>),
     Flush(Flush),
     /// Open (install or check) the ledger; answered like a record.
     Open(Waiter),
@@ -175,14 +175,14 @@ struct Job {
 }
 
 impl Job {
-    fn new(entry: Entry) -> Self {
+    fn new(entry: Box<Entry>) -> Self {
         let Entry {
             write,
             queued_at,
             file,
             waiter,
             adopted,
-        } = entry;
+        } = *entry;
         let (owner, attempt, prices, observations) = match write {
             LedgerWrite::Admit {
                 owner,
@@ -212,7 +212,7 @@ impl Job {
 
     /// Take `entry` into this job when it is the same attempt and the result
     /// is still one ledger write: the admission first, then its observations.
-    fn absorb(&mut self, entry: Entry) -> Result<(), Entry> {
+    fn absorb(&mut self, entry: Box<Entry>) -> Result<(), Box<Entry>> {
         if entry.write.attempt() != &self.attempt {
             return Err(entry);
         }
@@ -249,7 +249,7 @@ impl Job {
             waiter,
             adopted,
             ..
-        } = entry;
+        } = *entry;
         self.adopted &= adopted;
         match write {
             LedgerWrite::Admit { prices, .. } => self.prices = Some(prices),
@@ -535,7 +535,7 @@ impl StateRuntime {
             adopted: false,
         };
         let ahead = refs.shared.pending.fetch_add(1, Ordering::AcqRel);
-        if commands.send(Command::Write(entry)).is_err() {
+        if commands.send(Command::Write(Box::new(entry))).is_err() {
             // The writer's runtime is gone; the saved file is picked up later.
             refs.shared.pending.fetch_sub(1, Ordering::AcqRel);
             return Ok(WriteOutcome::Deferred);
@@ -680,7 +680,7 @@ async fn run(
             }
             for entry in adopted {
                 shared.pending.fetch_add(1, Ordering::AcqRel);
-                enqueue(&mut inbox.queue, entry);
+                enqueue(&mut inbox.queue, Box::new(entry));
             }
         }
         if inbox.queue.is_empty() && inbox.opens.is_empty() {
@@ -866,7 +866,7 @@ impl Inbox {
     }
 }
 
-fn enqueue(queue: &mut VecDeque<Job>, entry: Entry) {
+fn enqueue(queue: &mut VecDeque<Job>, entry: Box<Entry>) {
     // Only the newest job for an attempt can take more of its records;
     // anything earlier would move them ahead of records queued in between.
     let entry = match queue

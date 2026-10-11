@@ -9,7 +9,6 @@ use codex_state::accounting::Attempt;
 use codex_state::accounting::Observation;
 use codex_state::accounting::Snapshot;
 use codex_utils_absolute_path::AbsolutePathBuf;
-use futures::poll;
 use pretty_assertions::assert_eq;
 use uuid::Uuid;
 

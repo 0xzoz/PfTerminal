@@ -1003,7 +1003,7 @@ pub(crate) struct Sampling {
     previous: Mutex<Option<Uuid>>,
     /// Held from reading `previous` until this admission replaces it, so
     /// concurrent admissions chain as retries one after another.
-    admission: tokio::sync::Mutex<()>,
+    admission: tokio::sync::Semaphore,
     failed: AtomicBool,
     /// The turn must stop: see `halt`.
     halted: AtomicBool,
@@ -1184,7 +1184,7 @@ impl Sampling {
                 && provider == codex_model_provider_info::OPENAI_PROVIDER_ID,
             basis_source: basis_source_for(mode),
             previous: Mutex::new(None),
-            admission: tokio::sync::Mutex::new(()),
+            admission: tokio::sync::Semaphore::const_new(1),
             failed: AtomicBool::new(false),
             halted: AtomicBool::new(false),
         }))
@@ -1255,7 +1255,7 @@ impl Sampling {
             canonical_route(endpoint) == canonical_route(&self.endpoint),
             "accounting route mismatch"
         );
-        let _admission = self.admission.lock().await;
+        let _admission = self.admission.acquire().await?;
         self.check()?;
         let mut completion = Completion {
             sampling: self,
