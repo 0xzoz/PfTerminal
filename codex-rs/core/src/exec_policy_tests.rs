@@ -2796,6 +2796,66 @@ prefix_rule(pattern = ["rm"], decision = "forbidden")"#,
     Ok(())
 }
 
+/// Issue #443: while the session's live level is Aggressive (right after
+/// `/security` confirms it, before the restart that loads the rules file),
+/// the vault rule is part of the policy: wrapped forms, other paths and a
+/// user's own allow rule are refused too. Outside Aggressive nothing changes.
+#[tokio::test]
+async fn issue_443_live_aggressive_adds_the_vault_rule() {
+    let mut parser = PolicyParser::new();
+    parser
+        .parse(
+            "user.rules",
+            r#"prefix_rule(pattern=["corbanu", "vault"], decision="allow")"#,
+        )
+        .expect("parse policy");
+    let manager = ExecPolicyManager::new(Arc::new(parser.build()));
+    let requirement = |command: Vec<String>, live_aggressive: bool| {
+        let manager = &manager;
+        async move {
+            manager
+                .create_exec_approval_requirement(
+                    ExecApprovalRequest {
+                        command: &command,
+                        approval_policy: AskForApproval::OnRequest,
+                        permission_profile: PermissionProfile::read_only(),
+                        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+                        sandbox_permissions: SandboxPermissions::UseDefault,
+                        prefix_rule: None,
+                    },
+                    live_aggressive,
+                )
+                .await
+        }
+    };
+    let words = |text: &str| text.split(' ').map(str::to_string).collect::<Vec<_>>();
+    for command in [
+        words("corbanu vault list"),
+        words("/opt/bin/codex vault get provider/example"),
+        vec![
+            "bash".to_string(),
+            "-lc".to_string(),
+            "env FOO=1 corbanu vault list".to_string(),
+        ],
+    ] {
+        match requirement(command.clone(), /*live_aggressive*/ true).await {
+            ExecApprovalRequirement::Forbidden { reason } => assert!(
+                reason.contains("Security level Aggressive: agents cannot use the Corbanu vault."),
+                "{command:?}: {reason}"
+            ),
+            other => panic!("{command:?} not refused: {other:?}"),
+        }
+    }
+    assert!(!matches!(
+        requirement(words("corbanu vault list"), /*live_aggressive*/ false).await,
+        ExecApprovalRequirement::Forbidden { .. }
+    ));
+    assert!(!matches!(
+        requirement(words("corbanu --version"), /*live_aggressive*/ true).await,
+        ExecApprovalRequirement::Forbidden { .. }
+    ));
+}
+
 /// #444 (AGG-30): "don't ask again" for `python3 src/notes.py list` must not
 /// carry a chained command. Under Aggressive's approval policy (untrusted) a
 /// chained command that is not read-only still asks, and a chained read-only
