@@ -261,6 +261,19 @@ impl ExecCommandHandler {
         let requested_additional_permissions = additional_permissions.clone();
         // TODO(anp): Make permission matching operate on PathUri for remote environments.
         let permission_cwd = native_cwd.as_ref().unwrap_or(&turn.config.cwd);
+        // Issue #245: under Aggressive a protected path is never opened.
+        if let Some(refusal) = crate::security::protected_reads::additional_permission_refusal(
+            &session,
+            &turn,
+            additional_permissions.as_ref(),
+            permission_cwd.as_path(),
+        )
+        .await
+        {
+            crate::security::protected_reads::notify(&session, &turn, refusal.clone()).await;
+            manager.release_process_id(process_id).await;
+            return Err(FunctionCallError::RespondToModel(refusal));
+        }
         let effective_additional_permissions = apply_granted_turn_permissions(
             context.session.as_ref(),
             &turn_environment.environment_id,
