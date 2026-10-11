@@ -582,6 +582,9 @@ fn create_filesystem_args(
     // pass whose bind covers them (two roots bound at the same directory, or a
     // link whose target lies inside an earlier root) applies them again.
     let mut earlier_read_only_subpaths: Vec<PathBuf> = Vec::new();
+    // #503: the same for denials, in the form an earlier pass masked them
+    // (a denial spelled through a link is masked at the link's target).
+    let mut earlier_unreadable_roots: Vec<PathBuf> = Vec::new();
     for (writable_root, symlink_target) in &sorted_writable_roots {
         let root = writable_root.root.as_path();
         let mount_root = symlink_target.as_deref().unwrap_or(root);
@@ -678,8 +681,19 @@ fn create_filesystem_args(
             nested_unreadable_roots =
                 remap_paths_for_symlink_target(nested_unreadable_roots, root, target);
         }
+        nested_unreadable_roots.extend(
+            earlier_unreadable_roots
+                .iter()
+                .filter(|path| path.starts_with(mount_root))
+                .cloned(),
+        );
         nested_unreadable_roots.sort();
         nested_unreadable_roots.dedup();
+        for path in &nested_unreadable_roots {
+            if !earlier_unreadable_roots.contains(path) {
+                earlier_unreadable_roots.push(path.clone());
+            }
+        }
         nested_unreadable_roots.sort_by_key(|path| path_depth(path));
         // #473: denied paths missing below a read-only folder, by the folder
         // that gets a snapshot (see `append_read_only_snapshot_dir_args`).
@@ -2377,6 +2391,74 @@ mod tests {
             .rposition(|window| window == ["--ro-bind", read_only.as_str(), read_only.as_str()])
             .expect("read-only path should be bound read-only");
         assert!(target_bind < read_only_bind, "{:?}", args.args);
+    }
+
+    /// #503: a denial spelled through a link is masked at the link's target.
+    /// A writable root bound later inside that target (deeper, or the same
+    /// directory) masks it again after its own bind.
+    #[cfg(unix)]
+    #[test]
+    fn denial_spelled_through_a_link_survives_later_binds_of_its_target() {
+        let entry = |path: &Path, access| FileSystemSandboxEntry {
+            path: FileSystemPath::Path {
+                path: AbsolutePathBuf::try_from(path).expect("absolute path"),
+            },
+            access,
+            missing_path_behavior: None,
+        };
+        let masked_after_last_bind = |args: &BwrapArgs, bound: &Path, denied: &Path| {
+            let bound = path_to_string(bound);
+            let denied = path_to_string(denied);
+            let last_bind = args
+                .args
+                .windows(3)
+                .rposition(|window| window == ["--bind", bound.as_str(), bound.as_str()])
+                .expect("writable root should be bound");
+            let deny_mask = args
+                .args
+                .iter()
+                .rposition(|arg| arg == &denied)
+                .expect("denial should be masked at the link target");
+            assert!(last_bind < deny_mask, "{:?}", args.args);
+        };
+
+        // The link is spelled deeper than its target, which holds a deeper
+        // writable root.
+        let temp_dir = TempDir::new().expect("temp dir");
+        let target = temp_dir.path().join("x");
+        let nested = target.join("sub");
+        let link = temp_dir.path().join("a").join("b").join("c").join("l");
+        std::fs::create_dir_all(&nested).expect("create nested root");
+        std::fs::write(nested.join("secret"), "secret").expect("create secret");
+        std::fs::create_dir_all(link.parent().expect("link parent")).expect("link parent");
+        std::os::unix::fs::symlink(&target, &link).expect("create link");
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            entry(&link, FileSystemAccessMode::Write),
+            entry(&nested, FileSystemAccessMode::Write),
+            entry(&link.join("sub").join("secret"), FileSystemAccessMode::Deny),
+        ]);
+        let args =
+            create_filesystem_args(&policy, temp_dir.path(), NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
+                .expect("filesystem args");
+        masked_after_last_bind(&args, &nested, &nested.join("secret"));
+
+        // The link and a writable root bind the same directory.
+        let temp_dir = TempDir::new().expect("temp dir");
+        let target = temp_dir.path().join("x");
+        let link = temp_dir.path().join("a").join("b").join("l");
+        std::fs::create_dir_all(&target).expect("create target");
+        std::fs::write(target.join("secret"), "secret").expect("create secret");
+        std::fs::create_dir_all(link.parent().expect("link parent")).expect("link parent");
+        std::os::unix::fs::symlink(&target, &link).expect("create link");
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            entry(&link, FileSystemAccessMode::Write),
+            entry(&target, FileSystemAccessMode::Write),
+            entry(&link.join("secret"), FileSystemAccessMode::Deny),
+        ]);
+        let args =
+            create_filesystem_args(&policy, temp_dir.path(), NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
+                .expect("filesystem args");
+        masked_after_last_bind(&args, &target, &target.join("secret"));
     }
 
     /// #503: with `:root = write`, an extra writable link to `/` binds `/`
