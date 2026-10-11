@@ -1420,9 +1420,11 @@ async fn full_write_profile_with_denial_keeps_dev_null_usable() {
     );
 }
 
-/// #503: a writable root that is a symlink to `/` is bound before shallower
-/// writable roots, so their protections (a read-only `.git`, a denied file)
-/// are not covered by the later `/` bind.
+/// #503: in a full-write profile (`:root = write` plus a denial), an extra
+/// writable root that is a symlink to `/` is treated as `/`: it is bound before
+/// shallower writable roots, so their protections (a read-only `.git`, a
+/// denied file) are not covered by a later `/` bind, and it asks for no mount
+/// points at the filesystem root.
 #[tokio::test]
 async fn writable_symlink_to_root_keeps_shallower_root_protections() {
     if should_skip_bwrap_tests().await {
@@ -1450,7 +1452,7 @@ async fn writable_symlink_to_root_keeps_shallower_root_protections() {
             path: FileSystemPath::Special {
                 value: FileSystemSpecialPath::Root,
             },
-            access: FileSystemAccessMode::Read,
+            access: FileSystemAccessMode::Write,
             missing_path_behavior: None,
         },
         entry(&workspace, FileSystemAccessMode::Write),
