@@ -12,6 +12,7 @@ use std::fmt;
 
 use chrono::Utc;
 use codex_secrets::SecretName;
+use codex_secrets::SecretScope;
 use sha2::Digest;
 use sha2::Sha256;
 use zeroize::Zeroizing;
@@ -367,7 +368,7 @@ impl Vault {
                     storage_backend: StorageBackend::EncryptedSecrets,
                 },
             );
-            let updates = vec![
+            let mut updates = vec![
                 (
                     VAULT_SCOPE.clone(),
                     secret_name_for(&label)?,
@@ -375,6 +376,7 @@ impl Vault {
                 ),
                 index_secret_entry(&index)?,
             ];
+            updates.extend(self.missing_fingerprint_salt()?);
             self.secrets.apply_batch(&updates, &[])?;
             Ok(())
         })
@@ -461,6 +463,7 @@ impl Vault {
                 )));
             }
             updates.push(index_secret_entry(&index)?);
+            updates.extend(self.missing_fingerprint_salt()?);
             self.secrets.apply_batch(&updates, &deletes)?;
             Ok(())
         })
@@ -469,8 +472,12 @@ impl Vault {
     /// A 12-hex fingerprint of a named account's material, salted per home so
     /// it cannot be reversed or correlated across machines. Two accounts that
     /// hold the same material share a fingerprint. `Ok(None)` when the account
-    /// holds nothing. The salt is created on first use and never leaves the
-    /// vault.
+    /// holds nothing, or when the vault has no salt yet.
+    ///
+    /// This is a read: it never writes the vault (#474). The salt is created,
+    /// and never leaves the vault, when an account is added or renamed, in the
+    /// same write. A vault whose accounts were all added before fingerprints
+    /// existed has none until its next such write.
     pub fn provider_account_fingerprint(
         &self,
         provider_id: &str,
@@ -496,7 +503,9 @@ impl Vault {
             if material.is_empty() {
                 return Ok(None);
             }
-            let salt = self.account_fingerprint_salt()?;
+            let Some(salt) = self.account_fingerprint_salt()? else {
+                return Ok(None);
+            };
             let mut hasher = Sha256::new();
             hasher.update(b"corbanu-provider-account-fingerprint-v1\0");
             hasher.update(salt.as_bytes());
@@ -519,23 +528,34 @@ impl Vault {
         })
     }
 
-    /// Reads or creates the per-home fingerprint salt. Callers hold the lock.
-    fn account_fingerprint_salt(&self) -> Result<Zeroizing<String>, VaultError> {
-        let name = SecretName::new(FINGERPRINT_SALT_SECRET_NAME).map_err(|error| {
-            VaultError::Storage(anyhow::anyhow!("invalid salt secret name: {error}"))
-        })?;
-        if let Some(salt) = self.secrets.get(&VAULT_SCOPE, &name)? {
-            return Ok(Zeroizing::new(salt));
+    /// Reads the per-home fingerprint salt. Callers hold the lock.
+    fn account_fingerprint_salt(&self) -> Result<Option<Zeroizing<String>>, VaultError> {
+        Ok(self
+            .secrets
+            .get(&VAULT_SCOPE, &fingerprint_salt_name()?)?
+            .map(Zeroizing::new))
+    }
+
+    /// The write that creates the fingerprint salt, when the vault has none.
+    /// Callers hold the lock and add it to a write they make anyway.
+    fn missing_fingerprint_salt(
+        &self,
+    ) -> Result<Option<(SecretScope, SecretName, String)>, VaultError> {
+        if self.account_fingerprint_salt()?.is_some() {
+            return Ok(None);
         }
-        let salt = Zeroizing::new(format!(
+        let salt = format!(
             "{}{}",
             uuid::Uuid::new_v4().simple(),
             uuid::Uuid::new_v4().simple()
-        ));
-        self.secrets
-            .apply_batch(&[(VAULT_SCOPE.clone(), name, salt.to_string())], &[])?;
-        Ok(salt)
+        );
+        Ok(Some((VAULT_SCOPE.clone(), fingerprint_salt_name()?, salt)))
     }
+}
+
+fn fingerprint_salt_name() -> Result<SecretName, VaultError> {
+    SecretName::new(FINGERPRINT_SALT_SECRET_NAME)
+        .map_err(|error| VaultError::Storage(anyhow::anyhow!("invalid salt secret name: {error}")))
 }
 
 /// The per-home fingerprint salt. It is not a credential, so it stays out of
