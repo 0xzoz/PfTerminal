@@ -806,6 +806,83 @@ mod thread_processor_behavior_tests {
         );
     }
 
+    /// PF-84 (#425): another provider's `--account` cannot mismatch a running
+    /// thread; an account of the thread's own provider still can.
+    #[test]
+    fn collect_resume_override_mismatches_ignores_another_providers_account() {
+        let cwd = test_path_buf("/tmp").abs();
+        let request = ThreadResumeParams {
+            thread_id: "thread-1".to_string(),
+            history: None,
+            path: None,
+            model: None,
+            model_provider: None,
+            provider_account: None,
+            service_tier: None,
+            cwd: None,
+            runtime_workspace_roots: None,
+            approval_policy: None,
+            approvals_reviewer: None,
+            sandbox: None,
+            permissions: None,
+            config: None,
+            base_instructions: None,
+            developer_instructions: None,
+            personality: None,
+            exclude_turns: false,
+            initial_turns_page: None,
+        };
+        let config_snapshot = ThreadConfigSnapshot {
+            model: "gpt-5".to_string(),
+            model_provider_id: "zai".to_string(),
+            service_tier: Some("flex".to_string()),
+            approval_policy: codex_protocol::protocol::AskForApproval::OnRequest,
+            approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer::User,
+            permission_profile: codex_protocol::models::PermissionProfile::Disabled,
+            active_permission_profile: None,
+            environments: TurnEnvironmentSelections::new(cwd, Vec::new()),
+            workspace_roots: Vec::new(),
+            profile_workspace_roots: Vec::new(),
+            ephemeral: false,
+            reasoning_effort: None,
+            reasoning_summary: None,
+            personality: None,
+            collaboration_mode: CollaborationMode {
+                mode: ModeKind::Default,
+                settings: Settings {
+                    model: "gpt-5".to_string(),
+                    reasoning_effort: None,
+                    developer_instructions: None,
+                },
+            },
+            session_source: SessionSource::Cli,
+            history_mode: Default::default(),
+            forked_from_thread_id: None,
+            parent_thread_id: None,
+            thread_source: None,
+            originator: "test_originator".to_string(),
+            provider_account: Some("zai:work".to_string()),
+        };
+
+        let mismatches = |selection: &str| {
+            let mut request = request.clone();
+            request.provider_account = Some(selection.to_string());
+            collect_resume_override_mismatches(&request, &config_snapshot)
+        };
+        assert_eq!(
+            [
+                mismatches("kimi-code:alt"),
+                mismatches("work"),
+                mismatches("main")
+            ],
+            [
+                Vec::<String>::new(),
+                Vec::new(),
+                vec!["provider_account requested=zai:main active=Some(\"zai:work\")".to_string()],
+            ]
+        );
+    }
+
     fn test_thread_metadata(
         model: Option<&str>,
         reasoning_effort: Option<ReasoningEffort>,
