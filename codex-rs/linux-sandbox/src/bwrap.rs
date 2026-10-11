@@ -530,7 +530,12 @@ fn create_filesystem_args(
     }
     let unreadable_paths: HashSet<PathBuf> = unreadable_roots.iter().cloned().collect();
     let mut sorted_writable_roots = writable_roots;
-    sorted_writable_roots.sort_by_key(|writable_root| path_depth(writable_root.root.as_path()));
+    // #503: order by the bound (canonical) path, so a symlink to `/` is bound
+    // first like `/` itself instead of covering shallower roots' masks.
+    sorted_writable_roots.sort_by_cached_key(|writable_root| {
+        let root = writable_root.root.as_path();
+        path_depth(&canonical_target_if_symlinked_path(root).unwrap_or_else(|| root.to_path_buf()))
+    });
     // Mask only the unreadable ancestors that sit outside every writable root.
     // Unreadable paths nested under a broader writable root are applied after
     // that broader root is bound, then reopened by any deeper writable child.
@@ -566,6 +571,7 @@ fn create_filesystem_args(
     for writable_root in &sorted_writable_roots {
         let root = writable_root.root.as_path();
         let symlink_target = canonical_target_if_symlinked_path(root);
+        let mount_root = symlink_target.as_deref().unwrap_or(root);
         // #473: placeholders are deduplicated within this pass only. Its
         // `--bind` puts the live host folder back over every mount an earlier
         // (broader) pass made below it.
@@ -576,13 +582,12 @@ fn create_filesystem_args(
         if let Some(masking_root) = unreadable_roots
             .iter()
             .map(PathBuf::as_path)
-            .filter(|unreadable_root| root.starts_with(unreadable_root))
+            .filter(|unreadable_root| mount_root.starts_with(unreadable_root))
             .max_by_key(|unreadable_root| path_depth(unreadable_root))
         {
-            append_mount_target_parent_dir_args(&mut bwrap_args.args, root, masking_root);
+            append_mount_target_parent_dir_args(&mut bwrap_args.args, mount_root, masking_root);
         }
 
-        let mount_root = symlink_target.as_deref().unwrap_or(root);
         bwrap_args.args.push("--bind".to_string());
         bwrap_args.args.push(path_to_string(mount_root));
         bwrap_args.args.push(path_to_string(mount_root));
@@ -605,11 +610,11 @@ fn create_filesystem_args(
             // an unprivileged bwrap cannot create a mount point there:
             // `mkdir /.git` or `/.codex` would fail every command.
             .filter(|path| {
-                !(full_write_root && root.parent().is_none() && path.parent() == Some(root))
+                !(full_write_root && mount_root.parent().is_none() && path.parent() == Some(root))
                     || path.exists()
             })
             .collect();
-        let protected_metadata_names = if root.parent().is_none() && full_write_root {
+        let protected_metadata_names = if mount_root.parent().is_none() && full_write_root {
             Vec::new()
         } else {
             writable_root.protected_metadata_names.clone()
