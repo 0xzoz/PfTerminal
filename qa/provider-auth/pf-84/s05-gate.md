@@ -23,6 +23,10 @@ off no attempt names an account and nothing below changes.
   creates a vault, key or salt, and is limited to 2 s. If the fingerprint can't be read in time,
   the account is recorded by name alone and the request is never held up.
 
+  Follow-up #474: the read used to create the salt on a vault made before S05, rewriting it on
+  the first named request. The salt is now created only when an account is added or renamed, in
+  that same write; until then such a vault's accounts are recorded by name alone.
+
   A sampling refuses a rebound mode on another account. A fingerprint is reused only for the
   same provider and account. Requests reported by another client (the Claude panes bridge)
   record no account.
