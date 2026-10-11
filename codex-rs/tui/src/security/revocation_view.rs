@@ -309,11 +309,16 @@ impl RevocationView {
                         |report| {
                             // #507: Core stopped its sessions; the Claude
                             // panes are the app's to stop.
-                            if revocation == HumanRevocation::KillSwitchOn
-                                && report.kill_switch_active
-                                && let Some(tx) = &app_event_tx
-                            {
-                                tx.send(AppEvent::KillSwitchTurnedOn);
+                            if let Some(tx) = &app_event_tx {
+                                match (revocation, report.kill_switch_active) {
+                                    (HumanRevocation::KillSwitchOn, true) => {
+                                        tx.send(AppEvent::KillSwitchTurnedOn);
+                                    }
+                                    (HumanRevocation::KillSwitchOff, false) => {
+                                        tx.send(AppEvent::KillSwitchTurnedOff);
+                                    }
+                                    _ => {}
+                                }
                             }
                             let message = outcome_line(revocation, &report);
                             Outcome {
@@ -484,15 +489,15 @@ fn review_text(choice: &Choice, level: SecurityLevel) -> (String, Vec<String>) {
         Choice::Core(HumanRevocation::KillSwitchOn) => (
             "Turn the kill switch on?".to_string(),
             vec![
-                "Everything \"Revoke all\" ends, and it stops what is running now, in every pane, Claude panes included: a reply in progress is cancelled and the commands it is running are ended, and so are background terminals.".to_string(),
-                "Until you turn it off here: Corbanu sends nothing to the model (each new turn is refused with a message saying so), messages from other agents wait and are delivered with the first turn after you turn it off, no grant can be issued, protected actions after untrusted content are refused, the browser and memory writes are refused, and the credential broker stays closed.".to_string(),
+                "Everything \"Revoke all\" ends, and work running now in every pane of this Corbanu Terminal stops, Claude panes included: a reply in progress is cancelled and its commands are stopped, as when you interrupt it, and background terminals end.".to_string(),
+                "Until you turn it off here: this Corbanu Terminal sends nothing to the model (each new turn is refused with a message saying so), messages from other agents wait (Codex panes get them with their first turn after you turn it off; tasks for Claude panes are sent when you turn it off), no grant can be issued, protected actions after untrusted content are refused, the browser and memory writes are refused, and the credential broker stays closed. Another Corbanu Terminal on this home takes the switch when it next starts.".to_string(),
                 format!("Saved in security_state.json: it holds after a restart. The level stays {level}."),
             ],
         ),
         Choice::Core(HumanRevocation::KillSwitchOff) => (
             "Turn the kill switch off?".to_string(),
             vec![
-                "Turns are sent to the model again, in Codex and Claude panes; messages from other agents that waited are delivered with the next turn (turning it off does not start one). Protected actions can be approved again and grants can be issued. Revoked grants and approvals do not come back; stopped replies and commands do not restart.".to_string(),
+                "Turns are sent to the model again, in Codex and Claude panes. Messages from other agents that waited reach Codex panes with their next turn (turning it off does not start one); tasks held for Claude panes are sent now. Protected actions can be approved again and grants can be issued. Revoked grants and approvals do not come back; stopped replies and commands do not restart.".to_string(),
                 format!("The level stays {level}: turning the kill switch off never lowers it."),
             ],
         ),

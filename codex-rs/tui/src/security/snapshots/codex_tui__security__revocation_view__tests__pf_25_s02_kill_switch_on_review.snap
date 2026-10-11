@@ -6,14 +6,15 @@ Grants and kill switch
 Core's level: Permissive · Kill switch: off
 
 Turn the kill switch on?
-Everything "Revoke all" ends, and it stops what is running now, in every pane, Claude
-panes included: a reply in progress is cancelled and the commands it is running are ended,
-and so are background terminals.
-Until you turn it off here: Corbanu sends nothing to the model (each new turn is
-refused with a message saying so), messages from other agents wait and are delivered
-with the first turn after you turn it off, no grant can be issued, protected actions
-after untrusted content are refused, the browser and memory writes are refused, and the
-credential broker stays closed.
+Everything "Revoke all" ends, and work running now in every pane of this Corbanu Terminal
+stops, Claude panes included: a reply in progress is cancelled and its commands are
+stopped, as when you interrupt it, and background terminals end.
+Until you turn it off here: this Corbanu Terminal sends nothing to the model (each new
+turn is refused with a message saying so), messages from other agents wait (Codex panes
+get them with their first turn after you turn it off; tasks for Claude panes are sent
+when you turn it off), no grant can be issued, protected actions after untrusted content
+are refused, the browser and memory writes are refused, and the credential broker stays
+closed. Another Corbanu Terminal on this home takes the switch when it next starts.
 Saved in security_state.json: it holds after a restart. The level stays Permissive.
 
 enter confirm · esc cancel, nothing changes

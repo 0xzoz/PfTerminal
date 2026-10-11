@@ -31,12 +31,14 @@ impl TurnLifecycleState {
 
     pub(super) fn start(&mut self, now: Instant) {
         self.agent_turn_running = true;
+        self.kill_switch_stopped = false;
         self.goal_status_active_turn_started_at = Some(now);
         self.sleep_inhibitor.set_turn_running(/*turn_running*/ true);
     }
 
     pub(super) fn finish(&mut self) {
         self.agent_turn_running = false;
+        self.kill_switch_stopped = false;
         self.goal_status_active_turn_started_at = None;
         self.sleep_inhibitor
             .set_turn_running(/*turn_running*/ false);

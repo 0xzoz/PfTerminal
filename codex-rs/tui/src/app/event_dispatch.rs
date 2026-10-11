@@ -1341,6 +1341,9 @@ impl App {
             AppEvent::KillSwitchTurnedOn => {
                 self.stop_claude_panes_for_kill_switch();
             }
+            AppEvent::KillSwitchTurnedOff => {
+                self.send_held_claude_tasks();
+            }
             AppEvent::FatalExitRequest(message) => {
                 return Ok(AppRunControl::Exit(ExitReason::Fatal(message)));
             }

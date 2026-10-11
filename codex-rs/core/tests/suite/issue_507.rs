@@ -69,8 +69,8 @@ fn builder(approval: AskForApproval, unified: bool) -> TestCodexBuilder {
         })
 }
 
-/// The person turns the kill switch on in `/security`.
-fn kill_switch_on_now(test: &TestCodex) -> anyhow::Result<()> {
+/// The person confirms `choice` in `/security`.
+fn revoke(test: &TestCodex, choice: HumanRevocation) -> anyhow::Result<()> {
     let home = test.codex_home_path();
     let thread = Some(test.session_configured.thread_id);
     let basis = LevelBasis::read(home, SecurityLevel::Aggressive, thread);
@@ -80,12 +80,23 @@ fn kill_switch_on_now(test: &TestCodex) -> anyhow::Result<()> {
         SecurityLevel::Aggressive,
         thread,
         &basis,
-        HumanRevocation::KillSwitchOn,
+        choice,
         /*now_unix_seconds*/ 1_000,
     )?;
-    assert!(report.kill_switch_active);
-    assert!(kill_switch_on(home));
+    assert_eq!(
+        report.kill_switch_active,
+        choice == HumanRevocation::KillSwitchOn
+    );
+    assert_eq!(
+        kill_switch_on(home),
+        choice == HumanRevocation::KillSwitchOn
+    );
     Ok(())
+}
+
+/// The person turns the kill switch on in `/security`.
+fn kill_switch_on_now(test: &TestCodex) -> anyhow::Result<()> {
+    revoke(test, HumanRevocation::KillSwitchOn)
 }
 
 async fn submit(test: &TestCodex, text: &str) -> anyhow::Result<()> {
@@ -343,5 +354,39 @@ async fn issue_507_control_background_command_runs_without_the_kill_switch() -> 
     .await;
     tokio::time::sleep(Duration::from_secs(COMMAND_SECONDS + 2)).await;
     assert!(marker.exists(), "the control command did not run");
+    Ok(())
+}
+
+/// "Revoke all" ends grants and approvals but leaves running work alone, as
+/// its review says; only the kill switch stops it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_507_revoke_all_leaves_the_running_command_alone() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    let marker_dir = tempfile::TempDir::new()?;
+    let marker = marker_dir.path().join("ran");
+    let command = format!("sleep {COMMAND_SECONDS}; touch '{}'", marker.display());
+    let server = start_mock_server().await;
+    mount_sse_sequence(
+        &server,
+        vec![sse(shell_call("call-1", &command)), sse(done())],
+    )
+    .await;
+    let test = builder(AskForApproval::Never, /*unified*/ false)
+        .build_with_auto_env(&server)
+        .await?;
+    submit(&test, "run the slow command").await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::ExecCommandBegin(_))
+    })
+    .await;
+
+    revoke(&test, HumanRevocation::AllActiveAuthority)?;
+    let ended = wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_))
+            || matches!(event, EventMsg::Warning(warning) if warning.message == KILL_SWITCH_STOPPED)
+    })
+    .await;
+    assert!(matches!(ended, EventMsg::TurnComplete(_)), "{ended:?}");
+    assert!(marker.exists(), "the command finished");
     Ok(())
 }

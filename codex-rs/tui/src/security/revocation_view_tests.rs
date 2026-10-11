@@ -333,7 +333,8 @@ fn pf_25_s02_only_this_view_revokes() {
         .map(|path| path.display().to_string())
         .filter(|path| {
             !path.ends_with("_tests.rs")
-                && !path.ends_with("/tests.rs")
+                && path != "tui/src/claude_panes/tests.rs"
+                && path != "tui/src/app/tests.rs"
                 && !path.contains("/tests/")
         })
         .filter(|path| !path.starts_with("core/src/security/"))

@@ -413,6 +413,8 @@ pub(crate) enum AppEvent {
     /// #507: the kill switch was turned on in `/security`; stop the Claude
     /// panes' running turns (Core stops its own sessions).
     KillSwitchTurnedOn,
+    /// #507: the kill switch was turned off; send the Claude pane tasks it held.
+    KillSwitchTurnedOff,
     /// Open the `/spawn` role picker.
     OpenSpawnRolePicker,
     /// Open the `/spawn` Nazgul pane-binding picker.

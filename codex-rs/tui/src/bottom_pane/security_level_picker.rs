@@ -761,7 +761,7 @@ impl SecurityLevelPicker {
             && !matches!(self.basis.stored, StoredSecurityState::Unreadable(_))
         {
             lines.push(
-                "Kill switch: on. Model turns in every pane (Claude panes too), new grants and protected actions after untrusted content are refused, and messages from other agents wait; press g to turn it off.".to_string(),
+                "Kill switch: on. Model turns in every pane (Claude panes too), new grants and protected actions after untrusted content are refused, and messages and tasks from other agents wait; press g to turn it off.".to_string(),
             );
         }
         // PF-25-S01: grants held now, with their scope and expiry.

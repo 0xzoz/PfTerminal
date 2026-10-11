@@ -5,21 +5,28 @@
 //! - The turn in progress is interrupted: a reply still streaming is
 //!   cancelled, approvals it is waiting for end, and the commands it started
 //!   are stopped with it.
-//! - Background terminals (unified exec processes) are ended too.
+//! - Background terminals (unified exec processes) and an open realtime
+//!   conversation are ended too.
 //! - A tool call that reaches the router while the switch is on is not run
 //!   ([`refuse_tool_call`]), so nothing slips through between the switch and
 //!   the interruption.
+//!
+//! Only this process's sessions are stopped: another Corbanu Terminal on the
+//! same home refuses turns once it reads the saved switch (at its start).
 //!
 //! Agent messages that arrive while the switch is on keep waiting (#445): no
 //! turn starts for them until a person turns the switch off.
 
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::PoisonError;
 use std::sync::Weak;
 
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::WarningEvent;
 
+use super::effective_policy::EffectivePolicyView;
 use super::transition::RevocationSink;
 use crate::function_tool::FunctionCallError;
 use crate::session::session::Session;
@@ -35,25 +42,47 @@ const KILL_SWITCH_TOOL_REFUSAL: &str = "Not run: the security kill switch is on,
 /// the policy tree holds it weakly.
 pub(crate) struct KillSwitchStop {
     session: Weak<Session>,
+    /// The session's policy tree.
+    policy: EffectivePolicyView,
+    /// The kill-switch event this session last saw: only a new one stops it.
+    seen: Mutex<Option<String>>,
     /// The commit runs on a plain thread; the stop runs on the session's runtime.
     runtime: tokio::runtime::Handle,
 }
 
 impl KillSwitchStop {
-    pub(crate) fn new(session: Weak<Session>, runtime: tokio::runtime::Handle) -> Self {
-        Self { session, runtime }
+    pub(crate) fn new(
+        session: Weak<Session>,
+        policy: EffectivePolicyView,
+        runtime: tokio::runtime::Handle,
+    ) -> Self {
+        let seen = Mutex::new(policy.kill_switch_event());
+        Self {
+            session,
+            policy,
+            seen,
+            runtime,
+        }
     }
 }
 
 impl RevocationSink for KillSwitchStop {
     fn revoke(&self) {
+        // Sinks are also told of "Revoke all" and stricter levels: only a
+        // kill switch turned on since this session last looked stops it.
+        let event = self.policy.kill_switch_event();
+        let fresh = {
+            let mut seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
+            let fresh = event.is_some() && *seen != event;
+            *seen = event;
+            fresh
+        };
+        if !fresh {
+            return;
+        }
         let Some(session) = self.session.upgrade() else {
             return;
         };
-        // Sinks are also told of "Revoke all", stricter levels and run end.
-        if !session.services.model_client().kill_switch_on() {
-            return;
-        }
         self.runtime.spawn(async move { stop(&session).await });
     }
 }
@@ -85,11 +114,19 @@ async fn stop(session: &Arc<Session>) {
         session.abort_all_tasks(TurnAbortReason::Interrupted).await;
     }
     session.close_unified_exec_processes().await;
+    let _ = session.conversation.shutdown().await;
 }
 
-/// A tool call is not run while the kill switch is on.
+/// A tool call is not run while the kill switch is on (anywhere in the
+/// session's policy tree).
 pub(crate) fn refuse_tool_call(session: &Session) -> Result<(), FunctionCallError> {
-    if session.services.model_client().kill_switch_on() {
+    if session
+        .services
+        .agent_control
+        .effective_security_policy()
+        .kill_switch_event()
+        .is_some()
+    {
         Err(FunctionCallError::RespondToModel(
             KILL_SWITCH_TOOL_REFUSAL.to_string(),
         ))

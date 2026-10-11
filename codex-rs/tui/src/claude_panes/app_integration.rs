@@ -959,6 +959,27 @@ impl App {
             self.chat_widget.add_error_message(reason);
             return;
         }
+        // #507: while the kill switch is on, a task another agent sent waits,
+        // as agent messages to Codex panes do, and is sent once it is off.
+        if crate::legacy_core::security_revocation::kill_switch_on(self.config.codex_home.as_ref())
+        {
+            let node_key = crate::spawn_orchestration::pane_node_id(&pane_id);
+            self.abort_spawn_auto_processing_turn(&node_key);
+            let title = self
+                .claude_panes
+                .panes()
+                .iter()
+                .find(|pane| pane.id == pane_id)
+                .map_or_else(|| pane_id.clone(), |pane| pane.title.clone());
+            self.kill_switch_held_claude_tasks.push((pane_id, task));
+            self.chat_widget.add_info_message(
+                format!(
+                    "A task for Claude pane `{title}` waits: the security kill switch is on. It is sent when the switch is turned off."
+                ),
+                /*hint*/ None,
+            );
+            return;
+        }
         let is_active = self.claude_panes.active_user_pane_id() == pane_id;
         let user_cell =
             crate::history_cell::new_user_prompt(task.clone(), Vec::new(), Vec::new(), Vec::new());
@@ -1192,6 +1213,41 @@ impl App {
                 }
             }
         }
+        // #507: the pane is free again; the next task it held may go.
+        self.send_next_held_claude_task(&pane_id);
+    }
+
+    /// #507: the kill switch was turned off: each Claude pane gets the first
+    /// task held for it now, and the rest as its turns end.
+    pub(crate) fn send_held_claude_tasks(&mut self) {
+        let mut panes: Vec<String> = Vec::new();
+        for (pane_id, _) in &self.kill_switch_held_claude_tasks {
+            if !panes.contains(pane_id) {
+                panes.push(pane_id.clone());
+            }
+        }
+        for pane_id in panes {
+            self.send_next_held_claude_task(&pane_id);
+        }
+    }
+
+    fn send_next_held_claude_task(&mut self, pane_id: &str) {
+        let Some(index) = self
+            .kill_switch_held_claude_tasks
+            .iter()
+            .position(|(held, _)| held == pane_id)
+        else {
+            return;
+        };
+        if self.claude_panes.claude_pane_is_running(pane_id)
+            || crate::legacy_core::security_revocation::kill_switch_on(
+                self.config.codex_home.as_ref(),
+            )
+        {
+            return;
+        }
+        let (pane_id, task) = self.kill_switch_held_claude_tasks.remove(index);
+        self.submit_claude_pane_task(pane_id, task);
     }
 
     fn user_pane_items(&self) -> Vec<SelectionItem> {

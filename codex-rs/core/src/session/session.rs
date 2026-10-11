@@ -1289,6 +1289,7 @@ impl Session {
             let kill_switch_stop = sess.services.thread_extension_data.get_or_init(|| {
                 crate::security::kill_switch_stop::KillSwitchStop::new(
                     Arc::downgrade(&sess),
+                    sess.services.agent_control.effective_security_policy(),
                     tokio::runtime::Handle::current(),
                 )
             });
