@@ -712,3 +712,57 @@ fn isolated_fixture_vault_keeps_its_key_in_the_profile() {
         .count();
     assert_eq!(fallback, 1);
 }
+
+/// #434: with the output gate armed, a stored provider-account secret is
+/// protected at once, but its non-secret parts (a Claude config folder) are
+/// not, and neither is custody material until a person reveals it.
+#[test]
+fn issue_434_only_secrets_are_protected_while_stored() {
+    use codex_secret_broker::output_gate;
+    use codex_secret_broker::output_gate::OutputSink;
+    output_gate::global().arm().expect("arm");
+    let directory = tempfile::tempdir().expect("tempdir");
+    let vault = Vault::new_with_keyring_store(
+        directory.path().to_path_buf(),
+        Arc::new(MockKeyringStore::default()),
+    );
+    let name = ProviderAccountName::parse("issue434").expect("name");
+    vault
+        .write_provider_account(
+            "claude-plan",
+            &name,
+            ProviderAccountKind::ClaudeConfigDir,
+            "/tmp/issue434-claude-config-folder",
+        )
+        .expect("config folder");
+    vault
+        .write_provider_account(
+            "zai",
+            &name,
+            ProviderAccountKind::ApiKey,
+            "issue434-account-key-0001",
+        )
+        .expect("api key");
+    vault
+        .add(AddCredential {
+            label: "issue434-seed".to_string(),
+            credential_type: CredentialType::SeedPhrase,
+            provider: None,
+            notes: None,
+            revocation_notes: None,
+            secret:
+                "i434 legal winner thank year wave sausage worth useful legal winner thank yellow"
+                    .to_string(),
+        })
+        .expect("seed");
+    let scrub = |text: &str| output_gate::scrub_if_armed(OutputSink::ToolResult, text);
+    assert_eq!(scrub("ls /tmp/issue434-claude-config-folder"), None);
+    assert!(scrub("key issue434-account-key-0001").is_some_and(|text| !text.contains("0001")));
+    assert_eq!(scrub("words: wave sausage worth useful"), None);
+    assert_eq!(
+        vault.protect_stored_values().expect("read"),
+        Vec::<String>::new()
+    );
+    assert_eq!(scrub("ls /tmp/issue434-claude-config-folder"), None);
+    assert_eq!(scrub("words: wave sausage worth useful"), None);
+}

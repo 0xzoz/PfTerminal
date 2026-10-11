@@ -35,7 +35,6 @@ use std::path::PathBuf;
 use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::sync::OnceLock;
-use std::sync::PoisonError;
 use std::time::Duration;
 use std::time::SystemTime;
 use zeroize::Zeroizing;
@@ -125,17 +124,27 @@ pub(crate) fn arm(codex_home: &Path) -> Result<(), String> {
         .clone()
 }
 
-/// The vault this process protects, and the file state last read (#434).
-struct VaultWatch {
-    codex_home: PathBuf,
-    read: Option<VaultFileState>,
+/// #434: the vault this process protects: the first home it armed with.
+static VAULT_HOME: OnceLock<PathBuf> = OnceLock::new();
+
+/// What was last read from the vault. Locked only inside a blocking read, one
+/// read at a time; a task start that finds a read running does not wait.
+#[derive(Default)]
+struct VaultRead {
+    state: Option<VaultFileState>,
+    /// Labels already reported as not protected.
+    reported: HashSet<String>,
 }
 
 /// Size, modification time and (on Unix) inode of the vault file: the vault
 /// is rewritten by an atomic rename, so a new value means a new inode.
 type VaultFileState = (u64, SystemTime, u64);
 
-static VAULT_WATCH: Mutex<Option<VaultWatch>> = Mutex::new(None);
+static VAULT_READ: LazyLock<Mutex<VaultRead>> = LazyLock::new(Default::default);
+
+/// A read is taking longer than [`VAULT_REFRESH_TIMEOUT`]; reported once.
+static VAULT_READ_SLOW_REPORTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// How long a task waits for the vault to be read before it starts anyway.
 const VAULT_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
@@ -150,40 +159,47 @@ fn vault_file_state(codex_home: &Path) -> Option<VaultFileState> {
 }
 
 /// #434: the armed gate protects the vault under `codex_home` (the first
-/// home this process armed with): its values are read and registered at the
-/// start of the next task, and again whenever the vault file changes.
+/// home this process armed with): its stored credentials are read and
+/// registered at the start of the next task, and again whenever the vault
+/// file changes. Never blocks.
 pub(crate) fn watch_vault(codex_home: &Path) {
-    if active().is_none() {
-        return;
+    if active().is_some() {
+        let _ = VAULT_HOME.set(codex_home.to_path_buf());
     }
-    let mut watch = VAULT_WATCH.lock().unwrap_or_else(PoisonError::into_inner);
-    watch.get_or_insert_with(|| VaultWatch {
-        codex_home: codex_home.to_path_buf(),
-        read: None,
-    });
 }
 
-/// #434: registers every value in the watched vault with the gate when the
-/// vault file changed since it was last read (or was never read), so values
-/// stored before this process started, or by another process, are removed
-/// from output too. A failed read is not retried until the file changes.
-/// Returns a warning for the person when values are not protected.
+/// #434: registers the stored credentials of the watched vault with the gate
+/// when the vault file changed since it was last read (or was never read),
+/// so values stored before this process started, or by another process, are
+/// removed from output too. A failed read is not retried until the file
+/// changes. Returns at once while another read is running. Returns a warning
+/// for the person when values are not protected (each label once).
 pub(crate) fn refresh_vault_values() -> Option<String> {
     active()?;
-    let mut watch = VAULT_WATCH.lock().unwrap_or_else(PoisonError::into_inner);
-    let watch = watch.as_mut()?;
-    let state = vault_file_state(&watch.codex_home)?;
-    if watch.read == Some(state) {
+    let codex_home = VAULT_HOME.get()?;
+    let mut read = match VAULT_READ.try_lock() {
+        Ok(read) => read,
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return None,
+    };
+    let state = vault_file_state(codex_home)?;
+    if read.state == Some(state) {
         return None;
     }
-    watch.read = Some(state);
-    match codex_vault::Vault::new(watch.codex_home.clone()).protect_stored_values() {
-        Ok(unprotected) => (!unprotected.is_empty()).then(|| {
-            format!(
-                "secret_output_gate: these vault credentials cannot be protected (too short or not admitted), so they are not removed from output: {}",
-                unprotected.join(", ")
-            )
-        }),
+    read.state = Some(state);
+    match codex_vault::Vault::new(codex_home.clone()).protect_stored_values() {
+        Ok(unprotected) => {
+            let new: Vec<String> = unprotected
+                .into_iter()
+                .filter(|label| read.reported.insert(label.clone()))
+                .collect();
+            (!new.is_empty()).then(|| {
+                format!(
+                    "secret_output_gate: these vault credentials cannot be protected (too short or not admitted), so they are not removed from output: {}",
+                    new.join(", ")
+                )
+            })
+        }
         Err(err) => {
             tracing::warn!(error = %err, "#434: vault values not protected");
             Some(format!(
@@ -201,19 +217,24 @@ pub(crate) async fn refresh_vault_values_for_task(
     session: &crate::session::session::Session,
     turn: &crate::session::turn_context::TurnContext,
 ) {
-    if active().is_none() {
+    if active().is_none() || VAULT_HOME.get().is_none() {
         return;
     }
     let refresh = tokio::task::spawn_blocking(refresh_vault_values);
     let warning = match tokio::time::timeout(VAULT_REFRESH_TIMEOUT, refresh).await {
         Ok(Ok(warning)) => warning,
-        Ok(Err(err)) => Some(format!(
-            "secret_output_gate: the vault could not be read, so its values are removed from output only once revealed: {err}"
-        )),
-        Err(_) => Some(
-            "secret_output_gate: the vault is taking long to read; values added to it since it was last read are removed from output once the read finishes"
-                .to_string(),
-        ),
+        Ok(Err(err)) => {
+            tracing::debug!(error = %err, "#434: the vault read failed");
+            Some(
+                "secret_output_gate: the vault could not be read, so its values are removed from output only once revealed"
+                    .to_string(),
+            )
+        }
+        Err(_) => (!VAULT_READ_SLOW_REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed))
+            .then(|| {
+                "secret_output_gate: the vault is taking long to read; values added to it since it was last read are removed from output once the read finishes"
+                    .to_string()
+            }),
     };
     if let Some(message) = warning {
         session

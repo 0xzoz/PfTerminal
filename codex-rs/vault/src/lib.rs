@@ -841,7 +841,9 @@ pub(crate) fn protect_stored(
         return Ok(());
     }
     match register_with_output_gate(label, credential_type, secret) {
-        Ok(()) | Err(RegisterError::TooShort) => Ok(()),
+        // Stored, but never released while the gate is armed
+        // (`protect_revealed`); the next vault read reports it by label.
+        Ok(()) | Err(RegisterError::TooShort | RegisterError::CapacityExhausted { .. }) => Ok(()),
         Err(err) => Err(VaultError::Storage(anyhow::anyhow!(
             "vault:{label} was not stored because the secret output gate cannot protect it: {err}"
         ))),
@@ -850,10 +852,11 @@ pub(crate) fn protect_stored(
 
 /// #434: whether a stored value is protected by the output gate while it is
 /// stored, not only once revealed. Not custody material: seed phrases,
-/// private keys and keystores are never released to agents and are not kept
-/// in this process unless a person reveals them. Not the non-secret parts of
-/// a provider account (a Claude config folder, an AWS profile name, a
-/// command account marker), which would hide ordinary text.
+/// private keys and keystores are never released to agents and are not
+/// registered with the gate (and so held for the session) unless a person
+/// reveals them. Not the non-secret parts of a provider account (a Claude
+/// config folder, an AWS profile name, a command account marker), which would
+/// hide ordinary text.
 fn protected_while_stored(label: &str, credential_type: CredentialType) -> bool {
     !matches!(
         credential_type,

@@ -361,10 +361,6 @@ impl Session {
         mailbox_parent_provenance: MailboxParentProvenance,
         agent_execution_guard: Option<AgentExecutionGuard>,
     ) {
-        // #434: vault values stored since the vault was last read (before
-        // this process started, or by another process) are protected before
-        // this task produces output.
-        crate::security::disclosure_gate::refresh_vault_values_for_task(self, &turn_context).await;
         let task: Arc<dyn AnySessionTask> = Arc::new(task);
         let task_kind = task.kind();
         let span_name = task.span_name();
@@ -458,6 +454,17 @@ impl Session {
         let handle = tokio::spawn(
             async move {
                 let ctx_for_finish = Arc::clone(&ctx);
+                // #434: vault values stored since the vault was last read
+                // (before this process started, or by another process) are
+                // protected before this task produces output.
+                let session_for_refresh = session_ctx.clone_session();
+                tokio::select! {
+                    () = crate::security::disclosure_gate::refresh_vault_values_for_task(
+                        &session_for_refresh,
+                        ctx.as_ref(),
+                    ) => {}
+                    () = task_cancellation_token.cancelled() => {}
+                }
                 let task_result = task_for_run
                     .run(
                         Arc::clone(&session_ctx),
