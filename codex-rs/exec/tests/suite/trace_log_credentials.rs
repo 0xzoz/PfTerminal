@@ -50,7 +50,10 @@ fn assert_key_not_logged(test: &TestCodexExecBuilder, output: &Output, key: &str
     for entry in walkdir::WalkDir::new(test.home_path()) {
         let entry = entry.expect("walk exec home");
         if entry.file_type().is_file() {
-            let bytes = std::fs::read(entry.path()).expect("read home file");
+            // Name the file: on CI one has vanished mid-walk after exec exited.
+            let bytes = std::fs::read(entry.path()).unwrap_or_else(|error| {
+                panic!("read home file {}: {error}", entry.path().display())
+            });
             assert!(
                 !contains(&bytes),
                 "provider key leaked into {}",
