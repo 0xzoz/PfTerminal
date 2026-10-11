@@ -964,7 +964,25 @@ impl App {
         if crate::legacy_core::security_revocation::kill_switch_on(self.config.codex_home.as_ref())
         {
             // An auto-processing turn stays pending, so the task keeps its
-            // place in the loop breaker when it is sent.
+            // place in the loop breaker when it is sent. Each pane holds one
+            // task, the newest: repeated assignment fires and child reports
+            // would otherwise pile up and run as a burst once it is off (the
+            // newest prompt also carries the latest context).
+            let superseded: Vec<String> = self
+                .kill_switch_held_claude_tasks
+                .iter()
+                .filter(|(held, _)| *held == pane_id)
+                .map(|(_, task)| task.clone())
+                .collect();
+            self.kill_switch_held_claude_tasks
+                .retain(|(held, _)| *held != pane_id);
+            for old in &superseded {
+                self.record_spawn_dispatch_failed_for_task(
+                    &target_node_id,
+                    old,
+                    "superseded by a newer task while the security kill switch was on",
+                );
+            }
             let title = self
                 .claude_panes
                 .panes()
@@ -972,12 +990,14 @@ impl App {
                 .find(|pane| pane.id == pane_id)
                 .map_or_else(|| pane_id.clone(), |pane| pane.title.clone());
             self.kill_switch_held_claude_tasks.push((pane_id, task));
-            self.chat_widget.add_info_message(
-                format!(
-                    "A task for Claude pane `{title}` waits: the security kill switch is on. It is sent when the switch is turned off (it is lost if Corbanu Terminal exits first)."
-                ),
-                /*hint*/ None,
-            );
+            if superseded.is_empty() {
+                self.chat_widget.add_info_message(
+                    format!(
+                        "A task for Claude pane `{title}` waits: the security kill switch is on. It is sent when the switch is turned off in /security here (a newer task replaces it; it is lost if Corbanu Terminal exits first)."
+                    ),
+                    /*hint*/ None,
+                );
+            }
             return;
         }
         let is_active = self.claude_panes.active_user_pane_id() == pane_id;

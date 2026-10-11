@@ -6972,17 +6972,18 @@ async fn issue_507_kill_switch_interrupts_running_claude_panes() {
     assert!(!said(&orc_pane_id), "an idle pane has nothing to stop");
 }
 
-/// #507: a task another agent sends to a Claude pane while the kill switch is
-/// on waits (it is not dropped or failed) and nothing starts. Once the switch
-/// is off, the pane gets the first held task as a turn, and the next one when
-/// that turn ends. (The turns never run: the test never yields to them.)
+/// #507: tasks other agents send to Claude panes while the kill switch is on
+/// wait (one per pane, the newest; the older one is recorded as superseded)
+/// and nothing starts. Once the switch is off, an idle pane gets its task as a
+/// turn at once, and a busy pane when its turn ends. (The turns never run:
+/// the test never yields to them.)
 #[tokio::test]
 async fn issue_507_tasks_for_claude_panes_wait_and_are_sent_after_the_switch() {
     use crate::legacy_core::security_level_change::LevelBasis;
     use crate::legacy_core::security_level_change::SecurityLevel;
     use crate::legacy_core::security_revocation::HumanRevocation;
     use crate::legacy_core::security_revocation::commit_human_revocation;
-    let (mut app, _app_event_rx, troll_pane_id, _orc_pane_id) =
+    let (mut app, _app_event_rx, troll_pane_id, orc_pane_id) =
         make_child_report_auto_claude_pane_app().await;
     let codex_home = app.config.codex_home.to_path_buf();
     let switch = |choice| {
@@ -6997,39 +6998,53 @@ async fn issue_507_tasks_for_claude_panes_wait_and_are_sent_after_the_switch() {
         )
         .expect("commit");
     };
+    let held = |app: &App| app.kill_switch_held_claude_tasks.clone();
     switch(HumanRevocation::KillSwitchOn);
 
-    app.submit_claude_pane_task(troll_pane_id.clone(), "first held task".to_string());
-    app.submit_claude_pane_task(troll_pane_id.clone(), "second held task".to_string());
-    let held = |app: &App| {
-        app.kill_switch_held_claude_tasks
-            .iter()
-            .map(|(_, task)| task.clone())
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(held(&app), vec!["first held task", "second held task"]);
+    for tick in 1..=3 {
+        app.submit_claude_pane_task(troll_pane_id.clone(), format!("assignment fire {tick}"));
+    }
+    app.submit_claude_pane_task(orc_pane_id.clone(), "orc task".to_string());
+    assert_eq!(
+        held(&app),
+        vec![
+            (troll_pane_id.clone(), "assignment fire 3".to_string()),
+            (orc_pane_id.clone(), "orc task".to_string()),
+        ]
+    );
     assert!(!app.claude_panes.claude_pane_is_running(&troll_pane_id));
+    assert!(!app.claude_panes.claude_pane_is_running(&orc_pane_id));
     app.send_held_claude_tasks();
     assert_eq!(held(&app).len(), 2, "still on: nothing is sent");
 
     switch(HumanRevocation::KillSwitchOff);
+    // The Troll pane is busy (a turn its operator started right away; that
+    // turn's task has already let go of the pane's lock).
+    drop(
+        app.claude_panes
+            .prepare_turn(&troll_pane_id, "busy".to_string(), &codex_home)
+            .expect("a running turn"),
+    );
     app.send_held_claude_tasks();
-    assert!(app.claude_panes.claude_pane_is_running(&troll_pane_id));
-    assert_eq!(held(&app), vec!["second held task"], "one turn per pane");
-    app.send_held_claude_tasks();
-    assert_eq!(held(&app), vec!["second held task"], "the pane is busy");
+    assert!(
+        app.claude_panes.claude_pane_is_running(&orc_pane_id),
+        "idle: sent"
+    );
+    assert_eq!(
+        held(&app),
+        vec![(troll_pane_id.clone(), "assignment fire 3".to_string())],
+        "busy: it waits for the turn to end"
+    );
 
     app.claude_panes
         .interrupt_turn(&troll_pane_id)
-        .expect("stop the first turn");
+        .expect("stop the busy turn");
     app.on_claude_pane_turn_finished(troll_pane_id.clone(), Err("interrupted".to_string()));
-    // The next task is sent as the turn ends. (Here the first turn's task
-    // never ran, so it still holds the pane's lock and this one is refused;
-    // in the app a turn ends only after its task let go of the lock.)
     assert!(
-        held(&app).is_empty(),
-        "the next task went when the turn ended"
+        app.claude_panes.claude_pane_is_running(&troll_pane_id),
+        "sent when the turn ended"
     );
+    assert!(held(&app).is_empty());
 }
 
 #[tokio::test]
