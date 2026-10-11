@@ -63,8 +63,22 @@ async fn sec_439_aggressive_refusals_name_the_level_and_the_way_forward() {
             "socket.gaierror: [Errno 8] nodename nor servname provided, or not known",
             Some(Blocked::Network),
         ),
-        // Ordinary failures and successes are not attributed.
+        // Ordinary failures and successes are not attributed, also when the
+        // macOS shims add their cache noise (AGG-36), which the sandbox-denial
+        // guess counts as a denial.
         (false, 1, "error: pathspec 'x' did not match", None),
+        (
+            true,
+            1,
+            "python3: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead\npython3: error: couldn't create cache file '/tmp/xcrun_db-1wa2m1Bl' (errno=Operation not permitted)\nerror: pathspec 'x' did not match",
+            None,
+        ),
+        (
+            true,
+            1,
+            "python3: error: couldn't create cache file '/tmp/xcrun_db-x' (errno=Operation not permitted)\nAssertionError: tests failed",
+            None,
+        ),
         // AGG-12 as observed (the harness proxy stood in for the network).
         (
             false,
@@ -101,6 +115,11 @@ async fn sec_439_aggressive_refusals_name_the_level_and_the_way_forward() {
         assert!(blocked.model_note().contains(notice));
     }
     assert!(Blocked::Files.notice().contains("Grant once"));
+    assert!(
+        Blocked::Files
+            .model_note()
+            .contains("If this is why the command failed")
+    );
     assert!(Blocked::Network.notice().contains("web search is off"));
 }
 
