@@ -534,8 +534,23 @@ fn create_filesystem_args(
         }
     }
     let unreadable_paths: HashSet<PathBuf> = unreadable_roots.iter().cloned().collect();
-    let mut sorted_writable_roots = writable_roots;
-    sorted_writable_roots.sort_by_key(|writable_root| path_depth(writable_root.root.as_path()));
+    // #503: order by the bound (canonical) path, so a symlink to `/` is bound
+    // first like `/` itself instead of covering shallower roots' masks. The
+    // target is resolved once, so the order and the binds agree.
+    let mut sorted_writable_roots: Vec<(WritableRoot, Option<PathBuf>)> = writable_roots
+        .into_iter()
+        .map(|writable_root| {
+            let symlink_target = canonical_target_if_symlinked_path(writable_root.root.as_path());
+            (writable_root, symlink_target)
+        })
+        .collect();
+    sorted_writable_roots.sort_by_key(|(writable_root, symlink_target)| {
+        path_depth(
+            symlink_target
+                .as_deref()
+                .unwrap_or(writable_root.root.as_path()),
+        )
+    });
     // Mask only the unreadable ancestors that sit outside every writable root.
     // Unreadable paths nested under a broader writable root are applied after
     // that broader root is bound, then reopened by any deeper writable child.
@@ -568,9 +583,16 @@ fn create_filesystem_args(
                 }
             )
     });
-    for writable_root in &sorted_writable_roots {
+    // #503: read-only paths applied by earlier passes, by bound path. A later
+    // pass whose bind covers them (two roots bound at the same directory, or a
+    // link whose target lies inside an earlier root) applies them again.
+    let mut earlier_read_only_subpaths: Vec<PathBuf> = Vec::new();
+    // #503: the same for denials, in the form an earlier pass masked them
+    // (a denial spelled through a link is masked at the link's target).
+    let mut earlier_unreadable_roots: Vec<PathBuf> = Vec::new();
+    for (writable_root, symlink_target) in &sorted_writable_roots {
         let root = writable_root.root.as_path();
-        let symlink_target = canonical_target_if_symlinked_path(root);
+        let mount_root = symlink_target.as_deref().unwrap_or(root);
         // #473: placeholders are deduplicated within this pass only. Its
         // `--bind` puts the live host folder back over every mount an earlier
         // (broader) pass made below it.
@@ -581,13 +603,12 @@ fn create_filesystem_args(
         if let Some(masking_root) = unreadable_roots
             .iter()
             .map(PathBuf::as_path)
-            .filter(|unreadable_root| root.starts_with(unreadable_root))
+            .filter(|unreadable_root| mount_root.starts_with(unreadable_root))
             .max_by_key(|unreadable_root| path_depth(unreadable_root))
         {
-            append_mount_target_parent_dir_args(&mut bwrap_args.args, root, masking_root);
+            append_mount_target_parent_dir_args(&mut bwrap_args.args, mount_root, masking_root);
         }
 
-        let mount_root = symlink_target.as_deref().unwrap_or(root);
         bwrap_args.args.push("--bind".to_string());
         bwrap_args.args.push(path_to_string(mount_root));
         bwrap_args.args.push(path_to_string(mount_root));
@@ -610,11 +631,11 @@ fn create_filesystem_args(
             // an unprivileged bwrap cannot create a mount point there:
             // `mkdir /.git` or `/.codex` would fail every command.
             .filter(|path| {
-                !(full_write_root && root.parent().is_none() && path.parent() == Some(root))
+                !(full_write_root && mount_root.parent().is_none() && path.parent() == Some(root))
                     || path.exists()
             })
             .collect();
-        let protected_metadata_names = if root.parent().is_none() && full_write_root {
+        let protected_metadata_names = if mount_root.parent().is_none() && full_write_root {
             Vec::new()
         } else {
             writable_root.protected_metadata_names.clone()
@@ -624,7 +645,7 @@ fn create_filesystem_args(
             root,
             &protected_metadata_names,
         );
-        if let Some(target) = &symlink_target {
+        if let Some(target) = symlink_target {
             read_only_subpaths = remap_paths_for_symlink_target(read_only_subpaths, root, target);
         }
         append_protected_create_targets_for_writable_root(
@@ -634,6 +655,21 @@ fn create_filesystem_args(
             symlink_target.as_deref(),
             &read_only_subpaths,
         );
+        // A link's own bound path stays read-only when an earlier root made
+        // it read-only (for example a link to a workspace's `.git`).
+        for path in &earlier_read_only_subpaths {
+            if path.starts_with(mount_root)
+                && (symlink_target.is_some() || path.as_path() != mount_root)
+                && !read_only_subpaths.contains(path)
+            {
+                read_only_subpaths.push(path.clone());
+            }
+        }
+        for path in &read_only_subpaths {
+            if !earlier_read_only_subpaths.contains(path) {
+                earlier_read_only_subpaths.push(path.clone());
+            }
+        }
         read_only_subpaths.sort_by_key(|path| path_depth(path));
         // A root reached through a link is bound at its target, so a denied
         // path spelled under the target is nested too (#488); the rootless
@@ -648,12 +684,23 @@ fn create_filesystem_args(
             })
             .cloned()
             .collect();
-        if let Some(target) = &symlink_target {
+        if let Some(target) = symlink_target {
             nested_unreadable_roots =
                 remap_paths_for_symlink_target(nested_unreadable_roots, root, target);
         }
+        nested_unreadable_roots.extend(
+            earlier_unreadable_roots
+                .iter()
+                .filter(|path| path.starts_with(mount_root))
+                .cloned(),
+        );
         nested_unreadable_roots.sort();
         nested_unreadable_roots.dedup();
+        for path in &nested_unreadable_roots {
+            if !earlier_unreadable_roots.contains(path) {
+                earlier_unreadable_roots.push(path.clone());
+            }
+        }
         nested_unreadable_roots.sort_by_key(|path| path_depth(path));
         // #473: denied paths missing below a read-only folder, by the folder
         // that gets a snapshot (see `append_read_only_snapshot_dir_args`).
@@ -2241,6 +2288,291 @@ mod tests {
                 .expect("writable `/dev/shm` should be rebound");
             assert!(root_bind < shm_bind, "{:?}", args.args);
         }
+    }
+
+    /// #503: a writable root that is a symlink to `/` is ordered by its
+    /// target, so it is bound before shallower roots instead of covering
+    /// them (and their masks) afterwards, and is followed by a fresh `/dev`.
+    #[cfg(unix)]
+    #[test]
+    fn writable_symlink_to_filesystem_root_is_bound_first() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let workspace = temp_dir.path().join("ws");
+        let denied_ancestor = temp_dir.path().join("a");
+        let link = denied_ancestor.join("b").join("c").join("root-link");
+        let denied = workspace.join("secret");
+        std::fs::create_dir_all(link.parent().expect("link parent")).expect("create link parent");
+        std::fs::create_dir(&workspace).expect("create workspace");
+        std::fs::write(&denied, "secret").expect("create denied file");
+        std::os::unix::fs::symlink("/", &link).expect("create symlink to /");
+        let entry = |path: &Path, access| FileSystemSandboxEntry {
+            path: FileSystemPath::Path {
+                path: AbsolutePathBuf::try_from(path).expect("absolute path"),
+            },
+            access,
+            missing_path_behavior: None,
+        };
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            entry(&workspace, FileSystemAccessMode::Write),
+            entry(&link, FileSystemAccessMode::Write),
+            entry(&denied, FileSystemAccessMode::Deny),
+            entry(&denied_ancestor, FileSystemAccessMode::Deny),
+        ]);
+
+        let args =
+            create_filesystem_args(&policy, temp_dir.path(), NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
+                .expect("filesystem args");
+        let position = |window: &[&str]| {
+            args.args
+                .windows(window.len())
+                .position(|candidate| candidate == window)
+        };
+        let root_bind = position(&["--bind", "/", "/", "--dev", "/dev"])
+            .expect("the symlink to `/` should bind `/` followed by `--dev /dev`");
+        let workspace = path_to_string(&workspace);
+        let workspace_bind = position(&["--bind", workspace.as_str(), workspace.as_str()])
+            .expect("workspace should be bound");
+        assert!(root_bind < workspace_bind, "{:?}", args.args);
+        let denied = path_to_string(&denied);
+        let deny_mask = args
+            .args
+            .iter()
+            .rposition(|arg| arg == &denied)
+            .expect("denied file should be masked");
+        assert!(workspace_bind < deny_mask, "{:?}", args.args);
+        // The link is bound at its target, never at its own spelling, and its
+        // denied ancestor is masked after the `/` bind.
+        let link = path_to_string(&link);
+        assert_eq!(
+            position(&["--bind", link.as_str(), link.as_str()]),
+            None,
+            "{:?}",
+            args.args
+        );
+        let denied_ancestor = path_to_string(&denied_ancestor);
+        let ancestor_mask = args
+            .args
+            .iter()
+            .rposition(|arg| arg == &denied_ancestor)
+            .expect("denied ancestor should be masked");
+        assert!(root_bind < ancestor_mask, "{:?}", args.args);
+    }
+
+    /// #503: a link whose target lies inside another writable root is bound
+    /// after it (deeper real path) and re-applies that root's read-only paths
+    /// below the target, which its own bind would otherwise cover.
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_root_inside_another_root_reapplies_its_read_only_paths() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let outer = temp_dir.path().join("outer");
+        let target = outer.join("c").join("d");
+        let read_only = target.join("ro");
+        let link = temp_dir.path().join("link");
+        std::fs::create_dir_all(&read_only).expect("create read-only dir");
+        std::os::unix::fs::symlink(&target, &link).expect("create link");
+        let entry = |path: &Path, access| FileSystemSandboxEntry {
+            path: FileSystemPath::Path {
+                path: AbsolutePathBuf::try_from(path).expect("absolute path"),
+            },
+            access,
+            missing_path_behavior: None,
+        };
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            entry(&outer, FileSystemAccessMode::Write),
+            entry(&link, FileSystemAccessMode::Write),
+            entry(&read_only, FileSystemAccessMode::Read),
+        ]);
+
+        let args =
+            create_filesystem_args(&policy, temp_dir.path(), NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
+                .expect("filesystem args");
+        let target = path_to_string(&target);
+        let target_bind = args
+            .args
+            .windows(3)
+            .position(|window| window == ["--bind", target.as_str(), target.as_str()])
+            .expect("link should be bound at its target");
+        let read_only = path_to_string(&read_only);
+        let read_only_bind = args
+            .args
+            .windows(3)
+            .rposition(|window| window == ["--ro-bind", read_only.as_str(), read_only.as_str()])
+            .expect("read-only path should be bound read-only");
+        assert!(target_bind < read_only_bind, "{:?}", args.args);
+    }
+
+    /// #503: a writable link to a workspace's `.git` is bound after the
+    /// workspace (deeper target) and the workspace's read-only `.git` is
+    /// applied again over it.
+    #[cfg(unix)]
+    #[test]
+    fn writable_link_to_protected_git_keeps_it_read_only() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let workspace = temp_dir.path().join("p").join("q").join("w");
+        let git = workspace.join(".git");
+        let link = temp_dir.path().join("l");
+        std::fs::create_dir_all(&git).expect("create .git");
+        std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").expect("write HEAD");
+        std::os::unix::fs::symlink(&git, &link).expect("create link");
+        let entry = |path: &Path| FileSystemSandboxEntry {
+            path: FileSystemPath::Path {
+                path: AbsolutePathBuf::try_from(path).expect("absolute path"),
+            },
+            access: FileSystemAccessMode::Write,
+            missing_path_behavior: None,
+        };
+        let policy = FileSystemSandboxPolicy::restricted(vec![entry(&workspace), entry(&link)]);
+
+        let args =
+            create_filesystem_args(&policy, temp_dir.path(), NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
+                .expect("filesystem args");
+        let git = path_to_string(&git);
+        let git_bind = args
+            .args
+            .windows(3)
+            .position(|window| window == ["--bind", git.as_str(), git.as_str()])
+            .expect("link should be bound at `.git`");
+        let git_read_only = args
+            .args
+            .windows(3)
+            .rposition(|window| window == ["--ro-bind", git.as_str(), git.as_str()])
+            .expect("`.git` should be bound read-only");
+        assert!(git_bind < git_read_only, "{:?}", args.args);
+    }
+
+    /// #503: a denial spelled through a link is masked at the link's target.
+    /// A writable root bound later inside that target (deeper, or the same
+    /// directory) masks it again after its own bind.
+    #[cfg(unix)]
+    #[test]
+    fn denial_spelled_through_a_link_survives_later_binds_of_its_target() {
+        let entry = |path: &Path, access| FileSystemSandboxEntry {
+            path: FileSystemPath::Path {
+                path: AbsolutePathBuf::try_from(path).expect("absolute path"),
+            },
+            access,
+            missing_path_behavior: None,
+        };
+        let masked_after_last_bind = |args: &BwrapArgs, bound: &Path, denied: &Path| {
+            let bound = path_to_string(bound);
+            let denied = path_to_string(denied);
+            let last_bind = args
+                .args
+                .windows(3)
+                .rposition(|window| window == ["--bind", bound.as_str(), bound.as_str()])
+                .expect("writable root should be bound");
+            let deny_mask = args
+                .args
+                .iter()
+                .rposition(|arg| arg == &denied)
+                .expect("denial should be masked at the link target");
+            assert!(last_bind < deny_mask, "{:?}", args.args);
+        };
+
+        // The link is spelled deeper than its target, which holds a deeper
+        // writable root.
+        let temp_dir = TempDir::new().expect("temp dir");
+        let target = temp_dir.path().join("x");
+        let nested = target.join("sub");
+        let link = temp_dir.path().join("a").join("b").join("c").join("l");
+        std::fs::create_dir_all(&nested).expect("create nested root");
+        std::fs::write(nested.join("secret"), "secret").expect("create secret");
+        std::fs::create_dir_all(link.parent().expect("link parent")).expect("link parent");
+        std::os::unix::fs::symlink(&target, &link).expect("create link");
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            entry(&link, FileSystemAccessMode::Write),
+            entry(&nested, FileSystemAccessMode::Write),
+            entry(&link.join("sub").join("secret"), FileSystemAccessMode::Deny),
+        ]);
+        let args =
+            create_filesystem_args(&policy, temp_dir.path(), NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
+                .expect("filesystem args");
+        masked_after_last_bind(&args, &nested, &nested.join("secret"));
+
+        // The link and a writable root bind the same directory.
+        let temp_dir = TempDir::new().expect("temp dir");
+        let target = temp_dir.path().join("x");
+        let link = temp_dir.path().join("a").join("b").join("l");
+        std::fs::create_dir_all(&target).expect("create target");
+        std::fs::write(target.join("secret"), "secret").expect("create secret");
+        std::fs::create_dir_all(link.parent().expect("link parent")).expect("link parent");
+        std::os::unix::fs::symlink(&target, &link).expect("create link");
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            entry(&link, FileSystemAccessMode::Write),
+            entry(&target, FileSystemAccessMode::Write),
+            entry(&link.join("secret"), FileSystemAccessMode::Deny),
+        ]);
+        let args =
+            create_filesystem_args(&policy, temp_dir.path(), NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
+                .expect("filesystem args");
+        masked_after_last_bind(&args, &target, &target.join("secret"));
+    }
+
+    /// #503: with `:root = write`, an extra writable link to `/` binds `/`
+    /// again; read-only paths and denials outside every workspace are applied
+    /// after the last `/` bind.
+    #[cfg(unix)]
+    #[test]
+    fn full_write_root_and_link_to_root_keep_protections_outside_workspaces() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let read_only = temp_dir.path().join("ro");
+        let denied = temp_dir.path().join("secret");
+        let link = temp_dir.path().join("root-link");
+        std::fs::create_dir(&read_only).expect("create read-only dir");
+        std::fs::write(&denied, "secret").expect("create denied file");
+        std::os::unix::fs::symlink("/", &link).expect("create symlink to /");
+        let entry = |path: &Path, access| FileSystemSandboxEntry {
+            path: FileSystemPath::Path {
+                path: AbsolutePathBuf::try_from(path).expect("absolute path"),
+            },
+            access,
+            missing_path_behavior: None,
+        };
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                access: FileSystemAccessMode::Write,
+                missing_path_behavior: None,
+            },
+            entry(&link, FileSystemAccessMode::Write),
+            entry(&read_only, FileSystemAccessMode::Read),
+            entry(&denied, FileSystemAccessMode::Deny),
+        ]);
+
+        let args =
+            create_filesystem_args(&policy, temp_dir.path(), NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
+                .expect("filesystem args");
+        let last_root_bind = args
+            .args
+            .windows(3)
+            .rposition(|window| window == ["--bind", "/", "/"])
+            .expect("`/` should be bound writable");
+        let read_only = path_to_string(&read_only);
+        let read_only_bind = args
+            .args
+            .windows(3)
+            .rposition(|window| window == ["--ro-bind", read_only.as_str(), read_only.as_str()])
+            .expect("read-only path should be bound read-only");
+        assert!(last_root_bind < read_only_bind, "{:?}", args.args);
+        let denied = path_to_string(&denied);
+        let deny_mask = args
+            .args
+            .iter()
+            .rposition(|arg| arg == &denied)
+            .expect("denied file should be masked");
+        assert!(last_root_bind < deny_mask, "{:?}", args.args);
+        // Neither pass asks for mount points at the filesystem root.
+        assert!(
+            !args
+                .args
+                .iter()
+                .any(|arg| arg == "/.git" || arg == "/.codex"),
+            "{:?}",
+            args.args
+        );
     }
 
     #[test]
