@@ -122,6 +122,58 @@ fn base_policy_allows_kmp_registration_shm_read_create_and_unlink() {
     );
 }
 
+/// #444 (AGG-36): with network off, confstr(DARWIN_USER_TEMP_DIR) needs these
+/// lookups; without them every /usr/bin/python3 run printed xcrun errors.
+#[test]
+fn base_policy_resolves_user_folders_without_network() {
+    for name in [
+        "(global-name \"com.apple.bsd.dirhelper\")",
+        "(global-name \"com.apple.system.opendirectoryd.membership\")",
+    ] {
+        assert!(
+            MACOS_SEATBELT_BASE_POLICY.contains(name),
+            "base policy must allow {name}:\n{MACOS_SEATBELT_BASE_POLICY}"
+        );
+    }
+}
+
+/// #444 (AGG-36): under a network-off sandbox without writable temp folders
+/// (as Aggressive), the per-user temp folder still resolves; the shims use it
+/// to find their cache instead of failing over to an unwritable /tmp.
+#[test]
+fn user_temp_folder_resolves_in_a_network_off_sandbox() {
+    let cwd = TempDir::new().expect("cwd");
+    let policy = SandboxPolicy::WorkspaceWrite {
+        writable_roots: vec![],
+        network_access: false,
+        exclude_tmpdir_env_var: true,
+        exclude_slash_tmp: true,
+    };
+    let args = create_seatbelt_command_args_for_legacy_policy(
+        vec![
+            "/usr/bin/getconf".to_string(),
+            "DARWIN_USER_TEMP_DIR".to_string(),
+        ],
+        &policy,
+        cwd.path(),
+        /*enforce_managed_network*/ false,
+        /*network*/ None,
+    )
+    .expect("seatbelt args");
+    let output = Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
+        .args(&args)
+        .current_dir(cwd.path())
+        .output()
+        .expect("execute seatbelt command");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.trim().starts_with('/'),
+        "getconf DARWIN_USER_TEMP_DIR failed under the sandbox: status {:?}, stdout {stdout:?}, stderr {:?}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn create_seatbelt_args_routes_network_through_proxy_ports() {
     let policy = dynamic_network_policy(
