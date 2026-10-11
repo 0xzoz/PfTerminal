@@ -156,11 +156,14 @@ pub fn run_credential_broker_main_with(resolver: Option<StoredKeyResolver>) -> !
     else {
         std::process::exit(BROKER_EXIT_UNAVAILABLE);
     };
-    let exit_code =
-        match runtime.block_on(run_broker(runtime_dir, containment.mechanism, stored_keys)) {
-            Ok(()) => 0,
-            Err(_) => BROKER_EXIT_UNAVAILABLE,
-        };
+    // A panic has already revoked (`RevokeOnExit`); it still exits here,
+    // without dropping the runtime.
+    let exit_code = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        runtime.block_on(run_broker(runtime_dir, containment.mechanism, stored_keys))
+    })) {
+        Ok(Ok(())) => 0,
+        Ok(Err(_)) | Err(_) => BROKER_EXIT_UNAVAILABLE,
+    };
     // #504: tests hold the process here, after its cleanup, to observe the
     // window before it exits.
     #[cfg(test)]

@@ -113,7 +113,9 @@ static CHECK_KEY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 struct Upstream {
     port: u16,
-    /// Every request it received: path and credential headers (#504).
+    /// Every request it received: its path and which credential headers it
+    /// carried (#504).
+    #[cfg(unix)]
     seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     _ca_dir: TempDir,
     ca_path: PathBuf,
@@ -140,12 +142,11 @@ async fn start_upstream_for(tls_host: &str) -> Upstream {
     let service = TlsAcceptorLayer::new(acceptor).into_layer(HttpServer::http1().service(
         service_fn(move |request: Request| {
             let header = |name: &str| {
-                request
-                    .headers()
-                    .get(name)
-                    .and_then(|value| value.to_str().ok())
-                    .unwrap_or("<none>")
-                    .to_string()
+                if request.headers().contains_key(name) {
+                    "<present>"
+                } else {
+                    "<none>"
+                }
             };
             let line = format!(
                 "{} authorization={} x-api-key={}",
@@ -203,6 +204,7 @@ async fn start_upstream_for(tls_host: &str) -> Upstream {
     tokio::spawn(listener.serve(service));
     Upstream {
         port,
+        #[cfg(unix)]
         seen,
         _ca_dir: ca_dir,
         ca_path,
