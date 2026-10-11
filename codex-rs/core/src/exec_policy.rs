@@ -324,19 +324,45 @@ impl ExecPolicyManager {
         Ok(Self::new(Arc::new(policy)))
     }
 
-    /// Read by the Unix shell-escalation runtime only.
-    #[cfg(unix)]
-    pub(crate) fn strict_rules(&self) -> bool {
-        self.strict_rules
-    }
-
     pub(crate) fn current(&self) -> Arc<Policy> {
         self.policy.load_full()
     }
 
+    /// Issue #443: the policy an agent command is checked against. While
+    /// Core's level for the session is Aggressive (also right after a person
+    /// confirms it in `/security`, before the restart that loads the rules
+    /// file), the Aggressive vault rule is part of it.
+    pub(crate) fn current_for(&self, live_aggressive: bool) -> Arc<Policy> {
+        let current = self.current();
+        if live_aggressive {
+            Arc::new(current.merge_overlay(aggressive_vault_policy()))
+        } else {
+            current
+        }
+    }
+
+    /// See [`Self::load`]; the vault rule of [`Self::current_for`] also
+    /// matches wrapped commands.
+    pub(crate) fn strict_rules_for(&self, live_aggressive: bool) -> bool {
+        self.strict_rules || live_aggressive
+    }
+
+    /// [`Self::create_exec_approval_requirement`] outside Aggressive.
+    #[cfg(test)]
     pub(crate) async fn create_exec_approval_requirement_for_command(
         &self,
         req: ExecApprovalRequest<'_>,
+    ) -> ExecApprovalRequirement {
+        self.create_exec_approval_requirement(req, /*live_aggressive*/ false)
+            .await
+    }
+
+    /// The approval an agent command needs under the session's live level
+    /// (see [`Self::current_for`]).
+    pub(crate) async fn create_exec_approval_requirement(
+        &self,
+        req: ExecApprovalRequest<'_>,
+        live_aggressive: bool,
     ) -> ExecApprovalRequirement {
         let ExecApprovalRequest {
             command,
@@ -346,7 +372,7 @@ impl ExecPolicyManager {
             sandbox_permissions,
             prefix_rule,
         } = req;
-        let exec_policy = self.current();
+        let exec_policy = self.current_for(live_aggressive);
         let ExecPolicyCommands {
             commands,
             used_complex_parsing,
@@ -377,7 +403,7 @@ impl ExecPolicyManager {
             &exec_policy_fallback,
             &match_options,
         );
-        if self.strict_rules {
+        if self.strict_rules_for(live_aggressive) {
             // The original command, not the parsed one: parsing keeps only
             // the first command of a heredoc script.
             apply_strict_forbidden_matches(&mut evaluation, exec_policy.as_ref(), command);
@@ -571,6 +597,25 @@ impl ExecPolicyManager {
         self.policy.store(Arc::new(updated_policy));
         Ok(())
     }
+}
+
+/// The rules file Aggressive writes (`corbanu vault …` is forbidden), parsed
+/// once. It is generated, so it always parses.
+fn aggressive_vault_policy() -> &'static Policy {
+    static POLICY: std::sync::LazyLock<Policy> = std::sync::LazyLock::new(|| {
+        let mut parser = PolicyParser::new();
+        match parser.parse(
+            codex_security_level::level::RULES_FILE,
+            &codex_security_level::level::rules_contents(),
+        ) {
+            Ok(()) => parser.build(),
+            Err(err) => {
+                tracing::error!("the Aggressive vault rule does not parse: {err}");
+                Policy::empty()
+            }
+        }
+    });
+    &POLICY
 }
 
 impl Default for ExecPolicyManager {

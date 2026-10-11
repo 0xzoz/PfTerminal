@@ -891,6 +891,22 @@ impl ModelClient {
         Ok(level)
     }
 
+    /// Issue #443: whether Aggressive is in force for this session now: in
+    /// its config, or in the live policy (also right after a person confirms
+    /// Aggressive in `/security`, before a restart). Without a readable live
+    /// policy only the config counts.
+    pub(crate) fn live_level_is_aggressive(&self) -> bool {
+        let live = self.ingress_policy.as_ref().and_then(|policy| {
+            policy
+                .0
+                .snapshot_for_agent(self.state.thread_id)
+                .ok()
+                .map(|snapshot| snapshot.level)
+        });
+        self.ingress_level.max(live.unwrap_or_default())
+            == codex_security_policy::SecurityLevel::Aggressive
+    }
+
     pub(crate) fn check_source_admission(&self, prompt: &Prompt) -> Result<()> {
         crate::security::ingress::check_native_request(
             self.source_admission_level()?,
