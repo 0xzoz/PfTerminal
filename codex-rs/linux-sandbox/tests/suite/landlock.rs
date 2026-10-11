@@ -1369,8 +1369,17 @@ async fn full_write_profile_with_denial_keeps_dev_null_usable() {
             access: FileSystemAccessMode::Deny,
             missing_path_behavior: None,
         },
+        // A denied device node stays denied on the fresh `/dev`.
+        FileSystemSandboxEntry {
+            path: FileSystemPath::Path {
+                path: AbsolutePathBuf::from_absolute_path("/dev/full").expect("absolute /dev/full"),
+            },
+            access: FileSystemAccessMode::Deny,
+            missing_path_behavior: None,
+        },
     ]);
     let script = "echo hi > /dev/null; echo null=$?; \
+                  head -c 1 /dev/full > /dev/null; echo full=$?; \
                   head -c 1 /dev/urandom > /dev/null; echo urandom=$?; \
                   cat secret.txt; echo cat=$?; \
                   echo x > secret.txt; echo write=$?; \
@@ -1387,7 +1396,14 @@ async fn full_write_profile_with_denial_keeps_dev_null_usable() {
     .expect("full-write profile runs under bubblewrap");
     let stdout = output.stdout.text;
     let stderr = output.stderr.text;
-    for expected in ["null=0", "urandom=0", "cat=1", "write=1", "other=0"] {
+    for expected in [
+        "null=0",
+        "urandom=0",
+        "full=1",
+        "cat=1",
+        "write=1",
+        "other=0",
+    ] {
         assert!(
             stdout.contains(expected),
             "{expected}: {stdout}\nstderr: {stderr}"

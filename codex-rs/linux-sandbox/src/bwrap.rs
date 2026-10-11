@@ -2133,6 +2133,7 @@ mod tests {
                 missing_path_behavior: None,
             },
             entry(&denied, FileSystemAccessMode::Deny),
+            entry(Path::new("/dev/full"), FileSystemAccessMode::Deny),
             entry(Path::new("/dev/shm"), FileSystemAccessMode::Write),
         ]);
 
@@ -2153,6 +2154,13 @@ mod tests {
             .rposition(|arg| arg == &denied)
             .expect("denied path should be masked");
         assert!(root_bind < deny_mask, "{:?}", args.args);
+        // A denied `/dev` node is masked on top of the fresh `/dev`.
+        let dev_mask = args
+            .args
+            .iter()
+            .rposition(|arg| arg == "/dev/full")
+            .expect("denied /dev/full should be masked");
+        assert!(root_bind < dev_mask, "{:?}", args.args);
         if Path::new("/dev/shm").exists() {
             let shm_bind = position(&["--bind", "/dev/shm", "/dev/shm"])
                 .expect("writable `/dev/shm` should be rebound");
@@ -2381,8 +2389,8 @@ mod tests {
                 "--ro-bind".to_string(),
                 path_to_string(&synthetic_mount_registry_root()),
                 path_to_string(&synthetic_mount_registry_root()),
-                // Rebind /dev after the root bind so device nodes remain
-                // writable/usable inside the writable root.
+                // The explicit writable /dev root binds the host /dev over
+                // the fresh one (still `nodev`, as before #493).
                 "--bind".to_string(),
                 "/dev".to_string(),
                 "/dev".to_string(),
