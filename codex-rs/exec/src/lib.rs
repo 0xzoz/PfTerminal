@@ -911,291 +911,298 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
             anyhow::anyhow!("failed to initialize in-process app-server client: {err}")
         })?;
     trace_exec_timing("after_in_process_start", exec_session_started_at);
-
-    // Handle resume subcommand through existing `thread/list` + `thread/resume`
-    // APIs so exec no longer reaches into rollout storage directly.
-    let (primary_thread_id, fallback_session_configured) = if let Some(ExecCommand::Resume(args)) =
-        command.as_ref()
-    {
-        trace_exec_timing("before_resolve_resume_thread_id", exec_session_started_at);
-        if let Some(thread_id) = resolve_resume_thread_id(
-            &client,
-            &config,
-            state_db.as_ref(),
-            args,
-            resume_model_override_requested,
-        )
-        .await?
-        {
-            trace_exec_timing("after_resolve_resume_thread_id", exec_session_started_at);
-            let response: ThreadResumeResponse = send_request_with_response(
-                &client,
-                ClientRequest::ThreadResume {
-                    request_id: request_ids.next(),
-                    params: thread_resume_params_from_config(
-                        &config,
-                        thread_id,
-                        resume_approvals_reviewer_override,
-                        resume_model_override_requested,
-                    ),
-                },
-                "thread/resume",
-            )
-            .await
-            .map_err(anyhow::Error::msg)?;
-            trace_exec_timing("after_thread_resume", exec_session_started_at);
-            let session_configured =
-                session_configured_from_thread_resume_response(&response, &config)
-                    .map_err(anyhow::Error::msg)?;
-            (session_configured.thread_id, session_configured)
-        } else {
-            trace_exec_timing("after_resolve_resume_thread_id", exec_session_started_at);
-            let response: ThreadStartResponse = send_request_with_response(
-                &client,
-                ClientRequest::ThreadStart {
-                    request_id: request_ids.next(),
-                    params: thread_start_params_from_config(&config),
-                },
-                "thread/start",
-            )
-            .await
-            .map_err(anyhow::Error::msg)?;
-            trace_exec_timing("after_thread_start_fallback", exec_session_started_at);
-            let session_configured =
-                session_configured_from_thread_start_response(&response, &config)
-                    .map_err(anyhow::Error::msg)?;
-            (session_configured.thread_id, session_configured)
-        }
-    } else {
-        let response: ThreadStartResponse = send_request_with_response(
-            &client,
-            ClientRequest::ThreadStart {
-                request_id: request_ids.next(),
-                params: thread_start_params_from_config(&config),
-            },
-            "thread/start",
-        )
-        .await
-        .map_err(anyhow::Error::msg)?;
-        trace_exec_timing("after_thread_start", exec_session_started_at);
-        let session_configured = session_configured_from_thread_start_response(&response, &config)
-            .map_err(anyhow::Error::msg)?;
-        (session_configured.thread_id, session_configured)
-    };
-
-    let primary_thread_id_for_span = primary_thread_id.to_string();
-    // Use the start/resume response as the authoritative bootstrap payload.
-    // Waiting for a later streamed `SessionConfigured` event adds up to 10s of
-    // avoidable startup latency on the in-process path.
-    let session_configured = fallback_session_configured;
-
-    exec_span.record("thread.id", primary_thread_id_for_span.as_str());
-
-    // Print the effective configuration and initial request so users can see what Codex
-    // is using.
-    event_processor.print_config_summary(&config, &prompt_summary, &session_configured);
-    trace_exec_timing("after_print_config_summary", exec_session_started_at);
-    if !json_mode
-        && let Some(message) =
-            codex_core::config::system_bwrap_warning(config.permissions.permission_profile())
-    {
-        event_processor.process_warning(message);
-    }
-    if let Some(message) = codex_core::config::legacy_windows_sandbox_warning(
-        WindowsSandboxLevel::from_config(&config),
-        config.permissions.permission_profile(),
-    ) {
-        // Keep JSONL stdout unchanged; the warning always goes to stderr.
-        if json_mode {
-            eprintln!("warning: {message}");
-        } else {
-            event_processor.process_warning(message);
-        }
-    }
-
-    info!("Codex initialized with event: {session_configured:?}");
-
-    let (interrupt_tx, mut interrupt_rx) = mpsc::unbounded_channel::<()>();
-    tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            tracing::debug!("Keyboard interrupt");
-            let _ = interrupt_tx.send(());
-        }
-    });
-
-    let task_id = match initial_operation {
-        InitialOperation::UserTurn {
-            items,
-            output_schema,
-        } => {
-            trace_exec_timing("before_turn_start", exec_session_started_at);
-            let response: TurnStartResponse = send_request_with_response(
-                &client,
-                ClientRequest::TurnStart {
-                    request_id: request_ids.next(),
-                    params: TurnStartParams {
-                        thread_id: primary_thread_id_for_span.clone(),
-                        client_user_message_id: None,
-                        input: items.into_iter().map(Into::into).collect(),
-                        responsesapi_client_metadata: None,
-                        additional_context: None,
-                        environments: None,
-                        cwd: Some(default_cwd),
-                        runtime_workspace_roots: None,
-                        approval_policy: Some(default_approval_policy.into()),
-                        approvals_reviewer: None,
-                        sandbox_policy: None,
-                        permissions: None,
-                        model: None,
-                        service_tier: None,
-                        effort: default_effort,
-                        summary: None,
-                        personality: None,
-                        output_schema,
-                        collaboration_mode: None,
-                        multi_agent_mode: None,
-                    },
-                },
-                "turn/start",
-            )
-            .await
-            .map_err(anyhow::Error::msg)?;
-            trace_exec_timing("after_turn_start", exec_session_started_at);
-            let task_id = response.turn.id;
-            info!("Sent prompt with event ID: {task_id}");
-            task_id
-        }
-        InitialOperation::Review { review_request } => {
-            let response: ReviewStartResponse = send_request_with_response(
-                &client,
-                ClientRequest::ReviewStart {
-                    request_id: request_ids.next(),
-                    params: ReviewStartParams {
-                        thread_id: primary_thread_id_for_span.clone(),
-                        target: review_target_to_api(review_request.target),
-                        delivery: None,
-                    },
-                },
-                "review/start",
-            )
-            .await
-            .map_err(anyhow::Error::msg)?;
-            let _ = event_processor.process_server_notification(ServerNotification::TurnStarted(
-                TurnStartedNotification {
-                    thread_id: response.review_thread_id.clone(),
-                    turn: response.turn.clone(),
-                },
-            ));
-            let task_id = response.turn.id;
-            info!("Sent review request with event ID: {task_id}");
-            task_id
-        }
-    };
-    exec_span.record("turn.id", task_id.as_str());
-
-    // Run the loop until the task is complete.
-    // Track whether a fatal error was reported by the server so we can
-    // exit with a non-zero status for automation-friendly signaling.
-    let mut error_seen = false;
-    let mut interrupt_channel_open = true;
-    let primary_thread_id_for_requests = primary_thread_id.to_string();
-    loop {
-        let server_event = tokio::select! {
-            maybe_interrupt = interrupt_rx.recv(), if interrupt_channel_open => {
-                if maybe_interrupt.is_none() {
-                    interrupt_channel_open = false;
-                    continue;
-                }
-                if let Err(err) = send_request_with_response::<TurnInterruptResponse>(
+    // #494: every exit after this point, early errors included, must shut
+    // the client down so the app-server's cleanup (the plugin sync's `git`
+    // and other drains) runs before exec returns.
+    let session = async {
+        // Handle resume subcommand through existing `thread/list` + `thread/resume`
+        // APIs so exec no longer reaches into rollout storage directly.
+        let (primary_thread_id, fallback_session_configured) =
+            if let Some(ExecCommand::Resume(args)) = command.as_ref() {
+                trace_exec_timing("before_resolve_resume_thread_id", exec_session_started_at);
+                if let Some(thread_id) = resolve_resume_thread_id(
                     &client,
-                    ClientRequest::TurnInterrupt {
-                        request_id: request_ids.next(),
-                        params: TurnInterruptParams {
-                            thread_id: primary_thread_id_for_requests.clone(),
-                            turn_id: task_id.clone(),
+                    &config,
+                    state_db.as_ref(),
+                    args,
+                    resume_model_override_requested,
+                )
+                .await?
+                {
+                    trace_exec_timing("after_resolve_resume_thread_id", exec_session_started_at);
+                    let response: ThreadResumeResponse = send_request_with_response(
+                        &client,
+                        ClientRequest::ThreadResume {
+                            request_id: request_ids.next(),
+                            params: thread_resume_params_from_config(
+                                &config,
+                                thread_id,
+                                resume_approvals_reviewer_override,
+                                resume_model_override_requested,
+                            ),
                         },
+                        "thread/resume",
+                    )
+                    .await
+                    .map_err(anyhow::Error::msg)?;
+                    trace_exec_timing("after_thread_resume", exec_session_started_at);
+                    let session_configured =
+                        session_configured_from_thread_resume_response(&response, &config)
+                            .map_err(anyhow::Error::msg)?;
+                    (session_configured.thread_id, session_configured)
+                } else {
+                    trace_exec_timing("after_resolve_resume_thread_id", exec_session_started_at);
+                    let response: ThreadStartResponse = send_request_with_response(
+                        &client,
+                        ClientRequest::ThreadStart {
+                            request_id: request_ids.next(),
+                            params: thread_start_params_from_config(&config),
+                        },
+                        "thread/start",
+                    )
+                    .await
+                    .map_err(anyhow::Error::msg)?;
+                    trace_exec_timing("after_thread_start_fallback", exec_session_started_at);
+                    let session_configured =
+                        session_configured_from_thread_start_response(&response, &config)
+                            .map_err(anyhow::Error::msg)?;
+                    (session_configured.thread_id, session_configured)
+                }
+            } else {
+                let response: ThreadStartResponse = send_request_with_response(
+                    &client,
+                    ClientRequest::ThreadStart {
+                        request_id: request_ids.next(),
+                        params: thread_start_params_from_config(&config),
                     },
-                    "turn/interrupt",
+                    "thread/start",
                 )
                 .await
-                {
-                    warn!("turn/interrupt failed: {err}");
-                }
-                continue;
-            }
-            maybe_event = client.next_event() => maybe_event,
-        };
+                .map_err(anyhow::Error::msg)?;
+                trace_exec_timing("after_thread_start", exec_session_started_at);
+                let session_configured =
+                    session_configured_from_thread_start_response(&response, &config)
+                        .map_err(anyhow::Error::msg)?;
+                (session_configured.thread_id, session_configured)
+            };
 
-        let Some(server_event) = server_event else {
-            break;
-        };
+        let primary_thread_id_for_span = primary_thread_id.to_string();
+        // Use the start/resume response as the authoritative bootstrap payload.
+        // Waiting for a later streamed `SessionConfigured` event adds up to 10s of
+        // avoidable startup latency on the in-process path.
+        let session_configured = fallback_session_configured;
 
-        match server_event {
-            InProcessServerEvent::ServerRequest(request) => {
-                handle_server_request(&client, *request, &mut error_seen).await;
-            }
-            InProcessServerEvent::ServerNotification(notification) => {
-                let mut notification = *notification;
-                if let ServerNotification::Error(payload) = &notification {
-                    if payload.thread_id == primary_thread_id_for_requests
-                        && payload.turn_id == task_id
-                        && !payload.will_retry
-                    {
-                        error_seen = true;
-                    }
-                } else if let ServerNotification::TurnCompleted(payload) = &notification
-                    && payload.thread_id == primary_thread_id_for_requests
-                    && payload.turn.id == task_id
-                    && matches!(
-                        payload.turn.status,
-                        codex_app_server_protocol::TurnStatus::Failed
-                            | codex_app_server_protocol::TurnStatus::Interrupted
-                    )
-                {
-                    error_seen = true;
-                }
+        exec_span.record("thread.id", primary_thread_id_for_span.as_str());
 
-                if should_process_notification(
-                    &notification,
-                    &primary_thread_id_for_requests,
-                    &task_id,
-                ) {
-                    maybe_backfill_turn_completed_items(
-                        config.ephemeral,
-                        &client,
-                        &mut request_ids,
-                        &mut notification,
-                    )
-                    .await;
-
-                    match event_processor.process_server_notification(notification) {
-                        CodexStatus::Running => {}
-                        CodexStatus::InitiateShutdown => {
-                            if let Err(err) = request_shutdown(
-                                &client,
-                                &mut request_ids,
-                                &primary_thread_id_for_requests,
-                            )
-                            .await
-                            {
-                                warn!("thread/unsubscribe failed during shutdown: {err}");
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
-            InProcessServerEvent::Lagged { skipped } => {
-                let message = lagged_event_warning_message(skipped);
-                warn!("{message}");
+        // Print the effective configuration and initial request so users can see what Codex
+        // is using.
+        event_processor.print_config_summary(&config, &prompt_summary, &session_configured);
+        trace_exec_timing("after_print_config_summary", exec_session_started_at);
+        if !json_mode
+            && let Some(message) =
+                codex_core::config::system_bwrap_warning(config.permissions.permission_profile())
+        {
+            event_processor.process_warning(message);
+        }
+        if let Some(message) = codex_core::config::legacy_windows_sandbox_warning(
+            WindowsSandboxLevel::from_config(&config),
+            config.permissions.permission_profile(),
+        ) {
+            // Keep JSONL stdout unchanged; the warning always goes to stderr.
+            if json_mode {
+                eprintln!("warning: {message}");
+            } else {
                 event_processor.process_warning(message);
             }
         }
+
+        info!("Codex initialized with event: {session_configured:?}");
+
+        let (interrupt_tx, mut interrupt_rx) = mpsc::unbounded_channel::<()>();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                tracing::debug!("Keyboard interrupt");
+                let _ = interrupt_tx.send(());
+            }
+        });
+
+        let task_id = match initial_operation {
+            InitialOperation::UserTurn {
+                items,
+                output_schema,
+            } => {
+                trace_exec_timing("before_turn_start", exec_session_started_at);
+                let response: TurnStartResponse = send_request_with_response(
+                    &client,
+                    ClientRequest::TurnStart {
+                        request_id: request_ids.next(),
+                        params: TurnStartParams {
+                            thread_id: primary_thread_id_for_span.clone(),
+                            client_user_message_id: None,
+                            input: items.into_iter().map(Into::into).collect(),
+                            responsesapi_client_metadata: None,
+                            additional_context: None,
+                            environments: None,
+                            cwd: Some(default_cwd),
+                            runtime_workspace_roots: None,
+                            approval_policy: Some(default_approval_policy.into()),
+                            approvals_reviewer: None,
+                            sandbox_policy: None,
+                            permissions: None,
+                            model: None,
+                            service_tier: None,
+                            effort: default_effort,
+                            summary: None,
+                            personality: None,
+                            output_schema,
+                            collaboration_mode: None,
+                            multi_agent_mode: None,
+                        },
+                    },
+                    "turn/start",
+                )
+                .await
+                .map_err(anyhow::Error::msg)?;
+                trace_exec_timing("after_turn_start", exec_session_started_at);
+                let task_id = response.turn.id;
+                info!("Sent prompt with event ID: {task_id}");
+                task_id
+            }
+            InitialOperation::Review { review_request } => {
+                let response: ReviewStartResponse = send_request_with_response(
+                    &client,
+                    ClientRequest::ReviewStart {
+                        request_id: request_ids.next(),
+                        params: ReviewStartParams {
+                            thread_id: primary_thread_id_for_span.clone(),
+                            target: review_target_to_api(review_request.target),
+                            delivery: None,
+                        },
+                    },
+                    "review/start",
+                )
+                .await
+                .map_err(anyhow::Error::msg)?;
+                let _ = event_processor.process_server_notification(
+                    ServerNotification::TurnStarted(TurnStartedNotification {
+                        thread_id: response.review_thread_id.clone(),
+                        turn: response.turn.clone(),
+                    }),
+                );
+                let task_id = response.turn.id;
+                info!("Sent review request with event ID: {task_id}");
+                task_id
+            }
+        };
+        exec_span.record("turn.id", task_id.as_str());
+
+        // Run the loop until the task is complete.
+        // Track whether a fatal error was reported by the server so we can
+        // exit with a non-zero status for automation-friendly signaling.
+        let mut error_seen = false;
+        let mut interrupt_channel_open = true;
+        let primary_thread_id_for_requests = primary_thread_id.to_string();
+        loop {
+            let server_event = tokio::select! {
+                maybe_interrupt = interrupt_rx.recv(), if interrupt_channel_open => {
+                    if maybe_interrupt.is_none() {
+                        interrupt_channel_open = false;
+                        continue;
+                    }
+                    if let Err(err) = send_request_with_response::<TurnInterruptResponse>(
+                        &client,
+                        ClientRequest::TurnInterrupt {
+                            request_id: request_ids.next(),
+                            params: TurnInterruptParams {
+                                thread_id: primary_thread_id_for_requests.clone(),
+                                turn_id: task_id.clone(),
+                            },
+                        },
+                        "turn/interrupt",
+                    )
+                    .await
+                    {
+                        warn!("turn/interrupt failed: {err}");
+                    }
+                    continue;
+                }
+                maybe_event = client.next_event() => maybe_event,
+            };
+
+            let Some(server_event) = server_event else {
+                break;
+            };
+
+            match server_event {
+                InProcessServerEvent::ServerRequest(request) => {
+                    handle_server_request(&client, *request, &mut error_seen).await;
+                }
+                InProcessServerEvent::ServerNotification(notification) => {
+                    let mut notification = *notification;
+                    if let ServerNotification::Error(payload) = &notification {
+                        if payload.thread_id == primary_thread_id_for_requests
+                            && payload.turn_id == task_id
+                            && !payload.will_retry
+                        {
+                            error_seen = true;
+                        }
+                    } else if let ServerNotification::TurnCompleted(payload) = &notification
+                        && payload.thread_id == primary_thread_id_for_requests
+                        && payload.turn.id == task_id
+                        && matches!(
+                            payload.turn.status,
+                            codex_app_server_protocol::TurnStatus::Failed
+                                | codex_app_server_protocol::TurnStatus::Interrupted
+                        )
+                    {
+                        error_seen = true;
+                    }
+
+                    if should_process_notification(
+                        &notification,
+                        &primary_thread_id_for_requests,
+                        &task_id,
+                    ) {
+                        maybe_backfill_turn_completed_items(
+                            config.ephemeral,
+                            &client,
+                            &mut request_ids,
+                            &mut notification,
+                        )
+                        .await;
+
+                        match event_processor.process_server_notification(notification) {
+                            CodexStatus::Running => {}
+                            CodexStatus::InitiateShutdown => {
+                                if let Err(err) = request_shutdown(
+                                    &client,
+                                    &mut request_ids,
+                                    &primary_thread_id_for_requests,
+                                )
+                                .await
+                                {
+                                    warn!("thread/unsubscribe failed during shutdown: {err}");
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+                InProcessServerEvent::Lagged { skipped } => {
+                    let message = lagged_event_warning_message(skipped);
+                    warn!("{message}");
+                    event_processor.process_warning(message);
+                }
+            }
+        }
+        Ok::<bool, anyhow::Error>(error_seen)
     }
+    .await;
 
     if let Err(err) = client.shutdown().await {
         warn!("in-process app-server shutdown failed: {err}");
     }
+    let error_seen = session?;
     event_processor.print_final_output();
     if error_seen {
         std::process::exit(1);
