@@ -226,6 +226,46 @@ fn credential_named_and_temporary_folders_do_not_stop_the_command() {
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(child.try_wait().unwrap(), None);
     assert_eq!(monitor.stop(), None);
+    // Removed folders no longer count toward the limit.
+    let watcher = CredentialWatcher::for_policy(&policy, &work)
+        .unwrap()
+        .unwrap();
+    let baseline = watcher.folders.len();
+    let mut watcher = watcher;
+    for round in 0..50 {
+        std::fs::create_dir(work.join(format!("gone{round}"))).unwrap();
+    }
+    let mut buffer = [0_u8; 64 * 1024];
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while watcher.folders.len() < baseline + 50 && Instant::now() < deadline {
+        let read = unsafe {
+            libc::read(
+                watcher.fd.as_raw_fd(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+            )
+        };
+        if let Ok(read) = usize::try_from(read) {
+            assert_eq!(watcher.matches_in(&buffer[..read]), None);
+        }
+    }
+    assert_eq!(watcher.folders.len(), baseline + 50);
+    for round in 0..50 {
+        std::fs::remove_dir(work.join(format!("gone{round}"))).unwrap();
+    }
+    while watcher.folders.len() > baseline && Instant::now() < deadline {
+        let read = unsafe {
+            libc::read(
+                watcher.fd.as_raw_fd(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+            )
+        };
+        if let Ok(read) = usize::try_from(read) {
+            assert_eq!(watcher.matches_in(&buffer[..read]), None);
+        }
+    }
+    assert_eq!(watcher.folders.len(), baseline);
     child.kill().unwrap();
     child.wait().unwrap();
 }

@@ -502,7 +502,17 @@ fn unsafe_credential_entries(cwd: &Path) -> Vec<String> {
                 continue;
             }
         };
-        for entry in entries.flatten() {
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(err) => {
+                    problems.push(format!(
+                        "Sandbox: cannot check {} for unsafe credential files: {err}",
+                        folder.display()
+                    ));
+                    continue;
+                }
+            };
             seen += 1;
             if seen > MAX_CHECKED_ENTRIES {
                 problems.push(format!(
@@ -512,16 +522,32 @@ fn unsafe_credential_entries(cwd: &Path) -> Vec<String> {
                 return problems;
             }
             let path = entry.path();
-            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
-                continue;
+            let metadata = match std::fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(err) => {
+                    problems.push(format!(
+                        "Sandbox: cannot check {} for unsafe credential files: {err}",
+                        path.display()
+                    ));
+                    continue;
+                }
             };
             if metadata.is_dir() {
                 pending.push(path);
             } else if is_credential_file_name(&entry.file_name())
                 && let Some(problem) = credential_entry_problem(&metadata)
             {
+                let target = std::fs::read_link(&path)
+                    .map(|target| {
+                        format!(
+                            "; anything written to it went to {}, so check or delete that file too",
+                            target.display()
+                        )
+                    })
+                    .unwrap_or_default();
                 problems.push(format!(
-                    "Sandbox: the credential file {} {problem}, so what is written to it could be read under another name; remove or rename it",
+                    "Sandbox: the credential file {} {problem}, so what is written to it could be read under another name; remove or rename it{target}",
                     path.display()
                 ));
             }

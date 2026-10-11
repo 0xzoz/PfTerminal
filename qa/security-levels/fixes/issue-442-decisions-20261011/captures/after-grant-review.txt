@@ -1,9 +1,9 @@
  Grant this command?
- Under Aggressive an approval never lifts the write protections (shell and git startup files, git hooks and config). This grant lets exactly this command run
- without them; a file written this way can run code later, outside the sandbox. Credential files and the Corbanu home stay unreadable, and Corbanu's own files
- and the project's .codex and .agents read-only: that is never granted under Aggressive.
-   Agent       human:session:01a12ccd-4f40-7b42-a35c-b14351db28df → agent:01a12ccd-4f40-7b42-a35c-b14351db28df
-   Session     01a12ccd-4f40-7b42-a35c-b14351db28df
+ Under Aggressive an approval never lifts the write protections (shell and git startup files, git hooks and config outside the project's .git). This grant lets
+ exactly this command run without them; a file written this way can run code later, outside the sandbox. Credential files and the Corbanu home stay unreadable,
+ and Corbanu's own files and the project's .git, .codex and .agents read-only: that is never granted under Aggressive.
+   Agent       human:session:01a12d1f-9cf7-7302-80a0-24a10a5df1a2 → agent:01a12d1f-9cf7-7302-80a0-24a10a5df1a2
+   Session     01a12d1f-9cf7-7302-80a0-24a10a5df1a2
    Action      execute
    Resource    protected_data/sandbox_protected_paths
    Command     $ printf x > .codex/notes.toml; echo codex=$?; printf x > .git/hooks/post-merge; echo hook=$?

@@ -116,8 +116,6 @@ pub(crate) struct CredentialWatcher {
     /// Credential files present at the start (hidden by the glob
     /// expansion), with their inode.
     known: HashMap<PathBuf, u64>,
-    /// Every folder watched, to count them once.
-    watched: HashSet<PathBuf>,
     /// Mount points bubblewrap itself creates (empty placeholders).
     placeholders: HashSet<PathBuf>,
     /// Existing credential files, in any letter case, to hide.
@@ -157,7 +155,6 @@ impl CredentialWatcher {
             roots: roots.clone(),
             folders: HashMap::new(),
             known: HashMap::new(),
-            watched: HashSet::new(),
             placeholders: HashSet::new(),
             existing: Vec::new(),
         };
@@ -209,12 +206,6 @@ impl CredentialWatcher {
                     folder.display()
                 ));
             }
-            if !self.watched.contains(&folder) && self.watched.len() >= MAX_WATCHED_FOLDERS {
-                return Some(format!(
-                    "more than {MAX_WATCHED_FOLDERS} folders to watch for credential files below {}",
-                    root.display()
-                ));
-            }
             let Ok(path) = CString::new(folder.as_os_str().as_bytes()) else {
                 return Some(format!("cannot watch {}", folder.display()));
             };
@@ -232,8 +223,15 @@ impl CredentialWatcher {
                     folder.display()
                 ));
             }
+            // The kernel keys watches by folder: a folder seen again (or
+            // renamed) keeps its watch and counts once.
+            if !self.folders.contains_key(&wd) && self.folders.len() >= MAX_WATCHED_FOLDERS {
+                return Some(format!(
+                    "more than {MAX_WATCHED_FOLDERS} folders to watch for credential files below {}",
+                    root.display()
+                ));
+            }
             self.folders.insert(wd, folder.clone());
-            self.watched.insert(folder.clone());
             let entries = match std::fs::read_dir(&folder) {
                 Ok(entries) => entries,
                 Err(err) if !required && err.kind() == std::io::ErrorKind::NotFound => continue,
@@ -247,8 +245,13 @@ impl CredentialWatcher {
                 let name = entry.file_name();
                 let path = folder.join(&name);
                 // Links are not followed, as in the glob expansion.
-                let Ok(metadata) = std::fs::symlink_metadata(&path) else {
-                    continue;
+                let metadata = match std::fs::symlink_metadata(&path) {
+                    Ok(metadata) => metadata,
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(err) if is_credential_file_name(&name) => {
+                        return Some(format!("cannot read {}: {err}", path.display()));
+                    }
+                    Err(_) => continue,
                 };
                 if metadata.is_dir() {
                     pending.push((path, Some(device)));
@@ -260,11 +263,7 @@ impl CredentialWatcher {
                 match scan {
                     Scan::Start => {
                         if let Some(problem) = credential_entry_problem(&metadata) {
-                            return Some(format!(
-                                "the credential file {} {problem}, so what is written to it could \
-                                 be read under another name; remove or rename it",
-                                path.display()
-                            ));
+                            return Some(unsafe_entry_message(&path, problem));
                         }
                         if metadata.is_file() {
                             self.existing.push(path.clone());
@@ -364,9 +363,7 @@ impl CredentialWatcher {
             events = &events[end..];
             if event.mask & libc::IN_IGNORED != 0 {
                 // The folder is gone: it no longer counts toward the limit.
-                if let Some(folder) = self.folders.remove(&event.wd) {
-                    self.watched.remove(&folder);
-                }
+                self.folders.remove(&event.wd);
                 continue;
             }
             if event.mask & libc::IN_Q_OVERFLOW != 0 {
@@ -414,6 +411,24 @@ impl CredentialMonitor {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
     }
+}
+
+/// Why `path`, an unsafe credential entry, refuses the command, and what the
+/// person should check.
+fn unsafe_entry_message(path: &Path, problem: &str) -> String {
+    let target = std::fs::read_link(path)
+        .map(|target| {
+            format!(
+                "; anything written to it went to {}, so check or delete that file too",
+                target.display()
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        "the credential file {} {problem}, so what is written to it could be read under another \
+         name; remove or rename it{target}",
+        path.display()
+    )
 }
 
 /// `path` with its folder resolved, the way the watcher spells paths.
