@@ -407,7 +407,7 @@ fn pf_41_s01_children_grants_taint_and_denials_are_correlated() {
     }
     facts.grants = vec![GrantFacts {
         thread: root,
-        surface: "one command without the protected-path rules",
+        surface: "one command without the write protections",
         expires_at: NOW + 240,
         used: 1,
         limit: Some(2),
@@ -437,8 +437,11 @@ fn pf_41_s01_children_grants_taint_and_denials_are_correlated() {
     assert_eq!(
         values("Grants"),
         vec![
-            "main session: one command without the protected-path rules; expires in 4m; used 1 of 2"
-                .to_string()
+            "main session: one command without the write protections; expires in 4m; used 1 of 2"
+                .to_string(),
+            // #442: what a grant never lifts.
+            "Protected reads: never granted under Aggressive, not even once: credential files (.env files found at start, SSH, cloud and CLI tokens) and Corbanu's sign-in, vault, config and history stay unreadable to agent commands; switch to Permissive in /security to allow them"
+                .to_string(),
         ]
     );
     assert_eq!(

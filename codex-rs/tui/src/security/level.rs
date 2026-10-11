@@ -24,6 +24,7 @@ pub(crate) use codex_security_level::level::hold_aggressive_lock;
 pub(crate) use codex_security_level::level::load;
 pub(crate) use codex_security_level::level::load_confirmed;
 pub(crate) use codex_security_level::level::load_state;
+#[cfg(test)]
 pub(crate) use codex_security_level::level::rules_contents;
 pub(crate) use codex_security_level::level::rules_path;
 pub(crate) use codex_security_level::level::save;

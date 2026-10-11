@@ -114,7 +114,9 @@ async fn sec_439_aggressive_refusals_name_the_level_and_the_way_forward() {
         }
         assert!(blocked.model_note().contains(notice));
     }
-    assert!(Blocked::Files.notice().contains("Grant once"));
+    // #442: protected reads are never granted, not even once.
+    assert!(Blocked::Files.notice().contains("not even once"));
+    assert!(!Blocked::Files.notice().contains("Grant once"));
     assert!(
         Blocked::Files
             .model_note()

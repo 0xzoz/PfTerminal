@@ -170,7 +170,7 @@ pub(crate) fn held_for_inspector(
             thread,
             surface: Surface::of(&entry.grant.scope.resource).map_or("unknown", |surface| {
                 match surface {
-                    Surface::UnprotectedCommand => "one command without the protected-path rules",
+                    Surface::UnprotectedCommand => "one command without the write protections",
                     Surface::UnconfinedProcess => "typing into one unconfined process",
                 }
             }),

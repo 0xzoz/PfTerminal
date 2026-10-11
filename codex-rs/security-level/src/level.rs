@@ -318,8 +318,9 @@ pub fn sync_rules(codex_home: &Path, level: ChosenLevel) -> io::Result<()> {
     let path = rules_path(codex_home);
     match level {
         ChosenLevel::Aggressive => {
-            if std::fs::read_to_string(&path).ok().as_deref() != Some(rules_contents().as_str()) {
-                write_atomically(&path, &rules_contents())?;
+            let expected = expected_rules(codex_home);
+            if std::fs::read_to_string(&path).ok().as_deref() != Some(expected.as_str()) {
+                write_atomically(&path, &expected)?;
             }
             Ok(())
         }
@@ -331,7 +332,40 @@ pub fn sync_rules(codex_home: &Path, level: ChosenLevel) -> io::Result<()> {
     }
 }
 
+/// The rule file for the default nested-launch setting (refuse).
 pub fn rules_contents() -> String {
+    rules_contents_for(NestedAgents::Refuse)
+}
+
+/// The rule file `codex_home`'s stored nested-launch setting needs.
+pub fn expected_rules(codex_home: &Path) -> String {
+    rules_contents_for(load_state(codex_home).1)
+}
+
+/// Whether `contents` is a rule file this module writes (either setting).
+/// The "pass" form is also the file earlier versions wrote.
+pub fn is_rules_contents(contents: &str) -> bool {
+    [NestedAgents::Refuse, NestedAgents::Pass]
+        .into_iter()
+        .any(|nested| contents == rules_contents_for(nested))
+}
+
+/// Subcommands that start an agent without a person (`exec`, its alias `e`,
+/// and `review`). Under nested-agents "refuse" the rule file forbids them,
+/// so an agent's request is refused before anyone is asked to approve a
+/// command that would only refuse (#441). The launch-time check stays the
+/// boundary: launches built at run time or not named on the command line
+/// still refuse when they start.
+pub const NESTED_AGENT_SUBCOMMANDS: [&str; 3] = ["exec", "e", "review"];
+
+/// Justification of the nested-launch rules. The exec policy's strict
+/// matching (the vault rule's net for wrapped and quoted forms) skips rules
+/// with it: they refuse earlier what the launch check refuses (until a
+/// thread started under "refuse" ends; `--help` included), so text such as
+/// `git commit -m "fix codex review"` must not match them.
+pub const NESTED_LAUNCH_JUSTIFICATION: &str = "Security level Aggressive: nested agent launches are set to refuse; a person can let `corbanu exec` and `corbanu review` run with Aggressive enforced in /security (from the next session).";
+
+pub fn rules_contents_for(nested: NestedAgents) -> String {
     let mut contents = String::from(
         "# Managed by Corbanu Terminal /security (Aggressive). Choosing Permissive removes this file.\n",
     );
@@ -339,6 +373,15 @@ pub fn rules_contents() -> String {
         contents.push_str(&format!(
             "prefix_rule(pattern = [\"{program}\", \"vault\"], decision = \"forbidden\", justification = \"Security level Aggressive: agents cannot use the Corbanu vault.\")\n"
         ));
+    }
+    if nested == NestedAgents::Refuse {
+        for program in VAULT_PROGRAMS {
+            for subcommand in NESTED_AGENT_SUBCOMMANDS {
+                contents.push_str(&format!(
+                    "prefix_rule(pattern = [\"{program}\", \"{subcommand}\"], decision = \"forbidden\", justification = \"{NESTED_LAUNCH_JUSTIFICATION}\")\n"
+                ));
+            }
+        }
     }
     contents
 }

@@ -263,7 +263,9 @@ pub(crate) async fn verify_aggressive(
     config: &Config,
 ) -> Result<(), String> {
     let rules_present = std::fs::read_to_string(level::rules_path(codex_home))
-        .is_ok_and(|contents| contents == level::rules_contents());
+        // Either nested-launch form: a session that saved another level
+        // keeps the file it was started with until the next launch.
+        .is_ok_and(|contents| codex_security_level::level::is_rules_contents(&contents));
     let mut failures = aggressive::verify(config, rules_present, origin);
     failures.extend(aggressive::verify_exec_policy(config).await);
     if failures.is_empty() {

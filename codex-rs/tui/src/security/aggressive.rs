@@ -39,7 +39,7 @@ const SECRET_ENV_PATTERNS: [&str; 4] = ["*VAULT*", "*PASSWORD*", "*PASSPHRASE*",
 pub(crate) const ROWS: [(&str, &str); 6] = [
     (
         "Sandbox",
-        "write only in the current folder (where the Corbanu home and the nested-launch registry stay read-only): no extra writable folders, no /tmp or $TMPDIR; approved commands stay inside it too; escalation and permission-request tools are off",
+        "write only in the current folder (where the Corbanu home and the nested-launch registry stay read-only): no extra writable folders, no /tmp or $TMPDIR; approved commands stay inside it too; escalation and permission-request tools are off; reading credential files (.env files found at start, SSH, cloud and CLI tokens) or Corbanu's sign-in, vault, config and history is denied to agent commands and is never granted, not even once (switch to Permissive in /security to allow it)",
     ),
     (
         "Approvals",
@@ -48,7 +48,7 @@ pub(crate) const ROWS: [(&str, &str); 6] = [
     ("Network", "off for agent commands; web search off"),
     (
         "Vault",
-        "the vault store and sign-in file are unreadable to agent commands, and direct `corbanu vault …` commands are refused; secret-like environment variables (KEY, SECRET, TOKEN, VAULT, PASSWORD, PASSPHRASE, CREDENTIAL) are removed, and login profiles and shell snapshots are not used",
+        "the vault store and sign-in file are unreadable to agent commands, and direct `corbanu vault …` commands are refused; secret-like environment variables (KEY, SECRET, TOKEN, VAULT, PASSWORD, PASSPHRASE, CREDENTIAL) are removed, and with secretless_agent_launch on so is every other variable outside an allowlist (for example PATH, HOME, locale, terminal, proxy and tool locations; set others explicitly in shell_environment_policy.set); login profiles and shell snapshots are not used",
     ),
     (MODEL_KEYS_LABEL, MODEL_KEYS_ROW),
     (
