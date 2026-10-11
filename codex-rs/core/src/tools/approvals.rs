@@ -188,8 +188,16 @@ impl ApprovalResolution {
     }
 }
 
-/// `record_decline`: list a refusal under the inspector's recent denials
-/// (#437). The caller that records a refusal itself passes `false`.
+/// Who lists a refused approval under the inspector's recent denials (#437).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DeclineRecord {
+    /// This function does.
+    Here,
+    /// The caller records the outcome itself (protected actions after
+    /// untrusted content).
+    ByCaller,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn resolve_tool_apporval<Rq, Out, T>(
     tool: &mut T,
@@ -199,15 +207,18 @@ pub(super) async fn resolve_tool_apporval<Rq, Out, T>(
     tool_ctx: &ToolCtx,
     reviewer: ApprovalReviewer,
     otel: &codex_otel::SessionTelemetry,
-    record_decline: bool,
+    decline_record: DeclineRecord,
 ) -> Result<ReviewDecision, ToolError>
 where
     T: ToolRuntime<Rq, Out>,
 {
     let what = approval_kind(&flat_tool_name(&tool_ctx.tool_name));
     let thread = tool_ctx.session.thread_id();
-    let mut pending =
-        record_decline.then(|| crate::security::inspection::PendingApproval::new(thread, what));
+    // An interrupted wait is "declined by you" only when the person was
+    // asked (not a hook or the automatic reviewer).
+    let asks_person = ctx.fresh_human_authority || reviewer == ApprovalReviewer::User;
+    let mut pending = (decline_record == DeclineRecord::Here)
+        .then(|| crate::security::inspection::PendingApproval::new(thread, what, asks_person));
     let resolution = resolve(
         tool,
         req,

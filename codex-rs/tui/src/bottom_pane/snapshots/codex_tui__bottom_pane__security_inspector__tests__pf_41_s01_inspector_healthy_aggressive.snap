@@ -9,8 +9,8 @@ Observed 0s ago, policy generation 2.1
 Level
   Saved: Aggressive [configured: /security]
   Core config: Permissive [configured: config layers]
-  [set] Active this run: Aggressive; the launch check passed for the session rows (runtime controls
-      below show what is observed now) [resolved: launch check]
+  [set] Active this run: Aggressive; rows marked "checked at launch" passed the launch check
+      (runtime controls below show what is observed now) [resolved: launch check]
   [on] Live policy: Aggressive in force; next start Aggressive; kill switch off; generation 2.1
       [observed: Core policy]
 

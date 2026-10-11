@@ -9,4 +9,4 @@ Observed 0s ago
 Level
   Saved: Aggressive [configured: /security]
   Core config: Permissive [configured: config layers]
-  [set] Active this run: Aggressive; the launch check passed for the session rows (runtime controls
+  [set] Active this run: Aggressive; rows marked "checked at launch" passed the launch check

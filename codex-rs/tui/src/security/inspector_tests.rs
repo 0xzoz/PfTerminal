@@ -529,7 +529,7 @@ fn sec_437_active_row_claims_only_the_launch_check() {
     assert!(
         active
             .value
-            .contains("launch check passed for the session rows"),
+            .contains("rows marked \"checked at launch\" passed the launch check"),
         "{}",
         active.value
     );
