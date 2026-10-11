@@ -79,3 +79,8 @@ the core tests with a plain workspace-write profile) lifted them. The grant revi
   - before (main `2e2e2f8d82`): the agent's `.env.local` and the person's `.env.production` were printed.
   - after: the agent cannot create `.env.local`; the person's `.env.production` is denied with the Aggressive
     explanation; `.codex` write denied after Grant once; review text updated.
+- Videos (GLM 5.3 Flash, at `04fa31adcd`):
+  [.env created mid-session](https://github.com/CorbanuCore/CorbanuTerminal/releases/download/demos/issue-442-issue442-new-env-file-denied-04fa31adcd7f-2026-10-11.mp4),
+  [.codex read-only after Grant once](https://github.com/CorbanuCore/CorbanuTerminal/releases/download/demos/issue-442-issue442-codex-always-read-only-04fa31adcd7f-2026-10-11.mp4).
+- Review: independent Opus 5.5 High (read-only `corbanu exec`), four rounds; rounds 1-3 requested changes (all fixed,
+  see the PR), round 4 approved; its minor findings are fixed too.
