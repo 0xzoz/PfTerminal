@@ -556,6 +556,7 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
                 }
             }
 
+            processor.cancel_plugin_sync();
             processor.clear_runtime_references();
             processor.cancel_active_login().await;
             processor
