@@ -1163,7 +1163,7 @@ impl<'a> Collector<'a> {
                 toml::Value::String(text) => {
                     let leaf = key.rsplit('.').next().unwrap_or_default();
                     let secret_key = is_secret_config_key(leaf);
-                    if text.is_empty() || is_reference(text) {
+                    if text.is_empty() || is_reference(text) || is_non_secret_setting(&key, text) {
                         continue;
                     }
                     if (secret_key && !looks_like_name_or_path(text)) || self.detector.secret(text)
@@ -1435,11 +1435,6 @@ fn is_reference(value: &str) -> bool {
 
 fn is_secret_config_key(key: &str) -> bool {
     let lower = key.to_ascii_lowercase();
-    // #438: settings whose names contain a secret-like word but whose values
-    // are modes (`file`, `keyring`, ...), never credentials.
-    if NON_SECRET_SETTINGS.contains(&lower.as_str()) {
-        return false;
-    }
     ["token", "secret", "password", "passphrase", "api_key", "apikey", "credential"]
         .iter()
         .any(|fragment| lower.contains(fragment))
@@ -1452,12 +1447,29 @@ fn is_secret_config_key(key: &str) -> bool {
         && !lower.contains('/')
 }
 
-/// Config settings named like secrets that only choose a mode.
-const NON_SECRET_SETTINGS: &[&str] = &[
-    "cli_auth_credentials_store",
-    "mcp_oauth_credentials_store",
-    "model_auto_compact_token_limit_scope",
+/// #438: top-level settings named like secrets whose values are enum
+/// choices, never credentials, with every value they accept.
+const NON_SECRET_SETTINGS: &[(&str, &[&str])] = &[
+    (
+        "cli_auth_credentials_store",
+        &["file", "keyring", "auto", "ephemeral"],
+    ),
+    ("mcp_oauth_credentials_store", &["auto", "file", "keyring"]),
+    (
+        "model_auto_compact_token_limit_scope",
+        &["total", "body_after_prefix"],
+    ),
 ];
+
+/// Whether the top-level `key` (the full dotted key, compared exactly) holds
+/// one of its enum choices. Any other value, or the name under another table
+/// (`shell_environment_policy.set.CLI_AUTH_CREDENTIALS_STORE`), is checked
+/// as before.
+fn is_non_secret_setting(key: &str, value: &str) -> bool {
+    NON_SECRET_SETTINGS
+        .iter()
+        .any(|(name, values)| *name == key && values.contains(&value))
+}
 
 /// Variable names and paths stored under a secret-looking key are references.
 fn looks_like_name_or_path(text: &str) -> bool {
