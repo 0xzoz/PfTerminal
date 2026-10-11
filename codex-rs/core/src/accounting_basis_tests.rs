@@ -523,13 +523,8 @@ async fn admission_records_the_named_account() -> anyhow::Result<()> {
         anyhow::Ok(applied)
     };
     let route = format!("{endpoint}/chat/completions");
-    let default_attempt = Sampling::start(db.clone(), owner, "default".into(), &default_mode)
-        .await?
-        .admit("some-model", &route)
-        .await?;
-    assert_eq!(default_attempt.account, None);
-    assert_eq!(formats().await?, vec![1]);
     let named_sampling = Sampling::start(db.clone(), owner, "named".into(), &named_mode).await?;
+    assert_eq!(formats().await?, vec![1]);
     // A rebound mode on another account is not this sampling's account.
     assert!(named_sampling.same_account(&rebound));
     assert!(!named_sampling.same_account(&default_mode));
@@ -537,6 +532,11 @@ async fn admission_records_the_named_account() -> anyhow::Result<()> {
     assert_eq!(named_attempt.account, Some(expected.clone()));
     // A format-1 ledger goes straight to format 4 with the named attempt.
     assert_eq!(formats().await?, vec![1, 2, 3, 4]);
+    let default_attempt = Sampling::start(db.clone(), owner, "default".into(), &default_mode)
+        .await?
+        .admit("some-model", &route)
+        .await?;
+    assert_eq!(default_attempt.account, None);
     let day = chrono::Utc::now().timestamp_millis() / 86_400_000;
     let codex_state::accounting::InspectionDay::Ready(view) =
         codex_state::accounting::AccountingStore::inspect_day(
