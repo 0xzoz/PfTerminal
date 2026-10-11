@@ -1501,6 +1501,82 @@ async fn sandbox_denies_reads_through_a_nested_link_workspace() {
     }
 }
 
+/// #503: in a full-write profile (`:root = write` plus a denial), an extra
+/// writable root that is a symlink to `/` is treated as `/`: it is bound before
+/// shallower writable roots, so their protections (a read-only `.git`, a
+/// denied file) are not covered by a later `/` bind; read-only paths outside
+/// every workspace stay read-only; and it asks for no mount points at the
+/// filesystem root.
+#[tokio::test]
+async fn writable_symlink_to_root_keeps_shallower_root_protections() {
+    if should_skip_bwrap_tests().await {
+        eprintln!("skipping bwrap test: bwrap sandbox prerequisites are unavailable");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base = dir.path().canonicalize().expect("canonical");
+    let workspace = base.join("ws");
+    std::fs::create_dir_all(workspace.join(".git")).expect("workspace .git");
+    let secret = workspace.join("secret.txt");
+    std::fs::write(&secret, "secret-503\n").expect("secret");
+    let read_only = base.join("ro");
+    std::fs::create_dir(&read_only).expect("read-only dir");
+    let link = base.join("a").join("b").join("c").join("root-link");
+    std::fs::create_dir_all(link.parent().expect("link parent")).expect("link parent");
+    std::os::unix::fs::symlink("/", &link).expect("symlink to /");
+    let entry = |path: &std::path::Path, access| FileSystemSandboxEntry {
+        path: FileSystemPath::Path {
+            path: AbsolutePathBuf::from_absolute_path(path).expect("absolute path"),
+        },
+        access,
+        missing_path_behavior: None,
+    };
+    let policy = FileSystemSandboxPolicy::restricted(vec![
+        FileSystemSandboxEntry {
+            path: FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            },
+            access: FileSystemAccessMode::Write,
+            missing_path_behavior: None,
+        },
+        entry(&workspace, FileSystemAccessMode::Write),
+        entry(&link, FileSystemAccessMode::Write),
+        entry(&secret, FileSystemAccessMode::Deny),
+        entry(&read_only, FileSystemAccessMode::Read),
+    ]);
+    let script = "echo hi > /dev/null; echo null=$?; \
+                  touch ../ro/probe; echo ro=$?; \
+                  touch .git/probe; echo git=$?; \
+                  cat secret.txt; echo cat=$?; \
+                  echo ok > other.txt; echo other=$?; \
+                  echo ok > ../outside.txt; echo outside=$?";
+    let output = run_cmd_result_with_permission_profile_for_cwd(
+        &["bash", "-c", script],
+        AbsolutePathBuf::from_absolute_path(&workspace).expect("absolute workspace"),
+        PermissionProfile::from_runtime_permissions(&policy, NetworkSandboxPolicy::Restricted),
+        create_env_from_core_vars(),
+        LONG_TIMEOUT_MS,
+        /*use_legacy_landlock*/ false,
+    )
+    .await
+    .expect("symlinked root profile runs under bubblewrap");
+    let stdout = output.stdout.text;
+    let stderr = output.stderr.text;
+    for expected in ["null=0", "ro=1", "git=1", "cat=1", "other=0", "outside=0"] {
+        assert!(
+            stdout.contains(expected),
+            "{expected}: {stdout}\nstderr: {stderr}"
+        );
+    }
+    assert!(!stdout.contains("secret-503"), "{stdout}");
+    assert!(!workspace.join(".git").join("probe").exists());
+    assert!(!read_only.join("probe").exists());
+    assert_eq!(
+        std::fs::read_to_string(base.join("outside.txt")).expect("outside"),
+        "ok\n"
+    );
+}
+
 /// Aggressive's profile on Linux: write in `work`, network off, and every
 /// credential file name below `work` denied (`tui::security::aggressive`).
 fn credential_name_profile(work: &std::path::Path) -> PermissionProfile {

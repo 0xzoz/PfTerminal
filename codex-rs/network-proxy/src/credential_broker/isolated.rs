@@ -21,6 +21,8 @@ pub(crate) use client::StoredRegistration;
 pub(crate) use client::user_runtime_dir;
 pub use protocol::StoredKeyAccount;
 pub use server::StoredKeyResolver;
+#[cfg(all(test, unix))]
+use server::TEST_EXIT_HOLD_MS_ENV;
 #[cfg(windows)]
 pub(crate) use server::prepare_vault_lock;
 pub use server::run_credential_broker_main;

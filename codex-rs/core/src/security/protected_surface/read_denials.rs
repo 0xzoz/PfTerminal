@@ -499,11 +499,39 @@ pub(crate) fn post_taint_read_policy(
 }
 
 /// Whether `path` (and what it resolves to) may be read under `policy`.
+///
+/// What `path` resolves to is also checked against the policy's paths with
+/// links resolved alike (#512): a denial spelled through a link (`/tmp` and
+/// `/var` on macOS, a linked home) never names the resolved target, so a
+/// link to a denied file, or the file under its real name, passed. This
+/// only adds a check: it never makes a path readable.
 pub(crate) fn readable_under(policy: &FileSystemSandboxPolicy, path: &Path, cwd: &Path) -> bool {
-    policy.can_read_path_with_cwd(path, cwd)
-        && std::fs::canonicalize(path).map_or(true, |canonical| {
-            policy.can_read_path_with_cwd(&canonical, cwd)
-        })
+    if !policy.can_read_path_with_cwd(path, cwd) {
+        return false;
+    }
+    let Ok(canonical) = std::fs::canonicalize(path) else {
+        return true;
+    };
+    policy.can_read_path_with_cwd(&canonical, cwd)
+        && with_real_locations(policy).can_read_path_with_cwd(&canonical, cwd)
+}
+
+/// `policy` with each path entry also under its real location, with the
+/// same access, so the most specific entry still wins once links resolve.
+fn with_real_locations(policy: &FileSystemSandboxPolicy) -> FileSystemSandboxPolicy {
+    let mut resolved = policy.clone();
+    for entry in &policy.entries {
+        if let FileSystemPath::Path { path } = &entry.path
+            && let Some(real) = real_location(path)
+            && real != *path
+        {
+            resolved.entries.push(FileSystemSandboxEntry {
+                path: FileSystemPath::Path { path: real },
+                ..entry.clone()
+            });
+        }
+    }
+    resolved
 }
 
 #[cfg(test)]
