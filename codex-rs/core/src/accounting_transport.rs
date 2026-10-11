@@ -367,6 +367,41 @@ impl<T: HttpTransport> AccountingTransport<T> {
         self.follow.as_ref()
     }
 
+    /// #475: the provider refused the admitted attempt before any response
+    /// (401 or 403): record that, so the attempt reads as refused with no
+    /// tokens and no charge rather than as one with incomplete usage.
+    async fn refused(
+        evidence: &ResponseEvidence,
+        attempt: Option<Attempt>,
+        error: &TransportError,
+    ) {
+        let TransportError::Http { status, .. } = error else {
+            return;
+        };
+        if !matches!(
+            *status,
+            http::StatusCode::UNAUTHORIZED | http::StatusCode::FORBIDDEN
+        ) || evidence.is_excluded()
+        {
+            return;
+        }
+        Self::bind(evidence, attempt);
+        let Some(attempt) = evidence.attempt.get() else {
+            return;
+        };
+        let refusal = codex_state::accounting::Patch {
+            refused_status: Some(status.as_u16()),
+            ..Default::default()
+        };
+        if let Err(error) = evidence
+            .sampling
+            .observe_patch(attempt, evidence.source, /*position*/ 1, refusal)
+            .await
+        {
+            evidence.give_up("record refusal", format_args!("{error:#}"));
+        }
+    }
+
     fn bind(evidence: &ResponseEvidence, attempt: Option<Attempt>) {
         if let Some(attempt) = attempt
             && evidence.attempt.set(attempt).is_err()
@@ -396,7 +431,11 @@ impl<T: HttpTransport> HttpTransport for AccountingTransport<T> {
                     _ => Err(TransportError::Build(REDIRECTED_UNRECORDED.into())),
                 };
             }
-            result => result?,
+            Err(error) => {
+                Self::refused(evidence, attempt, &error).await;
+                return Err(error);
+            }
+            Ok(response) => response,
         };
         Self::bind(evidence, attempt);
         // One body, one observation: revisions are positive, and this response
@@ -431,7 +470,11 @@ impl<T: HttpTransport> HttpTransport for AccountingTransport<T> {
                     _ => Err(TransportError::Build(REDIRECTED_UNRECORDED.into())),
                 };
             }
-            result => result?,
+            Err(error) => {
+                Self::refused(evidence, attempt, &error).await;
+                return Err(error);
+            }
+            Ok(response) => response,
         };
         Self::bind(evidence, attempt);
         Ok(response)

@@ -127,7 +127,12 @@ impl<'a> Journal<'a> {
         }
         // A record a format-1 ledger cannot express upgrades the ledger in the
         // same transaction that writes it.
-        let format = attempt.ledger_format();
+        let format = batch
+            .iter()
+            .map(Observation::ledger_format)
+            .chain([attempt.ledger_format()])
+            .max()
+            .unwrap_or(1);
         if format > 1 {
             crate::runtime::accounting::store::require_format_on_connection(conn, format).await?;
         }

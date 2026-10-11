@@ -409,6 +409,7 @@ pub(super) fn patch(
             .then_some(usage.billed_usd)
             .flatten()
             .and_then(|text| codex_state::accounting::Decimal::try_from(text).ok()),
+        refused_status: None,
     })
 }
 

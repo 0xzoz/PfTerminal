@@ -65,6 +65,13 @@ pub struct Patch {
     /// absent, so every patch recorded without one keeps its exact bytes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub billed_usd: Option<Decimal>,
+    /// The HTTP status (401 or 403) with which the provider refused the
+    /// attempt before any response (#475): it used no tokens and is not
+    /// charged. Such a patch states nothing else. Omitted when absent, so
+    /// every other patch keeps its exact bytes; one that has it needs ledger
+    /// format 5.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refused_status: Option<u16>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,6 +186,19 @@ pub struct Observation {
     pub patch: Patch,
 }
 
+impl Observation {
+    /// The ledger format this observation needs: 5 when it records a refused
+    /// attempt, otherwise 1. `append_on_connection` upgrades the ledger to it
+    /// first.
+    pub(crate) fn ledger_format(&self) -> i64 {
+        if self.patch.refused_status.is_some() {
+            5
+        } else {
+            1
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct Usage {
     pub input: Option<i64>,
@@ -192,6 +212,10 @@ pub struct Usage {
     /// from tokens; omitted when absent so earlier estimates keep their bytes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub billed_usd: Option<Decimal>,
+    /// The status the provider refused the attempt with (#475); every count
+    /// is then zero. Omitted when absent so earlier estimates keep their bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refused_status: Option<u16>,
 }
 
 /// Replay cumulative patches in source revision order, validating every prefix.
@@ -199,6 +223,43 @@ pub(super) fn replay(dialect: Dialect, observations: &[Observation]) -> anyhow::
     let mut raw = [None; 6];
     let mut billed_usd = None;
     let mut usage = Usage::default();
+    // #475: a refused attempt got no response, so its one patch states the
+    // refusal and nothing else, and every count is zero.
+    if let Some(refused) = observations
+        .iter()
+        .find_map(|observation| observation.patch.refused_status)
+    {
+        let [observation] = observations else {
+            anyhow::bail!("a refused attempt has exactly one observation");
+        };
+        ensure!(
+            i64::from(observation.revision) > 0,
+            "replay requires unique ordered revisions"
+        );
+        ensure!(
+            observation.patch
+                == Patch {
+                    refused_status: Some(refused),
+                    ..Patch::default()
+                },
+            "a refusal states no usage"
+        );
+        ensure!(
+            (400..500).contains(&refused) && refused != 429,
+            "invalid refusal status"
+        );
+        return Ok(Usage {
+            input: Some(0),
+            noncached: Some(0),
+            read: Some(0),
+            write: Some(0),
+            output: Some(0),
+            reasoning: Some(0),
+            total: Some(0),
+            billed_usd: None,
+            refused_status: Some(refused),
+        });
+    }
     let mut previous = 0;
     for observation in observations {
         let revision = i64::from(observation.revision);
@@ -268,6 +329,7 @@ pub(super) fn replay(dialect: Dialect, observations: &[Observation]) -> anyhow::
             reasoning: measured_reasoning,
             total: measured_total,
             billed_usd,
+            refused_status: None,
         };
     }
     Ok(usage)

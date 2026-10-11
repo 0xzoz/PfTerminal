@@ -3209,3 +3209,57 @@ async fn accounting_inspect_future_day_says_why() {
     );
     assert!(!text.contains("Usage:"), "{text}");
 }
+
+/// #475: a request the provider refused with 401 before any response reads
+/// as a failure with no charge: never as incomplete usage, a lower bound or a
+/// reason to check the provider's bill.
+#[test]
+fn accounting_inspect_refused_request_reads_as_failed_with_no_charge() {
+    let mut q = quote();
+    q.attempt.provider = "zai".into();
+    q.attempt.account = Some(codex_state::accounting::AttemptAccount {
+        name: "fake".into(),
+        fingerprint: Some("0123456789ab".into()),
+    });
+    q.snapshot = Some(native_snapshot(
+        serde_json::json!({"noncached":"1","read":"1","write":null,"output":"4"}),
+        "Billed",
+        /*basis_source*/ None,
+        /*plan_burn_millis*/ None,
+    ));
+    q.usage = Usage {
+        input: Some(0),
+        noncached: Some(0),
+        read: Some(0),
+        write: Some(0),
+        output: Some(0),
+        reasoning: Some(0),
+        total: Some(0),
+        billed_usd: None,
+        refused_status: Some(401),
+    };
+    q.buckets = [BucketQuote::Priced(Decimal::default()); 4];
+    q.known_subtotal = Decimal::default();
+    q.all_buckets_priced = Some(Decimal::default());
+    let quotes = [&q];
+
+    let route = route_line(&quotes, /*named*/ true);
+    assert!(
+        route.contains("1 attempt refused by the provider (HTTP 401) — no charge"),
+        "{route}"
+    );
+    let header = plain_header(&quotes, /*named*/ true).join("\n");
+    assert!(header.contains("Refused: 1 attempt refused by the provider (HTTP 401) — no charge"));
+    for text in [&route, &header] {
+        for misleading in ["incomplete", "at least", "check", "not reported"] {
+            assert!(!text.contains(misleading), "{misleading}: {text}");
+        }
+    }
+    let attempt = attempt_text(&q).join("\n");
+    assert!(
+        attempt.contains(
+            "Completion/billing status: refused by the provider (HTTP 401) before any response; no tokens, no charge"
+        ),
+        "{attempt}"
+    );
+}

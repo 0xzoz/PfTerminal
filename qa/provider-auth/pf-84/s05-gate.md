@@ -36,6 +36,10 @@ off no attempt names an account and nothing below changes.
   The "Other conversations" rows are grouped the same way. Accounts are named, `default`
   included, only when the view holds work from a named account. The per-account rows add up
   exactly to the provider totals.
+
+  Follow-up #475: a request the provider refuses with 401 or 403 before any response (a fake key)
+  is recorded as refused (ledger format 5, written only with the first refusal). `/cost` shows it
+  as refused with no charge, not as incomplete usage that sends the user to the provider's bill.
 - **`/status`** names the session's account, which S04 already did.
 
 ## Tests (final tree, macOS, `just test`, isolated profile)
