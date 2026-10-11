@@ -759,9 +759,8 @@ impl FileSystemSandboxPolicy {
     /// written, so a path spelled through a nested link does not match a
     /// rule spelled without it.
     ///
-    /// This does not model Seatbelt's per-root exclusions: with a readable
-    /// root reached through a nested link, Seatbelt can leave a denied path
-    /// readable that this counts as denied (#488).
+    /// This does not model a sandbox's own clauses; on macOS use
+    /// `codex_sandboxing::seatbelt::seatbelt_allows_file_read` (#488).
     pub fn can_read_effective_path_with_cwd(&self, path: &Path, cwd: &Path) -> bool {
         match self.kind {
             FileSystemSandboxKind::Unrestricted | FileSystemSandboxKind::ExternalSandbox => {
