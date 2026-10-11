@@ -1340,3 +1340,66 @@ async fn missing_denied_paths_below_read_only_or_missing_folders_run_and_stay_hi
     );
     assert!(!base.join(".config").exists(), "placeholder removed");
 }
+
+/// #493: under a full-write profile with a denial, the writable `/` bind
+/// must not cover the minimal `/dev` (bubblewrap binds `nodev`), so
+/// `/dev/null` stays usable while the denied file stays unreadable.
+#[tokio::test]
+async fn full_write_profile_with_denial_keeps_dev_null_usable() {
+    if should_skip_bwrap_tests().await {
+        eprintln!("skipping bwrap test: bwrap sandbox prerequisites are unavailable");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base = dir.path().canonicalize().expect("canonical");
+    let secret = base.join("secret.txt");
+    std::fs::write(&secret, "secret-493\n").expect("secret");
+    let policy = FileSystemSandboxPolicy::restricted(vec![
+        FileSystemSandboxEntry {
+            path: FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            },
+            access: FileSystemAccessMode::Write,
+            missing_path_behavior: None,
+        },
+        FileSystemSandboxEntry {
+            path: FileSystemPath::Path {
+                path: AbsolutePathBuf::from_absolute_path(&secret).expect("absolute secret"),
+            },
+            access: FileSystemAccessMode::Deny,
+            missing_path_behavior: None,
+        },
+    ]);
+    let script = "echo hi > /dev/null; echo null=$?; \
+                  head -c 1 /dev/urandom > /dev/null; echo urandom=$?; \
+                  cat secret.txt; echo cat=$?; \
+                  echo x > secret.txt; echo write=$?; \
+                  echo ok > other.txt; echo other=$?";
+    let output = run_cmd_result_with_permission_profile_for_cwd(
+        &["bash", "-c", script],
+        AbsolutePathBuf::from_absolute_path(&base).expect("absolute base"),
+        PermissionProfile::from_runtime_permissions(&policy, NetworkSandboxPolicy::Restricted),
+        create_env_from_core_vars(),
+        LONG_TIMEOUT_MS,
+        /*use_legacy_landlock*/ false,
+    )
+    .await
+    .expect("full-write profile runs under bubblewrap");
+    let stdout = output.stdout.text;
+    let stderr = output.stderr.text;
+    for expected in ["null=0", "urandom=0", "cat=1", "write=1", "other=0"] {
+        assert!(
+            stdout.contains(expected),
+            "{expected}: {stdout}\nstderr: {stderr}"
+        );
+    }
+    assert!(!stdout.contains("secret-493"), "{stdout}");
+    assert_eq!(
+        std::fs::read_to_string(&secret).expect("secret"),
+        "secret-493\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(base.join("other.txt")).expect("other"),
+        "ok\n"
+    );
+}
