@@ -10,10 +10,12 @@
 //! in their own crates through the same registry.
 //!
 //! Managed values are captured at arm time (secret-looking environment
-//! variables, URL passwords, sign-in files and secret-named config values),
-//! whenever the sign-in store loads or saves tokens (login, refresh, keyring)
-//! and when this process reveals a vault credential. Raw values stay in this
-//! process.
+//! variables, URL passwords, sign-in files, secret-named config values and,
+//! #434, every value in the vault), whenever the sign-in store loads or saves
+//! tokens (login, refresh, keyring), when this process stores or reveals a
+//! vault credential, and at the start of each turn when the vault file has
+//! changed since it was last read (a value added by another process). Raw
+//! values stay in this process.
 
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::secretless_launch;
@@ -28,9 +30,11 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::sync::OnceLock;
+use std::time::SystemTime;
 use zeroize::Zeroizing;
 
 /// Environment values shorter than this are flags, not credentials.
@@ -116,6 +120,80 @@ pub(crate) fn arm(codex_home: &Path) -> Result<(), String> {
             Ok(())
         })
         .clone()
+}
+
+/// The vault this process protects, and the file state last read (#434).
+struct VaultWatch {
+    codex_home: PathBuf,
+    read: Option<VaultFileState>,
+}
+
+type VaultFileState = (u64, SystemTime);
+
+static VAULT_WATCH: Mutex<Option<VaultWatch>> = Mutex::new(None);
+
+fn vault_file_state(codex_home: &Path) -> Option<VaultFileState> {
+    let metadata = std::fs::metadata(codex_home.join("secrets").join("local.age")).ok()?;
+    Some((metadata.len(), metadata.modified().ok()?))
+}
+
+/// #434: registers every value in the vault under `codex_home` with the
+/// armed gate, so values stored before this process started are removed from
+/// output too. Later calls (and [`refresh_vault_values`]) reread the vault
+/// only when its file has changed. Returns a startup warning when a value
+/// cannot be protected or the vault cannot be read.
+pub(crate) fn protect_vault_values(codex_home: &Path) -> Option<String> {
+    active()?;
+    let mut watch = match VAULT_WATCH.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    // One process protects one vault: the first home it armed with.
+    let watch = watch.get_or_insert_with(|| VaultWatch {
+        codex_home: codex_home.to_path_buf(),
+        read: None,
+    });
+    if watch.codex_home != codex_home {
+        return None;
+    }
+    let state = vault_file_state(&watch.codex_home)?;
+    if watch.read == Some(state) {
+        return None;
+    }
+    match codex_vault::Vault::new(watch.codex_home.clone()).protect_stored_values() {
+        Ok(unprotected) => {
+            watch.read = Some(state);
+            (!unprotected.is_empty()).then(|| {
+                format!(
+                    "secret_output_gate: these vault credentials cannot be protected (too short or not admitted), so they are not removed from output: {}",
+                    unprotected.join(", ")
+                )
+            })
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "PF-28-S01: vault values not protected");
+            Some(format!(
+                "secret_output_gate: vault values could not be read, so they are not removed from output until revealed: {err}"
+            ))
+        }
+    }
+}
+
+/// #434: at the start of a turn, protects values added to the vault since it
+/// was last read (for example by `corbanu vault` in another terminal).
+pub(crate) fn refresh_vault_values() {
+    let codex_home = match VAULT_WATCH.lock() {
+        Ok(guard) => guard.as_ref().map(|watch| watch.codex_home.clone()),
+        Err(poisoned) => poisoned
+            .into_inner()
+            .as_ref()
+            .map(|watch| watch.codex_home.clone()),
+    };
+    if let Some(codex_home) = codex_home
+        && let Some(warning) = protect_vault_values(&codex_home)
+    {
+        tracing::warn!("{warning}");
+    }
 }
 
 /// The armed gate, if any.

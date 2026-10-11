@@ -621,14 +621,28 @@ fn pf_28_s01_revealed_values_are_registered_with_the_output_gate() {
         "pf28 legal winner thank year wave sausage worth useful legal winner thank yellow",
     );
     let scrub = |text: &str| output_gate::scrub_if_armed(OutputSink::ToolResult, text);
-    assert_eq!(scrub("pw pf28-basic-password-9"), None);
-    vault
-        .reveal_for_programmatic_use("pf28-basic", SecurityLevel::Permissive)
-        .expect("reveal");
+    // #434: storing a value with the gate armed protects it at once, before
+    // any reveal (the person may put the same value in a file).
     assert_eq!(
         scrub("pw pf28-basic-password-9").as_deref(),
         Some("pw [REDACTED:vault:pf28-basic]")
     );
+    vault
+        .update(
+            "pf28-basic",
+            Some("pf28user:pf28-rotated-password-3".to_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("update");
+    assert_eq!(
+        scrub("pw pf28-rotated-password-3").as_deref(),
+        Some("pw [REDACTED:vault:pf28-basic]")
+    );
+    vault
+        .reveal_for_programmatic_use("pf28-basic", SecurityLevel::Permissive)
+        .expect("reveal");
     vault.reveal("pf28-seed").expect("human reveal");
     let withheld =
         scrub("pf28 legal winner thank year wave sausage worth useful legal winner thank yellow")

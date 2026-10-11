@@ -26,7 +26,8 @@ This session
 
 Runtime controls
   [on] Secretless launch: environment allowlist and launch checks armed [observed: this process]
-  [on] Output gate: managed secrets are removed from output [observed: this process]
+  [on] Output gate: managed secrets, including every vault value, are removed from output [observed:
+      this process]
   [unobserved] Model key broker: installed; its health is not probed [installed: this process]
   [off] Credential broker: off (isolated_credential_broker) [resolved: features]
   [on] Untrusted content: labelled; none in this session yet [observed: session]

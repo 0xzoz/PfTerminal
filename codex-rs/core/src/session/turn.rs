@@ -204,6 +204,12 @@ pub(crate) async fn run_turn(
 ) -> CodexResult<Option<String>> {
     let turn_started_at = Instant::now();
     trace_turn_timing("run_turn_start", turn_started_at);
+    // #434: values added to the vault since it was last read are protected
+    // before this turn produces output.
+    if crate::security::disclosure_gate::active().is_some() {
+        let _ = tokio::task::spawn_blocking(crate::security::disclosure_gate::refresh_vault_values)
+            .await;
+    }
     let provider_info = turn_context.provider.info();
     let mut client_session = prewarmed_client_session
         .filter(|session| ModelClient::session_matches_provider(session, provider_info))

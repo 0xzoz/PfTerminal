@@ -386,6 +386,7 @@ impl Vault {
             if index.credentials.contains_key(&label) {
                 return Err(VaultError::CredentialExists { label });
             }
+            protect_stored(&label, credential_type, &secret)?;
 
             let now = Utc::now().timestamp();
             let meta = VaultCredentialMeta {
@@ -442,6 +443,7 @@ impl Vault {
                 if secret.trim().is_empty() {
                     return Err(VaultError::EmptySecret);
                 }
+                protect_stored(&label, meta.credential_type, &secret)?;
                 Some((
                     VAULT_SCOPE.clone(),
                     secret_name_for(&label)?,
@@ -625,6 +627,35 @@ impl Vault {
         })
     }
 
+    /// #434: registers every stored value with the armed output gate, so a
+    /// value stored before this process started (or by another process) is
+    /// removed from output although this process never revealed it. Returns
+    /// the labels that could not be protected (for example a value too short
+    /// to tell apart from ordinary text). Does nothing while the gate is not armed or
+    /// the vault does not exist.
+    pub fn protect_stored_values(&self) -> Result<Vec<String>, VaultError> {
+        if codex_secret_broker::output_gate::active().is_none()
+            || self.key_storage() == VaultKeyStorage::NotInitialized
+        {
+            return Ok(Vec::new());
+        }
+        self.with_storage_lock(|| {
+            let index = self.load_index()?;
+            let mut unprotected = Vec::new();
+            for (label, meta) in &index.credentials {
+                let Some(secret) = self.read_secret(label)?.map(Zeroizing::new) else {
+                    continue;
+                };
+                // One value the gate cannot admit does not leave the others
+                // unprotected; it is reported by label.
+                if register_with_output_gate(label, meta.credential_type, &secret).is_err() {
+                    unprotected.push(label.clone());
+                }
+            }
+            Ok(unprotected)
+        })
+    }
+
     /// Whether a credential with the given label exists.
     pub fn exists(&self, label: &str) -> Result<bool, VaultError> {
         let normalized = normalize_label(label)?;
@@ -763,6 +794,38 @@ fn protect_revealed(
     credential_type: CredentialType,
     secret: &str,
 ) -> Result<(), VaultError> {
+    register_with_output_gate(label, credential_type, secret).map_err(|err| {
+        VaultError::Storage(anyhow::anyhow!(
+            "vault:{label} was not released because the secret output gate cannot protect it: {err}"
+        ))
+    })
+}
+
+/// #434: a value stored while the output gate is armed is protected at once,
+/// not only after this process reveals it, because the person can put the
+/// same value in a file an agent reads. If the gate cannot admit it, it is not
+/// stored. A value too short to protect is stored unprotected, as before:
+/// it cannot be told apart from ordinary text and is never released while
+/// the gate is armed ([`protect_revealed`]).
+pub(crate) fn protect_stored(
+    label: &str,
+    credential_type: CredentialType,
+    secret: &str,
+) -> Result<(), VaultError> {
+    use codex_secret_broker::output_gate::RegisterError;
+    match register_with_output_gate(label, credential_type, secret) {
+        Ok(()) | Err(RegisterError::TooShort) => Ok(()),
+        Err(err) => Err(VaultError::Storage(anyhow::anyhow!(
+            "vault:{label} was not stored because the secret output gate cannot protect it: {err}"
+        ))),
+    }
+}
+
+fn register_with_output_gate(
+    label: &str,
+    credential_type: CredentialType,
+    secret: &str,
+) -> Result<(), codex_secret_broker::output_gate::RegisterError> {
     use codex_secret_broker::output_gate;
     use codex_secret_broker::output_gate::SecretClass;
     let Some(gate) = output_gate::active() else {
@@ -820,11 +883,7 @@ fn protect_revealed(
         .filter(|(index, part)| *index == 0 || part.trim().len() >= output_gate::MIN_VALUE_BYTES)
         .map(|(_, part)| (label.as_str(), class, part.as_str()))
         .collect();
-    gate.register_all(&entries).map(|_| ()).map_err(|err| {
-        VaultError::Storage(anyhow::anyhow!(
-            "{label} was not released because the secret output gate cannot protect it: {err}"
-        ))
-    })
+    gate.register_all(&entries).map(|_| ())
 }
 
 /// Any run of three consecutive words of a seed phrase, so part of a phrase

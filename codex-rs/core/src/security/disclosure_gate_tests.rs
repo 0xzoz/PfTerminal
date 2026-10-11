@@ -589,3 +589,85 @@ fn pf_28_s01_escaped_value_inside_a_string_is_found_in_the_serialized_item() {
     assert!(!text.contains("pw-77"), "{text}");
     assert!(text.contains("[REDACTED:escaped]"), "{text}");
 }
+
+/// #434 (milestone AGG-16): a vault value reached a tool result verbatim
+/// under Aggressive. Values stored before the session started (restart) and
+/// values added mid-session through `/vault` are both removed. Runs in a
+/// child process: it needs a gate armed by config load, with no vault value
+/// registered beforehand, and never reaches the OS keyring.
+#[cfg(debug_assertions)]
+#[tokio::test]
+async fn issue_434_vault_values_are_gated_after_restart_and_when_added_mid_session() {
+    const CHILD_ENV: &str = "CODEX_CORE_ISSUE_434_CHILD";
+    const TEST: &str = "security::disclosure_gate::tests::issue_434_vault_values_are_gated_after_restart_and_when_added_mid_session";
+    if std::env::var_os(CHILD_ENV).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args(["--exact", TEST, "--nocapture"])
+            .env(CHILD_ENV, "1")
+            .env("CORBANU_TEST_NO_NATIVE_KEYRING", "1")
+            .output()
+            .expect("run child test");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let home = tempfile::tempdir().expect("home");
+    let cwd = tempfile::tempdir().expect("cwd");
+    let add = |label: &str, secret: &str| {
+        codex_vault::Vault::new(home.path().to_path_buf())
+            .add(codex_vault::AddCredential {
+                label: label.to_string(),
+                credential_type: codex_vault::CredentialType::ApiKey,
+                provider: None,
+                notes: None,
+                revocation_notes: None,
+                secret: secret.to_string(),
+            })
+            .expect("vault add");
+    };
+    // Stored before this session started (the "after restart" half).
+    add("synthetic/agg16", "AGG16SYNTH123");
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[features]\nsecret_output_gate = true\n",
+    )
+    .expect("config");
+    crate::config::ConfigBuilder::default()
+        .codex_home(home.path().to_path_buf())
+        .harness_overrides(crate::config::ConfigOverrides {
+            cwd: Some(cwd.path().to_path_buf()),
+            ..Default::default()
+        })
+        .build()
+        .await
+        .expect("config arms the gate");
+    let read_notes = |value: &str| {
+        let item = ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: "call-agg16".to_string(),
+            output: FunctionCallOutputPayload::from_text(format!(
+                "buy coffee\nreview budget\n{value}\n"
+            )),
+            internal_chat_message_metadata_passthrough: None,
+        };
+        let gated = gate_values(OutputSink::ToolResult, &[item]).expect("value is gated");
+        serde_json::to_string(&gated).expect("json")
+    };
+    let text = read_notes("AGG16SYNTH123");
+    assert!(!text.contains("AGG16SYNTH123"), "{text}");
+    assert!(text.contains("[REDACTED:vault:synthetic/agg16]"), "{text}");
+    assert!(text.contains("review budget"), "{text}");
+
+    // Added mid-session through `/vault`, as in the milestone run.
+    add("synthetic/agg16-mid", "AGG16MIDSESSION456");
+    let text = read_notes("AGG16MIDSESSION456");
+    assert!(!text.contains("AGG16MIDSESSION456"), "{text}");
+    assert!(
+        text.contains("[REDACTED:vault:synthetic/agg16-mid]"),
+        "{text}"
+    );
+}

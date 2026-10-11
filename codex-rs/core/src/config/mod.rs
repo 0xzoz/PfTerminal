@@ -3802,6 +3802,9 @@ impl Config {
             }
             crate::security::disclosure_gate::arm(codex_home.as_path())
                 .map_err(|err| std::io::Error::new(std::io::ErrorKind::PermissionDenied, err))?;
+            startup_warnings.extend(crate::security::disclosure_gate::protect_vault_values(
+                codex_home.as_path(),
+            ));
             if !features.enabled(Feature::SecretlessAgentLaunch) {
                 startup_warnings.push(
                     "secret_output_gate: without secretless_agent_launch, agent commands can read the vault themselves (for example `corbanu vault auth-helper`); values revealed outside Core are not gated"

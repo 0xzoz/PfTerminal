@@ -627,7 +627,7 @@ fn runtime_rows(input: &InspectorInput, facts: &RuntimeFacts) -> Vec<Row> {
         required(control(
             "Output gate",
             facts.output_gate,
-            "managed secrets are removed from output",
+            "managed secrets, including every vault value, are removed from output",
             "off (secret_output_gate)",
         )),
         match facts.model_broker {

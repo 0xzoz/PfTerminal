@@ -295,6 +295,7 @@ impl Vault {
         if value.trim().is_empty() {
             return Err(VaultError::EmptySecret);
         }
+        crate::protect_stored(&label, kind.credential_type(), value)?;
         self.with_storage_lock(|| {
             let mut index = self.load_index()?;
             let now = Utc::now().timestamp();
