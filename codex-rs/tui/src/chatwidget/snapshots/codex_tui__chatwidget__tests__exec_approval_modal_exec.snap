@@ -17,7 +17,7 @@ Buffer {
         "› 1. Yes, proceed (y)                                                           ",
         "  2. No, and tell Corbanu Terminal what to do differently (esc)                 ",
         "                                                                                ",
-        "  A key in brackets highlights its option; enter confirms it.                   ",
+        "  A letter in brackets only highlights its option; enter confirms it.           ",
         "  Press enter to confirm or esc to cancel                                       ",
     ],
     styles: [
