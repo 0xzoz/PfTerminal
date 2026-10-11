@@ -658,7 +658,10 @@ model_auto_compact_token_limit_scope = "after_prefix"
     let mut sources = fixture.sources();
     sources.config_layers = vec![flags, system];
     let preflight = fixture.run(&sources);
-    assert_eq!(find(&preflight, FindingKind::ConfigLiteral), Vec::<&Finding>::new());
+    assert_eq!(
+        find(&preflight, FindingKind::ConfigLiteral),
+        Vec::<&Finding>::new()
+    );
     assert_eq!(preflight.inventory.isolation_paths(), Vec::<PathBuf>::new());
     assert!(preflight.is_clean(), "{:?}", preflight.blockers());
 
