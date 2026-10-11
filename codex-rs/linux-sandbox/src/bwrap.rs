@@ -650,9 +650,11 @@ fn create_filesystem_args(
             symlink_target.as_deref(),
             &read_only_subpaths,
         );
+        // A link's own bound path stays read-only when an earlier root made
+        // it read-only (for example a link to a workspace's `.git`).
         for path in &earlier_read_only_subpaths {
             if path.starts_with(mount_root)
-                && path.as_path() != mount_root
+                && (symlink_target.is_some() || path.as_path() != mount_root)
                 && !read_only_subpaths.contains(path)
             {
                 read_only_subpaths.push(path.clone());
@@ -2391,6 +2393,44 @@ mod tests {
             .rposition(|window| window == ["--ro-bind", read_only.as_str(), read_only.as_str()])
             .expect("read-only path should be bound read-only");
         assert!(target_bind < read_only_bind, "{:?}", args.args);
+    }
+
+    /// #503: a writable link to a workspace's `.git` is bound after the
+    /// workspace (deeper target) and the workspace's read-only `.git` is
+    /// applied again over it.
+    #[cfg(unix)]
+    #[test]
+    fn writable_link_to_protected_git_keeps_it_read_only() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let workspace = temp_dir.path().join("p").join("q").join("w");
+        let git = workspace.join(".git");
+        let link = temp_dir.path().join("l");
+        std::fs::create_dir_all(&git).expect("create .git");
+        std::os::unix::fs::symlink(&git, &link).expect("create link");
+        let entry = |path: &Path| FileSystemSandboxEntry {
+            path: FileSystemPath::Path {
+                path: AbsolutePathBuf::try_from(path).expect("absolute path"),
+            },
+            access: FileSystemAccessMode::Write,
+            missing_path_behavior: None,
+        };
+        let policy = FileSystemSandboxPolicy::restricted(vec![entry(&workspace), entry(&link)]);
+
+        let args =
+            create_filesystem_args(&policy, temp_dir.path(), NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
+                .expect("filesystem args");
+        let git = path_to_string(&git);
+        let git_bind = args
+            .args
+            .windows(3)
+            .position(|window| window == ["--bind", git.as_str(), git.as_str()])
+            .expect("link should be bound at `.git`");
+        let git_read_only = args
+            .args
+            .windows(3)
+            .rposition(|window| window == ["--ro-bind", git.as_str(), git.as_str()])
+            .expect("`.git` should be bound read-only");
+        assert!(git_bind < git_read_only, "{:?}", args.args);
     }
 
     /// #503: a denial spelled through a link is masked at the link's target.
