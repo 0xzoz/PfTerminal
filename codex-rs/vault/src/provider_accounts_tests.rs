@@ -512,7 +512,7 @@ fn aws_profile_names_are_validated() {
         "-work",
         "my profile",
         "a/b",
-        "x\n",
+        "x\ny",
         &"p".repeat(65),
     ] {
         assert_eq!(
