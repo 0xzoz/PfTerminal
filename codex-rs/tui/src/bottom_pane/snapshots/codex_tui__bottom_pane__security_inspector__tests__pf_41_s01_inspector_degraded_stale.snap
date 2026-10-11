@@ -10,8 +10,8 @@ Observed 120s ago: stale, press r
 Level
   Saved: Aggressive [configured: /security]
   Core config: Permissive [configured: config layers]
-  [set] Active this run: Aggressive; the launch check passed for the session rows (runtime controls
-      below show what is observed now) [resolved: launch check]
+  [set] Active this run: Aggressive; rows marked "checked at launch" passed the launch check
+      (runtime controls below show what is observed now) [resolved: launch check]
   [unobserved] Live policy: not running for this session here (not started yet, or a remote app
       server); next start Aggressive [stored state]
 

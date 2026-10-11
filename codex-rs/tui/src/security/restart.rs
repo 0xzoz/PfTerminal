@@ -42,9 +42,10 @@ pub(crate) fn restart_blocker_for(removed_env_keys: &[String]) -> Option<String>
     }
     let names = removed_env_keys.join(", ");
     Some(format!(
-        "Restart now is not available: this session moved {names} from your environment into \
-         the credential broker, so starting again from here would start without it. Quit \
-         Corbanu Terminal (/quit) and start it again from your shell to apply the saved level."
+        "Restart now is not available: this session removed {names} from its environment (the \
+         credential broker holds the key, or it was discarded when the broker could not start), \
+         so a restart from here would not have it. Quit Corbanu Terminal (/quit) and start it \
+         again from your shell to apply the saved level."
     ))
 }
 

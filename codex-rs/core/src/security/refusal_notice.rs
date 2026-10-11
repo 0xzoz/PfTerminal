@@ -12,7 +12,7 @@ use crate::config::Config;
 /// Added to the permissions instructions under Aggressive, so the model
 /// names the level when it cannot do something (AGG-13: asked for a web
 /// search, it tried `curl` instead).
-pub(crate) const AGGRESSIVE_INSTRUCTIONS: &str = "The person chose security level Aggressive in Corbanu Terminal's /security. Under it, agent commands stay in the sandbox even when the person approves them: they can write only inside the workspace, have no network access, and can never read protected files (such as .env and keychains), not even with a grant; web search is off, and agents cannot use the Corbanu vault. When a request needs something this blocks, do not try another way around it (for example, do not fetch web pages with curl when web search is off): tell the person that security level Aggressive blocks it and that they can choose another level with /security.";
+pub(crate) const AGGRESSIVE_INSTRUCTIONS: &str = "The person chose security level Aggressive in Corbanu Terminal's /security. Under it, agent commands stay in the sandbox even when the person approves them: they can write only inside the workspace, have no network access, and can never read protected files (such as .env and keychains), not even with a grant; web search is off, and agents cannot use the Corbanu vault (the person can use /vault themselves). When a request needs something this blocks, do not try another way around it (for example, do not fetch web pages with curl when web search is off): tell the person that security level Aggressive blocks it and that they can choose another level with /security.";
 
 /// What the Aggressive sandbox stopped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,8 +24,9 @@ pub(crate) enum Blocked {
 }
 
 /// Lowercase fragments of common "no network" failures (curl, git, Python,
-/// Node, pip). A refused connection is left out: it also means "nothing
-/// listens there".
+/// Node, pip). Under Aggressive no connection is possible at all, so a
+/// failed connection to a local server counts too; the notice says the
+/// command only "looks" blocked.
 const NETWORK_FAILURES: [&str; 8] = [
     "could not resolve host",
     "couldn't resolve host",
@@ -37,8 +38,29 @@ const NETWORK_FAILURES: [&str; 8] = [
     "getaddrinfo",
 ];
 
+/// Lowercase fragments of a line that reports a denied file operation.
+const DENIAL_LINES: [&str; 3] = [
+    "operation not permitted",
+    "permission denied",
+    "read-only file system",
+];
+
+/// Lines the macOS developer-tool shims (`/usr/bin/python3`, `git`) print when
+/// they cannot write their cache. They name no file the command asked for and
+/// would make every failing `git` or `python3` command look blocked.
+const SHIM_NOISE: [&str; 4] = ["xcrun_db", "darwin_user_", "xcodebuild", "dvtfilepath"];
+
+/// A denied file operation the command itself reported.
+fn denial_line(lower: &str) -> bool {
+    lower.lines().any(|line| {
+        DENIAL_LINES.iter().any(|denial| line.contains(denial))
+            && !SHIM_NOISE.iter().any(|noise| line.contains(noise))
+    })
+}
+
 /// What the Aggressive sandbox stopped in a finished command, if anything.
-/// `sandbox_denied` is the sandbox-denial verdict for the command.
+/// `sandbox_denied` is the sandbox-denial verdict for the command; a file
+/// denial also needs a denial line that is not developer-tool noise.
 pub(crate) fn blocked(
     config: &Config,
     sandbox_denied: bool,
@@ -54,7 +76,7 @@ pub(crate) fn blocked(
         .any(|failure| lower.contains(failure))
     {
         Some(Blocked::Network)
-    } else if sandbox_denied {
+    } else if sandbox_denied && denial_line(&lower) {
         Some(Blocked::Files)
     } else {
         None
@@ -77,7 +99,7 @@ impl Blocked {
     /// Added to the command's output for the model.
     pub(crate) fn model_note(self) -> String {
         format!(
-            "\n[Corbanu Terminal: {} Tell the person this instead of trying another way around it.]",
+            "\n[Corbanu Terminal: {} If this is why the command failed, tell the person instead of working around it.]",
             self.notice()
         )
     }

@@ -51,6 +51,7 @@ mod additional_context;
 mod agent_execution;
 mod agent_websocket;
 mod agents_md;
+mod aggressive_refusals;
 mod anthropic_payload_limit;
 mod apply_patch_cli;
 #[cfg(not(target_os = "windows"))]

@@ -897,7 +897,7 @@ impl SecurityLevelPicker {
                         .collect::<Vec<_>>();
                     removed.push((
                         "Nested agents",
-                        "agent commands can start other agents (`corbanu exec`, `review`, a new session, `app-server` or `mcp-server`) without Aggressive enforced",
+                        "agent commands can start other agents (`corbanu exec`, `review`, `resume`, `fork`, a new session, `app-server` or `mcp-server`) without Aggressive enforced",
                     ));
                     if self.preflight_input.is_some() {
                         removed.push((

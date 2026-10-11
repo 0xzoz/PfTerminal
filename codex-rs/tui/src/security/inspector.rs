@@ -321,7 +321,7 @@ pub(crate) fn sections(
                 if launch_checked {
                     // #437: the launch check covers the session rows, not the
                     // runtime controls (which say what is observed).
-                    "Aggressive; the launch check passed for the session rows (runtime controls below show what is observed now)"
+                    "Aggressive; rows marked \"checked at launch\" passed the launch check (runtime controls below show what is observed now)"
                 } else {
                     "Permissive"
                 },

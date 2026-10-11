@@ -404,9 +404,9 @@ impl ExecCommandHandler {
                 ))
             }
             // #439: a refusal reads as its own message, not as a debug dump.
-            Err(UnifiedExecError::Rejected { message }) => {
-                Err(FunctionCallError::RespondToModel(message))
-            }
+            Err(UnifiedExecError::Rejected { message }) => Err(FunctionCallError::RespondToModel(
+                format!("exec_command failed for `{command_for_display}`: {message}"),
+            )),
             Err(err) => Err(FunctionCallError::RespondToModel(format!(
                 "exec_command failed for `{command_for_display}`: {err}"
             ))),
