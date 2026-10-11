@@ -1292,9 +1292,9 @@ impl UnifiedExecProcessManager {
                         };
                         UnifiedExecError::sandbox_denied(message, output)
                     }
-                    _ => UnifiedExecError::create_process(format!("{err:?}")),
+                    _ => UnifiedExecError::create_process(err.to_string()),
                 },
-                other => UnifiedExecError::create_process(format!("{other:?}")),
+                ToolError::Rejected(message) => UnifiedExecError::Rejected { message },
             })
     }
 

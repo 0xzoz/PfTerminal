@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use crate::function_tool::FunctionCallError;
 use crate::maybe_emit_implicit_skill_invocation;
+use crate::security::refusal_notice;
 use crate::tools::context::ExecCommandToolOutput;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolPayload;
@@ -31,6 +32,8 @@ use crate::unified_exec::generate_chunk_id;
 use codex_features::Feature;
 use codex_otel::SessionTelemetry;
 use codex_otel::TOOL_CALL_UNIFIED_EXEC_METRIC;
+use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::WarningEvent;
 use codex_sandboxing::SandboxManager;
 use codex_sandboxing::SandboxType;
 use codex_sandboxing::SandboxablePreference;
@@ -370,16 +373,40 @@ impl ExecCommandHandler {
             )
             .await
         {
-            Ok(response) => Ok(boxed_tool_output(response)),
+            Ok(mut response) => {
+                let blocked = refusal_notice::blocked(
+                    &turn.config,
+                    /*sandbox_denied*/ false,
+                    response.exit_code,
+                    &String::from_utf8_lossy(&response.raw_output),
+                );
+                if let Some(blocked) = blocked {
+                    notify_blocked(&context, blocked).await;
+                    response
+                        .raw_output
+                        .extend_from_slice(blocked.model_note().as_bytes());
+                }
+                Ok(boxed_tool_output(response))
+            }
             Err(UnifiedExecError::SandboxDenied {
                 output,
                 original_token_count,
                 output_omitted_bytes,
                 ..
             }) => {
-                let output_text = output.aggregated_output.text;
+                let mut output_text = output.aggregated_output.text;
                 let original_token_count =
                     original_token_count.unwrap_or_else(|| approx_token_count(&output_text));
+                // #439: say when security level Aggressive stopped it.
+                if let Some(blocked) = refusal_notice::blocked(
+                    &turn.config,
+                    /*sandbox_denied*/ true,
+                    Some(output.exit_code),
+                    &output_text,
+                ) {
+                    notify_blocked(&context, blocked).await;
+                    output_text.push_str(&blocked.model_note());
+                }
                 Ok(boxed_tool_output(ExecCommandToolOutput {
                     event_call_id: context.call_id.clone(),
                     chunk_id: generate_chunk_id(),
@@ -396,11 +423,28 @@ impl ExecCommandHandler {
                     hook_command: Some(hook_command),
                 }))
             }
+            // #439: a refusal reads as its own message, not as a debug dump.
+            Err(UnifiedExecError::Rejected { message }) => {
+                Err(FunctionCallError::RespondToModel(message))
+            }
             Err(err) => Err(FunctionCallError::RespondToModel(format!(
-                "exec_command failed for `{command_for_display}`: {err:?}"
+                "exec_command failed for `{command_for_display}`: {err}"
             ))),
         }
     }
+}
+
+/// #439: tells the person in the transcript why the command failed.
+async fn notify_blocked(context: &UnifiedExecContext, blocked: refusal_notice::Blocked) {
+    context
+        .session
+        .send_event(
+            context.turn.as_ref(),
+            EventMsg::Warning(WarningEvent {
+                message: blocked.notice().to_string(),
+            }),
+        )
+        .await;
 }
 
 impl CoreToolRuntime for ExecCommandHandler {
