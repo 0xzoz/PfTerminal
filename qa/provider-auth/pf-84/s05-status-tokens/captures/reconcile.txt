@@ -1,0 +1,6 @@
+run-plain 2 rollouts
+   ('zai', 'personal') {'input': 2578, 'cached': 1856, 'output': 16, 'reasoning': 13, 'total': 4450}
+   ('zai', 'work') {'input': 7364, 'cached': 22912, 'output': 139, 'reasoning': 60, 'total': 30415}
+run-da 2 rollouts
+   ('zai', 'personal') {'input': 4423, 'cached': 0, 'output': 16, 'reasoning': 13, 'total': 4439}
+   ('zai', 'work') {'input': 7991, 'cached': 37632, 'output': 211, 'reasoning': 90, 'total': 45834}
