@@ -1588,3 +1588,51 @@ fn renaming_a_folder_above_a_protected_path_is_denied() {
     assert!(config.join("fish/config.fish").exists());
     assert!(base.join(".zshrc").is_symlink());
 }
+
+/// #493 (Linux) has no Seatbelt equivalent: under a full-write profile with a
+/// denial, `/dev/null` stays writable and the denied file stays unreadable.
+#[test]
+fn full_write_profile_with_denial_keeps_dev_null_usable() {
+    let dir = TempDir::new().expect("tempdir");
+    let base = dir.path().canonicalize().expect("canonical");
+    let secret = base.join("secret.txt");
+    fs::write(&secret, "secret-493\n").expect("secret");
+    let policy = FileSystemSandboxPolicy::restricted(vec![
+        FileSystemSandboxEntry {
+            path: FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            },
+            access: FileSystemAccessMode::Write,
+            missing_path_behavior: None,
+        },
+        FileSystemSandboxEntry {
+            path: FileSystemPath::Path {
+                path: AbsolutePathBuf::from_absolute_path(&secret).expect("absolute"),
+            },
+            access: FileSystemAccessMode::Deny,
+            missing_path_behavior: None,
+        },
+    ]);
+    let script = "echo hi > /dev/null; echo null=$?; cat secret.txt; echo cat=$?";
+    let args = create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
+        command: vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
+        file_system_sandbox_policy: &policy,
+        network_sandbox_policy: NetworkSandboxPolicy::Restricted,
+        sandbox_policy_cwd: &base,
+        enforce_managed_network: false,
+        managed_network: None,
+        environment_id: None,
+        network: None,
+        extra_allow_unix_sockets: &[],
+    })
+    .expect("args");
+    let output = Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
+        .args(&args)
+        .current_dir(&base)
+        .output()
+        .expect("run seatbelt");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("null=0"), "{stdout}");
+    assert!(stdout.contains("cat=1"), "{stdout}");
+    assert!(!stdout.contains("secret-493"), "{stdout}");
+}
