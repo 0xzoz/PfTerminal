@@ -234,11 +234,11 @@ struct PreparedProcessHandles {
     tty: bool,
 }
 
-/// Why a unified-exec command did not start, and whether the person had
-/// approved it in a prompt (which already shows it as running, #466).
+/// Why a unified-exec command did not start, and whether a review that
+/// approved it already shows it as running (#466).
 pub(super) struct StartFailure {
     pub(super) error: UnifiedExecError,
-    pub(super) prompt_approved: bool,
+    pub(super) shown_by_review: bool,
 }
 
 struct InitialExecCommandGuard {
@@ -534,12 +534,12 @@ impl UnifiedExecProcessManager {
             }
             Err(StartFailure {
                 error,
-                prompt_approved,
+                shown_by_review,
             }) => {
                 self.release_process_id(request.process_id).await;
                 if let UnifiedExecError::SandboxDenied { output, .. } = &error {
                     emit_denied_at_start(context, &request, cwd, output).await;
-                } else if prompt_approved {
+                } else if shown_by_review {
                     // #466: the approval prompt showed this command as
                     // running; end it, or it stays "Running" for good.
                     emit_failed_at_start(context, &request, cwd, error.to_string()).await;
@@ -1376,7 +1376,7 @@ impl UnifiedExecProcessManager {
                 context.turn.approval_policy.value(),
             )
             .await;
-        let prompt_approved = runtime.prompt_approved();
+        let shown_by_review = runtime.shown_by_review();
         result
             .map(|result| (result.output, result.deferred_network_approval))
             .map_err(|err| match err {
@@ -1404,7 +1404,7 @@ impl UnifiedExecProcessManager {
             })
             .map_err(|error| StartFailure {
                 error,
-                prompt_approved,
+                shown_by_review,
             })
     }
 

@@ -47,6 +47,7 @@ use codex_network_proxy::NetworkProxy;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::SandboxErr;
 use codex_protocol::models::AdditionalPermissionProfile;
+use codex_protocol::protocol::NetworkPolicyRuleAction;
 use codex_protocol::protocol::ReviewDecision;
 use codex_sandboxing::SandboxCommand;
 use codex_sandboxing::SandboxablePreference;
@@ -56,9 +57,6 @@ use codex_utils_path_uri::PathUri;
 use futures::future::BoxFuture;
 use std::collections::HashMap;
 use std::io;
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
@@ -107,10 +105,11 @@ pub struct UnifiedExecApprovalKey {
 pub struct UnifiedExecRuntime<'a> {
     manager: &'a UnifiedExecProcessManager,
     shell_mode: UnifiedExecShellMode,
-    /// #466: whether the last approval prompt for this command was approved.
-    /// The prompt shows the command as running, so it must end even when the
+    /// #466: whether the command is shown as running because of a review
+    /// that approved it. A review shows it (the app server starts its item);
+    /// a refusal ends it there. An approved one must end even when the
     /// command then fails to start.
-    prompt_approved: Arc<AtomicBool>,
+    shown_by_review: bool,
 }
 
 fn unified_exec_options(
@@ -152,14 +151,15 @@ impl<'a> UnifiedExecRuntime<'a> {
         Self {
             manager,
             shell_mode,
-            prompt_approved: Arc::new(AtomicBool::new(false)),
+            shown_by_review: false,
         }
     }
 
-    /// Whether the person approved this command in a prompt (the last one,
-    /// when a retry asked again). A cached approval shows no prompt.
-    pub(crate) fn prompt_approved(&self) -> bool {
-        self.prompt_approved.load(Ordering::Acquire)
+    /// Whether the last review of this command (the person's or the
+    /// automatic reviewer's) approved it, leaving it shown as running. A
+    /// cached approval or a permission hook shows nothing.
+    pub(crate) fn shown_by_review(&self) -> bool {
+        self.shown_by_review
     }
 }
 
@@ -187,6 +187,24 @@ impl Approvable<UnifiedExecRequest> for UnifiedExecRuntime<'_> {
         }]
     }
 
+    fn note_review_decision(&mut self, decision: &ReviewDecision, ctx: &ApprovalCtx<'_>) {
+        // A network review neither shows nor ends the command.
+        if ctx.network_approval_context.is_some() {
+            return;
+        }
+        self.shown_by_review = match decision {
+            ReviewDecision::Denied { .. } | ReviewDecision::TimedOut | ReviewDecision::Abort => {
+                false
+            }
+            ReviewDecision::NetworkPolicyAmendment {
+                network_policy_amendment,
+            } => network_policy_amendment.action != NetworkPolicyRuleAction::Deny,
+            ReviewDecision::Approved
+            | ReviewDecision::ApprovedExecpolicyAmendment { .. }
+            | ReviewDecision::ApprovedForSession => true,
+        };
+    }
+
     fn start_approval_async<'b>(
         &'b mut self,
         req: &'b UnifiedExecRequest,
@@ -202,7 +220,6 @@ impl Approvable<UnifiedExecRequest> for UnifiedExecRuntime<'_> {
             .retry_reason
             .clone()
             .or_else(|| req.justification.clone());
-        let prompt_approved = Arc::clone(&self.prompt_approved);
         Box::pin(async move {
             let native_cwd = match req.cwd.to_abs_path() {
                 Ok(c) => c,
@@ -221,7 +238,7 @@ impl Approvable<UnifiedExecRequest> for UnifiedExecRuntime<'_> {
                 fresh,
                 || async move {
                     let available_decisions = None;
-                    let decision = session
+                    session
                         .request_command_approval(
                             turn,
                             call_id,
@@ -241,21 +258,7 @@ impl Approvable<UnifiedExecRequest> for UnifiedExecRuntime<'_> {
                             available_decisions,
                             /*plugin_attribution_override*/ None,
                         )
-                        .await;
-                    // Only a command prompt (not a network one) shows the
-                    // command as running.
-                    if ctx.network_approval_context.is_none() {
-                        prompt_approved.store(
-                            matches!(
-                                decision,
-                                ReviewDecision::Approved
-                                    | ReviewDecision::ApprovedExecpolicyAmendment { .. }
-                                    | ReviewDecision::ApprovedForSession
-                            ),
-                            Ordering::Release,
-                        );
-                    }
-                    decision
+                        .await
                 },
             )
             .await

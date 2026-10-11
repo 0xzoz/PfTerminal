@@ -28,11 +28,11 @@ use serde_json::json;
 const CALL_ID: &str = "call-approved";
 
 /// Runs one `exec_command` that needs approval and answers the prompt with
-/// `decision`; returns whether a begin event came and the end event, if any.
+/// `decision`; returns how many begin events came and the end events.
 async fn run_approved(
     arguments: serde_json::Value,
     decision: ReviewDecision,
-) -> anyhow::Result<(bool, Option<ExecCommandEndEvent>)> {
+) -> anyhow::Result<(usize, Vec<ExecCommandEndEvent>)> {
     let server = start_mock_server().await;
     let test: TestCodex = test_codex()
         .with_model("test-gpt-5.1-codex")
@@ -93,15 +93,15 @@ async fn run_approved(
             decision,
         })
         .await?;
-    let mut began = false;
-    let mut ended = None;
+    let mut began = 0;
+    let mut ended = Vec::new();
     wait_for_event(&test.codex, |event| match event {
         EventMsg::ExecCommandBegin(begin) if begin.call_id == CALL_ID => {
-            began = true;
+            began += 1;
             false
         }
         EventMsg::ExecCommandEnd(end) if end.call_id == CALL_ID => {
-            ended = Some(end.clone());
+            ended.push(end.clone());
             false
         }
         EventMsg::TurnComplete(_) => true,
@@ -112,7 +112,8 @@ async fn run_approved(
 }
 
 /// Approved, then refused before it started (its folder is gone): it ends
-/// as failed with the reason instead of staying "Running".
+/// as failed with the reason instead of staying "Running". Without a TTY the
+/// spawn fails on the missing folder (a PTY could fall back to another one).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn issue_466_an_approved_command_that_cannot_start_ends() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
@@ -121,13 +122,16 @@ async fn issue_466_an_approved_command_that_cannot_start_ends() -> anyhow::Resul
         json!({
             "cmd": "touch approved.txt",
             "workdir": "missing-folder",
+            "tty": false,
             "yield_time_ms": 5_000,
         }),
         ReviewDecision::Approved,
     )
     .await?;
-    assert!(began, "the approved command is shown");
-    let ended = ended.expect("the approved command that could not start ends");
+    assert_eq!(began, 1, "the approved command is shown once");
+    let [ended] = ended.as_slice() else {
+        panic!("the approved command that could not start ends once: {ended:?}");
+    };
     assert_ne!(ended.exit_code, 0);
     assert!(!ended.aggregated_output.is_empty(), "the reason is shown");
     Ok(())
@@ -145,7 +149,7 @@ async fn issue_466_a_declined_command_gets_no_second_end() -> anyhow::Result<()>
         },
     )
     .await?;
-    assert!(!began, "a declined command does not start");
-    assert!(ended.is_none(), "{ended:?}");
+    assert_eq!(began, 0, "a declined command does not start");
+    assert!(ended.is_empty(), "{ended:?}");
     Ok(())
 }
