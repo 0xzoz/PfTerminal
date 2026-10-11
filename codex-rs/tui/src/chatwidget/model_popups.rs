@@ -820,6 +820,40 @@ impl ChatWidget {
         })]
     }
 
+    /// A model and effort chosen for a new pane or spawned agent go to that
+    /// pane; they never change or persist the session model.
+    fn send_pane_selection(
+        tx: &AppEventSender,
+        purpose: &ModelSelectionPurpose,
+        provider: Option<String>,
+        model: String,
+        effort: Option<ReasoningEffortConfig>,
+    ) {
+        match purpose {
+            // The session's own choice goes through `model_selection_actions`.
+            ModelSelectionPurpose::Session => {}
+            ModelSelectionPurpose::CodexPane { .. } => {
+                tx.send(AppEvent::OpenCodexPaneNamePrompt {
+                    provider,
+                    model,
+                    effort,
+                });
+            }
+            ModelSelectionPurpose::SpawnAgent {
+                role,
+                parent_node_id,
+                ..
+            } => tx.send(AppEvent::CreateSpawnAgent {
+                role: *role,
+                parent_node_id: parent_node_id.clone(),
+                agent_nickname: None,
+                provider,
+                model,
+                effort,
+            }),
+        }
+    }
+
     fn should_persist_model_provider(provider: Option<&str>) -> bool {
         !provider.is_some_and(|provider| provider.starts_with("gpu-"))
     }
@@ -1149,25 +1183,14 @@ impl ChatWidget {
                             }
                         }
                     }
-                    ModelSelectionPurpose::CodexPane { .. } => {
-                        tx.send(AppEvent::OpenCodexPaneNamePrompt {
-                            provider: provider_for_action.clone(),
-                            model: model_for_action.clone(),
-                            effort: choice_effort.clone(),
-                        });
-                    }
-                    ModelSelectionPurpose::SpawnAgent {
-                        role,
-                        parent_node_id,
-                        ..
-                    } => tx.send(AppEvent::CreateSpawnAgent {
-                        role: *role,
-                        parent_node_id: parent_node_id.clone(),
-                        agent_nickname: None,
-                        provider: provider_for_action.clone(),
-                        model: model_for_action.clone(),
-                        effort: choice_effort.clone(),
-                    }),
+                    purpose @ (ModelSelectionPurpose::CodexPane { .. }
+                    | ModelSelectionPurpose::SpawnAgent { .. }) => Self::send_pane_selection(
+                        tx,
+                        purpose,
+                        provider_for_action.clone(),
+                        model_for_action.clone(),
+                        choice_effort.clone(),
+                    ),
                 })];
 
             items.push(SelectionItem {
@@ -1193,9 +1216,11 @@ impl ChatWidget {
                 "consume"
             };
             let preset_for_action = preset;
+            let purpose_for_action = purpose.clone();
             let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
                 tx.send(AppEvent::OpenAdvancedReasoningPopup {
                     model: preset_for_action.clone(),
+                    purpose: purpose_for_action.clone(),
                 });
             })];
             items.push(SelectionItem {
@@ -1261,7 +1286,19 @@ impl ChatWidget {
     }
 
     /// Open the explicit Max/Ultra effort picker for the given model.
+    #[cfg(test)]
     pub(crate) fn open_advanced_reasoning_popup(&mut self, preset: ModelPreset) {
+        self.open_advanced_reasoning_popup_for_purpose(preset, ModelSelectionPurpose::Session);
+    }
+
+    /// The Max/Ultra step keeps the purpose of the popup it came from: a
+    /// pane or spawned agent gets the effort, the session model is untouched
+    /// (#468).
+    pub(crate) fn open_advanced_reasoning_popup_for_purpose(
+        &mut self,
+        preset: ModelPreset,
+        purpose: ModelSelectionPurpose,
+    ) {
         let provider = preset
             .provider_id
             .clone()
@@ -1283,7 +1320,8 @@ impl ChatWidget {
         }
 
         let model_slug = preset.model.to_string();
-        let is_current_model = self.current_model() == preset.model.as_str();
+        let is_current_model = matches!(purpose, ModelSelectionPurpose::Session)
+            && self.current_model() == preset.model.as_str();
         let highlight_choice = is_current_model
             .then(|| self.effective_reasoning_effort())
             .flatten();
@@ -1298,14 +1336,45 @@ impl ChatWidget {
                 }
                 _ => unreachable!("advanced choices are limited to Max and Ultra"),
             };
-            let should_prompt_plan_mode_scope = self
-                .should_prompt_plan_mode_reasoning_scope(model_slug.as_str(), Some(effort.clone()));
-            let actions = self.model_selection_actions(
-                model_slug.clone(),
-                provider.clone(),
-                Some(effort.clone()),
-                should_prompt_plan_mode_scope,
-            );
+            let actions = match &purpose {
+                ModelSelectionPurpose::Session => {
+                    let should_prompt_plan_mode_scope = self
+                        .should_prompt_plan_mode_reasoning_scope(
+                            model_slug.as_str(),
+                            Some(effort.clone()),
+                        );
+                    self.model_selection_actions(
+                        model_slug.clone(),
+                        provider.clone(),
+                        Some(effort.clone()),
+                        should_prompt_plan_mode_scope,
+                    )
+                }
+                ModelSelectionPurpose::CodexPane { .. }
+                | ModelSelectionPurpose::SpawnAgent { .. } => {
+                    let purpose = purpose.clone();
+                    let provider = provider.clone();
+                    let model = model_slug.clone();
+                    // Ultra may use more agents in the new pane too.
+                    let warning = self.ultra_reasoning_concurrency_warning(&effort);
+                    let effort = Some(effort.clone());
+                    let action: SelectionAction = Box::new(move |tx| {
+                        Self::send_pane_selection(
+                            tx,
+                            &purpose,
+                            provider.clone(),
+                            model.clone(),
+                            effort.clone(),
+                        );
+                        if let Some(warning) = warning.clone() {
+                            tx.send(AppEvent::InsertHistoryCell(Box::new(
+                                history_cell::new_warning_event(warning),
+                            )));
+                        }
+                    });
+                    vec![action]
+                }
+            };
 
             items.push(SelectionItem {
                 name: Self::reasoning_effort_label(&effort),
