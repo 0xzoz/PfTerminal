@@ -612,57 +612,109 @@ const PF_30_S03_VAULT: &str = "corbanu vault list";
 /// PF-30-S03: after tool output enters the session, a vault command needs a
 /// fresh human approval even where the approval policy would run it unasked;
 /// with approvals off it is refused, not run.
+/// Moderate only: under Aggressive the vault rule refuses the command
+/// outright, before this prompt (#443; see the Aggressive test below).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pf_30_s03_vault_command_after_untrusted_content_needs_the_human() -> anyhow::Result<()> {
     use codex_protocol::protocol::AskForApproval;
     use codex_protocol::protocol::ReviewDecision;
     skip_if_no_network!(Ok(()));
-    for level in [SecurityLevel::Moderate, SecurityLevel::Aggressive] {
-        let (test, captured) = pf_30_s03_two_call_turn(
-            level,
-            AskForApproval::OnRequest,
-            PF_30_S03_INJECTED,
-            PF_30_S03_VAULT,
-        )
+    let level = SecurityLevel::Moderate;
+    let (test, captured) = pf_30_s03_two_call_turn(
+        level,
+        AskForApproval::OnRequest,
+        PF_30_S03_INJECTED,
+        PF_30_S03_VAULT,
+    )
+    .await?;
+    let approval = pf_30_s03_next_approval(&test)
+        .await
+        .expect("the vault command asks the human");
+    assert_eq!(
+        approval.command.last().map(String::as_str),
+        Some(PF_30_S03_VAULT)
+    );
+    let reason = approval.reason.clone().unwrap_or_default();
+    assert!(
+        reason.contains("vault access after untrusted content"),
+        "{reason}"
+    );
+    // No "don't ask again" rule is offered for a post-taint action.
+    assert_eq!(approval.proposed_execpolicy_amendment, None);
+    test.codex
+        .submit(Op::ExecApproval {
+            id: approval.effective_approval_id(),
+            turn_id: None,
+            decision: ReviewDecision::denied("no"),
+        })
         .await?;
-        let approval = pf_30_s03_next_approval(&test)
-            .await
-            .expect("the vault command asks the human");
-        assert_eq!(
-            approval.command.last().map(String::as_str),
-            Some(PF_30_S03_VAULT)
-        );
-        let reason = approval.reason.clone().unwrap_or_default();
-        assert!(
-            reason.contains("vault access after untrusted content"),
-            "{reason}"
-        );
-        // No "don't ask again" rule is offered for a post-taint action.
-        assert_eq!(approval.proposed_execpolicy_amendment, None);
-        test.codex
-            .submit(Op::ExecApproval {
-                id: approval.effective_approval_id(),
-                turn_id: None,
-                decision: ReviewDecision::denied("no"),
-            })
-            .await?;
-        assert!(pf_30_s03_next_approval(&test).await.is_none());
-        assert_eq!(captured.requests().len(), 3);
+    assert!(pf_30_s03_next_approval(&test).await.is_none());
+    assert_eq!(captured.requests().len(), 3);
 
-        // Approvals off: refused with a stable reason, never run.
+    // Approvals off: refused with a stable reason, never run.
+    let (test, captured) = pf_30_s03_two_call_turn(
+        level,
+        AskForApproval::Never,
+        PF_30_S03_INJECTED,
+        PF_30_S03_VAULT,
+    )
+    .await?;
+    assert!(pf_30_s03_next_approval(&test).await.is_none());
+    let output = captured.requests()[2]
+        .function_call_output_text("call-second")
+        .expect("vault call output");
+    assert!(output.contains("approvals are off"), "{output}");
+    assert!(output.contains("vault access"), "{output}");
+    Ok(())
+}
+
+/// PF-30-S03 with #443: under Aggressive, a vault command after untrusted
+/// content is refused outright by the vault rule, whatever the approval
+/// policy. Nobody is asked and nothing runs.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pf_30_s03_aggressive_refuses_a_vault_command_after_untrusted_content_outright()
+-> anyhow::Result<()> {
+    use codex_protocol::protocol::AskForApproval;
+    use std::os::unix::fs::PermissionsExt;
+    skip_if_no_network!(Ok(()));
+    const RAN: &str = "fake corbanu ran";
+    // A stand-in `corbanu` called by absolute path (the vault rule matches
+    // any path), so a slip would show as RAN and never reach a real vault.
+    let bin = tempfile::TempDir::new()?;
+    let corbanu = bin.path().join("corbanu");
+    std::fs::write(&corbanu, format!("#!/bin/sh\necho \"{RAN}: $*\"\n"))?;
+    std::fs::set_permissions(&corbanu, std::fs::Permissions::from_mode(0o755))?;
+    let vault = format!("{} vault list", corbanu.display());
+    for approval in [AskForApproval::OnRequest, AskForApproval::Never] {
         let (test, captured) = pf_30_s03_two_call_turn(
-            level,
-            AskForApproval::Never,
+            SecurityLevel::Aggressive,
+            approval,
             PF_30_S03_INJECTED,
-            PF_30_S03_VAULT,
+            &vault,
         )
         .await?;
-        assert!(pf_30_s03_next_approval(&test).await.is_none());
-        let output = captured.requests()[2]
+        assert!(
+            pf_30_s03_next_approval(&test).await.is_none(),
+            "{approval:?}: the vault command is refused without asking"
+        );
+        let requests = captured.requests();
+        assert_eq!(requests.len(), 3);
+        let injected = requests[1]
+            .function_call_output_text("call-first")
+            .expect("injected call output");
+        assert!(
+            injected.contains("corbanu_untrusted_data"),
+            "{approval:?}: {injected}"
+        );
+        let output = requests[2]
             .function_call_output_text("call-second")
             .expect("vault call output");
-        assert!(output.contains("approvals are off"), "{output}");
-        assert!(output.contains("vault access"), "{output}");
+        assert!(
+            output.contains("Security level Aggressive: agents cannot use the Corbanu vault."),
+            "{approval:?}: {output}"
+        );
+        assert!(!output.contains(RAN), "{approval:?}: {output}");
     }
     Ok(())
 }
