@@ -13,6 +13,7 @@ mod mcp_required_exit;
 mod nested_launch;
 mod originator;
 mod output_schema;
+mod plugin_sync_shutdown;
 mod prompt_stdin;
 mod provider_key_env;
 mod resume;

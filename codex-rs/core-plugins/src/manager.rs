@@ -105,6 +105,8 @@ use std::collections::VecDeque;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::PoisonError;
 use std::sync::RwLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -447,6 +449,13 @@ pub struct PluginsManager {
     auth_mode: RwLock<Option<AuthMode>>,
     analytics_events_client: RwLock<Option<AnalyticsEventsClient>>,
     plugin_install_source: PluginInstallSource,
+    curated_repo_sync: Mutex<Option<CuratedRepoSync>>,
+}
+
+/// The curated repo sync this manager started, so shutdown can cancel it.
+struct CuratedRepoSync {
+    cancel: Arc<AtomicBool>,
+    thread: std::thread::JoinHandle<()>,
 }
 
 #[derive(Clone)]
@@ -553,6 +562,7 @@ impl PluginsManager {
             auth_mode: RwLock::new(auth_mode),
             analytics_events_client: RwLock::new(None),
             plugin_install_source: PluginInstallSource::Manual,
+            curated_repo_sync: Mutex::new(None),
         }
     }
 
@@ -2594,10 +2604,16 @@ impl PluginsManager {
             });
         let manager = Arc::clone(self);
         let codex_home = self.codex_home.clone();
-        if let Err(err) = std::thread::Builder::new()
+        let cancel = Arc::new(AtomicBool::new(false));
+        let thread_cancel = Arc::clone(&cancel);
+        let spawned = std::thread::Builder::new()
             .name("plugins-curated-repo-sync".to_string())
             .spawn(move || {
-                match sync_openai_plugins_repo(codex_home.as_path(), http_client_factory) {
+                match sync_openai_plugins_repo(
+                    codex_home.as_path(),
+                    http_client_factory,
+                    &thread_cancel,
+                ) {
                     Ok(curated_plugin_version) => {
                         let configured_curated_plugin_ids =
                             configured_curated_plugin_ids_from_codex_home(codex_home.as_path());
@@ -2624,11 +2640,44 @@ impl PluginsManager {
                         warn!("failed to sync curated plugins repo: {err}");
                     }
                 }
-            })
-        {
-            CURATED_REPO_SYNC_STARTED.store(false, Ordering::SeqCst);
-            warn!("failed to start curated plugins repo sync task: {err}");
+            });
+        match spawned {
+            Ok(thread) => {
+                *self
+                    .curated_repo_sync
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) =
+                    Some(CuratedRepoSync { cancel, thread });
+            }
+            Err(err) => {
+                CURATED_REPO_SYNC_STARTED.store(false, Ordering::SeqCst);
+                warn!("failed to start curated plugins repo sync task: {err}");
+            }
         }
+    }
+
+    /// #477: cancels the curated repo sync this manager started and waits up
+    /// to `timeout` for it to stop, killing any `git` it runs, so nothing it
+    /// started outlives the process or writes to the home after exit.
+    pub async fn shutdown_curated_repo_sync(&self, timeout: std::time::Duration) {
+        let Some(sync) = self
+            .curated_repo_sync
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        else {
+            return;
+        };
+        sync.cancel.store(true, Ordering::SeqCst);
+        let deadline = tokio::time::Instant::now() + timeout;
+        while !sync.thread.is_finished() {
+            if tokio::time::Instant::now() >= deadline {
+                warn!("curated plugins repo sync did not stop within {timeout:?}");
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let _ = sync.thread.join();
     }
 
     async fn run_remote_installed_plugins_cache_refresh_loop(self: Arc<Self>) {
