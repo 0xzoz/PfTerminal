@@ -962,16 +962,13 @@ fn unlistable_directories_by_pass(
                 .filter(|(_, real)| source.starts_with(real))
                 .max_by_key(|(_, real)| path_depth(real))
                 .and_then(|(logical, real)| {
-                    source
-                        .strip_prefix(real)
-                        .ok()
-                        .map(|rest| {
-                            if rest.as_os_str().is_empty() {
-                                logical.clone()
-                            } else {
-                                logical.join(rest)
-                            }
-                        })
+                    source.strip_prefix(real).ok().map(|rest| {
+                        if rest.as_os_str().is_empty() {
+                            logical.clone()
+                        } else {
+                            logical.join(rest)
+                        }
+                    })
                 })
         };
         if let Some(target) = target {
