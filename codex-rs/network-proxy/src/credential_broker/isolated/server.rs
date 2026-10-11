@@ -105,6 +105,11 @@ pub fn run_credential_broker_main() -> ! {
     run_credential_broker_main_with(/*resolver*/ None)
 }
 
+/// Test builds only: milliseconds the broker process waits after its cleanup
+/// before it exits (#504).
+#[cfg(test)]
+pub(crate) const TEST_EXIT_HOLD_MS_ENV: &str = "CODEX_PF27_BROKER_TEST_EXIT_HOLD_MS";
+
 /// Like [`run_credential_broker_main`], resolving stored provider keys with
 /// `resolver` (PF-27-S05).
 pub fn run_credential_broker_main_with(resolver: Option<StoredKeyResolver>) -> ! {
@@ -151,11 +156,23 @@ pub fn run_credential_broker_main_with(resolver: Option<StoredKeyResolver>) -> !
     else {
         std::process::exit(BROKER_EXIT_UNAVAILABLE);
     };
-    let exit_code =
-        match runtime.block_on(run_broker(runtime_dir, containment.mechanism, stored_keys)) {
-            Ok(()) => 0,
-            Err(_) => BROKER_EXIT_UNAVAILABLE,
-        };
+    // A panic has already revoked (`RevokeOnExit`); it still exits here,
+    // without dropping the runtime.
+    let exit_code = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        runtime.block_on(run_broker(runtime_dir, containment.mechanism, stored_keys))
+    })) {
+        Ok(Ok(())) => 0,
+        Ok(Err(_)) | Err(_) => BROKER_EXIT_UNAVAILABLE,
+    };
+    // #504: tests hold the process here, after its cleanup, to observe the
+    // window before it exits.
+    #[cfg(test)]
+    if let Some(hold) = std::env::var(TEST_EXIT_HOLD_MS_ENV)
+        .ok()
+        .and_then(|ms| ms.parse().ok())
+    {
+        std::thread::sleep(std::time::Duration::from_millis(hold));
+    }
     // Exit without dropping the runtime: a blocking reader may still be
     // parked on a channel the controller holds open (signal-initiated shutdown).
     std::process::exit(exit_code)
@@ -375,6 +392,12 @@ async fn run_broker(
     });
     drop(hello);
 
+    // #504: every exit from here on revokes first, a panic included.
+    let mut exit = RevokeOnExit {
+        broker: broker.clone(),
+        accept: None,
+    };
+
     write_json_line(
         &mut control_write,
         &ControlResponse::Ready {
@@ -387,7 +410,7 @@ async fn run_broker(
     )
     .await?;
 
-    let accept = endpoint.serve(broker.clone());
+    exit.accept = Some(endpoint.serve(broker.clone()));
     let parent_gone = transport::shutdown_requested(parent)?;
     tokio::pin!(parent_gone);
     loop {
@@ -410,10 +433,29 @@ async fn run_broker(
     // Controller EOF, controller death or a termination signal: close every
     // outstanding channel by revoking, then remove the private socket
     // directory before exiting.
-    broker.revoke();
-    accept.abort();
+    drop(exit);
     drop(endpoint);
     Ok(())
+}
+
+/// #504: revokes every reference (clears the credentials and the env stash,
+/// bumps the run generation, wakes in-flight requests), then stops
+/// accepting, however `run_broker` leaves once the broker exists: a return,
+/// an error (such as a broken control channel) or a panic. Declared after
+/// the endpoint, so it runs before the endpoint removes the socket
+/// directory.
+struct RevokeOnExit {
+    broker: Arc<Broker>,
+    accept: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for RevokeOnExit {
+    fn drop(&mut self) {
+        self.broker.revoke();
+        if let Some(accept) = self.accept.take() {
+            accept.abort();
+        }
+    }
 }
 
 /// True when binding failed because another process holds a pipe name
@@ -802,6 +844,7 @@ impl Broker {
                 let mut state = poisoned.into_inner();
                 state.credentials.clear();
                 state.env_stash.clear();
+                state.replay = ReplayWindow::default();
                 state.run_generation = state.run_generation.saturating_add(1);
                 state.run_generation
             }

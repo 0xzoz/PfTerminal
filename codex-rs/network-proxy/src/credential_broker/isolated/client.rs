@@ -688,6 +688,18 @@ impl IsolatedBrokerClient {
             .and_then(|child| child.as_ref().map(Child::id))
     }
 
+    /// Writes raw bytes on the control channel, for broken-channel
+    /// qualification (#504).
+    #[cfg(all(test, unix))]
+    pub(crate) fn send_raw_control_for_test(&self, bytes: &[u8]) {
+        use std::io::Write as _;
+        if let Ok(mut control) = self.control.lock()
+            && let Some(writer) = control.writer.as_mut()
+        {
+            let _ = writer.write_all(bytes).and_then(|()| writer.flush());
+        }
+    }
+
     /// Terminates the broker immediately. Used for crash qualification.
     #[cfg(test)]
     pub(crate) fn kill_for_test(&self) {
