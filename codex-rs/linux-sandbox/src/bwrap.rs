@@ -2353,6 +2353,10 @@ mod tests {
                 "--bind".to_string(),
                 "/".to_string(),
                 "/".to_string(),
+                // #493: the `/` bind covers the minimal /dev with the host's,
+                // mounted `nodev`; mount a fresh one over it.
+                "--dev".to_string(),
+                "/dev".to_string(),
                 // Mask the default metadata path names under the writable root.
                 // Because the root is `/` in this test, these carveout paths
                 // appear directly below `/`.
