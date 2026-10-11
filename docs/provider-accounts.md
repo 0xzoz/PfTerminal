@@ -69,9 +69,9 @@ token counts are shown: no prices and no cost records.
   the rows can add up to more.
 - Accounts appear by name only. Other providers' accounts are not listed; switch
   to that provider to see them.
-- A new session starts from zero. A resumed conversation keeps its own earlier
-  counts, but agents it spawned before the resume count again only once they
-  run. Memory extraction shows after the next reply.
+- A new session starts from zero. A resumed conversation shows its earlier
+  counts again, its spawned agents' included once the TUI reattaches them.
+  Memory extraction outside a turn shows with the next count.
 
 Developer-accounting builds also have `/cost`, which shows the same requests by
 provider, account and model for one UTC day. For a session that stays within

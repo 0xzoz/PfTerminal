@@ -58,4 +58,12 @@ if [ -n "$COST" ]; then
 fi
 send "/exit"; sleep 3
 tmux -L "$SOCK" kill-server 2>/dev/null
+# Resume the conversation: the coordinator's own counts come back.
+tmux -L "$SOCK" new-session -d -s main -x 150 -y 50 \
+  "env HOME=$ROOT/userhome CODEX_HOME=$ROOT/home CORBANU_HOME=$ROOT/home PFTERMINAL_HOME=$ROOT/home CORBANU_TEST_NO_NATIVE_KEYRING=1 RUST_LOG=info $BIN -C $ROOT/ws resume --last --account work; sleep 600"
+wait_for "Corbanu Terminal" 60 || exit 1
+sleep 3
+send "/status"; sleep 3; wait_for "work \\(active\\) +[0-9,]+" 30 || exit 1; snap 5-resumed
+send "/exit"; sleep 3
+tmux -L "$SOCK" kill-server 2>/dev/null
 echo "DONE $ROOT"

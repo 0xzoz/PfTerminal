@@ -32,7 +32,7 @@
 │  Security:             Requested Permissive; effective protection unverified (/security)      │
 │  Agents.md:            <none>                                                                 │
 │  Collaboration mode:   Default                                                                │
-│  Session:              01a12ce7-2bd6-74c2-8e9f-517bb442dabd                                   │
+│  Session:              01a12d44-8e33-7363-9d5b-2cc6060944aa                                   │
 │                                                                                               │
 │  Token usage:          0 total  (0 input + 0 output)                                          │
 │  Account usage:        work · no usage yet                                                    │
@@ -57,7 +57,7 @@
 │  Security:             Requested Permissive; effective protection unverified (/security)      │
 │  Agents.md:            <none>                                                                 │
 │  Collaboration mode:   Default                                                                │
-│  Session:              01a12ce7-2bd6-74c2-8e9f-517bb442dabd                                   │
+│  Session:              01a12d44-8e33-7363-9d5b-2cc6060944aa                                   │
 │                                                                                               │
 │  Token usage:          7.42K total  (7.42K input + 3 output)                                  │
 │  Context window:       100% left (7.42K used / 950K)                                          │
@@ -68,4 +68,4 @@
 
 › Run /review on my current changes
 
-  Z.AI GLM 5.3 Flash via zai default · /Volumes/CorbanuDrive/Corbanu/.codex-work/pf84-status-tokens/run-da/ws · Corbanu Terminal · TPS: 0.6 tok/s
+  Z.AI GLM 5.3 Flash via zai default · /Volumes/CorbanuDrive/Corbanu/.codex-work/pf84-status-tokens/run-da/ws · Corbanu Terminal · TPS: 0.5 tok/s
