@@ -1671,17 +1671,15 @@ async fn issue_442_env_created_by_a_sandboxed_command_stops_it_and_stays_hidden(
 }
 
 /// #442, real bubblewrap: files the person creates between commands, in any
-/// letter case and through a `.env` link to another credential file, are
-/// unreadable to the next command.
+/// letter case, are unreadable to the next command.
 #[tokio::test]
-async fn issue_442_env_created_between_commands_and_env_links_stay_hidden() {
+async fn issue_442_env_created_between_commands_stays_hidden() {
     let Some((_tmpdir, work)) = credential_workspace().await else {
         return;
     };
     std::fs::write(work.join("app/.env"), "API_KEY=dummy-442-person").unwrap();
     std::fs::write(work.join(".ENV.Local"), "API_KEY=dummy-442-case").unwrap();
-    std::fs::write(work.join(".env.development"), "API_KEY=dummy-442-linked").unwrap();
-    std::os::unix::fs::symlink(".env.development", work.join(".envrc")).unwrap();
+    std::fs::write(work.join(".envrc"), "export API_KEY=dummy-442-rc").unwrap();
     let read = run_in(
         &work,
         "for f in app/.env .ENV.Local .envrc; do cat \"$f\"; echo \"$f=$?\"; done; cat notes.txt",

@@ -51,35 +51,18 @@ pub fn is_credential_file_name(name: &OsStr) -> bool {
 
 /// Why an existing credential-named entry (not a folder) at `path` is unsafe:
 /// whatever the person writes to it would land where agent commands could
-/// read it. Safe are a plain file with no other hard links, and a link to
-/// such a file that also has a credential name and lies below one of
-/// `roots`, or to a folder.
-pub fn credential_entry_problem(
-    path: &Path,
-    metadata: &std::fs::Metadata,
-    roots: &[PathBuf],
-) -> Option<&'static str> {
+/// read it. Only a plain file with no other hard links is safe; any link is
+/// refused, since it can be re-pointed (or a folder along it swapped) after
+/// it was checked.
+pub fn credential_entry_problem(metadata: &std::fs::Metadata) -> Option<&'static str> {
     let kind = metadata.file_type();
-    if kind.is_file() {
-        return (hard_links(metadata) > 1).then_some("has other hard links");
+    if kind.is_symlink() {
+        return Some("is a link");
     }
-    if !kind.is_symlink() {
+    if !kind.is_file() {
         return Some("is not a regular file (a pipe, socket or device)");
     }
-    let Ok(target) = std::fs::canonicalize(path) else {
-        return Some("is a link to nothing");
-    };
-    let Ok(target_metadata) = std::fs::metadata(&target) else {
-        return Some("is a link to nothing");
-    };
-    if target_metadata.is_dir() {
-        return None;
-    }
-    let safe_target = target_metadata.is_file()
-        && hard_links(&target_metadata) <= 1
-        && target.file_name().is_some_and(is_credential_file_name)
-        && roots.iter().any(|root| target.starts_with(root));
-    (!safe_target).then_some("is a link to a file that is not itself a protected credential file")
+    (hard_links(metadata) > 1).then_some("has other hard links")
 }
 
 #[cfg(unix)]
@@ -382,8 +365,9 @@ impl ReadDenyMatcher {
         let mut invalid_pattern = false;
         let mut deny_read_matchers = Vec::new();
         for pattern in file_system_sandbox_policy.get_unreadable_globs_with_cwd(cwd) {
-            // Credential names match in any case (`.ENV` on a
-            // case-insensitive filesystem is `.env`).
+            // Credential globs match in any letter case (`.ENV` on a
+            // case-insensitive filesystem is `.env`); this also covers their
+            // folder part, which only ever denies more.
             let case_insensitive = credential_file_glob_root(&pattern).is_some();
             match build_glob_matcher(&pattern, case_insensitive) {
                 Ok(matcher) => deny_read_matchers.push(matcher),
@@ -3677,42 +3661,19 @@ mod tests {
     #[test]
     fn credential_entry_problems() {
         let temp = TempDir::new().expect("tempdir");
-        let root = temp.path().canonicalize().expect("canonical");
-        let roots = [root.clone()];
-        fs::write(root.join("notes"), "").expect("notes");
-        fs::write(root.join(".env.development"), "").expect("env");
-        fs::create_dir(root.join("venv")).expect("dir");
+        let root = temp.path();
         fs::write(root.join(".env"), "").expect("env");
         fs::write(root.join("linked"), "").expect("linked");
         fs::hard_link(root.join("linked"), root.join(".env.hard")).expect("hard");
-        let links = [
-            (".env.dev", ".env.development", None),
-            (".env.venv", "venv", None),
-            (
-                ".env.notes",
-                "notes",
-                Some("is a link to a file that is not itself a protected credential file"),
-            ),
-            (".env.none", "missing", Some("is a link to nothing")),
-        ];
-        for (name, target, _) in &links {
-            std::os::unix::fs::symlink(target, root.join(name)).expect("link");
-        }
+        fs::create_dir(root.join("venv")).expect("dir");
+        std::os::unix::fs::symlink(".env", root.join(".env.link")).expect("link");
+        std::os::unix::fs::symlink("venv", root.join(".env.dir")).expect("link");
         let problem = |name: &str| {
-            let path = root.join(name);
-            let metadata = fs::symlink_metadata(&path).expect("metadata");
-            credential_entry_problem(&path, &metadata, &roots)
+            credential_entry_problem(&fs::symlink_metadata(root.join(name)).expect("metadata"))
         };
         assert_eq!(problem(".env"), None);
         assert_eq!(problem(".env.hard"), Some("has other hard links"));
-        for (name, _, expected) in links {
-            assert_eq!(problem(name), expected, "{name}");
-        }
-        // A link to a credential file outside the roots is unsafe too.
-        let other = TempDir::new().expect("tempdir");
-        fs::write(other.path().join(".env"), "").expect("env");
-        std::os::unix::fs::symlink(other.path().join(".env"), root.join(".env.outside"))
-            .expect("link");
-        assert!(problem(".env.outside").is_some());
+        assert_eq!(problem(".env.link"), Some("is a link"));
+        assert_eq!(problem(".env.dir"), Some("is a link"));
     }
 }

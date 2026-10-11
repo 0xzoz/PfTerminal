@@ -479,21 +479,28 @@ fn verify_credential_names(
 const MAX_CHECKED_ENTRIES: usize = 1_000_000;
 
 /// #442: credential-named entries in the current folder that the sandbox
-/// cannot protect, because what the person writes to them would land where
-/// agent commands can read it (links to other files, extra hard links,
-/// pipes). Agent commands cannot create such names under Aggressive; this
-/// catches ones made before (another session, a checkout).
+/// cannot protect, because what the person writes to them could land where
+/// agent commands can read it (links, extra hard links, pipes). Agent
+/// commands cannot create such names under Aggressive on macOS; this catches
+/// ones made before (another session, a checkout). Only the current folder
+/// is checked.
 fn unsafe_credential_entries(cwd: &Path) -> Vec<String> {
     let Ok(root) = std::fs::canonicalize(cwd) else {
         return vec![format!("Sandbox: cannot read {}", cwd.display())];
     };
-    let roots = [root.clone()];
     let mut problems = Vec::new();
     let mut pending = vec![root];
     let mut seen = 0_usize;
     while let Some(folder) = pending.pop() {
-        let Ok(entries) = std::fs::read_dir(&folder) else {
-            continue;
+        let entries = match std::fs::read_dir(&folder) {
+            Ok(entries) => entries,
+            Err(err) => {
+                problems.push(format!(
+                    "Sandbox: cannot check {} for unsafe credential files: {err}",
+                    folder.display()
+                ));
+                continue;
+            }
         };
         for entry in entries.flatten() {
             seen += 1;
@@ -511,7 +518,7 @@ fn unsafe_credential_entries(cwd: &Path) -> Vec<String> {
             if metadata.is_dir() {
                 pending.push(path);
             } else if is_credential_file_name(&entry.file_name())
-                && let Some(problem) = credential_entry_problem(&path, &metadata, &roots)
+                && let Some(problem) = credential_entry_problem(&metadata)
             {
                 problems.push(format!(
                     "Sandbox: the credential file {} {problem}, so what is written to it could be read under another name; remove or rename it",

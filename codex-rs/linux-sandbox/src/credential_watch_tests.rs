@@ -140,8 +140,7 @@ fn other_names_and_placeholders_do_not_stop_the_command() {
 }
 
 /// Existing credential files are reported in every letter case, so the
-/// sandbox hides them (the glob expansion matches the exact case only); a
-/// link to one of them, or to a folder, is safe.
+/// sandbox hides them (the glob expansion matches the exact case only).
 #[test]
 fn existing_credential_files_are_reported_in_any_case() {
     let dir = tempfile::tempdir().unwrap();
@@ -149,8 +148,6 @@ fn existing_credential_files_are_reported_in_any_case() {
     std::fs::create_dir_all(work.join("app")).unwrap();
     std::fs::write(work.join(".env.development"), "API_KEY=dummy").unwrap();
     std::fs::write(work.join("app/.ENV.Local"), "API_KEY=dummy").unwrap();
-    std::os::unix::fs::symlink(".env.development", work.join(".env")).unwrap();
-    std::os::unix::fs::symlink("app", work.join(".env.dir")).unwrap();
     let policy = deny_globs(credential_file_globs(&work.to_string_lossy()));
     let watcher = CredentialWatcher::for_policy(&policy, &work)
         .unwrap()
@@ -170,13 +167,17 @@ type Plant = fn(&Path);
 /// person writes to it would land where the command can read it.
 #[test]
 fn unsafe_credential_entries_refuse_the_command() {
-    let cases: [(&str, Plant); 4] = [
-        ("is a link to nothing", |work| {
+    let cases: [(&str, Plant); 5] = [
+        ("is a link", |work| {
             std::os::unix::fs::symlink("planted", work.join(".env")).unwrap();
         }),
-        ("is a link to a file that is not itself", |work| {
-            std::fs::write(work.join("notes"), "").unwrap();
-            std::os::unix::fs::symlink("notes", work.join(".env")).unwrap();
+        ("is a link", |work| {
+            std::fs::create_dir(work.join("d")).unwrap();
+            std::os::unix::fs::symlink("d", work.join(".env")).unwrap();
+        }),
+        ("is a link", |work| {
+            std::fs::write(work.join(".env.real"), "").unwrap();
+            std::os::unix::fs::symlink(".env.real", work.join(".env")).unwrap();
         }),
         ("has other hard links", |work| {
             std::fs::write(work.join("notes"), "").unwrap();

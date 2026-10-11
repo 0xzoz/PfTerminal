@@ -7,10 +7,9 @@
 //! folder:
 //! - every command hides the matches that exist when it starts (the policy's
 //!   glob expansion, plus every letter case);
-//! - a credential name that is not a plain file (a pipe or device, a file
-//!   with other hard links, a link to anything but a folder or a credential
-//!   file below the watched folder) refuses the command: whatever the person
-//!   writes to it would land somewhere the command can read;
+//! - a credential name that is not a plain file (a link, a pipe or device, a
+//!   file with other hard links) refuses the command: whatever the person
+//!   writes to it could land somewhere the command can read;
 //! - this watcher covers the rest: it watches every folder below that folder
 //!   (inotify) from before that expansion until the command ends, and a
 //!   non-folder with such a name created, linked or moved in meanwhile stops
@@ -260,9 +259,7 @@ impl CredentialWatcher {
                 }
                 match scan {
                     Scan::Start => {
-                        if let Some(problem) =
-                            credential_entry_problem(&path, &metadata, &self.roots)
-                        {
+                        if let Some(problem) = credential_entry_problem(&metadata) {
                             return Some(format!(
                                 "the credential file {} {problem}, so what is written to it could \
                                  be read under another name; remove or rename it",
@@ -365,6 +362,13 @@ impl CredentialWatcher {
                 return Some("a truncated credential file watch event".to_string());
             };
             events = &events[end..];
+            if event.mask & libc::IN_IGNORED != 0 {
+                // The folder is gone: it no longer counts toward the limit.
+                if let Some(folder) = self.folders.remove(&event.wd) {
+                    self.watched.remove(&folder);
+                }
+                continue;
+            }
             if event.mask & libc::IN_Q_OVERFLOW != 0 {
                 // Events were lost: look at everything again.
                 for root in self.roots.clone() {

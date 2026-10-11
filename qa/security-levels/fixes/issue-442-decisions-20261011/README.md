@@ -13,8 +13,8 @@ a name (a `.env` virtualenv) is not a credential file.
 
 | Platform | Mechanism | Covers | Limits |
 | --- | --- | --- | --- |
-| macOS (Seatbelt) | Regex rules from the globs `/**/<name>` and `<workspace>/**/<name>`: no read, and no create, link, rename-to, write or unlink (folders aside) | Any such file anywhere, created at any time by anyone. Agent commands cannot create one, so they cannot plant a link or pipe the person's file would be written through. Case aliases (`.ENV`) are denied too | None found. Agent commands cannot create `.env` files at all (also `.env.example`, see below) |
-| Linux (bubblewrap) | 1. At every command start, every match below the workspace is masked (glob expansion), plus what a credential-named link points to. 2. A credential name that is a link to nothing, a pipe, socket or device, or a file with other hard links refuses the command. 3. From before that scan until the command ends, inotify watches every folder below the workspace; a non-folder with such a name created, linked or moved in by anyone stops the command (SIGKILL) | Files created between commands (by the agent or the person) and while a command runs | Bubblewrap can only mask existing paths and seccomp/Landlock cannot match names, so a file created during a command is not hidden from it; the command is stopped instead (fail closed). A process already waiting for the file can read it in the moment before the stop. Only the workspace is covered, not `.env` files elsewhere. A folder reached through a link inside the workspace is not watched. Refused: folders on NFS/SMB/CIFS/9p/FUSE/Ceph/Lustre/AFS (inotify misses changes made elsewhere), more than 100,000 folders, watch-setup failure. Lost events trigger a full rescan. The file is left in place (its creator is unknown). One watcher per command: many concurrent commands on a huge tree can hit `max_user_watches` (refused, fail closed) |
+| macOS (Seatbelt) | Regex rules from the globs `/**/<name>` and `<workspace>/**/<name>`: no read, and no create, link, rename-to, write or unlink (folders aside) | Any such file anywhere, created at any time by anyone. Agent commands cannot create one, so they cannot plant a link or pipe the person's file would be written through. Case aliases (`.ENV`) are denied too | Agent commands cannot create `.env` files at all (also `.env.example`, see below). A credential name that is not a plain file (a link, extra hard links, a pipe) made before the session would let the person's write land elsewhere: the launch check refuses Aggressive for such entries in the current folder only (not elsewhere on disk) |
+| Linux (bubblewrap) | 1. At every command start, every match below the workspace is masked (glob expansion, plus every letter case from the watcher's own walk). 2. A credential name that is not a plain file (any link, a pipe, socket or device, a file with other hard links) refuses the command until it is removed. 3. From before that scan until the command ends, inotify watches every folder below the workspace; a non-folder with such a name created, linked or moved in by anyone stops the command (SIGKILL) | Files created between commands (by the agent or the person) and while a command runs | Bubblewrap can only mask existing paths and seccomp/Landlock cannot match names, so a file created during a command is not hidden from it; the command is stopped instead (fail closed). A process already waiting for the file can read it in the moment before the stop. Only the workspace is covered, not `.env` files elsewhere. A folder reached through a link inside the workspace is not watched. A folder below the workspace replaced by a link to outside it is not followed. Refused: folders on NFS/SMB/CIFS/9p/FUSE/NCP/Ceph/Lustre/AFS/Coda/OCFS2/GFS2/vboxsf (inotify misses changes made elsewhere), more than 100,000 folders, watch-setup failure. Lost events trigger a full rescan. The file is left in place (its creator is unknown). One watcher per command: many concurrent commands on a huge tree can hit `max_user_watches` (refused, fail closed) |
 | Windows | Unchanged: globs are expanded to deny ACEs on existing files at each command start | Files that exist when a command starts | Deny ACEs are per object and ACLs cannot match names, so a file created **during** a command inherits the folder's ACL and is readable to that command. Not fixed here (no Windows host to build and test a watcher) |
 
 The launch check refuses Aggressive when the profile lacks these rules (or the current folder's path contains glob
@@ -47,6 +47,12 @@ the core tests with a plain workspace-write profile) lifted them. The grant revi
    keeps read-only, and the shell start-up files are outside the workspace. Decide whether Grant once should lift
    `.git/hooks` and `.git/config` (weaker) or be described as such.
 
+5. **Credential-file links are refused.** A `.env` that is a link (for example `.env -> ../shared/.env`), has extra
+   hard links or is a pipe makes Aggressive refuse to start (current folder, all platforms) and, on Linux, refuses every
+   command while it exists. A link can be re-pointed after it is checked, so the person's write could land in a readable
+   file. Fail closed as built; the alternative is to allow links whose whole path has no other links, checked at each
+   command (weaker against a re-point mid-command).
+
 ## Evidence
 
 - Regression tests, failing before:
@@ -56,11 +62,14 @@ the core tests with a plain workspace-write profile) lifted them. The grant revi
     cannot create; the person's `.env.local`, `app/.env`, `.envrc`, `.env.production`, `../other-project/.env` are
     unreadable to the next command, also via copy, hard link, symlink or rename; Permissive still reads). Before: the
     synthetic values were printed.
-  - `issue_442_launch_check_requires_credential_names` (launch check).
+  - `issue_442_launch_check_requires_credential_names` and `issue_442_launch_check_names_unsafe_credential_files`
+    (launch check); protocol `credential_file_names_globs_and_roots`, `credential_entry_problems`.
   - Linux, real bwrap on glitch (`linux-sandbox` `issue_442_*`, 4 tests): created by a sandboxed command; by the person
-    between commands and through a `.env` link; while a command runs; a planted link. Before (watcher off): the first
-    three failed, two leaked the value. Unit tests in `credential_watch_tests.rs` (stops, moved-in folders, unsafe
-    entries refused, `.env` folders and temporary build folders not stopped).
+    between commands (any letter case); while a command runs; a planted link (refused while dangling and after the
+    person wrote through it). Before (watcher off, first version of these tests): created-by-command, through-a-link and
+    while-running all failed, the last two leaked the value. Unit tests in `credential_watch_tests.rs` (stops, moved-in folders, unsafe
+    entries refused (links of any kind, hard links, pipes), any-case existing files hidden, `.env` folders and temporary
+    build folders not stopped).
   - Core: `pf_25_s01::issue_442_a_confirmed_grant_never_lifts_codex_or_agents` (before: `codex=0 agents=0`),
     `read_denials::issue_442_a_grant_keeps_codex_and_agents_read_only`,
     `pf_23_s01::issue_442_env_file_matched_by_name_is_denied_and_explained`,
