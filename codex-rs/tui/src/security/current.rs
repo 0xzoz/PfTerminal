@@ -72,12 +72,17 @@ pub(crate) fn current_values(config: &Config) -> CurrentValues {
         }
         FileSystemSandboxKind::Restricted => {
             let mut roots = file_system.get_writable_roots_with_cwd(cwd);
+            // Roots come back with top-level aliases resolved (#467: `/tmp`
+            // on macOS); nested links stay as written.
+            let resolved_cwd = codex_utils_absolute_path::canonicalize_preserving_symlinks(cwd)
+                .unwrap_or_else(|_| cwd.to_path_buf());
+            let is_cwd = |root: &Path| root == cwd || root == resolved_cwd;
             // The current folder first; the rest in policy order.
-            roots.sort_by_key(|root| root.root.as_path() != cwd);
+            roots.sort_by_key(|root| !is_cwd(root.root.as_path()));
             let roots = roots
                 .into_iter()
                 .map(|root| {
-                    if root.root.as_path() == cwd {
+                    if is_cwd(root.root.as_path()) {
                         "the current folder".to_string()
                     } else {
                         root.root.display().to_string()

@@ -722,6 +722,38 @@ impl FileSystemSandboxPolicy {
         self.resolve_access_with_cwd(path, cwd).can_read()
     }
 
+    /// Like [`Self::can_read_path_with_cwd`], with the policy's paths and
+    /// `path` normalized alike, the way the sandboxes normalize their roots
+    /// before matching denials to them: top-level aliases resolve (`/tmp`
+    /// and `/private/tmp` on macOS name one file), nested links stay as
+    /// written, so a path spelled through a nested link does not match a
+    /// rule spelled without it.
+    ///
+    /// This does not model Seatbelt's per-root exclusions: with a readable
+    /// root reached through a nested link, Seatbelt can leave a denied path
+    /// readable that this counts as denied (#488).
+    pub fn can_read_effective_path_with_cwd(&self, path: &Path, cwd: &Path) -> bool {
+        match self.kind {
+            FileSystemSandboxKind::Unrestricted | FileSystemSandboxKind::ExternalSandbox => {
+                return true;
+            }
+            FileSystemSandboxKind::Restricted => {}
+        }
+        let Some(path) = resolve_candidate_path(path, cwd) else {
+            return false;
+        };
+        let path = normalize_effective_absolute_path(path);
+        self.resolved_entries_with_cwd(cwd)
+            .into_iter()
+            .map(|entry| ResolvedFileSystemEntry {
+                path: normalize_effective_absolute_path(entry.path),
+                access: entry.access,
+            })
+            .filter(|entry| path.as_path().starts_with(entry.path.as_path()))
+            .max_by_key(resolved_entry_precedence)
+            .is_some_and(|entry| entry.access.can_read())
+    }
+
     pub fn can_write_path_with_cwd(&self, path: &Path, cwd: &Path) -> bool {
         if !self.resolve_access_with_cwd(path, cwd).can_write() {
             return false;
@@ -2686,6 +2718,81 @@ mod tests {
                 .read_only_subpaths
                 .contains(&expected_codex)
         );
+    }
+
+    fn deny_in_workspace(denied: &Path) -> FileSystemSandboxPolicy {
+        FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Special {
+                    value: FileSystemSpecialPath::project_roots(/*subpath*/ None),
+                },
+                access: FileSystemAccessMode::Write,
+                missing_path_behavior: None,
+            },
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Path {
+                    path: AbsolutePathBuf::from_absolute_path(denied).expect("absolute"),
+                },
+                access: FileSystemAccessMode::Deny,
+                missing_path_behavior: None,
+            },
+        ])
+    }
+
+    /// #467: `/tmp` and `/private/tmp` name one file to the sandbox, so a
+    /// rule and a workspace spelled differently through that alias agree.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn can_read_effective_path_matches_through_top_level_aliases() {
+        let root = tempfile::tempdir_in("/tmp").expect("tempdir in /tmp");
+        let logical = root.path().to_path_buf();
+        assert!(logical.starts_with("/tmp"), "{logical:?}");
+        let physical = logical.canonicalize().expect("canonical");
+        assert!(physical.starts_with("/private/tmp"), "{physical:?}");
+        fs::write(physical.join(".env"), "x").expect(".env");
+        for (denied, cwd) in [(&physical, &logical), (&logical, &physical)] {
+            let policy = deny_in_workspace(&denied.join(".env"));
+            for path in [
+                logical.join(".env"),
+                physical.join(".env"),
+                PathBuf::from(".env"),
+            ] {
+                assert!(
+                    !policy.can_read_effective_path_with_cwd(&path, cwd),
+                    "{path:?} readable with {denied:?}/.env denied, cwd {cwd:?}"
+                );
+            }
+            // Not created yet: still denied.
+            let later = deny_in_workspace(&denied.join("later.key"));
+            assert!(!later.can_read_effective_path_with_cwd(&logical.join("later.key"), cwd));
+            assert!(policy.can_read_effective_path_with_cwd(&logical.join("other"), cwd));
+        }
+        // The literal check is what #467 reported.
+        let policy = deny_in_workspace(&physical.join(".env"));
+        assert!(policy.can_read_path_with_cwd(&logical.join(".env"), &logical));
+    }
+
+    /// Seatbelt matches a denial to a readable root by its normalized
+    /// spelling, which keeps nested links: a rule reached only through one
+    /// is not counted, so the check stays on the safe side.
+    #[cfg(unix)]
+    #[test]
+    fn can_read_effective_path_keeps_nested_links_apart() {
+        let root = TempDir::new().expect("tempdir");
+        let real = root.path().join("real");
+        fs::create_dir(&real).expect("real");
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+        fs::write(real.join(".env"), "x").expect(".env");
+        for (denied, cwd) in [(&real, &link), (&link, &real)] {
+            let policy = deny_in_workspace(&denied.join(".env"));
+            let other = if denied == &real { &link } else { &real };
+            assert!(
+                policy.can_read_effective_path_with_cwd(&other.join(".env"), cwd),
+                "{other:?}/.env counted as denied by {denied:?}/.env"
+            );
+            assert!(!policy.can_read_effective_path_with_cwd(&denied.join(".env"), denied));
+        }
     }
 
     #[test]

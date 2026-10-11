@@ -1535,6 +1535,7 @@ pub(crate) enum AppEvent {
     /// Open the explicit Max/Ultra reasoning selection popup for a model.
     OpenAdvancedReasoningPopup {
         model: ModelPreset,
+        purpose: crate::chatwidget::ModelSelectionPurpose,
     },
 
     /// Apply an advanced reasoning effort to the active conversation without changing defaults.

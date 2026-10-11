@@ -743,9 +743,11 @@ fn status_account_value(
         } if provider.uses_first_party_openai_auth() => {
             format!("{env_var} from your environment (billed per use)")
         }
-        StatusAccountDisplay::ApiKey { .. } => {
+        StatusAccountDisplay::ApiKey { .. } if provider.uses_first_party_openai_auth() => {
             "OpenAI API key configured (run corbanu login to use ChatGPT)".to_string()
         }
+        // Other providers report their own stored key here (#462).
+        StatusAccountDisplay::ApiKey { .. } => format!("{} API key configured", provider.name),
     })
 }
 

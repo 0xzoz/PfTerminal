@@ -56,6 +56,7 @@ mod anthropic_payload_limit;
 mod apply_patch_cli;
 #[cfg(not(target_os = "windows"))]
 mod approvals;
+mod approved_command_ends;
 mod audio_truncation;
 mod auto_review;
 mod catalog_permission_messages;

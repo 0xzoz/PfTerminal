@@ -4417,7 +4417,7 @@ async fn model_picker_selects_kimi_k3_with_required_max_reasoning() {
     chat.handle_key_event(KeyEvent::from(KeyCode::Down));
     chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
     let advanced_preset = std::iter::from_fn(|| rx.try_recv().ok()).find_map(|event| match event {
-        AppEvent::OpenAdvancedReasoningPopup { model } => Some(model),
+        AppEvent::OpenAdvancedReasoningPopup { model, .. } => Some(model),
         _ => None,
     });
     chat.open_advanced_reasoning_popup(advanced_preset.expect("Kimi advanced reasoning popup"));
@@ -4657,7 +4657,7 @@ async fn select_ultra_with_multi_agent_thread_limit(max_threads: usize) -> (bool
     chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
 
     let advanced_preset = std::iter::from_fn(|| rx.try_recv().ok()).find_map(|event| match event {
-        AppEvent::OpenAdvancedReasoningPopup { model } => Some(model),
+        AppEvent::OpenAdvancedReasoningPopup { model, .. } => Some(model),
         _ => None,
     });
     chat.open_advanced_reasoning_popup(advanced_preset.expect("advanced reasoning popup"));
@@ -4701,6 +4701,109 @@ async fn ultra_reasoning_selection_skips_warning_below_threshold() {
     let below_threshold = select_ultra_with_multi_agent_thread_limit(/*max_threads*/ 7).await;
 
     assert_eq!(below_threshold, (true, Vec::new()));
+}
+
+/// #468: Max or Ultra chosen under "More reasoning…" for a spawned agent
+/// spawns it with that effort and never changes or saves the session model.
+#[tokio::test]
+async fn spawn_advanced_reasoning_spawns_instead_of_saving_session_model() {
+    for advanced in [ReasoningEffortConfig::Max, ReasoningEffortConfig::Ultra] {
+        let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+        chat.config
+            .multi_agent_v2
+            .max_concurrent_threads_per_session = 8;
+        let mut preset = get_available_model(&chat, "gpt-5.4");
+        preset.default_reasoning_effort = ReasoningEffortConfig::Low;
+        preset.supported_reasoning_efforts = vec![
+            ReasoningEffortPreset {
+                effort: ReasoningEffortConfig::Low,
+                description: "Low reasoning".to_string(),
+            },
+            ReasoningEffortPreset {
+                effort: advanced.clone(),
+                description: "Advanced reasoning".to_string(),
+            },
+        ];
+        let purpose = spawn_model_purpose(SpawnRole::Troll, Some("node-1"), "gpt-5.4");
+        chat.open_reasoning_popup_for_purpose(preset, purpose.clone());
+        while rx.try_recv().is_ok() {}
+
+        chat.handle_key_event(KeyEvent::from(KeyCode::Down));
+        chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+        let (model, forwarded) = std::iter::from_fn(|| rx.try_recv().ok())
+            .find_map(|event| match event {
+                AppEvent::OpenAdvancedReasoningPopup { model, purpose } => Some((model, purpose)),
+                _ => None,
+            })
+            .expect("More reasoning… opens the advanced popup");
+        assert_eq!(forwarded, purpose);
+
+        chat.open_advanced_reasoning_popup_for_purpose(model, forwarded);
+        chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+        let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AppEvent::CreateSpawnAgent {
+                    role: SpawnRole::Troll,
+                    parent_node_id: Some(parent),
+                    model,
+                    effort: Some(effort),
+                    ..
+                } if parent == "node-1" && model == "gpt-5.4" && *effort == advanced
+            )),
+            "{advanced:?} must spawn the Troll: {events:?}"
+        );
+        assert!(
+            events.iter().all(|event| !matches!(
+                event,
+                AppEvent::PersistModelSelection { .. }
+                    | AppEvent::UpdateModelSelection { .. }
+                    | AppEvent::UpdateReasoningEffort(_)
+                    | AppEvent::ApplyAdvancedReasoning { .. }
+            )),
+            "{advanced:?} for a spawn must not touch the session model: {events:?}"
+        );
+        // Ultra still warns about multi-agent concurrency for the new pane.
+        assert_eq!(
+            events
+                .iter()
+                .any(|event| matches!(event, AppEvent::InsertHistoryCell(_))),
+            advanced == ReasoningEffortConfig::Ultra,
+            "{events:?}"
+        );
+
+        // A new Corbanu Terminal pane gets the effort the same way.
+        let pane = ModelSelectionPurpose::CodexPane {
+            default_model: "gpt-5.4".to_string(),
+        };
+        let mut preset = get_available_model(&chat, "gpt-5.4");
+        preset.supported_reasoning_efforts = vec![ReasoningEffortPreset {
+            effort: advanced.clone(),
+            description: "Advanced reasoning".to_string(),
+        }];
+        chat.open_advanced_reasoning_popup_for_purpose(preset, pane);
+        chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+        let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AppEvent::OpenCodexPaneNamePrompt { model, effort: Some(effort), .. }
+                    if model == "gpt-5.4" && *effort == advanced
+            )),
+            "{advanced:?} must open the pane prompt: {events:?}"
+        );
+        assert!(
+            events.iter().all(|event| !matches!(
+                event,
+                AppEvent::PersistModelSelection { .. }
+                    | AppEvent::UpdateModelSelection { .. }
+                    | AppEvent::UpdateReasoningEffort(_)
+                    | AppEvent::ApplyAdvancedReasoning { .. }
+            )),
+            "{advanced:?} for a pane must not touch the session model: {events:?}"
+        );
+    }
 }
 
 #[tokio::test]
