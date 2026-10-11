@@ -318,8 +318,9 @@ pub fn sync_rules(codex_home: &Path, level: ChosenLevel) -> io::Result<()> {
     let path = rules_path(codex_home);
     match level {
         ChosenLevel::Aggressive => {
-            if std::fs::read_to_string(&path).ok().as_deref() != Some(rules_contents().as_str()) {
-                write_atomically(&path, &rules_contents())?;
+            let expected = expected_rules(codex_home);
+            if std::fs::read_to_string(&path).ok().as_deref() != Some(expected.as_str()) {
+                write_atomically(&path, &expected)?;
             }
             Ok(())
         }
@@ -331,7 +332,37 @@ pub fn sync_rules(codex_home: &Path, level: ChosenLevel) -> io::Result<()> {
     }
 }
 
+/// The rule file for the default nested-launch setting (refuse).
 pub fn rules_contents() -> String {
+    rules_contents_for(NestedAgents::Refuse)
+}
+
+/// The rule file `codex_home`'s stored nested-launch setting needs.
+pub fn expected_rules(codex_home: &Path) -> String {
+    rules_contents_for(load_state(codex_home).1)
+}
+
+/// Whether `contents` is a rule file this module writes (either setting).
+pub fn is_rules_contents(contents: &str) -> bool {
+    [NestedAgents::Refuse, NestedAgents::Pass]
+        .into_iter()
+        .any(|nested| contents == rules_contents_for(nested))
+}
+
+/// Subcommands that start an agent without a person (`exec`, its alias `e`,
+/// and `review`). Under nested-agents "refuse" the rule file forbids them,
+/// so an agent's request is refused before anyone is asked to approve a
+/// command that would only refuse (#441). The launch-time check stays: forms
+/// the rule cannot see (global flags before the subcommand) still refuse.
+pub const NESTED_AGENT_SUBCOMMANDS: [&str; 3] = ["exec", "e", "review"];
+
+/// Subcommands an agent command can never start under Aggressive, whatever
+/// the nested-launch setting (another interactive session, or a server that
+/// reaches the person's sessions): forbidden by the rule file too, so they
+/// are refused before any approval prompt (#441).
+pub const REFUSED_SESSION_SUBCOMMANDS: [&str; 4] = ["resume", "fork", "app-server", "mcp-server"];
+
+pub fn rules_contents_for(nested: NestedAgents) -> String {
     let mut contents = String::from(
         "# Managed by Corbanu Terminal /security (Aggressive). Choosing Permissive removes this file.\n",
     );
@@ -339,6 +370,22 @@ pub fn rules_contents() -> String {
         contents.push_str(&format!(
             "prefix_rule(pattern = [\"{program}\", \"vault\"], decision = \"forbidden\", justification = \"Security level Aggressive: agents cannot use the Corbanu vault.\")\n"
         ));
+    }
+    for program in VAULT_PROGRAMS {
+        for subcommand in REFUSED_SESSION_SUBCOMMANDS {
+            contents.push_str(&format!(
+                "prefix_rule(pattern = [\"{program}\", \"{subcommand}\"], decision = \"forbidden\", justification = \"Security level Aggressive: agents cannot start another interactive or server Corbanu session.\")\n"
+            ));
+        }
+    }
+    if nested == NestedAgents::Refuse {
+        for program in VAULT_PROGRAMS {
+            for subcommand in NESTED_AGENT_SUBCOMMANDS {
+                contents.push_str(&format!(
+                    "prefix_rule(pattern = [\"{program}\", \"{subcommand}\"], decision = \"forbidden\", justification = \"Security level Aggressive: nested agent launches are set to refuse; a person can let `corbanu exec` and `corbanu review` run with Aggressive enforced in /security.\")\n"
+                ));
+            }
+        }
     }
     contents
 }

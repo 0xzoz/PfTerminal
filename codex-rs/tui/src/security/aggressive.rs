@@ -48,7 +48,7 @@ pub(crate) const ROWS: [(&str, &str); 6] = [
     ("Network", "off for agent commands; web search off"),
     (
         "Vault",
-        "the vault store and sign-in file are unreadable to agent commands, and direct `corbanu vault …` commands are refused; secret-like environment variables (KEY, SECRET, TOKEN, VAULT, PASSWORD, PASSPHRASE, CREDENTIAL) are removed, and login profiles and shell snapshots are not used",
+        "the vault store and sign-in file are unreadable to agent commands, and direct `corbanu vault …` commands are refused; secret-like environment variables (KEY, SECRET, TOKEN, VAULT, PASSWORD, PASSPHRASE, CREDENTIAL) are removed, and with secretless_agent_launch on so is every other variable outside an allowlist (PATH, HOME, locale, terminal, proxy and tool locations; set others explicitly in shell_environment_policy.set); login profiles and shell snapshots are not used",
     ),
     (MODEL_KEYS_LABEL, MODEL_KEYS_ROW),
     (

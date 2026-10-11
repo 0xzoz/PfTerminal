@@ -20,6 +20,7 @@ pub(crate) use codex_security_level::level::STATE_FILE;
 pub(crate) use codex_security_level::level::StoredLevel;
 pub(crate) use codex_security_level::level::VAULT_PROGRAMS;
 pub(crate) use codex_security_level::level::aggressive_running;
+pub(crate) use codex_security_level::level::expected_rules;
 pub(crate) use codex_security_level::level::hold_aggressive_lock;
 pub(crate) use codex_security_level::level::load;
 pub(crate) use codex_security_level::level::load_confirmed;

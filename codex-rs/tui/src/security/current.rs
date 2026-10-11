@@ -158,7 +158,11 @@ pub(crate) fn current_values(config: &Config) -> CurrentValues {
         } else {
             "unreadable"
         },
-        if kept.is_empty() {
+        // #440: the secretless launch keeps only allowlisted names (and
+        // names set explicitly), not every name that is not secret-like.
+        if kept.is_empty() && config.features.enabled(Feature::SecretlessAgentLaunch) {
+            "only allowlisted environment variables reach agent commands (PATH, HOME, locale, terminal, proxy and tool locations; secretless_agent_launch); set others explicitly in shell_environment_policy.set".to_string()
+        } else if kept.is_empty() {
             "secret-like environment variables are removed".to_string()
         } else {
             format!(
