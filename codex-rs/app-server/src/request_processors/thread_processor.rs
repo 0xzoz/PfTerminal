@@ -82,18 +82,19 @@ fn collect_resume_override_mismatches(
             config_snapshot.model_provider_id
         ));
     }
-    if let Some(requested_account) = request.provider_account.as_deref().map(|selection| {
-        let (provider_id, name) = codex_core::config::split_account_selection(
-            selection,
-            &config_snapshot.model_provider_id,
-        );
-        format!("{provider_id}:{name}")
-    }) && config_snapshot.provider_account.as_deref() != Some(requested_account.as_str())
+    // Only an account of the thread's own provider can mismatch; another
+    // provider's account applies to agents on that provider (#425).
+    if let Some((provider_id, name)) = request.provider_account.as_deref().map(|selection| {
+        codex_core::config::split_account_selection(selection, &config_snapshot.model_provider_id)
+    }) && provider_id == config_snapshot.model_provider_id
     {
-        mismatch_details.push(format!(
-            "provider_account requested={requested_account} active={:?}",
-            config_snapshot.provider_account
-        ));
+        let requested_account = format!("{provider_id}:{name}");
+        if config_snapshot.provider_account.as_deref() != Some(requested_account.as_str()) {
+            mismatch_details.push(format!(
+                "provider_account requested={requested_account} active={:?}",
+                config_snapshot.provider_account
+            ));
+        }
     }
     if let Some(requested_service_tier) = request.service_tier.as_ref()
         && requested_service_tier != &config_snapshot.service_tier
@@ -681,6 +682,7 @@ impl ThreadRequestProcessor {
             supports_openai_form_elicitation,
             request_context,
             ThreadStartResponseKind::ThreadStart,
+            /*inherited_provider_account*/ None,
         )
         .await
         .map(|()| None)
@@ -702,14 +704,16 @@ impl ThreadRequestProcessor {
             agent_class,
             mut thread,
         } = params;
-        // PF-84: a worker inherits its parent's live account unless the
-        // request names one.
-        if thread.provider_account.is_none()
-            && let Ok(parent_id) = ThreadId::from_string(&parent_thread_id)
-            && let Ok(parent) = self.thread_manager.get_thread(parent_id).await
-        {
-            thread.provider_account = parent.config_snapshot().await.provider_account;
-        }
+        // PF-84: a worker inherits its parent's live account; an explicit
+        // account of the same provider beats it, one of another provider
+        // leaves it in place (#425).
+        let parent_provider_account = match ThreadId::from_string(&parent_thread_id) {
+            Ok(parent_id) => match self.thread_manager.get_thread(parent_id).await {
+                Ok(parent) => parent.config_snapshot().await.provider_account,
+                Err(_) => None,
+            },
+            Err(_) => None,
+        };
         thread.spawn_agent_parent_thread_id = Some(parent_thread_id);
         thread.spawn_agent_role = Some(agent_role);
         thread.thread_source = Some(codex_app_server_protocol::ThreadSource::Subagent);
@@ -724,6 +728,7 @@ impl ThreadRequestProcessor {
                 agent_nickname,
                 agent_class,
             },
+            parent_provider_account,
         )
         .await
         .map(|()| None)
@@ -1346,6 +1351,7 @@ impl ThreadRequestProcessor {
         supports_openai_form_elicitation: bool,
         request_context: RequestContext,
         response_kind: ThreadStartResponseKind,
+        inherited_provider_account: Option<String>,
     ) -> Result<(), JSONRPCErrorError> {
         let ThreadStartParams {
             model,
@@ -1411,6 +1417,7 @@ impl ThreadRequestProcessor {
         typesafe_overrides.ephemeral = ephemeral;
         typesafe_overrides.allow_provider_model_fallback = allow_provider_model_fallback;
         typesafe_overrides.provider_account = provider_account;
+        typesafe_overrides.inherited_provider_account = inherited_provider_account;
         let listener_task_context = ListenerTaskContext {
             thread_manager: Arc::clone(&self.thread_manager),
             thread_state_manager: self.thread_state_manager.clone(),
@@ -3684,12 +3691,11 @@ impl ThreadRequestProcessor {
                 &mut typesafe_overrides,
             )
             .await;
-        // PF-84: resume on the recorded account unless one was chosen
-        // explicitly; only when the thread resumes on the recorded provider.
-        if typesafe_overrides.provider_account.is_none()
-            && let InitialHistory::Resumed(resumed_history) = &thread_history
-        {
-            typesafe_overrides.provider_account = recorded_provider_account(
+        // PF-84: resume on the recorded account (only when the thread resumes
+        // on the recorded provider). An explicit account of the same provider
+        // beats it; one of another provider leaves it in place (#425).
+        if let InitialHistory::Resumed(resumed_history) = &thread_history {
+            typesafe_overrides.inherited_provider_account = recorded_provider_account(
                 &resumed_history.history,
                 typesafe_overrides.model_provider.as_deref(),
             );
@@ -3914,6 +3920,7 @@ impl ThreadRequestProcessor {
                     initial_turns_page,
                     turns_backwards_cursor,
                     items_backwards_cursor,
+                    provider_account: config_snapshot.provider_account.clone(),
                 };
 
                 let connection_id = request_id.connection_id;
