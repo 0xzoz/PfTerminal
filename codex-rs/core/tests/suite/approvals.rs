@@ -3986,7 +3986,12 @@ async fn declined_command_approval_is_a_recent_denial() -> Result<()> {
     let (event, expected_command) = ActionKind::RunCommand {
         command: "touch declined-437.txt",
     }
-    .prepare(&test, &server, "declined-437", SandboxPermissions::UseDefault)
+    .prepare(
+        &test,
+        &server,
+        "declined-437",
+        SandboxPermissions::UseDefault,
+    )
     .await?;
     let expected_command = expected_command.expect("a shell command");
     let _ = mount_sse_once(

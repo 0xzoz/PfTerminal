@@ -3968,10 +3968,7 @@ async fn sec_435_first_troll_starts_the_crew_at_its_parent() {
     let err = app
         .custom_spawn_member_agent_class(SpawnRole::Troll)
         .expect_err("no crew yet");
-    assert!(
-        err.to_string().contains("spawn a Nazgul first"),
-        "{err}"
-    );
+    assert!(err.to_string().contains("spawn a Nazgul first"), "{err}");
 
     let (class, started) = app
         .custom_spawn_member_agent_class_under(SpawnRole::Troll, CODEX_MAIN_PANE_ID)

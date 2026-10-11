@@ -558,12 +558,13 @@ impl ChatWidget {
         self.config.personality = settings.personality;
 
         // #437: keep the profile's denied reads while nothing changed.
-        let permission_profile = crate::app::thread_settings::permission_profile_for_thread_settings(
-            self.config.permissions.permission_profile(),
-            Some(&self.config.permissions.effective_permission_profile()),
-            self.config.permissions.active_permission_profile().as_ref(),
-            &settings,
-        );
+        let permission_profile =
+            crate::app::thread_settings::permission_profile_for_thread_settings(
+                self.config.permissions.permission_profile(),
+                Some(&self.config.permissions.effective_permission_profile()),
+                self.config.permissions.active_permission_profile().as_ref(),
+                &settings,
+            );
         let permission_snapshot = PermissionProfileSnapshot::from_session_snapshot(
             permission_profile,
             settings.active_permission_profile.take().map(Into::into),

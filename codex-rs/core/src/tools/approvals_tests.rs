@@ -64,7 +64,11 @@ fn sec_437_refused_approvals_are_described_for_the_inspector() {
             ApprovalResolutionSource::Guardian,
             Some("not answered in time"),
         ),
-        (ReviewDecision::Approved, ApprovalResolutionSource::User, None),
+        (
+            ReviewDecision::Approved,
+            ApprovalResolutionSource::User,
+            None,
+        ),
     ] {
         assert_eq!(decline_outcome(&resolution(decision, source)), expected);
     }
