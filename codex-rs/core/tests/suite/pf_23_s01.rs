@@ -831,9 +831,11 @@ async fn issue_245_additional_permissions_never_reopen_a_protected_read() -> any
             },
         )
         .await?;
-        // Approved where asked; under Moderate and Aggressive it may be
+        // Approved where asked. Where no approval can lift the rules, it is
         // refused before anyone is asked.
+        let mut asked = false;
         while let Some(approval) = next_exec_approval(&test).await {
+            asked = true;
             test.codex
                 .submit(Op::ExecApproval {
                     id: approval.effective_approval_id(),
@@ -845,13 +847,109 @@ async fn issue_245_additional_permissions_never_reopen_a_protected_read() -> any
         let requests = captured.requests();
         let output = output_text(&requests[requests.len() - 1], "call-read");
         let explained = output.contains("protected files") && output.contains("/security");
-        if output.contains(CANARY) != readable || (!readable && !explained) {
+        let refused_unasked = !readable && !asked;
+        if output.contains(CANARY) != readable
+            || (!readable && !explained)
+            || readable == refused_unasked
+        {
             wrong.push(format!(
                 "{level:?} tainted={tainted} requests_on={requests_on} literal={literal}: {output}"
             ));
         }
     }
     assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
+/// Issue #245: a permission grant that names a protected path is recorded
+/// without it under Moderate: later commands, which all carry the grant,
+/// still run, and the protected file stays unreadable.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_245_a_grant_never_carries_a_protected_path_into_later_commands() -> anyhow::Result<()>
+{
+    use codex_protocol::models::FileSystemPermissions;
+    use codex_protocol::protocol::ReviewDecision;
+    use codex_protocol::request_permissions::PermissionGrantScope;
+    use codex_protocol::request_permissions::RequestPermissionProfile;
+    use codex_protocol::request_permissions::RequestPermissionsResponse;
+    use codex_utils_absolute_path::AbsolutePathBuf;
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let home = Arc::new(TempDir::new()?);
+    let root = home.path().canonicalize()?;
+    std::fs::create_dir_all(root.join("wallet"))?;
+    let dummy = root.join("wallet/pf23-notes.txt");
+    std::fs::write(&dummy, CANARY)?;
+    let folder = root.to_string_lossy().into_owned();
+    let (head, tail) = folder.split_at(folder.len() - 2);
+    let evading = format!("cat \"$(printf '{head}%s/wallet/pf23-notes.txt' {tail})\"");
+    let grant = RequestPermissionProfile {
+        file_system: Some(FileSystemPermissions::from_read_write_roots(
+            Some(vec![AbsolutePathBuf::from_absolute_path(&dummy)?]),
+            /*write*/ None,
+        )),
+        ..Default::default()
+    };
+    let (test, captured) = start_turn_in(
+        Some(home),
+        SecurityLevel::Moderate,
+        AskForApproval::OnRequest,
+        vec![
+            call(
+                "call-grant",
+                "request_permissions",
+                json!({ "reason": "read the notes", "permissions": grant }),
+            ),
+            shell_step("call-echo", "echo still-runs"),
+            shell_step("call-read", &evading),
+            done_step(),
+        ],
+        |config| {
+            for feature in [
+                Feature::RequestPermissionsTool,
+                Feature::ExecPermissionApprovals,
+            ] {
+                config.features.enable(feature).expect("enable feature");
+            }
+        },
+    )
+    .await?;
+    match wait_for_event(&test.codex, |event| {
+        matches!(
+            event,
+            EventMsg::RequestPermissions(_) | EventMsg::TurnComplete(_)
+        )
+    })
+    .await
+    {
+        EventMsg::RequestPermissions(_) => {}
+        other => panic!("no permission request: {other:?}"),
+    }
+    test.codex
+        .submit(Op::RequestPermissionsResponse {
+            id: "call-grant".to_string(),
+            response: RequestPermissionsResponse {
+                permissions: grant,
+                scope: PermissionGrantScope::Session,
+                strict_auto_review: false,
+            },
+        })
+        .await?;
+    while let Some(approval) = next_exec_approval(&test).await {
+        test.codex
+            .submit(Op::ExecApproval {
+                id: approval.effective_approval_id(),
+                turn_id: None,
+                decision: ReviewDecision::Approved,
+            })
+            .await?;
+    }
+    let requests = captured.requests();
+    let echoed = output_text(&requests[requests.len() - 2], "call-echo");
+    assert!(echoed.contains("still-runs"), "{echoed}");
+    let read = output_text(&requests[requests.len() - 1], "call-read");
+    assert!(!read.contains(CANARY), "{read}");
     Ok(())
 }
 

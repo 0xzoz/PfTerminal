@@ -2967,6 +2967,7 @@ impl Session {
             self.record_granted_request_permissions_for_turn(
                 &response,
                 &environment.environment_id,
+                Some(&native_environment_cwd),
                 originating_turn_state.as_ref(),
             )
             .await;
@@ -3148,6 +3149,7 @@ impl Session {
         match entry {
             Some(entry) => {
                 // TODO(anp): Migrate request_permissions to support paths from foreign environments.
+                let native_cwd = entry.environment.cwd.to_abs_path().ok();
                 let response = match entry.environment.cwd.to_abs_path() {
                     Ok(native_environment_cwd) => Self::normalize_request_permissions_response(
                         entry.requested_permissions,
@@ -3170,6 +3172,7 @@ impl Session {
                 self.record_granted_request_permissions_for_turn(
                     &response,
                     &entry.environment.environment_id,
+                    native_cwd.as_ref(),
                     originating_turn_state.as_ref(),
                 )
                 .await;
@@ -3214,17 +3217,31 @@ impl Session {
         &self,
         response: &RequestPermissionsResponse,
         environment_id: &str,
+        cwd: Option<&AbsolutePathBuf>,
         originating_turn_state: Option<&Arc<Mutex<crate::state::TurnState>>>,
     ) {
         if response.permissions.is_empty() {
             return;
         }
+        let mut permissions: AdditionalPermissionProfile = response.permissions.clone().into();
+        // Issue #245: a grant never carries a protected path into later
+        // commands once the protected-path rules apply.
+        if let Some(cwd) = cwd {
+            let config = self.get_config().await;
+            match crate::security::protected_additional::recordable_grant(
+                self,
+                &config,
+                cwd,
+                permissions,
+            ) {
+                Some(kept) => permissions = kept,
+                None => return,
+            }
+        }
         match response.scope {
             PermissionGrantScope::Turn => {
                 if let Some(turn_state) = originating_turn_state {
                     let mut ts = turn_state.lock().await;
-                    let permissions: AdditionalPermissionProfile =
-                        response.permissions.clone().into();
                     ts.record_granted_permissions(environment_id, permissions);
                     if response.strict_auto_review {
                         ts.enable_strict_auto_review();
@@ -3233,10 +3250,7 @@ impl Session {
             }
             PermissionGrantScope::Session => {
                 let mut state = self.state.lock().await;
-                state.record_granted_permissions(
-                    environment_id,
-                    response.permissions.clone().into(),
-                );
+                state.record_granted_permissions(environment_id, permissions);
             }
         }
     }

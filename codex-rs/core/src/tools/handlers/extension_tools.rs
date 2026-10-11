@@ -144,18 +144,6 @@ async fn to_extension_call(invocation: &ToolInvocation) -> ExtensionToolCall {
         )
         .await
         .additional_permissions;
-        // Issue #245: a grant never reopens a protected path.
-        let workspace_roots: Vec<_> = environment
-            .workspace_roots()
-            .iter()
-            .filter_map(|root| root.to_abs_path().ok())
-            .collect();
-        let additional_permissions = crate::security::protected_additional::file_tool_grants(
-            &invocation.session,
-            &invocation.turn,
-            &workspace_roots,
-            additional_permissions,
-        );
         let file_system_sandbox_context =
             crate::security::protected_surface::protect_file_tool_context(
                 &invocation.session,

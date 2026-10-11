@@ -925,6 +925,13 @@ async fn pf_30_s03_orchestrator_rechecks_after_the_prompt() {
     }
     impl crate::tools::sandboxing::Approvable<()> for Probe {
         type ApprovalKey = String;
+
+        fn additional_permissions<'a>(
+            &self,
+            _req: &'a (),
+        ) -> Option<&'a codex_protocol::models::AdditionalPermissionProfile> {
+            None
+        }
         fn approval_keys(&self, _req: &()) -> Vec<Self::ApprovalKey> {
             vec!["probe".to_string()]
         }

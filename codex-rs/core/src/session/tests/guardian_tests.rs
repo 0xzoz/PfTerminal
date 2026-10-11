@@ -403,6 +403,7 @@ async fn strict_auto_review_turn_grant_forces_guardian_for_shell_command_policy_
                 strict_auto_review: true,
             },
             codex_exec_server::LOCAL_ENVIRONMENT_ID,
+            /*cwd*/ None,
             Some(&originating_turn_state),
         )
         .await;

@@ -1253,6 +1253,13 @@ async fn danger_full_access_tool_attempts_do_not_enforce_managed_network() -> an
     impl crate::tools::sandboxing::Approvable<()> for ProbeToolRuntime {
         type ApprovalKey = String;
 
+        fn additional_permissions<'a>(
+            &self,
+            _req: &'a (),
+        ) -> Option<&'a codex_protocol::models::AdditionalPermissionProfile> {
+            None
+        }
+
         fn approval_keys(&self, _req: &()) -> Vec<Self::ApprovalKey> {
             vec!["probe".to_string()]
         }
@@ -6745,6 +6752,7 @@ async fn record_granted_request_permissions_for_turn_uses_originating_turn() {
                 strict_auto_review: false,
             },
             codex_exec_server::LOCAL_ENVIRONMENT_ID,
+            /*cwd*/ None,
             Some(&originating_turn_state),
         )
         .await;
@@ -6792,6 +6800,7 @@ async fn request_permission_grants_are_environment_keyed() {
                 strict_auto_review: false,
             },
             "remote",
+            /*cwd*/ None,
             Some(&originating_turn_state),
         )
         .await;
@@ -6813,6 +6822,7 @@ async fn request_permission_grants_are_environment_keyed() {
                 strict_auto_review: false,
             },
             "remote",
+            /*cwd*/ None,
             /*originating_turn_state*/ None,
         )
         .await;
@@ -6845,6 +6855,7 @@ async fn enable_strict_auto_review_for_turn_uses_originating_turn() {
                 strict_auto_review: true,
             },
             codex_exec_server::LOCAL_ENVIRONMENT_ID,
+            /*cwd*/ None,
             Some(&originating_turn_state),
         )
         .await;

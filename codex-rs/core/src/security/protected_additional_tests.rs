@@ -88,7 +88,7 @@ fn issue_245_an_entry_at_or_under_a_protected_path_opens_it() {
             opened_protected_path(
                 &f.denials,
                 &additional(vec![entry(&path, access)]),
-                &f.project
+                &[f.project.as_path()]
             )
             .is_some(),
             "{} {access:?}",
@@ -106,7 +106,7 @@ fn issue_245_an_entry_at_or_under_a_protected_path_opens_it() {
         entry(&ssh_key, FileSystemAccessMode::Read),
     ]);
     assert_eq!(
-        opened_protected_path(&f.denials, &with_root, &f.project),
+        opened_protected_path(&f.denials, &with_root, &[f.project.as_path()]),
         Some(ssh_key.display().to_string())
     );
 }
@@ -126,7 +126,7 @@ fn issue_245_entries_that_open_no_protected_path_pass() {
             opened_protected_path(
                 &f.denials,
                 &additional(vec![entry(&path, access)]),
-                &f.project
+                &[f.project.as_path()]
             ),
             None,
             "{} {access:?}",
@@ -140,13 +140,47 @@ fn issue_245_entries_that_open_no_protected_path_pass() {
         file_system: None,
     };
     assert_eq!(
-        opened_protected_path(&f.denials, &network_only, &f.project),
+        opened_protected_path(&f.denials, &network_only, &[f.project.as_path()]),
         None
     );
 }
 
 #[test]
-fn issue_245_file_tool_grants_drop_only_protected_entries() {
+fn issue_245_relative_and_project_root_entries_resolve_against_every_folder() {
+    let f = fixture();
+    let project_root_key = additional(vec![FileSystemSandboxEntry::new(
+        FileSystemPath::Special {
+            value: FileSystemSpecialPath::project_roots(Some(".ssh/id_ed25519".into())),
+        },
+        FileSystemAccessMode::Read,
+    )]);
+    // Checked against the project only it opens nothing; the sandbox may
+    // resolve it against the home folder, where it opens the key.
+    assert_eq!(
+        opened_protected_path(&f.denials, &project_root_key, &[f.project.as_path()]),
+        None
+    );
+    assert_eq!(
+        opened_protected_path(
+            &f.denials,
+            &project_root_key,
+            &[f.project.as_path(), f.user_home.as_path()]
+        ),
+        Some(f.user_home.join(".ssh/id_ed25519").display().to_string())
+    );
+    // A write above a protected folder stays below its denial.
+    assert_eq!(
+        opened_protected_path(
+            &f.denials,
+            &additional(vec![entry(&f.user_home, FileSystemAccessMode::Write)]),
+            &[f.project.as_path()]
+        ),
+        None
+    );
+}
+
+#[test]
+fn issue_245_grants_drop_only_protected_entries() {
     let f = fixture();
     let notes = entry(&f.project.join("notes.txt"), FileSystemAccessMode::Read);
     let key = entry(
@@ -157,12 +191,16 @@ fn issue_245_file_tool_grants_drop_only_protected_entries() {
         without_protected_paths(
             &f.denials,
             Some(additional(vec![notes.clone(), key.clone()])),
-            &f.project
+            &[f.project.as_path()]
         ),
         Some(additional(vec![notes]))
     );
     assert_eq!(
-        without_protected_paths(&f.denials, Some(additional(vec![key.clone()])), &f.project),
+        without_protected_paths(
+            &f.denials,
+            Some(additional(vec![key.clone()])),
+            &[f.project.as_path()]
+        ),
         None
     );
     let mut with_network = additional(vec![key]);
@@ -170,7 +208,7 @@ fn issue_245_file_tool_grants_drop_only_protected_entries() {
         enabled: Some(true),
     });
     assert_eq!(
-        without_protected_paths(&f.denials, Some(with_network), &f.project),
+        without_protected_paths(&f.denials, Some(with_network), &[f.project.as_path()]),
         Some(AdditionalPermissionProfile {
             network: Some(NetworkPermissions {
                 enabled: Some(true)

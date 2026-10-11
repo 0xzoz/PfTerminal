@@ -180,6 +180,8 @@ impl ToolOrchestrator {
         // Issue #245: additional permissions never reopen a protected path.
         // Refused before anyone is asked where no approval can lift the
         // rules for this run; checked again below once the rules are known.
+        // A forbidden request keeps its own refusal; an external sandbox
+        // takes no protected-path rules and ignores additional permissions.
         if let Some(state) = tool_ctx
             .session
             .services
@@ -188,6 +190,11 @@ impl ToolOrchestrator {
             .filter(crate::security::tainted_action::PostTaintState::protected_paths_apply)
             && !(state.moderate_bound()
                 && (post_taint.is_some() || moderate_escalation_before_taint(tool, req, tool_ctx)))
+            && !matches!(requirement, ExecApprovalRequirement::Forbidden { .. })
+            && !matches!(
+                permission_profile,
+                codex_protocol::models::PermissionProfile::External { .. }
+            )
             && let Some(additional) = tool.additional_permissions(req)
         {
             #[allow(deprecated)]
@@ -198,8 +205,8 @@ impl ToolOrchestrator {
                 &materialized_workspace_roots,
                 &permissions,
             );
-            refuse_protected_additional(additional, &denials, &turn_cwd, state.level, tool_ctx)
-                .await?;
+            let cwds = resolution_folders(tool, req, &turn_cwd, &materialized_workspace_roots);
+            refuse_protected_additional(additional, &denials, &cwds, state.level, tool_ctx).await?;
         }
         if let Some(action) = &post_taint {
             if let Some(refusal) = action.refused_up_front() {
@@ -439,7 +446,9 @@ impl ToolOrchestrator {
                 if let Some(additional) = tool.additional_permissions(req) {
                     #[allow(deprecated)]
                     let turn_cwd = turn_ctx.cwd.clone();
-                    refuse_protected_additional(additional, &denials, &turn_cwd, level, tool_ctx)
+                    let cwds =
+                        resolution_folders(tool, req, &turn_cwd, &materialized_workspace_roots);
+                    refuse_protected_additional(additional, &denials, &cwds, level, tool_ctx)
                         .await?;
                 }
                 (Some(exec_server), materialized)
@@ -1089,17 +1098,41 @@ fn post_taint_read_denials(
     Some((exec_server, materialized, denials, state.level))
 }
 
+/// Issue #245: every folder the sandbox may resolve a relative or
+/// project-root additional permission against: the run's own folder, the
+/// turn's folder and the workspace roots.
+fn resolution_folders<Rq, Out, T>(
+    tool: &T,
+    req: &Rq,
+    turn_cwd: &codex_utils_absolute_path::AbsolutePathBuf,
+    workspace_roots: &[codex_utils_absolute_path::AbsolutePathBuf],
+) -> Vec<codex_utils_absolute_path::AbsolutePathBuf>
+where
+    T: ToolRuntime<Rq, Out>,
+{
+    let mut folders: Vec<_> = tool
+        .sandbox_cwd(req)
+        .and_then(|cwd| cwd.to_abs_path().ok())
+        .into_iter()
+        .collect();
+    folders.push(turn_cwd.clone());
+    folders.extend(workspace_roots.iter().cloned());
+    folders.dedup();
+    folders
+}
+
 /// Issue #245: refuses a run whose additional permissions would open a path
 /// `denials` protects, and explains why to the person and the model.
 async fn refuse_protected_additional(
     additional: &codex_protocol::models::AdditionalPermissionProfile,
     denials: &crate::security::protected_surface::ReadDenials,
-    cwd: &codex_utils_absolute_path::AbsolutePathBuf,
+    cwds: &[codex_utils_absolute_path::AbsolutePathBuf],
     level: codex_security_policy::SecurityLevel,
     tool_ctx: &ToolCtx,
 ) -> Result<(), ToolError> {
     use crate::security::protected_additional;
-    let Some(path) = protected_additional::opened_protected_path(denials, additional, cwd) else {
+    let cwds: Vec<&std::path::Path> = cwds.iter().map(AsRef::as_ref).collect();
+    let Some(path) = protected_additional::opened_protected_path(denials, additional, &cwds) else {
         return Ok(());
     };
     tracing::warn!(

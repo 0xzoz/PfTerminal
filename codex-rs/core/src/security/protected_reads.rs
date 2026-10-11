@@ -225,7 +225,9 @@ pub(crate) async fn additional_permission_refusal(
             &inputs.workspace_roots,
             &inputs.profile,
         );
-        super::protected_additional::opened_protected_path(&denials, &additional, &cwd)
+        let mut cwds = vec![cwd.as_path(), inputs.turn_cwd.as_path()];
+        cwds.extend(inputs.workspace_roots.iter().map(AbsolutePathBuf::as_path));
+        super::protected_additional::opened_protected_path(&denials, &additional, &cwds)
             .map(|path| explanation(&path))
     })
     .await

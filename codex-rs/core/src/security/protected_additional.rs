@@ -6,9 +6,10 @@
 //!
 //! Under Moderate and Aggressive, wherever the protected-path rules apply to
 //! a run, a request whose additional permissions open a protected path is
-//! refused and explained. Where Moderate lets a person's approval lift the
-//! rules for one command (issue #239), nothing changes. Permissive has no
-//! rules and is unchanged.
+//! refused and explained, and a permission grant (`request_permissions`) is
+//! recorded without such entries, so it cannot reach later commands. Where
+//! Moderate lets a person's approval lift the rules for one command (issue
+//! #239), nothing changes. Permissive has no rules and is unchanged.
 
 use std::path::Path;
 
@@ -21,11 +22,13 @@ use codex_security_policy::SecurityLevel;
 use super::protected_surface::ReadDenials;
 
 /// The first protected path (as an absolute path) that an entry of
-/// `additional` would make readable or writable. Deny entries only narrow.
+/// `additional` would make readable or writable, with relative and
+/// project-root entries resolved against each of `cwds` (the folders the
+/// sandbox may resolve them against). Deny entries only narrow.
 pub(crate) fn opened_protected_path(
     denials: &ReadDenials,
     additional: &AdditionalPermissionProfile,
-    cwd: &Path,
+    cwds: &[&Path],
 ) -> Option<String> {
     let entries = &additional.file_system.as_ref()?.entries;
     if entries.is_empty() {
@@ -37,19 +40,20 @@ pub(crate) fn opened_protected_path(
         .filter(|entry| entry.access != FileSystemAccessMode::Deny)
         // One entry at a time: an entry for `/` must not hide a narrower one.
         .flat_map(|entry| {
-            FileSystemSandboxPolicy::restricted(vec![entry.clone()])
-                .get_readable_roots_with_cwd(cwd)
+            let alone = FileSystemSandboxPolicy::restricted(vec![entry.clone()]);
+            cwds.iter()
+                .flat_map(move |cwd| alone.get_readable_roots_with_cwd(cwd))
         })
         .find(|root| matcher.is_read_denied(root.as_path()))
         .map(|root| root.display().to_string())
 }
 
-/// `additional` without the entries that would open a protected path, for
-/// file tools that carry a session or turn grant into every call.
+/// `additional` without the entries that would open a protected path (for a
+/// grant, which every later command carries).
 pub(crate) fn without_protected_paths(
     denials: &ReadDenials,
     additional: Option<AdditionalPermissionProfile>,
-    cwd: &Path,
+    cwds: &[&Path],
 ) -> Option<AdditionalPermissionProfile> {
     let mut additional = additional?;
     let Some(file_system) = additional.file_system.take() else {
@@ -69,7 +73,7 @@ pub(crate) fn without_protected_paths(
                     glob_scan_max_depth: None,
                 }),
             };
-            opened_protected_path(denials, &alone, cwd).is_none()
+            opened_protected_path(denials, &alone, cwds).is_none()
         })
         .collect();
     if !entries.is_empty() {
@@ -81,34 +85,39 @@ pub(crate) fn without_protected_paths(
     (!additional.is_empty()).then_some(additional)
 }
 
-/// File tools carry the session's and turn's granted permissions into every
-/// call: once the protected-path rules apply (Moderate, Aggressive, or after
-/// untrusted content), entries that would open a protected path are dropped.
-/// No approval lifts the rules for file tools.
-pub(crate) fn file_tool_grants(
+/// A `request_permissions` grant as it is recorded for the turn or session:
+/// once the protected-path rules apply (Moderate, Aggressive), without the
+/// entries that would open a protected path. Every later command and file
+/// tool carries the recorded grant, and such an entry would only get them
+/// refused. `cwd` is the folder the grant was made for.
+pub(crate) fn recordable_grant(
     session: &crate::session::session::Session,
-    turn: &crate::session::turn_context::TurnContext,
-    workspace_roots: &[codex_utils_absolute_path::AbsolutePathBuf],
-    additional: Option<AdditionalPermissionProfile>,
+    config: &crate::config::Config,
+    cwd: &codex_utils_absolute_path::AbsolutePathBuf,
+    grant: AdditionalPermissionProfile,
 ) -> Option<AdditionalPermissionProfile> {
-    additional.as_ref()?;
     if session
         .services
         .model_client()
         .post_taint_state()
         .is_none_or(|state| !state.protected_paths_apply())
     {
-        return additional;
+        return Some(grant);
     }
-    #[allow(deprecated)]
-    let turn_cwd = turn.cwd.clone();
     let denials = ReadDenials::for_turn(
-        turn.config.codex_home.as_path(),
-        &turn_cwd,
-        workspace_roots,
-        turn.config.permissions.permission_profile(),
+        config.codex_home.as_path(),
+        cwd,
+        &[],
+        config.permissions.permission_profile(),
     );
-    without_protected_paths(&denials, additional, turn_cwd.as_path())
+    let kept = without_protected_paths(&denials, Some(grant.clone()), &[cwd.as_path()]);
+    if kept.as_ref() != Some(&grant) {
+        tracing::warn!(
+            target: "codex_core::security::tainted_action",
+            "a permission grant would open a protected path; recorded without it"
+        );
+    }
+    kept
 }
 
 /// The refusal for an additional permission that would open `path`, in the
@@ -116,14 +125,14 @@ pub(crate) fn file_tool_grants(
 pub(crate) fn refusal(level: SecurityLevel, path: &str) -> String {
     match level {
         SecurityLevel::Aggressive => super::protected_reads::explanation(path),
+        // Only Moderate reaches here: Permissive has no protected paths.
         _ => {
             let path = super::protected_reads::shown_path(path);
             format!(
                 "Security level Moderate blocked access to `{path}`: an additional permission \
                  can never open protected files (credential files such as .env, SSH, cloud and \
-                 CLI tokens, and Corbanu's sign-in, vault, config and history). To allow it for \
-                 one command, a person can approve that command when it asks to run outside the \
-                 sandbox, or switch to Permissive in /security (it applies after a restart)."
+                 CLI tokens, and Corbanu's sign-in, vault, config and history). To allow it, a \
+                 person can switch to Permissive in /security (it applies after a restart)."
             )
         }
     }
