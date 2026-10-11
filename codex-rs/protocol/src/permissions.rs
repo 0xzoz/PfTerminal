@@ -37,6 +37,36 @@ pub fn is_protected_metadata_name(name: &OsStr) -> bool {
         .any(|metadata_name| name == OsStr::new(metadata_name))
 }
 
+/// #442 (Travis, 2026-10-11): credential file names a protected level denies
+/// by name, so a file created after the session started is covered too. Each
+/// pattern is one path component in the filesystem policy's glob syntax.
+pub const CREDENTIAL_FILE_NAME_PATTERNS: &[&str] = &[".env", ".env.*", ".envrc"];
+
+/// Whether `name` matches one of [`CREDENTIAL_FILE_NAME_PATTERNS`].
+pub fn is_credential_file_name(name: &OsStr) -> bool {
+    let name = name.as_encoded_bytes();
+    name == b".env" || name == b".envrc" || name.starts_with(b".env.")
+}
+
+/// The deny globs that cover every credential file name below `root`, now
+/// and created later.
+pub fn credential_file_globs(root: &str) -> Vec<String> {
+    let root = root.trim_end_matches('/');
+    CREDENTIAL_FILE_NAME_PATTERNS
+        .iter()
+        .map(|name| format!("{root}/**/{name}"))
+        .collect()
+}
+
+/// The folder a deny glob from [`credential_file_globs`] covers, so a sandbox
+/// that can only hide existing files can also watch for new ones.
+pub fn credential_file_glob_root(pattern: &str) -> Option<PathBuf> {
+    CREDENTIAL_FILE_NAME_PATTERNS.iter().find_map(|name| {
+        let root = pattern.strip_suffix(name)?.strip_suffix("/**/")?;
+        Some(PathBuf::from(if root.is_empty() { "/" } else { root }))
+    })
+}
+
 /// Returns the protected workspace metadata name when an agent write to `path`
 /// should be blocked before execution.
 pub fn forbidden_agent_metadata_write(
@@ -3518,5 +3548,65 @@ mod tests {
 
         assert!(is_read_denied(&bracket_file, &policy, temp.path()));
         assert!(!is_read_denied(&other, &policy, temp.path()));
+    }
+
+    /// #442: the credential name patterns, the globs built from them, and the
+    /// folder each glob covers.
+    #[test]
+    fn credential_file_names_globs_and_roots() {
+        for name in [".env", ".env.local", ".env.", ".envrc"] {
+            assert!(is_credential_file_name(OsStr::new(name)), "{name}");
+        }
+        for name in [".envrcx", "x.env", ".environment", "env", ".en"] {
+            assert!(!is_credential_file_name(OsStr::new(name)), "{name}");
+        }
+        assert_eq!(
+            credential_file_globs("/work/"),
+            vec!["/work/**/.env", "/work/**/.env.*", "/work/**/.envrc"]
+        );
+        assert_eq!(
+            credential_file_globs("/"),
+            vec!["/**/.env", "/**/.env.*", "/**/.envrc"]
+        );
+        for root in ["/work", "/"] {
+            for glob in credential_file_globs(root) {
+                assert_eq!(
+                    credential_file_glob_root(&glob),
+                    Some(PathBuf::from(root)),
+                    "{glob}"
+                );
+            }
+        }
+        for other in ["/work/**/*.pem", "/work/.env", "/work/*/.env"] {
+            assert_eq!(credential_file_glob_root(other), None, "{other}");
+        }
+
+        // The policy's own matcher denies every credential name below the
+        // root, at any depth, and nothing else.
+        let temp = TempDir::new().expect("tempdir");
+        let root = temp.path().to_string_lossy().into_owned();
+        let policy = FileSystemSandboxPolicy::restricted(
+            credential_file_globs(&root)
+                .into_iter()
+                .map(|pattern| {
+                    FileSystemSandboxEntry::new(
+                        FileSystemPath::GlobPattern { pattern },
+                        FileSystemAccessMode::Deny,
+                    )
+                })
+                .collect(),
+        );
+        for denied in [".env", "app/.env.local", "a/b/c/.envrc"] {
+            assert!(
+                is_read_denied(&temp.path().join(denied), &policy, temp.path()),
+                "{denied}"
+            );
+        }
+        for allowed in ["env", "app/x.env", ".environment/x"] {
+            assert!(
+                !is_read_denied(&temp.path().join(allowed), &policy, temp.path()),
+                "{allowed}"
+            );
+        }
     }
 }

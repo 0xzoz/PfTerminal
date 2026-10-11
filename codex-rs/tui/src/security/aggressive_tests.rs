@@ -5,6 +5,7 @@ use codex_protocol::config_types::ShellEnvironmentPolicyFilter;
 use pretty_assertions::assert_eq;
 
 use codex_protocol::config_types::SandboxMode;
+use codex_protocol::permissions::credential_file_globs;
 
 use super::*;
 use crate::legacy_core::config::ConfigBuilder;
@@ -731,4 +732,165 @@ async fn nested_child_on_another_home_protects_both_homes() {
             .iter()
             .any(|failure| failure.starts_with("Child agents:"))
     );
+}
+
+/// The profile entry that denies credential names below the workspace.
+fn without_credential_names(cli: &mut [(String, toml::Value)]) {
+    for (key, value) in cli.iter_mut() {
+        if key == &format!("permissions.{PROFILE_ID}") {
+            let filesystem = value
+                .get_mut("filesystem")
+                .and_then(toml::Value::as_table_mut)
+                .unwrap();
+            filesystem.remove(":workspace_roots").unwrap();
+            filesystem.retain(|key, _| !key.starts_with("/**/"));
+        }
+    }
+}
+
+/// #442 (Travis, 2026-10-11): the launch check fails when credential files
+/// created later would not be denied by name.
+#[tokio::test]
+async fn issue_442_launch_check_requires_credential_names() {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let config = load(home.path(), cwd.path(), "").await;
+    let origin = config.codex_home.to_path_buf();
+    assert_eq!(verify(&config, true, &origin), Vec::<String>::new());
+    let globs = config
+        .permissions
+        .file_system_sandbox_policy()
+        .get_unreadable_globs_with_cwd(config.cwd.as_path());
+    for glob in credential_file_globs(&config.cwd.to_string_lossy()) {
+        assert!(globs.contains(&glob), "{glob} not in {globs:?}");
+    }
+
+    let mut cli = base_overrides(home.path(), home.path());
+    without_credential_names(&mut cli);
+    let config = load_with(home.path(), cwd.path(), "", cli).await;
+    assert_eq!(
+        verify(&config, true, &origin),
+        vec![
+            "Sandbox: credential files created later (.env, .env.*, .envrc) would be readable to agent commands"
+                .to_string()
+        ]
+    );
+}
+
+/// Runs `script` in `cwd` under the Seatbelt arguments for `config`.
+#[cfg(target_os = "macos")]
+fn seatbelt_run(config: &Config, script: &str) -> String {
+    use codex_protocol::permissions::NetworkSandboxPolicy;
+    use codex_sandboxing::seatbelt::CreateSeatbeltCommandArgsParams;
+    use codex_sandboxing::seatbelt::MACOS_PATH_TO_SEATBELT_EXECUTABLE;
+    use codex_sandboxing::seatbelt::create_seatbelt_command_args;
+
+    let policy = config.permissions.file_system_sandbox_policy();
+    let args = create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
+        command: vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
+        file_system_sandbox_policy: &policy,
+        network_sandbox_policy: NetworkSandboxPolicy::Restricted,
+        sandbox_policy_cwd: config.cwd.as_path(),
+        enforce_managed_network: false,
+        managed_network: None,
+        environment_id: None,
+        network: None,
+        extra_allow_unix_sockets: &[],
+    })
+    .unwrap();
+    let output = std::process::Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
+        .args(args)
+        .current_dir(config.cwd.as_path())
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// #442 (Travis, 2026-10-11), real `sandbox-exec`: under the Aggressive
+/// profile, `.env` files created after launch, by one agent command or by
+/// the person, cannot be read by the next agent command, in the workspace or
+/// elsewhere; the `.env` the preflight found keeps its explicit denial, and
+/// other files stay readable. Under Permissive nothing changes.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn issue_442_credential_files_created_later_stay_unreadable_under_seatbelt() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let cwd = root.join("work");
+    let elsewhere = root.join("other-project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::write(cwd.join(".env"), "API_KEY=dummy-found-at-start").unwrap();
+    std::fs::write(cwd.join("notes.txt"), "plain-notes").unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let mut cli = base_overrides(home.path(), home.path());
+    deny_reads(&mut cli, &[cwd.join(".env")]);
+    let config = load_with(home.path(), &cwd, "", cli).await;
+    assert_eq!(
+        verify(&config, true, &config.codex_home.to_path_buf()),
+        Vec::<String>::new()
+    );
+
+    // One agent command creates credential files mid-session.
+    let made = seatbelt_run(
+        &config,
+        "mkdir -p app && printf API_KEY=dummy-made-by-agent > .env.local && \
+         printf API_KEY=dummy-made-by-agent > app/.env && \
+         printf 'export API_KEY=dummy-made-by-agent' > .envrc; echo made=$?",
+    );
+    assert!(made.contains("made=0"), "{made}");
+    // The person creates more, here and in another project.
+    std::fs::write(cwd.join(".env.production"), "API_KEY=dummy-made-by-person").unwrap();
+    std::fs::write(elsewhere.join(".env"), "API_KEY=dummy-elsewhere").unwrap();
+
+    // The next agent command can read none of them, in any spelling.
+    let script = format!(
+        "for f in .env .env.local app/.env .envrc .env.production '{}/.env' ./app/../.env.local; do \
+         cat \"$f\"; echo \"$f=$?\"; done; cp .env.local copy; echo copy=$?; \
+         ln .env.local hard; echo hard=$?; ln -s .env.local soft; cat soft; echo soft=$?; \
+         mv .env.local moved; echo moved=$?; cat notes.txt; echo notes=$?",
+        elsewhere.display()
+    );
+    let read = seatbelt_run(&config, &script);
+    assert!(!read.contains("dummy-"), "{read}");
+    for line in [
+        ".env=1",
+        ".env.local=1",
+        "app/.env=1",
+        ".envrc=1",
+        ".env.production=1",
+        "other-project/.env=1",
+        "copy=1",
+        "soft=1",
+        "moved=1",
+        "plain-notes",
+        "notes=0",
+    ] {
+        assert!(read.contains(line), "{line} not in {read}");
+    }
+    assert!(!read.contains("hard=0"), "{read}");
+
+    // Permissive is unchanged: no Aggressive overrides, nothing denied by name.
+    let permissive = {
+        std::fs::write(home.path().join("config.toml"), "").unwrap();
+        ConfigBuilder::default()
+            .codex_home(home.path().to_path_buf())
+            .harness_overrides(ConfigOverrides {
+                cwd: Some(cwd.clone()),
+                ..Default::default()
+            })
+            .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
+            .build()
+            .await
+            .unwrap()
+    };
+    assert!(
+        permissive
+            .permissions
+            .file_system_sandbox_policy()
+            .get_unreadable_globs_with_cwd(&cwd)
+            .is_empty()
+    );
+    let read = seatbelt_run(&permissive, "cat .env.production; echo read=$?");
+    assert!(read.contains("dummy-made-by-person"), "{read}");
 }

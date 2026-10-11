@@ -13,10 +13,11 @@ at launch.
   Aggressive: write only in the current folder (where the Corbanu home and the
     nested-launch registry stay read-only): no extra writable folders, no /tmp
     or $TMPDIR; approved commands stay inside it too; escalation and permission-
-    request tools are off; reading credential files (.env files found at start,
-    SSH, cloud and CLI tokens) or Corbanu's sign-in, vault, config and history
-    is denied to agent commands and is never granted, not even once (switch to
-    Permissive in /security to allow it)
+    request tools are off; the project's .codex and .agents stay read-only, even
+    with Grant once; reading credential files (.env, .env.* and .envrc files,
+    also ones created later; SSH, cloud and CLI tokens) or Corbanu's sign-in,
+    vault, config and history is denied to agent commands and is never granted,
+    not even once (switch to Permissive in /security to allow it)
 • Approvals now: on-request (reviewer: you)
   Aggressive: untrusted: you approve every command that is not known read-only
     (reviewer: you, never auto-review)

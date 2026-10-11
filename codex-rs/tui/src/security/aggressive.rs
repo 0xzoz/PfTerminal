@@ -19,6 +19,9 @@ use codex_execpolicy::Decision;
 use codex_features::Feature;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::WebSearchMode;
+use codex_protocol::permissions::CREDENTIAL_FILE_NAME_PATTERNS;
+use codex_protocol::permissions::ReadDenyMatcher;
+use codex_protocol::permissions::credential_file_globs;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::shell_environment::create_env_from_vars;
 
@@ -39,7 +42,7 @@ const SECRET_ENV_PATTERNS: [&str; 4] = ["*VAULT*", "*PASSWORD*", "*PASSPHRASE*",
 pub(crate) const ROWS: [(&str, &str); 6] = [
     (
         "Sandbox",
-        "write only in the current folder (where the Corbanu home and the nested-launch registry stay read-only): no extra writable folders, no /tmp or $TMPDIR; approved commands stay inside it too; escalation and permission-request tools are off; reading credential files (.env files found at start, SSH, cloud and CLI tokens) or Corbanu's sign-in, vault, config and history is denied to agent commands and is never granted, not even once (switch to Permissive in /security to allow it)",
+        "write only in the current folder (where the Corbanu home and the nested-launch registry stay read-only): no extra writable folders, no /tmp or $TMPDIR; approved commands stay inside it too; escalation and permission-request tools are off; the project's .codex and .agents stay read-only, even with Grant once; reading credential files (.env, .env.* and .envrc files, also ones created later; SSH, cloud and CLI tokens) or Corbanu's sign-in, vault, config and history is denied to agent commands and is never granted, not even once (switch to Permissive in /security to allow it)",
     ),
     (
         "Approvals",
@@ -160,6 +163,20 @@ pub(crate) fn base_overrides_with_registry(
         // contains it (the home folder) cannot delete its entries.
         if let Some(registry) = registry.and_then(registry_profile_key) {
             filesystem.insert(registry.to_string(), string("read"));
+        }
+        // #442 (Travis, 2026-10-11): credential files by name, so one created
+        // after launch is denied too, not only those the preflight found.
+        let workspace = CREDENTIAL_FILE_NAME_PATTERNS
+            .iter()
+            .map(|name| (format!("**/{name}"), string("deny")))
+            .collect::<toml::Table>();
+        filesystem.insert(":workspace_roots".to_string(), workspace.into());
+        // Seatbelt matches the names everywhere by regex; the other sandboxes
+        // can only expand them below the workspace (see `verify_sandbox`).
+        if cfg!(target_os = "macos") {
+            for glob in credential_file_globs("/") {
+                filesystem.insert(glob, string("deny"));
+            }
         }
     }
     vec![
@@ -415,6 +432,33 @@ fn verify_sandbox(config: &Config, failures: &mut Vec<String>) {
         if !outside.starts_with(cwd) && file_system.can_write_path_with_cwd(&outside, cwd) {
             failures.push(format!("Sandbox: {} is writable", outside.display()));
         }
+    }
+    verify_credential_names(&file_system, cwd, failures);
+}
+
+/// #442: a credential file created after launch is denied by its name: below
+/// the current folder on every system (the exact globs the Linux sandbox
+/// watches for), and anywhere under Seatbelt.
+fn verify_credential_names(
+    file_system: &codex_protocol::permissions::FileSystemSandboxPolicy,
+    cwd: &Path,
+    failures: &mut Vec<String>,
+) {
+    let globs = file_system.get_unreadable_globs_with_cwd(cwd);
+    let mut expected = credential_file_globs(&cwd.to_string_lossy());
+    if cfg!(target_os = "macos") {
+        expected.extend(credential_file_globs("/"));
+    }
+    let matcher = ReadDenyMatcher::try_new(file_system, cwd).ok().flatten();
+    let probe = |path: &Path| matcher.as_ref().is_some_and(|m| m.is_read_denied(path));
+    let probes_denied = [".env", "app/.env.local", ".envrc"]
+        .iter()
+        .all(|name| probe(&cwd.join("corbanu-new").join(name)));
+    if !probes_denied || expected.iter().any(|glob| !globs.contains(glob)) {
+        failures.push(format!(
+            "Sandbox: credential files created later ({}) would be readable to agent commands",
+            CREDENTIAL_FILE_NAME_PATTERNS.join(", ")
+        ));
     }
 }
 

@@ -38,10 +38,12 @@ Runtime controls
 Grants
   Held: none. Grants are never saved: a restart, level change, revocation or the kill switch ends
       them [observed: Core policy]
-  [on] Protected reads: never granted under Aggressive, not even once: credential files (.env files
-      found at start, SSH, cloud and CLI tokens) and Corbanu's sign-in, vault, config and history
-      stay unreadable to agent commands; switch to Permissive in /security to allow them [resolved:
-      level]
+  [on] Protected reads: never granted under Aggressive, not even once: credential files
+      (.env, .env.* and .envrc files, also ones created later; SSH, cloud and CLI tokens) and
+      Corbanu's sign-in, vault, config and history stay unreadable to agent commands; switch to
+      Permissive in /security to allow them [resolved: level]
+  [on] Agent settings: always read-only under Aggressive, even with Grant once: the project's .codex
+      and .agents (they set agent policy and can run code later) [resolved: level]
 
 Agents
   [on] main session: Aggressive [observed: Core policy]

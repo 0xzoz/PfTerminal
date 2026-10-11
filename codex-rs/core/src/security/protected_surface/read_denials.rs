@@ -20,6 +20,7 @@
 //! any taint. Permissive and flag-off sessions are unchanged.
 
 use crate::security::tainted_action::USER_PERSISTENCE;
+use crate::security::tainted_action::WORKSPACE_AGENT_SETTINGS;
 use crate::security::tainted_action::WORKSPACE_PERSISTENCE;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::FileSystemAccessMode;
@@ -114,9 +115,10 @@ pub(crate) struct ReadDenials {
     globs: Vec<String>,
     /// Readable but never writable (PF-23-S02), even before they exist.
     read_only: Vec<AbsolutePathBuf>,
-    /// The same for the Corbanu home's runtime entries (`tmp` holds the
-    /// sandbox launchers): never writable, not even with a grant (#442).
-    runtime_read_only: Vec<AbsolutePathBuf>,
+    /// The same, never lifted by a grant (#442): the Corbanu home's runtime
+    /// entries (`tmp` holds the sandbox launchers) and the project's
+    /// `.codex` and `.agents`.
+    never_lifted: Vec<AbsolutePathBuf>,
     /// Where the profile's relative entries resolve (the turn's folder).
     cwd: Option<AbsolutePathBuf>,
     /// Denials dropped because they hold the command's folder or a writable
@@ -143,10 +145,19 @@ impl ReadDenials {
         for entry in CORBANU_READ_ONLY {
             denials.push_home_read_only(codex_home.join(entry), keep);
         }
-        denials.runtime_read_only = std::mem::take(&mut denials.read_only);
+        // #442 (Travis, 2026-10-11): the project's agent settings stay
+        // read-only even with a grant.
+        for root in keep {
+            for entry in WORKSPACE_AGENT_SETTINGS {
+                denials.push_read_only(root.join(entry), keep);
+            }
+        }
+        denials.never_lifted = std::mem::take(&mut denials.read_only);
         for root in keep {
             for entry in WORKSPACE_PERSISTENCE {
-                denials.push_read_only(root.join(entry), keep);
+                if !WORKSPACE_AGENT_SETTINGS.contains(entry) {
+                    denials.push_read_only(root.join(entry), keep);
+                }
             }
             // The repository the root is in, found the way git finds it; a
             // worktree or submodule keeps hooks and config in the git folder
@@ -284,14 +295,15 @@ impl ReadDenials {
 
     /// #442: an Aggressive grant lifts the write protections of files that
     /// run later (start-up files, git hooks and config) only. Every read
-    /// denial stays, and so do the Corbanu home's read-only entries.
+    /// denial stays, and so do the Corbanu home's read-only entries and the
+    /// project's `.codex` and `.agents` (Travis, 2026-10-11).
     pub(crate) fn lift_write_rules(&mut self) {
         self.read_only.clear();
     }
 
     /// Every path made read-only.
     pub(crate) fn read_only_paths(&self) -> impl Iterator<Item = &AbsolutePathBuf> {
-        self.runtime_read_only.iter().chain(&self.read_only)
+        self.never_lifted.iter().chain(&self.read_only)
     }
 
     /// Every denied path, existing first.
@@ -331,7 +343,7 @@ impl ReadDenials {
                 )
             }))
             .collect();
-        if entries.is_empty() && self.read_only.is_empty() && self.runtime_read_only.is_empty() {
+        if entries.is_empty() && self.read_only.is_empty() && self.never_lifted.is_empty() {
             return Some(profile.clone());
         }
         // Turns an unrestricted policy into full write access plus the

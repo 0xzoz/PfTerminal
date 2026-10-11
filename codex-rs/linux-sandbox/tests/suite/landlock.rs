@@ -1419,3 +1419,112 @@ async fn full_write_profile_with_denial_keeps_dev_null_usable() {
         "ok\n"
     );
 }
+
+/// Aggressive's profile on Linux: write in `work`, network off, and every
+/// credential file name below `work` denied (`tui::security::aggressive`).
+fn credential_name_profile(work: &std::path::Path) -> PermissionProfile {
+    let root = AbsolutePathBuf::try_from(work).unwrap();
+    let (mut file_system, network) = PermissionProfile::workspace_write_with(
+        std::slice::from_ref(&root),
+        NetworkSandboxPolicy::Restricted,
+        /*exclude_tmpdir_env_var*/ true,
+        /*exclude_slash_tmp*/ true,
+    )
+    .to_runtime_permissions();
+    file_system.entries.extend(
+        codex_protocol::permissions::credential_file_globs(&work.to_string_lossy())
+            .into_iter()
+            .map(|pattern| {
+                FileSystemSandboxEntry::new(
+                    FileSystemPath::GlobPattern { pattern },
+                    FileSystemAccessMode::Deny,
+                )
+            }),
+    );
+    PermissionProfile::from_runtime_permissions(&file_system, network)
+}
+
+async fn run_in(work: &std::path::Path, script: &str) -> codex_protocol::exec_output::ExecToolCallOutput {
+    let result = run_cmd_result_with_permission_profile_for_cwd(
+        &["bash", "-c", script],
+        AbsolutePathBuf::try_from(work).unwrap(),
+        credential_name_profile(work),
+        create_env_from_core_vars(),
+        LONG_TIMEOUT_MS,
+        /*use_legacy_landlock*/ false,
+    )
+    .await;
+    match result {
+        Ok(output) => output,
+        Err(err) => match err.details() {
+            CodexErrorDetails::Sandbox(SandboxErr::Denied { output, .. }) => {
+                output.as_ref().clone()
+            }
+            details => panic!("{script}: {details:?}"),
+        },
+    }
+}
+
+/// #442 (Travis, 2026-10-11), real bubblewrap: a `.env` created mid-session
+/// stays unreadable. One a sandboxed command creates stops that command, and
+/// the next command cannot read it; nor one the person creates between
+/// commands, nor what a `.env` link points to; one created while a command
+/// runs stops that command before it reads it. Other files stay readable.
+#[tokio::test]
+async fn issue_442_env_files_created_mid_session_stay_unreadable() {
+    if should_skip_bwrap_tests().await {
+        eprintln!("skipping bwrap test: bwrap sandbox prerequisites are unavailable");
+        return;
+    }
+    let tmpdir = tempfile::tempdir().expect("tempdir");
+    let work = tmpdir.path().canonicalize().unwrap();
+    std::fs::create_dir_all(work.join("app")).unwrap();
+    std::fs::write(work.join("notes.txt"), "plain-notes").unwrap();
+
+    // A sandboxed command creates `.env.local`: it is stopped.
+    let made = run_in(
+        &work,
+        "printf API_KEY=dummy-442-agent > .env.local; sleep 2; echo made=$?",
+    )
+    .await;
+    assert_ne!(made.exit_code, 0, "{made:?}");
+    assert!(!made.stdout.text.contains("made="), "{made:?}");
+    assert!(
+        made.stderr.text.contains("the sandbox stopped this command"),
+        "{made:?}"
+    );
+
+    // The person creates more between commands, one behind a link.
+    std::fs::write(work.join("app/.env"), "API_KEY=dummy-442-person").unwrap();
+    std::fs::write(work.join("shared.secret"), "API_KEY=dummy-442-linked").unwrap();
+    std::os::unix::fs::symlink("shared.secret", work.join(".envrc")).unwrap();
+
+    // The next command reads none of them.
+    let read = run_in(
+        &work,
+        "for f in .env.local app/.env .envrc; do cat \"$f\"; echo \"$f=$?\"; done; \
+         cp app/.env copy; echo copy=$?; cat notes.txt; echo notes=$?",
+    )
+    .await;
+    let text = format!("{}{}", read.stdout.text, read.stderr.text);
+    assert!(!text.contains("dummy-442"), "{text}");
+    for line in [".env.local=1", "app/.env=1", ".envrc=1", "copy=1", "plain-notes", "notes=0"] {
+        assert!(read.stdout.text.contains(line), "{line} not in {text}");
+    }
+
+    // A long-running command: a `.env` created while it runs stops it
+    // before it gets to read it.
+    let running = {
+        let work = work.clone();
+        tokio::spawn(async move {
+            run_in(&work, "sleep 3; cat .env.later; echo later=$?").await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+    std::fs::write(work.join(".env.later"), "API_KEY=dummy-442-later").unwrap();
+    let later = running.await.unwrap();
+    let text = format!("{}{}", later.stdout.text, later.stderr.text);
+    assert!(!text.contains("dummy-442"), "{text}");
+    assert!(!text.contains("later="), "{text}");
+    assert!(text.contains("the sandbox stopped this command"), "{text}");
+}

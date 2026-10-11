@@ -288,3 +288,41 @@ async fn pf_25_s01_declined_approval_drops_the_confirmed_grant() -> anyhow::Resu
     assert!(!output.contains(CANARY), "{output}");
     Ok(())
 }
+
+/// #442 (Travis, 2026-10-11): the project's `.codex` and `.agents` stay
+/// read-only under Aggressive even with "Grant once"; the grant still lifts
+/// the other write protections (a git hook here) for the same run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_442_a_confirmed_grant_never_lifts_codex_or_agents() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let home = Arc::new(TempDir::new()?);
+    let write = "printf pf25 > .git/hooks/pf25-hook; echo hook=$?; \
+                 printf pf25 > .codex/pf25.toml; echo codex=$?; \
+                 printf pf25 > .agents/pf25.md; echo agents=$?";
+    let (test, captured) = start(home, vec![shell_step("call-granted", write), done_step()]).await?;
+    let thread = test.session_configured.thread_id;
+    let cwd = test.cwd_path();
+    for folder in [".git/hooks", ".codex", ".agents"] {
+        std::fs::create_dir_all(cwd.join(folder))?;
+    }
+
+    let approval = next_approval(&test).await.expect("the write asks first");
+    let offer = security_grant::offer(thread, &approval.effective_approval_id()).expect("offer");
+    security_grant::confirm(&offer, GrantUses::Once)?;
+    approve(&test, &approval).await?;
+    assert!(next_approval(&test).await.is_none());
+
+    let requests = captured.requests();
+    let output = output_text(&requests[requests.len() - 1], "call-granted");
+    assert!(output.contains("hook=0"), "{output}");
+    assert!(output.contains("codex=1"), "{output}");
+    assert!(output.contains("agents=1"), "{output}");
+    assert_eq!(
+        std::fs::read_to_string(cwd.join(".git/hooks/pf25-hook"))?,
+        "pf25"
+    );
+    assert!(!cwd.join(".codex/pf25.toml").exists());
+    assert!(!cwd.join(".agents/pf25.md").exists());
+    Ok(())
+}
