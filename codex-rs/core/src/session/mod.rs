@@ -1310,6 +1310,15 @@ impl Session {
         state.token_info()
     }
 
+    /// PF-84: this thread's provider-reported usage per named account, for
+    /// replay to a client that attaches after resume.
+    pub(crate) async fn account_token_usage(
+        &self,
+    ) -> Option<Vec<codex_protocol::protocol::AccountTokenUsage>> {
+        let state = self.state.lock().await;
+        state.account_token_usage()
+    }
+
     pub(crate) async fn get_estimated_token_count(
         &self,
         turn_context: &TurnContext,
@@ -1442,6 +1451,12 @@ impl Session {
                 if let Some(info) = Self::last_token_info_from_rollout(&rollout_items) {
                     let mut state = self.state.lock().await;
                     state.set_token_info(Some(info));
+                }
+                // PF-84: a resumed thread keeps its usage per account. A fork does
+                // not: its parent's requests stay the parent's.
+                if let Some(usage) = Self::last_account_token_usage_from_rollout(&rollout_items) {
+                    let mut state = self.state.lock().await;
+                    state.set_account_token_usage(usage);
                 }
                 Self::trace_session_timing(
                     "record_initial_history_resumed_after_token_seed",
@@ -1610,6 +1625,15 @@ impl Session {
     fn last_token_info_from_rollout(rollout_items: &[RolloutItem]) -> Option<TokenUsageInfo> {
         rollout_items.iter().rev().find_map(|item| match item {
             RolloutItem::EventMsg(EventMsg::TokenCount(ev)) => ev.info.clone(),
+            _ => None,
+        })
+    }
+
+    fn last_account_token_usage_from_rollout(
+        rollout_items: &[RolloutItem],
+    ) -> Option<Vec<codex_protocol::protocol::AccountTokenUsage>> {
+        rollout_items.iter().rev().find_map(|item| match item {
+            RolloutItem::EventMsg(EventMsg::TokenCount(ev)) => ev.account_usage.clone(),
             _ => None,
         })
     }
@@ -4491,6 +4515,27 @@ impl Session {
                 let mut state = self.state.lock().await;
                 state
                     .update_token_info_from_usage(token_usage, turn_context.model_context_window());
+                // PF-84: attribute the usage to the account that served it, as the
+                // accounting ledger does (provider id and account name only).
+                if turn_context
+                    .config
+                    .features
+                    .enabled(codex_features::Feature::NamedAccounts)
+                {
+                    let account = turn_context
+                        .provider
+                        .info()
+                        .account
+                        .as_ref()
+                        .map_or(codex_vault::DEFAULT_PROVIDER_ACCOUNT, |account| {
+                            account.name.as_str()
+                        });
+                    state.record_account_token_usage(
+                        &turn_context.config.model_provider_id,
+                        account,
+                        token_usage,
+                    );
+                }
                 if matches!(
                     turn_context.config.model_auto_compact_token_limit_scope,
                     AutoCompactTokenLimitScope::BodyAfterPrefix
@@ -4591,11 +4636,16 @@ impl Session {
     }
 
     pub(crate) async fn send_token_count_event(&self, turn_context: &TurnContext) {
-        let (info, rate_limits) = {
+        let (info, rate_limits, account_usage) = {
             let state = self.state.lock().await;
-            state.token_info_and_rate_limits()
+            let (info, rate_limits) = state.token_info_and_rate_limits();
+            (info, rate_limits, state.account_token_usage())
         };
-        let event = EventMsg::TokenCount(TokenCountEvent { info, rate_limits });
+        let event = EventMsg::TokenCount(TokenCountEvent {
+            info,
+            rate_limits,
+            account_usage,
+        });
         self.send_event(turn_context, event).await;
     }
 

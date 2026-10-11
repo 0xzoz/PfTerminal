@@ -48,3 +48,25 @@ A resumed thread runs on its recorded account; with the feature off, the
 resume is refused and names the recorded account (`--account
 <provider>:default` resumes on the default credentials). A rejected key names the account and
 its `corbanu account add` recovery; the default credential is unchanged.
+
+## Usage per account in `/status`
+
+With the feature on, `/status` names the session's account on the provider
+line and adds an **Account usage** line: the tokens this session used on each
+account of the current provider, as the provider reported them. It covers the
+whole session, so a spawned agent on another account counts toward that
+account. Only token counts are shown: no prices and no cost records.
+
+- One account is one line: `work · 35,100 input · 12,000 cached input · 6,247
+  output (300 reasoning)`. Before the first reply it reads `no usage yet`.
+- Several accounts are a short table with the session's account marked
+  `(active)`.
+- **Input** is the uncached part, as on the **Token usage** line; cached input
+  and reasoning appear only when the provider reports them, and reasoning is
+  part of the output.
+- Accounts appear by name only. Other providers' accounts are not listed; switch
+  to that provider to see them.
+- A resumed conversation keeps its counts; a new session starts from zero.
+
+Developer-accounting builds also have `/cost`, which shows the same work by
+provider, account and model; its token counts for the same conversation and UTC day match these.

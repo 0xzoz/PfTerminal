@@ -244,6 +244,7 @@ impl ChatWidget {
         let agents_summary =
             crate::status::compose_agents_summary(&self.config, &self.instruction_source_paths);
         let model_display_name = self.model_display_name();
+        let account_usage = self.status_account_usage();
         let (cell, handle) = crate::status::new_status_output_with_rate_limits_handle(
             &self.config,
             self.runtime_model_provider_base_url.as_deref(),
@@ -262,11 +263,52 @@ impl ChatWidget {
             reasoning_effort_override,
             agents_summary,
             refreshing_rate_limits,
+            account_usage,
         );
         if let Some(request_id) = request_id {
             self.refreshing_status_outputs.push((request_id, handle));
         }
         self.add_to_history(cell);
+    }
+
+    /// PF-84: the active provider's per-account token summary, only while
+    /// named accounts are on (with the feature off `/status` is unchanged).
+    fn status_account_usage(&self) -> Option<crate::status::StatusAccountUsage> {
+        let provider = &self.config.model_provider;
+        if !self
+            .config
+            .features
+            .enabled(codex_features::Feature::NamedAccounts)
+            || !crate::legacy_core::config::supports_named_accounts(provider)
+        {
+            return None;
+        }
+        let provider_id = self.config.model_provider_id.as_str();
+        // The account the app server reported for this thread wins, as a
+        // resumed thread runs on its recorded account.
+        let active = self
+            .thread_provider_account
+            .as_deref()
+            .and_then(|account| account.split_once(':'))
+            .filter(|(provider, _)| *provider == provider_id)
+            .map(|(_, name)| name)
+            .or_else(|| {
+                provider
+                    .account
+                    .as_ref()
+                    .map(|account| account.name.as_str())
+            })
+            .unwrap_or(codex_vault::DEFAULT_PROVIDER_ACCOUNT);
+        Some(self.session_account_usage.for_provider(provider_id, active))
+    }
+
+    /// PF-84: records a thread's latest per-account usage report.
+    pub(crate) fn record_thread_account_usage(
+        &mut self,
+        thread_id: ThreadId,
+        usage: Vec<codex_app_server_protocol::ThreadAccountTokenUsage>,
+    ) {
+        self.session_account_usage.record(thread_id, usage);
     }
 
     pub(crate) fn finish_status_rate_limit_refresh(

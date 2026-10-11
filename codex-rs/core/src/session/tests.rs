@@ -2661,24 +2661,28 @@ async fn record_initial_history_seeds_token_info_from_rollout() {
         TokenCountEvent {
             info: Some(info1),
             rate_limits: None,
+            account_usage: None,
         },
     )));
     rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
         TokenCountEvent {
             info: None,
             rate_limits: None,
+            account_usage: None,
         },
     )));
     rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
         TokenCountEvent {
             info: Some(info2.clone()),
             rate_limits: None,
+            account_usage: None,
         },
     )));
     rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
         TokenCountEvent {
             info: None,
             rate_limits: None,
+            account_usage: None,
         },
     )));
 
@@ -13977,4 +13981,98 @@ async fn pf_30_s02_token_budget_mcp_hint_is_mcp_data_with_the_flag() {
         client.message_origin(&items[0]),
         Some(MessageOrigin::External(SourceKind::Mcp))
     );
+}
+
+fn pf84_usage(input: i64, output: i64) -> TokenUsage {
+    TokenUsage {
+        input_tokens: input,
+        cached_input_tokens: 0,
+        cache_write_input_tokens: 0,
+        output_tokens: output,
+        reasoning_output_tokens: 0,
+        total_tokens: input + output,
+    }
+}
+
+/// PF-84: with named accounts on, each request's provider-reported usage is
+/// added to the account that served it and sent with the token count; with
+/// them off nothing is kept and the event keeps its bytes.
+#[tokio::test]
+async fn token_usage_is_attributed_per_account_only_with_named_accounts() {
+    for named_accounts in [false, true] {
+        let (session, turn_context, rx) = make_session_and_context_with_auth_and_config_and_rx(
+            CodexAuth::from_api_key("Test API Key"),
+            Vec::new(),
+            |config| {
+                if named_accounts {
+                    config
+                        .features
+                        .enable(Feature::NamedAccounts)
+                        .expect("enable named accounts");
+                }
+            },
+        )
+        .await;
+        session
+            .update_token_usage_info(&turn_context, Some(&pf84_usage(10, 2)))
+            .await
+            .expect("first usage");
+        session
+            .update_token_usage_info(&turn_context, Some(&pf84_usage(5, 1)))
+            .await
+            .expect("second usage");
+
+        let expected = named_accounts.then(|| {
+            vec![codex_protocol::protocol::AccountTokenUsage {
+                provider_id: turn_context.config.model_provider_id.clone(),
+                account: "default".to_string(),
+                usage: pf84_usage(15, 3),
+            }]
+        });
+        assert_eq!(session.account_token_usage().await, expected);
+        let last = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|event| match event.msg {
+                EventMsg::TokenCount(event) => Some(event),
+                _ => None,
+            })
+            .last()
+            .expect("token count event");
+        assert_eq!(last.account_usage, expected);
+    }
+}
+
+/// PF-84: a resumed thread keeps its usage per account; a fork does not
+/// inherit its parent's.
+#[tokio::test]
+async fn resume_restores_account_usage_and_fork_does_not() {
+    let usage = vec![codex_protocol::protocol::AccountTokenUsage {
+        provider_id: "zai".to_string(),
+        account: "work".to_string(),
+        usage: pf84_usage(100, 10),
+    }];
+    for resumed in [true, false] {
+        let (session, turn_context) = make_session_and_context().await;
+        let (mut rollout_items, _expected) = sample_rollout(&session, &turn_context).await;
+        rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
+            TokenCountEvent {
+                info: None,
+                rate_limits: None,
+                account_usage: Some(usage.clone()),
+            },
+        )));
+        let history = if resumed {
+            InitialHistory::Resumed(ResumedHistory {
+                conversation_id: ThreadId::default(),
+                history: Arc::new(rollout_items),
+                rollout_path: Some(PathBuf::from("/tmp/resume.jsonl")),
+            })
+        } else {
+            InitialHistory::Forked(rollout_items)
+        };
+        session.record_initial_history(history).await;
+        assert_eq!(
+            session.account_token_usage().await,
+            resumed.then(|| usage.clone())
+        );
+    }
 }

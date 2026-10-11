@@ -460,6 +460,9 @@ impl App {
             chat_widget.last_terminal_title = previous_terminal_title;
         }
         chat_widget.remote_connection = self.chat_widget.remote_connection.clone();
+        // PF-84: a thread switch keeps the session's per-account usage.
+        chat_widget.session_account_usage =
+            std::mem::take(&mut self.chat_widget.session_account_usage);
         for (thread_id, entry) in self.agent_navigation.ordered_threads() {
             chat_widget.set_collab_agent_metadata(
                 thread_id,
@@ -620,6 +623,8 @@ impl App {
         self.spawn_status_by_thread.clear();
         self.spawn_parent_reports_by_node.clear();
         self.side_threads.clear();
+        // PF-84: a new session starts its per-account usage afresh.
+        self.chat_widget.session_account_usage.clear();
         self.active_thread_id = None;
         self.active_thread_rx = None;
         self.primary_thread_id = None;

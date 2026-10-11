@@ -12711,6 +12711,7 @@ fn token_usage_notification_with_total(
             },
             model_context_window,
         },
+        account_usage: None,
     })
 }
 
@@ -15622,4 +15623,64 @@ async fn background_history_insertion_requests_a_frame_without_user_input() -> R
         .expect("history insertion should schedule a frame")
         .expect("draw notification channel should remain open");
     Ok(())
+}
+
+/// PF-84: every thread's per-account usage report reaches `/status`, a
+/// report without account usage (named accounts off) records nothing, and a
+/// new session starts afresh.
+#[tokio::test]
+async fn thread_account_usage_reaches_status_and_resets_with_the_session() {
+    let (mut app, _rx, _op_rx) = make_test_app_with_channels().await;
+    let report = |thread_id: ThreadId, account: &str, total_tokens: i64| {
+        let ServerNotification::ThreadTokenUsageUpdated(mut update) =
+            token_usage_notification_with_total(
+                thread_id,
+                "turn-1",
+                total_tokens,
+                /*model_context_window*/ None,
+            )
+        else {
+            unreachable!("token usage notification");
+        };
+        update.account_usage = Some(vec![codex_app_server_protocol::ThreadAccountTokenUsage {
+            provider_id: "zai".to_string(),
+            account: account.to_string(),
+            usage: update.token_usage.total.clone(),
+        }]);
+        ServerNotification::ThreadTokenUsageUpdated(update)
+    };
+    app.record_thread_account_usage(&report(ThreadId::new(), "default", /*total_tokens*/ 9));
+    app.record_thread_account_usage(&report(ThreadId::new(), "work", /*total_tokens*/ 9));
+    app.record_thread_account_usage(&token_usage_notification_with_total(
+        ThreadId::new(),
+        "turn-1",
+        /*total_tokens*/ 50,
+        /*model_context_window*/ None,
+    ));
+    let summary = app
+        .chat_widget
+        .session_account_usage
+        .for_provider("zai", "default");
+    assert_eq!(
+        summary
+            .rows
+            .iter()
+            .map(|(account, usage)| (account.as_str(), usage.total_tokens))
+            .collect::<Vec<_>>(),
+        vec![("default", 9), ("work", 9)]
+    );
+
+    app.reset_thread_event_state();
+    let summary = app
+        .chat_widget
+        .session_account_usage
+        .for_provider("zai", "default");
+    assert_eq!(
+        summary
+            .rows
+            .iter()
+            .map(|(account, usage)| (account.as_str(), usage.total_tokens))
+            .collect::<Vec<_>>(),
+        vec![("default", 0)]
+    );
 }

@@ -157,6 +157,7 @@ impl App {
 
         self.cache_collab_receiver_threads_for_notification(&notification);
         self.update_spawn_status_for_thread_notification(&notification);
+        self.record_thread_account_usage(&notification);
 
         match server_notification_thread_target(&notification) {
             ServerNotificationThreadTarget::Thread(thread_id) => {
@@ -251,6 +252,19 @@ impl App {
             };
         if let Err(err) = result {
             tracing::warn!("failed to enqueue app-server request: {err}");
+        }
+    }
+
+    /// PF-84: every thread of the session reports its usage per account (only
+    /// while named accounts are on); `/status` adds them up, so a spawned
+    /// agent's work counts toward its own account.
+    pub(super) fn record_thread_account_usage(&mut self, notification: &ServerNotification) {
+        if let ServerNotification::ThreadTokenUsageUpdated(update) = notification
+            && let Some(usage) = update.account_usage.clone()
+            && let Ok(thread_id) = codex_protocol::ThreadId::from_string(&update.thread_id)
+        {
+            self.chat_widget
+                .record_thread_account_usage(thread_id, usage);
         }
     }
 }

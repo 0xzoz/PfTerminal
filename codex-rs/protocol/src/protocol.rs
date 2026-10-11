@@ -2260,6 +2260,44 @@ impl TokenUsageInfo {
 pub struct TokenCountEvent {
     pub info: Option<TokenUsageInfo>,
     pub rate_limits: Option<RateLimitSnapshot>,
+    /// PF-84: this thread's provider-reported usage per (provider, named
+    /// account), `default` included. Present only while named accounts are
+    /// on, so other rollouts and notifications keep their bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub account_usage: Option<Vec<AccountTokenUsage>>,
+}
+
+/// PF-84: provider-reported token usage of one named provider account. Holds
+/// the provider id and account name only, never credential material.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct AccountTokenUsage {
+    pub provider_id: String,
+    pub account: String,
+    pub usage: TokenUsage,
+}
+
+impl AccountTokenUsage {
+    /// Adds `usage` to the entry for (`provider_id`, `account`), creating it
+    /// in first-use order.
+    pub fn accumulate(
+        entries: &mut Vec<AccountTokenUsage>,
+        provider_id: &str,
+        account: &str,
+        usage: &TokenUsage,
+    ) {
+        match entries
+            .iter_mut()
+            .find(|entry| entry.provider_id == provider_id && entry.account == account)
+        {
+            Some(entry) => entry.usage.add_assign(usage),
+            None => entries.push(AccountTokenUsage {
+                provider_id: provider_id.to_string(),
+                account: account.to_string(),
+                usage: usage.clone(),
+            }),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema, TS)]
