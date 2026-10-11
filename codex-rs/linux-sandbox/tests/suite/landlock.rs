@@ -1255,3 +1255,76 @@ async fn pf_23_s02_full_write_profile_keeps_protected_files_read_only() {
         "ok\n"
     );
 }
+
+/// #488 parity: bubblewrap masks denied paths after binding the workspace,
+/// and mounts follow links, so a workspace opened through a nested link
+/// keeps a denied file unreadable whichever spelling denies or reads it.
+#[tokio::test]
+async fn sandbox_denies_reads_through_a_nested_link_workspace() {
+    if should_skip_bwrap_tests().await {
+        eprintln!("skipping bwrap test: bwrap sandbox prerequisites are unavailable");
+        return;
+    }
+
+    let tmpdir = tempfile::tempdir().expect("tempdir");
+    let real = tmpdir.path().join("real");
+    let link = tmpdir.path().join("link");
+    std::fs::create_dir(&real).expect("real");
+    std::fs::write(real.join(".env"), "API_KEY=x\n").expect(".env");
+    std::fs::write(real.join("other"), "ok\n").expect("other");
+    std::os::unix::fs::symlink(&real, &link).expect("link");
+    let script = format!(
+        "cat .env; echo dot=$?; cat {real}/.env; echo real=$?; cat {link}/.env; echo link=$?; \
+         cat other; echo other=$?",
+        real = real.display(),
+        link = link.display(),
+    );
+    for (denied, cwd) in [(&real, &link), (&link, &real)] {
+        let file_system_sandbox_policy = FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                access: FileSystemAccessMode::Read,
+                missing_path_behavior: None,
+            },
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Special {
+                    value: FileSystemSpecialPath::project_roots(/*subpath*/ None),
+                },
+                access: FileSystemAccessMode::Write,
+                missing_path_behavior: None,
+            },
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Path {
+                    path: AbsolutePathBuf::try_from(denied.join(".env").as_path())
+                        .expect("absolute .env"),
+                },
+                access: FileSystemAccessMode::Deny,
+                missing_path_behavior: None,
+            },
+        ]);
+        let permission_profile = PermissionProfile::from_runtime_permissions(
+            &file_system_sandbox_policy,
+            NetworkSandboxPolicy::Restricted,
+        );
+        let output = run_cmd_result_with_permission_profile_for_cwd(
+            &["bash", "-c", &script],
+            AbsolutePathBuf::try_from(cwd.as_path()).expect("absolute cwd"),
+            permission_profile,
+            create_env_from_core_vars(),
+            LONG_TIMEOUT_MS,
+            /*use_legacy_landlock*/ false,
+        )
+        .await
+        .expect("sandboxed command should execute");
+        let stdout = &output.stdout.text;
+        assert!(!stdout.contains("API_KEY"), "{denied:?} denied: {stdout}");
+        for line in ["dot=1", "real=1", "link=1", "other=0"] {
+            assert!(
+                stdout.contains(line),
+                "{denied:?} denied: {line} not in {stdout}"
+            );
+        }
+    }
+}

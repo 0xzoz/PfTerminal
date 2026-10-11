@@ -31,6 +31,7 @@ use codex_protocol::permissions::PROTECTED_METADATA_PATH_NAMES;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
@@ -1587,4 +1588,331 @@ fn renaming_a_folder_above_a_protected_path_is_denied() {
     assert!(!base.join("empty/git").exists());
     assert!(config.join("fish/config.fish").exists());
     assert!(base.join(".zshrc").is_symlink());
+}
+
+// #488: denials are attached to every root that reaches them, in the
+// spellings Seatbelt matches.
+
+/// The spelling Seatbelt checks: the nearest existing ancestor resolved.
+/// Written independently of the code under test.
+fn seen_by_seatbelt(path: &Path) -> PathBuf {
+    match path.canonicalize() {
+        Ok(path) => path,
+        Err(_) => match (path.parent(), path.file_name()) {
+            (Some(parent), Some(name)) => seen_by_seatbelt(parent).join(name),
+            _ => path.to_path_buf(),
+        },
+    }
+}
+
+/// The Aggressive shape: read everywhere, write the workspace and deny the
+/// given paths.
+fn workspace_policy_denying(denied: &[PathBuf]) -> FileSystemSandboxPolicy {
+    let mut entries = vec![
+        FileSystemSandboxEntry {
+            path: FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            },
+            access: FileSystemAccessMode::Read,
+            missing_path_behavior: None,
+        },
+        FileSystemSandboxEntry {
+            path: FileSystemPath::Special {
+                value: FileSystemSpecialPath::SlashTmp,
+            },
+            access: FileSystemAccessMode::Read,
+            missing_path_behavior: None,
+        },
+        FileSystemSandboxEntry {
+            path: FileSystemPath::Special {
+                value: FileSystemSpecialPath::project_roots(/*subpath*/ None),
+            },
+            access: FileSystemAccessMode::Write,
+            missing_path_behavior: None,
+        },
+    ];
+    entries.extend(denied.iter().map(|path| FileSystemSandboxEntry {
+        path: FileSystemPath::Path {
+            path: AbsolutePathBuf::from_absolute_path(path).expect("absolute"),
+        },
+        access: FileSystemAccessMode::Deny,
+        missing_path_behavior: None,
+    }));
+    FileSystemSandboxPolicy::restricted(entries)
+}
+
+fn seatbelt_args(
+    policy: &FileSystemSandboxPolicy,
+    cwd: &Path,
+    command: Vec<String>,
+) -> Vec<String> {
+    create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
+        command,
+        file_system_sandbox_policy: policy,
+        network_sandbox_policy: NetworkSandboxPolicy::Restricted,
+        sandbox_policy_cwd: cwd,
+        enforce_managed_network: false,
+        managed_network: None,
+        environment_id: None,
+        network: None,
+        extra_allow_unix_sockets: &[],
+    })
+    .expect("seatbelt args")
+}
+
+/// The `prefix` clauses read back from generated arguments: each root with
+/// its excluded paths.
+fn generated_clauses(args: &[String], prefix: &str) -> Vec<(PathBuf, Vec<PathBuf>)> {
+    let policy = seatbelt_policy_arg(args);
+    let params: BTreeMap<&str, PathBuf> = args
+        .iter()
+        .filter_map(|arg| arg.strip_prefix("-D")?.split_once('='))
+        .map(|(key, value)| (key, PathBuf::from(value)))
+        .collect();
+    (0..)
+        .map_while(|index| {
+            let key = format!("{prefix}_{index}");
+            let root = params.get(key.as_str())?.clone();
+            let excluded = (0..)
+                .map_while(|excluded| {
+                    let key = format!("{key}_EXCLUDED_{excluded}");
+                    let path = params.get(key.as_str())?.clone();
+                    assert!(
+                        policy.contains(&format!("(require-not (subpath (param \"{key}\")))")),
+                        "{key} is not applied:\n{policy}"
+                    );
+                    Some(path)
+                })
+                .collect();
+            Some((root, excluded))
+        })
+        .collect()
+}
+
+fn clauses_allow(clauses: &[(PathBuf, Vec<PathBuf>)], path: &Path) -> bool {
+    let path = seen_by_seatbelt(path);
+    clauses.iter().any(|(root, excluded)| {
+        path.starts_with(root) && !excluded.iter().any(|excluded| path.starts_with(excluded))
+    })
+}
+
+struct LinkScenario {
+    name: &'static str,
+    cwd: PathBuf,
+    denied: Vec<PathBuf>,
+    /// Every spelling of the denied files, all of which must be denied.
+    denied_spellings: Vec<PathBuf>,
+    /// Files the policy allows reading and writing.
+    allowed: Vec<PathBuf>,
+}
+
+/// The scenarios #488 asks for. Each `TempDir` must outlive its scenario.
+fn link_scenarios(base: &Path, tmp: &Path) -> Vec<LinkScenario> {
+    let real = base.join("real");
+    let link = base.join("link");
+    fs::create_dir_all(real.join("sub")).expect("real");
+    std::os::unix::fs::symlink(&real, &link).expect("link");
+    for dir in [&real, &tmp.to_path_buf()] {
+        fs::write(dir.join(".env"), "API_KEY=x\n").expect(".env");
+        fs::write(dir.join("other"), "ok\n").expect("other");
+    }
+    let physical_tmp = tmp.canonicalize().expect("canonical tmp");
+    let both = |name: &str| vec![real.join(name), link.join(name)];
+    let allowed = |dir: &Path| vec![dir.join("other"), dir.join("sub/new"), dir.join("new")];
+    vec![
+        LinkScenario {
+            name: "plain workspace",
+            cwd: real.clone(),
+            denied: vec![real.join(".env")],
+            denied_spellings: vec![real.join(".env")],
+            allowed: allowed(&real),
+        },
+        LinkScenario {
+            name: "/tmp workspace denied by its /private/tmp path",
+            cwd: tmp.to_path_buf(),
+            denied: vec![physical_tmp.join(".env")],
+            denied_spellings: vec![tmp.join(".env"), physical_tmp.join(".env")],
+            allowed: [allowed(tmp), allowed(&physical_tmp)].concat(),
+        },
+        LinkScenario {
+            name: "/private/tmp workspace denied by its /tmp path",
+            cwd: physical_tmp.clone(),
+            denied: vec![tmp.join(".env")],
+            denied_spellings: vec![tmp.join(".env"), physical_tmp.join(".env")],
+            allowed: [allowed(tmp), allowed(&physical_tmp)].concat(),
+        },
+        LinkScenario {
+            name: "nested link workspace",
+            cwd: link.clone(),
+            denied: vec![real.join(".env")],
+            denied_spellings: both(".env"),
+            allowed: [allowed(&real), allowed(&link)].concat(),
+        },
+        LinkScenario {
+            name: "denial reached through a link",
+            cwd: real.clone(),
+            denied: vec![link.join(".env")],
+            denied_spellings: both(".env"),
+            allowed: [allowed(&real), allowed(&link)].concat(),
+        },
+        LinkScenario {
+            name: "missing denied paths",
+            cwd: link.clone(),
+            denied: vec![real.join("later.key"), link.join("never.key")],
+            denied_spellings: [both("later.key"), both("never.key")].concat(),
+            allowed: [allowed(&real), allowed(&link)].concat(),
+        },
+    ]
+}
+
+#[test]
+fn denials_hold_through_links_and_nothing_allowed_is_denied() {
+    let base = TempDir::new().expect("tempdir");
+    let base = base.path().canonicalize().expect("canonical");
+    let tmp = tempfile::tempdir_in("/tmp").expect("tempdir in /tmp");
+    assert!(tmp.path().starts_with("/tmp"), "{:?}", tmp.path());
+    for scenario in link_scenarios(&base, tmp.path()) {
+        let name = scenario.name;
+        let policy = workspace_policy_denying(&scenario.denied);
+        let args = seatbelt_args(&policy, &scenario.cwd, vec!["/bin/true".to_string()]);
+        let read = generated_clauses(&args, "READABLE_ROOT");
+        let write = generated_clauses(&args, "WRITABLE_ROOT");
+        assert!(!read.is_empty() && !write.is_empty(), "{name}: {args:#?}");
+        for path in &scenario.denied_spellings {
+            assert!(!clauses_allow(&read, path), "{name}: {path:?} readable");
+            assert!(!clauses_allow(&write, path), "{name}: {path:?} writable");
+        }
+        for path in &scenario.allowed {
+            assert!(clauses_allow(&read, path), "{name}: {path:?} unreadable");
+            assert!(clauses_allow(&write, path), "{name}: {path:?} unwritable");
+        }
+        assert!(clauses_allow(&read, Path::new("/usr/bin/true")), "{name}");
+        // Only paths the policy already keeps from the sandbox are excluded:
+        // denied paths, and for writes its read-only paths.
+        let denied: Vec<PathBuf> = scenario
+            .denied
+            .iter()
+            .map(|path| seen_by_seatbelt(path))
+            .collect();
+        let read_only: Vec<PathBuf> = policy
+            .get_writable_roots_with_cwd(&scenario.cwd)
+            .into_iter()
+            .flat_map(|root| root.read_only_subpaths)
+            .map(|path| seen_by_seatbelt(path.as_path()))
+            .collect();
+        for (_, excluded) in &read {
+            for path in excluded {
+                assert!(
+                    denied.contains(&seen_by_seatbelt(path)),
+                    "{name}: read exclusion {path:?} is not denied"
+                );
+            }
+        }
+        for (_, excluded) in &write {
+            for path in excluded {
+                let path = seen_by_seatbelt(path);
+                assert!(
+                    denied.contains(&path) || read_only.contains(&path),
+                    "{name}: write exclusion {path:?} is not denied or read-only"
+                );
+            }
+        }
+        // The launch check's helper evaluates the same clauses.
+        for path in scenario
+            .denied_spellings
+            .iter()
+            .chain(&scenario.allowed)
+            .chain([&PathBuf::from(".env"), &PathBuf::from("other")])
+        {
+            assert_eq!(
+                super::seatbelt_allows_file_read(&policy, &scenario.cwd, path),
+                clauses_allow(&read, &scenario.cwd.join(path)),
+                "{name}: {path:?}"
+            );
+        }
+    }
+}
+
+/// Without denials (Permissive's shape) reads stay unrestricted.
+#[test]
+fn policies_without_denials_keep_full_read_access() {
+    let cwd = TempDir::new().expect("tempdir");
+    let policy = FileSystemSandboxPolicy::from_legacy_sandbox_policy_for_cwd(
+        &SandboxPolicy::new_workspace_write_policy(),
+        cwd.path(),
+    );
+    let args = seatbelt_args(&policy, cwd.path(), vec!["/bin/true".to_string()]);
+    assert!(seatbelt_policy_arg(&args).contains("(allow file-read*)"));
+    assert!(generated_clauses(&args, "READABLE_ROOT").is_empty());
+    assert!(super::seatbelt_allows_file_read(
+        &policy,
+        cwd.path(),
+        &cwd.path().join(".env")
+    ));
+}
+
+/// #488 regression: agent commands in a workspace opened through a nested
+/// link cannot read or create the denied files in any spelling.
+#[test]
+fn sandboxed_commands_cannot_read_denied_files_through_a_nested_link() {
+    let base = TempDir::new().expect("tempdir");
+    let base = base.path().canonicalize().expect("canonical");
+    let tmp = tempfile::tempdir_in("/tmp").expect("tempdir in /tmp");
+    let real = base.join("real");
+    let link = base.join("link");
+    for scenario in link_scenarios(&base, tmp.path())
+        .into_iter()
+        .filter(|scenario| scenario.cwd == link)
+    {
+        let name = scenario.name;
+        let policy = workspace_policy_denying(&scenario.denied);
+        let denied = scenario.denied[0].file_name().expect("name");
+        let denied = denied.to_string_lossy();
+        let script = format!(
+            "cat {denied}; echo dot=$?; cat '{real}/{denied}'; echo real=$?; \
+             cat '{link}/{denied}'; echo link=$?; cat other; echo other=$?; \
+             echo y > fresh.txt; echo fresh=$?",
+            real = real.display(),
+            link = link.display(),
+        );
+        let args = seatbelt_args(
+            &policy,
+            &scenario.cwd,
+            vec!["/bin/sh".to_string(), "-c".to_string(), script],
+        );
+        let output = Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
+            .args(&args)
+            .current_dir(&link)
+            .output()
+            .expect("run seatbelt");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(!stdout.contains("API_KEY"), "{name}: {stdout}");
+        for line in ["dot=1", "real=1", "link=1", "other=0", "fresh=0"] {
+            assert!(stdout.contains(line), "{name}: {line} not in {stdout}");
+        }
+        let _ = fs::remove_file(real.join("fresh.txt"));
+    }
+    // A denied path not created yet cannot be created through the link,
+    // whichever spelling denies it.
+    for denied in [link.join("never.key"), real.join("later.key")] {
+        let policy = workspace_policy_denying(std::slice::from_ref(&denied));
+        let name = denied.file_name().expect("name").to_string_lossy();
+        let args = seatbelt_args(
+            &policy,
+            &link,
+            vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                format!("echo x > {name}; echo created=$?"),
+            ],
+        );
+        let output = Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
+            .args(&args)
+            .current_dir(&link)
+            .output()
+            .expect("run seatbelt");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("created=1"), "{denied:?}: {stdout}");
+        assert!(!real.join(&*name).exists(), "{denied:?}");
+    }
 }

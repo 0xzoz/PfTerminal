@@ -349,33 +349,178 @@ struct SeatbeltAccessRoot {
     protected_metadata_names: Vec<String>,
 }
 
+/// A [`SeatbeltAccessRoot`] in the spellings Seatbelt matches, which is how
+/// it is emitted: the root normalized, and each excluded path in every
+/// spelling from [`exclusion_spellings`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SeatbeltClause {
+    root: AbsolutePathBuf,
+    excluded: Vec<AbsolutePathBuf>,
+    protected_metadata_names: Vec<String>,
+}
+
+impl SeatbeltClause {
+    fn new(access_root: SeatbeltAccessRoot) -> Self {
+        let root =
+            normalize_path_for_sandbox(access_root.root.as_path()).unwrap_or(access_root.root);
+        let mut excluded = Vec::new();
+        for path in &access_root.excluded_subpaths {
+            for spelling in exclusion_spellings(path) {
+                if !excluded.contains(&spelling) {
+                    excluded.push(spelling);
+                }
+            }
+        }
+        Self {
+            root,
+            excluded,
+            protected_metadata_names: access_root.protected_metadata_names,
+        }
+    }
+
+    /// Whether the clause allows `path`, spelled as Seatbelt sees it.
+    /// Protected metadata names are not evaluated (read clauses have none).
+    fn allows(&self, path: &Path) -> bool {
+        path.starts_with(self.root.as_path())
+            && !self
+                .excluded
+                .iter()
+                .any(|excluded| path.starts_with(excluded.as_path()))
+    }
+}
+
+/// The spellings Seatbelt may match for an excluded path: canonical (as
+/// written when it cannot be resolved, such as a path not created yet), and
+/// with its nearest existing folder resolved, which is how Seatbelt sees a
+/// path not created yet once it is (`link/later.key` is checked as
+/// `real/later.key`).
+fn exclusion_spellings(path: &AbsolutePathBuf) -> Vec<AbsolutePathBuf> {
+    let mut spellings =
+        vec![normalize_path_for_sandbox(path.as_path()).unwrap_or_else(|| path.clone())];
+    if let Some(resolved) = resolve_nearest_existing(path.as_path())
+        .and_then(|resolved| AbsolutePathBuf::from_absolute_path(resolved).ok())
+        && !spellings.contains(&resolved)
+    {
+        spellings.push(resolved);
+    }
+    spellings
+}
+
+/// Whether Seatbelt reaches `path` through the clause rooted at `root`: by
+/// the spellings as written, or by the spellings Seatbelt matches. A path
+/// reached through a link (`link/.env` for a root `real`, or `real/.env`
+/// for a root `link`) needs its exclusion on that root too (#488).
+fn reached_through_root(path: &AbsolutePathBuf, root: &AbsolutePathBuf) -> bool {
+    if path.as_path().starts_with(root.as_path()) {
+        return true;
+    }
+    let root = normalize_path_for_sandbox(root.as_path()).unwrap_or_else(|| root.clone());
+    exclusion_spellings(path)
+        .iter()
+        .any(|spelling| spelling.as_path().starts_with(root.as_path()))
+}
+
+/// File-read access as the Seatbelt profile grants it.
+enum SeatbeltReadAccess {
+    /// `(allow file-read*)`.
+    Full,
+    Clauses(Vec<SeatbeltClause>),
+}
+
+/// The file-read clauses for `policy`. [`create_seatbelt_command_args`]
+/// emits exactly these, and [`seatbelt_allows_file_read`] evaluates them.
+fn seatbelt_read_access(policy: &FileSystemSandboxPolicy, cwd: &Path) -> SeatbeltReadAccess {
+    let unreadable_roots = policy.get_unreadable_roots_with_cwd(cwd);
+    let roots = if policy.has_full_disk_read_access() {
+        if unreadable_roots.is_empty() {
+            return SeatbeltReadAccess::Full;
+        }
+        vec![SeatbeltAccessRoot {
+            root: root_absolute_path(),
+            excluded_subpaths: unreadable_roots,
+            protected_metadata_names: Vec::new(),
+        }]
+    } else {
+        // Each denied path is excluded from every readable root that
+        // reaches it, however either is spelled.
+        policy
+            .get_readable_roots_with_cwd(cwd)
+            .into_iter()
+            .map(|root| SeatbeltAccessRoot {
+                excluded_subpaths: unreadable_roots
+                    .iter()
+                    .filter(|path| reached_through_root(path, &root))
+                    .cloned()
+                    .collect(),
+                protected_metadata_names: Vec::new(),
+                root,
+            })
+            .collect()
+    };
+    SeatbeltReadAccess::Clauses(roots.into_iter().map(SeatbeltClause::new).collect())
+}
+
+/// Whether the Seatbelt profile built for `policy` lets agent commands read
+/// `path` (relative paths resolve against `cwd`). It evaluates the same
+/// file-read clauses [`create_seatbelt_command_args`] emits, against the
+/// spelling Seatbelt checks (links resolved), so a launch check built on it
+/// cannot drift from the sandbox. It errs towards `true`: glob denials are
+/// not evaluated, and with platform defaults every path counts as readable.
+/// The base profile's terminal devices (`/dev/ptmx`, `/dev/ttys*`) are not
+/// modeled.
+pub fn seatbelt_allows_file_read(
+    policy: &FileSystemSandboxPolicy,
+    cwd: &Path,
+    path: &Path,
+) -> bool {
+    if policy.include_platform_defaults() {
+        return true;
+    }
+    let clauses = match seatbelt_read_access(policy, cwd) {
+        SeatbeltReadAccess::Full => return true,
+        SeatbeltReadAccess::Clauses(clauses) => clauses,
+    };
+    let path = cwd.join(path);
+    let path = resolve_nearest_existing(&path).unwrap_or(path);
+    clauses.iter().any(|clause| clause.allows(&path))
+}
+
 fn build_seatbelt_access_policy(
     action: &str,
     param_prefix: &str,
     roots: Vec<SeatbeltAccessRoot>,
 ) -> (String, Vec<(String, PathBuf)>) {
+    build_seatbelt_clause_policy(
+        action,
+        param_prefix,
+        roots.into_iter().map(SeatbeltClause::new).collect(),
+    )
+}
+
+fn build_seatbelt_clause_policy(
+    action: &str,
+    param_prefix: &str,
+    clauses: Vec<SeatbeltClause>,
+) -> (String, Vec<(String, PathBuf)>) {
     let mut policy_components = Vec::new();
     let mut params = Vec::new();
 
-    for (index, access_root) in roots.into_iter().enumerate() {
-        let root =
-            normalize_path_for_sandbox(access_root.root.as_path()).unwrap_or(access_root.root);
+    for (index, clause) in clauses.into_iter().enumerate() {
+        let SeatbeltClause {
+            root,
+            excluded,
+            protected_metadata_names,
+        } = clause;
         let root_param = format!("{param_prefix}_{index}");
         params.push((root_param.clone(), root.clone().into_path_buf()));
 
-        if access_root.excluded_subpaths.is_empty()
-            && access_root.protected_metadata_names.is_empty()
-        {
+        if excluded.is_empty() && protected_metadata_names.is_empty() {
             policy_components.push(format!("(subpath (param \"{root_param}\"))"));
             continue;
         }
 
         let mut require_parts = vec![format!("(subpath (param \"{root_param}\"))")];
-        for (excluded_index, excluded_subpath) in
-            access_root.excluded_subpaths.into_iter().enumerate()
-        {
-            let excluded_subpath =
-                normalize_path_for_sandbox(excluded_subpath.as_path()).unwrap_or(excluded_subpath);
+        for (excluded_index, excluded_subpath) in excluded.into_iter().enumerate() {
             let excluded_param = format!("{param_prefix}_{index}_EXCLUDED_{excluded_index}");
             params.push((excluded_param.clone(), excluded_subpath.into_path_buf()));
             // Exclude both the exact protected path and anything beneath it.
@@ -388,7 +533,7 @@ fn build_seatbelt_access_policy(
                 "(require-not (subpath (param \"{excluded_param}\")))"
             ));
         }
-        for metadata_name in access_root.protected_metadata_names {
+        for metadata_name in protected_metadata_names {
             let regex =
                 seatbelt_protected_metadata_name_regex(&root, &metadata_name).replace('"', "\\\"");
             require_parts.push(format!(r#"(require-not (regex #"{regex}"))"#));
@@ -446,6 +591,16 @@ fn sandbox_spellings(path: &Path) -> BTreeSet<PathBuf> {
     if let Some(normalized) = normalize_path_for_sandbox(path) {
         spellings.insert(normalized.into_path_buf());
     }
+    if let Some(resolved) = resolve_nearest_existing(path) {
+        spellings.insert(resolved);
+    }
+    spellings
+}
+
+/// `path` with its nearest existing ancestor (itself, when it exists)
+/// resolved: the spelling Seatbelt checks, including for a path not created
+/// yet under a linked folder.
+fn resolve_nearest_existing(path: &Path) -> Option<PathBuf> {
     let mut existing = path;
     let mut tail = Vec::new();
     while !existing.exists() {
@@ -455,13 +610,11 @@ fn sandbox_spellings(path: &Path) -> BTreeSet<PathBuf> {
         tail.push(name);
         existing = parent;
     }
-    if let Ok(mut resolved) = existing.canonicalize() {
-        for name in tail.iter().rev() {
-            resolved.push(name);
-        }
-        spellings.insert(resolved);
+    let mut resolved = existing.canonicalize().ok()?;
+    for name in tail.iter().rev() {
+        resolved.push(name);
     }
-    spellings
+    Some(resolved)
 }
 
 /// Seatbelt rules match paths, not files: renaming a protected path, or any
@@ -754,7 +907,7 @@ pub fn create_seatbelt_command_args(
                     "WRITABLE_ROOT",
                     vec![SeatbeltAccessRoot {
                         root: root_absolute_path(),
-                        excluded_subpaths: unreadable_roots.clone(),
+                        excluded_subpaths: unreadable_roots,
                         protected_metadata_names: Vec::new(),
                     }],
                 )
@@ -766,66 +919,47 @@ pub fn create_seatbelt_command_args(
                 file_system_sandbox_policy
                     .get_writable_roots_with_cwd(sandbox_policy_cwd)
                     .into_iter()
-                    .map(|root| SeatbeltAccessRoot {
-                        protected_metadata_names: protected_metadata_names_for_writable_root(
-                            file_system_sandbox_policy,
-                            &root,
-                            sandbox_policy_cwd,
-                        ),
-                        root: root.root,
-                        excluded_subpaths: root.read_only_subpaths,
+                    .map(|root| {
+                        // Denied paths the root reaches only through a link
+                        // are excluded too (#488); the rest already are.
+                        let mut excluded_subpaths = root.read_only_subpaths.clone();
+                        excluded_subpaths.extend(
+                            unreadable_roots
+                                .iter()
+                                .filter(|path| reached_through_root(path, &root.root))
+                                .cloned(),
+                        );
+                        SeatbeltAccessRoot {
+                            protected_metadata_names: protected_metadata_names_for_writable_root(
+                                file_system_sandbox_policy,
+                                &root,
+                                sandbox_policy_cwd,
+                            ),
+                            root: root.root,
+                            excluded_subpaths,
+                        }
                     })
                     .collect(),
             )
         };
 
     let (file_read_policy, file_read_dir_params) =
-        if file_system_sandbox_policy.has_full_disk_read_access() {
-            if unreadable_roots.is_empty() {
-                (
-                    "; allow read-only file operations\n(allow file-read*)".to_string(),
-                    Vec::new(),
-                )
-            } else {
-                let (policy, params) = build_seatbelt_access_policy(
-                    "file-read*",
-                    "READABLE_ROOT",
-                    vec![SeatbeltAccessRoot {
-                        root: root_absolute_path(),
-                        excluded_subpaths: unreadable_roots,
-                        protected_metadata_names: Vec::new(),
-                    }],
-                );
-                (
-                    format!("; allow read-only file operations\n{policy}"),
-                    params,
-                )
-            }
-        } else {
-            let (policy, params) = build_seatbelt_access_policy(
-                "file-read*",
-                "READABLE_ROOT",
-                file_system_sandbox_policy
-                    .get_readable_roots_with_cwd(sandbox_policy_cwd)
-                    .into_iter()
-                    .map(|root| SeatbeltAccessRoot {
-                        excluded_subpaths: unreadable_roots
-                            .iter()
-                            .filter(|path| path.as_path().starts_with(root.as_path()))
-                            .cloned()
-                            .collect(),
-                        protected_metadata_names: Vec::new(),
-                        root,
-                    })
-                    .collect(),
-            );
-            if policy.is_empty() {
-                (String::new(), params)
-            } else {
-                (
-                    format!("; allow read-only file operations\n{policy}"),
-                    params,
-                )
+        match seatbelt_read_access(file_system_sandbox_policy, sandbox_policy_cwd) {
+            SeatbeltReadAccess::Full => (
+                "; allow read-only file operations\n(allow file-read*)".to_string(),
+                Vec::new(),
+            ),
+            SeatbeltReadAccess::Clauses(clauses) => {
+                let (policy, params) =
+                    build_seatbelt_clause_policy("file-read*", "READABLE_ROOT", clauses);
+                if policy.is_empty() {
+                    (String::new(), params)
+                } else {
+                    (
+                        format!("; allow read-only file operations\n{policy}"),
+                        params,
+                    )
+                }
             }
         };
 
