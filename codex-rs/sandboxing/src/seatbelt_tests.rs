@@ -1688,3 +1688,71 @@ fn full_write_profile_with_denial_keeps_dev_null_usable() {
     assert!(stdout.contains("cat=1"), "{stdout}");
     assert!(!stdout.contains("secret-493"), "{stdout}");
 }
+
+/// #506: a directory the policy may not list cannot be listed, by any
+/// spelling, under a read-only or a full-write base; its entries, their
+/// metadata and its own metadata stay as the rest of the policy leaves them,
+/// and a denied entry stays denied.
+#[test]
+fn unlistable_directory_cannot_be_listed_but_its_entries_stay_usable() {
+    let dir = TempDir::new().expect("tempdir");
+    let base = dir.path().canonicalize().expect("canonical");
+    let home = base.join("home");
+    fs::create_dir_all(home.join("tmp")).expect("tmp");
+    fs::write(home.join("tmp/helper.txt"), "helper-506\n").expect("helper");
+    fs::write(home.join("listing-canary-506"), "x\n").expect("canary");
+    fs::write(home.join("secret.txt"), "secret-506\n").expect("secret");
+    std::os::unix::fs::symlink(&home, base.join("link")).expect("link");
+    let home_path = AbsolutePathBuf::from_absolute_path(&home).expect("absolute");
+    for root_access in [FileSystemAccessMode::Read, FileSystemAccessMode::Write] {
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry::new(
+                FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                root_access,
+            ),
+            FileSystemSandboxEntry::new(
+                FileSystemPath::Path {
+                    path: home_path.join("secret.txt"),
+                },
+                FileSystemAccessMode::Deny,
+            ),
+            FileSystemSandboxEntry::deny_directory_listing(&home_path),
+        ]);
+        let script = "ls home; echo ls=$?; ls home/; echo ls-slash=$?; ls link/; echo ls-link=$?; \
+                      ls home/tmp/..; echo ls-dotdot=$?; echo home/*; \
+                      cat home/tmp/helper.txt; ls home/tmp; echo ls-tmp=$?; \
+                      test -d home && echo is-dir; cd home/tmp && pwd -P; cd \"$OLDPWD\"; \
+                      cat home/secret.txt; echo cat-secret=$?";
+        let args = create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
+            command: vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
+            file_system_sandbox_policy: &policy,
+            network_sandbox_policy: NetworkSandboxPolicy::Restricted,
+            sandbox_policy_cwd: &base,
+            enforce_managed_network: false,
+            managed_network: None,
+            environment_id: None,
+            network: None,
+            extra_allow_unix_sockets: &[],
+        })
+        .expect("args");
+        let output = Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
+            .args(&args)
+            .current_dir(&base)
+            .output()
+            .expect("run seatbelt");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let context = format!("{root_access:?}: {stdout}");
+        for denied in ["ls=1", "ls-slash=1", "ls-link=1", "ls-dotdot=1"] {
+            assert!(stdout.contains(denied), "{denied} {context}");
+        }
+        assert!(!stdout.contains("listing-canary-506"), "{context}");
+        assert!(stdout.contains("helper-506"), "{context}");
+        assert!(stdout.contains("helper.txt"), "{context}");
+        assert!(stdout.contains("ls-tmp=0"), "{context}");
+        assert!(stdout.contains("is-dir"), "{context}");
+        assert!(stdout.contains("cat-secret=1"), "{context}");
+        assert!(!stdout.contains("secret-506"), "{context}");
+    }
+}

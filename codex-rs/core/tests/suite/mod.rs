@@ -89,6 +89,7 @@ mod hooks_mcp;
 mod image_rollout;
 mod issue_443;
 mod issue_445;
+mod issue_506;
 mod items;
 mod json_result;
 mod live_cli;

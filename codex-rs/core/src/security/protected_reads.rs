@@ -48,6 +48,26 @@ pub(crate) fn explanation(path: &str) -> String {
     )
 }
 
+/// #506: the explanation shown when listing the folder `path` was denied.
+pub(crate) fn listing_explanation(path: &str) -> String {
+    format!(
+        "Security level Aggressive blocked listing `{}`: agent commands can never list the \
+         Corbanu home or read its protected files (Corbanu's sign-in, vault, config and \
+         history), and this cannot be granted, not even once. To allow it, a person can switch \
+         to Permissive in /security (it applies after a restart).",
+        shown_path(path)
+    )
+}
+
+/// `path` as the command spelled it, escaped and bounded for display.
+fn shown_path(path: &str) -> String {
+    let mut path = super::grant_offer::escape_controls(path);
+    if path.chars().count() > MAX_SHOWN_PATH_CHARS {
+        path = path.chars().take(MAX_SHOWN_PATH_CHARS).collect::<String>() + "…";
+    }
+    path
+}
+
 /// Longest path shown in an explanation.
 const MAX_SHOWN_PATH_CHARS: usize = 200;
 
@@ -106,12 +126,14 @@ impl ReadPolicyInputs {
     /// The deny-read matcher of the session's read policy; `None` for a
     /// profile that cannot take the rules (an external sandbox).
     fn matcher(&self, cwd: &Path) -> Option<ReadDenyMatcher> {
-        let denials = ReadDenials::for_turn(
+        let mut denials = ReadDenials::for_turn(
             &self.codex_home,
             &self.turn_cwd,
             &self.workspace_roots,
             &self.profile,
         );
+        // Captured only under Aggressive (see `capture`).
+        denials.deny_home_listing();
         let policy = denials.apply(&self.profile)?.file_system_sandbox_policy();
         // A malformed pattern denies every path; explain nothing then.
         ReadDenyMatcher::try_new(&policy, cwd).ok().flatten()
@@ -159,15 +181,21 @@ pub(crate) async fn denial_explanation(
         if matcher.is_read_denied(&cwd) {
             return Some(explanation(&cwd.display().to_string()));
         }
-        denied_word(
-            &command,
-            &cwd,
-            inputs.user_home.as_deref(),
-            &inputs.codex_home,
-            |path| matcher.is_read_denied(path),
-            Some(&denial_lines),
-        )
-        .map(|word| explanation(&word))
+        let word = |denied: &dyn Fn(&Path) -> bool| {
+            denied_word(
+                &command,
+                &cwd,
+                inputs.user_home.as_deref(),
+                &inputs.codex_home,
+                denied,
+                Some(&denial_lines),
+            )
+        };
+        word(&|path| matcher.is_read_denied(path))
+            .map(|word| explanation(&word))
+            .or_else(|| {
+                word(&|path| matcher.is_listing_denied(path)).map(|word| listing_explanation(&word))
+            })
     })
     .await
 }
@@ -187,12 +215,13 @@ pub(crate) async fn protected_path_in_command(
         if matcher.is_read_denied(&cwd) {
             return Some(cwd.display().to_string());
         }
+        // #506: a grant never lifts the home's listing denial either.
         denied_word(
             &command,
             &cwd,
             inputs.user_home.as_deref(),
             &inputs.codex_home,
-            |path| matcher.is_read_denied(path),
+            |path| matcher.is_listing_denied(path),
             /*denial_lines*/ None,
         )
     })

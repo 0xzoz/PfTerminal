@@ -119,6 +119,10 @@ pub(crate) struct ReadDenials {
     runtime_read_only: Vec<AbsolutePathBuf>,
     /// Where the profile's relative entries resolve (the turn's folder).
     cwd: Option<AbsolutePathBuf>,
+    /// The Corbanu home, unless it is a folder the command keeps.
+    home: Option<AbsolutePathBuf>,
+    /// #506: whether listing [`Self::home`] is denied too (Aggressive).
+    home_listing_denied: bool,
     /// Denials dropped because they hold the command's folder or a writable
     /// root (denying them would deny the workspace itself).
     pub(crate) skipped: Vec<AbsolutePathBuf>,
@@ -140,6 +144,10 @@ impl ReadDenials {
         let Ok(codex_home) = AbsolutePathBuf::from_absolute_path(codex_home) else {
             return denials;
         };
+        // Listing a folder the command works in stays allowed.
+        if !keep.contains(&codex_home) {
+            denials.home = Some(codex_home.clone());
+        }
         for entry in CORBANU_READ_ONLY {
             denials.push_home_read_only(codex_home.join(entry), keep);
         }
@@ -289,6 +297,18 @@ impl ReadDenials {
         self.read_only.clear();
     }
 
+    /// #506: under Aggressive, agent commands may not list the Corbanu home
+    /// either. What is below it keeps these rules: its runtime entries stay
+    /// readable, everything else stays denied.
+    pub(crate) fn deny_home_listing(&mut self) {
+        self.home_listing_denied = true;
+    }
+
+    /// The folder whose listing is denied, if any.
+    pub(crate) fn unlistable_home(&self) -> Option<&AbsolutePathBuf> {
+        self.home.as_ref().filter(|_| self.home_listing_denied)
+    }
+
     /// Every path made read-only.
     pub(crate) fn read_only_paths(&self) -> impl Iterator<Item = &AbsolutePathBuf> {
         self.runtime_read_only.iter().chain(&self.read_only)
@@ -330,6 +350,10 @@ impl ReadDenials {
                     FileSystemAccessMode::Deny,
                 )
             }))
+            .chain(
+                self.unlistable_home()
+                    .map(FileSystemSandboxEntry::deny_directory_listing),
+            )
             .collect();
         if entries.is_empty() && self.read_only.is_empty() && self.runtime_read_only.is_empty() {
             return Some(profile.clone());
@@ -408,14 +432,15 @@ pub(crate) fn protect_file_tool_context(
     turn: &crate::session::turn_context::TurnContext,
     mut context: codex_file_system::FileSystemSandboxContext,
 ) -> codex_file_system::FileSystemSandboxContext {
-    if session
+    let Some(state) = session
         .services
         .model_client()
         .post_taint_state()
-        .is_none_or(|state| !state.protected_paths_apply())
-    {
+        .filter(crate::security::tainted_action::PostTaintState::protected_paths_apply)
+    else {
         return context;
-    }
+    };
+    let aggressive = state.level == codex_security_policy::SecurityLevel::Aggressive;
     let Ok(profile) = PermissionProfile::try_from(context.permissions.clone()) else {
         // Unreadable permissions: no file access at all (fail closed).
         context.permissions = PermissionProfile::from_runtime_permissions(
@@ -434,12 +459,16 @@ pub(crate) fn protect_file_tool_context(
         .collect();
     // Keep roots come from the turn's own profile: extra permissions granted
     // to this call never make a denied folder readable.
-    let denials = ReadDenials::for_turn(
+    let mut denials = ReadDenials::for_turn(
         turn.config.codex_home.as_path(),
         &turn_cwd,
         &workspace_roots,
         turn.config.permissions.permission_profile(),
     );
+    // #506: file tools list folders inside the sandbox, so the same denial.
+    if aggressive {
+        denials.deny_home_listing();
+    }
     if let Some(protected) = denials.apply(&profile) {
         context.permissions = protected.into();
     }

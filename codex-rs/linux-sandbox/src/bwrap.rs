@@ -242,8 +242,14 @@ pub(crate) fn create_bwrap_command_args(
     let unreadable_globs =
         file_system_sandbox_policy.get_unreadable_globs_with_cwd(sandbox_policy_cwd);
     // Full disk write normally skips bwrap, but unreadable glob patterns still
-    // need concrete bwrap masks for the matches expanded below.
-    if file_system_sandbox_policy.has_full_disk_write_access() && unreadable_globs.is_empty() {
+    // need concrete bwrap masks for the matches expanded below, and an
+    // unlistable directory (#506) its own mount.
+    if file_system_sandbox_policy.has_full_disk_write_access()
+        && unreadable_globs.is_empty()
+        && file_system_sandbox_policy
+            .get_unlistable_directories()
+            .is_empty()
+    {
         return if options.network_mode == BwrapNetworkMode::FullAccess {
             Ok(BwrapArgs {
                 args: command,
@@ -384,7 +390,10 @@ fn create_filesystem_args(
         .collect::<Vec<_>>();
     if writable_roots.is_empty()
         && file_system_sandbox_policy.has_full_disk_write_access()
-        && !unreadable_globs.is_empty()
+        && (!unreadable_globs.is_empty()
+            || !file_system_sandbox_policy
+                .get_unlistable_directories()
+                .is_empty())
     {
         writable_roots.push(WritableRoot {
             root: AbsolutePathBuf::from_absolute_path("/")?,
@@ -531,6 +540,26 @@ fn create_filesystem_args(
     let unreadable_paths: HashSet<PathBuf> = unreadable_roots.iter().cloned().collect();
     let mut sorted_writable_roots = writable_roots;
     sorted_writable_roots.sort_by_key(|writable_root| path_depth(writable_root.root.as_path()));
+    // #506: each unlistable directory is mounted in the pass that exposes it:
+    // the deepest writable root above it, or the read baseline.
+    let unlistable_directories = unlistable_directories_by_pass(
+        file_system_sandbox_policy,
+        cwd,
+        &sorted_writable_roots,
+        &unreadable_roots,
+    );
+    let mut unlisted = Vec::new();
+    for (pass, directory) in &unlistable_directories {
+        if pass.is_none()
+            && append_unlistable_directory_args(
+                &mut bwrap_args.args,
+                directory,
+                /*writable*/ false,
+            )
+        {
+            unlisted.push(directory.clone());
+        }
+    }
     // Mask only the unreadable ancestors that sit outside every writable root.
     // Unreadable paths nested under a broader writable root are applied after
     // that broader root is bound, then reopened by any deeper writable child.
@@ -592,6 +621,19 @@ fn create_filesystem_args(
         if dev.starts_with(mount_root) && mount_root != dev {
             bwrap_args.args.push("--dev".to_string());
             bwrap_args.args.push("/dev".to_string());
+        }
+        // #506: before this pass's read-only and deny mounts, which then
+        // apply to the rebound entries as they would to the originals.
+        for (pass, directory) in &unlistable_directories {
+            if pass.as_deref() == Some(mount_root)
+                && append_unlistable_directory_args(
+                    &mut bwrap_args.args,
+                    directory,
+                    /*writable*/ true,
+                )
+            {
+                unlisted.push(directory.clone());
+            }
         }
 
         let mut read_only_subpaths: Vec<PathBuf> = writable_root
@@ -725,8 +767,115 @@ fn create_filesystem_args(
     for unreadable_root in rootless_unreadable_roots {
         append_unreadable_root_args(&mut bwrap_args, &unreadable_root, &allowed_write_paths)?;
     }
+    // #506: last, once every mount target below them exists, so the command
+    // cannot change their mode (or add entries) either.
+    for directory in unlisted {
+        bwrap_args.args.push("--remount-ro".to_string());
+        bwrap_args.args.push(path_to_string(&directory));
+    }
 
     Ok(bwrap_args)
+}
+
+/// #506: the policy's unlistable directories that exist and the command can
+/// see, by real location, each with the mount root of the deepest writable
+/// root above it (`None`: the read baseline exposes it). A directory that is
+/// itself a writable root, or hidden by a deny mask, is left out.
+fn unlistable_directories_by_pass(
+    file_system_sandbox_policy: &FileSystemSandboxPolicy,
+    cwd: &Path,
+    writable_roots: &[WritableRoot],
+    unreadable_roots: &[PathBuf],
+) -> Vec<(Option<PathBuf>, PathBuf)> {
+    let mount_roots: Vec<PathBuf> = writable_roots
+        .iter()
+        .map(|root| {
+            canonical_target_if_symlinked_path(root.root.as_path())
+                .unwrap_or_else(|| root.root.to_path_buf())
+        })
+        .collect();
+    let readable_roots = file_system_sandbox_policy.get_readable_roots_with_cwd(cwd);
+    let mut directories = Vec::new();
+    for directory in file_system_sandbox_policy.get_unlistable_directories() {
+        let Ok(directory) = directory.as_path().canonicalize() else {
+            continue;
+        };
+        if !directory.is_dir() || mount_roots.iter().any(|root| *root == directory) {
+            continue;
+        }
+        let pass = mount_roots
+            .iter()
+            .filter(|root| directory.starts_with(root))
+            .max_by_key(|root| path_depth(root))
+            .cloned();
+        // Hidden by a deny mask no writable root below it reopens.
+        let hidden = unreadable_roots.iter().any(|unreadable| {
+            directory.starts_with(unreadable)
+                && !pass
+                    .as_ref()
+                    .is_some_and(|root| root.starts_with(unreadable))
+        });
+        let exposed = pass.is_some()
+            || file_system_sandbox_policy.has_full_disk_read_access()
+            || readable_roots
+                .iter()
+                .any(|root| directory.starts_with(root.as_path()));
+        if !hidden && exposed && !directories.iter().any(|(_, known)| *known == directory) {
+            directories.push((pass, directory));
+        }
+    }
+    directories
+}
+
+/// #506: replace `directory` with an empty folder only its owner can pass
+/// through (mode 0111: no listing), and put each entry back as it was:
+/// links as links, everything else bound from the host. The folder is made
+/// read-only at the end (see [`create_filesystem_args`]). Returns whether the
+/// mounts were added (`false`: the directory could not be read).
+fn append_unlistable_directory_args(
+    args: &mut Vec<String>,
+    directory: &Path,
+    writable: bool,
+) -> bool {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return false;
+    };
+    let mut children: Vec<(PathBuf, Option<PathBuf>)> = entries
+        .flatten()
+        .map(|entry| {
+            let path = entry.path();
+            let link = entry
+                .file_type()
+                .is_ok_and(|kind| kind.is_symlink())
+                .then(|| fs::read_link(&path).ok())
+                .flatten();
+            (path, link)
+        })
+        .collect();
+    children.sort();
+    args.extend([
+        "--perms".to_string(),
+        "111".to_string(),
+        "--tmpfs".to_string(),
+        path_to_string(directory),
+    ]);
+    for (child, link) in children {
+        let child = path_to_string(&child);
+        match link {
+            Some(target) => args.extend(["--symlink".to_string(), path_to_string(&target), child]),
+            None => args.extend([
+                if writable {
+                    "--bind-try"
+                } else {
+                    "--ro-bind-try"
+                }
+                .to_string(),
+                child.clone(),
+                child,
+            ]),
+        }
+    }
+    true
 }
 
 fn append_protected_create_targets_for_writable_root(
@@ -3226,5 +3375,90 @@ mod tests {
             .iter()
             .map(|target| target.path().to_path_buf())
             .collect()
+    }
+
+    /// #506: an unlistable directory becomes an empty mode-0111 folder with
+    /// its entries put back, in the pass that exposes it (the read baseline,
+    /// or the writable root above it), before that pass's deny masks, and is
+    /// made read-only last.
+    #[test]
+    fn issue_506_unlistable_directory_is_rebuilt_without_listing() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let base = temp_dir.path().canonicalize().expect("canonical");
+        let home = base.join("home");
+        std::fs::create_dir_all(home.join("tmp")).expect("tmp");
+        std::fs::write(home.join("secret.txt"), "secret").expect("secret");
+        std::os::unix::fs::symlink("tmp", home.join("link")).expect("link");
+        let home_path = AbsolutePathBuf::from_absolute_path(&home).expect("absolute");
+        let home_str = path_to_string(&home);
+        let tmp_str = path_to_string(&home.join("tmp"));
+        let secret_str = path_to_string(&home.join("secret.txt"));
+        for (root_access, bind) in [
+            (FileSystemAccessMode::Read, "--ro-bind-try"),
+            (FileSystemAccessMode::Write, "--bind-try"),
+        ] {
+            let policy = FileSystemSandboxPolicy::restricted(vec![
+                FileSystemSandboxEntry::new(
+                    FileSystemPath::Special {
+                        value: FileSystemSpecialPath::Root,
+                    },
+                    root_access,
+                ),
+                FileSystemSandboxEntry::new(
+                    FileSystemPath::Path {
+                        path: home_path.join("secret.txt"),
+                    },
+                    FileSystemAccessMode::Deny,
+                ),
+                FileSystemSandboxEntry::deny_directory_listing(&home_path),
+            ]);
+            let args = create_filesystem_args(&policy, &base, NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
+                .expect("filesystem args")
+                .args;
+            let position = |window: &[&str]| {
+                args.windows(window.len())
+                    .position(|candidate| candidate.iter().zip(window).all(|(a, b)| a == b))
+                    .unwrap_or_else(|| panic!("{root_access:?}: {window:?} missing in {args:?}"))
+            };
+            let tmpfs = position(&["--perms", "111", "--tmpfs", &home_str]);
+            let tmp = position(&[bind, &tmp_str, &tmp_str]);
+            let link = position(&["--symlink", "tmp", &path_to_string(&home.join("link"))]);
+            let secret = position(&[bind, &secret_str, &secret_str]);
+            let secret_mask = position(&["--perms", "000", "--ro-bind-data"]);
+            let remount = position(&["--remount-ro", &home_str]);
+            assert!(tmpfs < tmp && tmpfs < link && tmpfs < secret, "{args:?}");
+            assert!(secret < secret_mask, "{args:?}");
+            assert_eq!(remount, args.len() - 2, "{args:?}");
+            if root_access == FileSystemAccessMode::Write {
+                assert!(position(&["--bind", "/", "/"]) < tmpfs, "{args:?}");
+            }
+        }
+    }
+
+    /// #506: full write with only an unlistable directory still needs bwrap.
+    #[test]
+    fn issue_506_full_write_with_an_unlistable_directory_is_wrapped() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let home = AbsolutePathBuf::from_absolute_path(temp_dir.path()).expect("absolute");
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry::new(
+                FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                FileSystemAccessMode::Write,
+            ),
+            FileSystemSandboxEntry::deny_directory_listing(&home),
+        ]);
+        let command = vec!["/bin/true".to_string()];
+        let args = create_bwrap_command_args(
+            command.clone(),
+            &policy,
+            Path::new("/"),
+            Path::new("/"),
+            BwrapOptions::default(),
+        )
+        .expect("bwrap args");
+        assert_ne!(args.args, command);
+        assert!(args.args.iter().any(|arg| arg == "--remount-ro"));
     }
 }
