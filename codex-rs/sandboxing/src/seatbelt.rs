@@ -422,15 +422,19 @@ fn reached_through_root(path: &AbsolutePathBuf, root: &AbsolutePathBuf) -> bool 
 
 /// Whether `path` (another root's protected path) is the explicit writable
 /// root `root` itself, which stays writable (#529): spelled alike once links
-/// resolve, with no link in `root` below its top-level folder. A root that
+/// resolve (also not created yet), with no link in `root` below its
+/// top-level folder. A root that
 /// is (or passes through) such a link, like a writable link to a
 /// workspace's `.git`, reopens nothing.
 fn is_explicit_root(path: &AbsolutePathBuf, root: &AbsolutePathBuf) -> bool {
     if has_nested_link(root.as_path()) {
         return false;
     }
-    let root_spelling = normalize_path_for_sandbox(root.as_path()).unwrap_or_else(|| root.clone());
-    path == root || exclusion_spellings(path).contains(&root_spelling)
+    let root_spellings = exclusion_spellings(root);
+    path == root
+        || exclusion_spellings(path)
+            .iter()
+            .any(|spelling| root_spellings.contains(spelling))
 }
 
 /// Whether a folder of `path` below its top-level one is a link (`/tmp` and
@@ -910,12 +914,17 @@ pub fn create_seatbelt_command_args(
     };
     // #529: each root's protected paths (read-only paths and protected
     // metadata names, also not created yet), once the policy denies reads.
+    // A root not created yet protects nothing yet (Linux skips it too), so
+    // it can still be created inside another root.
     let protected_by_root: Vec<Vec<AbsolutePathBuf>> = if unreadable_roots.is_empty() {
         Vec::new()
     } else {
         writable_roots
             .iter()
             .map(|root| {
+                if !root.root.as_path().exists() {
+                    return Vec::new();
+                }
                 let mut protected = root.read_only_subpaths.clone();
                 for name in protected_metadata_names_for_writable_root(
                     file_system_sandbox_policy,

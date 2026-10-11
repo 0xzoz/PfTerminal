@@ -2280,3 +2280,26 @@ fn an_explicit_writable_root_stays_writable_under_another_spelling() {
     let stdout = run_in_seatbelt(&policy, &link, &script);
     assert_lines(&stdout, &["git=0", "linkgit=0"]);
 }
+
+/// #529 review: a configured writable root not created yet inside another
+/// writable root (a `target` folder before the first build) can be created.
+#[test]
+fn a_missing_writable_root_inside_another_root_can_be_created() {
+    let base = TempDir::new().expect("tempdir");
+    let base = base.path().canonicalize().expect("canonical");
+    let workspace = base.join("ws");
+    fs::create_dir_all(&workspace).expect("ws");
+    let target = workspace.join("target");
+    let policy = FileSystemSandboxPolicy::restricted(vec![
+        root_read_entry(),
+        path_entry(&workspace, FileSystemAccessMode::Write),
+        path_entry(&target, FileSystemAccessMode::Write),
+        path_entry(&base.join("denied"), FileSystemAccessMode::Deny),
+    ]);
+    let script = format!(
+        "mkdir '{target}'; echo target=$?; echo x > '{target}/out'; echo out=$?",
+        target = target.display(),
+    );
+    let stdout = run_in_seatbelt(&policy, &workspace, &script);
+    assert_lines(&stdout, &["target=0", "out=0"]);
+}
