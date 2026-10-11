@@ -7,6 +7,7 @@ retry with an escalated sandbox strategy on denial (no re‑approval thanks to
 caching).
 */
 use super::approvals::ApprovalReviewer;
+use super::approvals::DeclineRecord;
 use super::approvals::resolve_tool_apporval;
 use crate::network_policy_decision::network_approval_context_from_payload;
 use crate::tools::flat_tool_name;
@@ -217,7 +218,7 @@ impl ToolOrchestrator {
                 tool_ctx,
                 ApprovalReviewer::User,
                 &otel,
-                /*record_decline*/ false,
+                DeclineRecord::ByCaller,
             )
             .await;
             pending.answered();
@@ -288,7 +289,7 @@ impl ToolOrchestrator {
                     tool_ctx,
                     ApprovalReviewer::User,
                     &otel,
-                    /*record_decline*/ true,
+                    DeclineRecord::Here,
                 )
                 .await?;
                 already_approved = true;
@@ -312,7 +313,7 @@ impl ToolOrchestrator {
                         tool_ctx,
                         ApprovalReviewer::Guardian,
                         &otel,
-                        /*record_decline*/ true,
+                        DeclineRecord::Here,
                     )
                     .await?;
                     already_approved = true;
@@ -353,7 +354,7 @@ impl ToolOrchestrator {
                     tool_ctx,
                     reviewer,
                     &otel,
-                    /*record_decline*/ true,
+                    DeclineRecord::Here,
                 )
                 .await?;
                 already_approved = true;
@@ -613,7 +614,7 @@ impl ToolOrchestrator {
                             ApprovalReviewer::for_turn(turn_ctx)
                         },
                         &otel,
-                        /*record_decline*/ true,
+                        DeclineRecord::Here,
                     )
                     .await?;
                     if let Some(action) = &post_taint {

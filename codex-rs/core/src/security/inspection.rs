@@ -310,14 +310,17 @@ pub(crate) fn record_declined_approval(
 pub(crate) struct PendingApproval {
     thread: ThreadId,
     what: &'static str,
+    /// The person was asked (not a hook or the automatic reviewer).
+    asks_person: bool,
     answered: bool,
 }
 
 impl PendingApproval {
-    pub(crate) fn new(thread: ThreadId, what: &'static str) -> Self {
+    pub(crate) fn new(thread: ThreadId, what: &'static str, asks_person: bool) -> Self {
         Self {
             thread,
             what,
+            asks_person,
             answered: false,
         }
     }
@@ -334,7 +337,11 @@ impl Drop for PendingApproval {
             record(
                 Some(self.thread),
                 self.what,
-                "declined by you (turn interrupted)",
+                if self.asks_person {
+                    "declined by you (turn interrupted)"
+                } else {
+                    "not run (turn interrupted)"
+                },
             );
         }
     }
