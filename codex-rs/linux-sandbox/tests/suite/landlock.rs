@@ -1594,24 +1594,26 @@ async fn issue_442_env_created_by_a_sandboxed_command_stops_it_and_stays_hidden(
     }
 }
 
-/// #442, real bubblewrap: files the person creates between commands, and
-/// what a `.env` link points to, are unreadable to the next command.
+/// #442, real bubblewrap: files the person creates between commands, in any
+/// letter case and through a `.env` link to another credential file, are
+/// unreadable to the next command.
 #[tokio::test]
 async fn issue_442_env_created_between_commands_and_env_links_stay_hidden() {
     let Some((_tmpdir, work)) = credential_workspace().await else {
         return;
     };
     std::fs::write(work.join("app/.env"), "API_KEY=dummy-442-person").unwrap();
-    std::fs::write(work.join("shared.secret"), "API_KEY=dummy-442-linked").unwrap();
-    std::os::unix::fs::symlink("shared.secret", work.join(".envrc")).unwrap();
+    std::fs::write(work.join(".ENV.Local"), "API_KEY=dummy-442-case").unwrap();
+    std::fs::write(work.join(".env.development"), "API_KEY=dummy-442-linked").unwrap();
+    std::os::unix::fs::symlink(".env.development", work.join(".envrc")).unwrap();
     let read = run_in(
         &work,
-        "for f in app/.env .envrc; do cat \"$f\"; echo \"$f=$?\"; done; cat notes.txt",
+        "for f in app/.env .ENV.Local .envrc; do cat \"$f\"; echo \"$f=$?\"; done; cat notes.txt",
     )
     .await;
     let text = format!("{}{}", read.stdout.text, read.stderr.text);
     assert!(!text.contains("dummy-442"), "{text}");
-    for line in ["app/.env=1", ".envrc=1", "plain-notes"] {
+    for line in ["app/.env=1", ".ENV.Local=1", ".envrc=1", "plain-notes"] {
         assert!(read.stdout.text.contains(line), "{line} not in {text}");
     }
 }
@@ -1650,7 +1652,8 @@ async fn issue_442_env_created_while_a_command_runs_stops_it() {
 
 /// #442, real bubblewrap: a link planted under a credential name stops the
 /// command that plants it, and later commands are refused until it is
-/// removed, so the person's `.env` can never be written through it.
+/// removed, so the person's `.env` can never be written through it to a
+/// file the command can read.
 #[tokio::test]
 async fn issue_442_a_planted_env_link_refuses_later_commands() {
     let Some((_tmpdir, work)) = credential_workspace().await else {
@@ -1665,21 +1668,21 @@ async fn issue_442_a_planted_env_link_refuses_later_commands() {
             .contains("the sandbox stopped this command"),
         "{planted:?}"
     );
-    // While the link points nowhere, commands are refused.
-    let refused = run_in(&work, "cat notes.txt; echo notes=$?").await;
-    let text = format!("{}{}", refused.stdout.text, refused.stderr.text);
-    assert!(!text.contains("notes="), "{text}");
-    assert!(text.contains("is a link to nothing"), "{text}");
-    // The person writes the key through the link: its target is hidden too.
-    std::fs::write(work.join(".env"), "API_KEY=dummy-442-planted").unwrap();
-    let read = run_in(
-        &work,
-        "cat notes-later; echo target=$?; cat .env; echo link=$?",
-    )
-    .await;
-    let text = format!("{}{}", read.stdout.text, read.stderr.text);
-    assert!(!text.contains("dummy-442"), "{text}");
-    for line in ["target=1", "link=1"] {
-        assert!(read.stdout.text.contains(line), "{line} not in {text}");
+    for state in ["dangling", "written through"] {
+        if state == "written through" {
+            // The person writes the key through the link.
+            std::fs::write(work.join(".env"), "API_KEY=dummy-442-planted").unwrap();
+        }
+        let refused = run_in(&work, "cat notes-later; echo read=$?").await;
+        let text = format!("{}{}", refused.stdout.text, refused.stderr.text);
+        assert!(!text.contains("dummy-442"), "{state}: {text}");
+        assert!(!text.contains("read="), "{state}: {text}");
+        assert!(
+            text.contains("the sandbox refuses to run this command"),
+            "{state}: {text}"
+        );
     }
+    std::fs::remove_file(work.join(".env")).unwrap();
+    let after = run_in(&work, "cat notes.txt; echo notes=$?").await;
+    assert!(after.stdout.text.contains("notes=0"), "{after:?}");
 }

@@ -363,7 +363,7 @@ fn run_bwrap_with_proc_fallback(
     });
     let mut file_system_sandbox_policy = file_system_sandbox_policy.clone();
     if let Some(watcher) = &credential_watcher {
-        for target in watcher.link_targets() {
+        for target in watcher.existing_files() {
             if let Ok(path) = codex_utils_absolute_path::AbsolutePathBuf::from_absolute_path(target)
             {
                 file_system_sandbox_policy

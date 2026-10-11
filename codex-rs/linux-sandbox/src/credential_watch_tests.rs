@@ -139,36 +139,50 @@ fn other_names_and_placeholders_do_not_stop_the_command() {
     child.wait().unwrap();
 }
 
-/// What existing links with a credential name point to is reported, so the
-/// sandbox can hide it (the glob expansion does not list links).
+/// Existing credential files are reported in every letter case, so the
+/// sandbox hides them (the glob expansion matches the exact case only); a
+/// link to one of them, or to a folder, is safe.
 #[test]
-fn link_targets_are_reported() {
+fn existing_credential_files_are_reported_in_any_case() {
     let dir = tempfile::tempdir().unwrap();
     let work = root(&dir);
     std::fs::create_dir_all(work.join("app")).unwrap();
-    std::fs::write(work.join("shared.secret"), "API_KEY=dummy").unwrap();
-    std::os::unix::fs::symlink("../shared.secret", work.join("app/.env")).unwrap();
-    std::os::unix::fs::symlink(".", work.join(".env.dir")).unwrap();
+    std::fs::write(work.join(".env.development"), "API_KEY=dummy").unwrap();
+    std::fs::write(work.join("app/.ENV.Local"), "API_KEY=dummy").unwrap();
+    std::os::unix::fs::symlink(".env.development", work.join(".env")).unwrap();
+    std::os::unix::fs::symlink("app", work.join(".env.dir")).unwrap();
     let policy = deny_globs(credential_file_globs(&work.to_string_lossy()));
     let watcher = CredentialWatcher::for_policy(&policy, &work)
         .unwrap()
         .unwrap();
-    assert_eq!(watcher.link_targets(), [work.join("shared.secret")]);
+    let mut existing = watcher.existing_files().to_vec();
+    existing.sort();
+    assert_eq!(
+        existing,
+        vec![work.join(".env.development"), work.join("app/.ENV.Local")]
+    );
 }
+
+/// Puts an unsafe credential entry in a folder.
+type Plant = fn(&Path);
 
 /// A credential name that is not a plain file refuses the command: what the
 /// person writes to it would land where the command can read it.
 #[test]
 fn unsafe_credential_entries_refuse_the_command() {
-    let cases: [(&str, fn(&Path)); 3] = [
+    let cases: [(&str, Plant); 4] = [
         ("is a link to nothing", |work| {
             std::os::unix::fs::symlink("planted", work.join(".env")).unwrap();
+        }),
+        ("is a link to a file that is not itself", |work| {
+            std::fs::write(work.join("notes"), "").unwrap();
+            std::os::unix::fs::symlink("notes", work.join(".env")).unwrap();
         }),
         ("has other hard links", |work| {
             std::fs::write(work.join("notes"), "").unwrap();
             std::fs::hard_link(work.join("notes"), work.join(".env.local")).unwrap();
         }),
-        ("is a pipe or socket", |work| {
+        ("is not a regular file", |work| {
             let path = std::ffi::CString::new(work.join(".envrc").as_os_str().as_bytes()).unwrap();
             assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
         }),

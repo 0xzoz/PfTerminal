@@ -2072,8 +2072,8 @@ fn sandboxed_commands_cannot_read_denied_files_through_a_nested_link() {
 }
 
 /// #442 (Travis, 2026-10-11), real `sandbox-exec`: under credential-name deny
-/// globs an agent command can neither read such a file (also by a case alias)
-/// nor create, link, rename to or overwrite one, so it cannot plant a link or
+/// globs an agent command can neither read such a file nor create, link,
+/// rename to or overwrite one, in any letter case, so it cannot plant a link or
 /// pipe that the person's later `.env` would be written through. A folder
 /// with such a name (a `.env` virtualenv) and other files stay usable.
 #[test]
@@ -2112,6 +2112,7 @@ fn credential_names_cannot_be_read_created_or_planted() {
          printf x > .env.local; echo create=$?; ln notes .env.hard; echo hard=$?; \
          ln -s notes .envrc; echo sym=$?; mkfifo .env.pipe; echo fifo=$?; \
          cp notes n2 && mv n2 .env.moved; echo moved=$?; mv .env gone; echo away=$?; \
+         printf x > .ENV.Local; echo upper=$?; ln -s notes .ENVRC; echo upperlink=$?; \
          mkdir .env.venv && printf ok > .env.venv/bin; echo venv=$?; \
          printf ok > other; cat other; echo other=$?";
     let args = create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
@@ -2144,6 +2145,8 @@ fn credential_names_cannot_be_read_created_or_planted() {
         "fifo=1",
         "moved=1",
         "away=1",
+        "upper=1",
+        "upperlink=1",
         "venv=0",
         "okother=0",
     ] {
@@ -2159,6 +2162,8 @@ fn credential_names_cannot_be_read_created_or_planted() {
         ".envrc",
         ".env.pipe",
         ".env.moved",
+        ".ENV.Local",
+        ".ENVRC",
     ] {
         assert!(
             fs::symlink_metadata(work.join(planted)).is_err(),

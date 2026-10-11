@@ -42,10 +42,54 @@ pub fn is_protected_metadata_name(name: &OsStr) -> bool {
 /// pattern is one path component in the filesystem policy's glob syntax.
 pub const CREDENTIAL_FILE_NAME_PATTERNS: &[&str] = &[".env", ".env.*", ".envrc"];
 
-/// Whether `name` matches one of [`CREDENTIAL_FILE_NAME_PATTERNS`].
+/// Whether `name` matches one of [`CREDENTIAL_FILE_NAME_PATTERNS`], in any
+/// case: on a case-insensitive filesystem `.ENV` is the same file as `.env`.
 pub fn is_credential_file_name(name: &OsStr) -> bool {
-    let name = name.as_encoded_bytes();
+    let name = name.as_encoded_bytes().to_ascii_lowercase();
     name == b".env" || name == b".envrc" || name.starts_with(b".env.")
+}
+
+/// Why an existing credential-named entry (not a folder) at `path` is unsafe:
+/// whatever the person writes to it would land where agent commands could
+/// read it. Safe are a plain file with no other hard links, and a link to
+/// such a file that also has a credential name and lies below one of
+/// `roots`, or to a folder.
+pub fn credential_entry_problem(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+    roots: &[PathBuf],
+) -> Option<&'static str> {
+    let kind = metadata.file_type();
+    if kind.is_file() {
+        return (hard_links(metadata) > 1).then_some("has other hard links");
+    }
+    if !kind.is_symlink() {
+        return Some("is not a regular file (a pipe, socket or device)");
+    }
+    let Ok(target) = std::fs::canonicalize(path) else {
+        return Some("is a link to nothing");
+    };
+    let Ok(target_metadata) = std::fs::metadata(&target) else {
+        return Some("is a link to nothing");
+    };
+    if target_metadata.is_dir() {
+        return None;
+    }
+    let safe_target = target_metadata.is_file()
+        && hard_links(&target_metadata) <= 1
+        && target.file_name().is_some_and(is_credential_file_name)
+        && roots.iter().any(|root| target.starts_with(root));
+    (!safe_target).then_some("is a link to a file that is not itself a protected credential file")
+}
+
+#[cfg(unix)]
+fn hard_links(metadata: &std::fs::Metadata) -> u64 {
+    std::os::unix::fs::MetadataExt::nlink(metadata)
+}
+
+#[cfg(not(unix))]
+fn hard_links(_metadata: &std::fs::Metadata) -> u64 {
+    1
 }
 
 /// The deny globs that cover every credential file name below `root`, now
@@ -338,7 +382,10 @@ impl ReadDenyMatcher {
         let mut invalid_pattern = false;
         let mut deny_read_matchers = Vec::new();
         for pattern in file_system_sandbox_policy.get_unreadable_globs_with_cwd(cwd) {
-            match build_glob_matcher(&pattern) {
+            // Credential names match in any case (`.ENV` on a
+            // case-insensitive filesystem is `.env`).
+            let case_insensitive = credential_file_glob_root(&pattern).is_some();
+            match build_glob_matcher(&pattern, case_insensitive) {
                 Ok(matcher) => deny_read_matchers.push(matcher),
                 Err(err) => match invalid_glob_behavior {
                     InvalidDenyReadGlobBehavior::FailClosed => invalid_pattern = true,
@@ -1551,12 +1598,13 @@ fn push_unique(candidates: &mut Vec<PathBuf>, candidate: PathBuf) {
     }
 }
 
-fn build_glob_matcher(pattern: &str) -> Result<GlobMatcher, String> {
+fn build_glob_matcher(pattern: &str, case_insensitive: bool) -> Result<GlobMatcher, String> {
     // Keep `*` and `?` within a single path component and preserve an unclosed
     // `[` as a literal so matcher behavior stays aligned with config parsing.
     GlobBuilder::new(pattern)
         .literal_separator(true)
         .allow_unclosed_class(true)
+        .case_insensitive(case_insensitive)
         .build()
         .map(|glob| glob.compile_matcher())
         .map_err(|err| err.to_string())
@@ -3553,7 +3601,15 @@ mod tests {
     /// folder each glob covers.
     #[test]
     fn credential_file_names_globs_and_roots() {
-        for name in [".env", ".env.local", ".env.", ".envrc"] {
+        for name in [
+            ".env",
+            ".env.local",
+            ".env.",
+            ".envrc",
+            ".ENV",
+            ".Env.Local",
+            ".ENVRC",
+        ] {
             assert!(is_credential_file_name(OsStr::new(name)), "{name}");
         }
         for name in [".envrcx", "x.env", ".environment", "env", ".en"] {
@@ -3595,7 +3651,13 @@ mod tests {
                 })
                 .collect(),
         );
-        for denied in [".env", "app/.env.local", "a/b/c/.envrc"] {
+        for denied in [
+            ".env",
+            "app/.env.local",
+            "a/b/c/.envrc",
+            "app/.ENV",
+            ".Env.local",
+        ] {
             assert!(
                 is_read_denied(&temp.path().join(denied), &policy, temp.path()),
                 "{denied}"
@@ -3607,5 +3669,50 @@ mod tests {
                 "{allowed}"
             );
         }
+    }
+
+    /// #442: which existing credential-named entries are unsafe because what
+    /// the person writes to them would land somewhere readable.
+    #[cfg(unix)]
+    #[test]
+    fn credential_entry_problems() {
+        let temp = TempDir::new().expect("tempdir");
+        let root = temp.path().canonicalize().expect("canonical");
+        let roots = [root.clone()];
+        fs::write(root.join("notes"), "").expect("notes");
+        fs::write(root.join(".env.development"), "").expect("env");
+        fs::create_dir(root.join("venv")).expect("dir");
+        fs::write(root.join(".env"), "").expect("env");
+        fs::write(root.join("linked"), "").expect("linked");
+        fs::hard_link(root.join("linked"), root.join(".env.hard")).expect("hard");
+        let links = [
+            (".env.dev", ".env.development", None),
+            (".env.venv", "venv", None),
+            (
+                ".env.notes",
+                "notes",
+                Some("is a link to a file that is not itself a protected credential file"),
+            ),
+            (".env.none", "missing", Some("is a link to nothing")),
+        ];
+        for (name, target, _) in &links {
+            std::os::unix::fs::symlink(target, root.join(name)).expect("link");
+        }
+        let problem = |name: &str| {
+            let path = root.join(name);
+            let metadata = fs::symlink_metadata(&path).expect("metadata");
+            credential_entry_problem(&path, &metadata, &roots)
+        };
+        assert_eq!(problem(".env"), None);
+        assert_eq!(problem(".env.hard"), Some("has other hard links"));
+        for (name, _, expected) in links {
+            assert_eq!(problem(name), expected, "{name}");
+        }
+        // A link to a credential file outside the roots is unsafe too.
+        let other = TempDir::new().expect("tempdir");
+        fs::write(other.path().join(".env"), "").expect("env");
+        std::os::unix::fs::symlink(other.path().join(".env"), root.join(".env.outside"))
+            .expect("link");
+        assert!(problem(".env.outside").is_some());
     }
 }

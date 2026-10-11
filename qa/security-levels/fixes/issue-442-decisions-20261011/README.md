@@ -63,7 +63,7 @@ the core tests with a plain workspace-write profile) lifted them. The grant revi
     entries refused, `.env` folders and temporary build folders not stopped).
   - Core: `pf_25_s01::issue_442_a_confirmed_grant_never_lifts_codex_or_agents` (before: `codex=0 agents=0`),
     `read_denials::issue_442_a_grant_keeps_codex_and_agents_read_only`,
-    `pf_23_s01::issue_442_env_file_created_mid_session_is_denied_and_explained`,
+    `pf_23_s01::issue_442_env_file_matched_by_name_is_denied_and_explained`,
     `pf_23_s01::issue_442_permissive_is_unchanged`.
 - tmux functional check (GLM 5.3 Flash, disposable home, `CORBANU_TEST_NO_NATIVE_KEYRING=1`, Aggressive after restart),
   [scripts](scripts), [captures](captures):

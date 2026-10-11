@@ -6,10 +6,11 @@
 //! denies the credential names ([`CREDENTIAL_FILE_NAME_PATTERNS`]) below a
 //! folder:
 //! - every command hides the matches that exist when it starts (the policy's
-//!   glob expansion, plus what a credential-named link points to);
-//! - a credential name that is not a plain file (a link to nothing, a pipe or
-//!   device, a file with other hard links) refuses the command: whatever the
-//!   person writes to it would land somewhere the command can read;
+//!   glob expansion, plus every letter case);
+//! - a credential name that is not a plain file (a pipe or device, a file
+//!   with other hard links, a link to anything but a folder or a credential
+//!   file below the watched folder) refuses the command: whatever the person
+//!   writes to it would land somewhere the command can read;
 //! - this watcher covers the rest: it watches every folder below that folder
 //!   (inotify) from before that expansion until the command ends, and a
 //!   non-folder with such a name created, linked or moved in meanwhile stops
@@ -32,7 +33,6 @@ use std::os::fd::AsRawFd;
 use std::os::fd::FromRawFd;
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::FileTypeExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::path::PathBuf;
@@ -44,6 +44,7 @@ use std::thread;
 
 use codex_protocol::permissions::CREDENTIAL_FILE_NAME_PATTERNS;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
+use codex_protocol::permissions::credential_entry_problem;
 use codex_protocol::permissions::credential_file_glob_root;
 use codex_protocol::permissions::is_credential_file_name;
 
@@ -54,18 +55,23 @@ const WATCH_MASK: u32 =
     libc::IN_CREATE | libc::IN_MOVED_TO | libc::IN_ONLYDIR | libc::IN_DONT_FOLLOW;
 
 /// Filesystems where a change made elsewhere (the server, the host, another
-/// client) raises no inotify event here.
-const UNWATCHABLE_FILESYSTEMS: &[(i64, &str)] = &[
+/// client) raises no inotify event here. Kernel magic numbers are 32-bit.
+const UNWATCHABLE_FILESYSTEMS: &[(u32, &str)] = &[
     (0x6969, "NFS"),
     (0x517B, "SMB"),
     (0xFF53_4D42, "CIFS"),
     (0xFE53_4D42, "SMB2"),
     (0x0102_1997, "9p"),
     (0x6573_5546, "FUSE"),
-    (0x564c, "NCP"),
-    (0x7346_7461, "Ceph"),
-    (0x0bd0_0bd0, "Lustre"),
-    (0x6a65_6a63, "AFS"),
+    (0x564C, "NCP"),
+    (0x00C3_6400, "Ceph"),
+    (0x0BD0_0BD0, "Lustre"),
+    (0x5346_414F, "AFS"),
+    (0x6B41_4653, "AFS"),
+    (0x7375_7245, "Coda"),
+    (0x7461_636F, "OCFS2"),
+    (0x0116_1970, "GFS2"),
+    (0x786F_4256, "vboxsf"),
 ];
 
 /// The folders whose credential names the policy denies, existing, by their
@@ -111,10 +117,12 @@ pub(crate) struct CredentialWatcher {
     /// Credential files present at the start (hidden by the glob
     /// expansion), with their inode.
     known: HashMap<PathBuf, u64>,
+    /// Every folder watched, to count them once.
+    watched: HashSet<PathBuf>,
     /// Mount points bubblewrap itself creates (empty placeholders).
     placeholders: HashSet<PathBuf>,
-    /// What existing links with a credential name point to.
-    link_targets: Vec<PathBuf>,
+    /// Existing credential files, in any letter case, to hide.
+    existing: Vec<PathBuf>,
 }
 
 /// The watcher running beside one command.
@@ -150,8 +158,9 @@ impl CredentialWatcher {
             roots: roots.clone(),
             folders: HashMap::new(),
             known: HashMap::new(),
+            watched: HashSet::new(),
             placeholders: HashSet::new(),
-            link_targets: Vec::new(),
+            existing: Vec::new(),
         };
         for root in &roots {
             if let Some(refusal) = watcher.watch_tree(root, Scan::Start) {
@@ -161,20 +170,25 @@ impl CredentialWatcher {
         Ok(Some(watcher))
     }
 
-    /// Files that existing links with a credential name point to: the
-    /// command must not read them through the link.
-    pub(crate) fn link_targets(&self) -> &[PathBuf] {
-        &self.link_targets
+    /// The credential files that exist now, in any letter case: the command
+    /// must not read them (the glob expansion matches the exact case only).
+    pub(crate) fn existing_files(&self) -> &[PathBuf] {
+        &self.existing
     }
 
     /// Watches `root` and every folder below it (each before it is listed,
     /// so nothing created meanwhile is missed). Returns why the command must
     /// not run ([`Scan::Start`]) or must stop ([`Scan::Running`]).
     fn watch_tree(&mut self, root: &Path, scan: Scan) -> Option<String> {
-        let parent_device = root
-            .parent()
-            .and_then(|parent| std::fs::metadata(parent).ok())
-            .map(|metadata| metadata.dev());
+        // The starting folders are always checked for their filesystem;
+        // below them, only where the device changes.
+        let parent_device = if self.roots.iter().any(|start| start == root) {
+            None
+        } else {
+            root.parent()
+                .and_then(|parent| std::fs::metadata(parent).ok())
+                .map(|metadata| metadata.dev())
+        };
         let mut pending = vec![(root.to_path_buf(), parent_device)];
         while let Some((folder, parent_device)) = pending.pop() {
             // Only the starting folders must exist; the others may be gone
@@ -196,7 +210,7 @@ impl CredentialWatcher {
                     folder.display()
                 ));
             }
-            if self.folders.len() >= MAX_WATCHED_FOLDERS {
+            if !self.watched.contains(&folder) && self.watched.len() >= MAX_WATCHED_FOLDERS {
                 return Some(format!(
                     "more than {MAX_WATCHED_FOLDERS} folders to watch for credential files below {}",
                     root.display()
@@ -220,6 +234,7 @@ impl CredentialWatcher {
                 ));
             }
             self.folders.insert(wd, folder.clone());
+            self.watched.insert(folder.clone());
             let entries = match std::fs::read_dir(&folder) {
                 Ok(entries) => entries,
                 Err(err) if !required && err.kind() == std::io::ErrorKind::NotFound => continue,
@@ -245,8 +260,17 @@ impl CredentialWatcher {
                 }
                 match scan {
                     Scan::Start => {
-                        if let Some(refusal) = self.check_existing(&path, &metadata) {
-                            return Some(refusal);
+                        if let Some(problem) =
+                            credential_entry_problem(&path, &metadata, &self.roots)
+                        {
+                            return Some(format!(
+                                "the credential file {} {problem}, so what is written to it could \
+                                 be read under another name; remove or rename it",
+                                path.display()
+                            ));
+                        }
+                        if metadata.is_file() {
+                            self.existing.push(path.clone());
                         }
                         self.known.insert(path, metadata.ino());
                     }
@@ -258,38 +282,6 @@ impl CredentialWatcher {
             }
         }
         None
-    }
-
-    /// An existing credential-named entry the command can be protected from:
-    /// a plain file (hidden by the glob expansion) or a link to an existing
-    /// file (its target is hidden too) or folder.
-    fn check_existing(&mut self, path: &Path, metadata: &std::fs::Metadata) -> Option<String> {
-        let kind = metadata.file_type();
-        if kind.is_file() && metadata.nlink() <= 1 {
-            return None;
-        }
-        if kind.is_symlink()
-            && let Ok(target) = std::fs::canonicalize(path)
-        {
-            if target.is_file() {
-                self.link_targets.push(target);
-            }
-            return None;
-        }
-        let what = if kind.is_file() {
-            "has other hard links"
-        } else if kind.is_symlink() {
-            "is a link to nothing"
-        } else if kind.is_fifo() || kind.is_socket() {
-            "is a pipe or socket"
-        } else {
-            "is not a regular file"
-        };
-        Some(format!(
-            "the credential file {} {what}, so what is written to it could be read under another \
-             name; remove or rename it",
-            path.display()
-        ))
     }
 
     /// Starts watching beside the command `child`, which is killed as soon
@@ -442,8 +434,9 @@ fn unwatchable_filesystem(folder: &Path) -> Option<&'static str> {
     if unsafe { libc::statfs(path.as_ptr(), &mut stat) } != 0 {
         return None;
     }
-    #[allow(clippy::useless_conversion)]
-    let kind = i64::from(stat.f_type);
+    // `f_type` is signed on glibc and unsigned on musl; the magic is 32-bit.
+    #[allow(clippy::unnecessary_cast, clippy::cast_possible_truncation)]
+    let kind = stat.f_type as u32;
     UNWATCHABLE_FILESYSTEMS
         .iter()
         .find(|(magic, _)| *magic == kind)

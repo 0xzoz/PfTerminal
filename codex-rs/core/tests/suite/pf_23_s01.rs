@@ -764,7 +764,7 @@ async fn issue_442_aggressive_denied_protected_read_is_explained() -> anyhow::Re
 /// explained like any other protected read.
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn issue_442_env_file_created_mid_session_is_denied_and_explained() -> anyhow::Result<()> {
+async fn issue_442_env_file_matched_by_name_is_denied_and_explained() -> anyhow::Result<()> {
     use codex_protocol::models::PermissionProfile;
     use codex_protocol::permissions::FileSystemAccessMode;
     use codex_protocol::permissions::FileSystemPath;

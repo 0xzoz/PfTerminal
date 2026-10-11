@@ -1006,3 +1006,37 @@ async fn issue_442_credential_files_created_later_stay_unreadable_under_seatbelt
     let read = seatbelt_run(&permissive, "cat .env.production; echo read=$?");
     assert!(read.contains("dummy-made-by-person"), "{read}");
 }
+
+/// #442: the launch check names a credential file made before the session
+/// that the sandbox cannot protect (a link to another file, extra hard links),
+/// and accepts plain files and links to other credential files.
+#[cfg(unix)]
+#[tokio::test]
+async fn issue_442_launch_check_names_unsafe_credential_files() {
+    let cwd = tempfile::tempdir().unwrap();
+    let work = cwd.path().canonicalize().unwrap();
+    std::fs::create_dir(work.join("app")).unwrap();
+    std::fs::write(work.join("notes.txt"), "").unwrap();
+    std::fs::write(work.join(".env.development"), "").unwrap();
+    std::os::unix::fs::symlink(".env.development", work.join(".env")).unwrap();
+    std::fs::write(work.join("app/.env.local"), "").unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let config = load(home.path(), &work, "").await;
+    let origin = config.codex_home.to_path_buf();
+    assert_eq!(verify(&config, true, &origin), Vec::<String>::new());
+
+    std::os::unix::fs::symlink("../notes.txt", work.join("app/.envrc")).unwrap();
+    std::fs::hard_link(work.join("notes.txt"), work.join(".env.hard")).unwrap();
+    let mut failures = verify(&config, true, &origin);
+    failures.sort();
+    assert_eq!(failures.len(), 2, "{failures:?}");
+    assert!(
+        failures[0].contains(".env.hard has other hard links"),
+        "{failures:?}"
+    );
+    assert!(
+        failures[1]
+            .contains(".envrc is a link to a file that is not itself a protected credential file"),
+        "{failures:?}"
+    );
+}

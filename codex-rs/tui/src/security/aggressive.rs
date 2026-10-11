@@ -21,7 +21,9 @@ use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::permissions::CREDENTIAL_FILE_NAME_PATTERNS;
 use codex_protocol::permissions::ReadDenyMatcher;
+use codex_protocol::permissions::credential_entry_problem;
 use codex_protocol::permissions::credential_file_globs;
+use codex_protocol::permissions::is_credential_file_name;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::shell_environment::create_env_from_vars;
 
@@ -470,6 +472,55 @@ fn verify_credential_names(
             CREDENTIAL_FILE_NAME_PATTERNS.join(", ")
         ));
     }
+    failures.extend(unsafe_credential_entries(cwd));
+}
+
+/// Folder entries [`unsafe_credential_entries`] looks at, at most.
+const MAX_CHECKED_ENTRIES: usize = 1_000_000;
+
+/// #442: credential-named entries in the current folder that the sandbox
+/// cannot protect, because what the person writes to them would land where
+/// agent commands can read it (links to other files, extra hard links,
+/// pipes). Agent commands cannot create such names under Aggressive; this
+/// catches ones made before (another session, a checkout).
+fn unsafe_credential_entries(cwd: &Path) -> Vec<String> {
+    let Ok(root) = std::fs::canonicalize(cwd) else {
+        return vec![format!("Sandbox: cannot read {}", cwd.display())];
+    };
+    let roots = [root.clone()];
+    let mut problems = Vec::new();
+    let mut pending = vec![root];
+    let mut seen = 0_usize;
+    while let Some(folder) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            seen += 1;
+            if seen > MAX_CHECKED_ENTRIES {
+                problems.push(format!(
+                    "Sandbox: more than {MAX_CHECKED_ENTRIES} files below {} to check for unsafe credential files; start from a smaller folder",
+                    cwd.display()
+                ));
+                return problems;
+            }
+            let path = entry.path();
+            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if metadata.is_dir() {
+                pending.push(path);
+            } else if is_credential_file_name(&entry.file_name())
+                && let Some(problem) = credential_entry_problem(&path, &metadata, &roots)
+            {
+                problems.push(format!(
+                    "Sandbox: the credential file {} {problem}, so what is written to it could be read under another name; remove or rename it",
+                    path.display()
+                ));
+            }
+        }
+    }
+    problems
 }
 
 /// The registry nested-launch detection reads must be read-only to agent

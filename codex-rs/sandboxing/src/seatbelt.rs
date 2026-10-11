@@ -705,6 +705,12 @@ fn build_seatbelt_unreadable_glob_policy(
         // virtualenv). Otherwise a command could plant a link or pipe under the
         // name and read what the person later writes through it.
         let credential_name = credential_file_glob_root(&pattern).is_some();
+        if credential_name {
+            regexes = regexes
+                .into_iter()
+                .map(|regex| credential_name_in_any_case(&regex))
+                .collect();
+        }
         for regex in regexes {
             let regex = regex.replace('"', "\\\"");
             policy_components.push(format!(r#"(deny file-read* (regex #"{regex}"))"#));
@@ -718,6 +724,23 @@ fn build_seatbelt_unreadable_glob_policy(
     }
 
     policy_components.join("\n")
+}
+
+/// #442: the regex of a credential-name glob with the name matching in any
+/// case. Seatbelt compares the name as stored, and on a case-insensitive
+/// volume a stored `.ENV` is where the person's `.env` writes go.
+fn credential_name_in_any_case(regex: &str) -> String {
+    const NAME: &str = r"\.env";
+    let Some(start) = regex.rfind(NAME) else {
+        return regex.to_string();
+    };
+    let (head, tail) = regex.split_at(start);
+    let tail = &tail[NAME.len()..];
+    let (rc, rest) = match tail.strip_prefix("rc") {
+        Some(rest) => ("[rR][cC]", rest),
+        None => ("", tail),
+    };
+    format!(r"{head}\.[eE][nN][vV]{rc}{rest}")
 }
 
 fn canonicalize_glob_static_prefix_for_sandbox(pattern: &str) -> Option<String> {
