@@ -339,10 +339,9 @@ fn fail_process_with_message(process: &UnifiedExecProcess, message: String) -> U
     UnifiedExecError::process_failed(process.failure_message().unwrap_or(message))
 }
 
-#[allow(clippy::too_many_arguments)]
 /// Issue #443: the command ran, and the sandbox stopped it so quickly that it
 /// ended while starting, before the begin event. Show it like any other
-/// command that ran: its line, its output and its exit code.
+/// command that ran (begin, then end with its output and exit code).
 async fn emit_denied_at_start(
     context: &UnifiedExecContext,
     request: &ExecCommandRequest,
@@ -385,6 +384,7 @@ async fn emit_denied_at_start(
     .await;
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn emit_failed_initial_exec_end_if_unstored(
     process_started_alive: bool,
     context: &UnifiedExecContext,

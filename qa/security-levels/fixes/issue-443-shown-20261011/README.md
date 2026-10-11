@@ -16,3 +16,15 @@ for `head -3 "$CORBANU_HOME/config.toml"`.
 | --- | --- |
 | before (#443 branch at `03f165ac28`) | no command line; only the model's text quoting the denial ([capture](captures/before-home.txt)) |
 | after (this branch at `492a40066b`) | `• Ran head -3 "$CORBANU_HOME/config.toml"` and `└ head: …: Operation not permitted` ([capture](captures/after-home.txt)) |
+
+The two captures also differ on the earlier `corbanu vault list` step. The before binary is the #443 branch, which
+refuses it. The after binary is this branch, cut from `main` without #443, so the command runs and fails with a usage
+error. That difference is unrelated to this change.
+
+Not covered here (found in review):
+
+- **Deferred network check.** When a deferred network check also fails, the denial is replaced by a rejection, and the
+  command is still not shown.
+- **Sandbox start-up failures.** On Linux (bwrap/namespace) these also arrive as a sandbox denial and now render as
+  "Ran" with the error output, although the command did not start.
+- **Read-like commands.** A denied read-like command renders in an "Explored" cell, which is upstream behaviour.
