@@ -673,3 +673,126 @@ fn issue_512_upload_reads_resolve_links_on_both_sides() {
         assert!(readable_under(&policy, &open, cwd), "{}", open.display());
     }
 }
+
+/// A user home reached through a link (`user -> real-user`) holding a
+/// dummy SSH key, with a workspace whose `.agents` links to that key.
+struct LinkedHome {
+    _dir: tempfile::TempDir,
+    real_home: std::path::PathBuf,
+    linked_home: std::path::PathBuf,
+    codex_home: std::path::PathBuf,
+    cwd: std::path::PathBuf,
+}
+
+fn linked_home_with_agents_link_to_key() -> LinkedHome {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let real_home = base.join("real-user");
+    std::fs::create_dir_all(real_home.join(".ssh")).unwrap();
+    std::fs::write(real_home.join(".ssh/id_ed25519"), "DUMMY_SSH_KEY_518").unwrap();
+    std::fs::create_dir_all(real_home.join("project")).unwrap();
+    std::fs::write(real_home.join("project/README.md"), "readme").unwrap();
+    std::os::unix::fs::symlink("../.ssh/id_ed25519", real_home.join("project/.agents")).unwrap();
+    let linked_home = base.join("user");
+    std::os::unix::fs::symlink(&real_home, &linked_home).unwrap();
+    let codex_home = linked_home.join(".corbanu");
+    std::fs::create_dir_all(codex_home.join("tmp")).unwrap();
+    let cwd = linked_home.join("project");
+    LinkedHome {
+        _dir: dir,
+        real_home,
+        linked_home,
+        codex_home,
+        cwd,
+    }
+}
+
+/// #518: a read-only entry never reopens a denied file. With the home
+/// reached through a link, `.agents -> ../.ssh/id_ed25519` became a `Read`
+/// entry at the key's real path, more specific than the `.ssh` denial
+/// spelled through the link, so a full-write profile could read the key.
+#[test]
+fn issue_518_read_only_entries_never_reopen_a_denial_through_a_linked_home() {
+    let fx = linked_home_with_agents_link_to_key();
+    let cwd = fx.cwd.as_path();
+    let denials = ReadDenials::collect(&fx.codex_home, Some(&fx.linked_home), None, &[abs(cwd)]);
+    for profile in [PermissionProfile::Disabled, workspace(cwd)] {
+        let policy = denials
+            .apply(&profile)
+            .unwrap()
+            .file_system_sandbox_policy();
+        let real_key = fx.real_home.join(".ssh/id_ed25519");
+        // No entry at or above the key's real path grants a read the
+        // denial does not: the sandboxes see the more specific entry first.
+        assert!(
+            !policy.entries.iter().any(|entry| entry.access.can_read()
+                && matches!(&entry.path, FileSystemPath::Path { path }
+                    if real_key.starts_with(path.as_path()) && path.as_path() != Path::new("/"))),
+            "{profile:?}: {:?}",
+            policy.entries
+        );
+        for key in [
+            real_key.clone(),
+            fx.linked_home.join(".ssh/id_ed25519"),
+            cwd.join(".agents"),
+            fx.real_home.join("project/.agents"),
+        ] {
+            assert!(
+                !readable_under(&policy, &key, cwd),
+                "{profile:?}: {}",
+                key.display()
+            );
+        }
+        assert!(
+            !policy.can_write_path_with_cwd(&real_key, cwd),
+            "{profile:?}"
+        );
+        assert!(readable_under(&policy, &cwd.join("README.md"), cwd));
+    }
+}
+
+/// #518 with the real macOS sandbox: a full-write command could `cat` the
+/// key through `.agents` and under its real name.
+#[cfg(target_os = "macos")]
+#[test]
+fn issue_518_sandboxed_commands_cannot_read_the_key_through_a_linked_home() {
+    use codex_sandboxing::seatbelt::CreateSeatbeltCommandArgsParams;
+    use codex_sandboxing::seatbelt::MACOS_PATH_TO_SEATBELT_EXECUTABLE;
+    use codex_sandboxing::seatbelt::create_seatbelt_command_args;
+
+    let fx = linked_home_with_agents_link_to_key();
+    let cwd = fx.cwd.as_path();
+    let denials = ReadDenials::collect(&fx.codex_home, Some(&fx.linked_home), None, &[abs(cwd)]);
+    let policy = denials
+        .apply(&PermissionProfile::Disabled)
+        .unwrap()
+        .file_system_sandbox_policy();
+    let script = format!(
+        "cat .agents; echo agents=$?; cat '{real}'; echo real=$?; cat '{link}'; echo link=$?; \
+         cat README.md; echo readme=$?",
+        real = fx.real_home.join(".ssh/id_ed25519").display(),
+        link = fx.linked_home.join(".ssh/id_ed25519").display(),
+    );
+    let args = create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
+        command: vec!["/bin/sh".to_string(), "-c".to_string(), script],
+        file_system_sandbox_policy: &policy,
+        network_sandbox_policy: NetworkSandboxPolicy::Restricted,
+        sandbox_policy_cwd: cwd,
+        enforce_managed_network: false,
+        managed_network: None,
+        environment_id: None,
+        network: None,
+        extra_allow_unix_sockets: &[],
+    })
+    .unwrap();
+    let output = std::process::Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
+        .args(&args)
+        .current_dir(cwd)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("DUMMY_SSH_KEY_518"), "{stdout}");
+    for line in ["agents=1", "real=1", "link=1", "readme=0"] {
+        assert!(stdout.contains(line), "{line} not in {stdout}");
+    }
+}

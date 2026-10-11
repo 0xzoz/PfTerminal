@@ -27,6 +27,7 @@ use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::FileSystemSandboxEntry;
 use codex_protocol::permissions::FileSystemSandboxKind;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
+use codex_protocol::permissions::ReadDenyMatcher;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use std::path::Path;
 
@@ -351,9 +352,18 @@ impl ReadDenials {
             .read_only_paths()
             .filter(|path| file_system.can_write_path_with_cwd(path.as_path(), cwd))
             .map(|path| {
+                // #518: a `Read` entry more specific than a denial would
+                // reopen it. A read-only path that is denied in any spelling
+                // (its real location under a denial spelled through a linked
+                // home, or a link to a denied file) is denied here too.
+                let access = if readable_under(&file_system, path.as_path(), cwd) {
+                    FileSystemAccessMode::Read
+                } else {
+                    FileSystemAccessMode::Deny
+                };
                 FileSystemSandboxEntry::skip_missing_path(
                     FileSystemPath::Path { path: path.clone() },
-                    FileSystemAccessMode::Read,
+                    access,
                 )
             })
             .collect();
@@ -491,35 +501,111 @@ pub(crate) fn post_taint_read_policy(
 /// What `path` resolves to is also checked against the policy's paths with
 /// links resolved alike (#512): a denial spelled through a link (`/tmp` and
 /// `/var` on macOS, a linked home) never names the resolved target, so a
-/// link to a denied file, or the file under its real name, passed. This
-/// only adds a check: it never makes a path readable.
+/// link to a denied file, or the file under its real name, passed. Pattern
+/// denials and denials relative to the working folder (resolved against its
+/// real location too) apply as well (#519). This only adds checks: it never
+/// makes a path readable.
 pub(crate) fn readable_under(policy: &FileSystemSandboxPolicy, path: &Path, cwd: &Path) -> bool {
-    if !policy.can_read_path_with_cwd(path, cwd) {
+    if !policy.can_read_path_with_cwd(path, cwd) || pattern_denied(policy, path, cwd) {
         return false;
     }
     let Ok(canonical) = std::fs::canonicalize(path) else {
         return true;
     };
-    policy.can_read_path_with_cwd(&canonical, cwd)
-        && with_real_locations(policy).can_read_path_with_cwd(&canonical, cwd)
+    let resolved = with_real_locations(policy);
+    let real_cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    [cwd, real_cwd.as_path()].into_iter().all(|cwd| {
+        policy.can_read_path_with_cwd(&canonical, cwd)
+            && resolved.can_read_path_with_cwd(&canonical, cwd)
+            && !pattern_denied(&resolved, &canonical, cwd)
+    })
+}
+
+/// Whether a pattern (glob) denial of `policy` matches `path` or what it
+/// resolves to. A malformed pattern matches everything (fails closed).
+fn pattern_denied(policy: &FileSystemSandboxPolicy, path: &Path, cwd: &Path) -> bool {
+    let patterns: Vec<FileSystemSandboxEntry> = policy
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.access == FileSystemAccessMode::Deny
+                && matches!(entry.path, FileSystemPath::GlobPattern { .. })
+        })
+        .cloned()
+        .collect();
+    if patterns.is_empty() {
+        return false;
+    }
+    ReadDenyMatcher::new(&FileSystemSandboxPolicy::restricted(patterns), cwd)
+        .is_some_and(|matcher| matcher.is_read_denied(path))
 }
 
 /// `policy` with each path entry also under its real location, with the
 /// same access, so the most specific entry still wins once links resolve.
+/// An absolute pattern gets a copy with its literal folder resolved too.
+///
+/// An allow is copied only where it does not land under a denial it was not
+/// already inside (#518): a `Read` entry for a link (a workspace's `.agents`
+/// pointing at `~/.ssh/id_ed25519`) must not reopen what the link targets.
+/// A carve-out inside a denied folder (`vault/open.txt` in a denied `vault`)
+/// keeps applying under the folder's real location.
 fn with_real_locations(policy: &FileSystemSandboxPolicy) -> FileSystemSandboxPolicy {
     let mut resolved = policy.clone();
+    let mut denied: Vec<(AbsolutePathBuf, AbsolutePathBuf)> = Vec::new();
     for entry in &policy.entries {
-        if let FileSystemPath::Path { path } = &entry.path
-            && let Some(real) = real_location(path)
-            && real != *path
+        if entry.access == FileSystemAccessMode::Deny
+            && let FileSystemPath::Path { path } = &entry.path
         {
+            let real = real_location(path).unwrap_or_else(|| path.clone());
+            denied.push((path.clone(), real));
+        }
+    }
+    for entry in &policy.entries {
+        let real = match &entry.path {
+            FileSystemPath::Path { path } => real_location(path)
+                .filter(|real| real != path)
+                .filter(|real| {
+                    entry.access == FileSystemAccessMode::Deny
+                        || denied
+                            .iter()
+                            .filter(|(spelled, real_denied)| {
+                                real.as_path().starts_with(spelled.as_path())
+                                    || real.as_path().starts_with(real_denied.as_path())
+                            })
+                            .all(|(spelled, real_denied)| {
+                                path.as_path().starts_with(spelled.as_path())
+                                    || path.as_path().starts_with(real_denied.as_path())
+                            })
+                })
+                .map(|path| FileSystemPath::Path { path }),
+            FileSystemPath::GlobPattern { pattern } => {
+                real_pattern(pattern).map(|pattern| FileSystemPath::GlobPattern { pattern })
+            }
+            FileSystemPath::Special { .. } => None,
+        };
+        if let Some(path) = real {
             resolved.entries.push(FileSystemSandboxEntry {
-                path: FileSystemPath::Path { path: real },
+                path,
                 ..entry.clone()
             });
         }
     }
     resolved
+}
+
+/// `pattern` with the folder before its first wildcard at its real
+/// location, when that differs.
+fn real_pattern(pattern: &str) -> Option<String> {
+    let wildcard = pattern.find(['*', '?', '[', '{'])?;
+    let split = pattern[..wildcard].rfind('/')?;
+    let folder = AbsolutePathBuf::from_absolute_path(Path::new(&pattern[..split.max(1)])).ok()?;
+    let real = real_location(&folder).filter(|real| *real != folder)?;
+    let real = real.as_path().to_string_lossy();
+    Some(format!(
+        "{}{}",
+        real.trim_end_matches('/'),
+        &pattern[split..]
+    ))
 }
 
 #[cfg(test)]
