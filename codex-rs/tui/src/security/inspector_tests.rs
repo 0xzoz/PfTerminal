@@ -513,3 +513,23 @@ fn pf_41_s01_unsandboxed_routes_are_not_contained_and_p1_controls_not_available(
         "run outside the OS sandbox with the environment allowlist; allowed because you configured or started it"
     );
 }
+
+/// #437 (AGG-24): beside unobserved brokers the header claimed "every row
+/// verified at launch". The launch check covers the session rows only.
+#[test]
+fn sec_437_active_row_claims_only_the_launch_check() {
+    let facts = RuntimeFacts {
+        model_broker: ControlFacts::Off,
+        ..healthy(ThreadId::new())
+    };
+    let input = input(ChosenLevel::Aggressive);
+    let rows = sections(&input, &saved(ChosenLevel::Aggressive), &facts, NOW);
+    let active = find(&rows, "Active this run");
+    assert!(!active.value.contains("every row"), "{}", active.value);
+    assert!(
+        active.value.contains("launch check passed for the session rows"),
+        "{}",
+        active.value
+    );
+    assert_eq!(find(&rows, "Model key broker").state, State::Off);
+}

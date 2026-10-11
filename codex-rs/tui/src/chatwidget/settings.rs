@@ -557,9 +557,12 @@ impl ChatWidget {
         self.set_approvals_reviewer(settings.approvals_reviewer.to_core());
         self.config.personality = settings.personality;
 
-        let permission_profile = PermissionProfile::from_legacy_sandbox_policy_for_cwd(
-            &settings.sandbox_policy.to_core(),
-            settings.cwd.as_path(),
+        // #437: keep the profile's denied reads while nothing changed.
+        let permission_profile = crate::app::thread_settings::permission_profile_for_thread_settings(
+            self.config.permissions.permission_profile(),
+            Some(&self.config.permissions.effective_permission_profile()),
+            self.config.permissions.active_permission_profile().as_ref(),
+            &settings,
         );
         let permission_snapshot = PermissionProfileSnapshot::from_session_snapshot(
             permission_profile,

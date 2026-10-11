@@ -266,3 +266,100 @@ request_permissions_tool = {request_tools}
         ]
     );
 }
+
+/// #437 (AGG-24/34, AGG-20 child pane): after a session's first turn the app
+/// server sends its thread settings, which carry only the legacy sandbox
+/// projection. Rebuilding the profile from it dropped the Aggressive denied
+/// reads, so the rows claimed approved commands leave the sandbox and the
+/// vault is readable. The known profile is kept while nothing changed.
+#[tokio::test]
+async fn sec_437_thread_settings_keep_the_aggressive_rows() {
+    use crate::legacy_core::config::PermissionProfileSnapshot;
+
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let extra = tempfile::tempdir().unwrap();
+    let mut config = build(
+        home.path(),
+        cwd.path(),
+        &workspace_write(extra.path(), true),
+        true,
+    )
+    .await;
+    let before = current_values(&config);
+    let profile = config.permissions.permission_profile().clone();
+    let active = config.permissions.active_permission_profile();
+    let cwd_abs = config.cwd.clone();
+    let settings = codex_app_server_protocol::ThreadSettings {
+        cwd: cwd_abs.clone(),
+        approval_policy: codex_app_server_protocol::AskForApproval::UnlessTrusted,
+        approvals_reviewer: codex_app_server_protocol::ApprovalsReviewer::User,
+        sandbox_policy: codex_sandboxing::compatibility_sandbox_policy_for_permission_profile(
+            &config.permissions.effective_permission_profile(),
+            cwd_abs.as_path(),
+        )
+        .into(),
+        active_permission_profile: active.clone().map(Into::into),
+        model: "glm-5.3-flash".to_string(),
+        model_provider: "zai".to_string(),
+        service_tier: None,
+        effort: None,
+        summary: None,
+        collaboration_mode: codex_protocol::config_types::CollaborationMode {
+            mode: codex_protocol::config_types::ModeKind::Default,
+            settings: codex_protocol::config_types::Settings {
+                model: "glm-5.3-flash".to_string(),
+                reasoning_effort: None,
+                developer_instructions: None,
+            },
+        },
+        multi_agent_mode: Default::default(),
+        personality: None,
+    };
+
+    // The milestone's rows: rebuilt from the projection alone.
+    let lossy = codex_protocol::models::PermissionProfile::from_legacy_sandbox_policy_for_cwd(
+        &settings.sandbox_policy.to_core(),
+        cwd_abs.as_path(),
+    );
+    let mut weakened = config.clone();
+    weakened
+        .permissions
+        .replace_permission_profile_from_session_snapshot(
+            PermissionProfileSnapshot::from_session_snapshot(lossy, active.clone()),
+        )
+        .unwrap();
+    let rows = current_values(&weakened);
+    assert!(
+        rows[0].contains("approved or allow-listed commands can run outside the sandbox"),
+        "{rows:?}"
+    );
+
+    let kept = crate::app::thread_settings::permission_profile_for_thread_settings(
+        &profile,
+        Some(&config.permissions.effective_permission_profile()),
+        active.as_ref(),
+        &settings,
+    );
+    assert_eq!(kept, profile);
+    config
+        .permissions
+        .replace_permission_profile_from_session_snapshot(
+            PermissionProfileSnapshot::from_session_snapshot(kept, active.clone()),
+        )
+        .unwrap();
+    assert_eq!(current_values(&config), before);
+
+    // A real change (a different sandbox) is still applied.
+    let mut changed = settings;
+    changed.sandbox_policy = codex_app_server_protocol::SandboxPolicy::DangerFullAccess;
+    assert_eq!(
+        crate::app::thread_settings::permission_profile_for_thread_settings(
+            &profile,
+            None,
+            active.as_ref(),
+            &changed,
+        ),
+        codex_protocol::models::PermissionProfile::Disabled
+    );
+}
