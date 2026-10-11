@@ -105,6 +105,11 @@ pub fn run_credential_broker_main() -> ! {
     run_credential_broker_main_with(/*resolver*/ None)
 }
 
+/// Test builds only: milliseconds the broker process waits after its cleanup
+/// before it exits (#504).
+#[cfg(test)]
+pub(crate) const TEST_EXIT_HOLD_MS_ENV: &str = "CODEX_PF27_BROKER_TEST_EXIT_HOLD_MS";
+
 /// Like [`run_credential_broker_main`], resolving stored provider keys with
 /// `resolver` (PF-27-S05).
 pub fn run_credential_broker_main_with(resolver: Option<StoredKeyResolver>) -> ! {
@@ -156,6 +161,15 @@ pub fn run_credential_broker_main_with(resolver: Option<StoredKeyResolver>) -> !
             Ok(()) => 0,
             Err(_) => BROKER_EXIT_UNAVAILABLE,
         };
+    // #504: tests hold the process here, after its cleanup, to observe the
+    // window before it exits.
+    #[cfg(test)]
+    if let Some(hold) = std::env::var(TEST_EXIT_HOLD_MS_ENV)
+        .ok()
+        .and_then(|ms| ms.parse().ok())
+    {
+        std::thread::sleep(std::time::Duration::from_millis(hold));
+    }
     // Exit without dropping the runtime: a blocking reader may still be
     // parked on a channel the controller holds open (signal-initiated shutdown).
     std::process::exit(exit_code)
@@ -375,45 +389,53 @@ async fn run_broker(
     });
     drop(hello);
 
-    write_json_line(
-        &mut control_write,
-        &ControlResponse::Ready {
-            protocol_version: CONTROL_PROTOCOL_VERSION,
-            broker_instance,
-            socket_path: endpoint.data_name(),
-            run_generation: 1,
-            containment,
-        },
-    )
-    .await?;
-
-    let accept = endpoint.serve(broker.clone());
-    let parent_gone = transport::shutdown_requested(parent)?;
-    tokio::pin!(parent_gone);
-    loop {
-        let line = tokio::select! {
-            line = read_control_line(&mut control) => line?,
-            () = &mut parent_gone => None,
-        };
-        let Some(line) = line else {
-            break;
-        };
-        let response = match serde_json::from_slice::<ControlRequest>(&line) {
-            // A stored-key read may block on the vault and the OS keyring.
-            Ok(request) => tokio::task::block_in_place(|| broker.control(request)),
-            Err(_) => ControlResponse::Error {
-                code: ControlErrorCode::Malformed,
+    let mut accept = None;
+    let served = async {
+        write_json_line(
+            &mut control_write,
+            &ControlResponse::Ready {
+                protocol_version: CONTROL_PROTOCOL_VERSION,
+                broker_instance,
+                socket_path: endpoint.data_name(),
+                run_generation: 1,
+                containment,
             },
-        };
-        write_json_line(&mut control_write, &response).await?;
+        )
+        .await?;
+
+        accept = Some(endpoint.serve(broker.clone()));
+        let parent_gone = transport::shutdown_requested(parent)?;
+        tokio::pin!(parent_gone);
+        loop {
+            let line = tokio::select! {
+                line = read_control_line(&mut control) => line?,
+                () = &mut parent_gone => None,
+            };
+            let Some(line) = line else {
+                break;
+            };
+            let response = match serde_json::from_slice::<ControlRequest>(&line) {
+                // A stored-key read may block on the vault and the OS keyring.
+                Ok(request) => tokio::task::block_in_place(|| broker.control(request)),
+                Err(_) => ControlResponse::Error {
+                    code: ControlErrorCode::Malformed,
+                },
+            };
+            write_json_line(&mut control_write, &response).await?;
+        }
+        anyhow::Ok(())
     }
-    // Controller EOF, controller death or a termination signal: close every
+    .await;
+    // Every exit once the broker exists: controller EOF, controller death, a
+    // termination signal, and (#504) a broken control channel. Close every
     // outstanding channel by revoking, then remove the private socket
     // directory before exiting.
     broker.revoke();
-    accept.abort();
+    if let Some(accept) = accept {
+        accept.abort();
+    }
     drop(endpoint);
-    Ok(())
+    served
 }
 
 /// True when binding failed because another process holds a pipe name

@@ -117,6 +117,20 @@ struct Upstream {
     ca_path: PathBuf,
 }
 
+/// Every Authorization header an upstream received, by upstream port.
+static UPSTREAM_SEEN: std::sync::Mutex<Vec<(u16, String)>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(unix)]
+fn upstream_seen(port: u16) -> Vec<String> {
+    UPSTREAM_SEEN
+        .lock()
+        .expect("upstream log")
+        .iter()
+        .filter(|(seen_port, _)| *seen_port == port)
+        .map(|(_, authorization)| authorization.clone())
+        .collect()
+}
+
 /// Local TLS upstream that echoes the Authorization header it received.
 async fn start_upstream() -> Upstream {
     start_upstream_for(UPSTREAM_HOST).await
@@ -134,7 +148,17 @@ async fn start_upstream_for(tls_host: &str) -> Upstream {
         .expect("bind upstream");
     let port = listener.local_addr().expect("upstream addr").port();
     let service = TlsAcceptorLayer::new(acceptor).into_layer(HttpServer::http1().service(
-        service_fn(|request: Request| async move {
+        service_fn(move |request: Request| async move {
+            if let Some(authorization) = request
+                .headers()
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+            {
+                UPSTREAM_SEEN
+                    .lock()
+                    .expect("upstream log")
+                    .push((port, authorization.to_string()));
+            }
             let echoed = if request.uri().path().ends_with("/xkey") {
                 rama_http::header::HeaderName::from_static("x-api-key")
             } else {
@@ -206,6 +230,31 @@ fn launcher_with_ca(
             (OsString::from("SSL_CERT_FILE"), ca_path.into_os_string()),
         ],
         controller_pid_override,
+    )
+}
+
+/// #504: a launcher whose broker waits `hold` after its cleanup before it
+/// exits, so a test can act in that window.
+#[cfg(unix)]
+fn launcher_holding_exit(upstream: &Upstream, hold: Duration) -> IsolatedBrokerLauncher {
+    IsolatedBrokerLauncher::test_harness(
+        /*program*/ None,
+        [CHILD_TEST, "--exact", "--nocapture", "--test-threads=1"]
+            .into_iter()
+            .map(OsString::from)
+            .collect(),
+        vec![
+            (OsString::from(CHILD_ENV), OsString::from("1")),
+            (
+                OsString::from("SSL_CERT_FILE"),
+                upstream.ca_path.clone().into_os_string(),
+            ),
+            (
+                OsString::from(super::TEST_EXIT_HOLD_MS_ENV),
+                OsString::from(hold.as_millis().to_string()),
+            ),
+        ],
+        /*controller_pid_override*/ None,
     )
 }
 
@@ -859,6 +908,68 @@ async fn pf_27_s04_pf_27_s01_externally_terminated_broker_is_detected_and_cleane
     let current = broker.current_isolated_client().expect("broker client");
     assert!(std::sync::Arc::ptr_eq(&current, &client));
     assert_eq!(current.pid_for_test(), Some(pid));
+}
+
+/// #504: between removing its socket directory and exiting, the broker is
+/// still alive, so a route may still authorize (`Brokered`). Forwarding that
+/// route fails as unavailable and the upstream never receives the token.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn issue_504_forwarding_in_the_exit_window_fails_closed() {
+    let upstream = start_upstream().await;
+    let broker = isolated_broker(launcher_holding_exit(&upstream, Duration::from_secs(20)));
+    let dummy = virtualized_dummy(&broker);
+    let client = broker.current_isolated_client().expect("broker client");
+    let pid = client.pid_for_test().expect("broker pid");
+    let status = std::process::Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .status()
+        .expect("kill");
+    assert!(status.success());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while client.socket_path().exists() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!client.socket_path().exists());
+    assert!(client.is_alive(), "the broker is in its exit window");
+
+    let Ok(CredentialRouting::Brokered(brokered)) = route(&broker, upstream.port, "/echo", &dummy)
+    else {
+        panic!("a live broker still authorizes the route");
+    };
+    assert_eq!(
+        brokered.forward(request("/echo", &dummy)).await.err(),
+        Some(IsolatedBrokerError::Unavailable)
+    );
+    assert!(client.is_alive(), "still in the exit window");
+    assert_eq!(upstream_seen(upstream.port), Vec::<String>::new());
+    client.kill_for_test();
+}
+
+/// #504: an early exit on a broken control channel revokes like a
+/// termination signal does: an open download closes while the process is
+/// still alive, rather than only when it exits.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn issue_504_a_broken_control_channel_revokes_before_the_broker_exits() {
+    let upstream = start_upstream().await;
+    let broker = isolated_broker(launcher_holding_exit(&upstream, Duration::from_secs(20)));
+    let dummy = virtualized_dummy(&broker);
+    let client = broker.current_isolated_client().expect("broker client");
+    let response = forward(&broker, upstream.port, STREAM_PATH, &dummy).await;
+    assert_eq!(response.status(), 200);
+    let reader = tokio::spawn(async move { response.try_into_string().await.is_err() });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // A control line over the bound: the broker's read fails and it exits.
+    client.send_raw_control_for_test(&vec![b'x'; super::protocol::MAX_CONTROL_LINE_BYTES + 2]);
+    let stream_failed = tokio::time::timeout(Duration::from_secs(10), reader)
+        .await
+        .expect("the revoke closes the open download")
+        .expect("reader task");
+    assert!(stream_failed);
+    assert!(client.is_alive(), "closed by the revoke, not by the exit");
+    client.kill_for_test();
 }
 
 #[cfg(unix)]
