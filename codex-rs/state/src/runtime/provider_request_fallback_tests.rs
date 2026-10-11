@@ -319,3 +319,242 @@ async fn one_accounts_cooldown_never_blocks_another() -> anyhow::Result<()> {
     runtime.close().await;
     Ok(())
 }
+
+fn check_reason(
+    throttled: &ProviderRequestThrottled<Option<ProviderRequestBlock>>,
+) -> Option<(ProviderRequestBlockReason, i64, Option<i64>)> {
+    throttled
+        .decision
+        .as_ref()
+        .map(|block| (block.reason.clone(), block.until_ms, block.last_status))
+}
+
+/// #476: a request sent without a lease (every human-driven session) records
+/// its 429, so every process on the home holds the key back for the cooldown
+/// the provider asked for; another key is never held back.
+#[tokio::test]
+async fn an_unleased_429_starts_a_cooldown_every_process_sees() -> anyhow::Result<()> {
+    let home = unique_temp_dir();
+    let runtime = StateRuntime::init_for_testing(home.clone(), "zai".into()).await?;
+    let other_process = StateRuntime::init_for_testing(home.clone(), "zai".into()).await?;
+    let account = |name: &str| ProviderRequestKey {
+        key_fingerprint: format!("account:{name}"),
+        ..key()
+    };
+    let check = |runtime: &StateRuntime, key: ProviderRequestKey, now_ms: i64| {
+        let runtime = runtime.clone();
+        async move {
+            runtime
+                .check_provider_request_throttle(&key, &preflight(), now_ms)
+                .await
+        }
+    };
+    assert_eq!(check(&runtime, account("b"), 1_000).await.decision, None);
+    let recorded = runtime
+        .record_provider_request_throttle_outcome(&account("b"), rate_limited(), 2_000)
+        .await;
+    assert_eq!(recorded.state_db_fallback, None);
+
+    for process in [&runtime, &other_process] {
+        assert_eq!(
+            check_reason(&check(process, account("b"), 3_000).await),
+            Some((ProviderRequestBlockReason::Cooldown, 62_000, Some(429)))
+        );
+        assert_eq!(check(process, account("a"), 3_000).await.decision, None);
+    }
+    // Without Retry-After the cooldown escalates 30 s, 60 s, ... per 429.
+    let no_retry_after = ProviderRequestResult::Failed {
+        status: Some(429),
+        request_id: None,
+        retry_after_ms: None,
+    };
+    for (now_ms, until_ms) in [(100_000, 130_000), (200_000, 260_000)] {
+        other_process
+            .record_provider_request_throttle_outcome(&account("a"), no_retry_after.clone(), now_ms)
+            .await;
+        assert_eq!(
+            check_reason(&check(&runtime, account("a"), now_ms + 1).await),
+            Some((ProviderRequestBlockReason::Cooldown, until_ms, Some(429)))
+        );
+    }
+    // A cooldown expires; a later success resets the escalation.
+    other_process
+        .record_provider_request_throttle_outcome(
+            &account("a"),
+            ProviderRequestResult::Success {
+                input_tokens: Some(10),
+                cached_input_tokens: Some(0),
+            },
+            400_000,
+        )
+        .await;
+    assert_eq!(check(&runtime, account("a"), 400_001).await.decision, None);
+    other_process
+        .record_provider_request_throttle_outcome(&account("a"), no_retry_after, 500_000)
+        .await;
+    assert_eq!(
+        check_reason(&check(&runtime, account("a"), 500_001).await),
+        Some((ProviderRequestBlockReason::Cooldown, 530_000, Some(429)))
+    );
+
+    other_process.close().await;
+    runtime.close().await;
+    let _ = std::fs::remove_dir_all(home);
+    Ok(())
+}
+
+/// #476: an unleased result never shortens a cooldown another request
+/// recorded, and never touches another request's lease.
+#[tokio::test]
+async fn an_unleased_result_never_ends_a_cooldown_or_lease() -> anyhow::Result<()> {
+    let home = unique_temp_dir();
+    let runtime = StateRuntime::init_for_testing(home.clone(), "zai".into()).await?;
+    let other_process = StateRuntime::init_for_testing(home.clone(), "zai".into()).await?;
+    runtime
+        .record_provider_request_throttle_outcome(&key(), rate_limited(), 1_000)
+        .await;
+    for result in [
+        ProviderRequestResult::Success {
+            input_tokens: Some(1),
+            cached_input_tokens: None,
+        },
+        ProviderRequestResult::Failed {
+            status: Some(401),
+            request_id: None,
+            retry_after_ms: None,
+        },
+        ProviderRequestResult::Failed {
+            status: Some(429),
+            request_id: Some("req-2".to_string()),
+            retry_after_ms: Some(1_000),
+        },
+    ] {
+        other_process
+            .record_provider_request_throttle_outcome(&key(), result, 2_000)
+            .await;
+        assert_eq!(
+            check_reason(
+                &runtime
+                    .check_provider_request_throttle(&key(), &preflight(), 3_000)
+                    .await
+            ),
+            Some((ProviderRequestBlockReason::Cooldown, 61_000, Some(429)))
+        );
+    }
+
+    let lease = acquired(acquire(&runtime, "worker-a", /*now_ms*/ 70_000).await);
+    other_process
+        .record_provider_request_throttle_outcome(
+            &key(),
+            ProviderRequestResult::Success {
+                input_tokens: None,
+                cached_input_tokens: None,
+            },
+            71_000,
+        )
+        .await;
+    assert_eq!(
+        blocked_reason(&acquire(&other_process, "worker-b", 72_000).await),
+        Some(ProviderRequestBlockReason::Lease)
+    );
+    runtime
+        .release_provider_request_throttle_lease(&lease, 73_000)
+        .await?;
+
+    other_process.close().await;
+    runtime.close().await;
+    let _ = std::fs::remove_dir_all(home);
+    Ok(())
+}
+
+/// #476: with the state DB busy, an unleased 429 still holds this process's
+/// requests back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unleased_429_holds_this_process_back_while_the_db_is_busy() -> anyhow::Result<()> {
+    let home = unique_temp_dir();
+    let runtime = StateRuntime::init_for_testing(home.clone(), "zai".into()).await?;
+    let held = hold_write_lock(&runtime.sqlite().state_db_path()).await?;
+    let recorded = runtime
+        .record_provider_request_throttle_outcome(&key(), rate_limited(), 1_000)
+        .await;
+    assert_eq!(recorded.state_db_fallback, Some(StateDbFallback::Busy));
+    let check = runtime
+        .check_provider_request_throttle(&key(), &preflight(), 2_000)
+        .await;
+    assert_eq!(
+        check_reason(&check),
+        Some((ProviderRequestBlockReason::Cooldown, 61_000, Some(429)))
+    );
+    held.rollback().await?;
+    runtime.close().await;
+    let _ = std::fs::remove_dir_all(home);
+    Ok(())
+}
+
+/// #482: every home has its own key fingerprint salt, read the same by every
+/// process on it.
+#[tokio::test]
+async fn the_key_salt_is_per_home() -> anyhow::Result<()> {
+    let (home_a, home_b) = (unique_temp_dir(), unique_temp_dir());
+    let a = StateRuntime::init_for_testing(home_a.clone(), "zai".into()).await?;
+    let a2 = StateRuntime::init_for_testing(home_a.clone(), "zai".into()).await?;
+    let b = StateRuntime::init_for_testing(home_b.clone(), "zai".into()).await?;
+    let salt_a = a.provider_request_key_salt().await?;
+    assert_eq!(salt_a.len(), 32);
+    assert_eq!(salt_a, a2.provider_request_key_salt().await?);
+    assert_ne!(salt_a, b.provider_request_key_salt().await?);
+    for runtime in [a, a2, b] {
+        runtime.close().await;
+    }
+    let _ = std::fs::remove_dir_all(home_a);
+    let _ = std::fs::remove_dir_all(home_b);
+    Ok(())
+}
+
+/// #482: a row an older build kept under the unsalted key moves to the salted
+/// key with its cooldown, and the unsalted value is gone from the DB.
+#[tokio::test]
+async fn a_legacy_row_moves_to_its_salted_key() -> anyhow::Result<()> {
+    let home = unique_temp_dir();
+    let runtime = StateRuntime::init_for_testing(home.clone(), "zai".into()).await?;
+    let legacy = ProviderRequestKey {
+        key_fingerprint: "env:ZAI_API_KEY:0123456789abcdef".to_string(),
+        ..key()
+    };
+    let salted = ProviderRequestKey {
+        key_fingerprint: "env-salted:ZAI_API_KEY:fedcba9876543210".to_string(),
+        ..key()
+    };
+    let lease = acquired(
+        runtime
+            .acquire_provider_request_throttle_lease(&legacy, &preflight(), "old", 600_000, 1_000)
+            .await,
+    );
+    runtime
+        .record_provider_request_throttle_result(&lease, rate_limited(), 2_000)
+        .await;
+
+    // A fresh process (no memory of the legacy cooldown) adopts the row.
+    let process = StateRuntime::init_for_testing(home.clone(), "zai".into()).await?;
+    process
+        .adopt_legacy_provider_request_key(&legacy.key_fingerprint, &salted.key_fingerprint)
+        .await;
+    assert_eq!(
+        check_reason(
+            &process
+                .check_provider_request_throttle(&salted, &preflight(), 3_000)
+                .await
+        ),
+        Some((ProviderRequestBlockReason::Cooldown, 62_000, Some(429)))
+    );
+    let keys: Vec<String> =
+        sqlx::query_scalar("SELECT key_fingerprint FROM provider_request_state")
+            .fetch_all(process.pool.as_ref())
+            .await?;
+    assert_eq!(keys, vec![salted.key_fingerprint.clone()]);
+
+    process.close().await;
+    runtime.close().await;
+    let _ = std::fs::remove_dir_all(home);
+    Ok(())
+}

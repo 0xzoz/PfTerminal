@@ -28,6 +28,7 @@
 use super::busy_retry::is_busy;
 use super::busy_retry::is_read_only;
 use super::provider_requests::RATE_LIMIT_STATUS;
+use super::provider_requests::UnleasedRow;
 use super::provider_requests::default_cooldown_ms;
 use super::provider_requests::since;
 use super::*;
@@ -39,6 +40,7 @@ use crate::ProviderRequestLeaseDecision;
 use crate::ProviderRequestPreflight;
 use crate::ProviderRequestResult;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Mutex;
 use std::sync::PoisonError;
 use std::time::Duration;
@@ -81,6 +83,10 @@ pub(crate) struct ProviderRequestMemory {
     paused: Mutex<Option<(Instant, StateDbFallback)>>,
     /// State DB leases that ended while the DB could not be written.
     pending_releases: Mutex<Vec<ProviderRequestLease>>,
+    /// The per-home key fingerprint salt, once read.
+    pub(super) key_salt: tokio::sync::OnceCell<Arc<[u8]>>,
+    /// Salted keys whose legacy unsalted rows this process already adopted.
+    pub(super) adopted_legacy_keys: Mutex<HashSet<String>>,
 }
 
 /// The fields of a `provider_request_state` row. A cooldown or lease the
@@ -246,6 +252,31 @@ impl MemoryRow {
             }
         }
         true
+    }
+
+    /// The in-memory `record_provider_request_unleased_result_once`. Returns
+    /// the cooldown it set, if the result set one.
+    fn record_unleased(&mut self, result: &ProviderRequestResult, now_ms: i64) -> Option<i64> {
+        let update = UnleasedRow {
+            consecutive_429_count: self.consecutive_429_count,
+            cooldown_until_ms: self.cooldown_until_ms,
+        }
+        .apply(result, now_ms)?;
+        let new_cooldown = update.cooldown_until_ms != self.cooldown_until_ms;
+        if new_cooldown {
+            self.cooldown_until_ms = update.cooldown_until_ms;
+            self.cooldown_in_state_db = false;
+        }
+        self.last_status = update.last_status;
+        self.last_request_id = update.last_request_id;
+        if let Some(tokens) = update.provider_input_tokens {
+            self.last_provider_input_tokens = tokens;
+        }
+        if let Some(tokens) = update.provider_cached_input_tokens {
+            self.last_provider_cached_input_tokens = tokens;
+        }
+        self.consecutive_429_count = update.consecutive_429_count;
+        new_cooldown.then_some(self.cooldown_until_ms)
     }
 
     fn release(&mut self, owner: &str) -> bool {
@@ -540,6 +571,38 @@ impl StateRuntime {
             }
         }
         ProviderRequestThrottled::new(state_db_recorded || !lease.in_state_db, fallback)
+    }
+
+    /// Record how a request sent without a lease ended (#476): a 429 starts
+    /// or extends the key's cooldown for every process on the home. Never
+    /// fails: see the module docs.
+    pub async fn record_provider_request_throttle_outcome(
+        &self,
+        key: &ProviderRequestKey,
+        result: ProviderRequestResult,
+        now_ms: i64,
+    ) -> ProviderRequestThrottled<()> {
+        let memory = &self.provider_request_memory;
+        // Memory first, so an interrupt during the DB wait cannot lose a 429.
+        let cooldown = memory.with_row(key, |row| row.record_unleased(&result, now_ms));
+        let mut fallback = self.provider_request_state_db_unready(now_ms).await;
+        if fallback.is_none() {
+            match self
+                .record_provider_request_unleased_result(key, &result, now_ms)
+                .await
+            {
+                // The DB's cooldown is at least the one recorded here.
+                Ok(()) => memory.with_row(key, |row| {
+                    if cooldown.is_some_and(|until| until == row.cooldown_until_ms) {
+                        row.cooldown_in_state_db = true;
+                    }
+                }),
+                Err(error) => {
+                    fallback = Some(memory.pause("record provider request result", &error));
+                }
+            }
+        }
+        ProviderRequestThrottled::new((), fallback)
     }
 
     /// End a lease without a result (an interrupted or abandoned request).

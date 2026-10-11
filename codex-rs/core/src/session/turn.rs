@@ -2610,14 +2610,20 @@ async fn acquire_provider_request_lease(
     prompt: &Prompt,
     responses_metadata: &CodexResponsesMetadata,
     cancellation_token: &CancellationToken,
-) -> CodexResult<Option<ProviderRequestLease>> {
+) -> CodexResult<ProviderRequestThrottle> {
     let preflight_started_at = Instant::now();
     trace_turn_timing("provider_preflight_start", preflight_started_at);
     let Some(state_db) = sess.state_db() else {
-        return Ok(None);
+        return Ok(ProviderRequestThrottle::default());
     };
 
-    let key = provider_request_key(sess, turn_context);
+    let Ok(key) = provider_request_key(sess, turn_context, &state_db)
+        .boxed()
+        .or_cancel(cancellation_token)
+        .await
+    else {
+        return Err(CodexErr::TurnAborted);
+    };
     let token_info = sess.token_usage_info().await;
     trace_turn_timing("provider_preflight_after_token_info", preflight_started_at);
     let last_token_usage = token_info
@@ -2711,7 +2717,10 @@ async fn acquire_provider_request_lease(
             )));
         }
         trace_turn_timing("provider_preflight_no_lease_needed", preflight_started_at);
-        return Ok(None);
+        return Ok(ProviderRequestThrottle {
+            unleased_key: Some(key),
+            lease: None,
+        });
     }
     let owner = format!(
         "pid:{}:thread:{}:turn:{}",
@@ -2763,7 +2772,10 @@ async fn acquire_provider_request_lease(
                 lease_until_ms = lease.lease_until_ms,
                 "provider request preflight acquired lease"
             );
-            Ok(Some(lease))
+            Ok(ProviderRequestThrottle {
+                unleased_key: None,
+                lease: Some(lease),
+            })
         }
         ProviderRequestLeaseDecision::Blocked(block) => {
             warn!(
@@ -2977,6 +2989,37 @@ async fn record_provider_request_result_for_lease(
     recorded.decision
 }
 
+/// #476: a request sent without a lease (any human-driven session, and a
+/// sub-agent's small or well-cached one) still records how it ended, so a 429
+/// holds every later request on the key back for the cooldown. A failure
+/// without an HTTP status (an interrupt, a network error) says nothing about
+/// the key and is not recorded.
+async fn record_unleased_provider_request_result(
+    sess: &Session,
+    key: &ProviderRequestKey,
+    result: ProviderRequestResult,
+) {
+    if matches!(result, ProviderRequestResult::Failed { status: None, .. }) {
+        return;
+    }
+    let Some(state_db) = sess.state_db() else {
+        return;
+    };
+    let result_kind = provider_request_result_kind(&result);
+    let recorded = state_db
+        .record_provider_request_throttle_outcome(key, result, now_unix_timestamp_ms())
+        .boxed()
+        .await;
+    trace!(
+        provider = %key.provider_id,
+        model = %key.model,
+        key_fingerprint = %key.key_fingerprint,
+        result = result_kind,
+        state_db_fallback = ?recorded.state_db_fallback,
+        "recorded unleased provider request result"
+    );
+}
+
 /// Say once per session that the shared state DB could not be written, so the
 /// provider-request throttle went on from this process's own state (#351).
 async fn notify_state_db_fallback(
@@ -3006,26 +3049,43 @@ async fn notify_state_db_fallback(
         .await;
 }
 
+/// How the throttle let a request go: under a lease, or without one.
+#[derive(Default)]
+struct ProviderRequestThrottle {
+    /// The key whose cooldown records this request's result when it holds
+    /// no lease (#476).
+    unleased_key: Option<ProviderRequestKey>,
+    lease: Option<ProviderRequestLease>,
+}
+
 struct ProviderRequestLeaseGuard {
     state_db: Option<StateDbHandle>,
     runtime_handle: tokio::runtime::Handle,
     lease: Option<ProviderRequestLease>,
+    unleased_key: Option<ProviderRequestKey>,
     /// The lease may never have been written; releasing nothing is expected.
     provisional: bool,
 }
 
 impl ProviderRequestLeaseGuard {
-    fn new(sess: &Session, lease: Option<ProviderRequestLease>) -> Self {
+    fn new(sess: &Session, throttle: ProviderRequestThrottle) -> Self {
         Self {
             state_db: sess.state_db(),
             runtime_handle: sess.services.runtime_handle.clone(),
-            lease,
+            lease: throttle.lease,
+            unleased_key: throttle.unleased_key,
             provisional: false,
         }
     }
 
     fn provisional(sess: &Session, lease: ProviderRequestLease) -> Self {
-        let mut guard = Self::new(sess, Some(lease));
+        let mut guard = Self::new(
+            sess,
+            ProviderRequestThrottle {
+                unleased_key: None,
+                lease: Some(lease),
+            },
+        );
         guard.provisional = true;
         guard
     }
@@ -3042,6 +3102,13 @@ impl ProviderRequestLeaseGuard {
         result: ProviderRequestResult,
         cancellation_token: &CancellationToken,
     ) {
+        if let Some(key) = self.unleased_key.take() {
+            record_unleased_provider_request_result(sess, &key, result)
+                .or_cancel(cancellation_token)
+                .await
+                .ok();
+            return;
+        }
         let Some(lease) = self.lease.clone() else {
             return;
         };
@@ -3148,33 +3215,70 @@ fn provider_request_error_retry_after_ms(err: &CodexErr) -> Option<i64> {
     }
 }
 
-fn provider_request_key(sess: &Session, turn_context: &TurnContext) -> ProviderRequestKey {
+async fn provider_request_key(
+    sess: &Session,
+    turn_context: &TurnContext,
+    state_db: &StateDbHandle,
+) -> ProviderRequestKey {
+    let key_fingerprint = match provider_request_key_identity(turn_context.provider.info(), || {
+        sess.services.auth_manager.auth_mode()
+    }) {
+        ProviderKeyIdentity::Label(label) => label,
+        ProviderKeyIdentity::EnvSecret { env_key, secret } => {
+            match state_db.provider_request_key_salt().await {
+                Ok(salt) => {
+                    let salted = salted_env_key_fingerprint(&salt, &env_key, &secret);
+                    state_db
+                        .adopt_legacy_provider_request_key(
+                            &legacy_env_key_fingerprint(&env_key, &secret),
+                            &salted,
+                        )
+                        .await;
+                    salted
+                }
+                Err(error) => {
+                    warn!(error = %format!("{error:#}"), "provider request key salt unavailable");
+                    format!("env-salted:{env_key}:unavailable")
+                }
+            }
+        }
+    };
     ProviderRequestKey {
         provider_id: turn_context.config.model_provider_id.clone(),
         model: turn_context.model_info.slug.clone(),
-        key_fingerprint: provider_request_key_fingerprint(turn_context.provider.info(), || {
-            sess.services.auth_manager.auth_mode()
-        }),
+        key_fingerprint,
     }
 }
 
 /// The credential identity a provider's throttle state is kept under.
-fn provider_request_key_fingerprint<A: std::fmt::Debug>(
+#[derive(Debug, PartialEq, Eq)]
+enum ProviderKeyIdentity {
+    /// A label that holds no credential material.
+    Label(String),
+    /// An API key from the environment, fingerprinted with the home's salt.
+    EnvSecret { env_key: String, secret: String },
+}
+
+fn provider_request_key_identity<A: std::fmt::Debug>(
     provider: &codex_model_provider_info::ModelProviderInfo,
     auth_mode: impl FnOnce() -> A,
-) -> String {
+) -> ProviderKeyIdentity {
     // PF-84: each named account has throttle state of its own, so one
     // account's 429 or lease never blocks another. A named account never uses
     // the provider's environment key, so that key is not part of its identity.
-    // The `default` account keeps today's key.
-    if let Some(account) = provider.account.as_ref() {
+    let label = if let Some(account) = provider.account.as_ref() {
         format!("account:{}", account.name)
     } else if let Some(env_key) = provider.env_key.as_deref() {
         match std::env::var(env_key)
             .ok()
             .filter(|value| !value.trim().is_empty())
         {
-            Some(secret) => format!("env:{env_key}:{}", secret_fingerprint(&secret)),
+            Some(secret) => {
+                return ProviderKeyIdentity::EnvSecret {
+                    env_key: env_key.to_string(),
+                    secret,
+                };
+            }
             // Do not hit the vault on the hot path just to fingerprint throttle state.
             // The actual request path still resolves the stored key and will fail
             // normally if it is missing or invalid.
@@ -3188,11 +3292,33 @@ fn provider_request_key_fingerprint<A: std::fmt::Debug>(
         "config:aws".to_string()
     } else {
         format!("auth-mode:{:?}", auth_mode())
-    }
+    };
+    ProviderKeyIdentity::Label(label)
 }
 
-fn secret_fingerprint(secret: &str) -> String {
-    let digest = Sha256::digest(secret.as_bytes());
+/// #482: an environment key's throttle identity, salted per home so the same
+/// key gives a different value on every machine.
+fn salted_env_key_fingerprint(salt: &[u8], env_key: &str, secret: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"corbanu-provider-request-key-v1\0");
+    hasher.update(salt);
+    hasher.update(b"\0");
+    hasher.update(env_key.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(secret.as_bytes());
+    format!("env-salted:{env_key}:{}", hex_prefix(&hasher.finalize()))
+}
+
+/// The unsalted identity older builds kept the key's throttle row under; it
+/// is only computed to move that row to the salted key.
+fn legacy_env_key_fingerprint(env_key: &str, secret: &str) -> String {
+    format!(
+        "env:{env_key}:{}",
+        hex_prefix(&Sha256::digest(secret.as_bytes()))
+    )
+}
+
+fn hex_prefix(digest: &[u8]) -> String {
     digest
         .iter()
         .take(8)
@@ -3289,7 +3415,7 @@ async fn try_run_sampling_request(
         turn_context.model_info.slug.as_str(),
         turn_context.provider.info().name.as_str(),
     );
-    let provider_request_lease = acquire_provider_request_lease(
+    let provider_request_throttle = acquire_provider_request_lease(
         sess.as_ref(),
         turn_context.as_ref(),
         client_session,
@@ -3300,7 +3426,7 @@ async fn try_run_sampling_request(
     .await?;
     trace_turn_timing("after_provider_request_lease", try_started_at);
     let mut provider_request_lease_guard =
-        ProviderRequestLeaseGuard::new(sess.as_ref(), provider_request_lease);
+        ProviderRequestLeaseGuard::new(sess.as_ref(), provider_request_throttle);
     let sampling_timing_guard = turn_context.turn_timing_state.begin_sampling();
     let uses_sequential_cutoff_reasoning_summaries = turn_context
         .config

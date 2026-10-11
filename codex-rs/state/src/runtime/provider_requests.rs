@@ -391,6 +391,79 @@ WHERE provider_id = ? AND model = ? AND key_fingerprint = ? AND lease_owner = ?
         Ok(rows_affected)
     }
 
+    /// Record how a request sent without a lease ended (#476). Unlike a leased
+    /// result it never touches the lease, and since other requests on the key
+    /// may have ended meanwhile, it never shortens a cooldown: a 429 extends
+    /// it, and any other result leaves an active one alone.
+    async fn record_provider_request_unleased_result_once(
+        &self,
+        key: &ProviderRequestKey,
+        result: &ProviderRequestResult,
+        now_ms: i64,
+    ) -> anyhow::Result<()> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        sqlx::query(
+            r#"
+INSERT INTO provider_request_state (provider_id, model, key_fingerprint, updated_at_ms)
+VALUES (?, ?, ?, ?)
+ON CONFLICT(provider_id, model, key_fingerprint) DO NOTHING
+            "#,
+        )
+        .bind(key.provider_id.as_str())
+        .bind(key.model.as_str())
+        .bind(key.key_fingerprint.as_str())
+        .bind(now_ms)
+        .execute(&mut *tx)
+        .await?;
+        let row = sqlx::query(
+            r#"
+SELECT consecutive_429_count, cooldown_until_ms
+FROM provider_request_state
+WHERE provider_id = ? AND model = ? AND key_fingerprint = ?
+            "#,
+        )
+        .bind(key.provider_id.as_str())
+        .bind(key.model.as_str())
+        .bind(key.key_fingerprint.as_str())
+        .fetch_one(&mut *tx)
+        .await?;
+        let existing = UnleasedRow {
+            consecutive_429_count: row.try_get("consecutive_429_count")?,
+            cooldown_until_ms: row.try_get("cooldown_until_ms")?,
+        };
+        let Some(update) = existing.apply(result, now_ms) else {
+            tx.commit().await?;
+            return Ok(());
+        };
+        sqlx::query(
+            r#"
+UPDATE provider_request_state
+SET cooldown_until_ms = ?,
+    last_status = ?,
+    last_request_id = ?,
+    last_provider_input_tokens = COALESCE(?, last_provider_input_tokens),
+    last_provider_cached_input_tokens = COALESCE(?, last_provider_cached_input_tokens),
+    consecutive_429_count = ?,
+    updated_at_ms = ?
+WHERE provider_id = ? AND model = ? AND key_fingerprint = ?
+            "#,
+        )
+        .bind(update.cooldown_until_ms)
+        .bind(update.last_status)
+        .bind(update.last_request_id)
+        .bind(update.provider_input_tokens)
+        .bind(update.provider_cached_input_tokens)
+        .bind(update.consecutive_429_count)
+        .bind(now_ms)
+        .bind(key.provider_id.as_str())
+        .bind(key.model.as_str())
+        .bind(key.key_fingerprint.as_str())
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     async fn release_provider_request_lease_once(
         &self,
         lease: &ProviderRequestLease,
@@ -503,6 +576,111 @@ impl StateRuntime {
         .await
     }
 
+    pub(crate) async fn record_provider_request_unleased_result(
+        &self,
+        key: &ProviderRequestKey,
+        result: &ProviderRequestResult,
+        now_ms: i64,
+    ) -> anyhow::Result<()> {
+        let started = Instant::now();
+        retry_busy_within(
+            "record provider request result",
+            PROVIDER_REQUEST_BUSY_WAIT,
+            || {
+                self.record_provider_request_unleased_result_once(
+                    key,
+                    result,
+                    since(now_ms, started),
+                )
+            },
+        )
+        .await
+    }
+
+    /// The per-home salt provider keys are fingerprinted with (#482), so a
+    /// throttle row's key differs on every home holding the same API key.
+    /// Migration 0053 creates it; it is read once per process.
+    pub async fn provider_request_key_salt(&self) -> anyhow::Result<Arc<[u8]>> {
+        self.provider_request_memory
+            .key_salt
+            .get_or_try_init(|| async {
+                let read = || async {
+                    sqlx::query_scalar::<_, Vec<u8>>(
+                        "SELECT salt FROM provider_request_key_salt WHERE id = 1",
+                    )
+                    .fetch_optional(self.pool.as_ref())
+                    .await
+                };
+                let salt = match read().await? {
+                    Some(salt) => salt,
+                    None => {
+                        sqlx::query(
+                            "INSERT OR IGNORE INTO provider_request_key_salt (id, salt) VALUES (1, randomblob(32))",
+                        )
+                        .execute(self.pool.as_ref())
+                        .await?;
+                        read()
+                            .await?
+                            .ok_or_else(|| anyhow::anyhow!("provider request key salt missing"))?
+                    }
+                };
+                anyhow::ensure!(salt.len() >= 16, "provider request key salt too short");
+                Ok(Arc::from(salt))
+            })
+            .await
+            .cloned()
+    }
+
+    /// Move the throttle rows an older build kept under `legacy` (an unsalted
+    /// key fingerprint) to `salted`, keeping their cooldown and lease (#482).
+    /// Done once per key and process; a row already kept under `salted` wins.
+    pub async fn adopt_legacy_provider_request_key(&self, legacy: &str, salted: &str) {
+        if self
+            .provider_request_memory
+            .adopted_legacy_keys
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(salted)
+        {
+            return;
+        }
+        let adopt = || async {
+            let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+            sqlx::query(
+                "UPDATE OR IGNORE provider_request_state SET key_fingerprint = ? WHERE key_fingerprint = ?",
+            )
+            .bind(salted)
+            .bind(legacy)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query("DELETE FROM provider_request_state WHERE key_fingerprint = ?")
+                .bind(legacy)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            anyhow::Ok(())
+        };
+        match retry_busy_within(
+            "adopt legacy provider request key",
+            PROVIDER_REQUEST_BUSY_WAIT,
+            adopt,
+        )
+        .await
+        {
+            Ok(()) => {
+                self.provider_request_memory
+                    .adopted_legacy_keys
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(salted.to_string());
+            }
+            // Tried again on the key's next request.
+            Err(error) => {
+                warn!(error = %format!("{error:#}"), "failed to adopt a legacy provider request key")
+            }
+        }
+    }
+
     /// `release_provider_request_lease`, waiting only as long as a step on the
     /// turn's path does.
     pub(crate) async fn release_provider_request_lease_briefly(
@@ -544,6 +722,81 @@ fn block_from_row(
         last_provider_input_tokens: row.try_get("last_provider_input_tokens")?,
         last_provider_cached_input_tokens: row.try_get("last_provider_cached_input_tokens")?,
     })
+}
+
+/// The fields an unleased result reads, in the state DB or this process's copy.
+pub(super) struct UnleasedRow {
+    pub(super) consecutive_429_count: i64,
+    pub(super) cooldown_until_ms: i64,
+}
+
+/// What an unleased result writes.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct UnleasedUpdate {
+    pub(super) cooldown_until_ms: i64,
+    pub(super) last_status: Option<i64>,
+    pub(super) last_request_id: Option<String>,
+    pub(super) provider_input_tokens: Option<i64>,
+    pub(super) provider_cached_input_tokens: Option<i64>,
+    pub(super) consecutive_429_count: i64,
+}
+
+impl UnleasedRow {
+    /// `None` when the result changes nothing: it carries no status, or it is
+    /// not a 429 and a cooldown is active (its status would then read as the
+    /// cooldown's cause).
+    pub(super) fn apply(
+        &self,
+        result: &ProviderRequestResult,
+        now_ms: i64,
+    ) -> Option<UnleasedUpdate> {
+        let cooling = self.cooldown_until_ms > now_ms;
+        match result {
+            ProviderRequestResult::Failed {
+                status: Some(status),
+                request_id,
+                retry_after_ms,
+            } if i64::from(*status) == RATE_LIMIT_STATUS => {
+                let consecutive_429_count = self.consecutive_429_count.saturating_add(1);
+                let cooldown = retry_after_ms
+                    .filter(|ms| *ms > 0)
+                    .unwrap_or_else(|| default_cooldown_ms(consecutive_429_count));
+                Some(UnleasedUpdate {
+                    cooldown_until_ms: self.cooldown_until_ms.max(now_ms.saturating_add(cooldown)),
+                    last_status: Some(RATE_LIMIT_STATUS),
+                    last_request_id: request_id.clone(),
+                    provider_input_tokens: None,
+                    provider_cached_input_tokens: None,
+                    consecutive_429_count,
+                })
+            }
+            _ if cooling => None,
+            ProviderRequestResult::Failed {
+                status: Some(status),
+                request_id,
+                ..
+            } => Some(UnleasedUpdate {
+                cooldown_until_ms: self.cooldown_until_ms,
+                last_status: Some(i64::from(*status)),
+                last_request_id: request_id.clone(),
+                provider_input_tokens: None,
+                provider_cached_input_tokens: None,
+                consecutive_429_count: 0,
+            }),
+            ProviderRequestResult::Failed { status: None, .. } => None,
+            ProviderRequestResult::Success {
+                input_tokens,
+                cached_input_tokens,
+            } => Some(UnleasedUpdate {
+                cooldown_until_ms: self.cooldown_until_ms,
+                last_status: Some(200),
+                last_request_id: None,
+                provider_input_tokens: input_tokens.map(|tokens| tokens.max(0)),
+                provider_cached_input_tokens: cached_input_tokens.map(|tokens| tokens.max(0)),
+                consecutive_429_count: 0,
+            }),
+        }
+    }
 }
 
 pub(super) fn default_cooldown_ms(consecutive_429_count: i64) -> i64 {

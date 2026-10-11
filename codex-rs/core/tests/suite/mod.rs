@@ -126,6 +126,7 @@ mod prompt_cache_key;
 mod prompt_caching;
 mod prompt_debug_tests;
 mod provenance;
+mod provider_throttle;
 mod quota_exceeded;
 mod realtime_conversation;
 mod realtime_initial_items;
