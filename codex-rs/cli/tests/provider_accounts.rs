@@ -125,3 +125,62 @@ fn account_add_validates_claude_config_dirs_and_names_the_kind() -> Result<()> {
         ));
     Ok(())
 }
+
+/// PF-84-S06 slice A: an Amazon Bedrock account holds an AWS profile name,
+/// validated and shown in clear; it can be renamed and removed. Other
+/// providers refuse the kind.
+#[test]
+fn bedrock_accounts_hold_a_validated_aws_profile_name() -> Result<()> {
+    let home = TempDir::new()?;
+    let account = |args: &[&str]| -> Result<assert_cmd::assert::Assert> {
+        Ok(corbanu(home.path())?
+            .arg("account")
+            .args(args)
+            .args(["--enable", "named_accounts"])
+            .assert())
+    };
+    let add = [
+        "add",
+        "amazon-bedrock",
+        "work",
+        "--kind",
+        "aws-profile",
+        "--value",
+    ];
+    account(&[&add[..], &["bad profile"]].concat())?
+        .failure()
+        .stderr(contains("invalid AWS profile name"));
+    account(&add)?
+        .failure()
+        .stderr(contains("this kind needs --value"));
+    account(&[
+        "add",
+        "zai",
+        "work",
+        "--kind",
+        "aws-profile",
+        "--value",
+        "dev",
+    ])?
+    .failure()
+    .stderr(contains(
+        "provider `zai` does not take `--kind aws-profile` accounts",
+    ));
+    account(&[&add[..], &["corp-dev"]].concat())?
+        .success()
+        .stdout("Saved amazon-bedrock account `work` (aws_profile).\n");
+    account(&["list", "amazon-bedrock"])?
+        .success()
+        .stdout("amazon-bedrock\twork\taws_profile\tprofile corp-dev\n");
+    account(&["rename", "amazon-bedrock", "work", "prod"])?
+        .success()
+        .stdout("Renamed amazon-bedrock account `work` to `prod`.\n");
+    account(&["list"])?
+        .success()
+        .stdout("amazon-bedrock\tprod\taws_profile\tprofile corp-dev\n");
+    account(&["remove", "amazon-bedrock", "prod"])?.success();
+    account(&["list"])?
+        .success()
+        .stdout("No named accounts. Every provider uses its default account.\n");
+    Ok(())
+}

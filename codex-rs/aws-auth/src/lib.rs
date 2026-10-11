@@ -1,4 +1,5 @@
 mod config;
+mod named_profile;
 mod signing;
 
 use std::time::SystemTime;
@@ -43,6 +44,10 @@ pub enum AwsAuthError {
     MissingCredentialsProvider,
     #[error("AWS SDK config did not resolve a region")]
     MissingRegion,
+    #[error(
+        "AWS profile `{0}` sets no region, or is not defined in the AWS config files; set `region` in that profile or `aws.region` for the provider"
+    )]
+    MissingProfileRegion(String),
     #[error("failed to load AWS credentials: {0}")]
     Credentials(#[from] aws_credential_types::provider::error::CredentialsError),
     #[error("request URL is not a valid URI: {0}")]
@@ -89,6 +94,27 @@ impl AwsAuthContext {
         })
     }
 
+    /// PF-84-S06: credentials and region from `profile` only, never from
+    /// environment keys, `AWS_PROFILE` or another profile. Credentials are
+    /// resolved once here, so a missing or broken profile fails before any
+    /// request.
+    pub async fn load_named_profile(
+        profile: &str,
+        region_override: Option<String>,
+        service: &str,
+    ) -> Result<Self, AwsAuthError> {
+        named_profile::load_named_profile(profile, region_override, service, /*files*/ None).await
+    }
+
+    /// PF-84-S06: the region a named profile uses (`region_override`, then
+    /// the profile's `region`), without resolving credentials.
+    pub async fn named_profile_region(
+        profile: &str,
+        region_override: Option<String>,
+    ) -> Result<String, AwsAuthError> {
+        named_profile::named_profile_region(profile, region_override, /*files*/ None).await
+    }
+
     pub fn region(&self) -> &str {
         &self.region
     }
@@ -112,6 +138,23 @@ impl AwsAuthContext {
 }
 
 impl AwsAuthError {
+    /// This error and its sources, for messages that must say why (the
+    /// SDK's top-level credential errors are terse). Never holds secrets:
+    /// the profile parser reports locations, not file contents.
+    pub fn detailed_message(&self) -> String {
+        let mut message = self.to_string();
+        let mut source = std::error::Error::source(self);
+        while let Some(error) = source {
+            let text = error.to_string();
+            if !message.contains(&text) {
+                message.push_str(": ");
+                message.push_str(&text);
+            }
+            source = error.source();
+        }
+        message
+    }
+
     /// Returns whether retrying the outbound request can reasonably recover from this auth error.
     pub fn is_retryable(&self) -> bool {
         match self {
@@ -123,6 +166,7 @@ impl AwsAuthError {
             AwsAuthError::EmptyService
             | AwsAuthError::MissingCredentialsProvider
             | AwsAuthError::MissingRegion
+            | AwsAuthError::MissingProfileRegion(_)
             | AwsAuthError::InvalidUri(_)
             | AwsAuthError::BuildHttpRequest(_)
             | AwsAuthError::InvalidHeaderValue(_)
