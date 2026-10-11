@@ -1310,6 +1310,29 @@ impl Session {
         state.token_info()
     }
 
+    /// PF-84: usage of requests made for this conversation outside its own
+    /// turn loop (a guardian or `/review` delegate, stage-one memory
+    /// extraction), which the accounting ledger also records under it. With a
+    /// turn context the update is sent at once; otherwise with the next count.
+    pub(crate) async fn record_delegated_account_usage(
+        &self,
+        turn_context: Option<&TurnContext>,
+        usage: &[codex_protocol::protocol::AccountTokenUsage],
+    ) {
+        if usage.is_empty() || !self.features().enabled(Feature::NamedAccounts) {
+            return;
+        }
+        {
+            let mut state = self.state.lock().await;
+            for entry in usage {
+                state.record_account_token_usage(&entry.provider_id, &entry.account, &entry.usage);
+            }
+        }
+        if let Some(turn_context) = turn_context {
+            self.send_token_count_event(turn_context).await;
+        }
+    }
+
     /// PF-84: this thread's provider-reported usage per named account, for
     /// replay to a client that attaches after resume.
     pub(crate) async fn account_token_usage(
@@ -1452,9 +1475,12 @@ impl Session {
                     let mut state = self.state.lock().await;
                     state.set_token_info(Some(info));
                 }
-                // PF-84: a resumed thread keeps its usage per account. A fork does
-                // not: its parent's requests stay the parent's.
-                if let Some(usage) = Self::last_account_token_usage_from_rollout(&rollout_items) {
+                // PF-84: a resumed thread keeps its usage per account, only while
+                // named accounts are on. A fork does not: its parent's requests
+                // stay the parent's.
+                if turn_context.config.features.enabled(Feature::NamedAccounts)
+                    && let Some(usage) = Self::last_account_token_usage_from_rollout(&rollout_items)
+                {
                     let mut state = self.state.lock().await;
                     state.set_account_token_usage(usage);
                 }
@@ -1513,6 +1539,18 @@ impl Session {
                         // cold resume cannot observe inherited settings as the latest value.
                         rollout_items.push(thread_settings_applied);
                     }
+                }
+                // PF-84: the copied prefix holds the parent's usage per account; mark
+                // where this fork's own (none yet) begins, so a resume before its first
+                // reply does not count the parent's again.
+                if turn_context.config.features.enabled(Feature::NamedAccounts) {
+                    rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
+                        TokenCountEvent {
+                            info: None,
+                            rate_limits: None,
+                            account_usage: Some(Vec::new()),
+                        },
+                    )));
                 }
                 self.persist_rollout_items(&rollout_items).await;
 
@@ -4517,11 +4555,7 @@ impl Session {
                     .update_token_info_from_usage(token_usage, turn_context.model_context_window());
                 // PF-84: attribute the usage to the account that served it, as the
                 // accounting ledger does (provider id and account name only).
-                if turn_context
-                    .config
-                    .features
-                    .enabled(codex_features::Feature::NamedAccounts)
-                {
+                if turn_context.config.features.enabled(Feature::NamedAccounts) {
                     let account = turn_context
                         .provider
                         .info()

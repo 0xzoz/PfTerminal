@@ -287,11 +287,7 @@ impl ChatWidget {
         // The account the app server reported for this thread wins, as a
         // resumed thread runs on its recorded account.
         let active = self
-            .thread_provider_account
-            .as_deref()
-            .and_then(|account| account.split_once(':'))
-            .filter(|(provider, _)| *provider == provider_id)
-            .map(|(_, name)| name)
+            .thread_account_of_current_provider()
             .or_else(|| {
                 provider
                     .account

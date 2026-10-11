@@ -15625,12 +15625,16 @@ async fn background_history_insertion_requests_a_frame_without_user_input() -> R
     Ok(())
 }
 
-/// PF-84: every thread's per-account usage report reaches `/status`, a
-/// report without account usage (named accounts off) records nothing, and a
-/// new session starts afresh.
+/// PF-84: every thread of the session reports its usage per account through
+/// `thread/tokenUsage/updated`; `/status` adds them up across a thread switch.
+/// A report without account usage (named accounts off) or from a thread of an
+/// earlier session records nothing, and a new session starts afresh.
 #[tokio::test]
 async fn thread_account_usage_reaches_status_and_resets_with_the_session() {
     let (mut app, _rx, _op_rx) = make_test_app_with_channels().await;
+    let app_server = crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+        .await
+        .expect("embedded app server");
     let report = |thread_id: ThreadId, account: &str, total_tokens: i64| {
         let ServerNotification::ThreadTokenUsageUpdated(mut update) =
             token_usage_notification_with_total(
@@ -15649,38 +15653,68 @@ async fn thread_account_usage_reaches_status_and_resets_with_the_session() {
         }]);
         ServerNotification::ThreadTokenUsageUpdated(update)
     };
-    app.record_thread_account_usage(&report(ThreadId::new(), "default", /*total_tokens*/ 9));
-    app.record_thread_account_usage(&report(ThreadId::new(), "work", /*total_tokens*/ 9));
-    app.record_thread_account_usage(&token_usage_notification_with_total(
-        ThreadId::new(),
-        "turn-1",
-        /*total_tokens*/ 50,
-        /*model_context_window*/ None,
-    ));
-    let summary = app
-        .chat_widget
-        .session_account_usage
-        .for_provider("zai", "default");
-    assert_eq!(
-        summary
-            .rows
-            .iter()
-            .map(|(account, usage)| (account.as_str(), usage.total_tokens))
-            .collect::<Vec<_>>(),
-        vec![("default", 9), ("work", 9)]
+    let coordinator = ThreadId::new();
+    let worker = ThreadId::new();
+    app.primary_thread_id = Some(coordinator);
+    app.agent_navigation.upsert(
+        worker, /*agent_nickname*/ None, /*agent_role*/ None, /*is_closed*/ false,
     );
+    for notification in [
+        report(coordinator, "default", /*total_tokens*/ 9),
+        report(worker, "work", /*total_tokens*/ 7),
+        // A thread this session does not know (an earlier session's agent).
+        report(ThreadId::new(), "work", /*total_tokens*/ 100),
+        // Named accounts off: no account usage.
+        token_usage_notification_with_total(
+            worker, "turn-1", /*total_tokens*/ 50, /*model_context_window*/ None,
+        ),
+    ] {
+        app.handle_app_server_event(
+            &app_server,
+            codex_app_server_client::AppServerEvent::ServerNotification(Box::new(notification)),
+        )
+        .await;
+    }
+    let totals = |app: &App| {
+        app.chat_widget
+            .session_account_usage
+            .for_provider("zai", "default")
+            .rows
+            .into_iter()
+            .map(|(account, usage)| (account, usage.total_tokens))
+            .collect::<Vec<_>>()
+    };
+    let expected = vec![("default".to_string(), 9), ("work".to_string(), 7)];
+    assert_eq!(totals(&app), expected);
+
+    // A thread switch rebuilds the chat widget and keeps the session's totals.
+    let replacement = ChatWidget::new_with_app_event(ChatWidgetInit {
+        config: app.config.clone(),
+        frame_requester: crate::tui::FrameRequester::test_dummy(),
+        app_event_tx: app.app_event_tx.clone(),
+        workspace_command_runner: None,
+        initial_user_message: None,
+        enhanced_keys_supported: app.enhanced_keys_supported,
+        has_chatgpt_account: app.chat_widget.has_chatgpt_account(),
+        has_codex_backend_auth: app.chat_widget.has_codex_backend_auth(),
+        model_catalog: app.model_catalog.clone(),
+        feedback: app.feedback.clone(),
+        is_first_run: false,
+        status_account_display: app.chat_widget.status_account_display().cloned(),
+        runtime_model_provider_base_url: app
+            .chat_widget
+            .runtime_model_provider_base_url()
+            .map(str::to_string),
+        initial_plan_type: app.chat_widget.current_plan_type(),
+        model: Some(app.chat_widget.current_model().to_string()),
+        startup_tooltip_override: None,
+        status_line_invalid_items_warned: app.status_line_invalid_items_warned.clone(),
+        terminal_title_invalid_items_warned: app.terminal_title_invalid_items_warned.clone(),
+        session_telemetry: app.session_telemetry.clone(),
+    });
+    app.replace_chat_widget(replacement);
+    assert_eq!(totals(&app), expected);
 
     app.reset_thread_event_state();
-    let summary = app
-        .chat_widget
-        .session_account_usage
-        .for_provider("zai", "default");
-    assert_eq!(
-        summary
-            .rows
-            .iter()
-            .map(|(account, usage)| (account.as_str(), usage.total_tokens))
-            .collect::<Vec<_>>(),
-        vec![("default", 0)]
-    );
+    assert_eq!(totals(&app), vec![("default".to_string(), 0)]);
 }

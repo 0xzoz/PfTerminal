@@ -54,8 +54,9 @@ its `corbanu account add` recovery; the default credential is unchanged.
 With the feature on, `/status` names the session's account on the provider
 line and adds an **Account usage** line: the tokens this session used on each
 account of the current provider, as the provider reported them. It covers the
-whole session, so a spawned agent on another account counts toward that
-account. Only token counts are shown: no prices and no cost records.
+whole session: spawned agents (each toward its own account), side
+conversations, automatic and `/review` reviews, and memory extraction. Only
+token counts are shown: no prices and no cost records.
 
 - One account is one line, such as
   `work · 35,100 input · 12,000 cached input · 6,247 output (300 reasoning)`.
@@ -64,10 +65,16 @@ account. Only token counts are shown: no prices and no cost records.
   `(active)`.
 - **Input** is the uncached part, as on the **Token usage** line; cached input
   and reasoning appear only when the provider reports them, and reasoning is
-  part of the output.
+  part of the output. Reviews are counted here but not on **Token usage**, so
+  the rows can add up to more.
 - Accounts appear by name only. Other providers' accounts are not listed; switch
   to that provider to see them.
-- A resumed conversation keeps its counts; a new session starts from zero.
+- A new session starts from zero. A resumed conversation keeps its own earlier
+  counts, but agents it spawned before the resume count again only once they
+  run. Memory extraction shows after the next reply.
 
-Developer-accounting builds also have `/cost`, which shows the same work by
-provider, account and model; its token counts for the same conversation and UTC day match these.
+Developer-accounting builds also have `/cost`, which shows the same requests by
+provider, account and model for one UTC day. For a session that stays within
+one day, its token counts per account match these, except for background
+memory consolidation, which `/cost` records under the conversation and
+`/status` does not show.

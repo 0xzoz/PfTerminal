@@ -257,11 +257,16 @@ impl App {
 
     /// PF-84: every thread of the session reports its usage per account (only
     /// while named accounts are on); `/status` adds them up, so a spawned
-    /// agent's work counts toward its own account.
+    /// agent's work counts toward its own account. Only this session's threads
+    /// count: a late report from a thread of an earlier session is ignored.
     pub(super) fn record_thread_account_usage(&mut self, notification: &ServerNotification) {
         if let ServerNotification::ThreadTokenUsageUpdated(update) = notification
             && let Some(usage) = update.account_usage.clone()
             && let Ok(thread_id) = codex_protocol::ThreadId::from_string(&update.thread_id)
+            && (self.primary_thread_id == Some(thread_id)
+                || self.agent_navigation.get(&thread_id).is_some()
+                || (self.side_threads.contains_key(&thread_id)
+                    && !self.abandoned_side_threads.contains(&thread_id)))
         {
             self.chat_widget
                 .record_thread_account_usage(thread_id, usage);

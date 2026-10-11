@@ -304,6 +304,9 @@ async fn forward_events(
 ) {
     let cancelled = cancel_token.cancelled();
     tokio::pin!(cancelled);
+    // PF-84: the delegate's usage per account so far; each increase counts
+    // toward the parent conversation, as the accounting ledger records it.
+    let mut delegated_usage: Vec<codex_protocol::protocol::AccountTokenUsage> = Vec::new();
 
     loop {
         tokio::select! {
@@ -317,6 +320,23 @@ async fn forward_events(
                     Err(_) => break,
                 };
                 match event {
+                    Event {
+                        id: _,
+                        msg:
+                            EventMsg::TokenCount(codex_protocol::protocol::TokenCountEvent {
+                                account_usage: Some(usage),
+                                ..
+                            }),
+                    } => {
+                        let increase = codex_protocol::protocol::AccountTokenUsage::increase_since(
+                            &delegated_usage,
+                            &usage,
+                        );
+                        delegated_usage = usage;
+                        parent_session
+                            .record_delegated_account_usage(Some(&parent_ctx), &increase)
+                            .await;
+                    }
                     Event {
                         id: _,
                         msg:
