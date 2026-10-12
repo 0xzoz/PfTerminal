@@ -205,7 +205,7 @@ jobs:
             Assert-Tests $sandbox 'sec_win_' 31
             & $medium -Program $sandbox -Arguments @('sec_win_', '--nocapture', '--test-threads=1')
             if ($LASTEXITCODE -ne 0) { throw "P1 hardening regressions failed in a normal session" }
-            Assert-Tests $sandbox 'credential_watch' 15
+            Assert-Tests $sandbox 'credential_watch' 18
             & $medium -Program $sandbox -Arguments @('credential_watch', '--nocapture', '--test-threads=1')
             if ($LASTEXITCODE -ne 0) { throw "#442 credential watch failed in a normal session" }
             $hardening = Get-TestExe @('-p', 'codex-process-hardening', '--lib')

@@ -423,3 +423,74 @@ fn nested_folders_keep_their_own_patterns() {
     assert!(!names.is_credential(&work.join(".env")));
     assert!(names.is_credential(&work.join(".env.local")));
 }
+
+/// The deny list's depth counts from each covered folder, as the resolver
+/// scans each glob from its own folder.
+#[test]
+fn depth_counts_from_each_covered_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = root(&dir);
+    std::fs::create_dir_all(work.join("a").join("b").join("c")).unwrap();
+    std::fs::create_dir_all(work.join("x").join("y")).unwrap();
+    let sep = std::path::MAIN_SEPARATOR;
+    let inner = work.join("a").join("b");
+    let mut policy = FileSystemSandboxPolicy::restricted(vec![
+        FileSystemSandboxEntry::new(
+            FileSystemPath::GlobPattern {
+                pattern: format!("{}{sep}**{sep}.env", work.to_string_lossy()),
+            },
+            FileSystemAccessMode::Deny,
+        ),
+        FileSystemSandboxEntry::new(
+            FileSystemPath::GlobPattern {
+                pattern: format!("{}{sep}**{sep}.env.*", inner.to_string_lossy()),
+            },
+            FileSystemAccessMode::Deny,
+        ),
+    ]);
+    policy.glob_scan_max_depth = Some(2);
+    let names = Names::for_policy(&policy, &work).unwrap();
+    std::fs::write(work.join("x").join("y").join(".env"), "").unwrap();
+    assert_eq!(
+        must_stop(Change::Lost, &HashMap::new(), &names, Some(2)),
+        None
+    );
+    std::fs::write(inner.join("c").join(".env.local"), "").unwrap();
+    assert!(
+        must_stop(Change::Lost, &HashMap::new(), &names, Some(2))
+            .expect("found")
+            .ends_with(".env.local")
+    );
+}
+
+/// Long (`\\?\`) and UNC spellings compare as the plain paths the scan
+/// builds.
+#[cfg(windows)]
+#[test]
+fn long_and_unc_paths_compare_plainly() {
+    assert_eq!(key(Path::new(r"\\?\C:\A\B")), key(Path::new(r"c:\a\b")));
+    assert_eq!(
+        key(Path::new(r"\\?\UNC\srv\sh\x")),
+        PathBuf::from(r"\\srv\sh\x")
+    );
+}
+
+/// A denied `.env` more than 260 characters deep does not refuse commands.
+#[cfg(windows)]
+#[test]
+fn a_deep_denied_file_is_known() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = root(&dir);
+    let mut deep = work.clone();
+    for part in 0..6 {
+        deep = deep.join(format!("{part}-{}", "d".repeat(48)));
+    }
+    std::fs::create_dir_all(&deep).unwrap();
+    std::fs::write(deep.join(".env"), "API_KEY=dummy").unwrap();
+    assert!(deep.join(".env").to_string_lossy().len() > 260);
+    assert!(
+        CredentialWatch::start(&policy(&work), &work, &[deep.join(".env")], Box::new(|| {}))
+            .expect("not refused")
+            .is_some()
+    );
+}

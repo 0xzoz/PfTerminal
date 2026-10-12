@@ -336,7 +336,11 @@ fn must_stop(
         // A new file, even at the place of a denied one, has a new ACL.
         // One already gone may have been read. (Short names in the folder
         // part are resolved first.)
-        _ if names.is_credential(&real_spelling(&path)) => Some(path.display().to_string()),
+        _ if names.is_credential(&path)
+            || (credential_like(&path) && names.is_credential(&real_spelling(&path))) =>
+        {
+            Some(path.display().to_string())
+        }
         _ => None,
     }
 }
@@ -474,6 +478,16 @@ fn unwatchable(folder: &Path) -> Option<&'static str> {
 #[cfg(not(windows))]
 fn unwatchable(_folder: &Path) -> Option<&'static str> {
     None
+}
+
+/// A name that could be a credential file's (any rule): only those are worth
+/// resolving the folder of.
+fn credential_like(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| {
+        name.to_string_lossy()
+            .to_ascii_lowercase()
+            .starts_with(".env")
+    })
 }
 
 /// `path` with its folder resolved, the way the scan spells paths.
