@@ -2511,7 +2511,10 @@ fn level_policies(
     vec![
         ("permissive", permissive),
         ("moderate", FileSystemSandboxPolicy::restricted(moderate)),
-        ("aggressive", FileSystemSandboxPolicy::restricted(aggressive)),
+        (
+            "aggressive",
+            FileSystemSandboxPolicy::restricted(aggressive),
+        ),
     ]
 }
 
