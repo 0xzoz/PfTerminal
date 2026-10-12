@@ -1173,13 +1173,38 @@ impl McpServerElicitationOverlay {
         self.typing_guard.on_request_changed();
     }
 
-    /// #523: keys that would type or edit text in a form field.
-    fn edits_text(key_event: KeyEvent) -> bool {
-        key_hint::is_plain_text_key_event(key_event)
-            || matches!(
-                key_event.code,
-                KeyCode::Backspace | KeyCode::Delete | KeyCode::Tab
-            )
+    /// #523: deliberate navigation in a form: the arrow, Page, Home and End
+    /// keys, and configured list keys that are neither a character nor a
+    /// chord.
+    fn is_navigation(&self, key_event: KeyEvent) -> bool {
+        if key_hint::is_plain_text_key_event(key_event)
+            || key_hint::has_ctrl_or_alt(key_event.modifiers)
+        {
+            return false;
+        }
+        let keymap = &self.list_keymap;
+        matches!(
+            key_event.code,
+            KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::Left
+                | KeyCode::Right
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+                | KeyCode::Home
+                | KeyCode::End
+        ) || [
+            &keymap.move_up,
+            &keymap.move_down,
+            &keymap.move_left,
+            &keymap.move_right,
+            &keymap.page_up,
+            &keymap.page_down,
+            &keymap.jump_top,
+            &keymap.jump_bottom,
+        ]
+        .iter()
+        .any(|bindings| bindings.is_pressed(key_event))
     }
 
     fn approval_notice(&self) -> Option<&'static str> {
@@ -1731,23 +1756,26 @@ impl BottomPaneView for McpServerElicitationOverlay {
             {
                 return;
             }
-        } else if self.typing_guard.awaits_navigation() && Self::edits_text(key_event) {
+        } else if self.typing_guard.awaits_navigation() {
             // #523: a form that opened while the user typed (or over another
-            // view) takes none of that text into its fields; they navigate
-            // first.
-            self.typing_guard.on_typed_input();
-            return;
-        } else if self.typing_guard.awaits_choice()
-            && self.current_field_is_select()
-            && let KeyCode::Char(ch) = key_event.code
-            && key_hint::is_plain_text_key_event(key_event)
-            && (self.option_index_for_digit(ch).is_none()
-                || self.typing_guard.notice() == Some(Notice::TypedText))
-        {
-            // #523: on a new request a letter (or anything after one) is
-            // typed text, not a choice; Enter still waits.
-            self.typing_guard.on_typed_input();
-            return;
+            // view), or took typed text since, takes nothing but navigation:
+            // no text, editing keys or shortcuts reach its fields.
+            if !self.is_navigation(key_event) {
+                self.typing_guard.on_typed_input();
+                return;
+            }
+            self.typing_guard.reset();
+        } else if self.typing_guard.awaits_choice() && self.current_field_is_select() {
+            // #523: on a new request a select field takes a number key or
+            // navigation; anything else is typed text and Enter still waits.
+            let digit = matches!(key_event.code, KeyCode::Char(ch)
+                if key_hint::is_plain_text_key_event(key_event)
+                    && self.option_index_for_digit(ch).is_some());
+            if !digit && !self.is_navigation(key_event) {
+                self.typing_guard.on_typed_input();
+                return;
+            }
+            self.typing_guard.reset();
         } else {
             self.typing_guard.reset();
         }
@@ -1823,14 +1851,27 @@ impl BottomPaneView for McpServerElicitationOverlay {
         if self.current_field_is_select() {
             self.validation_error = None;
             let options_len = self.options_len();
+            let plain = !key_hint::has_ctrl_or_alt(key_event.modifiers);
             match key_event.code {
-                KeyCode::Up | KeyCode::Char('k') => {
+                KeyCode::Up => {
                     if let Some(answer) = self.current_answer_mut() {
                         answer.selection.move_up_wrap(options_len);
                         answer.answer_committed = false;
                     }
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
+                KeyCode::Char('k') if plain => {
+                    if let Some(answer) = self.current_answer_mut() {
+                        answer.selection.move_up_wrap(options_len);
+                        answer.answer_committed = false;
+                    }
+                }
+                KeyCode::Down => {
+                    if let Some(answer) = self.current_answer_mut() {
+                        answer.selection.move_down_wrap(options_len);
+                        answer.answer_committed = false;
+                    }
+                }
+                KeyCode::Char('j') if plain => {
                     if let Some(answer) = self.current_answer_mut() {
                         answer.selection.move_down_wrap(options_len);
                         answer.answer_committed = false;
@@ -1845,7 +1886,7 @@ impl BottomPaneView for McpServerElicitationOverlay {
                     self.go_next_or_submit();
                 }
                 // #192: a number key chooses its option; Enter submits.
-                KeyCode::Char(ch) => {
+                KeyCode::Char(ch) if plain => {
                     if let Some(option_idx) = self.option_index_for_digit(ch) {
                         self.highlight_option(option_idx);
                         self.select_current_option(/*committed*/ true);
@@ -1891,7 +1932,10 @@ impl BottomPaneView for McpServerElicitationOverlay {
     }
 
     fn handle_paste(&mut self, pasted: String) -> bool {
-        if self.is_approval() || self.typing_guard.awaits_navigation() {
+        if self.is_approval()
+            || self.typing_guard.awaits_navigation()
+            || (self.typing_guard.awaits_choice() && self.current_field_is_select())
+        {
             // A paste is typed text; it never answers an approval.
             self.typing_guard.on_typed_input();
             return true;
@@ -2997,6 +3041,59 @@ mod tests {
             resolved_decisions(&mut rx),
             vec![(McpServerElicitationAction::Accept, None)]
         );
+    }
+
+    fn confirm_form(tx: AppEventSender) -> McpServerElicitationOverlay {
+        let request = from_form_request(
+            ThreadId::default(),
+            form_request(
+                "Allow this request?",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "confirmed": { "type": "boolean", "title": "Confirm" }
+                    },
+                    "required": ["confirmed"],
+                }),
+                /*meta*/ None,
+            ),
+        )
+        .expect("expected supported form");
+        McpServerElicitationOverlay::new(
+            request, tx, /*has_input_focus*/ true, /*enhanced_keys_supported*/ false,
+            /*disable_paste_burst*/ false,
+        )
+    }
+
+    /// Review r2 (#523): shortcuts and editing keys are typed text too: on a
+    /// form shown mid-typing or over a view, Ctrl+J (the composer's newline)
+    /// or Ctrl+W does not clear the guard, and after an answer Tab or
+    /// Backspace does not either. Only navigation does.
+    #[test]
+    fn issue_523_shortcuts_and_editing_keys_never_answer_a_new_form() {
+        let ctrl = |ch| KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL);
+        let (tx, mut rx) = test_sender();
+        let mut overlay = confirm_form(tx);
+        overlay.require_fresh_choice();
+        press(&mut overlay, KeyCode::Char('x'));
+        overlay.handle_key_event(ctrl('j'));
+        press(&mut overlay, KeyCode::Char('y'));
+        overlay.handle_key_event(ctrl('w'));
+        press(&mut overlay, KeyCode::Enter);
+        assert_eq!(resolved_decisions(&mut rx), Vec::new());
+
+        for key in [KeyCode::Tab, KeyCode::Backspace, KeyCode::Delete] {
+            let (tx, mut rx) = test_sender();
+            let mut overlay = confirm_form(tx);
+            overlay.require_fresh_choice_after_answer();
+            press(&mut overlay, key);
+            press(&mut overlay, KeyCode::Enter);
+            assert_eq!(resolved_decisions(&mut rx), Vec::new(), "{key:?}");
+            press(&mut overlay, KeyCode::Down);
+            press(&mut overlay, KeyCode::Up);
+            press(&mut overlay, KeyCode::Enter);
+            assert_eq!(resolved_decisions(&mut rx).len(), 1, "{key:?}");
+        }
     }
 
     /// #192: in a form, a number key chooses an option without submitting.
