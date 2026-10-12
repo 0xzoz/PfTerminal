@@ -41,7 +41,7 @@ wait = "Configure providers"
 key = "Up"
 repeat = 3
 [[steps]]
-wait = "› 13\\. Amazon Bedrock · default"
+wait = "› 13\\. Amazon Bedrock"
 [[steps]]
 key = "Enter"
 [[steps]]
@@ -65,11 +65,15 @@ pause = 1.0
 [[steps]]
 key = "Enter"
 [[steps]]
-wait = "Amazon Bedrock · work"
+wait = "Saved amazon-bedrock account `work`"
 [[steps]]
-pause = 2.0
+pause = 1.5
 [[steps]]
 key = "Down"
+[[steps]]
+wait = "› 14\\. Amazon Bedrock · work +Named account · AWS profile `work`"
+[[steps]]
+pause = 2.0
 [[steps]]
 key = "Enter"
 [[steps]]

@@ -6,6 +6,7 @@
 
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use codex_aws_auth::AwsAuthContext;
 use codex_aws_auth::AwsAuthError;
@@ -26,6 +27,9 @@ pub(super) struct NamedBedrockAccount {
     name: String,
     home: Option<PathBuf>,
     profile_source: ProfileSource,
+    /// The signing context of the profile last loaded, so its credentials
+    /// (and an SSO token cache) are resolved once, not on every request.
+    loaded: Arc<tokio::sync::Mutex<Option<(String, AwsAuthContext)>>>,
 }
 
 impl NamedBedrockAccount {
@@ -41,6 +45,7 @@ impl NamedBedrockAccount {
             name: account.name.clone(),
             home,
             profile_source: codex_login::provider_account_aws_profile,
+            loaded: Arc::default(),
         })
     }
 
@@ -77,21 +82,35 @@ impl NamedBedrockAccount {
     /// The Mantle region: `aws.region` when configured, else the profile's.
     pub(super) async fn region(&self, aws: &ModelProviderAwsAuthInfo) -> Result<String> {
         let profile = self.profile()?;
+        if let Some((loaded, context)) = self.loaded.lock().await.as_ref()
+            && *loaded == profile
+        {
+            return Ok(context.region().to_string());
+        }
         AwsAuthContext::named_profile_region(&profile, region_from_config(aws))
             .await
             .map_err(|error| self.profile_error(&profile, &error))
     }
 
-    /// The profile's signing context; its credentials are resolved here.
+    /// The profile's signing context. Its credentials are resolved when the
+    /// profile is first loaded (or changes), before any request is signed.
     pub(super) async fn context(&self, aws: &ModelProviderAwsAuthInfo) -> Result<AwsAuthContext> {
         let profile = self.profile()?;
-        AwsAuthContext::load_named_profile(
+        let mut loaded = self.loaded.lock().await;
+        if let Some((loaded_profile, context)) = loaded.as_ref()
+            && *loaded_profile == profile
+        {
+            return Ok(context.clone());
+        }
+        let context = AwsAuthContext::load_named_profile(
             &profile,
             region_from_config(aws),
             BEDROCK_MANTLE_SERVICE_NAME,
         )
         .await
-        .map_err(|error| self.profile_error(&profile, &error))
+        .map_err(|error| self.profile_error(&profile, &error))?;
+        *loaded = Some((profile, context.clone()));
+        Ok(context)
     }
 
     fn profile_error(&self, profile: &str, error: &AwsAuthError) -> CodexErr {

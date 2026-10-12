@@ -139,10 +139,22 @@ impl AwsAuthContext {
 
 impl AwsAuthError {
     /// This error and its sources, for messages that must say why (the
-    /// SDK's top-level credential errors are terse). Never holds secrets:
-    /// the profile parser reports locations, not file contents.
+    /// SDK's top-level credential errors are terse). The sources of a
+    /// credential provider's own failure are left out: a `credential_process`
+    /// helper's stderr ends up there and may hold anything. Configuration and
+    /// profile errors report names and file locations, not file contents.
     pub fn detailed_message(&self) -> String {
         let mut message = self.to_string();
+        if matches!(
+            self,
+            AwsAuthError::Credentials(
+                aws_credential_types::provider::error::CredentialsError::ProviderError(_)
+                    | aws_credential_types::provider::error::CredentialsError::Unhandled(_)
+            )
+        ) {
+            message.push_str(" (details withheld; they may contain credential-helper output)");
+            return message;
+        }
         let mut source = std::error::Error::source(self);
         while let Some(error) = source {
             let text = error.to_string();

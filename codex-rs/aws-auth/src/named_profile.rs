@@ -3,9 +3,12 @@
 //! The SDK's default chain reads `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`
 //! before any profile, so a named account must not use it. This loads only
 //! the shared config and credentials files (honouring `AWS_CONFIG_FILE` and
-//! `AWS_SHARED_CREDENTIALS_FILE`), never `AWS_PROFILE`, environment keys or
-//! instance metadata, and never falls back to another profile. SSO and
-//! `credential_process` profiles work as the SDK resolves them.
+//! `AWS_SHARED_CREDENTIALS_FILE`), never `AWS_PROFILE`, and never falls back
+//! to another profile. A profile's `credential_source` (`Environment`,
+//! `Ec2InstanceMetadata`, `EcsContainer`) is refused too, so environment keys
+//! and instance or container credentials are never used. Static keys,
+//! `source_profile` role chains, SSO and `credential_process` profiles work
+//! as the SDK resolves them.
 
 // The SDK keeps these names as deprecated aliases of `aws-runtime` types;
 // using them avoids a direct dependency on that crate.
@@ -15,11 +18,37 @@ use aws_config::meta::region::ProvideRegion;
 use aws_config::profile::ProfileFileCredentialsProvider;
 use aws_config::profile::ProfileFileRegionProvider;
 use aws_config::profile::profile_file::ProfileFiles;
+use aws_config::provider_config::ProviderConfig;
 use aws_credential_types::provider::ProvideCredentials;
 use aws_credential_types::provider::SharedCredentialsProvider;
+use aws_credential_types::provider::error::CredentialsError;
+use aws_credential_types::provider::future;
+use aws_types::region::Region;
 
 use crate::AwsAuthContext;
 use crate::AwsAuthError;
+
+/// The `credential_source` values a named account refuses.
+const REFUSED_CREDENTIAL_SOURCES: [&str; 3] =
+    ["Environment", "Ec2InstanceMetadata", "EcsContainer"];
+
+/// Stands in for a refused `credential_source`.
+#[derive(Debug)]
+struct RefusedCredentialSource(&'static str);
+
+impl ProvideCredentials for RefusedCredentialSource {
+    fn provide_credentials<'a>(&'a self) -> future::ProvideCredentials<'a>
+    where
+        Self: 'a,
+    {
+        future::ProvideCredentials::ready(Err(CredentialsError::invalid_configuration(format!(
+            "`credential_source = {}` is not allowed for a named account: it would use \
+             environment, instance or container credentials; give the profile its own keys, \
+             a `source_profile`, SSO or `credential_process`",
+            self.0
+        ))))
+    }
+}
 
 /// The region a named profile uses: `region_override` when set, otherwise
 /// the profile's own `region`. No environment fallback. `files` replaces
@@ -58,16 +87,25 @@ pub(crate) async fn load_named_profile(
     if service.trim().is_empty() {
         return Err(AwsAuthError::EmptyService);
     }
-    let mut builder = ProfileFileCredentialsProvider::builder().profile_name(profile);
-    if let Some(files) = files.clone() {
+    let region = named_profile_region(profile, region_override, files.clone()).await;
+    // Role chains call STS, which needs the region.
+    let provider_config = ProviderConfig::without_region()
+        .with_region(region.as_ref().ok().cloned().map(Region::new));
+    let mut builder = ProfileFileCredentialsProvider::builder()
+        .configure(&provider_config)
+        .profile_name(profile);
+    for source in REFUSED_CREDENTIAL_SOURCES {
+        builder = builder.with_custom_provider(source, RefusedCredentialSource(source));
+    }
+    if let Some(files) = files {
         builder = builder.profile_files(files);
     }
     let provider = builder.build();
+    // A missing profile reports itself before a missing region would.
     provider.provide_credentials().await?;
-    let region = named_profile_region(profile, region_override, files).await?;
     Ok(AwsAuthContext {
         credentials_provider: SharedCredentialsProvider::new(provider),
-        region,
+        region: region?,
         service: service.trim().to_string(),
     })
 }

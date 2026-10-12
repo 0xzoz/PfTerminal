@@ -52,7 +52,7 @@ its `corbanu account add` recovery; the default credential is unchanged.
 ## Amazon Bedrock: AWS profile accounts
 
 A Bedrock account stores only the name of an AWS profile (not secret, shown in
-`corbanu account list` and `/providers`):
+`corbanu account list` and `/providers`; letters, digits and `-_.+@`, up to 64):
 
 ```
 corbanu account add amazon-bedrock work --kind aws-profile --value corp-dev
@@ -64,7 +64,8 @@ Its requests are signed with that profile's credentials from `~/.aws/config` and
 `~/.aws/credentials` (or the files `AWS_CONFIG_FILE` and
 `AWS_SHARED_CREDENTIALS_FILE` name), and nothing else: not the managed Bedrock
 key, `AWS_BEARER_TOKEN_BEDROCK`, `AWS_PROFILE`, `AWS_ACCESS_KEY_ID` or
-instance credentials. The region is `model_providers.amazon-bedrock.aws.region`
+instance or container credentials (a profile whose `credential_source` asks for
+them is refused). The region is `model_providers.amazon-bedrock.aws.region`
 if set, else the profile's `region`. SSO profiles work once you have run
 `aws sso login --profile <p>` yourself. A profile that is missing, has no
 region or whose credentials fail is refused with that reason before any

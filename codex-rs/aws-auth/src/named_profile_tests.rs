@@ -11,14 +11,17 @@ use crate::signing::header_value;
 const SERVICE: &str = "bedrock-mantle";
 
 /// A `default` profile, a `work` profile with a region, a `noregion`
-/// profile and an SSO-style `sso-dev` profile, all with fake keys.
+/// profile and two role profiles whose `credential_source` lies outside the
+/// files, all with fake keys.
 fn files() -> ProfileFiles {
     ProfileFiles::builder()
         .with_contents(
             ProfileFileKind::Config,
             "[default]\nregion = eu-west-1\n\
              [profile work]\nregion = us-west-2\n\
-             [profile noregion]\n",
+             [profile noregion]\n\
+             [profile envsourced]\nregion = us-west-2\nrole_arn = arn:aws:iam::123456789012:role/demo\ncredential_source = Environment\n\
+             [profile imdssourced]\nregion = us-west-2\nrole_arn = arn:aws:iam::123456789012:role/demo\ncredential_source = Ec2InstanceMetadata\n",
         )
         .with_contents(
             ProfileFileKind::Credentials,
@@ -115,5 +118,43 @@ async fn profile_without_region_is_refused() {
             .await
             .expect("override"),
         "us-east-1"
+    );
+}
+
+/// A profile's `credential_source` never reaches environment keys or
+/// instance credentials for a named account.
+#[tokio::test]
+async fn credential_sources_outside_the_files_are_refused() {
+    for (profile, source) in [
+        ("envsourced", "Environment"),
+        ("imdssourced", "Ec2InstanceMetadata"),
+    ] {
+        let error = load_named_profile(
+            profile,
+            /*region_override*/ None,
+            SERVICE,
+            Some(files()),
+        )
+        .await
+        .expect_err("refused credential source");
+        let message = error.detailed_message();
+        assert!(
+            message.contains(&format!("`credential_source = {source}` is not allowed")),
+            "{message}"
+        );
+    }
+}
+
+/// A credential helper's own failure text (which may echo anything) is not
+/// put into user-facing messages.
+#[test]
+fn provider_failure_details_are_withheld() {
+    let error = AwsAuthError::Credentials(CredentialsError::provider_error(
+        "credential_process stderr: helper-secret-canary",
+    ));
+    let message = error.detailed_message();
+    assert!(
+        !message.contains("helper-secret-canary") && message.contains("details withheld"),
+        "{message}"
     );
 }
