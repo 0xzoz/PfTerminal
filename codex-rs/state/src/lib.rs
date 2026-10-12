@@ -30,7 +30,9 @@ pub use model::LogQuery;
 pub use model::LogRow;
 pub use model::Phase2JobClaimOutcome;
 /// Preferred entrypoint: owns configuration and metrics.
+pub use runtime::QUICK_BUSY_TIMEOUT;
 pub use runtime::StateRuntime;
+pub use runtime::is_state_db_busy;
 pub use sqlite::SqliteConfig;
 
 pub use audit::ThreadStateAuditRow;

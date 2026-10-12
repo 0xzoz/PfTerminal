@@ -242,6 +242,29 @@ impl SqliteConfig {
             .await
     }
 
+    /// A second, small pool on the already opened state DB whose connections
+    /// wait at most `busy_timeout` for another connection's write lock, for
+    /// writes a model request waits on (see `StateRuntime::quick`).
+    pub(super) async fn open_state_db_quick(
+        &self,
+        busy_timeout: Duration,
+    ) -> Result<SqlitePool, Error> {
+        let options = SqliteConnectOptions::new()
+            .filename(self.state_db_path())
+            .create_if_missing(false)
+            .journal_mode(SqliteJournalMode::Wal)
+            .synchronous(SqliteSynchronous::Normal)
+            .busy_timeout(busy_timeout)
+            .log_statements(LevelFilter::Off);
+        SqlitePoolOptions::new()
+            .max_connections(2)
+            // Waiting for one of its connections counts against the same
+            // short wait; a timeout reads as a busy DB.
+            .acquire_timeout(busy_timeout)
+            .connect_with(options)
+            .await
+    }
+
     pub(super) async fn open_logs_db(
         &self,
         migrator: &Migrator,

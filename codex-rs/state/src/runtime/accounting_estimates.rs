@@ -55,12 +55,7 @@ impl<'a> EstimateStore<'a> {
         id: Uuid,
         candidates: &[Snapshot],
     ) -> anyhow::Result<ObservationQuote> {
-        let mut tx = self
-            .journal
-            .runtime
-            .pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await?;
+        let mut tx = crate::runtime::db_lock::begin_immediate(&self.journal.runtime.pool).await?;
         let result = Journal::persist_price_on_connection(&mut tx, id, candidates).await;
         match result {
             Ok(quote) => {

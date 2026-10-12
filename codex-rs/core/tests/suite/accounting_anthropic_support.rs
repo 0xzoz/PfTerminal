@@ -98,6 +98,9 @@ pub async fn connection(db: &StateRuntime) -> Result<SqliteConnection> {
 }
 
 pub async fn payloads<T: DeserializeOwned>(db: &StateRuntime, table: &str) -> Result<Vec<T>> {
+    // A record put off while the state DB was busy is written by this
+    // process's ledger writer; read once it has written what it was handed.
+    db.flush_accounting(Duration::from_secs(30)).await;
     assert!(
         [
             "draft_accounting_attempts",
