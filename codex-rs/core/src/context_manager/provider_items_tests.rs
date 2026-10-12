@@ -117,9 +117,13 @@ fn target(producer: &str, wire: WireApi, stores_items: bool) -> ProviderTarget {
     }
 }
 
+/// Both steps: the prompt's drops, then (Responses) the client's ID removal.
 fn adapted(items: Vec<ResponseItem>, target: &ProviderTarget) -> Vec<ResponseItem> {
     let mut items = items;
     adapt_for_provider(&mut items, target);
+    if target.wire == WireApi::Responses {
+        strip_foreign_references(&mut items, &target.producer);
+    }
     items
 }
 
@@ -379,4 +383,21 @@ fn the_producer_is_not_counted_as_context() {
         crate::context_manager::estimate_item_token_count(&stamped),
         crate::context_manager::estimate_item_token_count(&plain)
     );
+}
+
+/// Source labelling looks items up by their recorded bytes, so the prompt
+/// step only drops items; another provider's kept items lose their IDs in
+/// the client afterwards.
+#[test]
+fn kept_items_stay_as_recorded_until_the_client_strips_them() {
+    let openai = target("openai", WireApi::Responses, /*stores_items*/ false);
+    let mut items = vec![
+        chat_reasoning(Some("zai")),
+        assistant(Some("zai")),
+        call(Some("zai")),
+    ];
+    adapt_for_provider(&mut items, &openai);
+    assert_eq!(items, vec![assistant(Some("zai")), call(Some("zai"))]);
+    strip_foreign_references(&mut items, "openai");
+    assert!(items.iter().all(|item| item.id().is_none()));
 }

@@ -35,6 +35,12 @@ pub struct Prompt {
 
     /// Whether the Responses API should strictly validate `output_schema`.
     pub output_schema_strict: bool,
+
+    /// #578: the producer of this request's provider (see
+    /// `TurnContext::output_producer`). Another producer's items lose their
+    /// IDs on a Responses request, after source labelling looked them up by
+    /// their recorded bytes. `None` leaves every item as recorded.
+    pub(crate) producer: Option<String>,
 }
 
 impl Default for Prompt {
@@ -46,6 +52,7 @@ impl Default for Prompt {
             base_instructions: BaseInstructions::default(),
             output_schema: None,
             output_schema_strict: true,
+            producer: None,
         }
     }
 }

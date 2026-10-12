@@ -2177,6 +2177,10 @@ impl ModelClient {
         responses_metadata: &CodexResponsesMetadata,
     ) -> Result<ResponsesApiRequest> {
         let mut input = self.source_admitted_input(prompt, model_info.use_responses_lite)?;
+        // #578: after labelling, which looks items up by their recorded bytes.
+        if let Some(producer) = prompt.producer.as_deref() {
+            crate::context_manager::provider_items::strip_foreign_references(&mut input, producer);
+        }
         self.drop_unresolvable_item_references(&mut input);
         let is_openai = self.state.provider.info().is_openai();
         if !is_openai {

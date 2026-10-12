@@ -558,7 +558,8 @@ fn estimate_response_item_model_visible_bytes(item: &ResponseItem) -> i64 {
             let (encrypted_payload_bytes, encrypted_replacement_bytes) =
                 encrypted_function_output_estimate_adjustment(item);
             // #578: the local producer never reaches the model
-            // (`,"producer":"…"` in the passthrough metadata).
+            // (`,"producer":"…"` in the passthrough metadata; history items
+            // always carry a turn ID first, so that is all it adds).
             let local_provenance_bytes = item.producer().map_or(0, |producer| {
                 i64::try_from(producer.len() + r#","producer":"""#.len()).unwrap_or(0)
             });

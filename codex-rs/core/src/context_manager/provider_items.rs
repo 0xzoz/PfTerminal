@@ -19,7 +19,9 @@
 //!     plain reasoning and summaries cannot be sent to a Responses host, only
 //!     referenced; Chat and Anthropic requests leave them out too); its other
 //!     items keep their content but lose their IDs and encrypted function
-//!     arguments, so they are sent inline, never as references.
+//!     arguments, so they are sent inline, never as references. The IDs are
+//!     removed by the client ([`strip_foreign_references`]) after source
+//!     labelling, which looks items up by their recorded bytes.
 //!   - Anthropic: its reasoning (another host's signed thinking) and
 //!     web-search blocks are dropped. Messages and tool calls carry no item
 //!     IDs on this wire.
@@ -84,15 +86,16 @@ impl ProviderTarget {
 
 /// Adapts `items` for `target`; see the module docs.
 pub(crate) fn adapt_for_provider(items: &mut Vec<ResponseItem>, target: &ProviderTarget) {
-    items.retain_mut(|item| match item.producer() {
+    items.retain(|item| match item.producer() {
         Some(producer) if producer == target.producer => true,
         Some(_) => adapt_foreign(item, target.wire),
         None => keep_unattributed(item, target),
     });
 }
 
-/// Another provider's item: returns whether it is kept (adapted in place).
-fn adapt_foreign(item: &mut ResponseItem, wire: WireApi) -> bool {
+/// Another provider's item: returns whether it is kept. Kept items stay as
+/// recorded (see [`strip_foreign_references`]).
+fn adapt_foreign(item: &ResponseItem, wire: WireApi) -> bool {
     match wire {
         WireApi::Chat => true,
         WireApi::Anthropic => !matches!(
@@ -120,15 +123,30 @@ fn adapt_foreign(item: &mut ResponseItem, wire: WireApi) -> bool {
                 }
                 return false;
             }
-            item.set_id(/*new_id*/ None);
-            if let ResponseItem::FunctionCall {
-                encrypted_function_args,
-                ..
-            } = item
-            {
-                *encrypted_function_args = None;
-            }
             true
+        }
+    }
+}
+
+/// The second step for a Responses request, run by the client once source
+/// labelling has looked the items up by their recorded bytes: another
+/// producer's items lose their IDs and encrypted function arguments, so they
+/// are sent inline, never as references.
+pub(crate) fn strip_foreign_references(items: &mut [ResponseItem], producer: &str) {
+    for item in items {
+        if item
+            .producer()
+            .is_none_or(|item_producer| item_producer == producer)
+        {
+            continue;
+        }
+        item.set_id(/*new_id*/ None);
+        if let ResponseItem::FunctionCall {
+            encrypted_function_args,
+            ..
+        } = item
+        {
+            *encrypted_function_args = None;
         }
     }
 }
