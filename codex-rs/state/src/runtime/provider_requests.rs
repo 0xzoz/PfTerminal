@@ -575,6 +575,118 @@ impl StateRuntime {
         }
     }
 
+    /// Carry a named account's active cooldown and lease from the row it was
+    /// kept under by name (`by_name`) to the one for its credential
+    /// (`by_key`), and drop the name's rows for `provider_id`; idle ones carry
+    /// nothing worth keeping. Several names can hold one credential, so an
+    /// existing credential row keeps the later cooldown and its own lease
+    /// when that is still active.
+    ///
+    /// Done once per name, key and process. Like the other steps it waits one
+    /// short try for a busy DB, then pauses it, and unless the DB is read-only
+    /// it is tried again on a later request once the pause ends. A name row's
+    /// lease is dropped when the credential row holds an active lease of its
+    /// own: a request still running under it is then not waited for, once.
+    pub async fn adopt_named_account_provider_request_key(
+        &self,
+        provider_id: &str,
+        by_name: &str,
+        by_key: &str,
+        now_ms: i64,
+    ) {
+        let memory = &self.provider_request_memory;
+        let adopted = format!("{provider_id}\0{by_name}\0{by_key}");
+        if !memory
+            .adopted_legacy_keys
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(adopted.clone())
+        {
+            return;
+        }
+        // Not done: try again on a later request, once the throttle uses the DB
+        // again (a paused DB answers without waiting). A read-only DB is not
+        // retried.
+        let not_adopted = || {
+            memory
+                .adopted_legacy_keys
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&adopted);
+        };
+        if let Some(unready) = self.provider_request_state_db_unready(now_ms).await {
+            if unready != StateDbFallback::ReadOnly {
+                not_adopted();
+            }
+            return;
+        }
+        let started = Instant::now();
+        let adopt = || async {
+            let now_ms = since(now_ms, started);
+            let mut tx = crate::runtime::db_lock::begin_immediate(&self.quick().pool).await?;
+            // SET expressions read the row as it was before the update.
+            sqlx::query(
+                r#"
+UPDATE provider_request_state AS current SET
+    cooldown_until_ms = MAX(current.cooldown_until_ms, named.cooldown_until_ms),
+    consecutive_429_count = MAX(current.consecutive_429_count, named.consecutive_429_count),
+    last_status = CASE WHEN named.cooldown_until_ms > current.cooldown_until_ms
+        THEN named.last_status ELSE current.last_status END,
+    last_request_id = CASE WHEN named.cooldown_until_ms > current.cooldown_until_ms
+        THEN named.last_request_id ELSE current.last_request_id END,
+    lease_owner = CASE WHEN current.lease_until_ms <= ?1 AND named.lease_until_ms > ?1
+        THEN named.lease_owner ELSE current.lease_owner END,
+    lease_until_ms = CASE WHEN current.lease_until_ms <= ?1 AND named.lease_until_ms > ?1
+        THEN named.lease_until_ms ELSE current.lease_until_ms END
+FROM provider_request_state AS named
+WHERE current.provider_id = ?2 AND current.key_fingerprint = ?4
+    AND named.provider_id = current.provider_id AND named.model = current.model
+    AND named.key_fingerprint = ?3
+    AND (named.cooldown_until_ms > ?1 OR named.lease_until_ms > ?1)
+                "#,
+            )
+            .bind(now_ms)
+            .bind(provider_id)
+            .bind(by_name)
+            .bind(by_key)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                r#"
+UPDATE OR IGNORE provider_request_state SET key_fingerprint = ?4
+WHERE provider_id = ?2 AND key_fingerprint = ?3
+    AND (cooldown_until_ms > ?1 OR lease_until_ms > ?1)
+                "#,
+            )
+            .bind(now_ms)
+            .bind(provider_id)
+            .bind(by_name)
+            .bind(by_key)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "DELETE FROM provider_request_state WHERE provider_id = ? AND key_fingerprint = ?",
+            )
+            .bind(provider_id)
+            .bind(by_name)
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            anyhow::Ok(())
+        };
+        if let Err(error) = retry_busy_within(
+            "adopt named account provider request key",
+            super::QUICK_BUSY_TIMEOUT,
+            adopt,
+        )
+        .await
+            && self.pause_state_db("adopt named account provider request key", &error)
+                != StateDbFallback::ReadOnly
+        {
+            not_adopted();
+        }
+    }
+
     /// `release_provider_request_lease`, waiting only as long as a step on the
     /// turn's path does.
     pub(crate) async fn release_provider_request_lease_briefly(
@@ -1401,6 +1513,121 @@ mod tests {
             }
             ProviderRequestLeaseDecision::Acquired(_) => panic!("expected cooldown block"),
         }
+
+        let _ = tokio::fs::remove_dir_all(codex_home).await;
+    }
+
+    /// Owner decision 2026-10-11: a named account's rows move from its name to
+    /// its credential. An active cooldown or lease carries over (the later
+    /// cooldown wins, a credential row's own active lease stays), idle rows
+    /// and the name's rows are dropped, and another provider's rows are kept.
+    #[tokio::test]
+    async fn named_account_rows_merge_into_the_credential_row() {
+        let codex_home = unique_temp_dir();
+        let runtime = StateRuntime::init_for_testing(codex_home.clone(), "p".to_string())
+            .await
+            .expect("initialize runtime");
+        let insert = |provider: &'static str,
+                      model: &'static str,
+                      key: &'static str,
+                      cooldown: i64,
+                      status: i64,
+                      lease: Option<(&'static str, i64)>| {
+            let runtime = runtime.clone();
+            async move {
+                sqlx::query(
+                    "INSERT INTO provider_request_state (provider_id, model, key_fingerprint, cooldown_until_ms, last_status, consecutive_429_count, lease_owner, lease_until_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)",
+                )
+                .bind(provider)
+                .bind(model)
+                .bind(key)
+                .bind(cooldown)
+                .bind(status)
+                .bind(i64::from(status == 429))
+                .bind(lease.map(|(owner, _)| owner))
+                .bind(lease.map_or(0, |(_, until)| until))
+                .execute(runtime.pool.as_ref())
+                .await
+                .expect("insert row");
+            }
+        };
+        let now = 10_000;
+        // `alpha`: cooling down longer than the credential row, with a lease
+        // while the credential row holds none.
+        insert(
+            "p",
+            "m",
+            "account:alpha",
+            50_000,
+            429,
+            Some(("w-alpha", 40_000)),
+        )
+        .await;
+        insert("p", "m", "account-key:f", 20_000, 503, None).await;
+        // `alpha` on a model with no credential row yet: moved as it is.
+        insert("p", "m2", "account:alpha", 60_000, 429, None).await;
+        // `beta`: a shorter cooldown and a lease that loses to the credential
+        // row's own active one by then.
+        insert(
+            "p",
+            "m",
+            "account:beta",
+            30_000,
+            429,
+            Some(("w-beta", 45_000)),
+        )
+        .await;
+        // `gamma`: idle; dropped, not moved.
+        insert("p", "m3", "account:gamma", 1_000, 200, None).await;
+        // Another provider's `alpha` is not this account.
+        insert("q", "m", "account:alpha", 70_000, 429, None).await;
+
+        for name in ["account:alpha", "account:beta", "account:gamma"] {
+            runtime
+                .adopt_named_account_provider_request_key("p", name, "account-key:f", now)
+                .await;
+        }
+
+        type Row = (String, String, String, i64, i64, Option<String>, i64);
+        let rows: Vec<Row> = sqlx::query_as(
+            "SELECT provider_id, model, key_fingerprint, cooldown_until_ms, last_status, lease_owner, lease_until_ms FROM provider_request_state ORDER BY provider_id, model, key_fingerprint",
+        )
+        .fetch_all(runtime.pool.as_ref())
+        .await
+        .expect("rows");
+        let row = |provider: &str,
+                   model: &str,
+                   key: &str,
+                   cooldown,
+                   status,
+                   lease: Option<&str>,
+                   until| {
+            (
+                provider.to_string(),
+                model.to_string(),
+                key.to_string(),
+                cooldown,
+                status,
+                lease.map(str::to_string),
+                until,
+            )
+        };
+        assert_eq!(
+            rows,
+            vec![
+                row(
+                    "p",
+                    "m",
+                    "account-key:f",
+                    50_000,
+                    429,
+                    Some("w-alpha"),
+                    40_000
+                ),
+                row("p", "m2", "account-key:f", 60_000, 429, None, 0),
+                row("q", "m", "account:alpha", 70_000, 429, None, 0),
+            ]
+        );
 
         let _ = tokio::fs::remove_dir_all(codex_home).await;
     }
