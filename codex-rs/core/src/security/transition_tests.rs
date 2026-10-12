@@ -874,11 +874,13 @@ fn security_transition_kill_switch_from_another_process_reaches_running_trees() 
     assert!(within(latency, || !*watched.borrow()));
 }
 
-/// #507: a switch this tree turned on later than the one saved is kept, and
-/// an unreadable file changes nothing while running.
+/// #507: a switch this tree turned on later than the one saved is kept; a
+/// release saved by another process does not end a switch it never saw (one
+/// this process could not save); an unreadable file changes nothing while
+/// running.
 #[test]
 #[serial_test::serial(aggressive_grants)]
-fn security_transition_kill_switch_watch_keeps_newer_and_ignores_unreadable() {
+fn security_transition_kill_switch_watch_keeps_unseen_switches_and_ignores_unreadable() {
     let home = tempfile::TempDir::new().unwrap();
     let here = fixture(SecurityLevel::Moderate);
     here.view.register_home(home.path());
@@ -889,15 +891,66 @@ fn security_transition_kill_switch_watch_keeps_newer_and_ignores_unreadable() {
     other
         .commit_with(other.kill(/*active*/ true), &store)
         .unwrap();
-    // This tree turns its own switch on later (not saved here).
+    // This tree turns its own switch on later, and cannot save it.
     here.controller
-        .commit_transition(here.kill(/*active*/ true), &MemoryStore::default(), NOW + 5)
+        .commit_transition(here.kill(/*active*/ true), &MemoryStore::failing(), NOW + 5)
         .unwrap();
     let held = here.controller.kill_switch_event_id();
+    assert!(held.is_some());
     assert_eq!(kill_switch_watch::apply(home.path()), 0);
+    assert_eq!(here.controller.kill_switch_event_id(), held);
+
+    // The other process releases its own switch, later still: this tree's
+    // unseen switch stays on.
+    other
+        .controller
+        .commit_transition(other.kill(/*active*/ false), &store, NOW + 9)
+        .unwrap();
+    assert_eq!(kill_switch_watch::apply(home.path()), 0);
+    assert!(here.now().4);
     assert_eq!(here.controller.kill_switch_event_id(), held);
 
     std::fs::write(home.path().join("security_state.json"), b"{not json").unwrap();
     assert_eq!(kill_switch_watch::apply(home.path()), 0);
     assert!(here.now().4);
+}
+
+/// #507: a switch this process saves itself updates the subscribers' value
+/// without signalling a change made elsewhere (the confirming screen reports
+/// it); one saved by another process is signalled.
+#[test]
+#[serial_test::serial(aggressive_grants)]
+fn security_transition_kill_switch_watch_signals_only_other_processes() {
+    let home = tempfile::TempDir::new().unwrap();
+    let here = fixture(SecurityLevel::Moderate);
+    here.view.register_home(home.path());
+    let mut watched = kill_switch_watch::start_for_test(home.path());
+    let _ = watched.borrow_and_update();
+    let local = crate::security::recovery::HomeTransitionStore::new(home.path());
+    here.commit_with(here.kill(/*active*/ true), &local)
+        .unwrap();
+    assert!(within(std::time::Duration::from_secs(2), || *watched.borrow()));
+    std::thread::sleep(kill_switch_watch::POLL);
+    assert!(
+        !watched.has_changed().unwrap(),
+        "a local change was signalled"
+    );
+
+    let other = fixture(SecurityLevel::Moderate);
+    let store = OtherProcessStore(crate::security::recovery::HomeTransitionStore::new(
+        home.path(),
+    ));
+    // The other process saw this switch (it read the saved state) and
+    // releases it.
+    let seen = crate::security::recovery::recover(home.path(), SecurityLevel::Moderate);
+    other.controller.catch_up(&seen);
+    other
+        .controller
+        .commit_transition(other.kill(/*active*/ false), &store, NOW + 3)
+        .unwrap();
+    assert!(within(std::time::Duration::from_secs(2), || {
+        watched.has_changed().unwrap_or(false)
+    }));
+    assert!(!*watched.borrow_and_update());
+    assert!(!here.now().4);
 }

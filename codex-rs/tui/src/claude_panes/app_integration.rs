@@ -977,10 +977,12 @@ impl App {
 
     /// #507 (Travis, 2026-10-12): a kill switch turned on or off by another
     /// Corbanu Terminal process on this home reaches this one while it runs.
-    pub(crate) fn watch_kill_switch_elsewhere(&self) {
+    pub(crate) fn watch_kill_switch_elsewhere(&mut self) {
         let mut watched = crate::legacy_core::security_revocation::watch_kill_switch(
             self.config.codex_home.as_ref(),
         );
+        // Start from the watch's own value, so no change falls in between.
+        self.kill_switch_known_on = *watched.borrow_and_update();
         let tx = self.app_event_tx.clone();
         tokio::spawn(async move {
             while watched.changed().await.is_ok() {

@@ -345,7 +345,17 @@ impl TrustedSecurityController {
             Ok(next)
         });
         let (next, not_saved) = match saved {
-            Ok(next) => (next, None),
+            Ok(next) => {
+                // #507: the watch of this home must not report this
+                // process's own switch as made elsewhere.
+                if let Some(event) = &event
+                    && store.home().is_some()
+                    && matches!(event.target, RevocationTarget::KillSwitch { .. })
+                {
+                    kill_switch_watch::saved_here(event.event_id.as_str());
+                }
+                (next, None)
+            }
             Err(TransitionError::Persist(reason))
                 if prepared.kind == TransitionKind::Restrictive =>
             {
