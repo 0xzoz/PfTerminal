@@ -1570,9 +1570,7 @@ async fn pf_33_s02_guard_limits_seatbelt_egress_to_proxy_ports() -> anyhow::Resu
 
 /// #583: a writable root inside a read-only folder (the Corbanu home's
 /// `worktrees`) cannot be renamed or removed, so no link can take its place
-/// before the next command; writing inside it still works. The rename guard
-/// already holds it: its `.git`/`.codex`/`.agents`, reached through the
-/// outer root (#529), are guarded with every folder above them.
+/// before the next command; writing inside it still works.
 #[test]
 fn a_writable_root_inside_a_read_only_folder_cannot_be_moved() {
     let dir = TempDir::new().expect("tempdir");
@@ -1614,6 +1612,13 @@ fn a_writable_root_inside_a_read_only_folder_cannot_be_moved() {
         extra_allow_unix_sockets: &[],
     })
     .expect("args");
+    // Guarded explicitly, whatever its protected names do.
+    let worktrees = format!("={}", home.join("worktrees").display());
+    assert!(
+        args.iter()
+            .any(|arg| arg.starts_with("-DRENAME_GUARD_") && arg.ends_with(&worktrees)),
+        "{args:?}"
+    );
     let output = Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
         .args(&args)
         .current_dir(&base)

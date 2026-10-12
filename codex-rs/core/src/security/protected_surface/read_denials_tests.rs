@@ -415,6 +415,56 @@ fn issue_583_a_worktrees_link_opens_nothing() {
     assert!(fx.codex_home.join("worktrees").is_dir());
 }
 
+/// #583 review: a Corbanu home reached through a link inside the workspace
+/// (`~/.corbanu -> /elsewhere/home`) gets no `worktrees` carve-out where the
+/// profile never covered the real folder: Seatbelt would resolve the link
+/// spelling and make the real `worktrees` writable.
+#[test]
+fn issue_583_a_linked_home_outside_the_workspace_gets_no_carve_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let user_home = base.join("user");
+    let real_home = base.join("outside/home");
+    std::fs::create_dir_all(real_home.join("worktrees/w")).unwrap();
+    std::fs::create_dir_all(user_home.join("project")).unwrap();
+    std::os::unix::fs::symlink(&real_home, user_home.join(".corbanu")).unwrap();
+    let codex_home = user_home.join(".corbanu");
+    let cwd = user_home.join("project");
+    // A workspace of the user's home only (no temporary-folder roots, which
+    // would hold the real home here).
+    let home_only = PermissionProfile::from_runtime_permissions(
+        &FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry::new(
+                FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                FileSystemAccessMode::Read,
+            ),
+            FileSystemSandboxEntry::new(
+                FileSystemPath::Path {
+                    path: abs(&user_home),
+                },
+                FileSystemAccessMode::Write,
+            ),
+        ]),
+        NetworkSandboxPolicy::Restricted,
+    );
+    let denials = ReadDenials::collect(&codex_home, Some(&user_home), None, &[abs(&cwd)]);
+    let policy = denials
+        .apply(&home_only)
+        .unwrap()
+        .file_system_sandbox_policy();
+    let worktree_writes: Vec<&FileSystemSandboxEntry> = policy
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.access == FileSystemAccessMode::Write
+                && matches!(&entry.path, FileSystemPath::Path { path } if path.as_path().ends_with("worktrees"))
+        })
+        .collect();
+    assert_eq!(worktree_writes, Vec::<&FileSystemSandboxEntry>::new());
+}
+
 /// Issue #562: on Linux the missing runtime folders are created, empty,
 /// only where the profile could write the Corbanu home, so bubblewrap never
 /// needs a placeholder file where Corbanu expects a folder. `AGENTS.md` is

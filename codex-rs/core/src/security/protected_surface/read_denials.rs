@@ -353,6 +353,14 @@ impl ReadDenials {
         let real_folder = std::fs::symlink_metadata(codex_home.join(HOME_WRITABLE).as_path())
             .is_ok_and(|metadata| metadata.is_dir());
         for folder in worktrees {
+            // A spelling through a link below the top-level folders (a home
+            // reached through `~/.corbanu -> /Volumes/x/home`) is left out:
+            // Seatbelt resolves a writable root, so it would open the link's
+            // target, which the profile's own rules never matched. The real
+            // location is kept, where the profile can write it.
+            if has_nested_link(folder.as_path()) {
+                continue;
+            }
             let holds_runtime = self
                 .runtime_read_only
                 .iter()
@@ -649,6 +657,17 @@ pub(crate) fn create_missing_runtime_folders(codex_home: &Path) {
             let _ = std::fs::create_dir(codex_home.join(entry));
         }
     }
+}
+
+/// Whether a folder of `path` below the top-level ones is a link (top-level
+/// aliases such as `/tmp` on macOS are not counted), as Seatbelt tells them.
+fn has_nested_link(path: &Path) -> bool {
+    path.ancestors()
+        .filter(|ancestor| ancestor.parent().and_then(Path::parent).is_some())
+        .any(|ancestor| {
+            std::fs::symlink_metadata(ancestor)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        })
 }
 
 /// `path` with its nearest existing folder resolved, or `None` when that
