@@ -189,19 +189,23 @@ pub(crate) fn opened_read_only_path(
     if paths.is_empty() {
         return None;
     }
+    let writable: Vec<&AbsolutePathBuf> = denials.home_writable_paths().collect();
     entries
         .iter()
         .filter(|entry| entry.access.can_write())
         .flat_map(|entry| cwds.iter().map(move |cwd| (entry, *cwd)))
-        .find_map(|(entry, cwd)| reopened(&paths, protected, entry, cwd))
+        .find_map(|(entry, cwd)| reopened(&paths, &writable, protected, entry, cwd))
 }
 
 /// The read-only path of `paths` that the write `entry` reopens: one at or
 /// above the paths it can write (equal entries tie in its favour, narrower
 /// ones win), or one below them that `protected` with the entry added could
-/// write. Links are followed as the sandbox does.
+/// write. Links are followed as the sandbox does. A path the entry writes
+/// inside a folder of `writable` below the read-only path (#583: `worktrees`
+/// in the read-only Corbanu home) reopens nothing.
 fn reopened(
     paths: &[&AbsolutePathBuf],
+    writable: &[&AbsolutePathBuf],
     protected: Option<&FileSystemSandboxPolicy>,
     entry: &FileSystemSandboxEntry,
     cwd: &Path,
@@ -238,15 +242,18 @@ fn reopened(
     paths
         .iter()
         .find(|path| {
-            spellings
-                .iter()
-                .any(|root| root.as_path().starts_with(path.as_path()))
-                || match &merged {
-                    Some(merged) => merged.can_write_path_with_cwd(path.as_path(), cwd),
-                    None => spellings
-                        .iter()
-                        .any(|root| path.as_path().starts_with(root.as_path())),
-                }
+            spellings.iter().any(|root| {
+                root.as_path().starts_with(path.as_path())
+                    && !writable.iter().any(|folder| {
+                        root.as_path().starts_with(folder.as_path())
+                            && folder.as_path().starts_with(path.as_path())
+                    })
+            }) || match &merged {
+                Some(merged) => merged.can_write_path_with_cwd(path.as_path(), cwd),
+                None => spellings
+                    .iter()
+                    .any(|root| path.as_path().starts_with(root.as_path())),
+            }
         })
         .map(|path| (*path).clone())
 }

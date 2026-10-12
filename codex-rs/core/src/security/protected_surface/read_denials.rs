@@ -82,6 +82,10 @@ const CORBANU_READ_ONLY: &[&str] = &[
     "AGENTS.md",
 ];
 
+/// #583: the Corbanu home folder commands keep writing in, also when the
+/// home itself is read-only (Corbanu's own git worktrees).
+const HOME_WRITABLE: &str = "worktrees";
+
 /// The one runtime entry that is a file (#562).
 const DEFAULT_AGENTS_MD: &str = "AGENTS.md";
 
@@ -129,6 +133,10 @@ pub(crate) struct ReadDenials {
     /// The same for the project's `.codex` and `.agents`: never lifted by a
     /// grant either (#442, Travis 2026-10-11).
     never_lifted: Vec<AbsolutePathBuf>,
+    /// #583: the folders inside a read-only Corbanu home that stay writable
+    /// where the profile can write them: `worktrees` and the folders the
+    /// command works in.
+    home_writable: Vec<AbsolutePathBuf>,
     /// Where the profile's relative entries resolve (the turn's folder).
     cwd: Option<AbsolutePathBuf>,
     /// The Corbanu home, unless it is a folder the command keeps.
@@ -169,6 +177,9 @@ impl ReadDenials {
             denials.push_runtime_read_only(codex_home.join(entry), keep);
         }
         denials.runtime_read_only = std::mem::take(&mut denials.read_only);
+        if denials.home.is_some() {
+            denials.protect_home(&codex_home, keep);
+        }
         // #442 (Travis, 2026-10-11): the project's agent settings stay
         // read-only even with a grant.
         for root in keep {
@@ -276,6 +287,49 @@ impl ReadDenials {
         )
     }
 
+    /// #583: the Corbanu home itself is read-only (with the runtime
+    /// entries, never lifted), so a protected command cannot create an entry
+    /// Corbanu reads later where it is missing: exec-policy `rules/`, which
+    /// would approve commands in later sessions, and any other name, as
+    /// every existing entry is already denied or read-only. Unlike the other
+    /// read-only paths it is kept when it holds a folder the command works
+    /// in: those folders, and `worktrees`, stay writable. On Linux a
+    /// missing store below it makes bubblewrap mount the home as a read-only
+    /// snapshot of its entries (#473), so nothing created in it after launch
+    /// is visible; the read-only home also stops a protected command
+    /// moving it aside (#587).
+    fn protect_home(&mut self, codex_home: &AbsolutePathBuf, keep: &[AbsolutePathBuf]) {
+        let Some(real_home) = real_location(codex_home) else {
+            return;
+        };
+        // As read-only paths: the real location, and on macOS the link name.
+        let mut homes = vec![real_home.clone()];
+        if cfg!(target_os = "macos") && *codex_home != real_home {
+            homes.push(codex_home.clone());
+        }
+        for home in &homes {
+            if !self.runtime_read_only.contains(home) {
+                self.runtime_read_only.push(home.clone());
+            }
+        }
+        let inside = |folder: &AbsolutePathBuf| {
+            homes.iter().any(|home| {
+                folder.as_path() != home.as_path() && folder.as_path().starts_with(home.as_path())
+            })
+        };
+        for folder in std::iter::once(codex_home.join(HOME_WRITABLE)).chain(keep.iter().cloned()) {
+            let mut spellings: Vec<AbsolutePathBuf> = real_location(&folder).into_iter().collect();
+            if cfg!(target_os = "macos") && !spellings.contains(&folder) {
+                spellings.push(folder);
+            }
+            for spelling in spellings {
+                if inside(&spelling) && !self.home_writable.contains(&spelling) {
+                    self.home_writable.push(spelling);
+                }
+            }
+        }
+    }
+
     fn holds_kept(path: &AbsolutePathBuf, keep: &[AbsolutePathBuf]) -> bool {
         keep.iter()
             .any(|kept| kept.as_path().starts_with(path.as_path()))
@@ -355,6 +409,7 @@ impl ReadDenials {
     pub(crate) fn runtime_only(self) -> Self {
         Self {
             runtime_read_only: self.runtime_read_only,
+            home_writable: self.home_writable,
             cwd: self.cwd,
             skipped: self.skipped,
             ..Self::default()
@@ -382,6 +437,12 @@ impl ReadDenials {
     /// sandbox launchers), read-only wherever the rules apply.
     pub(crate) fn runtime_read_only_paths(&self) -> impl Iterator<Item = &AbsolutePathBuf> {
         self.runtime_read_only.iter()
+    }
+
+    /// #583: the folders inside the read-only Corbanu home that stay
+    /// writable where the profile can write them.
+    pub(crate) fn home_writable_paths(&self) -> impl Iterator<Item = &AbsolutePathBuf> {
+        self.home_writable.iter()
     }
 
     /// Issue #513: the read-only paths no grant lifts (#442): the runtime
@@ -496,6 +557,19 @@ impl ReadDenials {
             .as_ref()
             .map_or_else(|| Path::new("/"), AbsolutePathBuf::as_path);
         let readable = Readability::new(&file_system, cwd);
+        // #583: what stays writable inside the read-only Corbanu home, where
+        // the profile could write it (more specific than the home's entry).
+        let home_writable: Vec<FileSystemSandboxEntry> = self
+            .home_writable
+            .iter()
+            .filter(|path| file_system.can_write_path_with_cwd(path.as_path(), cwd))
+            .map(|path| {
+                FileSystemSandboxEntry::skip_missing_path(
+                    FileSystemPath::Path { path: path.clone() },
+                    FileSystemAccessMode::Write,
+                )
+            })
+            .collect();
         let read_only: Vec<FileSystemSandboxEntry> = self
             .read_only_paths()
             .filter(|path| file_system.can_write_path_with_cwd(path.as_path(), cwd))
@@ -516,6 +590,7 @@ impl ReadDenials {
             })
             .collect();
         file_system.entries.extend(read_only);
+        file_system.entries.extend(home_writable);
         Some(PermissionProfile::from_runtime_permissions(
             &file_system,
             network,

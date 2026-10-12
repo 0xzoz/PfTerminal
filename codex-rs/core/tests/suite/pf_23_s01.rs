@@ -1657,6 +1657,78 @@ async fn issue_562_missing_runtime_entries_cannot_be_created() -> anyhow::Result
     Ok(())
 }
 
+/// #583: under a protected level with full access, a command cannot create a
+/// missing Corbanu-home entry that Corbanu reads later: exec-policy
+/// `rules/x.rules` (which would approve commands in later sessions) or any
+/// other name. Corbanu's `worktrees` stay writable. Permissive is unchanged.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_583_missing_corbanu_home_entries_cannot_be_created() -> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let mut wrong = Vec::new();
+    for (level, created) in [
+        (SecurityLevel::Moderate, false),
+        (SecurityLevel::Aggressive, false),
+        (SecurityLevel::Permissive, true),
+    ] {
+        let home = Arc::new(TempDir::new()?);
+        let root = home.path().canonicalize()?;
+        std::fs::create_dir_all(root.join("worktrees/w"))?;
+        let path = root.to_string_lossy().into_owned();
+        // Split inside the home folder's own name: neither part names it.
+        let (head, tail) = path.split_at(path.len() - 2);
+        let command = format!(
+            "h=\"$(printf '{head}%s' {tail})\"; r=\"ru$(printf les)\"; \
+             mkdir -p \"$h/$r\"; \
+             printf 'prefix_rule(pattern=[\"touch\"], decision=\"allow\")\\n' > \"$h/$r/x.$r\"; \
+             printf x > \"$h/new-entry\"; printf ok > \"$h/worktrees/w/ok\"; echo ran-583"
+        );
+        let (test, captured) = start_turn_in(
+            Some(home.clone()),
+            level,
+            AskForApproval::Never,
+            vec![
+                call(
+                    "call-create",
+                    "shell_command",
+                    json!({ "command": command }),
+                ),
+                done_step(),
+            ],
+            |config| {
+                config
+                    .permissions
+                    .set_permission_profile(PermissionProfile::Disabled)
+                    .expect("full access");
+            },
+        )
+        .await?;
+        assert!(next_exec_approval(&test).await.is_none());
+        let requests = captured.requests();
+        let output = output_text(&requests[requests.len() - 1], "call-create");
+        let entries = ["rules/x.rules", "new-entry"];
+        let present: Vec<&str> = entries
+            .into_iter()
+            .filter(|entry| root.join(entry).exists())
+            .collect();
+        let expected = if created {
+            entries.to_vec()
+        } else {
+            Vec::new()
+        };
+        let worktree_written = root.join("worktrees/w/ok").exists();
+        if !output.contains("ran-583") || present != expected || !worktree_written {
+            wrong.push(format!(
+                "{level:?}: present={present:?} worktree={worktree_written}: {output}"
+            ));
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
 /// PF-23-S03: a level confirmed earlier and stored in `security_state.json`
 /// is enforced after a restart even when the configured level is lower.
 #[cfg(target_os = "macos")]

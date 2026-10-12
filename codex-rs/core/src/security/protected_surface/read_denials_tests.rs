@@ -268,6 +268,85 @@ fn issue_562_missing_runtime_entries_stay_read_only() {
     assert!(!readable(&override_md));
 }
 
+/// #583: a protected command cannot create a missing Corbanu-home entry
+/// that Corbanu reads later (exec-policy `rules/`, or any other name): the
+/// home itself is read-only wherever the profile could write it, also when
+/// the rules are lifted for one command (#540). `worktrees` and the folders
+/// the command works in stay writable; the profile is never widened.
+#[test]
+fn issue_583_the_corbanu_home_takes_no_new_entries() {
+    let fx = fixture();
+    let project = fx.user_home.join("project");
+    let worktree = fx.codex_home.join("worktrees/w");
+    let created = [
+        fx.codex_home.join("rules"),
+        fx.codex_home.join("rules/x.rules"),
+        fx.codex_home.join("prompts/p.md"),
+        fx.codex_home.join("new.txt"),
+    ];
+    for (cwd, profile) in [
+        (project.clone(), PermissionProfile::Disabled),
+        (project.clone(), workspace(&fx.user_home)),
+        (worktree.clone(), PermissionProfile::Disabled),
+        (worktree.clone(), workspace(&worktree)),
+    ] {
+        let all = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)]);
+        for denials in [
+            ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)]),
+            all.runtime_only(),
+        ] {
+            let policy = denials
+                .apply(&profile)
+                .unwrap()
+                .file_system_sandbox_policy();
+            let writable = |path: &Path| policy.can_write_path_with_cwd(path, &cwd);
+            for path in &created {
+                assert!(!writable(path), "{}: {cwd:?} {profile:?}", path.display());
+            }
+            assert!(!writable(&fx.codex_home), "{cwd:?} {profile:?}");
+            assert!(writable(&worktree.join("file")), "{cwd:?} {profile:?}");
+            assert!(writable(&cwd.join("file")), "{cwd:?} {profile:?}");
+            assert!(
+                policy.can_read_path_with_cwd(&fx.codex_home.join("skills/s"), &cwd),
+                "{cwd:?} {profile:?}"
+            );
+        }
+    }
+    // The profile is never widened: one that writes only the project keeps
+    // the home's folders read-only.
+    let project_only = PermissionProfile::from_runtime_permissions(
+        &FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry::new(
+                FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                FileSystemAccessMode::Read,
+            ),
+            FileSystemSandboxEntry::new(
+                FileSystemPath::Path {
+                    path: abs(&project),
+                },
+                FileSystemAccessMode::Write,
+            ),
+        ]),
+        NetworkSandboxPolicy::Restricted,
+    );
+    let denials = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&project)]);
+    let policy = denials
+        .apply(&project_only)
+        .unwrap()
+        .file_system_sandbox_policy();
+    assert!(!policy.can_write_path_with_cwd(&worktree.join("file"), &project));
+    // A command working in the home itself keeps it writable, as before.
+    let home = abs(&fx.codex_home);
+    let denials = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[home]);
+    let policy = denials
+        .apply(&PermissionProfile::Disabled)
+        .unwrap()
+        .file_system_sandbox_policy();
+    assert!(policy.can_write_path_with_cwd(&fx.codex_home.join("new.txt"), &fx.codex_home));
+}
+
 /// Issue #562: on Linux the missing runtime folders are created, empty,
 /// only where the profile could write the Corbanu home, so bubblewrap never
 /// needs a placeholder file where Corbanu expects a folder. `AGENTS.md` is

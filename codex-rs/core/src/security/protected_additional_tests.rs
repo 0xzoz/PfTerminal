@@ -304,12 +304,13 @@ fn issue_513_a_write_never_reopens_the_runtime_entries() {
     }
     // Reads never write; the rule holds where the profile could write.
     let read = additional(vec![entry(&runtime, FileSystemAccessMode::Read)]);
-    let writes_home = protected_policy(&f.denials, &[f.project.as_path(), f.codex_home.as_path()]);
+    // #583: the home itself is read-only too, so "broader" is its folder.
+    let writes_home = protected_policy(&f.denials, &[f.project.as_path(), f.user_home.as_path()]);
     for (name, request, protected) in [
         ("read", read, &protected),
         (
             "broader, profile writes it",
-            write(&f.codex_home),
+            write(&f.user_home),
             &writes_home,
         ),
         ("project", write(&f.project.join("notes.txt")), &protected),
@@ -326,6 +327,37 @@ fn issue_513_a_write_never_reopens_the_runtime_entries() {
             "{name}"
         );
     }
+}
+
+/// #583: an additional write may not open the read-only Corbanu home (it
+/// would let a command create `rules/`), but one inside `worktrees` opens
+/// nothing protected.
+#[test]
+fn issue_583_a_write_opens_worktrees_but_never_the_corbanu_home() {
+    let f = fixture();
+    let worktree = f.codex_home.join("worktrees/w");
+    std::fs::create_dir_all(&worktree).unwrap();
+    let denials = ReadDenials::collect(
+        &f.codex_home,
+        Some(&f.user_home),
+        /*claude_config_dir*/ None,
+        &[AbsolutePathBuf::from_absolute_path(&f.project).unwrap()],
+    );
+    let protected = protected_policy(&denials, &[f.project.as_path(), f.user_home.as_path()]);
+    let opened_by = |path: &Path| {
+        opened_read_only_path(
+            &denials,
+            Some(&protected),
+            &write(path),
+            &[f.project.as_path()],
+            ReadOnlyScope::Runtime,
+        )
+    };
+    let home = AbsolutePathBuf::from_absolute_path(&f.codex_home).unwrap();
+    assert_eq!(opened_by(&f.codex_home), Some(home.clone()));
+    assert_eq!(opened_by(&f.codex_home.join("rules")), Some(home));
+    assert_eq!(opened_by(&worktree), None);
+    assert_eq!(opened_by(&worktree.join("src")), None);
 }
 
 #[test]
