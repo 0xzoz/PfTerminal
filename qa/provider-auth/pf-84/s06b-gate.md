@@ -162,6 +162,7 @@ API key in `auth.json`; a decoy `OPENAI_API_KEY` is set throughout. Captures: [s
   - Run 1 started on `openai · work`, so the process list follows: `/model` → GLM → back to OpenAI.
   - Run 2 started on GLM: `/providers` *Use for this session* `work` → `/model` OpenAI (`work-ok`) → GLM
     (`default-ok`). It shows connectors and accounting following and the TUI refetching; its process list is Z.AI's.
+  - Runs 3 and 4 (review and final heads) start on `openai · work` and switch GLM → OpenAI → GLM.
   - Core logged each switch (`default` / `openai:work`) before the TUI's `model/list`. The ledger attributes each
     attempt to the account that served it. Leak scan for both real keys: 0 files.
 - **Seen, not caused here (#578):** after GLM → OpenAI in the same session, OpenAI rejected the turn with 404 for a
