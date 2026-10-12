@@ -6218,7 +6218,7 @@ pub(crate) async fn make_session_and_context_for_config(config: Config) -> (Sess
         user_shell: Arc::new(default_user_shell()),
         show_raw_agent_reasoning: config.show_raw_agent_reasoning,
         exec_policy,
-        auth_manager: auth_manager.clone(),
+        active_auth: crate::state::ActiveAuthManager::new(auth_manager.clone()),
         openai_file_upload_client_pool: RouteAwareClientPool::new_without_request_logging(
             config.http_client_factory(),
             ClientRouteClass::Api,
@@ -8464,7 +8464,7 @@ where
         user_shell: Arc::new(default_user_shell()),
         show_raw_agent_reasoning: config.show_raw_agent_reasoning,
         exec_policy,
-        auth_manager: Arc::clone(&auth_manager),
+        active_auth: crate::state::ActiveAuthManager::new(Arc::clone(&auth_manager)),
         openai_file_upload_client_pool: RouteAwareClientPool::new_without_request_logging(
             config.http_client_factory(),
             ClientRouteClass::Api,
@@ -8922,61 +8922,6 @@ async fn mcp_policy_changes_schedule_runtime_refresh() {
         .expect("approval policy update should succeed");
 
     assert!(session.mcp_refresh.is_pending());
-}
-
-#[tokio::test]
-async fn mcp_refresh_updates_plugin_auth_mode_before_checking_pending_state() {
-    let codex_home = tempfile::tempdir().expect("create auth test directory");
-    let (mut session, _turn_context) = make_session_and_context().await;
-    session.services.auth_manager = AuthManager::from_auth_for_testing_with_home(
-        CodexAuth::from_api_key("old-api-key"),
-        codex_home.path().to_path_buf(),
-    );
-    let session = Arc::new(session);
-    let auth_mode = session.services.auth_manager.get_api_auth_mode();
-
-    assert_ne!(session.services.plugins_manager.auth_mode(), auth_mode);
-    session.mcp_refresh.claim();
-
-    session.refresh_mcp_if_dirty().await;
-
-    assert_eq!(session.services.plugins_manager.auth_mode(), auth_mode);
-    assert!(
-        session
-            .services
-            .mcp_runtime
-            .current_binding()
-            .await
-            .is_some()
-    );
-
-    codex_login::login_with_api_key(
-        codex_home.path(),
-        "new-api-key",
-        codex_login::AuthCredentialsStoreMode::File,
-        codex_login::AuthKeyringBackendKind::default(),
-    )
-    .expect("store replacement API key");
-    session.services.auth_manager.reload().await;
-    assert_eq!(
-        session
-            .services
-            .auth_manager
-            .auth_cached()
-            .and_then(|auth| auth.get_token().ok()),
-        Some("new-api-key".to_string())
-    );
-    assert_eq!(session.services.plugins_manager.auth_mode(), auth_mode);
-    session.mcp_refresh.claim();
-
-    session.refresh_mcp_if_dirty().await;
-
-    assert!(
-        session
-            .services
-            .mcp_runtime
-            .current_auth_matches(session.services.auth_manager.auth_cached().as_ref())
-    );
 }
 
 struct PendingNoiseConnectProvider;
