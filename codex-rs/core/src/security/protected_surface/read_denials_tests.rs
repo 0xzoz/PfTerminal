@@ -398,9 +398,9 @@ fn issue_603_names_corbanu_reads_later_are_protected_in_the_home() {
     let cases = [
         (fx.codex_home.clone(), None, PermissionProfile::Disabled),
         (fx.codex_home.clone(), None, workspace(&fx.codex_home)),
-        (other.clone(), None, PermissionProfile::Disabled),
+        (other, None, PermissionProfile::Disabled),
         (
-            project.clone(),
+            project,
             Some(fx.codex_home.clone()),
             PermissionProfile::Disabled,
         ),
@@ -454,7 +454,7 @@ fn issue_603_read_later_folders_are_created_only_for_a_command_in_the_home() {
     let home = abs(&fx.codex_home);
     let project = abs(&fx.user_home.join("project"));
     for (cwd, profile) in [
-        (project.clone(), PermissionProfile::Disabled),
+        (project, PermissionProfile::Disabled),
         (home.clone(), PermissionProfile::read_only()),
     ] {
         ReadDenials::for_turn(&fx.codex_home, &cwd, std::slice::from_ref(&cwd), &profile);
