@@ -1076,7 +1076,8 @@ impl App {
             }
         };
         if let Some(recorded) = recorded_account.as_ref()
-            && let Some(message) = crate::resume_account_error(&resume_config, recorded)
+            && let Some(message) =
+                crate::resume_launch::resume_account_error(&resume_config, recorded)
         {
             self.harness_overrides.inherited_provider_account = previous_thread_account;
             self.chat_widget.add_error_message(message);
@@ -1182,12 +1183,12 @@ impl App {
     }
 
     /// PF-84 (#545): the named account `target` ran on (see
-    /// `crate::resume_recorded_provider_account`).
+    /// `crate::resume_launch::resume_recorded_provider_account`).
     async fn resume_target_recorded_account(
         &self,
         target: &SessionTarget,
     ) -> Option<RecordedProviderAccount> {
-        crate::resume_recorded_provider_account(
+        crate::resume_launch::resume_recorded_provider_account(
             &crate::resume_picker::SessionSelection::Resume(target.clone()),
             &self.config,
             self.app_server_target.uses_remote_workspace(),

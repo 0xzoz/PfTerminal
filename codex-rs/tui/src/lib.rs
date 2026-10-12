@@ -12,6 +12,11 @@ use crate::legacy_core::config::resolve_bootstrap_auth_keyring_backend_kind;
 use crate::legacy_core::config::resolve_bootstrap_http_client_factory;
 use crate::legacy_core::config::resolve_oss_provider;
 use crate::legacy_core::config::resolve_profile_v2_config_path;
+use crate::resume_launch::ResumeLaunchSelection;
+use crate::resume_launch::is_resume_launch;
+use crate::resume_launch::resume_account_error;
+use crate::resume_launch::resume_recorded_provider_account;
+use crate::resume_launch::select_resume_launch_session;
 use crate::session_resume::ResolveCwdOutcome;
 use crate::session_resume::ResumeCwdContext;
 use crate::session_resume::effective_resume_cwd_mode;
@@ -176,6 +181,7 @@ mod provider_status_host;
 pub(crate) mod public_widgets;
 mod render;
 mod resize_reflow_cap;
+mod resume_launch;
 mod resume_picker;
 mod security;
 mod selection_list;
@@ -732,17 +738,6 @@ async fn lookup_session_target_by_name_with_app_server(
     }
 }
 
-/// What `corbanu resume` (an id, `--last` or the picker) selected.
-enum ResumeLaunchSelection {
-    Selected(resume_picker::SessionSelection),
-    /// No saved session matches this id or name.
-    Missing(String),
-}
-
-fn is_resume_launch(cli: &Cli) -> bool {
-    cli.resume_session_id.is_some() || cli.resume_last || cli.resume_picker
-}
-
 fn exit_missing_session(
     terminal_restore_guard: &mut tui::TerminalRestoreGuard,
     tui: &mut Tui,
@@ -776,110 +771,6 @@ fn user_requested_exit_info() -> AppExitInfo {
         update_action: None,
         exit_reason: ExitReason::UserRequested,
     }
-}
-
-/// Resolves the session `corbanu resume` names. The picker consumes the app
-/// server, as it always has; a later step starts a new one.
-async fn select_resume_launch_session(
-    tui: &mut Tui,
-    cli: &Cli,
-    config: &Config,
-    app_server: &mut Option<AppServerSession>,
-    uses_remote_workspace: bool,
-    remote_cwd_override: Option<&Path>,
-) -> color_eyre::Result<ResumeLaunchSelection> {
-    if let Some(id_str) = cli.resume_session_id.as_deref() {
-        let Some(startup_app_server) = app_server.as_mut() else {
-            unreachable!("app server should be initialized for --resume <id>");
-        };
-        let target = lookup_session_target_with_app_server(startup_app_server, id_str).await?;
-        return Ok(
-            match explicit_resume_selection(
-                config.codex_home.as_ref(),
-                id_str,
-                target,
-                uses_remote_workspace,
-            ) {
-                Some(selection) => ResumeLaunchSelection::Selected(selection),
-                None => ResumeLaunchSelection::Missing(id_str.to_string()),
-            },
-        );
-    }
-    if cli.resume_last {
-        let filter_cwd = latest_session_cwd_filter(
-            uses_remote_workspace,
-            remote_cwd_override,
-            config,
-            cli.resume_show_all,
-        );
-        let Some(app_server) = app_server.as_mut() else {
-            unreachable!("app server should be initialized for --resume --last");
-        };
-        let target = lookup_latest_session_target_with_app_server(
-            app_server,
-            config,
-            filter_cwd,
-            cli.resume_include_non_interactive,
-        )
-        .await?;
-        return Ok(ResumeLaunchSelection::Selected(match target {
-            Some(target_session) => resume_picker::SessionSelection::Resume(target_session),
-            None => resume_picker::SessionSelection::StartFresh,
-        }));
-    }
-    let Some(app_server) = app_server.take() else {
-        unreachable!("app server should be initialized for --resume picker");
-    };
-    Ok(ResumeLaunchSelection::Selected(
-        resume_picker::run_resume_picker_with_app_server(
-            tui,
-            config,
-            cli.resume_show_all,
-            cli.resume_include_non_interactive,
-            app_server,
-        )
-        .await?,
-    ))
-}
-
-/// PF-84 (#545): the named account the selected thread ran on, which the app
-/// server resumes it on unless `--account` names another account of the same
-/// provider. `None` for a fork, a fresh session, a remote workspace, or while
-/// named accounts are off (the app server then refuses a recorded account).
-pub(crate) async fn resume_recorded_provider_account(
-    selection: &resume_picker::SessionSelection,
-    config: &Config,
-    uses_remote_workspace: bool,
-) -> Option<session_resume::RecordedProviderAccount> {
-    let resume_picker::SessionSelection::Resume(target) = selection else {
-        return None;
-    };
-    if uses_remote_workspace
-        || !config
-            .features
-            .enabled(codex_features::Feature::NamedAccounts)
-    {
-        return None;
-    }
-    session_resume::read_recorded_provider_account(target.path.as_deref()?).await
-}
-
-/// PF-84 (#545): why the thread cannot resume on the account it ran on, with
-/// the same recovery as the account line, instead of asking for a default key.
-pub(crate) fn resume_account_error(
-    config: &Config,
-    recorded: &session_resume::RecordedProviderAccount,
-) -> Option<String> {
-    // Only when the session runs on the recorded account: `--account` may
-    // name another account of the provider, and that one is checked at launch.
-    config.model_provider.account.as_ref().filter(|account| {
-        account.provider_id == recorded.provider_id && account.name == recorded.account
-    })?;
-    let message = crate::legacy_core::config::session_account_error(config)?;
-    Some(format!(
-        "This conversation ran on {} account `{}` and resumes on it: {message}",
-        recorded.provider_id, recorded.account
-    ))
 }
 
 async fn lookup_session_target_with_app_server(
@@ -1405,12 +1296,12 @@ pub async fn run_main(
     if let Err(message) = security_launch.finish(&mut config).await {
         exit_with_security_error(&message);
     }
-    // PF-84 (#426): a missing named account is refused before onboarding,
-    // with exec's recovery text, instead of asking for a default key. This
-    // also applies to resume: onboarding cannot tell that the thread would
-    // run on its recorded account, so `--account <name>` is the recovery. A
-    // local daemon serves this same home; a remote app server checks its own
-    // home at thread start.
+    // PF-84 (#426): a missing named account (`--account` or
+    // `[provider_accounts]`) is refused before onboarding, with exec's
+    // recovery text, instead of asking for a default key. The account a
+    // resumed thread recorded is checked once the thread is selected (#545).
+    // A local daemon serves this same home; a remote app server checks its
+    // own home at thread start.
     if !app_server_target.uses_remote_workspace()
         && let Some(message) = crate::legacy_core::config::session_account_error(&config)
     {
