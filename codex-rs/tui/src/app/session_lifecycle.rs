@@ -1195,6 +1195,7 @@ impl App {
             &crate::resume_picker::SessionSelection::Resume(target.clone()),
             &self.config,
             self.app_server_target.uses_remote_workspace(),
+            self.resume_model_settings(),
         )
         .await
     }

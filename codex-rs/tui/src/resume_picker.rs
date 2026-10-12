@@ -6442,6 +6442,30 @@ session_picker_view = "dense"
         assert!(matches!(selection, Some(SessionSelection::StartFresh)));
     }
 
+    /// PF-84 #555: before onboarding, a new session would need a sign-in, so
+    /// Esc quits and the footer says so.
+    #[tokio::test]
+    async fn esc_before_onboarding_quits() {
+        let loader = page_only_loader(|_| {});
+        let mut state = PickerState::new(
+            FrameRequester::test_dummy(),
+            loader,
+            ProviderFilter::MatchDefault(String::from("openai")),
+            /*show_all*/ true,
+            /*filter_cwd*/ None,
+            SessionPickerAction::Resume,
+        );
+        state.launch_context = SessionPickerLaunchContext::StartupBeforeOnboarding;
+        assert!(footer_lines_text(&state, /*width*/ 220).contains("esc quit"));
+
+        let selection = state
+            .handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await
+            .expect("handle key");
+
+        assert!(matches!(selection, Some(SessionSelection::Exit)));
+    }
+
     #[tokio::test]
     async fn esc_with_query_clears_search_and_preserves_selected_result() {
         let loader = page_only_loader(|_| {});

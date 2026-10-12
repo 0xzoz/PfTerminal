@@ -4,13 +4,16 @@
 
 use std::path::Path;
 
+use codex_login::OpenAiAuthMetadata;
 use codex_model_provider::AccountRecovery;
 
 use crate::Cli;
 use crate::app_server_session::AppServerSession;
+use crate::app_server_session::ResumeModelSettings;
 use crate::legacy_core::config::Config;
 use crate::resume_picker;
 use crate::session_resume::RecordedProviderAccount;
+use crate::startup_provider::StartupProviderResolution;
 use crate::tui::Tui;
 
 /// What `corbanu resume` (an id, `--last` or the picker) selected.
@@ -24,19 +27,18 @@ pub(crate) fn is_resume_launch(cli: &Cli) -> bool {
     cli.resume_session_id.is_some() || cli.resume_last || cli.resume_picker
 }
 
-/// PF-84 (#555): a resume or fork runs on the account its conversation
-/// recorded, which beats `[provider_accounts]`. So unless `--account` names
-/// the session provider's account, that provider's account is checked once
-/// the thread is chosen (see [`chosen_thread_account_error`]), not at launch.
+/// PF-84 (#555): a resume runs on the account its conversation recorded,
+/// which beats `[provider_accounts]`. So unless `--account` names the session
+/// provider's account, that provider's account is checked once the thread is
+/// chosen (see [`chosen_thread_account_error`]), not at launch. A fork keeps
+/// the launch check: no early path checks it before onboarding.
 pub(crate) fn defers_launch_account_check(cli: &Cli, config: &Config) -> bool {
-    let continues_a_thread =
-        is_resume_launch(cli) || cli.fork_picker || cli.fork_last || cli.fork_session_id.is_some();
     let explicit_for_session_provider = config
         .provider_account_override
         .as_deref()
         .and_then(|selection| selection.split_once(':'))
         .is_some_and(|(provider_id, _)| provider_id == config.model_provider_id);
-    continues_a_thread
+    is_resume_launch(cli)
         && !explicit_for_session_provider
         && config
             .features
@@ -137,12 +139,14 @@ pub(crate) async fn select_resume_launch_session(
 /// PF-84 (#545): the named account the selected thread ran on, which the app
 /// server resumes it on, and a fork of it runs on (#555), unless `--account`
 /// names another account of the same provider. `None` for a fresh session, a
-/// remote workspace, or while named accounts are off (the app server then
-/// refuses a recorded account).
+/// remote workspace, while named accounts are off (the app server then
+/// refuses a recorded account), or when the account does not apply (see
+/// [`recorded_account_applies`]).
 pub(crate) async fn resume_recorded_provider_account(
     selection: &resume_picker::SessionSelection,
     config: &Config,
     uses_remote_workspace: bool,
+    model_settings: ResumeModelSettings,
 ) -> Option<RecordedProviderAccount> {
     let (resume_picker::SessionSelection::Resume(target)
     | resume_picker::SessionSelection::Fork(target)) = selection
@@ -156,7 +160,62 @@ pub(crate) async fn resume_recorded_provider_account(
     {
         return None;
     }
-    crate::session_resume::read_recorded_provider_account(target.path.as_deref()?).await
+    crate::session_resume::read_recorded_provider_account(target.path.as_deref()?)
+        .await
+        .filter(|recorded| recorded_account_applies(selection, model_settings, recorded, config))
+}
+
+/// PF-84 (#555): whether the thread runs on the account it recorded. The app
+/// server applies it only to the provider the thread runs on: a resume
+/// without a model or provider override restores the recorded provider; a
+/// fork, or a resume with an override, runs on the session's provider, where
+/// another provider's account never applies (#425).
+fn recorded_account_applies(
+    selection: &resume_picker::SessionSelection,
+    model_settings: ResumeModelSettings,
+    recorded: &RecordedProviderAccount,
+    config: &Config,
+) -> bool {
+    let restores_recorded_provider =
+        matches!(selection, resume_picker::SessionSelection::Resume(_))
+            && model_settings == ResumeModelSettings::RestoreFromThread;
+    restores_recorded_provider || recorded.provider_id == config.model_provider_id
+}
+
+/// PF-84 (#545, #555): before onboarding, the provider resolution for the
+/// thread `corbanu resume` chose, which ran on `recorded`, and why it cannot
+/// resume, if it cannot. A thread recorded on another provider is resolved on
+/// that provider, so the session provider's onboarding does not apply.
+pub(crate) async fn check_resume_before_onboarding(
+    selection: &resume_picker::SessionSelection,
+    config: &Config,
+    recorded: &RecordedProviderAccount,
+    openai: OpenAiAuthMetadata,
+) -> (StartupProviderResolution, Option<String>) {
+    let mut thread_config = None;
+    if recorded.provider_id != config.model_provider_id
+        && let resume_picker::SessionSelection::Resume(target) = selection
+    {
+        let model = crate::session_resume::read_session_model(
+            /*state_db_ctx*/ None,
+            target.thread_id,
+            target.path.as_deref(),
+        )
+        .await;
+        thread_config = recorded_provider_config(config, recorded, model);
+        if thread_config.is_none() {
+            let resolution = crate::startup_provider::resolve(config, Some(openai)).await;
+            return (resolution, Some(unknown_recorded_provider_error(recorded)));
+        }
+    }
+    let check_config = thread_config.as_ref().unwrap_or(config);
+    let resolution = crate::startup_provider::resolve(check_config, Some(openai)).await;
+    let refusal = resume_account_error(check_config, recorded, AccountRecovery::CommandLine)
+        .or_else(|| {
+            (thread_config.is_some() && resolution.requires_provider_onboarding)
+                .then(|| missing_provider_credentials_error(recorded))
+        });
+    (resolution, refusal)
 }
 
 /// PF-84 (#545): why the thread cannot resume on the account it ran on, with
@@ -211,7 +270,7 @@ pub(crate) fn apply_inherited_account_to_its_provider(
 /// PF-84 (#555): `config` as a thread recorded on another provider resumes:
 /// on that provider, with its recorded account and `model`. `None` when the
 /// thread runs on the session's provider or this home lacks its provider.
-pub(crate) fn recorded_provider_config(
+fn recorded_provider_config(
     config: &Config,
     recorded: &RecordedProviderAccount,
     model: Option<String>,
@@ -229,10 +288,22 @@ pub(crate) fn recorded_provider_config(
     Some(thread_config)
 }
 
+/// PF-84 (#555): why a thread recorded on a provider this home does not
+/// configure cannot resume there.
+fn unknown_recorded_provider_error(recorded: &RecordedProviderAccount) -> String {
+    let provider_id = &recorded.provider_id;
+    format!(
+        "This conversation ran on {provider_id} account `{}` and resumes on it: provider \
+         `{provider_id}` is not configured in this home; add it to `config.toml` and resume \
+         again",
+        recorded.account
+    )
+}
+
 /// PF-84 (#555): why a thread recorded on another provider cannot resume
 /// when this home has no credentials for that provider, instead of opening
 /// the session provider's onboarding.
-pub(crate) fn missing_provider_credentials_error(recorded: &RecordedProviderAccount) -> String {
+fn missing_provider_credentials_error(recorded: &RecordedProviderAccount) -> String {
     let provider_id = &recorded.provider_id;
     format!(
         "This conversation ran on {provider_id} account `{}` and resumes on it: provider \
@@ -340,6 +411,77 @@ mod tests {
                 AccountRecovery::CommandLine
             ),
             None
+        );
+        Ok(())
+    }
+
+    /// PF-84 #555: a recorded account of another provider applies only to a
+    /// resume that restores the thread's provider; a fork or a resume with a
+    /// model or provider override runs on the session's provider.
+    #[tokio::test]
+    async fn another_providers_account_applies_only_to_a_restoring_resume() -> std::io::Result<()> {
+        let home = TempDir::new()?;
+        let config = zai_config(&home, /*explicit*/ None, "zai:work").await?;
+        let target = resume_picker::SessionTarget {
+            path: None,
+            thread_id: codex_protocol::ThreadId::new(),
+        };
+        let resume = resume_picker::SessionSelection::Resume(target.clone());
+        let fork = resume_picker::SessionSelection::Fork(target);
+        let kimi = recorded("kimi-code", "work");
+        let zai = recorded("zai", "work");
+        let applies = |selection, settings, recorded| {
+            recorded_account_applies(selection, settings, recorded, &config)
+        };
+
+        assert_eq!(
+            [
+                applies(&resume, ResumeModelSettings::RestoreFromThread, &kimi),
+                applies(
+                    &resume,
+                    ResumeModelSettings::OverrideFromCurrentConfig,
+                    &kimi
+                ),
+                applies(&fork, ResumeModelSettings::RestoreFromThread, &kimi),
+                applies(&fork, ResumeModelSettings::RestoreFromThread, &zai),
+                applies(
+                    &resume,
+                    ResumeModelSettings::OverrideFromCurrentConfig,
+                    &zai
+                ),
+            ],
+            [true, false, false, true, true]
+        );
+        Ok(())
+    }
+
+    /// PF-84 #555: `[provider_accounts]` waits for the chosen thread only on
+    /// a resume, without `--account` for the session's provider.
+    #[tokio::test]
+    async fn only_a_resume_defers_the_launch_account_check() -> std::io::Result<()> {
+        use clap::Parser;
+        let home = TempDir::new()?;
+        let config = zai_config(&home, /*explicit*/ None, "zai:work").await?;
+        let explicit = zai_config(&home, Some("work"), "zai:work").await?;
+        let other_explicit = zai_config(&home, Some("kimi-code:work"), "zai:work").await?;
+        let cli = |configure: fn(&mut Cli)| {
+            let mut cli = Cli::try_parse_from(["corbanu"]).expect("parse");
+            configure(&mut cli);
+            cli
+        };
+        let resume = cli(|cli| cli.resume_last = true);
+        let fork = cli(|cli| cli.fork_last = true);
+        let fresh = cli(|_| {});
+
+        assert_eq!(
+            [
+                defers_launch_account_check(&resume, &config),
+                defers_launch_account_check(&resume, &other_explicit),
+                defers_launch_account_check(&resume, &explicit),
+                defers_launch_account_check(&fork, &config),
+                defers_launch_account_check(&fresh, &config),
+            ],
+            [true, true, false, false, false]
         );
         Ok(())
     }

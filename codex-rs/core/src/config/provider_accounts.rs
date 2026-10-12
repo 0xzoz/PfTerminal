@@ -186,12 +186,13 @@ fn unused_other_provider_account(
     ))
 }
 
-/// PF-84 (#555): applies the account a resumed or forked thread recorded,
+/// PF-84 (#555): applies the account a resumed thread recorded,
 /// `<provider>:<name>`, when that provider is not the session's. The loader
 /// applies an inherited account only to the session's own provider; a client
-/// that resumes a thread on another provider (the TUI) calls this so the
-/// provider it switches to carries the account the thread runs on. An
-/// explicit `--account` of that provider still wins.
+/// that resumes a thread on its recorded provider (the TUI, when no model or
+/// provider override applies) calls this so the provider it switches to
+/// carries the account the thread runs on. An explicit `--account` of that
+/// provider still wins.
 pub fn apply_recorded_provider_account(
     config: &mut super::Config,
     selection: &str,

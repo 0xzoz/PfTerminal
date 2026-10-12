@@ -13,12 +13,10 @@ use crate::legacy_core::config::resolve_bootstrap_http_client_factory;
 use crate::legacy_core::config::resolve_oss_provider;
 use crate::legacy_core::config::resolve_profile_v2_config_path;
 use crate::resume_launch::ResumeLaunchSelection;
+use crate::resume_launch::check_resume_before_onboarding;
 use crate::resume_launch::chosen_thread_account_error;
 use crate::resume_launch::defers_launch_account_check;
 use crate::resume_launch::is_resume_launch;
-use crate::resume_launch::missing_provider_credentials_error;
-use crate::resume_launch::recorded_provider_config;
-use crate::resume_launch::resume_account_error;
 use crate::resume_launch::resume_recorded_provider_account;
 use crate::resume_launch::select_resume_launch_session;
 use crate::session_resume::ResolveCwdOutcome;
@@ -61,7 +59,6 @@ use codex_login::AuthRouteConfig;
 use codex_login::default_client::originator;
 use codex_login::default_client::set_default_client_residency_requirement;
 use codex_login::enforce_login_restrictions;
-use codex_model_provider::AccountRecovery;
 use codex_protocol::ThreadId;
 use codex_protocol::auth::AuthMode;
 use codex_protocol::config_types::AltScreenMode;
@@ -1656,6 +1653,9 @@ async fn run_ratatui_app(
     // runs the picker before onboarding) and check that account instead.
     let deferred_account_check =
         !uses_remote_workspace && defers_launch_account_check(&cli, &initial_config);
+    // Whether a resume restores the thread's own model and provider (#555).
+    let resume_model_settings =
+        crate::app::resume_model_settings_for_overrides(&initial_config, &overrides);
     let mut early_resume_selection = None;
     let use_fork = cli.fork_picker || cli.fork_last || cli.fork_session_id.is_some();
     if startup_provider.requires_provider_onboarding
@@ -1697,6 +1697,7 @@ async fn run_ratatui_app(
                     selected,
                     &initial_config,
                     uses_remote_workspace,
+                    resume_model_settings,
                 )
                 .await
                 {
@@ -1710,32 +1711,15 @@ async fn run_ratatui_app(
                             strict_config,
                         )
                         .await;
-                        // A thread recorded on another provider resumes there
-                        // (#555): check that provider, not the session's.
-                        let thread_config = match selected {
-                            resume_picker::SessionSelection::Resume(target) => {
-                                let model = session_resume::read_session_model(
-                                    /*state_db_ctx*/ None,
-                                    target.thread_id,
-                                    target.path.as_deref(),
-                                )
-                                .await;
-                                recorded_provider_config(&initial_config, &recorded, model)
-                            }
-                            _ => None,
-                        };
-                        let check_config = thread_config.as_ref().unwrap_or(&initial_config);
-                        startup_provider = startup_provider::resolve(
-                            check_config,
-                            Some(startup_provider::openai_metadata(login_status)),
+                        let (resolution, refusal) = check_resume_before_onboarding(
+                            selected,
+                            &initial_config,
+                            &recorded,
+                            startup_provider::openai_metadata(login_status),
                         )
                         .await;
-                        resume_account_error(check_config, &recorded, AccountRecovery::CommandLine)
-                            .or_else(|| {
-                                (thread_config.is_some()
-                                    && startup_provider.requires_provider_onboarding)
-                                    .then(|| missing_provider_credentials_error(&recorded))
-                            })
+                        startup_provider = resolution;
+                        refusal
                     }
                     None => chosen_thread_account_error(
                         &initial_config,
@@ -2042,8 +2026,13 @@ async fn run_ratatui_app(
 
     // PF-84 (#545): the session config carries the account the resumed thread
     // runs on, so the TUI shows and checks the account the app server uses.
-    let resume_recorded_account =
-        resume_recorded_provider_account(&session_selection, &config, uses_remote_workspace).await;
+    let resume_recorded_account = resume_recorded_provider_account(
+        &session_selection,
+        &config,
+        uses_remote_workspace,
+        resume_model_settings,
+    )
+    .await;
     if let Some(recorded) = resume_recorded_account.as_ref() {
         overrides.inherited_provider_account = Some(recorded.selection());
     }
