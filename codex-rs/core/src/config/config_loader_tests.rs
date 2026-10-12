@@ -4275,6 +4275,60 @@ async fn security_recovery_project_layer_only_raises_the_level() -> std::io::Res
     Ok(())
 }
 
+/// PF-84 (#555): a resumed thread's recorded account of another provider is
+/// applied to that provider's entry, unless `--account` names that provider
+/// or it is the session's provider (the loader's job).
+#[tokio::test]
+async fn recorded_account_of_another_provider_is_applied_to_that_provider() -> std::io::Result<()> {
+    let codex_home = tempdir().expect("tempdir");
+    std::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        "model = \"glm-5.3-flash\"\nmodel_provider = \"zai\"\n\n\
+         [features]\nnamed_accounts = true\n\n[provider_accounts]\nkimi-code = \"cfg\"\n",
+    )?;
+    let config = |explicit: Option<&str>| {
+        ConfigBuilder::default()
+            .codex_home(codex_home.path().to_path_buf())
+            .harness_overrides(ConfigOverrides {
+                provider_account: explicit.map(str::to_string),
+                ..Default::default()
+            })
+            .build()
+    };
+    let account = |config: &crate::config::Config, id: &str| {
+        config.model_providers[id]
+            .account
+            .as_ref()
+            .map(|account| account.name.clone())
+    };
+
+    let mut plain = config(/*explicit*/ None).await?;
+    crate::config::apply_recorded_provider_account(&mut plain, "kimi-code:work")?;
+    crate::config::apply_recorded_provider_account(&mut plain, "zai:work")?;
+    let mut explicit = config(Some("kimi-code:alt")).await?;
+    crate::config::apply_recorded_provider_account(&mut explicit, "kimi-code:work")?;
+
+    assert_eq!(
+        [
+            account(&plain, "kimi-code"),
+            account(&plain, "zai"),
+            plain
+                .model_provider
+                .account
+                .clone()
+                .map(|account| account.name),
+            account(&explicit, "kimi-code"),
+        ],
+        [
+            Some("work".to_string()),
+            None,
+            None,
+            Some("alt".to_string())
+        ]
+    );
+    Ok(())
+}
+
 /// PF-84 (#425): the account a resumed thread recorded (or a worker's parent
 /// runs on) beats `[provider_accounts]`; an explicit account replaces it only
 /// for the same provider, so another provider's `--account` never drops it.

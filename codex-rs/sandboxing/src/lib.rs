@@ -14,7 +14,11 @@ mod windows_legacy_warning;
 #[cfg(target_os = "linux")]
 pub use bwrap::APPARMOR_BWRAP_USERNS_PROFILE;
 #[cfg(target_os = "linux")]
+pub use bwrap::BWRAP_UNAVAILABLE_MESSAGE;
+#[cfg(target_os = "linux")]
 pub use bwrap::find_apparmor_bwrap_launcher;
+#[cfg(target_os = "linux")]
+pub use bwrap::find_bundled_bwrap;
 #[cfg(target_os = "linux")]
 pub use bwrap::find_system_bwrap_in_path;
 #[cfg(target_os = "linux")]

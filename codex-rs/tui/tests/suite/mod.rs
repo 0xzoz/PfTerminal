@@ -20,6 +20,8 @@ mod provider_convergence;
 mod provider_management;
 mod resize_reflow;
 #[cfg(unix)]
+mod resume_provider_accounts;
+#[cfg(unix)]
 mod resume_recorded_account;
 #[cfg(unix)]
 mod security_profiles;

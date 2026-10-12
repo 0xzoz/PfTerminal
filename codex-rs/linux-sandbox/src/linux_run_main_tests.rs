@@ -379,6 +379,32 @@ fn cleanup_synthetic_mount_targets_removes_transient_file_after_concurrent_owner
     assert!(!empty_file.exists());
 }
 
+/// #562: a placeholder found when the arguments were built but removed by
+/// its owner's cleanup before this run registered: bubblewrap makes a new
+/// one, which is this run's own, so its marker must say a run made it (a
+/// later run then holds it too, and the last one out removes it).
+#[test]
+fn register_synthetic_mount_targets_owns_a_placeholder_that_vanished_before_registration() {
+    let temp_dir = tempfile::TempDir::new().expect("tempdir");
+    let placeholder = temp_dir.path().join("AGENTS.md");
+    std::fs::write(&placeholder, "").expect("write placeholder");
+    let metadata = std::fs::symlink_metadata(&placeholder).expect("stat placeholder");
+    let target = crate::bwrap::SyntheticMountTarget::existing_empty_file(&placeholder, &metadata);
+    std::fs::remove_file(&placeholder).expect("owner's cleanup");
+
+    let registrations = register_synthetic_mount_targets(&[target]);
+
+    assert!(!registrations[0].target.preserves_pre_existing_path());
+    assert_eq!(
+        std::fs::read(&registrations[0].marker_file).expect("marker"),
+        SYNTHETIC_MOUNT_MARKER_SYNTHETIC
+    );
+    // bubblewrap's new mount target, then this run's cleanup.
+    std::fs::write(&placeholder, "").expect("new placeholder");
+    cleanup_synthetic_mount_targets(&registrations);
+    assert!(!placeholder.exists());
+}
+
 #[test]
 fn cleanup_synthetic_mount_targets_preserves_real_pre_existing_empty_file() {
     let temp_dir = tempfile::TempDir::new().expect("tempdir");

@@ -370,6 +370,14 @@ pub(crate) async fn additional_permission_refusal(
 ) -> Option<String> {
     let additional = additional?.clone();
     let inputs = ReadPolicyInputs::capture(session, turn)?;
+    // An external sandbox takes no protected-path rules (and ignores
+    // additional permissions), as in the orchestrator's check.
+    if matches!(
+        inputs.profile,
+        codex_protocol::models::PermissionProfile::External { .. }
+    ) {
+        return None;
+    }
     let cwd = cwd.to_path_buf();
     off_thread(move || {
         let denials = ReadDenials::for_turn(
@@ -380,9 +388,10 @@ pub(crate) async fn additional_permission_refusal(
         );
         let mut cwds = vec![cwd.as_path(), inputs.turn_cwd.as_path()];
         cwds.extend(inputs.workspace_roots.iter().map(AbsolutePathBuf::as_path));
-        // Issue #513: nor a runtime entry of the Corbanu home for writing,
-        // which no grant lifts. Other write protections wait for the run's
-        // grant to be known.
+        // Issue #513: nor a path no grant lifts for writing (#565: the
+        // runtime entries of the Corbanu home and the project's `.codex` and
+        // `.agents`). Other write protections wait for the run's grant to
+        // be known.
         let protected = denials
             .apply(&inputs.profile)
             .map(|protected| protected.file_system_sandbox_policy());
@@ -390,7 +399,7 @@ pub(crate) async fn additional_permission_refusal(
             denials: &denials,
             protected: protected.as_ref(),
             reads: true,
-            writes: super::protected_additional::ReadOnlyScope::Runtime,
+            writes: super::protected_additional::ReadOnlyScope::NeverLifted,
         };
         super::protected_additional::opened(check, &additional, &cwds)
             .map(|opened| opened.refusal(SecurityLevel::Aggressive))

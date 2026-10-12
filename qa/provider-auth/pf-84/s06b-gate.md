@@ -110,10 +110,12 @@ API key in `auth.json`; a decoy `OPENAI_API_KEY` is set throughout. Captures: [s
 
 ## Known limits (record before the flag is removed)
 
-- A session started on a named account keeps that account for MCP connectors, plugin install and accounting even
-  after a mid-session switch to a default-account OpenAI provider (model requests do switch back).
-- The model list is fetched with the account the process started on; `/status` rate limits before the first reply
-  come from the default login.
+- ~~A session started on a named account keeps that account for MCP connectors, plugin install and accounting even
+  after a mid-session switch to a default-account OpenAI provider.~~ Fixed in the PF-84 follow-up (below): they
+  follow every mid-session switch, named to default, default to named and between named accounts.
+- ~~The model list is fetched with the account the process started on.~~ Fixed in the same follow-up: it follows the
+  account the user's session uses. Still open: `/status` rate limits before the first reply come from the default
+  login, and the app server's `/apps` directory listing (`app/list`) always uses the default login.
 - The registry keeps each named manager's first base settings (`forced_login_method`, workspace, route) until it is
   dropped; a config reload does not update a live manager (the session-start check does run again).
 - `for_named_account` reads the vault while holding the registry lock; the `/status` card reads the vault on the UI
@@ -121,3 +123,50 @@ API key in `auth.json`; a decoy `OPENAI_API_KEY` is set throughout. Captures: [s
 - A same-user re-login leaves the replaced refresh token unrevoked (by design, to keep the new session alive).
 - Not done: zeroizing every in-memory copy of an API key; a keychain-mode test of the default login; the legacy
   pfterminal default store in the same-user check; a narrow race between a refresh save and a concurrent remove.
+
+## Follow-up: mid-session account switch (fix/pf84-switch-follow)
+
+- **What follows the switch.** Every path that changes the session's provider (`update_settings`, and a turn whose
+  settings change it) moves the session's sign-in (`SessionServices::active_auth`) to that provider's named account or
+  the default login, under the state lock and before the model client is rebuilt. Connectors (MCP, Apps auth included)
+  are marked for reconnection; the prewarm worker re-subscribes to the new manager's refreshes, also when the old
+  manager is gone. Plugin installs read the active sign-in per use. Accounting prices each request under its own
+  provider's account (`active_auth.for_provider`), turn-level reads use the turn's manager, so a switch mid-turn does
+  not reprice the running turn. A session starting on a provider without a named account uses the default login, also
+  when spawned from a session on a named account.
+- **Model list.** When the process starts on an OpenAI sign-in provider, its list (`model/list`) is an
+  `AccountModelsManager` that follows the account of a user's session (not sub-agents) at session start and on a
+  switch; each named account has its own cache (`models-cache/<provider>/<name>/`). A switch to an account whose
+  cache is fresh (the check refreshing uses: this client version, under 5 minutes) shows it at once and refetches in
+  the background; otherwise the switch waits for the fetch (at most 5 s; API-key sign-ins fetch nothing). If the fetch
+  takes longer, the TUI shows the bundled list until its next refetch (a later switch or restart); core has the
+  fetched list once it arrives. Only responses from that provider (same base URL) and account refresh it. With two
+  user sessions switching at once, one may check the other's list (last one wins, as above). The TUI sends an account-changing model selection with `confirm` (falling back to an
+  unconfirmed update if confirmation is unavailable); only once core confirms the switch does it fetch `model/list`
+  again and say *Connectors, usage and the model list now use …*.
+- **Limits.** The process has one list: with several user sessions on different accounts (an app-server client with
+  many threads) the last one to start or switch decides it. A process started on a provider without OpenAI sign-in
+  (e.g. `zai`) keeps that provider's list. Analytics events keep the manager the session started with. A turn running
+  across a switch is priced under its own provider's account but recorded under the session's current provider id
+  (`accounting_binding`, unchanged). The switch reads a named account's ChatGPT or API-key sign-in from the vault under
+  the session state lock (other kinds load on first use); accounting resolves the request's account per request, which
+  reads the vault only if nothing holds that account's manager. Runtime model entries added for other providers keep
+  their metadata across a list refresh, as before.
+- **Tests (fail before, pass after).** Core `session::account_switch_tests`: connectors, the prewarm worker across
+  default → work → default → play, a turn that changes the provider, accounting per request provider, the model list,
+  no reconnect when the account is unchanged; `account_models_manager::tests`. TUI: catalog replacement and which
+  switches refresh the list.
+- **tmux check** (disposable home, `CORBANU_TEST_NO_NATIVE_KEYRING=1`; `work` signed in with the `openai-api-key`
+  vault label, GLM 5.3 Flash on the default Z.AI key, both fetched inline, never printed). Evidence:
+  [s06/switch-follow/](s06/switch-follow/).
+  - Run 1 started on `openai · work`, so the process list follows: `/model` → GLM → back to OpenAI.
+  - Run 2 started on GLM: `/providers` *Use for this session* `work` → `/model` OpenAI (`work-ok`) → GLM
+    (`default-ok`). It shows connectors and accounting following and the TUI refetching; its process list is Z.AI's.
+  - Runs 3 and 4 (review and final heads) start on `openai · work` and switch GLM → OpenAI → GLM.
+  - Core logged each switch (`default` / `openai:work`) before the TUI's `model/list`. The ledger attributes each
+    attempt to the account that served it. Leak scan for both real keys: 0 files.
+- **Video:** [pf84-switch-follow](https://github.com/CorbanuCore/CorbanuTerminal/releases/download/demos/pf-84-s06-pf84-switch-follow-40cbb034ec7e-2026-10-12.mp4)
+  (final head, leak-scanned): `/providers` *Use for this session* `work`, `/model` OpenAI answered via `work`, back to
+  GLM answered via the default account, each switch announced.
+- **Seen, not caused here (#578):** after GLM → OpenAI in the same session, OpenAI rejected the turn with 404 for a
+  GLM reasoning item id (`rs_…`, `store=false`) carried in the history; the request was authenticated as `work`.
