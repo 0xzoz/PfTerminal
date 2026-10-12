@@ -58,6 +58,7 @@ pub use auth::RefreshTokenError;
 pub use auth::UnauthorizedRecovery;
 pub use auth::current_named_sign_in;
 pub use auth::default_client;
+pub use auth::default_login_restriction_error;
 pub use auth::delete_provider_api_key;
 pub use auth::email_hint;
 pub use auth::enforce_login_restrictions;

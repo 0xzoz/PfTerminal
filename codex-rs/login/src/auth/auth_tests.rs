@@ -2122,6 +2122,10 @@ struct TestAuthManagerConfig {
     codex_home: PathBuf,
     forced_login_method: Option<ForcedLoginMethod>,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
+    forced_chatgpt_workspace_id: Option<Vec<String>>,
+    named_session: bool,
+    /// `None`: the same as `forced_login_method`.
+    configured_forced_login_method: Option<Option<ForcedLoginMethod>>,
 }
 
 impl AuthManagerConfig for TestAuthManagerConfig {
@@ -2138,7 +2142,7 @@ impl AuthManagerConfig for TestAuthManagerConfig {
     }
 
     fn forced_chatgpt_workspace_id(&self) -> Option<Vec<String>> {
-        None
+        self.forced_chatgpt_workspace_id.clone()
     }
 
     fn chatgpt_base_url(&self) -> String {
@@ -2151,6 +2155,15 @@ impl AuthManagerConfig for TestAuthManagerConfig {
 
     fn forced_login_method(&self) -> Option<ForcedLoginMethod> {
         self.forced_login_method
+    }
+
+    fn runs_on_named_sign_in_account(&self) -> bool {
+        self.named_session
+    }
+
+    fn configured_forced_login_method(&self) -> Option<ForcedLoginMethod> {
+        self.configured_forced_login_method
+            .unwrap_or(self.forced_login_method)
     }
 }
 
@@ -2166,6 +2179,9 @@ async fn shared_from_config_reads_openai_api_key_env_unless_chatgpt_login_is_req
         codex_home: codex_home.path().to_path_buf(),
         forced_login_method,
         auth_credentials_store_mode,
+        forced_chatgpt_workspace_id: None,
+        named_session: false,
+        configured_forced_login_method: None,
     };
 
     for mode in [
@@ -2261,6 +2277,236 @@ async fn enforce_login_restrictions_logs_out_for_method_mismatch() {
     assert!(
         !codex_home.path().join("auth.json").exists(),
         "auth.json should be removed on mismatch"
+    );
+}
+
+/// PF-84-S06 (#570): the check a thread on the default login gets after a
+/// named-account session left that login alone reports the violation and
+/// leaves the login exactly as it was.
+#[tokio::test]
+#[serial(codex_auth_env)]
+async fn default_login_restriction_error_reports_without_logging_out() {
+    let codex_home = tempdir().unwrap();
+    let _access_token_guard = remove_access_token_env_var();
+    let _codex_api_key_guard = EnvVarGuard::remove(CODEX_API_KEY_ENV_VAR);
+    let _ambient_api_key_guard = EnvVarGuard::remove(AMBIENT_API_KEY_ENV_VAR);
+    let auth_file = codex_home.path().join("auth.json");
+
+    // No restriction, or no login: nothing to report.
+    let unrestricted = build_config(
+        codex_home.path(),
+        /*forced_login_method*/ None,
+        /*forced_chatgpt_workspace_id*/ None,
+    )
+    .await;
+    assert_eq!(
+        super::default_login_restriction_error(&unrestricted)
+            .await
+            .unwrap(),
+        None
+    );
+    let forced_chatgpt = build_config(
+        codex_home.path(),
+        Some(ForcedLoginMethod::Chatgpt),
+        /*forced_chatgpt_workspace_id*/ None,
+    )
+    .await;
+    assert_eq!(
+        super::default_login_restriction_error(&forced_chatgpt)
+            .await
+            .unwrap(),
+        None
+    );
+
+    login_with_api_key(
+        codex_home.path(),
+        "sk-test",
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    )
+    .expect("seed api key");
+    let before = std::fs::read(&auth_file).unwrap();
+    let message = super::default_login_restriction_error(&forced_chatgpt)
+        .await
+        .unwrap()
+        .expect("an API key breaks a required ChatGPT login");
+    assert!(
+        message.contains("ChatGPT login is required") && message.contains("left unchanged"),
+        "{message}"
+    );
+    assert!(!message.contains("Logging out"), "{message}");
+    assert_eq!(std::fs::read(&auth_file).unwrap(), before);
+
+    let _jwt = write_auth_file(
+        AuthFileParams {
+            openai_api_key: None,
+            chatgpt_plan_type: Some("pro".to_string()),
+            chatgpt_account_id: Some(WORKSPACE_ID_DISALLOWED.to_string()),
+        },
+        codex_home.path(),
+    )
+    .expect("failed to write auth file");
+    let before = std::fs::read(&auth_file).unwrap();
+    let other_workspace = build_config(
+        codex_home.path(),
+        /*forced_login_method*/ None,
+        Some(vec![WORKSPACE_ID_ALLOWED.to_string()]),
+    )
+    .await;
+    let message = super::default_login_restriction_error(&other_workspace)
+        .await
+        .unwrap()
+        .expect("another workspace breaks the restriction");
+    assert!(
+        message.contains(&format!("workspace(s) {WORKSPACE_ID_ALLOWED}")),
+        "{message}"
+    );
+    assert_eq!(std::fs::read(&auth_file).unwrap(), before);
+    let same_workspace = build_config(
+        codex_home.path(),
+        Some(ForcedLoginMethod::Chatgpt),
+        Some(vec![WORKSPACE_ID_DISALLOWED.to_string()]),
+    )
+    .await;
+    assert_eq!(
+        super::default_login_restriction_error(&same_workspace)
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+/// PF-84-S06 (#570): in a process whose session runs on a named sign-in
+/// account (so startup left the default login alone), the default login's
+/// manager treats a login the restrictions rule out as absent, also after a
+/// reload, and never deletes it. Other processes load it as before.
+#[tokio::test]
+#[serial(codex_auth_env)]
+async fn shared_from_config_hides_a_restricted_default_login_only_in_named_sessions() {
+    let codex_home = tempdir().unwrap();
+    let _access_token_guard = remove_access_token_env_var();
+    let _codex_api_key_guard = EnvVarGuard::remove(CODEX_API_KEY_ENV_VAR);
+    let _ambient_api_key_guard = EnvVarGuard::remove(AMBIENT_API_KEY_ENV_VAR);
+    let _openai_api_key_guard = EnvVarGuard::remove(OPENAI_API_KEY_ENV_VAR);
+    let auth_file = codex_home.path().join("auth.json");
+    let _jwt = write_auth_file(
+        AuthFileParams {
+            openai_api_key: None,
+            chatgpt_plan_type: Some("pro".to_string()),
+            chatgpt_account_id: Some(WORKSPACE_ID_DISALLOWED.to_string()),
+        },
+        codex_home.path(),
+    )
+    .expect("failed to write auth file");
+    let before = std::fs::read(&auth_file).unwrap();
+    let config = |forced_login_method, workspace: &str, named_session| TestAuthManagerConfig {
+        codex_home: codex_home.path().to_path_buf(),
+        forced_login_method,
+        auth_credentials_store_mode: AuthCredentialsStoreMode::File,
+        forced_chatgpt_workspace_id: Some(vec![workspace.to_string()]),
+        named_session,
+        configured_forced_login_method: None,
+    };
+
+    for (forced_login_method, workspace) in [
+        (Some(ForcedLoginMethod::Api), WORKSPACE_ID_DISALLOWED),
+        (None, WORKSPACE_ID_ALLOWED),
+    ] {
+        let named = AuthManager::shared_from_config(
+            &config(forced_login_method, workspace, /*named_session*/ true),
+            /*enable_codex_api_key_env*/ false,
+        )
+        .await;
+        assert!(named.auth_cached().is_none());
+        named.reload().await;
+        assert!(named.auth().await.is_none());
+
+        let default_session = AuthManager::shared_from_config(
+            &config(forced_login_method, workspace, /*named_session*/ false),
+            /*enable_codex_api_key_env*/ false,
+        )
+        .await;
+        assert!(default_session.auth_cached().is_some());
+    }
+
+    // An allowed login is used as before.
+    let allowed = AuthManager::shared_from_config(
+        &config(
+            Some(ForcedLoginMethod::Chatgpt),
+            WORKSPACE_ID_DISALLOWED,
+            /*named_session*/ true,
+        ),
+        /*enable_codex_api_key_env*/ false,
+    )
+    .await;
+    assert!(allowed.auth_cached().is_some());
+    assert_eq!(std::fs::read(&auth_file).unwrap(), before);
+}
+
+/// #571: a third-party session provider implies an API-key-only login for
+/// onboarding (`forced_login_method` reads `api`), but a named OpenAI ChatGPT
+/// account is refused only by a configured `forced_login_method = "api"`.
+#[tokio::test]
+#[serial(codex_auth_env)]
+async fn named_chatgpt_account_follows_only_the_configured_login_method() {
+    let codex_home = tempdir().unwrap();
+    let scratch = tempdir().unwrap();
+    let _access_token_guard = remove_access_token_env_var();
+    let _jwt = write_auth_file(
+        AuthFileParams {
+            openai_api_key: None,
+            chatgpt_plan_type: Some("plus".to_string()),
+            chatgpt_account_id: Some(WORKSPACE_ID_ALLOWED.to_string()),
+        },
+        scratch.path(),
+    )
+    .expect("failed to write auth file");
+    let sign_in: AuthDotJson =
+        serde_json::from_slice(&std::fs::read(scratch.path().join("auth.json")).unwrap()).unwrap();
+    let work = NamedChatgptAccount {
+        provider_id: "openai".to_string(),
+        name: "work".to_string(),
+    };
+    crate::auth::save_named_account_auth(
+        codex_home.path(),
+        &work,
+        &sign_in,
+        /*must_be_new*/ true,
+    )
+    .expect("named sign-in");
+    let config = |configured| TestAuthManagerConfig {
+        codex_home: codex_home.path().to_path_buf(),
+        forced_login_method: Some(ForcedLoginMethod::Api),
+        auth_credentials_store_mode: AuthCredentialsStoreMode::File,
+        forced_chatgpt_workspace_id: None,
+        named_session: false,
+        configured_forced_login_method: Some(configured),
+    };
+
+    let implied = AuthManager::shared_from_config(
+        &config(/*configured*/ None),
+        /*enable_codex_api_key_env*/ false,
+    )
+    .await;
+    assert!(
+        implied
+            .for_named_account(work.clone())
+            .auth_cached()
+            .is_some_and(|auth| auth.is_chatgpt_auth())
+    );
+    let configured = AuthManager::shared_from_config(
+        &config(Some(ForcedLoginMethod::Api)),
+        /*enable_codex_api_key_env*/ false,
+    )
+    .await;
+    let refused = configured.for_named_account(work);
+    assert!(refused.auth().await.is_none());
+    assert!(
+        refused
+            .named_sign_in_unavailable()
+            .is_some_and(|reason| reason.contains("requires an API key")),
+        "{:?}",
+        refused.named_sign_in_unavailable()
     );
 }
 

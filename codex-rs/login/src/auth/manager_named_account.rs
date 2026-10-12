@@ -84,6 +84,30 @@ impl AuthManager {
         self.named_account.as_ref()
     }
 
+    /// PF-84-S06 (#571): why this named account's manager has no usable
+    /// sign-in: none is stored, it cannot be read, or the login restrictions
+    /// refuse it. `None` for the default login's manager or when a sign-in
+    /// is available. Requests on the account are refused with this instead
+    /// of being sent without credentials.
+    pub fn named_sign_in_unavailable(&self) -> Option<String> {
+        let account = self.named_account.as_ref()?;
+        match self.named_account_auth_dot_json() {
+            Ok(Some(_)) => None,
+            Ok(None) => Some(format!(
+                "account `{}` has no sign-in; sign in with `corbanu login --account {}` \
+                 (add `--with-api-key` for an API key)",
+                account.name, account.name
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                Some(error.to_string())
+            }
+            Err(error) => Some(format!(
+                "the sign-in of account `{}` cannot be read: {error}",
+                account.name
+            )),
+        }
+    }
+
     fn new_named_account_manager(
         &self,
         account: NamedChatgptAccount,
@@ -113,6 +137,7 @@ impl AuthManager {
             named_account: Some(account),
             forced_login_method: self.forced_login_method,
             base_manager: Some(base),
+            hide_restricted_default_login: false,
         }
     }
 

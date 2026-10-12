@@ -184,6 +184,7 @@ mod permissions;
 mod provider_accounts;
 pub use codex_model_provider::selected_account_error;
 pub(crate) use provider_accounts::configured_account_names;
+pub use provider_accounts::default_login_restriction_error;
 pub use provider_accounts::other_provider_account_error;
 pub use provider_accounts::session_account_error;
 pub use provider_accounts::split_account_selection;
@@ -1506,6 +1507,14 @@ impl AuthManagerConfig for Config {
     fn forced_login_method(&self) -> Option<ForcedLoginMethod> {
         self.forced_login_method
     }
+
+    fn configured_forced_login_method(&self) -> Option<ForcedLoginMethod> {
+        self.configured_forced_login_method
+    }
+
+    fn runs_on_named_sign_in_account(&self) -> bool {
+        Config::runs_on_named_sign_in_account(self)
+    }
 }
 
 #[derive(Clone, Default)]
@@ -1929,6 +1938,28 @@ impl Config {
     /// Returns auth routing resolved from the effective feature configuration.
     pub fn auth_route_config(&self) -> AuthRouteConfig {
         AuthRouteConfig::from_http_client_factory(self.http_client_factory())
+    }
+
+    /// The default login's settings and the configured login restrictions, as
+    /// checked (and enforced) against the default login at startup.
+    pub fn default_login_restrictions(&self) -> codex_login::AuthConfig {
+        codex_login::AuthConfig {
+            codex_home: self.codex_home.to_path_buf(),
+            auth_credentials_store_mode: self.cli_auth_credentials_store_mode,
+            keyring_backend_kind: self.auth_keyring_backend_kind(),
+            forced_login_method: self.configured_forced_login_method,
+            forced_chatgpt_workspace_id: self.forced_chatgpt_workspace_id.clone(),
+            chatgpt_base_url: Some(self.chatgpt_base_url.clone()),
+            auth_route_config: self.auth_route_config(),
+        }
+    }
+
+    /// PF-84-S06 (#570): whether this session's own provider runs on a named
+    /// OpenAI sign-in account. Such a session checks the login restrictions
+    /// against that account only and never reads or logs out the default
+    /// login at startup.
+    pub fn runs_on_named_sign_in_account(&self) -> bool {
+        codex_model_provider::named_sign_in_account(&self.model_provider).is_some()
     }
 
     /// Creates the HTTP client factory resolved from the effective feature configuration.

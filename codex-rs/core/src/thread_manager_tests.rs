@@ -16,6 +16,7 @@ use codex_protocol::AgentPath;
 use codex_protocol::ResponseItemId;
 use codex_protocol::capabilities::CapabilityRootLocation;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
+use codex_protocol::config_types::ForcedLoginMethod;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ReasoningItemReasoningSummary;
@@ -458,6 +459,84 @@ async fn start_thread_refuses_a_missing_named_account() {
         &("account `gone` of provider `zai` is not configured; add it with \
          `corbanu account add zai gone` or pick another with `--account` (see `corbanu account list`)"
             .to_string())
+    );
+}
+
+/// PF-84-S06 (#570): a session on a named sign-in account leaves a default
+/// login the login restrictions rule out in place, so a thread that would run
+/// on that default login (a switch to the default account, or a spawned agent
+/// on it) is refused with the reason, and the login is not touched. A thread
+/// on a named account, or with the feature off or no restriction, is not
+/// checked against the default login.
+#[tokio::test]
+async fn start_thread_refuses_a_ruled_out_default_login_without_logging_it_out() {
+    let temp_dir = tempdir().expect("tempdir");
+    let mut config = test_config().await;
+    config.codex_home = temp_dir.path().join("codex-home").abs();
+    config.cwd = config.codex_home.abs();
+    std::fs::create_dir_all(&config.codex_home).expect("create codex home");
+    config
+        .features
+        .enable(Feature::NamedAccounts)
+        .expect("named accounts should be available in tests");
+    config.model_provider_id = "openai".to_string();
+    config.model_provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
+    config.configured_forced_login_method = Some(ForcedLoginMethod::Chatgpt);
+    config.forced_login_method = Some(ForcedLoginMethod::Chatgpt);
+    codex_login::login_with_api_key(
+        &config.codex_home,
+        "sk-default-570",
+        config.cli_auth_credentials_store_mode,
+        config.auth_keyring_backend_kind(),
+    )
+    .expect("seed the default login");
+    let auth_file = config.codex_home.join("auth.json");
+    let before = std::fs::read(&auth_file).expect("default login");
+
+    let message = crate::config::default_login_restriction_error(&config)
+        .await
+        .expect("an API key breaks a required ChatGPT login");
+    assert!(
+        message.contains("ChatGPT login is required") && message.contains("left unchanged"),
+        "{message}"
+    );
+
+    let mut named = config.clone();
+    named.model_provider.account = Some(codex_model_provider_info::NamedProviderAccount {
+        provider_id: "openai".to_string(),
+        name: "work".to_string(),
+    });
+    let mut feature_off = config.clone();
+    feature_off
+        .features
+        .disable(Feature::NamedAccounts)
+        .expect("named accounts can be turned off");
+    let mut unrestricted = config.clone();
+    unrestricted.configured_forced_login_method = None;
+    unrestricted.forced_login_method = None;
+    for other in [&named, &feature_off, &unrestricted] {
+        assert_eq!(
+            crate::config::default_login_restriction_error(other).await,
+            None
+        );
+    }
+
+    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+    );
+    let Err(error) = manager.start_thread(StartThreadOptions::new(config)).await else {
+        panic!("a ruled-out default login must not start a thread");
+    };
+    let CodexErrorDetails::InvalidRequest(refusal) = error.details() else {
+        panic!("expected an invalid request, got {error}");
+    };
+    assert_eq!(refusal, &message);
+    assert_eq!(
+        std::fs::read(&auth_file).expect("default login kept"),
+        before
     );
 }
 

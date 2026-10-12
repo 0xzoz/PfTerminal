@@ -1640,7 +1640,72 @@ async fn enforce_login_restrictions_with_agent_identity_authapi_base_url(
     config: &AuthConfig,
     agent_identity_authapi_base_url: Option<&str>,
 ) -> std::io::Result<()> {
-    let Some(auth) = load_auth_with_openai_api_key_env(
+    let Some(auth) = load_auth_for_restrictions(config, agent_identity_authapi_base_url).await?
+    else {
+        return Ok(());
+    };
+    match login_restriction_violation(
+        &auth,
+        config.forced_login_method,
+        config.forced_chatgpt_workspace_id.as_deref(),
+    ) {
+        None => Ok(()),
+        Some(LoginRestrictionViolation::Method(reason)) => {
+            let message = format!("{reason} Logging out.");
+            if auth_uses_api_key_from_env(&auth) {
+                return Err(std::io::Error::other(message));
+            }
+            logout_and_continue(
+                &config.codex_home,
+                message,
+                config.auth_credentials_store_mode,
+                config.keyring_backend_kind,
+            )
+        }
+        Some(LoginRestrictionViolation::Workspace(reason)) => logout_with_message(
+            &config.codex_home,
+            format!("{reason} Logging out."),
+            config.auth_credentials_store_mode,
+            config.keyring_backend_kind,
+        ),
+    }
+}
+
+/// PF-84-S06 (#570): why the default login breaks the configured login
+/// restrictions, checked without logging it out. For a thread that would run
+/// on the default login while a session on a named account left it in place.
+pub async fn default_login_restriction_error(
+    config: &AuthConfig,
+) -> std::io::Result<Option<String>> {
+    if config.forced_login_method.is_none() && config.forced_chatgpt_workspace_id.is_none() {
+        return Ok(None);
+    }
+    let agent_identity_authapi_base_url =
+        agent_identity_authapi_base_url(config.chatgpt_base_url.as_deref()).ok();
+    let Some(auth) =
+        load_auth_for_restrictions(config, agent_identity_authapi_base_url.as_deref()).await?
+    else {
+        return Ok(None);
+    };
+    Ok(login_restriction_violation(
+        &auth,
+        config.forced_login_method,
+        config.forced_chatgpt_workspace_id.as_deref(),
+    )
+    .map(|violation| {
+        format!(
+            "The default OpenAI login cannot be used: {} It was left unchanged; sign in \
+             with `corbanu login`, or choose a named account with `--account` or /providers.",
+            violation.reason()
+        )
+    }))
+}
+
+async fn load_auth_for_restrictions(
+    config: &AuthConfig,
+    agent_identity_authapi_base_url: Option<&str>,
+) -> std::io::Result<Option<CodexAuth>> {
+    load_auth_with_openai_api_key_env(
         &config.codex_home,
         /*enable_codex_api_key_env*/ true,
         OpenAiApiKeyEnv::for_forced_login_method(config.forced_login_method),
@@ -1651,12 +1716,30 @@ async fn enforce_login_restrictions_with_agent_identity_authapi_base_url(
         agent_identity_authapi_base_url,
         &config.auth_route_config,
     )
-    .await?
-    else {
-        return Ok(());
-    };
+    .await
+}
 
-    if let Some(required_method) = config.forced_login_method {
+/// How a login breaks the configured login restrictions. A wrong method is
+/// logged out and the session continues; a wrong workspace ends it.
+enum LoginRestrictionViolation {
+    Method(String),
+    Workspace(String),
+}
+
+impl LoginRestrictionViolation {
+    fn reason(&self) -> &str {
+        match self {
+            Self::Method(reason) | Self::Workspace(reason) => reason,
+        }
+    }
+}
+
+fn login_restriction_violation(
+    auth: &CodexAuth,
+    forced_login_method: Option<ForcedLoginMethod>,
+    forced_chatgpt_workspace_id: Option<&[String]>,
+) -> Option<LoginRestrictionViolation> {
+    if let Some(required_method) = forced_login_method {
         let method_violation = match (required_method, auth.auth_mode()) {
             (ForcedLoginMethod::Api, AuthMode::ApiKey)
             | (ForcedLoginMethod::Api, AuthMode::BedrockApiKey) => None,
@@ -1669,82 +1752,55 @@ async fn enforce_login_restrictions_with_agent_identity_authapi_base_url(
             | (ForcedLoginMethod::Api, AuthMode::ChatgptAuthTokens)
             | (ForcedLoginMethod::Api, AuthMode::Headers)
             | (ForcedLoginMethod::Api, AuthMode::AgentIdentity)
-            | (ForcedLoginMethod::Api, AuthMode::PersonalAccessToken) => Some(
-                "API key login is required, but ChatGPT is currently being used. Logging out."
-                    .to_string(),
-            ),
+            | (ForcedLoginMethod::Api, AuthMode::PersonalAccessToken) => {
+                Some("API key login is required, but ChatGPT is currently being used.")
+            }
             (ForcedLoginMethod::Chatgpt, AuthMode::ApiKey)
-            | (ForcedLoginMethod::Chatgpt, AuthMode::BedrockApiKey) => Some(
-                "ChatGPT login is required, but an API key is currently being used. Logging out."
-                    .to_string(),
+            | (ForcedLoginMethod::Chatgpt, AuthMode::BedrockApiKey) => {
+                Some("ChatGPT login is required, but an API key is currently being used.")
+            }
+        };
+        if let Some(reason) = method_violation {
+            return Some(LoginRestrictionViolation::Method(reason.to_string()));
+        }
+    }
+
+    let expected_account_ids = forced_chatgpt_workspace_id?;
+    let chatgpt_account_id = match auth {
+        CodexAuth::ApiKey(_) | CodexAuth::Headers(_) | CodexAuth::BedrockApiKey(_) => {
+            return None;
+        }
+        CodexAuth::AgentIdentity(_) | CodexAuth::PersonalAccessToken(_) => auth.get_account_id(),
+        CodexAuth::Chatgpt(_) | CodexAuth::ChatgptAuthTokens(_) => match auth.get_token_data() {
+            Ok(data) => data.id_token.chatgpt_account_id,
+            Err(err) => {
+                return Some(LoginRestrictionViolation::Workspace(format!(
+                    "Failed to load ChatGPT credentials while enforcing workspace restrictions: {err}."
+                )));
+            }
+        },
+    };
+
+    // workspace is the external identifier for account id.
+    let chatgpt_account_id = chatgpt_account_id.as_deref();
+    if chatgpt_account_id.is_some_and(|actual| {
+        expected_account_ids
+            .iter()
+            .any(|expected| expected == actual)
+    }) {
+        return None;
+    }
+    let expected_workspaces = expected_account_ids.join(", ");
+    Some(LoginRestrictionViolation::Workspace(
+        match chatgpt_account_id {
+            Some(actual) => format!(
+                "Login is restricted to workspace(s) {expected_workspaces}, but current credentials belong to {actual}."
             ),
-        };
-
-        if let Some(message) = method_violation {
-            if auth_uses_api_key_from_env(&auth) {
-                return Err(std::io::Error::other(message));
-            }
-            return logout_and_continue(
-                &config.codex_home,
-                message,
-                config.auth_credentials_store_mode,
-                config.keyring_backend_kind,
-            );
-        }
-    }
-
-    if let Some(expected_account_ids) = config.forced_chatgpt_workspace_id.as_deref() {
-        let chatgpt_account_id = match &auth {
-            CodexAuth::ApiKey(_) | CodexAuth::Headers(_) | CodexAuth::BedrockApiKey(_) => {
-                return Ok(());
-            }
-            CodexAuth::AgentIdentity(_) | CodexAuth::PersonalAccessToken(_) => {
-                auth.get_account_id()
-            }
-            CodexAuth::Chatgpt(_) | CodexAuth::ChatgptAuthTokens(_) => {
-                let token_data = match auth.get_token_data() {
-                    Ok(data) => data,
-                    Err(err) => {
-                        return logout_with_message(
-                            &config.codex_home,
-                            format!(
-                                "Failed to load ChatGPT credentials while enforcing workspace restrictions: {err}. Logging out."
-                            ),
-                            config.auth_credentials_store_mode,
-                            config.keyring_backend_kind,
-                        );
-                    }
-                };
-                token_data.id_token.chatgpt_account_id
-            }
-        };
-
-        // workspace is the external identifier for account id.
-        let chatgpt_account_id = chatgpt_account_id.as_deref();
-        if !chatgpt_account_id.is_some_and(|actual| {
-            expected_account_ids
-                .iter()
-                .any(|expected| expected == actual)
-        }) {
-            let expected_workspaces = expected_account_ids.join(", ");
-            let message = match chatgpt_account_id {
-                Some(actual) => format!(
-                    "Login is restricted to workspace(s) {expected_workspaces}, but current credentials belong to {actual}. Logging out."
-                ),
-                None => format!(
-                    "Login is restricted to workspace(s) {expected_workspaces}, but current credentials lack a workspace identifier. Logging out."
-                ),
-            };
-            return logout_with_message(
-                &config.codex_home,
-                message,
-                config.auth_credentials_store_mode,
-                config.keyring_backend_kind,
-            );
-        }
-    }
-
-    Ok(())
+            None => format!(
+                "Login is restricted to workspace(s) {expected_workspaces}, but current credentials lack a workspace identifier."
+            ),
+        },
+    ))
 }
 
 fn logout_with_message(
@@ -2502,12 +2558,18 @@ pub struct AuthManager {
     /// refreshes and logs out only that account's vault store, never the
     /// default login, the environment or the ephemeral store.
     named_account: Option<NamedChatgptAccount>,
-    /// The login method the configuration requires; a named account's
-    /// sign-in of the other kind is refused.
+    /// The login method the configuration requires (`forced_login_method` as
+    /// configured, not the API-key-only onboarding default a third-party
+    /// session provider implies); a named account's sign-in of the other
+    /// kind is refused.
     forced_login_method: Option<ForcedLoginMethod>,
     /// For a named-account manager, the manager of the default login it was
     /// created from (providers without a named account go back to it).
     base_manager: Option<Arc<AuthManager>>,
+    /// PF-84-S06 (#570): the session runs on a named sign-in account, so the
+    /// default login was not checked (and logged out) at startup; one the
+    /// login restrictions rule out is treated as absent instead.
+    hide_restricted_default_login: bool,
 }
 
 #[derive(Debug)]
@@ -2559,6 +2621,21 @@ pub trait AuthManagerConfig {
     /// ChatGPT login stops `OPENAI_API_KEY` from being used as a fallback.
     fn forced_login_method(&self) -> Option<ForcedLoginMethod> {
         None
+    }
+
+    /// The login method the configuration itself requires (`forced_login_method`
+    /// as configured). Unlike [`AuthManagerConfig::forced_login_method`] it
+    /// omits the API-key-only default a third-party session provider implies
+    /// for onboarding, which must not refuse a named OpenAI account (#571).
+    fn configured_forced_login_method(&self) -> Option<ForcedLoginMethod> {
+        self.forced_login_method()
+    }
+
+    /// PF-84-S06 (#570): whether the session runs on a named OpenAI sign-in
+    /// account. Its startup then leaves the default login alone, so the
+    /// default login's manager must not use one the restrictions rule out.
+    fn runs_on_named_sign_in_account(&self) -> bool {
+        false
     }
 }
 
@@ -2671,6 +2748,7 @@ impl AuthManager {
             named_account: None,
             forced_login_method: None,
             base_manager: None,
+            hide_restricted_default_login: false,
             auth_route_config,
         }
     }
@@ -2702,6 +2780,7 @@ impl AuthManager {
             named_account: None,
             forced_login_method: None,
             base_manager: None,
+            hide_restricted_default_login: false,
             auth_route_config: crate::test_support::transport_default_auth_route_config(),
         })
     }
@@ -2732,6 +2811,7 @@ impl AuthManager {
             named_account: None,
             forced_login_method: None,
             base_manager: None,
+            hide_restricted_default_login: false,
             auth_route_config: crate::test_support::transport_default_auth_route_config(),
         })
     }
@@ -2770,6 +2850,7 @@ impl AuthManager {
             named_account: None,
             forced_login_method: None,
             base_manager: None,
+            hide_restricted_default_login: false,
             auth_route_config: crate::test_support::transport_default_auth_route_config(),
         })
     }
@@ -2819,6 +2900,7 @@ impl AuthManager {
             named_account: None,
             forced_login_method: None,
             base_manager: None,
+            hide_restricted_default_login: false,
             // External bearer auth refreshes by running the provider's command and never makes
             // auth-owned HTTP requests, so this route is intentionally inert.
             auth_route_config: AuthRouteConfig::from_http_client_factory(HttpClientFactory::new(
@@ -3045,7 +3127,7 @@ impl AuthManager {
         }
 
         let forced_chatgpt_workspace_id = self.forced_chatgpt_workspace_id();
-        load_auth_with_openai_api_key_env(
+        let auth = load_auth_with_openai_api_key_env(
             &self.codex_home,
             self.enable_codex_api_key_env,
             self.openai_api_key_env,
@@ -3058,7 +3140,32 @@ impl AuthManager {
         )
         .await
         .ok()
-        .flatten()
+        .flatten();
+        self.without_restricted_default_login(auth)
+    }
+
+    /// PF-84-S06 (#570): drops a default login the login restrictions rule
+    /// out when this process left it in place for a named-account session.
+    fn without_restricted_default_login(&self, auth: Option<CodexAuth>) -> Option<CodexAuth> {
+        let auth = auth?;
+        if !self.hide_restricted_default_login || self.named_account.is_some() {
+            return Some(auth);
+        }
+        let forced_workspace = self.forced_chatgpt_workspace_id();
+        match login_restriction_violation(
+            &auth,
+            self.forced_login_method,
+            forced_workspace.as_deref(),
+        ) {
+            Some(violation) => {
+                tracing::warn!(
+                    "the default login is not used in this session: {}",
+                    violation.reason()
+                );
+                None
+            }
+            None => Some(auth),
+        }
     }
 
     fn set_cached_auth(&self, new_auth: Option<CodexAuth>) -> bool {
@@ -3170,7 +3277,13 @@ impl AuthManager {
             config.auth_route_config(),
         )
         .await;
-        manager.forced_login_method = config.forced_login_method();
+        manager.forced_login_method = config.configured_forced_login_method();
+        manager.hide_restricted_default_login = config.runs_on_named_sign_in_account();
+        if manager.hide_restricted_default_login
+            && let Ok(mut cached) = manager.inner.write()
+        {
+            cached.auth = manager.without_restricted_default_login(cached.auth.take());
+        }
         Arc::new(manager)
     }
 

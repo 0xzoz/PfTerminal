@@ -204,15 +204,42 @@ pub fn subagent_account_error(config: &super::Config) -> Option<String> {
 
 /// PF-84-S06: a named OpenAI sign-in of the kind or workspace the
 /// configuration's login restrictions rule out is refused before the session
-/// starts (its manager also refuses to load it).
+/// starts (its manager also refuses to load it). Only the configured
+/// `forced_login_method` counts, not the API-key-only onboarding default a
+/// third-party session provider implies (#571).
 fn sign_in_restriction_error(config: &super::Config) -> Option<String> {
     let account = codex_model_provider::named_sign_in_account(&config.model_provider)?;
     codex_login::named_account_restriction_error(
         config.codex_home.as_path(),
         &account,
-        config.forced_login_method,
+        config.configured_forced_login_method,
         config.forced_chatgpt_workspace_id.as_deref(),
     )
+}
+
+/// PF-84-S06 (#570): a thread on the default OpenAI login is refused while
+/// that login breaks the configured login restrictions, leaving it unchanged.
+/// Other sessions log such a login out at startup, so only a session started
+/// on a named sign-in account (which leaves the default login alone) can
+/// reach this: by switching to, or spawning an agent on, the default account.
+pub async fn default_login_restriction_error(config: &super::Config) -> Option<String> {
+    let provider = &config.model_provider;
+    if !config
+        .features
+        .enabled(codex_features::Feature::NamedAccounts)
+        || !provider.requires_openai_auth
+        || provider.auth.is_some()
+        || provider.aws.is_some()
+        || provider.account.is_some()
+    {
+        return None;
+    }
+    codex_login::default_login_restriction_error(&config.default_login_restrictions())
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "could not check the default login against the login restrictions");
+            None
+        })
 }
 
 /// Splits `[<provider>:]<name>`; the provider defaults to the session's.

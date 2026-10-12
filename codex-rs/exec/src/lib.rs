@@ -75,7 +75,6 @@ use codex_core::path_utils;
 use codex_core::windows_sandbox::WindowsSandboxLevelExt;
 use codex_feedback::CodexFeedback;
 use codex_git_utils::get_git_repo_root;
-use codex_login::AuthConfig;
 use codex_login::default_client::set_default_client_residency_requirement;
 use codex_login::default_client::set_default_originator;
 use codex_login::enforce_login_restrictions;
@@ -576,17 +575,11 @@ pub async fn run_main_enforced(
 
     set_default_client_residency_requirement(config.enforce_residency.value());
 
-    let auth_route_config = config.auth_route_config();
-    if let Err(err) = enforce_login_restrictions(&AuthConfig {
-        codex_home: config.codex_home.to_path_buf(),
-        auth_credentials_store_mode: config.cli_auth_credentials_store_mode,
-        keyring_backend_kind: config.auth_keyring_backend_kind(),
-        forced_login_method: config.configured_forced_login_method,
-        forced_chatgpt_workspace_id: config.forced_chatgpt_workspace_id.clone(),
-        chatgpt_base_url: Some(config.chatgpt_base_url.clone()),
-        auth_route_config,
-    })
-    .await
+    // PF-84-S06 (#570): a session on a named sign-in account checks the
+    // restrictions against that account at thread start and never reads or
+    // logs out the default login.
+    if !config.runs_on_named_sign_in_account()
+        && let Err(err) = enforce_login_restrictions(&config.default_login_restrictions()).await
     {
         eprintln!("{err}");
         std::process::exit(1);

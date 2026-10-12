@@ -127,7 +127,7 @@ corbanu exec --account work "..."
 ```
 
 In `/providers`, _Add another account_ on OpenAI offers a device-code ChatGPT
-sign-in or a masked OpenAI API key. Rows show only the kind, an email hint
+sign-in or a masked OpenAI API key, whatever provider the session runs on. Rows show only the kind, an email hint
 (`w…@example.com`), the plan and a fingerprint.
 
 - The default login stays where it is (`auth.json` or the `Codex Auth`
@@ -144,6 +144,14 @@ sign-in or a masked OpenAI API key. Rows show only the kind, an email hint
   login.
 - `forced_login_method` and `forced_chatgpt_workspace_id` apply to named
   accounts too: a sign-in of the other kind or another workspace is refused.
+  A session on a named account checks them against that account only and
+  leaves the default login alone even when they rule it out; such a default
+  login is then not used in that session, and switching to the default
+  account (or spawning an agent on it) is refused with the reason. Only a
+  configured `forced_login_method` counts: a session on another provider (such
+  as Z.AI) can still sign in, select and use a named ChatGPT account.
+- A named account with no usable sign-in is refused with the reason and its
+  recovery; a request is never sent without its credentials.
 - Signing the same ChatGPT user in under two accounts (or as `default` and a
   named account) is allowed with a warning: they share that user's limits,
   and signing out of one can end the other's session.

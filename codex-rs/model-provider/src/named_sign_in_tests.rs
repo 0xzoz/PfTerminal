@@ -55,3 +55,28 @@ async fn named_and_default_openai_providers_never_mix_sign_ins() {
     );
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// #571: a provider on a named sign-in account that has no usable sign-in
+/// refuses the request with the reason instead of sending it without
+/// credentials.
+#[tokio::test]
+async fn named_openai_account_without_a_sign_in_is_refused_not_sent_unauthenticated() {
+    let home = std::env::temp_dir().join(format!("pf84-s06-unsigned-{}", std::process::id()));
+    std::fs::create_dir_all(&home).expect("home");
+    let base = AuthManager::from_auth_for_testing_with_home(
+        CodexAuth::from_api_key("sk-default-canary"),
+        home.clone(),
+    );
+    let provider = create_model_provider(openai(Some("missing")), Some(base));
+    let Err(error) = provider.api_auth().await else {
+        panic!("a named account without a sign-in must not authorize a request");
+    };
+    let message = error.to_string();
+    assert!(
+        message.contains("account `missing` has no sign-in")
+            && message.contains("corbanu login --account missing"),
+        "{message}"
+    );
+    assert!(!message.contains("sk-default-canary"), "{message}");
+    let _ = std::fs::remove_dir_all(&home);
+}

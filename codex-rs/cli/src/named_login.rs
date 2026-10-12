@@ -74,14 +74,20 @@ pub async fn run_named_account_login(
     issuer_base_url: Option<String>,
 ) -> ! {
     let (config, account) = config_and_account(cli_config_overrides, name).await;
+    // #573: only the configured restriction counts. The API-key-only default
+    // a third-party session provider implies is about the default login's
+    // onboarding, not a named OpenAI account.
     let api_key_login = matches!(method, NamedLoginMethod::ApiKey(_));
-    match (config.forced_login_method, api_key_login) {
-        (Some(ForcedLoginMethod::Api), false) => {
-            exit_with("ChatGPT login is disabled. Use API key login instead.")
-        }
-        (Some(ForcedLoginMethod::Chatgpt), true) => {
-            exit_with("API key login is disabled. Use ChatGPT login instead.")
-        }
+    match (config.configured_forced_login_method, api_key_login) {
+        (Some(ForcedLoginMethod::Api), false) => exit_with(format!(
+            "ChatGPT sign-in is disabled by `forced_login_method = \"api\"`; sign account \
+             `{name}` in with an OpenAI API key: `corbanu login --account {name} --with-api-key`."
+        )),
+        (Some(ForcedLoginMethod::Chatgpt), true) => exit_with(format!(
+            "API key sign-in is disabled by `forced_login_method = \"chatgpt\"`; sign account \
+             `{name}` in with ChatGPT: `corbanu login --account {name}` (add `--device-auth` \
+             for a device code)."
+        )),
         _ => {}
     }
     let auth_route_config = config.auth_route_config();
