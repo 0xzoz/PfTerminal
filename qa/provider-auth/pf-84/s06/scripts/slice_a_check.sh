@@ -92,13 +92,15 @@ tui() {
   waitfor "(›|>) " || true; sleep 2
 }
 send() { $T send-keys -t a -l "$1"; sleep 0.5; $T send-keys -t a Enter; }
+# Move the list selection (›) to the row matching $1.
+select_row() { for _ in $(seq 1 30); do $T capture-pane -p -t a | grep -qE "› +[0-9]+\. +$1" && return 0; $T send-keys -t a Down; sleep 0.3; done; return 1; }
 tui --account work
 send "/status"; waitfor "account work"; sleep 1; cap tui-1-status
 $T send-keys -t a Escape; sleep 1
 send "Reply with exactly: pong"; waitfor "signed by"; sleep 1; cap tui-2-turn
-# /providers: Bedrock rows (wrap to the bottom, then up to "Amazon Bedrock · default").
+# /providers: the Bedrock rows; add an account on "Amazon Bedrock · default".
 send "/providers"; waitfor "Providers"; sleep 1
-for _ in 1 2 3 4; do $T send-keys -t a Up; sleep 0.3; done; sleep 1; cap tui-3-providers
+select_row "Amazon Bedrock · default"; sleep 1; cap tui-3-providers
 $T send-keys -t a Enter; waitfor "Add another account"; sleep 1; cap tui-4-manage
 $T send-keys -t a Enter; waitfor "Account name"; sleep 0.5
 send "prod"; waitfor "AWS profile name"; sleep 1; cap tui-5-profile-entry

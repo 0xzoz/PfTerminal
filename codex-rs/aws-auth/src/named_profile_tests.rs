@@ -11,14 +11,19 @@ use crate::signing::header_value;
 const SERVICE: &str = "bedrock-mantle";
 
 /// A `default` profile, a `work` profile with a region, a `noregion`
-/// profile and an SSO-style `sso-dev` profile, all with fake keys.
+/// profile and two role profiles whose `credential_source` lies outside the
+/// files, all with fake keys.
 fn files() -> ProfileFiles {
     ProfileFiles::builder()
         .with_contents(
             ProfileFileKind::Config,
             "[default]\nregion = eu-west-1\n\
              [profile work]\nregion = us-west-2\n\
-             [profile noregion]\n",
+             [profile noregion]\n\
+             [profile envsourced]\nregion = us-west-2\nrole_arn = arn:aws:iam::123456789012:role/demo\ncredential_source = Environment\n\
+             [profile imdssourced]\nregion = us-west-2\nrole_arn = arn:aws:iam::123456789012:role/demo\ncredential_source = Ec2InstanceMetadata\n\
+             [profile ecssourced]\nregion = us-west-2\nrole_arn = arn:aws:iam::123456789012:role/demo\ncredential_source = EcsContainer\n\
+             [profile rolechain]\nrole_arn = arn:aws:iam::123456789012:role/demo\nsource_profile = noregion\n",
         )
         .with_contents(
             ProfileFileKind::Credentials,
@@ -115,5 +120,64 @@ async fn profile_without_region_is_refused() {
             .await
             .expect("override"),
         "us-east-1"
+    );
+}
+
+/// A profile's `credential_source` never reaches environment keys or
+/// instance credentials for a named account.
+#[tokio::test]
+async fn credential_sources_outside_the_files_are_refused() {
+    for (profile, source) in [
+        ("envsourced", "Environment"),
+        ("imdssourced", "Ec2InstanceMetadata"),
+        ("ecssourced", "EcsContainer"),
+    ] {
+        let error = load_named_profile(
+            profile,
+            /*region_override*/ None,
+            SERVICE,
+            Some(files()),
+        )
+        .await
+        .expect_err("refused credential source");
+        assert_eq!(
+            error.to_string(),
+            AwsAuthError::RefusedCredentialSource(source.to_string()).to_string()
+        );
+    }
+}
+
+/// A credential helper's own failure text (which may echo anything) is not
+/// put into user-facing messages.
+#[test]
+fn provider_failure_details_are_withheld() {
+    let error = AwsAuthError::Credentials(CredentialsError::provider_error(
+        "Error retrieving credentials from external process: exited with code 1. Stderr: \
+         helper-secret-canary",
+    ));
+    let message = error.detailed_message();
+    assert!(
+        !message.contains("helper-secret-canary")
+            && message.contains("exited with code 1")
+            && message.contains("(helper output withheld)"),
+        "{message}"
+    );
+}
+
+/// A role chain without a region cannot reach STS; that is reported as the
+/// missing region (no request is sent: endpoint resolution fails first).
+#[tokio::test]
+async fn role_chain_without_a_region_reports_the_region() {
+    let error = load_named_profile(
+        "rolechain",
+        /*region_override*/ None,
+        SERVICE,
+        Some(files()),
+    )
+    .await
+    .expect_err("no region for STS");
+    assert_eq!(
+        error.to_string(),
+        AwsAuthError::MissingProfileRegion("rolechain".to_string()).to_string()
     );
 }

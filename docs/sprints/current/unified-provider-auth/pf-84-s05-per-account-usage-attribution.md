@@ -15,6 +15,8 @@ base_commit: "c7e6e07cbc629b8fa366de30cfacefae23b06b69"
 depends_on: "PF-84-S03, PF-60-S04"
 created: 2026-10-08
 updated: 2026-10-11
+merged_behind_flag: "named_accounts"
+gate_evidence: "qa/provider-auth/pf-84/s05-gate.md"
 ---
 
 # PF-84-S05 — Per-account usage and rate-limit attribution
@@ -37,9 +39,8 @@ updated: 2026-10-11
 
 Paths are under `codex-rs/`, at `63ea3d0cbd`.
 
-- Accounting records: `core/src/accounting.rs:48-68, 225-269, 346-463` (keyed
-  by `provider_id` today); schema in `state/accounting_migrations/`
-  (`state/src/migrations.rs:7-10`).
+- Accounting records: `core/src/accounting.rs:48-68, 225-269, 346-463` (keyed by `provider_id` today);
+  schema in `state/accounting_migrations/` (`state/src/migrations.rs:7-10`).
 - Rate-limit leases: `state/src/runtime/provider_requests.rs:8-12, 92, 127`. These
   are already keyed by `key_fingerprint`; make that the account fingerprint for
   every auth kind, including subscription logins.
@@ -65,12 +66,13 @@ Paths are under `codex-rs/`, at `63ea3d0cbd`.
   provider, account and model, in this conversation (coordinator and spawned agents) and in
   other conversations (`corbanu exec` workers) of the same home, reconciling exactly.
 - [x] Merged behind `named_accounts` with gate evidence: [gate](../../../../qa/provider-auth/pf-84/s05-gate.md).
+- [x] Follow-up (Travis, 2026-10-11, option b): release `/status` shows token totals per account,
+  no cost records ([#528](https://github.com/CorbanuCore/CorbanuTerminal/pull/528), [gate](../../../../qa/provider-auth/pf-84/s05-status-tokens-gate.md)).
 
 ## Remaining
 
 - [ ] Code-blind functional acceptance (independent; not the implementer's), then Travis's sign-off.
-- [ ] Known limits (gate): usage views exist only in developer-accounting builds; a named
-  account's throttle row is keyed by name, so a replaced key keeps an active cooldown.
+- [ ] Known limit: a named account's throttle row is keyed by name; a replaced key keeps its cooldown.
 
 ## Verification
 
@@ -86,8 +88,7 @@ Paths are under `codex-rs/`, at `63ea3d0cbd`.
 
 ## Security notes
 
-- Accounting stores names and fingerprints only. The fingerprint derivation is
-  salted per home so it cannot be correlated across machines.
+- Accounting stores names and fingerprints only, salted per home so they cannot be correlated across machines.
 - No credential value reaches the state DB, logs or exports (canary scan).
 
 ## Exit evidence

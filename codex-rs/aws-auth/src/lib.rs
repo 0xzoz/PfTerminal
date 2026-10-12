@@ -48,6 +48,10 @@ pub enum AwsAuthError {
         "AWS profile `{0}` sets no region, or is not defined in the AWS config files; set `region` in that profile or `aws.region` for the provider"
     )]
     MissingProfileRegion(String),
+    #[error(
+        "`credential_source = {0}` is not allowed for a named account: it would use environment, instance or container credentials; give the profile its own keys, a `source_profile`, SSO or `credential_process`"
+    )]
+    RefusedCredentialSource(String),
     #[error("failed to load AWS credentials: {0}")]
     Credentials(#[from] aws_credential_types::provider::error::CredentialsError),
     #[error("request URL is not a valid URI: {0}")]
@@ -96,8 +100,8 @@ impl AwsAuthContext {
 
     /// PF-84-S06: credentials and region from `profile` only, never from
     /// environment keys, `AWS_PROFILE` or another profile. Credentials are
-    /// resolved once here, so a missing or broken profile fails before any
-    /// request.
+    /// resolved once here (and again for each signature), so a missing or
+    /// broken profile fails before any request.
     pub async fn load_named_profile(
         profile: &str,
         region_override: Option<String>,
@@ -139,13 +143,20 @@ impl AwsAuthContext {
 
 impl AwsAuthError {
     /// This error and its sources, for messages that must say why (the
-    /// SDK's top-level credential errors are terse). Never holds secrets:
-    /// the profile parser reports locations, not file contents.
+    /// SDK's top-level credential errors are terse). A `credential_process`
+    /// helper's stderr, which the SDK copies into its error after `Stderr:`,
+    /// is cut off: it may hold anything. Other sources report names, file
+    /// locations and service errors, not file contents.
     pub fn detailed_message(&self) -> String {
+        const HELPER_OUTPUT: &str = "Stderr:";
         let mut message = self.to_string();
         let mut source = std::error::Error::source(self);
         while let Some(error) = source {
-            let text = error.to_string();
+            let mut text = error.to_string();
+            if let Some(index) = text.find(HELPER_OUTPUT) {
+                text.truncate(index);
+                text.push_str("(helper output withheld)");
+            }
             if !message.contains(&text) {
                 message.push_str(": ");
                 message.push_str(&text);
@@ -167,6 +178,7 @@ impl AwsAuthError {
             | AwsAuthError::MissingCredentialsProvider
             | AwsAuthError::MissingRegion
             | AwsAuthError::MissingProfileRegion(_)
+            | AwsAuthError::RefusedCredentialSource(_)
             | AwsAuthError::InvalidUri(_)
             | AwsAuthError::BuildHttpRequest(_)
             | AwsAuthError::InvalidHeaderValue(_)

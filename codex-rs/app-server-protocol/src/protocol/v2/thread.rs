@@ -1728,6 +1728,32 @@ pub struct ThreadTokenUsageUpdatedNotification {
     pub thread_id: String,
     pub turn_id: String,
     pub token_usage: ThreadTokenUsage,
+    /// PF-84: this thread's provider-reported usage per (provider, named
+    /// account), `default` included. Sent only while named accounts are on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub account_usage: Option<Vec<ThreadAccountTokenUsage>>,
+}
+
+/// PF-84: provider-reported token usage of one named provider account: its
+/// provider id and account name, never credential material.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadAccountTokenUsage {
+    pub provider_id: String,
+    pub account: String,
+    pub usage: TokenUsageBreakdown,
+}
+
+impl From<codex_protocol::protocol::AccountTokenUsage> for ThreadAccountTokenUsage {
+    fn from(value: codex_protocol::protocol::AccountTokenUsage) -> Self {
+        Self {
+            provider_id: value.provider_id,
+            account: value.account,
+            usage: value.usage.into(),
+        }
+    }
 }
 
 /// Internal-only notification containing the exact usage from one upstream

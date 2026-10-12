@@ -54,7 +54,123 @@ async fn accounting_chat_custom_provider_collects_with_real_identity() -> anyhow
     // bytes it had before named accounts, and the ledger its format.
     assert_eq!(records[0].account, None);
     assert!(!ledger_has_format_4(&db).await?);
+    // PF-84: with named accounts off, no usage is kept per account.
+    assert_eq!(test.codex.account_token_usage().await, None);
     posts(&server, /*expected*/ 1).await;
+    stop(&test).await;
+    Ok(())
+}
+
+/// PF-84: the per-account token summary `/status` shows (release builds, no
+/// cost records) agrees exactly with the accounting ledger `/cost` reads for
+/// the same session.
+#[tokio::test]
+async fn accounting_chat_named_account_summary_agrees_with_the_ledger() -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    let endpoint = format!("{}/v1", server.uri());
+    mount(&server, success(usage())).await;
+    let mode = AccountingMode::Provider {
+        scope: uuid::Uuid::new_v4(),
+        provider_id: "my-llm".into(),
+        wire_api: codex_model_provider_info::WireApi::Chat,
+        approved_endpoint: endpoint.clone(),
+        approved_query: None,
+        pricing: PriceAuthority::Unavailable,
+        basis_source: Default::default(),
+        account: None,
+    };
+    let test = builder(endpoint, mode)
+        .with_config(|config| {
+            let name = codex_vault::ProviderAccountName::parse("work").expect("account name");
+            codex_vault::Vault::new(config.codex_home.to_path_buf())
+                .write_provider_account(
+                    "my-llm",
+                    &name,
+                    codex_vault::ProviderAccountKind::ApiKey,
+                    "synthetic-pf84-work-key",
+                )
+                .expect("enroll the work account");
+            config.model_provider_id = "my-llm".into();
+            config.model_provider.name = "My LLM".into();
+            config.model_provider.requires_openai_auth = false;
+            config.model_provider.env_key = Some("PF84_STATUS_TOKENS_UNSET_KEY".into());
+            config.model_provider.account = Some(codex_model_provider_info::NamedProviderAccount {
+                provider_id: "my-llm".into(),
+                name: "work".into(),
+            });
+            config
+                .features
+                .enable(codex_features::Feature::NamedAccounts)
+                .expect("enable named accounts");
+        })
+        .with_auth_in_home()
+        .build_with_auto_env(&server)
+        .await?;
+    test.submit_turn("first turn on work").await?;
+    test.submit_turn("second turn on work").await?;
+    let db = test.codex.state_db().unwrap();
+    let records = attempts(&db).await?;
+    assert_eq!(records.len(), 2);
+    assert!(
+        records
+            .iter()
+            .all(|attempt| attempt.account_name() == "work")
+    );
+
+    let summary = test
+        .codex
+        .account_token_usage()
+        .await
+        .expect("usage per account");
+    assert_eq!(summary.len(), 1);
+    assert_eq!(
+        (summary[0].provider_id.as_str(), summary[0].account.as_str()),
+        ("my-llm", "work")
+    );
+    let now = chrono::Utc::now().timestamp_millis();
+    let InspectionDay::Ready(view) = AccountingStore::inspect_day(
+        &db,
+        test.session_configured.thread_id,
+        now / 86_400_000,
+        now,
+    )
+    .await?
+    else {
+        anyhow::bail!("expected the recorded day");
+    };
+    let quotes: Vec<&ObservationQuote> = view
+        .requests
+        .values()
+        .flatten()
+        .filter(|quote| quote.attempt.account_name() == "work")
+        .collect();
+    let ledger = DayTotals::from_quotes(quotes.iter().copied())?;
+    // Input, cached (read), output, reasoning and total, as `/cost` sums them.
+    let [input, _, read, _, output, reasoning, total] = ledger.measured;
+    assert!(
+        [&input, &read, &output, &reasoning, &total]
+            .iter()
+            .all(|metric| metric.unknown == 0)
+    );
+    let usage = &summary[0].usage;
+    assert_eq!(
+        [
+            usage.input_tokens,
+            usage.cached_input_tokens,
+            usage.output_tokens,
+            usage.reasoning_output_tokens,
+            usage.total_tokens,
+        ],
+        [
+            input.known,
+            read.known,
+            output.known,
+            reasoning.known,
+            total.known
+        ]
+    );
+    assert_eq!(usage.total_tokens, 280);
+    posts(&server, /*expected*/ 2).await;
     stop(&test).await;
     Ok(())
 }

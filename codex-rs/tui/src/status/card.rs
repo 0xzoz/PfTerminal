@@ -32,6 +32,7 @@ use std::path::PathBuf;
 use url::Url;
 
 use super::account::StatusAccountDisplay;
+use super::account_usage::StatusAccountUsage;
 use super::format::FieldFormatter;
 use super::format::push_label;
 use super::format::truncate_line_to_width;
@@ -121,6 +122,9 @@ struct StatusHistoryCell {
     session_id: Option<String>,
     forked_from: Option<String>,
     token_usage: StatusTokenUsageData,
+    /// PF-84: the active provider's per-account token summary, only while
+    /// named accounts are on.
+    account_usage: Option<StatusAccountUsage>,
     rate_limit_state: Arc<RwLock<StatusRateLimitState>>,
 }
 
@@ -196,6 +200,7 @@ pub(crate) fn new_status_output_with_rate_limits(
         reasoning_effort_override,
         "<none>".to_string(),
         refreshing_rate_limits,
+        /*account_usage*/ None,
     )
     .0
 }
@@ -219,6 +224,7 @@ pub(crate) fn new_status_output_with_rate_limits_handle(
     reasoning_effort_override: Option<Option<ReasoningEffort>>,
     agents_summary: String,
     refreshing_rate_limits: bool,
+    account_usage: Option<StatusAccountUsage>,
 ) -> (CompositeHistoryCell, StatusHistoryHandle) {
     let command = PlainHistoryCell::new(vec!["/status".magenta().into()]);
     let (card, handle) = StatusHistoryCell::new(
@@ -239,6 +245,7 @@ pub(crate) fn new_status_output_with_rate_limits_handle(
         reasoning_effort_override,
         agents_summary,
         refreshing_rate_limits,
+        account_usage,
     );
 
     (
@@ -267,6 +274,7 @@ impl StatusHistoryCell {
         reasoning_effort_override: Option<Option<ReasoningEffort>>,
         agents_summary: String,
         refreshing_rate_limits: bool,
+        account_usage: Option<StatusAccountUsage>,
     ) -> (Self, StatusHistoryHandle) {
         let approval_policy = AskForApproval::from(config.permissions.approval_policy.value());
         let permission_profile = config.permissions.effective_permission_profile();
@@ -372,6 +380,7 @@ impl StatusHistoryCell {
                 session_id,
                 forked_from,
                 token_usage,
+                account_usage,
                 agents_summary,
                 rate_limit_state: rate_limit_state.clone(),
             },
@@ -809,6 +818,15 @@ impl HistoryCell for StatusHistoryCell {
         if self.token_usage.context_window.is_some() {
             push_label(&mut labels, &mut seen, "Context window");
         }
+        let account_usage_lines = self
+            .account_usage
+            .as_ref()
+            .filter(|_| !matches!(self.account, Some(StatusAccountDisplay::ChatGpt { .. })))
+            .map(StatusAccountUsage::lines)
+            .unwrap_or_default();
+        if !account_usage_lines.is_empty() {
+            push_label(&mut labels, &mut seen, "Account usage");
+        }
 
         self.collect_rate_limit_labels(&rate_limit_state, &mut seen, &mut labels);
 
@@ -913,6 +931,20 @@ impl HistoryCell for StatusHistoryCell {
 
         if let Some(spans) = self.context_window_spans() {
             lines.push(formatter.line("Context window", spans));
+        }
+        // One account is one line, wrapped to the card; several are a table.
+        let account_usage_lines: Vec<Line<'static>> = if account_usage_lines.len() == 1 {
+            word_wrap_lines(
+                account_usage_lines.into_iter().map(Line::from),
+                RtOptions::new(value_width.max(1)),
+            )
+        } else {
+            account_usage_lines.into_iter().map(Line::from).collect()
+        };
+        let mut account_usage_lines = account_usage_lines.into_iter();
+        if let Some(first) = account_usage_lines.next() {
+            lines.push(formatter.line("Account usage", first.spans));
+            lines.extend(account_usage_lines.map(|line| formatter.continuation(line.spans)));
         }
 
         lines.extend(self.rate_limit_lines(&rate_limit_state, available_inner_width, &formatter));

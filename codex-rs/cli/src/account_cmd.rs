@@ -139,7 +139,9 @@ pub async fn run_account_command(command: AccountCommand) -> anyhow::Result<()> 
                             &account.provider_id,
                             &account.name,
                             ProviderAccountKind::AwsProfile,
-                        )?
+                        )
+                        .ok()
+                        .flatten()
                         .map(|profile| format!("\tprofile {}", profile.as_str()))
                         .unwrap_or_default()
                 } else if account.kinds.contains(&ProviderAccountKind::ChatgptAuth) {
@@ -197,6 +199,20 @@ pub async fn run_account_command(command: AccountCommand) -> anyhow::Result<()> 
             let to = ProviderAccountName::parse(&to)?;
             vault.rename_provider_account(&provider, &from, &to)?;
             writeln!(stdout, "Renamed {provider} account `{from}` to `{to}`.")?;
+            // Unlike /providers, this does not edit `[provider_accounts]`.
+            let selected = config
+                .model_providers
+                .get(&provider)
+                .and_then(|info| info.account.as_ref())
+                .is_some_and(|account| account.name == from.as_str());
+            if selected {
+                writeln!(
+                    stdout,
+                    "Note: `[provider_accounts]` still selects `{from}` for {provider}; new \
+                     sessions refuse it until you change it to `{to}`. A running session on \
+                     `{from}` loses it at its next request."
+                )?;
+            }
         }
         AccountSubcommand::Remove { provider, name } => {
             ensure_changes_allowed(&persisted_config, &config)?;

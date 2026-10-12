@@ -48,3 +48,58 @@ A resumed thread runs on its recorded account; with the feature off, the
 resume is refused and names the recorded account (`--account
 <provider>:default` resumes on the default credentials). A rejected key names the account and
 its `corbanu account add` recovery; the default credential is unchanged.
+
+## Usage per account in `/status`
+
+With the feature on, `/status` names the session's account on the provider
+line and adds an **Account usage** line: the tokens this session used on each
+account of the current provider, as the provider reported them. It covers the
+whole session: spawned agents (each toward its own account), side
+conversations, automatic and `/review` reviews, and memory extraction. Only
+token counts are shown: no prices and no cost records.
+
+- One account is one line, such as
+  `work · 35,100 input · 12,000 cached input · 6,247 output (300 reasoning)`.
+  Before the first reply it reads `no usage yet`.
+- Several accounts are a short table with the session's account marked
+  `(active)`.
+- **Input** is the uncached part, as on the **Token usage** line; cached input
+  and reasoning appear only when the provider reports them, and reasoning is
+  part of the output. Reviews are counted here but not on **Token usage**, so
+  the rows can add up to more.
+- Accounts appear by name only. Other providers' accounts are not listed; switch
+  to that provider to see them.
+- A new session starts from zero. A resumed conversation shows its earlier
+  counts again, its spawned agents' included once the TUI reattaches them.
+  Memory extraction outside a turn shows with the next count.
+
+Developer-accounting builds also have `/cost`, which shows the same requests by
+provider, account and model for one UTC day. For a session that stays within
+one day, its token counts per account match these, except for background
+memory consolidation, which `/cost` records under the conversation and
+`/status` does not show.
+
+## Amazon Bedrock: AWS profile accounts
+
+A Bedrock account stores only the name of an AWS profile (not secret, shown in
+`corbanu account list` and `/providers`; up to 64 letters, digits and `-_.+@`,
+starting with a letter or digit):
+
+```
+corbanu account add amazon-bedrock work --kind aws-profile --value corp-dev
+corbanu account rename amazon-bedrock work prod
+corbanu exec --account prod "..."
+```
+
+Its requests are signed with that profile's credentials from `~/.aws/config` and
+`~/.aws/credentials` (or the files `AWS_CONFIG_FILE` and
+`AWS_SHARED_CREDENTIALS_FILE` name), and nothing else: not the managed Bedrock
+key, `AWS_BEARER_TOKEN_BEDROCK`, `AWS_PROFILE`, `AWS_ACCESS_KEY_ID` or
+instance or container credentials (a profile whose `credential_source` asks for
+them is refused). The region is `model_providers.amazon-bedrock.aws.region`
+if set, else the profile's `region`. SSO profiles work once you have run
+`aws sso login --profile <p>` yourself. A profile that is missing, has no
+region or whose credentials fail is refused with that reason before any
+request; Corbanu never falls back to another profile. The `default` account
+keeps today's order (managed key, then `AWS_BEARER_TOKEN_BEDROCK`, then the
+AWS SDK chain).

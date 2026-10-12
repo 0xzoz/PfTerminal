@@ -85,10 +85,19 @@ async fn named_account_ignores_the_managed_key_and_uses_its_profile_region() {
     );
 }
 
-#[tokio::test]
-async fn missing_profile_is_refused_with_recovery_text_and_no_fallback() {
+/// A profile that cannot be used names the account, the profile and the
+/// recovery, and says nothing falls back. (Loading itself is tested with
+/// injected AWS files in `codex-aws-auth`; this test reads no AWS files.)
+#[test]
+fn unusable_profile_errors_name_the_recovery() {
     let provider = named_provider(Some("us-west-2"), missing_profile);
-    let message = error_text(provider.api_auth().await);
+    let account = provider.named_account.as_ref().expect("named account");
+    let message = account
+        .profile_error(
+            MISSING_PROFILE,
+            &codex_aws_auth::AwsAuthError::MissingProfileRegion(MISSING_PROFILE.to_string()),
+        )
+        .to_string();
     assert!(
         message.contains(&format!(
             "account `work` of provider `amazon-bedrock` uses AWS profile `{MISSING_PROFILE}`, \
@@ -129,6 +138,6 @@ fn default_account_keeps_the_managed_key() {
     );
     assert!(Arc::ptr_eq(
         &provider.auth_manager().expect("managed manager"),
-        &provider.auth_manager.clone().expect("manager"),
+        provider.auth_manager.as_ref().expect("manager"),
     ));
 }

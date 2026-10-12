@@ -2668,24 +2668,28 @@ async fn record_initial_history_seeds_token_info_from_rollout() {
         TokenCountEvent {
             info: Some(info1),
             rate_limits: None,
+            account_usage: None,
         },
     )));
     rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
         TokenCountEvent {
             info: None,
             rate_limits: None,
+            account_usage: None,
         },
     )));
     rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
         TokenCountEvent {
             info: Some(info2.clone()),
             rate_limits: None,
+            account_usage: None,
         },
     )));
     rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
         TokenCountEvent {
             info: None,
             rate_limits: None,
+            account_usage: None,
         },
     )));
 
@@ -13986,6 +13990,209 @@ async fn pf_30_s02_token_budget_mcp_hint_is_mcp_data_with_the_flag() {
     );
 }
 
+fn pf84_usage(input: i64, output: i64) -> TokenUsage {
+    TokenUsage {
+        input_tokens: input,
+        cached_input_tokens: 0,
+        cache_write_input_tokens: 0,
+        output_tokens: output,
+        reasoning_output_tokens: 0,
+        total_tokens: input + output,
+    }
+}
+
+/// PF-84: with named accounts on, each request's provider-reported usage is
+/// added to the account that served it and sent with the token count; with
+/// them off nothing is kept and the event keeps its bytes.
+#[tokio::test]
+async fn token_usage_is_attributed_per_account_only_with_named_accounts() {
+    for named_accounts in [false, true] {
+        let (session, turn_context, rx) = make_session_and_context_with_auth_and_config_and_rx(
+            CodexAuth::from_api_key("Test API Key"),
+            Vec::new(),
+            |config| {
+                if named_accounts {
+                    config
+                        .features
+                        .enable(Feature::NamedAccounts)
+                        .expect("enable named accounts");
+                }
+            },
+        )
+        .await;
+        session
+            .update_token_usage_info(&turn_context, Some(&pf84_usage(10, 2)))
+            .await
+            .expect("first usage");
+        session
+            .update_token_usage_info(&turn_context, Some(&pf84_usage(5, 1)))
+            .await
+            .expect("second usage");
+
+        let expected = named_accounts.then(|| {
+            vec![codex_protocol::protocol::AccountTokenUsage {
+                provider_id: turn_context.config.model_provider_id.clone(),
+                account: "default".to_string(),
+                usage: pf84_usage(15, 3),
+            }]
+        });
+        assert_eq!(session.account_token_usage().await, expected);
+        let last = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|event| match event.msg {
+                EventMsg::TokenCount(event) => Some(event),
+                _ => None,
+            })
+            .last()
+            .expect("token count event");
+        assert_eq!(last.account_usage, expected);
+    }
+}
+
+pub(crate) async fn pf84_session(named_accounts: bool) -> (Arc<Session>, Arc<TurnContext>) {
+    let (session, turn_context, _rx) = make_session_and_context_with_auth_and_config_and_rx(
+        CodexAuth::from_api_key("Test API Key"),
+        Vec::new(),
+        |config| {
+            if named_accounts {
+                config
+                    .features
+                    .enable(Feature::NamedAccounts)
+                    .expect("enable named accounts");
+            }
+        },
+    )
+    .await;
+    (session, turn_context)
+}
+
+fn pf84_parent_usage() -> Vec<codex_protocol::protocol::AccountTokenUsage> {
+    vec![codex_protocol::protocol::AccountTokenUsage {
+        provider_id: "zai".to_string(),
+        account: "work".to_string(),
+        usage: pf84_usage(100, 10),
+    }]
+}
+
+/// PF-84: a resumed thread keeps its usage per account while named accounts
+/// are on (with them off nothing is restored, so later events keep their
+/// bytes); a fork does not inherit its parent's.
+#[tokio::test]
+async fn resume_restores_account_usage_and_fork_does_not() {
+    let usage = pf84_parent_usage();
+    for (named_accounts, resumed) in [(true, true), (true, false), (false, true)] {
+        let (session, turn_context) = pf84_session(named_accounts).await;
+        let (mut rollout_items, _expected) = sample_rollout(&session, &turn_context).await;
+        rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
+            TokenCountEvent {
+                info: None,
+                rate_limits: None,
+                account_usage: Some(usage.clone()),
+            },
+        )));
+        let history = if resumed {
+            InitialHistory::Resumed(ResumedHistory {
+                conversation_id: ThreadId::default(),
+                history: Arc::new(rollout_items),
+                rollout_path: Some(PathBuf::from("/tmp/resume.jsonl")),
+            })
+        } else {
+            InitialHistory::Forked(rollout_items)
+        };
+        session.record_initial_history(history).await;
+        assert_eq!(
+            session.account_token_usage().await,
+            (named_accounts && resumed).then(|| usage.clone()),
+            "named_accounts={named_accounts} resumed={resumed}"
+        );
+    }
+}
+
+/// PF-84: a fork's rollout marks where its own usage begins, so resuming it
+/// before its first reply does not count the parent's usage again.
+#[tokio::test]
+async fn resuming_a_fork_before_its_first_reply_has_no_account_usage() {
+    let (mut fork, turn_context) = pf84_session(/*named_accounts*/ true).await;
+    let (mut parent_items, _expected) = sample_rollout(&fork, &turn_context).await;
+    parent_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
+        TokenCountEvent {
+            info: None,
+            rate_limits: None,
+            account_usage: Some(pf84_parent_usage()),
+        },
+    )));
+    let rollout_path = attach_thread_persistence(
+        Arc::get_mut(&mut fork).expect("session should not have additional references"),
+    )
+    .await;
+    fork.record_initial_history(InitialHistory::Forked(parent_items))
+        .await;
+    fork.flush_rollout()
+        .await
+        .expect("flush the fork's rollout");
+    let (items, _, _) = RolloutRecorder::load_rollout_items(&rollout_path)
+        .await
+        .expect("read the fork's rollout");
+
+    let (resumed, _) = pf84_session(/*named_accounts*/ true).await;
+    resumed
+        .record_initial_history(InitialHistory::Resumed(ResumedHistory {
+            conversation_id: ThreadId::default(),
+            history: Arc::new(items),
+            rollout_path: Some(rollout_path),
+        }))
+        .await;
+    assert_eq!(resumed.account_token_usage().await, None);
+}
+
+/// PF-84: a delegate's (guardian or `/review`) usage counts toward the parent
+/// conversation's accounts, only while named accounts are on.
+#[tokio::test]
+async fn delegated_usage_counts_toward_the_parent_only_with_named_accounts() {
+    for named_accounts in [false, true] {
+        let (session, _turn_context) = pf84_session(named_accounts).await;
+        for _ in 0..2 {
+            session
+                .record_delegated_account_usage(&pf84_parent_usage())
+                .await;
+        }
+        let expected = named_accounts.then(|| {
+            vec![codex_protocol::protocol::AccountTokenUsage {
+                usage: pf84_usage(200, 20),
+                ..pf84_parent_usage().remove(0)
+            }]
+        });
+        assert_eq!(session.account_token_usage().await, expected);
+    }
+}
+
+#[test]
+fn account_usage_increase_is_per_account_and_skips_unchanged() {
+    use codex_protocol::protocol::AccountTokenUsage;
+    let entry = |account: &str, input: i64| AccountTokenUsage {
+        provider_id: "zai".to_string(),
+        account: account.to_string(),
+        usage: pf84_usage(input, 1),
+    };
+    let previous = vec![entry("work", 10)];
+    let current = vec![entry("work", 10), entry("personal", 5)];
+    assert_eq!(
+        AccountTokenUsage::increase_since(&previous, &current),
+        vec![entry("personal", 5)]
+    );
+    let current = vec![entry("work", 25)];
+    assert_eq!(
+        AccountTokenUsage::increase_since(&previous, &current),
+        vec![AccountTokenUsage {
+            usage: TokenUsage {
+                input_tokens: 15,
+                total_tokens: 15,
+                ..TokenUsage::default()
+            },
+            ..entry("work", 0)
+        }]
+    );
+}
+
 /// Review r2: a grant stored while no rules applied (the level raised later
 /// in the session) never reopens a protected path for later commands or
 /// file tools.
@@ -14052,5 +14259,70 @@ async fn issue_245_a_grant_stored_before_the_rules_applied_drops_protected_paths
     assert_eq!(
         session.granted_session_permissions(&environment_id).await,
         Some(notes_only)
+    );
+}
+
+/// Issue #524: a grant is checked against the session's current folder and
+/// profile too. A protected folder that holds the original folder is skipped
+/// for that folder, so checked against it alone an entry inside the folder
+/// survived after the session moved elsewhere.
+#[tokio::test]
+async fn issue_524_a_grant_is_checked_against_the_current_folder_too() {
+    use codex_protocol::permissions::FileSystemAccessMode;
+    use codex_protocol::permissions::FileSystemPath;
+    use codex_protocol::permissions::FileSystemSandboxEntry;
+    use codex_security_policy::SecurityLevel;
+    let (session, turn) = make_session_and_context().await;
+    let memories = turn.config.codex_home.join("memories");
+    let original = memories.join("project");
+    std::fs::create_dir_all(original.as_path()).unwrap();
+    {
+        let mut state = session.state.lock().await;
+        let mut config = (*state.session_configuration.original_config_do_not_use).clone();
+        config.cwd = original.clone();
+        state.session_configuration.original_config_do_not_use = Arc::new(config);
+    }
+    let environment_id = turn
+        .environments
+        .primary()
+        .expect("a primary environment")
+        .environment_id
+        .clone();
+    let grant = AdditionalPermissionProfile {
+        network: None,
+        file_system: Some(codex_protocol::models::FileSystemPermissions {
+            entries: vec![FileSystemSandboxEntry::new(
+                FileSystemPath::Path {
+                    path: memories.join("notes.md"),
+                },
+                FileSystemAccessMode::Read,
+            )],
+            glob_scan_max_depth: None,
+        }),
+    };
+    session
+        .state
+        .lock()
+        .await
+        .record_granted_permissions(&environment_id, grant);
+    let control = session
+        .services
+        .agent_control
+        .clone()
+        .with_effective_security_policy(
+            SecurityLevel::Moderate,
+            session.thread_id,
+            /*inherits_from_spawn_parent*/ false,
+        )
+        .expect("policy");
+    let client = (*session.services.model_client())
+        .clone()
+        .with_ingress_policy(SecurityLevel::Moderate, control.effective_security_policy())
+        .with_source_envelopes(true);
+    session.services.replace_model_client(client);
+
+    assert_eq!(
+        session.granted_session_permissions(&environment_id).await,
+        None
     );
 }

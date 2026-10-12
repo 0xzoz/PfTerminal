@@ -643,6 +643,14 @@ impl CodexThread {
         self.session.token_usage_info().await
     }
 
+    /// PF-84: this thread's provider-reported usage per named account, `None`
+    /// unless named accounts recorded some.
+    pub async fn account_token_usage(
+        &self,
+    ) -> Option<Vec<codex_protocol::protocol::AccountTokenUsage>> {
+        self.session.account_token_usage().await
+    }
+
     /// Records a user-role session-prefix message without creating a new user turn boundary.
     #[cfg(test)]
     pub(crate) async fn inject_user_message_without_turn(&self, message: String) {
