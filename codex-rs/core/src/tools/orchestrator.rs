@@ -575,9 +575,7 @@ impl ToolOrchestrator {
                 && !tool
                     .sandbox_permissions(req)
                     .requires_escalated_permissions();
-        let unsandboxed_allowed_for_run =
-            unsandboxed_execution_allowed(&file_system_sandbox_policy)
-                && (!keeps_sandbox || post_taint.is_some());
+        let policy_allows_no_sandbox = unsandboxed_execution_allowed(&file_system_sandbox_policy);
 
         // 2) First attempt under the selected sandbox.
         let sandbox_override = if keeps_sandbox {
@@ -702,7 +700,12 @@ impl ToolOrchestrator {
                 }
                 let sandbox_startup_failure =
                     is_sandbox_startup_failure(initial_sandbox, output.as_ref());
-                let unsandboxed_allowed = unsandboxed_allowed_for_run;
+                let unsandboxed_allowed = retry_may_leave_sandbox(
+                    policy_allows_no_sandbox,
+                    keeps_sandbox,
+                    post_taint.is_some(),
+                    network_approval_context.is_some(),
+                );
                 // Under `Never` or `OnRequest`, do not retry without sandbox;
                 // surface a concise sandbox denial that preserves the original
                 // output. Exception: if the platform sandbox itself failed to
@@ -903,6 +906,20 @@ impl ToolOrchestrator {
             }
         }
     }
+}
+
+/// Issue #540: whether the retry after a sandbox denial may run without a
+/// sandbox. A run that keeps its sandbox (`keeps_sandbox`: the protected-path
+/// rules apply and it did not ask to run outside) leaves it only for a
+/// protected action's retry, which a person approves afresh, and never for
+/// a network approval: that person allowed a host, not an unsandboxed run.
+fn retry_may_leave_sandbox(
+    policy_allows: bool,
+    keeps_sandbox: bool,
+    protected_action: bool,
+    network_retry: bool,
+) -> bool {
+    policy_allows && (!keeps_sandbox || (protected_action && !network_retry))
 }
 
 fn sandbox_outcome_from_tool_error(err: &ToolError) -> Option<&'static str> {
@@ -1386,6 +1403,29 @@ fn is_sandbox_startup_failure(sandbox: SandboxType, output: &ExecToolCallOutput)
 mod tests {
     use super::*;
     use codex_protocol::exec_output::StreamOutput;
+
+    /// Issue #540: a run that keeps its sandbox leaves it on retry only for
+    /// a protected action a person approves afresh, never for a network
+    /// approval; other runs are unchanged.
+    #[test]
+    fn issue_540_retry_leaves_the_sandbox_only_where_a_person_approves_it() {
+        // (policy allows, keeps sandbox, protected action, network) -> leaves
+        for (policy, keeps, protected, network, leaves) in [
+            (true, false, false, false, true),
+            (true, false, false, true, true),
+            (false, false, true, false, false),
+            (true, true, false, false, false),
+            (true, true, true, false, true),
+            (true, true, true, true, false),
+            (false, true, true, false, false),
+        ] {
+            assert_eq!(
+                retry_may_leave_sandbox(policy, keeps, protected, network),
+                leaves,
+                "{policy} {keeps} {protected} {network}"
+            );
+        }
+    }
 
     fn denied_output(text: &str) -> ExecToolCallOutput {
         output_with_streams("", text)
