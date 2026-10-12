@@ -49,7 +49,10 @@ before any sign-in screen; with a remote app server, the server refuses at
 thread start.
 
 A resumed thread runs on its recorded provider and account. `corbanu resume`
-(an id, `--last` or the picker) and `/resume` use them without `--account`:
+(an id, `--last` or the picker) and `/resume` use them without `--account`.
+With `-m`, `-c model_provider` or a profile model, the thread runs on the
+session's provider instead, and another provider's recorded account does not
+apply.
 
 - **No default key, or a home configured for another provider:** the TUI
   picks the thread first, so no sign-in screen appears. Esc in that picker
@@ -63,7 +66,12 @@ A resumed thread runs on its recorded provider and account. `corbanu resume`
   in `/providers`".
 - **The recorded provider has no credentials in this home:** the TUI exits
   and says how to set them up (`corbanu -c model_provider="zai"`), instead of
-  the configured provider's sign-in.
+  the configured provider's sign-in. If this home does not define that
+  provider at all, the TUI says so.
+
+`corbanu fork` keeps the launch check: a missing `[provider_accounts]` entry
+refuses it before the fork is chosen, even though the fork would run on the
+source conversation's account; `--account` picks another one.
 
 An explicit `--account` of the same provider still wins. With the feature off,
 the resume is refused and names the recorded account (`--account

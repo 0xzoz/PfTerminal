@@ -1302,7 +1302,7 @@ pub async fn run_main(
     // `[provider_accounts]`) is refused before onboarding, with exec's
     // recovery text, instead of asking for a default key. The account a
     // resumed thread recorded is checked once the thread is selected (#545),
-    // and so is `[provider_accounts]` for a resume or fork, which runs on that
+    // and so is `[provider_accounts]` for a resume, which runs on that
     // recorded account instead (#555). A local daemon serves this same home;
     // a remote app server checks its own home at thread start.
     let deferred_account_check =
