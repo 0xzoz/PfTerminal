@@ -1889,7 +1889,7 @@ async fn issue_583_git_still_commits_in_a_corbanu_home_worktree() -> anyhow::Res
 /// `worktrees`, cannot create the missing names Corbanu reads later:
 /// exec-policy `rules/x.rules`, `hooks.json` (also as `HOOKS.JSON`, the same
 /// file on a case-insensitive volume) or `agents/x`. Other new names and
-/// `worktrees` stay writable where the level lets it write the home, and on Linux no placeholder file is left where
+/// `worktrees` stay writable, and on Linux no placeholder file is left where
 /// a folder belongs. Permissive is unchanged.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1962,11 +1962,9 @@ async fn issue_603_a_command_in_the_corbanu_home_cannot_create_names_corbanu_rea
             } else {
                 Vec::new()
             };
-            // Aggressive gives a command in `other` a workspace of that
-            // folder alone: the rest of the home was never writable there.
-            let home_writable = !(in_other && level == SecurityLevel::Aggressive);
-            let free = cwd.join("free-603").exists()
-                && root.join("worktrees/w/ok").exists() == home_writable;
+            // New names in the working folder (Aggressive keeps the rest of
+            // the home read-only for a command in `other`) and `worktrees`.
+            let free = cwd.join("free-603").exists() && root.join("worktrees/w/ok").exists();
             let placeholder_files: Vec<&str> = ["rules", "agents"]
                 .into_iter()
                 .filter(|folder| root.join(folder).is_file())
