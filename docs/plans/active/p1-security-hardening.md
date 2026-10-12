@@ -52,7 +52,7 @@ Open when P0 closed on 2026-10-08. Nothing here is done; each item names where i
 | Item | From | Next step |
 | --- | --- | --- |
 | [PF-13-S07](../../sprints/current/p1-security-hardening/pf-13-s07-integrated-credential-boundary-qualification.md) final archive | P0 convergence | Rerun the Linux canary on the current candidate; archive after the Aggressive milestone sign-off |
-| Milestone **Aggressive ships** | P0 delivery gate | Code-blind VM run done 2026-10-10/11 on `9ead7a5755` ([record](../../../qa/security-levels/milestones/aggressive-20261010/README.md)): 17 passed, 15 failed, 7 blocked of 39; defects #434–#445. Not passed; Travis's sign-off decision requested |
+| Milestone **Aggressive ships** | P0 delivery gate | Code-blind VM run done 2026-10-10/11 on `9ead7a5755` ([record](../../../qa/security-levels/milestones/aggressive-20261010/README.md)): 17 passed, 15 failed, 7 blocked of 39; defects #434–#445. Re-run 2026-10-12 on `6ebfa1f47c` after the fixes and the 2026-10-11 decisions ([record](../../../qa/security-levels/milestones/aggressive-20261011-rerun/README.md)): 41 passed, 10 failed, 6 blocked of 57; defects #620–#626; last independent evidence check r3 failed on mechanical points, corrected but unverified (review budget used). Not passed; Travis's sign-off decision requested |
 | Milestone **Moderate ships** | P0 delivery gate | Same; covers PF-28-S02, PF-23 and the Moderate picker entry |
 | Milestone **flag removal** | P0 delivery gate | Code-blind run, sign-off, PF-21 Permissive compatibility against `3c1b2f6cbe11657ff4e3b72b11db029c9e7a92eb`, no critical finding open; then PF-26 |
 | [PF-28-S02](../../sprints/archive/p0-security-levels/pf-28-s02-reflected-secret-response-scrubbing.md) items | archived 2026-10-08 | Latency targets (need product authority); per-type scrubbing; per-session stream state; recorded encoding/HEAD/HTTP2 limits |
@@ -220,7 +220,7 @@ PF-35's qualification baseline, carried from the P0 plan. Changing a target need
 
 ## Implementation sequence
 
-1. Qualification lane: Aggressive milestone (code-blind run done 2026-10-11, not passed; sign-off decision pending), then PF-13-S07 archive; Moderate milestone.
+1. Qualification lane: Aggressive milestone (code-blind re-run done 2026-10-12, not passed: #620–#626; sign-off decision pending), then PF-13-S07 archive; Moderate milestone.
 2. Broker lane: PF-27-S06 to S09 completed (S06 and S07 2026-10-08, S08 2026-10-09, S09 2026-10-10); free.
 3. The deferred features in the map order above, each under the per-sprint gate.
 4. Flag removal milestone, then PF-26-S04 → S02 → S03.
@@ -251,7 +251,7 @@ Windows records need a real Windows machine for this step.
 
 | Milestone | Tester | Result |
 | --- | --- | --- |
-| Aggressive ships | Travis Good (requested 2026-10-11) | pending: code-blind run not passed ([record](../../../qa/security-levels/milestones/aggressive-20261010/README.md)) |
+| Aggressive ships | Travis Good (requested 2026-10-11, again 2026-10-12) | pending: code-blind re-run not passed ([record](../../../qa/security-levels/milestones/aggressive-20261011-rerun/README.md)) |
 | Moderate ships | named by release owner | pending |
 | Flag removal | named by release owner | pending |
 
