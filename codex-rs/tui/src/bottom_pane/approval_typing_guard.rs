@@ -199,6 +199,11 @@ impl TypingGuard {
         }
     }
 
+    /// #523: whether a number key armed an option for Enter.
+    pub(super) fn is_armed(&self) -> bool {
+        matches!(self.state, State::Armed(_))
+    }
+
     /// #523: whether Enter waits for a choice: the prompt is new to the
     /// user, or text was typed into it.
     pub(super) fn awaits_choice(&self) -> bool {

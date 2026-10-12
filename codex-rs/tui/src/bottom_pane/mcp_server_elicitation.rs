@@ -1765,17 +1765,29 @@ impl BottomPaneView for McpServerElicitationOverlay {
                 return;
             }
             self.typing_guard.reset();
-        } else if self.typing_guard.awaits_choice() && self.current_field_is_select() {
-            // #523: on a new request a select field takes a number key or
-            // navigation; anything else is typed text and Enter still waits.
-            let digit = matches!(key_event.code, KeyCode::Char(ch)
-                if key_hint::is_plain_text_key_event(key_event)
-                    && self.option_index_for_digit(ch).is_some());
-            if !digit && !self.is_navigation(key_event) {
+        } else if self.current_field_is_select()
+            && (self.typing_guard.awaits_choice() || self.typing_guard.is_armed())
+        {
+            // #523: on a new request a select field takes one number key
+            // (which arms its option for Enter) or navigation; anything else,
+            // including a key after the number, is typed text and Enter
+            // waits.
+            let digit = match key_event.code {
+                KeyCode::Char(ch) if key_hint::is_plain_text_key_event(key_event) => {
+                    self.option_index_for_digit(ch)
+                }
+                _ => None,
+            };
+            if self.is_navigation(key_event) {
+                self.typing_guard.reset();
+            } else if let Some(idx) = digit
+                && self.typing_guard.on_text_key(Some(idx)).is_some()
+            {
+                // Falls through: the select handler highlights it.
+            } else {
                 self.typing_guard.on_typed_input();
                 return;
             }
-            self.typing_guard.reset();
         } else {
             self.typing_guard.reset();
         }
@@ -3002,7 +3014,7 @@ mod tests {
 
     /// #523: a select form shown just after another prompt was answered
     /// takes a letter (and a digit after it) as typed text, not a choice;
-    /// Enter submits only after the arrow keys or a digit alone.
+    /// Enter submits only after the arrow keys or a single number key.
     #[test]
     fn issue_523_select_form_after_an_answer_takes_no_letter() {
         let (tx, mut rx) = test_sender();
@@ -3094,6 +3106,27 @@ mod tests {
             press(&mut overlay, KeyCode::Enter);
             assert_eq!(resolved_decisions(&mut rx).len(), 1, "{key:?}");
         }
+    }
+
+    /// Review r3 (#523): on a select form shown just after an answer, a
+    /// number key arms its option; a key after it is typed text, so `1x`
+    /// then Enter answers nothing, while `1` then Enter does.
+    #[test]
+    fn issue_523_a_key_after_the_number_is_typed_text() {
+        let (tx, mut rx) = test_sender();
+        let mut overlay = confirm_form(tx);
+        overlay.require_fresh_choice_after_answer();
+        for key in [KeyCode::Char('1'), KeyCode::Char('x'), KeyCode::Enter] {
+            press(&mut overlay, key);
+        }
+        assert_eq!(resolved_decisions(&mut rx), Vec::new());
+
+        let (tx, mut rx) = test_sender();
+        let mut overlay = confirm_form(tx);
+        overlay.require_fresh_choice_after_answer();
+        press(&mut overlay, KeyCode::Char('1'));
+        press(&mut overlay, KeyCode::Enter);
+        assert_eq!(resolved_decisions(&mut rx).len(), 1);
     }
 
     /// #192: in a form, a number key chooses an option without submitting.
