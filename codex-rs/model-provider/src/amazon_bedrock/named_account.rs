@@ -29,7 +29,7 @@ pub(super) struct NamedBedrockAccount {
     profile_source: ProfileSource,
     /// The signing context of the profile last loaded, so its credentials
     /// (and an SSO token cache) are resolved once, not on every request.
-    loaded: Arc<tokio::sync::Mutex<Option<(String, AwsAuthContext)>>>,
+    loaded: Arc<std::sync::Mutex<Option<(String, AwsAuthContext)>>>,
 }
 
 impl NamedBedrockAccount {
@@ -82,9 +82,7 @@ impl NamedBedrockAccount {
     /// The Mantle region: `aws.region` when configured, else the profile's.
     pub(super) async fn region(&self, aws: &ModelProviderAwsAuthInfo) -> Result<String> {
         let profile = self.profile()?;
-        if let Some((loaded, context)) = self.loaded.lock().await.as_ref()
-            && *loaded == profile
-        {
+        if let Some(context) = self.loaded_context(&profile) {
             return Ok(context.region().to_string());
         }
         AwsAuthContext::named_profile_region(&profile, region_from_config(aws))
@@ -96,12 +94,10 @@ impl NamedBedrockAccount {
     /// profile is first loaded (or changes), before any request is signed.
     pub(super) async fn context(&self, aws: &ModelProviderAwsAuthInfo) -> Result<AwsAuthContext> {
         let profile = self.profile()?;
-        let mut loaded = self.loaded.lock().await;
-        if let Some((loaded_profile, context)) = loaded.as_ref()
-            && *loaded_profile == profile
-        {
-            return Ok(context.clone());
+        if let Some(context) = self.loaded_context(&profile) {
+            return Ok(context);
         }
+        // Not locked while loading; a concurrent first load just loads twice.
         let context = AwsAuthContext::load_named_profile(
             &profile,
             region_from_config(aws),
@@ -109,8 +105,19 @@ impl NamedBedrockAccount {
         )
         .await
         .map_err(|error| self.profile_error(&profile, &error))?;
-        *loaded = Some((profile, context.clone()));
+        if let Ok(mut loaded) = self.loaded.lock() {
+            *loaded = Some((profile, context.clone()));
+        }
         Ok(context)
+    }
+
+    /// The cached context, when it was loaded for `profile`.
+    fn loaded_context(&self, profile: &str) -> Option<AwsAuthContext> {
+        let loaded = self.loaded.lock().ok()?;
+        loaded
+            .as_ref()
+            .filter(|(loaded_profile, _)| loaded_profile == profile)
+            .map(|(_, context)| context.clone())
     }
 
     fn profile_error(&self, profile: &str, error: &AwsAuthError) -> CodexErr {

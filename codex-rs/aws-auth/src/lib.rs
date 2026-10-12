@@ -48,6 +48,10 @@ pub enum AwsAuthError {
         "AWS profile `{0}` sets no region, or is not defined in the AWS config files; set `region` in that profile or `aws.region` for the provider"
     )]
     MissingProfileRegion(String),
+    #[error(
+        "`credential_source = {0}` is not allowed for a named account: it would use environment, instance or container credentials; give the profile its own keys, a `source_profile`, SSO or `credential_process`"
+    )]
+    RefusedCredentialSource(String),
     #[error("failed to load AWS credentials: {0}")]
     Credentials(#[from] aws_credential_types::provider::error::CredentialsError),
     #[error("request URL is not a valid URI: {0}")]
@@ -179,6 +183,7 @@ impl AwsAuthError {
             | AwsAuthError::MissingCredentialsProvider
             | AwsAuthError::MissingRegion
             | AwsAuthError::MissingProfileRegion(_)
+            | AwsAuthError::RefusedCredentialSource(_)
             | AwsAuthError::InvalidUri(_)
             | AwsAuthError::BuildHttpRequest(_)
             | AwsAuthError::InvalidHeaderValue(_)

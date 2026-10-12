@@ -137,10 +137,9 @@ async fn credential_sources_outside_the_files_are_refused() {
         )
         .await
         .expect_err("refused credential source");
-        let message = error.detailed_message();
-        assert!(
-            message.contains(&format!("`credential_source = {source}` is not allowed")),
-            "{message}"
+        assert_eq!(
+            error.to_string(),
+            AwsAuthError::RefusedCredentialSource(source.to_string()).to_string()
         );
     }
 }

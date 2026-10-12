@@ -24,6 +24,8 @@ use aws_credential_types::provider::SharedCredentialsProvider;
 use aws_credential_types::provider::error::CredentialsError;
 use aws_credential_types::provider::future;
 use aws_types::region::Region;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use crate::AwsAuthContext;
 use crate::AwsAuthError;
@@ -32,20 +34,25 @@ use crate::AwsAuthError;
 const REFUSED_CREDENTIAL_SOURCES: [&str; 3] =
     ["Environment", "Ec2InstanceMetadata", "EcsContainer"];
 
-/// Stands in for a refused `credential_source`.
+/// Stands in for a refused `credential_source` and records that it was
+/// asked, so the refusal is reported as such (the SDK wraps it).
 #[derive(Debug)]
-struct RefusedCredentialSource(&'static str);
+struct RefusedCredentialSource {
+    source: &'static str,
+    asked: Arc<Mutex<Option<&'static str>>>,
+}
 
 impl ProvideCredentials for RefusedCredentialSource {
     fn provide_credentials<'a>(&'a self) -> future::ProvideCredentials<'a>
     where
         Self: 'a,
     {
+        if let Ok(mut asked) = self.asked.lock() {
+            *asked = Some(self.source);
+        }
         future::ProvideCredentials::ready(Err(CredentialsError::invalid_configuration(format!(
-            "`credential_source = {}` is not allowed for a named account: it would use \
-             environment, instance or container credentials; give the profile its own keys, \
-             a `source_profile`, SSO or `credential_process`",
-            self.0
+            "credential_source = {} is not allowed for a named account",
+            self.source
         ))))
     }
 }
@@ -94,15 +101,28 @@ pub(crate) async fn load_named_profile(
     let mut builder = ProfileFileCredentialsProvider::builder()
         .configure(&provider_config)
         .profile_name(profile);
+    let asked = Arc::new(Mutex::new(None));
     for source in REFUSED_CREDENTIAL_SOURCES {
-        builder = builder.with_custom_provider(source, RefusedCredentialSource(source));
+        builder = builder.with_custom_provider(
+            source,
+            RefusedCredentialSource {
+                source,
+                asked: Arc::clone(&asked),
+            },
+        );
     }
     if let Some(files) = files {
         builder = builder.profile_files(files);
     }
     let provider = builder.build();
     // A missing profile reports itself before a missing region would.
-    provider.provide_credentials().await?;
+    if let Err(error) = provider.provide_credentials().await {
+        let refused = asked.lock().ok().and_then(|asked| *asked);
+        return Err(match refused {
+            Some(source) => AwsAuthError::RefusedCredentialSource(source.to_string()),
+            None => error.into(),
+        });
+    }
     Ok(AwsAuthContext {
         credentials_provider: SharedCredentialsProvider::new(provider),
         region: region?,
