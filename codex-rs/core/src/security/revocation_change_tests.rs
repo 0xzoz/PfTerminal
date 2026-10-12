@@ -28,6 +28,17 @@ use std::sync::atomic::Ordering;
 /// within one second itself.
 static NOW: AtomicI64 = AtomicI64::new(1_000);
 
+/// "Revoke all" and the kill switch end every grant of the process, so the
+/// tests here run one at a time: one test's revocation must not end the
+/// grants another test is still checking.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn now() -> i64 {
     NOW.load(Ordering::Relaxed)
 }
@@ -132,6 +143,7 @@ fn held_by(thread: ThreadId) -> Vec<String> {
 #[test]
 #[serial_test::serial(aggressive_grants)]
 fn security_revocation_kill_switch_applies_now_saves_and_releases_without_lowering() {
+    let _serial = serial();
     let home = TempDir::new().unwrap();
     let (view, root) = live_tree(&home, SecurityLevel::Aggressive);
     let (other, _) = live_tree(&home, SecurityLevel::Aggressive);
@@ -179,6 +191,7 @@ fn security_revocation_kill_switch_applies_now_saves_and_releases_without_loweri
 #[test]
 #[serial_test::serial(aggressive_grants)]
 fn security_revocation_cannot_release_a_kill_switch_that_is_off() {
+    let _serial = serial();
     let home = TempDir::new().unwrap();
     let (_view, root) = live_tree(&home, SecurityLevel::Aggressive);
     assert!(revoke(&home, Some(root), HumanRevocation::KillSwitchOff).is_err());
@@ -190,6 +203,7 @@ fn security_revocation_cannot_release_a_kill_switch_that_is_off() {
 #[test]
 #[serial_test::serial(aggressive_grants)]
 fn security_revocation_kill_switch_without_a_session_is_saved() {
+    let _serial = serial();
     let home = TempDir::new().unwrap();
     let report = revoke(&home, None, HumanRevocation::KillSwitchOn).unwrap();
     assert!(report.kill_switch_active && !report.live);
@@ -209,6 +223,7 @@ fn security_revocation_kill_switch_without_a_session_is_saved() {
 #[test]
 #[serial_test::serial(aggressive_grants)]
 fn security_revocation_all_active_authority_ends_grants() {
+    let _serial = serial();
     let home = TempDir::new().unwrap();
     let (view, root) = live_tree(&home, SecurityLevel::Aggressive);
     hold_grant(root, "cat a");
@@ -232,6 +247,7 @@ fn security_revocation_all_active_authority_ends_grants() {
 #[test]
 #[serial_test::serial(aggressive_grants)]
 fn security_revocation_refuses_a_state_changed_since_review() {
+    let _serial = serial();
     let home = TempDir::new().unwrap();
     let (_view, root) = live_tree(&home, SecurityLevel::Aggressive);
     let reviewed = basis(&home, Some(root));
@@ -254,6 +270,7 @@ fn security_revocation_refuses_a_state_changed_since_review() {
 #[test]
 #[serial_test::serial(aggressive_grants)]
 fn security_revocation_one_grant_ends_only_that_grant() {
+    let _serial = serial();
     let thread = ThreadId::new();
     let first = hold_grant(thread, "cat one");
     hold_grant(thread, "cat two");
@@ -267,6 +284,7 @@ fn security_revocation_one_grant_ends_only_that_grant() {
 #[test]
 #[serial_test::serial(aggressive_grants)]
 fn security_revocation_release_reaches_the_other_sessions() {
+    let _serial = serial();
     let home = TempDir::new().unwrap();
     let (_view, root) = live_tree(&home, SecurityLevel::Aggressive);
     let (_other_view, other) = live_tree(&home, SecurityLevel::Aggressive);
@@ -283,6 +301,7 @@ fn security_revocation_release_reaches_the_other_sessions() {
 #[test]
 #[serial_test::serial(aggressive_grants)]
 fn security_revocation_release_is_for_the_switch_reviewed() {
+    let _serial = serial();
     let home = TempDir::new().unwrap();
     revoke(&home, None, HumanRevocation::KillSwitchOn).unwrap();
     let reviewed = basis(&home, None);
@@ -311,6 +330,7 @@ fn security_revocation_release_is_for_the_switch_reviewed() {
 #[test]
 #[serial_test::serial(aggressive_grants)]
 fn security_revocation_unsaved_without_a_session_is_an_error() {
+    let _serial = serial();
     let home = TempDir::new().unwrap();
     std::fs::create_dir(home.path().join("security_state.lock")).unwrap();
     let result = revoke(&home, None, HumanRevocation::KillSwitchOn);
@@ -324,6 +344,7 @@ fn security_revocation_unsaved_without_a_session_is_an_error() {
 #[test]
 #[serial_test::serial(aggressive_grants)]
 fn security_revocation_all_ends_every_grant_of_the_process() {
+    let _serial = serial();
     let home = TempDir::new().unwrap();
     let (_view, root) = live_tree(&home, SecurityLevel::Aggressive);
     let elsewhere = ThreadId::new();
@@ -337,6 +358,7 @@ fn security_revocation_all_ends_every_grant_of_the_process() {
 #[test]
 #[serial_test::serial(aggressive_grants)]
 fn security_revocation_release_reaches_only_the_same_switch() {
+    let _serial = serial();
     let home = TempDir::new().unwrap();
     let other_home = TempDir::new().unwrap();
     let (_view, root) = live_tree(&home, SecurityLevel::Aggressive);
@@ -355,6 +377,7 @@ fn security_revocation_release_reaches_only_the_same_switch() {
 #[test]
 #[serial_test::serial(aggressive_grants)]
 fn security_revocation_unsaved_but_taken_by_another_session_is_reported() {
+    let _serial = serial();
     let home = TempDir::new().unwrap();
     let (_view, other) = live_tree(&home, SecurityLevel::Aggressive);
     std::fs::create_dir(home.path().join("security_state.lock")).unwrap();

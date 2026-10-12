@@ -18,19 +18,19 @@ credential-health and reauthentication follow-up.
 PF-84 (named accounts per provider) was activated on 2026-10-10. Travis accepted
 S01, S02 and S03 on 2026-10-11 and they are archived: S02 and S03 behind the
 default-off `named_accounts` flag, S03 with limits (#425, #426 and #428 must be
-resolved before the flag is removed; S02-15 stays open). Travis accepted S04 on 2026-10-11 and it is archived (behind the flag). Travis
-accepted S05 on 2026-10-11; it is archived after #528. S06 (named AWS profile,
+resolved before the flag is removed; S02-15 stays open). Travis accepted S04 and S05 on 2026-10-11 and they are archived (behind the
+flag). S06 (named AWS profile,
 then ChatGPT/OpenAI sign-in accounts, per decision D4) is in progress. See the plan's PF-84 section.
 
 | Order | Sprint | Outcome | Status | Depends on |
 | ---: | --- | --- | --- | --- |
 | 22 | [PF-58-S01](pf-58-s01-credential-health-and-reauth.md) | Credential-scoped health and keyboard reauthentication | draft residual qualification; human-accepted for main integration | PF-57-S01 |
-| 27 | [PF-84-S05](pf-84-s05-per-account-usage-attribution.md) | Per-account usage and rate-limit attribution | ready | PF-84-S03, PF-60-S04 |
 | 28 | [PF-84-S06](pf-84-s06-aws-and-chatgpt-accounts.md) | Named AWS profile, then ChatGPT/OpenAI sign-in accounts | in_progress | PF-84-S05 |
 | 23 | [PF-84-S01](../../archive/unified-provider-auth/pf-84-s01-home-override-hygiene.md) | Home override hygiene (wrapper pitfall) | completed | none |
 | 24 | [PF-84-S02](../../archive/unified-provider-auth/pf-84-s02-account-registry-and-resolution.md) | Named account registry, storage and resolution | completed | none |
 | 25 | [PF-84-S03](../../archive/unified-provider-auth/pf-84-s03-account-selection-and-propagation.md) | Account selection per session, CLI and worker | completed | PF-84-S02 |
 | 26 | [PF-84-S04](../../archive/unified-provider-auth/pf-84-s04-provider-account-management-ui.md) | `/providers` account management; duplicate-row fix | completed | PF-84-S03 |
+| 27 | [PF-84-S05](../../archive/unified-provider-auth/pf-84-s05-per-account-usage-attribution.md) | Per-account usage and rate-limit attribution | completed | PF-84-S03, PF-60-S04 |
 | 7 | [PF-48-S01](../../archive/unified-provider-auth/pf-48-s01-provider-catalog-contract.md) | Typed provider catalog and capability contract | completed | PF-47-S01 |
 | 8 | [PF-49-S01](../../archive/unified-provider-auth/pf-49-s01-status-and-eligibility.md) | Shared metadata status and eligibility persistence | completed | PF-48-S01 |
 | 9 | [PF-50-S01](../../archive/unified-provider-auth/pf-50-s01-api-key-flow-controller.md) | Shared typed controller and API-key adapter | completed | PF-49-S01 |

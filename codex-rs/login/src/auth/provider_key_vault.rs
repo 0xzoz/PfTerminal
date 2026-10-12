@@ -54,6 +54,22 @@ pub fn provider_account_api_key(
     )
 }
 
+/// PF-84-S06: the AWS profile name (not secret) a named account uses, from
+/// the vault only. A missing account or kind is `Ok(None)`; there is no
+/// fallback to `AWS_PROFILE` or the `default` profile.
+pub fn provider_account_aws_profile(
+    codex_home: &Path,
+    provider_id: &str,
+    account_name: &str,
+) -> std::io::Result<Option<String>> {
+    read_provider_account_kind(
+        &Vault::new(codex_home.to_path_buf()),
+        provider_id,
+        account_name,
+        codex_vault::ProviderAccountKind::AwsProfile,
+    )
+}
+
 /// PF-84: whether a named account holds `kind`, from vault metadata only (no
 /// secret is decrypted). A missing account is `Ok(false)`.
 pub fn provider_account_holds(

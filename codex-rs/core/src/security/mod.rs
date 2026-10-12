@@ -18,6 +18,7 @@ pub(crate) mod ingress;
 pub mod inspection;
 mod integration;
 pub mod inventory;
+pub(crate) mod kill_switch_stop;
 pub(crate) mod launch_contract;
 pub mod level_change;
 pub mod migration;

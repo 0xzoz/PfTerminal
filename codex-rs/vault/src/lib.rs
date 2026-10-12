@@ -95,6 +95,7 @@ pub use provider_accounts::is_provider_managed_account_label;
 pub use provider_accounts::parse_provider_account_label;
 pub use provider_accounts::parse_provider_account_selection;
 pub use provider_accounts::provider_account_label;
+pub use provider_accounts::validate_aws_profile_name;
 pub use provider_accounts::validate_provider_account_provider_id;
 
 #[cfg(test)]

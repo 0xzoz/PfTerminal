@@ -906,6 +906,34 @@ impl App {
         true
     }
 
+    /// #507: the kill switch was turned on: every running Claude pane turn
+    /// is interrupted (its Claude process and the commands it runs end), with
+    /// the reason in that pane.
+    pub(crate) fn stop_claude_panes_for_kill_switch(&mut self) {
+        let running: Vec<String> = self
+            .claude_panes
+            .panes()
+            .iter()
+            .map(|pane| pane.id.clone())
+            .filter(|pane_id| self.claude_panes.claude_pane_is_running(pane_id))
+            .collect();
+        for pane_id in running {
+            if let Err(err) = self.claude_panes.interrupt_turn(&pane_id) {
+                tracing::warn!(pane_id, %err, "kill switch: could not interrupt the Claude pane");
+                continue;
+            }
+            let message = crate::legacy_core::security_revocation::KILL_SWITCH_STOPPED;
+            if self.claude_panes.active_claude_pane_id() == Some(pane_id.as_str()) {
+                self.chat_widget.add_warning_message(message.to_string());
+            } else {
+                self.append_inactive_claude_pane_transcript_cell(
+                    &pane_id,
+                    Arc::new(crate::history_cell::new_warning_event(message.to_string())),
+                );
+            }
+        }
+    }
+
     /// PF-84: the named Claude Plan account panes must use, if one is selected.
     fn claude_plan_account(&self) -> Option<String> {
         self.config
@@ -929,6 +957,47 @@ impl App {
             self.abort_spawn_auto_processing_turn(&node_key);
             self.record_spawn_dispatch_failed_for_task(&target_node_id, &task, reason.clone());
             self.chat_widget.add_error_message(reason);
+            return;
+        }
+        // #507: while the kill switch is on, a task another agent sent waits,
+        // as agent messages to Codex panes do, and is sent once it is off.
+        if crate::legacy_core::security_revocation::kill_switch_on(self.config.codex_home.as_ref())
+        {
+            // An auto-processing turn stays pending, so the task keeps its
+            // place in the loop breaker when it is sent. Each pane holds one
+            // task, the newest: repeated assignment fires and child reports
+            // would otherwise pile up and run as a burst once it is off (the
+            // newest prompt also carries the latest context).
+            let superseded: Vec<String> = self
+                .kill_switch_held_claude_tasks
+                .iter()
+                .filter(|(held, _)| *held == pane_id)
+                .map(|(_, task)| task.clone())
+                .collect();
+            self.kill_switch_held_claude_tasks
+                .retain(|(held, _)| *held != pane_id);
+            for old in &superseded {
+                self.record_spawn_dispatch_failed_for_task(
+                    &target_node_id,
+                    old,
+                    "superseded by a newer task while the security kill switch was on",
+                );
+            }
+            let title = self
+                .claude_panes
+                .panes()
+                .iter()
+                .find(|pane| pane.id == pane_id)
+                .map_or_else(|| pane_id.clone(), |pane| pane.title.clone());
+            self.kill_switch_held_claude_tasks.push((pane_id, task));
+            if superseded.is_empty() {
+                self.chat_widget.add_info_message(
+                    format!(
+                        "A task for Claude pane `{title}` waits: the security kill switch is on. It is sent when the switch is turned off in /security here (a newer task replaces it; it is lost if Corbanu Terminal exits first)."
+                    ),
+                    /*hint*/ None,
+                );
+            }
             return;
         }
         let is_active = self.claude_panes.active_user_pane_id() == pane_id;
@@ -1163,6 +1232,42 @@ impl App {
                     );
                 }
             }
+        }
+        // #507: the pane is free again; the next task it held may go.
+        self.send_next_held_claude_task(&pane_id);
+    }
+
+    /// #507: the kill switch was turned off: each idle Claude pane gets the
+    /// task held for it now; a busy one when its turn ends.
+    pub(crate) fn send_held_claude_tasks(&mut self) {
+        let mut panes: Vec<String> = Vec::new();
+        for (pane_id, _) in &self.kill_switch_held_claude_tasks {
+            if !panes.contains(pane_id) {
+                panes.push(pane_id.clone());
+            }
+        }
+        for pane_id in panes {
+            self.send_next_held_claude_task(&pane_id);
+        }
+    }
+
+    fn send_next_held_claude_task(&mut self, pane_id: &str) {
+        // A task that does not start a turn (refused, or the pane is gone)
+        // must not strand the ones behind it.
+        while let Some(index) = self
+            .kill_switch_held_claude_tasks
+            .iter()
+            .position(|(held, _)| held == pane_id)
+        {
+            if self.claude_panes.claude_pane_is_running(pane_id)
+                || crate::legacy_core::security_revocation::kill_switch_on(
+                    self.config.codex_home.as_ref(),
+                )
+            {
+                return;
+            }
+            let (pane_id, task) = self.kill_switch_held_claude_tasks.remove(index);
+            self.submit_claude_pane_task(pane_id, task);
         }
     }
 
