@@ -156,6 +156,37 @@ fn literal_text_is_distinct_from_named_enter_key() -> Result<()> {
 }
 
 #[test]
+fn input_after_escape_is_not_read_with_the_escape() -> Result<()> {
+    let Some(server) = server_or_skip("escape_then_text")? else {
+        return Ok(());
+    };
+    // Prints the bytes of each read(2) on its own line. The pause between
+    // reads stands in for a busy TUI: without a gap, Esc and the text that
+    // follows it land in one read, which crossterm parses as Alt+`/`.
+    let session = server.new_session(SessionSpec::new(
+        "escape",
+        TerminalSize::new(/*columns*/ 40, /*rows*/ 8),
+        command_for_shell(
+            "stty raw -echo; printf 'ready\r\n'; \
+             while :; do sleep 0.1; dd bs=64 count=1 2>/dev/null | od -An -tx1; printf '\r'; done",
+        ),
+    ))?;
+    let pane = session.primary_pane();
+    pane.wait_stable_contains("ready", Duration::from_secs(/*secs*/ 3))?;
+
+    pane.send_key(TmuxKey::Escape)?;
+    pane.send_literal("/x")?;
+    let reads = pane.wait_stable_contains("2f 78", Duration::from_secs(/*secs*/ 3))?;
+    let reads: Vec<&str> = reads
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && *line != "ready")
+        .collect();
+    pretty_assertions::assert_eq!(reads, vec!["1b", "2f 78"]);
+    Ok(())
+}
+
+#[test]
 fn viewport_and_scrollback_are_captured_separately() -> Result<()> {
     let Some(server) = server_or_skip("viewport_and_scrollback")? else {
         return Ok(());
