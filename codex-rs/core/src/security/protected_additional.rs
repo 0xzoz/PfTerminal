@@ -332,7 +332,7 @@ pub(crate) fn without_opened(
 
 /// `additional` without the entries that would open a protected path to
 /// reads (#245).
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn without_protected_paths(
     denials: &ReadDenials,
     additional: Option<AdditionalPermissionProfile>,

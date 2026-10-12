@@ -21,6 +21,7 @@ use zip::write::SimpleFileOptions;
 const TEST_CURATED_PLUGIN_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 static NOT_CANCELLED: AtomicBool = AtomicBool::new(false);
 
+#[cfg(unix)]
 fn test_git(binary: &Path) -> Git<'_> {
     Git {
         binary,

@@ -416,6 +416,12 @@ pub(crate) enum AppEvent {
     /// #507: the kill switch was turned off. Nothing restarts; the person is
     /// told which Claude panes have a task waiting for their next turn.
     KillSwitchTurnedOff,
+    /// #507 (Travis, 2026-10-12): another Corbanu Terminal process on this
+    /// home turned the kill switch on or off; Core already applied it to
+    /// this process's sessions.
+    KillSwitchChangedElsewhere {
+        on: bool,
+    },
     /// Open the `/spawn` role picker.
     OpenSpawnRolePicker,
     /// Open the `/spawn` Nazgul pane-binding picker.
@@ -1667,6 +1673,12 @@ pub(crate) enum AppEvent {
     },
     /// PF-84-S04: a named-account action from `/providers`.
     ProviderAccount(crate::provider_named_accounts::ProviderAccountEvent),
+    /// PF-84 (#572): whether the vault holds a named Bedrock account (`None`
+    /// when it could not be read), for the check numbered `generation`.
+    NamedBedrockAccountChecked {
+        generation: u64,
+        offered: Option<bool>,
+    },
     ProviderManagerMetadataResolved {
         generation: u64,
         metadata: crate::provider_status_host::ProviderAccountMetadata,

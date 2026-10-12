@@ -9,7 +9,6 @@ use pretty_assertions::assert_eq;
 
 /// #535: a writable link into another root's read-only path is explained
 /// once per thread, naming the link and the path that stays read-only.
-#[cfg(unix)]
 #[test]
 fn excluded_writable_links_are_explained_once_per_thread() {
     let dir = tempfile::tempdir().expect("tempdir");

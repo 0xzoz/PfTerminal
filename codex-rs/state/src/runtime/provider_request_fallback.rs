@@ -83,7 +83,8 @@ pub(crate) struct ProviderRequestMemory {
     pending_releases: Mutex<Vec<ProviderRequestLease>>,
     /// The per-home key fingerprint salt, once read.
     pub(super) key_salt: tokio::sync::OnceCell<Arc<[u8]>>,
-    /// Salted keys whose legacy unsalted rows this process already adopted.
+    /// Salted keys whose legacy unsalted rows, and named accounts whose rows
+    /// kept by name, this process already adopted.
     pub(super) adopted_legacy_keys: Mutex<HashSet<String>>,
 }
 

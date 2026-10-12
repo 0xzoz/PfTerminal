@@ -97,6 +97,7 @@ pub(super) async fn make_test_app() -> App {
         spawn_auto_loop_state_by_node: HashMap::new(),
         spawn_operator_input_seen: false,
         kill_switch_held_claude_tasks: Vec::new(),
+        kill_switch_known_on: false,
         spawn_quarantine_notified_by_node: HashSet::new(),
         spawn_context_left_by_thread: HashMap::new(),
         spawn_last_report_seq_by_node: HashMap::new(),

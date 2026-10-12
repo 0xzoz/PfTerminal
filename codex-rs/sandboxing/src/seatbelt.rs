@@ -348,6 +348,10 @@ struct SeatbeltAccessRoot {
     root: AbsolutePathBuf,
     excluded_subpaths: Vec<AbsolutePathBuf>,
     protected_metadata_names: Vec<String>,
+    /// #536: `root` is the real location pinned when the session first saw
+    /// the writable root; it is emitted as is, never resolved again, so a
+    /// link swapped in since cannot move the grant.
+    pinned: bool,
 }
 
 /// A [`SeatbeltAccessRoot`] in the spellings Seatbelt matches, which is how
@@ -362,8 +366,11 @@ struct SeatbeltClause {
 
 impl SeatbeltClause {
     fn new(access_root: SeatbeltAccessRoot) -> Self {
-        let root =
-            normalize_path_for_sandbox(access_root.root.as_path()).unwrap_or(access_root.root);
+        let root = if access_root.pinned {
+            access_root.root
+        } else {
+            normalize_path_for_sandbox(access_root.root.as_path()).unwrap_or(access_root.root)
+        };
         let mut excluded = Vec::new();
         for path in &access_root.excluded_subpaths {
             for spelling in exclusion_spellings(path) {
@@ -465,6 +472,7 @@ fn seatbelt_read_access(policy: &FileSystemSandboxPolicy, cwd: &Path) -> Seatbel
             return SeatbeltReadAccess::Full;
         }
         vec![SeatbeltAccessRoot {
+            pinned: false,
             root: root_absolute_path(),
             excluded_subpaths: unreadable_roots,
             protected_metadata_names: Vec::new(),
@@ -476,6 +484,7 @@ fn seatbelt_read_access(policy: &FileSystemSandboxPolicy, cwd: &Path) -> Seatbel
             .get_readable_roots_with_cwd(cwd)
             .into_iter()
             .map(|root| SeatbeltAccessRoot {
+                pinned: false,
                 excluded_subpaths: unreadable_roots
                     .iter()
                     .filter(|path| reached_through_root(path, &root))
@@ -1080,6 +1089,7 @@ pub fn create_seatbelt_command_args(
                     "file-write*",
                     "WRITABLE_ROOT",
                     vec![SeatbeltAccessRoot {
+                        pinned: false,
                         root: root_absolute_path(),
                         excluded_subpaths: unreadable_roots,
                         protected_metadata_names: Vec::new(),
@@ -1119,13 +1129,19 @@ pub fn create_seatbelt_command_args(
                                 .filter(|path| reached_through_root(path, &root.root))
                                 .cloned(),
                         );
+                        // #536: grant at the real location the session
+                        // pinned for this root, when it has seen it.
+                        let pinned =
+                            crate::writable_root_ledger::pinned_real_location(root.root.as_path())
+                                .and_then(|real| AbsolutePathBuf::from_absolute_path(real).ok());
                         SeatbeltAccessRoot {
                             protected_metadata_names: protected_metadata_names_for_writable_root(
                                 file_system_sandbox_policy,
                                 &root,
                                 sandbox_policy_cwd,
                             ),
-                            root: root.root,
+                            pinned: pinned.is_some(),
+                            root: pinned.unwrap_or(root.root),
                             excluded_subpaths,
                         }
                     })

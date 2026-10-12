@@ -31,6 +31,7 @@ use crate::provider::ProviderAccountResult;
 use crate::provider::ProviderAccountState;
 use crate::provider::ProviderCapabilities;
 use auth::resolve_provider_auth as resolve_bedrock_provider_auth;
+pub use catalog::model_presets as amazon_bedrock_model_presets;
 pub(crate) use catalog::static_model_catalog;
 use catalog::with_default_only_service_tier;
 use mantle::bedrock_mantle_runtime_base_url;

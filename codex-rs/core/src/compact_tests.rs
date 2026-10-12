@@ -737,3 +737,42 @@ fn insert_initial_context_before_last_real_user_or_summary_keeps_compaction_last
     ];
     assert_eq!(refreshed, expected);
 }
+
+/// #509: a compaction request respects the key's cooldown and records its
+/// own 429, so it neither hits a cooling key nor hides a limit it ran into.
+#[tokio::test]
+async fn compaction_respects_and_records_the_provider_request_throttle() {
+    use crate::provider_throttle::tests::RateLimitedSession;
+    use crate::provider_throttle::tests::assert_rate_limited_then_blocked;
+
+    let fixture = RateLimitedSession::start().await;
+    let mut client_session = fixture.session.services.model_client().new_session();
+    let metadata = fixture.metadata();
+    let prompt = Prompt {
+        input: vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "compact this".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }],
+        ..Default::default()
+    };
+    let mut drain = async || {
+        drain_to_completed(
+            &fixture.session,
+            &fixture.turn_context,
+            &mut client_session,
+            &metadata,
+            &prompt,
+        )
+        .await
+        .expect_err("the provider refuses every request")
+    };
+    let first = drain().await;
+    let second = drain().await;
+    assert_rate_limited_then_blocked(&first, &second);
+    assert_eq!(fixture.requests().await, 1);
+}
