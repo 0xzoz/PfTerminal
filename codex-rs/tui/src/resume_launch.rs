@@ -88,15 +88,18 @@ pub(crate) async fn select_resume_launch_session(
 }
 
 /// PF-84 (#545): the named account the selected thread ran on, which the app
-/// server resumes it on unless `--account` names another account of the same
-/// provider. `None` for a fork, a fresh session, a remote workspace, or while
-/// named accounts are off (the app server then refuses a recorded account).
+/// server resumes it on, and a fork of it runs on (#555), unless `--account`
+/// names another account of the same provider. `None` for a fresh session, a
+/// remote workspace, or while named accounts are off (the app server then
+/// refuses a recorded account).
 pub(crate) async fn resume_recorded_provider_account(
     selection: &resume_picker::SessionSelection,
     config: &Config,
     uses_remote_workspace: bool,
 ) -> Option<RecordedProviderAccount> {
-    let resume_picker::SessionSelection::Resume(target) = selection else {
+    let (resume_picker::SessionSelection::Resume(target)
+    | resume_picker::SessionSelection::Fork(target)) = selection
+    else {
         return None;
     };
     if uses_remote_workspace

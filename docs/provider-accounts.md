@@ -11,8 +11,11 @@ list`). Turn the feature on with `--enable named_accounts` or
 
 For a provider, the first of these wins: an explicit `--account` for that
 provider (or a spawn's `account`), the account a resumed thread recorded (or a
-worker's parent runs on), `[provider_accounts] <provider> = "<name>"`,
-`default`.
+worker's parent, or a fork's source conversation, runs on),
+`[provider_accounts] <provider> = "<name>"`, `default`.
+
+A fork (`/fork`, editing an earlier prompt, `/side`, `corbanu fork`) runs on
+the account its source conversation runs on, and `/status` names it.
 
 - `--account <name>` selects an account of the provider you launch with. On
   `resume`, write `<provider>:<name>` if the thread runs on another provider.

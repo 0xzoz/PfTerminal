@@ -678,6 +678,11 @@ pub struct ThreadForkParams {
     pub model: Option<String>,
     #[ts(optional = nullable)]
     pub model_provider: Option<String>,
+    /// PF-84: a named account (`[<provider>:]<name>`) for the fork; it beats
+    /// `[provider_accounts]` and the account the source thread runs on.
+    #[experimental("thread/fork.providerAccount")]
+    #[ts(optional = nullable)]
+    pub provider_account: Option<String>,
     #[serde(
         default,
         deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
@@ -765,6 +770,12 @@ pub struct ThreadForkResponse {
     #[experimental("thread/fork.multiAgentMode")]
     #[serde(default)]
     pub multi_agent_mode: MultiAgentMode,
+    /// PF-84: the account the fork runs on, as `<provider>:<name>`
+    /// (`default` included): the source thread's unless the request named
+    /// another account of the same provider.
+    #[experimental("thread/fork.providerAccount")]
+    #[serde(default)]
+    pub provider_account: Option<String>,
 }
 
 impl ThreadForkResponse {

@@ -4589,6 +4589,7 @@ impl ThreadRequestProcessor {
             path,
             model,
             model_provider,
+            provider_account,
             service_tier,
             cwd,
             runtime_workspace_roots,
@@ -4732,6 +4733,22 @@ impl ThreadRequestProcessor {
             /*personality*/ None,
         );
         typesafe_overrides.ephemeral = ephemeral.then_some(true);
+        // PF-84 (#555): a fork runs on the account its source thread runs on
+        // (the loaded thread's, else the newest one it recorded), as a spawned
+        // worker does. An explicit account of the same provider beats it; an
+        // account of another provider never applies (#425).
+        typesafe_overrides.provider_account = provider_account;
+        typesafe_overrides.inherited_provider_account =
+            match self.thread_manager.get_thread(source_thread_id).await {
+                Ok(source) => source.config_snapshot().await.provider_account,
+                Err(_) if self.config.features.enabled(Feature::NamedAccounts) => {
+                    recorded_provider_account(
+                        source_history_items.as_ref(),
+                        /*resumed_provider_id*/ None,
+                    )
+                }
+                Err(_) => None,
+            };
         let latest_context = if paginated_source
             && typesafe_overrides.approvals_reviewer.is_none()
             && !request_overrides
@@ -5008,6 +5025,7 @@ impl ThreadRequestProcessor {
             active_permission_profile,
             reasoning_effort: session_configured.reasoning_effort,
             multi_agent_mode: MultiAgentMode::ExplicitRequestOnly,
+            provider_account: config_snapshot.provider_account,
         };
 
         let notif = thread_started_notification(thread);
