@@ -484,6 +484,10 @@ async fn close_sqlite_pools(pools: &[&SqlitePool]) {
 }
 
 /// Open and migrate the rebuildable paginated thread-history database.
+///
+/// Takes the home's database init lock (#549), so the first call waits while
+/// another process creates or migrates any runtime database of the home (at
+/// most `DB_INIT_LOCK_WAIT`); callers open it once per process.
 pub async fn open_thread_history_db(sqlite: &SqliteConfig) -> anyhow::Result<SqlitePool> {
     tokio::fs::create_dir_all(sqlite.home()).await?;
     let init_lock = sqlite.lock_runtime_db_init().await;

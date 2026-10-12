@@ -116,42 +116,43 @@ fn concurrent_first_launches_on_a_new_home_all_get_a_state_db() {
             + Duration::from_millis(1_500);
         // Every launch is started before any is waited for.
         let mut children = Vec::with_capacity(LAUNCHES);
-        for _ in 0..LAUNCHES {
+        for index in 0..LAUNCHES {
             children.push(
                 std::process::Command::new(&exe)
                     .args(["--exact", &child_test, "--test-threads=1"])
                     .env(RACE_HOME_ENV, &home)
                     .env(RACE_START_ENV, start.as_millis().to_string())
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
+                    // Files, not pipes: a child that fails loudly never blocks.
+                    .stdout(std::fs::File::create(home.join(format!("out-{index}"))).expect("out"))
+                    .stderr(std::fs::File::create(home.join(format!("err-{index}"))).expect("err"))
                     .spawn()
                     .expect("spawn launch"),
             );
         }
-        let deadline = Instant::now() + Duration::from_secs(60);
+        // Under nextest's 60 s kill, a stuck launch still fails readably.
+        let deadline = Instant::now() + Duration::from_secs(20);
         let failures: Vec<String> = children
             .into_iter()
-            .map(|mut child| {
-                while child.try_wait().expect("poll launch").is_none() {
+            .enumerate()
+            .filter_map(|(index, mut child)| {
+                let status = loop {
+                    if let Some(status) = child.try_wait().expect("poll launch") {
+                        break Some(status);
+                    }
                     if Instant::now() > deadline {
                         let _ = child.kill();
-                        break;
+                        let _ = child.wait();
+                        break None;
                     }
                     std::thread::sleep(Duration::from_millis(20));
-                }
-                child.wait_with_output().expect("launch output")
-            })
-            .filter(|output| {
-                !output.status.success()
-                    || !String::from_utf8_lossy(&output.stdout).contains("1 passed")
-            })
-            .map(|output| {
-                format!(
-                    "{}\n{}\n{}",
-                    output.status,
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr)
-                )
+                };
+                let stdout =
+                    std::fs::read_to_string(home.join(format!("out-{index}"))).unwrap_or_default();
+                let stderr =
+                    std::fs::read_to_string(home.join(format!("err-{index}"))).unwrap_or_default();
+                let passed =
+                    status.is_some_and(|status| status.success()) && stdout.contains("1 passed");
+                (!passed).then(|| format!("{status:?}\n{stdout}\n{stderr}"))
             })
             .collect();
         assert!(
@@ -193,7 +194,7 @@ async fn runtime_databases_wait_for_the_init_lock() -> anyhow::Result<()> {
                 .await
         }
     });
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
     assert!(!opening.is_finished(), "opened while the lock was held");
     assert!(!database_has_content(&sqlite.goals_db_path()));
 
