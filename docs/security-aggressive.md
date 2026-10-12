@@ -37,7 +37,7 @@ How each system protects files created later:
     between the file appearing and the stop.
   - Only the current folder is covered.
   - Folders on network or FUSE filesystems refuse the command.
-- **Windows** (the default, elevated sandbox; the non-admin sandbox refuses
+- **Windows** (the elevated sandbox; the non-admin sandbox refuses
   these profiles): each command is denied the credential files that exist
   when it starts, and a command is stopped when one appears while it runs
   (also a file saved over a denied one, which gets a new ACL). The same limits
