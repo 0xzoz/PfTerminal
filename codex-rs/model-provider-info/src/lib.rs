@@ -2014,6 +2014,9 @@ impl ModelProviderInfo {
         self.name == AMAZON_BEDROCK_PROVIDER_NAME
     }
 
+    /// Z.AI answers a transient overload (code 1305) with a 429, so its
+    /// transport retries one. A 429 with a `Retry-After` over a few seconds is
+    /// not retried there: the provider-request throttle owns that wait (#510).
     fn retries_transient_rate_limits(&self) -> bool {
         self.is_zai()
     }
