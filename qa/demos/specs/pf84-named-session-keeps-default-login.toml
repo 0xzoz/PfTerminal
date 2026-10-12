@@ -51,9 +51,9 @@ key = "Enter"
 wait = "Use default account for this session"
 [[steps]]
 key = "Down"
-repeat = 3
+repeat = 4
 [[steps]]
-wait = "› +4\\. Use default account for this session"
+wait = "› +5\\. Use default account for this session"
 [[steps]]
 key = "Enter"
 [[steps]]
