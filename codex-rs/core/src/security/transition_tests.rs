@@ -197,6 +197,7 @@ fn revoke(target: RevocationTarget) -> SecurityControlAction {
 }
 
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn security_transition_restrictive_persists_first_and_applies_now() {
     let fixture = fixture(SecurityLevel::Permissive);
     let store = MemoryStore::default();
@@ -435,6 +436,7 @@ fn security_transition_fences_children_pending_decisions_and_grants() {
 }
 
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn security_transition_kill_switch_and_release() {
     let fixture = fixture(SecurityLevel::Moderate);
     let store = MemoryStore::default();
@@ -518,6 +520,7 @@ fn security_transition_grant_request_is_not_a_transition() {
 }
 
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn security_transition_drops_grants_cached_and_pending_approvals() {
     use crate::security::aggressive;
     use crate::security::tainted_action::PostTaintAction;
@@ -617,6 +620,7 @@ fn post_taint(fixture: &Fixture) -> crate::security::tainted_action::PostTaintSt
 /// later commit in the older tree merges into what is stored instead of
 /// overwriting it, and a restrictive commit reaches the other tree now.
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn security_transition_trees_on_one_home_merge_and_propagate() {
     let home = tempfile::TempDir::new().unwrap();
     let store = crate::security::recovery::HomeTransitionStore::new(home.path());
@@ -667,6 +671,7 @@ fn security_transition_trees_on_one_home_merge_and_propagate() {
 }
 
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn security_transition_revoking_an_actor_stops_its_agents() {
     let fixture = fixture(SecurityLevel::Aggressive);
     let child = ThreadId::new();
@@ -695,6 +700,7 @@ fn security_transition_revoking_an_actor_stops_its_agents() {
 /// next commit that does save (and it is saved then), and a commit with no
 /// stored state does not store this tree's level as a floor for the user.
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn security_transition_unsaved_kill_switch_survives_the_next_commit() {
     let fixture = fixture(SecurityLevel::Aggressive);
     let store = MemoryStore::failing();
@@ -714,6 +720,7 @@ fn security_transition_unsaved_kill_switch_survives_the_next_commit() {
 /// still takes another tree's kill switch, and a release confirmed before a
 /// newer kill switch was stored is refused.
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn security_transition_kill_switch_reaches_older_trees_and_stale_release_is_refused() {
     let home = tempfile::TempDir::new().unwrap();
     let store = crate::security::recovery::HomeTransitionStore::new(home.path());
@@ -770,6 +777,7 @@ fn security_transition_kill_switch_reaches_older_trees_and_stale_release_is_refu
 /// Round 2: a held state lock never blocks the kill switch: it applies in
 /// memory and says it was not saved.
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn security_transition_kill_switch_does_not_wait_for_a_held_lock() {
     let home = tempfile::TempDir::new().unwrap();
     let holder = std::fs::File::create(home.path().join("security_state.lock")).unwrap();

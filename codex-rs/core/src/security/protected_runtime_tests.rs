@@ -185,6 +185,7 @@ fn routes() -> ProtectedRouteRegistry {
 }
 
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn protected_runtime_binds_configured_creator_and_effective_levels() {
     let revocations = Arc::new(RwLock::new(RevocationState::new()));
     let (view, _controller, root) = policy(SecurityLevel::Moderate, RevocationState::new());
@@ -257,6 +258,7 @@ fn protected_runtime_binds_configured_creator_and_effective_levels() {
 }
 
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn protected_runtime_rejects_unavailable_stale_and_expired_readiness() {
     let revocations = Arc::new(RwLock::new(RevocationState::new()));
     let (view, _controller, root) = policy(SecurityLevel::Moderate, RevocationState::new());
@@ -434,6 +436,7 @@ fn protected_runtime_rejects_unavailable_stale_and_expired_readiness() {
 }
 
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn unregistered_ingress_and_egress_fail_closed() {
     let revocations = Arc::new(RwLock::new(RevocationState::new()));
     let (view, _controller, root) = policy(SecurityLevel::Moderate, RevocationState::new());
@@ -471,6 +474,7 @@ fn unregistered_ingress_and_egress_fail_closed() {
 }
 
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn restart_recovery_and_live_generation_changes_block_reuse() {
     let revocations = Arc::new(RwLock::new(RevocationState::new()));
     let (view, _controller, root) = policy(SecurityLevel::Moderate, RevocationState::new());
@@ -642,6 +646,7 @@ fn request_and_grant(snapshot: &EffectivePolicySnapshot) -> (AuthorizationReques
 }
 
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn durable_intent_and_live_fence_precede_the_effect() {
     let revocations = Arc::new(RwLock::new(RevocationState::new()));
     let (view, _controller, root) = policy(SecurityLevel::Moderate, RevocationState::new());

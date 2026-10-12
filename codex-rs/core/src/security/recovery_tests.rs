@@ -95,6 +95,7 @@ fn security_recovery_restart_keeps_the_stricter_level_and_generation() {
 }
 
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn security_recovery_kill_switch_survives_restart() {
     let home = TempDir::new().unwrap();
     save(
@@ -123,6 +124,7 @@ fn security_recovery_crash_between_downgrade_writes_stays_strict() {
 }
 
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn security_recovery_tampered_state_enforces_aggressive_and_the_kill_switch() {
     let mut forged = serde_json::to_value(DurableSecurityState::new(
         SecurityLevel::Permissive,
