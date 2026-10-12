@@ -56,6 +56,8 @@ pub(super) enum Confirm {
 pub(super) enum Notice {
     TypedText,
     ChooseFirst,
+    /// The same, where a key is typed text until the user navigates (#523).
+    NavigateFirst,
     PersistentNeedsArrows,
 }
 
@@ -71,11 +73,31 @@ impl TypingGuard {
         matches!(self.state, State::Idle | State::Fresh { .. })
     }
 
+    /// #523: whether only navigation may act now: the prompt opened while
+    /// the user typed or over another view (or was revealed), and nothing
+    /// but typed text came since. A form's text fields take no keys then.
+    pub(super) fn awaits_navigation(&self) -> bool {
+        matches!(
+            self.state,
+            State::Fresh {
+                keys_arm: false,
+                ..
+            } | State::Typed
+        )
+    }
+
     pub(super) fn notice(&self) -> Option<Notice> {
         match self.state {
             State::Typed => Some(Notice::TypedText),
             State::PersistentKey => Some(Notice::PersistentNeedsArrows),
-            State::Fresh { told: true, .. } => Some(Notice::ChooseFirst),
+            State::Fresh {
+                told: true,
+                keys_arm: true,
+            } => Some(Notice::ChooseFirst),
+            State::Fresh {
+                told: true,
+                keys_arm: false,
+            } => Some(Notice::NavigateFirst),
             State::Idle | State::Fresh { told: false, .. } | State::Armed(_) => None,
         }
     }
@@ -168,10 +190,24 @@ impl TypingGuard {
     /// A character command key (such as open thread) acted. Enter waits for
     /// a choice, and a following character counts as typed text.
     pub(super) fn on_command_key(&mut self) {
-        self.state = State::Fresh {
-            told: false,
-            keys_arm: false,
-        };
+        // Typed text stays typed text (#523: a prompt revealed mid-word).
+        if self.state != State::Typed {
+            self.state = State::Fresh {
+                told: false,
+                keys_arm: false,
+            };
+        }
+    }
+
+    /// #523: whether a number key armed an option for Enter.
+    pub(super) fn is_armed(&self) -> bool {
+        matches!(self.state, State::Armed(_))
+    }
+
+    /// #523: whether Enter waits for a choice: the prompt is new to the
+    /// user, or text was typed into it.
+    pub(super) fn awaits_choice(&self) -> bool {
+        matches!(self.state, State::Fresh { .. } | State::Typed)
     }
 }
 
