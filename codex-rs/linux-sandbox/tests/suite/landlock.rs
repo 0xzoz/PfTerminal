@@ -1445,6 +1445,63 @@ async fn overlapping_runs_keep_shared_placeholders_until_the_last_ends() {
     }
 }
 
+/// #562: a file left where a denied path's folder would be (here a stale
+/// placeholder for `home/Library` from a run that was killed) used to fail
+/// every run (`Can't mkdir parents … Not a directory`). The run now works,
+/// and the file stays in place: the command can neither remove it nor create
+/// the denied path below it.
+#[tokio::test]
+async fn a_file_where_a_denied_paths_folder_would_be_stays_in_place() {
+    if should_skip_bwrap_tests().await {
+        eprintln!("skipping bwrap test: bwrap sandbox prerequisites are unavailable");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base = dir.path().canonicalize().expect("canonical");
+    let home = base.join("home");
+    std::fs::create_dir_all(&home).expect("home");
+    std::fs::write(home.join("Library"), "").expect("stale placeholder");
+    let policy = FileSystemSandboxPolicy::restricted(vec![
+        FileSystemSandboxEntry {
+            path: FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            },
+            access: FileSystemAccessMode::Write,
+            missing_path_behavior: None,
+        },
+        FileSystemSandboxEntry::skip_missing_path(
+            FileSystemPath::Path {
+                path: AbsolutePathBuf::from_absolute_path(home.join("Library/Keychains"))
+                    .expect("absolute"),
+            },
+            FileSystemAccessMode::Deny,
+        ),
+    ]);
+    let output = run_cmd_result_with_permission_profile_for_cwd(
+        &[
+            "bash",
+            "-c",
+            "rm -f home/Library; echo rm=$?; mv home/Library home/Moved; echo mv=$?; \
+             mkdir -p home/Library/Keychains; echo mkdir=$?; true",
+        ],
+        AbsolutePathBuf::from_absolute_path(&base).expect("absolute base"),
+        PermissionProfile::from_runtime_permissions(&policy, NetworkSandboxPolicy::Restricted),
+        create_env_from_core_vars(),
+        NETWORK_TIMEOUT_MS,
+        /*use_legacy_landlock*/ false,
+    )
+    .await
+    .expect("the run starts");
+    let stdout = output.stdout.text;
+    let stderr = output.stderr.text;
+    assert_eq!(output.exit_code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    for held in ["rm=1", "mv=1", "mkdir=1"] {
+        assert!(stdout.contains(held), "{held}: {stdout}\nstderr: {stderr}");
+    }
+    assert!(home.join("Library").is_file(), "the file stays");
+    assert!(!home.join("Moved").exists());
+}
+
 /// #493: under a full-write profile with a denial, the writable `/` bind
 /// must not cover the minimal `/dev` (bubblewrap binds `nodev`), so
 /// `/dev/null` stays usable while the denied file stays unreadable.

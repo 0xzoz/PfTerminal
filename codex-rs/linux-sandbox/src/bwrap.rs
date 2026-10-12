@@ -196,6 +196,18 @@ impl SyntheticMountTarget {
         self.pre_existing_path.is_some()
     }
 
+    /// #562: whether the file or folder found when the arguments were built
+    /// is still the one at the path. Another run's cleanup may have removed
+    /// it since; bubblewrap then makes a new mount target, which is this
+    /// run's own placeholder.
+    pub(crate) fn pre_existing_path_is_unchanged(&self) -> bool {
+        let Some(identity) = self.pre_existing_path else {
+            return true;
+        };
+        fs::symlink_metadata(&self.path)
+            .is_ok_and(|metadata| FileIdentity::from_metadata(&metadata) == identity)
+    }
+
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
@@ -1535,7 +1547,11 @@ fn append_read_only_subpath_args(
     if !subpath.exists() {
         if let Some(first_missing_component) = find_first_non_existent_component(subpath)
             && is_within_allowed_write_paths(&first_missing_component, allowed_write_paths)
-            && !hold_file_above_missing_path(bwrap_args, &first_missing_component)?
+            && !hold_file_above_missing_path(
+                bwrap_args,
+                &first_missing_component,
+                allowed_write_paths,
+            )?
         {
             append_missing_read_only_subpath_args(bwrap_args, &first_missing_component)?;
         }
@@ -1733,7 +1749,11 @@ fn append_unreadable_root_args(
     if !unreadable_root.exists() {
         if let Some(first_missing_component) = find_first_non_existent_component(unreadable_root)
             && is_within_allowed_write_paths(&first_missing_component, allowed_write_paths)
-            && !hold_file_above_missing_path(bwrap_args, &first_missing_component)?
+            && !hold_file_above_missing_path(
+                bwrap_args,
+                &first_missing_component,
+                allowed_write_paths,
+            )?
         {
             append_missing_empty_file_bind_data_args(bwrap_args, &first_missing_component)?;
         }
@@ -1755,26 +1775,45 @@ fn append_unreadable_root_args(
     append_existing_unreadable_path_args(bwrap_args, unreadable_root, allowed_write_paths)
 }
 
-/// #562: `missing` cannot be created when the folder it would go in is a
-/// regular file, so it needs no placeholder (bubblewrap would fail the run:
-/// `Can't mkdir parents … Not a directory`). Where that file is another live
-/// run's placeholder (for a path below it, such as `~/Library` for
-/// `~/Library/Keychains`), it is held as one: masked and registered, so this
-/// command cannot remove it from under that run, nor that run's cleanup from
-/// under this one. Returns whether `missing` needs nothing more.
-fn hold_file_above_missing_path(bwrap_args: &mut BwrapArgs, missing: &Path) -> Result<bool> {
+/// #562: the folder `missing` would go in is a regular file, so `missing`
+/// needs no placeholder of its own (bubblewrap would fail the run: `Can't
+/// mkdir parents … Not a directory`). The file stays in place instead, so the
+/// command cannot remove it and create the path: another live run's
+/// placeholder (for a path below it, such as `~/Library` for
+/// `~/Library/Keychains`) is held as one (masked and registered, so that
+/// run's cleanup cannot remove it from under this one); any other file in a
+/// writable root is bound read-only where it is (a mount point cannot be
+/// removed or renamed). Returns whether `missing` needs nothing more.
+fn hold_file_above_missing_path(
+    bwrap_args: &mut BwrapArgs,
+    missing: &Path,
+    allowed_write_paths: &[PathBuf],
+) -> Result<bool> {
     let Some(parent) = missing.parent() else {
         return Ok(false);
     };
     if !fs::symlink_metadata(parent).is_ok_and(|metadata| metadata.file_type().is_file()) {
         return Ok(false);
     }
-    if let Some(metadata) = live_placeholder_file(parent)
-        && !has_synthetic_mount_target(bwrap_args, parent)
-    {
+    if has_synthetic_mount_target(bwrap_args, parent) || has_read_only_bind(bwrap_args, parent) {
+        return Ok(true);
+    }
+    if let Some(metadata) = live_placeholder_file(parent) {
         append_existing_empty_file_bind_data_args(bwrap_args, parent, &metadata)?;
+    } else if is_within_allowed_write_paths(parent, allowed_write_paths) {
+        bwrap_args.args.push("--ro-bind".to_string());
+        bwrap_args.args.push(path_to_string(parent));
+        bwrap_args.args.push(path_to_string(parent));
     }
     Ok(true)
+}
+
+fn has_read_only_bind(bwrap_args: &BwrapArgs, path: &Path) -> bool {
+    let path = path_to_string(path);
+    bwrap_args
+        .args
+        .windows(3)
+        .any(|window| window[0] == "--ro-bind" && window[1] == path && window[2] == path)
 }
 
 /// #562: `path` when it is an empty file another live run registered as its
