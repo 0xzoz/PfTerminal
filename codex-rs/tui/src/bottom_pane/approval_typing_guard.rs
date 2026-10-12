@@ -56,6 +56,8 @@ pub(super) enum Confirm {
 pub(super) enum Notice {
     TypedText,
     ChooseFirst,
+    /// The same, where a key is typed text until the user navigates (#523).
+    NavigateFirst,
     PersistentNeedsArrows,
 }
 
@@ -88,7 +90,14 @@ impl TypingGuard {
         match self.state {
             State::Typed => Some(Notice::TypedText),
             State::PersistentKey => Some(Notice::PersistentNeedsArrows),
-            State::Fresh { told: true, .. } => Some(Notice::ChooseFirst),
+            State::Fresh {
+                told: true,
+                keys_arm: true,
+            } => Some(Notice::ChooseFirst),
+            State::Fresh {
+                told: true,
+                keys_arm: false,
+            } => Some(Notice::NavigateFirst),
             State::Idle | State::Fresh { told: false, .. } | State::Armed(_) => None,
         }
     }

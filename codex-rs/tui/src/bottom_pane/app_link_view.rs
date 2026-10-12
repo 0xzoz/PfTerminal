@@ -709,7 +709,9 @@ impl AppLinkView {
         }
         Some(match self.typing_guard.notice()? {
             Notice::TypedText => super::mcp_server_elicitation::TYPED_TEXT_NOTICE,
-            Notice::ChooseFirst => super::mcp_server_elicitation::CHOOSE_FIRST_NOTICE,
+            Notice::ChooseFirst | Notice::NavigateFirst => {
+                super::mcp_server_elicitation::CHOOSE_FIRST_NOTICE
+            }
             Notice::PersistentNeedsArrows => {
                 super::mcp_server_elicitation::PERSISTENT_OPTION_KEY_ERROR
             }

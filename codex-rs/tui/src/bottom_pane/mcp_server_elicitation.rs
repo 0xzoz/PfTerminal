@@ -1187,13 +1187,13 @@ impl McpServerElicitationOverlay {
         if !self.is_approval() {
             return match notice {
                 Notice::TypedText => Some(FORM_TYPED_NOTICE),
-                Notice::ChooseFirst => Some(FORM_FIRST_NOTICE),
+                Notice::ChooseFirst | Notice::NavigateFirst => Some(FORM_FIRST_NOTICE),
                 Notice::PersistentNeedsArrows => None,
             };
         }
         Some(match notice {
             Notice::TypedText => TYPED_TEXT_NOTICE,
-            Notice::ChooseFirst => CHOOSE_FIRST_NOTICE,
+            Notice::ChooseFirst | Notice::NavigateFirst => CHOOSE_FIRST_NOTICE,
             Notice::PersistentNeedsArrows => PERSISTENT_OPTION_KEY_ERROR,
         })
     }

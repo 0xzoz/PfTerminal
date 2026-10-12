@@ -784,6 +784,10 @@ impl ApprovalOverlay {
                 "This is a new request. Choose an option with {up}/{down} or its key, then \
                  {accept}; {cancel} cancels."
             ),
+            Notice::NavigateFirst => format!(
+                "This is a new request. Choose an option with {up}/{down}, then {accept}; \
+                 {cancel} cancels."
+            ),
             Notice::PersistentNeedsArrows => format!(
                 "That option lasts beyond this request, so its key does not choose it. \
                  Highlight it with {up}/{down}, then press {accept}; {cancel} cancels."
