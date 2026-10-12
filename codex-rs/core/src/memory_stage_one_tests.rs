@@ -952,3 +952,31 @@ async fn pf_23_s03_past_session_level_is_a_floor_for_its_memory() {
         ))
     ));
 }
+
+/// #578: local provenance (the producer a labelled message keeps for request
+/// building) is not part of the stage-one memory text.
+#[tokio::test]
+async fn stage_one_text_leaves_out_local_provenance() {
+    let owner = owner(SecurityLevel::Moderate).await;
+    let _ = (*owner.services.model_client())
+        .clone()
+        .with_source_envelopes(true);
+    let client = client(&owner).await.unwrap();
+    let source = ThreadId::new();
+    let mut answer = ResponseItem::Message {
+        id: None,
+        role: "assistant".into(),
+        content: vec![codex_protocol::models::ContentItem::OutputText {
+            text: "ANSWER_CANARY".into(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    answer.set_producer("openai:work");
+    let items = vec![opened_by(source), RolloutItem::ResponseItem(answer)];
+    let contents = client
+        .label_items(source, &items, /*token_limit*/ 100_000, |text| text)
+        .unwrap();
+    assert!(contents.contains("ANSWER_CANARY"), "{contents}");
+    assert!(!contents.contains("producer"), "{contents}");
+}

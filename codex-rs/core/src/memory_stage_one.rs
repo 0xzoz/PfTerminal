@@ -511,7 +511,8 @@ impl StageOneMemoryClient {
             .iter()
             .filter_map(keep_for_stage_one)
             .filter_map(|mut item| {
-                // #578: local provenance (producer) is not part of the memory text.
+                // #578: local provenance (fragment sources and producer) is
+                // not part of the memory text.
                 item.clear_local_provenance();
                 serde_json::to_string(&item).ok()
             })

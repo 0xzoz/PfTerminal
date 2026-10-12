@@ -532,6 +532,12 @@ mod job {
                 | RolloutItem::SourceOrigin(_)
                 | RolloutItem::EventMsg(_) => None,
             })
+            .map(|mut item| {
+                // #578: local provenance (fragment sources and producer) is
+                // not part of the memory text.
+                item.clear_local_provenance();
+                item
+            })
             .collect::<Vec<_>>();
         let serialized = serde_json::to_string(&filtered).map_err(|err| {
             CodexErr::InvalidRequest(format!("failed to serialize rollout memory: {err}"))
@@ -568,16 +574,13 @@ mod job {
             return None;
         }
 
-        let mut item = ResponseItem::Message {
+        Some(ResponseItem::Message {
             id: id.clone(),
             role: role.clone(),
             content,
             phase: phase.clone(),
             internal_chat_message_metadata_passthrough: metadata.clone(),
-        };
-        // #578: local provenance (producer) is not part of the memory text.
-        item.clear_local_provenance();
-        Some(item)
+        })
     }
 
     fn is_memory_excluded_contextual_user_fragment(content_item: &ContentItem) -> bool {
@@ -956,6 +959,40 @@ mod tests {
         let parsed: Vec<ResponseItem> = serde_json::from_str(&serialized).expect("parse");
 
         assert_eq!(parsed, expected);
+    }
+
+    /// #578: the producer recorded on model output is not part of the memory text.
+    #[test]
+    fn memory_text_leaves_out_local_provenance() {
+        let mut call = ResponseItem::FunctionCall {
+            id: None,
+            name: "shell".to_string(),
+            namespace: None,
+            arguments: "{}".to_string(),
+            encrypted_function_args: None,
+            call_id: "call-1".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        };
+        call.set_producer("zai");
+        let mut answer = ResponseItem::Message {
+            id: None,
+            role: "assistant".to_string(),
+            content: vec![ContentItem::OutputText {
+                text: "done".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        };
+        answer.set_producer("openai:work");
+
+        let serialized = job::serialize_filtered_rollout_response_items(&[
+            RolloutItem::ResponseItem(call),
+            RolloutItem::ResponseItem(answer),
+        ])
+        .expect("serialize");
+
+        assert!(serialized.contains("done"), "{serialized}");
+        assert!(!serialized.contains("producer"), "{serialized}");
     }
 
     #[test]
