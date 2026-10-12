@@ -1144,7 +1144,8 @@ enum WriteTarget {
 /// PF-23-S02 write protection the run keeps. The Corbanu home's runtime
 /// entries (`tmp` holds the sandbox launchers) are refused under Aggressive
 /// and Moderate, before anyone is asked, even where a person's approval
-/// lifts the other rules (#239). Under Aggressive the other read-only paths
+/// lifts the other rules (#239); so are the project's `.codex` and `.agents`
+/// under Aggressive (#565). Under Aggressive the other read-only paths
 /// are refused too unless a grant lifts them; under Moderate unless a
 /// person approved the command when asked (see
 /// `issue_513_moderate_only_a_persons_fresh_approval_lifts_a_write_protection`
@@ -1170,8 +1171,10 @@ async fn issue_513_additional_writes_never_reopen_a_write_protection() -> anyhow
         (aggressive, true, true, RuntimeFile, false, false),
         // As Corbanu Terminal launches Aggressive: permission requests off.
         (aggressive, false, false, RuntimeFile, false, false),
-        // Refused once the run's grant is known (none here), after asking.
-        (aggressive, false, true, ProjectAgents, false, true),
+        // #565: no grant lifts it under Aggressive (#520), so it is refused
+        // before anyone is asked, with permission requests on or off.
+        (aggressive, false, true, ProjectAgents, false, false),
+        (aggressive, false, false, ProjectAgents, false, false),
         (moderate, false, true, RuntimeFolder, false, false),
         // After untrusted content a person's approval of this protected
         // command would lift the other rules (#239); never this one.

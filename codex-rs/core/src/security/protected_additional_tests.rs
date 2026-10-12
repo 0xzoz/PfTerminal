@@ -382,6 +382,14 @@ fn issue_513_other_write_protections_count_under_aggressive_until_a_grant_lifts_
         } else {
             refused.clone()
         };
+        // #565: before the approval only what no grant lifts counts, so it
+        // is refused before anyone is asked; a git hook waits for the grant.
+        assert_eq!(
+            check(&f.denials, ReadOnlyScope::NeverLifted, &target),
+            after_grant,
+            "{}",
+            target.display()
+        );
         assert_eq!(
             check(&granted, ReadOnlyScope::Kept, &target),
             after_grant,
@@ -487,13 +495,18 @@ fn issue_513_moderate_scope_follows_the_approver() {
     use SecurityLevel::Aggressive;
     use SecurityLevel::Moderate;
     use SecurityLevel::Permissive;
-    let (runtime, kept) = (ReadOnlyScope::Runtime, ReadOnlyScope::Kept);
+    let (runtime, never_lifted, kept) = (
+        ReadOnlyScope::Runtime,
+        ReadOnlyScope::NeverLifted,
+        ReadOnlyScope::Kept,
+    );
     for (level, person, before, after) in [
         (Moderate, true, runtime, runtime),
         (Moderate, false, kept, kept),
-        // Aggressive: a grant for the run is known only after the approval.
-        (Aggressive, true, runtime, kept),
-        (Aggressive, false, runtime, kept),
+        // Aggressive: a grant for the run is known only after the approval;
+        // what no grant lifts is refused before anyone is asked (#565).
+        (Aggressive, true, never_lifted, kept),
+        (Aggressive, false, never_lifted, kept),
         (Permissive, false, runtime, runtime),
     ] {
         assert_eq!(
