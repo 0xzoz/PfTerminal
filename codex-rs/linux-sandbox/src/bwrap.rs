@@ -3063,9 +3063,8 @@ mod tests {
         assert!(target_bind < read_only_bind, "{:?}", args.args);
     }
 
-    /// #503: a writable link to a workspace's `.git` is bound after the
-    /// workspace (deeper target) and the workspace's read-only `.git` is
-    /// applied again over it.
+    /// #503: a writable link to a workspace's `.git` cannot make it writable;
+    /// since #535 the link is no writable root at all.
     #[cfg(unix)]
     #[test]
     fn writable_link_to_protected_git_keeps_it_read_only() {
@@ -3089,17 +3088,23 @@ mod tests {
             create_filesystem_args(&policy, temp_dir.path(), NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
                 .expect("filesystem args");
         let git = path_to_string(&git);
-        let git_bind = args
-            .args
-            .windows(3)
-            .position(|window| window == ["--bind", git.as_str(), git.as_str()])
-            .expect("link should be bound at `.git`");
-        let git_read_only = args
-            .args
-            .windows(3)
-            .rposition(|window| window == ["--ro-bind", git.as_str(), git.as_str()])
-            .expect("`.git` should be bound read-only");
-        assert!(git_bind < git_read_only, "{:?}", args.args);
+        // #535 (Travis, 2026-10-12): the link is no grant, so `.git` is never
+        // bound writable, and stays read-only.
+        assert!(
+            !args
+                .args
+                .windows(3)
+                .any(|window| window == ["--bind", git.as_str(), git.as_str()]),
+            "{:?}",
+            args.args
+        );
+        assert!(
+            args.args
+                .windows(3)
+                .any(|window| window == ["--ro-bind", git.as_str(), git.as_str()]),
+            "{:?}",
+            args.args
+        );
     }
 
     /// #503: a denial spelled through a link is masked at the link's target.
