@@ -732,6 +732,156 @@ async fn lookup_session_target_by_name_with_app_server(
     }
 }
 
+/// What `corbanu resume` (an id, `--last` or the picker) selected.
+enum ResumeLaunchSelection {
+    Selected(resume_picker::SessionSelection),
+    /// No saved session matches this id or name.
+    Missing(String),
+}
+
+fn is_resume_launch(cli: &Cli) -> bool {
+    cli.resume_session_id.is_some() || cli.resume_last || cli.resume_picker
+}
+
+fn exit_missing_session(
+    terminal_restore_guard: &mut tui::TerminalRestoreGuard,
+    tui: &mut Tui,
+    id_str: &str,
+    action: &str,
+) -> AppExitInfo {
+    error!("Error finding conversation path: {id_str}");
+    terminal_restore_guard.restore_silently();
+    session_log::log_session_end();
+    let _ = tui.terminal.clear();
+    fatal_exit_info(format!(
+        "No saved session found with ID {id_str}. Run `corbanu {action}` without an ID to choose from existing sessions."
+    ))
+}
+
+fn fatal_exit_info(message: String) -> AppExitInfo {
+    AppExitInfo {
+        token_usage: crate::token_usage::TokenUsage::default(),
+        thread_id: None,
+        resume_hint: None,
+        update_action: None,
+        exit_reason: ExitReason::Fatal(message),
+    }
+}
+
+fn user_requested_exit_info() -> AppExitInfo {
+    AppExitInfo {
+        token_usage: crate::token_usage::TokenUsage::default(),
+        thread_id: None,
+        resume_hint: None,
+        update_action: None,
+        exit_reason: ExitReason::UserRequested,
+    }
+}
+
+/// Resolves the session `corbanu resume` names. The picker consumes the app
+/// server, as it always has; a later step starts a new one.
+async fn select_resume_launch_session(
+    tui: &mut Tui,
+    cli: &Cli,
+    config: &Config,
+    app_server: &mut Option<AppServerSession>,
+    uses_remote_workspace: bool,
+    remote_cwd_override: Option<&Path>,
+) -> color_eyre::Result<ResumeLaunchSelection> {
+    if let Some(id_str) = cli.resume_session_id.as_deref() {
+        let Some(startup_app_server) = app_server.as_mut() else {
+            unreachable!("app server should be initialized for --resume <id>");
+        };
+        let target = lookup_session_target_with_app_server(startup_app_server, id_str).await?;
+        return Ok(
+            match explicit_resume_selection(
+                config.codex_home.as_ref(),
+                id_str,
+                target,
+                uses_remote_workspace,
+            ) {
+                Some(selection) => ResumeLaunchSelection::Selected(selection),
+                None => ResumeLaunchSelection::Missing(id_str.to_string()),
+            },
+        );
+    }
+    if cli.resume_last {
+        let filter_cwd = latest_session_cwd_filter(
+            uses_remote_workspace,
+            remote_cwd_override,
+            config,
+            cli.resume_show_all,
+        );
+        let Some(app_server) = app_server.as_mut() else {
+            unreachable!("app server should be initialized for --resume --last");
+        };
+        let target = lookup_latest_session_target_with_app_server(
+            app_server,
+            config,
+            filter_cwd,
+            cli.resume_include_non_interactive,
+        )
+        .await?;
+        return Ok(ResumeLaunchSelection::Selected(match target {
+            Some(target_session) => resume_picker::SessionSelection::Resume(target_session),
+            None => resume_picker::SessionSelection::StartFresh,
+        }));
+    }
+    let Some(app_server) = app_server.take() else {
+        unreachable!("app server should be initialized for --resume picker");
+    };
+    Ok(ResumeLaunchSelection::Selected(
+        resume_picker::run_resume_picker_with_app_server(
+            tui,
+            config,
+            cli.resume_show_all,
+            cli.resume_include_non_interactive,
+            app_server,
+        )
+        .await?,
+    ))
+}
+
+/// PF-84 (#545): the named account the selected thread ran on, which the app
+/// server resumes it on unless `--account` names another account of the same
+/// provider. `None` for a fork, a fresh session, a remote workspace, or while
+/// named accounts are off (the app server then refuses a recorded account).
+pub(crate) async fn resume_recorded_provider_account(
+    selection: &resume_picker::SessionSelection,
+    config: &Config,
+    uses_remote_workspace: bool,
+) -> Option<session_resume::RecordedProviderAccount> {
+    let resume_picker::SessionSelection::Resume(target) = selection else {
+        return None;
+    };
+    if uses_remote_workspace
+        || !config
+            .features
+            .enabled(codex_features::Feature::NamedAccounts)
+    {
+        return None;
+    }
+    session_resume::read_recorded_provider_account(target.path.as_deref()?).await
+}
+
+/// PF-84 (#545): why the thread cannot resume on the account it ran on, with
+/// the same recovery as the account line, instead of asking for a default key.
+pub(crate) fn resume_account_error(
+    config: &Config,
+    recorded: &session_resume::RecordedProviderAccount,
+) -> Option<String> {
+    // Only when the session runs on the recorded account: `--account` may
+    // name another account of the provider, and that one is checked at launch.
+    config.model_provider.account.as_ref().filter(|account| {
+        account.provider_id == recorded.provider_id && account.name == recorded.account
+    })?;
+    let message = crate::legacy_core::config::session_account_error(config)?;
+    Some(format!(
+        "This conversation ran on {} account `{}` and resumes on it: {message}",
+        recorded.provider_id, recorded.account
+    ))
+}
+
 async fn lookup_session_target_with_app_server(
     app_server: &mut AppServerSession,
     id_or_name: &str,
@@ -1496,9 +1646,9 @@ async fn run_ratatui_app(
     strict_config: bool,
     app_server_target: AppServerTarget,
     remote_cwd_override: Option<PathBuf>,
-    initial_config: Config,
+    mut initial_config: Config,
     manually_selected_oss_provider: Option<String>,
-    overrides: ConfigOverrides,
+    mut overrides: ConfigOverrides,
     cli_kv_overrides: Vec<(String, toml::Value)>,
     mut cloud_config_bundle: CloudConfigBundleLoader,
     feedback: codex_feedback::CodexFeedback,
@@ -1595,11 +1745,83 @@ async fn run_ratatui_app(
         unreachable!("app server should exist while resolving provider status");
     };
     let login_status = get_login_status(app_server_for_status, &initial_config).await?;
-    let startup_provider = startup_provider::resolve(
+    let mut startup_provider = startup_provider::resolve(
         &initial_config,
         Some(startup_provider::openai_metadata(login_status)),
     )
     .await;
+
+    // PF-84 (#545): onboarding would ask for a default key, but a resumed
+    // thread runs on the account it recorded. Pick the thread first (this
+    // runs the picker before onboarding) and check that account instead.
+    let mut early_resume_selection = None;
+    let use_fork = cli.fork_picker || cli.fork_last || cli.fork_session_id.is_some();
+    if startup_provider.requires_provider_onboarding
+        && is_resume_launch(&cli)
+        && !use_fork
+        && !uses_remote_workspace
+        && initial_config
+            .features
+            .enabled(codex_features::Feature::NamedAccounts)
+    {
+        let selection = select_resume_launch_session(
+            &mut tui,
+            &cli,
+            &initial_config,
+            &mut app_server,
+            uses_remote_workspace,
+            remote_cwd_override.as_deref(),
+        )
+        .await?;
+        match &selection {
+            ResumeLaunchSelection::Missing(id_str) => {
+                shutdown_app_server_if_present(app_server.take()).await;
+                return Ok(exit_missing_session(
+                    &mut terminal_restore_guard,
+                    &mut tui,
+                    id_str,
+                    "resume",
+                ));
+            }
+            ResumeLaunchSelection::Selected(resume_picker::SessionSelection::Exit) => {
+                terminal_restore_guard.restore_silently();
+                session_log::log_session_end();
+                return Ok(user_requested_exit_info());
+            }
+            ResumeLaunchSelection::Selected(selected) => {
+                if let Some(recorded) = resume_recorded_provider_account(
+                    selected,
+                    &initial_config,
+                    uses_remote_workspace,
+                )
+                .await
+                    && recorded.provider_id == initial_config.model_provider_id
+                {
+                    overrides.inherited_provider_account = Some(recorded.selection());
+                    initial_config = load_config_or_exit(
+                        cli_kv_overrides.clone(),
+                        overrides.clone(),
+                        loader_overrides.clone(),
+                        cloud_config_bundle.clone(),
+                        strict_config,
+                    )
+                    .await;
+                    if let Some(message) = resume_account_error(&initial_config, &recorded) {
+                        shutdown_app_server_if_present(app_server.take()).await;
+                        terminal_restore_guard.restore_silently();
+                        session_log::log_session_end();
+                        return Ok(fatal_exit_info(message));
+                    }
+                    startup_provider = startup_provider::resolve(
+                        &initial_config,
+                        Some(startup_provider::openai_metadata(login_status)),
+                    )
+                    .await;
+                }
+            }
+        }
+        early_resume_selection = Some(selection);
+    }
     let requires_provider_onboarding = startup_provider.requires_provider_onboarding;
     let should_show_onboarding = startup_provider::should_show_provider_onboarding(
         should_show_trust_screen_flag,
@@ -1610,6 +1832,39 @@ async fn run_ratatui_app(
     let mut startup_provider_resolution = Some(startup_provider);
 
     let mut deferred_provider_setup = None;
+    // The picker above consumed the app server; onboarding needs one. Start it
+    // on the onboarding config and drop it afterwards, so the session's app
+    // server still starts on the resumed thread's config as it always has.
+    let onboarding_only_app_server = should_show_onboarding && app_server.is_none();
+    if onboarding_only_app_server {
+        match start_app_server(
+            &app_server_target,
+            arg0_paths.clone(),
+            initial_config.clone(),
+            cli_kv_overrides.clone(),
+            loader_overrides.clone(),
+            strict_config,
+            cloud_config_bundle.clone(),
+            feedback.clone(),
+            log_db.clone(),
+            state_db.clone(),
+            environment_manager.clone(),
+        )
+        .await
+        {
+            Ok(started) => {
+                app_server = Some(
+                    AppServerSession::new(started, app_server_target.thread_params_mode())
+                        .with_remote_cwd_override(remote_cwd_override.clone()),
+                );
+            }
+            Err(err) => {
+                terminal_restore_guard.restore_silently();
+                session_log::log_session_end();
+                return Err(err);
+            }
+        }
+    }
     let config = if should_show_onboarding {
         startup_provider_resolution = None;
         let show_login_screen = requires_provider_onboarding
@@ -1706,24 +1961,10 @@ async fn run_ratatui_app(
     } else {
         initial_config
     };
+    if onboarding_only_app_server {
+        shutdown_app_server_if_present(app_server.take()).await;
+    }
 
-    let mut missing_session_exit = |id_str: &str, action: &str| {
-        error!("Error finding conversation path: {id_str}");
-        terminal_restore_guard.restore_silently();
-        session_log::log_session_end();
-        let _ = tui.terminal.clear();
-        Ok(AppExitInfo {
-            token_usage: crate::token_usage::TokenUsage::default(),
-            thread_id: None,
-            resume_hint: None,
-            update_action: None,
-            exit_reason: ExitReason::Fatal(format!(
-                "No saved session found with ID {id_str}. Run `corbanu {action}` without an ID to choose from existing sessions."
-            )),
-        })
-    };
-
-    let use_fork = cli.fork_picker || cli.fork_last || cli.fork_session_id.is_some();
     let session_selection = if use_fork {
         if let Some(id_str) = cli.fork_session_id.as_deref() {
             let Some(startup_app_server) = app_server.as_mut() else {
@@ -1734,7 +1975,12 @@ async fn run_ratatui_app(
                 Some(selection) => selection,
                 None => {
                     shutdown_app_server_if_present(app_server.take()).await;
-                    return missing_session_exit(id_str, "fork");
+                    return Ok(exit_missing_session(
+                        &mut terminal_restore_guard,
+                        &mut tui,
+                        id_str,
+                        "fork",
+                    ));
                 }
             }
         } else if cli.fork_last {
@@ -1783,69 +2029,37 @@ async fn run_ratatui_app(
         } else {
             resume_picker::SessionSelection::StartFresh
         }
-    } else if let Some(id_str) = cli.resume_session_id.as_deref() {
-        let Some(startup_app_server) = app_server.as_mut() else {
-            unreachable!("app server should be initialized for --resume <id>");
-        };
-        let target = lookup_session_target_with_app_server(startup_app_server, id_str).await?;
-        match explicit_resume_selection(
-            config.codex_home.as_ref(),
-            id_str,
-            target,
-            uses_remote_workspace,
-        ) {
+    } else if is_resume_launch(&cli) {
+        let selection = match early_resume_selection.take() {
             Some(selection) => selection,
             None => {
-                shutdown_app_server_if_present(app_server.take()).await;
-                return missing_session_exit(id_str, "resume");
+                select_resume_launch_session(
+                    &mut tui,
+                    &cli,
+                    &config,
+                    &mut app_server,
+                    uses_remote_workspace,
+                    remote_cwd_override.as_deref(),
+                )
+                .await?
             }
-        }
-    } else if cli.resume_last {
-        let filter_cwd = latest_session_cwd_filter(
-            uses_remote_workspace,
-            remote_cwd_override.as_deref(),
-            &config,
-            cli.resume_show_all,
-        );
-        let Some(app_server) = app_server.as_mut() else {
-            unreachable!("app server should be initialized for --resume --last");
         };
-        match lookup_latest_session_target_with_app_server(
-            app_server,
-            &config,
-            filter_cwd,
-            cli.resume_include_non_interactive,
-        )
-        .await?
-        {
-            Some(target_session) => resume_picker::SessionSelection::Resume(target_session),
-            None => resume_picker::SessionSelection::StartFresh,
-        }
-    } else if cli.resume_picker {
-        let Some(app_server) = app_server.take() else {
-            unreachable!("app server should be initialized for --resume picker");
-        };
-        match resume_picker::run_resume_picker_with_app_server(
-            &mut tui,
-            &config,
-            cli.resume_show_all,
-            cli.resume_include_non_interactive,
-            app_server,
-        )
-        .await?
-        {
-            resume_picker::SessionSelection::Exit => {
+        match selection {
+            ResumeLaunchSelection::Missing(id_str) => {
+                shutdown_app_server_if_present(app_server.take()).await;
+                return Ok(exit_missing_session(
+                    &mut terminal_restore_guard,
+                    &mut tui,
+                    &id_str,
+                    "resume",
+                ));
+            }
+            ResumeLaunchSelection::Selected(resume_picker::SessionSelection::Exit) => {
                 terminal_restore_guard.restore_silently();
                 session_log::log_session_end();
-                return Ok(AppExitInfo {
-                    token_usage: crate::token_usage::TokenUsage::default(),
-                    thread_id: None,
-                    resume_hint: None,
-                    update_action: None,
-                    exit_reason: ExitReason::UserRequested,
-                });
+                return Ok(user_requested_exit_info());
             }
-            other => other,
+            ResumeLaunchSelection::Selected(selection) => selection,
         }
     } else {
         resume_picker::SessionSelection::StartFresh
@@ -1894,6 +2108,14 @@ async fn run_ratatui_app(
         resume_picker::SessionSelection::StartFresh
     ) && (cli.resume_picker || cli.fork_picker);
 
+    // PF-84 (#545): the session config carries the account the resumed thread
+    // runs on, so the TUI shows and checks the account the app server uses.
+    let resume_recorded_account =
+        resume_recorded_provider_account(&session_selection, &config, uses_remote_workspace).await;
+    if let Some(recorded) = resume_recorded_account.as_ref() {
+        overrides.inherited_provider_account = Some(recorded.selection());
+    }
+
     let reloads_provider_config = matches!(
         &session_selection,
         resume_picker::SessionSelection::Resume(_) | resume_picker::SessionSelection::Fork(_)
@@ -1924,6 +2146,14 @@ async fn run_ratatui_app(
     };
     if reloads_provider_config {
         startup_provider_resolution = None;
+    }
+    if let Some(recorded) = resume_recorded_account.as_ref()
+        && let Some(message) = resume_account_error(&config, recorded)
+    {
+        shutdown_app_server_if_present(app_server.take()).await;
+        terminal_restore_guard.restore_silently();
+        session_log::log_session_end();
+        return Ok(fatal_exit_info(message));
     }
 
     // Configure syntax highlighting theme from the final config — onboarding
