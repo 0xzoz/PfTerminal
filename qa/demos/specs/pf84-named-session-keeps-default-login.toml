@@ -6,7 +6,7 @@
 #   python3 scripts/demo_video.py record qa/demos/specs/pf84-named-session-keeps-default-login.toml \
 #     --bin <candidate> --sprint PF-84-S06 --publish
 id = "pf84-named-session-keeps-default-login"
-feature = "PF-84 #570: a named-account session never logs out the default login"
+feature = "PF-84 #570: a named-account session never logs out the default login (TUI with its own app server; see #595)"
 expected = "Under forced_login_method=chatgpt the session on account chat is authorized as chat; switching to the default (API-key) login is refused with the reason, and auth.json is unchanged."
 model = "gpt-5.4"
 provider = "openai"
