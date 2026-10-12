@@ -15,17 +15,24 @@
 //! put off at once. Nothing is dropped for contention.
 //!
 //! Each record is first saved to a file under the home
-//! (`accounting-pending/<process>-<seq>.json`), so it survives this process,
-//! and the file is removed once the record is in the ledger. Records a process
-//! left behind (it exited or crashed first) are applied by the next writer
-//! that starts on the home, or by a running writer's periodic sweep: a
-//! process holds an advisory lock on `accounting-pending/<process>.lock` for
-//! as long as it runs. A ledger write is idempotent for the same record, so a
-//! record applied twice is recorded once.
+//! (`accounting-pending/<process>-<seq>.json`), so it survives this process
+//! (not an OS crash: the file is not synced, as the state DB itself runs with
+//! `synchronous=NORMAL`), and the file is removed once the record is in the
+//! ledger. Records a process left behind (it exited or crashed first) are
+//! claimed and applied by the next writer that starts on the home, or by a
+//! running writer's periodic sweep: a process holds an advisory lock on
+//! `accounting-pending/<process>.lock` for as long as it runs, and a claimant
+//! holds that lock while it takes the records. A ledger write is idempotent
+//! for the same record, so a record applied twice is recorded once. `exec`
+//! waits at exit for what its writer can still write; the TUI leaves it saved
+//! for the next writer.
 //!
-//! Records the ledger refuses (anything but contention, a read-only DB or a
-//! conversation row not written yet) are logged as gaps and dropped, as
-//! before.
+//! Records the ledger refuses (anything but contention, a read-only or failing
+//! disk, or a row it refers to that is not written yet) are logged and
+//! dropped, as before. A request still waiting for its record gets the error
+//! and its turn warns of the gap; a refusal that comes later is counted per
+//! conversation (`StateRuntime::accounting_refusals`) and reported by the turn
+//! that notices it.
 use super::AccountingStore;
 use super::AsOf;
 use super::Attempt;
@@ -35,7 +42,9 @@ use super::is_contention;
 use crate::StateRuntime;
 use crate::runtime::accounting::native::NotAdmitted;
 use crate::runtime::accounting::native::OwnerMissing;
+use crate::runtime::accounting::native::PredecessorMissing;
 use crate::runtime::busy_retry::is_read_only;
+use crate::runtime::busy_retry::is_storage_failure;
 use codex_protocol::ThreadId;
 use serde::Deserialize;
 use serde::Serialize;
@@ -64,6 +73,9 @@ const WAIT_CAP: Duration = Duration::from_secs(1);
 
 /// How often a writer checks on another process's hourly validation.
 const VALIDATION_POLL: Duration = Duration::from_secs(1);
+
+/// How long the validating process keeps trying to record that it validated.
+const VALIDATION_COMMIT_WAIT: Duration = Duration::from_secs(120);
 
 /// The lease on the hour's whole-ledger validation, under `PENDING_DIR`.
 const VALIDATION_LEASE: &str = "validation.lock";
@@ -297,12 +309,29 @@ impl Spool {
             .truncate(false)
             .write(true)
             .open(dir.join(format!("{process}.lock")))?;
-        lock.lock()?;
+        // A fresh name: nobody else can hold it.
+        lock.try_lock().map_err(std::io::Error::other)?;
         Ok(Self {
             dir,
             process,
             _lock: lock,
         })
+    }
+
+    /// Remove this process's lock file when it leaves no record behind, so
+    /// clean exits do not pile up lock files.
+    fn retire(&self) {
+        let own = format!("{}-", self.process);
+        let left = std::fs::read_dir(&self.dir).is_ok_and(|listing| {
+            listing.flatten().any(|item| {
+                item.file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with(&own))
+            })
+        });
+        if !left {
+            let _ = std::fs::remove_file(self.dir.join(format!("{}.lock", self.process)));
+        }
     }
 
     async fn save(&self, seq: u64, saved: &Saved) -> anyhow::Result<PathBuf> {
@@ -324,11 +353,19 @@ fn orphans(spool: &Spool, seq: &AtomicU64) -> Vec<Entry> {
         return Vec::new();
     };
     let mut files: Vec<(String, PathBuf)> = Vec::new();
+    let mut locks: Vec<String> = Vec::new();
     for item in listing.flatten() {
         let path = item.path();
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
+        if let Some(process) = name.strip_suffix(".lock")
+            && process.len() == 36
+            && process != spool.process
+        {
+            locks.push(process.to_string());
+            continue;
+        }
         let Some((process, _)) = name.rsplit_once('-') else {
             continue;
         };
@@ -337,6 +374,18 @@ fn orphans(spool: &Spool, seq: &AtomicU64) -> Vec<Entry> {
         }
     }
     files.sort();
+    // Lock files of exited processes that left no record: removed, so clean
+    // exits do not pile them up.
+    for lock in locks {
+        let has_records = files.iter().any(|(process, _)| *process == lock);
+        // The claim (and its lock) lives until the file is gone.
+        if !has_records
+            && let Some(claim) = claim(&spool.dir, &lock)
+            && let Some(path) = claim.path.as_ref()
+        {
+            let _ = std::fs::remove_file(path);
+        }
+    }
     let mut adopted = Vec::new();
     // The claim on each process seen: its lock, held while its records are
     // taken, so two writers never split one process's records between them.
@@ -371,7 +420,9 @@ fn orphans(spool: &Spool, seq: &AtomicU64) -> Vec<Entry> {
         match saved {
             Ok(saved) if saved.version == 1 => adopted.push(Entry {
                 write: saved.write,
-                queued_at: Instant::now(),
+                // When it was first queued, so a parked record is not given
+                // another full `OWNER_WAIT` each time it is adopted.
+                queued_at: queued_at(saved.queued_at_ms),
                 file: Some(own),
                 waiter: None,
                 adopted: true,
@@ -393,6 +444,16 @@ fn orphans(spool: &Spool, seq: &AtomicU64) -> Vec<Entry> {
         }
     }
     adopted
+}
+
+/// The `Instant` a record saved at `queued_at_ms` (UTC) was queued.
+fn queued_at(queued_at_ms: i64) -> Instant {
+    let age_ms = chrono::Utc::now()
+        .timestamp_millis()
+        .saturating_sub(queued_at_ms)
+        .clamp(0, i64::try_from(OWNER_WAIT.as_millis()).unwrap_or(i64::MAX));
+    let age = Duration::from_millis(u64::try_from(age_ms).unwrap_or(0));
+    Instant::now().checked_sub(age).unwrap_or_else(Instant::now)
 }
 
 /// A gone process's records, claimed by holding its lock.
@@ -439,6 +500,9 @@ struct Shared {
     /// Set while the writer waits on something other than a write: the lock
     /// held elsewhere, or the hour's validation.
     waiting: AtomicBool,
+    /// Turns of the writer's loop, for tests that it idles.
+    #[cfg(test)]
+    turns: AtomicU64,
 }
 
 impl AccountingWriter {
@@ -564,11 +628,15 @@ impl StateRuntime {
     /// first record that needs it, which reports a failure.
     pub async fn open_accounting(self: &Arc<Self>) {
         let (commands, refs) = self.accounting_writer();
-        if refs.shared.waiting.load(Ordering::Acquire) || self.state_db_contended() {
-            return;
-        }
         let (waiter, settled) = oneshot::channel();
         if commands.send(Command::Open(waiter)).is_err() {
+            return;
+        }
+        // As for a record: wait only for an open that starts now.
+        if refs.shared.pending.load(Ordering::Acquire) > 0
+            || refs.shared.waiting.load(Ordering::Acquire)
+            || self.state_db_contended()
+        {
             return;
         }
         let _ = tokio::time::timeout(WAIT_CAP, settled).await;
@@ -630,6 +698,8 @@ struct Opened {
 }
 
 enum Failure {
+    /// The runtime's pools were closed: the process is shutting down.
+    Closed,
     /// Retry after the pause; the DB was busy or read-only.
     Busy(Duration),
     /// A row it refers to is not there: the conversation's (its metadata
@@ -641,14 +711,21 @@ enum Failure {
 }
 
 fn classify(error: anyhow::Error) -> Failure {
-    if is_contention(&error) {
+    if error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<sqlx::Error>(),
+            Some(sqlx::Error::PoolClosed)
+        )
+    }) {
+        Failure::Closed
+    } else if is_contention(&error) {
         Failure::Busy(RETRY_FIRST)
-    } else if is_read_only(&error) {
+    } else if is_read_only(&error) || is_storage_failure(&error) {
+        // Not cleared by the next commit elsewhere, and not the record's fault.
         Failure::Busy(READ_ONLY_RETRY)
-    } else if error
-        .chain()
-        .any(|cause| cause.is::<OwnerMissing>() || cause.is::<NotAdmitted>())
-    {
+    } else if error.chain().any(|cause| {
+        cause.is::<OwnerMissing>() || cause.is::<NotAdmitted>() || cause.is::<PredecessorMissing>()
+    }) {
         Failure::Waiting(error)
     } else {
         Failure::Refused(error)
@@ -666,21 +743,31 @@ async fn run(
     let mut next_sweep = Instant::now();
     let mut pause = RETRY_FIRST;
     loop {
-        if let Some(spool) = spool.as_ref()
-            && Instant::now() >= next_sweep
-        {
+        #[cfg(test)]
+        shared.turns.fetch_add(1, Ordering::Relaxed);
+        // `next_sweep` moves on with or without a spool: the idle wait below
+        // sleeps until it, and must not spin.
+        if Instant::now() >= next_sweep {
             next_sweep = Instant::now() + SWEEP_EVERY;
-            let adopted = orphans(spool, &shared.seq);
-            if !adopted.is_empty() {
-                tracing::info!(
-                    target: LOG_TARGET,
-                    records = adopted.len(),
-                    "accounting: writing records an exited process left pending"
-                );
-            }
-            for entry in adopted {
-                shared.pending.fetch_add(1, Ordering::AcqRel);
-                enqueue(&mut inbox.queue, Box::new(entry));
+            if let Some(spool) = spool.as_ref() {
+                let adopted = {
+                    let spool = Arc::clone(spool);
+                    let shared = Arc::clone(&shared);
+                    tokio::task::spawn_blocking(move || orphans(&spool, &shared.seq))
+                        .await
+                        .unwrap_or_default()
+                };
+                if !adopted.is_empty() {
+                    tracing::info!(
+                        target: LOG_TARGET,
+                        records = adopted.len(),
+                        "accounting: writing records an exited process left pending"
+                    );
+                }
+                for entry in adopted {
+                    shared.pending.fetch_add(1, Ordering::AcqRel);
+                    enqueue(&mut inbox.queue, Box::new(entry));
+                }
             }
         }
         if inbox.queue.is_empty() && inbox.opens.is_empty() {
@@ -691,7 +778,7 @@ async fn run(
             tokio::select! {
                 command = commands.recv() => match command {
                     Some(command) => inbox.accept(command),
-                    None => return,
+                    None => return retire(spool.as_deref()),
                 },
                 () = tokio::time::sleep_until(wake) => {}
             }
@@ -706,7 +793,10 @@ async fn run(
             .iter()
             .position(|job| job.not_before.is_none_or(|at| at <= now));
         if ready.is_none() && inbox.opens.is_empty() {
-            // Only parked jobs: wait for the first, or for a new record.
+            // Only parked jobs: nothing this writer can do now, so an exiting
+            // process need not wait for them.
+            inbox.answer_blocked();
+            // Wait for the first, or for a new record.
             let wake = inbox
                 .queue
                 .iter()
@@ -716,14 +806,14 @@ async fn run(
             tokio::select! {
                 command = commands.recv() => match command {
                     Some(command) => inbox.accept(command),
-                    None => return,
+                    None => return retire(spool.as_deref()),
                 },
                 () = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {}
             }
             continue;
         }
         let Some(state) = runtime.upgrade() else {
-            return;
+            return retire(spool.as_deref());
         };
         // The hour's whole-ledger validation runs in one process at a time,
         // before any write needs it; meanwhile records are put off.
@@ -756,6 +846,7 @@ async fn run(
                     pause = (pause * 2).min(RETRY_MAX);
                     continue;
                 }
+                Err(Failure::Closed) => return retire(spool.as_deref()),
                 Err(Failure::Waiting(_) | Failure::Refused(_)) => {
                     // Reported by the first record that needs the ledger.
                     for waiter in inbox.opens.drain(..) {
@@ -807,6 +898,8 @@ async fn run(
                 tokio::time::sleep(wait.max(pause)).await;
                 pause = (pause * 2).min(RETRY_MAX);
             }
+            // Shutting down: the saved records are left for the next writer.
+            Err(Failure::Closed) => return retire(spool.as_deref()),
             Err(Failure::Waiting(_))
                 if job.queued_at.elapsed() < OWNER_WAIT
                     && (job.adopted || state.thread_row_put_off(job.owner)) =>
@@ -815,7 +908,14 @@ async fn run(
                 job.not_before = Some(Instant::now() + RETRY_MAX);
             }
             Err(Failure::Waiting(error)) => {
-                refuse(&mut inbox.queue, index, &shared, format!("{error:#}")).await;
+                refuse(
+                    &state,
+                    &mut inbox.queue,
+                    index,
+                    &shared,
+                    format!("{error:#}"),
+                )
+                .await;
             }
             Err(Failure::Refused(error)) => {
                 opened.store = false;
@@ -828,7 +928,7 @@ async fn run(
                         job.settle(|| Err(Settled::Failed(cause.clone())));
                     }
                 } else {
-                    refuse(&mut inbox.queue, index, &shared, cause).await;
+                    refuse(&state, &mut inbox.queue, index, &shared, cause).await;
                 }
             }
         }
@@ -866,6 +966,13 @@ impl Inbox {
     }
 }
 
+/// The writer is ending: drop this process's lock file if it leaves no record.
+fn retire(spool: Option<&Spool>) {
+    if let Some(spool) = spool {
+        spool.retire();
+    }
+}
+
 fn enqueue(queue: &mut VecDeque<Job>, entry: Box<Entry>) {
     // Only the newest job for an attempt can take more of its records;
     // anything earlier would move them ahead of records queued in between.
@@ -883,11 +990,20 @@ fn enqueue(queue: &mut VecDeque<Job>, entry: Box<Entry>) {
     queue.push_back(Job::new(entry));
 }
 
-async fn refuse(queue: &mut VecDeque<Job>, index: usize, shared: &Shared, cause: String) {
+async fn refuse(
+    state: &StateRuntime,
+    queue: &mut VecDeque<Job>,
+    index: usize,
+    shared: &Shared,
+    cause: String,
+) {
     let Some(mut job) = queue.remove(index) else {
         return;
     };
     shared.pending.fetch_sub(job.entries, Ordering::AcqRel);
+    // A request no longer waiting for this record learns of it through the
+    // count (`StateRuntime::accounting_refusals`).
+    state.note_accounting_refused(job.owner);
     tracing::error!(
         target: LOG_TARGET,
         step = "write record",
@@ -937,18 +1053,34 @@ async fn ensure_validated(
     }
     let started = Instant::now();
     // Moving the checkpoint into this hour tells the other processes it was
-    // done. A failure is the write's to report: it validates again.
-    match store.maintain_for_write(AsOf::Now).await {
-        Ok(()) => tracing::info!(
-            target: LOG_TARGET,
-            elapsed_ms = started.elapsed().as_millis() as u64,
-            "accounting: validated the ledger for this hour"
-        ),
-        Err(error) => tracing::debug!(
-            target: LOG_TARGET,
-            error = %format_args!("{error:#}"),
-            "accounting: the hour's ledger validation did not complete"
-        ),
+    // done. The validation itself is kept for the hour (`validate_hour`), so a
+    // busy DB only delays that short commit: it is retried, still holding the
+    // lease, rather than leaving the next process to validate again. Any other
+    // failure is the write's to report.
+    let mut pause = RETRY_FIRST;
+    loop {
+        match store.maintain_for_write(AsOf::Now).await {
+            Ok(()) => {
+                tracing::info!(
+                    target: LOG_TARGET,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "accounting: validated the ledger for this hour"
+                );
+                break;
+            }
+            Err(error) if is_contention(&error) && started.elapsed() < VALIDATION_COMMIT_WAIT => {
+                tokio::time::sleep(pause).await;
+                pause = (pause * 2).min(RETRY_MAX);
+            }
+            Err(error) => {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    error = %format_args!("{error:#}"),
+                    "accounting: the hour's ledger validation did not complete"
+                );
+                break;
+            }
+        }
     }
     true
 }

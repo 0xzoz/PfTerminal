@@ -258,6 +258,9 @@ impl SqliteConfig {
             .log_statements(LevelFilter::Off);
         SqlitePoolOptions::new()
             .max_connections(2)
+            // Waiting for one of its connections counts against the same
+            // short wait; a timeout reads as a busy DB.
+            .acquire_timeout(busy_timeout)
             .connect_with(options)
             .await
     }

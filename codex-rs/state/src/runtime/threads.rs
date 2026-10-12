@@ -1113,7 +1113,9 @@ ON CONFLICT(id) DO UPDATE SET
         }
     }
 
-    /// Check that deleting `thread_ids` can update this database, changing nothing.
+    /// Check that deleting `thread_ids` can update this database, changing none
+    /// of their records. (Like any ledger write, it may first retire ledger
+    /// records already due to expire.)
     ///
     /// Callers that remove other records first (a conversation's rollout files)
     /// run this before them, so a ledger that cannot be updated leaves the
@@ -1122,6 +1124,8 @@ ON CONFLICT(id) DO UPDATE SET
         if thread_ids.is_empty() {
             return Ok(());
         }
+        // Retiring what retention has due, in short batches as any ledger write
+        // does, keeps the preflight's maintenance under the lock bounded.
         let validated_at_ms = Self::prepare_delete(self, DeletionTime::AtWriterLock).await?;
         let mut tx = super::accounting::native::begin_delete(&self.pool).await?;
         let result = async {

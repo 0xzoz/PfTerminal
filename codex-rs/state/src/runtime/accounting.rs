@@ -119,11 +119,10 @@ impl<'a> Journal<'a> {
             );
         }
         if let Some(predecessor) = attempt.retry_of {
-            let parent = read_attempt(conn, predecessor).await?;
-            ensure!(
-                parent.as_ref().is_some_and(|p| attempt.same_owner(p)),
-                "invalid retry predecessor"
-            );
+            let Some(parent) = read_attempt(conn, predecessor).await? else {
+                return Err(native::PredecessorMissing.into());
+            };
+            ensure!(attempt.same_owner(&parent), "invalid retry predecessor");
         }
         // A record a format-1 ledger cannot express upgrades the ledger in the
         // same transaction that writes it.

@@ -13,7 +13,10 @@
 //! deletion). An index changes no record and no result, and builds that do not
 //! know these indexes neither use nor mind them. A ledger migration that
 //! rebuilds `draft_accounting_attempts` drops them with it; they are created
-//! again on the next open.
+//! again on the next open. Their names are outside the ledger's
+//! `draft_accounting_*` namespace, so a future ledger migration cannot collide
+//! with them. An expression index evaluates `json_extract` on every inserted
+//! payload; payloads are always serialized JSON.
 use crate::StateRuntime;
 use std::time::Instant;
 
@@ -23,14 +26,14 @@ const LOG_TARGET: &str = "codex_core::accounting";
 /// use exactly; SQLite only uses an expression index for an identical one.
 const INDEXES: [(&str, &str); 2] = [
     (
-        "draft_accounting_attempt_owner_dispatch",
-        "CREATE INDEX IF NOT EXISTS draft_accounting_attempt_owner_dispatch \
+        "corbanu_lookup_attempt_owner_dispatch",
+        "CREATE INDEX IF NOT EXISTS corbanu_lookup_attempt_owner_dispatch \
          ON draft_accounting_attempts(json_extract(payload, '$.thread_id'), \
          json_extract(payload, '$.dispatched_at_ms'))",
     ),
     (
-        "draft_accounting_attempt_dispatch",
-        "CREATE INDEX IF NOT EXISTS draft_accounting_attempt_dispatch \
+        "corbanu_lookup_attempt_dispatch",
+        "CREATE INDEX IF NOT EXISTS corbanu_lookup_attempt_dispatch \
          ON draft_accounting_attempts(json_extract(payload, '$.dispatched_at_ms'))",
     ),
 ];

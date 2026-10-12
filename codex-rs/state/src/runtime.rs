@@ -129,16 +129,20 @@ pub struct StateRuntime {
     /// Conversations whose `threads` row this process put off writing while
     /// the state DB was busy; their ledger records wait for the row.
     thread_rows_put_off: Arc<std::sync::Mutex<std::collections::HashSet<ThreadId>>>,
+    /// Ledger records the ledger refused, per conversation; see
+    /// `accounting_refusals`.
+    accounting_refusals: Arc<std::sync::Mutex<std::collections::HashMap<ThreadId, u64>>>,
 }
 
 /// How long a write a model request waits on (see [`StateRuntime::quick`])
 /// waits for another connection's write lock before giving up.
 pub const QUICK_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// Whether `error` is SQLITE_BUSY: the shared state DB's write lock was held by
-/// another connection, usually another Corbanu process, past the wait.
+/// Whether `error` is the shared state DB being busy: SQLITE_BUSY (another
+/// connection, usually another Corbanu process, held the write lock past the
+/// wait) or no pooled connection free in time.
 pub fn is_state_db_busy(error: &anyhow::Error) -> bool {
-    busy_retry::is_busy(error)
+    accounting::store::is_contention(error)
 }
 
 impl StateRuntime {
@@ -321,6 +325,7 @@ impl StateRuntime {
             quick: None,
             accounting_writer: Arc::default(),
             thread_rows_put_off: Arc::default(),
+            accounting_refusals: Arc::default(),
         };
         runtime.quick = quick_pool.map(|quick_pool| Arc::new(runtime.on_pool(quick_pool)));
         let runtime = Arc::new(runtime);
@@ -352,6 +357,7 @@ impl StateRuntime {
             quick: None,
             accounting_writer: Arc::clone(&self.accounting_writer),
             thread_rows_put_off: Arc::clone(&self.thread_rows_put_off),
+            accounting_refusals: Arc::clone(&self.accounting_refusals),
         }
     }
 
@@ -393,6 +399,27 @@ impl StateRuntime {
         } else {
             rows.remove(&thread);
         }
+    }
+
+    /// How many of `owner`'s ledger records this process's writer refused so
+    /// far. A record can be refused after the request that made it stopped
+    /// waiting for it; a turn compares the count to report the gap.
+    pub fn accounting_refusals(&self, owner: ThreadId) -> u64 {
+        self.accounting_refusals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&owner)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn note_accounting_refused(&self, owner: ThreadId) {
+        *self
+            .accounting_refusals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(owner)
+            .or_default() += 1;
     }
 
     pub(crate) fn thread_row_put_off(&self, thread: ThreadId) -> bool {

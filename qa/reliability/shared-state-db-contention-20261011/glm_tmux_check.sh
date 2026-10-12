@@ -22,19 +22,19 @@ EOF
 SOCK="$OUT/tmux.sock"
 export CORBANU_TEST_NO_NATIVE_KEYRING=1
 export CORBANU_HOME="$OUT/home" PFTERMINAL_HOME="$OUT/home" CODEX_HOME="$OUT/home"
-# The tmux server started below inherits the key; it is not on any command line.
-ZAI_API_KEY="$(env -u CORBANU_TEST_NO_NATIVE_KEYRING -u CORBANU_HOME -u CODEX_HOME -u PFTERMINAL_HOME \
-  "$HOME/.local/bin/corbanu" vault auth-helper provider/zai_api_key)"
-export ZAI_API_KEY
+# The key is fetched by each session's own command, inline, and never
+# exported or printed.
+KEY_CMD="env -u CORBANU_TEST_NO_NATIVE_KEYRING -u CORBANU_HOME -u CODEX_HOME -u PFTERMINAL_HOME $HOME/.local/bin/corbanu vault auth-helper provider/zai_api_key"
 if [ "${WARMUP:-0}" = 1 ]; then
   # One session alone first, so the home's runtime DBs exist before eight
   # first launches race to create them (a separate, pre-existing issue).
-  (cd "$OUT/work" && "$BIN" exec --skip-git-repo-check -m glm-5.3-flash -c model_provider='"zai"' \
+  (cd "$OUT/work" && ZAI_API_KEY="$($KEY_CMD)" "$BIN" exec --skip-git-repo-check \
+    -m glm-5.3-flash -c model_provider='"zai"' \
     "Reply with exactly the word READY." > "$OUT/warmup.txt" 2>&1) || true
 fi
 PROMPT='Use the shell tool three times, one command per call: pwd, then ls, then date. Then reply with exactly the word FINISHED-OK.'
 for i in $(seq 1 "$N"); do
-  cmd="cd '$OUT/work' && '$BIN' --dangerously-bypass-approvals-and-sandbox -m glm-5.3-flash -c model_provider=\"zai\" \"session $i: $PROMPT\""
+  cmd="cd '$OUT/work' && ZAI_API_KEY=\"\$($KEY_CMD)\" '$BIN' --dangerously-bypass-approvals-and-sandbox -m glm-5.3-flash -c model_provider=\"zai\" \"session $i: $PROMPT\""
   if [ "$i" = 1 ]; then
     "$TMUX_BIN" -S "$SOCK" new-session -d -s glm -n "s$i" -x 160 -y 48 "$cmd"
     # Keep a session's pane if it exits, to see why.
@@ -43,7 +43,6 @@ for i in $(seq 1 "$N"); do
     "$TMUX_BIN" -S "$SOCK" new-window -t glm -n "s$i" "$cmd"
   fi
 done
-unset ZAI_API_KEY
 echo "started $N sessions at $(date -u +%H:%M:%S)"
 deadline=$((SECONDS + ${WAIT_SECONDS:-420}))
 while [ $SECONDS -lt $deadline ]; do
@@ -68,3 +67,4 @@ echo "--- busy/locked/accounting warnings in the home's logs DB:"
 sqlite3 "$OUT/home/pfterminal_logs_2.sqlite" \
   "SELECT count(*) FROM logs WHERE level IN ('WARN','ERROR') AND (feedback_log_body LIKE '%database is locked%' OR feedback_log_body LIKE '%state database is busy%' OR feedback_log_body LIKE '%developer accounting failed%')" \
   2>/dev/null || echo "(no logs DB)"
+"$TMUX_BIN" -S "$SOCK" kill-server 2>/dev/null || true

@@ -142,6 +142,20 @@ impl std::fmt::Display for NotAdmitted {
 
 impl std::error::Error for NotAdmitted {}
 
+/// A retry whose predecessor attempt is not in the ledger (yet): it may still
+/// be queued in another process's ledger writer. Its message is the one this
+/// check always had.
+#[derive(Debug)]
+pub(crate) struct PredecessorMissing;
+
+impl std::fmt::Display for PredecessorMissing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("invalid retry predecessor")
+    }
+}
+
+impl std::error::Error for PredecessorMissing {}
+
 async fn require_active(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure!(
         matches!(

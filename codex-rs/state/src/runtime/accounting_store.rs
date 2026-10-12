@@ -654,6 +654,10 @@ impl<'a> AccountingStore<'a> {
     /// hour's validation on a read snapshot and the due expiries in short
     /// batches, as ahead of a write (`prepare_write`). Returns when the
     /// validation ran; `None` when there is no ledger.
+    ///
+    /// As for ledger writes, the whole ledger is validated at most once per
+    /// hour: a deletion after another process already validated it this hour
+    /// does not validate it again.
     pub(in crate::runtime) async fn prepare_delete(
         runtime: &'a StateRuntime,
         as_of: AsOf,

@@ -336,14 +336,16 @@ async fn apply_metadata_update(
                         message: format!("failed to read thread metadata for {thread_id}: {err}"),
                     })?;
             creating.store(existing.is_none(), std::sync::atomic::Ordering::Relaxed);
-            // An existing row's best-effort update may be put off; a new row is
-            // written now, since other records (the ledger's) refer to it.
-            let put_off = busy_db == BusyDb::PutOff && !require_sqlite_write && existing.is_some();
-            if put_off && state_db.state_db_contended() {
+            // A best-effort update waits briefly for the lock. While the DB is
+            // known to be busy, one for an existing row is put off untried; a
+            // new row is still tried once, since the ledger's records refer to
+            // it (they wait for it if it is put off).
+            let quick = busy_db == BusyDb::PutOff && !require_sqlite_write;
+            if quick && existing.is_some() && state_db.state_db_contended() {
                 return Ok(Written::PutOff);
             }
             let writer: &codex_state::StateRuntime =
-                if put_off { state_db.quick() } else { state_db };
+                if quick { state_db.quick() } else { state_db };
             let advance_recency_at = patch.advance_recency_at;
             if existing.is_none() && rollout_path.is_none() {
                 let resolved = resolve_rollout_path(store, thread_id, include_archived).await?;

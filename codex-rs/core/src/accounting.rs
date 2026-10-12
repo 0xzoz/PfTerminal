@@ -198,6 +198,9 @@ pub(crate) struct TurnScopes {
     pub(crate) chat: Option<Arc<chat::DeferredChatSampling>>,
     /// A collector for this turn never opened.
     unrecorded: bool,
+    /// The ledger and conversation this turn records under, to notice records
+    /// the ledger writer refused after their request stopped waiting.
+    ledger: Option<(Arc<StateRuntime>, ThreadId)>,
     _anthropic_scope: SamplingScope,
     _responses_scope: responses::Scope,
     _chat_scope: chat::Scope,
@@ -234,13 +237,17 @@ impl TurnScopes {
 }
 
 /// Warn once per turn when `scopes` - or a collector that never attached
-/// (`None`) - left a model request unrecorded.
+/// (`None`) - left a model request unrecorded, including a record the ledger
+/// writer refused after its request stopped waiting for it
+/// (`SessionNotices::refused_since`).
 pub(crate) async fn warn_if_unrecorded(
     session: &crate::session::session::Session,
     turn_context: &crate::session::turn_context::TurnContext,
     scopes: Option<&TurnScopes>,
 ) {
-    if scopes.is_none_or(TurnScopes::stopped)
+    let ledger = scopes.and_then(|scopes| scopes.ledger.as_ref());
+    if (scopes.is_none_or(TurnScopes::stopped)
+        || session.services.accounting_notices.refused_since(ledger))
         && !turn_context
             .accounting_gap_warning_emitted
             .swap(true, Ordering::Relaxed)
@@ -340,6 +347,10 @@ pub(crate) struct SessionNotices {
     pub(crate) format: std::sync::atomic::AtomicU8,
     pub(crate) format_warned: std::sync::atomic::AtomicBool,
     pub(crate) excluded: std::sync::atomic::AtomicBool,
+    /// The ledger writer's refusal count for this session's records when it
+    /// last reported them (`refused_since`); set when its first turn attaches.
+    pub(crate) refusals_seen: std::sync::atomic::AtomicU64,
+    pub(crate) refusals_seen_set: std::sync::atomic::AtomicBool,
 }
 
 const FORMAT_NEWER: u8 = 1;
@@ -367,6 +378,28 @@ async fn ledger_refused(
             true
         }
         Err(_) => false,
+    }
+}
+
+impl SessionNotices {
+    /// Start counting the ledger writer's refusals of this session's records
+    /// (`refused_since`), once: refusals before its first turn are not its own.
+    fn count_refusals_from(&self, db: &StateRuntime, owner: ThreadId) {
+        if !self.refusals_seen_set.swap(true, Ordering::Relaxed) {
+            self.refusals_seen
+                .store(db.accounting_refusals(owner), Ordering::Relaxed);
+        }
+    }
+
+    /// Whether the ledger writer refused any of this session's records since
+    /// the session last looked. A record can be refused after its request
+    /// stopped waiting for it; the turn that notices reports the gap.
+    pub(crate) fn refused_since(&self, ledger: Option<&(Arc<StateRuntime>, ThreadId)>) -> bool {
+        let Some((db, owner)) = ledger else {
+            return false;
+        };
+        let refused = db.accounting_refusals(*owner);
+        refused > self.refusals_seen.swap(refused, Ordering::Relaxed)
     }
 }
 
@@ -477,6 +510,9 @@ pub(crate) async fn attach_scopes(
             Err(Uncollected::Excluded(_) | Uncollected::NewerFormat) => None,
         }
     };
+    let ledger = owner
+        .as_ref()
+        .map(|owner| (Arc::clone(&owner.db), owner.thread));
     let turn = match &owner {
         Some(owner) if !owner.label_prefix.is_empty() => {
             scoped_turn_label(owner.label_prefix, &turn)
@@ -549,7 +585,14 @@ pub(crate) async fn attach_scopes(
         });
     let _chat_scope =
         chat::Scope::attach(Arc::clone(&client_session.chat_accounting), chat.clone())?;
+    if let Some((db, owner)) = ledger.as_ref() {
+        session
+            .services
+            .accounting_notices
+            .count_refusals_from(db, *owner);
+    }
     Ok(TurnScopes {
+        ledger,
         anthropic,
         responses,
         chat,

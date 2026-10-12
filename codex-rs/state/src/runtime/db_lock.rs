@@ -1,4 +1,4 @@
-//! Timing of the shared state DB's write lock.
+//! Timing of SQLite write locks, the shared state DB's above all.
 //!
 //! The state DB is shared by every Corbanu process on a home, and SQLite has
 //! one write lock per database: while one connection holds it, every other
@@ -99,7 +99,7 @@ impl HoldTimer {
                 wait_ms,
                 held_ms,
                 how,
-                "state DB write lock held long; other sessions wait for it"
+                "SQLite write lock held long; other connections wait for it (site names the database)"
             );
         } else {
             tracing::debug!(
@@ -108,7 +108,7 @@ impl HoldTimer {
                 wait_ms,
                 held_ms,
                 how,
-                "state DB write lock released"
+                "SQLite write lock released"
             );
         }
     }

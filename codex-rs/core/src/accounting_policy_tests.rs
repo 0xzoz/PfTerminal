@@ -953,6 +953,65 @@ async fn accounting_policy_busy_state_db_never_holds_a_request_up_and_loses_noth
     fixture.two_reopens(vec![first, second]).await
 }
 
+/// A record the ledger writer refuses after its request stopped waiting is
+/// still reported: by the turn that notices it, once.
+#[tokio::test]
+async fn accounting_policy_late_refusals_are_reported_once() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let owner = fixture.sampling.owner;
+    let notices = SessionNotices::default();
+    let ledger = (fixture.db.clone(), owner);
+    let refuse = || async {
+        // Recorded under this conversation, for another one: refused.
+        let mut other = fixture.sampling.admit(MODEL, ENDPOINT).await?;
+        other.thread_id = ThreadId::new();
+        let refused = fixture
+            .db
+            .record_accounting(codex_state::accounting::LedgerWrite::Admit {
+                owner,
+                attempt: other,
+                prices: Vec::new(),
+            })
+            .await;
+        assert!(refused.is_err());
+        anyhow::Ok(())
+    };
+    // One from before the session's first turn is not its own.
+    refuse().await?;
+    notices.count_refusals_from(&fixture.db, owner);
+    assert!(!notices.refused_since(Some(&ledger)));
+    refuse().await?;
+    assert!(notices.refused_since(Some(&ledger)));
+    assert!(!notices.refused_since(Some(&ledger)));
+    assert!(!notices.refused_since(None));
+    Ok(())
+}
+
+/// Cancelling a sampling while it waits for the ledger to open attaches
+/// nothing.
+#[tokio::test]
+async fn accounting_policy_start_cancel_attaches_nothing() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let lock = hold_write_lock(&fixture).await?;
+    let slot = Slot::default();
+    let enabled = mode();
+    let mut start = Box::pin(async {
+        let sampling = Sampling::start(
+            fixture.db.clone(),
+            fixture.sampling.owner,
+            "cancelled".into(),
+            &enabled,
+        )
+        .await?;
+        SamplingScope::attach(slot.clone(), Some(sampling))
+    });
+    let _ = poll!(&mut start);
+    drop(start);
+    assert!(read_slot(&slot)?.is_none());
+    release(lock).await?;
+    fixture.two_reopens(Vec::new()).await
+}
+
 #[tokio::test]
 async fn accounting_policy_serial_retry_identity_and_time_sample_after_the_admission_lock()
 -> Result<()> {

@@ -320,7 +320,7 @@ async fn adopted_usage_waits_for_its_admission() -> anyhow::Result<()> {
     let exited = Uuid::new_v4().to_string();
     let saved = Saved {
         version: 1,
-        queued_at_ms: 0,
+        queued_at_ms: chrono::Utc::now().timestamp_millis(),
         write: observe(owner, &first, 1),
     };
     std::fs::write(
@@ -366,7 +366,7 @@ async fn the_owner_day_query_uses_the_lookup_index() -> anyhow::Result<()> {
     .await?;
     assert!(
         plan.iter()
-            .any(|(.., detail)| detail.contains("draft_accounting_attempt_owner_dispatch")),
+            .any(|(.., detail)| detail.contains("corbanu_lookup_attempt_owner_dispatch")),
         "{plan:?}"
     );
     let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(
@@ -378,9 +378,162 @@ async fn the_owner_day_query_uses_the_lookup_index() -> anyhow::Result<()> {
     .await?;
     assert!(
         plan.iter()
-            .any(|(.., detail)| detail.contains("draft_accounting_attempt_dispatch")),
+            .any(|(.., detail)| detail.contains("corbanu_lookup_attempt_dispatch")),
         "{plan:?}"
     );
+    runtime.close().await;
+    Ok(())
+}
+
+/// The writer of `runtime`, for tests that look at its state.
+fn writer_turns(runtime: &StateRuntime) -> u64 {
+    runtime
+        .accounting_writer
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map_or(0, |writer| writer.shared.turns.load(Ordering::Relaxed))
+}
+
+/// Records are still written when they cannot be saved first (the pending
+/// folder cannot be created), and the idle writer does not spin.
+#[tokio::test]
+async fn without_a_pending_folder_records_are_written_and_the_writer_idles() -> anyhow::Result<()> {
+    let path = home();
+    let owner = ThreadId::new();
+    let runtime = runtime_with_owner(&path, owner).await?;
+    std::fs::write(path.join(PENDING_DIR), b"not a folder")?;
+    let first = attempt(owner);
+    assert_eq!(
+        runtime.record_accounting(admit(owner, &first)).await?,
+        WriteOutcome::Written
+    );
+    assert_eq!(recorded(&runtime, &first).await?, (1, 0));
+    let before = writer_turns(&runtime);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let idle_turns = writer_turns(&runtime) - before;
+    assert!(idle_turns < 5, "the idle writer turned {idle_turns} times");
+    runtime.close().await;
+    Ok(())
+}
+
+/// A process exiting does not wait for records parked on a row that is not
+/// there: the writer can do nothing for them now.
+#[tokio::test]
+async fn settling_does_not_wait_for_parked_records() -> anyhow::Result<()> {
+    let path = home();
+    let owner = ThreadId::new();
+    let runtime = runtime_with_owner(&path, owner).await?;
+    let late = ThreadId::new();
+    runtime.note_thread_row_put_off(late, /*put_off*/ true);
+    runtime
+        .record_accounting(admit(late, &attempt(late)))
+        .await?;
+    let started = Instant::now();
+    assert!(runtime.settle_accounting(Duration::from_secs(20)).await);
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    // Still saved for a later writer.
+    assert_eq!(pending_records(&path).len(), 1);
+    runtime.close().await;
+    Ok(())
+}
+
+/// One process at a time runs the hour's whole-ledger validation. While
+/// another holds the lease, records are put off without waiting and an
+/// exiting process does not wait; once the lease is free, this writer
+/// validates and writes them.
+#[tokio::test]
+async fn the_hourly_validation_waits_for_the_lease() -> anyhow::Result<()> {
+    let path = home();
+    let owner = ThreadId::new();
+    let setup = runtime_with_owner(&path, owner).await?;
+    let hour_ms = 60 * 60 * 1000;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    // An earlier record, and the checkpoint left in an earlier hour.
+    let mut old = attempt(owner);
+    old.dispatched_at_ms = (now_ms - 3 * hour_ms).try_into()?;
+    setup.record_accounting(admit(owner, &old)).await?;
+    sqlx::query("UPDATE draft_accounting_retention_checkpoint SET completed_as_of_ms = ?")
+        .bind(now_ms - 2 * hour_ms)
+        .execute(setup.pool.as_ref())
+        .await?;
+    setup.close().await;
+
+    let lease = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path.join(PENDING_DIR).join(VALIDATION_LEASE))?;
+    lease.lock()?;
+    let runtime = StateRuntime::init_for_testing(path.to_path_buf(), "synthetic".into()).await?;
+    let next = attempt(owner);
+    let started = Instant::now();
+    assert_eq!(
+        runtime.record_accounting(admit(owner, &next)).await?,
+        WriteOutcome::Deferred
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(runtime.settle_accounting(Duration::from_secs(20)).await);
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(recorded(&runtime, &next).await?, (0, 0));
+    drop(lease);
+    assert!(runtime.flush_accounting(Duration::from_secs(30)).await);
+    assert_eq!(recorded(&runtime, &next).await?, (1, 0));
+    let checkpoint: i64 =
+        sqlx::query_scalar("SELECT completed_as_of_ms FROM draft_accounting_retention_checkpoint")
+            .fetch_one(runtime.pool.as_ref())
+            .await?;
+    assert!(checkpoint >= now_ms - now_ms.rem_euclid(hour_ms));
+    runtime.close().await;
+    Ok(())
+}
+
+/// A retry adopted from an exited process before its predecessor's admission
+/// is in the ledger waits for it instead of being refused.
+#[tokio::test]
+async fn an_adopted_retry_waits_for_its_predecessor() -> anyhow::Result<()> {
+    let path = home();
+    let owner = ThreadId::new();
+    let setup = runtime_with_owner(&path, owner).await?;
+    let first = attempt(owner);
+    let mut retry = attempt(owner);
+    retry.request_id = first.request_id;
+    retry.retry_of = Some(first.attempt_id);
+    let dir = path.join(PENDING_DIR);
+    std::fs::create_dir_all(&dir)?;
+    let saved = Saved {
+        version: 1,
+        queued_at_ms: chrono::Utc::now().timestamp_millis(),
+        write: admit(owner, &retry),
+    };
+    std::fs::write(
+        dir.join(format!("{}-{:020}.json", Uuid::new_v4(), 0)),
+        serde_json::to_vec(&saved)?,
+    )?;
+    let runtime = StateRuntime::init_for_testing(path.to_path_buf(), "synthetic".into()).await?;
+    runtime.open_accounting().await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(recorded(&runtime, &retry).await?, (0, 0));
+    assert_eq!(
+        setup.record_accounting(admit(owner, &first)).await?,
+        WriteOutcome::Written
+    );
+    assert!(runtime.flush_accounting(Duration::from_secs(30)).await);
+    assert_eq!(recorded(&runtime, &retry).await?, (1, 0));
+    assert_eq!(runtime.accounting_refusals(owner), 0);
+    setup.close().await;
     runtime.close().await;
     Ok(())
 }

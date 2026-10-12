@@ -38,11 +38,16 @@ pub(super) async fn expire_batch_on_connection(
     let mut unbound = BTreeSet::new();
     let due: Vec<String> = sqlx::query_scalar(
         "SELECT attempt_id FROM draft_accounting_attempts
-            WHERE json_extract(payload, '$.dispatched_at_ms') + ? <= ?
+            WHERE json_extract(payload, '$.dispatched_at_ms') <= ?
             ORDER BY attempt_id LIMIT ?",
     )
-    .bind(DETAIL_MS)
-    .bind(as_of_ms)
+    // `dispatched + DETAIL_MS <= as_of`, with the arithmetic on the bound so
+    // the dispatch index (`accounting_indexes.rs`) answers it under the lock.
+    .bind(
+        as_of_ms
+            .checked_sub(DETAIL_MS)
+            .context("detail expiry underflow")?,
+    )
     .bind(limit)
     .fetch_all(&mut *conn)
     .await?;
