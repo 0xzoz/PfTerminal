@@ -314,7 +314,7 @@ async fn request_user_input_interrupt_emits_deferred_token_count() -> anyhow::Re
         .await?;
 
     // The tool call starts before the stream reaches `response.completed`, so
-    // the question can arrive before the turn has recorded the usage (always
+    // the question can arrive before the turn has recorded the usage (reliably
     // with developer-accounting, which writes each usage report to the ledger
     // before forwarding it). Interrupt only once the turn has both asked and
     // recorded the completed response; neither order is guaranteed. The token
