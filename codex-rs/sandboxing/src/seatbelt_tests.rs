@@ -2536,20 +2536,47 @@ fn writable_links_into_a_read_only_path_are_not_grants_at_any_level() {
     std::os::unix::fs::symlink(workspace.join(".git"), &git_link).expect("link to .git");
     let denied = base.join("denied");
     fs::write(&denied, "x").expect("denied");
-    for (level, policy) in level_policies(&workspace, &[&hooks_link, &git_link], &denied) {
+    // #535 review: on a filesystem that ignores case (macOS's default), links
+    // spelled in another case, and a link root typed in another case.
+    let ignores_case = base.join("WS").exists();
+    let case_hooks = base.join("case-hooks");
+    std::os::unix::fs::symlink(workspace.join(".GIT").join("hooks"), &case_hooks)
+        .expect("case link to hooks");
+    let case_git = base.join("case-git");
+    std::os::unix::fs::symlink(workspace.join(".Git"), &case_git).expect("case link to .git");
+    let typed = base.join("HOOKS-LINK");
+    let mut links: Vec<&Path> = vec![&hooks_link, &git_link];
+    if ignores_case {
+        links.extend([case_hooks.as_path(), case_git.as_path(), typed.as_path()]);
+    }
+    for (level, policy) in level_policies(&workspace, &links, &denied) {
         let exclusions = policy.writable_links_into_read_only_paths(&workspace);
-        assert_eq!(exclusions.len(), 2, "{level}: {exclusions:?}");
+        assert_eq!(exclusions.len(), links.len(), "{level}: {exclusions:?}");
         let script = format!(
             "echo x >> '{hooks_link}/pre-commit'; echo hook=$?; echo x > '{hooks_link}/new'; \
              echo hooknew=$?; echo x > '{git_link}/HEAD'; echo gitlink=$?; \
-             echo x > '{hooks}/direct'; echo direct=$?; echo x > '{workspace}/file'; echo ws=$?",
+             echo x > '{hooks}/direct'; echo direct=$?; echo x > '{workspace}/file'; echo ws=$?; \
+             echo x > '{case_hooks}/case'; echo casehooks=$?; echo x > '{case_git}/HEAD'; \
+             echo casegit=$?; echo x > '{typed}/typed'; echo typed=$?",
             hooks_link = hooks_link.display(),
             git_link = git_link.display(),
             hooks = hooks.display(),
             workspace = workspace.display(),
+            case_hooks = case_hooks.display(),
+            case_git = case_git.display(),
+            typed = typed.display(),
         );
         let stdout = run_in_seatbelt(&policy, &workspace, &script);
-        for line in ["hook=1", "hooknew=1", "gitlink=1", "direct=1", "ws=0"] {
+        for line in [
+            "hook=1",
+            "hooknew=1",
+            "gitlink=1",
+            "direct=1",
+            "ws=0",
+            "casehooks=1",
+            "casegit=1",
+            "typed=1",
+        ] {
             assert!(
                 stdout.lines().any(|got| got == line),
                 "{level}: {line} not in {stdout}"
@@ -2561,6 +2588,7 @@ fn writable_links_into_a_read_only_path_are_not_grants_at_any_level() {
             "{level}"
         );
         assert!(!hooks.join("new").exists() && !workspace.join(".git/HEAD").exists());
+        assert!(!hooks.join("case").exists() && !hooks.join("typed").exists());
         fs::remove_file(workspace.join("file")).expect("ws file");
     }
 }

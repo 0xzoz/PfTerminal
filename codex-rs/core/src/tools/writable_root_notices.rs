@@ -39,8 +39,9 @@ pub(crate) fn excluded_writable_link_warnings(
 
 pub(crate) fn excluded_writable_link_warning(exclusion: &WritableLinkIntoReadOnlyPath) -> String {
     format!(
-        "Write access to `{}` is not granted: it is a link into `{}`, which stays read-only. \
-         Name the folder by its real path if it should be writable.",
+        "Write access to `{}` is not granted: it is, or passes through, a link into `{}`, a \
+         path another writable folder protects. Name the folder by its real path if it should \
+         be writable.",
         exclusion.link.display(),
         exclusion.read_only_path.display(),
     )
