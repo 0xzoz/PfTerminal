@@ -1311,7 +1311,43 @@ impl FileSystemSandboxPolicy {
 
     /// Returns the writable roots together with read-only carveouts resolved
     /// against the provided cwd.
+    ///
+    /// Issue #535: a root that is reached through a link whose real location
+    /// is, or lies inside, another root's read-only path is not a grant and
+    /// is left out (see [`Self::writable_links_into_read_only_paths`]).
     pub fn get_writable_roots_with_cwd(&self, cwd: &Path) -> Vec<WritableRoot> {
+        let roots = self.writable_roots_including_links_into_read_only_paths(cwd);
+        let excluded = links_into_read_only_paths(&roots);
+        roots
+            .into_iter()
+            .enumerate()
+            .filter(|(index, _)| !excluded.iter().any(|(link, _)| link == index))
+            .map(|(_, root)| root)
+            .collect()
+    }
+
+    /// Issue #535: the writable roots this policy names that are left out of
+    /// [`Self::get_writable_roots_with_cwd`], each with the read-only path of
+    /// another root its real location reaches. Such a root is a link (or
+    /// passes through one) whose real location is, or lies inside, a path
+    /// another root keeps read-only, like a writable link to a workspace's
+    /// `.git/hooks`: it is not a grant, and the path stays read-only through
+    /// it. Callers explain the exclusion to the person.
+    pub fn writable_links_into_read_only_paths(
+        &self,
+        cwd: &Path,
+    ) -> Vec<WritableLinkIntoReadOnlyPath> {
+        let roots = self.writable_roots_including_links_into_read_only_paths(cwd);
+        links_into_read_only_paths(&roots)
+            .into_iter()
+            .map(|(link, read_only_path)| WritableLinkIntoReadOnlyPath {
+                link: roots[link].root.clone(),
+                read_only_path,
+            })
+            .collect()
+    }
+
+    fn writable_roots_including_links_into_read_only_paths(&self, cwd: &Path) -> Vec<WritableRoot> {
         if self.has_full_disk_write_access() {
             return Vec::new();
         }
@@ -1896,6 +1932,159 @@ fn dedup_absolute_paths(
         }
     }
     deduped
+}
+
+/// Issue #535: a writable root left out because it is a link into another
+/// root's read-only path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WritableLinkIntoReadOnlyPath {
+    /// The writable root as the policy resolves it (still spelled through
+    /// the link).
+    pub link: AbsolutePathBuf,
+    /// The read-only path of another writable root it reaches.
+    pub read_only_path: AbsolutePathBuf,
+}
+
+/// Issue #535: the roots (by index) reached through a link whose real
+/// location is, or lies inside, a read-only path of another root (protected
+/// metadata names count, also not created yet), with that path. A root
+/// spelled through the read-only path itself (an explicit `.git/hooks`
+/// root) and a root without a link below its top-level folder (`/tmp` and
+/// `/var` on macOS are top-level aliases) stay grants.
+#[cfg(unix)]
+fn links_into_read_only_paths(roots: &[WritableRoot]) -> Vec<(usize, AbsolutePathBuf)> {
+    let mut excluded = Vec::new();
+    for (index, root) in roots.iter().enumerate() {
+        if !passes_through_nested_link(root.root.as_path()) {
+            continue;
+        }
+        let real_root = real_location(root.root.as_path());
+        let reached = roots
+            .iter()
+            .enumerate()
+            .filter(|(other, _)| *other != index)
+            .flat_map(|(_, other)| {
+                other.read_only_subpaths.iter().cloned().chain(
+                    other
+                        .protected_metadata_names
+                        .iter()
+                        .map(|name| other.root.join(name)),
+                )
+            })
+            .find(|read_only| {
+                !root.root.as_path().starts_with(read_only.as_path())
+                    && location_within(&real_root, &real_location(read_only.as_path()))
+            });
+        if let Some(read_only) = reached {
+            excluded.push((index, read_only));
+        }
+    }
+    excluded
+}
+
+#[cfg(not(unix))]
+fn links_into_read_only_paths(_roots: &[WritableRoot]) -> Vec<(usize, AbsolutePathBuf)> {
+    Vec::new()
+}
+
+/// Whether a folder of `path` below its top-level one is a link.
+#[cfg(unix)]
+fn passes_through_nested_link(path: &Path) -> bool {
+    path.ancestors()
+        .filter(|ancestor| ancestor.parent().and_then(Path::parent).is_some())
+        .any(|ancestor| {
+            std::fs::symlink_metadata(ancestor)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        })
+}
+
+/// Where `path` really is: every link followed, including a link whose
+/// target does not exist yet, and the components that do not exist kept as
+/// written. Unlike `canonicalize`, this also places a path not created yet.
+#[cfg(unix)]
+pub fn real_location(path: &Path) -> PathBuf {
+    use std::collections::VecDeque;
+    use std::path::Component;
+
+    const MAX_LINKS: usize = 40;
+    let mut pending: VecDeque<std::ffi::OsString> = path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(name) => Some(name.to_os_string()),
+            Component::ParentDir => Some("..".into()),
+            Component::RootDir | Component::CurDir | Component::Prefix(_) => None,
+        })
+        .collect();
+    let mut resolved = PathBuf::from("/");
+    let mut links = 0;
+    while let Some(name) = pending.pop_front() {
+        if name == ".." {
+            resolved.pop();
+            continue;
+        }
+        let candidate = resolved.join(&name);
+        let target = std::fs::symlink_metadata(&candidate)
+            .ok()
+            .filter(|metadata| metadata.file_type().is_symlink() && links < MAX_LINKS)
+            .and_then(|_| std::fs::read_link(&candidate).ok());
+        let Some(target) = target else {
+            resolved = candidate;
+            continue;
+        };
+        links += 1;
+        if target.is_absolute() {
+            resolved = PathBuf::from("/");
+        }
+        for component in target.components().rev() {
+            match component {
+                Component::Normal(name) => pending.push_front(name.to_os_string()),
+                Component::ParentDir => pending.push_front("..".into()),
+                Component::RootDir | Component::CurDir | Component::Prefix(_) => {}
+            }
+        }
+    }
+    canonical_existing_prefix(resolved)
+}
+
+/// `path` (links already followed) with its deepest existing folder in the
+/// form the filesystem stores: on macOS, whose default filesystem ignores
+/// case and Unicode form, `<ws>/.GIT` is `<ws>/.git`. The missing rest is
+/// kept as written.
+#[cfg(unix)]
+fn canonical_existing_prefix(path: PathBuf) -> PathBuf {
+    let mut existing = path.as_path();
+    let mut missing = Vec::new();
+    while std::fs::symlink_metadata(existing).is_err() {
+        let (Some(parent), Some(name)) = (existing.parent(), existing.file_name()) else {
+            return path;
+        };
+        missing.push(name.to_os_string());
+        existing = parent;
+    }
+    let Ok(mut canonical) = std::fs::canonicalize(existing) else {
+        return path;
+    };
+    for name in missing.into_iter().rev() {
+        canonical.push(name);
+    }
+    canonical
+}
+
+/// Whether real location `path` is `prefix` or lies inside it. On macOS the
+/// comparison ignores case, as its default filesystem does, so a part not
+/// created yet cannot dodge it by case.
+#[cfg(unix)]
+pub fn location_within(path: &Path, prefix: &Path) -> bool {
+    if cfg!(target_os = "macos") {
+        let fold = |path: &Path| -> Vec<String> {
+            path.components()
+                .map(|component| component.as_os_str().to_string_lossy().to_lowercase())
+                .collect()
+        };
+        fold(path).starts_with(&fold(prefix))
+    } else {
+        path.starts_with(prefix)
+    }
 }
 
 fn sorted_absolute_paths(mut paths: Vec<AbsolutePathBuf>) -> Vec<AbsolutePathBuf> {
@@ -4128,5 +4317,81 @@ mod tests {
                 .get_unlistable_directories()
                 .is_empty()
         );
+    }
+
+    /// #535: a writable link whose real location is, or lies inside, another
+    /// root's read-only path (also a protected name not created yet, and
+    /// through a nested link) is left out and reported; an explicit root
+    /// spelled through the read-only path and a link elsewhere are kept.
+    #[cfg(unix)]
+    #[test]
+    fn writable_links_into_read_only_paths_are_left_out() {
+        let dir = TempDir::new().expect("tempdir");
+        let base = dir.path().canonicalize().expect("canonical");
+        let workspace = base.join("ws");
+        let hooks = workspace.join(".git").join("hooks");
+        fs::create_dir_all(&hooks).expect("hooks");
+        let elsewhere = base.join("elsewhere");
+        fs::create_dir_all(&elsewhere).expect("elsewhere");
+        let links = base.join("links");
+        fs::create_dir_all(&links).expect("links");
+        symlink_dir(&hooks, &links.join("hooks")).expect("hooks link");
+        symlink_dir(&workspace.join(".git"), &links.join("git")).expect("git link");
+        symlink_dir(&workspace.join(".codex"), &links.join("codex")).expect("dangling link");
+        symlink_dir(Path::new("../ws/.git"), &links.join("relative")).expect("relative link");
+        symlink_dir(&elsewhere, &links.join("elsewhere")).expect("other link");
+        let nested = links.join("git").join("hooks");
+        let entry = |path: &Path| {
+            FileSystemSandboxEntry::new(
+                FileSystemPath::Path {
+                    path: AbsolutePathBuf::from_absolute_path(path).expect("absolute"),
+                },
+                FileSystemAccessMode::Write,
+            )
+        };
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry::new(
+                FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                FileSystemAccessMode::Read,
+            ),
+            entry(&workspace),
+            entry(&links.join("hooks")),
+            entry(&links.join("git")),
+            entry(&links.join("codex")),
+            entry(&links.join("relative")),
+            entry(&nested),
+            entry(&links.join("elsewhere")),
+            entry(&hooks),
+        ]);
+        let mut excluded: Vec<(PathBuf, PathBuf)> = policy
+            .writable_links_into_read_only_paths(&workspace)
+            .into_iter()
+            .map(|exclusion| {
+                (
+                    exclusion.link.into_path_buf(),
+                    exclusion.read_only_path.into_path_buf(),
+                )
+            })
+            .collect();
+        excluded.sort();
+        let git = workspace.join(".git");
+        assert_eq!(
+            excluded,
+            vec![
+                (links.join("codex"), workspace.join(".codex")),
+                (links.join("git"), git.clone()),
+                (nested, git.clone()),
+                (links.join("hooks"), git.clone()),
+                (links.join("relative"), git),
+            ]
+        );
+        let roots: Vec<PathBuf> = policy
+            .get_writable_roots_with_cwd(&workspace)
+            .into_iter()
+            .map(|root| root.root.into_path_buf())
+            .collect();
+        assert_eq!(roots, vec![workspace, links.join("elsewhere"), hooks]);
     }
 }

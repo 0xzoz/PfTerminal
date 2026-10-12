@@ -1182,11 +1182,11 @@ async fn sandbox_blocks_dev_tcp_redirection() {
 }
 
 /// PF-23-S02 on Linux, full-write profiles: what the protected-path rules
-/// hold (a read-only file stays read-only, also through a symlinked dotfile
-/// and after its folder is renamed) and the limits the gate records (the
-/// link itself can be removed, the folder renamed and the path rebuilt,
-/// because bind mounts move with their folder). macOS blocks those too
-/// (`seatbelt_tests::renaming_a_folder_above_a_protected_path_is_denied`).
+/// hold (a read-only file stays read-only, also through a symlinked dotfile;
+/// since #587 its folder cannot be renamed either, as on macOS:
+/// `seatbelt_tests::renaming_a_folder_above_a_protected_path_is_denied`)
+/// and the limits the gate records (the link itself can be removed, and a
+/// new file created next to the protected one).
 #[tokio::test]
 async fn pf_23_s02_full_write_profile_keeps_protected_files_read_only() {
     if should_skip_bwrap_tests().await {
@@ -1240,11 +1240,11 @@ async fn pf_23_s02_full_write_profile_keeps_protected_files_read_only() {
     .await
     .expect("full-write profile runs under bubblewrap");
     let stdout = output.stdout.text;
-    for held in ["link-write=1", "write=1", "moved-write=1"] {
+    for held in ["link-write=1", "write=1", "mv=1", "moved-write=1"] {
         assert!(stdout.contains(held), "{held}: {stdout}");
     }
-    // Recorded Linux limits: the rename and the link removal go through.
-    for limit in ["other=0", "mv=0", "rm-link=0"] {
+    // Recorded Linux limits: the link removal and a new file go through.
+    for limit in ["other=0", "rm-link=0"] {
         assert!(stdout.contains(limit), "{limit}: {stdout}");
     }
     assert_eq!(
@@ -1252,9 +1252,113 @@ async fn pf_23_s02_full_write_profile_keeps_protected_files_read_only() {
         "ok\n"
     );
     assert_eq!(
-        std::fs::read_to_string(base.join("moved/fish/config.fish")).expect("moved config"),
+        std::fs::read_to_string(config.join("fish/config.fish")).expect("config"),
         "ok\n"
     );
+    assert!(!base.join("moved").exists());
+}
+
+/// #587: under a profile that can write the Corbanu home's parent (full
+/// access, or a workspace holding it) with protected paths, a command
+/// cannot move the home (or a folder above it) aside and plant a new one:
+/// the new folder would have none of the rules, and a later command could
+/// read the moved copy's denied stores under the moved name.
+#[tokio::test]
+async fn issue_587_protected_home_and_its_folders_cannot_be_moved_aside() {
+    if should_skip_bwrap_tests().await {
+        eprintln!("skipping bwrap test: bwrap sandbox prerequisites are unavailable");
+        return;
+    }
+    for full_access in [true, false] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().canonicalize().expect("canonical");
+        let home = base.join("outer/home");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::write(home.join("auth.json"), "secret-587\n").expect("store");
+        std::fs::write(home.join("AGENTS.md"), "original\n").expect("AGENTS.md");
+        let entry = |path: std::path::PathBuf, access| {
+            FileSystemSandboxEntry::skip_missing_path(
+                FileSystemPath::Path {
+                    path: AbsolutePathBuf::from_absolute_path(path).expect("absolute"),
+                },
+                access,
+            )
+        };
+        let writable = if full_access {
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                access: FileSystemAccessMode::Write,
+                missing_path_behavior: None,
+            }
+        } else {
+            entry(base.clone(), FileSystemAccessMode::Write)
+        };
+        // As `ReadDenials` builds it: denied stores (one not created yet)
+        // and read-only runtime entries (one missing).
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                access: FileSystemAccessMode::Read,
+                missing_path_behavior: None,
+            },
+            writable,
+            entry(home.join("auth.json"), FileSystemAccessMode::Deny),
+            entry(home.join("secrets"), FileSystemAccessMode::Deny),
+            entry(home.join("AGENTS.md"), FileSystemAccessMode::Read),
+            entry(home.join("skills"), FileSystemAccessMode::Read),
+        ]);
+        let run = |script: &'static str| {
+            let cwd = AbsolutePathBuf::from_absolute_path(&base).expect("absolute base");
+            let profile = PermissionProfile::from_runtime_permissions(
+                &policy,
+                NetworkSandboxPolicy::Restricted,
+            );
+            async move {
+                run_cmd_result_with_permission_profile_for_cwd(
+                    &["bash", "-c", script],
+                    cwd,
+                    profile,
+                    create_env_from_core_vars(),
+                    LONG_TIMEOUT_MS,
+                    /*use_legacy_landlock*/ false,
+                )
+                .await
+            }
+        };
+        let output = run("mv outer/home outer/home.old; echo mv-home=$?; \
+                          mv outer outer.old; echo mv-outer=$?; \
+                          mkdir -p outer/home; echo planted > outer/home/AGENTS.md; echo plant=$?")
+        .await
+        .expect("the profile runs under bubblewrap");
+        let stdout = output.stdout.text;
+        let stderr = output.stderr.text;
+        for held in ["mv-home=1", "mv-outer=1", "plant=1"] {
+            assert!(
+                stdout.contains(held),
+                "full access {full_access}: {held}: {stdout}\nstderr: {stderr}"
+            );
+        }
+        assert!(!base.join("outer/home.old").exists());
+        assert!(!base.join("outer.old").exists());
+        assert_eq!(
+            std::fs::read_to_string(home.join("AGENTS.md")).expect("AGENTS.md"),
+            "original\n"
+        );
+        // A later command with the same rules: on main the moved store was
+        // readable under its new name.
+        let output = run("cat outer/home.old/auth.json outer.old/home/auth.json; true")
+            .await
+            .expect("the profile runs under bubblewrap");
+        assert!(
+            !output.stdout.text.contains("secret-587"),
+            "full access {full_access}: {}",
+            output.stdout.text
+        );
+    }
 }
 
 /// #473: under a full-write profile `~/.claude` is read-only (it runs hooks)
@@ -1500,6 +1604,83 @@ async fn a_file_where_a_denied_paths_folder_would_be_stays_in_place() {
     }
     assert!(home.join("Library").is_file(), "the file stays");
     assert!(!home.join("Moved").exists());
+}
+
+/// #582: a placeholder whose run was killed (SIGKILL on a timeout) before
+/// it could clean up is removed by the next protected run, instead of
+/// staying for good: an empty read-only `~/Library` once broke every
+/// protected run on a machine (#579 then held it in place).
+#[tokio::test]
+async fn issue_582_a_placeholder_left_by_a_killed_run_is_removed_by_the_next() {
+    if should_skip_bwrap_tests().await {
+        eprintln!("skipping bwrap test: bwrap sandbox prerequisites are unavailable");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base = dir.path().canonicalize().expect("canonical");
+    let home = base.join("home");
+    std::fs::create_dir_all(&home).expect("home");
+    let policy = FileSystemSandboxPolicy::restricted(vec![
+        FileSystemSandboxEntry {
+            path: FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            },
+            access: FileSystemAccessMode::Write,
+            missing_path_behavior: None,
+        },
+        FileSystemSandboxEntry::skip_missing_path(
+            FileSystemPath::Path {
+                path: AbsolutePathBuf::from_absolute_path(home.join("Library/Keychains"))
+                    .expect("absolute"),
+            },
+            FileSystemAccessMode::Deny,
+        ),
+    ]);
+    // A registry of its own, so other tests' runs do not sweep this one's
+    // placeholder first.
+    let tmp = base.join("tmp");
+    std::fs::create_dir(&tmp).expect("tmp");
+    let run = |script: &'static str, timeout_ms: u64| {
+        let cwd = AbsolutePathBuf::from_absolute_path(&base).expect("absolute base");
+        let profile =
+            PermissionProfile::from_runtime_permissions(&policy, NetworkSandboxPolicy::Restricted);
+        let mut env = create_env_from_core_vars();
+        env.insert("TMPDIR".to_string(), tmp.to_string_lossy().into_owned());
+        async move {
+            run_cmd_result_with_permission_profile_for_cwd(
+                &["bash", "-c", script],
+                cwd,
+                profile,
+                env,
+                timeout_ms,
+                /*use_legacy_landlock*/ false,
+            )
+            .await
+        }
+    };
+    // Killed on its timeout while its placeholder is in place.
+    let killed = run("sleep 30", 2_000).await;
+    assert!(
+        matches!(
+            killed
+                .as_ref()
+                .err()
+                .map(codex_protocol::error::CodexErr::details),
+            Some(CodexErrorDetails::Sandbox(SandboxErr::Timeout { .. }))
+        ),
+        "{killed:?}"
+    );
+    let library = home.join("Library");
+    let stale = std::fs::symlink_metadata(&library).expect("the placeholder stays");
+    assert!(stale.is_file() && stale.len() == 0, "{stale:?}");
+    let output = run("echo ran-582", NETWORK_TIMEOUT_MS)
+        .await
+        .expect("the next run starts");
+    assert!(output.stdout.text.contains("ran-582"), "{output:?}");
+    assert!(
+        std::fs::symlink_metadata(&library).is_err(),
+        "the stale placeholder is removed, and the next run cleans up its own"
+    );
 }
 
 /// #493: under a full-write profile with a denial, the writable `/` bind
@@ -2201,4 +2382,209 @@ async fn issue_442_templates_stay_usable_and_never_reach_the_env() {
     assert!(!text.contains("read="), "{text}");
     assert!(text.contains("has other hard links"), "{text}");
     assert!(text.contains("delete the other names"), "{text}");
+
+/// A folder for test files outside every writable root (not a temporary
+/// folder): Cargo's target scratch folder, or the crate where a build tool
+/// does not set it.
+fn outside_temp_root() -> PathBuf {
+    option_env!("CARGO_TARGET_TMPDIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+}
+
+/// Policies shaped like each security level, for the #535/#536 tests:
+/// Permissive (a workspace-write config with extra writable roots, no
+/// denials), Moderate (the same with a denied path) and Aggressive (as
+/// Moderate, with the temporary folders not writable).
+fn level_policies(
+    workspace: &Path,
+    extra_writable: &[&Path],
+    denied: &Path,
+) -> Vec<(&'static str, FileSystemSandboxPolicy)> {
+    let workspace_write = |exclude_tmp: bool| {
+        FileSystemSandboxPolicy::from_legacy_sandbox_policy_for_cwd(
+            &codex_protocol::protocol::SandboxPolicy::WorkspaceWrite {
+                writable_roots: extra_writable
+                    .iter()
+                    .map(|path| AbsolutePathBuf::from_absolute_path(path).unwrap())
+                    .collect(),
+                network_access: false,
+                exclude_tmpdir_env_var: exclude_tmp,
+                exclude_slash_tmp: exclude_tmp,
+            },
+            workspace,
+        )
+    };
+    let denial = FileSystemSandboxEntry {
+        path: FileSystemPath::Path {
+            path: AbsolutePathBuf::from_absolute_path(denied).unwrap(),
+        },
+        access: FileSystemAccessMode::Deny,
+        missing_path_behavior: None,
+    };
+    let permissive = workspace_write(false);
+    let mut moderate = permissive.entries.clone();
+    moderate.push(denial.clone());
+    let mut aggressive = workspace_write(true).entries;
+    aggressive.push(denial);
+    vec![
+        ("permissive", permissive),
+        ("moderate", FileSystemSandboxPolicy::restricted(moderate)),
+        (
+            "aggressive",
+            FileSystemSandboxPolicy::restricted(aggressive),
+        ),
+    ]
+}
+
+async fn run_level(
+    workspace: &Path,
+    policy: &FileSystemSandboxPolicy,
+    script: &str,
+) -> codex_protocol::exec_output::ExecToolCallOutput {
+    let output = run_cmd_result_with_permission_profile_for_cwd(
+        &["bash", "-c", script],
+        AbsolutePathBuf::from_absolute_path(workspace).unwrap(),
+        PermissionProfile::from_runtime_permissions(policy, NetworkSandboxPolicy::Restricted),
+        create_env_from_core_vars(),
+        LONG_TIMEOUT_MS,
+        /*use_legacy_landlock*/ false,
+    )
+    .await;
+    match output {
+        Ok(output) => output,
+        Err(err) => match err.details() {
+            CodexErrorDetails::Sandbox(SandboxErr::Denied { output, .. }) => (**output).clone(),
+            _ => panic!("command failed to run: {err:?}"),
+        },
+    }
+}
+
+/// #535 (Travis, 2026-10-12: option B), real bubblewrap: a writable root
+/// that is a link into another root's read-only path (a workspace's
+/// `.git/hooks`, or its `.git` itself) is not a grant at any level: the hooks
+/// and `.git` stay read-only through it, while the workspace stays writable.
+#[tokio::test]
+async fn writable_links_into_a_read_only_path_are_not_grants_at_any_level() {
+    if should_skip_bwrap_tests().await {
+        eprintln!("skipping bwrap test: bwrap sandbox prerequisites are unavailable");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let workspace = base.join("ws");
+    let hooks = workspace.join(".git").join("hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    std::fs::write(hooks.join("pre-commit"), "#!/bin/sh\n").unwrap();
+    let hooks_link = base.join("hooks-link");
+    std::os::unix::fs::symlink(&hooks, &hooks_link).unwrap();
+    let git_link = base.join("git-link");
+    std::os::unix::fs::symlink(workspace.join(".git"), &git_link).unwrap();
+    let denied = base.join("denied");
+    std::fs::write(&denied, "x").unwrap();
+    for (level, policy) in level_policies(&workspace, &[&hooks_link, &git_link], &denied) {
+        assert_eq!(
+            policy.writable_links_into_read_only_paths(&workspace).len(),
+            2,
+            "{level}"
+        );
+        let script = format!(
+            "echo x >> '{hooks_link}/pre-commit'; echo hook=$?; echo x > '{hooks_link}/new'; \
+             echo hooknew=$?; echo x > '{git_link}/HEAD'; echo gitlink=$?; \
+             echo x > '{hooks}/direct'; echo direct=$?; echo x > '{workspace}/file'; echo ws=$?",
+            hooks_link = hooks_link.display(),
+            git_link = git_link.display(),
+            hooks = hooks.display(),
+            workspace = workspace.display(),
+        );
+        let output = run_level(&workspace, &policy, &script).await;
+        for line in ["hook=1", "hooknew=1", "gitlink=1", "direct=1", "ws=0"] {
+            assert!(
+                output.stdout.text.lines().any(|got| got == line),
+                "{level}: {line} not in {}\nstderr: {}",
+                output.stdout.text,
+                output.stderr.text
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(hooks.join("pre-commit")).unwrap(),
+            "#!/bin/sh\n",
+            "{level}"
+        );
+        assert!(!hooks.join("new").exists() && !workspace.join(".git/HEAD").exists());
+        std::fs::remove_file(workspace.join("file")).unwrap();
+    }
+}
+
+/// #535: what stays a grant at every level: an explicit root spelled through
+/// the read-only path (the person names `.git/hooks` itself), a link that
+/// leads elsewhere in `/tmp`, a workspace spelled through a link, and a git
+/// worktree with the main checkout as an extra root.
+#[tokio::test]
+async fn ordinary_roots_stay_writable_at_every_level() {
+    if should_skip_bwrap_tests().await {
+        eprintln!("skipping bwrap test: bwrap sandbox prerequisites are unavailable");
+        return;
+    }
+    let dir = tempfile::Builder::new()
+        .prefix("roots-535-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let real = dir.path().canonicalize().unwrap();
+    // The whole tree is spelled through a link, like `/tmp` on macOS: one
+    // outside the writable roots (Linux refuses a read-only path spelled
+    // through a link a command could change).
+    let aliases = tempfile::tempdir_in(outside_temp_root()).unwrap();
+    let alias = aliases.path().join("alias");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    let base = alias.clone();
+    let main = base.join("main");
+    let gitdir = main.join(".git").join("worktrees").join("wt");
+    std::fs::create_dir_all(&gitdir).unwrap();
+    std::fs::create_dir_all(main.join(".git/hooks")).unwrap();
+    let worktree = base.join("wt");
+    std::fs::create_dir_all(&worktree).unwrap();
+    std::fs::write(
+        worktree.join(".git"),
+        format!("gitdir: {}\n", gitdir.display()),
+    )
+    .unwrap();
+    let elsewhere = base.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let link = base.join("cache");
+    std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+    let hooks = main.join(".git/hooks");
+    let denied = base.join("denied");
+    std::fs::write(&denied, "x").unwrap();
+    for (level, policy) in level_policies(&worktree, &[&main, &hooks, &link], &denied) {
+        assert_eq!(
+            policy.writable_links_into_read_only_paths(&worktree),
+            Vec::new(),
+            "{level}"
+        );
+        let script = format!(
+            "echo x > file; echo wt=$?; echo x > '{main}/file'; echo main=$?; \
+             echo x > '{hooks}/explicit'; echo hooks=$?; echo x > '{link}/file'; echo link=$?",
+            main = main.display(),
+            hooks = hooks.display(),
+            link = link.display(),
+        );
+        let output = run_level(&worktree, &policy, &script).await;
+        for line in ["wt=0", "main=0", "hooks=0", "link=0"] {
+            assert!(
+                output.stdout.text.lines().any(|got| got == line),
+                "{level}: {line} not in {}\nstderr: {}",
+                output.stdout.text,
+                output.stderr.text
+            );
+        }
+        for written in [
+            worktree.join("file"),
+            main.join("file"),
+            hooks.join("explicit"),
+            elsewhere.join("file"),
+        ] {
+            std::fs::remove_file(written).unwrap();
+        }
+    }
 }
