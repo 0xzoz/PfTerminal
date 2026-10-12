@@ -1489,9 +1489,13 @@ impl BottomPaneView for RequestUserInputOverlay {
         }
 
         // A freeform answer, or the notes of a chosen option.
-        let queue_key = !self.has_options() && self.composer_queue_keys.is_pressed(key_event);
+        // Tab in an option's notes goes back to the options (below).
+        let back_to_options = self.has_options()
+            && key_event.code == KeyCode::Tab
+            && key_event.modifiers == KeyModifiers::NONE;
+        let queue_key = !back_to_options && self.composer_queue_keys.is_pressed(key_event);
         if queue_key {
-            // #544: the composer's queue key (Tab) submits a freeform answer:
+            // #544: the composer's queue key (Tab) submits the answer too:
             // like Enter, never held or before a fresh choice.
             if key_event.kind == KeyEventKind::Repeat
                 || self.typing_guard.awaits_navigation()
@@ -1517,7 +1521,10 @@ impl BottomPaneView for RequestUserInputOverlay {
                 self.pending_submission_draft = None;
                 // An Enter the composer took as text (a newline inside a
                 // paste burst) answers nothing.
-                if self.composer.is_in_paste_burst() || self.capture_composer_draft() != before {
+                let newlines = |draft: &ComposerDraft| draft.text.matches('\n').count();
+                if self.composer.is_in_paste_burst()
+                    || newlines(&self.capture_composer_draft()) > newlines(&before)
+                {
                     return;
                 }
                 if self.has_options() {
@@ -2788,6 +2795,56 @@ mod tests {
         press(&mut overlay, &[KeyCode::Char('x')]);
         overlay.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
         assert_eq!(overlay.current_index(), 1);
+    }
+
+    /// #544 review r2: the check that an Enter the composer took as text
+    /// answers nothing still lets a whitespace-only answer move on with one
+    /// Enter.
+    #[test]
+    fn issue_544_whitespace_answer_takes_one_enter() {
+        let (tx, mut rx) = test_sender();
+        let mut overlay = RequestUserInputOverlay::new(
+            request_event("turn-1", vec![question_without_options("q1", "Details")]),
+            tx,
+            /*has_input_focus*/ true,
+            /*enhanced_keys_supported*/ false,
+            /*disable_paste_burst*/ true,
+        );
+        overlay
+            .composer
+            .set_text_content("   ".to_string(), Vec::new(), Vec::new());
+        // One Enter moves on: here to the "unanswered" confirmation.
+        press(&mut overlay, &[KeyCode::Enter]);
+        assert!(overlay.confirm_unanswered_active());
+        assert_eq!(answered(&mut rx), None);
+    }
+
+    /// #544 review r2: a remapped queue key in an option's notes submits
+    /// only like Enter (never held or before a fresh choice).
+    #[test]
+    fn issue_544_remapped_queue_key_in_notes_is_guarded() {
+        let (tx, mut rx) = test_sender();
+        let mut keymap = RuntimeKeymap::defaults();
+        keymap.composer.queue = vec![crate::key_hint::ctrl(KeyCode::Char('q'))];
+        let mut overlay = RequestUserInputOverlay::new_with_keymap(
+            request_event("turn-1", vec![question_with_options("q1", "Pick one")]),
+            tx,
+            /*has_input_focus*/ true,
+            /*enhanced_keys_supported*/ false,
+            /*disable_paste_burst*/ true,
+            keymap,
+        );
+        press(&mut overlay, &[KeyCode::Tab, KeyCode::Char('n')]);
+        assert!(overlay.focus_is_notes());
+        overlay.require_fresh_choice_after_answer();
+        let queue = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL);
+        overlay.handle_key_event(queue);
+        overlay.handle_key_event(KeyEvent::new_with_kind(
+            KeyCode::Char('q'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Repeat,
+        ));
+        assert_eq!(answered(&mut rx), None);
     }
 
     #[test]
