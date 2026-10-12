@@ -490,15 +490,15 @@ fn review_text(choice: &Choice, level: SecurityLevel) -> (String, Vec<String>) {
             "Turn the kill switch on?".to_string(),
             vec![
                 "Everything \"Revoke all\" ends, and work running now in every pane of this Corbanu Terminal stops, Claude panes included: a reply in progress is cancelled and its commands are stopped, as when you interrupt it, and background terminals end.".to_string(),
-                "Until you turn it off here: this Corbanu Terminal sends nothing to the model (each new turn is refused with a message saying so), messages from other agents wait (Codex panes get them with their first turn after you turn it off; tasks for Claude panes are sent when you turn it off), no grant can be issued, protected actions after untrusted content are refused, the browser and memory writes are refused, and the credential broker stays closed.".to_string(),
+                "Until you turn it off here: this Corbanu Terminal sends nothing to the model (each new turn is refused with a message saying so), messages and tasks from other agents wait, assignments and whips are paused, no grant can be issued, protected actions after untrusted content are refused, the browser and memory writes are refused, and the credential broker stays closed. Another Corbanu Terminal on this home takes the switch when it next starts.".to_string(),
                 "Other Corbanu Terminals running on this home take it too, within about a second: their running work stops the same way and they refuse new turns.".to_string(),
-                format!("Saved in security_state.json: it holds after a restart. The level stays {level}."),
+                format!("Saved in security_state.json: it holds after a restart. The level stays {level}. Turning it off later restarts nothing: work resumes only when someone acts."),
             ],
         ),
         Choice::Core(HumanRevocation::KillSwitchOff) => (
             "Turn the kill switch off?".to_string(),
             vec![
-                "Turns are sent to the model again, in Codex and Claude panes. Messages from other agents that waited reach Codex panes with their next turn (turning it off does not start one); tasks held for Claude panes are sent now. Protected actions can be approved again and grants can be issued. Revoked grants and approvals do not come back; stopped replies and commands do not restart. Other Corbanu Terminals running on this home take it within about a second.".to_string(),
+                "Turns are sent to the model again, in Codex and Claude panes, but nothing restarts on its own: no pane starts a turn, stopped replies and commands do not restart, and paused assignments and whips stay paused until you resume them. Messages and tasks from other agents that waited go with each pane's next turn, when someone types in it or it gets new work. Protected actions can be approved again and grants can be issued. Revoked grants and approvals do not come back. Other Corbanu Terminals running on this home take it within about a second.".to_string(),
                 format!("The level stays {level}: turning the kill switch off never lowers it."),
             ],
         ),

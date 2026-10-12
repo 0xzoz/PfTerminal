@@ -2315,6 +2315,9 @@ impl App {
         for id in ids {
             self.expire_whip_if_needed(&id, now);
         }
+        if self.pause_whips_for_kill_switch() {
+            return;
+        }
         self.watch_assignment_reachability(now);
         let target_generations: Vec<(String, u64)> = self
             .orchestrate_whips
@@ -2637,6 +2640,45 @@ impl App {
         ))
     }
 
+    /// #507: while the security kill switch is on, no assignment or whip
+    /// fires on its own. Each armed one is paused, so none starts work when
+    /// the switch is turned off either: a person resumes it. Returns whether
+    /// the switch is on.
+    pub(crate) fn pause_whips_for_kill_switch(&mut self) -> bool {
+        if !self
+            .orchestrate_whips
+            .values()
+            .any(|whip| whip.state == WhipState::Armed)
+        {
+            return false;
+        }
+        if !crate::legacy_core::security_revocation::kill_switch_on(self.config.codex_home.as_ref())
+        {
+            return false;
+        }
+        let mut paused: Vec<(String, bool)> = self
+            .orchestrate_whips
+            .values_mut()
+            .filter(|whip| whip.state == WhipState::Armed)
+            .map(|whip| {
+                whip.state = WhipState::Paused;
+                (whip.id.clone(), whip.is_assignment())
+            })
+            .collect();
+        paused.sort();
+        self.persist_pane_state();
+        for (id, is_assignment) in paused {
+            let subject = if is_assignment { "Assignment" } else { "Whip" };
+            self.chat_widget.add_info_message(
+                format!(
+                    "{subject} {id} paused: the security kill switch is on. Turning it off does not resume it; resume it with /orchestrate resume {id} when you want it to run again."
+                ),
+                /*hint*/ None,
+            );
+        }
+        true
+    }
+
     fn set_whip_state_by_ref(&mut self, id_or_target: &str, state: WhipState, action: &str) {
         let Some(id) = self.find_whip_id(id_or_target) else {
             self.chat_widget
@@ -2717,6 +2759,11 @@ impl App {
         idle_generation: u64,
         trigger: FireTrigger,
     ) {
+        if !matches!(trigger, FireTrigger::Manual | FireTrigger::Test)
+            && self.pause_whips_for_kill_switch()
+        {
+            return;
+        }
         let ids: Vec<String> = self
             .orchestrate_whips
             .values()

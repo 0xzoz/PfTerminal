@@ -413,7 +413,8 @@ pub(crate) enum AppEvent {
     /// #507: the kill switch was turned on in `/security`; stop the Claude
     /// panes' running turns (Core stops its own sessions).
     KillSwitchTurnedOn,
-    /// #507: the kill switch was turned off; send the Claude pane tasks it held.
+    /// #507: the kill switch was turned off. Nothing restarts; the person is
+    /// told which Claude panes have a task waiting for their next turn.
     KillSwitchTurnedOff,
     /// #507 (Travis, 2026-10-12): another Corbanu Terminal process on this
     /// home turned the kill switch on or off; Core already applied it to

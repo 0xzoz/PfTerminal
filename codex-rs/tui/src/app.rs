@@ -851,7 +851,8 @@ pub(crate) struct App {
     /// False after resume until a live operator/non-auto turn proves current intent.
     pub(crate) spawn_operator_input_seen: bool,
     /// #507: the task another agent last sent to each Claude pane while the
-    /// kill switch was on (one per pane); sent once it is turned off.
+    /// kill switch was on (one per pane); it goes with that pane's next turn
+    /// after the switch is off (turning it off sends nothing).
     pub(crate) kill_switch_held_claude_tasks: Vec<(String, String)>,
     /// #507: whether this app last saw the kill switch on, so a change
     /// reported twice (here and by the home's watch) is handled once.

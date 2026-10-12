@@ -5398,6 +5398,12 @@ impl App {
                     content: task.clone(),
                     trigger_turn: true,
                 };
+                // #507: with the kill switch on the task waits in the mailbox
+                // for that pane's next turn; nothing runs, before or after the
+                // switch is turned off.
+                let kill_switch_on = crate::legacy_core::security_revocation::kill_switch_on(
+                    self.config.codex_home.as_ref(),
+                );
                 match app_server.send_agent_message(params).await {
                     Ok(_) => {
                         self.spawn_processed_dispatch_origins.insert(origin_id);
@@ -5416,15 +5422,24 @@ impl App {
                             "durably admitted to the native mailbox",
                             /*notify*/ false,
                         );
-                        self.spawn_status_by_thread.insert(
-                            thread_id,
-                            codex_app_server_protocol::CollabAgentState {
-                                status: codex_app_server_protocol::CollabAgentStatus::Running,
-                                message: None,
-                            },
-                        );
-                        self.agent_navigation
-                            .set_running(thread_id, /*is_running*/ true);
+                        if kill_switch_on {
+                            self.chat_widget.add_info_message(
+                                format!(
+                                    "A task for {label} waits: the security kill switch is on. Turning it off starts nothing: the task goes with that pane's next turn, when someone types in it or it gets new work."
+                                ),
+                                /*hint*/ None,
+                            );
+                        } else {
+                            self.spawn_status_by_thread.insert(
+                                thread_id,
+                                codex_app_server_protocol::CollabAgentState {
+                                    status: codex_app_server_protocol::CollabAgentStatus::Running,
+                                    message: None,
+                                },
+                            );
+                            self.agent_navigation
+                                .set_running(thread_id, /*is_running*/ true);
+                        }
                         self.agent_navigation.set_last_task_message(
                             thread_id,
                             Some(task.chars().take(240).collect()),
@@ -5562,6 +5577,22 @@ impl App {
                         "task is {} bytes; maximum is {} bytes",
                         task.len(),
                         crate::dispatch_queue::MAX_DISPATCH_TASK_BYTES
+                    );
+                    self.record_spawn_dispatch_failed_for_task(&target_node_id, &task, &detail);
+                    self.chat_widget.add_error_message(detail);
+                    return Ok(AppRunControl::Continue);
+                }
+                // #507: with the kill switch on, a task for a pane the person
+                // opened is a user turn, which is refused and not kept; say so
+                // to the sender and the person instead of reporting it sent.
+                // Checked before the store-lock retry below, so a retry never
+                // starts it once the switch is off.
+                if crate::legacy_core::security_revocation::kill_switch_on(
+                    self.config.codex_home.as_ref(),
+                ) {
+                    let detail = format!(
+                        "Not sent to {}: the security kill switch is on, and a task for a pane you opened is not kept (as a typed message is not). Send it again after turning the switch off.",
+                        self.thread_label(thread_id)
                     );
                     self.record_spawn_dispatch_failed_for_task(&target_node_id, &task, &detail);
                     self.chat_widget.add_error_message(detail);
@@ -6607,6 +6638,7 @@ impl App {
             {
                 Ok(removed) => {
                     self.claude_pane_transcript_cells.remove(&pane_id);
+                    self.drop_held_claude_task_of_removed_pane(&pane_id);
                     self.persist_pane_state();
                     tracing::info!(
                         pane_id,
