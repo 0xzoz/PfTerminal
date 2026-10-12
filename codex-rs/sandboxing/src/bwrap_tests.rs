@@ -9,7 +9,7 @@ use tempfile::tempdir;
 #[test]
 fn system_bwrap_warning_reports_missing_system_bwrap() {
     assert_eq!(
-        system_bwrap_warning_for_path(/*system_bwrap_path*/ None, || true),
+        system_bwrap_warning_for_path(/*system_bwrap_path*/ None, || true, || true),
         Some(MISSING_BWRAP_WARNING.to_string())
     );
 }
@@ -18,11 +18,25 @@ fn system_bwrap_warning_reports_missing_system_bwrap() {
 /// one: it says the sandbox cannot run commands and what to install.
 #[test]
 fn system_bwrap_warning_without_a_bundled_copy_names_what_to_install() {
-    let warning = system_bwrap_warning_for_path(/*system_bwrap_path*/ None, || false);
+    let warning = system_bwrap_warning_for_path(/*system_bwrap_path*/ None, || false, || true);
     assert_eq!(warning, Some(NO_BWRAP_WARNING.to_string()));
     assert!(NO_BWRAP_WARNING.contains("cannot run commands in its Linux sandbox"));
     assert!(NO_BWRAP_WARNING.contains("sudo apt install bubblewrap"));
     assert!(!NO_BWRAP_WARNING.contains("bundled bubblewrap in the meantime"));
+}
+
+/// #581: where the bundled copy cannot create user namespaces (AppArmor
+/// restricts them and no `rootlesskit` profile allows them), the warning
+/// says the sandbox cannot start and names the package, instead of
+/// promising the bundled copy.
+#[test]
+fn system_bwrap_warning_says_when_the_bundled_copy_cannot_start() {
+    let warning = system_bwrap_warning_for_path(/*system_bwrap_path*/ None, || true, || false);
+    assert_eq!(warning, Some(BUNDLED_BWRAP_BLOCKED_WARNING.to_string()));
+    assert!(BUNDLED_BWRAP_BLOCKED_WARNING.contains("cannot start"));
+    assert!(BUNDLED_BWRAP_BLOCKED_WARNING.contains("sudo apt install bubblewrap"));
+    assert!(BUNDLED_BWRAP_BLOCKED_WARNING.contains("rootlesskit"));
+    assert!(!BUNDLED_BWRAP_BLOCKED_WARNING.contains("in the meantime"));
 }
 
 /// Issue #563: the refusal printed when no bubblewrap is found keeps the
@@ -156,7 +170,7 @@ exit 1
         let fake_bwrap_path: &Path = fake_bwrap.as_ref();
 
         assert_eq!(
-            system_bwrap_warning_for_path(Some(fake_bwrap_path), || true),
+            system_bwrap_warning_for_path(Some(fake_bwrap_path), || true, || true),
             Some(USER_NAMESPACE_WARNING.to_string()),
             "{failure}",
         );
@@ -174,7 +188,7 @@ exit 1
     let fake_bwrap_path: &Path = fake_bwrap.as_ref();
 
     assert_eq!(
-        system_bwrap_warning_for_path(Some(fake_bwrap_path), || true),
+        system_bwrap_warning_for_path(Some(fake_bwrap_path), || true, || true),
         None
     );
 }

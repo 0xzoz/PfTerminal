@@ -54,7 +54,6 @@ use codex_config::format_config_error_with_source;
 use codex_config::types::ResumeCwdMode;
 use codex_exec_server::EnvironmentManager;
 use codex_exec_server::ExecServerRuntimePaths;
-use codex_login::AuthConfig;
 use codex_login::AuthRouteConfig;
 use codex_login::default_client::originator;
 use codex_login::default_client::set_default_client_residency_requirement;
@@ -1396,20 +1395,27 @@ pub async fn run_main(
         }
     }
 
-    if !app_server_target.uses_remote_workspace() {
-        let auth_route_config = config.auth_route_config();
+    // PF-84-S06 (#570): a session on a named sign-in account checks the
+    // restrictions against that account at thread start and never reads or
+    // logs out the default login. A resumed or forked thread's account is
+    // known only later, so those launches leave the default login in place
+    // too. Only with the embedded app server: this process's managers then
+    // never use a ruled-out default login, and a thread on it is refused at
+    // thread start with the reason. A reused local daemon is another process,
+    // so the TUI enforces at startup for it as before; a remote server
+    // decides for itself.
+    let leaves_default_login = matches!(app_server_target, AppServerTarget::Embedded)
+        && (config.runs_on_named_sign_in_account()
+            || (config.named_accounts_enabled()
+                && (is_resume_launch(&cli)
+                    || cli.fork_picker
+                    || cli.fork_last
+                    || cli.fork_session_id.is_some())));
+    if leaves_default_login {
+        codex_login::leave_default_login_unenforced();
+    } else if !app_server_target.uses_remote_workspace() {
         #[allow(clippy::print_stderr)]
-        if let Err(err) = enforce_login_restrictions(&AuthConfig {
-            codex_home: config.codex_home.to_path_buf(),
-            auth_credentials_store_mode: config.cli_auth_credentials_store_mode,
-            keyring_backend_kind: config.auth_keyring_backend_kind(),
-            forced_login_method: config.configured_forced_login_method,
-            forced_chatgpt_workspace_id: config.forced_chatgpt_workspace_id.clone(),
-            chatgpt_base_url: Some(config.chatgpt_base_url.clone()),
-            auth_route_config,
-        })
-        .await
-        {
+        if let Err(err) = enforce_login_restrictions(&config.default_login_restrictions()).await {
             eprintln!("{err}");
             std::process::exit(1);
         }
@@ -1747,10 +1753,12 @@ async fn run_ratatui_app(
         early_resume_selection = Some(selection);
     }
     let requires_provider_onboarding = startup_provider.requires_provider_onboarding;
+    let default_login_forced_method =
+        startup_provider::default_login_forced_method(&initial_config);
     let should_show_onboarding = startup_provider::should_show_provider_onboarding(
         should_show_trust_screen_flag,
         requires_provider_onboarding,
-        initial_config.forced_login_method,
+        default_login_forced_method,
         login_status,
     );
     let mut startup_provider_resolution = Some(startup_provider);
@@ -1793,7 +1801,7 @@ async fn run_ratatui_app(
         startup_provider_resolution = None;
         let show_login_screen = requires_provider_onboarding
             || matches!(
-                initial_config.forced_login_method,
+                default_login_forced_method,
                 Some(ForcedLoginMethod::Chatgpt)
             ) && login_status == LoginStatus::NotAuthenticated;
         let onboarding_result = run_onboarding_app(

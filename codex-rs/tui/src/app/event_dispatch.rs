@@ -1367,10 +1367,13 @@ impl App {
                 return Ok(AppRunControl::Exit(ExitReason::Restart));
             }
             AppEvent::KillSwitchTurnedOn => {
-                self.on_kill_switch_turned_on();
+                self.on_kill_switch_changed(/*on*/ true, /*elsewhere*/ false);
             }
             AppEvent::KillSwitchTurnedOff => {
-                self.on_kill_switch_turned_off();
+                self.on_kill_switch_changed(/*on*/ false, /*elsewhere*/ false);
+            }
+            AppEvent::KillSwitchChangedElsewhere { on } => {
+                self.on_kill_switch_changed(on, /*elsewhere*/ true);
             }
             AppEvent::FatalExitRequest(message) => {
                 return Ok(AppRunControl::Exit(ExitReason::Fatal(message)));

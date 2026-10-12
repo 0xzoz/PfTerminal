@@ -149,8 +149,9 @@ corbanu exec --account work "..."
 ```
 
 In `/providers`, _Add another account_ on OpenAI offers a device-code ChatGPT
-sign-in or a masked OpenAI API key. Rows show only the kind, an email hint
-(`w…@example.com`), the plan and a fingerprint.
+sign-in or a masked OpenAI API key, whatever provider the session runs on.
+Rows show only the kind, an email hint (`w…@example.com`), the plan and a
+fingerprint.
 
 - The default login stays where it is (`auth.json` or the `Codex Auth`
   keychain item) and is never read, refreshed, replaced or logged out by a
@@ -169,6 +170,21 @@ sign-in or a masked OpenAI API key. Rows show only the kind, an email hint
   reply, and the `/apps` directory, come from the default login.
 - `forced_login_method` and `forced_chatgpt_workspace_id` apply to named
   accounts too: a sign-in of the other kind or another workspace is refused.
+  A session on a named account checks them against that account only and
+  leaves the default login alone even when they rule it out; so do `resume`,
+  `fork` and `exec resume`, whose thread's account is known only later. Such
+  a default login is then not used by that process, and a thread on the
+  default account (a switch to it, a spawned agent, a resumed default thread)
+  is refused with the reason instead of logging the login out. A TUI that
+  reuses a running local app-server daemon (another process) still enforces
+  on the default login at startup, as before, also for a session on a named
+  account. While a forced login rules the default out, `corbanu fork` of a
+  named thread without `--account` shows the default sign-in screen; pass
+  `--account <name>` to fork it on its account. Only a
+  configured `forced_login_method` counts: a session on another provider (such
+  as Z.AI) can still sign in, select and use a named ChatGPT account.
+- A named account with no usable sign-in is refused with the reason and its
+  recovery; a request is never sent without its credentials.
 - Signing the same ChatGPT user in under two accounts (or as `default` and a
   named account) is allowed with a warning: they share that user's limits,
   and signing out of one can end the other's session.

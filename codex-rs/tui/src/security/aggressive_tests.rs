@@ -221,6 +221,7 @@ async fn codex_home_inside_the_workspace_stays_read_only() {
     );
 }
 
+#[cfg(unix)]
 fn isolation_problems(config: &Config, path: &Path) -> Vec<String> {
     crate::security::preflight::verify_isolation(config, &[path.to_path_buf()])
 }

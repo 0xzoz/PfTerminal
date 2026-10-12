@@ -2922,6 +2922,7 @@ dependencies = [
  "insta",
  "libc",
  "maplit",
+ "notify",
  "once_cell",
  "openssl-sys",
  "opentelemetry",
