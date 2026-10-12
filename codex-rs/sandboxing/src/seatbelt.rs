@@ -1040,6 +1040,23 @@ pub fn create_seatbelt_command_args(
                     .cloned(),
             );
         }
+        // #583: a writable root inside another root's read-only path (the
+        // Corbanu home's `worktrees`) may not be renamed or removed either:
+        // a link put in its place would make the next sandbox's root where
+        // the link points. (Its protected names below already guard it; this
+        // does not depend on them.)
+        for root in &writable_roots {
+            let inside_read_only = writable_roots.iter().any(|other| {
+                other.root != root.root
+                    && other.read_only_subpaths.iter().any(|read_only| {
+                        root.root.as_path() != read_only.as_path()
+                            && root.root.as_path().starts_with(read_only.as_path())
+                    })
+            });
+            if inside_read_only && !rename_guarded.contains(&root.root) {
+                rename_guarded.push(root.root.clone());
+            }
+        }
         // #529: a root's own `.git`/`.codex`/`.agents` may not be renamed
         // with it (nor created) through another root that holds it.
         for (_, path) in &reached_from_other_roots {
