@@ -86,3 +86,6 @@ afterwards and not independently verified ([review/r3-corrections.md](review/r3-
 Note: each run's end-state copy of the test project is under `runs/<label>/collected/fixture/workspace/`. Its git
 directory is stored as `dot-git/` (renamed only so the outer repository keeps the files); its synthetic `.env` is
 ignored by the project's own `.gitignore` and so is not in the repository.
+The SQLite WAL files the G28 executor copied from the used product homes (`runs/G28/collected/evidence/used-home-r1*/`) are
+stored gzipped to stay under the repository blob-size limit; one (`used-home-r15/product-home/pfterminal_logs_2.sqlite-wal.gz`,
+644 KB, SHA-256 `e15037fec18e1992781f5a2527c2d40e2c6fe7eff172893b211aa9029ffe1790`) is kept outside the repository. No result depends on them.
