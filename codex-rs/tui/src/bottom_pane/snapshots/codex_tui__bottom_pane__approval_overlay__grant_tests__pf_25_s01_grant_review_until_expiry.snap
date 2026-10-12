@@ -4,12 +4,13 @@ expression: "render(&view, 100)"
 ---
 
  Grant this command?
- Under Aggressive, Grant once lets one command write your shell and git start-up files (such
- as .zshrc, .profile, .gitconfig, .config/git and .local/bin), and only where Aggressive lets
- commands write: the current folder, so it only matters when that folder holds them (for example,
- Corbanu runs in your home folder). Nothing else changes: credential files and the Corbanu home
- stay unreadable; Corbanu's own files and the project's .git, .codex and .agents stay read-only;
- other folders and the network stay closed.
+ Under Aggressive, Grant once lets one command write files that run code later, which Aggressive
+ otherwise keeps read-only, and only inside the current folder: a git hooks folder the project
+ sets with core.hooksPath (such as Husky's .husky), and, when the current folder holds your home
+ folder, your shell and git start-up files (such as .zshrc, .profile, .gitconfig and .local/
+ bin), login agents and services, and .claude settings. Nothing else changes: credential files
+ and Corbanu's sign-in, vault, config and history stay unreadable; Corbanu's own files and the
+ project's .git, .codex and .agents stay read-only; other folders and the network stay closed.
  An approval alone never lifts this. A start-up file written this way runs code later, outside
  the sandbox.
 

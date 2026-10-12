@@ -47,12 +47,14 @@ Grants
       security to allow them. On Linux a command is stopped when such a file appears while it runs;
       a process already waiting for that file can read it in the moment before the stop [resolved:
       level]
-  [on] Grant once: lets one command write your shell and git start-up files (such
-      as .zshrc, .profile, .gitconfig, .config/git and .local/bin), and only where Aggressive lets
-      commands write: the current folder, so it only matters when that folder holds them (for
-      example, Corbanu runs in your home folder). Nothing else changes: credential files and the
-      Corbanu home stay unreadable; Corbanu's own files and the project's .git, .codex and .agents
-      stay read-only; other folders and the network stay closed. [resolved: level]
+  [on] Grant once: lets one command write files that run code later, which Aggressive otherwise
+      keeps read-only, and only inside the current folder: a git hooks folder the project sets with
+      core.hooksPath (such as Husky's .husky), and, when the current folder holds your home folder,
+      your shell and git start-up files (such as .zshrc, .profile, .gitconfig and .local/bin), login
+      agents and services, and .claude settings. Nothing else changes: credential files and
+      Corbanu's sign-in, vault, config and history stay unreadable; Corbanu's own files and the
+      project's .git, .codex and .agents stay read-only; other folders and the network stay closed.
+      [resolved: level]
 
 Agents
   [set] Nested agents: refuse (default): agent commands that start another agent (`corbanu exec`,

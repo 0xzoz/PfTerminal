@@ -1077,9 +1077,9 @@ fn issue_442_a_grant_keeps_codex_and_agents_read_only() {
 /// #442 (Travis, 2026-10-12): exactly what "Grant once" lifts, as the grant
 /// review, the inspector and the docs describe it (`GRANT_ONCE_LIFTS` in the
 /// TUI): the shell and git start-up files, login agents and services and
-/// `.claude` in the user's home, a `core.hooksPath` hooks folder, and the
-/// project's `.git/hooks` and `.git/config` (which the Aggressive sandbox
-/// keeps read-only anyway, with all of `.git`). A new kind of lifted path
+/// `.claude` in the user's home, a `core.hooksPath` hooks folder, and git
+/// files inside the project's `.git` (which the Aggressive sandbox keeps
+/// read-only anyway, with all of `.git`). A new kind of lifted path
 /// fails here until the descriptions name it.
 #[test]
 fn issue_442_a_grant_lifts_only_the_described_kinds() {
@@ -1110,12 +1110,13 @@ fn issue_442_a_grant_lifts_only_the_described_kinds() {
         let Ok(relative) = path.as_path().strip_prefix(&cwd) else {
             return false;
         };
+        // Inside the project's `.git` (hooks, config, `config.worktree`,
+        // `commondir`): read-only under Aggressive whatever the grant.
         USER_PERSISTENCE
             .iter()
             .any(|entry| relative == Path::new(entry))
-            || [".git/hooks", ".git/config", ".husky"]
-                .iter()
-                .any(|entry| relative == Path::new(entry))
+            || relative.starts_with(".git")
+            || relative == Path::new(".husky")
     };
     assert!(!lifted.is_empty());
     let undescribed: Vec<_> = lifted.iter().filter(|path| !described(path)).collect();
