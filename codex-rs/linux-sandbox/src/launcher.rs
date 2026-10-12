@@ -50,9 +50,9 @@ pub(crate) fn exec_bwrap(argv: Vec<String>, preserved_files: Vec<File>) -> ! {
 /// where the helper runs from a constructor (test binaries dispatch on arg0
 /// that way). Either way the command never ran. Everything before it runs
 /// and fails as before; only the message and the status (1) differ. This may
-/// run in a child forked from a multithreaded process (the `/proc` probe,
-/// the run with placeholders to clean up), so it only uses `write` and
-/// `_exit`, which are safe there (no allocation, no locks).
+/// run in a forked child (the `/proc` probe, the run with placeholders to
+/// clean up), so it avoids allocation and locks itself: only `write` and
+/// `_exit`.
 fn exit_bwrap_unavailable() -> ! {
     write_all_to_stderr(codex_sandboxing::BWRAP_UNAVAILABLE_MESSAGE.as_bytes());
     write_all_to_stderr(b"\n");
@@ -66,6 +66,9 @@ fn write_all_to_stderr(mut bytes: &[u8]) {
         let written =
             unsafe { libc::write(libc::STDERR_FILENO, bytes.as_ptr().cast(), bytes.len()) };
         let Ok(written) = usize::try_from(written) else {
+            if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
             return;
         };
         if written == 0 {
