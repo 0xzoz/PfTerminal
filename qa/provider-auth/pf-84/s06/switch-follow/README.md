@@ -12,6 +12,9 @@ macOS debug build of `fix/pf84-switch-follow` (developer-accounting on), private
 - Run 2 (`*-run2.txt`): `-m glm-5.3-flash -c model_provider=zai`; off screen `login --account work` and a fake
   default OpenAI key; `/providers` → *OpenAI · work* → *Use for this session*; `/model` → OpenAI GPT-5.6-Luna
   (`work-ok`); `/model` → GLM (`default-ok`).
+- Run 3 (`*-run3.txt`, review head `df68e14642`): `-m gpt-5.4-mini -c model_provider=openai --account work`
+  (the process list follows); `work-first` → `/model` GLM → `/model` OpenAI GPT-5.6-Luna (`work-again`, no GLM
+  turn in between, see #578) → `/model` GLM (`default-glm`).
 - Each switch: core logs `account=… connectors, plugin installs, accounting and the model list follow the switch`,
   then the TUI's `model/list` request; the TUI says *Connectors, usage and the model list now use …*. The ledger
   attributes each attempt to the account that served it (`default` for GLM).
