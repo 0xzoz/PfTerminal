@@ -1380,34 +1380,37 @@ async fn overlapping_runs_keep_shared_placeholders_until_the_last_ends() {
         entry(&home.join("AGENTS.override.md"), FileSystemAccessMode::Deny),
         entry(&home.join("Library/Keychains"), FileSystemAccessMode::Deny),
     ]);
-    let run = |script: &'static str| {
-        run_cmd_result_with_permission_profile_for_cwd(
-            &["bash", "-c", script],
-            AbsolutePathBuf::from_absolute_path(&base).expect("absolute base"),
-            PermissionProfile::from_runtime_permissions(&policy, NetworkSandboxPolicy::Restricted),
-            create_env_from_core_vars(),
-            NETWORK_TIMEOUT_MS,
-            /*use_legacy_landlock*/ false,
-        )
+    let run = |script: String| {
+        let base = base.clone();
+        let policy = policy.clone();
+        async move {
+            run_cmd_result_with_permission_profile_for_cwd(
+                &["bash", "-c", &script],
+                AbsolutePathBuf::from_absolute_path(&base).expect("absolute base"),
+                PermissionProfile::from_runtime_permissions(
+                    &policy,
+                    NetworkSandboxPolicy::Restricted,
+                ),
+                create_env_from_core_vars(),
+                NETWORK_TIMEOUT_MS,
+                /*use_legacy_landlock*/ false,
+            )
+            .await
+        }
     };
-    let wait_for = |name: &'static str| {
+    let wait_for = |name: &str| {
         format!("i=0; while [ ! -e {name} ] && [ $i -lt 120 ]; do sleep 0.05; i=$((i+1)); done")
     };
     // The first run waits until the second has started, then ends.
-    let first_script: &'static str = Box::leak(
-        format!("touch first-started; {}; true", wait_for("second-started")).into_boxed_str(),
-    );
+    let first_script = format!("touch first-started; {}; true", wait_for("second-started"));
     // The second starts once the first holds the placeholders, waits until
     // the first has ended, then tries to create every protected path.
-    let second_script: &'static str = Box::leak(
-        format!(
-            "touch second-started; {}; \
-             printf x > home/AGENTS.md; echo agents=$?; \
-             printf x > home/AGENTS.override.md; echo override=$?; \
-             mkdir -p home/Library/Keychains; echo keychains=$?; true",
-            wait_for("first-ended")
-        )
-        .into_boxed_str(),
+    let second_script = format!(
+        "touch second-started; {}; \
+         printf x > home/AGENTS.md; echo agents=$?; \
+         printf x > home/AGENTS.override.md; echo override=$?; \
+         mkdir -p home/Library/Keychains; echo keychains=$?; true",
+        wait_for("first-ended")
     );
     let first = async {
         let output = run(first_script).await;

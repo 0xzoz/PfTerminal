@@ -1740,11 +1740,10 @@ fn append_unreadable_root_args(
         return Ok(());
     }
 
-    // #562: an empty file here may be another run's placeholder; hold it as
-    // one so that run's cleanup cannot remove it from under this one.
-    if let Some(metadata) = empty_file_metadata(unreadable_root)
-        && is_within_allowed_write_paths(unreadable_root, allowed_write_paths)
-    {
+    // #562: an empty file here may be another run's placeholder (made in
+    // that run's writable root, which need not be one of this run's); hold
+    // it as one so that run's cleanup cannot remove it from under this one.
+    if let Some(metadata) = empty_file_metadata(unreadable_root) {
         if has_synthetic_mount_target(bwrap_args, unreadable_root) {
             return Ok(());
         }
