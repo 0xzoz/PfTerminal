@@ -1673,6 +1673,12 @@ pub(crate) enum AppEvent {
     },
     /// PF-84-S04: a named-account action from `/providers`.
     ProviderAccount(crate::provider_named_accounts::ProviderAccountEvent),
+    /// PF-84 (#572): whether the vault holds a named Bedrock account (`None`
+    /// when it could not be read), for the check numbered `generation`.
+    NamedBedrockAccountChecked {
+        generation: u64,
+        offered: Option<bool>,
+    },
     ProviderManagerMetadataResolved {
         generation: u64,
         metadata: crate::provider_status_host::ProviderAccountMetadata,

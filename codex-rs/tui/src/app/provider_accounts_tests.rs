@@ -120,6 +120,100 @@ async fn a_default_set_by_a_higher_layer_is_reported() {
     assert!(error.contains("another config layer"), "{error}");
 }
 
+/// #572: with a named Bedrock account (an AWS profile) in the vault, a
+/// session on another provider is offered Bedrock's models in `/model` (and
+/// the provider policy lets them be picked), so an account chosen with *Use
+/// for this session* is reachable. Without one, with the feature off, or
+/// once the last one is removed, Bedrock stays out of the list as before,
+/// except the model the session is on. Only the newest check is applied.
+#[tokio::test]
+async fn named_bedrock_account_offers_bedrock_models() {
+    use super::super::provider_management_status::holds_named_bedrock_account;
+    use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
+    let bedrock_models = |app: &App| {
+        app.model_catalog
+            .try_list_models()
+            .unwrap()
+            .into_iter()
+            .filter(|preset| preset.provider_id.as_deref() == Some(AMAZON_BEDROCK_PROVIDER_ID))
+            .collect::<Vec<_>>()
+    };
+    let (mut app, home) = app_with_named_accounts("").await;
+    app.model_catalog.set_provider_policy(
+        crate::chatwidget::provider_model_policy::ProviderModelPolicy::new(
+            crate::provider_status_host::ProviderStatusHost::from_config(
+                &app.config,
+                crate::provider_status_host::ProviderAccountMetadata::default(),
+            ),
+            codex_provider_auth::ProviderRuntimeAuthorizations::default(),
+        ),
+    );
+    let check = |app: &mut App| {
+        let offered = holds_named_bedrock_account(&app.config);
+        let generation = app.model_catalog.begin_provider_models_check();
+        app.named_bedrock_account_checked(generation, offered);
+    };
+    assert_eq!(holds_named_bedrock_account(&app.config), Some(false));
+    check(&mut app);
+    assert!(bedrock_models(&app).is_empty());
+
+    let vault = codex_vault::Vault::new(home.path().to_path_buf());
+    vault
+        .write_provider_account(
+            AMAZON_BEDROCK_PROVIDER_ID,
+            &name("work"),
+            codex_vault::ProviderAccountKind::AwsProfile,
+            "corp-dev",
+        )
+        .expect("write account");
+    let mut feature_off = app.config.clone();
+    feature_off
+        .features
+        .disable(codex_features::Feature::NamedAccounts)
+        .expect("named accounts can be turned off");
+    assert_eq!(holds_named_bedrock_account(&feature_off), Some(false));
+    assert_eq!(holds_named_bedrock_account(&app.config), Some(true));
+
+    // A stale check's answer is dropped.
+    let stale = app.model_catalog.begin_provider_models_check();
+    check(&mut app);
+    app.named_bedrock_account_checked(stale, Some(false));
+    let offered = bedrock_models(&app);
+    assert!(
+        offered.iter().any(
+            |preset| preset.model == codex_model_provider_info::AMAZON_BEDROCK_GPT_5_4_MODEL_ID
+        ),
+        "{offered:?}"
+    );
+    assert!(
+        offered
+            .iter()
+            .all(|preset| app.model_catalog.preset_is_selectable(preset)),
+        "{offered:?}"
+    );
+
+    // The session switches to one of them; removing the last account then
+    // withdraws the others but keeps the model the session is on.
+    // (As the model picker does: provider in the config, model in the chat
+    // widget; `config.model` keeps the model the session started with.)
+    app.config.model_provider_id = AMAZON_BEDROCK_PROVIDER_ID.to_string();
+    app.chat_widget
+        .set_model(codex_model_provider_info::AMAZON_BEDROCK_GPT_5_4_MODEL_ID);
+    vault
+        .remove_provider_account(AMAZON_BEDROCK_PROVIDER_ID, &name("work"))
+        .expect("remove account");
+    check(&mut app);
+    let kept = bedrock_models(&app);
+    assert_eq!(
+        kept.iter()
+            .map(|preset| preset.model.as_str())
+            .collect::<Vec<_>>(),
+        vec![codex_model_provider_info::AMAZON_BEDROCK_GPT_5_4_MODEL_ID]
+    );
+    // It keeps its Bedrock metadata.
+    assert!(!kept[0].supported_reasoning_efforts.is_empty(), "{kept:?}");
+}
+
 /// #573: with a third-party provider configured, `/providers` still offers a
 /// device-code ChatGPT sign-in for a named OpenAI account; only a configured
 /// `forced_login_method` narrows the choice.
