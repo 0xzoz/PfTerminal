@@ -340,6 +340,9 @@ fn run_bwrap_with_proc_fallback(
     let network_mode = bwrap_network_mode(network_sandbox_policy, allow_network_for_proxy);
     let mut mount_proc = mount_proc;
     let command_cwd = command_cwd.unwrap_or(sandbox_policy_cwd);
+    // #582: once, before any arguments are built, so a stale placeholder is
+    // not taken for an existing path (or a file where a folder belongs).
+    remove_stale_synthetic_mount_targets();
 
     if mount_proc
         && !preflight_proc_mount_support(network_mode)
@@ -411,9 +414,6 @@ fn build_bwrap_argv(
     command_cwd: &Path,
     options: BwrapOptions,
 ) -> CodexResult<crate::bwrap::BwrapArgs> {
-    // #582: before the arguments are built, so a stale placeholder is not
-    // taken for an existing path (or a file where a folder belongs).
-    remove_stale_synthetic_mount_targets();
     let bwrap_args = create_bwrap_command_args(
         inner,
         file_system_sandbox_policy,
@@ -1121,7 +1121,13 @@ fn cleanup_synthetic_mount_targets(targets: &[SyntheticMountTargetRegistration])
             if synthetic_mount_marker_dir_has_active_process(&target.marker_dir) {
                 continue;
             }
-            remove_synthetic_mount_target(&target.target);
+            // #582: a placeholder another run made (and was killed before
+            // removing) goes as its record says, also when this run only
+            // held it as an existing path.
+            match read_synthetic_mount_target_record(&target.marker_dir) {
+                Some(made) => remove_synthetic_mount_target(&made),
+                None => remove_synthetic_mount_target(&target.target),
+            }
             remove_synthetic_mount_target_record(&target.marker_dir);
             match fs::remove_dir(&target.marker_dir) {
                 Ok(()) => {}
@@ -1327,13 +1333,18 @@ fn remove_synthetic_mount_target_record(marker_dir: &Path) {
     }
 }
 
+/// The placeholder recorded in `marker_dir`, if the record is ours and
+/// names the path its folder is for.
 fn read_synthetic_mount_target_record(
     marker_dir: &Path,
 ) -> Option<crate::bwrap::SyntheticMountTarget> {
-    let record = fs::read(marker_dir.join(SYNTHETIC_MOUNT_TARGET_RECORD)).ok()?;
+    let path = marker_dir.join(SYNTHETIC_MOUNT_TARGET_RECORD);
+    if !owned_by_this_user(&path, /*file*/ true) {
+        return None;
+    }
+    let record = fs::read(path).ok()?;
     let newline = record.iter().position(|byte| *byte == b'\n')?;
     let path = Path::new(std::ffi::OsStr::from_bytes(&record[newline + 1..]));
-    // The record must name the path its folder is for.
     if !path.is_absolute() || synthetic_mount_marker_dir(path) != marker_dir {
         return None;
     }
@@ -1346,89 +1357,131 @@ fn read_synthetic_mount_target_record(
     }
 }
 
+/// Whether `path` is a file (or folder) of this user that no one else may
+/// write: another user who made the shared temporary folder's registry
+/// first must not be able to plant records.
+fn owned_by_this_user(path: &Path, file: bool) -> bool {
+    // SAFETY: `geteuid` has no preconditions.
+    let euid = unsafe { libc::geteuid() };
+    fs::symlink_metadata(path).is_ok_and(|metadata| {
+        use std::os::unix::fs::MetadataExt;
+        let kind = if file {
+            metadata.file_type().is_file()
+        } else {
+            metadata.file_type().is_dir()
+        };
+        kind && metadata.uid() == euid && metadata.mode() & 0o022 == 0
+    })
+}
+
 /// #582: removes the placeholders whose runs all ended without cleaning up
 /// (the helper killed with SIGKILL, for example on a timeout), as their own
 /// cleanup would have: an empty file, or an empty folder, at the recorded
 /// path. Before, such a placeholder stayed: later runs took it for an
 /// existing path, and one where a folder belongs (an empty read-only
 /// `~/Library` for `~/Library/Keychains`) failed every protected run until
-/// #579 held it in place. A marker folder with a live run, or a marker of
-/// another kind (a protected-create target), is left alone.
+/// #579 held it in place.
+///
+/// A run that meets a recorded placeholder holds it (registers itself,
+/// [`is_live_placeholder`]), so one with any live marker is left alone, as
+/// is a marker folder of another kind (a protected-create target). This
+/// never fails a run: without a usable registry it does nothing, and what
+/// cannot be removed keeps its record for a later run.
 fn remove_stale_synthetic_mount_targets() {
     let registry_root = synthetic_mount_registry_root();
-    // Nothing was ever registered: do not create the registry.
-    if !registry_root.is_dir() {
+    if !owned_by_this_user(&registry_root, /*file*/ false) {
         return;
     }
-    with_synthetic_mount_registry_lock(|| {
-        let Ok(entries) = fs::read_dir(&registry_root) else {
-            return;
+    let Ok(entries) = fs::read_dir(&registry_root) else {
+        return;
+    };
+    // Without the lock first: most runs find nothing recorded.
+    let recorded: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|marker_dir| marker_dir.join(SYNTHETIC_MOUNT_TARGET_RECORD).is_file())
+        .collect();
+    if recorded.is_empty() {
+        return;
+    }
+    // A registry this run cannot lock (read-only in a nested sandbox) is
+    // left as it is.
+    let Ok(lock_file) = File::open(registry_root.join("lock")) else {
+        return;
+    };
+    // SAFETY: locks a descriptor this function owns.
+    if unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) } < 0 {
+        return;
+    }
+    for marker_dir in recorded {
+        let Some(target) = read_synthetic_mount_target_record(&marker_dir) else {
+            continue;
         };
-        for entry in entries.flatten() {
-            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-                continue;
-            }
-            let marker_dir = entry.path();
-            let Some(target) = read_synthetic_mount_target_record(&marker_dir) else {
-                continue;
-            };
-            if !made_only_by_ended_runs(&marker_dir) {
-                continue;
-            }
-            // Never fails the run: what cannot be removed stays as before.
-            if let Ok(metadata) = fs::symlink_metadata(target.path())
-                && target.should_remove_after_bwrap(&metadata)
-            {
-                let _ = match target.kind() {
-                    crate::bwrap::SyntheticMountTargetKind::EmptyFile => {
-                        fs::remove_file(target.path())
-                    }
-                    crate::bwrap::SyntheticMountTargetKind::EmptyDirectory => {
-                        fs::remove_dir(target.path())
-                    }
-                };
-            }
+        if !only_ended_runs(&marker_dir) {
+            continue;
+        }
+        let removed = match fs::symlink_metadata(target.path()) {
+            Err(err) => err.kind() == std::io::ErrorKind::NotFound,
+            Ok(metadata) if !target.should_remove_after_bwrap(&metadata) => true,
+            Ok(_) => match target.kind() {
+                crate::bwrap::SyntheticMountTargetKind::EmptyFile => {
+                    fs::remove_file(target.path()).is_ok()
+                }
+                crate::bwrap::SyntheticMountTargetKind::EmptyDirectory => {
+                    fs::remove_dir(target.path()).is_ok()
+                }
+            },
+        };
+        if removed {
+            remove_ended_markers(&marker_dir);
             let _ = fs::remove_file(marker_dir.join(SYNTHETIC_MOUNT_TARGET_RECORD));
             let _ = fs::remove_dir(&marker_dir);
         }
-    });
+    }
+    // The lock is released when `lock_file` closes.
 }
 
-/// Whether every run in `marker_dir` has ended, one of which made the
-/// placeholder. Their markers are then removed.
-fn made_only_by_ended_runs(marker_dir: &Path) -> bool {
+/// Whether every marker in `marker_dir` is a run (that made or held the
+/// placeholder) which has ended.
+fn only_ended_runs(marker_dir: &Path) -> bool {
     let Ok(entries) = fs::read_dir(marker_dir) else {
         return false;
     };
-    let mut ended = Vec::new();
-    let mut made = false;
     for entry in entries.flatten() {
         let path = entry.path();
-        let Some(pid) = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .and_then(|name| name.parse::<libc::pid_t>().ok())
-        else {
+        let Some(pid) = marker_pid(&path) else {
             continue;
         };
         if process_is_active(pid) {
             return false;
         }
         match fs::read(&path) {
-            Ok(contents) if contents == SYNTHETIC_MOUNT_MARKER_SYNTHETIC => made = true,
-            Ok(contents) if contents == SYNTHETIC_MOUNT_MARKER_EXISTING => {}
-            Ok(_) => return false,
-            Err(_) => continue,
+            Ok(contents)
+                if contents == SYNTHETIC_MOUNT_MARKER_SYNTHETIC
+                    || contents == SYNTHETIC_MOUNT_MARKER_EXISTING => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            _ => return false,
         }
-        ended.push(path);
-    }
-    if !made {
-        return false;
-    }
-    for marker in ended {
-        let _ = fs::remove_file(marker);
     }
     true
+}
+
+fn remove_ended_markers(marker_dir: &Path) {
+    let Ok(entries) = fs::read_dir(marker_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if marker_pid(&path).is_some() {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+fn marker_pid(path: &Path) -> Option<libc::pid_t> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.parse::<libc::pid_t>().ok())
 }
 
 fn process_is_active(pid: libc::pid_t) -> bool {
@@ -1493,6 +1546,11 @@ pub(crate) fn is_live_placeholder(path: &Path) -> bool {
     }
     with_synthetic_mount_registry_lock(|| {
         synthetic_mount_marker_dir_has_active_synthetic_owner(&marker_dir)
+            // #582: one whose maker was killed before removing it: held as
+            // a placeholder too, so a sweep leaves it while this run uses it,
+            // and the last run out removes it.
+            || read_synthetic_mount_target_record(&marker_dir)
+                .is_some_and(|made| made.path() == path)
     })
 }
 

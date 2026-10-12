@@ -412,8 +412,9 @@ fn ended_pid() -> u32 {
     child.id()
 }
 
-/// #582: a placeholder registered by a run that ended without cleaning up.
-fn stale_registration(placeholder: &Path, kind_marker: &[u8]) -> PathBuf {
+/// #582: a placeholder made (and recorded) by a run that ended without
+/// cleaning up; its marker now names an ended process.
+fn stale_registration(placeholder: &Path) -> PathBuf {
     let registrations =
         register_synthetic_mount_targets(&[crate::bwrap::SyntheticMountTarget::missing(
             placeholder,
@@ -421,63 +422,81 @@ fn stale_registration(placeholder: &Path, kind_marker: &[u8]) -> PathBuf {
     let registration = &registrations[0];
     let stale_marker = registration.marker_dir.join(ended_pid().to_string());
     std::fs::rename(&registration.marker_file, &stale_marker).expect("hand the marker over");
-    std::fs::write(&stale_marker, kind_marker).expect("marker kind");
     registration.marker_dir.clone()
 }
 
 /// #582: the next run removes a placeholder whose runs all ended without
-/// cleaning up (as their cleanup would have), and its marker folder.
+/// cleaning up (as their cleanup would have), its record and marker folder.
+/// One that is no longer an empty file stays, without its record.
 #[test]
 fn stale_placeholders_of_ended_runs_are_removed() {
     let temp_dir = tempfile::TempDir::new().expect("tempdir");
     let placeholder = temp_dir.path().join("Library");
     std::fs::write(&placeholder, "").expect("placeholder");
-    let marker_dir = stale_registration(&placeholder, SYNTHETIC_MOUNT_MARKER_SYNTHETIC);
+    let marker_dir = stale_registration(&placeholder);
+    let changed = temp_dir.path().join("changed");
+    std::fs::write(&changed, "").expect("placeholder");
+    let changed_marker_dir = stale_registration(&changed);
+    std::fs::write(&changed, "real contents").expect("a real file now");
 
     remove_stale_synthetic_mount_targets();
 
     assert!(!placeholder.exists());
     assert!(!marker_dir.exists());
+    assert_eq!(std::fs::read(&changed).expect("changed"), b"real contents");
+    assert!(!changed_marker_dir.exists());
 }
 
-/// #582: what is left in place: a placeholder a live run still uses, a
-/// path that is no longer an empty file, and a pre-existing file an ended
-/// run only held.
+/// #582: a recorded placeholder a live run still uses (its maker, or a run
+/// that holds it after its maker was killed) stays, as does a marker folder
+/// with a marker of another kind.
 #[test]
-fn stale_placeholder_sweep_leaves_live_held_and_changed_paths() {
+fn stale_placeholder_sweep_leaves_placeholders_in_use() {
     let temp_dir = tempfile::TempDir::new().expect("tempdir");
 
-    let live = temp_dir.path().join("live");
-    std::fs::write(&live, "").expect("live placeholder");
-    let live_registrations =
-        register_synthetic_mount_targets(&[crate::bwrap::SyntheticMountTarget::missing(&live)]);
-
-    let changed = temp_dir.path().join("changed");
-    std::fs::write(&changed, "").expect("placeholder");
-    let changed_marker_dir = stale_registration(&changed, SYNTHETIC_MOUNT_MARKER_SYNTHETIC);
-    std::fs::write(&changed, "real contents").expect("a real file now");
+    let made = temp_dir.path().join("made");
+    std::fs::write(&made, "").expect("placeholder");
+    let made_registrations =
+        register_synthetic_mount_targets(&[crate::bwrap::SyntheticMountTarget::missing(&made)]);
 
     let held = temp_dir.path().join("held");
     std::fs::write(&held, "").expect("placeholder");
-    let held_marker_dir = stale_registration(&held, SYNTHETIC_MOUNT_MARKER_EXISTING);
+    let held_marker_dir = stale_registration(&held);
+    // A later run that met it holds it (see `is_live_placeholder`).
+    assert!(is_live_placeholder(&held));
+    let metadata = std::fs::symlink_metadata(&held).expect("stat");
+    let held_registrations = register_synthetic_mount_targets(&[
+        crate::bwrap::SyntheticMountTarget::existing_empty_file(&held, &metadata),
+    ]);
+
+    let other = temp_dir.path().join("other");
+    std::fs::write(&other, "").expect("placeholder");
+    let other_marker_dir = stale_registration(&other);
+    std::fs::write(
+        other_marker_dir.join(ended_pid().to_string()),
+        PROTECTED_CREATE_MARKER,
+    )
+    .expect("another kind of marker");
 
     remove_stale_synthetic_mount_targets();
 
-    assert!(live.exists());
-    assert!(live_registrations[0].marker_file.exists());
-    assert_eq!(std::fs::read(&changed).expect("changed"), b"real contents");
-    assert!(!changed_marker_dir.exists());
+    assert!(made.exists());
     assert!(held.exists());
     assert!(held_marker_dir.exists());
+    assert!(other.exists());
 
-    cleanup_synthetic_mount_targets(&live_registrations);
-    assert!(!live.exists());
-    assert!(!live_registrations[0].marker_dir.exists());
-    std::fs::remove_file(held_marker_dir.join(SYNTHETIC_MOUNT_TARGET_RECORD)).expect("record");
-    for marker in std::fs::read_dir(&held_marker_dir).expect("held markers") {
-        std::fs::remove_file(marker.expect("marker").path()).expect("remove marker");
+    // The last run out removes each as its maker would have (#582 review:
+    // a holder whose maker was killed must not leave it behind).
+    cleanup_synthetic_mount_targets(&made_registrations);
+    cleanup_synthetic_mount_targets(&held_registrations);
+    assert!(!made.exists());
+    assert!(!held.exists());
+    assert!(!held_marker_dir.exists());
+
+    for entry in std::fs::read_dir(&other_marker_dir).expect("other markers") {
+        std::fs::remove_file(entry.expect("entry").path()).expect("remove");
     }
-    std::fs::remove_dir(&held_marker_dir).expect("held marker dir");
+    std::fs::remove_dir(&other_marker_dir).expect("other marker dir");
 }
 
 #[test]

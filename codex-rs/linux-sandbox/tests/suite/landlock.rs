@@ -1532,16 +1532,22 @@ async fn issue_582_a_placeholder_left_by_a_killed_run_is_removed_by_the_next() {
             FileSystemAccessMode::Deny,
         ),
     ]);
+    // A registry of its own, so other tests' runs do not sweep this one's
+    // placeholder first.
+    let tmp = base.join("tmp");
+    std::fs::create_dir(&tmp).expect("tmp");
     let run = |script: &'static str, timeout_ms: u64| {
         let cwd = AbsolutePathBuf::from_absolute_path(&base).expect("absolute base");
         let profile =
             PermissionProfile::from_runtime_permissions(&policy, NetworkSandboxPolicy::Restricted);
+        let mut env = create_env_from_core_vars();
+        env.insert("TMPDIR".to_string(), tmp.to_string_lossy().into_owned());
         async move {
             run_cmd_result_with_permission_profile_for_cwd(
                 &["bash", "-c", script],
                 cwd,
                 profile,
-                create_env_from_core_vars(),
+                env,
                 timeout_ms,
                 /*use_legacy_landlock*/ false,
             )
@@ -1552,7 +1558,10 @@ async fn issue_582_a_placeholder_left_by_a_killed_run_is_removed_by_the_next() {
     let killed = run("sleep 30", 2_000).await;
     assert!(
         matches!(
-            killed.as_ref().err().map(codex_protocol::error::CodexErr::details),
+            killed
+                .as_ref()
+                .err()
+                .map(codex_protocol::error::CodexErr::details),
             Some(CodexErrorDetails::Sandbox(SandboxErr::Timeout { .. }))
         ),
         "{killed:?}"
