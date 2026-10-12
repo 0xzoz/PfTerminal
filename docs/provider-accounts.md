@@ -123,7 +123,7 @@ corbanu logout --account work                 # revokes and clears only `work`
 corbanu exec --account work "..."
 ```
 
-In `/providers`, *Add another account* on OpenAI offers a device-code ChatGPT
+In `/providers`, _Add another account_ on OpenAI offers a device-code ChatGPT
 sign-in or a masked OpenAI API key. Rows show only the kind, an email hint
 (`w…@example.com`), the plan and a fingerprint.
 
@@ -144,5 +144,5 @@ sign-in or a masked OpenAI API key. Rows show only the kind, an email hint
 - Signing the same ChatGPT user in under two accounts (or as `default` and a
   named account) is allowed with a warning: they share that user's limits,
   and signing out of one can end the other's session.
-- A refresh the server rejects ends the turn with `sign in again with
-  corbanu login --account <name>`; the default login is unchanged.
+- A refresh the server rejects ends the turn and names the recovery,
+  `corbanu login --account <name>`; the default login is unchanged.
