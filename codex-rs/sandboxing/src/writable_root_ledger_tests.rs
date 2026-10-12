@@ -233,3 +233,31 @@ fn the_refusal_names_the_link_that_changed() {
         "{refusal}"
     );
 }
+
+/// #536 review: a root that was already a link to a folder inside the
+/// workspace (reached through a linked code folder) and is pointed elsewhere
+/// names that link, the only one a command could have made.
+#[cfg(unix)]
+#[test]
+fn the_refusal_names_a_repointed_link() {
+    let (_dir, base) = base();
+    let real_code = base.join("mnt-code");
+    std::fs::create_dir_all(real_code.join("ws/build/out")).expect("ws");
+    let elsewhere = base.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).expect("elsewhere");
+    let code = base.join("code");
+    std::os::unix::fs::symlink(&real_code, &code).expect("code link");
+    let workspace = code.join("ws");
+    let target = workspace.join("target");
+    std::os::unix::fs::symlink(workspace.join("build/out"), &target).expect("inner link");
+    let policy = FileSystemSandboxPolicy::restricted(vec![write(&workspace), write(&target)]);
+    record_writable_roots(&policy, &workspace);
+    assert!(check_writable_roots(&policy, &workspace).is_ok());
+    std::fs::remove_file(&target).expect("unlink");
+    std::os::unix::fs::symlink(&elsewhere, &target).expect("repointed");
+    let refusal = check_writable_roots(&policy, &workspace).expect_err("refused");
+    let WritableRootRefusal::Changed { link, .. } = &refusal else {
+        panic!("{refusal:?}");
+    };
+    assert_eq!(link, &target);
+}

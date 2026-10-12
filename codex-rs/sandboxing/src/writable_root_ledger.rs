@@ -158,7 +158,7 @@ pub fn check_writable_roots(
             if !links_on(root.root.as_path()).is_empty() {
                 return Err(WritableRootRefusal::Changed {
                     root: root.root.to_path_buf(),
-                    link: changed_link(root.root.as_path(), was),
+                    link: link_to_name(&roots, root.root.as_path(), was),
                     was: was.clone(),
                     now: now.clone(),
                 });
@@ -237,6 +237,22 @@ fn outside_holders(
         real: reals[index].clone(),
         holder: roots[*first].root.to_path_buf(),
     })
+}
+
+/// The link to name in a refusal for `root`, which led to `was`: the first
+/// link on its path whose folder is inside a writable root (only those can
+/// have been made by a command), else the one [`changed_link`] finds.
+fn link_to_name(roots: &[WritableRoot], root: &Path, was: &Path) -> PathBuf {
+    links_on(root)
+        .into_iter()
+        .find(|link| {
+            link.parent().is_some_and(|folder| {
+                roots
+                    .iter()
+                    .any(|writable| folder.starts_with(writable.root.as_path()))
+            })
+        })
+        .unwrap_or_else(|| changed_link(root, was))
 }
 
 /// The real location recorded for `root`, if this process has seen it.
