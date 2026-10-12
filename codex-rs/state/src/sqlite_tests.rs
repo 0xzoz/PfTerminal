@@ -209,3 +209,26 @@ async fn runtime_databases_wait_for_the_init_lock() -> anyhow::Result<()> {
     pool.close().await;
     Ok(())
 }
+
+/// #586: once a launch holds the init lock, the file is not empty. On Linux an
+/// empty file at that path can be a sandbox placeholder, which the command
+/// run's cleanup removes even while it is locked.
+#[tokio::test]
+async fn the_init_lock_file_is_not_left_empty() -> anyhow::Result<()> {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home).await?;
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let lock = sqlite_home.join(DB_INIT_LOCK_FILENAME);
+    std::fs::write(&lock, b"")?;
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let held = sqlite.lock_runtime_db_init().await;
+    assert_eq!(std::fs::metadata(&lock)?.len(), 1);
+    drop(held);
+    // Later launches leave it as it is.
+    let held = sqlite.lock_runtime_db_init().await;
+    assert_eq!(std::fs::metadata(&lock)?.len(), 1);
+    drop(held);
+    Ok(())
+}

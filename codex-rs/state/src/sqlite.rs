@@ -414,7 +414,10 @@ impl SqliteConfig {
         let mut reported_wait = false;
         loop {
             match file.try_lock() {
-                Ok(()) => return RuntimeDbInitLock { _file: Some(file) },
+                Ok(()) => {
+                    keep_lock_file_nonempty(&file);
+                    return RuntimeDbInitLock { _file: Some(file) };
+                }
                 Err(std::fs::TryLockError::WouldBlock) => {
                     let waited = started.elapsed();
                     if waited >= DB_INIT_LOCK_WAIT {
@@ -496,6 +499,18 @@ pub(crate) struct RuntimeDbInitLock {
 }
 
 /// A read-only or sandboxed home is expected not to take the lock: quiet.
+/// #586: the lock file is never left empty. On Linux an empty file at its
+/// path can be the sandbox's placeholder for a protected command's run (the
+/// lock is denied to agent commands even before it exists). The run's cleanup
+/// removes an empty placeholder even while a launch holds it locked, and the
+/// next launch would then lock a new file.
+fn keep_lock_file_nonempty(mut file: &std::fs::File) {
+    use std::io::Write;
+    if file.metadata().is_ok_and(|metadata| metadata.len() == 0) {
+        let _ = file.write_all(b"\n");
+    }
+}
+
 fn log_unlocked(path: &Path, err: &std::io::Error) {
     if matches!(
         err.kind(),

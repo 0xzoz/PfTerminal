@@ -1671,10 +1671,12 @@ async fn issue_562_missing_runtime_entries_cannot_be_created() -> anyhow::Result
 }
 
 /// Issue #586: a protected command cannot create, and so cannot hold, the
-/// database init lock (#549) where it is missing, even with full access and
-/// the path built at run time. Holding it would make every new launch on
-/// the home wait out the lock before opening the databases unlocked.
-/// Permissive is unchanged.
+/// database init lock (#549) where it is missing, by its name or (on a
+/// case-insensitive macOS volume, the same file) in another case, even with
+/// full access and the path built at run time. Holding it would make every
+/// new launch on the home wait out the lock before opening the databases
+/// unlocked. Where the lock exists, a hard link to it cannot be made and
+/// held either. Permissive is unchanged.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn issue_586_missing_db_init_lock_cannot_be_created_or_held() -> anyhow::Result<()> {
@@ -1682,53 +1684,70 @@ async fn issue_586_missing_db_init_lock_cannot_be_created_or_held() -> anyhow::R
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
     let mut wrong = Vec::new();
-    for (level, created) in [
-        (SecurityLevel::Moderate, false),
-        (SecurityLevel::Aggressive, false),
-        (SecurityLevel::Permissive, true),
-    ] {
-        let home = Arc::new(TempDir::new()?);
-        let root = home.path().canonicalize()?;
-        let lock = root.join("pfterminal_db_init.lock");
-        let path = root.to_string_lossy().into_owned();
-        // Split inside the home folder's own name: neither part names it.
-        let (head, tail) = path.split_at(path.len() - 2);
-        let command = format!(
-            "h=\"$(printf '{head}%s' {tail})\"; n=\"pfterminal_db_$(printf init).lock\"; \
-             perl -e 'use Fcntl qw(:flock); open(my $f, \">>\", $ARGV[0]) or die \"open: $!\\n\"; \
-             flock($f, LOCK_EX | LOCK_NB) or die \"lock: $!\\n\"; print \"held-586\\n\"' \"$h/$n\"; \
-             echo ran-586"
-        );
-        let (test, captured) = start_turn_after(
-            Some(home.clone()),
-            level,
-            AskForApproval::Never,
-            vec![
-                call("call-lock", "shell_command", json!({ "command": command })),
-                done_step(),
-            ],
-            |config| {
-                config
-                    .permissions
-                    .set_permission_profile(PermissionProfile::Disabled)
-                    .expect("full access");
-            },
-            // The session created it at start-up; the command meets it missing.
-            |_| match std::fs::remove_file(&lock) {
-                Ok(()) => {}
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-                Err(err) => panic!("remove {}: {err}", lock.display()),
-            },
-        )
-        .await?;
-        assert!(next_exec_approval(&test).await.is_none());
-        let requests = captured.requests();
-        let output = output_text(&requests[requests.len() - 1], "call-lock");
-        if !output.contains("ran-586")
-            || output.contains("held-586") != created
-            || lock.exists() != created
-        {
-            wrong.push(format!("{level:?}: exists={}: {output}", lock.exists()));
+    for missing in [true, false] {
+        for (level, held) in [
+            (SecurityLevel::Moderate, false),
+            (SecurityLevel::Aggressive, false),
+            (SecurityLevel::Permissive, true),
+        ] {
+            let home = Arc::new(TempDir::new()?);
+            let root = home.path().canonicalize()?;
+            let lock = root.join("pfterminal_db_init.lock");
+            let path = root.to_string_lossy().into_owned();
+            // Split inside the home folder's own name: neither part names it.
+            let (head, tail) = path.split_at(path.len() - 2);
+            let attempts = if missing {
+                "hold \"$h/$n\" lower; hold \"$h/PFTERMINAL_DB_$(printf INIT).LOCK\" upper"
+            } else {
+                "ln \"$h/$n\" ./link586 && hold ./link586 link"
+            };
+            let command = format!(
+                "h=\"$(printf '{head}%s' {tail})\"; n=\"pfterminal_db_$(printf init).lock\"; \
+                 hold() {{ perl -e 'use Fcntl qw(:flock); \
+                 open(my $f, \">>\", $ARGV[0]) or die \"open: $!\\n\"; \
+                 flock($f, LOCK_EX | LOCK_NB) or die \"lock: $!\\n\"' \"$1\" && echo \"held-$2\"; }}; \
+                 {attempts}; echo ran-586"
+            );
+            let (test, captured) = start_turn_after(
+                Some(home.clone()),
+                level,
+                AskForApproval::Never,
+                vec![
+                    call("call-lock", "shell_command", json!({ "command": command })),
+                    done_step(),
+                ],
+                |config| {
+                    config
+                        .permissions
+                        .set_permission_profile(PermissionProfile::Disabled)
+                        .expect("full access");
+                },
+                // The session created it here at start-up (so this home holds
+                // the databases); the first command meets it missing.
+                |_| {
+                    if missing {
+                        std::fs::remove_file(&lock).expect("the session created the lock");
+                    } else {
+                        assert!(lock.is_file(), "the session created the lock");
+                    }
+                },
+            )
+            .await?;
+            assert!(next_exec_approval(&test).await.is_none());
+            let requests = captured.requests();
+            let output = output_text(&requests[requests.len() - 1], "call-lock");
+            let ok = if missing {
+                // In another case it is the same file where the volume ignores case.
+                output.contains("held-lower") == held && lock.exists() == held
+            } else {
+                output.contains("held-link") == held
+            };
+            if !output.contains("ran-586") || !ok {
+                wrong.push(format!(
+                    "{level:?} missing={missing}: exists={}: {output}",
+                    lock.exists()
+                ));
+            }
         }
     }
     assert_eq!(wrong, Vec::<String>::new());
