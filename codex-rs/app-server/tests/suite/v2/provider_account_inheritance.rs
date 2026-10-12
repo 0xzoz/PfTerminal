@@ -333,7 +333,10 @@ async fn an_explicit_fork_account_beats_the_source_account() -> Result<()> {
     // `other` is neither the source's account nor `[provider_accounts]`.
     let source = work_thread(&mut app).await?;
     let forked = fork(&mut app, source, Some("other")).await?;
-    assert_eq!(forked.provider_account.as_deref(), Some("mock_provider:other"));
+    assert_eq!(
+        forked.provider_account.as_deref(),
+        Some("mock_provider:other")
+    );
     say_pong(&mut app, forked.thread.id).await?;
 
     assert_eq!(
