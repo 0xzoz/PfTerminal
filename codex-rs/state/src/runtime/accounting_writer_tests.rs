@@ -381,6 +381,21 @@ async fn the_owner_day_query_uses_the_lookup_index() -> anyhow::Result<()> {
             .any(|(.., detail)| detail.contains("corbanu_lookup_attempt_dispatch")),
         "{plan:?}"
     );
+    // The expiry batch's statement (`accounting_retention_incremental.rs`).
+    let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(
+        "EXPLAIN QUERY PLAN SELECT attempt_id FROM draft_accounting_attempts
+            WHERE json_extract(payload, '$.dispatched_at_ms') <= ?
+            ORDER BY attempt_id LIMIT ?",
+    )
+    .bind(0)
+    .bind(10)
+    .fetch_all(runtime.pool.as_ref())
+    .await?;
+    assert!(
+        plan.iter()
+            .any(|(.., detail)| detail.contains("corbanu_lookup_attempt_dispatch")),
+        "{plan:?}"
+    );
     runtime.close().await;
     Ok(())
 }
