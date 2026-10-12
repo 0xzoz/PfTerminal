@@ -1040,3 +1040,36 @@ fn issue_518_a_home_name_above_the_active_home_stays_denied() {
         .file_system_sandbox_policy();
     assert!(!readable_under(&policy, &legacy.join("auth.json"), &cwd));
 }
+
+/// #442 (Travis, 2026-10-11): a grant never lifts the project's `.codex` and
+/// `.agents`, existing or not; it still lifts git hooks and config.
+#[test]
+fn issue_442_a_grant_keeps_codex_and_agents_read_only() {
+    let fx = fixture();
+    let cwd = fx.user_home.join("project");
+    std::fs::create_dir_all(cwd.join(".git/hooks")).unwrap();
+    std::fs::create_dir_all(cwd.join(".codex")).unwrap();
+    let mut denials = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)]);
+    denials.lift_write_rules();
+    let policy = denials
+        .apply(&PermissionProfile::Disabled)
+        .unwrap()
+        .file_system_sandbox_policy();
+    for kept in [
+        ".codex/config.toml",
+        ".codex",
+        ".agents/skills/x/SKILL.md",
+        ".agents",
+    ] {
+        assert!(
+            !policy.can_write_path_with_cwd(&cwd.join(kept), &cwd),
+            "{kept}"
+        );
+    }
+    for lifted in [".git/hooks/pre-commit", ".git/config"] {
+        assert!(
+            policy.can_write_path_with_cwd(&cwd.join(lifted), &cwd),
+            "{lifted}"
+        );
+    }
+}

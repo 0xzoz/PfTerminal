@@ -351,16 +351,40 @@ fn run_bwrap_with_proc_fallback(
         network_mode,
         ..Default::default()
     };
+    // #442: watch before the existing credential files are found and hidden,
+    // so none created in between is missed.
+    let credential_watcher = crate::credential_watch::CredentialWatcher::for_policy(
+        file_system_sandbox_policy,
+        sandbox_policy_cwd,
+    )
+    .unwrap_or_else(|err| {
+        eprintln!("{}", crate::credential_watch::refused_message(&err));
+        std::process::exit(1);
+    });
+    let mut file_system_sandbox_policy = file_system_sandbox_policy.clone();
+    if let Some(watcher) = &credential_watcher {
+        for target in watcher.existing_files() {
+            if let Ok(path) = codex_utils_absolute_path::AbsolutePathBuf::from_absolute_path(target)
+            {
+                file_system_sandbox_policy
+                    .entries
+                    .push(FileSystemSandboxEntry::new(
+                        FileSystemPath::Path { path },
+                        FileSystemAccessMode::Deny,
+                    ));
+            }
+        }
+    }
     let mut bwrap_args = build_bwrap_argv(
         inner,
-        file_system_sandbox_policy,
+        &file_system_sandbox_policy,
         sandbox_policy_cwd,
         command_cwd,
         options,
     )
     .unwrap_or_else(|err| exit_with_bwrap_build_error(err));
     apply_inner_command_argv0(&mut bwrap_args.args);
-    run_or_exec_bwrap(bwrap_args);
+    run_or_exec_bwrap(bwrap_args, credential_watcher);
 }
 
 fn bwrap_network_mode(
@@ -486,16 +510,23 @@ fn resolve_true_command() -> String {
     "true".to_string()
 }
 
-fn run_or_exec_bwrap(bwrap_args: crate::bwrap::BwrapArgs) -> ! {
+fn run_or_exec_bwrap(
+    bwrap_args: crate::bwrap::BwrapArgs,
+    credential_watcher: Option<crate::credential_watch::CredentialWatcher>,
+) -> ! {
     if bwrap_args.synthetic_mount_targets.is_empty()
         && bwrap_args.protected_create_targets.is_empty()
+        && credential_watcher.is_none()
     {
         exec_bwrap(bwrap_args.args, bwrap_args.preserved_files);
     }
-    run_bwrap_in_child_with_synthetic_mount_cleanup(bwrap_args);
+    run_bwrap_in_child_with_synthetic_mount_cleanup(bwrap_args, credential_watcher);
 }
 
-fn run_bwrap_in_child_with_synthetic_mount_cleanup(bwrap_args: crate::bwrap::BwrapArgs) -> ! {
+fn run_bwrap_in_child_with_synthetic_mount_cleanup(
+    bwrap_args: crate::bwrap::BwrapArgs,
+    credential_watcher: Option<crate::credential_watch::CredentialWatcher>,
+) -> ! {
     let crate::bwrap::BwrapArgs {
         args,
         preserved_files,
@@ -506,7 +537,13 @@ fn run_bwrap_in_child_with_synthetic_mount_cleanup(bwrap_args: crate::bwrap::Bwr
     let synthetic_mount_registrations = register_synthetic_mount_targets(&synthetic_mount_targets);
     let protected_create_registrations =
         register_protected_create_targets(&protected_create_targets);
-    let exec_start_pipe = create_exec_start_pipe(!protected_create_targets.is_empty());
+    let exec_start_pipe = create_exec_start_pipe(
+        !protected_create_targets.is_empty() || credential_watcher.is_some(),
+    );
+    let placeholders = synthetic_mount_targets
+        .iter()
+        .map(|target| target.path().to_path_buf())
+        .collect::<Vec<_>>();
     let parent_pid = unsafe { libc::getpid() };
     let pid = unsafe { libc::fork() };
     if pid < 0 {
@@ -528,10 +565,17 @@ fn run_bwrap_in_child_with_synthetic_mount_cleanup(bwrap_args: crate::bwrap::Bwr
     }
 
     close_child_exec_start_read(exec_start_pipe[0]);
+    let credential_monitor = credential_watcher.map(|watcher| watcher.start(pid, &placeholders));
     let protected_create_monitor = ProtectedCreateMonitor::start(&protected_create_targets);
     let signal_forwarders = install_bwrap_signal_forwarders(pid);
     release_child_exec_start(exec_start_pipe[1]);
     setup_signal_mask.restore();
+    // Stop the credential watcher while the child is still unreaped, so a
+    // late stop can never signal a reused pid.
+    let credential_stop = credential_monitor.and_then(|monitor| {
+        wait_for_bwrap_child_exit_without_reaping(pid);
+        monitor.stop()
+    });
     let status = wait_for_bwrap_child(pid);
     let cleanup_signal_mask = ForwardedSignalMask::block();
     BWRAP_CHILD_PID.store(0, Ordering::SeqCst);
@@ -543,6 +587,10 @@ fn run_bwrap_in_child_with_synthetic_mount_cleanup(bwrap_args: crate::bwrap::Bwr
         || cleanup_protected_create_targets(&protected_create_registrations);
     signal_forwarders.restore();
     cleanup_signal_mask.restore();
+    if let Some(found) = credential_stop {
+        eprintln!("{}", crate::credential_watch::stopped_message(&found));
+        std::process::exit(1);
+    }
     exit_with_wait_status_or_policy_violation(status, protected_create_violation);
 }
 
@@ -853,6 +901,23 @@ fn reset_forwarded_signal_handlers_to_default() {
                 let err = std::io::Error::last_os_error();
                 panic!("failed to reset bubblewrap signal handler for {signal}: {err}");
             }
+        }
+    }
+}
+
+/// Returns once `pid` has exited, leaving it to be reaped.
+fn wait_for_bwrap_child_exit_without_reaping(pid: libc::pid_t) {
+    let Ok(id) = libc::id_t::try_from(pid) else {
+        return;
+    };
+    loop {
+        // SAFETY: `info` is a valid out pointer for `waitid`.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: plain syscall on this process's own child.
+        let res =
+            unsafe { libc::waitid(libc::P_PID, id, &mut info, libc::WEXITED | libc::WNOWAIT) };
+        if res == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            return;
         }
     }
 }

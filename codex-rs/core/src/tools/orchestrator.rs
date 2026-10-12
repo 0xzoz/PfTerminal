@@ -711,7 +711,9 @@ impl ToolOrchestrator {
                 // output. Exception: if the platform sandbox itself failed to
                 // start after an explicit OnRequest approval, the approval is
                 // enough to retry unsandboxed when doing so would not drop
-                // denied-read enforcement.
+                // denied-read enforcement, nor (#540) leave a kept sandbox
+                // outside a protected action's fresh approval
+                // (`retry_may_leave_sandbox`).
                 if !tool.wants_no_sandbox_approval(approval_policy) {
                     let allow_on_request_network_prompt =
                         matches!(approval_policy, AskForApproval::OnRequest)
@@ -1417,6 +1419,7 @@ mod tests {
             (true, true, false, false, false),
             (true, true, true, false, true),
             (true, true, true, true, false),
+            (true, true, false, true, false),
             (false, true, true, false, false),
         ] {
             assert_eq!(
