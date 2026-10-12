@@ -55,8 +55,8 @@ enum RateLimitRetry {
 /// integer `retry-after-ms`, then a positive integer `Retry-After` in seconds
 /// (a `Retry-After` that is not an integer, such as an HTTP date, stops the
 /// retries; core reads the date), then `x-ratelimit-reset-ms` and
-/// `x-ratelimit-reset` (Unix time in milliseconds or seconds). A wait up to `MAX_TRANSPORT_RETRY_AFTER`
-/// is honoured; a longer one stops the retries. A 429 with none of them (a
+/// `x-ratelimit-reset` (Unix time in milliseconds or seconds). A wait up to
+/// `MAX_TRANSPORT_RETRY_AFTER` is honoured; a longer one stops the retries. A 429 with none of them (a
 /// transient overload, as Z.AI sends) keeps the normal backoff.
 fn rate_limit_retry_delay(err: &TransportError) -> RateLimitRetry {
     let TransportError::Http {
