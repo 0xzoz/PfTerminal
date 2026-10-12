@@ -166,6 +166,13 @@ pub fn kill_switch_on(codex_home: &Path) -> bool {
     })
 }
 
+/// #507: whether the kill switch is on for `codex_home`, kept current while
+/// this process runs: also when another Corbanu Terminal process on the home
+/// turns it on or off (seen within about a second).
+pub fn watch_kill_switch(codex_home: &Path) -> tokio::sync::watch::Receiver<bool> {
+    super::effective_policy::transition::kill_switch_watch::subscribe(codex_home)
+}
+
 /// End the grant `grant_id` now. Returns whether one was held.
 pub fn revoke_grant(grant_id: &str) -> bool {
     super::aggressive::revoke_grant(grant_id)
