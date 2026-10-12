@@ -138,6 +138,16 @@ pub struct LandlockCommand {
     #[arg(long = "proxy-route-spec", hide = true)]
     pub proxy_route_spec: Option<String>,
 
+    /// Internal (#536): the writable roots' real locations as the caller
+    /// pinned them; each root is bound there, and the command is refused
+    /// when a root no longer leads there.
+    #[arg(
+        long = "pinned-writable-roots",
+        hide = true,
+        value_parser = parse_pinned_writable_roots
+    )]
+    pub pinned_writable_roots: Option<PinnedWritableRoots>,
+
     /// When set, skip mounting a fresh `/proc` even though PID isolation is
     /// still enabled. This is primarily intended for restrictive container
     /// environments that deny `--proc /proc`.
@@ -170,6 +180,7 @@ pub fn run_main() -> ! {
         apply_seccomp_then_exec,
         allow_network_for_proxy,
         proxy_route_spec,
+        pinned_writable_roots,
         no_proc,
         close_inherited_fd,
         command,
@@ -233,6 +244,12 @@ pub fn run_main() -> ! {
             panic!("error applying Linux sandbox restrictions: {e:?}");
         }
         exec_or_panic(command);
+    }
+
+    if let Some(PinnedWritableRoots(pinned)) = pinned_writable_roots {
+        // #536: bubblewrap and legacy Landlock grant each writable root on
+        // the folder opened and checked at its pinned location.
+        crate::pinned::set(pinned);
     }
 
     if !use_legacy_landlock {
@@ -303,6 +320,16 @@ impl fmt::Display for ResolvePermissionProfileError {
     }
 }
 
+/// The `--pinned-writable-roots` value (#536).
+#[derive(Debug, Clone)]
+pub struct PinnedWritableRoots(pub Vec<codex_protocol::permissions::PinnedWritableRoot>);
+
+fn parse_pinned_writable_roots(value: &str) -> std::result::Result<PinnedWritableRoots, String> {
+    serde_json::from_str(value)
+        .map(PinnedWritableRoots)
+        .map_err(|err| format!("invalid pinned writable roots: {err}"))
+}
+
 fn parse_permission_profile(value: &str) -> std::result::Result<PermissionProfile, String> {
     serde_json::from_str(value).map_err(|err| format!("invalid permission profile JSON: {err}"))
 }
@@ -371,6 +398,10 @@ fn run_bwrap_with_proc_fallback(
     let options = BwrapOptions {
         mount_proc,
         network_mode,
+        pins: crate::pinned::get().map(|roots| crate::bwrap::WritableRootPins {
+            roots,
+            bind_fd: crate::launcher::bind_fd_available(),
+        }),
         ..Default::default()
     };
     // #442: watch before the existing credential files are found and hidden,
