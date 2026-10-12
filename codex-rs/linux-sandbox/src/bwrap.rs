@@ -390,10 +390,12 @@ fn create_bwrap_flags(
 ///    root above `/dev` (the `/` of a full-write profile) is followed by a
 ///    fresh `--dev /dev`: its bind would otherwise cover the minimal `/dev`
 ///    with the host's, mounted `nodev`, so even `/dev/null` fails (#493).
+///    For a session's command, `--bind-fd <checked folder> <root>` (#536).
 /// 5. `--ro-bind <subpath> <subpath>` re-applies read-only protections under
 ///    those writable roots so protected subpaths win.
 /// 6. Nested unreadable carveouts under a writable root are masked after that
 ///    root is bound, and unrelated unreadable roots are masked afterward.
+#[cfg(test)]
 fn create_filesystem_args(
     file_system_sandbox_policy: &FileSystemSandboxPolicy,
     cwd: &Path,
