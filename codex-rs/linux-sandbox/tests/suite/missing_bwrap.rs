@@ -99,7 +99,7 @@ fn without_bubblewrap_the_helper_refuses_and_names_what_to_install() {
 /// With a bubblewrap next to the helper (as the release packages ship it,
 /// in `codex-resources/`), the helper uses it when none is on PATH. Runs
 /// where the `bwrap` binary was built next to the helper
-/// (`cargo build --bin bwrap`) and the host can create user namespaces.
+/// (`cargo build --bin bwrap`) and the host lets it create user namespaces.
 #[test]
 fn without_bubblewrap_on_path_the_helper_uses_its_bundled_copy() {
     let built = Path::new(env!("CARGO_BIN_EXE_codex-linux-sandbox")).with_file_name("bwrap");
@@ -121,7 +121,13 @@ fn without_bubblewrap_on_path_the_helper_uses_its_bundled_copy() {
         &PermissionProfile::read_only(),
     );
     let stderr = String::from_utf8_lossy(&probe.stderr);
-    if stderr.contains("namespace") || stderr.contains("uid map") {
+    // A bubblewrap outside the system's AppArmor allowance cannot create
+    // the namespaces where unprivileged user namespaces are restricted
+    // (Ubuntu 24.04 by default).
+    if ["namespace", "uid map", "RTM_NEWADDR", "RTM_NEWLINK"]
+        .iter()
+        .any(|failure| stderr.contains(failure))
+    {
         eprintln!("skipped: this host cannot create user namespaces: {stderr}");
         return;
     }
