@@ -14261,3 +14261,68 @@ async fn issue_245_a_grant_stored_before_the_rules_applied_drops_protected_paths
         Some(notes_only)
     );
 }
+
+/// Issue #524: a grant is checked against the session's current folder and
+/// profile too. A protected folder that holds the original folder is skipped
+/// for that folder, so checked against it alone an entry inside the folder
+/// survived after the session moved elsewhere.
+#[tokio::test]
+async fn issue_524_a_grant_is_checked_against_the_current_folder_too() {
+    use codex_protocol::permissions::FileSystemAccessMode;
+    use codex_protocol::permissions::FileSystemPath;
+    use codex_protocol::permissions::FileSystemSandboxEntry;
+    use codex_security_policy::SecurityLevel;
+    let (session, turn) = make_session_and_context().await;
+    let memories = turn.config.codex_home.join("memories");
+    let original = memories.join("project");
+    std::fs::create_dir_all(original.as_path()).unwrap();
+    {
+        let mut state = session.state.lock().await;
+        let mut config = (*state.session_configuration.original_config_do_not_use).clone();
+        config.cwd = original.clone();
+        state.session_configuration.original_config_do_not_use = Arc::new(config);
+    }
+    let environment_id = turn
+        .environments
+        .primary()
+        .expect("a primary environment")
+        .environment_id
+        .clone();
+    let grant = AdditionalPermissionProfile {
+        network: None,
+        file_system: Some(codex_protocol::models::FileSystemPermissions {
+            entries: vec![FileSystemSandboxEntry::new(
+                FileSystemPath::Path {
+                    path: memories.join("notes.md"),
+                },
+                FileSystemAccessMode::Read,
+            )],
+            glob_scan_max_depth: None,
+        }),
+    };
+    session
+        .state
+        .lock()
+        .await
+        .record_granted_permissions(&environment_id, grant);
+    let control = session
+        .services
+        .agent_control
+        .clone()
+        .with_effective_security_policy(
+            SecurityLevel::Moderate,
+            session.thread_id,
+            /*inherits_from_spawn_parent*/ false,
+        )
+        .expect("policy");
+    let client = (*session.services.model_client())
+        .clone()
+        .with_ingress_policy(SecurityLevel::Moderate, control.effective_security_policy())
+        .with_source_envelopes(true);
+    session.services.replace_model_client(client);
+
+    assert_eq!(
+        session.granted_session_permissions(&environment_id).await,
+        None
+    );
+}

@@ -294,8 +294,20 @@ pub(crate) async fn additional_permission_refusal(
         );
         let mut cwds = vec![cwd.as_path(), inputs.turn_cwd.as_path()];
         cwds.extend(inputs.workspace_roots.iter().map(AbsolutePathBuf::as_path));
-        super::protected_additional::opened_protected_path(&denials, &additional, &cwds)
-            .map(|path| explanation(&path))
+        // Issue #513: nor a runtime entry of the Corbanu home for writing,
+        // which no grant lifts. Other write protections wait for the run's
+        // grant to be known.
+        let protected = denials
+            .apply(&inputs.profile)
+            .map(|protected| protected.file_system_sandbox_policy());
+        let check = super::protected_additional::Check {
+            denials: &denials,
+            protected: protected.as_ref(),
+            reads: true,
+            writes: super::protected_additional::ReadOnlyScope::Runtime,
+        };
+        super::protected_additional::opened(check, &additional, &cwds)
+            .map(|opened| opened.refusal(SecurityLevel::Aggressive))
     })
     .await
 }

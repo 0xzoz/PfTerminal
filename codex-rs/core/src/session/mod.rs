@@ -3294,13 +3294,17 @@ impl Session {
         if response.permissions.is_empty() {
             return response;
         }
-        let config = self.get_config().await;
-        let (kept, refusal) = crate::security::protected_additional::strip_grant(
-            self,
-            &config,
-            cwd,
+        let Some(level) = crate::security::protected_additional::protected_level(self) else {
+            return response;
+        };
+        let (codex_home, configs) = self.grant_check_configs(Some(cwd)).await;
+        let (kept, refusal) = crate::security::protected_additional::strip_grant_off_thread(
+            level,
+            codex_home,
+            configs,
             response.permissions.clone().into(),
-        );
+        )
+        .await;
         let Some(refusal) = refusal else {
             return response;
         };
@@ -3375,8 +3379,47 @@ impl Session {
         granted: Option<AdditionalPermissionProfile>,
     ) -> Option<AdditionalPermissionProfile> {
         let granted = granted?;
-        let config = self.get_config().await;
-        crate::security::protected_additional::strip_grant(self, &config, &config.cwd, granted).0
+        let Some(level) = crate::security::protected_additional::protected_level(self) else {
+            return Some(granted);
+        };
+        let (codex_home, configs) = self.grant_check_configs(/*cwd*/ None).await;
+        crate::security::protected_additional::strip_grant_off_thread(
+            level, codex_home, configs, granted,
+        )
+        .await
+        .0
+    }
+
+    /// Issue #524: the Corbanu home, and what a grant is checked against:
+    /// `cwd` (or the session's original folder) with the original profile,
+    /// and the session's current folder and profile, which may have changed
+    /// since, each with the current workspace roots.
+    async fn grant_check_configs(
+        &self,
+        cwd: Option<&AbsolutePathBuf>,
+    ) -> (
+        std::path::PathBuf,
+        Vec<crate::security::protected_additional::GrantCheckConfig>,
+    ) {
+        use crate::security::protected_additional::GrantCheckConfig;
+        let state = self.state.lock().await;
+        let current = &state.session_configuration;
+        let config = &current.original_config_do_not_use;
+        let workspace_roots = current.primary_workspace_roots();
+        let mut configs = vec![GrantCheckConfig {
+            cwd: cwd.unwrap_or(&config.cwd).clone(),
+            workspace_roots: workspace_roots.clone(),
+            profile: config.permissions.permission_profile().clone(),
+        }];
+        let now = GrantCheckConfig {
+            cwd: current.cwd().clone(),
+            workspace_roots,
+            profile: current.permission_profile(),
+        };
+        if !configs.contains(&now) {
+            configs.push(now);
+        }
+        (config.codex_home.to_path_buf(), configs)
     }
 
     #[expect(
