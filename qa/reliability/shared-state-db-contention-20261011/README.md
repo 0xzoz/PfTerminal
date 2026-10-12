@@ -55,7 +55,7 @@ the lock for milliseconds, so the split is not needed.
 per turn) on one disposable home holding the DB copy, against `mock_anthropic.py`, with developer
 accounting on. `--warmup` runs one exec first so the home's other runtime DBs exist and the hour's
 validation is done, as on a home in use (ten simultaneous first launches on a brand-new home race
-creating `pfterminal_goals_1`/`memories_1`; a separate, pre-existing bug seen with both builds).
+creating `pfterminal_goals_1`/`memories_1`; a separate, pre-existing bug seen with both builds, #549).
 `--hold-seconds` holds the write lock from another process 5 s into the run, as a long
 maintenance or a backup would. Reports are in `evidence/`. The Mac was shared with other builds
 (load average 11-45), so absolute times are noisy.
