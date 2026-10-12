@@ -116,9 +116,11 @@ pub(crate) struct ReadDenials {
     globs: Vec<String>,
     /// Readable but never writable (PF-23-S02), even before they exist.
     read_only: Vec<AbsolutePathBuf>,
-    /// The same, never lifted by a grant (#442): the Corbanu home's runtime
-    /// entries (`tmp` holds the sandbox launchers) and the project's
-    /// `.codex` and `.agents`.
+    /// The same for the Corbanu home's runtime entries (`tmp` holds the
+    /// sandbox launchers): never writable, not even with a grant (#442).
+    runtime_read_only: Vec<AbsolutePathBuf>,
+    /// The same for the project's `.codex` and `.agents`: never lifted by a
+    /// grant either (#442, Travis 2026-10-11).
     never_lifted: Vec<AbsolutePathBuf>,
     /// Where the profile's relative entries resolve (the turn's folder).
     cwd: Option<AbsolutePathBuf>,
@@ -159,6 +161,7 @@ impl ReadDenials {
         for entry in CORBANU_READ_ONLY {
             denials.push_home_read_only(codex_home.join(entry), keep);
         }
+        denials.runtime_read_only = std::mem::take(&mut denials.read_only);
         // #442 (Travis, 2026-10-11): the project's agent settings stay
         // read-only even with a grant.
         for root in keep {
@@ -329,7 +332,7 @@ impl ReadDenials {
 
     /// Every path made read-only.
     pub(crate) fn read_only_paths(&self) -> impl Iterator<Item = &AbsolutePathBuf> {
-        self.never_lifted.iter().chain(&self.read_only)
+        self.never_lifted_paths().chain(&self.read_only)
     }
 
     /// Issue #513: the Corbanu home's runtime entries (`tmp` holds the
@@ -338,9 +341,10 @@ impl ReadDenials {
         self.runtime_read_only.iter()
     }
 
-    /// Issue #513: the read-only paths no grant lifts (#442).
+    /// Issue #513: the read-only paths no grant lifts (#442): the runtime
+    /// entries and the project's `.codex` and `.agents`.
     pub(crate) fn never_lifted_paths(&self) -> impl Iterator<Item = &AbsolutePathBuf> {
-        self.runtime_read_only.iter()
+        self.runtime_read_only.iter().chain(&self.never_lifted)
     }
 
     /// `path` with its nearest existing folder resolved (links followed),
@@ -419,7 +423,11 @@ impl ReadDenials {
                     .map(FileSystemSandboxEntry::deny_directory_listing),
             )
             .collect();
-        if entries.is_empty() && self.read_only.is_empty() && self.never_lifted.is_empty() {
+        if entries.is_empty()
+            && self.read_only.is_empty()
+            && self.runtime_read_only.is_empty()
+            && self.never_lifted.is_empty()
+        {
             return Some(profile.clone());
         }
         // Turns an unrestricted policy into full write access plus the
