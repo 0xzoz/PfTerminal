@@ -206,7 +206,7 @@ async fn run_codex_thread_interactive_respects_pre_cancelled_spawn() {
         Duration::from_secs(/*secs*/ 1),
         run_codex_thread_interactive(
             parent_ctx.config.as_ref().clone(),
-            Arc::clone(&parent_session.services.auth_manager),
+            parent_session.services.auth_manager(),
             Arc::clone(&parent_session.services.models_manager),
             parent_session,
             parent_ctx,

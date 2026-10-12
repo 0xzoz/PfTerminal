@@ -34,14 +34,15 @@ fn session_account(app: &App, provider_id: &str) -> Option<String> {
 #[tokio::test]
 async fn a_session_account_that_cannot_load_changes_nothing() {
     let (mut app, _home) = app_with_named_accounts("").await;
-    // OpenAI sign-in cannot hold named accounts yet (pending S06).
+    // A local server has no credential, so no named accounts (OpenAI sign-in
+    // can hold them since S06).
     let error = app
-        .select_session_provider_account("openai", Some(&name("work")))
+        .select_session_provider_account("ollama", Some(&name("work")))
         .await
         .expect_err("refused");
     assert!(error.contains("does not support named accounts"), "{error}");
     assert_eq!(app.harness_overrides.provider_account, None);
-    assert_eq!(session_account(&app, "openai"), None);
+    assert_eq!(session_account(&app, "ollama"), None);
 }
 
 #[tokio::test]
@@ -117,4 +118,65 @@ async fn a_default_set_by_a_higher_layer_is_reported() {
         .await
         .expect_err("outranked");
     assert!(error.contains("another config layer"), "{error}");
+}
+
+/// PF-84: only a model switch that changes the sign-in account refreshes the
+/// model list (and says so); one between models of the same account does not.
+#[test]
+fn only_a_sign_in_account_change_is_a_switch() {
+    use crate::app::event_dispatch::account_switch_message;
+    use crate::app::event_dispatch::sign_in_account_switch;
+    use codex_model_provider_info::ModelProviderInfo;
+    use codex_model_provider_info::NamedProviderAccount;
+
+    let openai = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
+    let mut work = openai.clone();
+    work.account = Some(NamedProviderAccount {
+        provider_id: "openai".to_string(),
+        name: "work".to_string(),
+    });
+    let zai = codex_model_provider_info::built_in_model_providers(/*openai_base_url*/ None)["zai"]
+        .clone();
+    let work_account = codex_login::NamedChatgptAccount {
+        provider_id: "openai".to_string(),
+        name: "work".to_string(),
+    };
+
+    assert_eq!(
+        sign_in_account_switch(&openai, &work),
+        Some(Some(work_account.clone()))
+    );
+    assert_eq!(sign_in_account_switch(&work, &zai), Some(None));
+    assert_eq!(sign_in_account_switch(&work, &work), None);
+    assert_eq!(sign_in_account_switch(&openai, &zai), None);
+    assert_eq!(
+        account_switch_message(Some(&work_account)),
+        "Connectors, usage and the model list now use openai account `work`; model list refreshed."
+    );
+    assert_eq!(
+        account_switch_message(None),
+        "Connectors, usage and the model list now use the default account; model list refreshed."
+    );
+}
+
+/// PF-84: only `Confirmed { Applied }` counts as applied before the reply;
+/// an uncertain outcome or a plain acceptance does not refresh the list.
+#[test]
+fn only_an_applied_confirmation_counts() {
+    use codex_app_server_protocol::ThreadSettingsUpdateOutcome;
+    use codex_app_server_protocol::ThreadSettingsUpdateResponse;
+
+    assert!(crate::app_server_session::applied_before_reply(
+        &ThreadSettingsUpdateResponse::Confirmed {
+            outcome: ThreadSettingsUpdateOutcome::Applied,
+        }
+    ));
+    assert!(!crate::app_server_session::applied_before_reply(
+        &ThreadSettingsUpdateResponse::Confirmed {
+            outcome: ThreadSettingsUpdateOutcome::Uncertain,
+        }
+    ));
+    assert!(!crate::app_server_session::applied_before_reply(
+        &ThreadSettingsUpdateResponse::Accepted {}
+    ));
 }
