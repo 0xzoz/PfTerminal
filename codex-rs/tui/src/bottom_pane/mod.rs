@@ -1675,7 +1675,7 @@ impl BottomPane {
             request
         };
 
-        let modal = RequestUserInputOverlay::new_with_keymap(
+        let mut modal = RequestUserInputOverlay::new_with_keymap(
             request,
             self.app_event_tx.clone(),
             self.has_input_focus,
@@ -1683,6 +1683,13 @@ impl BottomPane {
             self.disable_paste_burst,
             self.keymap.clone(),
         );
+        // #544: over another view or while the user typed, or just after a
+        // view closed, as for the other request views (#523).
+        match self.fresh_choice_for_request(Instant::now()) {
+            FreshChoice::Deliberate => modal.require_fresh_choice(),
+            FreshChoice::AfterAnswer => modal.require_fresh_choice_after_answer(),
+            FreshChoice::None => {}
+        }
         self.pause_status_timer_for_modal();
         self.set_composer_input_enabled(
             /*enabled*/ false,
@@ -2565,6 +2572,71 @@ mod tests {
             press_keys(&mut pane, &[KeyCode::Enter]);
             assert!(approval_answered(&mut rx), "mcp={mcp}");
         }
+    }
+
+    fn user_input_request() -> ToolRequestUserInputParams {
+        ToolRequestUserInputParams {
+            thread_id: "thread-1".to_string(),
+            item_id: "call-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            questions: vec![codex_app_server_protocol::ToolRequestUserInputQuestion {
+                id: "q1".to_string(),
+                header: "Pick".to_string(),
+                question: "Continue?".to_string(),
+                is_other: false,
+                is_secret: false,
+                options: Some(vec![
+                    codex_app_server_protocol::ToolRequestUserInputOption {
+                        label: "Yes".to_string(),
+                        description: "Go on.".to_string(),
+                    },
+                    codex_app_server_protocol::ToolRequestUserInputOption {
+                        label: "No".to_string(),
+                        description: "Stop.".to_string(),
+                    },
+                ]),
+            }],
+            auto_resolution_ms: None,
+        }
+    }
+
+    fn question_answered(rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>) -> bool {
+        std::iter::from_fn(|| rx.try_recv().ok()).any(|event| {
+            matches!(
+                event,
+                AppEvent::CodexOp(crate::app_command::AppCommand::UserInputAnswer { .. })
+            )
+        })
+    }
+
+    /// #544: an agent's question shown over another view, or just after a
+    /// prompt closed, takes neither the Enter nor a number key and Enter
+    /// meant for what came before.
+    #[test]
+    fn user_input_request_over_a_view_or_after_a_prompt_needs_a_choice() {
+        let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
+        let mut pane = test_pane(AppEventSender::new(tx_raw));
+        pane.show_selection_view(picker());
+        pane.push_user_input_request(user_input_request());
+        press_keys(
+            &mut pane,
+            &[KeyCode::Enter, KeyCode::Char('1'), KeyCode::Enter],
+        );
+        assert!(!question_answered(&mut rx));
+        press_keys(&mut pane, &[KeyCode::Down, KeyCode::Up, KeyCode::Enter]);
+        assert!(question_answered(&mut rx));
+
+        let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
+        let features = Features::with_defaults();
+        let mut pane = test_pane(AppEventSender::new(tx_raw));
+        pane.push_approval_request(exec_request(), &features);
+        press_keys(&mut pane, &[KeyCode::Enter]);
+        assert!(approval_answered(&mut rx));
+        pane.push_user_input_request(user_input_request());
+        press_keys(&mut pane, &[KeyCode::Enter]);
+        assert!(!question_answered(&mut rx));
+        press_keys(&mut pane, &[KeyCode::Char('2'), KeyCode::Enter]);
+        assert!(question_answered(&mut rx));
     }
 
     fn url_link_view(tx: AppEventSender) -> AppLinkView {
