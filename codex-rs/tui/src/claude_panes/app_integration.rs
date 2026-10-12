@@ -959,7 +959,54 @@ impl App {
         }
     }
 
-    /// #507: the kill switch was turned on in `/security` here: running
+    /// #507: the kill switch changed, in `/security` here or (`elsewhere`)
+    /// in another Corbanu Terminal process on this home. Core has stopped or
+    /// released its own sessions; the Claude panes are the app's. Each change
+    /// is handled once, whichever report arrives first.
+    pub(crate) fn on_kill_switch_changed(&mut self, on: bool, elsewhere: bool) {
+        if self.kill_switch_known_on == on {
+            return;
+        }
+        self.kill_switch_known_on = on;
+        if elsewhere {
+            self.chat_widget.add_info_message(
+                if on {
+                    KILL_SWITCH_ON_ELSEWHERE
+                } else {
+                    KILL_SWITCH_OFF_ELSEWHERE
+                }
+                .to_string(),
+                /*hint*/ None,
+            );
+        }
+        // Turned off (here or elsewhere), nothing starts by itself (Travis,
+        // 2026-10-12): tasks held for Claude panes go with their next turn.
+        if on {
+            self.on_kill_switch_turned_on();
+        } else {
+            self.on_kill_switch_turned_off();
+        }
+    }
+
+    /// #507 (Travis, 2026-10-12): a kill switch turned on or off by another
+    /// Corbanu Terminal process on this home reaches this one while it runs.
+    pub(crate) fn watch_kill_switch_elsewhere(&mut self) {
+        let mut watched = crate::legacy_core::security_revocation::watch_kill_switch(
+            self.config.codex_home.as_ref(),
+        );
+        // Start from the watch's own value, so no change falls in between.
+        self.kill_switch_known_on = *watched.borrow_and_update();
+        let tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            while watched.changed().await.is_ok() {
+                let on = *watched.borrow_and_update();
+                tx.send(AppEvent::KillSwitchChangedElsewhere { on });
+            }
+        });
+    }
+
+    /// #507: the kill switch was turned on (here, or in another Corbanu
+    /// Terminal on this home): running
     /// Claude pane turns stop, and assignments and whips pause at once (not
     /// at the next sweep), so none can fire once the switch is off again.
     pub(crate) fn on_kill_switch_turned_on(&mut self) {
@@ -1675,6 +1722,13 @@ fn rename_claude_pane_shortcut(pane_id: String) -> SelectionShortcutAction {
         dismiss_on_select: true,
     }
 }
+
+/// #507: shown when another Corbanu Terminal on this home turned the kill
+/// switch on.
+pub(crate) const KILL_SWITCH_ON_ELSEWHERE: &str = "The security kill switch was turned on in another Corbanu Terminal on this home. Work running here was stopped (Claude panes included), and nothing is sent to the model until it is turned off in /security (here or there). Messages and tasks from other agents wait until then.";
+
+/// #507: shown when another Corbanu Terminal on this home turned it off.
+pub(crate) const KILL_SWITCH_OFF_ELSEWHERE: &str = "The security kill switch was turned off in another Corbanu Terminal on this home. Turns are sent to the model again. Nothing restarts by itself here: stopped replies and commands do not restart, and a task that waited for a Claude pane goes with that pane's next turn.";
 
 /// #507: shown in a Claude pane when its turn carries the task held while the
 /// kill switch was on.

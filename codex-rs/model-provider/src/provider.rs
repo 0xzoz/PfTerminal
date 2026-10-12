@@ -34,6 +34,7 @@ use crate::amazon_bedrock::AmazonBedrockModelProvider;
 use crate::auth::ProviderAuthScope;
 use crate::auth::ResolvedProviderAuth;
 use crate::auth::auth_manager_for_provider;
+use crate::auth::named_sign_in_account;
 use crate::auth::resolve_provider_auth;
 use crate::auth::resolve_provider_auth_for_scope;
 use crate::models_endpoint::OpenAiModelsEndpoint;
@@ -537,6 +538,40 @@ impl ModelProvider for ConfiguredModelProvider {
                     ))
                     .into());
                 }
+            }
+            // PF-84-S06 (#571): a named OpenAI sign-in account without a
+            // usable sign-in is refused with the reason, never sent
+            // unauthenticated while the session claims the account.
+            if auth.is_none()
+                && let Some(account) = named_sign_in_account(&self.info)
+            {
+                let reason = self
+                    .auth_manager
+                    .as_ref()
+                    .and_then(|auth_manager| auth_manager.named_sign_in_unavailable())
+                    .unwrap_or_else(|| {
+                        format!(
+                            "account `{name}` has no usable sign-in; sign in again with \
+                             `corbanu login --account {name}`",
+                            name = account.name
+                        )
+                    });
+                return Err(CodexErr::Fatal(format!("{}: {reason}", self.info.name)));
+            }
+            // PF-84-S06 (#570): the default login this process hides (the
+            // restrictions rule it out) is refused with the reason, not
+            // replaced by an unauthenticated request.
+            if auth.is_none()
+                && self.info.requires_openai_auth
+                && self.info.env_key.is_none()
+                && self.info.auth.is_none()
+                && self.info.account.is_none()
+                && let Some(reason) = self
+                    .auth_manager
+                    .as_ref()
+                    .and_then(|auth_manager| auth_manager.hidden_default_login_reason())
+            {
+                return Err(CodexErr::Fatal(reason));
             }
             resolve_provider_auth(auth.as_ref(), self.info())
         })

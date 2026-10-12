@@ -237,15 +237,47 @@ pub fn subagent_account_error(config: &super::Config) -> Option<String> {
 
 /// PF-84-S06: a named OpenAI sign-in of the kind or workspace the
 /// configuration's login restrictions rule out is refused before the session
-/// starts (its manager also refuses to load it).
+/// starts (its manager also refuses to load it). Only the configured
+/// `forced_login_method` counts, not the API-key-only onboarding default a
+/// third-party session provider implies (#571).
 fn sign_in_restriction_error(config: &super::Config) -> Option<String> {
     let account = codex_model_provider::named_sign_in_account(&config.model_provider)?;
     codex_login::named_account_restriction_error(
         config.codex_home.as_path(),
         &account,
-        config.forced_login_method,
+        config.configured_forced_login_method,
         config.forced_chatgpt_workspace_id.as_deref(),
     )
+}
+
+/// PF-84-S06 (#570): a thread on the default OpenAI login is refused while
+/// the process's default-login manager hides that login because the login
+/// restrictions it was built with rule it out (it is left unchanged). Only
+/// in a process that left the default login in place at startup (see
+/// `codex_login::leave_default_login_unenforced`): a new session on the
+/// default account (`/providers` → *Use default account for this session*),
+/// a spawned agent on it, or a resumed or forked default-login thread. A
+/// mid-session provider switch to it is refused at the first request with
+/// the same reason (the provider's `api_auth`).
+pub fn default_login_restriction_error(
+    config: &super::Config,
+    auth_manager: &std::sync::Arc<codex_login::AuthManager>,
+) -> Option<String> {
+    let provider = &config.model_provider;
+    if !config
+        .features
+        .enabled(codex_features::Feature::NamedAccounts)
+        || !provider.requires_openai_auth
+        || provider.auth.is_some()
+        || provider.aws.is_some()
+        || provider.env_key.is_some()
+        || provider.account.is_some()
+    {
+        return None;
+    }
+    auth_manager
+        .default_account_manager()
+        .hidden_default_login_reason()
 }
 
 /// Splits `[<provider>:]<name>`; the provider defaults to the session's.

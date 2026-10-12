@@ -202,6 +202,13 @@ impl App {
             Ok(message) => self.chat_widget.add_info_message(message, /*hint*/ None),
             Err(message) => self.chat_widget.add_error_message(message),
         }
+        // #572: an added (or the last removed) Bedrock account changes
+        // whether Bedrock is reachable.
+        super::provider_management_status::check_named_bedrock_account(
+            &self.model_catalog,
+            &self.config,
+            &self.app_event_tx,
+        );
         self.schedule_provider_manager_refresh();
     }
 
@@ -309,8 +316,10 @@ impl App {
             .get(provider_id)
             .map(|provider| crate::provider_named_accounts::add_methods(provider_id, provider))
             .unwrap_or_default();
-        // A required login method rules out the other kind of sign-in.
-        match self.config.forced_login_method {
+        // A required login method rules out the other kind of sign-in. Only
+        // the configured one: the API-key-only default a third-party session
+        // provider implies is about the default login (#573).
+        match self.config.configured_forced_login_method {
             Some(ForcedLoginMethod::Chatgpt) => {
                 methods.retain(|method| *method != AddAccountMethod::OpenaiApiKey);
             }
