@@ -7033,6 +7033,10 @@ async fn issue_507_kill_switch_from_another_process_stops_claude_panes_once() {
         app.kill_switch_held_claude_tasks,
         vec![(troll_pane_id.clone(), "held task".to_string())]
     );
+    // A newer task for that pane replaces it: the older one never runs
+    // after the newer one.
+    app.submit_claude_pane_task(troll_pane_id.clone(), "newer task".to_string());
+    assert_eq!(app.kill_switch_held_claude_tasks, Vec::new());
 }
 
 fn interrupted_claude_turn(app: &App) -> crate::claude_panes::ClaudePaneTurnOutput {

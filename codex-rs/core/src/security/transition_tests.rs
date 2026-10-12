@@ -834,7 +834,7 @@ fn within(limit: std::time::Duration, done: impl Fn() -> bool) -> bool {
 /// #507 (Travis, 2026-10-12): a kill switch another Corbanu Terminal process
 /// turns on for the home reaches the trees of this process while they run
 /// (their sinks stop the running work), within the stated latency, and so
-/// does turning it off. Nothing else is taken from the file.
+/// does turning it off. Levels are not taken from the file.
 #[test]
 #[serial_test::serial(aggressive_grants)]
 fn security_transition_kill_switch_from_another_process_reaches_running_trees() {
@@ -859,7 +859,8 @@ fn security_transition_kill_switch_from_another_process_reaches_running_trees() 
     );
     assert!(here.revocations() >= 1, "the running work was not stopped");
     assert!(within(latency, || *watched.borrow()));
-    // A stricter level saved by the other process is not taken while running.
+    // A stricter level saved by the other process is not taken while running
+    // (only the kill switch and the revocations saved with it are).
     assert_eq!(here.now().0, SecurityLevel::Moderate);
 
     let release = other.kill(/*active*/ false);
@@ -913,6 +914,31 @@ fn security_transition_kill_switch_watch_keeps_unseen_switches_and_ignores_unrea
     std::fs::write(home.path().join("security_state.json"), b"{not json").unwrap();
     assert_eq!(kill_switch_watch::apply(home.path()), 0);
     assert!(here.now().4);
+}
+
+/// #507: a switch another process turned on and off again before this one
+/// looked (one wake-up) changes nothing here: nothing to stop or end.
+#[test]
+#[serial_test::serial(aggressive_grants)]
+fn security_transition_kill_switch_watch_on_and_off_within_one_look_changes_nothing() {
+    let home = tempfile::TempDir::new().unwrap();
+    let here = fixture(SecurityLevel::Moderate);
+    here.view.register_home(home.path());
+    let before = here.now();
+    let other = fixture(SecurityLevel::Moderate);
+    let store = OtherProcessStore(crate::security::recovery::HomeTransitionStore::new(
+        home.path(),
+    ));
+    other
+        .commit_with(other.kill(/*active*/ true), &store)
+        .unwrap();
+    other
+        .controller
+        .commit_transition(other.kill(/*active*/ false), &store, NOW + 1)
+        .unwrap();
+    assert_eq!(kill_switch_watch::apply(home.path()), 0);
+    assert_eq!(here.now(), before);
+    assert_eq!(here.revocations(), 0);
 }
 
 /// #507: a switch this process saves itself updates the subscribers' value

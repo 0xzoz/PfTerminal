@@ -1088,6 +1088,25 @@ impl App {
             }
             return;
         }
+        // #507: the switch is off, but a task may still wait for this pane
+        // (it was turned off in another Corbanu Terminal, which starts nothing
+        // here): this newer task replaces it, so the older one never runs
+        // after it.
+        let superseded: Vec<String> = self
+            .kill_switch_held_claude_tasks
+            .iter()
+            .filter(|(held, _)| *held == pane_id)
+            .map(|(_, task)| task.clone())
+            .collect();
+        self.kill_switch_held_claude_tasks
+            .retain(|(held, _)| *held != pane_id);
+        for old in &superseded {
+            self.record_spawn_dispatch_failed_for_task(
+                &target_node_id,
+                old,
+                "superseded by a newer task after the security kill switch was turned off",
+            );
+        }
         let is_active = self.claude_panes.active_user_pane_id() == pane_id;
         let user_cell =
             crate::history_cell::new_user_prompt(task.clone(), Vec::new(), Vec::new(), Vec::new());
