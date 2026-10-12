@@ -1729,6 +1729,81 @@ async fn issue_583_missing_corbanu_home_entries_cannot_be_created() -> anyhow::R
     Ok(())
 }
 
+/// #583 review: with the Corbanu home read-only, a command working in one of
+/// its git worktrees (`worktrees/`) under full access still commits there,
+/// and still cannot create a new home entry.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_583_git_still_commits_in_a_corbanu_home_worktree() -> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let home = Arc::new(TempDir::new()?);
+    let root = home.path().canonicalize()?;
+    let repos = TempDir::new()?;
+    let main = repos.path().canonicalize()?.join("main");
+    let worktree = root.join("worktrees/w/repo");
+    std::fs::create_dir_all(&main)?;
+    std::fs::create_dir_all(root.join("worktrees/w"))?;
+    let git = |args: &[&str], cwd: &std::path::Path| {
+        std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .current_dir(cwd)
+            .output()
+    };
+    git(&["init", "-q"], &main)?;
+    git(&["commit", "-q", "--allow-empty", "-m", "first"], &main)?;
+    let added = git(
+        &[
+            "worktree",
+            "add",
+            "-q",
+            &worktree.to_string_lossy(),
+            "-b",
+            "w",
+        ],
+        &main,
+    )?;
+    assert!(added.status.success(), "{added:?}");
+    let path = root.to_string_lossy().into_owned();
+    let (head, tail) = path.split_at(path.len() - 2);
+    let command = format!(
+        "git -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m second \
+         && echo committed-583; h=\"$(printf '{head}%s' {tail})\"; printf x > \"$h/new-entry\"; \
+         echo ran-583"
+    );
+    let cwd = codex_utils_absolute_path::AbsolutePathBuf::from_absolute_path(&worktree)?;
+    let (test, captured) = start_turn_in(
+        Some(home.clone()),
+        SecurityLevel::Moderate,
+        AskForApproval::Never,
+        vec![
+            call(
+                "call-commit",
+                "shell_command",
+                json!({ "command": command }),
+            ),
+            done_step(),
+        ],
+        move |config| {
+            config.cwd = cwd.clone();
+            config
+                .permissions
+                .set_permission_profile(PermissionProfile::Disabled)
+                .expect("full access");
+        },
+    )
+    .await?;
+    assert!(next_exec_approval(&test).await.is_none());
+    let requests = captured.requests();
+    let output = output_text(&requests[requests.len() - 1], "call-commit");
+    assert!(output.contains("committed-583"), "{output}");
+    assert!(output.contains("ran-583"), "{output}");
+    assert!(!root.join("new-entry").exists(), "{output}");
+    Ok(())
+}
+
 /// PF-23-S03: a level confirmed earlier and stored in `security_state.json`
 /// is enforced after a restart even when the configured level is lower.
 #[cfg(target_os = "macos")]

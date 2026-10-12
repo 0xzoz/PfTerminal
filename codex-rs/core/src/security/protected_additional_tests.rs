@@ -330,8 +330,8 @@ fn issue_513_a_write_never_reopens_the_runtime_entries() {
 }
 
 /// #583: an additional write may not open the read-only Corbanu home (it
-/// would let a command create `rules/`), but one inside `worktrees` opens
-/// nothing protected.
+/// would let a command create `rules/`), where the never-lifted rules
+/// apply, but one inside `worktrees` opens nothing protected.
 #[test]
 fn issue_583_a_write_opens_worktrees_but_never_the_corbanu_home() {
     let f = fixture();
@@ -350,7 +350,7 @@ fn issue_583_a_write_opens_worktrees_but_never_the_corbanu_home() {
             Some(&protected),
             &write(path),
             &[f.project.as_path()],
-            ReadOnlyScope::Runtime,
+            ReadOnlyScope::NeverLifted,
         )
     };
     let home = AbsolutePathBuf::from_absolute_path(&f.codex_home).unwrap();
