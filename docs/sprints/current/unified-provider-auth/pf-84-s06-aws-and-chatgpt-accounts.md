@@ -9,9 +9,9 @@ owner: "Codex PF-84-S06 worker"
 parallel_lane: "account-kinds"
 write_scope: "codex-rs/core/, codex-rs/vault/, codex-rs/login/, codex-rs/model-provider/, codex-rs/model-provider-info/, codex-rs/aws-auth/, codex-rs/cli/, codex-rs/tui/, codex-rs/exec/, codex-rs/app-server/, codex-rs/app-server-protocol/, codex-rs/Cargo.lock, MODULE.bazel.lock, docs/provider-accounts.md, qa/provider-auth/pf-84/s06a-gate.md, qa/provider-auth/pf-84/s06b-gate.md, qa/provider-auth/pf-84/s06/, qa/demos/specs/pf84-aws-profile-account.toml, qa/demos/specs/pf84-chatgpt-account.toml, qa/demos/index/PF-84-S06.md, docs/sprints/current/unified-provider-auth/pf-84-s06-aws-and-chatgpt-accounts.md, docs/sprints/current/unified-provider-auth/index.md"
 integration_gate: "Codex PF-84-S06 worker merges each slice (A, then B) to main after just test on the touched crates with and without developer-accounting, Linux clippy -D warnings on glitch, macOS clippy, the tmux run in a disposable home and one Opus 5.5 High review per slice"
-worktree: "/Volumes/CorbanuDrive/Corbanu/worktrees/pf84-s06-accounts"
-branch: "feat/pf-84-s06-accounts"
-base_commit: "8026ce9963f64d411b4dd930d46eabacd859c688"
+worktree: "/Volumes/CorbanuDrive/Corbanu/worktrees/pf84-s06b-chatgpt"
+branch: "feat/pf-84-s06b-chatgpt-accounts"
+base_commit: "511ec41249ba7897d1474915a17333360e070edd"
 depends_on: "PF-84-S05"
 created: 2026-10-11
 updated: 2026-10-11

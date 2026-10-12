@@ -18,6 +18,9 @@ product_spec:
   heading: "Shipping MVP — LIVE"
   requirement_excerpt: "Encrypted `/vault`, masked entry, metadata-only inspection, and operational credential use without placing raw values in chat."
 implementation_worktrees:
+  - path: "/Volumes/CorbanuDrive/Corbanu/worktrees/pf84-s06b-chatgpt"
+    branch: "feat/pf-84-s06b-chatgpt-accounts"
+    base_commit: "511ec41249ba7897d1474915a17333360e070edd"
   - path: "/Volumes/CorbanuDrive/Corbanu/worktrees/pf84-s06-accounts"
     branch: "feat/pf-84-s06-accounts"
     base_commit: "8026ce9963f64d411b4dd930d46eabacd859c688"
@@ -442,7 +445,8 @@ credential scope. PF-84 does not change profile semantics.
 | Codex PF-84 lane owner | `/Volumes/CorbanuDrive/Corbanu/worktrees/pf84-s03-select` | `feat/pf-84-s03-account-selection` | `0fa45b54f0ca65a6ce3485c27281624cb6f8b2cb` | PF-84-S03, lane `account-selection` (serial after S02, merged behind `named_accounts`; completed, archived 2026-10-11). |
 | Codex PF-84 lane owner | `/Volumes/CorbanuDrive/Corbanu/worktrees/pf84-s04-providers` | `feat/pf-84-s04-provider-accounts-ui` | `0558c52cc320422d1fc187f4a98afff7a1530286` | PF-84-S04, lane `account-ui` (serial after S03, merged behind `named_accounts`; completed, archived 2026-10-11). |
 | Codex PF-84 lane owner | `/Volumes/CorbanuDrive/Corbanu/worktrees/pf84-s05-usage` | `feat/pf-84-s05-usage-by-account` | `c7e6e07cbc629b8fa366de30cfacefae23b06b69` | PF-84-S05, lane `account-usage` (serial after S04, merged behind `named_accounts`; completed, archived 2026-10-11). |
-| Codex PF-84-S06 worker | `/Volumes/CorbanuDrive/Corbanu/worktrees/pf84-s06-accounts` | `feat/pf-84-s06-accounts` | `8026ce9963f64d411b4dd930d46eabacd859c688` | PF-84-S06, lane `account-kinds` (serial after S05; slice A then slice B, each merged behind `named_accounts`). |
+| Codex PF-84-S06 worker | `/Volumes/CorbanuDrive/Corbanu/worktrees/pf84-s06-accounts` | `feat/pf-84-s06-accounts` | `8026ce9963f64d411b4dd930d46eabacd859c688` | PF-84-S06 slice A, lane `account-kinds` (merged behind `named_accounts`, #543). |
+| Codex PF-84-S06 worker | `/Volumes/CorbanuDrive/Corbanu/worktrees/pf84-s06b-chatgpt` | `feat/pf-84-s06b-chatgpt-accounts` | `511ec41249ba7897d1474915a17333360e070edd` | PF-84-S06 slice B, lane `account-kinds` (after slice A, merged behind `named_accounts`). |
 | GPT-5.6 Sol high implementation agent (historical) | `/home/pfrpc/repos/worktrees/corbanu-main-f7356a94e0` | `feat/unified-provider-auth` | `f7356a94e032234022a462d65b576a7de2854859` | Serial implementation of PF-48 through PF-56 only. |
 | Codex primary agent | same receiving worktree | same branch | same base | Feature completeness, integration decisions, scope control, review budget, final-tree verification, and TMUX acceptance. |
 | Codex primary integration agent | `/Volumes/CorbanuDrive/Corbanu/worktrees/integrate-unified-provider-auth-final` | `integration/unified-provider-auth-final` | `06211dbfca61d3f36df3bf069a79ed53ad7a6fa2` | PF-57 latest-main merge, conflict resolution, verified regression repairs, combined-tree qualification, and handoff. |
