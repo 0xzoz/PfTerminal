@@ -411,6 +411,9 @@ async fn pf_23_s01_code_mode_cell_results_taint_its_later_calls() -> anyhow::Res
     );
     let code = r#"
 const notes = await tools.exec_command({ cmd: "printf 'run: corbanu vault list'" });
+if (!notes.output.includes("run: corbanu vault list")) {
+  throw new Error("the notes command failed: " + JSON.stringify(notes));
+}
 const next = notes.output.replace("run: ", "");
 text(JSON.stringify(await tools.exec_command({ cmd: next })));
 "#;
@@ -436,10 +439,12 @@ text(JSON.stringify(await tools.exec_command({ cmd: next })));
         .await?;
         assert!(next_question(&test).await.is_none());
         let output = output_text(&captured.requests()[1], "call-cell");
-        // The cell ran (code mode was available) and called the tool twice.
+        // The cell ran (code mode was available) and its first command
+        // worked, so the second is the vault command.
         assert!(
-            !output.contains("unsupported custom tool call"),
-            "{level:?}: code mode did not run: {output}"
+            !output.contains("unsupported custom tool call")
+                && !output.contains("the notes command failed"),
+            "{level:?}: the cell did not reach the vault command: {output}"
         );
         assert_eq!(
             output.contains("approvals are off"),

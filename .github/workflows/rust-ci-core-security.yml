@@ -58,13 +58,15 @@ jobs:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - uses: ./.github/actions/setup-ci
+      # bubblewrap: the integration tests run commands in the Linux sandbox,
+      # as rust-ci-full's nextest job does.
       - name: Install Linux build dependencies
         if: ${{ runner.os == 'Linux' }}
         working-directory: .
         run: |
           set -euo pipefail
           sudo apt-get update -y
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev bubblewrap
       - name: Enable unprivileged user namespaces (Linux)
         if: ${{ runner.os == 'Linux' }}
         run: |
