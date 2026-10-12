@@ -1568,6 +1568,75 @@ async fn pf_33_s02_guard_limits_seatbelt_egress_to_proxy_ports() -> anyhow::Resu
     Ok(())
 }
 
+/// #583: a writable root inside a read-only folder (the Corbanu home's
+/// `worktrees`) cannot be renamed or removed, so no link can take its place
+/// before the next command; writing inside it still works.
+#[test]
+fn a_writable_root_inside_a_read_only_folder_cannot_be_moved() {
+    let dir = TempDir::new().expect("tempdir");
+    let base = dir.path().canonicalize().expect("canonical");
+    let home = base.join("home");
+    fs::create_dir_all(home.join("worktrees")).expect("worktrees");
+    let entry = |path: &Path, access| FileSystemSandboxEntry {
+        path: FileSystemPath::Path {
+            path: AbsolutePathBuf::from_absolute_path(path).expect("absolute"),
+        },
+        access,
+        missing_path_behavior: None,
+    };
+    // A workspace covering the home, as `ReadDenials::apply` builds it.
+    let policy = FileSystemSandboxPolicy::restricted(vec![
+        FileSystemSandboxEntry {
+            path: FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            },
+            access: FileSystemAccessMode::Read,
+            missing_path_behavior: None,
+        },
+        entry(&base, FileSystemAccessMode::Write),
+        entry(&home.join("auth.json"), FileSystemAccessMode::Deny),
+        entry(&home, FileSystemAccessMode::Read),
+        entry(&home.join("worktrees"), FileSystemAccessMode::Write),
+    ]);
+    let script = "mv home/worktrees wt; echo mv=$?; rmdir home/worktrees; echo rmdir=$?; \
+                  echo ok > home/worktrees/ok && echo wrote";
+    let args = create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
+        command: vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
+        file_system_sandbox_policy: &policy,
+        network_sandbox_policy: NetworkSandboxPolicy::Restricted,
+        sandbox_policy_cwd: &base,
+        enforce_managed_network: false,
+        managed_network: None,
+        environment_id: None,
+        network: None,
+        extra_allow_unix_sockets: &[],
+    })
+    .expect("args");
+    // Guarded explicitly, whatever its protected names do.
+    let worktrees = format!("={}", home.join("worktrees").display());
+    assert!(
+        args.iter()
+            .any(|arg| arg.starts_with("-DRENAME_GUARD_") && arg.ends_with(&worktrees)),
+        "{args:?}"
+    );
+    let output = Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
+        .args(&args)
+        .current_dir(&base)
+        .output()
+        .expect("run seatbelt");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if String::from_utf8_lossy(&output.stderr)
+        .contains("sandbox-exec: sandbox_apply: Operation not permitted")
+    {
+        return;
+    }
+    for held in ["mv=1", "rmdir=1", "wrote"] {
+        assert!(stdout.contains(held), "{held}: {stdout}");
+    }
+    assert!(home.join("worktrees").is_dir());
+    assert!(!base.join("wt").exists());
+}
+
 /// PF-23-S02: once a policy denies reads, a protected path's folders cannot
 /// be renamed (which would move it out from under its rule), and a
 /// protected symlink cannot be removed; writing elsewhere in those folders
