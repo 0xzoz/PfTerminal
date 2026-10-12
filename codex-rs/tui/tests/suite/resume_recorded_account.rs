@@ -61,7 +61,6 @@ async fn tmux_resume_uses_recorded_named_account_without_default_key() -> Result
     let pane = session.primary_pane();
     wait_resumed_on_work(pane)?;
     exit_tui(pane)?;
-    session.wait_for_exit(READY_TIMEOUT)?;
 
     // The picker (`corbanu resume`) now comes before any onboarding.
     let session = tmux.new_session(resume_spec(
@@ -80,7 +79,6 @@ async fn tmux_resume_uses_recorded_named_account_without_default_key() -> Result
     pane.send_key(TmuxKey::Enter)?;
     wait_resumed_on_work(pane)?;
     exit_tui(pane)?;
-    session.wait_for_exit(READY_TIMEOUT)?;
     Ok(())
 }
 
@@ -142,11 +140,13 @@ fn wait_resumed_on_work(pane: &TmuxPane<'_>) -> Result<()> {
     Ok(())
 }
 
+/// Exits through `/exit`; the wrapper shell reports the exit status.
 fn exit_tui(pane: &TmuxPane<'_>) -> Result<()> {
     pane.send_key(TmuxKey::Escape)?;
     pane.send_literal("/exit")?;
     pane.wait_stable_contains("/exit", READY_TIMEOUT)?;
     pane.send_key(TmuxKey::Enter)?;
+    pane.wait_stable_contains("EXITED 0", READY_TIMEOUT)?;
     Ok(())
 }
 
