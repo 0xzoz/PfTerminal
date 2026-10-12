@@ -156,11 +156,19 @@ fn portable_name_rules() {
 }
 
 #[test]
-fn replay_name_matches_offered_name() {
-    assert_eq!(
-        preferred_flat_tool_name(&ToolName::namespaced("mcp__orders", "lookup")),
-        "mcp__orders__lookup"
-    );
+fn flat_name_for_matches_the_offered_name_without_collisions() {
+    let long_namespace = format!("mcp__{}", "s".repeat(70));
+    let tools = vec![
+        mcp("mcp__orders", "lookup"),
+        mcp(&long_namespace, "tool"),
+        mcp("9lives", "jump"),
+    ];
+    let expected: Vec<String> = tools
+        .iter()
+        .map(|(tool_name, _)| flat_tool_name_for(tool_name))
+        .collect();
+    assert_eq!(flatten(tools, &[]).0, expected);
+    assert_eq!(expected[0], "mcp__orders__lookup");
     assert_eq!(
         preferred_flat_tool_name(&ToolName::plain("exec_command")),
         "exec_command"

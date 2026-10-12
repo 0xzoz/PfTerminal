@@ -2325,6 +2325,7 @@ impl ModelClient {
         if !self.state.provider.info().is_openai() {
             retain_latest_contextual_developer_fragments(&mut input);
         }
+        flatten_namespaced_history(&mut input, &prompt.tools);
         let mut skipped_tool_call_ids = HashSet::new();
         append_chat_messages_for_response_items(
             input,
@@ -2511,6 +2512,7 @@ impl ModelClient {
         if !self.state.provider.info().is_openai() {
             retain_latest_contextual_developer_fragments(&mut input);
         }
+        flatten_namespaced_history(&mut input, &prompt.tools);
         let mut messages = Vec::new();
         let mut skipped_tool_call_ids = HashSet::new();
         for item in input {
@@ -4866,14 +4868,35 @@ fn chat_replay_function_arguments(arguments: String) -> String {
     json!({ "malformed_arguments": raw }).to_string()
 }
 
-/// Chat Completions and Anthropic Messages have no namespaces, so a namespaced
-/// call recorded on the Responses wire is replayed under its flat name.
-fn replay_tool_name(namespace: Option<String>, name: String) -> String {
-    match namespace {
-        Some(namespace) => crate::tools::flat_tool_names::preferred_flat_tool_name(
-            &codex_tools::ToolName::namespaced(namespace, name),
-        ),
-        None => name,
+/// Chat Completions and Anthropic Messages have no namespaces. A namespaced
+/// call recorded on the Responses wire (before a provider switch or in forked
+/// history) replays under the flat name this request offers for it, such as an
+/// MCP tool's `mcp__server__tool`; otherwise under its bare name, as before.
+fn flatten_namespaced_history(input: &mut [ResponseItem], tools: &[ToolSpec]) {
+    let offered: HashSet<&str> = tools
+        .iter()
+        .filter(|tool| matches!(tool, ToolSpec::Function(_) | ToolSpec::Freeform(_)))
+        .map(ToolSpec::name)
+        .collect();
+    for item in input {
+        let (ResponseItem::FunctionCall {
+            name, namespace, ..
+        }
+        | ResponseItem::CustomToolCall {
+            name, namespace, ..
+        }) = item
+        else {
+            continue;
+        };
+        let Some(namespace) = namespace.take() else {
+            continue;
+        };
+        let flat = crate::tools::flat_tool_names::flat_tool_name_for(
+            &codex_tools::ToolName::namespaced(namespace, name.clone()),
+        );
+        if offered.contains(flat.as_str()) {
+            *name = flat;
+        }
     }
 }
 
@@ -5018,27 +5041,19 @@ fn append_chat_message_for_response_item(
         }
         ResponseItem::FunctionCall {
             name,
-            namespace,
             arguments,
             call_id,
             ..
         } => {
             let arguments = chat_replay_function_arguments(arguments);
-            push_chat_tool_call(
-                messages,
-                call_id,
-                replay_tool_name(namespace, name),
-                arguments,
-            );
+            push_chat_tool_call(messages, call_id, name, arguments);
         }
         ResponseItem::CustomToolCall {
             name,
-            namespace,
             input,
             call_id,
             ..
         } => {
-            let name = replay_tool_name(namespace, name);
             // Chat Completions exposes freeform tools as `{"input": string}`
             // functions, so replay custom calls in that same shape.
             let arguments = json!({ "input": input }).to_string();
@@ -5347,19 +5362,16 @@ fn append_anthropic_message_for_response_item(
         }
         ResponseItem::FunctionCall {
             name,
-            namespace,
             arguments,
             call_id,
             ..
         }
         | ResponseItem::CustomToolCall {
             name,
-            namespace,
             input: arguments,
             call_id,
             ..
         } => {
-            let name = replay_tool_name(namespace, name);
             let input = match serde_json::from_str::<Value>(&arguments) {
                 Ok(input) => input,
                 Err(_) => {

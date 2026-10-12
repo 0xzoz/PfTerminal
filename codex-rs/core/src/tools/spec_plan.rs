@@ -109,7 +109,12 @@ use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 use std::sync::Arc;
 use tracing::instrument;
+use tracing::warn;
 
+/// Most function tools one request may carry on wires without namespaces: the
+/// smallest documented limit among them (OpenAI Chat Completions rejects more
+/// than 128 tools).
+const MAX_TOOLS_WITHOUT_NAMESPACES: usize = 128;
 const MULTI_AGENT_V2_NAMESPACE_DESCRIPTION: &str = "Tools for spawning and managing sub-agents.";
 const IMAGE_GEN_NAMESPACE: &str = "image_gen";
 const IMAGEGEN_TOOL_NAME: &str = "imagegen";
@@ -335,13 +340,14 @@ fn build_model_visible_specs(
                 ToolSpec::Namespace(namespace)
                     if !namespace_tools && runtime.tool_origin() == ToolOrigin::Mcp =>
                 {
-                    flattened_mcp_tools.extend(namespace.tools.into_iter().map(|tool| {
-                        let ResponsesApiNamespaceTool::Function(tool) = tool;
-                        (
-                            ToolName::namespaced(namespace.name.clone(), tool.name.clone()),
-                            tool,
-                        )
-                    }));
+                    // Each MCP runtime is one tool; key it by its registry name
+                    // so the flat name routes back to exactly this runtime.
+                    debug_assert_eq!(namespace.tools.len(), 1);
+                    if let Some(ResponsesApiNamespaceTool::Function(tool)) =
+                        namespace.tools.into_iter().next()
+                    {
+                        flattened_mcp_tools.push((tool_name, tool));
+                    }
                 }
                 spec => specs.push(spec),
             }
@@ -355,6 +361,17 @@ fn build_model_visible_specs(
         .collect();
     if flattened_mcp_tools.is_empty() {
         return (specs, FlatToolNames::default());
+    }
+    let budget = MAX_TOOLS_WITHOUT_NAMESPACES.saturating_sub(specs.len());
+    if flattened_mcp_tools.len() > budget {
+        flattened_mcp_tools.sort_by(|(left, _), (right, _)| left.cmp(right));
+        let omitted = flattened_mcp_tools.split_off(budget);
+        warn!(
+            offered = budget,
+            omitted = omitted.len(),
+            first_omitted = %omitted[0].0,
+            "too many MCP tools for a provider without namespace tools; omitting the rest"
+        );
     }
     // A flat name must not shadow any visible tool or any registered plain tool,
     // because the router resolves registered plain names first.

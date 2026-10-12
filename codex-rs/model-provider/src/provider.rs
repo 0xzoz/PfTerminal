@@ -450,8 +450,8 @@ impl ModelProvider for ConfiguredModelProvider {
                 web_search: true,
             }
         } else if self.info.wire_api == WireApi::Chat {
-            // Chat Completions has no namespace container either; namespaced
-            // tools must be flattened (MCP) or replaced by plain variants.
+            // Chat Completions has no namespace container either. Core offers
+            // MCP tools under flat names and drops other namespaced tools.
             ProviderCapabilities {
                 namespace_tools: false,
                 image_generation: false,

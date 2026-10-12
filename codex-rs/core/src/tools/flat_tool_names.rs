@@ -62,7 +62,7 @@ fn is_portable_char(c: char) -> bool {
 /// code mode joins them (`mcp__server__tool`), with characters outside the
 /// portable set replaced. Plain names are returned as they are. The result can
 /// still be too long or collide; [`flatten_namespaced_tools`] resolves both.
-pub(crate) fn preferred_flat_tool_name(tool_name: &ToolName) -> String {
+fn preferred_flat_tool_name(tool_name: &ToolName) -> String {
     let joined = code_mode_name_for_tool_name(tool_name);
     if tool_name.namespace.is_none() {
         joined
@@ -82,6 +82,17 @@ fn portable_chars(name: &str) -> String {
         flat.insert(0, '_');
     }
     flat
+}
+
+/// The flat name a namespaced tool gets when nothing collides with it: its
+/// preferred name when that is portable, otherwise the hashed form.
+pub(crate) fn flat_tool_name_for(tool_name: &ToolName) -> String {
+    let preferred = preferred_flat_tool_name(tool_name);
+    if is_portable_tool_name(&preferred) {
+        preferred
+    } else {
+        hashed_flat_name(&preferred, &tool_identity(tool_name), /*attempt*/ 0)
+    }
 }
 
 /// Gives every namespaced tool a unique, portable flat name.

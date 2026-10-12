@@ -2118,18 +2118,104 @@ fn flat_call(name: &str) -> crate::tools::router::ToolCall {
     }
 }
 
-async fn mcp_router(configure_turn: fn(&mut TurnContext)) -> ToolRouter {
+async fn router_with(
+    configure_turn: fn(&mut TurnContext),
+    tool_runtimes: Vec<Arc<dyn CoreToolRuntime>>,
+) -> ToolRouter {
     let (_session, mut turn) = make_session_and_context().await;
     configure_turn(&mut turn);
-    ToolRouter::from_tools(
-        &turn,
+    ToolRouter::from_tools(&turn, tool_runtimes, Vec::new(), &Default::default())
+}
+
+async fn mcp_router(configure_turn: fn(&mut TurnContext)) -> ToolRouter {
+    router_with(
+        configure_turn,
         vec![
             mcp_runtime("orders", "mcp__orders", "lookup", ToolExposure::Direct),
             mcp_runtime("orders", "mcp__orders", "cancel", ToolExposure::Direct),
         ],
-        Vec::new(),
-        &Default::default(),
     )
+    .await
+}
+
+/// A custom provider on the Chat Completions wire (no provider-specific branch).
+fn use_generic_chat_provider(turn: &mut TurnContext) {
+    let provider_info = ModelProviderInfo {
+        wire_api: codex_model_provider_info::WireApi::Chat,
+        ..ModelProviderInfo::create_openai_provider(Some("http://localhost:1/v1".to_string()))
+    };
+    update_config(turn, |config| {
+        config.model_provider_id = "custom-chat".to_string();
+        config.model_provider = provider_info.clone();
+    });
+    turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
+}
+
+fn plain_dynamic_runtime(name: &str) -> Arc<dyn CoreToolRuntime> {
+    let DynamicToolSpec::Function(function) = dynamic_tool(None, name, false) else {
+        unreachable!("plain dynamic tools are functions");
+    };
+    Arc::new(
+        crate::tools::handlers::DynamicToolHandler::new(&function)
+            .expect("dynamic tool spec should build"),
+    )
+}
+
+#[tokio::test]
+async fn flat_mcp_names_never_shadow_registered_plain_tools() {
+    let router = router_with(
+        use_zai_provider,
+        vec![
+            plain_dynamic_runtime("mcp__orders__lookup"),
+            mcp_runtime("orders", "mcp__orders", "lookup", ToolExposure::Direct),
+        ],
+    )
+    .await;
+    let specs = router.model_visible_specs();
+    let flat_names: Vec<&str> = specs
+        .iter()
+        .map(ToolSpec::name)
+        .filter(|name| name.starts_with("mcp__orders__lookup"))
+        .collect();
+    assert_eq!(flat_names.len(), 2, "{flat_names:?}");
+    let hashed = flat_names
+        .iter()
+        .find(|name| **name != "mcp__orders__lookup")
+        .expect("the MCP tool gets a hashed name");
+
+    // The plain name still reaches the plain tool; the hashed one reaches MCP.
+    let plain = router.resolve_flat_tool_call(flat_call("mcp__orders__lookup"));
+    assert_eq!(plain.tool_name, ToolName::plain("mcp__orders__lookup"));
+    let mcp = router.resolve_flat_tool_call(flat_call(hashed));
+    assert_eq!(mcp.tool_name, ToolName::namespaced("mcp__orders", "lookup"));
+}
+
+#[tokio::test]
+async fn flattened_mcp_tools_stay_within_the_tool_count_limit() {
+    let tool_runtimes = (0..200)
+        .map(|index| {
+            mcp_runtime(
+                "bulk",
+                "mcp__bulk",
+                &format!("tool_{index:03}"),
+                ToolExposure::Direct,
+            )
+        })
+        .collect();
+    let router = router_with(use_zai_provider, tool_runtimes).await;
+    let specs = router.model_visible_specs();
+    assert_eq!(specs.len(), 128);
+    // The kept tools are the first ones by name, independent of registration order.
+    assert!(
+        specs
+            .iter()
+            .any(|spec| spec.name() == "mcp__bulk__tool_000")
+    );
+    assert!(
+        !specs
+            .iter()
+            .any(|spec| spec.name() == "mcp__bulk__tool_199")
+    );
 }
 
 #[tokio::test]
@@ -2138,6 +2224,7 @@ async fn mcp_tools_are_flattened_and_resolved_on_wires_without_namespace_tools()
         use_zai_provider as fn(&mut TurnContext),
         use_openrouter_provider,
         use_claude_plan_provider,
+        use_generic_chat_provider,
     ] {
         let router = mcp_router(configure_turn).await;
         let specs = router.model_visible_specs();

@@ -3234,38 +3234,62 @@ fn chat_freeform_tool_wrappers_are_never_strict() {
 }
 
 #[test]
-fn namespaced_calls_replay_under_their_flat_names() {
-    let call = ResponseItem::FunctionCall {
+fn namespaced_history_replays_under_offered_flat_names() {
+    let call = |namespace: &str, name: &str| ResponseItem::FunctionCall {
         id: None,
-        name: "lookup".to_string(),
-        namespace: Some("mcp__orders".to_string()),
+        name: name.to_string(),
+        namespace: Some(namespace.to_string()),
         arguments: "{}".to_string(),
-        call_id: "call-mcp".to_string(),
+        call_id: format!("call-{name}"),
         encrypted_function_args: None,
         internal_chat_message_metadata_passthrough: None,
     };
+    let function = |name: &str| {
+        codex_tools::ToolSpec::Function(codex_tools::ResponsesApiTool {
+            name: name.to_string(),
+            description: String::new(),
+            strict: false,
+            defer_loading: None,
+            parameters: codex_tools::JsonSchema::object(Default::default(), None, None),
+            output_schema: None,
+        })
+    };
+    let long_namespace = format!("mcp__{}", "s".repeat(70));
+    let long_flat = crate::tools::flat_tool_names::flat_tool_name_for(
+        &codex_tools::ToolName::namespaced(long_namespace.clone(), "tool"),
+    );
+    assert_eq!(long_flat.len(), 64);
+    let tools = vec![
+        function("mcp__orders__lookup"),
+        function("spawn_agent"),
+        function(&long_flat),
+    ];
+    let mut input = vec![
+        call("mcp__orders", "lookup"),
+        // A collaboration call from a Responses parent: chat models are
+        // offered the plain tool, so it keeps its bare name.
+        call("collaboration", "spawn_agent"),
+        call(&long_namespace, "tool"),
+    ];
 
-    let mut chat_messages = Vec::new();
-    super::append_chat_messages_for_response_items(
-        vec![call.clone()],
-        &mut chat_messages,
-        &mut std::collections::HashSet::new(),
-        ChatReasoningProtocol::Independent,
-    );
-    assert_eq!(
-        chat_messages[0].tool_calls[0].function.name,
-        "mcp__orders__lookup"
-    );
+    super::flatten_namespaced_history(&mut input, &tools);
 
-    let mut anthropic_messages = Vec::new();
-    super::append_anthropic_message_for_response_item(
-        call,
-        &mut anthropic_messages,
-        &mut std::collections::HashSet::new(),
-    );
+    let names: Vec<_> = input
+        .iter()
+        .map(|item| match item {
+            ResponseItem::FunctionCall {
+                name, namespace, ..
+            } => (name.clone(), namespace.clone()),
+            other => panic!("unexpected item {other:?}"),
+        })
+        .collect();
     assert_eq!(
-        anthropic_messages[0]["content"][0]["name"],
-        "mcp__orders__lookup"
+        names,
+        vec![
+            ("mcp__orders__lookup".to_string(), None),
+            ("spawn_agent".to_string(), None),
+            (long_flat, None),
+        ]
     );
 }
 
