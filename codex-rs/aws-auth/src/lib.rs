@@ -171,7 +171,8 @@ impl AwsAuthError {
             }
             source = error.source();
         }
-        message
+        // Other SDK credential errors can quote what they failed to parse.
+        codex_log_guard::redact_credentials(&message).into_owned()
     }
 
     /// Returns whether retrying the outbound request can reasonably recover from this auth error.

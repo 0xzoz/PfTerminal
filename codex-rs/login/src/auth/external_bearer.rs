@@ -364,33 +364,36 @@ async fn run_provider_auth_command(
 /// The part of a failed helper's stderr that may go into its error (#548).
 /// The error is shown and logged, so another program's stderr, which may
 /// echo anything, is withheld. Corbanu's own `internal-*` helpers write
-/// actionable messages; theirs is kept, capped and with credential-shaped
-/// values redacted.
+/// actionable messages; theirs is kept (the end, where the error is),
+/// capped and with credential-shaped values redacted.
 fn helper_stderr_suffix(config: &ModelProviderAuthInfo, stderr: &str) -> String {
     const MAX_CHARS: usize = 500;
     if stderr.is_empty() {
         return String::new();
     }
     if !is_corbanu_internal_helper(config) {
-        return format!(
-            " (its output is withheld; run `{}` yourself to see it)",
-            config.command
-        );
+        return " (its output is withheld; run the configured auth command yourself to see it)"
+            .to_string();
     }
-    let capped: String = stderr.chars().take(MAX_CHARS).collect();
-    format!(": {}", codex_log_guard::redact_credentials(&capped))
+    let skip = stderr.chars().count().saturating_sub(MAX_CHARS);
+    let tail: String = stderr.chars().skip(skip).collect();
+    format!(": {}", codex_log_guard::redact_credentials(&tail))
 }
 
-/// Whether `config` runs one of Corbanu's own hidden `internal-*` helpers.
+/// The hidden subcommand that prints a GPU rental endpoint's token.
+pub const GPU_ENDPOINT_TOKEN_HELPER_SUBCOMMAND: &str = "internal-gpu-endpoint-token";
+
+/// Whether `config` runs one of Corbanu's own hidden helper subcommands.
+/// The program name varies (`corbanu`, a debug or legacy name, or
+/// `/proc/self/exe` after an in-place update), so the subcommand decides.
 fn is_corbanu_internal_helper(config: &ModelProviderAuthInfo) -> bool {
-    let program = Path::new(&config.command)
-        .file_stem()
-        .and_then(|stem| stem.to_str());
-    program.is_some_and(|program| program == "corbanu")
-        && config
-            .args
-            .first()
-            .is_some_and(|arg| arg.starts_with("internal-"))
+    config.args.first().is_some_and(|arg| {
+        [
+            CLAUDE_PLAN_TOKEN_HELPER_SUBCOMMAND,
+            GPU_ENDPOINT_TOKEN_HELPER_SUBCOMMAND,
+        ]
+        .contains(&arg.as_str())
+    })
 }
 
 /// Verifies that a provider's external bearer-token command can currently

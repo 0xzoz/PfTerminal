@@ -42,15 +42,24 @@ fn failing_helper_files(dir: &Path) -> ProfileFiles {
         .build()
 }
 
+/// Retried while Linux still reports the new helper busy (another test's
+/// fork can hold its write descriptor).
 async fn load_failing_profile(dir: &Path) -> AwsAuthError {
-    load_named_profile(
-        "canary",
-        /*region_override*/ None,
-        "bedrock-mantle",
-        Some(failing_helper_files(dir)),
-    )
-    .await
-    .expect_err("the helper fails")
+    for _ in 0..20 {
+        let error = load_named_profile(
+            "canary",
+            /*region_override*/ None,
+            "bedrock-mantle",
+            Some(failing_helper_files(dir)),
+        )
+        .await
+        .expect_err("the helper fails");
+        if !error.detailed_message().contains("Text file busy") {
+            return error;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("helper stayed busy");
 }
 
 #[derive(Clone, Default)]

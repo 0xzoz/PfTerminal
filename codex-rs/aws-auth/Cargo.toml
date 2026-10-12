@@ -18,12 +18,12 @@ aws-credential-types = { workspace = true }
 aws-sigv4 = { workspace = true }
 aws-types = { workspace = true }
 bytes = { workspace = true }
+codex-log-guard = { workspace = true }
 http = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
 codex-feedback = { workspace = true }
-codex-log-guard = { workspace = true }
 codex-state = { workspace = true }
 codex-utils-absolute-path = { workspace = true }
 pretty_assertions = { workspace = true }

@@ -1714,7 +1714,10 @@ pub fn gpu_runtime_model_provider(
     provider.name = format!("Rented GPU · {}", record.model_id);
     provider.auth = Some(ModelProviderAuthInfo {
         command: current_corbanu_auth_helper(),
-        args: vec!["internal-gpu-endpoint-token".to_string(), record.rental_id],
+        args: vec![
+            codex_login::auth::GPU_ENDPOINT_TOKEN_HELPER_SUBCOMMAND.to_string(),
+            record.rental_id,
+        ],
         // Vault access may briefly serialize with the rental controller in another process.
         // Leave enough startup time for that lock handoff instead of rejecting a healthy
         // runtime provider at the generic five-second auth-helper default.

@@ -1435,6 +1435,23 @@ fn failing_helper(
     (tempdir, config)
 }
 
+/// The error of a helper written just before: retried while Linux still
+/// reports it busy (another test's fork can hold the write descriptor).
+#[cfg(unix)]
+async fn failing_helper_message(config: &ModelProviderAuthInfo) -> String {
+    for _ in 0..20 {
+        let message = crate::auth::validate_provider_auth_command(config)
+            .await
+            .expect_err("failing helper")
+            .to_string();
+        if !message.contains("Text file busy") {
+            return message;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("helper stayed busy");
+}
+
 /// #548: another program's stderr may echo anything; it stays out of the
 /// error, which is shown and logged.
 #[cfg(unix)]
@@ -1443,10 +1460,7 @@ async fn provider_auth_command_failure_withholds_helper_stderr() {
     const CANARY: &str = "fake-helper-stderr-canary-548-81d0e4";
     let (_dir, config) = failing_helper("helper.sh", CANARY, &[]);
 
-    let message = crate::auth::validate_provider_auth_command(&config)
-        .await
-        .expect_err("failing helper")
-        .to_string();
+    let message = failing_helper_message(&config).await;
 
     assert!(!message.contains(CANARY), "{message}");
     assert!(
@@ -1461,16 +1475,14 @@ async fn provider_auth_command_failure_withholds_helper_stderr() {
 #[tokio::test]
 async fn corbanu_internal_helper_failure_keeps_its_message_redacted() {
     const TOKEN: &str = "fake-internal-token-548-5be0c3";
+    // Any program name (a debug build, `/proc/self/exe`): the subcommand decides.
     let (_dir, config) = failing_helper(
-        "corbanu",
+        "corbanu-debug",
         &format!("Claude Plan is not signed in; run corbanu login (access_token={TOKEN})"),
         &["internal-claude-oauth-token"],
     );
 
-    let message = crate::auth::validate_provider_auth_command(&config)
-        .await
-        .expect_err("failing helper")
-        .to_string();
+    let message = failing_helper_message(&config).await;
 
     assert!(message.contains("run corbanu login"), "{message}");
     assert!(!message.contains(TOKEN), "{message}");
