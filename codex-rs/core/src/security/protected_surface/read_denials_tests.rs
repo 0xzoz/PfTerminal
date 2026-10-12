@@ -350,9 +350,9 @@ fn issue_583_the_corbanu_home_takes_no_new_entries() {
     let other = fx.codex_home.join("other");
     std::fs::create_dir_all(&other).unwrap();
     for (cwd, runtime_only) in [
-        (project.clone(), true),
+        (project, true),
         (fx.codex_home.clone(), false),
-        (other.clone(), false),
+        (other, false),
     ] {
         let denials = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)]);
         let denials = if runtime_only {
