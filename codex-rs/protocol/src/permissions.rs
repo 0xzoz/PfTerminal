@@ -4104,7 +4104,7 @@ mod tests {
         policy.entries.push(entry.clone());
         policy.entries.push(entry);
         let cwd = base.as_path();
-        assert_eq!(policy.get_unmovable_paths(), vec![link.clone()]);
+        assert_eq!(policy.get_unmovable_paths(), vec![link]);
         assert!(full.get_unmovable_paths().is_empty());
         assert!(policy.has_full_disk_write_access());
         assert!(policy.get_unreadable_roots_with_cwd(cwd).is_empty());

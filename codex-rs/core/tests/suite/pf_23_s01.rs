@@ -1741,7 +1741,8 @@ async fn issue_587_the_corbanu_home_cannot_be_moved_aside() -> anyhow::Result<()
 
 /// #594/#598: a Corbanu home at `<tmp>/dot/home`, also reached through the
 /// link `<tmp>/link`, spelled `link` (as the default `~/.corbanu` is when it
-/// is a link) or by its real location (as `CORBANU_HOME` is).
+/// is a link) or by its real location only (as `CORBANU_HOME` given its real
+/// location is; a variable naming the link records the link too).
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 struct LinkedHome {
     _temp: Arc<TempDir>,
@@ -1836,6 +1837,25 @@ impl LinkedHome {
         }
     }
 
+    /// #619 (macOS, pre-existing): with a workspace-write profile a home
+    /// below `/tmp` keeps its runtime entries writable, so `AGENTS.md` can be
+    /// planted in place (moving and replacing are still refused).
+    fn with_known_exception(
+        &self,
+        mut expected: Vec<&'static str>,
+        level: SecurityLevel,
+        full_access: bool,
+    ) -> Vec<&'static str> {
+        if cfg!(target_os = "macos")
+            && level != SecurityLevel::Permissive
+            && !full_access
+            && self.root.starts_with("/private/tmp")
+        {
+            expected.push("planted");
+        }
+        expected
+    }
+
     /// What the command achieved.
     fn changed(&self) -> Vec<&'static str> {
         let mut changed = Vec::new();
@@ -1915,7 +1935,11 @@ async fn issue_594_a_linked_corbanu_home_cannot_be_replaced() -> anyhow::Result<
         let output = output_text(&requests[requests.len() - 1], "call-replace");
         drop(test);
         let changed = home.changed();
-        let expected = LinkedHome::expected(level, through_link, /*approved*/ false);
+        let expected = home.with_known_exception(
+            LinkedHome::expected(level, through_link, /*approved*/ false),
+            level,
+            full_access,
+        );
         if !LinkedHome::ran(level, through_link, /*approved*/ false, &output) || changed != expected
         {
             wrong.push(format!(
@@ -1980,7 +2004,11 @@ async fn issue_598_an_approved_command_cannot_move_the_corbanu_home() -> anyhow:
         let output = output_text(&requests[requests.len() - 1], "call-replace");
         drop(test);
         let changed = home.changed();
-        let expected = LinkedHome::expected(level, through_link, /*approved*/ true);
+        let expected = home.with_known_exception(
+            LinkedHome::expected(level, through_link, /*approved*/ true),
+            level,
+            full_access,
+        );
         // Under Moderate a person was asked and the rules were lifted (the
         // credential file was readable).
         let lifted = level == SecurityLevel::Permissive || asked == 1 && output.contains(CANARY);
