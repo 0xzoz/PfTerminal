@@ -233,9 +233,7 @@ async fn pf_23_s01_upload_reads_follow_the_denials_after_taint() {
 
 /// Issue #562: the Corbanu home's runtime entries stay read-only where they
 /// are missing too (on Linux too: bubblewrap holds a missing one with a
-/// placeholder), and `AGENTS.override.md` is denied before it exists. On
-/// Linux a missing runtime folder is created, empty, so bubblewrap never
-/// needs a placeholder file where Corbanu expects a folder.
+/// placeholder), and `AGENTS.override.md` is denied before it exists.
 #[test]
 fn issue_562_missing_runtime_entries_stay_read_only() {
     let fx = fixture();
@@ -268,17 +266,41 @@ fn issue_562_missing_runtime_entries_stay_read_only() {
     let override_md = fx.codex_home.join("AGENTS.override.md");
     assert!(!writable(&override_md));
     assert!(!readable(&override_md));
-    for folder in ["plugins", "packages", ".tmp"] {
+}
+
+/// Issue #562: on Linux the missing runtime folders are created, empty,
+/// only where the profile could write the Corbanu home, so bubblewrap never
+/// needs a placeholder file where Corbanu expects a folder. `AGENTS.md` is
+/// never created.
+#[test]
+fn issue_562_missing_runtime_folders_are_created_only_where_writable() {
+    let fx = fixture();
+    let cwd = abs(&fx.user_home.join("project"));
+    let folders = ["plugins", "packages", ".tmp"];
+    ReadDenials::for_turn(
+        &fx.codex_home,
+        &cwd,
+        &[cwd.clone()],
+        &PermissionProfile::read_only(),
+    );
+    for folder in folders {
+        assert!(!fx.codex_home.join(folder).exists(), "{folder}");
+    }
+    ReadDenials::for_turn(
+        &fx.codex_home,
+        &cwd,
+        &[cwd.clone()],
+        &PermissionProfile::Disabled,
+    );
+    for folder in folders {
         assert_eq!(
             fx.codex_home.join(folder).is_dir(),
             cfg!(target_os = "linux"),
             "{folder}"
         );
     }
-    // The file entry is never created; a placeholder holds it while a
-    // command runs.
     assert!(!fx.codex_home.join("AGENTS.md").exists());
-    assert!(!override_md.exists());
+    assert!(!fx.codex_home.join("AGENTS.override.md").exists());
 }
 
 /// PF-23-S02: files that run code later become read-only wherever the

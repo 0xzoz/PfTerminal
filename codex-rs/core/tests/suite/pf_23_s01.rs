@@ -1575,7 +1575,7 @@ async fn issue_540_runtime_entries_stay_read_only_when_a_person_lifts_the_rules(
 }
 
 /// Issue #562: a protected command cannot create a missing runtime entry of
-/// the Corbanu home either (`AGENTS.md`, `skills`, `plugins`), nor the
+/// the Corbanu home either (`AGENTS.md`, `skills`, `plugins`, `packages`), nor the
 /// `AGENTS.override.md` read ahead of it, even with full access and with
 /// the path built at run time (only the sandbox can stop it). On Linux no
 /// placeholder is left behind. Permissive is unchanged.
@@ -1599,7 +1599,8 @@ async fn issue_562_missing_runtime_entries_cannot_be_created() -> anyhow::Result
         let command = format!(
             "h=\"$(printf '{head}%s' {tail})\"; a=\"AGE$(printf NTS)\"; \
              printf x > \"$h/$a.md\"; printf x > \"$h/$a.override.md\"; \
-             mkdir -p \"$h/skills/issue562\" \"$h/plugins/issue562\"; echo ran-562"
+             mkdir -p \"$h/skills/issue562\" \"$h/plugins/issue562\" \"$h/packages/issue562\"; \
+             echo ran-562"
         );
         let (test, captured) = start_turn_in(
             Some(home.clone()),
@@ -1629,6 +1630,7 @@ async fn issue_562_missing_runtime_entries_cannot_be_created() -> anyhow::Result
             "AGENTS.override.md",
             "skills/issue562",
             "plugins/issue562",
+            "packages/issue562",
         ];
         let present: Vec<&str> = entries
             .into_iter()

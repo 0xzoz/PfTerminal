@@ -1517,8 +1517,10 @@ fn append_read_only_subpath_args(
         && is_within_allowed_write_paths(subpath, allowed_write_paths)
     {
         // Another concurrent bwrap setup can leave an empty mount target at
-        // a missing metadata path. Treat it like the missing case instead of
-        // binding that transient host path as the stable source.
+        // a missing path (#562: any name, not only metadata). Treat it like
+        // the missing case instead of binding that transient host path as
+        // the stable source, so its owner's cleanup cannot remove it from
+        // under this run.
         match metadata {
             EmptyProtectedMetadataPath::File(metadata) => {
                 append_existing_empty_file_bind_data_args(bwrap_args, subpath, &metadata)?;
@@ -1533,6 +1535,7 @@ fn append_read_only_subpath_args(
     if !subpath.exists() {
         if let Some(first_missing_component) = find_first_non_existent_component(subpath)
             && is_within_allowed_write_paths(&first_missing_component, allowed_write_paths)
+            && !hold_file_above_missing_path(bwrap_args, &first_missing_component)?
         {
             append_missing_read_only_subpath_args(bwrap_args, &first_missing_component)?;
         }
@@ -1730,13 +1733,55 @@ fn append_unreadable_root_args(
     if !unreadable_root.exists() {
         if let Some(first_missing_component) = find_first_non_existent_component(unreadable_root)
             && is_within_allowed_write_paths(&first_missing_component, allowed_write_paths)
+            && !hold_file_above_missing_path(bwrap_args, &first_missing_component)?
         {
             append_missing_empty_file_bind_data_args(bwrap_args, &first_missing_component)?;
         }
         return Ok(());
     }
 
+    // #562: an empty file here may be another run's placeholder; hold it as
+    // one so that run's cleanup cannot remove it from under this one.
+    if let Some(metadata) = empty_file_metadata(unreadable_root)
+        && is_within_allowed_write_paths(unreadable_root, allowed_write_paths)
+    {
+        if has_synthetic_mount_target(bwrap_args, unreadable_root) {
+            return Ok(());
+        }
+        bwrap_args.args.push("--perms".to_string());
+        bwrap_args.args.push("000".to_string());
+        return append_existing_empty_file_bind_data_args(bwrap_args, unreadable_root, &metadata);
+    }
+
     append_existing_unreadable_path_args(bwrap_args, unreadable_root, allowed_write_paths)
+}
+
+/// #562: `missing` cannot be created when the folder it would go in is a
+/// regular file. An empty one in a writable root may be another run's
+/// placeholder (for a path below it, such as `~/Library` for
+/// `~/Library/Keychains`): it is held as one here, read-only and registered,
+/// so that run's cleanup cannot remove it while this one runs. Returns
+/// whether `missing` needs nothing more. Before, bubblewrap failed the run
+/// (`Can't mkdir parents … Not a directory`).
+fn hold_file_above_missing_path(bwrap_args: &mut BwrapArgs, missing: &Path) -> Result<bool> {
+    let Some(parent) = missing.parent() else {
+        return Ok(false);
+    };
+    let Ok(metadata) = fs::symlink_metadata(parent) else {
+        return Ok(false);
+    };
+    if !metadata.file_type().is_file() {
+        return Ok(false);
+    }
+    if metadata.len() == 0 && !has_synthetic_mount_target(bwrap_args, parent) {
+        append_existing_empty_file_bind_data_args(bwrap_args, parent, &metadata)?;
+    }
+    Ok(true)
+}
+
+fn empty_file_metadata(path: &Path) -> Option<Metadata> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    (metadata.file_type().is_file() && metadata.len() == 0).then_some(metadata)
 }
 
 fn append_existing_unreadable_path_args(
@@ -1796,15 +1841,15 @@ enum EmptyProtectedMetadataPath {
 }
 
 fn transient_empty_metadata_path(path: &Path) -> Option<EmptyProtectedMetadataPath> {
+    // #562: every placeholder file is empty, whatever its name.
+    if let Some(metadata) = empty_file_metadata(path) {
+        return Some(EmptyProtectedMetadataPath::File(metadata));
+    }
     if !path.file_name().is_some_and(is_protected_metadata_name) {
         return None;
     }
 
     let metadata = fs::symlink_metadata(path).ok()?;
-    if metadata.file_type().is_file() && metadata.len() == 0 {
-        return Some(EmptyProtectedMetadataPath::File(metadata));
-    }
-
     if metadata.file_type().is_dir() && directory_is_empty(path) {
         return Some(EmptyProtectedMetadataPath::Directory(metadata));
     }

@@ -1342,6 +1342,106 @@ async fn missing_denied_paths_below_read_only_or_missing_folders_run_and_stay_hi
     assert!(!base.join(".config").exists(), "placeholder removed");
 }
 
+/// #562: two overlapping runs that share placeholders for missing protected
+/// paths (a read-only `AGENTS.md`, a denied `AGENTS.override.md`, and a
+/// denied path below a missing folder). The second run starts while the
+/// first holds them. When the first ends, its cleanup must not remove them
+/// from under the second (unlinking a mount point detaches it in every
+/// mount namespace), and the second must still run where a placeholder file
+/// stands in for a missing folder. Nothing is created, and nothing is left.
+#[tokio::test]
+async fn overlapping_runs_keep_shared_placeholders_until_the_last_ends() {
+    if should_skip_bwrap_tests().await {
+        eprintln!("skipping bwrap test: bwrap sandbox prerequisites are unavailable");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base = dir.path().canonicalize().expect("canonical");
+    let home = base.join("home");
+    std::fs::create_dir_all(&home).expect("home");
+    let entry = |path: &std::path::Path, access| {
+        FileSystemSandboxEntry::skip_missing_path(
+            FileSystemPath::Path {
+                path: AbsolutePathBuf::from_absolute_path(path).expect("absolute"),
+            },
+            access,
+        )
+    };
+    // As `ReadDenials` builds it on Linux for a full-write profile.
+    let policy = FileSystemSandboxPolicy::restricted(vec![
+        FileSystemSandboxEntry {
+            path: FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            },
+            access: FileSystemAccessMode::Write,
+            missing_path_behavior: None,
+        },
+        entry(&home.join("AGENTS.md"), FileSystemAccessMode::Read),
+        entry(&home.join("AGENTS.override.md"), FileSystemAccessMode::Deny),
+        entry(&home.join("Library/Keychains"), FileSystemAccessMode::Deny),
+    ]);
+    let run = |script: &'static str| {
+        run_cmd_result_with_permission_profile_for_cwd(
+            &["bash", "-c", script],
+            AbsolutePathBuf::from_absolute_path(&base).expect("absolute base"),
+            PermissionProfile::from_runtime_permissions(&policy, NetworkSandboxPolicy::Restricted),
+            create_env_from_core_vars(),
+            NETWORK_TIMEOUT_MS,
+            /*use_legacy_landlock*/ false,
+        )
+    };
+    let wait_for = |name: &'static str| {
+        format!("i=0; while [ ! -e {name} ] && [ $i -lt 120 ]; do sleep 0.05; i=$((i+1)); done")
+    };
+    // The first run waits until the second has started, then ends.
+    let first_script: &'static str = Box::leak(
+        format!("touch first-started; {}; true", wait_for("second-started")).into_boxed_str(),
+    );
+    // The second starts once the first holds the placeholders, waits until
+    // the first has ended, then tries to create every protected path.
+    let second_script: &'static str = Box::leak(
+        format!(
+            "touch second-started; {}; \
+             printf x > home/AGENTS.md; echo agents=$?; \
+             printf x > home/AGENTS.override.md; echo override=$?; \
+             mkdir -p home/Library/Keychains; echo keychains=$?; true",
+            wait_for("first-ended")
+        )
+        .into_boxed_str(),
+    );
+    let first = async {
+        let output = run(first_script).await;
+        std::fs::write(base.join("first-ended"), "").expect("first-ended");
+        output
+    };
+    let second = async {
+        for _ in 0..200 {
+            if base.join("first-started").exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(
+            home.join("AGENTS.md").exists(),
+            "the first run's placeholder"
+        );
+        run(second_script).await
+    };
+    let (first, second) = tokio::join!(first, second);
+    let first = first.expect("first run");
+    assert_eq!(first.exit_code, 0, "first: {}", first.stderr.text);
+    let second = second.expect("second run");
+    let stdout = second.stdout.text;
+    let stderr = second.stderr.text;
+    assert_eq!(second.exit_code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    for held in ["agents=1", "override=1", "keychains=1"] {
+        assert!(stdout.contains(held), "{held}: {stdout}\nstderr: {stderr}");
+    }
+    for name in ["AGENTS.md", "AGENTS.override.md", "Library"] {
+        assert!(!home.join(name).exists(), "{name} left in the home");
+    }
+}
+
 /// #493: under a full-write profile with a denial, the writable `/` bind
 /// must not cover the minimal `/dev` (bubblewrap binds `nodev`), so
 /// `/dev/null` stays usable while the denied file stays unreadable.
