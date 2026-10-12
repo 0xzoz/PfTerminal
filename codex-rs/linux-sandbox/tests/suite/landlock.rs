@@ -1552,7 +1552,7 @@ async fn issue_582_a_placeholder_left_by_a_killed_run_is_removed_by_the_next() {
     let killed = run("sleep 30", 2_000).await;
     assert!(
         matches!(
-            killed.as_ref().err().map(|err| err.details()),
+            killed.as_ref().err().map(codex_protocol::error::CodexErr::details),
             Some(CodexErrorDetails::Sandbox(SandboxErr::Timeout { .. }))
         ),
         "{killed:?}"
