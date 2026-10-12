@@ -89,12 +89,14 @@ mod hooks_mcp;
 mod image_rollout;
 mod issue_443;
 mod issue_445;
+mod issue_506;
 mod items;
 mod json_result;
 mod live_cli;
 mod log_redaction;
 mod mcp_auth_elicitation;
 mod mcp_auth_refresh;
+mod mcp_chat_completions;
 #[cfg(unix)]
 mod mcp_refresh_cleanup;
 mod mcp_startup_refresh_http_proxy;
