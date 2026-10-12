@@ -78,6 +78,12 @@ instead of silently discarding the session. Switching panes does not terminate
 the retained Claude session. A later prompt can resume a pane whose provider
 session remains valid.
 
+The security kill switch stops a running Claude turn and refuses new ones. A
+task another agent sends to a Claude pane while it is on waits (the newest per
+pane; the sender of an older one is told it was superseded). Turning the switch
+off sends nothing: the waiting task goes with that pane's next turn, when
+someone types in it or it gets new work.
+
 ## Main implementation
 
 - `codex-rs/tui/src/claude_panes/`

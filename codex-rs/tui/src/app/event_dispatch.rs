@@ -1342,7 +1342,7 @@ impl App {
                 self.stop_claude_panes_for_kill_switch();
             }
             AppEvent::KillSwitchTurnedOff => {
-                self.send_held_claude_tasks();
+                self.on_kill_switch_turned_off();
             }
             AppEvent::FatalExitRequest(message) => {
                 return Ok(AppRunControl::Exit(ExitReason::Fatal(message)));
@@ -5337,6 +5337,12 @@ impl App {
                     content: task.clone(),
                     trigger_turn: true,
                 };
+                // #507: with the kill switch on the task waits in the mailbox
+                // for that pane's next turn; nothing runs, before or after the
+                // switch is turned off.
+                let kill_switch_on = crate::legacy_core::security_revocation::kill_switch_on(
+                    self.config.codex_home.as_ref(),
+                );
                 match app_server.send_agent_message(params).await {
                     Ok(_) => {
                         self.spawn_processed_dispatch_origins.insert(origin_id);
@@ -5355,15 +5361,24 @@ impl App {
                             "durably admitted to the native mailbox",
                             /*notify*/ false,
                         );
-                        self.spawn_status_by_thread.insert(
-                            thread_id,
-                            codex_app_server_protocol::CollabAgentState {
-                                status: codex_app_server_protocol::CollabAgentStatus::Running,
-                                message: None,
-                            },
-                        );
-                        self.agent_navigation
-                            .set_running(thread_id, /*is_running*/ true);
+                        if kill_switch_on {
+                            self.chat_widget.add_info_message(
+                                format!(
+                                    "A task for {label} waits: the security kill switch is on. Turning it off starts nothing: the task goes with that pane's next turn, when someone types in it or it gets new work."
+                                ),
+                                /*hint*/ None,
+                            );
+                        } else {
+                            self.spawn_status_by_thread.insert(
+                                thread_id,
+                                codex_app_server_protocol::CollabAgentState {
+                                    status: codex_app_server_protocol::CollabAgentStatus::Running,
+                                    message: None,
+                                },
+                            );
+                            self.agent_navigation
+                                .set_running(thread_id, /*is_running*/ true);
+                        }
                         self.agent_navigation.set_last_task_message(
                             thread_id,
                             Some(task.chars().take(240).collect()),

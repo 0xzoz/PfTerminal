@@ -7044,79 +7044,272 @@ async fn issue_554_kill_switch_stop_does_not_say_interrupted_by_user() {
     assert!(said.contains("interrupted by user"), "{said}");
 }
 
-/// #507: tasks other agents send to Claude panes while the kill switch is on
-/// wait (one per pane, the newest; the older one is recorded as superseded)
-/// and nothing starts. Once the switch is off, an idle pane gets its task as a
-/// turn at once, and a busy pane when its turn ends. (The turns never run:
-/// the test never yields to them.)
-#[tokio::test]
-async fn issue_507_tasks_for_claude_panes_wait_and_are_sent_after_the_switch() {
+/// #507: the person confirms `choice` in `/security`.
+fn issue_507_switch(app: &App, choice: crate::legacy_core::security_revocation::HumanRevocation) {
     use crate::legacy_core::security_level_change::LevelBasis;
     use crate::legacy_core::security_level_change::SecurityLevel;
-    use crate::legacy_core::security_revocation::HumanRevocation;
     use crate::legacy_core::security_revocation::commit_human_revocation;
+    let codex_home = app.config.codex_home.to_path_buf();
+    let basis = LevelBasis::read(&codex_home, SecurityLevel::Permissive, None);
+    commit_human_revocation(
+        &codex_home,
+        SecurityLevel::Permissive,
+        /*thread*/ None,
+        &basis,
+        choice,
+        /*now_unix_seconds*/ 1_000,
+    )
+    .expect("commit");
+}
+
+fn issue_507_transcript(app: &App, pane_id: &str) -> String {
+    app.claude_pane_transcript_cells
+        .get(pane_id)
+        .into_iter()
+        .flatten()
+        .map(|cell| lines_to_single_string(&cell.display_lines(/*width*/ 400)))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// #507 (owner decision 2026-10-12): tasks other agents send to Claude panes
+/// while the kill switch is on wait (one per pane, the newest; the older one
+/// is recorded as superseded). Turning the switch off starts nothing, and a
+/// pane's turn ending does not send its waiting task either.
+#[tokio::test]
+async fn issue_507_switch_off_starts_no_claude_pane_turn() {
+    use crate::legacy_core::security_revocation::HumanRevocation;
     let (mut app, _app_event_rx, troll_pane_id, orc_pane_id) =
         make_child_report_auto_claude_pane_app().await;
     let codex_home = app.config.codex_home.to_path_buf();
-    let switch = |choice| {
-        let basis = LevelBasis::read(&codex_home, SecurityLevel::Permissive, None);
-        commit_human_revocation(
-            &codex_home,
-            SecurityLevel::Permissive,
-            /*thread*/ None,
-            &basis,
-            choice,
-            /*now_unix_seconds*/ 1_000,
-        )
-        .expect("commit");
-    };
     let held = |app: &App| app.kill_switch_held_claude_tasks.clone();
-    switch(HumanRevocation::KillSwitchOn);
+    issue_507_switch(&app, HumanRevocation::KillSwitchOn);
 
     for tick in 1..=3 {
         app.submit_claude_pane_task(troll_pane_id.clone(), format!("assignment fire {tick}"));
     }
     app.submit_claude_pane_task(orc_pane_id.clone(), "orc task".to_string());
-    assert_eq!(
-        held(&app),
-        vec![
-            (troll_pane_id.clone(), "assignment fire 3".to_string()),
-            (orc_pane_id.clone(), "orc task".to_string()),
-        ]
-    );
+    let waiting = vec![
+        (troll_pane_id.clone(), "assignment fire 3".to_string()),
+        (orc_pane_id.clone(), "orc task".to_string()),
+    ];
+    assert_eq!(held(&app), waiting);
+    assert!(app.claude_panes.prepared_prompts.is_empty());
+
+    issue_507_switch(&app, HumanRevocation::KillSwitchOff);
+    app.on_kill_switch_turned_off();
     assert!(!app.claude_panes.claude_pane_is_running(&troll_pane_id));
     assert!(!app.claude_panes.claude_pane_is_running(&orc_pane_id));
-    app.send_held_claude_tasks();
-    assert_eq!(held(&app).len(), 2, "still on: nothing is sent");
+    assert!(
+        app.claude_panes.prepared_prompts.is_empty(),
+        "turning the switch off starts no turn"
+    );
+    assert_eq!(held(&app), waiting, "the tasks keep waiting");
 
-    switch(HumanRevocation::KillSwitchOff);
-    // The Troll pane is busy (a turn its operator started right away; that
-    // turn's task has already let go of the pane's lock).
+    // A turn that ends in the pane (one its operator started) does not send
+    // the waiting task either.
     drop(
         app.claude_panes
             .prepare_turn(&troll_pane_id, "busy".to_string(), &codex_home)
             .expect("a running turn"),
     );
-    app.send_held_claude_tasks();
-    assert!(
-        app.claude_panes.claude_pane_is_running(&orc_pane_id),
-        "idle: sent"
-    );
-    assert_eq!(
-        held(&app),
-        vec![(troll_pane_id.clone(), "assignment fire 3".to_string())],
-        "busy: it waits for the turn to end"
-    );
-
     app.claude_panes
         .interrupt_turn(&troll_pane_id)
         .expect("stop the busy turn");
     app.on_claude_pane_turn_finished(troll_pane_id.clone(), Err("interrupted".to_string()));
-    assert!(
-        app.claude_panes.claude_pane_is_running(&troll_pane_id),
-        "sent when the turn ended"
+    assert!(!app.claude_panes.claude_pane_is_running(&troll_pane_id));
+    assert_eq!(
+        app.claude_panes.prepared_prompts.len(),
+        1,
+        "only the busy turn"
     );
-    assert!(held(&app).is_empty());
+    assert_eq!(held(&app), waiting);
+}
+
+/// #507: after the switch is off, a Claude pane's waiting task goes with its
+/// next turn: the one a person types (the waiting task first), or one new work
+/// starts. Either way it is sent once, and the pane says so.
+#[tokio::test]
+async fn issue_507_waiting_claude_task_goes_with_the_next_turn() {
+    use crate::legacy_core::security_revocation::HumanRevocation;
+    let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    let codex_home = app.config.codex_home.to_path_buf();
+    let typed_pane = app
+        .claude_panes
+        .create_pane_with_role(
+            crate::claude_panes::ClaudeProviderProfileKind::ClaudePlan,
+            app.config.cwd.to_path_buf(),
+            &codex_home,
+            /*spawn_role*/ None,
+            /*spawn_nickname*/ None,
+        )
+        .expect("create user pane");
+    let worker_pane = app
+        .claude_panes
+        .create_pane_with_role(
+            crate::claude_panes::ClaudeProviderProfileKind::ClaudePlan,
+            app.config.cwd.to_path_buf(),
+            &codex_home,
+            Some(crate::spawn_orchestration::SpawnRole::Orc),
+            Some("Snaga".to_string()),
+        )
+        .expect("create worker pane");
+    assert_eq!(
+        app.claude_panes.active_claude_pane_id(),
+        Some(typed_pane.as_str())
+    );
+    issue_507_switch(&app, HumanRevocation::KillSwitchOn);
+    app.submit_claude_pane_task(typed_pane.clone(), "pf507 waiting task A".to_string());
+    app.submit_claude_pane_task(worker_pane.clone(), "pf507 waiting task B".to_string());
+    issue_507_switch(&app, HumanRevocation::KillSwitchOff);
+    app.on_kill_switch_turned_off();
+    assert!(app.claude_panes.prepared_prompts.is_empty());
+
+    // A person types in the active pane.
+    assert!(app.try_submit_active_claude_pane_op(&claude_pane_text_op("pf507 typed message")));
+    let prompts = app.claude_panes.prepared_prompts.clone();
+    assert_eq!(prompts.len(), 1);
+    assert_eq!(prompts[0].0, typed_pane);
+    let prompt = &prompts[0].1;
+    let task = prompt
+        .find("pf507 waiting task A")
+        .expect("waiting task sent");
+    let typed = prompt.find("pf507 typed message").expect("typed text sent");
+    assert!(task < typed, "the waiting task arrived first: {prompt}");
+    assert!(!prompt.contains("pf507 waiting task B"));
+
+    // New work for the other pane: its waiting task goes with it.
+    app.submit_claude_pane_task(worker_pane.clone(), "pf507 new task".to_string());
+    let prompts = app.claude_panes.prepared_prompts.clone();
+    assert_eq!(prompts.len(), 2);
+    assert_eq!(prompts[1].0, worker_pane);
+    assert!(prompts[1].1.contains("pf507 waiting task B"));
+    assert!(prompts[1].1.contains("pf507 new task"));
+    assert!(
+        issue_507_transcript(&app, &worker_pane).contains("Sent with this turn"),
+        "{}",
+        issue_507_transcript(&app, &worker_pane)
+    );
+    assert!(app.kill_switch_held_claude_tasks.is_empty(), "sent once");
+}
+
+/// #507: a waiting task stays waiting when the next turn cannot start (the
+/// pane is busy), and goes with the first turn that does.
+#[tokio::test]
+async fn issue_507_waiting_claude_task_survives_a_refused_turn() {
+    use crate::legacy_core::security_revocation::HumanRevocation;
+    let (mut app, _app_event_rx, _troll_pane_id, orc_pane_id) =
+        make_child_report_auto_claude_pane_app().await;
+    let codex_home = app.config.codex_home.to_path_buf();
+    issue_507_switch(&app, HumanRevocation::KillSwitchOn);
+    app.submit_claude_pane_task(orc_pane_id.clone(), "pf507 superseded".to_string());
+    app.submit_claude_pane_task(orc_pane_id.clone(), "pf507 waiting".to_string());
+    assert_eq!(
+        app.kill_switch_held_claude_tasks,
+        vec![(orc_pane_id.clone(), "pf507 waiting".to_string())],
+        "the newest waits; the older one was reported superseded"
+    );
+    issue_507_switch(&app, HumanRevocation::KillSwitchOff);
+    let busy = app
+        .claude_panes
+        .prepare_turn(&orc_pane_id, "busy".to_string(), &codex_home)
+        .expect("a running turn");
+    app.submit_claude_pane_task(orc_pane_id.clone(), "pf507 refused".to_string());
+    assert_eq!(
+        app.claude_panes.prepared_prompts.len(),
+        1,
+        "only the busy turn"
+    );
+    assert_eq!(
+        app.kill_switch_held_claude_tasks,
+        vec![(orc_pane_id.clone(), "pf507 waiting".to_string())]
+    );
+    drop(busy);
+    app.claude_panes
+        .interrupt_turn(&orc_pane_id)
+        .expect("stop the busy turn");
+    app.on_claude_pane_turn_finished(orc_pane_id.clone(), Err("interrupted".to_string()));
+    app.submit_claude_pane_task(orc_pane_id.clone(), "pf507 next".to_string());
+    assert!(app.kill_switch_held_claude_tasks.is_empty());
+    let prompt = &app.claude_panes.prepared_prompts[1].1;
+    assert!(prompt.contains("pf507 waiting"), "{prompt}");
+    assert!(!prompt.contains("pf507 superseded"), "{prompt}");
+}
+
+/// #507: turning the switch off sends nothing to any pane (Codex panes,
+/// child agents, Claude panes): no turn, task or agent message.
+#[tokio::test]
+async fn issue_507_switch_off_sends_nothing_anywhere() {
+    use crate::legacy_core::security_revocation::HumanRevocation;
+    let (mut app, mut app_event_rx, mut op_rx) = make_test_app_with_channels().await;
+    issue_507_switch(&app, HumanRevocation::KillSwitchOn);
+    issue_507_switch(&app, HumanRevocation::KillSwitchOff);
+    app.on_kill_switch_turned_off();
+    app.sweep_orchestrate_whips();
+    while let Ok(event) = app_event_rx.try_recv() {
+        assert!(
+            !matches!(
+                event,
+                AppEvent::CodexOp(_)
+                    | AppEvent::SubmitCodexUserPaneTask { .. }
+                    | AppEvent::SubmitSpawnAgentTask { .. }
+                    | AppEvent::SubmitSpawnClaudePaneTask { .. }
+            ),
+            "switch-off sent work"
+        );
+    }
+    assert!(op_rx.try_recv().is_err(), "switch-off submitted an op");
+}
+
+/// #507: assignments and whips (timers) do not fire while the kill switch
+/// is on; they are paused, and turning it off does not resume them. A person
+/// resumes them.
+#[tokio::test]
+async fn issue_507_whips_pause_and_stay_paused_after_switch_off() {
+    use crate::legacy_core::security_revocation::HumanRevocation;
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    write_test_whip(&app, "keep-going", "# whip: keep-going\nContinue the work.");
+    let pane_id = app
+        .claude_panes
+        .create_pane_with_role(
+            crate::claude_panes::ClaudeProviderProfileKind::ClaudePlan,
+            app.config.cwd.to_path_buf(),
+            app.config.codex_home.as_ref(),
+            Some(crate::spawn_orchestration::SpawnRole::Orc),
+            Some("Krimp".to_string()),
+        )
+        .expect("create pane");
+    app.handle_orchestrate_command(format!(
+        "attach {pane_id} keep-going --mode auto --holder none --max 3"
+    ));
+    while app_event_rx.try_recv().is_ok() {}
+
+    issue_507_switch(&app, HumanRevocation::KillSwitchOn);
+    app.sweep_orchestrate_whips();
+    app.note_whip_target_idle_with_fire_control(
+        &crate::spawn_orchestration::pane_node_id(&pane_id),
+        Some("done"),
+        /*allow_fire*/ true,
+        /*turn_succeeded*/ true,
+    );
+    assert!(drain_claude_pane_task_events(&mut app_event_rx).is_empty());
+    assert_eq!(
+        app.orchestrate_whips.get("whip-1").map(|whip| whip.state),
+        Some(crate::orchestrate::WhipState::Paused)
+    );
+
+    issue_507_switch(&app, HumanRevocation::KillSwitchOff);
+    app.sweep_orchestrate_whips();
+    assert!(
+        drain_claude_pane_task_events(&mut app_event_rx).is_empty(),
+        "switch-off resumes no whip"
+    );
+
+    app.handle_orchestrate_command("resume whip-1".to_string());
+    app.sweep_orchestrate_whips();
+    let fired = drain_claude_pane_task_events(&mut app_event_rx);
+    assert_eq!(fired.len(), 1, "a person resumed it");
+    assert!(fired[0].1.contains("Continue the work."));
 }
 
 #[tokio::test]

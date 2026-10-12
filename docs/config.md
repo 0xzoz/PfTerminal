@@ -215,6 +215,16 @@ effect when Corbanu restarts; a `[security] level` in config applies from the
 next new session. Under Aggressive with the broker off, Corbanu shows a startup
 warning and `/security` reports the level as partial.
 
+### Kill switch
+
+`/security` → `g` → "Turn the kill switch on" stops the work running in every
+pane, Claude panes included, and refuses model turns until a person turns it off
+there. Messages and tasks from other agents that arrive meanwhile wait, and
+`/orchestrate` assignments and whips are paused. Turning the switch off restarts
+nothing: no pane starts a turn, and paused assignments stay paused until you run
+`/orchestrate resume <id>`. Waiting messages and tasks go with each pane's next
+turn, when someone types in it or it gets new work.
+
 <a id="shell-environment"></a>
 
 ## Shell Environment

@@ -900,6 +900,9 @@ impl App {
             return true;
         }
         self.note_assignment_user_turn(&crate::spawn_orchestration::pane_node_id(&pane_id));
+        // #507: a task held while the kill switch was on goes with this turn.
+        let held = self.held_claude_task(&pane_id);
+        let prompt = with_held_claude_task(held.as_deref(), prompt);
         let prompt_context = self.claude_pane_prompt_context(&pane_id);
         let prompt = compose_claude_pane_prompt(prompt, prompt_context.as_deref());
         let claude_plan_account = self.claude_plan_account();
@@ -915,6 +918,14 @@ impl App {
                 return true;
             }
         };
+        if let Some(held) = held {
+            // A person's turn: the held task no longer counts as an
+            // automatic one for the loop breaker.
+            self.abort_spawn_auto_processing_turn(&crate::spawn_orchestration::pane_node_id(
+                &pane_id,
+            ));
+            self.held_claude_task_delivered(&pane_id, &held);
+        }
 
         self.chat_widget.begin_external_pane_turn();
         let tx = self.app_event_tx.clone();
@@ -1002,7 +1013,8 @@ impl App {
             return;
         }
         // #507: while the kill switch is on, a task another agent sent waits,
-        // as agent messages to Codex panes do, and is sent once it is off.
+        // as agent messages to Codex panes do, for the pane's next turn after
+        // it is off; turning it off does not send it.
         if crate::legacy_core::security_revocation::kill_switch_on(self.config.codex_home.as_ref())
         {
             // An auto-processing turn stays pending, so the task keeps its
@@ -1035,13 +1047,14 @@ impl App {
             if superseded.is_empty() {
                 self.chat_widget.add_info_message(
                     format!(
-                        "A task for Claude pane `{title}` waits: the security kill switch is on. It is sent when the switch is turned off in /security here (a newer task replaces it; it is lost if Corbanu Terminal exits first)."
+                        "A task for Claude pane `{title}` waits: the security kill switch is on. Turning it off starts nothing: the task goes with this pane's next turn, when someone types in it or it gets new work (a newer task replaces it; it is lost if Corbanu Terminal exits first)."
                     ),
                     /*hint*/ None,
                 );
             }
             return;
         }
+        let held = self.held_claude_task(&pane_id);
         let is_active = self.claude_panes.active_user_pane_id() == pane_id;
         let user_cell =
             crate::history_cell::new_user_prompt(task.clone(), Vec::new(), Vec::new(), Vec::new());
@@ -1054,7 +1067,10 @@ impl App {
         self.claude_panes
             .set_latest_task_message(&pane_id, Some(task.clone()));
         let prompt_context = self.claude_pane_prompt_context(&pane_id);
-        let prompt = compose_claude_pane_prompt(task.clone(), prompt_context.as_deref());
+        let prompt = compose_claude_pane_prompt(
+            with_held_claude_task(held.as_deref(), task.clone()),
+            prompt_context.as_deref(),
+        );
         let node_key = crate::spawn_orchestration::pane_node_id(&pane_id);
         let auto_processing_turn = self
             .spawn_auto_loop_state_by_node
@@ -1078,6 +1094,9 @@ impl App {
                 return;
             }
         };
+        if let Some(held) = held {
+            self.held_claude_task_delivered(&pane_id, &held);
+        }
         self.record_spawn_dispatch_delivered_for_task(&target_node_id, &task);
         self.record_claude_spawn_rollout_task_started(&pane_id, &task, prepared.plan.turn_index);
         // Loop breaker: a turn we auto-triggered (child-report processing) transitions
@@ -1282,41 +1301,65 @@ impl App {
                 }
             }
         }
-        // #507: the pane is free again; the next task it held may go.
-        self.send_next_held_claude_task(&pane_id);
     }
 
-    /// #507: the kill switch was turned off: each idle Claude pane gets the
-    /// task held for it now; a busy one when its turn ends.
-    pub(crate) fn send_held_claude_tasks(&mut self) {
-        let mut panes: Vec<String> = Vec::new();
-        for (pane_id, _) in &self.kill_switch_held_claude_tasks {
-            if !panes.contains(pane_id) {
-                panes.push(pane_id.clone());
-            }
-        }
-        for pane_id in panes {
-            self.send_next_held_claude_task(&pane_id);
-        }
-    }
-
-    fn send_next_held_claude_task(&mut self, pane_id: &str) {
-        // A task that does not start a turn (refused, or the pane is gone)
-        // must not strand the ones behind it.
-        while let Some(index) = self
+    /// #507: the kill switch was turned off. Nothing starts: each task held
+    /// for a Claude pane goes with that pane's next turn. The person is told
+    /// which panes have one.
+    pub(crate) fn on_kill_switch_turned_off(&mut self) {
+        let titles: Vec<String> = self
             .kill_switch_held_claude_tasks
             .iter()
-            .position(|(held, _)| held == pane_id)
-        {
-            if self.claude_panes.claude_pane_is_running(pane_id)
-                || crate::legacy_core::security_revocation::kill_switch_on(
-                    self.config.codex_home.as_ref(),
-                )
-            {
-                return;
-            }
-            let (pane_id, task) = self.kill_switch_held_claude_tasks.remove(index);
-            self.submit_claude_pane_task(pane_id, task);
+            .map(|(pane_id, _)| {
+                self.claude_panes
+                    .panes()
+                    .iter()
+                    .find(|pane| pane.id == *pane_id)
+                    .map_or_else(|| pane_id.clone(), |pane| pane.title.clone())
+            })
+            .map(|title| format!("`{title}`"))
+            .collect();
+        if titles.is_empty() {
+            return;
+        }
+        self.chat_widget.add_info_message(
+            format!(
+                "Nothing restarted. A task waits for each of these Claude panes and goes with that pane's next turn, when someone types in it or it gets new work: {}.",
+                titles.join(", ")
+            ),
+            /*hint*/ None,
+        );
+    }
+
+    /// #507: the task held for `pane_id` while the kill switch was on.
+    fn held_claude_task(&self, pane_id: &str) -> Option<String> {
+        self.kill_switch_held_claude_tasks
+            .iter()
+            .find(|(held, _)| held == pane_id)
+            .map(|(_, task)| task.clone())
+    }
+
+    /// #507: the held task went with the turn that just started in `pane_id`.
+    fn held_claude_task_delivered(&mut self, pane_id: &str, task: &str) {
+        self.kill_switch_held_claude_tasks
+            .retain(|(held, _)| held != pane_id);
+        self.record_spawn_dispatch_delivered_for_task(
+            &crate::spawn_orchestration::pane_node_id(pane_id),
+            task,
+        );
+        let summary = HELD_TASK_DELIVERED.to_string();
+        let mut hint: String = task.chars().take(HELD_TASK_HINT_CHARS).collect();
+        if hint.len() < task.len() {
+            hint.push('…');
+        }
+        let hint = Some(hint);
+        if self.claude_panes.active_user_pane_id() == pane_id {
+            self.chat_widget.add_info_message(summary, hint);
+        } else {
+            self.append_inactive_claude_pane_transcript_cell(
+                pane_id,
+                Arc::new(crate::history_cell::new_info_event(summary, hint)),
+            );
         }
     }
 
@@ -1590,5 +1633,25 @@ fn rename_claude_pane_shortcut(pane_id: String) -> SelectionShortcutAction {
             });
         }),
         dismiss_on_select: true,
+    }
+}
+
+/// #507: shown in a Claude pane when its turn carries the task held while the
+/// kill switch was on.
+const HELD_TASK_DELIVERED: &str =
+    "Sent with this turn: the task that waited while the security kill switch was on.";
+
+/// #507: how much of the delivered task the pane shows.
+const HELD_TASK_HINT_CHARS: usize = 200;
+
+/// #507: the prompt of a pane's first turn after the kill switch, with the
+/// task held for it first (it arrived first), as a Codex pane gets its waiting
+/// agent messages with its next turn.
+pub(crate) fn with_held_claude_task(held: Option<&str>, prompt: String) -> String {
+    match held {
+        Some(held) => format!(
+            "A task sent to you while the security kill switch was on (it waited for this turn):\n\n{held}\n\nThis turn's message:\n\n{prompt}"
+        ),
+        None => prompt,
     }
 }
