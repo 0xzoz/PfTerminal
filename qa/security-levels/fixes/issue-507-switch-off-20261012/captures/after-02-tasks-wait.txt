@@ -7,7 +7,7 @@
 ╰──────────────────────────────────────────────────────────╯
 
 
-› Summarize recent commits
+› Implement {feature}
 
   Z.AI GLM 5.3 Flash via zai default · /Volumes/CorbanuDrive/Corbanu/.codex-work/workers-20261002/agg-dec-off/runs/after/ws · Corbanu Terminal · TPS: -- tok/s
 
@@ -32,7 +32,7 @@ in it or it gets new work.
 with this pane's next turn, when someone types in it or it gets new work (a newer task replaces it; it is lost if Corbanu Terminal exits first).
 
 
-› Summarize recent commits
+› Implement {feature}
 
   Z.AI GLM 5.3 Flash via zai default · /Volumes/CorbanuDrive/Corbanu/.codex-work/workers-20261002/agg-dec-off/runs/after/ws · Corbanu Terminal · TPS: -- tok/s …
 

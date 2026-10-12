@@ -7,7 +7,7 @@
 ╰──────────────────────────────────────────────────────────╯
 
 
-› Summarize recent commits
+› Implement {feature}
 
   Z.AI GLM 5.3 Flash via zai default · /Volumes/CorbanuDrive/Corbanu/.codex-work/workers-20261002/agg-dec-off/runs/after/ws · Corbanu Terminal · TPS: -- tok/s
 
@@ -35,7 +35,7 @@ with this pane's next turn, when someone types in it or it gets new work (a newe
 Snaga [orc] - Opus 5.5 Claude Plan`.
 
 
-› Summarize recent commits
+› Implement {feature}
 
   Z.AI GLM 5.3 Flash via zai default · /Volumes/CorbanuDrive/Corbanu/.codex-work/workers-20261002/agg-dec-off/runs/after/ws · Corbanu Terminal · TPS: -- tok/s …
 

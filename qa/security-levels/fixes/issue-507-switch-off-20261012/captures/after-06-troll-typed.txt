@@ -17,14 +17,14 @@
 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-• Done — codex-task.txt created in the workspace with the single line pf507-codex-task.
+• Created codex-task.txt in the workspace with the single line pf507-codex-task.
 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 
-› Write tests for @filename
+› Run /review on my current changes
 
-  Z.AI GLM 5.3 Flash via zai low · /Volumes/CorbanuDrive/Corbanu/.codex-work/workers-20261002/agg-dec-off/runs/after/ws · Corbanu Terminal · TPS: 8.3 tok/s · `…
+  Z.AI GLM 5.3 Flash via zai low · /Volumes/CorbanuDrive/Corbanu/.codex-work/workers-20261002/agg-dec-off/runs/after/ws · Corbanu Terminal · TPS: 5.3 tok/s · `…
 
 
 

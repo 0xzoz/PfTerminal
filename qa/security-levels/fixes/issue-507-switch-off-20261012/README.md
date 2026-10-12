@@ -16,7 +16,11 @@ A `/spawn` crew: Nazgul Angmar and Troll Burzum (native, GLM 5.3 Flash) and Orc 
 Plan). With the switch on, `/spawn status` → "Send task to …" sends Burzum "create codex-task.txt containing
 pf507-codex-task" and Snaga "reply with exactly pf507-claude-task". Then the switch goes off and the run waits 45 s.
 
-Builds (macOS arm64, debug): **before** `c4999b1265` (`origin/main` at the branch point); **after** this branch.
+Builds (macOS arm64, debug): **before** `c4999b1265` (`origin/main` at the branch point); **after** this branch at
+`4f41d8b859` (the after captures are from that final build).
+
+Video (SOP, leak-scanned): [issue507-switch-off-restarts-nothing](https://github.com/CorbanuCore/CorbanuTerminal/releases/download/demos/issue-507-issue507-switch-off-restarts-nothing-4f41d8b859bc-2026-10-12.mp4)
+([spec](../../../demos/specs/issue507-switch-off-restarts-nothing.toml)).
 
 | Step | Before | After |
 | --- | --- | --- |
