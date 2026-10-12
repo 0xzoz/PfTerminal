@@ -31,8 +31,10 @@
 //! disk, or a row it refers to that is not written yet) are logged and
 //! dropped, as before. A request still waiting for its record gets the error
 //! and its turn warns of the gap; a refusal that comes later is counted per
-//! conversation (`StateRuntime::accounting_refusals`) and reported by the turn
-//! that notices it.
+//! conversation (`StateRuntime::accounting_refusals`) and reported by that
+//! conversation's next turn in this process. A refusal of a record adopted
+//! from an exited process is counted in the adopting process, which usually
+//! has no session for that conversation: it is only logged.
 use super::AccountingStore;
 use super::AsOf;
 use super::Attempt;
@@ -74,9 +76,6 @@ const WAIT_CAP: Duration = Duration::from_secs(1);
 /// How often a writer checks on another process's hourly validation.
 const VALIDATION_POLL: Duration = Duration::from_secs(1);
 
-/// How long the validating process keeps trying to record that it validated.
-const VALIDATION_COMMIT_WAIT: Duration = Duration::from_secs(120);
-
 /// The lease on the hour's whole-ledger validation, under `PENDING_DIR`.
 const VALIDATION_LEASE: &str = "validation.lock";
 
@@ -86,6 +85,13 @@ const SWEEP_EVERY: Duration = Duration::from_secs(300);
 /// How long a record that refers to a row not written yet - its
 /// conversation's `threads` row, or its attempt's admission - is retried.
 const OWNER_WAIT: Duration = Duration::from_secs(600);
+
+/// The least an adopted record waits for a row it refers to.
+const ADOPTED_MIN_WAIT: Duration = Duration::from_secs(60);
+
+/// A lock file younger than this is never swept: its process may be between
+/// creating and locking it.
+const LOCK_FILE_GRACE: Duration = Duration::from_secs(60);
 
 const RETRY_FIRST: Duration = Duration::from_millis(50);
 const RETRY_MAX: Duration = Duration::from_secs(2);
@@ -309,7 +315,8 @@ impl Spool {
             .truncate(false)
             .write(true)
             .open(dir.join(format!("{process}.lock")))?;
-        // A fresh name: nobody else can hold it.
+        // A fresh name nobody else holds; a sweep leaves a lock file this young
+        // alone (`LOCK_FILE_GRACE`).
         lock.try_lock().map_err(std::io::Error::other)?;
         Ok(Self {
             dir,
@@ -380,6 +387,7 @@ fn orphans(spool: &Spool, seq: &AtomicU64) -> Vec<Entry> {
         let has_records = files.iter().any(|(process, _)| *process == lock);
         // The claim (and its lock) lives until the file is gone.
         if !has_records
+            && !recently_created(&spool.dir.join(format!("{lock}.lock")))
             && let Some(claim) = claim(&spool.dir, &lock)
             && let Some(path) = claim.path.as_ref()
         {
@@ -446,14 +454,27 @@ fn orphans(spool: &Spool, seq: &AtomicU64) -> Vec<Entry> {
     adopted
 }
 
-/// The `Instant` a record saved at `queued_at_ms` (UTC) was queued.
+/// The `Instant` a record saved at `queued_at_ms` (UTC) counts as queued from,
+/// for `OWNER_WAIT`. An adopted record keeps its age, so it is not given a
+/// fresh wait on every adoption, but always gets at least `ADOPTED_MIN_WAIT`:
+/// the rows it refers to may be among the records adopted with it.
 fn queued_at(queued_at_ms: i64) -> Instant {
+    let oldest = OWNER_WAIT.saturating_sub(ADOPTED_MIN_WAIT);
     let age_ms = chrono::Utc::now()
         .timestamp_millis()
         .saturating_sub(queued_at_ms)
-        .clamp(0, i64::try_from(OWNER_WAIT.as_millis()).unwrap_or(i64::MAX));
+        .clamp(0, i64::try_from(oldest.as_millis()).unwrap_or(i64::MAX));
     let age = Duration::from_millis(u64::try_from(age_ms).unwrap_or(0));
     Instant::now().checked_sub(age).unwrap_or_else(Instant::now)
+}
+
+/// Whether `path` was modified within `LOCK_FILE_GRACE` (or cannot be read).
+fn recently_created(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .is_none_or(|age| age < LOCK_FILE_GRACE)
 }
 
 /// A gone process's records, claimed by holding its lock.
@@ -778,7 +799,7 @@ async fn run(
             tokio::select! {
                 command = commands.recv() => match command {
                     Some(command) => inbox.accept(command),
-                    None => return retire(spool.as_deref()),
+                    None => return retire(spool.as_ref()),
                 },
                 () = tokio::time::sleep_until(wake) => {}
             }
@@ -806,14 +827,14 @@ async fn run(
             tokio::select! {
                 command = commands.recv() => match command {
                     Some(command) => inbox.accept(command),
-                    None => return retire(spool.as_deref()),
+                    None => return retire(spool.as_ref()),
                 },
                 () = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {}
             }
             continue;
         }
         let Some(state) = runtime.upgrade() else {
-            return retire(spool.as_deref());
+            return retire(spool.as_ref());
         };
         // The hour's whole-ledger validation runs in one process at a time,
         // before any write needs it; meanwhile records are put off.
@@ -846,7 +867,7 @@ async fn run(
                     pause = (pause * 2).min(RETRY_MAX);
                     continue;
                 }
-                Err(Failure::Closed) => return retire(spool.as_deref()),
+                Err(Failure::Closed) => return retire(spool.as_ref()),
                 Err(Failure::Waiting(_) | Failure::Refused(_)) => {
                     // Reported by the first record that needs the ledger.
                     for waiter in inbox.opens.drain(..) {
@@ -899,7 +920,7 @@ async fn run(
                 pause = (pause * 2).min(RETRY_MAX);
             }
             // Shutting down: the saved records are left for the next writer.
-            Err(Failure::Closed) => return retire(spool.as_deref()),
+            Err(Failure::Closed) => return retire(spool.as_ref()),
             Err(Failure::Waiting(_))
                 if job.queued_at.elapsed() < OWNER_WAIT
                     && (job.adopted || state.thread_row_put_off(job.owner)) =>
@@ -967,9 +988,9 @@ impl Inbox {
 }
 
 /// The writer is ending: drop this process's lock file if it leaves no record.
-fn retire(spool: Option<&Spool>) {
-    if let Some(spool) = spool {
-        spool.retire();
+fn retire(spool: Option<&Arc<Spool>>) {
+    if let Some(spool) = spool.cloned() {
+        drop(tokio::task::spawn_blocking(move || spool.retire()));
     }
 }
 
@@ -1053,34 +1074,20 @@ async fn ensure_validated(
     }
     let started = Instant::now();
     // Moving the checkpoint into this hour tells the other processes it was
-    // done. The validation itself is kept for the hour (`validate_hour`), so a
-    // busy DB only delays that short commit: it is retried, still holding the
-    // lease, rather than leaving the next process to validate again. Any other
-    // failure is the write's to report.
-    let mut pause = RETRY_FIRST;
-    loop {
-        match store.maintain_for_write(AsOf::Now).await {
-            Ok(()) => {
-                tracing::info!(
-                    target: LOG_TARGET,
-                    elapsed_ms = started.elapsed().as_millis() as u64,
-                    "accounting: validated the ledger for this hour"
-                );
-                break;
-            }
-            Err(error) if is_contention(&error) && started.elapsed() < VALIDATION_COMMIT_WAIT => {
-                tokio::time::sleep(pause).await;
-                pause = (pause * 2).min(RETRY_MAX);
-            }
-            Err(error) => {
-                tracing::debug!(
-                    target: LOG_TARGET,
-                    error = %format_args!("{error:#}"),
-                    "accounting: the hour's ledger validation did not complete"
-                );
-                break;
-            }
-        }
+    // done. If that commit fails (busy), the validation is still kept for the
+    // hour (`validate_hour`), so this process's next write moves it; any other
+    // failure is that write's to report.
+    match store.maintain_for_write(AsOf::Now).await {
+        Ok(()) => tracing::info!(
+            target: LOG_TARGET,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "accounting: validated the ledger for this hour"
+        ),
+        Err(error) => tracing::debug!(
+            target: LOG_TARGET,
+            error = %format_args!("{error:#}"),
+            "accounting: the hour's ledger validation was not recorded yet"
+        ),
     }
     true
 }

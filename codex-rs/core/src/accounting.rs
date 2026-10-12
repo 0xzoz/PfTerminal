@@ -246,8 +246,10 @@ pub(crate) async fn warn_if_unrecorded(
     scopes: Option<&TurnScopes>,
 ) {
     let ledger = scopes.and_then(|scopes| scopes.ledger.as_ref());
-    if (scopes.is_none_or(TurnScopes::stopped)
-        || session.services.accounting_notices.refused_since(ledger))
+    // Always read, so a refusal this turn already reports is not reported
+    // again by the next one.
+    let refused = session.services.accounting_notices.refused_since(ledger);
+    if (scopes.is_none_or(TurnScopes::stopped) || refused)
         && !turn_context
             .accounting_gap_warning_emitted
             .swap(true, Ordering::Relaxed)

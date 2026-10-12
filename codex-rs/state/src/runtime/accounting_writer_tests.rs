@@ -385,7 +385,7 @@ async fn the_owner_day_query_uses_the_lookup_index() -> anyhow::Result<()> {
     let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(
         "EXPLAIN QUERY PLAN SELECT attempt_id FROM draft_accounting_attempts
             WHERE json_extract(payload, '$.dispatched_at_ms') <= ?
-            ORDER BY attempt_id LIMIT ?",
+            ORDER BY json_extract(payload, '$.dispatched_at_ms'), attempt_id LIMIT ?",
     )
     .bind(0)
     .bind(10)
@@ -516,7 +516,8 @@ async fn the_hourly_validation_waits_for_the_lease() -> anyhow::Result<()> {
 }
 
 /// A retry adopted from an exited process before its predecessor's admission
-/// is in the ledger waits for it instead of being refused.
+/// is in the ledger waits for it instead of being refused, even when it was
+/// saved long ago.
 #[tokio::test]
 async fn an_adopted_retry_waits_for_its_predecessor() -> anyhow::Result<()> {
     let path = home();
@@ -530,7 +531,8 @@ async fn an_adopted_retry_waits_for_its_predecessor() -> anyhow::Result<()> {
     std::fs::create_dir_all(&dir)?;
     let saved = Saved {
         version: 1,
-        queued_at_ms: chrono::Utc::now().timestamp_millis(),
+        // Saved well past `OWNER_WAIT` ago.
+        queued_at_ms: chrono::Utc::now().timestamp_millis() - 3_600_000,
         write: admit(owner, &retry),
     };
     std::fs::write(
