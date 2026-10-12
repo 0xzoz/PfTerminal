@@ -75,6 +75,56 @@ fn issue_442_finds_the_denied_path_the_command_names() {
     );
 }
 
+/// #506 review: a denial line names the folder as the shell resolved it, so
+/// `ls "$CODEX_HOME"` and `ls home/tmp/..` are attributed to the home; the
+/// listing explanation names the path as the command spelled it.
+#[test]
+fn issue_506_listing_denial_is_attributed_through_variables_and_dot_dot() {
+    let cwd = Path::new("/work/project");
+    let user_home = Path::new("/users/me");
+    let codex_home = Path::new("/users/me/.corbanu");
+    let denied = |path: &Path| {
+        AbsolutePathBuf::from_absolute_path(path).is_ok_and(|path| path.as_path() == codex_home)
+    };
+    let lines = ["ls: /users/me/.corbanu: Operation not permitted".to_string()];
+    for (script, expected) in [
+        ("ls -la \"$CODEX_HOME\"", "$CODEX_HOME"),
+        ("ls ${CORBANU_HOME}", "${CORBANU_HOME}"),
+        ("ls ~/.corbanu/tmp/..", "~/.corbanu/tmp/.."),
+    ] {
+        assert_eq!(
+            denied_word(
+                &shell(script),
+                cwd,
+                Some(user_home),
+                codex_home,
+                denied,
+                Some(&lines),
+            ),
+            Some(expected.to_string()),
+            "{script}"
+        );
+    }
+    let other = ["ls: /users/me/other: Operation not permitted".to_string()];
+    assert_eq!(
+        denied_word(
+            &shell("ls \"$CODEX_HOME\" other"),
+            cwd,
+            Some(user_home),
+            codex_home,
+            denied,
+            Some(&other),
+        ),
+        None
+    );
+    let text = listing_explanation("$CODEX_HOME");
+    assert!(
+        text.starts_with("Security level Aggressive blocked listing `$CODEX_HOME`"),
+        "{text}"
+    );
+    assert!(text.contains("not even once"), "{text}");
+}
+
 /// #442 (milestone AGG-09): under Aggressive a denied read of a protected
 /// file is explained where it failed, naming the level and /security; it is
 /// not explained under Permissive, for a command that succeeded, or for a
