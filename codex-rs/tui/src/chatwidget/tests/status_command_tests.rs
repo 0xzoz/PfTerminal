@@ -197,3 +197,102 @@ async fn account_update_rejects_stale_status_rate_limit_snapshots() {
 
     assert!(chat.rate_limit_snapshots_by_limit_id.is_empty());
 }
+
+/// PF-84: a Z.AI session whose threads (the coordinator on `default`, a
+/// spawned agent on `work`, a worker on another provider) reported usage.
+fn zai_session_with_account_usage(chat: &mut ChatWidget, named_accounts: bool) {
+    chat.config.model_provider_id = "zai".to_string();
+    chat.config.model_provider = codex_model_provider_info::ModelProviderInfo {
+        name: "Z.AI".to_string(),
+        env_key: Some("PF84_STATUS_ACCOUNT_USAGE_UNSET_KEY".to_string()),
+        ..Default::default()
+    };
+    if named_accounts {
+        chat.config
+            .features
+            .enable(codex_features::Feature::NamedAccounts)
+            .expect("enable named accounts");
+    }
+    let report = |provider_id: &str, account: &str, input: i64, output: i64| {
+        codex_app_server_protocol::ThreadAccountTokenUsage {
+            provider_id: provider_id.to_string(),
+            account: account.to_string(),
+            usage: codex_app_server_protocol::TokenUsageBreakdown {
+                total_tokens: input + output,
+                input_tokens: input,
+                cached_input_tokens: 0,
+                cache_write_input_tokens: 0,
+                output_tokens: output,
+                reasoning_output_tokens: 0,
+            },
+        }
+    };
+    chat.record_thread_account_usage(
+        ThreadId::new(),
+        vec![report(
+            "zai", "default", /*input*/ 1_000, /*output*/ 100,
+        )],
+    );
+    chat.record_thread_account_usage(
+        ThreadId::new(),
+        vec![report(
+            "zai", "work", /*input*/ 400, /*output*/ 40,
+        )],
+    );
+    chat.record_thread_account_usage(
+        ThreadId::new(),
+        vec![report("kimi", "alt", /*input*/ 7, /*output*/ 7)],
+    );
+}
+
+fn render_status(
+    chat: &mut ChatWidget,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+) -> String {
+    chat.dispatch_command(SlashCommand::Status);
+    match rx.try_recv() {
+        Ok(AppEvent::InsertHistoryCell(cell)) => {
+            lines_to_single_string(&cell.display_lines(/*width*/ 100))
+        }
+        other => panic!("expected status output, got {other:?}"),
+    }
+}
+
+/// PF-84: with named accounts off, `/status` is byte-for-byte what it was,
+/// whatever usage the threads reported.
+#[tokio::test]
+async fn status_account_usage_flag_off_leaves_status_unchanged() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    zai_session_with_account_usage(&mut chat, /*named_accounts*/ false);
+    let with_reports = render_status(&mut chat, &mut rx);
+    chat.session_account_usage.clear();
+    let without_reports = render_status(&mut chat, &mut rx);
+
+    pretty_assertions::assert_eq!(with_reports, without_reports);
+    assert!(!with_reports.contains("Account usage"), "{with_reports}");
+}
+
+/// PF-84: a spawned agent on another account counts toward that account; the
+/// session's account is marked; another provider's accounts are left out.
+#[tokio::test]
+async fn status_account_usage_lists_the_active_providers_accounts() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    zai_session_with_account_usage(&mut chat, /*named_accounts*/ true);
+    let rendered = render_status(&mut chat, &mut rx);
+
+    assert!(rendered.contains("Account usage:"), "{rendered}");
+    assert!(
+        rendered.contains("default (active)  1,000     100"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("work                400      40"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("alt"), "{rendered}");
+
+    // A resumed thread runs on the account the app server reported.
+    chat.thread_provider_account = Some("zai:work".to_string());
+    let rendered = render_status(&mut chat, &mut rx);
+    assert!(rendered.contains("work (active)"), "{rendered}");
+}
