@@ -1,11 +1,17 @@
 name: rust-ci core security tests
 
-# codex-core's security unit tests (`security::`: protected paths, read
-# denials, taint, approvals) on one runner. Shared by rust-ci.yml (PR: Linux
+# codex-core's security tests (`security::` unit tests: protected paths, read
+# denials, taint, approvals; and the integration tests below) on one runner. Shared by rust-ci.yml (PR: Linux
 # and macOS) and rust-ci-full.yml (postmerge: macOS; Linux runs the whole
 # suite there). Before this, no job ran codex-core tests on macOS, so a
 # macOS-only security failure (#512: a denial spelled through the `/tmp` or
 # `/var` link) stayed red on main unnoticed.
+#
+# #553: also the PF-23/PF-25 security integration tests (`suite::pf_23_s01`,
+# `suite::pf_25_s01`: post-taint checks for MCP, `write_stdin` and code mode,
+# sandboxed home reads, grants). They need the code-mode host and the test MCP
+# server, which `cargo test -p codex-core` does not build; without the host,
+# code mode is unavailable and its taint test would check nothing.
 on:
   workflow_call:
     inputs:
@@ -94,8 +100,15 @@ jobs:
             sccache-core-security-${{ inputs.runner }}-${{ inputs.target }}-${{ steps.sccache_config.outputs.lockhash }}-
             sccache-core-security-${{ inputs.runner }}-${{ inputs.target }}-
 
-      - name: Build the codex-core test binary
-        run: cargo test --locked --target ${{ inputs.target }} -p codex-core --lib --no-run
+      - name: Build the codex-core test binaries
+        run: |
+          cargo test --locked --target ${{ inputs.target }} -p codex-core --lib --no-run
+          cargo test --locked --target ${{ inputs.target }} -p codex-core --test all --no-run
+
+      # Found next to the test binaries by `cargo_bin` (same target folder).
+      - name: Build the integration-test helpers
+        run: |
+          cargo build --locked --target ${{ inputs.target }} -p codex-code-mode-host -p codex-rmcp-client --bins
 
       # The runner's own TMPDIR (on macOS a folder under the `/var` link).
       - name: "cargo test codex-core security::"
@@ -108,6 +121,16 @@ jobs:
           TMPDIR: /tmp
         run: |
           cargo test --locked --target ${{ inputs.target }} -p codex-core --lib -- security::
+
+      - name: "cargo test codex-core suite::pf_23_s01 suite::pf_25_s01"
+        run: |
+          cargo test --locked --target ${{ inputs.target }} -p codex-core --test all -- suite::pf_23_s01 suite::pf_25_s01
+
+      - name: "cargo test codex-core suite::pf_23_s01 suite::pf_25_s01 (TMPDIR=/tmp)"
+        env:
+          TMPDIR: /tmp
+        run: |
+          cargo test --locked --target ${{ inputs.target }} -p codex-core --test all -- suite::pf_23_s01 suite::pf_25_s01
 
       # Main keeps the cache warm; a PR saves only when nothing was restored.
       - name: Save sccache cache
