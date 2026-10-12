@@ -69,6 +69,13 @@ step "B3 logout: only play signed out and revoked"
 run "$BIN" logout --account play
 run "$BIN" account list openai
 echo "auth.json sha256: $(sum)"
+step "a home with no default login: the named account alone works"
+H2=$RUN/corbanu2; mkdir -p "$H2"; cp "$CODEX_HOME/config.toml" "$H2/"
+next_user solo; printf '$ CODEX_HOME=<second home> corbanu login --account solo --device-auth\n'
+CODEX_HOME=$H2 "$BIN" login --account solo --device-auth --experimental_issuer "$URL" 2>&1 | grep -E "Signed in|rror"
+CODEX_HOME=$H2 ex --account solo "Reply with exactly: pong"
+CODEX_HOME=$H2 ex "Reply with exactly: pong"
+echo "default auth.json in the second home: $(ls "$H2/auth.json" 2>/dev/null || echo none)"
 step "mock events (users and generations only)"
 cat "$LOG"
 } > "$OUT/cli.txt" 2>&1

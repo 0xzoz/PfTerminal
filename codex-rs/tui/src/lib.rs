@@ -1595,11 +1595,15 @@ async fn run_ratatui_app(
         unreachable!("app server should exist while resolving provider status");
     };
     let login_status = get_login_status(app_server_for_status, &initial_config).await?;
-    let startup_provider = startup_provider::resolve(
-        &initial_config,
-        Some(startup_provider::openai_metadata(login_status)),
-    )
-    .await;
+    // PF-84-S06: a named OpenAI sign-in account was checked before startup
+    // (it holds a sign-in), so the default login's state does not apply.
+    let openai_metadata =
+        if codex_model_provider::named_sign_in_account(&initial_config.model_provider).is_some() {
+            codex_login::OpenAiAuthMetadata::Account
+        } else {
+            startup_provider::openai_metadata(login_status)
+        };
+    let startup_provider = startup_provider::resolve(&initial_config, Some(openai_metadata)).await;
     let requires_provider_onboarding = startup_provider.requires_provider_onboarding;
     let should_show_onboarding = startup_provider::should_show_provider_onboarding(
         should_show_trust_screen_flag,
