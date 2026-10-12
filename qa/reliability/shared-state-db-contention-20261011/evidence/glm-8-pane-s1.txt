@@ -8,7 +8,7 @@
 ╰─────────────────────────────────────────────────────────╯
 
 
-› Implement {feature}
+› Summarize recent commits
 
   Z.AI GLM 5.3 Flash via zai default · <scratch>/glm-8/work · Corbanu Terminal · TPS: -- tok/s
 
@@ -31,7 +31,7 @@
   └ List ls
 
 • Ran date
-  └ Sun Oct 11 16:54:26 MST 2026
+  └ Sun Oct 11 18:16:38 MST 2026
 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -40,9 +40,9 @@
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 
-› Implement {feature}
+› Summarize recent commits
 
-  Z.AI GLM 5.3 Flash via zai default · <scratch>/glm-8/work · Corbanu Terminal · TPS: 4.3 tok/s
+  Z.AI GLM 5.3 Flash via zai default · <scratch>/glm-8/work · Corbanu Terminal · TPS: 4.1 tok/s
 
 
 

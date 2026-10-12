@@ -33,6 +33,7 @@ if [ "${WARMUP:-0}" = 1 ]; then
     "Reply with exactly the word READY." > "$OUT/warmup.txt" 2>&1) || true
 fi
 PROMPT='Use the shell tool three times, one command per call: pwd, then ls, then date. Then reply with exactly the word FINISHED-OK.'
+START_MS=$(($(date +%s) * 1000))
 for i in $(seq 1 "$N"); do
   cmd="cd '$OUT/work' && ZAI_API_KEY=\"\$($KEY_CMD)\" '$BIN' --dangerously-bypass-approvals-and-sandbox -m glm-5.3-flash -c model_provider=\"zai\" \"session $i: $PROMPT\""
   if [ "$i" = 1 ]; then
@@ -58,6 +59,14 @@ while [ $SECONDS -lt $deadline ]; do
   [ "$done_count" -ge "$N" ] && break
   sleep 15
 done
+# The sessions' ledger writers finish what they hold (the first writer of an
+# hour validates the whole ledger first) before the sessions are closed.
+for _ in $(seq 1 36); do
+  left=$(find "$OUT/home/accounting-pending" -name '*.json' 2>/dev/null | wc -l | tr -d ' ')
+  [ "$left" = 0 ] && break
+  sleep 5
+done
+echo "records still saved for a later writer: ${left:-0}"
 for i in $(seq 1 "$N"); do
   "$TMUX_BIN" -S "$SOCK" capture-pane -p -t "glm:s$i" -S -400 > "$OUT/panes/s$i.txt" 2>/dev/null || true
 done
@@ -67,4 +76,7 @@ echo "--- busy/locked/accounting warnings in the home's logs DB:"
 sqlite3 "$OUT/home/pfterminal_logs_2.sqlite" \
   "SELECT count(*) FROM logs WHERE level IN ('WARN','ERROR') AND (feedback_log_body LIKE '%database is locked%' OR feedback_log_body LIKE '%state database is busy%' OR feedback_log_body LIKE '%developer accounting failed%')" \
   2>/dev/null || echo "(no logs DB)"
+echo "--- ledger: attempts, conversations and observations recorded by this run:"
+sqlite3 "$OUT/home/pfterminal_state_5.sqlite" \
+  "SELECT count(*), count(DISTINCT json_extract(a.payload, '\$.thread_id')), (SELECT count(*) FROM draft_accounting_observations o WHERE o.attempt_id IN (SELECT attempt_id FROM draft_accounting_attempts WHERE json_extract(payload, '\$.provider') = 'zai' AND json_extract(payload, '\$.dispatched_at_ms') >= $START_MS)) FROM draft_accounting_attempts a WHERE json_extract(a.payload, '\$.provider') = 'zai' AND json_extract(a.payload, '\$.dispatched_at_ms') >= $START_MS"
 "$TMUX_BIN" -S "$SOCK" kill-server 2>/dev/null || true

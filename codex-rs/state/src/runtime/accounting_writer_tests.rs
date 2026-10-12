@@ -432,6 +432,30 @@ async fn without_a_pending_folder_records_are_written_and_the_writer_idles() -> 
     Ok(())
 }
 
+/// A lock file with no records is swept once its process is gone, but never
+/// while it is young: its process may be between creating and locking it.
+#[tokio::test]
+async fn lock_files_without_records_are_swept_only_when_old() -> anyhow::Result<()> {
+    let path = home();
+    let owner = ThreadId::new();
+    let dir = path.join(PENDING_DIR);
+    std::fs::create_dir_all(&dir)?;
+    let young = dir.join(format!("{}.lock", Uuid::new_v4()));
+    let old = dir.join(format!("{}.lock", Uuid::new_v4()));
+    std::fs::write(&young, b"")?;
+    std::fs::File::create(&old)?
+        .set_modified(std::time::SystemTime::now() - Duration::from_secs(3_600))?;
+    let runtime = runtime_with_owner(&path, owner).await?;
+    // Starting the writer sweeps.
+    runtime
+        .record_accounting(admit(owner, &attempt(owner)))
+        .await?;
+    assert!(young.exists());
+    assert!(!old.exists());
+    runtime.close().await;
+    Ok(())
+}
+
 /// A process exiting does not wait for records parked on a row that is not
 /// there: the writer can do nothing for them now.
 #[tokio::test]

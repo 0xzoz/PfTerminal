@@ -562,9 +562,11 @@ impl StateRuntime {
             tx.commit().await?;
             anyhow::Ok(())
         };
+        // One short try: the rows are adopted by a later process if not now,
+        // and a busy DB then pauses the other steps rather than adding to them.
         if let Err(error) = retry_busy_within(
             "adopt legacy provider request key",
-            PROVIDER_REQUEST_BUSY_WAIT,
+            super::QUICK_BUSY_TIMEOUT,
             adopt,
         )
         .await
