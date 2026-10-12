@@ -496,8 +496,8 @@ pub(crate) fn write_refusal(level: SecurityLevel, path: &str, rule: WriteRule) -
         }
         (WriteRule::Liftable, SecurityLevel::Aggressive) => format!(
             "Security level Aggressive blocked writing to `{path}`: files that run code or set \
-             policy later (shell start-up files, git hooks and config, the project's .codex and \
-             .agents) stay read-only, and an additional permission cannot change that. Where a \
+             policy later (shell start-up files, git hooks and config) stay read-only, and an \
+             additional permission cannot change that. Where a \
              person approving the command is offered \"Grant once\", it lifts this for that \
              command; otherwise {switch}"
         ),

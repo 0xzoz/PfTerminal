@@ -453,6 +453,8 @@ fn issue_513_write_refusals_say_whether_a_grant_can_lift_them() {
     );
     assert!(hook.starts_with("Security level Aggressive"), "{hook}");
     assert!(hook.contains("\"Grant once\""), "{hook}");
+    // #565: "Grant once" never lifts .codex or .agents under Aggressive.
+    assert!(!hook.contains(".agents"), "{hook}");
     assert!(!hook.contains("cannot be granted"), "{hook}");
     // #520: kept even with a grant under Aggressive.
     let kept = write_refusal(

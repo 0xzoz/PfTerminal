@@ -1245,7 +1245,12 @@ async fn issue_513_additional_writes_never_reopen_a_write_protection() -> anyhow
         let output = output_text(&requests[requests.len() - 1], "call-write");
         let launcher_now = std::fs::read_to_string(&launcher)?;
         let wrote = output.contains("wrote-513") || launcher_now != "original";
-        let explained = output.contains("blocked writing to") && output.contains("/security");
+        let explained = output.contains("blocked writing to")
+            && output.contains("/security")
+            // #565: the #520 explanation for what no grant lifts.
+            && (level != aggressive
+                || !matches!(target, ProjectAgents)
+                || output.contains("neither an additional permission nor"));
         if wrote != writable || (!writable && !explained) || asked != asked_first {
             wrong.push(format!(
                 "{level:?} tainted={tainted} requests_on={requests_on} {target:?}: \

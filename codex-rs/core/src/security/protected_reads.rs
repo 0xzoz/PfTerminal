@@ -369,6 +369,14 @@ pub(crate) async fn additional_permission_refusal(
 ) -> Option<String> {
     let additional = additional?.clone();
     let inputs = ReadPolicyInputs::capture(session, turn)?;
+    // An external sandbox takes no protected-path rules (and ignores
+    // additional permissions), as in the orchestrator's check.
+    if matches!(
+        inputs.profile,
+        codex_protocol::models::PermissionProfile::External { .. }
+    ) {
+        return None;
+    }
     let cwd = cwd.to_path_buf();
     off_thread(move || {
         let denials = ReadDenials::for_turn(
