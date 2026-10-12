@@ -329,7 +329,14 @@ impl StatusHistoryCell {
             &approval,
             workspace_root_suffix.as_deref(),
         );
-        let model_provider = format_model_provider(config, runtime_model_provider_base_url);
+        // PF-84 (#555): name the account the usage rows mark active, which
+        // is the one the app server reported for the thread when it did.
+        let active_account = account_usage
+            .as_ref()
+            .and_then(|usage| usage.rows.first())
+            .map(|(account, _)| account.as_str());
+        let model_provider =
+            format_model_provider(config, runtime_model_provider_base_url, active_account);
         let show_chatgpt_usage_link = config.model_provider.requires_openai_auth;
         let account = compose_account_display(account_display);
         let account_value = status_account_value(config, account_display);
@@ -996,7 +1003,11 @@ impl HistoryCell for StatusHistoryCell {
     }
 }
 
-fn format_model_provider(config: &Config, runtime_base_url: Option<&str>) -> Option<String> {
+fn format_model_provider(
+    config: &Config,
+    runtime_base_url: Option<&str>,
+    active_account: Option<&str>,
+) -> Option<String> {
     let provider = &config.model_provider;
     let name = provider.name.trim();
     let provider_name = if name.is_empty() {
@@ -1012,12 +1023,14 @@ fn format_model_provider(config: &Config, runtime_base_url: Option<&str>) -> Opt
         .enabled(codex_features::Feature::NamedAccounts)
         && crate::legacy_core::config::supports_named_accounts(provider))
     .then(|| {
-        provider
-            .account
-            .as_ref()
-            .map_or(codex_vault::DEFAULT_PROVIDER_ACCOUNT, |account| {
-                account.name.as_str()
-            })
+        active_account.unwrap_or_else(|| {
+            provider
+                .account
+                .as_ref()
+                .map_or(codex_vault::DEFAULT_PROVIDER_ACCOUNT, |account| {
+                    account.name.as_str()
+                })
+        })
     });
     let is_default_openai = provider.is_openai() && base_url.is_none();
     if is_default_openai && account.is_none() {

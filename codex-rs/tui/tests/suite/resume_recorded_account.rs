@@ -121,6 +121,41 @@ async fn tmux_resume_names_a_missing_recorded_account_with_recovery() -> Result<
     Ok(())
 }
 
+/// PF-84 #555: `corbanu fork <id>` runs the fork on the account the
+/// conversation recorded, and `/status` names it, rather than the
+/// `[provider_accounts]` account.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tmux_fork_runs_on_the_recorded_account() -> Result<()> {
+    if !TmuxServer::should_run("PF-84 #555 fork on the recorded account")? {
+        return Ok(());
+    }
+    let repo_root = codex_utils_cargo_bin::repo_root()?;
+    let binary = corbanu_binary(&repo_root)?;
+    let home = tempdir()?;
+    write_config_with(
+        home.path(),
+        &repo_root,
+        "\n[provider_accounts]\nzai = \"personal\"\n",
+    )?;
+    add_account(&binary, home.path(), "work")?;
+    add_account(&binary, home.path(), "personal")?;
+    let thread_id = seed_rollout(home.path(), &repo_root, "work")?;
+
+    let tmux = TmuxServer::start("pf84_555_fork_recorded_account")?;
+    let session = tmux.new_session(launch_spec(
+        "pf84-555-fork-id",
+        &binary,
+        &repo_root,
+        home.path(),
+        "fork",
+        &[thread_id.to_string()],
+    ))?;
+    let pane = session.primary_pane();
+    wait_resumed_on_work(pane)?;
+    exit_tui(pane)?;
+    Ok(())
+}
+
 fn wait_resumed_on_work(pane: &TmuxPane<'_>) -> Result<()> {
     let screen = pane.wait_stable_until(
         "the resumed conversation, or onboarding",
@@ -159,6 +194,18 @@ fn resume_spec(
     home: &Path,
     args: &[String],
 ) -> SessionSpec {
+    launch_spec(name, binary, repo_root, home, "resume", args)
+}
+
+/// Runs `corbanu <subcommand> <args>` like [`resume_spec`].
+fn launch_spec(
+    name: &str,
+    binary: &Path,
+    repo_root: &Path,
+    home: &Path,
+    subcommand: &str,
+    args: &[String],
+) -> SessionSpec {
     let mut command = CommandSpec::new("/bin/sh")
         .env("CODEX_HOME", home)
         .env("CORBANU_HOME", home)
@@ -166,7 +213,7 @@ fn resume_spec(
         .arg("-c")
         .arg("unset ZAI_API_KEY; \"$0\" \"$@\"; echo \"EXITED $?\"; sleep 600")
         .arg(binary)
-        .arg("resume");
+        .arg(subcommand);
     for arg in args {
         command = command.arg(arg);
     }
@@ -187,6 +234,11 @@ fn resume_spec(
 }
 
 fn write_config(home: &Path, repo_root: &Path) -> Result<()> {
+    write_config_with(home, repo_root, "")
+}
+
+/// [`write_config`] plus `extra` TOML tables.
+fn write_config_with(home: &Path, repo_root: &Path, extra: &str) -> Result<()> {
     fs::create_dir_all(home.join("log"))?;
     fs::write(
         home.join("config.toml"),
@@ -202,7 +254,7 @@ named_accounts = true
 
 [projects."{}"]
 trust_level = "trusted"
-"#,
+{extra}"#,
             home.join("log").display(),
             repo_root.display(),
         ),
