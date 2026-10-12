@@ -959,6 +959,14 @@ impl App {
         }
     }
 
+    /// #507: the kill switch was turned on in `/security` here: running
+    /// Claude pane turns stop, and assignments and whips pause at once (not
+    /// at the next sweep), so none can fire once the switch is off again.
+    pub(crate) fn on_kill_switch_turned_on(&mut self) {
+        self.stop_claude_panes_for_kill_switch();
+        self.pause_whips_for_kill_switch();
+    }
+
     /// #507: the kill switch was turned on: every running Claude pane turn
     /// is interrupted (its Claude process and the commands it runs end), with
     /// the reason in that pane.
@@ -1017,11 +1025,12 @@ impl App {
         // it is off; turning it off does not send it.
         if crate::legacy_core::security_revocation::kill_switch_on(self.config.codex_home.as_ref())
         {
-            // An auto-processing turn stays pending, so the task keeps its
-            // place in the loop breaker when it is sent. Each pane holds one
-            // task, the newest: repeated assignment fires and child reports
-            // would otherwise pile up and run as a burst once it is off (the
-            // newest prompt also carries the latest context).
+            // No auto-processing turn starts for it: the task goes with the
+            // pane's next turn, which counts as that turn's own kind. Each
+            // pane holds one task, the newest: repeated assignment fires and
+            // child reports would otherwise pile up (the newest prompt also
+            // carries the latest context).
+            self.abort_spawn_auto_processing_turn(&target_node_id);
             let superseded: Vec<String> = self
                 .kill_switch_held_claude_tasks
                 .iter()
@@ -1201,10 +1210,14 @@ impl App {
                     output.text.clone()
                 };
                 self.record_claude_spawn_rollout_task_completed(&pane_id, &output);
-                self.record_spawn_child_report_for_claude_pane(
+                // #507: the report of a turn the kill switch stopped starts no
+                // turn in the parent (the stop may end after the switch is
+                // off); the parent gets it with its next turn.
+                self.record_spawn_child_report_for_claude_pane_with(
                     &pane_id,
                     &report_status,
                     Some(&report_text),
+                    /*start_turns*/ !kill_switch_stopped,
                 );
                 // Dispatch only from cleanly completed turns. Interrupted, paused, and failed
                 // turns must never dispatch: their text can contain a complete-looking
@@ -1284,7 +1297,12 @@ impl App {
                 self.claude_panes.finish_turn(&pane_id, &Err(error.clone()));
                 let source_node_id = crate::spawn_orchestration::pane_node_id(&pane_id);
                 self.note_spawn_turn_completed_for_auto_loop(&source_node_id);
-                self.record_spawn_child_report_for_claude_pane(&pane_id, "error", Some(&error));
+                self.record_spawn_child_report_for_claude_pane_with(
+                    &pane_id,
+                    "error",
+                    Some(&error),
+                    /*start_turns*/ !kill_switch_stopped,
+                );
                 self.note_whip_target_idle_with_fire_control(
                     &source_node_id,
                     Some(&error),
@@ -1310,14 +1328,13 @@ impl App {
         let titles: Vec<String> = self
             .kill_switch_held_claude_tasks
             .iter()
-            .map(|(pane_id, _)| {
+            .filter_map(|(pane_id, _)| {
                 self.claude_panes
                     .panes()
                     .iter()
                     .find(|pane| pane.id == *pane_id)
-                    .map_or_else(|| pane_id.clone(), |pane| pane.title.clone())
+                    .map(|pane| format!("`{}`", pane.title))
             })
-            .map(|title| format!("`{title}`"))
             .collect();
         if titles.is_empty() {
             return;
@@ -1328,6 +1345,21 @@ impl App {
                 titles.join(", ")
             ),
             /*hint*/ None,
+        );
+    }
+
+    /// #507: a removed Claude pane's waiting task is dropped and its sender
+    /// told.
+    pub(crate) fn drop_held_claude_task_of_removed_pane(&mut self, pane_id: &str) {
+        let Some(task) = self.held_claude_task(pane_id) else {
+            return;
+        };
+        self.kill_switch_held_claude_tasks
+            .retain(|(held, _)| held != pane_id);
+        self.record_spawn_dispatch_failed_for_task(
+            &crate::spawn_orchestration::pane_node_id(pane_id),
+            &task,
+            "the Claude pane was removed while its task waited (security kill switch)",
         );
     }
 

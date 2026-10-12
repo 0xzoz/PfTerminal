@@ -33,13 +33,20 @@ Builds (macOS arm64, debug): **before** `c4999b1265` (`origin/main` at the branc
 | --- | --- | --- |
 | Claude pane, task from another agent | waits; goes with the pane's next turn (typed or new work); a refused turn keeps it | `app::tests::issue_507_switch_off_starts_no_claude_pane_turn`, `…_waiting_claude_task_goes_with_the_next_turn`, `…_survives_a_refused_turn` |
 | Claude pane, a turn ending after switch-off | does not send the waiting task | `issue_507_switch_off_starts_no_claude_pane_turn` |
+| Claude pane removed while its task waits | the task is dropped and its sender told | `issue_507_removed_pane_drops_its_waiting_task` |
+| Report of a Claude turn the switch stopped, finishing after switch-off | reaches the parent, starts no parent turn (no auto-processing; mailbox mail without `trigger_turn`) | `issue_507_report_of_a_stopped_claude_turn_starts_no_parent_turn` |
 | Codex pane, agent message (mailbox, `trigger_turn`) | no turn; goes with the next turn | `suite::issue_507_switch_off::issue_507_switch_off_does_not_start_a_turn_for_waiting_agent_messages` |
 | Spawned child agent's mailbox | no turn in the child | `…_does_not_start_a_child_agent` |
 | Durable sleep (timer) woken by mail | not woken | `…_does_not_wake_a_durable_sleep` |
 | Automatic idle turn (goal continuation) | refused while on (was: a refused turn, which blocks the goal); nothing after | `…_no_automatic_idle_turn_while_the_switch_is_on` |
-| `/orchestrate` assignments and whips (45 s sweep, idle edges) | paused while on (were: fired, tasks refused or held); stay paused until `/orchestrate resume` | `app::tests::issue_507_whips_pause_and_stay_paused_after_switch_off` |
-| Switch-off event in the TUI | sends no op, turn, task or agent message | `app::tests::issue_507_switch_off_sends_nothing_anywhere` |
+| `/orchestrate` assignments and whips (45 s sweep, idle edges) | paused when the switch goes on (and at the next sweep or idle edge if it came from elsewhere); stay paused until `/orchestrate resume` | `app::tests::issue_507_whips_pause_and_stay_paused_after_switch_off`, `…_switch_events_pause_whips_at_once_and_start_nothing` |
+| The switch-off event itself | sends no op, turn, task or agent message | `issue_507_switch_events_pause_whips_at_once_and_start_nothing` |
+| Task for a Codex pane the person opened (`/panes`), while on | reported as not sent before the session lookup and its retry (was: a user turn, refused and not kept, recorded as sent; a store-lock retry could send it after switch-off) | `issue_507_operator_codex_pane_task_is_reported_not_sent` |
 
-Fail before / pass after: the goal-continuation, whip and three Claude-pane tests fail on `c4999b1265`; the
-mailbox, child-agent, durable-sleep, refused-turn and switch-off-event tests pass on both (guards: those paths
-already started nothing).
+Not separately tested: the capacity-wait wake re-enters the same kill-switch check as the mailbox wake; the
+agent-control inbox submits only when a work order arrives (a new trigger), and while the switch is on core refuses it.
+
+Fail before / pass after (on `c4999b1265`, with the test-only `prepared_prompts` seam backported where a test needs
+it): the goal-continuation, whip, three Claude-pane, switch-event, stopped-report and operator-pane tests fail before
+and pass after; the mailbox, child-agent, durable-sleep, refused-turn and removed-pane tests are guards (those paths
+already started nothing, or the helper is new).

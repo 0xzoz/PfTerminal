@@ -1339,7 +1339,7 @@ impl App {
                 return Ok(AppRunControl::Exit(ExitReason::Restart));
             }
             AppEvent::KillSwitchTurnedOn => {
-                self.stop_claude_panes_for_kill_switch();
+                self.on_kill_switch_turned_on();
             }
             AppEvent::KillSwitchTurnedOff => {
                 self.on_kill_switch_turned_off();
@@ -5521,6 +5521,22 @@ impl App {
                     self.chat_widget.add_error_message(detail);
                     return Ok(AppRunControl::Continue);
                 }
+                // #507: with the kill switch on, a task for a pane the person
+                // opened is a user turn, which is refused and not kept; say so
+                // to the sender and the person instead of reporting it sent.
+                // Checked before the store-lock retry below, so a retry never
+                // starts it once the switch is off.
+                if crate::legacy_core::security_revocation::kill_switch_on(
+                    self.config.codex_home.as_ref(),
+                ) {
+                    let detail = format!(
+                        "Not sent to {}: the security kill switch is on, and a task for a pane you opened is not kept (as a typed message is not). Send it again after turning the switch off.",
+                        self.thread_label(thread_id)
+                    );
+                    self.record_spawn_dispatch_failed_for_task(&target_node_id, &task, &detail);
+                    self.chat_widget.add_error_message(detail);
+                    return Ok(AppRunControl::Continue);
+                }
                 let session = match self.thread_event_channels.get(&thread_id) {
                     Some(channel) => match channel.store.try_lock() {
                         Ok(store) => store.session.clone(),
@@ -6561,6 +6577,7 @@ impl App {
             {
                 Ok(removed) => {
                     self.claude_pane_transcript_cells.remove(&pane_id);
+                    self.drop_held_claude_task_of_removed_pane(&pane_id);
                     self.persist_pane_state();
                     tracing::info!(
                         pane_id,

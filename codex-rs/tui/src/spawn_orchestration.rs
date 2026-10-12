@@ -1669,7 +1669,12 @@ impl App {
             let report = spawn_child_report(&child_title, "completed", result, seq, &as_of);
             let notify =
                 node_id_pane(&parent_node_id).is_some_and(|pane_id| pane_id != CODEX_MAIN_PANE_ID);
-            self.record_spawn_parent_report_with_notify(parent_node_id, report, notify);
+            self.record_spawn_parent_report_with_notify(
+                parent_node_id,
+                report,
+                notify,
+                /*start_turns*/ true,
+            );
         }
     }
 
@@ -1786,11 +1791,28 @@ impl App {
         );
     }
 
+    /// Tests: a report that may start turns in the parent.
+    #[cfg(test)]
     pub(crate) fn record_spawn_child_report_for_claude_pane(
         &mut self,
         pane_id: &str,
         status: &str,
         result: Option<&str>,
+    ) {
+        self.record_spawn_child_report_for_claude_pane_with(
+            pane_id, status, result, /*start_turns*/ true,
+        );
+    }
+
+    /// Records a Claude pane's report for its parent. With `start_turns`
+    /// false the parent is told but no turn is started for it (#507: the
+    /// report of a turn the kill switch stopped).
+    pub(crate) fn record_spawn_child_report_for_claude_pane_with(
+        &mut self,
+        pane_id: &str,
+        status: &str,
+        result: Option<&str>,
+        start_turns: bool,
     ) {
         if !self.spawn_node_is_persistent_crew_member(&pane_node_id(pane_id)) {
             return;
@@ -1802,11 +1824,21 @@ impl App {
         let child_node_id = pane_node_id(pane_id);
         let (seq, as_of) = self.reserve_spawn_report_seq(&child_node_id);
         let report = spawn_child_report(&child_title, status, result, seq, &as_of);
-        self.record_spawn_parent_report(parent_node_id, report);
+        self.record_spawn_parent_report_with_notify(
+            parent_node_id,
+            report,
+            /*notify*/ true,
+            start_turns,
+        );
     }
 
     pub(crate) fn record_spawn_parent_report(&mut self, parent_node_id: String, report: String) {
-        self.record_spawn_parent_report_with_notify(parent_node_id, report, /*notify*/ true);
+        self.record_spawn_parent_report_with_notify(
+            parent_node_id,
+            report,
+            /*notify*/ true,
+            /*start_turns*/ true,
+        );
     }
 
     fn record_spawn_parent_report_with_notify(
@@ -1814,6 +1846,7 @@ impl App {
         parent_node_id: String,
         report: String,
         notify: bool,
+        start_turns: bool,
     ) {
         let inserted = {
             let reports = self
@@ -1835,11 +1868,16 @@ impl App {
             }
         };
         if inserted && notify {
-            self.notify_spawn_parent_report(&parent_node_id, &report);
+            self.notify_spawn_parent_report(&parent_node_id, &report, start_turns);
         }
     }
 
-    fn notify_spawn_parent_report(&mut self, parent_node_id: &str, report: &str) {
+    fn notify_spawn_parent_report(
+        &mut self,
+        parent_node_id: &str,
+        report: &str,
+        start_turns: bool,
+    ) {
         let summary = "Child report delivered.".to_string();
         let hint = Some(report.to_string());
         // `codex-main` is the native primary Codex thread, not a Claude pane. Route it through the
@@ -1856,7 +1894,7 @@ impl App {
                     Arc::new(crate::history_cell::new_info_event(summary, hint)),
                 );
             }
-            if !self.claude_panes.claude_pane_is_running(parent_pane_id) {
+            if start_turns && !self.claude_panes.claude_pane_is_running(parent_pane_id) {
                 if self.begin_spawn_auto_processing_turn(parent_node_id) {
                     let trigger_prompt = child_report_processing_prompt(report);
                     self.app_event_tx.send(AppEvent::SubmitSpawnClaudePaneTask {
@@ -1927,7 +1965,7 @@ impl App {
                             AgentMessageKind::Informational
                         },
                         content: report.to_string(),
-                        trigger_turn: true,
+                        trigger_turn: start_turns,
                     },
                 });
         }
@@ -2058,7 +2096,12 @@ impl App {
             status,
             compact_spawn_context_value(detail)
         );
-        self.record_spawn_parent_report_with_notify(ack.source_node_id.clone(), report, notify);
+        self.record_spawn_parent_report_with_notify(
+            ack.source_node_id.clone(),
+            report,
+            notify,
+            /*start_turns*/ true,
+        );
     }
 
     fn make_spawn_dispatch_ack(

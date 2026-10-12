@@ -82,7 +82,8 @@ The security kill switch stops a running Claude turn and refuses new ones. A
 task another agent sends to a Claude pane while it is on waits (the newest per
 pane; the sender of an older one is told it was superseded). Turning the switch
 off sends nothing: the waiting task goes with that pane's next turn, when
-someone types in it or it gets new work.
+someone types in it or it gets new work (if that turn then fails, the task is
+not sent again).
 
 ## Main implementation
 

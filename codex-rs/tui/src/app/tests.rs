@@ -7236,31 +7236,6 @@ async fn issue_507_waiting_claude_task_survives_a_refused_turn() {
     assert!(!prompt.contains("pf507 superseded"), "{prompt}");
 }
 
-/// #507: turning the switch off sends nothing to any pane (Codex panes,
-/// child agents, Claude panes): no turn, task or agent message.
-#[tokio::test]
-async fn issue_507_switch_off_sends_nothing_anywhere() {
-    use crate::legacy_core::security_revocation::HumanRevocation;
-    let (mut app, mut app_event_rx, mut op_rx) = make_test_app_with_channels().await;
-    issue_507_switch(&app, HumanRevocation::KillSwitchOn);
-    issue_507_switch(&app, HumanRevocation::KillSwitchOff);
-    app.on_kill_switch_turned_off();
-    app.sweep_orchestrate_whips();
-    while let Ok(event) = app_event_rx.try_recv() {
-        assert!(
-            !matches!(
-                event,
-                AppEvent::CodexOp(_)
-                    | AppEvent::SubmitCodexUserPaneTask { .. }
-                    | AppEvent::SubmitSpawnAgentTask { .. }
-                    | AppEvent::SubmitSpawnClaudePaneTask { .. }
-            ),
-            "switch-off sent work"
-        );
-    }
-    assert!(op_rx.try_recv().is_err(), "switch-off submitted an op");
-}
-
 /// #507: assignments and whips (timers) do not fire while the kill switch
 /// is on; they are paused, and turning it off does not resume them. A person
 /// resumes them.
@@ -7310,6 +7285,165 @@ async fn issue_507_whips_pause_and_stay_paused_after_switch_off() {
     let fired = drain_claude_pane_task_events(&mut app_event_rx);
     assert_eq!(fired.len(), 1, "a person resumed it");
     assert!(fired[0].1.contains("Continue the work."));
+}
+
+/// #507 review: the switch events themselves (as `/security` sends them):
+/// turning it on pauses armed whips at once, with no sweep in between, so the
+/// first sweep after it is turned off fires nothing; turning it off starts
+/// no turn, task, op or agent message, and the Claude pane's task keeps
+/// waiting.
+#[tokio::test]
+async fn issue_507_switch_events_pause_whips_at_once_and_start_nothing() -> Result<()> {
+    use crate::legacy_core::security_revocation::HumanRevocation;
+    let (mut app, mut app_event_rx, mut op_rx) = make_test_app_with_channels().await;
+    let config = app.chat_widget.config_ref().clone();
+    let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(&config)).await?;
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    write_test_whip(&app, "keep-going", "# whip: keep-going\nContinue the work.");
+    let pane_id = app
+        .claude_panes
+        .create_pane_with_role(
+            crate::claude_panes::ClaudeProviderProfileKind::ClaudePlan,
+            app.config.cwd.to_path_buf(),
+            app.config.codex_home.as_ref(),
+            Some(crate::spawn_orchestration::SpawnRole::Orc),
+            Some("Krimp".to_string()),
+        )
+        .expect("create pane");
+    app.handle_orchestrate_command(format!(
+        "attach {pane_id} keep-going --mode auto --holder none --max 3"
+    ));
+    while app_event_rx.try_recv().is_ok() {}
+
+    issue_507_switch(&app, HumanRevocation::KillSwitchOn);
+    app.submit_claude_pane_task(pane_id.clone(), "pf507 waiting".to_string());
+    let control =
+        Box::pin(app.handle_event(&mut tui, &mut app_server, AppEvent::KillSwitchTurnedOn)).await?;
+    assert!(matches!(control, AppRunControl::Continue));
+    assert_eq!(
+        app.orchestrate_whips.get("whip-1").map(|whip| whip.state),
+        Some(crate::orchestrate::WhipState::Paused),
+        "paused when the switch went on, not at the next sweep"
+    );
+
+    issue_507_switch(&app, HumanRevocation::KillSwitchOff);
+    Box::pin(app.handle_event(&mut tui, &mut app_server, AppEvent::KillSwitchTurnedOff)).await?;
+    app.sweep_orchestrate_whips();
+    while let Ok(event) = app_event_rx.try_recv() {
+        assert!(
+            !matches!(
+                event,
+                AppEvent::CodexOp(_)
+                    | AppEvent::SubmitCodexUserPaneTask { .. }
+                    | AppEvent::SubmitSpawnAgentTask { .. }
+                    | AppEvent::SubmitSpawnClaudePaneTask { .. }
+                    | AppEvent::SendSpawnAgentMailboxMessage { .. }
+            ),
+            "switch-off sent work"
+        );
+    }
+    assert!(op_rx.try_recv().is_err(), "switch-off submitted an op");
+    assert!(app.claude_panes.prepared_prompts.is_empty());
+    assert_eq!(
+        app.kill_switch_held_claude_tasks,
+        vec![(pane_id, "pf507 waiting".to_string())]
+    );
+    Ok(())
+}
+
+/// #507 review: a Claude turn the kill switch stopped may only finish after
+/// the switch is off; its report reaches the parent but starts no turn there.
+#[tokio::test]
+async fn issue_507_report_of_a_stopped_claude_turn_starts_no_parent_turn() {
+    use crate::legacy_core::security_revocation::HumanRevocation;
+    let (mut app, mut app_event_rx, troll_pane_id, orc_pane_id) =
+        make_child_report_auto_claude_pane_app().await;
+    let codex_home = app.config.codex_home.to_path_buf();
+    let running = app
+        .claude_panes
+        .prepare_turn(&orc_pane_id, "long task".to_string(), &codex_home)
+        .expect("a running Orc turn");
+    issue_507_switch(&app, HumanRevocation::KillSwitchOn);
+    app.stop_claude_panes_for_kill_switch();
+    issue_507_switch(&app, HumanRevocation::KillSwitchOff);
+    drop(running);
+    let output = interrupted_claude_turn(&app);
+    app.on_claude_pane_turn_finished(orc_pane_id.clone(), Ok(output));
+
+    assert!(
+        drain_claude_pane_task_events(&mut app_event_rx).is_empty(),
+        "no auto-processing turn for the parent"
+    );
+    assert!(!app.claude_panes.claude_pane_is_running(&troll_pane_id));
+    let troll_node = crate::spawn_orchestration::pane_node_id(&troll_pane_id);
+    assert_eq!(
+        app.spawn_parent_reports_by_node
+            .get(&troll_node)
+            .map(std::collections::VecDeque::len),
+        Some(1),
+        "the parent still has the report"
+    );
+}
+
+/// #507 review: a removed Claude pane's waiting task is dropped (its sender
+/// is told), and the switch-off notice does not name it.
+#[tokio::test]
+async fn issue_507_removed_pane_drops_its_waiting_task() {
+    use crate::legacy_core::security_revocation::HumanRevocation;
+    let (mut app, _app_event_rx, _troll_pane_id, orc_pane_id) =
+        make_child_report_auto_claude_pane_app().await;
+    issue_507_switch(&app, HumanRevocation::KillSwitchOn);
+    app.submit_claude_pane_task(orc_pane_id.clone(), "pf507 waiting".to_string());
+    app.claude_panes
+        .remove_managed_crew_pane(&orc_pane_id, app.config.codex_home.as_ref())
+        .expect("remove the pane");
+    app.drop_held_claude_task_of_removed_pane(&orc_pane_id);
+    assert!(app.kill_switch_held_claude_tasks.is_empty());
+}
+
+/// #507 review: a task for an operator-owned Codex pane while the switch is
+/// on is not submitted as a user turn (which would be refused and not kept,
+/// yet recorded as sent); it is reported as not sent, before the session
+/// lookup and its retry.
+#[tokio::test]
+async fn issue_507_operator_codex_pane_task_is_reported_not_sent() -> Result<()> {
+    use crate::legacy_core::security_revocation::HumanRevocation;
+    let (mut app, mut app_event_rx, mut op_rx) = make_test_app_with_channels().await;
+    let config = app.chat_widget.config_ref().clone();
+    let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(&config)).await?;
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    let thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000507")?;
+    app.upsert_agent_picker_thread(
+        thread_id,
+        Some("Gorbag".to_string()),
+        /*agent_role*/ None,
+        /*is_closed*/ false,
+    );
+    while app_event_rx.try_recv().is_ok() {}
+
+    issue_507_switch(&app, HumanRevocation::KillSwitchOn);
+    Box::pin(app.handle_event(
+        &mut tui,
+        &mut app_server,
+        AppEvent::SubmitCodexUserPaneTask {
+            thread_id,
+            task: "pf507 operator task".to_string(),
+        },
+    ))
+    .await?;
+    assert!(op_rx.try_recv().is_err(), "no user turn was submitted");
+    let said = std::iter::from_fn(|| app_event_rx.try_recv().ok())
+        .filter_map(|event| match event {
+            AppEvent::InsertHistoryCell(cell) => {
+                Some(lines_to_single_string(&cell.display_lines(/*width*/ 400)))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(said.contains("the security kill switch is on"), "{said}");
+    assert!(!said.contains("no live session"), "{said}");
+    Ok(())
 }
 
 #[tokio::test]
