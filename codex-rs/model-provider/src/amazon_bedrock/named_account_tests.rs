@@ -129,6 +129,6 @@ fn default_account_keeps_the_managed_key() {
     );
     assert!(Arc::ptr_eq(
         &provider.auth_manager().expect("managed manager"),
-        &provider.auth_manager.clone().expect("manager"),
+        provider.auth_manager.as_ref().expect("manager"),
     ));
 }
