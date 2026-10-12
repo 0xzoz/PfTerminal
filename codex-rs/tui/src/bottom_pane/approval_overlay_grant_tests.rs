@@ -408,3 +408,22 @@ fn pf_25_s01_review_escapes_model_text() {
         "{rendered}"
     );
 }
+
+/// #523: an approval revealed (or opened over a view) with its grant review
+/// on "Grant and run" goes back to the approval; the Enter meant for the
+/// view above grants nothing and answers nothing.
+#[test]
+fn issue_523_a_revealed_review_grants_nothing() {
+    let (mut view, mut rx) = overlay(Some(offer()), true);
+    key(&mut view, KeyCode::Char('g'));
+    key(&mut view, KeyCode::Enter);
+    assert!(view.grant_review.is_some());
+    key(&mut view, KeyCode::Down);
+
+    view.on_revealed();
+    key(&mut view, KeyCode::Enter);
+    key(&mut view, KeyCode::Enter);
+    assert!(view.grant_review.is_none());
+    assert!(!view.is_complete());
+    assert_eq!(exec_decisions(&mut rx), Vec::new());
+}

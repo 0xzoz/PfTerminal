@@ -767,6 +767,14 @@ impl AppLinkView {
                 self.typing_guard.reset();
                 self.move_selection_next();
             }
+            KeyCode::PageUp | KeyCode::Home if navigation => {
+                self.typing_guard.reset();
+                self.selected_action = 0;
+            }
+            KeyCode::PageDown | KeyCode::End if navigation => {
+                self.typing_guard.reset();
+                self.selected_action = self.action_labels().len().saturating_sub(1);
+            }
             KeyCode::Tab | KeyCode::BackTab => self.typing_guard.on_typed_input(),
             _ if navigation && self.list_keymap.move_up.is_pressed(key_event) => {
                 self.typing_guard.reset();

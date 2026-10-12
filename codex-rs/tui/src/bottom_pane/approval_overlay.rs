@@ -240,6 +240,9 @@ impl ApprovalOverlay {
     /// opened over another view, or was revealed when the view above it
     /// closed. Until the user navigates, a key is typed text too.
     pub(crate) fn require_deliberate_choice(&mut self) {
+        // An open grant review goes back to the approval: a double or held
+        // Enter meant for the view above must not grant.
+        self.grant_review = None;
         self.typing_guard.on_command_key();
     }
 

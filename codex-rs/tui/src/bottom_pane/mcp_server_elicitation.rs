@@ -1737,6 +1737,17 @@ impl BottomPaneView for McpServerElicitationOverlay {
             // first.
             self.typing_guard.on_typed_input();
             return;
+        } else if self.typing_guard.awaits_choice()
+            && self.current_field_is_select()
+            && let KeyCode::Char(ch) = key_event.code
+            && key_hint::is_plain_text_key_event(key_event)
+            && (self.option_index_for_digit(ch).is_none()
+                || self.typing_guard.notice() == Some(Notice::TypedText))
+        {
+            // #523: on a new request a letter (or anything after one) is
+            // typed text, not a choice; Enter still waits.
+            self.typing_guard.on_typed_input();
+            return;
         } else {
             self.typing_guard.reset();
         }
@@ -2942,6 +2953,49 @@ mod tests {
         assert_eq!(
             contents(&mut rx),
             vec![Some(serde_json::json!({ "name": "ok" }))]
+        );
+    }
+
+    /// #523: a select form shown just after another prompt was answered
+    /// takes a letter (and a digit after it) as typed text, not a choice;
+    /// Enter submits only after the arrow keys or a digit alone.
+    #[test]
+    fn issue_523_select_form_after_an_answer_takes_no_letter() {
+        let (tx, mut rx) = test_sender();
+        let request = from_form_request(
+            ThreadId::default(),
+            form_request(
+                "Allow this request?",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "confirmed": { "type": "boolean", "title": "Confirm" }
+                    },
+                    "required": ["confirmed"],
+                }),
+                /*meta*/ None,
+            ),
+        )
+        .expect("expected supported form");
+        let mut overlay = McpServerElicitationOverlay::new(
+            request, tx, /*has_input_focus*/ true, /*enhanced_keys_supported*/ false,
+            /*disable_paste_burst*/ false,
+        );
+        overlay.require_fresh_choice_after_answer();
+
+        press(&mut overlay, KeyCode::Char('x'));
+        press(&mut overlay, KeyCode::Enter);
+        press(&mut overlay, KeyCode::Char('1'));
+        press(&mut overlay, KeyCode::Enter);
+        assert_eq!(resolved_decisions(&mut rx), Vec::new());
+        assert!(!overlay.is_complete());
+
+        press(&mut overlay, KeyCode::Down);
+        press(&mut overlay, KeyCode::Up);
+        press(&mut overlay, KeyCode::Enter);
+        assert_eq!(
+            resolved_decisions(&mut rx),
+            vec![(McpServerElicitationAction::Accept, None)]
         );
     }
 

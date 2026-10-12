@@ -800,6 +800,8 @@ impl BottomPane {
 
     pub fn handle_paste(&mut self, pasted: String) {
         let has_pasted_text = !pasted.is_empty();
+        // #523: a view uncovered since the last key learns it first.
+        self.sync_top_view();
         if let Some(view) = self.view_stack.last_mut() {
             let needs_redraw = view.handle_paste(pasted);
             let view_complete = view.is_complete();
@@ -847,8 +849,10 @@ impl BottomPane {
         let needs_redraw = view.pre_draw_tick(now);
         let view_complete = view.is_complete();
         if view_complete {
-            self.view_stack.clear();
-            self.on_active_view_complete();
+            // #523: only the view that finished closes, as with a key; an
+            // approval waiting below it stays.
+            let completion = view.completion();
+            self.pop_active_view_with_completion(completion);
         }
         if needs_redraw || view_complete {
             self.request_redraw();
@@ -2561,6 +2565,111 @@ mod tests {
             press_keys(&mut pane, &[KeyCode::Enter]);
             assert!(approval_answered(&mut rx), "mcp={mcp}");
         }
+    }
+
+    fn url_link_view(tx: AppEventSender) -> AppLinkView {
+        let params = AppLinkViewParams::from_url_app_server_request(
+            codex_protocol::ThreadId::default(),
+            "server-1",
+            codex_app_server_protocol::RequestId::String("link-1".to_string()),
+            &codex_app_server_protocol::McpServerElicitationRequest::Url {
+                meta: None,
+                message: "Sign in to continue.".to_string(),
+                url: "https://example.com/sign-in".to_string(),
+                elicitation_id: "link-1".to_string(),
+            },
+        )
+        .expect("link params");
+        AppLinkView::new(params, tx)
+    }
+
+    fn link_acted(rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>) -> bool {
+        std::iter::from_fn(|| rx.try_recv().ok()).any(|event| {
+            matches!(
+                event,
+                AppEvent::SubmitThreadOp {
+                    op: Op::ResolveElicitation { .. },
+                    ..
+                } | AppEvent::OpenUrlInBrowser { .. }
+            )
+        })
+    }
+
+    /// #514/#523: a server's link request shown over another view, or just
+    /// after a prompt closed, takes neither the Enter nor a number key and
+    /// Enter meant for what came before.
+    #[test]
+    fn link_request_over_a_view_or_after_a_prompt_needs_a_choice() {
+        let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+        let mut pane = test_pane(tx.clone());
+        pane.show_selection_view(picker());
+        pane.show_app_link_view(url_link_view(tx.clone()));
+        press_keys(
+            &mut pane,
+            &[KeyCode::Enter, KeyCode::Char('1'), KeyCode::Enter],
+        );
+        assert!(!link_acted(&mut rx));
+        press_keys(
+            &mut pane,
+            &[
+                KeyCode::Down,
+                KeyCode::Up,
+                KeyCode::Char('2'),
+                KeyCode::Enter,
+            ],
+        );
+        assert!(link_acted(&mut rx));
+
+        let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+        let features = Features::with_defaults();
+        let mut pane = test_pane(tx.clone());
+        pane.push_approval_request(exec_request(), &features);
+        press_keys(&mut pane, &[KeyCode::Enter]);
+        assert!(approval_answered(&mut rx));
+        pane.show_app_link_view(url_link_view(tx));
+        press_keys(&mut pane, &[KeyCode::Enter]);
+        assert!(!link_acted(&mut rx));
+        press_keys(&mut pane, &[KeyCode::Char('2'), KeyCode::Enter]);
+        assert!(link_acted(&mut rx));
+    }
+
+    /// #523: a view that finishes on a tick closes alone; an approval
+    /// waiting below it stays.
+    #[test]
+    fn tick_completion_closes_only_that_view() {
+        #[derive(Default)]
+        struct TickCompletesView {
+            complete: bool,
+        }
+
+        impl Renderable for TickCompletesView {
+            fn render(&self, _area: Rect, _buf: &mut Buffer) {}
+
+            fn desired_height(&self, _width: u16) -> u16 {
+                0
+            }
+        }
+
+        impl BottomPaneView for TickCompletesView {
+            fn pre_draw_tick(&mut self, _now: Instant) -> bool {
+                self.complete = true;
+                true
+            }
+
+            fn is_complete(&self) -> bool {
+                self.complete
+            }
+        }
+
+        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let features = Features::with_defaults();
+        let mut pane = test_pane(AppEventSender::new(tx_raw));
+        pane.push_approval_request(exec_request(), &features);
+        pane.push_view(Box::new(TickCompletesView::default()));
+        pane.pre_draw_tick_at(Instant::now());
+        assert_eq!(pane.view_stack.len(), 1);
     }
 
     /// PF-83 F05: choosing a permission while an approval is pending must not
