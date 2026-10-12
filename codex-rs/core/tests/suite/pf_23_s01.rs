@@ -1803,11 +1803,15 @@ impl LinkedHome {
     }
 
     /// What a protected command may still achieve. Permissive: all of it.
-    /// A link Corbanu was not given (the home spelled by its real location)
-    /// is not the home's, so replacing it changes nothing Corbanu uses. On
-    /// Linux a mount cannot hold a link: a home spelled through a link in a
-    /// writable folder makes the sandbox refuse the command while its reads
-    /// are denied, but a command a person approved can replace the link.
+    /// With the home spelled by its real location the test gives Corbanu no
+    /// link (as when `CORBANU_HOME` was given its real location), so
+    /// replacing the link changes nothing Corbanu uses. On Linux a mount
+    /// cannot hold a link: a home spelled through a link in a writable
+    /// folder makes the sandbox refuse the command while its reads are
+    /// denied, but a command a person approved can replace the link. Known
+    /// Linux limit (#594): a home variable naming a link in a writable folder
+    /// is recorded but only the folders above the link are held, so any
+    /// protected command can replace that link (Seatbelt holds it).
     fn expected(level: SecurityLevel, through_link: bool, approved: bool) -> Vec<&'static str> {
         if level == SecurityLevel::Permissive {
             vec!["moved", "link replaced", "planted"]
