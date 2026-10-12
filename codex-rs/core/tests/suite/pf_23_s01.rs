@@ -1574,6 +1574,79 @@ async fn issue_540_runtime_entries_stay_read_only_when_a_person_lifts_the_rules(
     Ok(())
 }
 
+/// Issue #562: a protected command cannot create a missing runtime entry of
+/// the Corbanu home either (`AGENTS.md`, `skills`, `plugins`), nor the
+/// `AGENTS.override.md` read ahead of it, even with full access and with
+/// the path built at run time (only the sandbox can stop it). On Linux no
+/// placeholder is left behind. Permissive is unchanged.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_562_missing_runtime_entries_cannot_be_created() -> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let mut wrong = Vec::new();
+    for (level, created) in [
+        (SecurityLevel::Moderate, false),
+        (SecurityLevel::Aggressive, false),
+        (SecurityLevel::Permissive, true),
+    ] {
+        let home = Arc::new(TempDir::new()?);
+        let root = home.path().canonicalize()?;
+        let path = root.to_string_lossy().into_owned();
+        // Split inside the home folder's own name: neither part names it.
+        let (head, tail) = path.split_at(path.len() - 2);
+        let command = format!(
+            "h=\"$(printf '{head}%s' {tail})\"; a=\"AGE$(printf NTS)\"; \
+             printf x > \"$h/$a.md\"; printf x > \"$h/$a.override.md\"; \
+             mkdir -p \"$h/skills/issue562\" \"$h/plugins/issue562\"; echo ran-562"
+        );
+        let (test, captured) = start_turn_in(
+            Some(home.clone()),
+            level,
+            AskForApproval::Never,
+            vec![
+                call(
+                    "call-create",
+                    "shell_command",
+                    json!({ "command": command }),
+                ),
+                done_step(),
+            ],
+            |config| {
+                config
+                    .permissions
+                    .set_permission_profile(PermissionProfile::Disabled)
+                    .expect("full access");
+            },
+        )
+        .await?;
+        assert!(next_exec_approval(&test).await.is_none());
+        let requests = captured.requests();
+        let output = output_text(&requests[requests.len() - 1], "call-create");
+        let entries = [
+            "AGENTS.md",
+            "AGENTS.override.md",
+            "skills/issue562",
+            "plugins/issue562",
+        ];
+        let present: Vec<&str> = entries
+            .into_iter()
+            .filter(|entry| root.join(entry).exists())
+            .collect();
+        let expected = if created {
+            entries.to_vec()
+        } else {
+            Vec::new()
+        };
+        if !output.contains("ran-562") || present != expected {
+            wrong.push(format!("{level:?}: present={present:?}: {output}"));
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
 /// PF-23-S03: a level confirmed earlier and stored in `security_state.json`
 /// is enforced after a restart even when the configured level is lower.
 #[cfg(target_os = "macos")]

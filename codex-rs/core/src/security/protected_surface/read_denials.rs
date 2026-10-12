@@ -58,6 +58,9 @@ const CORBANU_STORES: &[&str] = &[
     "security_level.toml",
     "security_state.json",
     "security_state.lock",
+    // #562: read as instructions ahead of AGENTS.md; a command may not
+    // create it either.
+    "AGENTS.override.md",
     "wallet",
     "run",
     "log",
@@ -78,6 +81,9 @@ const CORBANU_READ_ONLY: &[&str] = &[
     "packages",
     "AGENTS.md",
 ];
+
+/// The one runtime entry that is a file (#562).
+const DEFAULT_AGENTS_MD: &str = "AGENTS.md";
 
 /// State and log databases, created after launch.
 const CORBANU_DATABASES: &str = "*.sqlite*";
@@ -160,7 +166,7 @@ impl ReadDenials {
             denials.home = Some(codex_home.clone());
         }
         for entry in CORBANU_READ_ONLY {
-            denials.push_home_read_only(codex_home.join(entry), keep);
+            denials.push_runtime_read_only(codex_home.join(entry), keep);
         }
         denials.runtime_read_only = std::mem::take(&mut denials.read_only);
         // #442 (Travis, 2026-10-11): the project's agent settings stay
@@ -292,6 +298,28 @@ impl ReadDenials {
         // `metadata` follows links: a link to a missing target is left out too.
         if cfg!(target_os = "linux") && std::fs::metadata(path.as_path()).is_err() {
             return;
+        }
+        self.push_read_only(path, keep);
+    }
+
+    /// #562: a runtime entry of the Corbanu home, also when it is missing,
+    /// so a protected command cannot create it (`AGENTS.md`, `skills`). On
+    /// Linux bubblewrap holds a missing path with an empty read-only
+    /// placeholder for the command's run, as it does for the Corbanu stores.
+    /// An empty `AGENTS.md` adds no instructions, so a placeholder there
+    /// (even one left behind) reads as no file. A missing runtime folder is
+    /// created first, empty, as Corbanu would: Corbanu never finds a
+    /// placeholder file where it expects a folder, and nothing is left
+    /// behind there.
+    fn push_runtime_read_only(&mut self, path: AbsolutePathBuf, keep: &[AbsolutePathBuf]) {
+        if cfg!(target_os = "linux")
+            && path
+                .file_name()
+                .is_some_and(|name| name != DEFAULT_AGENTS_MD)
+        {
+            // Fails harmlessly where it exists (also as a link) or the home
+            // is missing; the path is protected either way.
+            let _ = std::fs::create_dir(path.as_path());
         }
         self.push_read_only(path, keep);
     }
