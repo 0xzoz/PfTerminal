@@ -1999,6 +1999,15 @@ async fn issue_442_a_planted_env_link_refuses_later_commands() {
     assert!(after.stdout.text.contains("notes=0"), "{after:?}");
 }
 
+/// A folder for test files outside every writable root (not a temporary
+/// folder): Cargo's target scratch folder, or the crate where a build tool
+/// does not set it.
+fn outside_temp_root() -> PathBuf {
+    option_env!("CARGO_TARGET_TMPDIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+}
+
 /// Policies shaped like each security level, for the #535/#536 tests:
 /// Permissive (a workspace-write config with extra writable roots, no
 /// denials), Moderate (the same with a denied path) and Aggressive (as
@@ -2141,7 +2150,7 @@ async fn ordinary_roots_stay_writable_at_every_level() {
     // The whole tree is spelled through a link, like `/tmp` on macOS: one
     // outside the writable roots (Linux refuses a read-only path spelled
     // through a link a command could change).
-    let aliases = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let aliases = tempfile::tempdir_in(outside_temp_root()).unwrap();
     let alias = aliases.path().join("alias");
     std::os::unix::fs::symlink(&real, &alias).unwrap();
     let base = alias.clone();
