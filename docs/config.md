@@ -213,7 +213,9 @@ broker_model_auth = false   # or true, at any level
 the same way. A level you choose in `/security` while Corbanu is running takes
 effect when Corbanu restarts; a `[security] level` in config applies from the
 next new session. Under Aggressive with the broker off, Corbanu shows a startup
-warning and `/security` reports the level as partial.
+warning and `/security` reports the level as partial. What Aggressive protects
+(credential files, links, Grant once) and its limits are on
+[Aggressive security level: protected files](security-aggressive.md).
 
 <a id="shell-environment"></a>
 
