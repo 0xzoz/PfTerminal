@@ -1,17 +1,17 @@
 ---
 sprint_id: "PF-84-S06"
 title: "Named AWS profile and ChatGPT/OpenAI sign-in accounts"
-status: draft
+status: in_progress
 plan_file: "docs/plans/active/unified-provider-auth.md"
 plan_feature: "PF-84"
 execution_order: 28
-owner: "UNALLOCATED"
-parallel_lane: "UNALLOCATED"
-write_scope: "UNALLOCATED"
-integration_gate: "UNALLOCATED"
-worktree: "UNALLOCATED"
-branch: "UNALLOCATED"
-base_commit: "UNALLOCATED"
+owner: "Codex PF-84-S06 worker"
+parallel_lane: "account-kinds"
+write_scope: "codex-rs/core/, codex-rs/vault/, codex-rs/login/, codex-rs/model-provider/, codex-rs/model-provider-info/, codex-rs/aws-auth/, codex-rs/cli/, codex-rs/tui/, codex-rs/exec/, codex-rs/app-server/, codex-rs/app-server-protocol/, codex-rs/Cargo.lock, MODULE.bazel.lock, docs/provider-accounts.md, qa/provider-auth/pf-84/s06a-gate.md, qa/provider-auth/pf-84/s06b-gate.md, qa/provider-auth/pf-84/s06/, qa/demos/specs/pf84-aws-profile-account.toml, qa/demos/specs/pf84-chatgpt-account.toml, qa/demos/index/PF-84-S06.md, docs/sprints/current/unified-provider-auth/pf-84-s06-aws-and-chatgpt-accounts.md, docs/sprints/current/unified-provider-auth/index.md"
+integration_gate: "Codex PF-84-S06 worker merges each slice (A, then B) to main after just test on the touched crates with and without developer-accounting, Linux clippy -D warnings on glitch, macOS clippy, the tmux run in a disposable home and one Opus 5.5 High review per slice"
+worktree: "/Volumes/CorbanuDrive/Corbanu/worktrees/pf84-s06-accounts"
+branch: "feat/pf-84-s06-accounts"
+base_commit: "8026ce9963f64d411b4dd930d46eabacd859c688"
 depends_on: "PF-84-S05"
 created: 2026-10-11
 updated: 2026-10-11
@@ -44,10 +44,10 @@ Paths are under `codex-rs/`, at `ee530a0e26`.
 
 ## Preconditions
 
-- [ ] Plan is active.
-- [ ] Dependencies are completed (PF-84-S05 merged behind `named_accounts`).
-- [ ] Worktree, branch, and base commit are exact and match the plan.
-- [ ] If parallel, owner/lane/scopes are disjoint and the receiving integration gate is recorded.
+- [x] Plan is active.
+- [x] Dependencies are completed (PF-84-S05 merged behind `named_accounts` and accepted by Travis 2026-10-11).
+- [x] Worktree, branch, and base commit are exact and match the plan.
+- [x] Serial in the PF-84 lane; the integration gate is recorded above.
 
 ## Done
 
@@ -80,12 +80,13 @@ Paths are under `codex-rs/`, at `ee530a0e26`.
 - The AWS profile name is metadata. The sprint never reads or stores AWS secrets and never sets env AWS keys for children.
 - A refresh or logout is scoped to one account. Under Aggressive, switching account still needs approval (D3).
 
-## Open points for Travis
+## Decisions (Travis, 2026-10-11)
 
-1. Default ChatGPT login: keep it in place (recommended) or move it into the vault.
-2. Same ChatGPT user in two accounts: warn (recommended) or refuse.
-3. AWS: provide a test profile, or accept limited testing (A merges unverified live).
-4. Allow AWS SSO profiles (`aws sso login` stays outside Corbanu)? Recommended: yes, as profile names only.
+1. The default ChatGPT login stays where it is (no move into the vault).
+2. The same ChatGPT user signed in under two accounts gets a warning, not a refusal.
+3. No test AWS profile: slice A is tested with a fake AWS config in a disposable home and a mock Bedrock endpoint;
+   the live Bedrock check stays pending (limited testing).
+4. AWS SSO profiles are allowed as profile names; `aws sso login` stays outside Corbanu (no SSO set-up UI).
 
 ## Exit evidence
 
