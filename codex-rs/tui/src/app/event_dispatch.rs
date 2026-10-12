@@ -5,6 +5,7 @@
 
 use super::resize_reflow::trailing_run_start;
 use super::session_lifecycle::ThreadAttachPresentation;
+use super::thread_settings::SettingsUpdateOutcome;
 use super::*;
 use crate::app_event::WalletUnlockContinuation;
 use crate::app_server_session::ForkGoalContinuation;
@@ -2140,16 +2141,15 @@ impl App {
                 // Only once core has moved: otherwise the list (and the
                 // message) could still be the old account's.
                 if let Some(account) = account_switch {
-                    use super::thread_settings::SettingsUpdateOutcome;
                     let message = match outcome {
                         SettingsUpdateOutcome::Confirmed => {
                             if self.refresh_model_list(app_server).await {
                                 Some(account_switch_message(account.as_ref()))
                             } else {
-                                Some("The account switch applied, but the model list could not be refreshed; reopen /model later to see its models.".to_string())
+                                Some(SWITCH_LIST_NOT_REFRESHED.to_string())
                             }
                         }
-                        SettingsUpdateOutcome::Accepted => Some("The account switch was not confirmed, so the model list was not refreshed; reopen /model later to see the new account's models.".to_string()),
+                        SettingsUpdateOutcome::Accepted => Some(SWITCH_NOT_CONFIRMED.to_string()),
                         // A failure already says so; nothing was sent otherwise.
                         SettingsUpdateOutcome::Failed | SettingsUpdateOutcome::NotSent => None,
                     };
@@ -6649,6 +6649,9 @@ impl App {
         }
     }
 }
+
+const SWITCH_LIST_NOT_REFRESHED: &str = "The account switch applied, but the model list could not be refreshed; reopen /model later to see its models.";
+const SWITCH_NOT_CONFIRMED: &str = "The account switch was not confirmed, so the model list was not refreshed; reopen /model later to see the new account's models.";
 
 /// PF-84: `Some(account)` when moving from `current` to `next` changes the
 /// sign-in account the session uses (`Some(None)`: to the default login).

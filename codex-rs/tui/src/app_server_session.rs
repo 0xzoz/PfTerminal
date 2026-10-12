@@ -307,6 +307,18 @@ pub(crate) enum PermissionConfirmationResult {
     Uncertain(String),
 }
 
+/// PF-84: only `Confirmed { Applied }` says core applied the update before
+/// replying; `Uncertain` (deadline passed, listener lost) and `Accepted` (a
+/// server that ignores `confirm`) do not.
+pub(crate) fn applied_before_reply(response: &ThreadSettingsUpdateResponse) -> bool {
+    matches!(
+        response,
+        ThreadSettingsUpdateResponse::Confirmed {
+            outcome: codex_app_server_protocol::ThreadSettingsUpdateOutcome::Applied,
+        }
+    )
+}
+
 impl PermissionConfirmationResult {
     fn from_reply(
         reply: std::result::Result<ThreadSettingsUpdateResponse, TypedRequestError>,
@@ -1236,12 +1248,16 @@ impl AppServerSession {
             .wrap_err("thread/metadata/update failed while syncing git branch")
     }
 
+    /// Returns whether core applied the update before replying (a
+    /// `confirm` request answered `Confirmed { Applied }`); `false` when it
+    /// was only accepted, the outcome is uncertain, or the server does not
+    /// support the method.
     pub(crate) async fn thread_settings_update(
         &mut self,
         params: ThreadSettingsUpdateParams,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         if !self.thread_settings_update_supported {
-            return Ok(());
+            return Ok(false);
         }
         let request_id = self.next_request_id();
         match self
@@ -1252,7 +1268,7 @@ impl AppServerSession {
             })
             .await
         {
-            Ok(_) => Ok(()),
+            Ok(response) => Ok(applied_before_reply(&response)),
             Err(TypedRequestError::Server { source, .. })
                 if is_thread_settings_update_unsupported(&source) =>
             {
@@ -1263,7 +1279,7 @@ impl AppServerSession {
                 // of showing an error every time the user changes model, effort,
                 // personality, or mode.
                 self.thread_settings_update_supported = false;
-                Ok(())
+                Ok(false)
             }
             Err(err) => Err(err).wrap_err("thread/settings/update failed in TUI"),
         }

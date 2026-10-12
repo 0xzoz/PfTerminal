@@ -187,19 +187,18 @@ impl App {
         }
         let mut params = params;
         let mut result = app_server.thread_settings_update(params.clone()).await;
-        if params.confirm && result.is_ok() {
-            return SettingsUpdateOutcome::Confirmed;
-        }
-        if params.confirm
-            && let Err(err) = &result
-        {
-            // PF-84: confirmation needs a live listener; the update itself
-            // must still apply, as it did before it was confirmed.
-            tracing::warn!(
-                "confirmed thread settings update failed, sending it unconfirmed: {err}"
-            );
-            params.confirm = false;
-            result = app_server.thread_settings_update(params).await;
+        match &result {
+            Ok(true) => return SettingsUpdateOutcome::Confirmed,
+            Err(err) if params.confirm => {
+                // PF-84: confirmation needs a live listener; the update itself
+                // must still apply, as it did before it was confirmed.
+                tracing::warn!(
+                    "confirmed thread settings update failed, sending it unconfirmed: {err}"
+                );
+                params.confirm = false;
+                result = app_server.thread_settings_update(params).await;
+            }
+            _ => {}
         }
         match result {
             Ok(_) => SettingsUpdateOutcome::Accepted,

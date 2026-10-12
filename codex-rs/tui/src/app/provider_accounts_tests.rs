@@ -158,3 +158,25 @@ fn only_a_sign_in_account_change_is_a_switch() {
         "Connectors, usage and the model list now use the default account; model list refreshed."
     );
 }
+
+/// PF-84: only `Confirmed { Applied }` counts as applied before the reply;
+/// an uncertain outcome or a plain acceptance does not refresh the list.
+#[test]
+fn only_an_applied_confirmation_counts() {
+    use codex_app_server_protocol::ThreadSettingsUpdateOutcome;
+    use codex_app_server_protocol::ThreadSettingsUpdateResponse;
+
+    assert!(crate::app_server_session::applied_before_reply(
+        &ThreadSettingsUpdateResponse::Confirmed {
+            outcome: ThreadSettingsUpdateOutcome::Applied,
+        }
+    ));
+    assert!(!crate::app_server_session::applied_before_reply(
+        &ThreadSettingsUpdateResponse::Confirmed {
+            outcome: ThreadSettingsUpdateOutcome::Uncertain,
+        }
+    ));
+    assert!(!crate::app_server_session::applied_before_reply(
+        &ThreadSettingsUpdateResponse::Accepted {}
+    ));
+}
