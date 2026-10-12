@@ -13,8 +13,10 @@ use crate::legacy_core::config::resolve_bootstrap_http_client_factory;
 use crate::legacy_core::config::resolve_oss_provider;
 use crate::legacy_core::config::resolve_profile_v2_config_path;
 use crate::resume_launch::ResumeLaunchSelection;
+use crate::resume_launch::check_resume_before_onboarding;
+use crate::resume_launch::chosen_thread_account_error;
+use crate::resume_launch::defers_launch_account_check;
 use crate::resume_launch::is_resume_launch;
-use crate::resume_launch::resume_account_error;
 use crate::resume_launch::resume_recorded_provider_account;
 use crate::resume_launch::select_resume_launch_session;
 use crate::session_resume::ResolveCwdOutcome;
@@ -1299,11 +1301,15 @@ pub async fn run_main(
     // PF-84 (#426): a missing named account (`--account` or
     // `[provider_accounts]`) is refused before onboarding, with exec's
     // recovery text, instead of asking for a default key. The account a
-    // resumed thread recorded is checked once the thread is selected (#545).
-    // A local daemon serves this same home; a remote app server checks its
-    // own home at thread start.
+    // resumed thread recorded is checked once the thread is selected (#545),
+    // and so is `[provider_accounts]` for a resume, which runs on that
+    // recorded account instead (#555). A local daemon serves this same home;
+    // a remote app server checks its own home at thread start.
+    let deferred_account_check =
+        !app_server_target.uses_remote_workspace() && defers_launch_account_check(&cli, &config);
     if !app_server_target.uses_remote_workspace()
-        && let Some(message) = crate::legacy_core::config::session_account_error(&config)
+        && let Some(message) =
+            crate::resume_launch::launch_account_error(&config, deferred_account_check)
     {
         exit_with_security_error(&message);
     }
@@ -1654,6 +1660,11 @@ async fn run_ratatui_app(
     // PF-84 (#545): onboarding would ask for a default key, but a resumed
     // thread runs on the account it recorded. Pick the thread first (this
     // runs the picker before onboarding) and check that account instead.
+    let deferred_account_check =
+        !uses_remote_workspace && defers_launch_account_check(&cli, &initial_config);
+    // Whether a resume restores the thread's own model and provider (#555).
+    let resume_model_settings =
+        crate::app::resume_model_settings_for_overrides(&initial_config, &overrides);
     let mut early_resume_selection = None;
     let use_fork = cli.fork_picker || cli.fork_last || cli.fork_session_id.is_some();
     if startup_provider.requires_provider_onboarding
@@ -1664,6 +1675,7 @@ async fn run_ratatui_app(
             .features
             .enabled(codex_features::Feature::NamedAccounts)
     {
+        // Esc leaves this picker: a new session would need onboarding (#555).
         let selection = select_resume_launch_session(
             &mut tui,
             &cli,
@@ -1671,9 +1683,10 @@ async fn run_ratatui_app(
             &mut app_server,
             uses_remote_workspace,
             remote_cwd_override.as_deref(),
+            resume_picker::SessionPickerLaunchContext::StartupBeforeOnboarding,
         )
         .await?;
-        match &selection {
+        let refusal = match &selection {
             ResumeLaunchSelection::Missing(id_str) => {
                 shutdown_app_server_if_present(app_server.take()).await;
                 return Ok(exit_missing_session(
@@ -1689,36 +1702,47 @@ async fn run_ratatui_app(
                 return Ok(user_requested_exit_info());
             }
             ResumeLaunchSelection::Selected(selected) => {
-                if let Some(recorded) = resume_recorded_provider_account(
+                match resume_recorded_provider_account(
                     selected,
                     &initial_config,
                     uses_remote_workspace,
+                    resume_model_settings,
                 )
                 .await
-                    && recorded.provider_id == initial_config.model_provider_id
                 {
-                    overrides.inherited_provider_account = Some(recorded.selection());
-                    initial_config = load_config_or_exit(
-                        cli_kv_overrides.clone(),
-                        overrides.clone(),
-                        loader_overrides.clone(),
-                        cloud_config_bundle.clone(),
-                        strict_config,
-                    )
-                    .await;
-                    if let Some(message) = resume_account_error(&initial_config, &recorded) {
-                        shutdown_app_server_if_present(app_server.take()).await;
-                        terminal_restore_guard.restore_silently();
-                        session_log::log_session_end();
-                        return Ok(fatal_exit_info(message));
+                    Some(recorded) => {
+                        overrides.inherited_provider_account = Some(recorded.selection());
+                        initial_config = load_config_or_exit(
+                            cli_kv_overrides.clone(),
+                            overrides.clone(),
+                            loader_overrides.clone(),
+                            cloud_config_bundle.clone(),
+                            strict_config,
+                        )
+                        .await;
+                        let (resolution, refusal) = check_resume_before_onboarding(
+                            selected,
+                            &initial_config,
+                            &recorded,
+                            startup_provider::openai_metadata(login_status),
+                        )
+                        .await;
+                        startup_provider = resolution;
+                        refusal
                     }
-                    startup_provider = startup_provider::resolve(
+                    None => chosen_thread_account_error(
                         &initial_config,
-                        Some(openai_metadata_for(&initial_config.model_provider)),
-                    )
-                    .await;
+                        /*recorded*/ None,
+                        deferred_account_check,
+                    ),
                 }
             }
+        };
+        if let Some(message) = refusal {
+            shutdown_app_server_if_present(app_server.take()).await;
+            terminal_restore_guard.restore_silently();
+            session_log::log_session_end();
+            return Ok(fatal_exit_info(message));
         }
         early_resume_selection = Some(selection);
     }
@@ -1940,6 +1964,7 @@ async fn run_ratatui_app(
                     &mut app_server,
                     uses_remote_workspace,
                     remote_cwd_override.as_deref(),
+                    resume_picker::SessionPickerLaunchContext::Startup,
                 )
                 .await?
             }
@@ -2010,8 +2035,13 @@ async fn run_ratatui_app(
 
     // PF-84 (#545): the session config carries the account the resumed thread
     // runs on, so the TUI shows and checks the account the app server uses.
-    let resume_recorded_account =
-        resume_recorded_provider_account(&session_selection, &config, uses_remote_workspace).await;
+    let resume_recorded_account = resume_recorded_provider_account(
+        &session_selection,
+        &config,
+        uses_remote_workspace,
+        resume_model_settings,
+    )
+    .await;
     if let Some(recorded) = resume_recorded_account.as_ref() {
         overrides.inherited_provider_account = Some(recorded.selection());
     }
@@ -2047,9 +2077,11 @@ async fn run_ratatui_app(
     if reloads_provider_config {
         startup_provider_resolution = None;
     }
-    if let Some(recorded) = resume_recorded_account.as_ref()
-        && let Some(message) = resume_account_error(&config, recorded)
-    {
+    if let Some(message) = chosen_thread_account_error(
+        &config,
+        resume_recorded_account.as_ref(),
+        deferred_account_check,
+    ) {
         shutdown_app_server_if_present(app_server.take()).await;
         terminal_restore_guard.restore_silently();
         session_log::log_session_end();
@@ -2268,6 +2300,7 @@ async fn load_config_or_exit_with_fallback_cwd(
     strict_config: bool,
     fallback_cwd: Option<PathBuf>,
 ) -> Config {
+    let inherited_provider_account = overrides.inherited_provider_account.clone();
     #[allow(clippy::print_stderr)]
     match ConfigBuilder::default()
         .cli_overrides(cli_kv_overrides)
@@ -2279,10 +2312,14 @@ async fn load_config_or_exit_with_fallback_cwd(
         .build()
         .await
     {
-        Ok(config) => {
+        Ok(mut config) => {
             if let Err(message) = security::launch::verify_reloaded(&config).await {
                 exit_with_security_error(&message);
             }
+            crate::resume_launch::apply_inherited_account_to_its_provider(
+                &mut config,
+                inherited_provider_account.as_deref(),
+            );
             config
         }
         Err(err) => {

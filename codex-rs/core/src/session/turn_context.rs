@@ -971,6 +971,12 @@ impl Session {
                         .model_provider_id
                         != next.original_config_do_not_use.model_provider_id
                         || state.session_configuration.provider != next.provider;
+                    // PF-84: as in update_settings, the account follows first.
+                    if model_provider_changed {
+                        self.follow_provider_account(&next);
+                    }
+                    let follows_model_list =
+                        model_provider_changed && self.model_list_follows_this_session(&next);
                     if model_provider_changed {
                         // Match update_settings: frame guards must see this provider
                         // before its configuration is published, under the same writer lock.
@@ -998,6 +1004,7 @@ impl Session {
                         previous_config,
                         new_config,
                         stale_startup_prewarm,
+                        follows_model_list,
                     ))
                 }
                 Err(err) => Err(CodexErr::InvalidRequest(err.to_string())),
@@ -1011,6 +1018,7 @@ impl Session {
             previous_config,
             new_config,
             stale_startup_prewarm,
+            follows_model_list,
         ) = match update_result {
             Ok(update) => update,
             Err(err) => {
@@ -1029,6 +1037,9 @@ impl Session {
         self.emit_config_changed_contributors(previous_config.as_ref(), new_config.as_ref());
         if mcp_inputs_changed {
             self.schedule_mcp_prewarm();
+        }
+        if follows_model_list {
+            self.follow_model_list_account().await;
         }
 
         if let Some(startup_prewarm) = stale_startup_prewarm {
@@ -1144,7 +1155,7 @@ impl Session {
         let mut turn_context: TurnContext = Self::make_turn_context(
             self.thread_id(),
             self.session_id(),
-            Some(Arc::clone(&self.services.auth_manager)),
+            Some(self.services.auth_manager()),
             &self.services.session_telemetry,
             session_configuration.provider.clone(),
             &session_configuration,

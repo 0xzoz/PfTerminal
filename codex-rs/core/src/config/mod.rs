@@ -183,6 +183,7 @@ mod permission_profile_catalog;
 mod permissions;
 mod provider_accounts;
 pub use codex_model_provider::selected_account_error;
+pub use provider_accounts::apply_recorded_provider_account;
 pub(crate) use provider_accounts::configured_account_names;
 pub use provider_accounts::other_provider_account_error;
 pub use provider_accounts::session_account_error;
@@ -1714,7 +1715,10 @@ pub fn gpu_runtime_model_provider(
     provider.name = format!("Rented GPU · {}", record.model_id);
     provider.auth = Some(ModelProviderAuthInfo {
         command: current_corbanu_auth_helper(),
-        args: vec!["internal-gpu-endpoint-token".to_string(), record.rental_id],
+        args: vec![
+            codex_login::auth::GPU_ENDPOINT_TOKEN_HELPER_SUBCOMMAND.to_string(),
+            record.rental_id,
+        ],
         // Vault access may briefly serialize with the rental controller in another process.
         // Leave enough startup time for that lock handoff instead of rejecting a healthy
         // runtime provider at the generic five-second auth-helper default.

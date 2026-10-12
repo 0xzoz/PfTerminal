@@ -517,6 +517,8 @@ impl App {
             ),
             /*hint*/ None,
         );
+        // PF-84: the model list follows the new session's account.
+        let _ = self.refresh_model_list(app_server).await;
         true
     }
 

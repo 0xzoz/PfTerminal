@@ -1153,7 +1153,7 @@ async fn prepare_realtime_start(
         .services
         .model_client()
         .auth_manager()
-        .unwrap_or_else(|| Arc::clone(&sess.services.auth_manager));
+        .unwrap_or_else(|| sess.services.auth_manager());
     let auth = auth_manager.auth().await;
     let config = sess.get_config().await;
     let transport = params
@@ -2503,7 +2503,7 @@ pub(crate) async fn realtime_accounting(
     let client_session = sess.services.new_model_client_session();
     let (accounting, provider_id) = sess.accounting_binding().await;
     let provider = sess.provider().await;
-    let auth = sess.services.auth_manager.auth().await;
+    let auth = sess.services.auth_manager().auth().await;
     match crate::accounting::attach_scopes(
         sess,
         &accounting,
