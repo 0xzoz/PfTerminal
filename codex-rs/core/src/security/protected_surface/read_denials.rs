@@ -28,6 +28,7 @@ use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::FileSystemSandboxEntry;
 use codex_protocol::permissions::FileSystemSandboxKind;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
+use codex_protocol::permissions::FileSystemSpecialPath;
 use codex_protocol::permissions::ReadDenyMatcher;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use std::path::Path;
@@ -324,6 +325,18 @@ impl ReadDenials {
         self.read_only.clear();
     }
 
+    /// Issue #540: only the rule that keeps the Corbanu home's runtime
+    /// entries read-only, for a command whose other rules a person's
+    /// approval lifted (Moderate, #239).
+    pub(crate) fn runtime_only(self) -> Self {
+        Self {
+            runtime_read_only: self.runtime_read_only,
+            cwd: self.cwd,
+            skipped: self.skipped,
+            ..Self::default()
+        }
+    }
+
     /// #506: under Aggressive, agent commands may not list the Corbanu home
     /// either. What is below it keeps these rules: its runtime entries stay
     /// readable, everything else stays denied.
@@ -437,7 +450,16 @@ impl ReadDenials {
             return Some(profile.clone());
         }
         // Turns an unrestricted policy into full write access plus the
-        // denials, and appends them to a restricted one.
+        // denials, and appends them to a restricted one. Read-only paths
+        // alone (#540) turn it into full write access too.
+        if file_system.kind == FileSystemSandboxKind::Unrestricted && entries.is_empty() {
+            file_system = FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry::new(
+                FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                FileSystemAccessMode::Write,
+            )]);
+        }
         file_system
             .preserve_deny_read_restrictions_from(&FileSystemSandboxPolicy::restricted(entries));
         if file_system.kind != FileSystemSandboxKind::Restricted {

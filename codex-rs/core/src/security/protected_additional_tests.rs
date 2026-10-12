@@ -353,26 +353,35 @@ fn issue_513_other_write_protections_count_under_aggressive_until_a_grant_lifts_
     granted.lift_write_rules();
     // A git hook counts until an Aggressive grant lifts it. The project's
     // `.agents` (#442, Travis 2026-10-11) and the runtime entries never
-    // lift. Moderate is unchanged (#513 decision).
-    for (protected_path, target, grantable) in [
+    // lift with a grant. Under Moderate a person's fresh approval (scope
+    // Runtime) lifts all but the runtime entries (#513, Travis 2026-10-11).
+    for (protected_path, target, rule) in [
         (
             f.project.join(".git/hooks"),
             f.project.join(".git/hooks/pre-commit"),
-            true,
+            WriteRule::Liftable,
         ),
         (
             f.project.join(".agents"),
             f.project.join(".agents/skill.md"),
-            false,
+            WriteRule::NeverGranted,
         ),
-        (f.codex_home.join("tmp"), f.codex_home.join("tmp"), false),
+        (
+            f.codex_home.join("tmp"),
+            f.codex_home.join("tmp"),
+            WriteRule::Runtime,
+        ),
     ] {
         let refused = Some(Opened::Write {
             path: protected_path.display().to_string(),
-            grantable,
+            rule,
         });
         assert_eq!(check(&f.denials, ReadOnlyScope::Kept, &target), refused);
-        let after_grant = if grantable { None } else { refused.clone() };
+        let after_grant = if rule == WriteRule::Liftable {
+            None
+        } else {
+            refused.clone()
+        };
         assert_eq!(
             check(&granted, ReadOnlyScope::Kept, &target),
             after_grant,
@@ -420,7 +429,7 @@ fn issue_513_write_refusals_say_whether_a_grant_can_lift_them() {
     let runtime = write_refusal(
         SecurityLevel::Moderate,
         "/home/u/.corbanu/tmp\u{1b}[2J",
-        false,
+        WriteRule::Runtime,
     );
     assert!(
         runtime.starts_with("Security level Moderate blocked writing to `/home/u/.corbanu/tmp"),
@@ -429,23 +438,84 @@ fn issue_513_write_refusals_say_whether_a_grant_can_lift_them() {
     assert!(!runtime.contains('\u{1b}'), "{runtime}");
     assert!(runtime.contains("cannot be granted"), "{runtime}");
     assert!(runtime.contains("Permissive in /security"), "{runtime}");
-    let hook = write_refusal(SecurityLevel::Aggressive, "/p/.git/hooks", true);
+    let hook = write_refusal(
+        SecurityLevel::Aggressive,
+        "/p/.git/hooks",
+        WriteRule::Liftable,
+    );
     assert!(hook.starts_with("Security level Aggressive"), "{hook}");
     assert!(hook.contains("\"Grant once\""), "{hook}");
     assert!(!hook.contains("cannot be granted"), "{hook}");
-    assert_eq!(
-        ReadOnlyScope::for_level(SecurityLevel::Aggressive),
-        ReadOnlyScope::Kept
+    // #520: kept even with a grant under Aggressive.
+    let kept = write_refusal(
+        SecurityLevel::Aggressive,
+        "/p/.agents",
+        WriteRule::NeverGranted,
     );
-    assert_eq!(
-        ReadOnlyScope::for_level(SecurityLevel::Moderate),
-        ReadOnlyScope::Runtime
+    assert!(
+        kept.contains("neither an additional permission nor"),
+        "{kept}"
     );
+    assert!(kept.contains("Permissive in /security"), "{kept}");
+    // Moderate: only a person's fresh approval lifts it, whatever the rule
+    // under Aggressive.
+    for rule in [WriteRule::Liftable, WriteRule::NeverGranted] {
+        let hook = write_refusal(SecurityLevel::Moderate, "/p/.git/hooks", rule);
+        assert!(
+            hook.starts_with("Security level Moderate blocked writing to `/p/.git/hooks`"),
+            "{hook}"
+        );
+        assert!(hook.contains("Only a person's own approval"), "{hook}");
+        for approver in [
+            "automatic reviewer",
+            "permission hook",
+            "\"don't ask again\"",
+            "permission grant",
+        ] {
+            assert!(hook.contains(approver), "{approver}: {hook}");
+        }
+        assert!(!hook.contains("Grant once"), "{hook}");
+        assert!(hook.contains("Permissive in /security"), "{hook}");
+    }
+}
+
+/// Issue #513 (Travis, 2026-10-11): which read-only paths count, by level
+/// and approver. Under Moderate only a person's fresh approval of the
+/// command leaves the persistence files to it; grants never carry them.
+#[test]
+fn issue_513_moderate_scope_follows_the_approver() {
+    use SecurityLevel::Aggressive;
+    use SecurityLevel::Moderate;
+    use SecurityLevel::Permissive;
+    let (runtime, kept) = (ReadOnlyScope::Runtime, ReadOnlyScope::Kept);
+    for (level, person, before, after) in [
+        (Moderate, true, runtime, runtime),
+        (Moderate, false, kept, kept),
+        // Aggressive: a grant for the run is known only after the approval.
+        (Aggressive, true, runtime, kept),
+        (Aggressive, false, runtime, kept),
+        (Permissive, false, runtime, runtime),
+    ] {
+        assert_eq!(
+            ReadOnlyScope::before_approval(level, person),
+            before,
+            "{level:?} {person}"
+        );
+        assert_eq!(
+            ReadOnlyScope::after_approval(level, person),
+            after,
+            "{level:?} {person}"
+        );
+    }
+    assert_eq!(ReadOnlyScope::for_grant(Moderate), kept);
+    assert_eq!(ReadOnlyScope::for_grant(Aggressive), kept);
+    assert_eq!(ReadOnlyScope::for_grant(Permissive), runtime);
 }
 
 /// Review r2 (#524): a grant is checked with the workspace roots, so a write
 /// to a second root's `.agents` is dropped under Aggressive (it would make
-/// every later command fail) and kept under Moderate (unchanged there).
+/// every later command fail), and under Moderate too (#513, Travis
+/// 2026-10-11: a grant never lifts it).
 #[test]
 fn issue_524_grants_are_checked_with_every_workspace_root() {
     let f = fixture();
@@ -483,9 +553,23 @@ fn issue_524_grants_are_checked_with_every_workspace_root() {
     assert_eq!(kept, None);
     let refusal = refusal.expect("a refusal");
     assert!(refusal.contains("blocked writing to"), "{refusal}");
+    let (kept, refusal) = strip_grant(
+        SecurityLevel::Moderate,
+        &f.codex_home,
+        &configs,
+        grant.clone(),
+    );
+    assert_eq!(kept, None);
+    let refusal = refusal.expect("a refusal");
+    assert!(
+        refusal.starts_with("Security level Moderate blocked writing to"),
+        "{refusal}"
+    );
+    assert!(refusal.contains("permission grant cannot"), "{refusal}");
+    // Permissive keeps it.
     assert_eq!(
         strip_grant(
-            SecurityLevel::Moderate,
+            SecurityLevel::Permissive,
             &f.codex_home,
             &configs,
             grant.clone()
@@ -503,4 +587,170 @@ fn issue_524_a_failed_check_is_refused_and_explained() {
         "{text}"
     );
     assert!(text.contains("Permissive in /security"), "{text}");
+}
+
+/// Issue #513 (Travis, 2026-10-11), the orchestrator with a probe tool:
+/// under Moderate an additional write to the project's `.agents` runs only
+/// when a person was asked about it now. Answered without asking (the
+/// approval cache, a preapproved grant) it is refused and explained. The
+/// person's prompt says which file approving opens.
+#[tokio::test]
+async fn issue_513_orchestrator_lets_only_a_person_asked_now_open_a_persistence_file() {
+    use crate::tools::sandboxing::ApprovalAction;
+    use crate::tools::sandboxing::ApprovalCtx;
+    use crate::tools::sandboxing::ExecApprovalRequirement;
+    use crate::tools::sandboxing::ToolError;
+    use codex_protocol::protocol::AskForApproval;
+    use codex_protocol::protocol::ReviewDecision;
+    use codex_utils_path_uri::PathUri;
+    use std::sync::Arc;
+
+    struct Probe {
+        additional: AdditionalPermissionProfile,
+        person: bool,
+        reasons: Vec<Option<String>>,
+        ran: bool,
+    }
+    impl crate::tools::sandboxing::Approvable<()> for Probe {
+        type ApprovalKey = String;
+
+        fn additional_permissions<'a>(
+            &self,
+            _req: &'a (),
+        ) -> Option<&'a AdditionalPermissionProfile> {
+            // The probe owns the profile; the trait wants it borrowed from
+            // the request, so leak one per call (a test only).
+            Some(Box::leak(Box::new(self.additional.clone())))
+        }
+        fn sandbox_permissions(&self, _req: &()) -> crate::sandboxing::SandboxPermissions {
+            crate::sandboxing::SandboxPermissions::WithAdditionalPermissions
+        }
+        fn exec_approval_requirement(&self, _req: &()) -> Option<ExecApprovalRequirement> {
+            Some(ExecApprovalRequirement::NeedsApproval {
+                reason: None,
+                proposed_execpolicy_amendment: None,
+            })
+        }
+        fn approval_keys(&self, _req: &()) -> Vec<Self::ApprovalKey> {
+            vec!["probe".to_string()]
+        }
+        fn start_approval_async<'a>(
+            &'a mut self,
+            _req: &'a (),
+            ctx: ApprovalCtx<'a>,
+        ) -> futures::future::BoxFuture<'a, ReviewDecision> {
+            self.reasons.push(ctx.retry_reason);
+            if self.person {
+                crate::tools::sandboxing::note_person_asked();
+            }
+            Box::pin(async { ReviewDecision::ApprovedForSession })
+        }
+        fn approval_action(
+            &self,
+            _req: &(),
+            ctx: &ApprovalCtx<'_>,
+        ) -> std::io::Result<ApprovalAction> {
+            Ok(ApprovalAction::Shell {
+                id: ctx.call_id.to_string(),
+                environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
+                command: vec!["true".into()],
+                #[allow(deprecated)]
+                cwd: PathUri::from_abs_path(&ctx.turn.cwd),
+                sandbox_permissions:
+                    crate::sandboxing::SandboxPermissions::WithAdditionalPermissions,
+                additional_permissions: Some(self.additional.clone()),
+                justification: None,
+            })
+        }
+    }
+    impl crate::tools::sandboxing::Sandboxable for Probe {
+        fn sandbox_preference(&self) -> codex_sandboxing::SandboxablePreference {
+            codex_sandboxing::SandboxablePreference::Auto
+        }
+    }
+    impl crate::tools::sandboxing::ToolRuntime<(), ()> for Probe {
+        fn workspace_roots<'a>(&self, _req: &'a ()) -> &'a [PathUri] {
+            &[]
+        }
+        async fn run(
+            &mut self,
+            _req: &(),
+            _attempt: &crate::tools::sandboxing::SandboxAttempt<'_>,
+            _ctx: &crate::tools::sandboxing::ToolCtx,
+        ) -> Result<(), ToolError> {
+            self.ran = true;
+            Ok(())
+        }
+    }
+
+    for person in [true, false] {
+        let session = crate::session::tests::make_session_with_config(|config| {
+            config.security_level = SecurityLevel::Moderate;
+            config
+                .features
+                .enable(codex_features::Feature::SourceEnvelopes)
+                .expect("source envelopes");
+        })
+        .await
+        .expect("session");
+        let _control = session
+            .services
+            .agent_control
+            .clone()
+            .with_effective_security_policy(
+                SecurityLevel::Moderate,
+                session.thread_id,
+                /*inherits_from_spawn_parent*/ false,
+            )
+            .expect("policy");
+        let turn = session.new_default_turn().await;
+        #[allow(deprecated)]
+        let agents = turn.cwd.join(".agents");
+        let mut probe = Probe {
+            additional: write(agents.as_path()),
+            person,
+            reasons: Vec::new(),
+            ran: false,
+        };
+        let tool_ctx = crate::tools::sandboxing::ToolCtx {
+            session: Arc::clone(&session),
+            turn: Arc::clone(&turn),
+            call_id: "probe-call".to_string(),
+            tool_name: codex_tools::ToolName::plain("probe"),
+        };
+        let result = crate::tools::orchestrator::ToolOrchestrator::new()
+            .run(
+                &mut probe,
+                &(),
+                &tool_ctx,
+                turn.as_ref(),
+                AskForApproval::OnRequest,
+            )
+            .await;
+        // A person is shown which file approving opens.
+        assert_eq!(probe.reasons.len(), 1, "person={person}");
+        let reason = probe.reasons[0].clone().unwrap_or_default();
+        assert!(
+            reason.contains("Approving lets this command write"),
+            "{reason}"
+        );
+        assert!(reason.contains(".agents"), "{reason}");
+        if person {
+            assert!(result.is_ok(), "{:?}", result.err());
+            assert!(probe.ran);
+        } else {
+            let Err(ToolError::Rejected(message)) = result else {
+                panic!("expected a refusal");
+            };
+            assert!(
+                message.starts_with("Security level Moderate blocked writing to"),
+                "{message}"
+            );
+            assert!(
+                message.contains("Only a person's own approval"),
+                "{message}"
+            );
+            assert!(!probe.ran);
+        }
+    }
 }
