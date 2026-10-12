@@ -183,7 +183,20 @@ impl App {
         if !thread_settings_update_has_changes(&params) {
             return;
         }
-        if let Err(err) = app_server.thread_settings_update(params).await {
+        let mut params = params;
+        let mut result = app_server.thread_settings_update(params.clone()).await;
+        if params.confirm
+            && let Err(err) = &result
+        {
+            // PF-84: confirmation needs a live listener; the update itself
+            // must still apply, as it did before it was confirmed.
+            tracing::warn!(
+                "confirmed thread settings update failed, sending it unconfirmed: {err}"
+            );
+            params.confirm = false;
+            result = app_server.thread_settings_update(params).await;
+        }
+        if let Err(err) = result {
             tracing::warn!("failed to update app-server thread settings from TUI: {err}");
             self.chat_widget
                 .add_error_message(format!("Failed to update thread settings: {err}"));

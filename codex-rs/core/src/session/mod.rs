@@ -304,10 +304,6 @@ impl SteerInputError {
     }
 }
 
-/// PF-84: how long a mid-session account switch waits for the new account's
-/// model list.
-const MODEL_LIST_SWITCH_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
-
 /// Notes from the previous real user turn.
 ///
 /// Conceptually this is the same role that `previous_model` used to fill, but
@@ -1745,19 +1741,7 @@ impl Session {
                 .model_provider_id
                 != updated.original_config_do_not_use.model_provider_id
                 || state.session_configuration.provider != updated.provider;
-            // PF-84: the new provider's sign-in (a named account's or the
-            // default login) becomes the one connectors, plugin installs,
-            // accounting and the model list use, before the client is built.
-            let account_switched = model_provider_changed
-                && self.services.active_auth.follow_provider(&updated.provider);
-            if account_switched {
-                let account = codex_model_provider::named_sign_in_account(&updated.provider)
-                    .map_or_else(|| "default".to_string(), |account| account.to_string());
-                info!(
-                    %account,
-                    "connectors, plugin installs, accounting and the model list follow the switch"
-                );
-            }
+            let account_switched = model_provider_changed && self.follow_provider_account(&updated);
             if model_provider_changed {
                 // Publish while updates are serialized, before the new configuration
                 // becomes observable. Frame guards read this client without state locks.
@@ -1777,8 +1761,7 @@ impl Session {
             let follows_model_list =
                 model_provider_changed && self.model_list_follows_this_session(&updated);
             state.session_configuration = updated;
-            // Connectors reconnect with the new account's sign-in.
-            if mcp_inputs_changed || account_switched {
+            if mcp_inputs_changed {
                 self.mark_mcp_runtime_dirty();
             }
             (
@@ -1809,15 +1792,36 @@ impl Session {
 
     /// PF-84: whether this session's account drives the process's model
     /// list: a user's session, not a sub-agent's or an internal one's.
-    fn model_list_follows_this_session(&self, configuration: &SessionConfiguration) -> bool {
+    pub(super) fn model_list_follows_this_session(
+        &self,
+        configuration: &SessionConfiguration,
+    ) -> bool {
         !configuration.session_source.is_non_root_agent()
+    }
+
+    /// PF-84: on a provider change, makes the new provider's sign-in (a named
+    /// account's or the default login) the one connectors, plugin installs and
+    /// accounting use, before the model client is built. Called under the
+    /// state lock by every path that changes the provider. Returns whether the
+    /// account changed; connectors are then marked for reconnection.
+    pub(super) fn follow_provider_account(&self, next: &SessionConfiguration) -> bool {
+        if !self.services.active_auth.follow_provider(&next.provider) {
+            return false;
+        }
+        let account = codex_model_provider::named_sign_in_account(&next.provider)
+            .map_or_else(|| "default".to_string(), |account| account.to_string());
+        info!(
+            %account,
+            "connectors, plugin installs, accounting and the model list follow the switch"
+        );
+        self.mark_mcp_runtime_dirty();
+        true
     }
 
     /// PF-84: lists models with the sign-in of the account this session's
     /// provider uses (the default login for any other provider). When that
-    /// changed, the account's list is fetched (a named account's is not
-    /// cached), waiting at most [`MODEL_LIST_SWITCH_WAIT`] so a client that
-    /// lists models after the switch sees it.
+    /// changed, the account's list (its own cache at once, see
+    /// `AccountModelsManager`) is fetched again in the background.
     pub(super) async fn follow_model_list_account(&self) {
         let (provider, http_client_factory) = {
             let state = self.state.lock().await;
@@ -1838,13 +1842,11 @@ impl Session {
             return;
         }
         let models_manager = Arc::clone(&self.services.models_manager);
-        let refresh = self.services.runtime_handle.spawn(async move {
+        self.services.runtime_handle.spawn(async move {
             models_manager
-                .list_models(RefreshStrategy::OnlineIfUncached, http_client_factory)
+                .list_models(RefreshStrategy::Online, http_client_factory)
                 .await;
         });
-        // On timeout the fetch goes on in the background.
-        let _ = tokio::time::timeout(MODEL_LIST_SWITCH_WAIT, refresh).await;
     }
 
     async fn ensure_runtime_model_provider(&self, updates: &mut SessionSettingsUpdate) {

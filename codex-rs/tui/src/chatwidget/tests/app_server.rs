@@ -1642,37 +1642,3 @@ async fn live_app_server_thread_closed_requests_immediate_exit() {
 
     assert_matches!(rx.try_recv(), Ok(AppEvent::Exit(ExitMode::Immediate)));
 }
-
-/// PF-84: a switch to a provider on another sign-in account asks for the
-/// model list again (it follows the account); one on the same account does not.
-#[tokio::test]
-async fn switching_the_sign_in_account_refreshes_the_model_list() {
-    use codex_model_provider_info::ModelProviderInfo;
-    use codex_model_provider_info::NamedProviderAccount;
-
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    let openai = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
-    let mut work = openai.clone();
-    work.account = Some(NamedProviderAccount {
-        provider_id: "openai".to_string(),
-        name: "work".to_string(),
-    });
-    chat.set_model_provider("openai".to_string(), openai.clone());
-    while rx.try_recv().is_ok() {}
-    let refreshes = |rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>| {
-        let mut count = 0;
-        while let Ok(event) = rx.try_recv() {
-            if matches!(event, AppEvent::RefreshModelList { .. }) {
-                count += 1;
-            }
-        }
-        count
-    };
-
-    chat.set_model_provider("openai".to_string(), work.clone());
-    assert_eq!(refreshes(&mut rx), 1, "to a named account");
-    chat.set_model_provider("openai".to_string(), work);
-    assert_eq!(refreshes(&mut rx), 0, "same account");
-    chat.set_model_provider("openai".to_string(), openai);
-    assert_eq!(refreshes(&mut rx), 1, "back to the default account");
-}

@@ -570,11 +570,13 @@ impl Session {
         );
         // PF-84-S06: a session on a named OpenAI sign-in account uses that
         // account's manager for everything (requests, refresh, connectors),
-        // never the default login.
+        // never the default login; any other provider uses the default login,
+        // also when spawned from a session on a named account (as after a
+        // mid-session switch, `ActiveAuthManager::follow_provider`).
         let auth_manager =
             match codex_model_provider::named_sign_in_account(&session_configuration.provider) {
                 Some(account) => auth_manager.for_named_account_loaded(account).await,
-                None => auth_manager,
+                None => auth_manager.default_account_manager(),
             };
         // PF-27-S05: provider credentials move into the broker before anything
         // (MCP servers, hooks, tools) starts from this process.

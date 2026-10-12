@@ -4,8 +4,10 @@
 //! The list (`/models`, and which models a ChatGPT or API-key sign-in may
 //! pick) used to be bound to the account the process started on. This
 //! manager keeps one stable handle (the app server, its refresh worker and
-//! every session hold it) and swaps the manager behind it when a primary
-//! session starts on, or switches to, another account.
+//! every session hold it) and swaps the manager behind it when a user's
+//! session starts on, or switches to, another account. The process has one
+//! list: with several user sessions on different accounts (an app-server
+//! client with many threads) the last one to start or switch decides it.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -30,6 +32,9 @@ use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::openai_models::ModelsResponse;
 use tokio::sync::TryLockError;
 
+/// Under the home: one model-list cache per named account.
+const NAMED_ACCOUNT_MODELS_CACHE_DIR: &str = "models-cache";
+
 pub(crate) struct AccountModelsManager {
     /// The provider the list is for, without an account.
     provider: ModelProviderInfo,
@@ -37,6 +42,7 @@ pub(crate) struct AccountModelsManager {
     codex_home: PathBuf,
     model_catalog: Option<ModelsResponse>,
     current: ArcSwap<Current>,
+    switching: std::sync::Mutex<()>,
 }
 
 struct Current {
@@ -81,6 +87,7 @@ impl AccountModelsManager {
             codex_home,
             model_catalog,
             current: ArcSwap::from_pointee(current),
+            switching: std::sync::Mutex::new(()),
         })
     }
 
@@ -191,7 +198,16 @@ impl ModelsManager for AccountModelsManager {
         Box::pin(async move { inner.refresh_if_new_etag(etag, http_client_factory).await })
     }
 
+    fn lists_for_sign_in_account(&self, account: Option<&NamedChatgptAccount>) -> bool {
+        self.current.load().account.as_ref() == account
+    }
+
     fn follow_sign_in_account(&self, account: Option<&NamedChatgptAccount>) -> bool {
+        // Sessions starting together rebuild (and refetch) once.
+        let _switching = self
+            .switching
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if self.current.load().account.as_ref() == account {
             return false;
         }
@@ -207,8 +223,9 @@ impl ModelsManager for AccountModelsManager {
 }
 
 /// `provider`'s model list with `account`'s sign-in. A named account's list
-/// is not cached on disk: the cache file is shared by the home, and another
-/// account may be offered other models.
+/// is cached in its own file (`models-cache/<provider>/<name>/`), so another
+/// account's list is never shown for it and a switch shows its last list at
+/// once.
 fn build(
     provider: &ModelProviderInfo,
     default_auth: &Arc<AuthManager>,
@@ -222,10 +239,24 @@ fn build(
         name: account.name.clone(),
     });
     let provider = create_model_provider(provider, Some(Arc::clone(default_auth)));
-    let manager = if account.is_some() {
-        provider.models_manager_without_cache(model_catalog.clone())
-    } else {
-        provider.models_manager(codex_home.to_path_buf(), model_catalog.clone())
+    let path_safe = |part: &str| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    };
+    let manager = match &account {
+        None => provider.models_manager(codex_home.to_path_buf(), model_catalog.clone()),
+        // Validated names; anything else is listed uncached.
+        Some(account) if path_safe(&account.provider_id) && path_safe(&account.name) => provider
+            .models_manager(
+                codex_home
+                    .join(NAMED_ACCOUNT_MODELS_CACHE_DIR)
+                    .join(&account.provider_id)
+                    .join(&account.name),
+                model_catalog.clone(),
+            ),
+        Some(_) => provider.models_manager_without_cache(model_catalog.clone()),
     };
     Current { account, manager }
 }

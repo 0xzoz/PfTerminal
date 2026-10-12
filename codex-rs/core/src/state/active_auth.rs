@@ -45,6 +45,8 @@ impl ActiveAuthManager {
     }
 
     /// Makes `provider`'s sign-in the active one. Returns whether it changed.
+    /// Runs under the session state lock; a named account's ChatGPT or
+    /// API-key sign-in is read from the vault here (other kinds on first use).
     pub(crate) fn follow_provider(&self, provider: &ModelProviderInfo) -> bool {
         let next = self.for_provider(provider);
         if Arc::ptr_eq(&next, &self.get()) {

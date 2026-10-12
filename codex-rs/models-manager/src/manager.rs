@@ -247,6 +247,15 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
     fn follow_sign_in_account(&self, _account: Option<&codex_login::NamedChatgptAccount>) -> bool {
         false
     }
+
+    /// PF-84: whether this list is the one of `account`'s sign-in (`None`:
+    /// the default login), so that account's responses may refresh it.
+    fn lists_for_sign_in_account(
+        &self,
+        _account: Option<&codex_login::NamedChatgptAccount>,
+    ) -> bool {
+        true
+    }
 }
 
 pub type ModelsManagerFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;

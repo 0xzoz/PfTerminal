@@ -111,8 +111,11 @@ async fn connectors_follow_a_mid_session_account_switch() {
     }
 }
 
-/// The sign-in the ledger prices requests under follows the switch (a named
-/// API-key account here, the default ChatGPT login before and after).
+/// The sign-in the ledger prices a request under is that of the request's
+/// own provider: after a switch to the named API-key account its requests
+/// are priced as API-key requests, while a request still going to the
+/// default provider (a turn that started before the switch) keeps the
+/// default ChatGPT login's mode.
 #[tokio::test]
 async fn accounting_follows_a_mid_session_account_switch() {
     let (session, _home) = session_with_accounts().await;
@@ -122,13 +125,90 @@ async fn accounting_follows_a_mid_session_account_switch() {
             session.codex_home().await.to_path_buf(),
         ),
     );
-    let mode = || crate::accounting_extensions::accounting_auth_mode(&session);
-    assert_eq!(mode().await, Some(AuthMode::Chatgpt));
+    let default_provider = session.provider().await;
+    let mode = |provider| crate::accounting_extensions::accounting_auth_mode(&session, provider);
+    assert_eq!(mode(&default_provider).await, Some(AuthMode::Chatgpt));
 
     switch_to(&session, "openai-work").await;
-    assert_eq!(mode().await, Some(AuthMode::ApiKey));
+    let work_provider = session.provider().await;
+    assert_eq!(mode(&work_provider).await, Some(AuthMode::ApiKey));
+    assert_eq!(mode(&default_provider).await, Some(AuthMode::Chatgpt));
     switch_to(&session, "openai").await;
-    assert_eq!(mode().await, Some(AuthMode::Chatgpt));
+    assert_eq!(
+        mode(&session.provider().await).await,
+        Some(AuthMode::Chatgpt)
+    );
+}
+
+/// The MCP prewarm worker keeps running across switches, including back
+/// from an account whose manager is gone by then, and reconnects the
+/// connectors with each new account.
+#[tokio::test]
+async fn the_connector_worker_survives_switches_and_reconnects() {
+    let (session, _home) = session_with_accounts().await;
+    let (_requests, requests_rx) = async_channel::bounded(1);
+    session.start_mcp_prewarm_worker(
+        requests_rx,
+        session.services.auth_manager().auth_change_receiver(),
+    );
+    for (provider_id, key) in [
+        ("openai-work", WORK_KEY),
+        ("openai", DEFAULT_KEY),
+        ("openai-play", PLAY_KEY),
+        ("openai", DEFAULT_KEY),
+    ] {
+        switch_to(&session, provider_id).await;
+        assert_eq!(active_key(&session).as_deref(), Some(key));
+        let auth = session.services.auth_manager().auth_cached();
+        let reconnected = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !session
+                .services
+                .mcp_runtime
+                .current_auth_matches(auth.as_ref())
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(
+            reconnected.is_ok(),
+            "{provider_id}: the worker did not reconnect"
+        );
+        let worker_running = session
+            .mcp_prewarm_task
+            .lock()
+            .expect("worker slot")
+            .as_ref()
+            .is_some_and(|worker| !worker.is_finished());
+        assert!(worker_running, "{provider_id}: the worker stopped");
+    }
+    session.stop_mcp_prewarm_worker().await;
+}
+
+/// A turn whose settings change the provider (`Op::UserInput` with thread
+/// settings) moves the account too, as `update_settings` does.
+#[tokio::test]
+async fn a_turn_that_changes_the_provider_moves_the_account() {
+    let (session, _home) = session_with_accounts().await;
+    session.refresh_mcp_if_dirty().await;
+    session
+        .new_turn_with_sub_id(
+            "turn-1".to_string(),
+            SessionSettingsUpdate {
+                model_provider: Some("openai-work".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("turn");
+    assert_eq!(
+        (
+            active_key(&session).as_deref(),
+            session.services.auth_manager().named_account().cloned()
+        ),
+        (Some(WORK_KEY), Some(account("work")))
+    );
+    assert!(session.mcp_refresh.is_pending());
 }
 
 /// A switch that keeps the same sign-in (another model of the same

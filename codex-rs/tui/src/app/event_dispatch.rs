@@ -2107,9 +2107,8 @@ impl App {
                     }
                 }
                 // PF-84: a switch to another sign-in account waits until the
-                // session has moved to it, so the model list fetched next
-                // (`AppEvent::RefreshModelList`) is that account's.
-                let mut account_changes = false;
+                // session has moved to it, then fetches that account's list.
+                let mut account_switch = None;
                 if let Some(model_provider) = provider.as_ref() {
                     let Some(provider_info) =
                         self.config.model_providers.get(model_provider).cloned()
@@ -2119,9 +2118,8 @@ impl App {
                         ));
                         return Ok(AppRunControl::Continue);
                     };
-                    account_changes =
-                        codex_model_provider::named_sign_in_account(&self.config.model_provider)
-                            != codex_model_provider::named_sign_in_account(&provider_info);
+                    account_switch =
+                        sign_in_account_switch(&self.config.model_provider, &provider_info);
                     self.config.model_provider_id = model_provider.clone();
                     self.config.model_provider = provider_info.clone();
                     self.chat_widget
@@ -2131,8 +2129,19 @@ impl App {
                 }
                 self.chat_widget.set_model(&model);
                 self.refresh_session_header(tui)?;
-                self.sync_active_thread_model_selection(app_server, model, provider, account_changes)
-                    .await;
+                self.sync_active_thread_model_selection(
+                    app_server,
+                    model,
+                    provider,
+                    account_switch.is_some(),
+                )
+                .await;
+                if let Some(account) = account_switch
+                    && self.refresh_model_list(app_server).await
+                {
+                    self.chat_widget
+                        .add_info_message(account_switch_message(account.as_ref()), /*hint*/ None);
+                }
                 self.sync_active_thread_service_tier_to_cached_session()
                     .await;
             }
@@ -4993,20 +5002,6 @@ impl App {
             AppEvent::OpenApprovalsPopup => {
                 self.chat_widget.open_approvals_popup();
             }
-            AppEvent::RefreshModelList { account } => {
-                let label = match account {
-                    Some(account) => format!("{} account `{}`", account.provider_id, account.name),
-                    None => "the default account".to_string(),
-                };
-                if self.refresh_model_list(app_server).await {
-                    self.chat_widget.add_info_message(
-                        format!(
-                            "Connectors, usage and the model list now use {label}; model list refreshed."
-                        ),
-                        /*hint*/ None,
-                    );
-                }
-            }
             AppEvent::OpenAgentPicker => {
                 self.open_agent_picker(app_server).await;
             }
@@ -6638,6 +6633,24 @@ impl App {
             }
         }
     }
+}
+
+/// PF-84: `Some(account)` when moving from `current` to `next` changes the
+/// sign-in account the session uses (`Some(None)`: to the default login).
+pub(super) fn sign_in_account_switch(
+    current: &codex_model_provider_info::ModelProviderInfo,
+    next: &codex_model_provider_info::ModelProviderInfo,
+) -> Option<Option<codex_login::NamedChatgptAccount>> {
+    let account = codex_model_provider::named_sign_in_account(next);
+    (codex_model_provider::named_sign_in_account(current) != account).then_some(account)
+}
+
+pub(super) fn account_switch_message(account: Option<&codex_login::NamedChatgptAccount>) -> String {
+    let label = match account {
+        Some(account) => format!("{} account `{}`", account.provider_id, account.name),
+        None => "the default account".to_string(),
+    };
+    format!("Connectors, usage and the model list now use {label}; model list refreshed.")
 }
 
 #[cfg(test)]

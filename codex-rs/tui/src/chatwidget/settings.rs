@@ -300,12 +300,6 @@ impl ChatWidget {
         model_provider_id: String,
         model_provider: codex_model_provider_info::ModelProviderInfo,
     ) {
-        // PF-84: the model list follows the sign-in account the session uses.
-        let account = codex_model_provider::named_sign_in_account(&model_provider);
-        if codex_model_provider::named_sign_in_account(&self.config.model_provider) != account {
-            self.app_event_tx
-                .send(AppEvent::RefreshModelList { account });
-        }
         self.runtime_model_provider_base_url = model_provider.base_url.clone();
         self.config.model_provider_id = model_provider_id;
         self.config.model_provider = model_provider;

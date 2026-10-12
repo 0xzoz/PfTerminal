@@ -119,3 +119,42 @@ async fn a_default_set_by_a_higher_layer_is_reported() {
         .expect_err("outranked");
     assert!(error.contains("another config layer"), "{error}");
 }
+
+/// PF-84: only a model switch that changes the sign-in account refreshes the
+/// model list (and says so); one between models of the same account does not.
+#[test]
+fn only_a_sign_in_account_change_is_a_switch() {
+    use crate::app::event_dispatch::account_switch_message;
+    use crate::app::event_dispatch::sign_in_account_switch;
+    use codex_model_provider_info::ModelProviderInfo;
+    use codex_model_provider_info::NamedProviderAccount;
+
+    let openai = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
+    let mut work = openai.clone();
+    work.account = Some(NamedProviderAccount {
+        provider_id: "openai".to_string(),
+        name: "work".to_string(),
+    });
+    let zai = codex_model_provider_info::built_in_model_providers(/*openai_base_url*/ None)["zai"]
+        .clone();
+    let work_account = codex_login::NamedChatgptAccount {
+        provider_id: "openai".to_string(),
+        name: "work".to_string(),
+    };
+
+    assert_eq!(
+        sign_in_account_switch(&openai, &work),
+        Some(Some(work_account.clone()))
+    );
+    assert_eq!(sign_in_account_switch(&work, &zai), Some(None));
+    assert_eq!(sign_in_account_switch(&work, &work), None);
+    assert_eq!(sign_in_account_switch(&openai, &zai), None);
+    assert_eq!(
+        account_switch_message(Some(&work_account)),
+        "Connectors, usage and the model list now use openai account `work`; model list refreshed."
+    );
+    assert_eq!(
+        account_switch_message(None),
+        "Connectors, usage and the model list now use the default account; model list refreshed."
+    );
+}
