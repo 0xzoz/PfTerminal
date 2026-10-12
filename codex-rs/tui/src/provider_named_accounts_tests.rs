@@ -15,6 +15,7 @@ fn row(provider_id: &str, account: &str) -> NamedAccountRow {
         name: name(account),
         kinds: vec![ProviderAccountKind::ApiKey],
         fingerprint: Some("0123456789ab".to_string()),
+        aws_profile: None,
     }
 }
 
@@ -69,6 +70,12 @@ fn only_providers_that_can_hold_accounts_offer_add() {
     };
     assert_eq!(add_methods("openai", &openai_login), Vec::new());
     assert_eq!(add_methods("Bad Id", &api_key), Vec::new());
+    // PF-84-S06: Bedrock takes AWS profile accounts, unless it uses command auth.
+    let bedrock = ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None);
+    assert_eq!(
+        add_methods("amazon-bedrock", &bedrock),
+        vec![AddAccountMethod::AwsProfile]
+    );
     assert_eq!(
         add_methods("plain", &ModelProviderInfo::default()),
         Vec::new()
@@ -169,4 +176,42 @@ fn save_rename_and_remove_touch_only_that_account() {
         )
         .is_err()
     );
+}
+
+/// PF-84-S06: an AWS profile account stores a validated, non-secret profile
+/// name that the row shows.
+#[test]
+fn aws_profile_accounts_store_and_show_the_profile_name() {
+    let home = tempfile::tempdir().expect("home");
+    assert_eq!(
+        save_account(
+            home.path().to_path_buf(),
+            "amazon-bedrock",
+            &name("work"),
+            AddAccountMethod::AwsProfile,
+            AccountValue::new("not a profile".to_string()),
+        ),
+        Err(codex_vault::ProviderAccountError::InvalidAwsProfile.to_string())
+    );
+    save_account(
+        home.path().to_path_buf(),
+        "amazon-bedrock",
+        &name("work"),
+        AddAccountMethod::AwsProfile,
+        AccountValue::new(" corp-dev \n".to_string()),
+    )
+    .expect("save");
+    let rows = load_rows(home.path()).expect("rows");
+    assert_eq!(
+        rows.iter()
+            .map(|row| (row.aws_profile.clone(), row.kinds.clone()))
+            .collect::<Vec<_>>(),
+        vec![(
+            Some("corp-dev".to_string()),
+            vec![ProviderAccountKind::AwsProfile]
+        )]
+    );
+    let mut row = rows[0].clone();
+    row.fingerprint = Some("0123456789ab".to_string());
+    assert_eq!(row_detail(&row), "AWS profile `corp-dev` · fp 0123456789ab");
 }
