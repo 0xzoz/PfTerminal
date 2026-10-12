@@ -20,10 +20,12 @@
 //! - the Corbanu home's runtime entries (`tmp` holds the sandbox launchers),
 //!   under Moderate and Aggressive, even where an approval lifted the other
 //!   rules, and never with a grant (#442);
+//! - under Aggressive, the project's `.codex` and `.agents`, never with a
+//!   grant either (#520), refused before anyone is asked (#565);
 //! - under Aggressive, the other read-only paths (start-up files, git hooks
-//!   and config, the project's `.codex` and `.agents`) unless an Aggressive
-//!   grant for the run lifted them;
-//! - under Moderate, those other paths unless a person's fresh approval of
+//!   and config) unless an Aggressive grant for the run lifted them;
+//! - under Moderate, the other read-only paths and the project's `.codex`
+//!   and `.agents` unless a person's fresh approval of
 //!   this command allowed it (Travis, 2026-10-11): not the automatic
 //!   reviewer, a permission hook, a remembered approval or a stored grant.
 //!   Grants never carry them, at either level.
