@@ -10,6 +10,7 @@
 //!   check, and `tool_use` IDs must match `^[a-zA-Z0-9_-]+$` (400).
 //! - Chat Completions: accepts the request; the test checks no encrypted
 //!   or signed state reaches it.
+#![allow(clippy::unwrap_used)]
 
 use std::sync::Arc;
 use std::sync::Mutex;
