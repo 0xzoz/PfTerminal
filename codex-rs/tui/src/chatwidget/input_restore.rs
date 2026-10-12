@@ -162,7 +162,7 @@ impl ChatWidget {
             } else if kill_switch_stopped {
                 // #507: the warning above says why and how to undo it.
                 self.add_to_history(history_cell::new_error_event(
-                    "Turn stopped by the security kill switch.".to_string(),
+                    super::KILL_SWITCH_TURN_STOPPED.to_string(),
                 ));
             } else {
                 self.add_to_history(history_cell::new_error_event(

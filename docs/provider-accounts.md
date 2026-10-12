@@ -11,8 +11,11 @@ list`). Turn the feature on with `--enable named_accounts` or
 
 For a provider, the first of these wins: an explicit `--account` for that
 provider (or a spawn's `account`), the account a resumed thread recorded (or a
-worker's parent runs on), `[provider_accounts] <provider> = "<name>"`,
-`default`.
+worker's parent, or a fork's source conversation, runs on),
+`[provider_accounts] <provider> = "<name>"`, `default`.
+
+A fork (`/fork`, editing an earlier prompt, `/side`, `corbanu fork`) runs on
+the account its source conversation runs on, and `/status` names it.
 
 - `--account <name>` selects an account of the provider you launch with. On
   `resume`, write `<provider>:<name>` if the thread runs on another provider.
@@ -42,17 +45,39 @@ account `ghost` of provider `zai` is not configured; add it with
 ```
 
 `corbanu exec` and resume fail at thread start. The TUI exits with this text
-before any sign-in screen, also when resuming (choose the account with
-`--account`); with a remote app server, the server refuses at thread start.
-A resumed thread runs on its recorded account. `corbanu resume` (an id,
-`--last` or the picker) and `/resume` use it without `--account`, also in a
-home with no default key: the TUI picks the thread first, so no API-key screen
-appears. If that account no longer exists, the TUI prefixes the text above with
-"This conversation ran on zai account `ghost` and resumes on it:". An explicit
-`--account` of the same provider still wins. With the feature off, the
-resume is refused and names the recorded account (`--account
-<provider>:default` resumes on the default credentials). A rejected key names the account and
-its `corbanu account add` recovery; the default credential is unchanged.
+before any sign-in screen; with a remote app server, the server refuses at
+thread start.
+
+A resumed thread runs on its recorded provider and account. `corbanu resume`
+(an id, `--last` or the picker) and `/resume` use them without `--account`.
+With `-m`, `-c model_provider` or a profile model, the thread runs on the
+session's provider instead, and another provider's recorded account does not
+apply.
+
+- **No default key, or a home configured for another provider:** the TUI
+  picks the thread first, so no sign-in screen appears. Esc in that picker
+  quits, because a new session would need a sign-in.
+- **`[provider_accounts]` names a missing account:** that entry does not
+  apply to the thread, so resume works on the recorded account.
+- **The recorded account no longer exists:** the TUI exits with the text
+  above, prefixed with "This conversation ran on zai account `ghost` and
+  resumes on it:". Inside a session, `/resume` shows it and stays on the
+  current conversation; there the recovery is "add it or pick another account
+  in `/providers`".
+- **The recorded provider has no credentials in this home:** the TUI exits
+  and says how to set them up (`corbanu -c model_provider="zai"`), instead of
+  the configured provider's sign-in. If this home does not define that
+  provider at all, the TUI names it instead of showing the sign-in.
+
+`corbanu fork` keeps the launch check: a missing `[provider_accounts]` entry
+refuses it before the fork is chosen, even though the fork would run on the
+source conversation's account; `--account` picks another one.
+
+An explicit `--account` of the same provider still wins. With the feature off,
+the resume is refused and names the recorded account (`--account
+<provider>:default` resumes on the default credentials). A rejected key names
+the account and its `corbanu account add` recovery; the default credential is
+unchanged.
 
 ## Usage per account in `/status`
 

@@ -290,9 +290,12 @@ async fn status_account_usage_lists_the_active_providers_accounts() {
         "{rendered}"
     );
     assert!(!rendered.contains("alt"), "{rendered}");
+    assert!(rendered.contains("· account default"), "{rendered}");
 
-    // A resumed thread runs on the account the app server reported.
+    // A resumed thread or a fork runs on the account the app server
+    // reported; the provider line names that account too (#555).
     chat.thread_provider_account = Some("zai:work".to_string());
     let rendered = render_status(&mut chat, &mut rx);
     assert!(rendered.contains("work (active)"), "{rendered}");
+    assert!(rendered.contains("· account work"), "{rendered}");
 }

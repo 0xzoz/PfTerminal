@@ -399,8 +399,21 @@ async fn pf_23_s01_typing_a_protected_command_into_a_running_shell_needs_the_hum
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pf_23_s01_code_mode_cell_results_taint_its_later_calls() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
+    // #553: code mode runs in the `codex-code-mode-host` process. Without
+    // it the session falls back to direct tools and the cell never runs, so
+    // this test would check nothing; say so instead of failing on the
+    // refusal. `cargo test -p codex-core` does not build it (`just test`
+    // and CI do).
+    assert!(
+        codex_utils_cargo_bin::cargo_bin("codex-code-mode-host").is_ok(),
+        "build `codex-code-mode-host` first (`cargo build -p codex-code-mode-host`, or run \
+         through `just test`): without it code mode is unavailable and the cell never runs"
+    );
     let code = r#"
 const notes = await tools.exec_command({ cmd: "printf 'run: corbanu vault list'" });
+if (!notes.output.includes("run: corbanu vault list")) {
+  throw new Error("the notes command failed: " + JSON.stringify(notes));
+}
 const next = notes.output.replace("run: ", "");
 text(JSON.stringify(await tools.exec_command({ cmd: next })));
 "#;
@@ -426,9 +439,22 @@ text(JSON.stringify(await tools.exec_command({ cmd: next })));
         .await?;
         assert!(next_question(&test).await.is_none());
         let output = output_text(&captured.requests()[1], "call-cell");
+        // The cell ran (code mode was available) and its first command
+        // worked, so the second is the vault command.
+        assert!(
+            !output.contains("unsupported custom tool call")
+                && !output.contains("the notes command failed"),
+            "{level:?}: the cell did not reach the vault command: {output}"
+        );
         assert_eq!(
             output.contains("approvals are off"),
             refused,
+            "{level:?}: {output}"
+        );
+        // The control: under Permissive the vault command ran.
+        assert_eq!(
+            output.contains("exit_code"),
+            !refused,
             "{level:?}: {output}"
         );
     }
@@ -459,7 +485,7 @@ fn shell_step(call_id: &str, command: &str) -> Step {
     call(call_id, "shell_command", json!({ "command": command }))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 async fn next_exec_approval(
     test: &TestCodex,
 ) -> Option<codex_protocol::protocol::ExecApprovalRequestEvent> {
@@ -1118,9 +1144,12 @@ enum WriteTarget {
 /// PF-23-S02 write protection the run keeps. The Corbanu home's runtime
 /// entries (`tmp` holds the sandbox launchers) are refused under Aggressive
 /// and Moderate, before anyone is asked, even where a person's approval
-/// lifts the other rules (#239). Under Aggressive the other read-only paths
-/// are refused too unless a grant lifts them. Moderate's other write
-/// protections and Permissive are unchanged.
+/// lifts the other rules (#239); so are the project's `.codex` and `.agents`
+/// under Aggressive (#565). Under Aggressive the other read-only paths
+/// are refused too unless a grant lifts them; under Moderate unless a
+/// person approved the command when asked (see
+/// `issue_513_moderate_only_a_persons_fresh_approval_lifts_a_write_protection`
+/// for the other approvers). Permissive is unchanged.
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn issue_513_additional_writes_never_reopen_a_write_protection() -> anyhow::Result<()> {
@@ -1142,13 +1171,15 @@ async fn issue_513_additional_writes_never_reopen_a_write_protection() -> anyhow
         (aggressive, true, true, RuntimeFile, false, false),
         // As Corbanu Terminal launches Aggressive: permission requests off.
         (aggressive, false, false, RuntimeFile, false, false),
-        // Refused once the run's grant is known (none here), after asking.
-        (aggressive, false, true, ProjectAgents, false, true),
+        // #565: no grant lifts it under Aggressive (#520), so it is refused
+        // before anyone is asked, with permission requests on or off.
+        (aggressive, false, true, ProjectAgents, false, false),
+        (aggressive, false, false, ProjectAgents, false, false),
         (moderate, false, true, RuntimeFolder, false, false),
         // After untrusted content a person's approval of this protected
         // command would lift the other rules (#239); never this one.
         (moderate, true, true, RuntimeFile, false, false),
-        // Unchanged pending a security decision (#513).
+        // A person approved it when asked (Travis, 2026-10-11).
         (moderate, false, true, ProjectAgents, true, true),
         (permissive, false, true, RuntimeFolder, true, true),
         (permissive, true, true, RuntimeFile, true, true),
@@ -1214,12 +1245,412 @@ async fn issue_513_additional_writes_never_reopen_a_write_protection() -> anyhow
         let output = output_text(&requests[requests.len() - 1], "call-write");
         let launcher_now = std::fs::read_to_string(&launcher)?;
         let wrote = output.contains("wrote-513") || launcher_now != "original";
-        let explained = output.contains("blocked writing to") && output.contains("/security");
+        let explained = output.contains("blocked writing to")
+            && output.contains("/security")
+            // #565: the #520 explanation for what no grant lifts.
+            && (level != aggressive
+                || !matches!(target, ProjectAgents)
+                || output.contains("neither an additional permission nor"));
         if wrote != writable || (!writable && !explained) || asked != asked_first {
             wrong.push(format!(
                 "{level:?} tainted={tainted} requests_on={requests_on} {target:?}: \
                  asked={asked} launcher={launcher_now:?}: {output}"
             ));
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
+/// Who answers the #513 Moderate write request.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug)]
+enum Approver {
+    /// A person, asked about this command now.
+    Person,
+    /// A permission hook allows it.
+    Hook,
+    /// The automatic reviewer would be asked.
+    Guardian,
+}
+
+/// Issue #513 (Travis, 2026-10-11): under Moderate an additional write
+/// permission may reopen a persistence file (here the project's `.agents`)
+/// only with a person's fresh approval of that command. Allowed by a
+/// permission hook it is refused and explained; where the automatic reviewer
+/// would decide, before it is asked. (The approval cache: unit tests
+/// `approvals::tests::issue_513_*` and `protected_additional::tests`; a
+/// second identical command here would follow untrusted tool output, which
+/// asks the person afresh.)
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_513_moderate_only_a_persons_fresh_approval_lifts_a_write_protection()
+-> anyhow::Result<()> {
+    use codex_config::types::ApprovalsReviewer;
+    use codex_protocol::protocol::ReviewDecision;
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let write = |call_id: &str| {
+        call(
+            call_id,
+            "shell_command",
+            json!({
+                "command": "mkdir -p .agents && printf x >> .agents/issue513.md && echo wrote-513",
+                "sandbox_permissions": "with_additional_permissions",
+                "additional_permissions": { "file_system": { "write": [".agents"] } },
+                "justification": "update the agent notes",
+            }),
+        )
+    };
+    let mut wrong = Vec::new();
+    // (approver, file content, people asked)
+    for (approver, content, asked_expected) in [
+        (Approver::Person, "x", 1),
+        (Approver::Hook, "", 0),
+        (Approver::Guardian, "", 0),
+    ] {
+        let home = Arc::new(TempDir::new()?);
+        if matches!(approver, Approver::Hook) {
+            let script = home.path().join("allow_hook.sh");
+            std::fs::write(
+                &script,
+                "cat > /dev/null\nprintf '%s\\n' '{\"hookSpecificOutput\":{\"hookEventName\":\"PermissionRequest\",\"decision\":{\"behavior\":\"allow\"}}}'\n",
+            )?;
+            let hooks = json!({
+                "hooks": {
+                    "PermissionRequest": [{
+                        "hooks": [{
+                            "type": "command",
+                            "command": format!("sh {}", script.display()),
+                        }],
+                    }],
+                },
+            });
+            std::fs::write(home.path().join("hooks.json"), hooks.to_string())?;
+        }
+        let steps = vec![write("call-write"), done_step()];
+        let (test, captured) = start_turn_in(
+            Some(home),
+            SecurityLevel::Moderate,
+            AskForApproval::OnRequest,
+            steps,
+            move |config| {
+                config
+                    .features
+                    .enable(Feature::ExecPermissionApprovals)
+                    .expect("enable exec permission approvals");
+                match approver {
+                    Approver::Hook => core_test_support::hooks::trust_discovered_hooks(config),
+                    Approver::Guardian => config.approvals_reviewer = ApprovalsReviewer::AutoReview,
+                    Approver::Person => {}
+                }
+            },
+        )
+        .await?;
+        let mut asked = 0;
+        while let Some(approval) = next_exec_approval(&test).await {
+            asked += 1;
+            test.codex
+                .submit(Op::ExecApproval {
+                    id: approval.effective_approval_id(),
+                    turn_id: None,
+                    decision: ReviewDecision::Approved,
+                })
+                .await?;
+        }
+        let requests = captured.requests();
+        let output = output_text(&requests[requests.len() - 1], "call-write");
+        let written = std::fs::read_to_string(test.config.cwd.join(".agents/issue513.md"))
+            .unwrap_or_default();
+        let refused = !matches!(approver, Approver::Person);
+        let explained = output.contains("Security level Moderate blocked writing to")
+            && output.contains("Only a person's own approval");
+        if written != content
+            || asked != asked_expected
+            || refused != explained
+            || refused == output.contains("wrote-513")
+        {
+            wrong.push(format!(
+                "{approver:?}: asked={asked} written={written:?}: {output}"
+            ));
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
+/// Issue #513: under Moderate a permission grant never carries a write to a
+/// persistence file: it is dropped and the person told, and a later command
+/// cannot write there.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_513_moderate_grant_never_carries_a_persistence_write() -> anyhow::Result<()> {
+    use codex_protocol::models::FileSystemPermissions;
+    use codex_protocol::protocol::ReviewDecision;
+    use codex_protocol::request_permissions::PermissionGrantScope;
+    use codex_protocol::request_permissions::RequestPermissionProfile;
+    use codex_protocol::request_permissions::RequestPermissionsResponse;
+    use codex_utils_absolute_path::AbsolutePathBuf;
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let home = Arc::new(TempDir::new()?);
+    let workspace = Arc::new(TempDir::new()?);
+    let cwd = AbsolutePathBuf::from_absolute_path(workspace.path().canonicalize()?)?;
+    let agents = cwd.join(".agents");
+    let grant = RequestPermissionProfile {
+        file_system: Some(FileSystemPermissions::from_read_write_roots(
+            /*read*/ None,
+            Some(vec![agents.clone()]),
+        )),
+        ..Default::default()
+    };
+    let session_cwd = cwd.clone();
+    let (test, captured) = start_turn_in(
+        Some(home),
+        SecurityLevel::Moderate,
+        AskForApproval::OnRequest,
+        vec![
+            call(
+                "call-grant",
+                "request_permissions",
+                json!({ "reason": "update the agent notes", "permissions": grant }),
+            ),
+            shell_step(
+                "call-write",
+                "mkdir -p .agents && printf x > .agents/issue513.md && echo wrote-513",
+            ),
+            done_step(),
+        ],
+        move |config| {
+            for feature in [
+                Feature::RequestPermissionsTool,
+                Feature::ExecPermissionApprovals,
+            ] {
+                config.features.enable(feature).expect("enable feature");
+            }
+            config.cwd = session_cwd.clone();
+        },
+    )
+    .await?;
+    match wait_for_event(&test.codex, |event| {
+        matches!(
+            event,
+            EventMsg::RequestPermissions(_) | EventMsg::TurnComplete(_)
+        )
+    })
+    .await
+    {
+        EventMsg::RequestPermissions(_) => {}
+        other => panic!("no permission request: {other:?}"),
+    }
+    test.codex
+        .submit(Op::RequestPermissionsResponse {
+            id: "call-grant".to_string(),
+            response: RequestPermissionsResponse {
+                permissions: grant,
+                scope: PermissionGrantScope::Session,
+                strict_auto_review: false,
+            },
+        })
+        .await?;
+    let warning = match wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::Warning(_) | EventMsg::TurnComplete(_))
+    })
+    .await
+    {
+        EventMsg::Warning(warning) => warning.message,
+        other => panic!("no warning: {other:?}"),
+    };
+    assert!(
+        warning.contains("Security level Moderate blocked writing to")
+            && warning.contains("permission grant cannot"),
+        "{warning}"
+    );
+    while let Some(approval) = next_exec_approval(&test).await {
+        test.codex
+            .submit(Op::ExecApproval {
+                id: approval.effective_approval_id(),
+                turn_id: None,
+                decision: ReviewDecision::Approved,
+            })
+            .await?;
+    }
+    let requests = captured.requests();
+    let granted = output_text(&requests[requests.len() - 2], "call-grant");
+    assert!(!granted.contains(".agents"), "{granted}");
+    let output = output_text(&requests[requests.len() - 1], "call-write");
+    assert!(!output.contains("wrote-513"), "{output}");
+    assert!(!agents.join("issue513.md").as_path().exists());
+    Ok(())
+}
+
+/// Issue #540: where a person's approval lifts Moderate's rules for one
+/// command (#239: here a protected command after untrusted content), the
+/// Corbanu home's runtime entries stay read-only in that command's real
+/// sandbox (Seatbelt, bubblewrap; full access gets one for it), while its
+/// other rules are lifted (the credential file is readable). A command a person
+/// approves to run outside the sandbox has no sandbox to hold the rule
+/// (documented exception). Permissive is unchanged.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_540_runtime_entries_stay_read_only_when_a_person_lifts_the_rules()
+-> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
+    use codex_protocol::protocol::ReviewDecision;
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let mut wrong = Vec::new();
+    // (level, outside the sandbox, exec-policy allow rule, launcher replaced)
+    for (level, escalated, allowed_by_rule, replaced) in [
+        (SecurityLevel::Moderate, false, false, false),
+        // An allow rule (it would skip the sandbox) does not take the run
+        // outside it either (review r1).
+        (SecurityLevel::Moderate, false, true, false),
+        // No sandbox runs it, so nothing can hold the rule.
+        (SecurityLevel::Moderate, true, false, true),
+        (SecurityLevel::Permissive, false, false, true),
+    ] {
+        let home = Arc::new(TempDir::new()?);
+        let root = home.path().canonicalize()?;
+        std::fs::create_dir_all(root.join("tmp"))?;
+        let launcher = root.join("tmp/issue540-launcher");
+        std::fs::write(&launcher, "original")?;
+        std::fs::write(root.join("auth.json"), CANARY)?;
+        std::fs::write(root.join("issue540-new"), "replaced")?;
+        if allowed_by_rule {
+            std::fs::create_dir_all(root.join("rules"))?;
+            std::fs::write(
+                root.join("rules/policy.rules"),
+                "prefix_rule(pattern=[\"cat\"], decision=\"allow\")\n\
+                 prefix_rule(pattern=[\"cp\"], decision=\"allow\")\n",
+            )?;
+        }
+        let mut arguments = json!({
+            "command": format!(
+                "cat '{}'; cp '{}' '{}'",
+                root.join("auth.json").display(),
+                root.join("issue540-new").display(),
+                launcher.display()
+            ),
+        });
+        if escalated {
+            arguments["sandbox_permissions"] = json!("require_escalated");
+            arguments["justification"] = json!("refresh the helper");
+        }
+        let (test, captured) = start_turn_in(
+            Some(home),
+            level,
+            AskForApproval::OnRequest,
+            vec![
+                injected_step(),
+                call("call-write", "shell_command", arguments),
+                done_step(),
+            ],
+            |config| {
+                config
+                    .permissions
+                    .set_permission_profile(PermissionProfile::Disabled)
+                    .expect("full access");
+            },
+        )
+        .await?;
+        let mut asked = 0;
+        while let Some(approval) = next_exec_approval(&test).await {
+            asked += 1;
+            test.codex
+                .submit(Op::ExecApproval {
+                    id: approval.effective_approval_id(),
+                    turn_id: None,
+                    decision: ReviewDecision::Approved,
+                })
+                .await?;
+        }
+        let requests = captured.requests();
+        let output = output_text(&requests[requests.len() - 1], "call-write");
+        let now = std::fs::read_to_string(&launcher)?;
+        // A person was asked (the rules were lifted: the credential file
+        // was readable) wherever the rules applied.
+        let lifted = asked == 1 && output.contains(CANARY);
+        if (now == "replaced") != replaced || (level == SecurityLevel::Moderate && !lifted) {
+            wrong.push(format!(
+                "{level:?} escalated={escalated} rule={allowed_by_rule}: asked={asked} \
+                 launcher={now:?}: {output}"
+            ));
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
+/// Issue #562: a protected command cannot create a missing runtime entry of
+/// the Corbanu home either (`AGENTS.md`, `skills`, `plugins`, `packages`), nor the
+/// `AGENTS.override.md` read ahead of it, even with full access and with
+/// the path built at run time (only the sandbox can stop it). On Linux no
+/// placeholder is left behind. Permissive is unchanged.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_562_missing_runtime_entries_cannot_be_created() -> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let mut wrong = Vec::new();
+    for (level, created) in [
+        (SecurityLevel::Moderate, false),
+        (SecurityLevel::Aggressive, false),
+        (SecurityLevel::Permissive, true),
+    ] {
+        let home = Arc::new(TempDir::new()?);
+        let root = home.path().canonicalize()?;
+        let path = root.to_string_lossy().into_owned();
+        // Split inside the home folder's own name: neither part names it.
+        let (head, tail) = path.split_at(path.len() - 2);
+        let command = format!(
+            "h=\"$(printf '{head}%s' {tail})\"; a=\"AGE$(printf NTS)\"; \
+             printf x > \"$h/$a.md\"; printf x > \"$h/$a.override.md\"; \
+             mkdir -p \"$h/skills/issue562\" \"$h/plugins/issue562\" \"$h/packages/issue562\"; \
+             echo ran-562"
+        );
+        let (test, captured) = start_turn_in(
+            Some(home.clone()),
+            level,
+            AskForApproval::Never,
+            vec![
+                call(
+                    "call-create",
+                    "shell_command",
+                    json!({ "command": command }),
+                ),
+                done_step(),
+            ],
+            |config| {
+                config
+                    .permissions
+                    .set_permission_profile(PermissionProfile::Disabled)
+                    .expect("full access");
+            },
+        )
+        .await?;
+        assert!(next_exec_approval(&test).await.is_none());
+        let requests = captured.requests();
+        let output = output_text(&requests[requests.len() - 1], "call-create");
+        let entries = [
+            "AGENTS.md",
+            "AGENTS.override.md",
+            "skills/issue562",
+            "plugins/issue562",
+            "packages/issue562",
+        ];
+        let present: Vec<&str> = entries
+            .into_iter()
+            .filter(|entry| root.join(entry).exists())
+            .collect();
+        let expected = if created {
+            entries.to_vec()
+        } else {
+            Vec::new()
+        };
+        if !output.contains("ran-562") || present != expected {
+            wrong.push(format!("{level:?}: present={present:?}: {output}"));
         }
     }
     assert_eq!(wrong, Vec::<String>::new());

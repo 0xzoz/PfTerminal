@@ -656,8 +656,15 @@ impl CoreShellActionProvider {
         // fallback function.
         let decision_driven_by_policy =
             Self::decision_driven_by_policy(&evaluation.matched_rules, evaluation.decision);
+        // Issue #540: where the protected-path rules apply, an intercepted
+        // exec leaves the sandbox only within a request a person approved to
+        // run outside it, never through an allow rule (as in the
+        // orchestrator).
         let unsandboxed_allowed =
-            unsandboxed_execution_allowed(&self.permission_profile.file_system_sandbox_policy());
+            unsandboxed_execution_allowed(&self.permission_profile.file_system_sandbox_policy())
+                && (self.sandbox_permissions == SandboxPermissions::RequireEscalated
+                    || crate::security::protected_additional::protected_level(&self.session)
+                        .is_none());
         let needs_escalation = match self.sandbox_permissions {
             SandboxPermissions::UseDefault => unsandboxed_allowed && decision_driven_by_policy,
             SandboxPermissions::RequireEscalated => unsandboxed_allowed,

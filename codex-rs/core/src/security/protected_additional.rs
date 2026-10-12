@@ -20,12 +20,15 @@
 //! - the Corbanu home's runtime entries (`tmp` holds the sandbox launchers),
 //!   under Moderate and Aggressive, even where an approval lifted the other
 //!   rules, and never with a grant (#442);
+//! - under Aggressive, the project's `.codex` and `.agents`, never with a
+//!   grant either (#520), refused before anyone is asked (#565);
 //! - under Aggressive, the other read-only paths (start-up files, git hooks
-//!   and config, the project's `.codex` and `.agents`) unless an Aggressive
-//!   grant for the run lifted them.
-//!
-//! Moderate's other write protections are unchanged here (#513 records that
-//! decision for security sign-off).
+//!   and config) unless an Aggressive grant for the run lifted them;
+//! - under Moderate, the other read-only paths and the project's `.codex`
+//!   and `.agents` unless a person's fresh approval of
+//!   this command allowed it (Travis, 2026-10-11): not the automatic
+//!   reviewer, a permission hook, a remembered approval or a stored grant.
+//!   Grants never carry them, at either level.
 
 use std::path::Path;
 
@@ -44,22 +47,65 @@ use super::protected_surface::ReadDenials;
 /// reopen in a run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReadOnlyScope {
-    /// Only the Corbanu home's runtime entries: Moderate, and wherever an
-    /// approval lifted the other rules for the run.
+    /// Only the Corbanu home's runtime entries: under Moderate where a
+    /// person's fresh approval decides the run, and before the approval
+    /// wherever one may still lift the others.
     Runtime,
-    /// Every read-only path the denials keep (Aggressive; a grant for the
-    /// run has already lifted what it lifts).
+    /// The read-only paths no grant lifts (`ReadDenials::never_lifted_paths`:
+    /// the runtime entries and the project's `.codex` and `.agents`): under
+    /// Aggressive before the approval, so nobody is asked about a write that
+    /// is refused afterwards whatever the answer (#565).
+    NeverLifted,
+    /// Every read-only path the denials keep (Aggressive, where a grant for
+    /// the run has already lifted what it lifts; Moderate without a person's
+    /// fresh approval; grants).
     Kept,
 }
 
 impl ReadOnlyScope {
-    /// The scope once the run's rules are known.
-    pub(crate) fn for_level(level: SecurityLevel) -> Self {
+    /// The scope before the run's approval. Under Moderate the persistence
+    /// files count up front where no person will decide the run
+    /// (`person_may_decide`: the automatic reviewer or nobody is asked).
+    /// Under Aggressive the paths no grant lifts count up front (#565); the
+    /// others wait for the run's grant, known after the approval.
+    pub(crate) fn before_approval(level: SecurityLevel, person_may_decide: bool) -> Self {
         match level {
-            SecurityLevel::Aggressive => Self::Kept,
+            SecurityLevel::Moderate if !person_may_decide => Self::Kept,
+            SecurityLevel::Aggressive => Self::NeverLifted,
             _ => Self::Runtime,
         }
     }
+
+    /// The scope once the run's rules are known. `by_person`: a person
+    /// approved this command when asked about it now.
+    pub(crate) fn after_approval(level: SecurityLevel, by_person: bool) -> Self {
+        match level {
+            SecurityLevel::Aggressive => Self::Kept,
+            SecurityLevel::Moderate if !by_person => Self::Kept,
+            _ => Self::Runtime,
+        }
+    }
+
+    /// The scope for a permission grant, which every later command carries
+    /// with nobody asked about it.
+    pub(crate) fn for_grant(level: SecurityLevel) -> Self {
+        match level {
+            SecurityLevel::Aggressive | SecurityLevel::Moderate => Self::Kept,
+            SecurityLevel::Permissive => Self::Runtime,
+        }
+    }
+}
+
+/// Issue #513: what may lift a read-only path's protection for one command.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WriteRule {
+    /// Nothing: the Corbanu home's runtime entries.
+    Runtime,
+    /// Under Moderate a person's fresh approval; under Aggressive nothing
+    /// (`ReadDenials::never_lifted_paths`).
+    NeverGranted,
+    /// Under Moderate a person's fresh approval; under Aggressive a grant.
+    Liftable,
 }
 
 /// What an additional permission would open, and so why it is refused.
@@ -67,9 +113,9 @@ impl ReadOnlyScope {
 pub(crate) enum Opened {
     /// A protected path it would make readable.
     Read(String),
-    /// A read-only path it would make writable. `grantable`: an Aggressive
-    /// grant for the command would lift this protection (#442).
-    Write { path: String, grantable: bool },
+    /// A read-only path it would make writable, and what may lift its
+    /// protection.
+    Write { path: String, rule: WriteRule },
     /// The check itself failed (#524): refused.
     Unchecked,
 }
@@ -79,7 +125,7 @@ impl Opened {
     pub(crate) fn refusal(&self, level: SecurityLevel) -> String {
         match self {
             Self::Read(path) => refusal(level, path),
-            Self::Write { path, grantable } => write_refusal(level, path, *grantable),
+            Self::Write { path, rule } => write_refusal(level, path, *rule),
             Self::Unchecked => unchecked_refusal(level),
         }
     }
@@ -137,6 +183,7 @@ pub(crate) fn opened_read_only_path(
     let entries = &additional.file_system.as_ref()?.entries;
     let paths: Vec<&AbsolutePathBuf> = match scope {
         ReadOnlyScope::Runtime => denials.runtime_read_only_paths().collect(),
+        ReadOnlyScope::NeverLifted => denials.never_lifted_paths().collect(),
         ReadOnlyScope::Kept => denials.read_only_paths().collect(),
     };
     if paths.is_empty() {
@@ -222,10 +269,20 @@ pub(crate) fn opened(
         cwds,
         check.writes,
     )?;
-    let grantable = !check.denials.never_lifted_paths().any(|kept| *kept == path);
+    let rule = if check
+        .denials
+        .runtime_read_only_paths()
+        .any(|kept| *kept == path)
+    {
+        WriteRule::Runtime
+    } else if check.denials.never_lifted_paths().any(|kept| *kept == path) {
+        WriteRule::NeverGranted
+    } else {
+        WriteRule::Liftable
+    };
     Some(Opened::Write {
         path: path.display().to_string(),
-        grantable,
+        rule,
     })
 }
 
@@ -297,10 +354,10 @@ pub(crate) fn protected_level(session: &crate::session::session::Session) -> Opt
 /// Issues #245 and #513: a permission grant (`request_permissions`)
 /// without the entries that would open a protected path or reopen a
 /// read-only one under `level`'s rules, and the refusal to show when any
-/// were dropped. Every later command and file tool carries the grant, and
-/// no Aggressive grant is known here, so under Aggressive every read-only
-/// path counts. Each of `configs` is checked as the orchestrator checks a
-/// command; an entry any of them refuses is dropped. Reads folders: call it
+/// were dropped. Every later command and file tool carries the grant with
+/// nobody asked about it, so under Aggressive and Moderate every read-only
+/// path counts (#513). Each of `configs` is checked as the orchestrator
+/// checks a command; an entry any of them refuses is dropped. Reads folders: call it
 /// off the async thread ([`strip_grant_off_thread`]).
 pub(crate) fn strip_grant(
     level: SecurityLevel,
@@ -331,7 +388,7 @@ pub(crate) fn strip_grant(
             denials: &denials,
             protected: protected.as_ref(),
             reads: true,
-            writes: ReadOnlyScope::for_level(level),
+            writes: ReadOnlyScope::for_grant(level),
         };
         let mut cwds = vec![cwd.as_path()];
         cwds.extend(workspace_roots.iter().map(AbsolutePathBuf::as_path));
@@ -410,31 +467,55 @@ pub(crate) fn refusal(level: SecurityLevel, path: &str) -> String {
     }
 }
 
-/// Issue #513: the refusal for an additional permission that would make the
-/// read-only `path` writable. `grantable`: an Aggressive grant for the
-/// command lifts this protection.
-pub(crate) fn write_refusal(level: SecurityLevel, path: &str, grantable: bool) -> String {
+/// Issue #513: the note on a Moderate approval prompt whose additional
+/// write permission opens the persistence file `path`: approving it is what
+/// lets this one command change it.
+pub(crate) fn persistence_note(path: &str) -> String {
     let path = super::protected_reads::shown_path(path);
-    let level = match level {
-        SecurityLevel::Aggressive => "Aggressive",
-        _ => "Moderate",
-    };
-    if grantable {
-        format!(
-            "Security level {level} blocked writing to `{path}`: files that run code or set \
-             policy later (shell start-up files, git hooks and config, the project's .codex and \
-             .agents) stay read-only, and an additional permission cannot change that. Where a \
+    format!(
+        "Approving lets this command write `{path}`, which runs code or sets policy later \
+         (Moderate keeps it read-only otherwise)."
+    )
+}
+
+/// Issue #513: the refusal for an additional permission that would make the
+/// read-only `path` writable under `level`, by what may lift it (`rule`).
+pub(crate) fn write_refusal(level: SecurityLevel, path: &str, rule: WriteRule) -> String {
+    let path = super::protected_reads::shown_path(path);
+    let switch = "a person can switch to Permissive in /security (it applies after a restart).";
+    match (rule, level) {
+        (WriteRule::Runtime, _) => {
+            let level = match level {
+                SecurityLevel::Aggressive => "Aggressive",
+                _ => "Moderate",
+            };
+            format!(
+                "Security level {level} blocked writing to `{path}`: Corbanu's runtime files (the \
+                 sandbox helpers in its tmp folder, shell snapshots, skills, plugins, packages \
+                 and AGENTS.md) stay read-only, and this cannot be granted, not even once. To \
+                 allow it, {switch}"
+            )
+        }
+        (WriteRule::Liftable, SecurityLevel::Aggressive) => format!(
+            "Security level Aggressive blocked writing to `{path}`: files that run code or set \
+             policy later (shell start-up files, git hooks and config) stay read-only, and an \
+             additional permission cannot change that. Where a \
              person approving the command is offered \"Grant once\", it lifts this for that \
-             command; otherwise a person can switch to Permissive in /security (it applies \
-             after a restart)."
-        )
-    } else {
-        format!(
-            "Security level {level} blocked writing to `{path}`: Corbanu's runtime files (the \
-             sandbox helpers in its tmp folder, shell snapshots, skills, plugins, packages and \
-             AGENTS.md) stay read-only, and this cannot be granted, not even once. To allow it, \
-             a person can switch to Permissive in /security (it applies after a restart)."
-        )
+             command; otherwise {switch}"
+        ),
+        (WriteRule::NeverGranted, SecurityLevel::Aggressive) => format!(
+            "Security level Aggressive blocked writing to `{path}`: it stays read-only under \
+             Aggressive, and neither an additional permission nor \"Grant once\" can change \
+             that. To allow it, {switch}"
+        ),
+        // Moderate (Permissive has no read-only paths).
+        (WriteRule::Liftable | WriteRule::NeverGranted, _) => format!(
+            "Security level Moderate blocked writing to `{path}`: files that run code or set \
+             policy later (shell start-up files, git hooks and config, the project's .codex and \
+             .agents) stay read-only. Only a person's own approval of this command, asked about \
+             it now, lifts that for the command; the automatic reviewer, a permission hook, an \
+             earlier \"don't ask again\" answer or a permission grant cannot. Otherwise {switch}"
+        ),
     }
 }
 

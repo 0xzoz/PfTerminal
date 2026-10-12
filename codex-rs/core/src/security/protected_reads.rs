@@ -204,8 +204,85 @@ pub(crate) async fn denial_explanation(
                     }))
                 .then(|| listing_explanation(&cwd.display().to_string()))
             })
+            // #554: a folder above the home listed recursively (`find ~`,
+            // `ls -aR ~`): the denial line names the home below it.
+            .or_else(|| {
+                unlistable_path_in_lines(
+                    &command,
+                    &cwd,
+                    inputs.user_home.as_deref(),
+                    &inputs.codex_home,
+                    &denial_lines,
+                    &|path| matcher.is_listing_denied(path) && !matcher.is_read_denied(path),
+                )
+                .map(|path| listing_explanation(&path))
+            })
     })
     .await
+}
+
+/// #554: the path a denial line reports, as it spells it, that `unlistable`
+/// accepts. A relative path is taken from the command's folder or from a
+/// folder the command names (`cd ~ && find .`).
+pub(super) fn unlistable_path_in_lines(
+    command: &[String],
+    cwd: &Path,
+    user_home: Option<&Path>,
+    codex_home: &Path,
+    denial_lines: &[String],
+    unlistable: &dyn Fn(&Path) -> bool,
+) -> Option<String> {
+    let mut bases = vec![cwd.to_path_buf()];
+    bases.extend(
+        command
+            .iter()
+            .flat_map(|argument| {
+                shlex::split(argument)
+                    .unwrap_or_else(|| argument.split_whitespace().map(str::to_string).collect())
+            })
+            .map(|word| {
+                word.trim_matches(|c: char| matches!(c, ';' | '|' | '&' | '(' | ')'))
+                    .to_string()
+            })
+            .filter(|word| !word.is_empty() && !word.starts_with('-'))
+            .filter_map(|word| resolve(&word, cwd, user_home, codex_home)),
+    );
+    // Only the Corbanu home is unlistable: skip the other lines (`find ~`
+    // can report many) without looking anything up.
+    let name = codex_home.file_name()?.to_str()?;
+    denial_lines
+        .iter()
+        .filter(|line| line.contains(name))
+        .flat_map(|line| paths_in_denial_line(line))
+        .find(|spelled| {
+            bases
+                .iter()
+                .any(|base| unlistable(&base.join(spelled.as_str())))
+        })
+}
+
+/// The paths a denial line may name: quoted (`find: ‘/x’: Permission
+/// denied`, `ls: cannot open directory '/x': …`) or between the program and
+/// the reason (`ls: /x: Operation not permitted`).
+fn paths_in_denial_line(line: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    for (open, close) in [('‘', '’'), ('\'', '\''), ('"', '"'), ('`', '\'')] {
+        let mut rest = line;
+        while let Some(start) = rest.find(open) {
+            let after = &rest[start + open.len_utf8()..];
+            let Some(end) = after.find(close) else {
+                break;
+            };
+            paths.push(after[..end].to_string());
+            rest = &after[end + close.len_utf8()..];
+        }
+    }
+    let fields: Vec<&str> = line.split(": ").collect();
+    if fields.len() >= 3 {
+        paths.push(fields[1..fields.len() - 1].join(": "));
+    }
+    paths.retain(|path| !path.trim().is_empty());
+    paths
 }
 
 /// #442: the protected path `command` names, under Aggressive: a grant for
@@ -268,7 +345,14 @@ pub(crate) async fn protected_note_in_command(
         };
         word(&|path| matcher.is_read_denied(path))
             .map(ProtectedNote::Read)
-            .or_else(|| word(&|path| matcher.is_listing_denied(path)).map(ProtectedNote::Listing))
+            // #554: Windows does not enforce the listing denial (its sandbox
+            // ignores the entry), so it says nothing about listings there.
+            .or_else(|| {
+                (!cfg!(windows))
+                    .then(|| word(&|path| matcher.is_listing_denied(path)))
+                    .flatten()
+                    .map(ProtectedNote::Listing)
+            })
     })
     .await
 }
@@ -285,6 +369,14 @@ pub(crate) async fn additional_permission_refusal(
 ) -> Option<String> {
     let additional = additional?.clone();
     let inputs = ReadPolicyInputs::capture(session, turn)?;
+    // An external sandbox takes no protected-path rules (and ignores
+    // additional permissions), as in the orchestrator's check.
+    if matches!(
+        inputs.profile,
+        codex_protocol::models::PermissionProfile::External { .. }
+    ) {
+        return None;
+    }
     let cwd = cwd.to_path_buf();
     off_thread(move || {
         let denials = ReadDenials::for_turn(
@@ -295,9 +387,10 @@ pub(crate) async fn additional_permission_refusal(
         );
         let mut cwds = vec![cwd.as_path(), inputs.turn_cwd.as_path()];
         cwds.extend(inputs.workspace_roots.iter().map(AbsolutePathBuf::as_path));
-        // Issue #513: nor a runtime entry of the Corbanu home for writing,
-        // which no grant lifts. Other write protections wait for the run's
-        // grant to be known.
+        // Issue #513: nor a path no grant lifts for writing (#565: the
+        // runtime entries of the Corbanu home and the project's `.codex` and
+        // `.agents`). Other write protections wait for the run's grant to
+        // be known.
         let protected = denials
             .apply(&inputs.profile)
             .map(|protected| protected.file_system_sandbox_policy());
@@ -305,7 +398,7 @@ pub(crate) async fn additional_permission_refusal(
             denials: &denials,
             protected: protected.as_ref(),
             reads: true,
-            writes: super::protected_additional::ReadOnlyScope::Runtime,
+            writes: super::protected_additional::ReadOnlyScope::NeverLifted,
         };
         super::protected_additional::opened(check, &additional, &cwds)
             .map(|opened| opened.refusal(SecurityLevel::Aggressive))

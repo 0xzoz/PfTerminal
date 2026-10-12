@@ -30,5 +30,6 @@ change the real-bwrap test lists the canary (`ls=0`).
 
 ## Not covered
 
-- Windows ignores the entry (the home stays listable there; its protected entries stay denied).
-- A listing from a parent folder (`find ~`, `ls -R ~`) is denied for the home but not explained.
+- Windows ignores the entry (the home stays listable there; its protected entries stay denied). Why it stays so:
+  [#554](../issue-554-20261011/README.md#windows).
+- A listing from a parent folder (`find ~`, `ls -R ~`) is denied for the home; #554 explains it.

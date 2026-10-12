@@ -231,6 +231,78 @@ async fn pf_23_s01_upload_reads_follow_the_denials_after_taint() {
     assert!(readable_under(&policy, &plain, cwd.as_path()));
 }
 
+/// Issue #562: the Corbanu home's runtime entries stay read-only where they
+/// are missing too (on Linux too: bubblewrap holds a missing one with a
+/// placeholder), and `AGENTS.override.md` is denied before it exists.
+#[test]
+fn issue_562_missing_runtime_entries_stay_read_only() {
+    let fx = fixture();
+    let cwd = fx.user_home.join("project");
+    for missing in [
+        "plugins",
+        "packages",
+        ".tmp",
+        "AGENTS.md",
+        "AGENTS.override.md",
+    ] {
+        assert!(!fx.codex_home.join(missing).exists(), "{missing}");
+    }
+    let denials = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)]);
+    let policy = denials
+        .apply(&PermissionProfile::Disabled)
+        .unwrap()
+        .file_system_sandbox_policy();
+    let writable = |path: &Path| policy.can_write_path_with_cwd(path, &cwd);
+    let readable = |path: &Path| policy.can_read_path_with_cwd(path, &cwd);
+    for runtime in [
+        fx.codex_home.join("AGENTS.md"),
+        fx.codex_home.join("plugins/p/plugin.json"),
+        fx.codex_home.join("packages/x"),
+        fx.codex_home.join(".tmp/x"),
+    ] {
+        assert!(!writable(&runtime), "{}", runtime.display());
+        assert!(readable(&runtime), "{}", runtime.display());
+    }
+    let override_md = fx.codex_home.join("AGENTS.override.md");
+    assert!(!writable(&override_md));
+    assert!(!readable(&override_md));
+}
+
+/// Issue #562: on Linux the missing runtime folders are created, empty,
+/// only where the profile could write the Corbanu home, so bubblewrap never
+/// needs a placeholder file where Corbanu expects a folder. `AGENTS.md` is
+/// never created.
+#[test]
+fn issue_562_missing_runtime_folders_are_created_only_where_writable() {
+    let fx = fixture();
+    let cwd = abs(&fx.user_home.join("project"));
+    let folders = ["plugins", "packages", ".tmp"];
+    ReadDenials::for_turn(
+        &fx.codex_home,
+        &cwd,
+        std::slice::from_ref(&cwd),
+        &PermissionProfile::read_only(),
+    );
+    for folder in folders {
+        assert!(!fx.codex_home.join(folder).exists(), "{folder}");
+    }
+    ReadDenials::for_turn(
+        &fx.codex_home,
+        &cwd,
+        std::slice::from_ref(&cwd),
+        &PermissionProfile::Disabled,
+    );
+    for folder in folders {
+        assert_eq!(
+            fx.codex_home.join(folder).is_dir(),
+            cfg!(target_os = "linux"),
+            "{folder}"
+        );
+    }
+    assert!(!fx.codex_home.join("AGENTS.md").exists());
+    assert!(!fx.codex_home.join("AGENTS.override.md").exists());
+}
+
 /// PF-23-S02: files that run code later become read-only wherever the
 /// command could write them; ordinary files stay writable.
 #[test]
@@ -749,6 +821,62 @@ async fn issue_506_file_tools_cannot_list_the_home_under_aggressive() {
         );
         assert!(unlistable.len() <= 1, "{unlistable:?}");
     }
+}
+
+/// #540: where a person's approval lifts Moderate's rules for one command,
+/// only the runtime entries' rule stays: they remain read-only, also under
+/// full access (which then gets a sandbox for it), while credential reads
+/// and persistence writes are lifted.
+#[test]
+fn issue_540_runtime_entries_stay_read_only_when_the_rules_are_lifted() {
+    let fx = fixture();
+    let cwd = fx.user_home.join("project");
+    std::fs::write(fx.user_home.join(".bashrc"), "x").unwrap();
+    for profile in [workspace(&fx.user_home), PermissionProfile::Disabled] {
+        let all = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)]);
+        assert!(all.read_only_paths().count() > all.runtime_read_only_paths().count());
+        let denials = all.runtime_only();
+        assert_eq!(denials.paths().count(), 0);
+        assert_eq!(
+            denials.read_only_paths().count(),
+            denials.runtime_read_only_paths().count()
+        );
+        assert!(denials.matcher().is_none());
+        let lifted = denials.apply(&profile).expect("not an external sandbox");
+        let policy = lifted.file_system_sandbox_policy();
+        assert_eq!(
+            policy.kind,
+            FileSystemSandboxKind::Restricted,
+            "{profile:?}"
+        );
+        let writable = |path: &Path| policy.can_write_path_with_cwd(path, &cwd);
+        for runtime in ["tmp", "tmp/arg0/launcher", "shell_snapshots", "skills"] {
+            assert!(
+                !writable(&fx.codex_home.join(runtime)),
+                "{runtime}: {profile:?}"
+            );
+        }
+        // Persistence files are lifted (the profile's own rules aside).
+        assert!(writable(&fx.user_home.join(".bashrc")), "{profile:?}");
+        assert!(writable(&cwd.join("notes.txt")), "{profile:?}");
+        assert!(
+            policy.can_read_path_with_cwd(&fx.user_home.join(".ssh/id_ed25519"), &cwd),
+            "{profile:?}"
+        );
+        assert!(
+            policy.can_read_path_with_cwd(&fx.codex_home.join("auth.json"), &cwd),
+            "{profile:?}"
+        );
+    }
+    // Full access keeps its network.
+    let lifted = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)])
+        .runtime_only()
+        .apply(&PermissionProfile::Disabled)
+        .unwrap();
+    assert_eq!(
+        lifted.network_sandbox_policy(),
+        NetworkSandboxPolicy::Enabled
+    );
 }
 
 /// A user home reached through a link (`user -> real-user`) holding a

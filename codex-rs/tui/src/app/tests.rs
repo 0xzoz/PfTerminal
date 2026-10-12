@@ -6972,6 +6972,78 @@ async fn issue_507_kill_switch_interrupts_running_claude_panes() {
     assert!(!said(&orc_pane_id), "an idle pane has nothing to stop");
 }
 
+fn interrupted_claude_turn(app: &App) -> crate::claude_panes::ClaudePaneTurnOutput {
+    crate::claude_panes::ClaudePaneTurnOutput {
+        text: String::new(),
+        status: crate::claude_panes::ClaudePaneTurnStatus::Interrupted,
+        session_id: None,
+        usage_summary: None,
+        turn_usage_summary: None,
+        usage_status: crate::claude_panes::ClaudePaneUsageStatus::Missing,
+        artifact_path: app.config.cwd.join("turn-0001.jsonl").to_path_buf(),
+        audit_path: app.config.cwd.join("turn-0001.audit.json").to_path_buf(),
+        duration_ms: 1,
+        terminal_reason: Some("interrupted".to_string()),
+        error_summary: Some("Claude pane turn interrupted by user.".to_string()),
+        tool_names: Vec::new(),
+        tool_events: Vec::new(),
+        reasoning_events: Vec::new(),
+        command_mode: crate::claude_panes::ClaudeCommandMode::NewSession,
+        direct_accounting: None,
+    }
+}
+
+/// #554: a Claude turn the kill switch stopped ends with the line Codex
+/// panes show, not "interrupted by user"; a person's own interrupt keeps it.
+#[tokio::test]
+async fn issue_554_kill_switch_stop_does_not_say_interrupted_by_user() {
+    let (mut app, _app_event_rx, troll_pane_id, _orc_pane_id) =
+        make_child_report_auto_claude_pane_app().await;
+    let codex_home = app.config.codex_home.to_path_buf();
+    let transcript = |app: &App, pane_id: &str| {
+        app.claude_pane_transcript_cells
+            .get(pane_id)
+            .into_iter()
+            .flatten()
+            .map(|cell| lines_to_single_string(&cell.display_lines(/*width*/ 400)))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let running = app
+        .claude_panes
+        .prepare_turn(&troll_pane_id, "long task".to_string(), &codex_home)
+        .expect("prepare running Troll pane");
+    app.stop_claude_panes_for_kill_switch();
+    drop(running);
+    let output = interrupted_claude_turn(&app);
+    app.on_claude_pane_turn_finished(troll_pane_id.clone(), Ok(output));
+    let said = transcript(&app, &troll_pane_id);
+    assert!(
+        said.contains("security kill switch was turned on"),
+        "{said}"
+    );
+    assert!(
+        said.contains(crate::chatwidget::KILL_SWITCH_TURN_STOPPED),
+        "{said}"
+    );
+    assert!(!said.contains("interrupted by user"), "{said}");
+
+    // The next turn, interrupted by the person, says so as before.
+    let running = app
+        .claude_panes
+        .prepare_turn(&troll_pane_id, "another task".to_string(), &codex_home)
+        .expect("prepare the next turn");
+    app.claude_panes
+        .interrupt_turn(&troll_pane_id)
+        .expect("interrupt");
+    drop(running);
+    let output = interrupted_claude_turn(&app);
+    app.on_claude_pane_turn_finished(troll_pane_id.clone(), Ok(output));
+    let said = transcript(&app, &troll_pane_id);
+    assert!(said.contains("interrupted by user"), "{said}");
+}
+
 /// #507: tasks other agents send to Claude panes while the kill switch is on
 /// wait (one per pane, the newest; the older one is recorded as superseded)
 /// and nothing starts. Once the switch is off, an idle pane gets its task as a

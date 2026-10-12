@@ -546,6 +546,10 @@ async fn handle_exec_approval(
                 normalized_relative_path: script_path,
             })
         });
+    // Issue #513: the delegate counts this answer as a person's (it asked
+    // its client), also when the automatic reviewer gives it here. Today's
+    // delegates run with approvals off; one that can prompt under Moderate
+    // must not let the reviewer's answer open a persistence file.
     let decision = if routes_approval_to_guardian(parent_ctx) {
         let review_cancel = cancel_token.child_token();
         let review_rx = spawn_approval_request_review(
