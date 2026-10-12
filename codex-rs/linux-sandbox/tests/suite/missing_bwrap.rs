@@ -33,8 +33,9 @@ fn lone_helper(dir: &Path) -> PathBuf {
 
 fn profiles(dir: &Path) -> Vec<(&'static str, PermissionProfile)> {
     let secret = AbsolutePathBuf::from_absolute_path(dir.join("missing-secret")).expect("absolute");
-    // Full write access with a denied path: the run that forks a child to
-    // clean up placeholders (protected levels).
+    // Full write access with a denied path: the run that forks bubblewrap's
+    // child to clean up placeholders after it (protected levels); the
+    // refusal comes from that child.
     let protected = FileSystemSandboxPolicy::restricted(vec![
         FileSystemSandboxEntry::new(
             FileSystemPath::Special {

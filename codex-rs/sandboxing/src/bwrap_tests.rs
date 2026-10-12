@@ -15,7 +15,7 @@ fn system_bwrap_warning_reports_missing_system_bwrap() {
 }
 
 /// Issue #563: without a bundled copy either, the warning does not promise
-/// one: it says sandboxed commands will not run and what to install.
+/// one: it says the sandbox cannot run commands and what to install.
 #[test]
 fn system_bwrap_warning_without_a_bundled_copy_names_what_to_install() {
     let warning = system_bwrap_warning_for_path(/*system_bwrap_path*/ None, || false);

@@ -40,29 +40,39 @@ pub(crate) fn exec_bwrap(argv: Vec<String>, preserved_files: Vec<File>) -> ! {
     match preferred_bwrap_launcher() {
         BubblewrapLauncher::System(launcher) => exec_system_bwrap(&launcher, argv, preserved_files),
         BubblewrapLauncher::Bundled(launcher) => launcher.exec(argv, preserved_files),
-        // Not reached: `ensure_bwrap_available` refuses first (#563).
         BubblewrapLauncher::Unavailable => exit_bwrap_unavailable(),
     }
 }
 
-pub(crate) fn bwrap_is_available() -> bool {
-    preferred_bwrap_launcher() != BubblewrapLauncher::Unavailable
-}
-
 /// Issue #563: with no usable bubblewrap, refuse the command with a message
-/// that names what to install, before bubblewrap would be started or a child
-/// forked for it. This was a panic: exit status 101, or an abort (134)
-/// without any message where the helper runs from a constructor (test
-/// binaries dispatch on arg0 that way). Either way the command never ran.
-pub(crate) fn ensure_bwrap_available() {
-    if !bwrap_is_available() {
-        exit_bwrap_unavailable();
-    }
+/// that names what to install, exactly where bubblewrap would have started.
+/// This was a panic: exit status 101, or an abort (134) without a message
+/// where the helper runs from a constructor (test binaries dispatch on arg0
+/// that way). Either way the command never ran. Everything before it runs
+/// and fails as before; only the message and the status (1) differ. This may
+/// run in a child forked from a multithreaded process (the `/proc` probe,
+/// the run with placeholders to clean up), so it only uses `write` and
+/// `_exit`, which are safe there (no allocation, no locks).
+fn exit_bwrap_unavailable() -> ! {
+    write_all_to_stderr(codex_sandboxing::BWRAP_UNAVAILABLE_MESSAGE.as_bytes());
+    write_all_to_stderr(b"\n");
+    // SAFETY: ends the process at once, without unwinding or atexit handlers.
+    unsafe { libc::_exit(1) }
 }
 
-fn exit_bwrap_unavailable() -> ! {
-    eprintln!("{}", codex_sandboxing::BWRAP_UNAVAILABLE_MESSAGE);
-    std::process::exit(1);
+fn write_all_to_stderr(mut bytes: &[u8]) {
+    while !bytes.is_empty() {
+        // SAFETY: writes from a live buffer of `bytes.len()` bytes to stderr.
+        let written =
+            unsafe { libc::write(libc::STDERR_FILENO, bytes.as_ptr().cast(), bytes.len()) };
+        let Ok(written) = usize::try_from(written) else {
+            return;
+        };
+        if written == 0 {
+            return;
+        }
+        bytes = &bytes[written..];
+    }
 }
 
 fn preferred_bwrap_launcher() -> BubblewrapLauncher {
