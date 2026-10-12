@@ -1657,6 +1657,86 @@ async fn issue_562_missing_runtime_entries_cannot_be_created() -> anyhow::Result
     Ok(())
 }
 
+/// #587: under a protected level, with full access or a workspace-write
+/// profile (whose temporary-folder root holds the test's Corbanu home, like
+/// a workspace covering `$HOME`), a command cannot move the Corbanu home
+/// aside and plant a new one (which would have none of the rules, and leave
+/// the old stores readable under the moved name), on either platform.
+/// Permissive is unchanged.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_587_the_corbanu_home_cannot_be_moved_aside() -> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let mut wrong = Vec::new();
+    for (level, moved, full_access) in [
+        (SecurityLevel::Moderate, false, true),
+        (SecurityLevel::Moderate, false, false),
+        (SecurityLevel::Aggressive, false, true),
+        (SecurityLevel::Permissive, true, true),
+        (SecurityLevel::Permissive, true, false),
+    ] {
+        let home = Arc::new(TempDir::new()?);
+        let root = home.path().canonicalize()?;
+        std::fs::write(root.join("AGENTS.md"), "original\n")?;
+        let old = root.with_file_name(format!(
+            "{}.old",
+            root.file_name().unwrap_or_default().to_string_lossy()
+        ));
+        let path = root.to_string_lossy().into_owned();
+        // Split inside the home folder's own name: neither part names it.
+        let (head, tail) = path.split_at(path.len() - 2);
+        let command = format!(
+            "h=\"$(printf '{head}%s' {tail})\"; mv \"$h\" \"$h.old\"; echo mv=$?; \
+             mkdir \"$h\" && echo planted > \"$h/AGENTS.md\"; echo ran-587"
+        );
+        let (test, captured) = start_turn_in(
+            Some(home.clone()),
+            level,
+            AskForApproval::Never,
+            vec![
+                call("call-move", "shell_command", json!({ "command": command })),
+                done_step(),
+            ],
+            move |config| {
+                let profile = if full_access {
+                    PermissionProfile::Disabled
+                } else {
+                    PermissionProfile::workspace_write()
+                };
+                config
+                    .permissions
+                    .set_permission_profile(profile)
+                    .expect("profile");
+            },
+        )
+        .await?;
+        assert!(next_exec_approval(&test).await.is_none());
+        let requests = captured.requests();
+        let output = output_text(&requests[requests.len() - 1], "call-move");
+        let agents = std::fs::read_to_string(root.join("AGENTS.md")).unwrap_or_default();
+        let was_moved = old.exists();
+        if !output.contains("ran-587")
+            || was_moved != moved
+            || (agents == "planted\n") != moved
+            || output.contains("mv=0") != moved
+        {
+            wrong.push(format!(
+                "{level:?} full_access={full_access}: moved={was_moved} AGENTS.md={agents:?}: {output}"
+            ));
+        }
+        drop(test);
+        if was_moved {
+            // Put the original home back so the temporary folder removes it.
+            std::fs::remove_dir_all(&root)?;
+            std::fs::rename(&old, &root)?;
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
 /// #583: under a protected level with full access, a command cannot create a
 /// missing Corbanu-home entry that Corbanu reads later: exec-policy
 /// `rules/x.rules` (which would approve commands in later sessions) or any
