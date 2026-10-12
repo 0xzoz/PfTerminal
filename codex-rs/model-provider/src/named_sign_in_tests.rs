@@ -10,7 +10,6 @@ use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::NamedProviderAccount;
 use pretty_assertions::assert_eq;
 
-use crate::provider::ModelProvider;
 use crate::provider::create_model_provider;
 
 fn openai(account: Option<&str>) -> ModelProviderInfo {
