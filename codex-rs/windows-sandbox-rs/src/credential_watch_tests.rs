@@ -30,7 +30,7 @@ fn root(dir: &tempfile::TempDir) -> PathBuf {
 
 fn policy(work: &Path) -> FileSystemSandboxPolicy {
     FileSystemSandboxPolicy::restricted(
-        credential_file_globs(&work.to_string_lossy().replace('\\', "/"))
+        credential_file_globs(&work.to_string_lossy())
             .into_iter()
             .map(|pattern| {
                 FileSystemSandboxEntry::new(
@@ -227,7 +227,11 @@ fn own_env_star_glob_still_covers_templates() {
     let work = root(&dir);
     let own = FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry::new(
         FileSystemPath::GlobPattern {
-            pattern: format!("{}/**/.env.*", work.to_string_lossy().replace('\\', "/")),
+            pattern: format!(
+                "{}{sep}**{sep}.env.*",
+                work.to_string_lossy(),
+                sep = std::path::MAIN_SEPARATOR
+            ),
         },
         FileSystemAccessMode::Deny,
     )]);
