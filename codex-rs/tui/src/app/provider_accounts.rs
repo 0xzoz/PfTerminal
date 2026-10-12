@@ -202,6 +202,13 @@ impl App {
             Ok(message) => self.chat_widget.add_info_message(message, /*hint*/ None),
             Err(message) => self.chat_widget.add_error_message(message),
         }
+        // #572: an added (or the last removed) Bedrock account changes
+        // whether Bedrock is reachable.
+        super::provider_management_status::check_named_bedrock_account(
+            &self.model_catalog,
+            &self.config,
+            &self.app_event_tx,
+        );
         self.schedule_provider_manager_refresh();
     }
 

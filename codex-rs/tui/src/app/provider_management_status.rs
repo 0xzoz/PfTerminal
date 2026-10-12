@@ -49,7 +49,95 @@ fn sync_provider_manager_model_policy(
     catalog.refresh_provider_policy();
 }
 
+/// PF-84-S06 (#572): Bedrock's models are listed for a session on Bedrock
+/// only, because its default account has no setup in the TUI. A named
+/// Bedrock account (an AWS profile) can be chosen from a session on another
+/// provider (`/providers` → *Use for this session*, `--account
+/// amazon-bedrock:<name>` or `[provider_accounts]`), so while the vault holds
+/// one, `/model` offers Bedrock's models too; they go again once none is
+/// left. The vault read blocks, so it runs off the runtime and reports back
+/// with [`AppEvent::NamedBedrockAccountChecked`]; only the newest check is
+/// applied, on the UI thread.
+pub(super) fn check_named_bedrock_account(
+    catalog: &crate::model_catalog::ModelCatalog,
+    config: &crate::legacy_core::config::Config,
+    tx: &crate::app_event_sender::AppEventSender,
+) {
+    let generation = catalog.begin_provider_models_check();
+    let config = config.clone();
+    let tx = tx.clone();
+    spawn_provider_status_job(move || {
+        let offered = holds_named_bedrock_account(&config);
+        tx.send(AppEvent::NamedBedrockAccountChecked {
+            generation,
+            offered,
+        });
+    });
+}
+
+/// Whether a named Bedrock account can be reached from this session's
+/// config (feature on, Bedrock configured, an AWS-profile account in the
+/// vault); `None` when the vault cannot be read. Blocking (it reads the vault
+/// index); no credential value is read.
+pub(super) fn holds_named_bedrock_account(
+    config: &crate::legacy_core::config::Config,
+) -> Option<bool> {
+    use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
+    if !config
+        .features
+        .enabled(codex_features::Feature::NamedAccounts)
+        || !config
+            .model_providers
+            .get(AMAZON_BEDROCK_PROVIDER_ID)
+            .is_some_and(codex_model_provider_info::ModelProviderInfo::is_amazon_bedrock)
+    {
+        return Some(false);
+    }
+    crate::provider_named_accounts::holds_named_account(
+        &config.codex_home,
+        AMAZON_BEDROCK_PROVIDER_ID,
+        codex_vault::ProviderAccountKind::AwsProfile,
+    )
+}
+
+/// Offers Bedrock's models (or withdraws the ones offered earlier, except
+/// `current_model`, the Bedrock model the session is on).
+pub(super) fn apply_named_bedrock_models(
+    catalog: &crate::model_catalog::ModelCatalog,
+    offered: bool,
+    current_model: Option<&str>,
+) {
+    catalog.set_provider_models(
+        codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID,
+        if offered {
+            codex_model_provider::amazon_bedrock_model_presets()
+        } else {
+            Vec::new()
+        },
+        current_model,
+    );
+}
+
 impl App {
+    /// Applies the newest named-Bedrock-account check (#572); withdrawing
+    /// Bedrock's models keeps the one the session is on.
+    pub(super) fn named_bedrock_account_checked(&mut self, generation: u64, offered: Option<bool>) {
+        let Some(offered) = offered else {
+            return;
+        };
+        if !self
+            .model_catalog
+            .is_latest_provider_models_check(generation)
+        {
+            return;
+        }
+        let on_bedrock =
+            self.config.model_provider_id == codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
+        let current_model = on_bedrock.then(|| self.chat_widget.current_model().to_string());
+        apply_named_bedrock_models(&self.model_catalog, offered, current_model.as_deref());
+        self.model_catalog.refresh_provider_policy();
+    }
+
     pub(super) fn reusable_provider_status_host(
         &self,
     ) -> Option<crate::provider_status_host::ProviderStatusHost> {
@@ -62,6 +150,7 @@ impl App {
 
     pub(super) fn open_provider_manager(&mut self, _app_server: &AppServerSession) {
         sync_provider_manager_model_policy(&self.model_catalog, &self.config);
+        check_named_bedrock_account(&self.model_catalog, &self.config, &self.app_event_tx);
         let generation = self.next_provider_management_generation();
         self.provider_management_host = None;
         let config = self.config.clone();
