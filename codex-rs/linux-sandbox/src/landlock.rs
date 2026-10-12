@@ -3,6 +3,7 @@
 //! Filesystem restrictions are enforced by bubblewrap in `linux_run_main`.
 //! Landlock helpers remain available here as legacy/backup utilities.
 use std::collections::BTreeMap;
+use std::fs::File;
 use std::path::Path;
 
 use codex_protocol::error::CodexErr;
@@ -76,12 +77,29 @@ pub(crate) fn apply_permission_profile_to_current_thread(
             ));
         }
 
-        let writable_roots = file_system_sandbox_policy
+        let writable_roots: Vec<AbsolutePathBuf> = file_system_sandbox_policy
             .get_writable_roots_with_cwd(cwd)
             .into_iter()
             .map(|writable_root| writable_root.root)
             .collect();
-        install_filesystem_landlock_rules_on_current_thread(writable_roots)?;
+        match crate::pinned::get() {
+            // #536: rules on the folders opened and checked at their pinned
+            // locations (Landlock rules hold the folder, not its path).
+            Some(pinned) => {
+                let folders = writable_roots
+                    .iter()
+                    .filter(|root| root.as_path().exists())
+                    .map(|root| {
+                        let real = crate::pinned::expected_location(pinned, root);
+                        crate::pinned::open_at(&[root.as_path()], &real)
+                    })
+                    .collect::<Result<Vec<File>>>()?;
+                install_filesystem_landlock_rules_on_current_thread(Vec::new(), folders)?;
+            }
+            None => {
+                install_filesystem_landlock_rules_on_current_thread(writable_roots, Vec::new())?
+            }
+        }
     }
 
     Ok(())
@@ -136,6 +154,7 @@ fn set_no_new_privs() -> Result<()> {
 /// via bubblewrap. It is kept for reference and potential fallback use.
 fn install_filesystem_landlock_rules_on_current_thread(
     writable_roots: Vec<AbsolutePathBuf>,
+    writable_folders: Vec<File>,
 ) -> Result<()> {
     let abi = ABI::V5;
     let access_rw = AccessFs::from_all(abi);
@@ -151,6 +170,9 @@ fn install_filesystem_landlock_rules_on_current_thread(
 
     if !writable_roots.is_empty() {
         ruleset = ruleset.add_rules(landlock::path_beneath_rules(&writable_roots, access_rw))?;
+    }
+    for folder in writable_folders {
+        ruleset = ruleset.add_rule(landlock::PathBeneath::new(folder, access_rw))?;
     }
 
     let status = ruleset.restrict_self()?;

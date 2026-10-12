@@ -29,7 +29,6 @@ use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result;
 use codex_protocol::permissions::PinnedWritableRoot;
 use codex_protocol::permissions::is_protected_metadata_name;
-use codex_protocol::permissions::real_location;
 use codex_protocol::protocol::FileSystemAccessMode;
 use codex_protocol::protocol::FileSystemPath;
 use codex_protocol::protocol::FileSystemSandboxPolicy;
@@ -58,52 +57,14 @@ const LINUX_PLATFORM_DEFAULT_READ_ROOTS: &[&str] = &[
 
 const MAX_UNREADABLE_GLOB_MATCHES: usize = 8192;
 
-/// #536: the writable roots' real locations, pinned by the caller when the
-/// session first saw them (`--pinned-writable-roots`). Set once per helper
-/// process, which runs one command.
-static PINNED_WRITABLE_ROOTS: std::sync::OnceLock<Vec<PinnedWritableRoot>> =
-    std::sync::OnceLock::new();
-
-pub(crate) fn set_pinned_writable_roots(pinned: Vec<PinnedWritableRoot>) {
-    let _ = PINNED_WRITABLE_ROOTS.set(pinned);
-}
-
-/// #536: a writable root to bind, opened at its pinned real location and
-/// checked to be there: bound with `--bind-fd`, bubblewrap mounts this very
-/// folder (and fails if it is swapped meanwhile), not whatever the root's
-/// path leads to by then.
-fn open_pinned_writable_root(
-    root: &Path,
-    mount_root: &Path,
-    pinned: &PinnedWritableRoot,
-) -> Result<File> {
-    use std::os::unix::fs::OpenOptionsExt;
-
-    let refused = |now: &Path| {
-        CodexErr::UnsupportedOperation(format!(
-            "Refused to run the command: the writable folder `{root}` now leads to `{now}` \
-             through a link made after it was checked (it led to `{was}`). Such a link cannot \
-             move write access: remove it (for example `!rm {root}`).",
-            root = root.display(),
-            now = now.display(),
-            was = pinned.real.display(),
-        ))
-    };
-    for spelled in [root, mount_root] {
-        let now = real_location(spelled);
-        if now != pinned.real {
-            return Err(refused(&now));
-        }
-    }
-    let file = fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_PATH)
-        .open(&pinned.real)?;
-    let opened = fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))?;
-    if opened != pinned.real {
-        return Err(refused(&opened));
-    }
-    Ok(file)
+/// #536: the writable roots the caller pinned (`--pinned-writable-roots`).
+/// Every writable root is then bound from the folder this helper opened and
+/// checked at its pinned location (`--bind-fd`), never by path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WritableRootPins {
+    pub(crate) roots: &'static [PinnedWritableRoot],
+    /// Whether the bubblewrap that runs supports `--bind-fd` (0.8+).
+    pub(crate) bind_fd: bool,
 }
 
 /// Options that control how bubblewrap is invoked.
@@ -121,6 +82,8 @@ pub(crate) struct BwrapOptions {
     /// Keep this uncapped by default so existing nested deny-read matches are
     /// masked before the sandboxed command starts.
     pub glob_scan_max_depth: Option<usize>,
+    /// #536: the caller's pinned writable roots, for a session's command.
+    pub pins: Option<WritableRootPins>,
 }
 
 impl Default for BwrapOptions {
@@ -129,6 +92,7 @@ impl Default for BwrapOptions {
             mount_proc: true,
             network_mode: BwrapNetworkMode::FullAccess,
             glob_scan_max_depth: None,
+            pins: None,
         }
     }
 }
@@ -368,12 +332,13 @@ fn create_bwrap_flags(
         preserved_files,
         synthetic_mount_targets,
         protected_create_targets,
-    } = create_filesystem_args(
+    } = create_filesystem_args_with_pins(
         file_system_sandbox_policy,
         sandbox_policy_cwd,
         options
             .glob_scan_max_depth
             .or(file_system_sandbox_policy.glob_scan_max_depth),
+        options.pins,
     )?;
     let normalized_command_cwd = normalize_command_cwd_for_bwrap(command_cwd);
     let mut args = Vec::new();
@@ -434,10 +399,26 @@ fn create_filesystem_args(
     cwd: &Path,
     glob_scan_max_depth: Option<usize>,
 ) -> Result<BwrapArgs> {
+    create_filesystem_args_with_pins(
+        file_system_sandbox_policy,
+        cwd,
+        glob_scan_max_depth,
+        /*pins*/ None,
+    )
+}
+
+/// [`create_filesystem_args`] for a session's command, whose writable roots
+/// the caller pinned (#536).
+fn create_filesystem_args_with_pins(
+    file_system_sandbox_policy: &FileSystemSandboxPolicy,
+    cwd: &Path,
+    glob_scan_max_depth: Option<usize>,
+    pins: Option<WritableRootPins>,
+) -> Result<BwrapArgs> {
     let unreadable_globs = file_system_sandbox_policy.get_unreadable_globs_with_cwd(cwd);
     // #536: for a session's command, no writable root held by another may
     // lead outside every root holding it, including the roots computed here.
-    if PINNED_WRITABLE_ROOTS.get().is_some() {
+    if pins.is_some() {
         codex_sandboxing::writable_root_ledger::check_held_links(file_system_sandbox_policy, cwd)
             .map_err(|refusal| CodexErr::UnsupportedOperation(refusal.to_string()))?;
     }
@@ -761,32 +742,28 @@ fn create_filesystem_args(
             append_mount_target_parent_dir_args(&mut bwrap_args.args, mount_root, masking_root);
         }
 
-        // #536: a root pinned by the caller is bound from the folder at its
-        // pinned real location, opened and checked here.
-        // Roots the caller did not see (a `:tmpdir` root follows this
-        // command's `TMPDIR`) passed the held-link check above.
-        let pinned = PINNED_WRITABLE_ROOTS.get().and_then(|pinned| {
-            pinned
-                .iter()
-                .find(|pinned| pinned.root == writable_root.root)
-        });
-        match pinned {
-            Some(pinned) => {
-                let file = open_pinned_writable_root(root, mount_root, pinned)?;
-                if crate::launcher::preferred_bwrap_supports_bind_fd() {
-                    // `--ro-bind-data` masks read the first preserved file
-                    // as `/dev/null`; keep it first.
-                    if bwrap_args.preserved_files.is_empty() {
-                        bwrap_args.preserved_files.push(File::open("/dev/null")?);
-                    }
-                    bwrap_args.args.push("--bind-fd".to_string());
-                    bwrap_args.args.push(file.as_raw_fd().to_string());
-                    bwrap_args.preserved_files.push(file);
-                } else {
-                    bwrap_args.args.push("--bind".to_string());
-                    bwrap_args.args.push(path_to_string(&pinned.real));
+        // #536: for a session's command, every writable root is bound from
+        // the folder opened and checked at its pinned location.
+        match pins {
+            Some(pins) => {
+                if !pins.bind_fd {
+                    return Err(CodexErr::UnsupportedOperation(
+                        "Refused to run the command: binding a checked writable folder needs \
+                         bubblewrap 0.8 or newer (`--bind-fd`), and none was found."
+                            .to_string(),
+                    ));
                 }
+                let real = crate::pinned::expected_location(pins.roots, &writable_root.root);
+                let file = crate::pinned::open_at(&[root, mount_root], &real)?;
+                // `--ro-bind-data` masks read the first preserved file as
+                // `/dev/null`; keep it first.
+                if bwrap_args.preserved_files.is_empty() {
+                    bwrap_args.preserved_files.push(File::open("/dev/null")?);
+                }
+                bwrap_args.args.push("--bind-fd".to_string());
+                bwrap_args.args.push(file.as_raw_fd().to_string());
                 bwrap_args.args.push(path_to_string(mount_root));
+                bwrap_args.preserved_files.push(file);
             }
             None => {
                 bwrap_args.args.push("--bind".to_string());
@@ -3059,6 +3036,107 @@ mod tests {
             .rposition(|window| window == ["--ro-bind", read_only.as_str(), read_only.as_str()])
             .expect("read-only path should be bound read-only");
         assert!(target_bind < read_only_bind, "{:?}", args.args);
+    }
+
+    /// #536: with pinned roots, each writable root is bound with `--bind-fd`
+    /// from the folder opened at its pinned location (never `--bind` by
+    /// path), `/dev/null` stays the first preserved file for the
+    /// `--ro-bind-data` masks, a root swapped for a link is refused, and so
+    /// is a bubblewrap without `--bind-fd`.
+    #[test]
+    fn pinned_writable_roots_are_bound_from_checked_folders() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let base = temp_dir.path().canonicalize().expect("canonical");
+        let workspace = base.join("ws");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let secret = workspace.join("secret.txt");
+        std::fs::write(&secret, "x").expect("secret");
+        let entry = |path: &Path, access| FileSystemSandboxEntry {
+            path: FileSystemPath::Path {
+                path: AbsolutePathBuf::try_from(path).expect("absolute path"),
+            },
+            access,
+            missing_path_behavior: None,
+        };
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                access: FileSystemAccessMode::Read,
+                missing_path_behavior: None,
+            },
+            entry(&workspace, FileSystemAccessMode::Write),
+            entry(&secret, FileSystemAccessMode::Deny),
+        ]);
+        let roots: &'static [PinnedWritableRoot] = Box::leak(
+            vec![PinnedWritableRoot {
+                root: AbsolutePathBuf::try_from(workspace.as_path()).expect("absolute"),
+                real: workspace.clone(),
+            }]
+            .into_boxed_slice(),
+        );
+        let pins = |bind_fd| Some(WritableRootPins { roots, bind_fd });
+        let args = create_filesystem_args_with_pins(
+            &policy,
+            &workspace,
+            NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH,
+            pins(true),
+        )
+        .expect("filesystem args");
+        let ws = path_to_string(&workspace);
+        assert!(
+            !args
+                .args
+                .windows(3)
+                .any(|window| window == ["--bind", ws.as_str(), ws.as_str()]),
+            "{:?}",
+            args.args
+        );
+        let bind = args
+            .args
+            .windows(3)
+            .find(|window| window[0] == "--bind-fd" && window[2] == ws)
+            .expect("bound with --bind-fd");
+        let fd_target =
+            |fd: &str| std::fs::read_link(format!("/proc/self/fd/{fd}")).expect("preserved fd");
+        assert_eq!(fd_target(&bind[1]), workspace);
+        assert_eq!(
+            fd_target(&args.preserved_files[0].as_raw_fd().to_string()),
+            PathBuf::from("/dev/null")
+        );
+        assert!(
+            args.args
+                .windows(3)
+                .any(|window| window[0] == "--ro-bind-data"
+                    && window[1] == args.preserved_files[0].as_raw_fd().to_string()),
+            "{:?}",
+            args.args
+        );
+
+        assert!(
+            create_filesystem_args_with_pins(
+                &policy,
+                &workspace,
+                NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH,
+                pins(false),
+            )
+            .is_err()
+        );
+        std::fs::rename(&workspace, base.join("moved")).expect("move away");
+        std::fs::create_dir(base.join("elsewhere")).expect("elsewhere");
+        std::os::unix::fs::symlink(base.join("elsewhere"), &workspace).expect("link");
+        let err = create_filesystem_args_with_pins(
+            &policy,
+            &workspace,
+            NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH,
+            pins(true),
+        )
+        .expect_err("a swapped root is refused");
+        assert!(
+            err.to_string().contains("Refused to run the command"),
+            "{err}"
+        );
     }
 
     /// #503: a writable link to a workspace's `.git` cannot make it writable;

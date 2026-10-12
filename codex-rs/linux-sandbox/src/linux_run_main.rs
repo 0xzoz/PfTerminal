@@ -229,25 +229,9 @@ pub fn run_main() -> ! {
     }
 
     if let Some(PinnedWritableRoots(pinned)) = pinned_writable_roots {
-        // #536: the legacy Landlock path opens each root by path when it
-        // applies its rules; check that each still leads where it was pinned.
-        if use_legacy_landlock
-            && let Some(changed) = pinned.iter().find(|pinned| {
-                pinned.root.as_path().exists()
-                    && codex_protocol::permissions::real_location(pinned.root.as_path())
-                        != pinned.real
-            })
-        {
-            eprintln!(
-                "Refused to run the command: the writable folder `{}` no longer leads to `{}`, \
-                 where it led when it was checked. A link made during the session cannot move \
-                 write access.",
-                changed.root.display(),
-                changed.real.display()
-            );
-            std::process::exit(1);
-        }
-        crate::bwrap::set_pinned_writable_roots(pinned);
+        // #536: bubblewrap and legacy Landlock grant each writable root on
+        // the folder opened and checked at its pinned location.
+        crate::pinned::set(pinned);
     }
 
     if !use_legacy_landlock {
@@ -392,6 +376,10 @@ fn run_bwrap_with_proc_fallback(
     let options = BwrapOptions {
         mount_proc,
         network_mode,
+        pins: crate::pinned::get().map(|roots| crate::bwrap::WritableRootPins {
+            roots,
+            bind_fd: crate::launcher::bind_fd_available(),
+        }),
         ..Default::default()
     };
     // #442: watch before the existing credential files are found and hidden,

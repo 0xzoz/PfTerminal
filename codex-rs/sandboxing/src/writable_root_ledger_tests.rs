@@ -51,6 +51,7 @@ fn a_missing_root_created_as_a_link_is_refused() {
         check_writable_roots(&policy, &workspace),
         Err(WritableRootRefusal::Changed {
             root: target.clone(),
+            link: target.clone(),
             was: target.clone(),
             now: elsewhere,
         })
@@ -90,7 +91,8 @@ fn a_held_link_leading_outside_its_holders_is_refused() {
     assert_eq!(
         check_writable_roots(&held, &workspace),
         Err(WritableRootRefusal::OutsideHolder {
-            root: cache,
+            root: cache.clone(),
+            link: cache,
             real: elsewhere.clone(),
             holder: workspace.clone(),
         })
@@ -166,4 +168,37 @@ fn removing_a_refused_link_lets_commands_run_again() {
         check_writable_roots(&policy, &workspace),
         Err(WritableRootRefusal::Changed { .. })
     ));
+}
+
+/// #536: the refusal names the link on the path (here a folder above the
+/// root), quoted for the shell.
+#[cfg(unix)]
+#[test]
+fn the_refusal_names_the_link_on_the_path() {
+    let (_dir, base) = base();
+    let workspace = base.join("ws");
+    let elsewhere = base.join("elsewhere");
+    std::fs::create_dir_all(&workspace).expect("ws");
+    std::fs::create_dir_all(elsewhere.join("deep")).expect("elsewhere");
+    let parent = workspace.join("a dir");
+    let root = parent.join("deep");
+    let policy = FileSystemSandboxPolicy::restricted(vec![write(&workspace), write(&root)]);
+    record_writable_roots(&policy, &workspace);
+    std::os::unix::fs::symlink(&elsewhere, &parent).expect("link above the root");
+    let refusal = check_writable_roots(&policy, &workspace).expect_err("refused");
+    assert_eq!(
+        refusal,
+        WritableRootRefusal::Changed {
+            root: root.clone(),
+            link: parent.clone(),
+            was: root,
+            now: elsewhere.join("deep"),
+        }
+    );
+    assert!(
+        refusal
+            .to_string()
+            .contains(&format!("`!rm '{}'`", parent.display())),
+        "{refusal}"
+    );
 }

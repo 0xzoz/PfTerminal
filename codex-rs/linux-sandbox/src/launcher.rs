@@ -28,16 +28,25 @@ struct SystemBwrapLauncher {
     program: AbsolutePathBuf,
     apparmor_launcher: Option<AbsolutePathBuf>,
     supports_argv0: bool,
+    /// `--bind-fd` (bubblewrap 0.8+), needed for a session's command (#536).
+    supports_bind_fd: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SystemBwrapCapabilities {
     supports_argv0: bool,
     supports_perms: bool,
+    supports_bind_fd: bool,
 }
 
 pub(crate) fn exec_bwrap(argv: Vec<String>, preserved_files: Vec<File>) -> ! {
-    match preferred_bwrap_launcher() {
+    // #536: arguments that bind checked writable folders need `--bind-fd`.
+    let launcher = if argv.iter().any(|arg| arg == "--bind-fd") {
+        bind_fd_launcher()
+    } else {
+        preferred_bwrap_launcher()
+    };
+    match launcher {
         BubblewrapLauncher::System(launcher) => exec_system_bwrap(&launcher, argv, preserved_files),
         BubblewrapLauncher::Bundled(launcher) => launcher.exec(argv, preserved_files),
         BubblewrapLauncher::Unavailable => {
@@ -82,6 +91,7 @@ fn system_bwrap_launcher_for_path_with_probe(
     let Some(SystemBwrapCapabilities {
         supports_argv0,
         supports_perms: true,
+        supports_bind_fd,
     }) = system_bwrap_capabilities(system_bwrap_path)
     else {
         return None;
@@ -100,6 +110,7 @@ fn system_bwrap_launcher_for_path_with_probe(
         }),
         program: system_bwrap_path,
         supports_argv0,
+        supports_bind_fd,
     })
 }
 
@@ -110,27 +121,24 @@ pub(crate) fn preferred_bwrap_supports_argv0() -> bool {
     }
 }
 
-/// #536: whether the bubblewrap that will run supports `--bind-fd` (added in
-/// bubblewrap 0.8.0; the bundled one has it), so a writable root can be bound
-/// from the folder this helper opened and checked.
-pub(crate) fn preferred_bwrap_supports_bind_fd() -> bool {
-    static SUPPORTS: OnceLock<bool> = OnceLock::new();
-    *SUPPORTS.get_or_init(|| match preferred_bwrap_launcher() {
-        BubblewrapLauncher::System(launcher) => {
-            match Command::new(launcher.program.as_path())
-                .arg("--help")
-                .output()
-            {
-                Ok(output) => {
-                    String::from_utf8_lossy(&output.stdout).contains("--bind-fd")
-                        || String::from_utf8_lossy(&output.stderr).contains("--bind-fd")
-                }
-                Err(_) => false,
+/// #536: the bubblewrap that runs a session's command, which binds its
+/// writable roots with `--bind-fd` (bubblewrap 0.8+): the preferred one, or
+/// the bundled one when the system's is older.
+fn bind_fd_launcher() -> BubblewrapLauncher {
+    match preferred_bwrap_launcher() {
+        BubblewrapLauncher::System(launcher) if !launcher.supports_bind_fd => {
+            match bundled_bwrap::launcher() {
+                Some(launcher) => BubblewrapLauncher::Bundled(launcher),
+                None => BubblewrapLauncher::Unavailable,
             }
         }
-        BubblewrapLauncher::Bundled(_) => true,
-        BubblewrapLauncher::Unavailable => false,
-    })
+        launcher => launcher,
+    }
+}
+
+/// #536: whether a bubblewrap supporting `--bind-fd` can run.
+pub(crate) fn bind_fd_available() -> bool {
+    !matches!(bind_fd_launcher(), BubblewrapLauncher::Unavailable)
 }
 
 fn system_bwrap_capabilities(system_bwrap_path: &Path) -> Option<SystemBwrapCapabilities> {
@@ -148,6 +156,8 @@ fn system_bwrap_capabilities(system_bwrap_path: &Path) -> Option<SystemBwrapCapa
     Some(SystemBwrapCapabilities {
         supports_argv0: stdout.contains("--argv0") || stderr.contains("--argv0"),
         supports_perms: stdout.contains("--perms") || stderr.contains("--perms"),
+        // bubblewrap added `--bind-fd` in v0.8.0.
+        supports_bind_fd: stdout.contains("--bind-fd") || stderr.contains("--bind-fd"),
     })
 }
 
@@ -219,12 +229,14 @@ mod tests {
                 Some(SystemBwrapCapabilities {
                     supports_argv0: true,
                     supports_perms: true,
+                    supports_bind_fd: true,
                 })
             }),
             Some(SystemBwrapLauncher {
                 apparmor_launcher: None,
                 program: expected,
                 supports_argv0: true,
+                supports_bind_fd: true,
             })
         );
     }
@@ -239,12 +251,14 @@ mod tests {
                 Some(SystemBwrapCapabilities {
                     supports_argv0: false,
                     supports_perms: true,
+                    supports_bind_fd: true,
                 })
             }),
             Some(SystemBwrapLauncher {
                 apparmor_launcher: None,
                 program: AbsolutePathBuf::from_absolute_path(fake_bwrap_path).expect("absolute"),
                 supports_argv0: false,
+                supports_bind_fd: true,
             })
         );
     }
@@ -258,6 +272,7 @@ mod tests {
                 Some(SystemBwrapCapabilities {
                     supports_argv0: false,
                     supports_perms: false,
+                    supports_bind_fd: true,
                 })
             }),
             None

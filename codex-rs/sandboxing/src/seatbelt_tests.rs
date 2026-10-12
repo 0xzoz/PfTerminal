@@ -2657,6 +2657,16 @@ fn ordinary_roots_stay_writable_at_every_level() {
     }
 }
 
+/// A folder for test files outside every writable root and outside the
+/// source tree: the test binary's folder.
+fn outside_temp_root() -> PathBuf {
+    std::env::current_exe()
+        .expect("test binary")
+        .parent()
+        .expect("test binary folder")
+        .to_path_buf()
+}
+
 /// Runs `script` in `cwd` the way a session does: through
 /// [`crate::SandboxManager::transform`] (which checks the writable roots,
 /// #536) and real `sandbox-exec`. `Err` carries a refusal.
@@ -2712,7 +2722,7 @@ fn a_root_created_as_a_link_during_the_session_is_refused_at_every_level() {
     let base = TempDir::new().expect("tempdir");
     let base = base.path().canonicalize().expect("canonical");
     // Outside every writable root at every level (not in a temporary folder).
-    let outside = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).expect("outside");
+    let outside = tempfile::tempdir_in(outside_temp_root()).expect("outside");
     let outside = outside.path().canonicalize().expect("canonical");
     let denied = base.join("denied");
     fs::write(&denied, "x").expect("denied");
@@ -2835,7 +2845,7 @@ fn seatbelt_grants_writable_roots_at_their_pinned_location() {
     let workspace = base.join("ws");
     let target = workspace.join("target");
     fs::create_dir_all(&target).expect("target");
-    let outside = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).expect("outside");
+    let outside = tempfile::tempdir_in(outside_temp_root()).expect("outside");
     let outside = outside.path().canonicalize().expect("canonical");
     let policy = FileSystemSandboxPolicy::restricted(vec![
         root_read_entry(),

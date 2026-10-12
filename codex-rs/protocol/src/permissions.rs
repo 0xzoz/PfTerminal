@@ -1853,6 +1853,23 @@ fn passes_through_nested_link(path: &Path) -> bool {
         })
 }
 
+/// Issue #536: the links on `path` below its top-level folder, shallowest
+/// first (`/tmp` and `/var` on macOS are top-level aliases).
+#[cfg(unix)]
+pub fn nested_links(path: &Path) -> Vec<PathBuf> {
+    let mut links: Vec<PathBuf> = path
+        .ancestors()
+        .filter(|ancestor| ancestor.parent().and_then(Path::parent).is_some())
+        .filter(|ancestor| {
+            std::fs::symlink_metadata(ancestor)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        })
+        .map(Path::to_path_buf)
+        .collect();
+    links.reverse();
+    links
+}
+
 /// Where `path` really is: every link followed, including a link whose
 /// target does not exist yet, and the components that do not exist kept as
 /// written. Unlike `canonicalize`, this also places a path not created yet.

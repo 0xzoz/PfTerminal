@@ -10,15 +10,24 @@
 //! Each writable root's real location (every link followed, see
 //! [`real_location`]) is recorded the first time this process sees it,
 //! normally when the session starts ([`record_writable_roots`]). Before each
-//! sandboxed command ([`check_writable_roots`]) a root whose real location
-//! changed since, or one held by another writable root that leads outside
-//! every root holding it, refuses the command with a message saying why. The
-//! sandboxes then grant writes at the recorded real location
-//! ([`pinned_real_location`]), not wherever the root leads by the time they
-//! are set up, so a link swapped in after the check grants nothing.
+//! sandboxed command ([`check_writable_roots`]) the command is refused, with
+//! a message naming the link, when a root:
+//! - leads through a link somewhere else than where it led when recorded;
+//! - is held by another writable root and leads outside every root holding
+//!   it (also a link left from an earlier session).
 //!
-//! A root's record lives as long as the process: a link made during one
-//! session is still refused in the next session of the same process.
+//! A root first seen after the session started (added by a permission
+//! request, or another working folder) is recorded then; it gets the second
+//! check and the pinning, but no comparison with the session's start.
+//!
+//! The sandboxes then grant writes at the location checked here (the
+//! [`PinnedWritableRoot`]s, and [`pinned_real_location`] for Seatbelt), not
+//! wherever the root leads by the time they are set up, so a link swapped in
+//! after the check grants nothing.
+//!
+//! A root that leads through no link any more (the person removed it, or a
+//! real folder took its place) is recorded where it is and runs again. A
+//! root's record lives as long as the process.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -30,10 +39,10 @@ use std::sync::MutexGuard;
 
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::PinnedWritableRoot;
-#[cfg(unix)]
-use codex_protocol::permissions::real_location;
 use codex_protocol::protocol::WritableRoot;
 
+/// Each root's real location when first seen (or when it last led through
+/// no link).
 static LEDGER: LazyLock<Mutex<HashMap<PathBuf, PathBuf>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -46,16 +55,19 @@ fn ledger() -> MutexGuard<'static, HashMap<PathBuf, PathBuf>> {
 /// Why a command was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WritableRootRefusal {
-    /// The root leads somewhere else than when the session first saw it.
+    /// The root leads, through `link`, somewhere else than where it led when
+    /// the session first saw it (`was`).
     Changed {
         root: PathBuf,
+        link: PathBuf,
         was: PathBuf,
         now: PathBuf,
     },
-    /// The root, held by another writable root, leads outside every root
-    /// holding it.
+    /// The root, held by another writable root, leads through `link`
+    /// outside every root holding it.
     OutsideHolder {
         root: PathBuf,
+        link: PathBuf,
         real: PathBuf,
         holder: PathBuf,
     },
@@ -64,32 +76,51 @@ pub enum WritableRootRefusal {
 impl fmt::Display for WritableRootRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Changed { root, was, now } => write!(
+            Self::Changed {
+                root,
+                link,
+                was,
+                now,
+            } => write!(
                 f,
-                "Refused to run the command: the writable folder `{root}` now leads to `{now}` \
-                 through a link made after the session started (it led to `{was}`). Such a link \
+                "Refused to run the command: the writable folder `{}` now leads to `{}` through \
+                 the link `{}`, made after the session started (it led to `{}`). Such a link \
                  cannot move write access, so commands are refused until it is removed: remove \
-                 it yourself (for example `!rm {root}`), or restart Corbanu if you made it on \
+                 it yourself (for example `!rm {}`), or restart Corbanu if you made it on \
                  purpose.",
-                root = root.display(),
-                now = now.display(),
-                was = was.display(),
+                root.display(),
+                now.display(),
+                link.display(),
+                was.display(),
+                shell_quoted(link),
             ),
-            Self::OutsideHolder { root, real, holder } => write!(
+            Self::OutsideHolder {
+                root,
+                link,
+                real,
+                holder,
+            } => write!(
                 f,
-                "Refused to run the command: the writable folder `{root}` is a link to `{real}`, \
-                 outside `{holder}`, the writable folder that holds it. A link cannot extend \
+                "Refused to run the command: the writable folder `{}` leads through the link `{}` \
+                 to `{}`, outside `{}`, the writable folder that holds it. A link cannot extend \
                  write access, so commands are refused until it is removed: remove it yourself \
-                 (for example `!rm {root}`), or configure the real folder instead.",
-                root = root.display(),
-                real = real.display(),
-                holder = holder.display(),
+                 (for example `!rm {}`), or configure the real folder instead.",
+                root.display(),
+                link.display(),
+                real.display(),
+                holder.display(),
+                shell_quoted(link),
             ),
         }
     }
 }
 
 impl std::error::Error for WritableRootRefusal {}
+
+/// `path` quoted for a shell command line.
+fn shell_quoted(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', r"'\''"))
+}
 
 /// Records the real location of each writable root of `policy` this process
 /// has not seen yet. Called when a session starts.
@@ -122,13 +153,12 @@ pub fn check_writable_roots(
             .entry(root.root.to_path_buf())
             .or_insert_with(|| now.clone());
         if *was != *now {
-            // A root that leads through no link any more (the link was
-            // removed, or a real folder took its place) is where it is
-            // spelled; it is recorded there, so a link made later is
-            // refused again.
-            if now.as_path() != root.root.as_path() {
+            // A root that leads through no link any more is where it is
+            // spelled: record it there, so a link made later is refused.
+            if let Some(link) = links_on(root.root.as_path()).into_iter().next() {
                 return Err(WritableRootRefusal::Changed {
                     root: root.root.to_path_buf(),
+                    link,
                     was: was.clone(),
                     now: now.clone(),
                 });
@@ -180,11 +210,22 @@ fn outside_holders(
         .map(|(other, _)| other)
         .collect();
     let first = holders.first()?;
-    (!holders
+    if holders
         .iter()
-        .any(|holder| reals[index].starts_with(&reals[*holder])))
-    .then(|| WritableRootRefusal::OutsideHolder {
+        .any(|holder| within(&reals[index], &reals[*holder]))
+    {
+        return None;
+    }
+    // Leading outside its holder, the root goes through a link on its path
+    // (or, failing that, is spelled through one above the holder).
+    let link = links_on(root.root.as_path())
+        .into_iter()
+        .find(|link| link.starts_with(roots[*first].root.as_path()))
+        .or_else(|| links_on(root.root.as_path()).into_iter().next())
+        .unwrap_or_else(|| root.root.to_path_buf());
+    Some(WritableRootRefusal::OutsideHolder {
         root: root.root.to_path_buf(),
+        link,
         real: reals[index].clone(),
         holder: roots[*first].root.to_path_buf(),
     })
@@ -204,17 +245,37 @@ fn holds(holder: &WritableRoot, holder_real: &Path, root: &WritableRoot) -> bool
                 .root
                 .as_path()
                 .parent()
-                .is_some_and(|parent| real_path(parent).starts_with(holder_real)))
+                .is_some_and(|parent| within(&real_path(parent), holder_real)))
+}
+
+#[cfg(unix)]
+fn links_on(path: &Path) -> Vec<PathBuf> {
+    codex_protocol::permissions::nested_links(path)
 }
 
 #[cfg(unix)]
 fn real_path(path: &Path) -> PathBuf {
-    real_location(path)
+    codex_protocol::permissions::real_location(path)
+}
+
+#[cfg(unix)]
+fn within(path: &Path, prefix: &Path) -> bool {
+    codex_protocol::permissions::location_within(path, prefix)
+}
+
+#[cfg(not(unix))]
+fn links_on(_path: &Path) -> Vec<PathBuf> {
+    Vec::new()
 }
 
 #[cfg(not(unix))]
 fn real_path(path: &Path) -> PathBuf {
     path.to_path_buf()
+}
+
+#[cfg(not(unix))]
+fn within(path: &Path, prefix: &Path) -> bool {
+    path.starts_with(prefix)
 }
 
 #[cfg(test)]
