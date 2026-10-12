@@ -1828,7 +1828,7 @@ fn links_into_read_only_paths(roots: &[WritableRoot]) -> Vec<(usize, AbsolutePat
             })
             .find(|read_only| {
                 !root.root.as_path().starts_with(read_only.as_path())
-                    && real_root.starts_with(real_location(read_only.as_path()))
+                    && location_within(&real_root, &real_location(read_only.as_path()))
             });
         if let Some(read_only) = reached {
             excluded.push((index, read_only));
@@ -1898,7 +1898,48 @@ pub fn real_location(path: &Path) -> PathBuf {
             }
         }
     }
-    resolved
+    canonical_existing_prefix(resolved)
+}
+
+/// `path` (links already followed) with its deepest existing folder in the
+/// form the filesystem stores: on macOS, whose default filesystem ignores
+/// case and Unicode form, `<ws>/.GIT` is `<ws>/.git`. The missing rest is
+/// kept as written.
+#[cfg(unix)]
+fn canonical_existing_prefix(path: PathBuf) -> PathBuf {
+    let mut existing = path.as_path();
+    let mut missing = Vec::new();
+    while std::fs::symlink_metadata(existing).is_err() {
+        let (Some(parent), Some(name)) = (existing.parent(), existing.file_name()) else {
+            return path;
+        };
+        missing.push(name.to_os_string());
+        existing = parent;
+    }
+    let Ok(mut canonical) = std::fs::canonicalize(existing) else {
+        return path;
+    };
+    for name in missing.into_iter().rev() {
+        canonical.push(name);
+    }
+    canonical
+}
+
+/// Whether real location `path` is `prefix` or lies inside it. On macOS the
+/// comparison ignores case, as its default filesystem does, so a part not
+/// created yet cannot dodge it by case.
+#[cfg(unix)]
+pub fn location_within(path: &Path, prefix: &Path) -> bool {
+    if cfg!(target_os = "macos") {
+        let fold = |path: &Path| -> Vec<String> {
+            path.components()
+                .map(|component| component.as_os_str().to_string_lossy().to_lowercase())
+                .collect()
+        };
+        fold(path).starts_with(&fold(prefix))
+    } else {
+        path.starts_with(prefix)
+    }
 }
 
 fn sorted_absolute_paths(mut paths: Vec<AbsolutePathBuf>) -> Vec<AbsolutePathBuf> {

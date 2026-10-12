@@ -2141,7 +2141,7 @@ async fn ordinary_roots_stay_writable_at_every_level() {
     // The whole tree is spelled through a link, like `/tmp` on macOS: one
     // outside the writable roots (Linux refuses a read-only path spelled
     // through a link a command could change).
-    let aliases = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let aliases = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let alias = aliases.path().join("alias");
     std::os::unix::fs::symlink(&real, &alias).unwrap();
     let base = alias.clone();

@@ -30,8 +30,9 @@ fn excluded_writable_links_are_explained_once_per_thread() {
     let policy = FileSystemSandboxPolicy::restricted(vec![write(&workspace), write(&link)]);
     let thread = ThreadId::new();
     let expected = vec![format!(
-        "Write access to `{}` is not granted: it is a link into `{}`, which stays read-only. \
-         Name the folder by its real path if it should be writable.",
+        "Write access to `{}` is not granted: it is, or passes through, a link into `{}`, a \
+         path another writable folder protects. Name the folder by its real path if it should \
+         be writable.",
         link.display(),
         workspace.join(".git").display(),
     )];

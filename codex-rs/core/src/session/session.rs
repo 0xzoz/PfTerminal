@@ -892,13 +892,18 @@ impl Session {
                 session_configuration.cwd().as_path(),
             );
             // Issue #535: configured writable links into another root's
-            // read-only path are left out of the sandbox; say so at launch.
-            let excluded_writable_links =
+            // read-only path are left out of the sandbox; say so at launch
+            // (once, not again in each sub-agent's thread).
+            let excluded_writable_links = if session_configuration.session_source.is_non_root_agent()
+            {
+                Vec::new()
+            } else {
                 crate::tools::writable_root_notices::excluded_writable_link_warnings(
                     thread_id,
                     &session_file_system_policy,
                     session_configuration.cwd().as_path(),
-                );
+                )
+            };
             for message in config
                 .startup_warnings
                 .iter()
