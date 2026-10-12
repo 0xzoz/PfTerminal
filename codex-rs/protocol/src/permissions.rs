@@ -3056,6 +3056,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     fn deny_in_workspace(denied: &Path) -> FileSystemSandboxPolicy {
         FileSystemSandboxPolicy::restricted(vec![
             FileSystemSandboxEntry {
