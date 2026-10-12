@@ -2210,7 +2210,7 @@ async fn a_root_created_as_a_link_during_the_session_is_refused_at_every_level()
     let dir = tempfile::tempdir().unwrap();
     let base = dir.path().canonicalize().unwrap();
     // Outside every writable root at every level (not in a temporary folder).
-    let outside = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let outside = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let outside = outside.path().canonicalize().unwrap();
     let denied = base.join("denied");
     std::fs::write(&denied, "x").unwrap();
@@ -2270,7 +2270,7 @@ async fn the_helper_refuses_a_root_swapped_after_the_check() {
     let workspace = base.join("ws");
     let target = workspace.join("target");
     std::fs::create_dir_all(&target).unwrap();
-    let outside = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let outside = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let outside = outside.path().canonicalize().unwrap();
     let policy = FileSystemSandboxPolicy::restricted(vec![
         FileSystemSandboxEntry {
