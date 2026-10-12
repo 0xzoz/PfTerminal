@@ -268,6 +268,23 @@ fn issue_562_missing_runtime_entries_stay_read_only() {
     assert!(!readable(&override_md));
 }
 
+/// Issue #586: the database init lock is denied before it exists, so a
+/// protected command can neither create it nor hold it.
+#[test]
+fn issue_586_db_init_lock_denied_before_it_exists() {
+    let fx = fixture();
+    let cwd = fx.user_home.join("project");
+    let lock = fx.codex_home.join("pfterminal_db_init.lock");
+    assert!(!lock.exists());
+    let denials = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)]);
+    let policy = denials
+        .apply(&PermissionProfile::Disabled)
+        .unwrap()
+        .file_system_sandbox_policy();
+    assert!(!policy.can_write_path_with_cwd(&lock, &cwd));
+    assert!(!policy.can_read_path_with_cwd(&lock, &cwd));
+}
+
 /// Issue #562: on Linux the missing runtime folders are created, empty,
 /// only where the profile could write the Corbanu home, so bubblewrap never
 /// needs a placeholder file where Corbanu expects a folder. `AGENTS.md` is

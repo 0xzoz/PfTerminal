@@ -58,6 +58,9 @@ const CORBANU_STORES: &[&str] = &[
     "security_level.toml",
     "security_state.json",
     "security_state.lock",
+    // #586: the database init lock (#549); a command holding it would
+    // stall every new launch on this home.
+    "pfterminal_db_init.lock",
     // #562: read as instructions ahead of AGENTS.md; a command may not
     // create it either.
     "AGENTS.override.md",
