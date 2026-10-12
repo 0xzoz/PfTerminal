@@ -2821,7 +2821,10 @@ fn seatbelt_grants_writable_roots_at_their_pinned_location() {
     let args = seatbelt_args(&policy, &workspace, vec!["/bin/true".to_string()]);
     let write = generated_clauses(&args, "WRITABLE_ROOT");
     assert_eq!(
-        write.iter().map(|(root, _)| root.clone()).collect::<Vec<_>>(),
+        write
+            .iter()
+            .map(|(root, _)| root.clone())
+            .collect::<Vec<_>>(),
         vec![target]
     );
     assert!(!clauses_allow(&write, &outside.join("file")));

@@ -66,22 +66,24 @@ impl fmt::Display for WritableRootRefusal {
         match self {
             Self::Changed { root, was, now } => write!(
                 f,
-                "Refused to run the command: the writable folder `{}` now leads to `{}`, but it \
-                 led to `{}` when the session started. A link made during the session cannot \
-                 move write access. Remove the link (or restart Corbanu if you made it on \
-                 purpose).",
-                root.display(),
-                now.display(),
-                was.display(),
+                "Refused to run the command: the writable folder `{root}` now leads to `{now}` \
+                 through a link made after the session started (it led to `{was}`). Such a link \
+                 cannot move write access, so commands are refused until it is removed: remove \
+                 it yourself (for example `!rm {root}`), or restart Corbanu if you made it on \
+                 purpose.",
+                root = root.display(),
+                now = now.display(),
+                was = was.display(),
             ),
             Self::OutsideHolder { root, real, holder } => write!(
                 f,
-                "Refused to run the command: the writable folder `{}` is a link to `{}`, outside \
-                 `{}`, the writable folder that holds it. A link cannot extend write access. \
-                 Name the real folder instead, or remove the link.",
-                root.display(),
-                real.display(),
-                holder.display(),
+                "Refused to run the command: the writable folder `{root}` is a link to `{real}`, \
+                 outside `{holder}`, the writable folder that holds it. A link cannot extend \
+                 write access, so commands are refused until it is removed: remove it yourself \
+                 (for example `!rm {root}`), or configure the real folder instead.",
+                root = root.display(),
+                real = real.display(),
+                holder = holder.display(),
             ),
         }
     }
@@ -120,11 +122,18 @@ pub fn check_writable_roots(
             .entry(root.root.to_path_buf())
             .or_insert_with(|| now.clone());
         if *was != *now {
-            return Err(WritableRootRefusal::Changed {
-                root: root.root.to_path_buf(),
-                was: was.clone(),
-                now: now.clone(),
-            });
+            // A root that leads through no link any more (the link was
+            // removed, or a real folder took its place) is where it is
+            // spelled; it is recorded there, so a link made later is
+            // refused again.
+            if now.as_path() != root.root.as_path() {
+                return Err(WritableRootRefusal::Changed {
+                    root: root.root.to_path_buf(),
+                    was: was.clone(),
+                    now: now.clone(),
+                });
+            }
+            *was = now.clone();
         }
         if let Some(refusal) = outside_holders(&roots, &reals, index) {
             return Err(refusal);

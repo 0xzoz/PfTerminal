@@ -136,3 +136,34 @@ fn aliases_and_worktrees_pass() {
     reals.sort();
     assert_eq!(reals, vec![base, main, worktree]);
 }
+
+/// #536: a link found at the start that leads outside its holder is refused;
+/// once the person removes it, commands run again, and a link made again is
+/// refused as made during the session.
+#[cfg(unix)]
+#[test]
+fn removing_a_refused_link_lets_commands_run_again() {
+    let (_dir, base) = base();
+    let workspace = base.join("ws");
+    let elsewhere = base.join("elsewhere");
+    std::fs::create_dir_all(&workspace).expect("ws");
+    std::fs::create_dir_all(&elsewhere).expect("elsewhere");
+    let target = workspace.join("target");
+    std::os::unix::fs::symlink(&elsewhere, &target).expect("link");
+    let policy = FileSystemSandboxPolicy::restricted(vec![write(&workspace), write(&target)]);
+    record_writable_roots(&policy, &workspace);
+    assert!(matches!(
+        check_writable_roots(&policy, &workspace),
+        Err(WritableRootRefusal::OutsideHolder { .. })
+    ));
+    std::fs::remove_file(&target).expect("unlink");
+    assert!(check_writable_roots(&policy, &workspace).is_ok());
+    std::fs::create_dir(&target).expect("real folder");
+    assert!(check_writable_roots(&policy, &workspace).is_ok());
+    std::fs::remove_dir(&target).expect("rmdir");
+    std::os::unix::fs::symlink(workspace.join(".."), &target).expect("link again");
+    assert!(matches!(
+        check_writable_roots(&policy, &workspace),
+        Err(WritableRootRefusal::Changed { .. })
+    ));
+}

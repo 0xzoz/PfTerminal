@@ -81,12 +81,12 @@ fn open_pinned_writable_root(
 
     let refused = |now: &Path| {
         CodexErr::UnsupportedOperation(format!(
-            "Refused to run the command: the writable folder `{}` now leads to `{}`, but it \
-             led to `{}` when it was checked. A link made during the session cannot move write \
-             access. Remove the link (or restart Corbanu if you made it on purpose).",
-            root.display(),
-            now.display(),
-            pinned.real.display(),
+            "Refused to run the command: the writable folder `{root}` now leads to `{now}` \
+             through a link made after it was checked (it led to `{was}`). Such a link cannot \
+             move write access: remove it (for example `!rm {root}`).",
+            root = root.display(),
+            now = now.display(),
+            was = pinned.real.display(),
         ))
     };
     for spelled in [root, mount_root] {
