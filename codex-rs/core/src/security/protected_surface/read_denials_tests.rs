@@ -280,7 +280,7 @@ fn issue_562_missing_runtime_folders_are_created_only_where_writable() {
     ReadDenials::for_turn(
         &fx.codex_home,
         &cwd,
-        &[cwd.clone()],
+        std::slice::from_ref(&cwd),
         &PermissionProfile::read_only(),
     );
     for folder in folders {
@@ -289,7 +289,7 @@ fn issue_562_missing_runtime_folders_are_created_only_where_writable() {
     ReadDenials::for_turn(
         &fx.codex_home,
         &cwd,
-        &[cwd.clone()],
+        std::slice::from_ref(&cwd),
         &PermissionProfile::Disabled,
     );
     for folder in folders {
