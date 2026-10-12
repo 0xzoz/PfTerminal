@@ -47,6 +47,6 @@ type = "!ls {workspace}/.agents/issue565.md"
 [[steps]]
 key = "Enter"
 [[steps]]
-wait = "No such file or directory"
+wait = "No such file\\s+or\\s+directory"
 [[steps]]
 pause = 3.0
