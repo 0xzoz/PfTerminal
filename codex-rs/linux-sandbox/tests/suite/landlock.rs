@@ -20,6 +20,7 @@ use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
 use std::collections::HashMap;
+use std::path::Path;
 use std::path::PathBuf;
 use tempfile::NamedTempFile;
 
@@ -1488,14 +1489,90 @@ async fn sandbox_denies_reads_through_a_nested_link_workspace() {
             "{denied:?} denied: exit {}, stdout {stdout}, stderr {}",
             output.exit_code, output.stderr.text
         );
+        // #502: a denial spelled through the absolute link runs too (it
+        // used to fail every command) and stays denied in every spelling.
         assert!(!stdout.contains("API_KEY"), "{report}");
-        if denied == &link {
-            // Masking a path spelled through an absolute link fails closed:
-            // bubblewrap cannot create the mount point, so nothing runs.
-            assert_ne!(output.exit_code, 0, "{report}");
-            continue;
-        }
         for line in ["dot=1", "real=1", "link=1", "other=0"] {
+            assert!(stdout.contains(line), "{line} missing: {report}");
+        }
+    }
+}
+
+/// #501: under restricted reads, a read-only root reached through a link is
+/// mounted at the link's path. A denial spelled by the real path (or through
+/// the link) stays unreadable through that mount, and the rest stays
+/// readable.
+#[tokio::test]
+async fn restricted_reads_deny_through_a_read_only_linked_root() {
+    if should_skip_bwrap_tests().await {
+        eprintln!("skipping bwrap test: bwrap sandbox prerequisites are unavailable");
+        return;
+    }
+    let tmpdir = tempfile::tempdir().expect("tempdir");
+    let base = tmpdir.path().canonicalize().expect("canonical");
+    let real = base.join("real");
+    let link = base.join("link");
+    let work = base.join("work");
+    std::fs::create_dir_all(&real).expect("real");
+    std::fs::create_dir_all(&work).expect("work");
+    std::fs::write(real.join("secret"), "API_KEY=x\n").expect("secret");
+    std::fs::write(real.join("other"), "ok\n").expect("other");
+    std::os::unix::fs::symlink(&real, &link).expect("link");
+    let sandbox_helper_dir = codex_linux_sandbox_exe()
+        .parent()
+        .expect("sandbox helper should have a parent")
+        .to_path_buf();
+    let entry = |path: &Path, access| FileSystemSandboxEntry {
+        path: FileSystemPath::Path {
+            path: AbsolutePathBuf::try_from(path).expect("absolute path"),
+        },
+        access,
+        missing_path_behavior: None,
+    };
+    let script = format!(
+        "cat {link}/secret; echo link=$?; cat {link}/other; echo other=$?",
+        link = link.display(),
+    );
+    // The last denial holds the linked root's whole target.
+    for (denied, other) in [
+        (real.join("secret"), "other=0"),
+        (link.join("secret"), "other=0"),
+        (real.clone(), "other=1"),
+    ] {
+        let file_system_sandbox_policy = FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Minimal,
+                },
+                access: FileSystemAccessMode::Read,
+                missing_path_behavior: None,
+            },
+            entry(&sandbox_helper_dir, FileSystemAccessMode::Read),
+            entry(&link, FileSystemAccessMode::Read),
+            entry(&work, FileSystemAccessMode::Write),
+            entry(&denied, FileSystemAccessMode::Deny),
+        ]);
+        let permission_profile = PermissionProfile::from_runtime_permissions(
+            &file_system_sandbox_policy,
+            NetworkSandboxPolicy::Restricted,
+        );
+        let output = run_cmd_result_with_permission_profile_for_cwd(
+            &["bash", "-c", &script],
+            AbsolutePathBuf::try_from(work.as_path()).expect("absolute cwd"),
+            permission_profile,
+            create_env_from_core_vars(),
+            LONG_TIMEOUT_MS,
+            /*use_legacy_landlock*/ false,
+        )
+        .await
+        .expect("sandboxed command should execute");
+        let stdout = &output.stdout.text;
+        let report = format!(
+            "{denied:?} denied: exit {}, stdout {stdout}, stderr {}",
+            output.exit_code, output.stderr.text
+        );
+        assert!(!stdout.contains("API_KEY"), "{report}");
+        for line in ["link=1", other] {
             assert!(stdout.contains(line), "{line} missing: {report}");
         }
     }
