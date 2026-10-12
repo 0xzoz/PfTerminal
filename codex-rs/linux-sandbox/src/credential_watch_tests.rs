@@ -248,6 +248,19 @@ fn credential_templates_are_neither_hidden_nor_stop_the_command() {
         monitor.stop(),
         Some(work.join("app/.env.example.local").display().to_string())
     );
+
+    // A person's own `**/.env.*` glob alone (not the whole rule) keeps
+    // covering the templates: an existing one is hidden.
+    std::fs::remove_file(work.join(".env.template")).unwrap();
+    let own = deny_globs(vec![format!("{}/**/.env.*", work.display())]);
+    let watcher = CredentialWatcher::for_policy(&own, &work).unwrap().unwrap();
+    assert!(
+        watcher
+            .existing_files()
+            .contains(&work.join(".env.example")),
+        "{:?}",
+        watcher.existing_files()
+    );
 }
 
 /// Folders with a credential name (a `.env` virtualenv) and short-lived

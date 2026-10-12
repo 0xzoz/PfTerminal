@@ -44,7 +44,9 @@ use std::thread;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::credential_file_glob_root;
 use codex_protocol::permissions::credential_file_names_shown;
+use codex_protocol::permissions::credential_rule_roots;
 use codex_protocol::permissions::is_credential_file_name;
+use codex_protocol::permissions::is_credential_template_name;
 use codex_protocol::permissions::unsafe_credential_entry_message;
 
 /// Folders watched for one command, at most. Past it the command is refused.
@@ -112,6 +114,10 @@ enum Scan {
 pub(crate) struct CredentialWatcher {
     fd: OwnedFd,
     roots: Vec<PathBuf>,
+    /// Below these the whole credential rule applies, so the templates are
+    /// not credential files (#442, Travis 2026-10-12); below a folder only a
+    /// person's own `**/.env.*` covers, they are.
+    template_roots: Vec<PathBuf>,
     folders: HashMap<libc::c_int, PathBuf>,
     /// Credential files present at the start (hidden by the glob
     /// expansion), with their inode.
@@ -149,10 +155,15 @@ impl CredentialWatcher {
                 std::io::Error::last_os_error()
             ));
         }
+        let template_roots = credential_rule_roots(&policy.get_unreadable_globs_with_cwd(cwd))
+            .into_iter()
+            .filter_map(|root| std::fs::canonicalize(root).ok())
+            .collect();
         let mut watcher = Self {
             // SAFETY: `fd` is a fresh descriptor nothing else owns.
             fd: unsafe { OwnedFd::from_raw_fd(fd) },
             roots: roots.clone(),
+            template_roots,
             folders: HashMap::new(),
             known: HashMap::new(),
             placeholders: HashSet::new(),
@@ -256,7 +267,7 @@ impl CredentialWatcher {
                     pending.push((path, Some(device)));
                     continue;
                 }
-                if !is_credential_file_name(&name) || self.placeholders.contains(&path) {
+                if !self.is_credential(&path, &name) || self.placeholders.contains(&path) {
                     continue;
                 }
                 match scan {
@@ -277,6 +288,16 @@ impl CredentialWatcher {
             }
         }
         None
+    }
+
+    /// Whether `name` (of `path`) is a credential file name here.
+    fn is_credential(&self, path: &Path, name: &OsStr) -> bool {
+        is_credential_file_name(name)
+            || (is_credential_template_name(name)
+                && !self
+                    .template_roots
+                    .iter()
+                    .any(|root| path.starts_with(root)))
     }
 
     /// Starts watching beside the command `child`, which is killed as soon
@@ -389,7 +410,7 @@ impl CredentialWatcher {
                 if let Some(found) = self.watch_tree(&path, Scan::Running) {
                     return Some(found);
                 }
-            } else if is_credential_file_name(name) && !self.placeholders.contains(&path) {
+            } else if self.is_credential(&path, name) && !self.placeholders.contains(&path) {
                 return Some(path.display().to_string());
             }
         }

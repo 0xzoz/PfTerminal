@@ -232,7 +232,9 @@ pub(crate) fn held_lines(grants: &[HeldGrant]) -> Vec<String> {
             } else {
                 escape_controls(&strip_bash_lc_and_escape(&grant.command))
             };
-            format!("Grant: `{command}` may write shell and git start-up files · {uses} · expires {expires}")
+            format!(
+                "Grant: `{command}` may write hooks and start-up files · {uses} · expires {expires}"
+            )
         })
         .collect()
 }

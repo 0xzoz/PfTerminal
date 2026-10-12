@@ -105,32 +105,63 @@ pub fn unsafe_credential_entry_message(
     let shown = path.display();
     let away = "or move it out of the workspace";
     Some(if metadata.file_type().is_symlink() {
-        let target = std::fs::read_link(path)
-            .map(|target| {
-                let target = path
+        let target = std::fs::read_link(path).ok().map(|target| {
+            lexically_normal(
+                &path
                     .parent()
-                    .map_or(target.clone(), |parent| parent.join(&target));
-                format!(" to {}", target.display())
-            })
-            .unwrap_or_default();
+                    .map_or(target.clone(), |parent| parent.join(&target)),
+            )
+        });
+        let (to, exposed) = match &target {
+            Some(target) => (
+                format!(" to {}", target.display()),
+                format!(
+                    " What was written to it is in {}, which agent commands may have read: move \
+                     that file out of the workspace too, and change any secret in it.",
+                    target.display()
+                ),
+            ),
+            None => (String::new(), String::new()),
+        };
         format!(
-            "the credential file {shown} is a link{target}. A credential file must be a regular \
-             file, or what is written to it lands where agent commands could read it under \
-             another name. To fix it, replace the link with a regular file (delete the link, \
-             then copy the file it pointed to into its place), {away}"
+            "the credential file {shown} is a link{to}. A credential file must be a regular file, \
+             or what is written to it lands where agent commands could read it under another \
+             name. To fix it, replace the link with a regular file (delete the link, then create \
+             the file in its place), {away}.{exposed}"
         )
     } else if problem == HARD_LINKED {
         format!(
-            "the credential file {shown} has other hard links (the same file under another \
-             name agent commands could read). To fix it, replace it with a regular copy (copy it \
-             to a new file, then rename that over it), {away}"
+            "the credential file {shown} has other hard links: the same file under other names \
+             agent commands could read. To fix it, delete the other names (find them with \
+             `find . -samefile {shown}`) or replace the file with a regular copy, {away}; any \
+             secret in it may have been read, so change it."
         )
     } else {
         format!(
             "the credential file {shown} {problem}. To fix it, replace it with a regular file, \
-             {away}"
+             {away}."
         )
     })
+}
+
+/// `path` with `.` and `name/..` removed, without touching the filesystem.
+fn lexically_normal(path: &Path) -> PathBuf {
+    let mut normal = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir
+                if matches!(
+                    normal.components().next_back(),
+                    Some(std::path::Component::Normal(_))
+                ) =>
+            {
+                normal.pop();
+            }
+            other => normal.push(other),
+        }
+    }
+    normal
 }
 
 const HARD_LINKED: &str = "has other hard links";
@@ -153,6 +184,33 @@ pub fn credential_file_globs(root: &str) -> Vec<String> {
         .iter()
         .map(|name| format!("{root}/**/{name}"))
         .collect()
+}
+
+/// #442 (Travis, 2026-10-12): the folders whose credential names `globs`
+/// deny with the whole rule, every pattern of [`credential_file_globs`] for
+/// the folder, as the Aggressive level writes it. Only there are the
+/// templates ([`CREDENTIAL_FILE_TEMPLATE_NAMES`]) exempt: a person's own
+/// `**/.env.*` glob alone keeps covering them.
+pub fn credential_rule_roots<S: AsRef<str>>(globs: &[S]) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = globs
+        .iter()
+        .filter_map(|glob| credential_file_glob_root(glob.as_ref()))
+        .collect();
+    roots.sort();
+    roots.dedup();
+    roots.retain(|root| {
+        let root = root.to_string_lossy();
+        credential_file_globs(&root)
+            .iter()
+            .all(|wanted| globs.iter().any(|glob| glob.as_ref() == wanted))
+    });
+    roots
+}
+
+/// Whether the deny glob `pattern` leaves the templates out: a credential
+/// glob of a folder in `rule_roots` ([`credential_rule_roots`]).
+pub fn credential_glob_exempts_templates(pattern: &str, rule_roots: &[PathBuf]) -> bool {
+    credential_file_glob_root(pattern).is_some_and(|root| rule_roots.contains(&root))
 }
 
 /// The folder a deny glob from [`credential_file_globs`] covers, so a sandbox
@@ -377,8 +435,8 @@ struct FileSystemSemanticSignature {
 /// Runtime matcher for read-deny entries in a filesystem sandbox policy.
 pub struct ReadDenyMatcher {
     denied_candidates: Vec<Vec<PathBuf>>,
-    /// Each glob, and whether it is a credential-name glob, whose matches
-    /// exclude the template names ([`CREDENTIAL_FILE_TEMPLATE_NAMES`]).
+    /// Each glob, and whether its matches leave out the template names
+    /// ([`credential_glob_exempts_templates`]).
     deny_read_matchers: Vec<(GlobMatcher, bool)>,
     invalid_pattern: bool,
     /// Directories that may not be listed (issue #506), by every spelling.
@@ -439,13 +497,16 @@ impl ReadDenyMatcher {
         // time here instead of being snapshotted to startup filesystem state.
         let mut invalid_pattern = false;
         let mut deny_read_matchers = Vec::new();
-        for pattern in file_system_sandbox_policy.get_unreadable_globs_with_cwd(cwd) {
+        let globs = file_system_sandbox_policy.get_unreadable_globs_with_cwd(cwd);
+        let rule_roots = credential_rule_roots(&globs);
+        for pattern in globs {
             // Credential globs match in any letter case (`.ENV` on a
             // case-insensitive filesystem is `.env`); this also covers their
             // folder part, which only ever denies more.
             let case_insensitive = credential_file_glob_root(&pattern).is_some();
+            let exempts_templates = credential_glob_exempts_templates(&pattern, &rule_roots);
             match build_glob_matcher(&pattern, case_insensitive) {
-                Ok(matcher) => deny_read_matchers.push((matcher, case_insensitive)),
+                Ok(matcher) => deny_read_matchers.push((matcher, exempts_templates)),
                 Err(err) => match invalid_glob_behavior {
                     InvalidDenyReadGlobBehavior::FailClosed => invalid_pattern = true,
                     InvalidDenyReadGlobBehavior::ReturnError => {
@@ -3872,6 +3933,27 @@ mod tests {
                 "{denied}"
             );
         }
+        // A person's own `**/.env.*` glob alone (not the whole rule) still
+        // covers the templates, at any level.
+        let own_env_star = FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry::new(
+            FileSystemPath::GlobPattern {
+                pattern: format!("{root}/**/.env.*"),
+            },
+            FileSystemAccessMode::Deny,
+        )]);
+        assert!(is_read_denied(
+            &temp.as_path().join(".env.example"),
+            &own_env_star,
+            temp.as_path()
+        ));
+        assert_eq!(
+            credential_rule_roots(&credential_file_globs(&root)),
+            vec![PathBuf::from(&root)]
+        );
+        assert_eq!(
+            credential_rule_roots(&[format!("{root}/**/.env.*")]),
+            Vec::<PathBuf>::new()
+        );
         // A user's own deny glob still covers a template name.
         let mut entries = policy.entries.clone();
         entries.push(FileSystemSandboxEntry::new(

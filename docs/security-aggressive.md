@@ -15,6 +15,14 @@ To allow it, switch to Permissive.
 (any letter case) hold no credentials, and checkouts, installs and scaffolds
 write them, so agent commands can read, create and change them on every
 system. A name such as `.env.example.local` is still a credential file.
+Because an agent can make a template, don't rename one into `.env` when
+you fill in real values: copy it instead (`cp .env.example .env`). On macOS
+an agent command can't make a template a link or pipe; on Linux a `.env`
+that is a link or has other names is refused, as below.
+
+A deny rule of your own for `**/.env.*` in a permission profile still covers
+the templates. Only a profile that denies all three of `**/.env`,
+`**/.env.*` and `**/.envrc` for a folder, as Aggressive does, leaves them out.
 
 How each system protects files created later:
 
@@ -32,29 +40,39 @@ How each system protects files created later:
 
 ## A credential file that is a link
 
-A `.env` (or other credential name) that is a link, a pipe, or a file with
-other hard links can't be protected: what you write to it lands somewhere an
-agent command could read under another name. Aggressive refuses to start
-while the current folder holds one, and on Linux every command is refused
-while it exists. The message names the file and where the link points.
+A `.env` (or other credential name) that is a link or a pipe, or on macOS
+and Linux a file with other hard links, can't be protected: what you write
+to it lands somewhere an agent command could read under another name.
+Aggressive refuses to start while the current folder holds one, and on
+Linux every command is refused while it exists. The message names the file
+and where the link points.
 
-To fix it, replace the link with a regular file (delete the link, then copy the
-file it pointed to into its place), or move it out of the workspace. A file
-with other hard links: copy it to a new file and rename that over it.
+To fix a link, replace it with a regular file (delete the link, then create
+the file in its place), or move it out of the workspace. What was written to
+it is in the file it pointed to, which agent commands may have read: move that
+file out of the workspace too, and change any secret in it. For a file with
+other hard links, delete the other names (`find . -samefile .env` lists them)
+or replace the file with a regular copy, and change any secret in it.
 
 ## Grant once
 
 Under Aggressive an approval never lifts the write protections. "Grant once"
-lifts one: it lets one command write your shell and git start-up files (such
-as `.zshrc`, `.profile`, `.gitconfig`, `.config/git` and `.local/bin`). It
-applies only where Aggressive lets commands write, the current folder, so it
-only matters when that folder holds them (for example, Corbanu runs in your
-home folder). A start-up file written this way runs code later, outside the
-sandbox.
+lets one command write the files that run code later, which Aggressive
+otherwise keeps read-only, and only inside the current folder (the only place
+Aggressive lets commands write):
 
-Nothing else changes: credential files and the Corbanu home stay unreadable;
-Corbanu's own files and the project's `.git`, `.codex` and `.agents` stay
-read-only; other folders and the network stay closed.
+- a git hooks folder the project sets with `core.hooksPath`, such as Husky's
+  `.husky`;
+- when the current folder holds your home folder: your shell and git start-up
+  files (such as `.zshrc`, `.profile`, `.gitconfig`, `.config/git` and
+  `.local/bin`), login agents and services (`Library/LaunchAgents`,
+  `.config/systemd`, `.config/autostart`) and `.claude` settings.
+
+A file written this way runs code later, outside the sandbox. Nothing else
+changes: credential files and Corbanu's sign-in, vault, config and history stay
+unreadable; Corbanu's own files and the project's `.git` (its hooks and config
+included), `.codex` and `.agents` stay read-only; other folders and the
+network stay closed.
 
 ## Commands run outside the sandbox
 

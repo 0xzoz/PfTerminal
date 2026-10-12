@@ -1073,3 +1073,63 @@ fn issue_442_a_grant_keeps_codex_and_agents_read_only() {
         );
     }
 }
+
+/// #442 (Travis, 2026-10-12): exactly what "Grant once" lifts, as the grant
+/// review, the inspector and the docs describe it (`GRANT_ONCE_LIFTS` in the
+/// TUI): the shell and git start-up files, login agents and services and
+/// `.claude` in the user's home, a `core.hooksPath` hooks folder, and the
+/// project's `.git/hooks` and `.git/config` (which the Aggressive sandbox
+/// keeps read-only anyway, with all of `.git`). A new kind of lifted path
+/// fails here until the descriptions name it.
+#[test]
+fn issue_442_a_grant_lifts_only_the_described_kinds() {
+    let fx = fixture();
+    // The current folder holds the user's home, the case where the most is
+    // lifted.
+    let cwd = fx.user_home.clone();
+    let git = cwd.join(".git");
+    std::fs::create_dir_all(git.join("hooks")).unwrap();
+    std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::fs::write(git.join("config"), "[core]\n\thooksPath = .husky\n").unwrap();
+    std::fs::create_dir_all(cwd.join(".husky")).unwrap();
+    for entry in USER_PERSISTENCE {
+        let path = cwd.join(entry);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        if !path.exists() {
+            std::fs::write(&path, "").unwrap();
+        }
+    }
+    let denials = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)]);
+    let never: Vec<_> = denials.never_lifted_paths().cloned().collect();
+    let lifted: Vec<_> = denials
+        .read_only_paths()
+        .filter(|path| !never.contains(path))
+        .cloned()
+        .collect();
+    let described = |path: &AbsolutePathBuf| {
+        let Ok(relative) = path.as_path().strip_prefix(&cwd) else {
+            return false;
+        };
+        USER_PERSISTENCE
+            .iter()
+            .any(|entry| relative == Path::new(entry))
+            || [".git/hooks", ".git/config", ".husky"]
+                .iter()
+                .any(|entry| relative == Path::new(entry))
+    };
+    assert!(!lifted.is_empty());
+    let undescribed: Vec<_> = lifted.iter().filter(|path| !described(path)).collect();
+    assert_eq!(undescribed, Vec::<&AbsolutePathBuf>::new());
+    for kind in [
+        ".zshrc",
+        ".claude",
+        "Library/LaunchAgents",
+        ".config/systemd",
+        ".husky",
+    ] {
+        assert!(
+            lifted.iter().any(|path| path.as_path() == cwd.join(kind)),
+            "{kind} not lifted: {lifted:?}"
+        );
+    }
+}

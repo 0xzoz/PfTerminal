@@ -1040,7 +1040,7 @@ async fn issue_442_launch_check_names_unsafe_credential_files() {
         failures[1].contains(&format!(
             "{} is a link to {}",
             work.join("app/.envrc").display(),
-            work.join("app/../notes.txt").display()
+            work.join("notes.txt").display()
         )),
         "{failures:?}"
     );
@@ -1053,7 +1053,12 @@ async fn issue_442_launch_check_names_unsafe_credential_files() {
         "{failures:?}"
     );
     assert!(
-        failures[0].contains("replace it with a regular copy"),
+        failures[0].contains("delete the other names"),
+        "{failures:?}"
+    );
+    // The exposed target is named, with what to do about it.
+    assert!(
+        failures[1].contains("move that file out of the workspace too"),
         "{failures:?}"
     );
 }

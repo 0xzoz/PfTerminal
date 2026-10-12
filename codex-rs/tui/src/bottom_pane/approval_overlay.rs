@@ -866,10 +866,8 @@ impl ApprovalOverlay {
                         &command,
                     ))
                     .bold(),
-                    format!(
-                        " permission to write shell and git start-up files (expires {expires})"
-                    )
-                    .into(),
+                    format!(" permission to write hooks and start-up files (expires {expires})")
+                        .into(),
                 ]
                 .into(),
             ]),
@@ -1324,8 +1322,7 @@ fn same_command(command: &[String], shown: &[String]) -> bool {
 
 fn grant_option() -> ApprovalOption {
     ApprovalOption {
-        label: "Grant once: also let it write shell and git start-up files (review first)"
-            .to_string(),
+        label: "Grant once: also let it write hooks and start-up files (review first)".to_string(),
         decision: ApprovalDecision::SecurityGrant,
         shortcuts: vec![key_hint::plain(KeyCode::Char('g'))],
         persistent: false,

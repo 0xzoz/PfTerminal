@@ -27,7 +27,8 @@ use std::process::Command;
 use crate::linux_run_main::synthetic_mount_registry_root;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result;
-use codex_protocol::permissions::credential_file_glob_root;
+use codex_protocol::permissions::credential_glob_exempts_templates;
+use codex_protocol::permissions::credential_rule_roots;
 use codex_protocol::permissions::is_credential_template_name;
 use codex_protocol::permissions::is_protected_metadata_name;
 use codex_protocol::protocol::FileSystemAccessMode;
@@ -1149,15 +1150,17 @@ fn expand_unreadable_globs_with_ripgrep(
     // Group each pattern by the static path prefix before its first glob
     // metacharacter. That keeps scans narrow, avoids searching from `/`, and
     // lets one `rg --files` call handle all patterns under the same root.
-    // Credential-name globs are scanned apart: their matches leave out the
-    // template names (#442, Travis 2026-10-12), which other globs still cover.
+    // The whole credential rule's globs are scanned apart: their matches
+    // leave out the template names (#442, Travis 2026-10-12), which other
+    // globs still cover.
+    let rule_roots = credential_rule_roots(patterns);
     let mut patterns_by_search_root: BTreeMap<(AbsolutePathBuf, bool), Vec<String>> =
         BTreeMap::new();
     for pattern in patterns {
         if let Some((search_root, glob)) = split_pattern_for_ripgrep(pattern, cwd)
             && search_root.as_path().is_dir()
         {
-            let credential = credential_file_glob_root(pattern).is_some();
+            let credential = credential_glob_exempts_templates(pattern, &rule_roots);
             patterns_by_search_root
                 .entry((search_root, credential))
                 .or_default()
@@ -3963,6 +3966,11 @@ mod tests {
         let mut own = credential;
         own.push(format!("{}/**/*.sample", root.display()));
         assert_eq!(expand(own), vec![".env", ".env.local", ".env.sample"]);
+        // A person's own `**/.env.*` alone is not the credential rule.
+        assert_eq!(
+            expand(vec![format!("{}/**/.env.*", root.display())]),
+            vec![".env.example", ".env.local", ".env.sample", ".env.template"]
+        );
     }
 
     #[cfg(unix)]

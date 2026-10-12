@@ -170,9 +170,7 @@ pub(crate) fn held_for_inspector(
             thread,
             surface: Surface::of(&entry.grant.scope.resource).map_or("unknown", |surface| {
                 match surface {
-                    Surface::UnprotectedCommand => {
-                        "one command may write shell and git start-up files"
-                    }
+                    Surface::UnprotectedCommand => "one command may write hooks and start-up files",
                     Surface::UnconfinedProcess => "typing into one unconfined process",
                 }
             }),

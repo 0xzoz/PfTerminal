@@ -2374,9 +2374,10 @@ fn unlistable_directory_cannot_be_listed_but_its_entries_stay_usable() {
 
 /// #442 (Travis, 2026-10-12), real `sandbox-exec`: `.env.example`,
 /// `.env.sample` and `.env.template`, in any case, are not credential files:
-/// an agent command reads, creates, overwrites and removes them. Every other
-/// credential name stays denied, and a template name never reaches the
-/// person's `.env` through a link.
+/// an agent command reads, creates, overwrites and removes them, but cannot
+/// make one a link or pipe (a person's later `.env` could be renamed from
+/// it). Every other credential name stays denied, and a template name never
+/// reaches the person's `.env` through a link or hard link.
 #[test]
 fn credential_templates_stay_usable() {
     let tmp = TempDir::new().expect("tempdir");
@@ -2410,14 +2411,17 @@ fn credential_templates_stay_usable() {
     );
     let policy = FileSystemSandboxPolicy::restricted(entries);
     let script = "cat .env.example; echo example=$?; cat .ENV.SAMPLE; echo sample=$?; \
-         printf tpl > .env.template; echo template=$?; printf x >> .env.example; echo append=$?; \
+         printf tpl > .env.template; echo template=$?; cat .env.template; echo; \
+         printf x >> .env.example; echo append=$?; \
          mkdir -p app && cp .env.example app/.Env.Template; echo copy=$?; \
          rm .ENV.SAMPLE; echo removed=$?; \
          cat .env; echo read=$?; printf x > .env.local; echo create=$?; \
          printf x > .env.example.local; echo near=$?; \
+         ln -s notes .env.sample; echo symlink=$?; mkfifo .env.sample; echo fifo=$?; \
          ln -s .env .env.sample; cat .env.sample; echo link=$?; \
-         ln .env .env.template.copy 2>/dev/null; ln .env hard-copy 2>/dev/null; \
-         cat .env.template.copy hard-copy 2>/dev/null; echo hardlinks=$?";
+         rm .env.template; ln .env .env.template; cat .env.template; echo readtpl=$?; \
+         ln .env hard-copy; cat hard-copy; echo hardcopy=$?; \
+         mv .env .env.example; echo mvenv=$?";
     let args = create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
         command: vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
         file_system_sandbox_policy: &policy,
@@ -2441,34 +2445,83 @@ fn credential_templates_stay_usable() {
         "API_KEY=example-442example=0",
         "API_KEY=sample-442sample=0",
         "template=0",
+        "tpl\n",
         "append=0",
         "copy=0",
         "removed=0",
         "read=1",
         "create=1",
         "near=1",
+        "symlink=1",
+        "fifo=1",
         "link=1",
+        "readtpl=1",
+        "hardcopy=1",
+        "mvenv=1",
     ] {
         assert!(stdout.contains(line), "{line} not in {stdout}");
     }
-    assert_eq!(
-        fs::read_to_string(work.join(".env.template")).expect("template"),
-        "tpl"
-    );
     assert!(work.join("app/.Env.Template").is_file());
-    // `.ENV.SAMPLE` was removed; `.env.sample` is now the planted link.
-    assert!(
-        fs::symlink_metadata(work.join(".env.sample"))
-            .expect("link")
-            .file_type()
-            .is_symlink()
+    assert_eq!(
+        fs::read_to_string(work.join(".env")).expect("env"),
+        "API_KEY=dummy-442-person"
     );
+    // No link or pipe was planted under a template name.
+    assert!(fs::symlink_metadata(work.join(".env.sample")).is_err());
     for denied in [".env.local", ".env.example.local"] {
         assert!(
             fs::symlink_metadata(work.join(denied)).is_err(),
             "{denied} was created"
         );
     }
+}
+
+/// #442 (Travis, 2026-10-12), real `sandbox-exec`: a person's own
+/// `**/.env.*` deny glob (not the whole credential rule) keeps covering the
+/// templates, at any level.
+#[test]
+fn own_env_star_glob_still_covers_templates() {
+    let tmp = TempDir::new().expect("tempdir");
+    let work = tmp.path().canonicalize().expect("canonical");
+    fs::write(work.join(".env.example"), "API_KEY=own-442").expect("example");
+    let policy = FileSystemSandboxPolicy::restricted(vec![
+        FileSystemSandboxEntry::new(
+            FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            },
+            FileSystemAccessMode::Read,
+        ),
+        FileSystemSandboxEntry::new(
+            FileSystemPath::GlobPattern {
+                pattern: format!("{}/**/.env.*", work.display()),
+            },
+            FileSystemAccessMode::Deny,
+        ),
+    ]);
+    let args = create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
+        command: vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "cat .env.example; echo example=$?".to_string(),
+        ],
+        file_system_sandbox_policy: &policy,
+        network_sandbox_policy: NetworkSandboxPolicy::Restricted,
+        sandbox_policy_cwd: &work,
+        enforce_managed_network: false,
+        managed_network: None,
+        environment_id: None,
+        network: None,
+        extra_allow_unix_sockets: &[],
+    })
+    .expect("args");
+    let output = Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
+        .args(&args)
+        .current_dir(&work)
+        .output()
+        .expect("sandbox-exec");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("own-442"), "{stdout}");
+    assert!(stdout.contains("example=1"), "{stdout}");
 }
 
 /// #442 (Travis, 2026-10-11), real `sandbox-exec`: under credential-name deny
