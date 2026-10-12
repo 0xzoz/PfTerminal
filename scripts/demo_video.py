@@ -79,6 +79,10 @@ class Spec:
     config: str = ""
     credentials: dict[str, str] = field(default_factory=dict)
     fixtures: dict[str, str] = field(default_factory=dict)
+    # Off-screen command run before the candidate starts (e.g. sign-ins the
+    # launch arguments need); same environment as a `run` step.
+    setup: str | None = None
+    setup_timeout: float = 60.0
 
 
 def load_spec(path: Path) -> Spec:
@@ -118,6 +122,8 @@ def load_spec(path: Path) -> Spec:
         config=data.get("config", ""),
         credentials=dict(data.get("credentials", {})),
         fixtures=dict(data.get("fixtures", {})),
+        setup=data.get("setup"),
+        setup_timeout=float(data.get("setup_timeout", 60.0)),
     )
 
 
@@ -706,6 +712,11 @@ def record(args: argparse.Namespace) -> Path:
         [str(binary), "--version"], capture_output=True, text=True
     ).stdout.strip()
     places["bin"] = str(binary)
+    if spec.setup:
+        log("setup (off screen, before launch)")
+        run_step(
+            expand(spec.setup, places), 0, places, creds, timeout=spec.setup_timeout
+        )
     launcher = write_launcher(run, spec, binary, places, creds)
     tmux = Tmux(f"demo-{spec.id}-{os.getpid()}")
     raw_cast = run / "raw.cast"

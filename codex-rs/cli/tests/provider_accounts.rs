@@ -247,3 +247,45 @@ fn named_openai_account_login_list_status_logout() -> Result<()> {
         .stderr(contains("is not signed in"));
     Ok(())
 }
+
+/// #573: a named OpenAI account can sign in with ChatGPT (device code) when
+/// the configured session provider is not OpenAI; only a configured
+/// `forced_login_method = "api"` refuses it, naming the API-key route for
+/// that account. The issuer is a closed local port, so the attempt itself
+/// fails after the method check.
+#[test]
+fn named_chatgpt_sign_in_is_not_refused_for_a_third_party_session_provider() -> Result<()> {
+    let home = TempDir::new()?;
+    std::fs::write(
+        home.path().join("config.toml"),
+        "model_provider = \"zai\"\nmodel = \"glm-5.3-flash\"\n[features]\nnamed_accounts = true\n",
+    )?;
+    let device_login = |extra: &[&str]| -> Result<assert_cmd::assert::Assert> {
+        let mut command = corbanu(home.path())?;
+        command
+            .args(extra)
+            .args([
+                "login",
+                "--account",
+                "work",
+                "--device-auth",
+                "--experimental_issuer",
+                "http://127.0.0.1:9",
+            ])
+            .timeout(std::time::Duration::from_secs(120));
+        Ok(command.assert())
+    };
+    device_login(&[])?.failure().stderr(
+        contains("Error signing in account `work`")
+            .and(contains("disabled").not())
+            .and(contains("Use API key login instead").not()),
+    );
+    device_login(&["-c", "forced_login_method=\"api\""])?
+        .failure()
+        .stderr(contains(
+            "ChatGPT sign-in is disabled by `forced_login_method = \"api\"`; sign account `work` \
+             in with an OpenAI API key: `corbanu login --account work --with-api-key`.",
+        ));
+    assert!(!home.path().join("auth.json").exists());
+    Ok(())
+}

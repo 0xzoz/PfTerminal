@@ -14,6 +14,11 @@ mod accounting_tests;
 use crate::client::ModelClient;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
+use crate::provider_throttle::AdmittedProviderRequest;
+use crate::provider_throttle::AuxiliaryRequest;
+use crate::provider_throttle::AuxiliaryRoute;
+use crate::provider_throttle::record_auxiliary_error;
+use crate::provider_throttle::record_auxiliary_outcome;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::security::ingress::NativeIngress;
 use crate::security::ingress::OriginKey;
@@ -623,6 +628,34 @@ impl StageOneMemoryClient {
             .await;
     }
 
+    /// Check the owner's provider key for a cooldown before extracting.
+    async fn admit_provider_request(
+        &self,
+        request: &StageOneMemoryRequest<'_>,
+    ) -> Result<Option<AdmittedProviderRequest>, StageOneMemoryError> {
+        let Some(owner) = self.binding.owner.upgrade() else {
+            return Ok(None);
+        };
+        let auth_manager = owner.services.auth_manager();
+        let (admitted, _fallback) = AdmittedProviderRequest::admit(
+            AuxiliaryRequest::MemoryExtraction,
+            AuxiliaryRoute {
+                state_db: owner.state_db(),
+                // Where the request reads a named account's key from.
+                codex_home: auth_manager.codex_home(),
+                provider_id: &self.accounting_provider_id,
+                provider: &self.binding.provider,
+                model: &request.model_info.slug,
+                auth_mode: auth_manager.auth_mode(),
+                thread_id: Some(self.binding.owner_id.to_string()),
+                turn_id: None,
+            },
+            request.prompt,
+        )
+        .await?;
+        Ok(admitted)
+    }
+
     pub async fn extract(
         &mut self,
         request: StageOneMemoryRequest<'_>,
@@ -657,12 +690,18 @@ impl StageOneMemoryClient {
                 None
             }
         };
+        // #509: extraction is a model request on the owner's key like any
+        // other: a cooldown holds it back, and its 429 holds the key back.
+        let admitted = self.admit_provider_request(&request).await?;
         let trace = InferenceTraceContext::disabled();
         let mut stream = tokio::select! {
             _ = self.binding.termination.clone() => return Err(StageOneMemoryDenial::OwnerTerminated.into()),
             result = session.stream(request.prompt, request.model_info, request.session_telemetry,
                 request.reasoning_effort, request.reasoning_summary, request.service_tier,
-                request.responses_metadata, &trace) => result.map_err(|error| self.binding.request_error(error))?,
+                request.responses_metadata, &trace) => {
+                record_auxiliary_outcome(admitted.as_ref(), &result).await;
+                result.map_err(|error| self.binding.request_error(error))?
+            }
         };
         let mut text = String::new();
         loop {
@@ -671,10 +710,11 @@ impl StageOneMemoryClient {
                 _ = self.binding.termination.clone() => return Err(StageOneMemoryDenial::OwnerTerminated.into()),
                 event = stream.next() => event,
             };
-            match event
-                .transpose()
-                .map_err(|error| self.binding.request_error(error))?
-            {
+            let event = event.transpose();
+            if let Err(error) = &event {
+                record_auxiliary_error(admitted.as_ref(), Some(error)).await;
+            }
+            match event.map_err(|error| self.binding.request_error(error))? {
                 Some(ResponseEvent::OutputTextDelta { delta, .. }) => text.push_str(&delta),
                 Some(ResponseEvent::OutputItemDone(
                     codex_protocol::models::ResponseItem::Message { content, .. },
