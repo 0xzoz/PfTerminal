@@ -470,4 +470,31 @@ async fn openai_on_a_named_sign_in_account_is_configured_without_a_default_login
             "enrolled = {enrolled}"
         );
     }
+    // A default API-key login does not configure an unenrolled named
+    // account; the session's own account vetted at startup (`Account`, e.g.
+    // with a remote app server whose vault this home does not hold) stays.
+    for (default_login, expected) in [
+        (
+            codex_login::OpenAiAuthMetadata::ApiKey,
+            ProviderConfigurationState::NotConfigured,
+        ),
+        (
+            codex_login::OpenAiAuthMetadata::Account,
+            ProviderConfigurationState::Configured,
+        ),
+    ] {
+        let host = ProviderStatusHost::from_config_with_account_registry(
+            &config,
+            ProviderAccountMetadata {
+                openai: default_login,
+                ..Default::default()
+            },
+            |_, _| false,
+        );
+        assert_eq!(
+            host.resolve_provider("openai").unwrap().configuration,
+            expected,
+            "{default_login:?}"
+        );
+    }
 }

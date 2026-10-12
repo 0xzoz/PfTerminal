@@ -404,10 +404,16 @@ impl ProviderStatusHost {
             Some(ProviderSetupCapability::OpenAiAccount)
             | Some(ProviderSetupCapability::ApiKey {
                 storage: ApiKeyStorage::OpenAiAuth,
-            }) => ProviderMetadata::OpenAi(match named {
-                Some(true) => codex_login::OpenAiAuthMetadata::Account,
-                Some(false) => codex_login::OpenAiAuthMetadata::Missing,
-                None => account.openai,
+            }) => ProviderMetadata::OpenAi(match (named, account.openai) {
+                (Some(true), _) => codex_login::OpenAiAuthMetadata::Account,
+                // Startup already vetted the session's own named account
+                // (`Account`); the local vault may not hold it (a remote
+                // app server), so that answer stands.
+                (Some(false), codex_login::OpenAiAuthMetadata::Account) => {
+                    codex_login::OpenAiAuthMetadata::Account
+                }
+                (Some(false), _) => codex_login::OpenAiAuthMetadata::Missing,
+                (None, metadata) => metadata,
             }),
             Some(ProviderSetupCapability::ApiKey {
                 storage: ApiKeyStorage::EnvironmentVariable { .. },
