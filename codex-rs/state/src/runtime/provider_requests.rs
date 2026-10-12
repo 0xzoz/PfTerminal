@@ -583,10 +583,10 @@ impl StateRuntime {
     /// when that is still active.
     ///
     /// Done once per name, key and process. Like the other steps it waits one
-    /// short try for a busy DB, then pauses it, and is tried again on a later
-    /// request once the pause ends. A name row's lease is dropped when the
-    /// credential row holds an active lease of its own: a request still
-    /// running under it is then not waited for, once.
+    /// short try for a busy DB, then pauses it, and unless the DB is read-only
+    /// it is tried again on a later request once the pause ends. A name row's
+    /// lease is dropped when the credential row holds an active lease of its
+    /// own: a request still running under it is then not waited for, once.
     pub async fn adopt_named_account_provider_request_key(
         &self,
         provider_id: &str,
@@ -604,9 +604,9 @@ impl StateRuntime {
         {
             return;
         }
-        // Not done because the DB was busy: try again on a later request, once
-        // the throttle uses the DB again (a paused DB answers without waiting).
-        // A DB that cannot be written is not retried.
+        // Not done: try again on a later request, once the throttle uses the DB
+        // again (a paused DB answers without waiting). A read-only DB is not
+        // retried.
         let not_adopted = || {
             memory
                 .adopted_legacy_keys
@@ -615,7 +615,7 @@ impl StateRuntime {
                 .remove(&adopted);
         };
         if let Some(unready) = self.provider_request_state_db_unready(now_ms).await {
-            if unready == StateDbFallback::Busy {
+            if unready != StateDbFallback::ReadOnly {
                 not_adopted();
             }
             return;
@@ -681,7 +681,7 @@ WHERE provider_id = ?2 AND key_fingerprint = ?3
         )
         .await
             && self.pause_state_db("adopt named account provider request key", &error)
-                == StateDbFallback::Busy
+                != StateDbFallback::ReadOnly
         {
             not_adopted();
         }
