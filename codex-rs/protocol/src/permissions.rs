@@ -1870,6 +1870,35 @@ pub fn nested_links(path: &Path) -> Vec<PathBuf> {
     links
 }
 
+/// Issue #536: the link on `path` that no longer leads where it led when
+/// `path` really was at `was`: for each link on the path (shallowest first),
+/// where it should lead is `was` without the part of `path` below the link.
+/// The deepest link when none can be told apart, or `path` itself when it
+/// has no link.
+#[cfg(unix)]
+pub fn changed_link(path: &Path, was: &Path) -> PathBuf {
+    let links = nested_links(path);
+    links
+        .iter()
+        .find(|link| {
+            let below = path
+                .strip_prefix(link)
+                .map(|below| below.components().count())
+                .unwrap_or(0);
+            let mut expected = was;
+            for _ in 0..below {
+                match expected.parent() {
+                    Some(parent) => expected = parent,
+                    None => return true,
+                }
+            }
+            real_location(link) != expected
+        })
+        .or(links.last())
+        .cloned()
+        .unwrap_or_else(|| path.to_path_buf())
+}
+
 /// Where `path` really is: every link followed, including a link whose
 /// target does not exist yet, and the components that do not exist kept as
 /// written. Unlike `canonicalize`, this also places a path not created yet.

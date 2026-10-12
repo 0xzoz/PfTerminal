@@ -125,12 +125,18 @@ pub(crate) fn preferred_bwrap_supports_argv0() -> bool {
 /// writable roots with `--bind-fd` (bubblewrap 0.8+): the preferred one, or
 /// the bundled one when the system's is older.
 fn bind_fd_launcher() -> BubblewrapLauncher {
-    match preferred_bwrap_launcher() {
+    bind_fd_choice(preferred_bwrap_launcher(), || {
+        bundled_bwrap::launcher().map(BubblewrapLauncher::Bundled)
+    })
+}
+
+fn bind_fd_choice(
+    preferred: BubblewrapLauncher,
+    bundled: impl FnOnce() -> Option<BubblewrapLauncher>,
+) -> BubblewrapLauncher {
+    match preferred {
         BubblewrapLauncher::System(launcher) if !launcher.supports_bind_fd => {
-            match bundled_bwrap::launcher() {
-                Some(launcher) => BubblewrapLauncher::Bundled(launcher),
-                None => BubblewrapLauncher::Unavailable,
-            }
+            bundled().unwrap_or(BubblewrapLauncher::Unavailable)
         }
         launcher => launcher,
     }
@@ -276,6 +282,40 @@ mod tests {
                 })
             }),
             None
+        );
+    }
+
+    /// #536: a session's command needs `--bind-fd`: a system bubblewrap
+    /// without it gives way to the bundled one, and without that the command
+    /// cannot run.
+    #[test]
+    fn bind_fd_choice_falls_back_to_the_bundled_bubblewrap() {
+        let system = |supports_bind_fd| {
+            BubblewrapLauncher::System(SystemBwrapLauncher {
+                program: AbsolutePathBuf::from_absolute_path("/usr/bin/bwrap").expect("absolute"),
+                apparmor_launcher: None,
+                supports_argv0: false,
+                supports_bind_fd,
+            })
+        };
+        // Any launcher stands in for the bundled one here.
+        let bundled = || Some(BubblewrapLauncher::Unavailable);
+        assert_eq!(bind_fd_choice(system(true), bundled), system(true));
+        assert_eq!(
+            bind_fd_choice(system(false), bundled),
+            BubblewrapLauncher::Unavailable
+        );
+        assert_eq!(
+            bind_fd_choice(system(false), || Some(system(true))),
+            system(true)
+        );
+        assert_eq!(
+            bind_fd_choice(system(false), || None),
+            BubblewrapLauncher::Unavailable
+        );
+        assert_eq!(
+            bind_fd_choice(BubblewrapLauncher::Unavailable, bundled),
+            BubblewrapLauncher::Unavailable
         );
     }
 

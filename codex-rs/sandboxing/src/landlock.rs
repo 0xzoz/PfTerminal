@@ -66,14 +66,12 @@ pub const PINNED_WRITABLE_ROOTS_FLAG: &str = "--pinned-writable-roots";
 
 /// Adds the pinned writable roots (#536) to helper arguments built by
 /// [`create_linux_sandbox_command_args_for_permission_profile`], before the
-/// command separator.
+/// command separator; also when there are none, so the helper checks the
+/// roots it computes itself.
 pub fn insert_pinned_writable_roots_arg(
     args: &mut Vec<String>,
     pinned: &[codex_protocol::permissions::PinnedWritableRoot],
 ) {
-    if pinned.is_empty() {
-        return;
-    }
     let json = serde_json::to_string(pinned)
         .unwrap_or_else(|err| panic!("failed to serialize pinned writable roots: {err}"));
     let separator = args

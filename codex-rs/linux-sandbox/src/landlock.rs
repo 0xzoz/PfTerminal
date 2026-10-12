@@ -86,11 +86,12 @@ pub(crate) fn apply_permission_profile_to_current_thread(
             // #536: rules on the folders opened and checked at their pinned
             // locations (Landlock rules hold the folder, not its path).
             Some(pinned) => {
+                let checked = crate::pinned::check_held_links(&file_system_sandbox_policy, cwd)?;
                 let folders = writable_roots
                     .iter()
                     .filter(|root| root.as_path().exists())
                     .map(|root| {
-                        let real = crate::pinned::expected_location(pinned, root);
+                        let real = crate::pinned::expected_location(pinned, &checked, root);
                         crate::pinned::open_at(&[root.as_path()], &real)
                     })
                     .collect::<Result<Vec<File>>>()?;

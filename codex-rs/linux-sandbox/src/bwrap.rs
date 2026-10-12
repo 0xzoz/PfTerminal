@@ -420,10 +420,10 @@ fn create_filesystem_args_with_pins(
     let unreadable_globs = file_system_sandbox_policy.get_unreadable_globs_with_cwd(cwd);
     // #536: for a session's command, no writable root held by another may
     // lead outside every root holding it, including the roots computed here.
-    if pins.is_some() {
-        codex_sandboxing::writable_root_ledger::check_held_links(file_system_sandbox_policy, cwd)
-            .map_err(|refusal| CodexErr::UnsupportedOperation(refusal.to_string()))?;
-    }
+    let checked = match pins {
+        Some(_) => crate::pinned::check_held_links(file_system_sandbox_policy, cwd)?,
+        None => Vec::new(),
+    };
     // Bubblewrap requires bind mount targets to exist. Skip missing writable
     // roots so mixed-platform configs can keep harmless paths for other
     // environments without breaking Linux command startup.
@@ -755,7 +755,8 @@ fn create_filesystem_args_with_pins(
                             .to_string(),
                     ));
                 }
-                let real = crate::pinned::expected_location(pins.roots, &writable_root.root);
+                let real =
+                    crate::pinned::expected_location(pins.roots, &checked, &writable_root.root);
                 let file = crate::pinned::open_at(&[root, mount_root], &real)?;
                 // `--ro-bind-data` masks read the first preserved file as
                 // `/dev/null`; keep it first.

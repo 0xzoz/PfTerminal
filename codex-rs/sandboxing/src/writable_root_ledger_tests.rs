@@ -202,3 +202,34 @@ fn the_refusal_names_the_link_on_the_path() {
         "{refusal}"
     );
 }
+
+/// #536 review: with the workspace itself reached through a link (a linked
+/// code folder), the refusal names the link made in the workspace, not the
+/// person's folder link above it.
+#[cfg(unix)]
+#[test]
+fn the_refusal_names_the_link_that_changed() {
+    let (_dir, base) = base();
+    let real_code = base.join("mnt-code");
+    std::fs::create_dir_all(real_code.join("ws")).expect("ws");
+    let elsewhere = base.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).expect("elsewhere");
+    let code = base.join("code");
+    std::os::unix::fs::symlink(&real_code, &code).expect("code link");
+    let workspace = code.join("ws");
+    let target = workspace.join("target");
+    let policy = FileSystemSandboxPolicy::restricted(vec![write(&workspace), write(&target)]);
+    record_writable_roots(&policy, &workspace);
+    std::os::unix::fs::symlink(&elsewhere, &target).expect("new link");
+    let refusal = check_writable_roots(&policy, &workspace).expect_err("refused");
+    let WritableRootRefusal::Changed { link, .. } = &refusal else {
+        panic!("{refusal:?}");
+    };
+    assert_eq!(link, &target);
+    assert!(
+        refusal
+            .to_string()
+            .contains(&format!("`!rm '{}'`", target.display())),
+        "{refusal}"
+    );
+}

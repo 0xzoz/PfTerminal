@@ -32,16 +32,27 @@ pub(crate) fn get() -> Option<&'static [PinnedWritableRoot]> {
 
 /// Where the writable root `root` must be: the location the caller pinned,
 /// or, for a root only this helper computes (a `:tmpdir` root follows the
-/// command's `TMPDIR`), where it leads now.
+/// command's `TMPDIR`), where the held-link check found it (`checked`).
 pub(crate) fn expected_location(
     pinned: &[PinnedWritableRoot],
+    checked: &[PinnedWritableRoot],
     root: &codex_utils_absolute_path::AbsolutePathBuf,
 ) -> std::path::PathBuf {
     pinned
         .iter()
+        .chain(checked)
         .find(|pinned| &pinned.root == root)
         .map(|pinned| pinned.real.clone())
         .unwrap_or_else(|| real_location(root.as_path()))
+}
+
+/// The held-link check (#536) for the roots this helper computes.
+pub(crate) fn check_held_links(
+    policy: &codex_protocol::permissions::FileSystemSandboxPolicy,
+    cwd: &Path,
+) -> Result<Vec<PinnedWritableRoot>> {
+    codex_sandboxing::writable_root_ledger::check_held_links(policy, cwd)
+        .map_err(|refusal| CodexErr::UnsupportedOperation(refusal.to_string()))
 }
 
 /// Opens the folder at `real`, the location the writable root spelled
@@ -70,13 +81,10 @@ pub(crate) fn open_at(spelled: &[&Path], real: &Path) -> Result<File> {
 }
 
 fn refusal(root: &Path, now: &Path, was: &Path) -> CodexErr {
-    let link = codex_protocol::permissions::nested_links(root)
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| root.to_path_buf());
+    let link = codex_protocol::permissions::changed_link(root, was);
     CodexErr::UnsupportedOperation(format!(
         "Refused to run the command: the writable folder `{}` now leads to `{}` through the \
-         link `{}`, made after it was checked (it led to `{}`). Such a link cannot move write \
+         link `{}`, made or changed after it was checked (it led to `{}`). Such a link cannot move write \
          access: remove it (for example `!rm '{}'`).",
         root.display(),
         now.display(),

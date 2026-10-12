@@ -84,7 +84,7 @@ impl fmt::Display for WritableRootRefusal {
             } => write!(
                 f,
                 "Refused to run the command: the writable folder `{}` now leads to `{}` through \
-                 the link `{}`, made after the session started (it led to `{}`). Such a link \
+                 the link `{}`, made or changed after this folder was first checked (it led to `{}`). Such a link \
                  cannot move write access, so commands are refused until it is removed: remove \
                  it yourself (for example `!rm {}`), or restart Corbanu if you made it on \
                  purpose.",
@@ -155,10 +155,10 @@ pub fn check_writable_roots(
         if *was != *now {
             // A root that leads through no link any more is where it is
             // spelled: record it there, so a link made later is refused.
-            if let Some(link) = links_on(root.root.as_path()).into_iter().next() {
+            if !links_on(root.root.as_path()).is_empty() {
                 return Err(WritableRootRefusal::Changed {
                     root: root.root.to_path_buf(),
-                    link,
+                    link: changed_link(root.root.as_path(), was),
                     was: was.clone(),
                     now: now.clone(),
                 });
@@ -183,16 +183,24 @@ pub fn check_writable_roots(
 pub fn check_held_links(
     policy: &FileSystemSandboxPolicy,
     cwd: &Path,
-) -> Result<(), WritableRootRefusal> {
+) -> Result<Vec<PinnedWritableRoot>, WritableRootRefusal> {
     let roots = policy.get_writable_roots_with_cwd(cwd);
     let reals: Vec<PathBuf> = roots
         .iter()
         .map(|root| real_path(root.root.as_path()))
         .collect();
-    match (0..roots.len()).find_map(|index| outside_holders(&roots, &reals, index)) {
-        Some(refusal) => Err(refusal),
-        None => Ok(()),
+    if let Some(refusal) = (0..roots.len()).find_map(|index| outside_holders(&roots, &reals, index))
+    {
+        return Err(refusal);
     }
+    Ok(roots
+        .into_iter()
+        .zip(reals)
+        .map(|(root, real)| PinnedWritableRoot {
+            root: root.root,
+            real,
+        })
+        .collect())
 }
 
 /// The refusal for `roots[index]` when it is held by other roots and leads
@@ -249,6 +257,11 @@ fn holds(holder: &WritableRoot, holder_real: &Path, root: &WritableRoot) -> bool
 }
 
 #[cfg(unix)]
+fn changed_link(path: &Path, was: &Path) -> PathBuf {
+    codex_protocol::permissions::changed_link(path, was)
+}
+
+#[cfg(unix)]
 fn links_on(path: &Path) -> Vec<PathBuf> {
     codex_protocol::permissions::nested_links(path)
 }
@@ -261,6 +274,11 @@ fn real_path(path: &Path) -> PathBuf {
 #[cfg(unix)]
 fn within(path: &Path, prefix: &Path) -> bool {
     codex_protocol::permissions::location_within(path, prefix)
+}
+
+#[cfg(not(unix))]
+fn changed_link(path: &Path, _was: &Path) -> PathBuf {
+    path.to_path_buf()
 }
 
 #[cfg(not(unix))]
