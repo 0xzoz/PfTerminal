@@ -1031,6 +1031,18 @@ impl App {
             // child reports would otherwise pile up (the newest prompt also
             // carries the latest context).
             self.abort_spawn_auto_processing_turn(&target_node_id);
+            let Some(title) = self
+                .claude_panes
+                .panes()
+                .iter()
+                .find(|pane| pane.id == pane_id)
+                .map(|pane| pane.title.clone())
+            else {
+                let detail = format!("Claude pane `{pane_id}` does not exist");
+                self.record_spawn_dispatch_failed_for_task(&target_node_id, &task, &detail);
+                self.chat_widget.add_error_message(detail);
+                return;
+            };
             let superseded: Vec<String> = self
                 .kill_switch_held_claude_tasks
                 .iter()
@@ -1039,19 +1051,15 @@ impl App {
                 .collect();
             self.kill_switch_held_claude_tasks
                 .retain(|(held, _)| *held != pane_id);
-            for old in &superseded {
+            // The same text again is the same task: its acks stay with it
+            // (they are keyed by text) instead of being reported superseded.
+            for old in superseded.iter().filter(|old| **old != task) {
                 self.record_spawn_dispatch_failed_for_task(
                     &target_node_id,
                     old,
                     "superseded by a newer task while the security kill switch was on",
                 );
             }
-            let title = self
-                .claude_panes
-                .panes()
-                .iter()
-                .find(|pane| pane.id == pane_id)
-                .map_or_else(|| pane_id.clone(), |pane| pane.title.clone());
             self.kill_switch_held_claude_tasks.push((pane_id, task));
             if superseded.is_empty() {
                 self.chat_widget.add_info_message(

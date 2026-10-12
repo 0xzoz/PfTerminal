@@ -1878,6 +1878,13 @@ impl App {
         report: &str,
         start_turns: bool,
     ) {
+        // #507: no turn is started for a report while the kill switch is on
+        // either (it would only wait, and could push a real waiting task out
+        // of a Claude pane); the parent has it with its next turn.
+        let start_turns = start_turns
+            && !crate::legacy_core::security_revocation::kill_switch_on(
+                self.config.codex_home.as_ref(),
+            );
         let summary = "Child report delivered.".to_string();
         let hint = Some(report.to_string());
         // `codex-main` is the native primary Codex thread, not a Claude pane. Route it through the

@@ -7446,6 +7446,87 @@ async fn issue_507_operator_codex_pane_task_is_reported_not_sent() -> Result<()>
     Ok(())
 }
 
+/// #507 review: while the switch is on, a child report starts no turn in a
+/// Claude parent either (it would only wait, and push out the parent's real
+/// waiting task); the report is kept for the parent's next turn.
+#[tokio::test]
+async fn issue_507_child_report_while_on_starts_no_parent_turn() {
+    use crate::legacy_core::security_revocation::HumanRevocation;
+    let (mut app, mut app_event_rx, troll_pane_id, orc_pane_id) =
+        make_child_report_auto_claude_pane_app().await;
+    issue_507_switch(&app, HumanRevocation::KillSwitchOn);
+    app.submit_claude_pane_task(troll_pane_id.clone(), "pf507 real task".to_string());
+    app.record_spawn_child_report_for_claude_pane(&orc_pane_id, "done", Some("result text"));
+    assert!(drain_claude_pane_task_events(&mut app_event_rx).is_empty());
+    assert_eq!(
+        app.kill_switch_held_claude_tasks,
+        vec![(troll_pane_id.clone(), "pf507 real task".to_string())],
+        "the real task still waits"
+    );
+    let troll_node = crate::spawn_orchestration::pane_node_id(&troll_pane_id);
+    assert_eq!(
+        app.spawn_parent_reports_by_node
+            .get(&troll_node)
+            .map(std::collections::VecDeque::len),
+        Some(1)
+    );
+}
+
+/// #507 review: the report of a stopped Claude turn reaches a native parent
+/// as mail that does not ask for a turn; an ordinary report still does.
+#[tokio::test]
+async fn issue_507_stopped_claude_report_to_a_native_parent_asks_for_no_turn() {
+    use crate::legacy_core::security_revocation::HumanRevocation;
+    let (mut app, mut app_event_rx, _troll_pane_id, orc_pane_id) =
+        make_child_report_auto_claude_pane_app().await;
+    let parent_thread =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000508").expect("thread id");
+    app.spawn_parent_by_node.insert(
+        crate::spawn_orchestration::pane_node_id(&orc_pane_id),
+        crate::spawn_orchestration::thread_node_id(parent_thread),
+    );
+    let codex_home = app.config.codex_home.to_path_buf();
+    let mail = |rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>| {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|event| match event {
+                AppEvent::SendSpawnAgentMailboxMessage { params } => Some(params.trigger_turn),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let running = app
+        .claude_panes
+        .prepare_turn(&orc_pane_id, "long task".to_string(), &codex_home)
+        .expect("a running Orc turn");
+    issue_507_switch(&app, HumanRevocation::KillSwitchOn);
+    app.stop_claude_panes_for_kill_switch();
+    issue_507_switch(&app, HumanRevocation::KillSwitchOff);
+    drop(running);
+    let output = interrupted_claude_turn(&app);
+    app.on_claude_pane_turn_finished(orc_pane_id.clone(), Ok(output));
+    assert_eq!(mail(&mut app_event_rx), vec![false]);
+
+    app.record_spawn_child_report_for_claude_pane(&orc_pane_id, "done", Some("result text"));
+    assert_eq!(
+        mail(&mut app_event_rx),
+        vec![true],
+        "control: a normal report"
+    );
+}
+
+/// #507 review: a task for a Claude pane that does not exist is refused, not
+/// held, while the switch is on.
+#[tokio::test]
+async fn issue_507_no_waiting_task_for_a_missing_claude_pane() {
+    use crate::legacy_core::security_revocation::HumanRevocation;
+    let (mut app, _app_event_rx, _troll_pane_id, _orc_pane_id) =
+        make_child_report_auto_claude_pane_app().await;
+    issue_507_switch(&app, HumanRevocation::KillSwitchOn);
+    app.submit_claude_pane_task("claude-missing".to_string(), "pf507 task".to_string());
+    assert!(app.kill_switch_held_claude_tasks.is_empty());
+}
+
 #[tokio::test]
 async fn child_report_auto_starts_turn_on_idle_claude_pane_parent() {
     let (mut app, mut app_event_rx, troll_pane_id, orc_pane_id) =
