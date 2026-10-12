@@ -24,6 +24,8 @@ fn usable_account_kinds(provider: &ModelProviderInfo) -> &'static [ProviderAccou
         ]
     } else if provider.auth.is_some() {
         &[ProviderAccountKind::Command]
+    } else if provider.requires_openai_auth {
+        &[ProviderAccountKind::ChatgptAuth]
     } else if provider.is_amazon_bedrock() {
         &[ProviderAccountKind::AwsProfile]
     } else if provider.env_key.is_some() {
@@ -47,6 +49,13 @@ pub fn selected_account_error(codex_home: &Path, provider: &ModelProviderInfo) -
     match configured {
         Ok(true) => None,
         Ok(false) => {
+            if usable_account_kinds(provider) == [ProviderAccountKind::ChatgptAuth] {
+                return Some(format!(
+                    "account `{name}` of provider `{provider_id}` is not signed in; sign in with \
+                     `corbanu login --account {name}` or pick another with `--account` (see \
+                     `corbanu account list`)"
+                ));
+            }
             let kind = if provider.is_amazon_bedrock() && provider.auth.is_none() {
                 " --kind aws-profile --value <profile>"
             } else {

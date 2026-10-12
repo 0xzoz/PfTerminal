@@ -233,7 +233,11 @@ impl ChatWidget {
             .map(|method| {
                 account_event_item(
                     method.label(),
-                    if method.is_secret() {
+                    if *method
+                        == crate::provider_named_accounts::AddAccountMethod::ChatgptDeviceCode
+                    {
+                        "Shows a code to enter in your browser; saved to this account only."
+                    } else if method.is_secret() {
                         "Paste it into masked entry."
                     } else if *method
                         == crate::provider_named_accounts::AddAccountMethod::AwsProfile
@@ -665,6 +669,8 @@ fn push_default_account_items(
         "Add another account",
         if provider_id == codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID {
             "Name it, then enter the AWS profile it uses (not secret)."
+        } else if provider_id == codex_model_provider_info::OPENAI_PROVIDER_ID {
+            "Name it, then sign in with ChatGPT or paste an OpenAI API key."
         } else {
             "Name it, then paste its key or token into masked entry."
         },
@@ -906,6 +912,7 @@ mod tests {
             kinds: vec![kind],
             fingerprint: Some(fingerprint.to_string()),
             aws_profile: None,
+            sign_in: None,
         };
         let accounts = AccountsView {
             rows: vec![

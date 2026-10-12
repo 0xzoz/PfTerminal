@@ -30,6 +30,8 @@ pub(crate) struct NamedAccountRow {
     /// PF-84-S06: the AWS profile name an `aws_profile` account uses; not
     /// secret, so it is shown.
     pub(crate) aws_profile: Option<String>,
+    /// PF-84-S06: a sign-in account's kind, email hint and plan (no token).
+    pub(crate) sign_in: Option<String>,
 }
 
 /// What `/providers` knows about accounts: the named rows, the account this
@@ -164,12 +166,29 @@ pub(crate) fn load_rows(codex_home: &Path) -> Result<Vec<NamedAccountRow>, Strin
                         .map(|profile| profile.as_str().to_string())
                 })
                 .flatten();
+            let sign_in = account
+                .kinds
+                .contains(&ProviderAccountKind::ChatgptAuth)
+                .then(|| {
+                    codex_login::named_account_summary(
+                        codex_home,
+                        &codex_login::NamedChatgptAccount {
+                            provider_id: account.provider_id.clone(),
+                            name: account.name.as_str().to_string(),
+                        },
+                    )
+                    .ok()
+                    .flatten()
+                    .map(|summary| describe_sign_in(&summary))
+                })
+                .flatten();
             NamedAccountRow {
                 provider_id: account.provider_id,
                 name: account.name,
                 kinds: account.kinds,
                 fingerprint,
                 aws_profile,
+                sign_in,
             }
         })
         .collect())
@@ -183,6 +202,10 @@ pub(crate) enum AddAccountMethod {
     ClaudeConfigDir,
     Command,
     AwsProfile,
+    /// A ChatGPT sign-in by device code, into the account's vault store.
+    ChatgptDeviceCode,
+    /// An OpenAI API-key sign-in (masked entry).
+    OpenaiApiKey,
 }
 
 impl AddAccountMethod {
@@ -193,6 +216,7 @@ impl AddAccountMethod {
             Self::ClaudeConfigDir => ProviderAccountKind::ClaudeConfigDir,
             Self::Command => ProviderAccountKind::Command,
             Self::AwsProfile => ProviderAccountKind::AwsProfile,
+            Self::ChatgptDeviceCode | Self::OpenaiApiKey => ProviderAccountKind::ChatgptAuth,
         }
     }
 
@@ -203,17 +227,19 @@ impl AddAccountMethod {
             Self::ClaudeConfigDir => "Claude Code login (its CLAUDE_CONFIG_DIR)",
             Self::Command => "External command account",
             Self::AwsProfile => "AWS profile (from ~/.aws/config)",
+            Self::ChatgptDeviceCode => "Sign in with ChatGPT (device code)",
+            Self::OpenaiApiKey => "OpenAI API key",
         }
     }
 
     /// Masked entry; otherwise the value is a path or nothing at all.
     pub(crate) fn is_secret(self) -> bool {
-        matches!(self, Self::ApiKey | Self::ClaudeToken)
+        matches!(self, Self::ApiKey | Self::ClaudeToken | Self::OpenaiApiKey)
     }
 }
 
 /// The ways a provider can take a named account; empty when it cannot hold
-/// one (OpenAI sign-in is PF-84-S06 slice B).
+/// one.
 pub(crate) fn add_methods(
     provider_id: &str,
     provider: &ModelProviderInfo,
@@ -230,6 +256,14 @@ pub(crate) fn add_methods(
         ]
     } else if provider.is_claude_plan() {
         Vec::new()
+    } else if provider.requires_openai_auth {
+        if provider_id != codex_model_provider_info::OPENAI_PROVIDER_ID {
+            return Vec::new();
+        }
+        vec![
+            AddAccountMethod::ChatgptDeviceCode,
+            AddAccountMethod::OpenaiApiKey,
+        ]
     } else if provider.env_key.is_some() {
         vec![AddAccountMethod::ApiKey]
     } else if provider.auth.is_some() {
@@ -272,7 +306,10 @@ pub(crate) fn kinds_label(kinds: &[ProviderAccountKind]) -> String {
 
 /// `token · fp 1a2b3c4d5e6f` for one row; an AWS profile is named.
 pub(crate) fn row_detail(row: &NamedAccountRow) -> String {
-    let mut detail = kinds_label(&row.kinds);
+    let mut detail = row
+        .sign_in
+        .clone()
+        .unwrap_or_else(|| kinds_label(&row.kinds));
     if let Some(profile) = row.aws_profile.as_deref() {
         detail.push_str(&format!(" `{profile}`"));
     }
@@ -280,6 +317,19 @@ pub(crate) fn row_detail(row: &NamedAccountRow) -> String {
         detail.push_str(&format!(" · fp {fingerprint}"));
     }
     detail
+}
+
+/// `ChatGPT · t…@example.com · Plus` (never a token).
+pub(crate) fn describe_sign_in(summary: &codex_login::NamedSignInSummary) -> String {
+    [
+        Some(summary.kind.to_string()),
+        summary.email_hint.clone(),
+        summary.plan.clone(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" · ")
 }
 
 /// A value on its way from masked entry to the vault.
@@ -315,6 +365,22 @@ pub(crate) fn save_account(
         AddAccountMethod::AwsProfile => Zeroizing::new(
             codex_vault::validate_aws_profile_name(&cleaned).map_err(|error| error.to_string())?,
         ),
+        // The account holds a whole sign-in (`auth.json` contents).
+        AddAccountMethod::OpenaiApiKey => Zeroizing::new(
+            serde_json::to_string(&codex_login::AuthDotJson {
+                auth_mode: Some(codex_protocol::auth::AuthMode::ApiKey),
+                openai_api_key: Some(cleaned.to_string()),
+                tokens: None,
+                last_refresh: None,
+                agent_identity: None,
+                personal_access_token: None,
+                bedrock_api_key: None,
+            })
+            .map_err(|error| error.to_string())?,
+        ),
+        AddAccountMethod::ChatgptDeviceCode => {
+            return Err("A ChatGPT sign-in is saved by its sign-in flow.".to_string());
+        }
         _ => cleaned,
     };
     // Adding never replaces an existing account's credential.
@@ -337,13 +403,38 @@ pub(crate) fn rename_account(
     Ok(format!("Renamed {provider_id} account `{from}` to `{to}`."))
 }
 
-/// Removes one account and only its labels. Blocking.
+/// Removes one account and only its labels; a sign-in account's tokens are
+/// revoked first (best effort). Blocking; call it off the async runtime.
 pub(crate) fn remove_account(
     codex_home: PathBuf,
     provider_id: &str,
     name: &ProviderAccountName,
+    auth_route_config: &codex_login::AuthRouteConfig,
 ) -> Result<String, String> {
-    match Vault::new(codex_home).remove_provider_account(provider_id, name) {
+    let vault = Vault::new(codex_home.clone());
+    let is_sign_in = vault
+        .provider_account_kinds(provider_id, name)
+        .is_ok_and(|kinds| kinds.contains(&ProviderAccountKind::ChatgptAuth));
+    if is_sign_in && let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        let account = codex_login::NamedChatgptAccount {
+            provider_id: provider_id.to_string(),
+            name: name.as_str().to_string(),
+        };
+        return match runtime.block_on(codex_login::logout_named_account_with_revoke(
+            &codex_home,
+            &account,
+            auth_route_config,
+        )) {
+            Ok(true) => Ok(format!(
+                "Signed out and removed {provider_id} account `{name}`."
+            )),
+            Ok(false) => Err(format!("{provider_id} has no account `{name}`.")),
+            Err(error) => Err(format!(
+                "Could not remove {provider_id} account `{name}`: {error}"
+            )),
+        };
+    }
+    match vault.remove_provider_account(provider_id, name) {
         Ok(true) => Ok(format!("Removed {provider_id} account `{name}`.")),
         Ok(false) => Err(format!("{provider_id} has no account `{name}`.")),
         Err(error) => Err(format!(

@@ -47,7 +47,7 @@ key = "Up"
 [[steps]]
 key = "Enter"
 [[steps]]
-wait = "Nested agents: refuse"
+wait = "Switch to Aggressive\\?"
 [[steps]]
 key = "Enter"
 [[steps]]

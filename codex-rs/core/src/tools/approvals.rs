@@ -149,11 +149,16 @@ impl ApprovalReviewer {
     }
 }
 
+/// Who answered an approval.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ApprovalResolutionSource {
+pub(super) enum ApprovalResolutionSource {
     Hook,
     Guardian,
+    /// A person, asked about this request now.
     User,
+    /// Answered without asking anyone: an earlier "don't ask again" answer
+    /// (the approval cache) or a stored permission grant (issue #513).
+    Remembered,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -174,7 +179,9 @@ impl ApprovalResolution {
                     ApprovalResolutionSource::Guardian => {
                         "automatic approval review denied the action"
                     }
-                    ApprovalResolutionSource::User => "rejected by user",
+                    ApprovalResolutionSource::User | ApprovalResolutionSource::Remembered => {
+                        "rejected by user"
+                    }
                 };
                 Err(ToolError::Rejected(rejection.to_string()))
             }
@@ -208,7 +215,7 @@ pub(super) async fn resolve_tool_apporval<Rq, Out, T>(
     reviewer: ApprovalReviewer,
     otel: &codex_otel::SessionTelemetry,
     decline_record: DeclineRecord,
-) -> Result<ReviewDecision, ToolError>
+) -> Result<ApprovalResolutionSource, ToolError>
 where
     T: ToolRuntime<Rq, Out>,
 {
@@ -235,7 +242,8 @@ where
             crate::security::inspection::record_declined_approval(thread, what, outcome);
         }
     }
-    resolution.into_tool_result()
+    let source = resolution.source;
+    resolution.into_tool_result().map(|_| source)
 }
 
 /// What the inspector says about a refused approval, or `None` when it was
@@ -250,7 +258,7 @@ fn decline_outcome(resolution: &ApprovalResolution) -> Option<&'static str> {
         _ => false,
     };
     refused.then_some(match resolution.source {
-        ApprovalResolutionSource::User => "declined by you",
+        ApprovalResolutionSource::User | ApprovalResolutionSource::Remembered => "declined by you",
         ApprovalResolutionSource::Hook => "declined by a permission hook",
         ApprovalResolutionSource::Guardian => "declined by the automatic reviewer",
     })
@@ -344,13 +352,24 @@ where
             )
             .await
         }
-        ApprovalReviewer::User => tool.start_approval_async(req, ctx.clone()).await,
+        ApprovalReviewer::User => {
+            let (decision, asked) = crate::tools::sandboxing::asking_person(|| {
+                tool.start_approval_async(req, ctx.clone())
+            })
+            .await;
+            let source = if asked {
+                ApprovalResolutionSource::User
+            } else {
+                ApprovalResolutionSource::Remembered
+            };
+            tool.note_review_decision(&decision, &ctx);
+            let resolution = ApprovalResolution { decision, source };
+            record_resolution(otel, tool_ctx, &resolution);
+            return resolution;
+        }
     };
     tool.note_review_decision(&resolution, &ctx);
-    let source = match reviewer {
-        ApprovalReviewer::Guardian => ApprovalResolutionSource::Guardian,
-        ApprovalReviewer::User => ApprovalResolutionSource::User,
-    };
+    let source = ApprovalResolutionSource::Guardian;
     let resolution = ApprovalResolution {
         decision: resolution,
         source,
@@ -367,7 +386,9 @@ fn record_resolution(
     let source = match resolution.source {
         ApprovalResolutionSource::Hook => ToolDecisionSource::Config,
         ApprovalResolutionSource::Guardian => ToolDecisionSource::AutomatedReviewer,
-        ApprovalResolutionSource::User => ToolDecisionSource::User,
+        ApprovalResolutionSource::User | ApprovalResolutionSource::Remembered => {
+            ToolDecisionSource::User
+        }
     };
     let tool_name = flat_tool_name(&tool_ctx.tool_name);
     otel.tool_decision(

@@ -6,9 +6,10 @@ use std::time::Duration;
 pub(super) const RATE_LIMIT_STATUS: i64 = 429;
 const DEFAULT_COOLDOWN_CAP_MS: i64 = 5 * 60 * 1000;
 /// About how long a throttle step on the turn's path waits for a busy state DB
-/// before the turn goes on with this process's in-memory throttle. An attempt
-/// started just before the deadline still waits out SQLite's 5 s busy timeout.
-const PROVIDER_REQUEST_BUSY_WAIT: Duration = Duration::from_secs(10);
+/// before the turn goes on with this process's in-memory throttle. These steps
+/// run on the short-wait pool (`StateRuntime::quick`): an attempt waits at most
+/// `QUICK_BUSY_TIMEOUT`, so this allows a second one and no more.
+const PROVIDER_REQUEST_BUSY_WAIT: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ProviderRequestKey {
@@ -84,7 +85,7 @@ impl StateRuntime {
         preflight: &ProviderRequestPreflight,
         now_ms: i64,
     ) -> anyhow::Result<Option<ProviderRequestBlock>> {
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = crate::runtime::db_lock::begin_immediate(&self.pool).await?;
 
         sqlx::query(
             r#"
@@ -168,7 +169,7 @@ WHERE provider_id = ? AND model = ? AND key_fingerprint = ?
         now_ms: i64,
     ) -> anyhow::Result<ProviderRequestLeaseDecision> {
         let lease_until_ms = now_ms.saturating_add(lease_ttl_ms.max(1));
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = crate::runtime::db_lock::begin_immediate(&self.pool).await?;
 
         sqlx::query(
             r#"
@@ -295,7 +296,7 @@ WHERE provider_id = ? AND model = ? AND key_fingerprint = ?
         result: ProviderRequestResult,
         now_ms: i64,
     ) -> anyhow::Result<u64> {
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = crate::runtime::db_lock::begin_immediate(&self.pool).await?;
         let released = sqlx::query(
             r#"
 UPDATE provider_request_state
@@ -331,7 +332,7 @@ WHERE provider_id = ? AND model = ? AND key_fingerprint = ? AND lease_owner = ?
         result: &ProviderRequestResult,
         now_ms: i64,
     ) -> anyhow::Result<()> {
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = crate::runtime::db_lock::begin_immediate(&self.pool).await?;
         record_result_on_connection(&mut tx, key, result, now_ms).await?;
         tx.commit().await?;
         Ok(())
@@ -386,7 +387,13 @@ impl StateRuntime {
         retry_busy_within(
             "check provider request cooldown",
             PROVIDER_REQUEST_BUSY_WAIT,
-            || self.check_provider_request_cooldown_once(key, preflight, since(now_ms, started)),
+            || {
+                self.quick().check_provider_request_cooldown_once(
+                    key,
+                    preflight,
+                    since(now_ms, started),
+                )
+            },
         )
         .await
     }
@@ -404,7 +411,7 @@ impl StateRuntime {
             "acquire provider request lease",
             PROVIDER_REQUEST_BUSY_WAIT,
             || {
-                self.try_acquire_provider_request_lease_once(
+                self.quick().try_acquire_provider_request_lease_once(
                     key,
                     preflight,
                     owner,
@@ -427,7 +434,7 @@ impl StateRuntime {
             "record provider request result",
             PROVIDER_REQUEST_BUSY_WAIT,
             || {
-                self.record_provider_request_result_once(
+                self.quick().record_provider_request_result_once(
                     lease,
                     result.clone(),
                     since(now_ms, started),
@@ -460,7 +467,7 @@ impl StateRuntime {
             "record provider request result",
             PROVIDER_REQUEST_BUSY_WAIT,
             || {
-                self.record_provider_request_unleased_result_once(
+                self.quick().record_provider_request_unleased_result_once(
                     key,
                     result,
                     since(now_ms, started),
@@ -533,7 +540,7 @@ impl StateRuntime {
         let started = Instant::now();
         let adopt = || async {
             let now_ms = since(now_ms, started);
-            let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+            let mut tx = crate::runtime::db_lock::begin_immediate(&self.quick().pool).await?;
             sqlx::query(
                 "UPDATE OR IGNORE provider_request_state SET key_fingerprint = ? WHERE key_fingerprint = ?",
             )
@@ -555,14 +562,16 @@ impl StateRuntime {
             tx.commit().await?;
             anyhow::Ok(())
         };
+        // One short try: the rows are adopted by a later process if not now,
+        // and a busy DB then pauses the other steps rather than adding to them.
         if let Err(error) = retry_busy_within(
             "adopt legacy provider request key",
-            PROVIDER_REQUEST_BUSY_WAIT,
+            super::QUICK_BUSY_TIMEOUT,
             adopt,
         )
         .await
         {
-            memory.pause("adopt legacy provider request key", &error);
+            self.pause_state_db("adopt legacy provider request key", &error);
         }
     }
 
@@ -577,7 +586,10 @@ impl StateRuntime {
         retry_busy_within(
             "release provider request lease",
             PROVIDER_REQUEST_BUSY_WAIT,
-            || self.release_provider_request_lease_once(lease, since(now_ms, started)),
+            || {
+                self.quick()
+                    .release_provider_request_lease_once(lease, since(now_ms, started))
+            },
         )
         .await
     }

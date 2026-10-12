@@ -58,6 +58,9 @@ pub(crate) const USER_PERSISTENCE: &[&str] = &[
 /// sandbox; project `.codex` and `.agents` set agent policy.
 pub(crate) const WORKSPACE_PERSISTENCE: &[&str] =
     &[".git/hooks", ".git/config", ".codex", ".agents"];
+/// The project's agent settings among them: read-only under Aggressive even
+/// with a grant (#442, Travis 2026-10-11).
+pub(crate) const WORKSPACE_AGENT_SETTINGS: &[&str] = &[".codex", ".agents"];
 /// Corbanu home folder names (besides the configured `CODEX_HOME`).
 const HOME_SEGMENTS: &[&str] = &[".corbanu", ".codex", ".pfterminal"];
 /// Uncached filesystem lookups one classification may make. Past it the

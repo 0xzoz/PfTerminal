@@ -874,55 +874,149 @@ fn poison<T>(mutex: &Mutex<T>) {
     );
 }
 
+/// The state DB's write lock held by another connection, as another Corbanu
+/// process holds it; released by `release`.
+async fn hold_write_lock(fixture: &Fixture) -> Result<sqlx::SqliteConnection> {
+    let mut connection = fixture.connection().await?;
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut connection)
+        .await?;
+    Ok(connection)
+}
+
+async fn release(mut connection: sqlx::SqliteConnection) -> Result<()> {
+    sqlx::query("ROLLBACK").execute(&mut connection).await?;
+    connection.close().await?;
+    Ok(())
+}
+
+/// Longest a record may hold a request up while the state DB is busy.
+const BUSY_WAIT_BOUND: Duration = Duration::from_millis(1_500);
+
 #[tokio::test]
-async fn accounting_policy_wait_cancellation_and_post_wait_failure_have_no_effect() -> Result<()> {
+async fn accounting_policy_busy_state_db_never_holds_a_request_up_and_loses_nothing() -> Result<()>
+{
     let fixture = Fixture::new().await?;
-    let permit = writes().acquire().await?;
-    let mut waiting = Box::pin(fixture.sampling.admit(MODEL, ENDPOINT));
-    assert!(poll!(&mut waiting).is_pending());
-    drop(waiting);
-    fixture.sampling.check()?;
-    let mut start = Box::pin(Sampling::start(
-        fixture.db.clone(),
-        fixture.sampling.owner,
-        "cancelled-start".into(),
-        &AccountingMode::Disabled,
-    ));
-    // OFF fails before the gate; a valid start waits and can be dropped without a Slot.
-    assert!(start.as_mut().await.is_err());
-    drop(start);
-    let enabled = mode();
-    let mut start = Box::pin(Sampling::start(
-        fixture.db.clone(),
-        fixture.sampling.owner,
-        "cancelled-start".into(),
-        &enabled,
-    ));
-    assert!(poll!(&mut start).is_pending());
-    drop(start);
-    let mut rejected = Box::pin(fixture.sampling.admit(MODEL, ENDPOINT));
-    assert!(poll!(&mut rejected).is_pending());
-    fixture.sampling.reject();
-    drop(permit);
-    assert!(rejected.await.is_err());
-    assert!(fixture.attempts().await?.is_empty());
+    let lock = hold_write_lock(&fixture).await?;
+    // OFF still fails; a valid start writes nothing and does not wait.
+    assert!(
+        Sampling::start(
+            fixture.db.clone(),
+            fixture.sampling.owner,
+            "off".into(),
+            &AccountingMode::Disabled,
+        )
+        .await
+        .is_err()
+    );
+    let started = std::time::Instant::now();
     let fresh = Sampling::start(
         fixture.db.clone(),
         fixture.sampling.owner,
         "fresh".into(),
-        &enabled,
+        &mode(),
     )
     .await?;
-    let attempt = fresh.admit(MODEL, ENDPOINT).await?;
-    assert_eq!(attempt.retry_of, None);
+    assert!(started.elapsed() < BUSY_WAIT_BOUND);
+    // Records are put off, not refused: the samplings stay open.
+    let started = std::time::Instant::now();
+    let first = fixture.sampling.admit(MODEL, ENDPOINT).await?;
+    let usage = AnthropicUsagePatch {
+        input_tokens: AnthropicTokenPresence::Number(7),
+        ..Default::default()
+    };
+    fixture
+        .sampling
+        .observe(&first, Uuid::new_v4(), /*position*/ 1, usage)
+        .await?;
+    let second = fresh.admit(MODEL, ENDPOINT).await?;
+    assert!(
+        started.elapsed() < BUSY_WAIT_BOUND,
+        "waited {:?}",
+        started.elapsed()
+    );
+    fixture.sampling.check()?;
+    fresh.check()?;
+    assert!(fixture.attempts().await?.is_empty());
+    release(lock).await?;
+    assert!(fixture.db.flush_accounting(Duration::from_secs(30)).await);
+    let observations: i64 = {
+        let mut connection = fixture.connection().await?;
+        let count = sqlx::query_scalar("SELECT count(*) FROM draft_accounting_observations")
+            .fetch_one(&mut connection)
+            .await?;
+        connection.close().await?;
+        count
+    };
+    assert_eq!(observations, 1);
     drop(fresh);
-    fixture.two_reopens(vec![attempt]).await
+    fixture.two_reopens(vec![first, second]).await
+}
+
+/// A record the ledger writer refuses after its request stopped waiting is
+/// still reported: by the turn that notices it, once.
+#[tokio::test]
+async fn accounting_policy_late_refusals_are_reported_once() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let owner = fixture.sampling.owner;
+    let notices = SessionNotices::default();
+    let ledger = (fixture.db.clone(), owner);
+    let refuse = || async {
+        // Recorded under this conversation, for another one: refused.
+        let mut other = fixture.sampling.admit(MODEL, ENDPOINT).await?;
+        other.thread_id = ThreadId::new();
+        let refused = fixture
+            .db
+            .record_accounting(codex_state::accounting::LedgerWrite::Admit {
+                owner,
+                attempt: other,
+                prices: Vec::new(),
+            })
+            .await;
+        assert!(refused.is_err());
+        anyhow::Ok(())
+    };
+    // One from before the session's first turn is not its own.
+    refuse().await?;
+    notices.count_refusals_from(&fixture.db, owner);
+    assert!(!notices.refused_since(Some(&ledger)));
+    refuse().await?;
+    assert!(notices.refused_since(Some(&ledger)));
+    assert!(!notices.refused_since(Some(&ledger)));
+    assert!(!notices.refused_since(None));
+    Ok(())
+}
+
+/// Cancelling a sampling while it waits for the ledger to open attaches
+/// nothing.
+#[tokio::test]
+async fn accounting_policy_start_cancel_attaches_nothing() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let lock = hold_write_lock(&fixture).await?;
+    let slot = Slot::default();
+    let enabled = mode();
+    let mut start = Box::pin(async {
+        let sampling = Sampling::start(
+            fixture.db.clone(),
+            fixture.sampling.owner,
+            "cancelled".into(),
+            &enabled,
+        )
+        .await?;
+        SamplingScope::attach(slot.clone(), Some(sampling))
+    });
+    let _ = poll!(&mut start);
+    drop(start);
+    assert!(read_slot(&slot)?.is_none());
+    release(lock).await?;
+    fixture.two_reopens(Vec::new()).await
 }
 
 #[tokio::test]
-async fn accounting_policy_serial_retry_identity_and_time_sample_after_gate() -> Result<()> {
+async fn accounting_policy_serial_retry_identity_and_time_sample_after_the_admission_lock()
+-> Result<()> {
     let fixture = Fixture::new().await?;
-    let permit = writes().acquire().await?;
+    let admission = fixture.sampling.admission.acquire().await?;
     let mut first = Box::pin(fixture.sampling.admit(MODEL, ENDPOINT));
     let mut second = Box::pin(fixture.sampling.admit(MODEL, ENDPOINT));
     assert!(poll!(&mut first).is_pending());
@@ -935,7 +1029,7 @@ async fn accounting_policy_serial_retry_identity_and_time_sample_after_gate() ->
     })
     .await?;
     let barrier_time = now();
-    drop(permit);
+    drop(admission);
     let (first, second) = tokio::try_join!(first, second)?;
     assert_eq!(first.retry_of, None);
     assert_eq!(second.retry_of, Some(first.attempt_id));
@@ -951,59 +1045,12 @@ async fn accounting_policy_serial_retry_identity_and_time_sample_after_gate() ->
 }
 
 #[tokio::test]
-async fn accounting_policy_observe_wait_cancel_and_start_cancel_publish_nothing() -> Result<()> {
-    let fixture = Fixture::new().await?;
-    let attempt = fixture.sampling.admit(MODEL, ENDPOINT).await?;
-    let permit = writes().acquire().await?;
-    let mut waiting = Box::pin(fixture.sampling.observe(
-        &attempt,
-        Uuid::new_v4(),
-        /*position*/ 0,
-        AnthropicUsagePatch::default(),
-    ));
-    assert!(poll!(&mut waiting).is_pending());
-    drop(waiting);
-    fixture.sampling.check()?;
-    drop(permit);
-    let mut connection = fixture.connection().await?;
-    sqlx::query("BEGIN IMMEDIATE")
-        .execute(&mut connection)
-        .await?;
-    let slot = Slot::default();
-    let enabled = mode();
-    let mut start = Box::pin(async {
-        let sampling = Sampling::start(
-            fixture.db.clone(),
-            fixture.sampling.owner,
-            "cancelled".into(),
-            &enabled,
-        )
-        .await?;
-        SamplingScope::attach(slot.clone(), Some(sampling))
-    });
-    assert!(poll!(&mut start).is_pending());
-    assert_eq!(writes().available_permits(), 0);
-    drop(start);
-    assert_eq!(writes().available_permits(), 1);
-    assert!(read_slot(&slot)?.is_none());
-    sqlx::query("ROLLBACK").execute(&mut connection).await?;
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM draft_accounting_observations")
-        .fetch_one(&mut connection)
-        .await?;
-    assert_eq!(count, 0);
-    connection.close().await?;
-    fixture.two_reopens(vec![attempt]).await
-}
-
-#[tokio::test]
-async fn accounting_policy_cancel_in_operation_rejects_and_releases_capacity() -> Result<()> {
+async fn accounting_policy_cancel_in_operation_closes_the_sampling_and_keeps_the_record()
+-> Result<()> {
     for operation in ["admit", "observe"] {
         let fixture = Fixture::new().await?;
         let attempt = fixture.sampling.admit(MODEL, ENDPOINT).await?;
-        let mut connection = fixture.connection().await?;
-        sqlx::query("BEGIN IMMEDIATE")
-            .execute(&mut connection)
-            .await?;
+        let lock = hold_write_lock(&fixture).await?;
         let sampling = &fixture.sampling;
         let mut pending = Box::pin(async {
             if operation == "admit" {
@@ -1013,7 +1060,7 @@ async fn accounting_policy_cancel_in_operation_rejects_and_releases_capacity() -
                     .observe(
                         &attempt,
                         Uuid::new_v4(),
-                        /*position*/ 0,
+                        /*position*/ 1,
                         AnthropicUsagePatch {
                             input_tokens: AnthropicTokenPresence::Number(7),
                             ..Default::default()
@@ -1022,24 +1069,30 @@ async fn accounting_policy_cancel_in_operation_rejects_and_releases_capacity() -
                     .await
             }
         });
-        assert!(poll!(&mut pending).is_pending());
-        assert_eq!(
-            writes().available_permits(),
-            0,
-            "inside the operation, not queued"
+        // Handed over and waiting for the writer's first try.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), &mut pending)
+                .await
+                .is_err()
         );
         drop(pending);
         assert!(fixture.sampling.check().is_err());
-        assert_eq!(writes().available_permits(), 1);
-        sqlx::query("ROLLBACK").execute(&mut connection).await?;
-        connection.close().await?;
         assert!(fixture.sampling.admit(MODEL, ENDPOINT).await.is_err());
+        release(lock).await?;
+        assert!(fixture.db.flush_accounting(Duration::from_secs(30)).await);
+        // The record handed over before the cancel is in the ledger.
         let mut connection = fixture.connection().await?;
-        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM draft_accounting_observations")
-            .fetch_one(&mut connection)
-            .await?;
-        assert_eq!(count, 0);
+        let (attempts, observations): (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM draft_accounting_attempts),
+                    (SELECT count(*) FROM draft_accounting_observations)",
+        )
+        .fetch_one(&mut connection)
+        .await?;
         connection.close().await?;
+        assert_eq!(
+            (attempts, observations),
+            if operation == "admit" { (2, 0) } else { (1, 1) }
+        );
         let fresh = tokio::time::timeout(
             Duration::from_secs(10),
             Sampling::start(
@@ -1053,9 +1106,11 @@ async fn accounting_policy_cancel_in_operation_rejects_and_releases_capacity() -
         let next = fresh.admit(MODEL, ENDPOINT).await?;
         assert_eq!(next.retry_of, None);
         assert_ne!(next.request_id, attempt.request_id);
-        // This barrier blocked the first DB operation. It does not establish
-        // rollback for arbitrary cancellation after SQLite has committed.
-        fixture.two_reopens(vec![attempt, next]).await?;
+        drop(fresh);
+        let mut expected = fixture.attempts().await?;
+        expected.retain(|row| row.attempt_id != next.attempt_id);
+        expected.push(next);
+        fixture.two_reopens(expected).await?;
     }
     Ok(())
 }
@@ -1090,15 +1145,14 @@ async fn accounting_policy_previous_poison_before_and_during_admission_is_sticky
         let mut pending = Box::pin(fixture.sampling.admit(MODEL, ENDPOINT));
         if phase == "during" {
             assert!(poll!(&mut pending).is_pending());
-            assert_eq!(writes().available_permits(), 0);
             poison(&fixture.sampling.previous);
             sqlx::query("ROLLBACK").execute(&mut connection).await?;
         }
         assert!(pending.await.is_err());
         assert!(fixture.sampling.check().is_err());
         assert!(fixture.sampling.admit(MODEL, ENDPOINT).await.is_err());
-        assert_eq!(writes().available_permits(), 1);
         connection.close().await?;
+        assert!(fixture.db.flush_accounting(Duration::from_secs(30)).await);
         let rows = fixture.attempts().await?;
         assert_eq!(rows.len(), usize::from(phase == "during"));
         if let Some(attempt) = rows.first() {

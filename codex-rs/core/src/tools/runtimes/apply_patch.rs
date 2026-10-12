@@ -181,6 +181,7 @@ impl Approvable<ApplyPatchRequest> for ApplyPatchRuntime {
                 return ReviewDecision::Approved;
             }
             if let Some(reason) = retry_reason {
+                crate::tools::sandboxing::note_person_asked();
                 let decision = session
                     .request_patch_approval(
                         turn,

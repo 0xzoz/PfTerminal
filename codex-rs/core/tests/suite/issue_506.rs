@@ -52,6 +52,10 @@ enum Command {
     ListHomeVariable,
     /// List and read the home's `skills` folder (a runtime entry).
     UseSkills,
+    /// #554: search the folder that holds the home (`find ~`).
+    FindAbove,
+    /// #554: list that folder recursively (`ls -aR ~`).
+    ListAboveRecursively,
 }
 
 /// One turn, in a session started at `level`, that runs `command` first
@@ -63,8 +67,11 @@ async fn run(
     unified: bool,
     command: Command,
 ) -> anyhow::Result<Run> {
-    let home = Arc::new(TempDir::new()?);
+    // The home sits in a folder of its own, which #554's commands list.
+    let above_dir = TempDir::new()?;
+    let home = Arc::new(TempDir::new_in(above_dir.path())?);
     let path = home.path().canonicalize()?;
+    let above = above_dir.path().canonicalize()?;
     std::fs::write(path.join(CANARY), "x")?;
     std::fs::create_dir_all(path.join("skills"))?;
     std::fs::write(path.join("skills/note.md"), SKILL_NOTE)?;
@@ -73,6 +80,8 @@ async fn run(
         Command::ListHome => format!("ls -a '{path}'"),
         Command::ListHomeVariable => "ls -a \"$CODEX_HOME\"".to_string(),
         Command::UseSkills => format!("ls '{path}/skills' && cat '{path}/skills/note.md'"),
+        Command::FindAbove => format!("find '{}'", above.display()),
+        Command::ListAboveRecursively => format!("ls -aR '{}'", above.display()),
     };
     let server = start_mock_server().await;
     let captured = mount_sse_sequence(
@@ -215,6 +224,29 @@ async fn assert_listing_denied(
         "{context}: {:?}",
         variable.warnings
     );
+    // #554: listed from the folder above, the home is denied and explained
+    // the same way.
+    for command in [Command::FindAbove, Command::ListAboveRecursively] {
+        let above = run(level, confirm, unified, command).await?;
+        assert!(
+            !above.output.contains(CANARY),
+            "{context}: {}",
+            above.output
+        );
+        assert!(
+            above.output.contains("Operation not permitted"),
+            "{context}: {}",
+            above.output
+        );
+        assert!(
+            above
+                .warnings
+                .iter()
+                .any(|warning| warning.starts_with(EXPLANATION)),
+            "{context}: no explanation in {:?}",
+            above.warnings
+        );
+    }
     let skills = run(level, confirm, unified, Command::UseSkills).await?;
     assert!(
         skills.output.contains("note.md"),
@@ -256,26 +288,25 @@ async fn issue_506_permissive_and_moderate_keep_listing_the_home() -> anyhow::Re
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
     for level in [SecurityLevel::Permissive, SecurityLevel::Moderate] {
-        let listed = run(
-            level,
-            /*confirm*/ false,
-            /*unified*/ false,
-            Command::ListHome,
-        )
-        .await?;
-        assert!(
-            listed.output.contains(CANARY),
-            "{level:?}: {}",
-            listed.output
-        );
-        assert!(
-            !listed
-                .warnings
-                .iter()
-                .any(|warning| warning.starts_with(EXPLANATION)),
-            "{level:?}: {:?}",
-            listed.warnings
-        );
+        for command in [Command::ListHome, Command::FindAbove] {
+            let listed = run(
+                level, /*confirm*/ false, /*unified*/ false, command,
+            )
+            .await?;
+            assert!(
+                listed.output.contains(CANARY),
+                "{level:?}: {}",
+                listed.output
+            );
+            assert!(
+                !listed
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.starts_with(EXPLANATION)),
+                "{level:?}: {:?}",
+                listed.warnings
+            );
+        }
     }
     Ok(())
 }
