@@ -663,7 +663,11 @@ fn push_default_account_items(
 ) {
     items.push(account_event_item(
         "Add another account",
-        "Name it, then paste its key or token into masked entry.",
+        if provider_id == codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID {
+            "Name it, then enter the AWS profile it uses (not secret)."
+        } else {
+            "Name it, then paste its key or token into masked entry."
+        },
         ProviderAccountEvent::AddStart {
             provider_id: provider_id.to_string(),
         },

@@ -139,15 +139,8 @@ fn bedrock_accounts_hold_a_validated_aws_profile_name() -> Result<()> {
             .args(["--enable", "named_accounts"])
             .assert())
     };
-    let add = [
-        "add",
-        "amazon-bedrock",
-        "work",
-        "--kind",
-        "aws-profile",
-        "--value",
-    ];
-    account(&[&add[..], &["bad profile"]].concat())?
+    let add = ["add", "amazon-bedrock", "work", "--kind", "aws-profile"];
+    account(&[&add[..], &["--value", "bad profile"]].concat())?
         .failure()
         .stderr(contains("invalid AWS profile name"));
     account(&add)?
@@ -166,7 +159,7 @@ fn bedrock_accounts_hold_a_validated_aws_profile_name() -> Result<()> {
     .stderr(contains(
         "provider `zai` does not take `--kind aws-profile` accounts",
     ));
-    account(&[&add[..], &["corp-dev"]].concat())?
+    account(&[&add[..], &["--value", "corp-dev"]].concat())?
         .success()
         .stdout("Saved amazon-bedrock account `work` (aws_profile).\n");
     account(&["list", "amazon-bedrock"])?

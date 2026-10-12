@@ -93,15 +93,22 @@ tui() {
 }
 send() { $T send-keys -t a -l "$1"; sleep 0.5; $T send-keys -t a Enter; }
 tui --account work
-send "/status"; waitfor "Account|account" ; sleep 1; cap tui-1-status
+send "/status"; waitfor "account work"; sleep 1; cap tui-1-status
 $T send-keys -t a Escape; sleep 1
-send "Reply with exactly: pong"; waitfor "signed by" ; sleep 1; cap tui-2-turn
-send "/providers"; waitfor "Bedrock"; sleep 1; cap tui-3-providers
-$T send-keys -t a Escape; sleep 1
-# Restart with the default for new sessions set in config: durable selection.
-printf '[provider_accounts]\n"amazon-bedrock" = "work"\n' >> "$CODEX_HOME/config.toml"
+send "Reply with exactly: pong"; waitfor "signed by"; sleep 1; cap tui-2-turn
+# /providers: Bedrock rows (wrap to the bottom, then up to "Amazon Bedrock · default").
+send "/providers"; waitfor "Providers"; sleep 1
+for _ in 1 2 3 4; do $T send-keys -t a Up; sleep 0.3; done; sleep 1; cap tui-3-providers
+$T send-keys -t a Enter; waitfor "Add another account"; sleep 1; cap tui-4-manage
+$T send-keys -t a Enter; waitfor "Account name"; sleep 0.5
+send "prod"; waitfor "AWS profile name"; sleep 1; cap tui-5-profile-entry
+send "other"; waitfor "Saved amazon-bedrock account"; sleep 1; cap tui-6-saved
+$T kill-server 2>/dev/null; sleep 1
+# Restart with `prod` as the default for new sessions: durable selection, other profile.
+printf '[provider_accounts]\n"amazon-bedrock" = "prod"\n' >> "$CODEX_HOME/config.toml"
 tui
-send "Reply with exactly: pong"; waitfor "signed by"; sleep 1; cap tui-4-restart
+send "Reply with exactly: pong"; waitfor "signed by"; sleep 1
+send "/status"; waitfor "account prod"; sleep 1; cap tui-7-restart
 $T kill-server 2>/dev/null
 
 # Leak scan: no fake secret or bearer canary in any capture or the profile's logs.
