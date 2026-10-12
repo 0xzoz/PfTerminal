@@ -270,6 +270,33 @@ impl App {
         tui.frame_requester().schedule_frame();
     }
 
+    /// PF-84: the model list again, after the session moved to another
+    /// account's sign-in (the app server lists with that account now).
+    /// Returns whether the list was replaced.
+    pub(super) async fn refresh_model_list(&mut self, app_server: &mut AppServerSession) -> bool {
+        match app_server.list_models().await {
+            Ok(models) if !models.is_empty() => {
+                self.model_catalog.replace_listed_models(models);
+                let model = self.chat_widget.current_model().to_string();
+                let provider_id = self.chat_widget.config_ref().model_provider_id.clone();
+                self.model_catalog.sync_runtime_models(
+                    [provider_id.as_str()],
+                    Some(&model),
+                    &provider_id,
+                );
+                true
+            }
+            Ok(_) => {
+                tracing::warn!("model/list returned no models after an account switch");
+                false
+            }
+            Err(error) => {
+                tracing::warn!("model/list failed after an account switch: {error}");
+                false
+            }
+        }
+    }
+
     pub(super) async fn refresh_gpu_runtime_overlay(&mut self) {
         let Some(state_db) = self.state_db.as_ref() else {
             self.model_catalog.replace_gpu_models(Vec::new());
@@ -2079,6 +2106,10 @@ impl App {
                         return Ok(AppRunControl::Continue);
                     }
                 }
+                // PF-84: a switch to another sign-in account waits until the
+                // session has moved to it, so the model list fetched next
+                // (`AppEvent::RefreshModelList`) is that account's.
+                let mut account_changes = false;
                 if let Some(model_provider) = provider.as_ref() {
                     let Some(provider_info) =
                         self.config.model_providers.get(model_provider).cloned()
@@ -2088,6 +2119,9 @@ impl App {
                         ));
                         return Ok(AppRunControl::Continue);
                     };
+                    account_changes =
+                        codex_model_provider::named_sign_in_account(&self.config.model_provider)
+                            != codex_model_provider::named_sign_in_account(&provider_info);
                     self.config.model_provider_id = model_provider.clone();
                     self.config.model_provider = provider_info.clone();
                     self.chat_widget
@@ -2097,7 +2131,7 @@ impl App {
                 }
                 self.chat_widget.set_model(&model);
                 self.refresh_session_header(tui)?;
-                self.sync_active_thread_model_selection(app_server, model, provider)
+                self.sync_active_thread_model_selection(app_server, model, provider, account_changes)
                     .await;
                 self.sync_active_thread_service_tier_to_cached_session()
                     .await;
@@ -4958,6 +4992,20 @@ impl App {
             }
             AppEvent::OpenApprovalsPopup => {
                 self.chat_widget.open_approvals_popup();
+            }
+            AppEvent::RefreshModelList { account } => {
+                let label = match account {
+                    Some(account) => format!("{} account `{}`", account.provider_id, account.name),
+                    None => "the default account".to_string(),
+                };
+                if self.refresh_model_list(app_server).await {
+                    self.chat_widget.add_info_message(
+                        format!(
+                            "Connectors, usage and the model list now use {label}; model list refreshed."
+                        ),
+                        /*hint*/ None,
+                    );
+                }
             }
             AppEvent::OpenAgentPicker => {
                 self.open_agent_picker(app_server).await;

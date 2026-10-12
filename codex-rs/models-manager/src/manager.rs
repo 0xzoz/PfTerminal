@@ -240,6 +240,13 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
         etag: String,
         http_client_factory: HttpClientFactory,
     ) -> ModelsManagerFuture<'_, ()>;
+
+    /// PF-84: list models with the sign-in of named account `account` (`None`:
+    /// the default login) from now on. Returns whether that changed. Managers
+    /// not bound to an OpenAI sign-in keep their list and return `false`.
+    fn follow_sign_in_account(&self, _account: Option<&codex_login::NamedChatgptAccount>) -> bool {
+        false
+    }
 }
 
 pub type ModelsManagerFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;

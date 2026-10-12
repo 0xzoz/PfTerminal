@@ -304,6 +304,10 @@ impl SteerInputError {
     }
 }
 
+/// PF-84: how long a mid-session account switch waits for the new account's
+/// model list.
+const MODEL_LIST_SWITCH_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Notes from the previous real user turn.
 ///
 /// Conceptually this is the same role that `previous_model` used to fill, but
@@ -630,6 +634,11 @@ impl Session {
         };
 
         let mut config = Arc::new(config);
+        // PF-84: a user's session lists models with its own account's sign-in.
+        if !session_source.is_non_root_agent() {
+            let account = codex_model_provider::named_sign_in_account(&config.model_provider);
+            models_manager.follow_sign_in_account(account.as_ref());
+        }
         let refresh_strategy = if session_source.is_non_root_agent() {
             codex_models_manager::manager::RefreshStrategy::Offline
         } else {
@@ -1710,6 +1719,7 @@ impl Session {
             permission_profile_changed,
             mcp_inputs_changed,
             stale_startup_prewarm,
+            follows_model_list,
         ) = {
             let mut state = self.state.lock().await;
             let updated = match state.session_configuration.apply(&updates) {
@@ -1735,6 +1745,19 @@ impl Session {
                 .model_provider_id
                 != updated.original_config_do_not_use.model_provider_id
                 || state.session_configuration.provider != updated.provider;
+            // PF-84: the new provider's sign-in (a named account's or the
+            // default login) becomes the one connectors, plugin installs,
+            // accounting and the model list use, before the client is built.
+            let account_switched = model_provider_changed
+                && self.services.active_auth.follow_provider(&updated.provider);
+            if account_switched {
+                let account = codex_model_provider::named_sign_in_account(&updated.provider)
+                    .map_or_else(|| "default".to_string(), |account| account.to_string());
+                info!(
+                    %account,
+                    "connectors, plugin installs, accounting and the model list follow the switch"
+                );
+            }
             if model_provider_changed {
                 // Publish while updates are serialized, before the new configuration
                 // becomes observable. Frame guards read this client without state locks.
@@ -1751,18 +1774,25 @@ impl Session {
                     .turn_environments
                     .update_selections(updated.environment_selections());
             }
+            let follows_model_list =
+                model_provider_changed && self.model_list_follows_this_session(&updated);
             state.session_configuration = updated;
-            if mcp_inputs_changed {
+            // Connectors reconnect with the new account's sign-in.
+            if mcp_inputs_changed || account_switched {
                 self.mark_mcp_runtime_dirty();
             }
             (
                 previous_config,
                 new_config,
                 permission_profile_changed,
-                mcp_inputs_changed,
+                mcp_inputs_changed || account_switched,
                 stale_startup_prewarm,
+                follows_model_list,
             )
         };
+        if follows_model_list {
+            self.follow_model_list_account().await;
+        }
         self.emit_config_changed_contributors(previous_config.as_ref(), new_config.as_ref());
         if let Some(startup_prewarm) = stale_startup_prewarm {
             startup_prewarm.abort().await;
@@ -1775,6 +1805,46 @@ impl Session {
             self.schedule_mcp_prewarm();
         }
         Ok(())
+    }
+
+    /// PF-84: whether this session's account drives the process's model
+    /// list: a user's session, not a sub-agent's or an internal one's.
+    fn model_list_follows_this_session(&self, configuration: &SessionConfiguration) -> bool {
+        !configuration.session_source.is_non_root_agent()
+    }
+
+    /// PF-84: lists models with the sign-in of the account this session's
+    /// provider uses (the default login for any other provider). When that
+    /// changed, the account's list is fetched (a named account's is not
+    /// cached), waiting at most [`MODEL_LIST_SWITCH_WAIT`] so a client that
+    /// lists models after the switch sees it.
+    pub(super) async fn follow_model_list_account(&self) {
+        let (provider, http_client_factory) = {
+            let state = self.state.lock().await;
+            (
+                state.session_configuration.provider.clone(),
+                state
+                    .session_configuration
+                    .original_config_do_not_use
+                    .http_client_factory(),
+            )
+        };
+        let account = codex_model_provider::named_sign_in_account(&provider);
+        if !self
+            .services
+            .models_manager
+            .follow_sign_in_account(account.as_ref())
+        {
+            return;
+        }
+        let models_manager = Arc::clone(&self.services.models_manager);
+        let refresh = self.services.runtime_handle.spawn(async move {
+            models_manager
+                .list_models(RefreshStrategy::OnlineIfUncached, http_client_factory)
+                .await;
+        });
+        // On timeout the fetch goes on in the background.
+        let _ = tokio::time::timeout(MODEL_LIST_SWITCH_WAIT, refresh).await;
     }
 
     async fn ensure_runtime_model_provider(&self, updates: &mut SessionSettingsUpdate) {
@@ -1848,7 +1918,7 @@ impl Session {
     ) -> ModelClient {
         let config = configuration.original_config_do_not_use.as_ref();
         ModelClient::new(
-            Some(Arc::clone(&self.services.auth_manager)),
+            Some(self.services.auth_manager()),
             if config.features.enabled(Feature::UseAgentIdentity) {
                 codex_login::auth::AgentIdentityAuthPolicy::ChatGptAuth
             } else {
@@ -4234,7 +4304,7 @@ impl Session {
             && (features.enabled(Feature::ToolSuggest)
                 || features.enabled(Feature::RecommendedPlugins))
         {
-            let auth = self.services.auth_manager.auth().await;
+            let auth = self.services.auth_manager().auth().await;
             let plugins_config = turn_context.config.plugins_config_input();
             self.services
                 .plugins_manager
@@ -5167,3 +5237,7 @@ mod elicitation_holders_tests;
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(test)]
+#[path = "account_switch_tests.rs"]
+mod account_switch_tests;

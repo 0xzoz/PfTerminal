@@ -1145,7 +1145,7 @@ impl Session {
         let mut turn_context: TurnContext = Self::make_turn_context(
             self.thread_id(),
             self.session_id(),
-            Some(Arc::clone(&self.services.auth_manager)),
+            Some(self.services.auth_manager()),
             &self.services.session_telemetry,
             session_configuration.provider.clone(),
             &session_configuration,

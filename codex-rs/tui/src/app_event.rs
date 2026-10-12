@@ -395,6 +395,12 @@ pub(crate) enum KeymapEditIntent {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub(crate) enum AppEvent {
+    /// PF-84: the session now uses another account's sign-in (`None`: the
+    /// default login); fetch the model list again (it follows that account).
+    RefreshModelList {
+        account: Option<codex_login::NamedChatgptAccount>,
+    },
+
     /// Open the agent picker for switching active threads.
     OpenAgentPicker,
     /// Merge a completed root-scoped agent-picker refresh without blocking terminal input.

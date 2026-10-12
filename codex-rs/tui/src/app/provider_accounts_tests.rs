@@ -34,14 +34,15 @@ fn session_account(app: &App, provider_id: &str) -> Option<String> {
 #[tokio::test]
 async fn a_session_account_that_cannot_load_changes_nothing() {
     let (mut app, _home) = app_with_named_accounts("").await;
-    // OpenAI sign-in cannot hold named accounts yet (pending S06).
+    // A local server has no credential, so no named accounts (OpenAI sign-in
+    // can hold them since S06).
     let error = app
-        .select_session_provider_account("openai", Some(&name("work")))
+        .select_session_provider_account("ollama", Some(&name("work")))
         .await
         .expect_err("refused");
     assert!(error.contains("does not support named accounts"), "{error}");
     assert_eq!(app.harness_overrides.provider_account, None);
-    assert_eq!(session_account(&app, "openai"), None);
+    assert_eq!(session_account(&app, "ollama"), None);
 }
 
 #[tokio::test]

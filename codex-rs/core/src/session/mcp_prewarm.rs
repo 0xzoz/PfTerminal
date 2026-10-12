@@ -18,8 +18,10 @@ impl Session {
     ) {
         let session = Arc::downgrade(self);
         let shutdown = self.mcp_prewarm_shutdown.clone();
+        let mut account_switches = self.services.active_auth.subscribe_switches();
         let worker = self.services.runtime_handle.spawn(async move {
             loop {
+                let mut account_switched = false;
                 let auth_changed = tokio::select! {
                     biased;
                     _ = shutdown.cancelled() => break,
@@ -35,10 +37,22 @@ impl Session {
                         }
                         true
                     },
+                    // PF-84: a mid-session switch to another account's
+                    // sign-in; watch that manager from now on.
+                    switch = account_switches.changed() => {
+                        if switch.is_err() {
+                            break;
+                        }
+                        account_switched = true;
+                        true
+                    },
                 };
                 let Some(session) = session.upgrade() else {
                     break;
                 };
+                if account_switched {
+                    auth_changes = session.services.auth_manager().auth_change_receiver();
+                }
                 if auth_changed {
                     session.mark_mcp_runtime_dirty();
                 }

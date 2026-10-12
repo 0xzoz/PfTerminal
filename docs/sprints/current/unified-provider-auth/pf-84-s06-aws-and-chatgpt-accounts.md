@@ -65,8 +65,9 @@ Paths are under `codex-rs/`, at `ee530a0e26`.
 ## Remaining
 
 - [ ] Code-blind functional design frozen before test-result disclosure (independent acceptance).
-- [ ] Before the flag is removed: the slice B known limits in the gate (mid-session switch keeps MCP/accounting on the
-  named account; model list and early rate limits from the starting/default login).
+- [x] Mid-session switch: connectors, plugin installs, accounting and the model list follow the active account
+  (follow-up, [s06b-gate.md](../../../../qa/provider-auth/pf-84/s06b-gate.md#follow-up-mid-session-account-switch-fixpf84-switch-follow)).
+- [ ] Before the flag is removed: early `/status` rate limits and the `/apps` directory still come from the default login.
 
 ## Verification
 

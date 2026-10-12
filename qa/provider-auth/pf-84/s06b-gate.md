@@ -110,10 +110,12 @@ API key in `auth.json`; a decoy `OPENAI_API_KEY` is set throughout. Captures: [s
 
 ## Known limits (record before the flag is removed)
 
-- A session started on a named account keeps that account for MCP connectors, plugin install and accounting even
-  after a mid-session switch to a default-account OpenAI provider (model requests do switch back).
-- The model list is fetched with the account the process started on; `/status` rate limits before the first reply
-  come from the default login.
+- ~~A session started on a named account keeps that account for MCP connectors, plugin install and accounting even
+  after a mid-session switch to a default-account OpenAI provider.~~ Fixed in the PF-84 follow-up (below): they
+  follow every mid-session switch, named to default, default to named and between named accounts.
+- ~~The model list is fetched with the account the process started on.~~ Fixed in the same follow-up: it follows the
+  account the user's session uses. Still open: `/status` rate limits before the first reply come from the default
+  login, and the app server's `/apps` directory listing (`app/list`) always uses the default login.
 - The registry keeps each named manager's first base settings (`forced_login_method`, workspace, route) until it is
   dropped; a config reload does not update a live manager (the session-start check does run again).
 - `for_named_account` reads the vault while holding the registry lock; the `/status` card reads the vault on the UI
@@ -121,3 +123,24 @@ API key in `auth.json`; a decoy `OPENAI_API_KEY` is set throughout. Captures: [s
 - A same-user re-login leaves the replaced refresh token unrevoked (by design, to keep the new session alive).
 - Not done: zeroizing every in-memory copy of an API key; a keychain-mode test of the default login; the legacy
   pfterminal default store in the same-user check; a narrow race between a refresh save and a concurrent remove.
+
+## Follow-up: mid-session account switch (fix/pf84-switch-follow)
+
+- **What follows the switch.** The session's sign-in (`SessionServices::active_auth`) moves with every provider change
+  to that provider's named account or the default login. MCP connectors (Apps auth included) are marked for
+  reconnection and their prewarm worker watches the new account's refreshes; plugin installs, accounting's auth mode
+  and turn contexts read the active sign-in per use. The process model list (`AccountModelsManager` behind
+  `model/list`) is swapped to the account of a user's session (not sub-agents) at session start and on a switch; a named
+  account's list is not cached on disk. The TUI waits for the switch to apply (`thread/settings/update` with
+  `confirm`), fetches `model/list` again and says *Connectors, usage and the model list now use …*.
+- **Tests (fail before, pass after).** Core: `session::account_switch_tests` (connectors, accounting, model list,
+  no reconnect when the account is unchanged) and `account_models_manager::tests`; TUI: catalog replacement and the
+  refresh trigger. Before: 3 of 4 switch tests fail with the switch disabled.
+- **tmux check** (disposable home, `CORBANU_TEST_NO_NATIVE_KEYRING=1`; `work` signed in with the `openai-api-key`
+  vault label, GLM 5.3 Flash on the default Z.AI key, both fetched inline, never printed). Evidence:
+  [s06/switch-follow/](s06/switch-follow/). Run 1: start on `openai · work` → `/model` GLM → back to OpenAI. Run 2:
+  start on GLM → `/providers` *Use for this session* `work` → `/model` OpenAI (`work-ok`) → GLM (`default-ok`). Core
+  logged the switch to `default` / `openai:work` each time, `model/list` was fetched after each switch, and the ledger
+  attributes each attempt to the account that served it. Leak scan for both real keys: 0 files.
+- **Seen, not caused here:** after GLM → OpenAI in the same session, OpenAI rejected the turn with 404 for a GLM
+  reasoning item id (`rs_…`, `store=false`) carried in the history; the request was authenticated as `work`.

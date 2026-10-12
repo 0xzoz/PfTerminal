@@ -1862,7 +1862,7 @@ pub(crate) async fn prepare_tool_recommendations(
         .await;
     let tool_suggest_is_enabled = tool_suggest_enabled(turn_context);
     let auth = if tool_suggest_is_enabled {
-        sess.services.auth_manager.auth().await
+        sess.services.auth_manager().auth().await
     } else {
         None
     };
@@ -2652,7 +2652,7 @@ async fn acquire_provider_request_lease(
             turn_context.reasoning_summary,
             turn_context.config.service_tier.clone(),
             responses_metadata,
-            sess.services.auth_manager.auth_mode(),
+            sess.services.auth_manager().auth_mode(),
         )
         .map(|bytes| i64::try_from(bytes).unwrap_or(i64::MAX))
         .unwrap_or_else(|err| {
@@ -3221,7 +3221,7 @@ async fn provider_request_key(
     state_db: &StateDbHandle,
 ) -> ProviderRequestKey {
     let key_fingerprint = match provider_request_key_identity(turn_context.provider.info(), || {
-        sess.services.auth_manager.auth_mode()
+        sess.services.auth_manager().auth_mode()
     }) {
         ProviderKeyIdentity::Label(label) => label,
         ProviderKeyIdentity::EnvSecret { env_key, secret } => {
@@ -3424,7 +3424,7 @@ async fn try_run_sampling_request(
         approval_policy = turn_context.approval_policy.value(),
         sandbox_policy = &turn_context.sandbox_policy(),
         effort = turn_context.reasoning_effort,
-        auth_mode = sess.services.auth_manager.auth_mode(),
+        auth_mode = sess.services.auth_manager().auth_mode(),
         features = sess.features.enabled_features(),
     );
     let inference_trace = sess.services.rollout_thread_trace.inference_trace_context(

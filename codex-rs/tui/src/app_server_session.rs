@@ -452,6 +452,29 @@ impl AppServerSession {
         client.server_version()
     }
 
+    /// The app server's current `model/list` (hidden models included), as
+    /// at bootstrap. PF-84: it follows the account the session uses.
+    pub(crate) async fn list_models(&mut self) -> Result<Vec<ModelPreset>> {
+        let request_id = self.next_request_id();
+        let models = self
+            .client
+            .request_typed::<ModelListResponse>(ClientRequest::ModelList {
+                request_id,
+                params: ModelListParams {
+                    cursor: None,
+                    limit: None,
+                    include_hidden: Some(true),
+                },
+            })
+            .await
+            .map_err(|err| bootstrap_request_error("model/list failed", err))?;
+        Ok(models
+            .data
+            .into_iter()
+            .map(model_preset_from_api_model)
+            .collect())
+    }
+
     pub(crate) async fn bootstrap(&mut self, config: &Config) -> Result<AppServerBootstrap> {
         let started_at = Instant::now();
         let account = self.read_account().await?;

@@ -42,12 +42,14 @@ impl App {
         app_server: &mut AppServerSession,
         model: String,
         model_provider: Option<String>,
+        confirm: bool,
     ) {
         let Some(thread_id) = self.active_thread_id else {
             return;
         };
         let params = ThreadSettingsUpdateParams {
             thread_id: thread_id.to_string(),
+            confirm,
             model: Some(model),
             model_provider,
             collaboration_mode: Some(self.chat_widget.effective_collaboration_mode()),
