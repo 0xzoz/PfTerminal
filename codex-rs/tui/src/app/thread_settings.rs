@@ -43,9 +43,9 @@ impl App {
         model: String,
         model_provider: Option<String>,
         confirm: bool,
-    ) {
+    ) -> bool {
         let Some(thread_id) = self.active_thread_id else {
-            return;
+            return false;
         };
         let params = ThreadSettingsUpdateParams {
             thread_id: thread_id.to_string(),
@@ -55,7 +55,7 @@ impl App {
             collaboration_mode: Some(self.chat_widget.effective_collaboration_mode()),
             ..ThreadSettingsUpdateParams::default()
         };
-        self.send_thread_settings_update(app_server, params).await;
+        self.send_thread_settings_update(app_server, params).await
     }
 
     pub(super) async fn sync_active_thread_reasoning_setting(
@@ -175,16 +175,19 @@ impl App {
         }
     }
 
+    /// Returns whether a confirmed update (`params.confirm`) was applied by
+    /// core before this returned.
     pub(super) async fn send_thread_settings_update(
         &mut self,
         app_server: &mut AppServerSession,
         params: ThreadSettingsUpdateParams,
-    ) {
+    ) -> bool {
         if !thread_settings_update_has_changes(&params) {
-            return;
+            return false;
         }
         let mut params = params;
         let mut result = app_server.thread_settings_update(params.clone()).await;
+        let confirmed = params.confirm && result.is_ok();
         if params.confirm
             && let Err(err) = &result
         {
@@ -201,6 +204,7 @@ impl App {
             self.chat_widget
                 .add_error_message(format!("Failed to update thread settings: {err}"));
         }
+        confirmed
     }
 }
 

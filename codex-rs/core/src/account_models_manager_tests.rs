@@ -131,3 +131,52 @@ fn providers_without_an_openai_sign_in_are_not_wrapped() {
         .is_none()
     );
 }
+
+/// Only a response from this provider on the account the list follows may
+/// refresh it (its models etag says nothing about another account's list).
+#[test]
+fn only_the_followed_account_refreshes_the_list() {
+    let (home, default_auth) = setup();
+    let openai = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
+    let manager = manager_for(&openai, &home, &default_auth);
+    let mut work_provider = openai.clone();
+    work_provider.account = Some(NamedProviderAccount {
+        provider_id: "openai".to_string(),
+        name: "work".to_string(),
+    });
+    let zai = codex_model_provider_info::built_in_model_providers(/*openai_base_url*/ None)["zai"]
+        .clone();
+
+    assert!(manager.lists_for_provider(&openai));
+    assert!(!manager.lists_for_provider(&work_provider));
+    assert!(!manager.lists_for_provider(&zai));
+    manager.follow_sign_in_account(Some(&work()));
+    assert!(manager.lists_for_provider(&work_provider));
+    assert!(!manager.lists_for_provider(&openai));
+}
+
+/// A named account's list has its own cache file; until it exists the list
+/// in use is not cached (the first switch fetches it).
+#[test]
+fn a_named_account_list_has_its_own_cache() {
+    let (home, default_auth) = setup();
+    let manager = manager_for(
+        &ModelProviderInfo::create_openai_provider(/*base_url*/ None),
+        &home,
+        &default_auth,
+    );
+    assert!(manager.current_list_is_cached());
+    manager.follow_sign_in_account(Some(&work()));
+    assert!(!manager.current_list_is_cached());
+
+    let dir = home.path().join("models-cache").join("openai").join("work");
+    std::fs::create_dir_all(&dir).expect("cache dir");
+    std::fs::write(dir.join("models_cache.json"), "{}").expect("cache file");
+    assert!(manager.current_list_is_cached());
+    // Not path-safe: never cached, never under the home.
+    let odd = NamedChatgptAccount {
+        provider_id: "openai".to_string(),
+        name: "../escape".to_string(),
+    };
+    assert_eq!(named_account_cache_dir(home.path(), &odd), None);
+}

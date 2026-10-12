@@ -248,12 +248,15 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
         false
     }
 
-    /// PF-84: whether this list is the one of `account`'s sign-in (`None`:
-    /// the default login), so that account's responses may refresh it.
-    fn lists_for_sign_in_account(
-        &self,
-        _account: Option<&codex_login::NamedChatgptAccount>,
-    ) -> bool {
+    /// PF-84: whether a response from a request to `provider` describes this
+    /// list, so its models etag may refresh it.
+    fn lists_for_provider(&self, _provider: &codex_model_provider_info::ModelProviderInfo) -> bool {
+        true
+    }
+
+    /// PF-84: whether the list in use was loaded from a cache (or needs no
+    /// fetch). `false` right after a switch to an account with no list yet.
+    fn current_list_is_cached(&self) -> bool {
         true
     }
 }

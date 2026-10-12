@@ -3851,14 +3851,12 @@ async fn try_run_sampling_request(
             }
             ResponseEvent::ModelsEtag(etag) => {
                 // Update internal state with latest models etag. PF-84: only
-                // a response from the account the process list follows says
-                // anything about that list.
-                let account =
-                    codex_model_provider::named_sign_in_account(turn_context.provider.info());
+                // a response from the provider and account the process list
+                // follows says anything about that list.
                 if sess
                     .services
                     .models_manager
-                    .lists_for_sign_in_account(account.as_ref())
+                    .lists_for_provider(turn_context.provider.info())
                 {
                     sess.services
                         .models_manager

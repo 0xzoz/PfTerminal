@@ -34,6 +34,8 @@ use tokio::sync::TryLockError;
 
 /// Under the home: one model-list cache per named account.
 const NAMED_ACCOUNT_MODELS_CACHE_DIR: &str = "models-cache";
+/// The file name `OpenAiModelsManager` caches its list under.
+const MODELS_CACHE_FILE: &str = "models_cache.json";
 
 pub(crate) struct AccountModelsManager {
     /// The provider the list is for, without an account.
@@ -198,8 +200,22 @@ impl ModelsManager for AccountModelsManager {
         Box::pin(async move { inner.refresh_if_new_etag(etag, http_client_factory).await })
     }
 
-    fn lists_for_sign_in_account(&self, account: Option<&NamedChatgptAccount>) -> bool {
-        self.current.load().account.as_ref() == account
+    /// Only responses from this provider's sign-in, on the account the list
+    /// follows (another provider's etag says nothing about this list).
+    fn lists_for_provider(&self, provider: &ModelProviderInfo) -> bool {
+        provider.requires_openai_auth
+            && provider.aws.is_none()
+            && provider.auth.is_none()
+            && self.current.load().account == named_sign_in_account(provider)
+    }
+
+    fn current_list_is_cached(&self) -> bool {
+        let current = self.current.load();
+        match &current.account {
+            Some(account) => named_account_cache_dir(&self.codex_home, account)
+                .is_some_and(|dir| dir.join(MODELS_CACHE_FILE).is_file()),
+            None => true,
+        }
     }
 
     fn follow_sign_in_account(&self, account: Option<&NamedChatgptAccount>) -> bool {
@@ -239,26 +255,34 @@ fn build(
         name: account.name.clone(),
     });
     let provider = create_model_provider(provider, Some(Arc::clone(default_auth)));
+    let manager = match &account {
+        None => provider.models_manager(codex_home.to_path_buf(), model_catalog.clone()),
+        Some(account) => match named_account_cache_dir(codex_home, account) {
+            Some(dir) => provider.models_manager(dir, model_catalog.clone()),
+            None => provider.models_manager_without_cache(model_catalog.clone()),
+        },
+    };
+    Current { account, manager }
+}
+
+/// Where a named account's model list is cached; `None` for a name that is
+/// not path-safe (names are validated; such a list is not cached).
+fn named_account_cache_dir(
+    codex_home: &std::path::Path,
+    account: &NamedChatgptAccount,
+) -> Option<PathBuf> {
     let path_safe = |part: &str| {
         !part.is_empty()
             && part
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
     };
-    let manager = match &account {
-        None => provider.models_manager(codex_home.to_path_buf(), model_catalog.clone()),
-        // Validated names; anything else is listed uncached.
-        Some(account) if path_safe(&account.provider_id) && path_safe(&account.name) => provider
-            .models_manager(
-                codex_home
-                    .join(NAMED_ACCOUNT_MODELS_CACHE_DIR)
-                    .join(&account.provider_id)
-                    .join(&account.name),
-                model_catalog.clone(),
-            ),
-        Some(_) => provider.models_manager_without_cache(model_catalog.clone()),
-    };
-    Current { account, manager }
+    (path_safe(&account.provider_id) && path_safe(&account.name)).then(|| {
+        codex_home
+            .join(NAMED_ACCOUNT_MODELS_CACHE_DIR)
+            .join(&account.provider_id)
+            .join(&account.name)
+    })
 }
 
 #[cfg(test)]

@@ -304,6 +304,10 @@ impl SteerInputError {
     }
 }
 
+/// PF-84: how long the first switch to an account with no cached model list
+/// waits for that list (API-key sign-ins need no fetch and never wait).
+const FIRST_MODEL_LIST_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Notes from the previous real user turn.
 ///
 /// Conceptually this is the same role that `previous_model` used to fill, but
@@ -1820,8 +1824,10 @@ impl Session {
 
     /// PF-84: lists models with the sign-in of the account this session's
     /// provider uses (the default login for any other provider). When that
-    /// changed, the account's list (its own cache at once, see
-    /// `AccountModelsManager`) is fetched again in the background.
+    /// changed, the account's list is fetched again: in the background when
+    /// its own cache shows it at once (see `AccountModelsManager`), otherwise
+    /// (the first switch to that account in this home) waited for, at most
+    /// [`FIRST_MODEL_LIST_WAIT`], so the client's next `model/list` has it.
     pub(super) async fn follow_model_list_account(&self) {
         let (provider, http_client_factory) = {
             let state = self.state.lock().await;
@@ -1842,11 +1848,16 @@ impl Session {
             return;
         }
         let models_manager = Arc::clone(&self.services.models_manager);
-        self.services.runtime_handle.spawn(async move {
+        let cached = models_manager.current_list_is_cached();
+        let fetch = self.services.runtime_handle.spawn(async move {
             models_manager
                 .list_models(RefreshStrategy::Online, http_client_factory)
                 .await;
         });
+        if !cached {
+            // On timeout the fetch goes on in the background.
+            let _ = tokio::time::timeout(FIRST_MODEL_LIST_WAIT, fetch).await;
+        }
     }
 
     async fn ensure_runtime_model_provider(&self, updates: &mut SessionSettingsUpdate) {

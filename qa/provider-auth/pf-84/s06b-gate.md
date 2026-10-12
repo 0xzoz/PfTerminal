@@ -137,15 +137,18 @@ API key in `auth.json`; a decoy `OPENAI_API_KEY` is set throughout. Captures: [s
 - **Model list.** When the process starts on an OpenAI sign-in provider, its list (`model/list`) is an
   `AccountModelsManager` that follows the account of a user's session (not sub-agents) at session start and on a
   switch; each named account has its own cache (`models-cache/<provider>/<name>/`), so a switch shows that account's
-  last list at once and refetches it in the background, without blocking the switch. Responses from another account
-  no longer refresh it. The TUI sends an account-changing model selection with `confirm` (falling back to an
-  unconfirmed update if confirmation is unavailable), then fetches `model/list` again and says *Connectors, usage and
-  the model list now use …*.
+  last list at once and refetches it in the background. The first switch to a ChatGPT account with no list yet waits
+  for it (at most 5 s; API-key sign-ins fetch nothing). Only responses from that provider and account refresh it. The TUI sends an account-changing model selection with `confirm` (falling back to an
+  unconfirmed update if confirmation is unavailable); only once core confirms the switch does it fetch `model/list`
+  again and say *Connectors, usage and the model list now use …*.
 - **Limits.** The process has one list: with several user sessions on different accounts (an app-server client with
   many threads) the last one to start or switch decides it. A process started on a provider without OpenAI sign-in
-  (e.g. `zai`) keeps that provider's list. Analytics events keep the manager the session started with. The switch
-  reads a named account's ChatGPT or API-key sign-in from the vault under the session state lock (other kinds load on
-  first use).
+  (e.g. `zai`) keeps that provider's list. Analytics events keep the manager the session started with. A turn running
+  across a switch is priced under its own provider's account but recorded under the session's current provider id
+  (`accounting_binding`, unchanged). The switch reads a named account's ChatGPT or API-key sign-in from the vault under
+  the session state lock (other kinds load on first use); accounting resolves the request's account per request, which
+  reads the vault only if nothing holds that account's manager. Runtime model entries added for other providers keep
+  their metadata across a list refresh, as before.
 - **Tests (fail before, pass after).** Core `session::account_switch_tests`: connectors, the prewarm worker across
   default → work → default → play, a turn that changes the provider, accounting per request provider, the model list,
   no reconnect when the account is unchanged; `account_models_manager::tests`. TUI: catalog replacement and which

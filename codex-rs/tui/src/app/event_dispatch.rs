@@ -2129,14 +2129,17 @@ impl App {
                 }
                 self.chat_widget.set_model(&model);
                 self.refresh_session_header(tui)?;
-                self.sync_active_thread_model_selection(
-                    app_server,
-                    model,
-                    provider,
-                    account_switch.is_some(),
-                )
-                .await;
-                if let Some(account) = account_switch
+                let confirmed = self
+                    .sync_active_thread_model_selection(
+                        app_server,
+                        model,
+                        provider,
+                        account_switch.is_some(),
+                    )
+                    .await;
+                // Only once core has moved: otherwise the list (and the
+                // message) could still be the old account's.
+                if let Some(account) = account_switch.filter(|_| confirmed)
                     && self.refresh_model_list(app_server).await
                 {
                     self.chat_widget
