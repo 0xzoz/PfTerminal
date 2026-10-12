@@ -112,6 +112,10 @@ pub enum SessionPickerAction {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SessionPickerLaunchContext {
     Startup,
+    /// PF-84 (#555): `corbanu resume` picks the thread before onboarding,
+    /// because a new session would need provider credentials first. Esc
+    /// leaves instead of starting a new session that would open onboarding.
+    StartupBeforeOnboarding,
     ExistingSession,
 }
 
@@ -309,6 +313,7 @@ pub async fn run_resume_picker_with_app_server(
     show_all: bool,
     include_non_interactive: bool,
     app_server: AppServerSession,
+    launch_context: SessionPickerLaunchContext,
 ) -> Result<SessionSelection> {
     let mut tui_events = tui.event_stream();
     run_resume_picker_with_launch_context(
@@ -317,7 +322,7 @@ pub async fn run_resume_picker_with_app_server(
         show_all,
         include_non_interactive,
         app_server,
-        SessionPickerLaunchContext::Startup,
+        launch_context,
         &mut tui_events,
     )
     .await
@@ -1104,7 +1109,15 @@ impl PickerState {
             }
             _ if self.list_keymap.cancel.is_pressed(key) => {
                 if self.query.is_empty() {
-                    return Ok(Some(SessionSelection::StartFresh));
+                    return Ok(Some(match self.launch_context {
+                        SessionPickerLaunchContext::StartupBeforeOnboarding => {
+                            SessionSelection::Exit
+                        }
+                        SessionPickerLaunchContext::Startup
+                        | SessionPickerLaunchContext::ExistingSession => {
+                            SessionSelection::StartFresh
+                        }
+                    }));
                 }
                 self.clear_query_preserving_selection();
             }
@@ -2213,13 +2226,15 @@ fn footer_hint_lines(state: &PickerState, width: u16) -> Vec<Line<'static>> {
     let (esc_label, esc_compact_label) = if state.query.is_empty() {
         match state.launch_context {
             SessionPickerLaunchContext::Startup => ("start new", "new"),
+            SessionPickerLaunchContext::StartupBeforeOnboarding => ("quit", "quit"),
             SessionPickerLaunchContext::ExistingSession => ("exit", "exit"),
         }
     } else {
         ("clear search", "clear")
     };
     let ctrl_c_label = match state.launch_context {
-        SessionPickerLaunchContext::Startup => "quit",
+        SessionPickerLaunchContext::Startup
+        | SessionPickerLaunchContext::StartupBeforeOnboarding => "quit",
         SessionPickerLaunchContext::ExistingSession => "exit",
     };
     let density_label = match state.density {

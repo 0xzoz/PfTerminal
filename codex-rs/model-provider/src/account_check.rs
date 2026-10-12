@@ -33,9 +33,27 @@ fn usable_account_kinds(provider: &ModelProviderInfo) -> &'static [ProviderAccou
     }
 }
 
+/// Where the user recovers a missing named account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountRecovery {
+    /// `corbanu account add`, or another account with `--account`.
+    CommandLine,
+    /// Inside the TUI: `/providers` adds the account or picks another one.
+    Providers,
+}
+
 /// Why the provider's selected named account cannot be used, with recovery
 /// text; `None` for the `default` account or a configured one.
 pub fn selected_account_error(codex_home: &Path, provider: &ModelProviderInfo) -> Option<String> {
+    selected_account_error_with_recovery(codex_home, provider, AccountRecovery::CommandLine)
+}
+
+/// [`selected_account_error`] with the recovery `recovery` names.
+pub fn selected_account_error_with_recovery(
+    codex_home: &Path,
+    provider: &ModelProviderInfo,
+    recovery: AccountRecovery,
+) -> Option<String> {
     let NamedProviderAccount { provider_id, name } = provider.account.as_ref()?;
     let mut configured = Ok(false);
     for kind in usable_account_kinds(provider) {
@@ -46,6 +64,10 @@ pub fn selected_account_error(codex_home: &Path, provider: &ModelProviderInfo) -
     }
     match configured {
         Ok(true) => None,
+        Ok(false) if recovery == AccountRecovery::Providers => Some(format!(
+            "account `{name}` of provider `{provider_id}` is not configured; add it or pick \
+             another account in `/providers`"
+        )),
         Ok(false) => {
             let kind = if provider.is_amazon_bedrock() && provider.auth.is_none() {
                 " --kind aws-profile --value <profile>"

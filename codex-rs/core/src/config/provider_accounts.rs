@@ -186,6 +186,38 @@ fn unused_other_provider_account(
     ))
 }
 
+/// PF-84 (#555): applies the account a resumed or forked thread recorded,
+/// `<provider>:<name>`, when that provider is not the session's. The loader
+/// applies an inherited account only to the session's own provider; a client
+/// that resumes a thread on another provider (the TUI) calls this so the
+/// provider it switches to carries the account the thread runs on. An
+/// explicit `--account` of that provider still wins.
+pub fn apply_recorded_provider_account(
+    config: &mut super::Config,
+    selection: &str,
+) -> std::io::Result<()> {
+    let (provider_id, _) = split_account_selection(selection, &config.model_provider_id);
+    let explicit_for_provider = config
+        .provider_account_override
+        .as_deref()
+        .and_then(|explicit| explicit.split_once(':'))
+        .is_some_and(|(explicit_provider, _)| explicit_provider == provider_id);
+    if provider_id == config.model_provider_id || explicit_for_provider {
+        return Ok(());
+    }
+    let named_accounts_enabled = config
+        .features
+        .enabled(codex_features::Feature::NamedAccounts);
+    let session_provider_id = config.model_provider_id.clone();
+    apply_explicit_provider_account(
+        &mut config.model_providers,
+        &session_provider_id,
+        selection,
+        named_accounts_enabled,
+        /*recorded*/ true,
+    )
+}
+
 /// Why the session cannot start on the accounts it selects: the session
 /// provider's account (from `--account` or `[provider_accounts]`), then an
 /// explicit account of another provider.

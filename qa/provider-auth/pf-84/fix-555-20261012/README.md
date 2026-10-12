@@ -16,3 +16,20 @@ Regression tests:
   on the source thread's account (both fail on main: they ran on `[provider_accounts]`); an explicit fork account wins.
 - `codex-tui` `suite::resume_recorded_account::tmux_fork_runs_on_the_recorded_account`: `corbanu fork <id>` shows `account work`
   (fails on main's binary: `account personal`).
+
+## Resume: other provider, missing `[provider_accounts]` account, Esc, in-app `/resume`
+
+Same disposable-home setup; each conversation first answers `ping` on `--account work` (on Z.AI), then is resumed.
+Before: `e7be21a1a9` (main). After: this branch.
+
+| Case | Before | After |
+| --- | --- | --- |
+| Home configured for OpenAI (no credentials); `corbanu resume` → the Z.AI conversation | picker, then OpenAI's provider onboarding (`resume-before-cross-1-picker.txt`, `resume-before-cross-2-resumed.txt`) | resumes on Z.AI; `pong` answered; `/status` says `account work` (`resume-after-cross-2-resumed.txt`, `resume-after-cross-3-status.txt`) |
+| `[provider_accounts] zai = "ghost"` (missing); `corbanu resume --last` | refused: `account ghost … is not configured` (`resume-before-ghost-1-resume.txt`) | resumes on `work`; `/status` says `account work` (`resume-after-ghost-2-status.txt`) |
+| No default key; `corbanu resume`, Esc in the picker | API-key onboarding (`resume-before-esc-2-after-esc.txt`) | picker footer says `esc quit`; Esc exits with status 0 (`resume-after-esc-1-picker.txt`, `resume-after-esc-2-after-esc.txt`) |
+| Session on `personal` (`[provider_accounts]`); `/resume`, Esc, then `/resume` → the `work` conversation | — | Esc returns to the session; the resumed conversation answers `pong` on `work`; `/status` says `account work` (`resume-after-inapp-1-esc.txt`, `resume-after-inapp-2-status.txt`) |
+| `work` removed; `/resume` → that conversation | error says `corbanu account add` / `--account` (`resume-before-missing-1-resume.txt`) | error says "add it or pick another account in `/providers`"; stays on the current conversation (`resume-after-missing-1-resume.txt`) |
+
+Regression tests: `codex-tui` `suite::resume_provider_accounts` (tmux, seeded rollouts): all five fail on main's binary and pass
+after (the in-app test fails on main only at the `/providers` wording). Unit tests: `resume_launch::tests`,
+`codex-model-provider` `tui_recovery_points_to_providers`.

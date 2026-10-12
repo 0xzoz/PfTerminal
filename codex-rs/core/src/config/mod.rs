@@ -183,6 +183,7 @@ mod permission_profile_catalog;
 mod permissions;
 mod provider_accounts;
 pub use codex_model_provider::selected_account_error;
+pub use provider_accounts::apply_recorded_provider_account;
 pub(crate) use provider_accounts::configured_account_names;
 pub use provider_accounts::other_provider_account_error;
 pub use provider_accounts::session_account_error;
