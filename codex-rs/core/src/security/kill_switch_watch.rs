@@ -75,7 +75,7 @@ pub(super) fn ensure(home: &Path) {
     // Unit tests build many trees on temporary homes and model "another
     // process" by writing the file; they start a watch explicitly.
     #[cfg(not(test))]
-    drop(watch(home, |_| ()));
+    watch(home, |_| {});
     #[cfg(test)]
     let _ = home;
 }
