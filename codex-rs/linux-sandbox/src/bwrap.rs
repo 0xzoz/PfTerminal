@@ -681,6 +681,9 @@ fn create_filesystem_args(
         append_unreadable_root_args(&mut bwrap_args, unreadable_root, &allowed_write_paths)?;
     }
 
+    // #587: once the policy denies reads (as Seatbelt's rename guard), the
+    // folders above each protected path inside a writable root are pinned.
+    let pin_protected_folders = !unreadable_roots.is_empty();
     // `:root = write` (full access with denials), not a project at `/`.
     let full_write_root = file_system_sandbox_policy.entries.iter().any(|entry| {
         entry.access == FileSystemAccessMode::Write
@@ -857,6 +860,24 @@ fn create_filesystem_args(
                 (*unlistable, read_only)
             })
             .collect();
+        if pin_protected_folders {
+            let protected: Vec<&Path> = read_only_subpaths
+                .iter()
+                .chain(&nested_unreadable_roots)
+                .map(PathBuf::as_path)
+                .chain(
+                    pass_unlistable
+                        .iter()
+                        .map(|unlistable| unlistable.target.as_path()),
+                )
+                .collect();
+            append_protected_folder_pins(
+                &mut bwrap_args,
+                mount_root,
+                &protected,
+                &allowed_write_paths,
+            );
+        }
         for subpath in &read_only_subpaths {
             let depth = path_depth(subpath);
             for (unlistable, read_only) in pending_unlistable
@@ -968,6 +989,65 @@ fn create_filesystem_args(
     }
 
     Ok(bwrap_args)
+}
+
+/// #587: binds each folder between `mount_root` and a protected path onto
+/// itself, before the pass's masks. A mount point cannot be renamed or
+/// removed (`EBUSY`), so a command cannot move a protected path's folder
+/// aside (`mv ~/.corbanu x`, then plant a new `~/.corbanu`) and so leave the
+/// rules behind: the new folder would have none, and the moved copy's
+/// denied stores would be readable under its new name. Seatbelt denies the
+/// same renames (`build_seatbelt_rename_guard_policy`). The bind is the live
+/// folder, so what is in it is unchanged; a folder gone by then (another
+/// run's placeholder) is skipped (`--bind-try`). Folders at or below a
+/// protected path (masked or read-only already), writable roots (bound
+/// already), links and folders in a parent the user neither owns nor can
+/// write (they cannot be renamed, such as `/home`) are left out.
+fn append_protected_folder_pins(
+    bwrap_args: &mut BwrapArgs,
+    mount_root: &Path,
+    protected: &[&Path],
+    allowed_write_paths: &[PathBuf],
+) {
+    let mut folders = BTreeSet::new();
+    for path in protected {
+        for folder in path.ancestors().skip(1) {
+            if folder == mount_root || !folder.starts_with(mount_root) {
+                break;
+            }
+            folders.insert(folder);
+        }
+    }
+    let mut pins: Vec<&Path> = folders
+        .into_iter()
+        .filter(|folder| {
+            !protected.iter().any(|path| folder.starts_with(path))
+                && !allowed_write_paths.iter().any(|root| root == folder)
+                && fs::symlink_metadata(folder).is_ok_and(|metadata| metadata.is_dir())
+                && folder.parent().is_some_and(user_may_change)
+        })
+        .collect();
+    pins.sort_by_key(|folder| path_depth(folder));
+    for folder in pins {
+        bwrap_args.args.push("--bind-try".to_string());
+        bwrap_args.args.push(path_to_string(folder));
+        bwrap_args.args.push(path_to_string(folder));
+    }
+}
+
+/// Whether the user could rename an entry of `folder`: it can write it, or
+/// owns it (and so could make it writable first).
+fn user_may_change(folder: &Path) -> bool {
+    // SAFETY: `geteuid` has no preconditions.
+    let euid = unsafe { libc::geteuid() };
+    if fs::metadata(folder).is_ok_and(|metadata| metadata.uid() == euid) {
+        return true;
+    }
+    let Ok(folder) = std::ffi::CString::new(folder.as_os_str().as_encoded_bytes()) else {
+        return false;
+    };
+    // SAFETY: `folder` is a valid NUL-terminated string for the call.
+    unsafe { libc::access(folder.as_ptr(), libc::W_OK) == 0 }
 }
 
 /// #506: one unlistable directory, as the sandbox shows it.
@@ -3065,9 +3145,8 @@ mod tests {
         assert!(target_bind < read_only_bind, "{:?}", args.args);
     }
 
-    /// #503: a writable link to a workspace's `.git` is bound after the
-    /// workspace (deeper target) and the workspace's read-only `.git` is
-    /// applied again over it.
+    /// #503: a writable link to a workspace's `.git` cannot make it writable;
+    /// since #535 the link is no writable root at all.
     #[cfg(unix)]
     #[test]
     fn writable_link_to_protected_git_keeps_it_read_only() {
@@ -3091,17 +3170,23 @@ mod tests {
             create_filesystem_args(&policy, temp_dir.path(), NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
                 .expect("filesystem args");
         let git = path_to_string(&git);
-        let git_bind = args
-            .args
-            .windows(3)
-            .position(|window| window == ["--bind", git.as_str(), git.as_str()])
-            .expect("link should be bound at `.git`");
-        let git_read_only = args
-            .args
-            .windows(3)
-            .rposition(|window| window == ["--ro-bind", git.as_str(), git.as_str()])
-            .expect("`.git` should be bound read-only");
-        assert!(git_bind < git_read_only, "{:?}", args.args);
+        // #535 (Travis, 2026-10-12): the link is no grant, so `.git` is never
+        // bound writable, and stays read-only.
+        assert!(
+            !args
+                .args
+                .windows(3)
+                .any(|window| window == ["--bind", git.as_str(), git.as_str()]),
+            "{:?}",
+            args.args
+        );
+        assert!(
+            args.args
+                .windows(3)
+                .any(|window| window == ["--ro-bind", git.as_str(), git.as_str()]),
+            "{:?}",
+            args.args
+        );
     }
 
     /// #503: a denial spelled through a link is masked at the link's target.
@@ -4069,6 +4154,86 @@ mod tests {
         } else {
             FileSystemSandboxEntry::new(path, access)
         }
+    }
+
+    /// #587: with denials, each folder between the writable root and a
+    /// protected path is bound onto itself before the pass's masks (a mount
+    /// point cannot be renamed); the protected folder itself and folders
+    /// below it are not. Without denials (Permissive) nothing is pinned.
+    #[test]
+    fn folders_above_protected_paths_are_pinned_before_their_masks() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let base = temp_dir.path().canonicalize().expect("canonical");
+        let home = base.join("outer/home");
+        std::fs::create_dir_all(home.join("skills/inner")).expect("home");
+        std::fs::write(home.join("auth.json"), "x").expect("store");
+        let writable = FileSystemSandboxEntry {
+            path: FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            },
+            access: FileSystemAccessMode::Write,
+            missing_path_behavior: None,
+        };
+        let read_only = path_entry(
+            &home.join("skills"),
+            FileSystemAccessMode::Read,
+            /*skip_missing*/ true,
+        );
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            writable.clone(),
+            path_entry(
+                &home.join("auth.json"),
+                FileSystemAccessMode::Deny,
+                /*skip_missing*/ true,
+            ),
+            read_only.clone(),
+        ]);
+        // A folder the user owns but cannot write right now could be made
+        // writable first: its entries are pinned too.
+        let outer = base.join("outer");
+        std::fs::set_permissions(
+            &outer,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o555),
+        )
+        .expect("chmod");
+        let args = create_filesystem_args(&policy, &base, NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
+            .expect("bwrap fs args")
+            .args;
+        std::fs::set_permissions(
+            &outer,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+        )
+        .expect("chmod");
+        let binds: Vec<&str> = args
+            .windows(3)
+            .filter(|window| window[0] == "--bind-try" && window[1] == window[2])
+            .map(|window| window[1].as_str())
+            .collect();
+        let path = |path: &Path| path_to_string(path);
+        for folder in [&base, &base.join("outer"), &home] {
+            assert!(
+                binds.contains(&path(folder).as_str()),
+                "{folder:?}: {args:?}"
+            );
+        }
+        for folder in [home.join("skills"), home.join("skills/inner")] {
+            assert!(
+                !binds.contains(&path(&folder).as_str()),
+                "{folder:?}: {args:?}"
+            );
+        }
+        let position = |flag: &str, target: &Path| {
+            args.windows(2)
+                .position(|window| window[0] == flag && window[1] == path(target))
+                .expect("mount")
+        };
+        assert!(position("--bind-try", &home) < position("--ro-bind", &home.join("skills")));
+
+        let workspace = FileSystemSandboxPolicy::restricted(vec![writable, read_only]);
+        let args = create_filesystem_args(&workspace, &base, NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
+            .expect("bwrap fs args")
+            .args;
+        assert!(!args.iter().any(|arg| arg == "--bind-try"), "{args:?}");
     }
 
     /// #473: `~/.claude` read-only (it runs hooks) with no

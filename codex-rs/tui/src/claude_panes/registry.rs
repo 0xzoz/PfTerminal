@@ -73,6 +73,9 @@ pub(crate) struct ClaudePaneRegistry {
     /// #554: panes whose running turn the kill switch stopped, until that
     /// turn's end is handled.
     kill_switch_stopped: HashSet<String>,
+    /// Tests: the prompt of each turn prepared, by pane.
+    #[cfg(test)]
+    pub(crate) prepared_prompts: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +90,8 @@ impl ClaudePaneRegistry {
             active_user_pane_id: CODEX_MAIN_PANE_ID.to_string(),
             panes: Vec::new(),
             kill_switch_stopped: HashSet::new(),
+            #[cfg(test)]
+            prepared_prompts: Vec::new(),
         }
     }
 
@@ -110,6 +115,8 @@ impl ClaudePaneRegistry {
             active_user_pane_id,
             panes,
             kill_switch_stopped: HashSet::new(),
+            #[cfg(test)]
+            prepared_prompts: Vec::new(),
         }
     }
 
@@ -417,6 +424,9 @@ impl ClaudePaneRegistry {
             .try_lock_owned()
             .map_err(|_| anyhow!("Claude pane `{}` is already running", pane.title))?;
 
+        #[cfg(test)]
+        self.prepared_prompts
+            .push((pane_id.to_string(), prompt.clone()));
         let mut plan = build_claude_command_plan(pane, prompt, codex_home)?;
         if let Some(deferred) = plan.deferred_claude_plan_auth.as_mut() {
             deferred.account = claude_plan_account.map(str::to_string);
