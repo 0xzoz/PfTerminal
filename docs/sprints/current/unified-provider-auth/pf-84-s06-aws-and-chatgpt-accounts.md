@@ -61,12 +61,11 @@ Paths are under `codex-rs/`, at `ee530a0e26`.
   written back per account, `corbanu login|logout --account`, `/providers` device-code and API-key adds, the default
   login untouched, rows with email hint/plan/fingerprint and the same-user warning. Gate:
   [s06b-gate.md](../../../../qa/provider-auth/pf-84/s06b-gate.md) (live ChatGPT pending: no disposable account).
+- [x] Mid-session switch: connectors, plugin installs, accounting and the model list follow the active account ([gate](../../../../qa/provider-auth/pf-84/s06b-gate.md#follow-up-mid-session-account-switch-fixpf84-switch-follow)).
 
 ## Remaining
 
 - [ ] Code-blind functional design frozen before test-result disclosure (independent acceptance).
-- [x] Mid-session switch: connectors, plugin installs, accounting and the model list follow the active account
-  (follow-up, [s06b-gate.md](../../../../qa/provider-auth/pf-84/s06b-gate.md#follow-up-mid-session-account-switch-fixpf84-switch-follow)).
 - [ ] Before the flag is removed: early `/status` rate limits and the `/apps` directory still come from the default login.
 
 ## Verification

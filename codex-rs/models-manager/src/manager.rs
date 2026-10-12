@@ -254,10 +254,11 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
         true
     }
 
-    /// PF-84: whether the list in use was loaded from a cache (or needs no
-    /// fetch). `false` right after a switch to an account with no list yet.
-    fn current_list_is_cached(&self) -> bool {
-        true
+    /// PF-84: loads a usable cached list (the same check refreshing uses:
+    /// fresh, this client version) and returns whether the list is current
+    /// without a fetch. `true` when this manager never fetches.
+    fn load_cached_list(&self) -> ModelsManagerFuture<'_, bool> {
+        Box::pin(async { true })
     }
 }
 
@@ -380,6 +381,10 @@ impl ModelsManager for OpenAiModelsManager {
             etag,
             http_client_factory,
         ))
+    }
+
+    fn load_cached_list(&self) -> ModelsManagerFuture<'_, bool> {
+        Box::pin(async move { !self.should_refresh_models().await || self.try_load_cache().await })
     }
 }
 

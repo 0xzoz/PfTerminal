@@ -304,7 +304,7 @@ impl SteerInputError {
     }
 }
 
-/// PF-84: how long the first switch to an account with no cached model list
+/// PF-84: how long a switch to an account without a fresh cached model list
 /// waits for that list (API-key sign-ins need no fetch and never wait).
 const FIRST_MODEL_LIST_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -1825,9 +1825,9 @@ impl Session {
     /// PF-84: lists models with the sign-in of the account this session's
     /// provider uses (the default login for any other provider). When that
     /// changed, the account's list is fetched again: in the background when
-    /// its own cache shows it at once (see `AccountModelsManager`), otherwise
-    /// (the first switch to that account in this home) waited for, at most
-    /// [`FIRST_MODEL_LIST_WAIT`], so the client's next `model/list` has it.
+    /// its own cache (see `AccountModelsManager`) is fresh, otherwise waited
+    /// for, at most [`FIRST_MODEL_LIST_WAIT`], so the client's next
+    /// `model/list` has it.
     pub(super) async fn follow_model_list_account(&self) {
         let (provider, http_client_factory) = {
             let state = self.state.lock().await;
@@ -1848,7 +1848,7 @@ impl Session {
             return;
         }
         let models_manager = Arc::clone(&self.services.models_manager);
-        let cached = models_manager.current_list_is_cached();
+        let cached = models_manager.load_cached_list().await;
         let fetch = self.services.runtime_handle.spawn(async move {
             models_manager
                 .list_models(RefreshStrategy::Online, http_client_factory)

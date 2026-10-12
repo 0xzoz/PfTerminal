@@ -288,3 +288,61 @@ async fn the_model_list_follows_a_mid_session_account_switch() {
     switch_to(&session, "openai").await;
     assert_eq!(listed(), both);
 }
+
+/// Moved from `session::tests` (that file is over the blob size limit).
+#[tokio::test]
+async fn mcp_refresh_updates_plugin_auth_mode_before_checking_pending_state() {
+    let codex_home = tempfile::tempdir().expect("create auth test directory");
+    let (session, _turn_context) = super::tests::make_session_and_context().await;
+    session.services.active_auth.replace_for_testing(
+        codex_login::AuthManager::from_auth_for_testing_with_home(
+            codex_login::CodexAuth::from_api_key("old-api-key"),
+            codex_home.path().to_path_buf(),
+        ),
+    );
+    let session = Arc::new(session);
+    let auth_mode = session.services.auth_manager().get_api_auth_mode();
+
+    assert_ne!(session.services.plugins_manager.auth_mode(), auth_mode);
+    session.mcp_refresh.claim();
+
+    session.refresh_mcp_if_dirty().await;
+
+    assert_eq!(session.services.plugins_manager.auth_mode(), auth_mode);
+    assert!(
+        session
+            .services
+            .mcp_runtime
+            .current_binding()
+            .await
+            .is_some()
+    );
+
+    codex_login::login_with_api_key(
+        codex_home.path(),
+        "new-api-key",
+        codex_login::AuthCredentialsStoreMode::File,
+        codex_login::AuthKeyringBackendKind::default(),
+    )
+    .expect("store replacement API key");
+    session.services.auth_manager().reload().await;
+    assert_eq!(
+        session
+            .services
+            .auth_manager()
+            .auth_cached()
+            .and_then(|auth| auth.get_token().ok()),
+        Some("new-api-key".to_string())
+    );
+    assert_eq!(session.services.plugins_manager.auth_mode(), auth_mode);
+    session.mcp_refresh.claim();
+
+    session.refresh_mcp_if_dirty().await;
+
+    assert!(
+        session
+            .services
+            .mcp_runtime
+            .current_auth_matches(session.services.auth_manager().auth_cached().as_ref())
+    );
+}

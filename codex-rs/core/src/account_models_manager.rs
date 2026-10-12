@@ -34,8 +34,6 @@ use tokio::sync::TryLockError;
 
 /// Under the home: one model-list cache per named account.
 const NAMED_ACCOUNT_MODELS_CACHE_DIR: &str = "models-cache";
-/// The file name `OpenAiModelsManager` caches its list under.
-const MODELS_CACHE_FILE: &str = "models_cache.json";
 
 pub(crate) struct AccountModelsManager {
     /// The provider the list is for, without an account.
@@ -206,16 +204,13 @@ impl ModelsManager for AccountModelsManager {
         provider.requires_openai_auth
             && provider.aws.is_none()
             && provider.auth.is_none()
+            && provider.base_url == self.provider.base_url
             && self.current.load().account == named_sign_in_account(provider)
     }
 
-    fn current_list_is_cached(&self) -> bool {
-        let current = self.current.load();
-        match &current.account {
-            Some(account) => named_account_cache_dir(&self.codex_home, account)
-                .is_some_and(|dir| dir.join(MODELS_CACHE_FILE).is_file()),
-            None => true,
-        }
+    fn load_cached_list(&self) -> ModelsManagerFuture<'_, bool> {
+        let inner = self.inner();
+        Box::pin(async move { inner.load_cached_list().await })
     }
 
     fn follow_sign_in_account(&self, account: Option<&NamedChatgptAccount>) -> bool {

@@ -155,25 +155,15 @@ fn only_the_followed_account_refreshes_the_list() {
     assert!(!manager.lists_for_provider(&openai));
 }
 
-/// A named account's list has its own cache file; until it exists the list
-/// in use is not cached (the first switch fetches it).
+/// A named account's list lives under its own directory; a name that is not
+/// path-safe is never cached, never outside it.
 #[test]
-fn a_named_account_list_has_its_own_cache() {
-    let (home, default_auth) = setup();
-    let manager = manager_for(
-        &ModelProviderInfo::create_openai_provider(/*base_url*/ None),
-        &home,
-        &default_auth,
+fn named_account_lists_have_their_own_cache_directory() {
+    let home = tempfile::tempdir().expect("home");
+    assert_eq!(
+        named_account_cache_dir(home.path(), &work()),
+        Some(home.path().join("models-cache").join("openai").join("work"))
     );
-    assert!(manager.current_list_is_cached());
-    manager.follow_sign_in_account(Some(&work()));
-    assert!(!manager.current_list_is_cached());
-
-    let dir = home.path().join("models-cache").join("openai").join("work");
-    std::fs::create_dir_all(&dir).expect("cache dir");
-    std::fs::write(dir.join("models_cache.json"), "{}").expect("cache file");
-    assert!(manager.current_list_is_cached());
-    // Not path-safe: never cached, never under the home.
     let odd = NamedChatgptAccount {
         provider_id: "openai".to_string(),
         name: "../escape".to_string(),

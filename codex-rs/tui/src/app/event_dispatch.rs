@@ -2139,11 +2139,19 @@ impl App {
                     .await;
                 // Only once core has moved: otherwise the list (and the
                 // message) could still be the old account's.
-                if let Some(account) = account_switch.filter(|_| confirmed)
-                    && self.refresh_model_list(app_server).await
-                {
-                    self.chat_widget
-                        .add_info_message(account_switch_message(account.as_ref()), /*hint*/ None);
+                match account_switch {
+                    Some(account) if confirmed && self.refresh_model_list(app_server).await => {
+                        self.chat_widget.add_info_message(
+                            account_switch_message(account.as_ref()),
+                            /*hint*/ None,
+                        );
+                    }
+                    Some(_) if confirmed => {}
+                    Some(_) => self.chat_widget.add_info_message(
+                        "The account switch was not confirmed, so the model list was not refreshed; reopen /model later to see the new account's models.".to_string(),
+                        /*hint*/ None,
+                    ),
+                    None => {}
                 }
                 self.sync_active_thread_service_tier_to_cached_session()
                     .await;

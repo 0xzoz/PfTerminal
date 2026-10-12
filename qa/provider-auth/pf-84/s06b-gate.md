@@ -136,9 +136,10 @@ API key in `auth.json`; a decoy `OPENAI_API_KEY` is set throughout. Captures: [s
   when spawned from a session on a named account.
 - **Model list.** When the process starts on an OpenAI sign-in provider, its list (`model/list`) is an
   `AccountModelsManager` that follows the account of a user's session (not sub-agents) at session start and on a
-  switch; each named account has its own cache (`models-cache/<provider>/<name>/`), so a switch shows that account's
-  last list at once and refetches it in the background. The first switch to a ChatGPT account with no list yet waits
-  for it (at most 5 s; API-key sign-ins fetch nothing). Only responses from that provider and account refresh it. The TUI sends an account-changing model selection with `confirm` (falling back to an
+  switch; each named account has its own cache (`models-cache/<provider>/<name>/`). A switch to an account whose
+  cache is fresh (the check refreshing uses: this client version, under 5 minutes) shows it at once and refetches in
+  the background; otherwise the switch waits for the fetch (at most 5 s; API-key sign-ins fetch nothing). Only
+  responses from that provider (same base URL) and account refresh it. The TUI sends an account-changing model selection with `confirm` (falling back to an
   unconfirmed update if confirmation is unavailable); only once core confirms the switch does it fetch `model/list`
   again and say *Connectors, usage and the model list now use …*.
 - **Limits.** The process has one list: with several user sessions on different accounts (an app-server client with
