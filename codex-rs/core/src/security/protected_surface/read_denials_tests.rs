@@ -475,7 +475,40 @@ fn issue_603_read_later_folders_are_created_only_for_a_command_in_the_home() {
             assert_eq!(mode & 0o077, 0, "{folder}: {mode:o}");
         }
     }
+    for lock in ["security_level.lock", "gpu-controller.lock"] {
+        let path = fx.codex_home.join(lock);
+        assert_eq!(path.is_file(), cfg!(target_os = "linux"), "{lock}");
+        if cfg!(target_os = "linux") {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o077, 0, "{lock}: {mode:o}");
+        }
+    }
     assert!(!fx.codex_home.join("hooks.json").exists());
+}
+
+/// #603 review: a `worktrees` link (to the home, above it, or `/`) does not
+/// switch the protection off for a command working in the home.
+#[cfg(unix)]
+#[test]
+fn issue_603_a_worktrees_link_keeps_the_names_protected() {
+    for target in [".", "..", "/"] {
+        let fx = fixture();
+        let worktrees = fx.codex_home.join("worktrees");
+        let _ = std::fs::remove_dir(&worktrees);
+        std::os::unix::fs::symlink(target, &worktrees).unwrap();
+        let cwd = fx.codex_home.clone();
+        let policy = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)])
+            .apply(&PermissionProfile::Disabled)
+            .unwrap()
+            .file_system_sandbox_policy();
+        for name in ["rules/x.rules", "hooks.json", "agents/x"] {
+            assert!(
+                !policy.can_write_path_with_cwd(&fx.codex_home.join(name), &cwd),
+                "{target}: {name}"
+            );
+        }
+    }
 }
 
 /// #583 review: a `worktrees` link (to a runtime entry, or to the home

@@ -1917,6 +1917,7 @@ async fn issue_603_a_command_in_the_corbanu_home_cannot_create_names_corbanu_rea
             let path = root.to_string_lossy().into_owned();
             // Split inside the home folder's own name: neither part names it.
             let (head, tail) = path.split_at(path.len() - 2);
+            let sub = if in_other { "other/" } else { "" };
             let command = format!(
                 "h=\"$(printf '{head}%s' {tail})\"; r=\"ru$(printf les)\"; \
                  a=\"age$(printf nts)\"; k=\"hoo$(printf ks)\"; \
@@ -1924,8 +1925,9 @@ async fn issue_603_a_command_in_the_corbanu_home_cannot_create_names_corbanu_rea
                  printf 'prefix_rule(pattern=[\"touch\"], decision=\"allow\")\\n' > \"$h/$r/x.$r\"; \
                  printf '{{\"hooks\":{{}}}}' > \"$h/$k.json\"; \
                  printf '{{\"hooks\":{{}}}}' > \"$h/$(printf HOOKS).JSON\"; \
+                 mkdir -p \"$h/$(printf RULES)\"; printf x > \"$h/$(printf RULES)/y.rules\"; \
                  mkdir -p \"$h/$a\"; printf x > \"$h/$a/x\"; \
-                 printf x > free-603; printf ok > \"$h/worktrees/w/ok\"; echo ran-603"
+                 printf x > \"$h/{sub}free-603\"; printf ok > \"$h/worktrees/w/ok\"; echo ran-603"
             );
             let cwd_abs = codex_utils_absolute_path::AbsolutePathBuf::from_absolute_path(&cwd)?;
             let (test, captured) = start_turn_in(
@@ -1952,18 +1954,21 @@ async fn issue_603_a_command_in_the_corbanu_home_cannot_create_names_corbanu_rea
             assert!(next_exec_approval(&test).await.is_none());
             let requests = captured.requests();
             let output = output_text(&requests[requests.len() - 1], "call-create");
-            let entries = ["rules/x.rules", "hooks.json", "agents/x"];
+            let mut entries = vec!["rules/x.rules", "hooks.json", "agents/x"];
+            // The same as `rules/y.rules` on macOS's case-insensitive volume.
+            if cfg!(target_os = "macos") {
+                entries.push("RULES/y.rules");
+            }
             let present: Vec<&str> = entries
-                .into_iter()
+                .iter()
+                .copied()
                 .filter(|entry| root.join(entry).exists())
                 .collect();
-            let expected = if created {
-                entries.to_vec()
-            } else {
-                Vec::new()
-            };
+            let expected = if created { entries } else { Vec::new() };
             // New names in the working folder (Aggressive keeps the rest of
-            // the home read-only for a command in `other`) and `worktrees`.
+            // the home read-only for a command in `other`) and `worktrees`
+            // (absolute paths: with `TMPDIR=/tmp` a macOS shell there cannot
+            // resolve its own folder).
             let free = cwd.join("free-603").exists() && root.join("worktrees/w/ok").exists();
             let placeholder_files: Vec<&str> = ["rules", "agents"]
                 .into_iter()

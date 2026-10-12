@@ -136,6 +136,17 @@ const CORBANU_READ_LATER_FILES: &[&str] = &[
     "installation_id",
     "session_index.jsonl",
     "external_agent_session_imports.json",
+    // In the database folder, the home by default.
+    "gpu-controller.lock",
+];
+
+/// #603 (Linux): the lock files among them, made empty and private before
+/// the run like the folders: bubblewrap's placeholder for a missing one
+/// would be removed after the run while another process may hold it.
+const CORBANU_READ_LATER_LOCKS: &[&str] = &[
+    "security_confirm.lock",
+    "security_level.lock",
+    "gpu-controller.lock",
 ];
 
 /// The one runtime entry that is a file (#562).
@@ -433,8 +444,12 @@ impl ReadDenials {
     /// On Linux bubblewrap holds a missing name with an empty placeholder
     /// for the command's run, so `for_turn` first creates the missing
     /// folders where the command could create them (as for the runtime
-    /// folders, #562); a file keeps its placeholder (an empty `hooks.json`
-    /// adds no hooks). A name that holds the command's own folder (it works
+    /// folders, #562) and lock files; another file keeps its placeholder
+    /// while the command runs (an empty `hooks.json` adds no hooks; another
+    /// session meanwhile sees an empty `.claude-auth-selection-present`,
+    /// `.sandbox_migration` or `security_preflight.toml`, and an empty
+    /// marker it writes then may go with the placeholder's cleanup, #582:
+    /// an accepted limit). A name that holds the command's own folder (it works
     /// in `rules`) is left out. Windows is not covered: its sandbox drops
     /// read-only entries for missing paths, as for every other one.
     fn protect_read_later(&mut self, codex_home: &AbsolutePathBuf, keep: &[AbsolutePathBuf]) {
@@ -740,9 +755,9 @@ pub(crate) fn create_missing_runtime_folders(codex_home: &Path) {
 }
 
 /// #603 (Linux): creates the missing folders Corbanu reads later, empty and
-/// private (as the socket folders need), for a command working in the home:
-/// held read-only as they are, so bubblewrap puts no placeholder file where
-/// Corbanu expects a folder.
+/// private (as the socket folders need), and its lock files, for a command
+/// working in the home: held read-only as they are, so bubblewrap puts no
+/// placeholder there.
 fn create_missing_read_later_folders(codex_home: &Path) {
     let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
@@ -750,6 +765,13 @@ fn create_missing_read_later_folders(codex_home: &Path) {
     for folder in CORBANU_READ_LATER_FOLDERS {
         // Fails harmlessly where it exists (also as a link).
         let _ = builder.create(codex_home.join(folder));
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    for lock in CORBANU_READ_LATER_LOCKS {
+        let _ = options.open(codex_home.join(lock));
     }
 }
 
@@ -765,10 +787,19 @@ fn spellings(path: &AbsolutePathBuf) -> Vec<AbsolutePathBuf> {
 
 /// #583/#603: whether a kept folder (by any spelling) is the Corbanu home or
 /// a folder of it outside `worktrees`: then the home stays writable and only
-/// the names Corbanu reads later are protected in it.
+/// the names Corbanu reads later are protected in it. Only a real
+/// `worktrees` folder is left out: a link there (to the home, or above it)
+/// would otherwise switch the protection off (#603 review).
 fn works_in_home(codex_home: &AbsolutePathBuf, keep: &[AbsolutePathBuf]) -> bool {
     let homes = spellings(codex_home);
-    let worktrees = spellings(&codex_home.join(HOME_WRITABLE));
+    let worktrees_path = codex_home.join(HOME_WRITABLE);
+    let real_folder = std::fs::symlink_metadata(worktrees_path.as_path())
+        .is_ok_and(|metadata| metadata.file_type().is_dir());
+    let worktrees = if real_folder {
+        spellings(&worktrees_path)
+    } else {
+        Vec::new()
+    };
     keep.iter().flat_map(spellings).any(|kept| {
         homes
             .iter()
