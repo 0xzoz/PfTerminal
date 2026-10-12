@@ -183,6 +183,8 @@ pub(crate) struct RequestUserInputOverlay {
     request_started_at: Instant,
     auto_resolution_snoozed: bool,
     composer_submit_keys: Vec<KeyBinding>,
+    /// The composer's queue keys (Tab): in an answer field they submit too.
+    composer_queue_keys: Vec<KeyBinding>,
     interrupt_turn_keys: Vec<KeyBinding>,
     list_keymap: ListKeymap,
     /// #544: keeps typed text, pastes and held keys from answering.
@@ -243,6 +245,7 @@ impl RequestUserInputOverlay {
             request_started_at: Instant::now(),
             auto_resolution_snoozed: false,
             composer_submit_keys: keymap.composer.submit.clone(),
+            composer_queue_keys: keymap.composer.queue.clone(),
             interrupt_turn_keys: keymap.chat.interrupt_turn.clone(),
             list_keymap: keymap.list,
             typing_guard: TypingGuard::default(),
@@ -1268,29 +1271,36 @@ impl RequestUserInputOverlay {
                 self.submit_answers();
             } else if let Some(idx) = self.first_unanswered_index() {
                 self.jump_to_question(idx);
+                // A double Enter must not answer the question shown now.
+                self.typing_guard.on_request_changed();
             }
             return;
         }
-        let navigation = !key_hint::is_plain_text_key_event(key_event)
-            && !key_hint::has_ctrl_or_alt(key_event.modifiers);
+        let navigation = self.is_navigation(key_event);
+        let keymap = &self.list_keymap;
+        let up = key_event.code == KeyCode::Up || keymap.move_up.is_pressed(key_event);
+        let down = key_event.code == KeyCode::Down || keymap.move_down.is_pressed(key_event);
+        let idle_plain =
+            self.typing_guard.is_idle() && !key_hint::has_ctrl_or_alt(key_event.modifiers);
         match key_event.code {
-            KeyCode::Esc | KeyCode::Backspace => {
-                self.typing_guard.reset();
+            // Going back answers nothing; Backspace is an editing key, so
+            // only when nothing was typed.
+            KeyCode::Esc | KeyCode::Backspace if key_event.code == KeyCode::Esc || idle_plain => {
                 self.close_unanswered_confirmation();
                 if let Some(idx) = self.first_unanswered_index() {
                     self.jump_to_question(idx);
                 }
+                // Typed text stays typed text; a double Enter answers nothing.
+                self.typing_guard.on_request_changed();
             }
-            KeyCode::Up if navigation => {
+            _ if navigation => {
                 self.typing_guard.reset();
                 if let Some(state) = self.confirm_unanswered.as_mut() {
-                    state.move_up_wrap(/*len*/ 2);
-                }
-            }
-            KeyCode::Down if navigation => {
-                self.typing_guard.reset();
-                if let Some(state) = self.confirm_unanswered.as_mut() {
-                    state.move_down_wrap(/*len*/ 2);
+                    if up {
+                        state.move_up_wrap(/*len*/ 2);
+                    } else if down {
+                        state.move_down_wrap(/*len*/ 2);
+                    }
                 }
             }
             KeyCode::Char(ch)
@@ -1378,6 +1388,12 @@ impl RequestUserInputOverlay {
         }
         let idle_plain =
             self.typing_guard.is_idle() && !key_hint::has_ctrl_or_alt(key_event.modifiers);
+        // Ctrl+P / Ctrl+N change question once nothing is pending (they
+        // answer nothing; while a choice is pending they are typed text).
+        if idle_plain_chord(key_event, self.typing_guard.is_idle()) {
+            self.move_question(/*next*/ key_event.code == KeyCode::Char('n'));
+            return;
+        }
         match key_event.code {
             // Clearing the selection answers nothing (an unanswered question
             // still asks before it is submitted).
@@ -1408,6 +1424,12 @@ impl RequestUserInputOverlay {
         }
         self.sync_composer_placeholder();
     }
+}
+
+/// Ctrl+P or Ctrl+N (and nothing else) while the guard is idle.
+fn idle_plain_chord(key_event: KeyEvent, idle: bool) -> bool {
+    idle && key_event.modifiers == KeyModifiers::CONTROL
+        && matches!(key_event.code, KeyCode::Char('p') | KeyCode::Char('n'))
 }
 
 impl BottomPaneView for RequestUserInputOverlay {
@@ -1467,7 +1489,20 @@ impl BottomPaneView for RequestUserInputOverlay {
         }
 
         // A freeform answer, or the notes of a chosen option.
-        if self.composer_submit_keys.is_pressed(key_event) {
+        let queue_key = !self.has_options() && self.composer_queue_keys.is_pressed(key_event);
+        if queue_key {
+            // #544: the composer's queue key (Tab) submits a freeform answer:
+            // like Enter, never held or before a fresh choice.
+            if key_event.kind == KeyEventKind::Repeat
+                || self.typing_guard.awaits_navigation()
+                || matches!(self.typing_guard.on_confirm(), Confirm::Blocked)
+            {
+                if self.typing_guard.awaits_navigation() {
+                    self.typing_guard.on_typed_input();
+                }
+                return;
+            }
+        } else if self.composer_submit_keys.is_pressed(key_event) {
             // #544: a held key, or one before a fresh choice, never submits.
             if key_event.kind == KeyEventKind::Repeat
                 || matches!(self.typing_guard.on_confirm(), Confirm::Blocked)
@@ -1475,10 +1510,16 @@ impl BottomPaneView for RequestUserInputOverlay {
                 return;
             }
             self.ensure_selected_for_notes();
-            self.pending_submission_draft = Some(self.capture_composer_draft());
+            let before = self.capture_composer_draft();
+            self.pending_submission_draft = Some(before.clone());
             let (result, _) = self.composer.handle_key_event(key_event);
             if !self.handle_composer_input_result(result) {
                 self.pending_submission_draft = None;
+                // An Enter the composer took as text (a newline inside a
+                // paste burst) answers nothing.
+                if self.composer.is_in_paste_burst() || self.capture_composer_draft() != before {
+                    return;
+                }
                 if self.has_options() {
                     self.select_current_option(/*committed*/ true);
                 }
@@ -2661,6 +2702,94 @@ mod tests {
         assert_eq!(answered(&mut rx), Some(Vec::new()));
     }
 
+    /// #544 review: going back from the "unanswered questions"
+    /// confirmation shows a question that takes no double Enter; typed text
+    /// stays typed text (Backspace is an editing key there too); the
+    /// freeform queue key (Tab) submits only like Enter; Ctrl+P/N move only
+    /// once nothing is pending.
+    #[test]
+    fn issue_544_review_going_back_tab_and_chords() {
+        let two = |tx| {
+            RequestUserInputOverlay::new(
+                request_event(
+                    "turn-1",
+                    vec![
+                        question_with_options("q1", "Pick one"),
+                        question_with_options("q2", "Pick two"),
+                    ],
+                ),
+                tx,
+                /*has_input_focus*/ true,
+                /*enhanced_keys_supported*/ false,
+                /*disable_paste_burst*/ false,
+            )
+        };
+        // Skip question 1, answer question 2: the confirmation opens.
+        let (tx, mut rx) = test_sender();
+        let mut overlay = two(tx);
+        press(&mut overlay, &[KeyCode::Right, KeyCode::Enter]);
+        assert!(overlay.confirm_unanswered_active());
+        // "Go back", then a double Enter: question 1 stays unanswered.
+        press(
+            &mut overlay,
+            &[KeyCode::Down, KeyCode::Enter, KeyCode::Enter],
+        );
+        assert!(!overlay.confirm_unanswered_active());
+        assert_eq!(overlay.current_index(), 0);
+        assert!(!overlay.answers[0].answer_committed);
+        assert_eq!(answered(&mut rx), None);
+
+        // Typed text, Backspace, Enter in the confirmation answer nothing.
+        let (tx, mut rx) = test_sender();
+        let mut overlay = two(tx);
+        press(&mut overlay, &[KeyCode::Right, KeyCode::Enter]);
+        press(
+            &mut overlay,
+            &[KeyCode::Char('a'), KeyCode::Backspace, KeyCode::Enter],
+        );
+        assert!(overlay.confirm_unanswered_active());
+        assert_eq!(overlay.notice(), Some(TYPED_TEXT_NOTICE));
+        press(&mut overlay, &[KeyCode::Esc, KeyCode::Enter]);
+        assert!(!overlay.answers[0].answer_committed);
+        assert_eq!(answered(&mut rx), None);
+
+        // Freeform: Tab (the composer's queue key) after an answer, or
+        // held, does not submit; after a key it does.
+        let (tx, mut rx) = test_sender();
+        let mut overlay = RequestUserInputOverlay::new(
+            request_event("turn-1", vec![question_without_options("q1", "Details")]),
+            tx,
+            /*has_input_focus*/ true,
+            /*enhanced_keys_supported*/ false,
+            /*disable_paste_burst*/ true,
+        );
+        overlay
+            .composer
+            .set_text_content("draft".to_string(), Vec::new(), Vec::new());
+        overlay.require_fresh_choice_after_answer();
+        press(&mut overlay, &[KeyCode::Tab]);
+        overlay.handle_key_event(KeyEvent::new_with_kind(
+            KeyCode::Tab,
+            KeyModifiers::NONE,
+            KeyEventKind::Repeat,
+        ));
+        assert_eq!(answered(&mut rx), None);
+        press(&mut overlay, &[KeyCode::End, KeyCode::Tab]);
+        assert_eq!(
+            answered(&mut rx),
+            Some(vec!["user_note: draft".to_string()])
+        );
+
+        // Ctrl+N moves once nothing is pending; typed text first keeps it.
+        let (tx, _rx) = test_sender();
+        let mut overlay = two(tx);
+        overlay.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
+        assert_eq!(overlay.current_index(), 1);
+        press(&mut overlay, &[KeyCode::Char('x')]);
+        overlay.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        assert_eq!(overlay.current_index(), 1);
+    }
+
     #[test]
     fn letters_are_typed_text_and_arrows_move_the_selection() {
         let (tx, mut rx) = test_sender();
@@ -3647,7 +3776,12 @@ mod tests {
         overlay.composer.handle_paste(large.clone());
 
         overlay.handle_key_event(KeyEvent::from(KeyCode::Enter));
+        // #544: back to the first question with navigation (the second
+        // shows after an answer, so a chord there is typed text).
         overlay.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        assert_eq!(overlay.current_index(), 1);
+        overlay.handle_key_event(KeyEvent::from(KeyCode::PageUp));
+        assert_eq!(overlay.current_index(), 0);
 
         let draft = &overlay.answers[0].draft;
         assert_eq!(draft.pending_pastes.len(), 1);
