@@ -82,10 +82,16 @@ def main():
         def do_POST(self):
             raw = self.rfile.read(int(self.headers.get("content-length", 0)) or 0)
             ctype = self.headers.get("content-type", "")
-            if "json" in ctype:
-                body = json.loads(raw or b"{}")
-            else:
-                body = dict(pair.split("=", 1) for pair in raw.decode().split("&") if "=" in pair)
+            body = {}
+            # Responses bodies may be compressed and are not needed.
+            if not self.headers.get("content-encoding"):
+                try:
+                    if "json" in ctype:
+                        body = json.loads(raw or b"{}")
+                    else:
+                        body = dict(pair.split("=", 1) for pair in raw.decode().split("&") if "=" in pair)
+                except (ValueError, UnicodeDecodeError):
+                    body = {}
             path = self.path.split("?")[0]
             if path == "/_next_user":
                 STATE["next_user"] = body["user"]

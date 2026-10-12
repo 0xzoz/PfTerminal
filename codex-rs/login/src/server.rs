@@ -864,7 +864,9 @@ pub(crate) async fn exchange_code_for_tokens(
     })
 }
 
-/// Persists exchanged credentials using the configured local auth store.
+/// Persists exchanged credentials using the configured local auth store, or
+/// the named account's vault store (PF-84-S06).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn persist_tokens_async(
     codex_home: &Path,
     api_key: Option<String>,

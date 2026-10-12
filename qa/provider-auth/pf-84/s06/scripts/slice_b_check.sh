@@ -50,9 +50,9 @@ login bad bad-user
 run "$BIN" account list openai
 echo "auth.json sha256: $(sum)"
 step "B2: concurrent refresh in two accounts (both access tokens expire in 60 s)"
-ex --account work "Reply with exactly: pong" > "$OUT/b2-work.txt" &
-ex --account play "Reply with exactly: pong" > "$OUT/b2-play.txt" &
-wait
+ex --account work "Reply with exactly: pong" > "$OUT/b2-work.txt" & W1=$!
+ex --account play "Reply with exactly: pong" > "$OUT/b2-play.txt" & W2=$!
+wait $W1 $W2
 cat "$OUT/b2-work.txt" "$OUT/b2-play.txt"
 step "the rotated tokens were saved to each account: no second refresh, no reuse"
 ex --account work "Reply with exactly: pong"
