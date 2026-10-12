@@ -3581,7 +3581,6 @@ version = "0.1.48"
 dependencies = [
  "clap",
  "codex-core",
- "codex-install-context",
  "codex-network-proxy",
  "codex-process-hardening",
  "codex-protocol",
@@ -4258,6 +4257,7 @@ name = "codex-sandboxing"
 version = "0.1.48"
 dependencies = [
  "anyhow",
+ "codex-install-context",
  "codex-network-proxy",
  "codex-protocol",
  "codex-utils-absolute-path",
