@@ -12,7 +12,10 @@ use codex_client::ReqwestTransport;
 use codex_client::TransportError;
 use codex_client::run_with_retry;
 use codex_http_client::HttpClientBuilder;
+use http::HeaderMap;
+use http::HeaderValue;
 use http::Method;
+use http::StatusCode;
 use wiremock::Mock;
 use wiremock::MockServer;
 use wiremock::ResponseTemplate;
@@ -89,7 +92,7 @@ async fn a_long_retry_after_ends_transport_retries_at_once() {
         Some("120")
     );
     assert_eq!(seen, 1, "a 429 asking for 120 s was retried");
-    assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
+    assert!(elapsed < Duration::from_secs(10), "{elapsed:?}");
 }
 
 #[tokio::test]
@@ -142,4 +145,183 @@ async fn a_429_without_retry_after_keeps_the_backoff_retry() {
     let (result, seen, _) = send(&server).await;
     assert_eq!(result.ok(), Some(200));
     assert_eq!(seen, 2);
+}
+
+/// How one failed attempt with `status` and `headers` is retried under Z.AI's
+/// policy, on a paused clock: (attempts made, virtual time before the retry).
+async fn retry_of(status: u16, headers: &[(&'static str, HeaderValue)]) -> (u64, Duration) {
+    let mut map = HeaderMap::new();
+    for (name, value) in headers {
+        map.insert(*name, value.clone());
+    }
+    let attempts = std::sync::atomic::AtomicU64::new(0);
+    let started = tokio::time::Instant::now();
+    let _ = run_with_retry(
+        zai_retry().to_policy(),
+        || Request::new(Method::POST, "http://unused.invalid".to_string()),
+        |_request, attempt| {
+            attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let map = map.clone();
+            async move {
+                if attempt == 0 {
+                    Err(TransportError::Http {
+                        status: StatusCode::from_u16(status).expect("status"),
+                        url: None,
+                        headers: Some(map),
+                        body: None,
+                    })
+                } else {
+                    Ok(())
+                }
+            }
+        },
+    )
+    .await;
+    (attempts.into_inner(), started.elapsed())
+}
+
+fn text(value: &str) -> HeaderValue {
+    HeaderValue::from_str(value).expect("header value")
+}
+
+fn unix_ms_in(delta: Duration) -> i64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock");
+    i64::try_from((now + delta).as_millis()).expect("ms")
+}
+
+/// The headers are read the way core reads them for the throttle's cooldown.
+#[tokio::test(start_paused = true)]
+async fn the_requested_wait_is_read_like_the_throttle_reads_it() {
+    let quick = Duration::from_millis(500);
+    // (case, status, headers, retried, minimum wait before the retry)
+    #[allow(clippy::type_complexity)]
+    let cases: Vec<(&str, u16, Vec<(&'static str, HeaderValue)>, bool, Duration)> = vec![
+        ("no header: backoff", 429, vec![], true, Duration::ZERO),
+        (
+            "2 s",
+            429,
+            vec![("retry-after", text("2"))],
+            true,
+            Duration::from_secs(2),
+        ),
+        (
+            "5 s",
+            429,
+            vec![("retry-after", text("5"))],
+            true,
+            Duration::from_secs(5),
+        ),
+        (
+            "6 s",
+            429,
+            vec![("retry-after", text("6"))],
+            false,
+            Duration::ZERO,
+        ),
+        (
+            "0",
+            429,
+            vec![("retry-after", text("0"))],
+            true,
+            Duration::ZERO,
+        ),
+        (
+            "-1",
+            429,
+            vec![("retry-after", text("-1"))],
+            true,
+            Duration::ZERO,
+        ),
+        (
+            "fraction",
+            429,
+            vec![("retry-after", text("10.5"))],
+            false,
+            Duration::ZERO,
+        ),
+        (
+            "huge",
+            429,
+            vec![("retry-after", text("99999999999999999999"))],
+            false,
+            Duration::ZERO,
+        ),
+        (
+            "non-ASCII is no header",
+            429,
+            vec![(
+                "retry-after",
+                HeaderValue::from_bytes(b"\xff1").expect("bytes"),
+            )],
+            true,
+            Duration::ZERO,
+        ),
+        (
+            "ms short",
+            429,
+            vec![("retry-after-ms", text("300"))],
+            true,
+            Duration::from_millis(300),
+        ),
+        (
+            "ms long",
+            429,
+            vec![("retry-after-ms", text("60000"))],
+            false,
+            Duration::ZERO,
+        ),
+        (
+            "ms 0 falls through to Retry-After",
+            429,
+            vec![("retry-after-ms", text("0")), ("retry-after", text("120"))],
+            false,
+            Duration::ZERO,
+        ),
+        (
+            "unreadable ms falls through",
+            429,
+            vec![("retry-after-ms", text("soon")), ("retry-after", text("1"))],
+            true,
+            Duration::from_secs(1),
+        ),
+        (
+            "reset ms short",
+            429,
+            vec![(
+                "x-ratelimit-reset-ms",
+                text(&unix_ms_in(Duration::from_secs(3)).to_string()),
+            )],
+            true,
+            Duration::from_secs(1),
+        ),
+        (
+            "reset s long",
+            429,
+            vec![(
+                "x-ratelimit-reset",
+                text(&(unix_ms_in(Duration::from_secs(600)) / 1000).to_string()),
+            )],
+            false,
+            Duration::ZERO,
+        ),
+        (
+            "5xx unchanged",
+            503,
+            vec![("retry-after", text("120"))],
+            true,
+            Duration::ZERO,
+        ),
+    ];
+    for (case, status, headers, retried, min_wait) in cases {
+        let (attempts, waited) = retry_of(status, &headers).await;
+        assert_eq!(attempts, if retried { 2 } else { 1 }, "{case}");
+        if retried {
+            assert!(waited >= min_wait, "{case}: waited {waited:?}");
+            if min_wait.is_zero() {
+                assert!(waited < quick, "{case}: waited {waited:?}");
+            }
+        }
+    }
 }

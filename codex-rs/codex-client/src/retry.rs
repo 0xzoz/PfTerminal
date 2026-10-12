@@ -48,11 +48,16 @@ enum RateLimitRetry {
     Stop,
 }
 
-/// How a retryable error's `Retry-After` shapes the next transport retry. A 429
-/// without one (a transient overload, as Z.AI sends) keeps the normal backoff.
-/// `retry-after-ms`, then `Retry-After` in seconds, are honoured up to
-/// `MAX_TRANSPORT_RETRY_AFTER`; a longer or unreadable one (such as an HTTP
-/// date) stops the retries.
+/// How a retryable error's requested wait shapes the next transport retry.
+///
+/// The headers are read in the order and the way core reads them for the
+/// throttle's cooldown (`codex-api` `extract_retry_after_ms`): a positive
+/// integer `retry-after-ms`, then a positive integer `Retry-After` in seconds
+/// (any other `Retry-After`, such as an HTTP date, stops the retries; core
+/// reads the date), then `x-ratelimit-reset-ms` and `x-ratelimit-reset` (Unix
+/// time in milliseconds or seconds). A wait up to `MAX_TRANSPORT_RETRY_AFTER`
+/// is honoured; a longer one stops the retries. A 429 with none of them (a
+/// transient overload, as Z.AI sends) keeps the normal backoff.
 fn rate_limit_retry_delay(err: &TransportError) -> RateLimitRetry {
     let TransportError::Http {
         status, headers, ..
@@ -67,25 +72,43 @@ fn rate_limit_retry_delay(err: &TransportError) -> RateLimitRetry {
         headers
             .as_ref()
             .and_then(|headers| headers.get(name))
-            .map(|value| value.to_str().map(str::trim))
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
     };
-    let wait = match (header("retry-after-ms"), header("retry-after")) {
-        (Some(Ok(ms)), _) => ms.parse::<f64>().ok().map(|ms| ms / 1000.0),
-        (Some(Err(_)), _) => None,
-        (None, Some(Ok(seconds))) => seconds.parse::<f64>().ok(),
-        (None, Some(Err(_))) => None,
-        (None, None) => return RateLimitRetry::After(Duration::ZERO),
+    let positive = |value: &str| value.parse::<i64>().ok().filter(|value| *value > 0);
+    let now_ms = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |now| i64::try_from(now.as_millis()).unwrap_or(i64::MAX))
     };
-    match wait {
-        Some(seconds) if seconds.is_finite() && seconds >= 0.0 => {
-            let wait = Duration::from_secs_f64(seconds.min(u32::MAX as f64));
-            if wait <= MAX_TRANSPORT_RETRY_AFTER {
-                RateLimitRetry::After(wait)
-            } else {
-                RateLimitRetry::Stop
-            }
+    let reset_in_ms = |value: &str| {
+        let reset = positive(value)?;
+        let reset_ms = if reset > 10_000_000_000 {
+            reset
+        } else {
+            reset.saturating_mul(1000)
+        };
+        Some(reset_ms.saturating_sub(now_ms())).filter(|ms| *ms > 0)
+    };
+    let wait_ms = if let Some(ms) = header("retry-after-ms").and_then(positive) {
+        ms
+    } else if let Some(retry_after) = header("retry-after") {
+        match positive(retry_after) {
+            Some(seconds) => seconds.saturating_mul(1000),
+            None if retry_after.parse::<i64>().is_ok() => 0,
+            None => return RateLimitRetry::Stop,
         }
-        _ => RateLimitRetry::Stop,
+    } else {
+        header("x-ratelimit-reset-ms")
+            .and_then(reset_in_ms)
+            .or_else(|| header("x-ratelimit-reset").and_then(reset_in_ms))
+            .unwrap_or(0)
+    };
+    let wait = Duration::from_millis(u64::try_from(wait_ms).unwrap_or(0));
+    if wait <= MAX_TRANSPORT_RETRY_AFTER {
+        RateLimitRetry::After(wait)
+    } else {
+        RateLimitRetry::Stop
     }
 }
 
