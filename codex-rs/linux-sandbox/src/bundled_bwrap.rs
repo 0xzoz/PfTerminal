@@ -3,6 +3,7 @@ use std::ffi::CString;
 use std::fs::File;
 use std::io::Read;
 use std::os::fd::AsRawFd;
+use std::os::fd::RawFd;
 use std::os::raw::c_char;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -21,12 +22,45 @@ const NULL_SHA256_DIGEST: [u8; 32] = [0; 32];
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BundledBwrapLauncher {
     program: AbsolutePathBuf,
+    /// #581: where AppArmor restricts user namespaces (Ubuntu 24.04), the
+    /// copy runs through `aa-exec -p rootlesskit`, from its verified
+    /// descriptor.
+    apparmor: Option<AppArmorLauncher>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AppArmorLauncher {
+    aa_exec: AbsolutePathBuf,
+    /// The digest-verified copy, open (close-on-exec) for the helper's life.
+    fd: RawFd,
+}
+
+/// The verified copy the AppArmor launcher runs (see [`AppArmorLauncher`]).
+static VERIFIED_BWRAP: OnceLock<File> = OnceLock::new();
 
 pub(crate) fn launcher() -> Option<BundledBwrapLauncher> {
     codex_sandboxing::find_bundled_bwrap()
         .or_else(bazel_bwrap_candidate)
-        .map(|program| BundledBwrapLauncher { program })
+        .map(|program| BundledBwrapLauncher {
+            apparmor: apparmor_launcher(&program),
+            program,
+        })
+}
+
+/// #581: probes the bundled copy as the system one is probed
+/// (`find_apparmor_bwrap_launcher`), but only once its digest is verified,
+/// and through that verified descriptor: `aa-exec` runs
+/// `/proc/self/fd/<fd>`, never the path, so no other file can take its
+/// place. `None` when the copy creates user namespaces by itself (or cannot
+/// be verified: the run then fails as before).
+fn apparmor_launcher(program: &AbsolutePathBuf) -> Option<AppArmorLauncher> {
+    let file = File::open(program.as_path()).ok()?;
+    verify_digest(&file, expected_sha256(), program.as_path()).ok()?;
+    let fd = file.as_raw_fd();
+    let aa_exec = codex_sandboxing::find_apparmor_bwrap_launcher_for_fd(fd)?;
+    let aa_exec = AbsolutePathBuf::from_absolute_path(aa_exec).ok()?;
+    VERIFIED_BWRAP.set(file).ok()?;
+    Some(AppArmorLauncher { aa_exec, fd })
 }
 
 /// The bubblewrap a Bazel test run provides (debug builds only).
@@ -39,7 +73,19 @@ fn bazel_bwrap_candidate() -> Option<AbsolutePathBuf> {
 }
 
 impl BundledBwrapLauncher {
+    /// #581: the descriptor of the verified copy that `aa-exec` must pass on
+    /// to bubblewrap, which then passes it on to the command. The sandbox's
+    /// inner stage closes it before running the command
+    /// (`--close-inherited-fd`), so the command cannot reopen the copy
+    /// through `/proc/self/fd`.
+    pub(crate) fn inherited_fd(&self) -> Option<RawFd> {
+        self.apparmor.as_ref().map(|apparmor| apparmor.fd)
+    }
+
     pub(crate) fn exec(&self, argv: Vec<String>, preserved_files: Vec<File>) -> ! {
+        if let Some(apparmor) = &self.apparmor {
+            exec_through_apparmor(apparmor, argv, preserved_files);
+        }
         let bwrap_file = File::open(self.program.as_path()).unwrap_or_else(|err| {
             panic!(
                 "failed to open bundled bubblewrap {}: {err}",
@@ -73,6 +119,49 @@ impl BundledBwrapLauncher {
             self.program.as_path().display()
         );
     }
+}
+
+/// `aa-exec -p rootlesskit -- /proc/self/fd/<fd> <bwrap args>`: the
+/// verified copy, made inheritable for this exec only.
+fn exec_through_apparmor(
+    apparmor: &AppArmorLauncher,
+    argv: Vec<String>,
+    preserved_files: Vec<File>,
+) -> ! {
+    make_files_inheritable(&preserved_files);
+    // SAFETY: clears close-on-exec on a descriptor this process keeps open
+    // (`VERIFIED_BWRAP`).
+    if unsafe { libc::fcntl(apparmor.fd, libc::F_SETFD, 0) } < 0 {
+        let err = std::io::Error::last_os_error();
+        panic!("failed to pass the bundled bubblewrap to aa-exec: {err}");
+    }
+    let aa_exec = CString::new(apparmor.aa_exec.as_path().as_os_str().as_encoded_bytes())
+        .unwrap_or_else(|err| panic!("invalid aa-exec path: {err}"));
+    let mut wrapped = vec![
+        "aa-exec".to_string(),
+        "-p".to_string(),
+        codex_sandboxing::APPARMOR_BWRAP_USERNS_PROFILE.to_string(),
+        "--".to_string(),
+        format!("/proc/self/fd/{}", apparmor.fd),
+    ];
+    wrapped.extend(argv.into_iter().skip(1));
+    let cstrings = argv_to_cstrings(&wrapped);
+    let mut argv_ptrs: Vec<*const c_char> = cstrings
+        .iter()
+        .map(CString::as_c_str)
+        .map(CStr::as_ptr)
+        .collect();
+    argv_ptrs.push(std::ptr::null());
+    // SAFETY: `aa_exec` and every entry in `argv_ptrs` are valid C strings
+    // for the duration of the call. On success `execv` does not return.
+    unsafe {
+        libc::execv(aa_exec.as_ptr(), argv_ptrs.as_ptr());
+    }
+    let err = std::io::Error::last_os_error();
+    panic!(
+        "failed to exec AppArmor launcher {} for bundled bubblewrap: {err}",
+        apparmor.aa_exec.as_path().display()
+    );
 }
 
 fn expected_sha256() -> Option<[u8; 32]> {

@@ -149,3 +149,67 @@ fn without_bubblewrap_on_path_the_helper_uses_its_bundled_copy() {
     }
     assert_eq!(wrong, Vec::<String>::new());
 }
+
+/// #581: where AppArmor restricts unprivileged user namespaces (Ubuntu
+/// 24.04 by default), the bundled copy could not start (`loopback: Failed
+/// RTM_NEWADDR`), so every sandboxed command failed. It now runs through
+/// `aa-exec -p rootlesskit`, from its verified descriptor, which the
+/// command does not inherit. Runs where `bwrap` was built next to the
+/// helper (`cargo build -p codex-bwrap`), the host restricts user
+/// namespaces and the `rootlesskit` profile lets a bubblewrap start.
+#[test]
+fn where_apparmor_restricts_user_namespaces_the_bundled_copy_runs_through_aa_exec() {
+    let built = Path::new(env!("CARGO_BIN_EXE_codex-linux-sandbox")).with_file_name("bwrap");
+    if !built.is_file() {
+        eprintln!("skipped: no bwrap built at {}", built.display());
+        return;
+    }
+    let restricted =
+        std::fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
+            .is_ok_and(|value| value.trim() == "1");
+    let through_aa_exec = Command::new("aa-exec")
+        .args(["-p", "rootlesskit", "--"])
+        .arg(&built)
+        .args(["--unshare-user", "--unshare-net", "--ro-bind", "/", "/"])
+        .args(["--", "/bin/true"])
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !restricted || !through_aa_exec {
+        eprintln!(
+            "skipped: user namespaces restricted={restricted}, bubblewrap through aa-exec={through_aa_exec}"
+        );
+        return;
+    }
+    let dir = TempDir::new().expect("temp dir");
+    let helper = lone_helper(dir.path());
+    let resources = dir.path().join("bin/codex-resources");
+    std::fs::create_dir(&resources).expect("create codex-resources");
+    std::fs::copy(&built, resources.join("bwrap")).expect("copy bwrap");
+    let empty_path = dir.path().join("empty-path");
+    std::fs::create_dir(&empty_path).expect("create empty PATH folder");
+    let mut wrong = Vec::new();
+    for (name, profile) in profiles(dir.path()) {
+        let output = Command::new(&helper)
+            .env_clear()
+            .env("PATH", &empty_path)
+            .current_dir(dir.path())
+            .arg("--sandbox-policy-cwd")
+            .arg(dir.path())
+            .arg("--permission-profile")
+            .arg(serde_json::to_string(&profile).expect("profile json"))
+            .arg("--")
+            .args(["/bin/sh", "-c", &format!("echo {RAN}; ls -l /proc/self/fd/")])
+            .output()
+            .expect("run the helper");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // The command inherits no descriptor of the bundled copy.
+        if !output.status.success() || !stdout.contains(RAN) || stdout.contains("bwrap") {
+            wrong.push(format!(
+                "{name}: status={:?} stdout={stdout:?} stderr={:?}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+}

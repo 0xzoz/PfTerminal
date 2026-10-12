@@ -25,6 +25,7 @@ use crate::bwrap::BwrapOptions;
 use crate::bwrap::create_bwrap_command_args;
 use crate::landlock::apply_permission_profile_to_current_thread;
 use crate::launcher::exec_bwrap;
+use crate::launcher::preferred_bwrap_inherited_fd;
 use crate::launcher::preferred_bwrap_supports_argv0;
 use crate::proxy_routing::activate_proxy_routes_in_netns;
 use crate::proxy_routing::prepare_host_proxy_route_spec;
@@ -139,6 +140,11 @@ pub struct LandlockCommand {
     #[arg(long = "no-proc", default_value_t = false)]
     pub no_proc: bool,
 
+    /// Internal (#581): a descriptor the inner stage closes before running
+    /// the command (the verified bundled bubblewrap that `aa-exec` ran).
+    #[arg(long = "close-inherited-fd", hide = true)]
+    pub close_inherited_fd: Option<i32>,
+
     /// Full command args to run under the Linux sandbox helper.
     #[arg(trailing_var_arg = true)]
     pub command: Vec<String>,
@@ -161,6 +167,7 @@ pub fn run_main() -> ! {
         allow_network_for_proxy,
         proxy_route_spec,
         no_proc,
+        close_inherited_fd,
         command,
     } = LandlockCommand::parse();
 
@@ -201,6 +208,12 @@ pub fn run_main() -> ! {
         ) {
             panic!("error applying Linux sandbox restrictions: {e:?}");
         }
+        if let Some(fd) = close_inherited_fd.filter(|fd| *fd > libc::STDERR_FILENO) {
+            // SAFETY: closes a descriptor this process does not use.
+            unsafe {
+                libc::close(fd);
+            }
+        }
         exec_or_panic(command);
     }
 
@@ -238,6 +251,7 @@ pub fn run_main() -> ! {
             permission_profile: &permission_profile,
             allow_network_for_proxy,
             proxy_route_spec,
+            close_inherited_fd: preferred_bwrap_inherited_fd(),
             command,
         });
         run_bwrap_with_proc_fallback(
@@ -1525,6 +1539,7 @@ struct InnerSeccompCommandArgs<'a> {
     permission_profile: &'a PermissionProfile,
     allow_network_for_proxy: bool,
     proxy_route_spec: Option<String>,
+    close_inherited_fd: Option<i32>,
     command: Vec<String>,
 }
 
@@ -1536,6 +1551,7 @@ fn build_inner_seccomp_command(args: InnerSeccompCommandArgs<'_>) -> Vec<String>
         permission_profile,
         allow_network_for_proxy,
         proxy_route_spec,
+        close_inherited_fd,
         command,
     } = args;
     let current_exe = match std::env::current_exe() {
@@ -1567,6 +1583,10 @@ fn build_inner_seccomp_command(args: InnerSeccompCommandArgs<'_>) -> Vec<String>
             .unwrap_or_else(|| panic!("managed proxy mode requires a proxy route spec"));
         inner.push("--proxy-route-spec".to_string());
         inner.push(proxy_route_spec);
+    }
+    if let Some(fd) = close_inherited_fd {
+        inner.push("--close-inherited-fd".to_string());
+        inner.push(fd.to_string());
     }
     inner.push("--".to_string());
     inner.extend(command);
