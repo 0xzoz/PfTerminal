@@ -391,8 +391,9 @@ impl<'a> TmuxPane<'a> {
     }
 
     /// Keeps a bare Esc from reaching the TUI in the same read as the next
-    /// input (see [`ESCAPE_SETTLE_MIN`]): waits out the minimum gap, then for
-    /// two equal captures, which shows the TUI has handled the Esc.
+    /// input (see [`ESCAPE_SETTLE_MIN`]). The minimum gap does the work: the
+    /// TUI reads input on its own thread. Two equal captures afterwards are
+    /// a heuristic that it has also finished reacting to the Esc.
     fn settle_after_escape(&self) -> Result<()> {
         let sent_at = self
             .escape_sent_at
