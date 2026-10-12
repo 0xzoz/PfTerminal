@@ -38,8 +38,9 @@ pub(crate) fn explanation(path: &str) -> String {
     format!(
         "Security level Aggressive blocked access to `{path}`: agent commands can never read \
          protected files (credential files such as .env, .env.* and .envrc, also ones created \
-         during the session; SSH, cloud and CLI tokens; and Corbanu's sign-in, vault, config \
-         and history), and this cannot be granted, not even \
+         during the session, but not .env.example, .env.sample or .env.template; SSH, cloud \
+         and CLI tokens; and Corbanu's sign-in, vault, config and history), and this cannot be \
+         granted, not even \
          once. To allow it, a person can switch to Permissive in /security (it applies after a \
          restart)."
     )

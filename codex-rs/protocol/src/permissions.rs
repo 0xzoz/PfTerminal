@@ -42,11 +42,39 @@ pub fn is_protected_metadata_name(name: &OsStr) -> bool {
 /// pattern is one path component in the filesystem policy's glob syntax.
 pub const CREDENTIAL_FILE_NAME_PATTERNS: &[&str] = &[".env", ".env.*", ".envrc"];
 
-/// Whether `name` matches one of [`CREDENTIAL_FILE_NAME_PATTERNS`], in any
-/// case: on a case-insensitive filesystem `.ENV` is the same file as `.env`.
-pub fn is_credential_file_name(name: &OsStr) -> bool {
+/// #442 (Travis, 2026-10-12): the template names a project keeps beside its
+/// `.env` (they hold no credentials, and checkouts and installs write them).
+/// [`CREDENTIAL_FILE_NAME_PATTERNS`] never covers them, in any case.
+pub const CREDENTIAL_FILE_TEMPLATE_NAMES: &[&str] =
+    &[".env.example", ".env.sample", ".env.template"];
+
+/// The credential names as people read them: ".env, .env.* (except
+/// .env.example, .env.sample and .env.template) and .envrc".
+pub fn credential_file_names_shown() -> String {
+    format!(
+        ".env, .env.* (except {}) and .envrc",
+        match CREDENTIAL_FILE_TEMPLATE_NAMES {
+            [first, second, last] => format!("{first}, {second} and {last}"),
+            names => names.join(", "),
+        }
+    )
+}
+
+/// Whether `name` is one of [`CREDENTIAL_FILE_TEMPLATE_NAMES`], in any case.
+pub fn is_credential_template_name(name: &OsStr) -> bool {
     let name = name.as_encoded_bytes().to_ascii_lowercase();
-    name == b".env" || name == b".envrc" || name.starts_with(b".env.")
+    CREDENTIAL_FILE_TEMPLATE_NAMES
+        .iter()
+        .any(|template| name == template.as_bytes())
+}
+
+/// Whether `name` matches one of [`CREDENTIAL_FILE_NAME_PATTERNS`], in any
+/// case (on a case-insensitive filesystem `.ENV` is the same file as `.env`),
+/// and is not a template ([`CREDENTIAL_FILE_TEMPLATE_NAMES`]).
+pub fn is_credential_file_name(name: &OsStr) -> bool {
+    let lower = name.as_encoded_bytes().to_ascii_lowercase();
+    (lower == b".env" || lower == b".envrc" || lower.starts_with(b".env."))
+        && !is_credential_template_name(name)
 }
 
 /// Why an existing credential-named entry (not a folder) at `path` is unsafe:
@@ -62,8 +90,50 @@ pub fn credential_entry_problem(metadata: &std::fs::Metadata) -> Option<&'static
     if !kind.is_file() {
         return Some("is not a regular file (a pipe, socket or device)");
     }
-    (hard_links(metadata) > 1).then_some("has other hard links")
+    (hard_links(metadata) > 1).then_some(HARD_LINKED)
 }
+
+/// #442 (Travis, 2026-10-12): why the existing credential entry at `path`
+/// cannot be protected, naming it, and exactly how to fix it; `None` when it
+/// is a plain file ([`credential_entry_problem`]). Shown when Aggressive
+/// starts and, on Linux, for each refused command.
+pub fn unsafe_credential_entry_message(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+) -> Option<String> {
+    let problem = credential_entry_problem(metadata)?;
+    let shown = path.display();
+    let away = "or move it out of the workspace";
+    Some(if metadata.file_type().is_symlink() {
+        let target = std::fs::read_link(path)
+            .map(|target| {
+                let target = path
+                    .parent()
+                    .map_or(target.clone(), |parent| parent.join(&target));
+                format!(" to {}", target.display())
+            })
+            .unwrap_or_default();
+        format!(
+            "the credential file {shown} is a link{target}. A credential file must be a regular \
+             file, or what is written to it lands where agent commands could read it under \
+             another name. To fix it, replace the link with a regular file (delete the link, \
+             then copy the file it pointed to into its place), {away}"
+        )
+    } else if problem == HARD_LINKED {
+        format!(
+            "the credential file {shown} has other hard links (the same file under another \
+             name agent commands could read). To fix it, replace it with a regular copy (copy it \
+             to a new file, then rename that over it), {away}"
+        )
+    } else {
+        format!(
+            "the credential file {shown} {problem}. To fix it, replace it with a regular file, \
+             {away}"
+        )
+    })
+}
+
+const HARD_LINKED: &str = "has other hard links";
 
 #[cfg(unix)]
 fn hard_links(metadata: &std::fs::Metadata) -> u64 {
@@ -307,7 +377,9 @@ struct FileSystemSemanticSignature {
 /// Runtime matcher for read-deny entries in a filesystem sandbox policy.
 pub struct ReadDenyMatcher {
     denied_candidates: Vec<Vec<PathBuf>>,
-    deny_read_matchers: Vec<GlobMatcher>,
+    /// Each glob, and whether it is a credential-name glob, whose matches
+    /// exclude the template names ([`CREDENTIAL_FILE_TEMPLATE_NAMES`]).
+    deny_read_matchers: Vec<(GlobMatcher, bool)>,
     invalid_pattern: bool,
     /// Directories that may not be listed (issue #506), by every spelling.
     unlistable_candidates: Vec<Vec<PathBuf>>,
@@ -373,7 +445,7 @@ impl ReadDenyMatcher {
             // folder part, which only ever denies more.
             let case_insensitive = credential_file_glob_root(&pattern).is_some();
             match build_glob_matcher(&pattern, case_insensitive) {
-                Ok(matcher) => deny_read_matchers.push(matcher),
+                Ok(matcher) => deny_read_matchers.push((matcher, case_insensitive)),
                 Err(err) => match invalid_glob_behavior {
                     InvalidDenyReadGlobBehavior::FailClosed => invalid_pattern = true,
                     InvalidDenyReadGlobBehavior::ReturnError => {
@@ -417,10 +489,14 @@ impl ReadDenyMatcher {
             return true;
         }
 
-        self.deny_read_matchers.iter().any(|matcher| {
-            path_candidates
-                .iter()
-                .any(|candidate| matcher.is_match(candidate))
+        self.deny_read_matchers.iter().any(|(matcher, credential)| {
+            path_candidates.iter().any(|candidate| {
+                matcher.is_match(candidate)
+                    && !(*credential
+                        && candidate
+                            .file_name()
+                            .is_some_and(is_credential_template_name))
+            })
         })
     }
 
@@ -3738,6 +3814,88 @@ mod tests {
                 !is_read_denied(&temp.path().join(allowed), &policy, temp.path()),
                 "{allowed}"
             );
+        }
+    }
+
+    /// #442 (Travis, 2026-10-12): `.env.example`, `.env.sample` and
+    /// `.env.template`, in any case, are not credential files: the names and
+    /// the policy's credential globs leave them readable. Everything else the
+    /// globs cover stays denied, also a template name that is a link to one.
+    #[test]
+    fn credential_templates_are_exempt() {
+        for name in [
+            ".env.example",
+            ".env.sample",
+            ".env.template",
+            ".ENV.EXAMPLE",
+            ".Env.Sample",
+            ".env.TEMPLATE",
+        ] {
+            assert!(is_credential_template_name(OsStr::new(name)), "{name}");
+            assert!(!is_credential_file_name(OsStr::new(name)), "{name}");
+        }
+        for name in [
+            ".env.example.local",
+            ".env.examples",
+            ".env.local",
+            ".env.sample.bak",
+            "env.example",
+        ] {
+            assert!(!is_credential_template_name(OsStr::new(name)), "{name}");
+        }
+        assert!(is_credential_file_name(OsStr::new(".env.example.local")));
+
+        let temp_dir = TempDir::new().expect("tempdir");
+        // The real location, so a link's target matches the globs too.
+        let temp = fs::canonicalize(temp_dir.path()).expect("real");
+        let root = temp.to_string_lossy().into_owned();
+        let policy = FileSystemSandboxPolicy::restricted(
+            credential_file_globs(&root)
+                .into_iter()
+                .map(|pattern| {
+                    FileSystemSandboxEntry::new(
+                        FileSystemPath::GlobPattern { pattern },
+                        FileSystemAccessMode::Deny,
+                    )
+                })
+                .collect(),
+        );
+        for allowed in [".env.example", "app/.env.sample", "a/.ENV.TEMPLATE"] {
+            assert!(
+                !is_read_denied(&temp.as_path().join(allowed), &policy, temp.as_path()),
+                "{allowed}"
+            );
+        }
+        for denied in [".env", ".env.local", "app/.env.example.local", ".envrc"] {
+            assert!(
+                is_read_denied(&temp.as_path().join(denied), &policy, temp.as_path()),
+                "{denied}"
+            );
+        }
+        // A user's own deny glob still covers a template name.
+        let mut entries = policy.entries.clone();
+        entries.push(FileSystemSandboxEntry::new(
+            FileSystemPath::GlobPattern {
+                pattern: format!("{root}/**/*.example"),
+            },
+            FileSystemAccessMode::Deny,
+        ));
+        let own = FileSystemSandboxPolicy::restricted(entries);
+        assert!(is_read_denied(
+            &temp.as_path().join(".env.example"),
+            &own,
+            temp.as_path()
+        ));
+        // A template name that is a link to a credential file stays denied.
+        #[cfg(unix)]
+        {
+            fs::write(temp.as_path().join(".env"), "SECRET=1").expect("env");
+            std::os::unix::fs::symlink(".env", temp.as_path().join(".env.sample")).expect("link");
+            assert!(is_read_denied(
+                &temp.as_path().join(".env.sample"),
+                &policy,
+                temp.as_path()
+            ));
         }
     }
 

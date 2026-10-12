@@ -3,6 +3,7 @@ use codex_network_proxy::NetworkProxy;
 use codex_network_proxy::PROXY_URL_ENV_KEYS;
 use codex_network_proxy::has_proxy_url_env_vars;
 use codex_network_proxy::proxy_url_env_value;
+use codex_protocol::permissions::CREDENTIAL_FILE_TEMPLATE_NAMES;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::permissions::PROTECTED_METADATA_PATH_NAMES;
@@ -773,17 +774,47 @@ fn build_seatbelt_unreadable_glob_policy(
         }
         for regex in regexes {
             let regex = regex.replace('"', "\\\"");
+            if credential_name {
+                // #442 (Travis, 2026-10-12): the template names stay usable.
+                let matches = format!(
+                    r#"(require-all (regex #"{regex}") (require-not (regex #"{}")))"#,
+                    credential_template_regex()
+                );
+                policy_components.push(format!("(deny file-read* {matches})"));
+                policy_components.push(format!("(deny file-write-unlink {matches})"));
+                policy_components.push(format!(
+                    "(deny file-write* (require-all {matches} (require-not (vnode-type DIRECTORY))))"
+                ));
+                continue;
+            }
             policy_components.push(format!(r#"(deny file-read* (regex #"{regex}"))"#));
             policy_components.push(format!(r#"(deny file-write-unlink (regex #"{regex}"))"#));
-            if credential_name {
-                policy_components.push(format!(
-                    r#"(deny file-write* (require-all (regex #"{regex}") (require-not (vnode-type DIRECTORY))))"#
-                ));
-            }
         }
     }
 
     policy_components.join("\n")
+}
+
+/// #442 (Travis, 2026-10-12): a path ending in a template name
+/// ([`CREDENTIAL_FILE_TEMPLATE_NAMES`]), in any case.
+fn credential_template_regex() -> String {
+    let any_case = |text: &str| {
+        text.chars()
+            .map(|ch| {
+                if ch.is_ascii_alphabetic() {
+                    format!("[{}{}]", ch.to_ascii_lowercase(), ch.to_ascii_uppercase())
+                } else {
+                    regex_lite::escape(&ch.to_string())
+                }
+            })
+            .collect::<String>()
+    };
+    let names = CREDENTIAL_FILE_TEMPLATE_NAMES
+        .iter()
+        .map(|name| any_case(name))
+        .collect::<Vec<_>>()
+        .join("|");
+    format!("/({names})$")
 }
 
 /// #442: the regex of a credential-name glob with the name matching in any

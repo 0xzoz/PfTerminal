@@ -2372,6 +2372,105 @@ fn unlistable_directory_cannot_be_listed_but_its_entries_stay_usable() {
     }
 }
 
+/// #442 (Travis, 2026-10-12), real `sandbox-exec`: `.env.example`,
+/// `.env.sample` and `.env.template`, in any case, are not credential files:
+/// an agent command reads, creates, overwrites and removes them. Every other
+/// credential name stays denied, and a template name never reaches the
+/// person's `.env` through a link.
+#[test]
+fn credential_templates_stay_usable() {
+    let tmp = TempDir::new().expect("tempdir");
+    let work = tmp.path().canonicalize().expect("canonical");
+    fs::write(work.join(".env"), "API_KEY=dummy-442-person").expect("env");
+    fs::write(work.join(".env.example"), "API_KEY=example-442").expect("example");
+    fs::write(work.join(".ENV.SAMPLE"), "API_KEY=sample-442").expect("sample");
+    let mut entries = vec![
+        FileSystemSandboxEntry::new(
+            FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            },
+            FileSystemAccessMode::Read,
+        ),
+        FileSystemSandboxEntry::new(
+            FileSystemPath::Path {
+                path: AbsolutePathBuf::from_absolute_path(&work).expect("absolute"),
+            },
+            FileSystemAccessMode::Write,
+        ),
+    ];
+    entries.extend(
+        codex_protocol::permissions::credential_file_globs(&work.to_string_lossy())
+            .into_iter()
+            .map(|pattern| {
+                FileSystemSandboxEntry::new(
+                    FileSystemPath::GlobPattern { pattern },
+                    FileSystemAccessMode::Deny,
+                )
+            }),
+    );
+    let policy = FileSystemSandboxPolicy::restricted(entries);
+    let script = "cat .env.example; echo example=$?; cat .ENV.SAMPLE; echo sample=$?; \
+         printf tpl > .env.template; echo template=$?; printf x >> .env.example; echo append=$?; \
+         mkdir -p app && cp .env.example app/.Env.Template; echo copy=$?; \
+         rm .ENV.SAMPLE; echo removed=$?; \
+         cat .env; echo read=$?; printf x > .env.local; echo create=$?; \
+         printf x > .env.example.local; echo near=$?; \
+         ln -s .env .env.sample; cat .env.sample; echo link=$?; \
+         ln .env .env.template.copy 2>/dev/null; ln .env hard-copy 2>/dev/null; \
+         cat .env.template.copy hard-copy 2>/dev/null; echo hardlinks=$?";
+    let args = create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
+        command: vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
+        file_system_sandbox_policy: &policy,
+        network_sandbox_policy: NetworkSandboxPolicy::Restricted,
+        sandbox_policy_cwd: &work,
+        enforce_managed_network: false,
+        managed_network: None,
+        environment_id: None,
+        network: None,
+        extra_allow_unix_sockets: &[],
+    })
+    .expect("args");
+    let output = Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
+        .args(&args)
+        .current_dir(&work)
+        .output()
+        .expect("sandbox-exec");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("dummy-442"), "{stdout}");
+    for line in [
+        "API_KEY=example-442example=0",
+        "API_KEY=sample-442sample=0",
+        "template=0",
+        "append=0",
+        "copy=0",
+        "removed=0",
+        "read=1",
+        "create=1",
+        "near=1",
+        "link=1",
+    ] {
+        assert!(stdout.contains(line), "{line} not in {stdout}");
+    }
+    assert_eq!(
+        fs::read_to_string(work.join(".env.template")).expect("template"),
+        "tpl"
+    );
+    assert!(work.join("app/.Env.Template").is_file());
+    // `.ENV.SAMPLE` was removed; `.env.sample` is now the planted link.
+    assert!(
+        fs::symlink_metadata(work.join(".env.sample"))
+            .expect("link")
+            .file_type()
+            .is_symlink()
+    );
+    for denied in [".env.local", ".env.example.local"] {
+        assert!(
+            fs::symlink_metadata(work.join(denied)).is_err(),
+            "{denied} was created"
+        );
+    }
+}
+
 /// #442 (Travis, 2026-10-11), real `sandbox-exec`: under credential-name deny
 /// globs an agent command can neither read such a file nor create, link,
 /// rename to or overwrite one, in any letter case, so it cannot plant a link or

@@ -3,7 +3,7 @@
 //!
 //! Bubblewrap can only hide paths that exist when a command starts, and
 //! neither seccomp nor Landlock can match a file name. So under a policy that
-//! denies the credential names ([`CREDENTIAL_FILE_NAME_PATTERNS`]) below a
+//! denies the credential names (`CREDENTIAL_FILE_NAME_PATTERNS`, templates aside) below a
 //! folder:
 //! - every command hides the matches that exist when it starts (the policy's
 //!   glob expansion, plus every letter case);
@@ -41,11 +41,11 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::thread;
 
-use codex_protocol::permissions::CREDENTIAL_FILE_NAME_PATTERNS;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
-use codex_protocol::permissions::credential_entry_problem;
 use codex_protocol::permissions::credential_file_glob_root;
+use codex_protocol::permissions::credential_file_names_shown;
 use codex_protocol::permissions::is_credential_file_name;
+use codex_protocol::permissions::unsafe_credential_entry_message;
 
 /// Folders watched for one command, at most. Past it the command is refused.
 const MAX_WATCHED_FOLDERS: usize = 100_000;
@@ -261,8 +261,8 @@ impl CredentialWatcher {
                 }
                 match scan {
                     Scan::Start => {
-                        if let Some(problem) = credential_entry_problem(&metadata) {
-                            return Some(unsafe_entry_message(&path, problem));
+                        if let Some(message) = unsafe_credential_entry_message(&path, &metadata) {
+                            return Some(message);
                         }
                         if metadata.is_file() {
                             self.existing.push(path.clone());
@@ -412,27 +412,6 @@ impl CredentialMonitor {
     }
 }
 
-/// Why `path`, an unsafe credential entry, refuses the command, and what the
-/// person should check.
-fn unsafe_entry_message(path: &Path, problem: &str) -> String {
-    let target = std::fs::read_link(path)
-        .map(|target| {
-            let target = path
-                .parent()
-                .map_or(target.clone(), |parent| parent.join(&target));
-            format!(
-                "; anything written to it went to {}, so check or delete that file too",
-                target.display()
-            )
-        })
-        .unwrap_or_default();
-    format!(
-        "the credential file {} {problem}, so what is written to it could be read under another \
-         name; remove or rename it{target}",
-        path.display()
-    )
-}
-
 /// `path` with its folder resolved, the way the watcher spells paths.
 fn real_spelling(path: &Path) -> PathBuf {
     match (
@@ -469,7 +448,7 @@ pub(crate) fn refused_message(reason: &str) -> String {
     format!(
         "Operation not permitted: the sandbox refuses to run this command because it cannot keep \
          credential files ({}) hidden from it: {reason}.",
-        CREDENTIAL_FILE_NAME_PATTERNS.join(", ")
+        credential_file_names_shown()
     )
 }
 
@@ -480,7 +459,7 @@ pub(crate) fn stopped_message(found: &str) -> String {
          ({found}) appeared while it ran. Files named {} are hidden from agent commands; one \
          created after a command starts cannot be hidden from it, so the command is stopped. \
          Later commands cannot read it.",
-        CREDENTIAL_FILE_NAME_PATTERNS.join(", ")
+        credential_file_names_shown()
     )
 }
 

@@ -426,13 +426,13 @@ pub(crate) fn sections(
         grants.rows.push(row(
             "Protected reads",
             State::Enforcing,
-            "never granted under Aggressive, not even once: credential files (.env, .env.* and .envrc files, also ones created later, on Windows from the next command on; SSH, cloud and CLI tokens) and Corbanu's sign-in, vault, config and history stay unreadable to agent commands; switch to Permissive in /security to allow them",
+            "never granted under Aggressive, not even once: credential files (.env, .env.* and .envrc files, also ones created later, on Windows from the next command on; not .env.example, .env.sample or .env.template; SSH, cloud and CLI tokens) and Corbanu's sign-in, vault, config and history stay unreadable to agent commands; switch to Permissive in /security to allow them. On Linux a command is stopped when such a file appears while it runs; a process already waiting for that file can read it in the moment before the stop",
             "resolved: level",
         ));
         grants.rows.push(row(
-            "Agent settings",
+            "Grant once",
             State::Enforcing,
-            "always read-only under Aggressive, even with Grant once: the project's .codex and .agents (they set agent policy and can run code later)",
+            super::aggressive::GRANT_ONCE_LIFTS,
             "resolved: level",
         ));
     }

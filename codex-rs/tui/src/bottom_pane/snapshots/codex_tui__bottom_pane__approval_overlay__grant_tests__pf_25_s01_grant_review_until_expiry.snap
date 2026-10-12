@@ -4,11 +4,14 @@ expression: "render(&view, 100)"
 ---
 
  Grant this command?
- Under Aggressive an approval never lifts the write protections (shell and git startup files, git
- hooks and config outside the project's .git). This grant lets exactly this command run without
- them; a file written this way can run code later, outside the sandbox. Credential files and the
- Corbanu home stay unreadable, and Corbanu's own files and the project's .git, .codex and .agents
- read-only: that is never granted under Aggressive.
+ Under Aggressive, Grant once lets one command write your shell and git start-up files (such
+ as .zshrc, .profile, .gitconfig, .config/git and .local/bin), and only where Aggressive lets
+ commands write: the current folder, so it only matters when that folder holds them (for example,
+ Corbanu runs in your home folder). Nothing else changes: credential files and the Corbanu home
+ stay unreadable; Corbanu's own files and the project's .git, .codex and .agents stay read-only;
+ other folders and the network stay closed.
+ An approval alone never lifts this. A start-up file written this way runs code later, outside
+ the sandbox.
 
    Agent       human:human → agent:019a0000-0000-7000-8000-000000000001
    Session     019a0000-0000-7000-8000-000000000001

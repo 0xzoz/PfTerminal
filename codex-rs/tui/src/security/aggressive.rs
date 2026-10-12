@@ -21,9 +21,10 @@ use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::permissions::CREDENTIAL_FILE_NAME_PATTERNS;
 use codex_protocol::permissions::ReadDenyMatcher;
-use codex_protocol::permissions::credential_entry_problem;
 use codex_protocol::permissions::credential_file_globs;
+use codex_protocol::permissions::credential_file_names_shown;
 use codex_protocol::permissions::is_credential_file_name;
+use codex_protocol::permissions::unsafe_credential_entry_message;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::shell_environment::create_env_from_vars;
 
@@ -44,7 +45,7 @@ const SECRET_ENV_PATTERNS: [&str; 4] = ["*VAULT*", "*PASSWORD*", "*PASSPHRASE*",
 pub(crate) const ROWS: [(&str, &str); 6] = [
     (
         "Sandbox",
-        "write only in the current folder (where the Corbanu home and the nested-launch registry stay read-only): no extra writable folders, no /tmp or $TMPDIR; approved commands stay inside it too; escalation and permission-request tools are off; the project's .codex and .agents stay read-only, even with Grant once; reading credential files (.env, .env.* and .envrc files, also ones created later, on Windows from the next command on; SSH, cloud and CLI tokens) or Corbanu's sign-in, vault, config and history is denied to agent commands and is never granted, not even once (switch to Permissive in /security to allow it)",
+        "write only in the current folder (where the Corbanu home and the nested-launch registry stay read-only): no extra writable folders, no /tmp or $TMPDIR; approved commands stay inside it too; escalation and permission-request tools are off; the project's .git, .codex and .agents stay read-only, even with Grant once (it only lets one command write your shell and git start-up files, where Aggressive lets commands write); reading credential files (.env, .env.* and .envrc files, also ones created later, on Windows from the next command on; not .env.example, .env.sample or .env.template; SSH, cloud and CLI tokens) or Corbanu's sign-in, vault, config and history is denied to agent commands and is never granted, not even once (switch to Permissive in /security to allow it); on Linux a command is stopped when such a file appears while it runs, and a process already waiting for that file can read it in the moment before the stop; a credential file that is a link must be replaced with a regular file or moved out of the folder",
     ),
     (
         "Approvals",
@@ -61,6 +62,13 @@ pub(crate) const ROWS: [(&str, &str); 6] = [
         "spawned agents get the same values; custom roles that would change them are refused at start; Claude panes are refused because Claude Code runs outside the sandbox, unless contained_external_agents and secretless_agent_launch run them in it, asking you before every command, file edit and web request (reading files stays automatic) (Claude Code sign-in still runs)",
     ),
 ];
+
+/// #442 (Travis, 2026-10-12): what "Grant once" lifts under Aggressive, and
+/// what it never does, wherever it is described (grant review, inspector).
+/// The real profile writes only in the current folder, and there the
+/// project's `.git` is read-only whatever the grant; `.codex` and `.agents`
+/// are never lifted either; so a grant can only reach the start-up files.
+pub(crate) const GRANT_ONCE_LIFTS: &str = "lets one command write your shell and git start-up files (such as .zshrc, .profile, .gitconfig, .config/git and .local/bin), and only where Aggressive lets commands write: the current folder, so it only matters when that folder holds them (for example, Corbanu runs in your home folder). Nothing else changes: credential files and the Corbanu home stay unreadable; Corbanu's own files and the project's .git, .codex and .agents stay read-only; other folders and the network stay closed.";
 
 /// Not checked by [`verify`]: the person's own config may keep it off.
 pub(crate) const MODEL_KEYS_LABEL: &str = "Model keys";
@@ -469,7 +477,7 @@ fn verify_credential_names(
     if !probes_denied || expected.iter().any(|glob| !globs.contains(glob)) {
         failures.push(format!(
             "Sandbox: credential files created later ({}) would be readable to agent commands",
-            CREDENTIAL_FILE_NAME_PATTERNS.join(", ")
+            credential_file_names_shown()
         ));
     }
     failures.extend(unsafe_credential_entries(cwd));
@@ -536,21 +544,10 @@ fn unsafe_credential_entries(cwd: &Path) -> Vec<String> {
             if metadata.is_dir() {
                 pending.push(path);
             } else if is_credential_file_name(&entry.file_name())
-                && let Some(problem) = credential_entry_problem(&metadata)
+                && let Some(message) = unsafe_credential_entry_message(&path, &metadata)
             {
-                let target = std::fs::read_link(&path)
-                    .map(|target| {
-                        let target = folder.join(target);
-                        format!(
-                            "; anything written to it went to {}, so check or delete that file too",
-                            target.display()
-                        )
-                    })
-                    .unwrap_or_default();
-                problems.push(format!(
-                    "Sandbox: the credential file {} {problem}, so what is written to it could be read under another name; remove or rename it{target}",
-                    path.display()
-                ));
+                // #442 (Travis, 2026-10-12): it names the entry and the fix.
+                problems.push(format!("Sandbox: {message}"));
             }
         }
     }

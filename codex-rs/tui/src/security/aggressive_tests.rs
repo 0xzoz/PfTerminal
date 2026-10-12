@@ -875,7 +875,7 @@ async fn issue_442_launch_check_requires_credential_names() {
     assert_eq!(
         verify(&config, true, &origin),
         vec![
-            "Sandbox: credential files created later (.env, .env.*, .envrc) would be readable to agent commands"
+            "Sandbox: credential files created later (.env, .env.* (except .env.example, .env.sample and .env.template) and .envrc) would be readable to agent commands"
                 .to_string()
         ]
     );
@@ -1034,5 +1034,73 @@ async fn issue_442_launch_check_names_unsafe_credential_files() {
         failures[0].contains(".env.hard has other hard links"),
         "{failures:?}"
     );
-    assert!(failures[1].contains(".envrc is a link,"), "{failures:?}");
+    // #442 (Travis, 2026-10-12): the refusal names the link, its target and
+    // exactly how to fix it.
+    assert!(
+        failures[1].contains(&format!(
+            "{} is a link to {}",
+            work.join("app/.envrc").display(),
+            work.join("app/../notes.txt").display()
+        )),
+        "{failures:?}"
+    );
+    assert!(
+        failures[1].contains("replace the link with a regular file"),
+        "{failures:?}"
+    );
+    assert!(
+        failures[1].contains("or move it out of the workspace"),
+        "{failures:?}"
+    );
+    assert!(
+        failures[0].contains("replace it with a regular copy"),
+        "{failures:?}"
+    );
+}
+
+/// #442 (Travis, 2026-10-12): `.env.example`, `.env.sample` and
+/// `.env.template` are not credential files: the launch check accepts them
+/// as links, and the profile leaves them readable on every system.
+#[cfg(unix)]
+#[tokio::test]
+async fn issue_442_credential_templates_are_exempt() {
+    let cwd = tempfile::tempdir().unwrap();
+    let work = cwd.path().canonicalize().unwrap();
+    std::fs::write(work.join("notes.txt"), "").unwrap();
+    std::os::unix::fs::symlink("notes.txt", work.join(".env.example")).unwrap();
+    std::os::unix::fs::symlink("notes.txt", work.join(".ENV.Template")).unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let config = load(home.path(), &work, "").await;
+    let origin = config.codex_home.to_path_buf();
+    assert_eq!(verify(&config, true, &origin), Vec::<String>::new());
+    let matcher = codex_protocol::permissions::ReadDenyMatcher::new(
+        &config.permissions.file_system_sandbox_policy(),
+        &work,
+    )
+    .expect("deny rules");
+    for template in [".env.example", "app/.env.sample", ".ENV.Template"] {
+        assert!(!matcher.is_read_denied(&work.join(template)), "{template}");
+    }
+    for credential in [".env", "app/.env.local", ".envrc"] {
+        assert!(
+            matcher.is_read_denied(&work.join(credential)),
+            "{credential}"
+        );
+    }
+    // The real Aggressive profile under Seatbelt: a checkout or scaffold can
+    // write a template, and the person's `.env` stays unreadable.
+    #[cfg(target_os = "macos")]
+    {
+        std::fs::write(work.join(".env"), "API_KEY=dummy-442-person").unwrap();
+        std::fs::write(work.join("notes.txt"), "TEMPLATE_KEY=").unwrap();
+        let out = seatbelt_run(
+            &config,
+            "cat .env.example; echo example=$?; printf x > .env.sample; echo sample=$?; \
+             cat .env; echo env=$?; printf x > .env.local; echo local=$?",
+        );
+        assert!(!out.contains("dummy-442"), "{out}");
+        for line in ["TEMPLATE_KEY=example=0", "sample=0", "env=1", "local=1"] {
+            assert!(out.contains(line), "{line} not in {out}");
+        }
+    }
 }

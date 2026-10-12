@@ -199,7 +199,55 @@ fn unsafe_credential_entries_refuse_the_command() {
         };
         assert!(refusal.contains(reason), "{refusal}");
         assert!(refused_message(&refusal).starts_with("Operation not permitted"));
+        // #442 (Travis, 2026-10-12): it names the entry and how to fix it.
+        assert!(
+            refusal.contains(&work.join("app").display().to_string()),
+            "{refusal}"
+        );
+        assert!(
+            refusal.contains("or move it out of the workspace"),
+            "{refusal}"
+        );
+        if reason == "is a link" {
+            assert!(
+                refusal.contains("replace the link with a regular file"),
+                "{refusal}"
+            );
+            assert!(refusal.contains(" to "), "{refusal}");
+        }
     }
+}
+
+/// #442 (Travis, 2026-10-12): `.env.example`, `.env.sample` and
+/// `.env.template` (any case) are not credential files: existing ones are
+/// not hidden, links with those names do not refuse the command, and one
+/// created while it runs does not stop it. Another credential name still does.
+#[test]
+fn credential_templates_are_neither_hidden_nor_stop_the_command() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = root(&dir);
+    std::fs::write(work.join(".env.example"), "API_KEY=example").unwrap();
+    std::fs::write(work.join(".ENV.SAMPLE"), "API_KEY=sample").unwrap();
+    std::fs::write(work.join("notes"), "").unwrap();
+    std::os::unix::fs::symlink("notes", work.join(".env.template")).unwrap();
+    let policy = deny_globs(credential_file_globs(&work.to_string_lossy()));
+    let watcher = CredentialWatcher::for_policy(&policy, &work)
+        .unwrap()
+        .unwrap();
+    assert_eq!(watcher.existing_files(), &[] as &[std::path::PathBuf]);
+    let mut child = sleeper();
+    let monitor = watcher.start(child.id() as libc::pid_t, &[]);
+    std::fs::create_dir(work.join("app")).unwrap();
+    std::fs::write(work.join("app/.Env.Template"), "").unwrap();
+    std::fs::write(work.join(".env.sample"), "").unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(child.try_wait().unwrap(), None);
+    std::fs::write(work.join("app/.env.example.local"), "API_KEY=dummy").unwrap();
+    assert!(killed(&mut child));
+    assert_eq!(
+        monitor.stop(),
+        Some(work.join("app/.env.example.local").display().to_string())
+    );
 }
 
 /// Folders with a credential name (a `.env` virtualenv) and short-lived
