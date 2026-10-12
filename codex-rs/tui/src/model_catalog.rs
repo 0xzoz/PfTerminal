@@ -199,10 +199,16 @@ impl ModelCatalog {
     }
 
     /// Sets the models offered for `runtime_provider_id` beyond its own list:
-    /// the ones added by an earlier call are removed, then `presets` are
+    /// the ones added by an earlier call are removed (except `current_model`,
+    /// the one the session is on, which stays as it was), then `presets` are
     /// added as models of that provider, skipping models the catalog already
     /// lists for it. They never become the default.
-    pub(crate) fn set_provider_models(&self, runtime_provider_id: &str, presets: Vec<ModelPreset>) {
+    pub(crate) fn set_provider_models(
+        &self,
+        runtime_provider_id: &str,
+        presets: Vec<ModelPreset>,
+        current_model: Option<&str>,
+    ) {
         let mut added = self
             .provider_model_ids
             .write()
@@ -212,8 +218,11 @@ impl ModelCatalog {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let previous = added.remove(runtime_provider_id).unwrap_or_default();
-        models.retain(|preset| !previous.contains(&preset.id));
-        let mut ids = Vec::new();
+        let kept = current_model
+            .map(|model| format!("{runtime_provider_id}:{model}"))
+            .filter(|id| previous.contains(id));
+        models.retain(|preset| !previous.contains(&preset.id) || Some(&preset.id) == kept.as_ref());
+        let mut ids = kept.into_iter().collect::<Vec<_>>();
         for mut preset in presets {
             if models.iter().any(|listed| {
                 listed.model == preset.model

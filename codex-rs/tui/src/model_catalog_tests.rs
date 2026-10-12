@@ -197,8 +197,8 @@ fn provider_models_are_added_once_with_exact_identity_and_never_as_default() {
     extra.is_default = true;
     let added = vec![preset("openai.gpt-5.5", /*provider_id*/ None), extra];
 
-    catalog.set_provider_models("amazon-bedrock", added.clone());
-    catalog.set_provider_models("amazon-bedrock", added);
+    catalog.set_provider_models("amazon-bedrock", added.clone(), /*current_model*/ None);
+    catalog.set_provider_models("amazon-bedrock", added, /*current_model*/ None);
 
     let models = catalog.try_list_models().unwrap();
     assert_eq!(models.len(), 3);
@@ -207,8 +207,24 @@ fn provider_models_are_added_once_with_exact_identity_and_never_as_default() {
     assert_eq!(models[2].provider_id.as_deref(), Some("amazon-bedrock"));
     assert!(!models[2].is_default);
 
-    // Setting none removes only the ones added this way.
-    catalog.set_provider_models("amazon-bedrock", Vec::new());
+    // Setting none removes only the ones added this way, except the model
+    // the session is on.
+    catalog.set_provider_models("amazon-bedrock", Vec::new(), Some("openai.gpt-5.4"));
+    let ids = catalog
+        .try_list_models()
+        .unwrap()
+        .into_iter()
+        .map(|preset| preset.id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        vec![
+            "openai.gpt-5.5",
+            "glm-5.3-flash",
+            "amazon-bedrock:openai.gpt-5.4"
+        ]
+    );
+    catalog.set_provider_models("amazon-bedrock", Vec::new(), /*current_model*/ None);
     let ids = catalog
         .try_list_models()
         .unwrap()

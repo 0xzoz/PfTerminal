@@ -193,17 +193,22 @@ async fn named_bedrock_account_offers_bedrock_models() {
 
     // The session switches to one of them; removing the last account then
     // withdraws the others but keeps the model the session is on.
+    // (As the model picker does: provider in the config, model in the chat
+    // widget; `config.model` keeps the model the session started with.)
     app.config.model_provider_id = AMAZON_BEDROCK_PROVIDER_ID.to_string();
-    app.config.model = Some(codex_model_provider_info::AMAZON_BEDROCK_GPT_5_4_MODEL_ID.to_string());
+    app.chat_widget
+        .set_model(codex_model_provider_info::AMAZON_BEDROCK_GPT_5_4_MODEL_ID);
     vault
         .remove_provider_account(AMAZON_BEDROCK_PROVIDER_ID, &name("work"))
         .expect("remove account");
     check(&mut app);
+    let kept = bedrock_models(&app);
     assert_eq!(
-        bedrock_models(&app)
-            .into_iter()
-            .map(|preset| preset.model)
+        kept.iter()
+            .map(|preset| preset.model.as_str())
             .collect::<Vec<_>>(),
-        vec![codex_model_provider_info::AMAZON_BEDROCK_GPT_5_4_MODEL_ID.to_string()]
+        vec![codex_model_provider_info::AMAZON_BEDROCK_GPT_5_4_MODEL_ID]
     );
+    // It keeps its Bedrock metadata.
+    assert!(!kept[0].supported_reasoning_efforts.is_empty(), "{kept:?}");
 }

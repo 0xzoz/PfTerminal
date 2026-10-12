@@ -372,12 +372,6 @@ pub(crate) async fn apply_requested_spawn_agent_model_overrides(
             .list_models(RefreshStrategy::Offline, config.http_client_factory())
             .await;
         let selected_model_name = find_spawn_agent_model_name(&available_models, requested_model)?;
-        let selected_model_info = crate::model_info_for_provider::model_info_for_config(
-            &session.services.models_manager,
-            &selected_model_name,
-            config,
-        )
-        .await;
 
         config.model = Some(selected_model_name.clone());
         // A model switch must not silently keep the parent's provider when that provider cannot
@@ -405,6 +399,13 @@ pub(crate) async fn apply_requested_spawn_agent_model_overrides(
             config.model_provider_id = corrected.to_string();
             config.model_provider = info;
         }
+        // The child's provider is final now (#572: Bedrock metadata).
+        let selected_model_info = crate::model_info_for_provider::model_info_for_config(
+            &session.services.models_manager,
+            &selected_model_name,
+            config,
+        )
+        .await;
         if let Some(reasoning_effort) = requested_reasoning_effort {
             validate_spawn_agent_reasoning_effort(
                 &selected_model_name,

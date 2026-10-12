@@ -100,10 +100,12 @@ pub(super) fn holds_named_bedrock_account(
     )
 }
 
-/// Offers Bedrock's models (or withdraws the ones offered earlier).
+/// Offers Bedrock's models (or withdraws the ones offered earlier, except
+/// `current_model`, the Bedrock model the session is on).
 pub(super) fn apply_named_bedrock_models(
     catalog: &crate::model_catalog::ModelCatalog,
     offered: bool,
+    current_model: Option<&str>,
 ) {
     catalog.set_provider_models(
         codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID,
@@ -112,12 +114,13 @@ pub(super) fn apply_named_bedrock_models(
         } else {
             Vec::new()
         },
+        current_model,
     );
 }
 
 impl App {
-    /// Applies the newest named-Bedrock-account check (#572) and puts the
-    /// current model back if withdrawing Bedrock's models removed it.
+    /// Applies the newest named-Bedrock-account check (#572); withdrawing
+    /// Bedrock's models keeps the one the session is on.
     pub(super) fn named_bedrock_account_checked(&mut self, generation: u64, offered: Option<bool>) {
         let Some(offered) = offered else {
             return;
@@ -128,8 +131,11 @@ impl App {
         {
             return;
         }
-        apply_named_bedrock_models(&self.model_catalog, offered);
-        sync_provider_manager_model_policy(&self.model_catalog, &self.config);
+        let on_bedrock =
+            self.config.model_provider_id == codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
+        let current_model = on_bedrock.then(|| self.chat_widget.current_model().to_string());
+        apply_named_bedrock_models(&self.model_catalog, offered, current_model.as_deref());
+        self.model_catalog.refresh_provider_policy();
     }
 
     pub(super) fn reusable_provider_status_host(
