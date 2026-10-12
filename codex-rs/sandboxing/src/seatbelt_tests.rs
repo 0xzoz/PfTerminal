@@ -2820,7 +2820,10 @@ fn seatbelt_grants_writable_roots_at_their_pinned_location() {
     std::os::unix::fs::symlink(&outside, &target).expect("link");
     let args = seatbelt_args(&policy, &workspace, vec!["/bin/true".to_string()]);
     let write = generated_clauses(&args, "WRITABLE_ROOT");
-    assert!(clauses_allow(&write, &target.join("file")));
+    assert_eq!(
+        write.iter().map(|(root, _)| root.clone()).collect::<Vec<_>>(),
+        vec![target.clone()]
+    );
     assert!(!clauses_allow(&write, &outside.join("file")));
     let stdout = run_in_seatbelt(&policy, &workspace, "echo x > target/file; echo wrote=$?");
     assert!(stdout.contains("wrote=1"), "{stdout}");
