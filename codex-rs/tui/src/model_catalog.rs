@@ -181,6 +181,35 @@ impl ModelCatalog {
         }
     }
 
+    /// Adds `presets` as models of `runtime_provider_id`, skipping models
+    /// the catalog already lists for it. They never become the default.
+    pub(crate) fn include_provider_models(
+        &self,
+        runtime_provider_id: &str,
+        presets: Vec<ModelPreset>,
+    ) {
+        let mut models = self
+            .models
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for mut preset in presets {
+            if models.iter().any(|listed| {
+                listed.model == preset.model
+                    && listed
+                        .provider_id
+                        .as_deref()
+                        .or_else(|| canonical_catalog_provider(&listed.model))
+                        == Some(runtime_provider_id)
+            }) {
+                continue;
+            }
+            preset.id = format!("{runtime_provider_id}:{}", preset.model);
+            preset.provider_id = Some(runtime_provider_id.to_string());
+            preset.is_default = false;
+            models.push(preset);
+        }
+    }
+
     pub(crate) fn preset_is_selectable(&self, preset: &ModelPreset) -> bool {
         self.provider_policy()
             .is_none_or(|policy| policy.preset_is_selectable(preset))

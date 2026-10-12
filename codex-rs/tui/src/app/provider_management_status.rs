@@ -46,7 +46,40 @@ fn sync_provider_manager_model_policy(
         config.model.as_deref(),
         &config.model_provider_id,
     );
+    include_named_bedrock_models(catalog, config);
     catalog.refresh_provider_policy();
+}
+
+/// PF-84-S06 (#572): Bedrock's models are listed for a session on Bedrock
+/// only, because its default account has no setup in the TUI. A named
+/// Bedrock account (an AWS profile) can be chosen from a session on another
+/// provider (`/providers` → *Use for this session*, `--account
+/// amazon-bedrock:<name>` or `[provider_accounts]`), so while the vault holds
+/// one, `/model` offers Bedrock's models too.
+pub(super) fn include_named_bedrock_models(
+    catalog: &crate::model_catalog::ModelCatalog,
+    config: &crate::legacy_core::config::Config,
+) {
+    use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
+    if !config
+        .features
+        .enabled(codex_features::Feature::NamedAccounts)
+        || !config
+            .model_providers
+            .get(AMAZON_BEDROCK_PROVIDER_ID)
+            .is_some_and(codex_model_provider_info::ModelProviderInfo::is_amazon_bedrock)
+        || !crate::provider_named_accounts::holds_named_account(
+            &config.codex_home,
+            AMAZON_BEDROCK_PROVIDER_ID,
+            codex_vault::ProviderAccountKind::AwsProfile,
+        )
+    {
+        return;
+    }
+    catalog.include_provider_models(
+        AMAZON_BEDROCK_PROVIDER_ID,
+        codex_model_provider::amazon_bedrock_model_presets(),
+    );
 }
 
 impl App {

@@ -112,6 +112,10 @@ request; Corbanu never falls back to another profile. The `default` account
 keeps today's order (managed key, then `AWS_BEARER_TOKEN_BEDROCK`, then the
 AWS SDK chain).
 
+While the vault holds a named Bedrock account, `/model` in a session on
+another provider also offers Bedrock's models, so an account chosen with
+_Use for this session_ (or `--account amazon-bedrock:<name>`) can be reached.
+
 ## OpenAI: ChatGPT and API-key sign-in accounts
 
 A named OpenAI account holds its own sign-in, ChatGPT or OpenAI API key, in the

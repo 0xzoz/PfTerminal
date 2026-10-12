@@ -202,6 +202,12 @@ impl App {
             Ok(message) => self.chat_widget.add_info_message(message, /*hint*/ None),
             Err(message) => self.chat_widget.add_error_message(message),
         }
+        // #572: a Bedrock account added here makes Bedrock reachable.
+        super::provider_management_status::include_named_bedrock_models(
+            &self.model_catalog,
+            &self.config,
+        );
+        self.model_catalog.refresh_provider_policy();
         self.schedule_provider_manager_refresh();
     }
 

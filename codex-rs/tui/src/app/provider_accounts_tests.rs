@@ -118,3 +118,60 @@ async fn a_default_set_by_a_higher_layer_is_reported() {
         .expect_err("outranked");
     assert!(error.contains("another config layer"), "{error}");
 }
+
+/// #572: with a named Bedrock account (an AWS profile) in the vault, a
+/// session on another provider is offered Bedrock's models in `/model`, so an
+/// account chosen with *Use for this session* is reachable. Without one, or
+/// with the feature off, Bedrock stays out of the list as before.
+#[tokio::test]
+async fn named_bedrock_account_offers_bedrock_models() {
+    use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
+    let bedrock_models = |app: &App| {
+        app.model_catalog
+            .try_list_models()
+            .unwrap()
+            .into_iter()
+            .filter(|preset| preset.provider_id.as_deref() == Some(AMAZON_BEDROCK_PROVIDER_ID))
+            .map(|preset| preset.model)
+            .collect::<Vec<_>>()
+    };
+    let (app, home) = app_with_named_accounts("").await;
+    super::super::provider_management_status::include_named_bedrock_models(
+        &app.model_catalog,
+        &app.config,
+    );
+    assert_eq!(bedrock_models(&app), Vec::<String>::new());
+
+    codex_vault::Vault::new(home.path().to_path_buf())
+        .write_provider_account(
+            AMAZON_BEDROCK_PROVIDER_ID,
+            &name("work"),
+            codex_vault::ProviderAccountKind::AwsProfile,
+            "corp-dev",
+        )
+        .expect("write account");
+    let mut feature_off = app.config.clone();
+    feature_off
+        .features
+        .disable(codex_features::Feature::NamedAccounts)
+        .expect("named accounts can be turned off");
+    super::super::provider_management_status::include_named_bedrock_models(
+        &app.model_catalog,
+        &feature_off,
+    );
+    assert_eq!(bedrock_models(&app), Vec::<String>::new());
+
+    super::super::provider_management_status::include_named_bedrock_models(
+        &app.model_catalog,
+        &app.config,
+    );
+    let offered = bedrock_models(&app);
+    assert!(
+        offered.contains(&codex_model_provider_info::AMAZON_BEDROCK_GPT_5_5_MODEL_ID.to_string()),
+        "{offered:?}"
+    );
+    assert!(
+        app.model_catalog
+            .provider_is_selectable(AMAZON_BEDROCK_PROVIDER_ID, &offered[0])
+    );
+}

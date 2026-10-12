@@ -7,6 +7,7 @@ mod models_endpoint;
 mod provider;
 
 pub use account_check::selected_account_error;
+pub use amazon_bedrock::amazon_bedrock_model_presets;
 pub use amazon_bedrock::is_supported_amazon_bedrock_region;
 pub use auth::AgentIdentitySessionFallback;
 pub use auth::ProviderApiKey;
