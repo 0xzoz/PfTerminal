@@ -27,7 +27,9 @@ use std::process::Command;
 use crate::linux_run_main::synthetic_mount_registry_root;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result;
+use codex_protocol::permissions::PinnedWritableRoot;
 use codex_protocol::permissions::is_protected_metadata_name;
+use codex_protocol::permissions::real_location;
 use codex_protocol::protocol::FileSystemAccessMode;
 use codex_protocol::protocol::FileSystemPath;
 use codex_protocol::protocol::FileSystemSandboxPolicy;
@@ -55,6 +57,54 @@ const LINUX_PLATFORM_DEFAULT_READ_ROOTS: &[&str] = &[
 ];
 
 const MAX_UNREADABLE_GLOB_MATCHES: usize = 8192;
+
+/// #536: the writable roots' real locations, pinned by the caller when the
+/// session first saw them (`--pinned-writable-roots`). Set once per helper
+/// process, which runs one command.
+static PINNED_WRITABLE_ROOTS: std::sync::OnceLock<Vec<PinnedWritableRoot>> =
+    std::sync::OnceLock::new();
+
+pub(crate) fn set_pinned_writable_roots(pinned: Vec<PinnedWritableRoot>) {
+    let _ = PINNED_WRITABLE_ROOTS.set(pinned);
+}
+
+/// #536: a writable root to bind, opened at its pinned real location and
+/// checked to be there: bound with `--bind-fd`, bubblewrap mounts this very
+/// folder (and fails if it is swapped meanwhile), not whatever the root's
+/// path leads to by then.
+fn open_pinned_writable_root(
+    root: &Path,
+    mount_root: &Path,
+    pinned: &PinnedWritableRoot,
+) -> Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let refused = |now: &Path| {
+        CodexErr::UnsupportedOperation(format!(
+            "Refused to run the command: the writable folder `{}` now leads to `{}`, but it \
+             led to `{}` when it was checked. A link made during the session cannot move write \
+             access. Remove the link (or restart Corbanu if you made it on purpose).",
+            root.display(),
+            now.display(),
+            pinned.real.display(),
+        ))
+    };
+    for spelled in [root, mount_root] {
+        let now = real_location(spelled);
+        if now != pinned.real {
+            return Err(refused(&now));
+        }
+    }
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_PATH)
+        .open(&pinned.real)?;
+    let opened = fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))?;
+    if opened != pinned.real {
+        return Err(refused(&opened));
+    }
+    Ok(file)
+}
 
 /// Options that control how bubblewrap is invoked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -705,9 +755,47 @@ fn create_filesystem_args(
             append_mount_target_parent_dir_args(&mut bwrap_args.args, mount_root, masking_root);
         }
 
-        bwrap_args.args.push("--bind".to_string());
-        bwrap_args.args.push(path_to_string(mount_root));
-        bwrap_args.args.push(path_to_string(mount_root));
+        // #536: a root pinned by the caller is bound from the folder at its
+        // pinned real location, opened and checked here.
+        let pinned = match PINNED_WRITABLE_ROOTS.get() {
+            Some(pinned) => Some(
+                pinned
+                    .iter()
+                    .find(|pinned| pinned.root == writable_root.root)
+                    .ok_or_else(|| {
+                        CodexErr::UnsupportedOperation(format!(
+                            "Refused to run the command: the writable folder `{}` was not \
+                             checked before the run.",
+                            root.display()
+                        ))
+                    })?,
+            ),
+            None => None,
+        };
+        match pinned {
+            Some(pinned) => {
+                let file = open_pinned_writable_root(root, mount_root, pinned)?;
+                if crate::launcher::preferred_bwrap_supports_bind_fd() {
+                    // `--ro-bind-data` masks read the first preserved file
+                    // as `/dev/null`; keep it first.
+                    if bwrap_args.preserved_files.is_empty() {
+                        bwrap_args.preserved_files.push(File::open("/dev/null")?);
+                    }
+                    bwrap_args.args.push("--bind-fd".to_string());
+                    bwrap_args.args.push(file.as_raw_fd().to_string());
+                    bwrap_args.preserved_files.push(file);
+                } else {
+                    bwrap_args.args.push("--bind".to_string());
+                    bwrap_args.args.push(path_to_string(&pinned.real));
+                }
+                bwrap_args.args.push(path_to_string(mount_root));
+            }
+            None => {
+                bwrap_args.args.push("--bind".to_string());
+                bwrap_args.args.push(path_to_string(mount_root));
+                bwrap_args.args.push(path_to_string(mount_root));
+            }
+        }
         // #493: restore the minimal `/dev` (step 2) before the deny masks of
         // this pass and before deeper `/dev/*` writable roots (sorted later).
         let dev = Path::new("/dev");

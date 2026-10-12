@@ -1787,6 +1787,19 @@ pub struct WritableLinkIntoReadOnlyPath {
     pub read_only_path: AbsolutePathBuf,
 }
 
+/// Issue #536: a writable root with the real location it had when the
+/// session first saw it. Sandboxes grant writes there, not wherever the root
+/// leads by the time they are set up, so a link swapped in meanwhile grants
+/// nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PinnedWritableRoot {
+    /// The writable root as [`FileSystemSandboxPolicy::get_writable_roots_with_cwd`]
+    /// resolves it.
+    pub root: AbsolutePathBuf,
+    /// Its real location (see [`real_location`]).
+    pub real: PathBuf,
+}
+
 /// Issue #535: the roots (by index) reached through a link whose real
 /// location is, or lies inside, a read-only path of another root (protected
 /// metadata names count, also not created yet), with that path. A root

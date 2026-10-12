@@ -59,6 +59,33 @@ pub fn create_linux_sandbox_command_args_for_permission_profile(
     linux_cmd
 }
 
+/// The helper flag carrying the writable roots' pinned real locations
+/// (#536): the helper binds each root there, and refuses to run when the
+/// root no longer leads there.
+pub const PINNED_WRITABLE_ROOTS_FLAG: &str = "--pinned-writable-roots";
+
+/// Adds the pinned writable roots (#536) to helper arguments built by
+/// [`create_linux_sandbox_command_args_for_permission_profile`], before the
+/// command separator.
+pub fn insert_pinned_writable_roots_arg(
+    args: &mut Vec<String>,
+    pinned: &[codex_protocol::permissions::PinnedWritableRoot],
+) {
+    if pinned.is_empty() {
+        return;
+    }
+    let json = serde_json::to_string(pinned)
+        .unwrap_or_else(|err| panic!("failed to serialize pinned writable roots: {err}"));
+    let separator = args
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or(args.len());
+    args.splice(
+        separator..separator,
+        [PINNED_WRITABLE_ROOTS_FLAG.to_string(), json],
+    );
+}
+
 /// Converts the sandbox cwd and execution options into the CLI invocation for
 /// `codex-linux-sandbox`.
 #[cfg_attr(not(test), allow(dead_code))]

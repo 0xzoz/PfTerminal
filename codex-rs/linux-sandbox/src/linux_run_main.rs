@@ -133,6 +133,16 @@ pub struct LandlockCommand {
     #[arg(long = "proxy-route-spec", hide = true)]
     pub proxy_route_spec: Option<String>,
 
+    /// Internal (#536): the writable roots' real locations as the caller
+    /// pinned them; each root is bound there, and the command is refused
+    /// when a root no longer leads there.
+    #[arg(
+        long = "pinned-writable-roots",
+        hide = true,
+        value_parser = parse_pinned_writable_roots
+    )]
+    pub pinned_writable_roots: Option<PinnedWritableRoots>,
+
     /// When set, skip mounting a fresh `/proc` even though PID isolation is
     /// still enabled. This is primarily intended for restrictive container
     /// environments that deny `--proc /proc`.
@@ -160,6 +170,7 @@ pub fn run_main() -> ! {
         apply_seccomp_then_exec,
         allow_network_for_proxy,
         proxy_route_spec,
+        pinned_writable_roots,
         no_proc,
         command,
     } = LandlockCommand::parse();
@@ -215,6 +226,28 @@ pub fn run_main() -> ! {
             panic!("error applying Linux sandbox restrictions: {e:?}");
         }
         exec_or_panic(command);
+    }
+
+    if let Some(PinnedWritableRoots(pinned)) = pinned_writable_roots {
+        // #536: the legacy Landlock path opens each root by path when it
+        // applies its rules; check that each still leads where it was pinned.
+        if use_legacy_landlock
+            && let Some(changed) = pinned.iter().find(|pinned| {
+                pinned.root.as_path().exists()
+                    && codex_protocol::permissions::real_location(pinned.root.as_path())
+                        != pinned.real
+            })
+        {
+            eprintln!(
+                "Refused to run the command: the writable folder `{}` no longer leads to `{}`, \
+                 where it led when it was checked. A link made during the session cannot move \
+                 write access.",
+                changed.root.display(),
+                changed.real.display()
+            );
+            std::process::exit(1);
+        }
+        crate::bwrap::set_pinned_writable_roots(pinned);
     }
 
     if !use_legacy_landlock {
@@ -282,6 +315,16 @@ impl fmt::Display for ResolvePermissionProfileError {
             Self::MissingConfiguration => write!(f, "missing permission profile configuration"),
         }
     }
+}
+
+/// The `--pinned-writable-roots` value (#536).
+#[derive(Debug, Clone)]
+pub struct PinnedWritableRoots(pub Vec<codex_protocol::permissions::PinnedWritableRoot>);
+
+fn parse_pinned_writable_roots(value: &str) -> std::result::Result<PinnedWritableRoots, String> {
+    serde_json::from_str(value)
+        .map(PinnedWritableRoots)
+        .map_err(|err| format!("invalid pinned writable roots: {err}"))
 }
 
 fn parse_permission_profile(value: &str) -> std::result::Result<PermissionProfile, String> {

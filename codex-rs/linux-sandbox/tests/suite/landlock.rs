@@ -2037,7 +2037,10 @@ fn level_policies(
     vec![
         ("permissive", permissive),
         ("moderate", FileSystemSandboxPolicy::restricted(moderate)),
-        ("aggressive", FileSystemSandboxPolicy::restricted(aggressive)),
+        (
+            "aggressive",
+            FileSystemSandboxPolicy::restricted(aggressive),
+        ),
     ]
 }
 
@@ -2192,4 +2195,129 @@ async fn ordinary_roots_stay_writable_at_every_level() {
         }
     }
     std::fs::remove_file(&alias).unwrap();
+}
+
+/// #536 (Travis, 2026-10-12), real bubblewrap: at every level, Permissive
+/// included, a configured writable root that does not exist yet and is
+/// created by a command as a link elsewhere does not move write access
+/// there; the next command is refused and says why. Removing the link lets
+/// commands run again.
+#[tokio::test]
+async fn a_root_created_as_a_link_during_the_session_is_refused_at_every_level() {
+    if should_skip_bwrap_tests().await {
+        eprintln!("skipping bwrap test: bwrap sandbox prerequisites are unavailable");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    // Outside every writable root at every level (not in a temporary folder).
+    let outside = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let outside = outside.path().canonicalize().unwrap();
+    let denied = base.join("denied");
+    std::fs::write(&denied, "x").unwrap();
+    for level in ["permissive", "moderate", "aggressive"] {
+        let workspace = base.join(level).join("ws");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let target = workspace.join("target");
+        let (_, policy) = level_policies(&workspace, &[&target], &denied)
+            .into_iter()
+            .find(|(shape, _)| *shape == level)
+            .unwrap();
+        codex_sandboxing::writable_root_ledger::record_writable_roots(&policy, &workspace);
+        let made = run_level(
+            &workspace,
+            &policy,
+            &format!("ln -s '{}' target; echo link=$?", outside.display()),
+        )
+        .await;
+        assert!(made.stdout.text.contains("link=0"), "{level}: {made:?}");
+        let refused = run_cmd_result_with_permission_profile_for_cwd(
+            &["bash", "-c", "echo pwned > target/planted; echo wrote=$?"],
+            AbsolutePathBuf::from_absolute_path(&workspace).unwrap(),
+            PermissionProfile::from_runtime_permissions(&policy, NetworkSandboxPolicy::Restricted),
+            create_env_from_core_vars(),
+            LONG_TIMEOUT_MS,
+            /*use_legacy_landlock*/ false,
+        )
+        .await;
+        let err = match refused {
+            Err(err) => err.to_string(),
+            Ok(output) => panic!("{level}: not refused: {output:?}"),
+        };
+        assert!(
+            err.contains("Refused to run the command")
+                && err.contains(&target.display().to_string()),
+            "{level}: {err}"
+        );
+        assert!(!outside.join("planted").exists(), "{level}");
+        std::fs::remove_file(&target).unwrap();
+        let again = run_level(&workspace, &policy, "echo ok > file; echo ws=$?").await;
+        assert!(again.stdout.text.contains("ws=0"), "{level}: {again:?}");
+    }
+}
+
+/// #536, real bubblewrap: the helper binds a writable root from the folder
+/// the session pinned. A root swapped for a link after the check (between
+/// the sandbox manager and the helper) is refused, and nothing is written
+/// where the link leads.
+#[tokio::test]
+async fn the_helper_refuses_a_root_swapped_after_the_check() {
+    if should_skip_bwrap_tests().await {
+        eprintln!("skipping bwrap test: bwrap sandbox prerequisites are unavailable");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let workspace = base.join("ws");
+    let target = workspace.join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    let outside = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let outside = outside.path().canonicalize().unwrap();
+    let policy = FileSystemSandboxPolicy::restricted(vec![
+        FileSystemSandboxEntry {
+            path: FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            },
+            access: FileSystemAccessMode::Read,
+            missing_path_behavior: None,
+        },
+        FileSystemSandboxEntry {
+            path: FileSystemPath::Path {
+                path: AbsolutePathBuf::from_absolute_path(&target).unwrap(),
+            },
+            access: FileSystemAccessMode::Write,
+            missing_path_behavior: None,
+        },
+    ]);
+    let profile =
+        PermissionProfile::from_runtime_permissions(&policy, NetworkSandboxPolicy::Restricted);
+    codex_sandboxing::writable_root_ledger::record_writable_roots(&policy, &workspace);
+    let pinned =
+        codex_sandboxing::writable_root_ledger::check_writable_roots(&policy, &workspace).unwrap();
+    let mut args = codex_sandboxing::landlock::create_linux_sandbox_command_args_for_permission_profile(
+        vec![
+            "bash".to_string(),
+            "-c".to_string(),
+            "echo pwned > target/planted; echo wrote=$?".to_string(),
+        ],
+        &workspace,
+        &profile,
+        &workspace,
+        /*use_legacy_landlock*/ false,
+        /*allow_network_for_proxy*/ false,
+    );
+    codex_sandboxing::landlock::insert_pinned_writable_roots_arg(&mut args, &pinned);
+    // Swapped after the check, before the helper runs.
+    std::fs::rename(&target, workspace.join("moved")).unwrap();
+    std::os::unix::fs::symlink(&outside, &target).unwrap();
+    let output = std::process::Command::new(codex_linux_sandbox_exe())
+        .args(&args)
+        .current_dir(&workspace)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stdout}\n{stderr}");
+    assert!(stderr.contains("Refused to run the command"), "{stderr}");
+    assert!(!outside.join("planted").exists(), "{stdout}\n{stderr}");
 }

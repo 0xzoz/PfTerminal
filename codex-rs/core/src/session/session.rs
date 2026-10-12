@@ -884,12 +884,19 @@ impl Session {
                     }),
                 });
             }
+            let session_file_system_policy = session_configuration.file_system_sandbox_policy();
+            // Issue #536: where each writable root leads when the session
+            // starts; a command is refused once one leads elsewhere.
+            codex_sandboxing::writable_root_ledger::record_writable_roots(
+                &session_file_system_policy,
+                session_configuration.cwd().as_path(),
+            );
             // Issue #535: configured writable links into another root's
             // read-only path are left out of the sandbox; say so at launch.
             let excluded_writable_links =
                 crate::tools::writable_root_notices::excluded_writable_link_warnings(
                     thread_id,
-                    &session_configuration.file_system_sandbox_policy(),
+                    &session_file_system_policy,
                     session_configuration.cwd().as_path(),
                 );
             for message in config

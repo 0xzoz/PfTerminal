@@ -110,6 +110,29 @@ pub(crate) fn preferred_bwrap_supports_argv0() -> bool {
     }
 }
 
+/// #536: whether the bubblewrap that will run supports `--bind-fd` (added in
+/// bubblewrap 0.8.0; the bundled one has it), so a writable root can be bound
+/// from the folder this helper opened and checked.
+pub(crate) fn preferred_bwrap_supports_bind_fd() -> bool {
+    static SUPPORTS: OnceLock<bool> = OnceLock::new();
+    *SUPPORTS.get_or_init(|| match preferred_bwrap_launcher() {
+        BubblewrapLauncher::System(launcher) => {
+            match Command::new(launcher.program.as_path())
+                .arg("--help")
+                .output()
+            {
+                Ok(output) => {
+                    String::from_utf8_lossy(&output.stdout).contains("--bind-fd")
+                        || String::from_utf8_lossy(&output.stderr).contains("--bind-fd")
+                }
+                Err(_) => false,
+            }
+        }
+        BubblewrapLauncher::Bundled(_) => true,
+        BubblewrapLauncher::Unavailable => false,
+    })
+}
+
 fn system_bwrap_capabilities(system_bwrap_path: &Path) -> Option<SystemBwrapCapabilities> {
     // bubblewrap added `--argv0` in v0.9.0:
     // https://github.com/containers/bubblewrap/releases/tag/v0.9.0
