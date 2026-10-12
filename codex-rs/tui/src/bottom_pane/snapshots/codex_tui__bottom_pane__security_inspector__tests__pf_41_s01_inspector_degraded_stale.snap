@@ -41,12 +41,11 @@ Runtime controls
 Grants
   Held: none: no live policy for this session [observed: Core policy]
   [on] Protected reads: never granted under Aggressive, not even once: credential files
-      (.env, .env.* and .envrc files, also ones created later, on Windows from the next command on;
-      not .env.example, .env.sample or .env.template; SSH, cloud and CLI tokens) and Corbanu's sign-
-      in, vault, config and history stay unreadable to agent commands; switch to Permissive in /
-      security to allow them. On Linux a command is stopped when such a file appears while it runs;
-      a process already waiting for that file can read it in the moment before the stop [resolved:
-      level]
+      (.env, .env.* and .envrc files, also ones created later; not .env.example, .env.sample
+      or .env.template; SSH, cloud and CLI tokens) and Corbanu's sign-in, vault, config and history
+      stay unreadable to agent commands; switch to Permissive in /security to allow them. On Linux
+      and Windows a command is stopped when such a file appears while it runs; a process already
+      waiting for that file can read it in the moment before the stop [resolved: level]
   [on] Grant once: lets one command write files that run code later, which Aggressive otherwise
       keeps read-only, and only inside the current folder: git hooks and config kept outside a .git
       folder (a hooks folder set with core.hooksPath, such as Husky's .husky, or a git folder with

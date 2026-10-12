@@ -1,0 +1,248 @@
+//! #442 (Travis, 2026-10-12): the Windows credential watch. These tests run
+//! on every system (CI's Windows runners included); on Windows they use
+//! `ReadDirectoryChangesW`.
+
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+use std::time::Instant;
+
+use codex_protocol::permissions::FileSystemAccessMode;
+use codex_protocol::permissions::FileSystemPath;
+use codex_protocol::permissions::FileSystemSandboxEntry;
+use codex_protocol::permissions::FileSystemSandboxPolicy;
+use codex_protocol::permissions::credential_file_globs;
+use pretty_assertions::assert_eq;
+
+use super::*;
+
+/// The stated latency: the command is stopped within this of the file
+/// appearing.
+const LATENCY: Duration = Duration::from_secs(2);
+
+fn root(dir: &tempfile::TempDir) -> PathBuf {
+    dunce::canonicalize(dir.path()).unwrap()
+}
+
+fn policy(work: &Path) -> FileSystemSandboxPolicy {
+    FileSystemSandboxPolicy::restricted(
+        credential_file_globs(&work.to_string_lossy().replace('\\', "/"))
+            .into_iter()
+            .map(|pattern| {
+                FileSystemSandboxEntry::new(
+                    FileSystemPath::GlobPattern { pattern },
+                    FileSystemAccessMode::Deny,
+                )
+            })
+            .collect(),
+    )
+}
+
+/// A watch whose stop sets a flag.
+fn watch(work: &Path, known: &[PathBuf]) -> (CredentialWatch, Arc<AtomicBool>) {
+    let stopped = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&stopped);
+    let watch = CredentialWatch::start(
+        &policy(work),
+        work,
+        known,
+        Box::new(move || flag.store(true, Ordering::SeqCst)),
+    )
+    .expect("started")
+    .expect("credential globs");
+    // Let the backend settle before the test acts.
+    std::thread::sleep(Duration::from_millis(200));
+    (watch, stopped)
+}
+
+fn within(limit: Duration, done: impl Fn() -> bool) -> bool {
+    let deadline = Instant::now() + limit;
+    while Instant::now() < deadline {
+        if done() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    done()
+}
+
+#[test]
+fn credential_files_created_meanwhile_stop_the_command() {
+    for (folder, name) in [("", ".env"), ("app/deep", ".env.local"), ("x", ".ENVRC")] {
+        let dir = tempfile::tempdir().unwrap();
+        let work = root(&dir);
+        let (watch, stopped) = watch(&work, &[]);
+        std::fs::create_dir_all(work.join(folder)).unwrap();
+        std::fs::write(work.join(folder).join(name), "API_KEY=dummy").unwrap();
+        assert!(
+            within(LATENCY, || stopped.load(Ordering::SeqCst)),
+            "{folder}/{name}"
+        );
+        let found = watch.found().expect("found");
+        assert!(found.ends_with(name), "{found}");
+    }
+}
+
+#[test]
+fn a_folder_moved_in_with_a_credential_file_stops_the_command() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = root(&dir);
+    let work = base.join("work");
+    std::fs::create_dir_all(base.join("outside/pkg")).unwrap();
+    std::fs::create_dir(&work).unwrap();
+    std::fs::write(base.join("outside/pkg/.env"), "API_KEY=dummy").unwrap();
+    let (watch, stopped) = watch(&work, &[]);
+    std::fs::rename(base.join("outside/pkg"), work.join("pkg")).unwrap();
+    assert!(within(LATENCY, || stopped.load(Ordering::SeqCst)));
+    assert!(watch.found().expect("found").ends_with(".env"));
+}
+
+/// A denied `.env` replaced by a new file (an editor's save by rename) has
+/// the folder's ACL: it stops the command too.
+#[test]
+fn a_known_credential_file_replaced_stops_the_command() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = root(&dir);
+    std::fs::write(work.join(".env"), "API_KEY=old").unwrap();
+    let (watch, stopped) = watch(&work, &[work.join(".env")]);
+    std::fs::write(work.join("save.tmp"), "API_KEY=new").unwrap();
+    std::fs::rename(work.join("save.tmp"), work.join(".env")).unwrap();
+    assert!(within(LATENCY, || stopped.load(Ordering::SeqCst)));
+    assert!(watch.found().expect("found").ends_with(".env"));
+}
+
+/// Templates, other names and credential-named folders (a `.env`
+/// virtualenv) do not stop the command.
+#[test]
+fn templates_other_names_and_folders_do_not_stop_the_command() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = root(&dir);
+    let (watch, stopped) = watch(&work, &[]);
+    for name in [
+        ".env.example",
+        ".ENV.SAMPLE",
+        ".env.template",
+        "env",
+        "x.env",
+        ".environment",
+    ] {
+        std::fs::write(work.join(name), "").unwrap();
+    }
+    std::fs::create_dir_all(work.join(".env/Scripts")).unwrap();
+    std::fs::write(work.join(".env/Scripts/activate"), "").unwrap();
+    std::fs::create_dir_all(work.join("app")).unwrap();
+    std::fs::write(work.join("app/.Env.Template"), "").unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(!stopped.load(Ordering::SeqCst), "{:?}", watch.found());
+    assert_eq!(watch.found(), None);
+}
+
+/// A credential file the deny list does not hold refuses the command; one it
+/// holds (in any letter case on Windows) does not.
+#[test]
+fn an_unknown_credential_file_at_the_start_refuses_the_command() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = root(&dir);
+    std::fs::create_dir(work.join("app")).unwrap();
+    std::fs::write(work.join("app/.env.local"), "API_KEY=dummy").unwrap();
+    std::fs::write(work.join(".env.example"), "").unwrap();
+    let refused = CredentialWatch::start(&policy(&work), &work, &[], Box::new(|| {}));
+    let Err(refusal) = refused else {
+        panic!("not refused");
+    };
+    assert!(refusal.starts_with("Operation not permitted"), "{refusal}");
+    assert!(refusal.contains(".env.local"), "{refusal}");
+    assert!(refusal.contains("run it again"), "{refusal}");
+
+    let known = [work.join("app/.env.local")];
+    assert!(
+        CredentialWatch::start(&policy(&work), &work, &known, Box::new(|| {}))
+            .expect("started")
+            .is_some()
+    );
+}
+
+/// No credential globs, no watch.
+#[test]
+fn no_credential_globs_no_watch() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = root(&dir);
+    let none = FileSystemSandboxPolicy::restricted(Vec::new());
+    assert!(
+        CredentialWatch::start(&none, &work, &[], Box::new(|| {}))
+            .expect("started")
+            .is_none()
+    );
+    assert_eq!(credential_watch_roots(&none, &work), Vec::<PathBuf>::new());
+    assert_eq!(credential_watch_roots(&policy(&work), &work), vec![work]);
+}
+
+/// End to end with a real process: the stop ends it within the latency.
+#[test]
+fn a_running_process_is_stopped() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = root(&dir);
+    let mut command = if cfg!(windows) {
+        let mut command = std::process::Command::new("ping");
+        command.args(["-n", "60", "127.0.0.1"]);
+        command
+    } else {
+        let mut command = std::process::Command::new("sleep");
+        command.arg("60");
+        command
+    };
+    let child = Arc::new(Mutex::new(
+        command.stdout(std::process::Stdio::null()).spawn().unwrap(),
+    ));
+    let to_kill = Arc::clone(&child);
+    let watch = CredentialWatch::start(
+        &policy(&work),
+        &work,
+        &[],
+        Box::new(move || {
+            let _ = to_kill.lock().unwrap().kill();
+        }),
+    )
+    .unwrap()
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    let started = Instant::now();
+    std::fs::write(work.join(".env"), "API_KEY=dummy").unwrap();
+    assert!(within(LATENCY, || {
+        child.lock().unwrap().try_wait().unwrap().is_some()
+    }));
+    assert!(started.elapsed() < LATENCY);
+    assert!(stopped_message(&watch.found().unwrap()).contains("appeared while it ran"));
+}
+
+/// A person's own `**/.env.*` glob alone (not the whole credential rule)
+/// keeps covering the templates: one created meanwhile stops the command.
+#[test]
+fn own_env_star_glob_still_covers_templates() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = root(&dir);
+    let own = FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry::new(
+        FileSystemPath::GlobPattern {
+            pattern: format!("{}/**/.env.*", work.to_string_lossy().replace('\\', "/")),
+        },
+        FileSystemAccessMode::Deny,
+    )]);
+    let stopped = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&stopped);
+    let watch = CredentialWatch::start(
+        &own,
+        &work,
+        &[],
+        Box::new(move || flag.store(true, Ordering::SeqCst)),
+    )
+    .unwrap()
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    std::fs::write(work.join(".env.example"), "").unwrap();
+    assert!(within(LATENCY, || stopped.load(Ordering::SeqCst)));
+    assert!(watch.found().unwrap().ends_with(".env.example"));
+}

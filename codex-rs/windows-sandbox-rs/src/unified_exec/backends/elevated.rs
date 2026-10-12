@@ -1,6 +1,6 @@
 use super::windows_common::finish_driver_spawn;
 use super::windows_common::make_runner_resizer;
-use super::windows_common::start_runner_pipe_writer;
+use super::windows_common::start_runner_pipe_writer_from;
 use super::windows_common::start_runner_stdin_writer;
 use super::windows_common::start_runner_stdout_reader;
 use crate::identity::SandboxCreds;
@@ -152,6 +152,34 @@ pub(crate) async fn spawn_windows_sandbox_session_elevated_for_permission_profil
         proxy_settings_mode,
     )?;
 
+    // #442 (Travis, 2026-10-12): a credential file that appears while the
+    // command runs stops it, as on Linux. The watch starts before the runner;
+    // its stop is queued for the runner if it comes first.
+    let (outbound_tx, outbound_rx) = std::sync::mpsc::channel::<FramedMessage>();
+    let credential_watch = {
+        let outbound_tx = outbound_tx.clone();
+        let (file_system, _) = permission_profile.to_runtime_permissions();
+        let known: Vec<PathBuf> = deny_read_override
+            .paths()
+            .into_iter()
+            .map(AbsolutePathBuf::into_path_buf)
+            .collect();
+        crate::credential_watch::CredentialWatch::start(
+            &file_system,
+            cwd,
+            &known,
+            Box::new(move || {
+                let _ = outbound_tx.send(FramedMessage {
+                    version: IPC_PROTOCOL_VERSION,
+                    message: Message::Terminate {
+                        payload: EmptyPayload::default(),
+                    },
+                });
+            }),
+        )
+        .map_err(anyhow::Error::msg)?
+    };
+
     let sandbox_creds = elevated.sandbox_creds;
     let request = RunnerTransportRequest {
         permissions,
@@ -194,7 +222,7 @@ pub(crate) async fn spawn_windows_sandbox_session_elevated_for_permission_profil
     };
     let (exit_tx, exit_rx) = oneshot::channel::<i32>();
 
-    let outbound_tx = start_runner_pipe_writer(pipe_write);
+    start_runner_pipe_writer_from(pipe_write, outbound_rx);
     let writer_handle = start_runner_stdin_writer(writer_rx, outbound_tx.clone(), tty, stdin_open);
     let terminator = {
         let outbound_tx = outbound_tx.clone();
@@ -213,6 +241,7 @@ pub(crate) async fn spawn_windows_sandbox_session_elevated_for_permission_profil
         stdout_tx,
         stderr_rx.as_ref().map(|(tx, _rx)| tx.clone()),
         exit_tx,
+        credential_watch,
     );
 
     Ok(finish_driver_spawn(
