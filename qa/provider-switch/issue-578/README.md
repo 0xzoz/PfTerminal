@@ -16,11 +16,11 @@ These are macOS debug builds in a private tmux socket. Each run used a disposabl
 | --- | --- | --- |
 | [`tui-pane-before.txt`](tui-pane-before.txt) | `main` (`a6f30dad0f`, plus the unrelated #586 change) | Both later OpenAI turns fail with `404 … Item with id 'rs_202610121745…' not found … store is set to false` |
 | [`tui-pane-after-manual.txt`](tui-pane-after-manual.txt) | `fix/578-cross-provider-item-refs` at `72d4f573b1` | `openai-three` and `openai-four` are answered. A further switch back to GLM (`glm-five`) is answered too. |
-| [`tui-pane-after-video.txt`](tui-pane-after-video.txt) | final head `adaa2074df` (the SOP video) | `openai-three` and `openai-four` are answered |
+| [`tui-pane-after-video.txt`](tui-pane-after-video.txt) | `7b5bb6cb60` (the SOP video; an earlier take at `adaa2074df` is in the index too) | `openai-three` and `openai-four` are answered |
 
 - **Rollout:** in the manual run after the fix, every model output item records its producer (`openai` or `zai`).
 - **Recovery path:** no request needed the 404 retry; the log has no "not found".
-- **Video:** [issue-578-pf578-provider-switch-history-adaa2074df65-2026-10-12.mp4](https://github.com/CorbanuCore/CorbanuTerminal/releases/download/demos/issue-578-pf578-provider-switch-history-adaa2074df65-2026-10-12.mp4),
+- **Video:** [issue-578-pf578-provider-switch-history-7b5bb6cb6071-2026-10-12.mp4](https://github.com/CorbanuCore/CorbanuTerminal/releases/download/demos/issue-578-pf578-provider-switch-history-7b5bb6cb6071-2026-10-12.mp4),
   spec `qa/demos/specs/pf578-provider-switch-history.toml`.
 - **Leak scans:** the real OpenAI and Z.AI keys were searched for (whole key, first and last 16 characters) in every run directory and in the
   video run directory. Each scan found 0 hits.
