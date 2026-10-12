@@ -16,6 +16,7 @@ use crate::session::PreviousTurnSettings;
 use crate::session::session::SessionConfiguration;
 use crate::session::time_reminder::CurrentTimeReminderState;
 use crate::session_startup_prewarm::SessionStartupPrewarmHandle;
+use codex_protocol::protocol::AccountTokenUsage;
 use codex_protocol::protocol::RateLimitSnapshot;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TokenUsageInfo;
@@ -46,6 +47,9 @@ pub(crate) struct SessionState {
     /// Whether the latest model request was authorised by the `OPENAI_API_KEY`
     /// fallback; the notice is shown only when this turns on.
     openai_api_key_env_fallback_in_use: bool,
+    /// PF-84: provider-reported usage per (provider, named account), kept only
+    /// while named accounts are on. Names only, never credential material.
+    account_token_usage: Vec<AccountTokenUsage>,
 }
 
 impl SessionState {
@@ -79,6 +83,7 @@ impl SessionState {
             granted_permissions_by_environment_id: HashMap::new(),
             next_turn_is_first: true,
             openai_api_key_env_fallback_in_use: false,
+            account_token_usage: Vec::new(),
         }
     }
 
@@ -228,6 +233,27 @@ impl SessionState {
         &self,
     ) -> (Option<TokenUsageInfo>, Option<RateLimitSnapshot>) {
         (self.token_info(), self.latest_rate_limits.clone())
+    }
+
+    /// PF-84: adds one request's provider-reported usage to the account that
+    /// served it.
+    pub(crate) fn record_account_token_usage(
+        &mut self,
+        provider_id: &str,
+        account: &str,
+        usage: &TokenUsage,
+    ) {
+        AccountTokenUsage::accumulate(&mut self.account_token_usage, provider_id, account, usage);
+    }
+
+    /// PF-84: this thread's usage per account; `None` until a named-accounts
+    /// session records some, so other sessions' events keep their bytes.
+    pub(crate) fn account_token_usage(&self) -> Option<Vec<AccountTokenUsage>> {
+        (!self.account_token_usage.is_empty()).then(|| self.account_token_usage.clone())
+    }
+
+    pub(crate) fn set_account_token_usage(&mut self, usage: Vec<AccountTokenUsage>) {
+        self.account_token_usage = usage;
     }
 
     pub(crate) fn set_token_usage_full(&mut self, context_window: i64) {

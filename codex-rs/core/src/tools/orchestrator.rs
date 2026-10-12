@@ -938,14 +938,14 @@ async fn protected_read_note(
     let (_, Some((command, cwd))) = operation? else {
         return None;
     };
-    crate::security::protected_reads::protected_path_in_command(
+    crate::security::protected_reads::protected_note_in_command(
         &tool_ctx.session,
         turn_ctx,
         command,
         std::path::Path::new(cwd),
     )
     .await
-    .map(|path| crate::security::protected_reads::explanation(&path))
+    .map(|found| found.explanation())
 }
 
 /// PF-25-S01: offer the human a grant for this exact command while its
@@ -1075,6 +1075,10 @@ fn post_taint_read_denials(
     );
     if granted {
         denials.lift_write_rules();
+    }
+    // #506: no grant lifts it either.
+    if state.level == codex_security_policy::SecurityLevel::Aggressive {
+        denials.deny_home_listing();
     }
     let (Some(exec_server), Some(materialized)) =
         (denials.apply(exec_server), denials.apply(materialized))

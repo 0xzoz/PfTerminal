@@ -2325,6 +2325,7 @@ impl ModelClient {
         if !self.state.provider.info().is_openai() {
             retain_latest_contextual_developer_fragments(&mut input);
         }
+        flatten_namespaced_history(&mut input, &prompt.tools);
         let mut skipped_tool_call_ids = HashSet::new();
         append_chat_messages_for_response_items(
             input,
@@ -2511,6 +2512,7 @@ impl ModelClient {
         if !self.state.provider.info().is_openai() {
             retain_latest_contextual_developer_fragments(&mut input);
         }
+        flatten_namespaced_history(&mut input, &prompt.tools);
         let mut messages = Vec::new();
         let mut skipped_tool_call_ids = HashSet::new();
         for item in input {
@@ -4864,6 +4866,38 @@ fn chat_replay_function_arguments(arguments: String) -> String {
         ));
     }
     json!({ "malformed_arguments": raw }).to_string()
+}
+
+/// Chat Completions and Anthropic Messages have no namespaces. A namespaced
+/// call recorded on the Responses wire (before a provider switch or in forked
+/// history) replays under the flat name this request offers for it, such as an
+/// MCP tool's `mcp__server__tool`; otherwise under its bare name, as before.
+fn flatten_namespaced_history(input: &mut [ResponseItem], tools: &[ToolSpec]) {
+    let offered: HashSet<&str> = tools
+        .iter()
+        .filter(|tool| matches!(tool, ToolSpec::Function(_) | ToolSpec::Freeform(_)))
+        .map(ToolSpec::name)
+        .collect();
+    for item in input {
+        let (ResponseItem::FunctionCall {
+            name, namespace, ..
+        }
+        | ResponseItem::CustomToolCall {
+            name, namespace, ..
+        }) = item
+        else {
+            continue;
+        };
+        let Some(namespace) = namespace.take() else {
+            continue;
+        };
+        let flat = crate::tools::flat_tool_names::flat_tool_name_for(
+            &codex_tools::ToolName::namespaced(namespace, name.clone()),
+        );
+        if offered.contains(flat.as_str()) {
+            *name = flat;
+        }
+    }
 }
 
 fn push_chat_tool_call(

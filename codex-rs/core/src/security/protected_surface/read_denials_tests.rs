@@ -674,6 +674,83 @@ fn issue_512_upload_reads_resolve_links_on_both_sides() {
     }
 }
 
+/// #506: with the home's listing denied, the sandbox gets a listing denial
+/// for the Corbanu home and nothing else changes: its runtime entries stay
+/// readable, its stores stay denied. Without it (Moderate), no listing
+/// denial; a command working in the home itself keeps listing it.
+#[test]
+fn issue_506_home_listing_denial_is_added_only_when_asked() {
+    let fx = fixture();
+    let cwd = fx.user_home.join("project");
+    let home = abs(&fx.codex_home);
+    let unlistable = |denials: &ReadDenials| {
+        denials
+            .apply(&workspace(&cwd))
+            .unwrap()
+            .file_system_sandbox_policy()
+            .get_unlistable_directories()
+    };
+    let mut denials = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)]);
+    assert!(unlistable(&denials).is_empty());
+    denials.deny_home_listing();
+    assert_eq!(unlistable(&denials), vec![home.clone()]);
+    let policy = denials
+        .apply(&workspace(&cwd))
+        .unwrap()
+        .file_system_sandbox_policy();
+    assert!(policy.can_read_path_with_cwd(&fx.codex_home.join("skills"), &cwd));
+    assert!(!policy.can_read_path_with_cwd(&fx.codex_home.join("auth.json"), &cwd));
+
+    // Full access gets a sandbox that only denies reads and the listing.
+    let full = denials.apply(&PermissionProfile::Disabled).unwrap();
+    let full = full.file_system_sandbox_policy();
+    assert!(full.can_write_path_with_cwd(&cwd.join("file.txt"), &cwd));
+    assert_eq!(full.get_unlistable_directories(), vec![home.clone()]);
+
+    let mut in_home = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[home]);
+    in_home.deny_home_listing();
+    assert_eq!(in_home.unlistable_home(), None);
+}
+
+/// #506: under Aggressive, in-process file tools (which list folders inside
+/// the sandbox) cannot list the Corbanu home either; under Moderate they can.
+#[tokio::test]
+async fn issue_506_file_tools_cannot_list_the_home_under_aggressive() {
+    use codex_security_policy::SecurityLevel;
+    for (level, denied) in [
+        (SecurityLevel::Aggressive, true),
+        (SecurityLevel::Moderate, false),
+    ] {
+        let (session, turn) = crate::session::tests::make_session_and_context().await;
+        let client = (*session.services.model_client())
+            .clone()
+            .with_ingress_level(level)
+            .with_source_envelopes(true);
+        session.services.replace_model_client(client);
+        let environment = turn
+            .environments
+            .primary()
+            .expect("a primary environment")
+            .clone();
+        let context = turn.file_system_sandbox_context(None, &environment);
+        let protected = protect_file_tool_context(&session, &turn, context);
+        let profile = PermissionProfile::try_from(protected.permissions).unwrap();
+        let unlistable = profile
+            .file_system_sandbox_policy()
+            .get_unlistable_directories();
+        // The home as the sandbox sees it (its real location).
+        assert_eq!(
+            unlistable
+                .iter()
+                .any(|path| path.as_path().file_name()
+                    == turn.config.codex_home.as_path().file_name()),
+            denied,
+            "{level:?}: {unlistable:?}"
+        );
+        assert!(unlistable.len() <= 1, "{unlistable:?}");
+    }
+}
+
 /// A user home reached through a link (`user -> real-user`) holding a
 /// dummy SSH key, with a workspace whose `.agents` links to that key.
 struct LinkedHome {

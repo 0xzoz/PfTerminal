@@ -2107,6 +2107,179 @@ async fn v1_multi_agent_tools_defer_when_tool_search_available() {
     assert!(description.contains("- Multi-agent tools: Spawn and manage sub-agents."));
 }
 
+fn flat_call(name: &str) -> crate::tools::router::ToolCall {
+    crate::tools::router::ToolCall {
+        tool_name: ToolName::plain(name),
+        call_id: "call-1".to_string(),
+        payload: crate::tools::context::ToolPayload::Function {
+            arguments: "{}".to_string(),
+        },
+        encrypted_function_args: None,
+    }
+}
+
+async fn router_with(
+    configure_turn: fn(&mut TurnContext),
+    tool_runtimes: Vec<Arc<dyn CoreToolRuntime>>,
+) -> ToolRouter {
+    let (_session, mut turn) = make_session_and_context().await;
+    configure_turn(&mut turn);
+    ToolRouter::from_tools(&turn, tool_runtimes, Vec::new(), &Default::default())
+}
+
+async fn mcp_router(configure_turn: fn(&mut TurnContext)) -> ToolRouter {
+    router_with(
+        configure_turn,
+        vec![
+            mcp_runtime("orders", "mcp__orders", "lookup", ToolExposure::Direct),
+            mcp_runtime("orders", "mcp__orders", "cancel", ToolExposure::Direct),
+        ],
+    )
+    .await
+}
+
+/// A custom provider on the Chat Completions wire (no provider-specific branch).
+fn use_generic_chat_provider(turn: &mut TurnContext) {
+    let provider_info = ModelProviderInfo {
+        wire_api: codex_model_provider_info::WireApi::Chat,
+        ..ModelProviderInfo::create_openai_provider(Some("http://localhost:1/v1".to_string()))
+    };
+    update_config(turn, |config| {
+        config.model_provider_id = "custom-chat".to_string();
+        config.model_provider = provider_info.clone();
+    });
+    turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
+}
+
+fn plain_dynamic_runtime(name: &str) -> Arc<dyn CoreToolRuntime> {
+    let DynamicToolSpec::Function(function) = dynamic_tool(None, name, false) else {
+        unreachable!("plain dynamic tools are functions");
+    };
+    Arc::new(
+        crate::tools::handlers::DynamicToolHandler::new(&function)
+            .expect("dynamic tool spec should build"),
+    )
+}
+
+#[tokio::test]
+async fn flat_mcp_names_never_shadow_registered_plain_tools() {
+    let router = router_with(
+        use_zai_provider,
+        vec![
+            plain_dynamic_runtime("mcp__orders__lookup"),
+            mcp_runtime("orders", "mcp__orders", "lookup", ToolExposure::Direct),
+        ],
+    )
+    .await;
+    let specs = router.model_visible_specs();
+    let flat_names: Vec<&str> = specs
+        .iter()
+        .map(ToolSpec::name)
+        .filter(|name| name.starts_with("mcp__orders__lookup"))
+        .collect();
+    assert_eq!(flat_names.len(), 2, "{flat_names:?}");
+    let hashed = flat_names
+        .iter()
+        .find(|name| **name != "mcp__orders__lookup")
+        .expect("the MCP tool gets a hashed name");
+
+    // The plain name still reaches the plain tool; the hashed one reaches MCP.
+    let plain = router.resolve_flat_tool_call(flat_call("mcp__orders__lookup"));
+    assert_eq!(plain.tool_name, ToolName::plain("mcp__orders__lookup"));
+    let mcp = router.resolve_flat_tool_call(flat_call(hashed));
+    assert_eq!(mcp.tool_name, ToolName::namespaced("mcp__orders", "lookup"));
+}
+
+#[tokio::test]
+async fn flattened_mcp_tools_stay_within_the_tool_count_limit() {
+    // Registered in reverse name order.
+    let tool_runtimes = (0..200)
+        .rev()
+        .map(|index| {
+            mcp_runtime(
+                "bulk",
+                "mcp__bulk",
+                &format!("tool_{index:03}"),
+                ToolExposure::Direct,
+            )
+        })
+        .collect();
+    let router = router_with(use_zai_provider, tool_runtimes).await;
+    let specs = router.model_visible_specs();
+    assert_eq!(specs.len(), 128);
+    // The kept tools are the first ones by name, independent of registration order.
+    assert!(
+        specs
+            .iter()
+            .any(|spec| spec.name() == "mcp__bulk__tool_000")
+    );
+    assert!(
+        !specs
+            .iter()
+            .any(|spec| spec.name() == "mcp__bulk__tool_199")
+    );
+}
+
+#[tokio::test]
+async fn mcp_tools_are_flattened_and_resolved_on_wires_without_namespace_tools() {
+    for configure_turn in [
+        use_zai_provider as fn(&mut TurnContext),
+        use_openrouter_provider,
+        use_claude_plan_provider,
+        use_generic_chat_provider,
+    ] {
+        let router = mcp_router(configure_turn).await;
+        let specs = router.model_visible_specs();
+        assert!(
+            !specs
+                .iter()
+                .any(|spec| matches!(spec, ToolSpec::Namespace(_))),
+            "namespaces must not reach a wire without namespace tools: {specs:?}"
+        );
+        for (flat, name) in [
+            ("mcp__orders__lookup", "lookup"),
+            ("mcp__orders__cancel", "cancel"),
+        ] {
+            let Some(ToolSpec::Function(tool)) = specs.iter().find(|spec| spec.name() == flat)
+            else {
+                panic!("expected flat MCP function `{flat}` in {specs:?}");
+            };
+            assert_eq!(tool.description, format!("{name} test tool"));
+            assert_eq!(tool.defer_loading, None);
+
+            let resolved = router.resolve_flat_tool_call(flat_call(flat));
+            assert_eq!(
+                resolved.tool_name,
+                ToolName::namespaced("mcp__orders", name)
+            );
+            assert!(router.tool_runtime(&resolved).is_some());
+        }
+
+        let unknown = router.resolve_flat_tool_call(flat_call("mcp__orders__missing"));
+        assert_eq!(unknown.tool_name, ToolName::plain("mcp__orders__missing"));
+    }
+}
+
+#[tokio::test]
+async fn mcp_tools_stay_namespaced_on_the_responses_wire() {
+    let router = mcp_router(use_openai_provider).await;
+    let specs = router.model_visible_specs();
+    let Some(ToolSpec::Namespace(namespace)) =
+        specs.iter().find(|spec| spec.name() == "mcp__orders")
+    else {
+        panic!("expected MCP namespace in {specs:?}");
+    };
+    assert_eq!(namespace.tools.len(), 2);
+    assert!(
+        !specs
+            .iter()
+            .any(|spec| spec.name() == "mcp__orders__lookup"),
+        "flat names are only for wires without namespaces"
+    );
+    let call = router.resolve_flat_tool_call(flat_call("mcp__orders__lookup"));
+    assert_eq!(call.tool_name, ToolName::plain("mcp__orders__lookup"));
+}
+
 #[tokio::test]
 async fn v1_multi_agent_tools_flatten_for_openrouter_without_namespace_tools() {
     let plan = probe(|turn| {

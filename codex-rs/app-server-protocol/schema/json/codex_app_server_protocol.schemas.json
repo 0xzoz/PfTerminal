@@ -19048,6 +19048,26 @@
         ],
         "type": "object"
       },
+      "ThreadAccountTokenUsage": {
+        "description": "PF-84: provider-reported token usage of one named provider account: its provider id and account name, never credential material.",
+        "properties": {
+          "account": {
+            "type": "string"
+          },
+          "providerId": {
+            "type": "string"
+          },
+          "usage": {
+            "$ref": "#/definitions/v2/TokenUsageBreakdown"
+          }
+        },
+        "required": [
+          "account",
+          "providerId",
+          "usage"
+        ],
+        "type": "object"
+      },
       "ThreadActiveFlag": {
         "enum": [
           "waitingOnApproval",
@@ -21905,6 +21925,16 @@
       "ThreadTokenUsageUpdatedNotification": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
+          "accountUsage": {
+            "description": "PF-84: this thread's provider-reported usage per (provider, named account), `default` included. Sent only while named accounts are on.",
+            "items": {
+              "$ref": "#/definitions/v2/ThreadAccountTokenUsage"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "threadId": {
             "type": "string"
           },

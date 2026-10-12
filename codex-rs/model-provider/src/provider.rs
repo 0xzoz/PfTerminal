@@ -449,6 +449,14 @@ impl ModelProvider for ConfiguredModelProvider {
                 image_generation: false,
                 web_search: true,
             }
+        } else if self.info.wire_api == WireApi::Chat {
+            // Chat Completions has no namespace container either. Core offers
+            // MCP tools under flat names and drops other namespaced tools.
+            ProviderCapabilities {
+                namespace_tools: false,
+                image_generation: false,
+                ..ProviderCapabilities::default()
+            }
         } else {
             ProviderCapabilities::default()
         }
@@ -934,6 +942,22 @@ mod tests {
         assert_eq!(
             provider.memory_consolidation_preferred_model(),
             CLAUDE_PLAN_MODEL
+        );
+    }
+
+    #[test]
+    fn chat_wire_providers_disable_namespace_tools() {
+        let mut provider_info = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
+        provider_info.wire_api = WireApi::Chat;
+        let provider = create_model_provider(provider_info, /*auth_manager*/ None);
+
+        assert_eq!(
+            provider.capabilities(),
+            ProviderCapabilities {
+                namespace_tools: false,
+                image_generation: false,
+                web_search: true,
+            }
         );
     }
 

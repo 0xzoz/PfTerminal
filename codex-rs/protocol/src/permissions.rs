@@ -244,6 +244,7 @@ struct FileSystemSemanticSignature {
     writable_roots: Vec<WritableRoot>,
     unreadable_roots: Vec<AbsolutePathBuf>,
     unreadable_globs: Vec<String>,
+    unlistable_directories: Vec<AbsolutePathBuf>,
 }
 
 /// Runtime matcher for read-deny entries in a filesystem sandbox policy.
@@ -251,6 +252,8 @@ pub struct ReadDenyMatcher {
     denied_candidates: Vec<Vec<PathBuf>>,
     deny_read_matchers: Vec<GlobMatcher>,
     invalid_pattern: bool,
+    /// Directories that may not be listed (issue #506), by every spelling.
+    unlistable_candidates: Vec<Vec<PathBuf>>,
 }
 
 impl ReadDenyMatcher {
@@ -318,10 +321,16 @@ impl ReadDenyMatcher {
                 },
             }
         }
+        let unlistable_candidates = file_system_sandbox_policy
+            .get_unlistable_directories()
+            .into_iter()
+            .map(|path| normalized_and_canonical_candidates(path.as_path()))
+            .collect();
         Ok(Some(Self {
             denied_candidates,
             deny_read_matchers,
             invalid_pattern,
+            unlistable_candidates,
         }))
     }
 
@@ -351,6 +360,20 @@ impl ReadDenyMatcher {
             path_candidates
                 .iter()
                 .any(|candidate| matcher.is_match(candidate))
+        })
+    }
+
+    /// Returns whether listing the directory `path` is denied: its contents
+    /// are unreadable, or it is a directory the policy may not list (#506).
+    pub fn is_listing_denied(&self, path: &Path) -> bool {
+        if self.is_read_denied(path) {
+            return true;
+        }
+        let path_candidates = normalized_and_canonical_candidates(path);
+        self.unlistable_candidates.iter().any(|unlistable| {
+            path_candidates
+                .iter()
+                .any(|candidate| unlistable.contains(candidate))
         })
     }
 }
@@ -383,6 +406,51 @@ const PROJECT_ROOTS_GLOB_PATTERN_PREFIX: &str = "codex-project-roots://";
 
 pub fn project_roots_glob_pattern(subpath: &Path) -> String {
     format!("{PROJECT_ROOTS_GLOB_PATTERN_PREFIX}{}", subpath.display())
+}
+
+/// Special-path token of a `deny` entry that stops agent commands listing one
+/// directory (issue #506): the directory's entries cannot be enumerated, while
+/// the directory itself and every path below it keep the access the rest of
+/// the policy gives them. The directory is the entry's absolute `subpath`.
+///
+/// It is carried as [`FileSystemSpecialPath::Unknown`] so that a runtime that
+/// predates it ignores it, as unknown tokens are designed to be: only the
+/// sandboxes and matchers that know the token enforce it.
+pub const DIRECTORY_LISTING_SPECIAL_PATH: &str = ":directory_listing";
+
+impl FileSystemSandboxEntry {
+    /// A `deny` entry that stops agent commands listing `directory`.
+    pub fn deny_directory_listing(directory: &AbsolutePathBuf) -> Self {
+        Self::new(
+            FileSystemPath::Special {
+                value: FileSystemSpecialPath::unknown(
+                    DIRECTORY_LISTING_SPECIAL_PATH,
+                    Some(directory.to_string_lossy().into_owned()),
+                ),
+            },
+            FileSystemAccessMode::Deny,
+        )
+    }
+
+    /// The directory this entry stops agent commands listing, if it is a
+    /// [`Self::deny_directory_listing`] entry.
+    pub fn unlistable_directory(&self) -> Option<AbsolutePathBuf> {
+        if self.access != FileSystemAccessMode::Deny {
+            return None;
+        }
+        match &self.path {
+            FileSystemPath::Special {
+                value:
+                    FileSystemSpecialPath::Unknown {
+                        path,
+                        subpath: Some(subpath),
+                    },
+            } if path == DIRECTORY_LISTING_SPECIAL_PATH => {
+                AbsolutePathBuf::from_absolute_path(Path::new(subpath)).ok()
+            }
+            _ => None,
+        }
+    }
 }
 
 fn read_only_file_system_entries() -> Vec<FileSystemSandboxEntry> {
@@ -1186,6 +1254,23 @@ impl FileSystemSandboxPolicy {
         patterns
     }
 
+    /// Directories agent commands may not list (issue #506), from
+    /// [`FileSystemSandboxEntry::deny_directory_listing`] entries. Only a
+    /// restricted policy carries them; what is below each directory keeps its
+    /// own access.
+    pub fn get_unlistable_directories(&self) -> Vec<AbsolutePathBuf> {
+        if !matches!(self.kind, FileSystemSandboxKind::Restricted) {
+            return Vec::new();
+        }
+        dedup_absolute_paths(
+            self.entries
+                .iter()
+                .filter_map(FileSystemSandboxEntry::unlistable_directory)
+                .collect(),
+            /*normalize_effective_paths*/ true,
+        )
+    }
+
     pub fn to_legacy_sandbox_policy(
         &self,
         network_policy: NetworkSandboxPolicy,
@@ -1325,6 +1410,7 @@ impl FileSystemSandboxPolicy {
             writable_roots: sorted_writable_roots(self.get_writable_roots_with_cwd(cwd)),
             unreadable_roots: sorted_absolute_paths(self.get_unreadable_roots_with_cwd(cwd)),
             unreadable_globs: self.get_unreadable_globs_with_cwd(cwd),
+            unlistable_directories: sorted_absolute_paths(self.get_unlistable_directories()),
         }
     }
 }
@@ -3517,5 +3603,62 @@ mod tests {
 
         assert!(is_read_denied(&bracket_file, &policy, temp.path()));
         assert!(!is_read_denied(&other, &policy, temp.path()));
+    }
+
+    /// #506: a directory-listing denial is its own kind of entry: it denies
+    /// listing that one directory, never reading or writing it or anything
+    /// below it, and runtimes see it only through its accessors.
+    #[test]
+    fn issue_506_directory_listing_denial_only_denies_listing() {
+        let temp = TempDir::new().expect("tempdir");
+        let base = temp.path().canonicalize().expect("canonical");
+        let home = AbsolutePathBuf::from_absolute_path(base.join("home")).expect("home");
+        std::fs::create_dir_all(home.join("tmp")).expect("tmp");
+        let entry = FileSystemSandboxEntry::deny_directory_listing(&home);
+        assert_eq!(entry.unlistable_directory(), Some(home.clone()));
+        let mut read = entry.clone();
+        read.access = FileSystemAccessMode::Read;
+        assert_eq!(read.unlistable_directory(), None);
+
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry::new(
+                FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                FileSystemAccessMode::Write,
+            ),
+            entry,
+        ]);
+        let cwd = base.as_path();
+        assert_eq!(policy.get_unlistable_directories(), vec![home.clone()]);
+        assert!(policy.has_full_disk_write_access());
+        assert!(policy.get_unreadable_roots_with_cwd(cwd).is_empty());
+        assert!(policy.get_unreadable_globs_with_cwd(cwd).is_empty());
+        assert!(policy.can_write_path_with_cwd(home.as_path(), cwd));
+        assert!(policy.can_read_path_with_cwd(home.join("tmp").as_path(), cwd));
+        // A runtime that knows the entry cannot run it as plain full access.
+        assert!(policy.needs_direct_runtime_enforcement(NetworkSandboxPolicy::Restricted, cwd));
+        assert!(!policy.is_semantically_equivalent_to(
+            &FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry::new(
+                FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                FileSystemAccessMode::Write,
+            )]),
+            cwd,
+        ));
+
+        let matcher = ReadDenyMatcher::new(&policy, cwd).expect("matcher");
+        assert!(matcher.is_listing_denied(home.as_path()));
+        assert!(matcher.is_listing_denied(&home.as_path().join("tmp").join("..")));
+        assert!(!matcher.is_read_denied(home.as_path()));
+        assert!(!matcher.is_listing_denied(home.join("tmp").as_path()));
+        assert!(!matcher.is_read_denied(home.join("tmp").as_path()));
+        // Not carried by a policy that does not restrict.
+        assert!(
+            FileSystemSandboxPolicy::unrestricted()
+                .get_unlistable_directories()
+                .is_empty()
+        );
     }
 }
