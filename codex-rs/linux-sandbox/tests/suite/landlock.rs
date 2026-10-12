@@ -2339,3 +2339,209 @@ async fn issue_442_a_planted_env_link_refuses_later_commands() {
     let after = run_in(&work, "cat notes.txt; echo notes=$?").await;
     assert!(after.stdout.text.contains("notes=0"), "{after:?}");
 }
+
+/// A folder for test files outside every writable root (not a temporary
+/// folder): Cargo's target scratch folder, or the crate where a build tool
+/// does not set it.
+fn outside_temp_root() -> PathBuf {
+    option_env!("CARGO_TARGET_TMPDIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+}
+
+/// Policies shaped like each security level, for the #535/#536 tests:
+/// Permissive (a workspace-write config with extra writable roots, no
+/// denials), Moderate (the same with a denied path) and Aggressive (as
+/// Moderate, with the temporary folders not writable).
+fn level_policies(
+    workspace: &Path,
+    extra_writable: &[&Path],
+    denied: &Path,
+) -> Vec<(&'static str, FileSystemSandboxPolicy)> {
+    let workspace_write = |exclude_tmp: bool| {
+        FileSystemSandboxPolicy::from_legacy_sandbox_policy_for_cwd(
+            &codex_protocol::protocol::SandboxPolicy::WorkspaceWrite {
+                writable_roots: extra_writable
+                    .iter()
+                    .map(|path| AbsolutePathBuf::from_absolute_path(path).unwrap())
+                    .collect(),
+                network_access: false,
+                exclude_tmpdir_env_var: exclude_tmp,
+                exclude_slash_tmp: exclude_tmp,
+            },
+            workspace,
+        )
+    };
+    let denial = FileSystemSandboxEntry {
+        path: FileSystemPath::Path {
+            path: AbsolutePathBuf::from_absolute_path(denied).unwrap(),
+        },
+        access: FileSystemAccessMode::Deny,
+        missing_path_behavior: None,
+    };
+    let permissive = workspace_write(false);
+    let mut moderate = permissive.entries.clone();
+    moderate.push(denial.clone());
+    let mut aggressive = workspace_write(true).entries;
+    aggressive.push(denial);
+    vec![
+        ("permissive", permissive),
+        ("moderate", FileSystemSandboxPolicy::restricted(moderate)),
+        (
+            "aggressive",
+            FileSystemSandboxPolicy::restricted(aggressive),
+        ),
+    ]
+}
+
+async fn run_level(
+    workspace: &Path,
+    policy: &FileSystemSandboxPolicy,
+    script: &str,
+) -> codex_protocol::exec_output::ExecToolCallOutput {
+    let output = run_cmd_result_with_permission_profile_for_cwd(
+        &["bash", "-c", script],
+        AbsolutePathBuf::from_absolute_path(workspace).unwrap(),
+        PermissionProfile::from_runtime_permissions(policy, NetworkSandboxPolicy::Restricted),
+        create_env_from_core_vars(),
+        LONG_TIMEOUT_MS,
+        /*use_legacy_landlock*/ false,
+    )
+    .await;
+    match output {
+        Ok(output) => output,
+        Err(err) => match err.details() {
+            CodexErrorDetails::Sandbox(SandboxErr::Denied { output, .. }) => (**output).clone(),
+            _ => panic!("command failed to run: {err:?}"),
+        },
+    }
+}
+
+/// #535 (Travis, 2026-10-12: option B), real bubblewrap: a writable root
+/// that is a link into another root's read-only path (a workspace's
+/// `.git/hooks`, or its `.git` itself) is not a grant at any level: the hooks
+/// and `.git` stay read-only through it, while the workspace stays writable.
+#[tokio::test]
+async fn writable_links_into_a_read_only_path_are_not_grants_at_any_level() {
+    if should_skip_bwrap_tests().await {
+        eprintln!("skipping bwrap test: bwrap sandbox prerequisites are unavailable");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let workspace = base.join("ws");
+    let hooks = workspace.join(".git").join("hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    std::fs::write(hooks.join("pre-commit"), "#!/bin/sh\n").unwrap();
+    let hooks_link = base.join("hooks-link");
+    std::os::unix::fs::symlink(&hooks, &hooks_link).unwrap();
+    let git_link = base.join("git-link");
+    std::os::unix::fs::symlink(workspace.join(".git"), &git_link).unwrap();
+    let denied = base.join("denied");
+    std::fs::write(&denied, "x").unwrap();
+    for (level, policy) in level_policies(&workspace, &[&hooks_link, &git_link], &denied) {
+        assert_eq!(
+            policy.writable_links_into_read_only_paths(&workspace).len(),
+            2,
+            "{level}"
+        );
+        let script = format!(
+            "echo x >> '{hooks_link}/pre-commit'; echo hook=$?; echo x > '{hooks_link}/new'; \
+             echo hooknew=$?; echo x > '{git_link}/HEAD'; echo gitlink=$?; \
+             echo x > '{hooks}/direct'; echo direct=$?; echo x > '{workspace}/file'; echo ws=$?",
+            hooks_link = hooks_link.display(),
+            git_link = git_link.display(),
+            hooks = hooks.display(),
+            workspace = workspace.display(),
+        );
+        let output = run_level(&workspace, &policy, &script).await;
+        for line in ["hook=1", "hooknew=1", "gitlink=1", "direct=1", "ws=0"] {
+            assert!(
+                output.stdout.text.lines().any(|got| got == line),
+                "{level}: {line} not in {}\nstderr: {}",
+                output.stdout.text,
+                output.stderr.text
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(hooks.join("pre-commit")).unwrap(),
+            "#!/bin/sh\n",
+            "{level}"
+        );
+        assert!(!hooks.join("new").exists() && !workspace.join(".git/HEAD").exists());
+        std::fs::remove_file(workspace.join("file")).unwrap();
+    }
+}
+
+/// #535: what stays a grant at every level: an explicit root spelled through
+/// the read-only path (the person names `.git/hooks` itself), a link that
+/// leads elsewhere in `/tmp`, a workspace spelled through a link, and a git
+/// worktree with the main checkout as an extra root.
+#[tokio::test]
+async fn ordinary_roots_stay_writable_at_every_level() {
+    if should_skip_bwrap_tests().await {
+        eprintln!("skipping bwrap test: bwrap sandbox prerequisites are unavailable");
+        return;
+    }
+    let dir = tempfile::Builder::new()
+        .prefix("roots-535-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let real = dir.path().canonicalize().unwrap();
+    // The whole tree is spelled through a link, like `/tmp` on macOS: one
+    // outside the writable roots (Linux refuses a read-only path spelled
+    // through a link a command could change).
+    let aliases = tempfile::tempdir_in(outside_temp_root()).unwrap();
+    let alias = aliases.path().join("alias");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    let base = alias.clone();
+    let main = base.join("main");
+    let gitdir = main.join(".git").join("worktrees").join("wt");
+    std::fs::create_dir_all(&gitdir).unwrap();
+    std::fs::create_dir_all(main.join(".git/hooks")).unwrap();
+    let worktree = base.join("wt");
+    std::fs::create_dir_all(&worktree).unwrap();
+    std::fs::write(
+        worktree.join(".git"),
+        format!("gitdir: {}\n", gitdir.display()),
+    )
+    .unwrap();
+    let elsewhere = base.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let link = base.join("cache");
+    std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+    let hooks = main.join(".git/hooks");
+    let denied = base.join("denied");
+    std::fs::write(&denied, "x").unwrap();
+    for (level, policy) in level_policies(&worktree, &[&main, &hooks, &link], &denied) {
+        assert_eq!(
+            policy.writable_links_into_read_only_paths(&worktree),
+            Vec::new(),
+            "{level}"
+        );
+        let script = format!(
+            "echo x > file; echo wt=$?; echo x > '{main}/file'; echo main=$?; \
+             echo x > '{hooks}/explicit'; echo hooks=$?; echo x > '{link}/file'; echo link=$?",
+            main = main.display(),
+            hooks = hooks.display(),
+            link = link.display(),
+        );
+        let output = run_level(&worktree, &policy, &script).await;
+        for line in ["wt=0", "main=0", "hooks=0", "link=0"] {
+            assert!(
+                output.stdout.text.lines().any(|got| got == line),
+                "{level}: {line} not in {}\nstderr: {}",
+                output.stdout.text,
+                output.stderr.text
+            );
+        }
+        for written in [
+            worktree.join("file"),
+            main.join("file"),
+            hooks.join("explicit"),
+            elsewhere.join("file"),
+        ] {
+            std::fs::remove_file(written).unwrap();
+        }
+    }
+}
