@@ -471,8 +471,21 @@ impl ReadDenials {
     }
 
     fn holds_kept(path: &AbsolutePathBuf, keep: &[AbsolutePathBuf]) -> bool {
-        keep.iter()
+        if keep
+            .iter()
             .any(|kept| kept.as_path().starts_with(path.as_path()))
+        {
+            return true;
+        }
+        // #603: also by real location, as the sandboxes compare them (a home
+        // spelled through `/tmp` with the working folder below it spelled by
+        // its real location).
+        let Ok(real) = std::fs::canonicalize(path.as_path()) else {
+            return false;
+        };
+        keep.iter().any(|kept| {
+            std::fs::canonicalize(kept.as_path()).is_ok_and(|kept| kept.starts_with(&real))
+        })
     }
 
     fn push_existing(&mut self, path: AbsolutePathBuf, keep: &[AbsolutePathBuf]) {
@@ -795,8 +808,18 @@ fn works_in_home(codex_home: &AbsolutePathBuf, keep: &[AbsolutePathBuf]) -> bool
     let worktrees_path = codex_home.join(HOME_WRITABLE);
     let real_folder = std::fs::symlink_metadata(worktrees_path.as_path())
         .is_ok_and(|metadata| metadata.file_type().is_dir());
-    let worktrees = if real_folder {
+    // Only spellings strictly inside the home: a link swapped in after the
+    // check above resolves to the home or outside it.
+    let worktrees: Vec<AbsolutePathBuf> = if real_folder {
         spellings(&worktrees_path)
+            .into_iter()
+            .filter(|worktrees| {
+                homes.iter().any(|home| {
+                    worktrees.as_path() != home.as_path()
+                        && worktrees.as_path().starts_with(home.as_path())
+                })
+            })
+            .collect()
     } else {
         Vec::new()
     };

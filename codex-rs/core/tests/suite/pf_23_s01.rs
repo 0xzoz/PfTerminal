@@ -1899,7 +1899,9 @@ async fn issue_603_a_command_in_the_corbanu_home_cannot_create_names_corbanu_rea
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
     let mut wrong = Vec::new();
-    for in_other in [false, true] {
+    // The working folder spelled as the home is, and by its real location
+    // (they differ where the home is under a link such as `/tmp` on macOS).
+    for (in_other, real_cwd) in [(false, false), (true, false), (true, true)] {
         for (level, created) in [
             (SecurityLevel::Moderate, false),
             (SecurityLevel::Aggressive, false),
@@ -1909,12 +1911,15 @@ async fn issue_603_a_command_in_the_corbanu_home_cannot_create_names_corbanu_rea
             let root = home.path().canonicalize()?;
             std::fs::create_dir_all(root.join("worktrees/w"))?;
             std::fs::create_dir_all(root.join("other"))?;
-            // The working folder spelled as the home is (`/tmp/...` on
-            // macOS with `TMPDIR=/tmp`); paths checked by its real location.
-            let cwd = if in_other {
-                home.path().join("other")
+            let spelled = if real_cwd {
+                root.clone()
             } else {
                 home.path().to_path_buf()
+            };
+            let cwd = if in_other {
+                spelled.join("other")
+            } else {
+                spelled
             };
             let path = root.to_string_lossy().into_owned();
             // Split inside the home folder's own name: neither part names it.
@@ -1982,7 +1987,7 @@ async fn issue_603_a_command_in_the_corbanu_home_cannot_create_names_corbanu_rea
                 || !placeholder_files.is_empty()
             {
                 wrong.push(format!(
-                    "{level:?} in_other={in_other}: present={present:?} free={free} \
+                    "{level:?} in_other={in_other} real_cwd={real_cwd}: present={present:?} free={free} \
                      placeholder_files={placeholder_files:?}: {output}"
                 ));
             }
