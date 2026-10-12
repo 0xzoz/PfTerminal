@@ -38,6 +38,7 @@ pub use named_chatgpt::logout_named_account_with_revoke;
 pub use named_chatgpt::named_account_restriction_error;
 pub use named_chatgpt::named_account_summary;
 pub use named_chatgpt::revoke_replaced_sign_in;
+pub(crate) use named_chatgpt::revoke_unsaved_sign_in;
 pub use named_chatgpt::same_user_sign_ins;
 pub use named_chatgpt::save_named_account_auth;
 pub use provider_key_vault::provider_account_api_key;

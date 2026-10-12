@@ -188,6 +188,7 @@ pub use provider_accounts::other_provider_account_error;
 pub use provider_accounts::session_account_error;
 pub use provider_accounts::split_account_selection;
 pub(crate) use provider_accounts::stamp_provider_account;
+pub use provider_accounts::subagent_account_error;
 pub use provider_accounts::supports_named_accounts;
 pub use provider_accounts::unused_other_provider_account_error;
 mod requirements;

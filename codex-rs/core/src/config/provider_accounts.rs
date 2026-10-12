@@ -195,6 +195,13 @@ pub fn session_account_error(config: &super::Config) -> Option<String> {
         .or_else(|| other_provider_account_error(config))
 }
 
+/// Why a spawned agent cannot start on its provider's account: not
+/// configured, or a sign-in the login restrictions rule out.
+pub fn subagent_account_error(config: &super::Config) -> Option<String> {
+    selected_account_error(config.codex_home.as_path(), &config.model_provider)
+        .or_else(|| sign_in_restriction_error(config))
+}
+
 /// PF-84-S06: a named OpenAI sign-in of the kind or workspace the
 /// configuration's login restrictions rule out is refused before the session
 /// starts (its manager also refuses to load it).

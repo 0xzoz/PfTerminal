@@ -431,6 +431,7 @@ async fn process_request(
                         opts.named_account
                             .clone()
                             .map(|account| (account, opts.named_account_must_be_new)),
+                        &opts.auth_route_config,
                     )
                     .await
                     {
@@ -881,45 +882,65 @@ pub(crate) async fn persist_tokens_async(
     auth_credentials_store_mode: AuthCredentialsStoreMode,
     keyring_backend_kind: AuthKeyringBackendKind,
     named_account: Option<(crate::NamedChatgptAccount, bool)>,
+    auth_route_config: &AuthRouteConfig,
 ) -> io::Result<()> {
     // Reuse existing synchronous logic but run it off the async runtime.
     let codex_home = codex_home.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        let mut tokens = TokenData {
-            id_token: parse_chatgpt_jwt_claims(&id_token).map_err(io::Error::other)?,
-            access_token,
-            refresh_token,
-            account_id: None,
-        };
-        if let Some(acc) = jwt_auth_claims(&id_token)
-            .get("chatgpt_account_id")
-            .and_then(|v| v.as_str())
-        {
-            tokens.account_id = Some(acc.to_string());
-        }
-        let auth = AuthDotJson {
-            auth_mode: Some(AuthMode::Chatgpt),
-            openai_api_key: api_key,
-            tokens: Some(tokens),
-            last_refresh: Some(Utc::now()),
-            agent_identity: None,
-            personal_access_token: None,
-            bedrock_api_key: None,
-        };
-        match named_account {
-            Some((account, must_be_new)) => {
-                crate::save_named_account_auth(&codex_home, &account, &auth, must_be_new)
+    let revoke_if_refused = matches!(named_account, Some((_, true)));
+    let refused = tokio::task::spawn_blocking(
+        move || -> io::Result<Result<(), (io::Error, AuthDotJson)>> {
+            let mut tokens = TokenData {
+                id_token: parse_chatgpt_jwt_claims(&id_token).map_err(io::Error::other)?,
+                access_token,
+                refresh_token,
+                account_id: None,
+            };
+            if let Some(acc) = jwt_auth_claims(&id_token)
+                .get("chatgpt_account_id")
+                .and_then(|v| v.as_str())
+            {
+                tokens.account_id = Some(acc.to_string());
             }
-            None => save_auth(
-                &codex_home,
-                &auth,
-                auth_credentials_store_mode,
-                keyring_backend_kind,
-            ),
-        }
-    })
+            let auth = AuthDotJson {
+                auth_mode: Some(AuthMode::Chatgpt),
+                openai_api_key: api_key,
+                tokens: Some(tokens),
+                last_refresh: Some(Utc::now()),
+                agent_identity: None,
+                personal_access_token: None,
+                bedrock_api_key: None,
+            };
+            Ok(match named_account {
+                // A refused first sign-in (the account exists) hands its new
+                // tokens back so they can be revoked.
+                Some((account, must_be_new)) => {
+                    crate::save_named_account_auth(&codex_home, &account, &auth, must_be_new)
+                        .map_err(|error| (error, auth))
+                }
+                None => save_auth(
+                    &codex_home,
+                    &auth,
+                    auth_credentials_store_mode,
+                    keyring_backend_kind,
+                )
+                .map_err(|error| (error, auth)),
+            })
+        },
+    )
     .await
-    .map_err(|e| io::Error::other(format!("persist task failed: {e}")))?
+    .map_err(|e| io::Error::other(format!("persist task failed: {e}")))??;
+    match refused {
+        Ok(()) => Ok(()),
+        Err((error, auth)) => {
+            if revoke_if_refused
+                && let Err(revoke_error) =
+                    crate::auth::revoke_unsaved_sign_in(&auth, auth_route_config).await
+            {
+                tracing::warn!("failed to revoke an unsaved sign-in: {revoke_error}");
+            }
+            Err(error)
+        }
+    }
 }
 
 /// Validates the ID token against an optional workspace restriction.

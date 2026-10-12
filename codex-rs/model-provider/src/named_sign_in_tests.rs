@@ -53,4 +53,5 @@ async fn named_and_default_openai_providers_never_mix_sign_ins() {
             None,
         )
     );
+    let _ = std::fs::remove_dir_all(&home);
 }

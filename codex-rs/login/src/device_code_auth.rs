@@ -230,6 +230,7 @@ pub async fn complete_device_code_login(
         opts.named_account
             .clone()
             .map(|account| (account, opts.named_account_must_be_new)),
+        &opts.auth_route_config,
     )
     .await
 }

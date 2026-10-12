@@ -236,7 +236,8 @@ pub fn current_named_sign_in(
 }
 
 /// Revokes a replaced sign-in's tokens (best effort), unless the account
-/// still holds the same refresh token.
+/// still holds the same refresh token or the new sign-in is the same ChatGPT
+/// user (revoking one sign-in of a user can end the user's other sessions).
 pub async fn revoke_replaced_sign_in(
     codex_home: &Path,
     account: &NamedChatgptAccount,
@@ -248,10 +249,18 @@ pub async fn revoke_replaced_sign_in(
             .as_ref()
             .map(|tokens| tokens.refresh_token.clone())
     };
+    let user = |auth: &AuthDotJson| {
+        auth.tokens
+            .as_ref()
+            .and_then(|tokens| tokens.id_token.chatgpt_user_id.clone())
+    };
     let current = current_named_sign_in(codex_home, account);
-    if current.as_ref().and_then(|current| refresh(&current.0)) == refresh(&previous.0)
-        && refresh(&previous.0).is_some()
-    {
+    let same_refresh = current.as_ref().and_then(|current| refresh(&current.0))
+        == refresh(&previous.0)
+        && refresh(&previous.0).is_some();
+    let same_user = current.as_ref().and_then(|current| user(&current.0)) == user(&previous.0)
+        && user(&previous.0).is_some();
+    if same_refresh || same_user {
         return;
     }
     if let Err(error) =
@@ -299,6 +308,14 @@ pub async fn logout_named_account_with_revoke(
         tracing::warn!("failed to revoke named account tokens during logout: {error}");
     }
     storage.delete()
+}
+
+/// Revokes the tokens of a sign-in that could not be saved (best effort).
+pub(crate) async fn revoke_unsaved_sign_in(
+    auth: &AuthDotJson,
+    auth_route_config: &crate::AuthRouteConfig,
+) -> std::io::Result<()> {
+    super::revoke::revoke_auth_tokens(Some(auth), auth_route_config).await
 }
 
 /// What may be shown about a named sign-in: never a token.

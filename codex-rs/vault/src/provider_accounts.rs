@@ -521,7 +521,8 @@ impl Vault {
                 {
                     // A sign-in's tokens rotate on refresh; its identity does not.
                     let value = if *kind == ProviderAccountKind::ChatgptAuth {
-                        sign_in_identity(&value).unwrap_or(value)
+                        let raw = Zeroizing::new(value);
+                        sign_in_identity(&raw).unwrap_or_else(|| raw.to_string())
                     } else {
                         value
                     };
@@ -625,6 +626,9 @@ fn sign_in_identity(raw: &str) -> Option<String> {
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_string)
             });
+        if workspace.is_none() && user.is_none() {
+            return None;
+        }
         return Some(format!(
             "chatgpt\0{}\0{}",
             workspace.unwrap_or_default(),

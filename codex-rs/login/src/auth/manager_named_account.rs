@@ -246,3 +246,7 @@ impl AuthManager {
         Some(removed)
     }
 }
+
+#[cfg(test)]
+#[path = "manager_named_account_tests.rs"]
+mod tests;
