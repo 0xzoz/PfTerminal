@@ -192,6 +192,84 @@ async fn issue_507_kill_switch_stops_the_running_command_and_its_turn() -> anyho
     Ok(())
 }
 
+/// Another Corbanu Terminal process on the same home turns the switch on or
+/// off: it saves `security_state.json` there and reaches no session of this
+/// process directly. Its save is made in a scratch home and moved into place
+/// the way a commit writes it (an atomic replace).
+fn other_process_switch(
+    home: &Path,
+    scratch: &Path,
+    choice: HumanRevocation,
+    now: i64,
+) -> anyhow::Result<()> {
+    if let Ok(saved) = std::fs::read(home.join("security_state.json")) {
+        std::fs::write(scratch.join("security_state.json"), saved)?;
+    }
+    let basis = LevelBasis::read(scratch, SecurityLevel::Aggressive, None);
+    commit_human_revocation(
+        scratch,
+        SecurityLevel::Aggressive,
+        /*thread*/ None,
+        &basis,
+        choice,
+        now,
+    )?;
+    let staged = home.join("security_state.json.other-process");
+    std::fs::copy(scratch.join("security_state.json"), &staged)?;
+    std::fs::rename(&staged, home.join("security_state.json"))?;
+    Ok(())
+}
+
+/// #507 (Travis, 2026-10-12): a kill switch another Corbanu Terminal process
+/// on the same home turns on stops the command running here within the
+/// stated latency (about a second, at most 2 s), and turning it off there
+/// reaches this process too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_507_kill_switch_from_another_process_stops_the_running_command() -> anyhow::Result<()>
+{
+    skip_if_no_network!(Ok(()));
+    let marker_dir = tempfile::TempDir::new()?;
+    let marker = marker_dir.path().join("ran-after-kill-switch");
+    let command = format!(
+        "sleep {}; touch '{}'",
+        COMMAND_SECONDS * 2,
+        marker.display()
+    );
+    let server = start_mock_server().await;
+    let captured = mount_sse_sequence(&server, vec![sse(shell_call("call-1", &command))]).await;
+    let test = builder(AskForApproval::Never, /*unified*/ false)
+        .build_with_auto_env(&server)
+        .await?;
+    let home = test.codex_home_path().to_path_buf();
+    submit(&test, "run the slow command").await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::ExecCommandBegin(_))
+    })
+    .await;
+
+    let other = tempfile::TempDir::new()?;
+    let started = std::time::Instant::now();
+    other_process_switch(&home, other.path(), HumanRevocation::KillSwitchOn, 1_000)?;
+    expect_stopped(&test).await;
+    let latency = started.elapsed();
+    assert!(
+        latency < Duration::from_secs(2),
+        "stopped after {latency:?}"
+    );
+    assert!(kill_switch_on(&home));
+    tokio::time::sleep(Duration::from_secs(COMMAND_SECONDS * 2 + 1)).await;
+    assert!(!marker.exists(), "{} was written", marker.display());
+    assert_eq!(captured.requests().len(), 1);
+
+    other_process_switch(&home, other.path(), HumanRevocation::KillSwitchOff, 1_001)?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while kill_switch_on(&home) && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!kill_switch_on(&home), "turning it off did not arrive");
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn issue_507_kill_switch_cancels_a_streaming_reply_and_its_tool_calls() -> anyhow::Result<()>
 {
