@@ -44,9 +44,15 @@ enum AccountSubcommand {
         /// What the account holds.
         #[arg(long, value_enum, default_value_t = AccountKindArg::ApiKey)]
         kind: AccountKindArg,
-        /// The value for the non-secret `claude-config-dir` kind.
+        /// The value for the non-secret `claude-config-dir` and `aws-profile` kinds.
         #[arg(long)]
         value: Option<String>,
+    },
+    /// Rename a named account; its credential is unchanged.
+    Rename {
+        provider: String,
+        from: String,
+        to: String,
     },
     /// Remove a named account and everything it holds.
     Remove { provider: String, name: String },
@@ -63,6 +69,8 @@ enum AccountKindArg {
     /// An account of an `auth.command` provider; the command receives its name
     /// in `CORBANU_PROVIDER_ACCOUNT`.
     Command,
+    /// An AWS profile name for Amazon Bedrock (`--value`; not secret).
+    AwsProfile,
 }
 
 impl AccountKindArg {
@@ -72,6 +80,7 @@ impl AccountKindArg {
             Self::ClaudeToken => ProviderAccountKind::ClaudeOauthToken,
             Self::ClaudeConfigDir => ProviderAccountKind::ClaudeConfigDir,
             Self::Command => ProviderAccountKind::Command,
+            Self::AwsProfile => ProviderAccountKind::AwsProfile,
         }
     }
 
@@ -123,7 +132,26 @@ pub async fn run_account_command(command: AccountCommand) -> anyhow::Result<()> 
                     .map(|kind| kind.as_str())
                     .collect::<Vec<_>>()
                     .join(", ");
-                writeln!(stdout, "{}\t{}\t{kinds}", account.provider_id, account.name)?;
+                // An AWS profile name is not secret, so it is shown.
+                let profile = if account.kinds.contains(&ProviderAccountKind::AwsProfile) {
+                    vault
+                        .read_provider_account(
+                            &account.provider_id,
+                            &account.name,
+                            ProviderAccountKind::AwsProfile,
+                        )
+                        .ok()
+                        .flatten()
+                        .map(|profile| format!("\tprofile {}", profile.as_str()))
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                writeln!(
+                    stdout,
+                    "{}\t{}\t{kinds}{profile}",
+                    account.provider_id, account.name
+                )?;
             }
         }
         AccountSubcommand::Add {
@@ -142,6 +170,27 @@ pub async fn run_account_command(command: AccountCommand) -> anyhow::Result<()> 
                 "Saved {provider} account `{name}` ({}).",
                 kind.kind().as_str()
             )?;
+        }
+        AccountSubcommand::Rename { provider, from, to } => {
+            ensure_changes_allowed(&persisted_config, &config)?;
+            let from = ProviderAccountName::parse(&from)?;
+            let to = ProviderAccountName::parse(&to)?;
+            vault.rename_provider_account(&provider, &from, &to)?;
+            writeln!(stdout, "Renamed {provider} account `{from}` to `{to}`.")?;
+            // Unlike /providers, this does not edit `[provider_accounts]`.
+            let selected = config
+                .model_providers
+                .get(&provider)
+                .and_then(|info| info.account.as_ref())
+                .is_some_and(|account| account.name == from.as_str());
+            if selected {
+                writeln!(
+                    stdout,
+                    "Note: `[provider_accounts]` still selects `{from}` for {provider}; new \
+                     sessions refuse it until you change it to `{to}`. A running session on \
+                     `{from}` loses it at its next request."
+                )?;
+            }
         }
         AccountSubcommand::Remove { provider, name } => {
             ensure_changes_allowed(&persisted_config, &config)?;
@@ -180,6 +229,9 @@ fn ensure_kind_fits_provider(
             provider_id == CLAUDE_PLAN_PROVIDER_ID
         }
         AccountKindArg::Command => provider.auth.is_some() && !provider.is_claude_plan(),
+        AccountKindArg::AwsProfile => {
+            provider.is_amazon_bedrock() && codex_core::config::supports_named_accounts(provider)
+        }
     };
     if !fits {
         let kind = clap::ValueEnum::to_possible_value(&kind)
@@ -215,6 +267,9 @@ fn account_value(kind: AccountKindArg, value: Option<String>) -> anyhow::Result<
     match (kind, value) {
         (AccountKindArg::Command, None) => Ok(Zeroizing::new("1".to_string())),
         (AccountKindArg::Command, Some(_)) => bail!("a command account takes no --value"),
+        (AccountKindArg::AwsProfile, Some(value)) => Ok(Zeroizing::new(
+            codex_vault::validate_aws_profile_name(&value)?,
+        )),
         (AccountKindArg::ClaudeConfigDir, Some(value)) => {
             let dir = std::path::Path::new(value.trim());
             if !dir.is_absolute() || !dir.is_dir() {

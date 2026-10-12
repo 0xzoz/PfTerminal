@@ -52,12 +52,12 @@ Paths are under `codex-rs/`, at `ee530a0e26`.
 ## Done
 
 - [x] Sprint record created as a draft from Travis's 2026-10-11 decision (option (a)).
+- [x] Slice A (A1–A3), merged behind `named_accounts`: AWS profile accounts for Amazon Bedrock, profile-only
+  signing, refusal before any request; CLI add/list/rename/remove and the `/providers` row. Gate:
+  [s06a-gate.md](../../../../qa/provider-auth/pf-84/s06a-gate.md) (live Bedrock pending: no test profile).
 
 ## Remaining
 
-- [ ] A1: `corbanu account add amazon-bedrock <name> --kind aws-profile --value <p>` (and the S04 row action) stores the profile name as metadata. Values are validated, never secret, and shown in clear.
-- [ ] A2: a named account sets `aws.profile` and uses a profile-only provider. It ignores the managed Bedrock key, `AWS_BEARER_TOKEN_BEDROCK`, `AWS_PROFILE` and `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`.
-- [ ] A3: refuse with recovery text, before any request, when a profile is missing from the AWS config/credentials files or its credentials fail. Never fall back to `default` or to the SDK default chain. Unit tests cover each env var present.
 - [ ] B1: `AuthStorageBackend` per account over vault label `provider/openai/accounts/<name>/chatgpt_auth` (whole `AuthDotJson`: ChatGPT tokens or an OpenAI API-key login). It creates no `Codex Auth` keychain item.
 - [ ] B2: refresh writes back through that account's storage only, under a per-account refresh lock. A mock-server test proves that refreshing `work` never touches `default` and that a rotated refresh token lands in `work`.
 - [ ] B3: `corbanu login --account <name>` (browser and device code) and the S04 "add account" row sign into the named account. Logout or remove clears only that account and revokes only its tokens.
@@ -67,12 +67,12 @@ Paths are under `codex-rs/`, at `ee530a0e26`.
 
 ## Verification
 
-- [ ] Focused: `just test -p codex-core -p codex-login -p codex-model-provider -p codex-aws-auth -p codex-vault` (plus touched crates); Linux clippy `-D warnings` on glitch.
+- [ ] Focused: `just test -p codex-core -p codex-login -p codex-model-provider -p codex-aws-auth -p codex-vault` (plus touched crates); Linux clippy `-D warnings` on glitch. Slice A: done ([gate](../../../../qa/provider-auth/pf-84/s06a-gate.md)).
 - [ ] tmux SOP (disposable homes, `CORBANU_TEST_NO_NATIVE_KEYRING=1`): A, with a fake profile and a missing profile, refused while env AWS keys are set. B, with an expired fake `work` store, shows "sign in again" while `default` stays intact. Restart is durable.
 - [ ] GLM run: coordinator `-m glm-5.3-flash -c model_provider="zai"`; workers `--account amazon-bedrock:fake` and `--account openai:work` (fake) get visible refusals, with no fallback, and the coordinator still replies.
-- [ ] A live: **NOT VERIFIABLE** without a test AWS profile. Travis would need to provide an AWS account with Bedrock model access in one region and a named model. He would also need a least-privilege IAM user or role (`bedrock:InvokeModel*`), its profile in a disposable `AWS_CONFIG_FILE`, with keys in the vault fetched only via `auth-helper`, and a spend cap.
+- [ ] A live (pending; limited testing, Travis 2026-10-11): **NOT VERIFIABLE** without a test AWS profile. Travis would need to provide an AWS account with Bedrock model access in one region and a named model. He would also need a least-privilege IAM user or role (`bedrock:InvokeModel*`), its profile in a disposable `AWS_CONFIG_FILE`, with keys in the vault fetched only via `auth-helper`, and a spend cap.
 - [ ] B live: a second real ChatGPT login signed in by Travis via device code in a disposable home; otherwise only the mock-server and fake-token tests count.
-- [ ] Videos: `pf84-aws-profile-account.toml`, `pf84-chatgpt-account.toml` (`--sprint PF-84-S06 --publish`). One Opus 5.5 High review per slice.
+- [ ] Videos: `pf84-aws-profile-account.toml` (done, [index](../../../../qa/demos/index/PF-84-S06.md)), `pf84-chatgpt-account.toml` (`--sprint PF-84-S06 --publish`). One Opus 5.5 High review per slice (A: APPROVE WITH NITS, round 3).
 
 ## Security notes
 

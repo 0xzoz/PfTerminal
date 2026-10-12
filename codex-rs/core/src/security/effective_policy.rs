@@ -165,6 +165,19 @@ impl EffectivePolicySnapshot {
 }
 
 impl EffectivePolicyView {
+    /// #507: the kill-switch event a person turned on, for the whole tree
+    /// (every agent of it), or `None` while it is off or before the policy
+    /// is initialized. Unreadable or force-denied state is not such a switch.
+    pub(crate) fn kill_switch_event(&self) -> Option<String> {
+        let guard = self.read_state().ok()?;
+        let revocations = &guard.as_ref()?.persisted.revocations;
+        revocations.kill_switch_active.then(|| {
+            revocations
+                .kill_switch_event_id()
+                .map_or_else(String::new, |id| id.as_str().to_string())
+        })
+    }
+
     pub(crate) fn is_initialized(&self) -> Result<bool, SecurityPolicyError> {
         Ok(self.read_state()?.is_some())
     }

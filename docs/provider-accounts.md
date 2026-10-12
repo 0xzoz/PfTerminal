@@ -78,3 +78,28 @@ provider, account and model for one UTC day. For a session that stays within
 one day, its token counts per account match these, except for background
 memory consolidation, which `/cost` records under the conversation and
 `/status` does not show.
+
+## Amazon Bedrock: AWS profile accounts
+
+A Bedrock account stores only the name of an AWS profile (not secret, shown in
+`corbanu account list` and `/providers`; up to 64 letters, digits and `-_.+@`,
+starting with a letter or digit):
+
+```
+corbanu account add amazon-bedrock work --kind aws-profile --value corp-dev
+corbanu account rename amazon-bedrock work prod
+corbanu exec --account prod "..."
+```
+
+Its requests are signed with that profile's credentials from `~/.aws/config` and
+`~/.aws/credentials` (or the files `AWS_CONFIG_FILE` and
+`AWS_SHARED_CREDENTIALS_FILE` name), and nothing else: not the managed Bedrock
+key, `AWS_BEARER_TOKEN_BEDROCK`, `AWS_PROFILE`, `AWS_ACCESS_KEY_ID` or
+instance or container credentials (a profile whose `credential_source` asks for
+them is refused). The region is `model_providers.amazon-bedrock.aws.region`
+if set, else the profile's `region`. SSO profiles work once you have run
+`aws sso login --profile <p>` yourself. A profile that is missing, has no
+region or whose credentials fail is refused with that reason before any
+request; Corbanu never falls back to another profile. The `default` account
+keeps today's order (managed key, then `AWS_BEARER_TOKEN_BEDROCK`, then the
+AWS SDK chain).
