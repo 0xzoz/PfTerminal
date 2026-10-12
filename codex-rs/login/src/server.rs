@@ -78,6 +78,9 @@ pub struct ServerOptions {
     pub cli_auth_credentials_store_mode: AuthCredentialsStoreMode,
     pub auth_keyring_backend_kind: AuthKeyringBackendKind,
     pub auth_route_config: AuthRouteConfig,
+    /// PF-84-S06: sign into this named account (its vault store) instead of
+    /// the default login.
+    pub named_account: Option<crate::NamedChatgptAccount>,
 }
 
 impl ServerOptions {
@@ -103,6 +106,7 @@ impl ServerOptions {
             cli_auth_credentials_store_mode,
             auth_keyring_backend_kind,
             auth_route_config,
+            named_account: None,
         }
     }
 }
@@ -421,6 +425,7 @@ async fn process_request(
                         tokens.refresh_token.clone(),
                         opts.cli_auth_credentials_store_mode,
                         opts.auth_keyring_backend_kind,
+                        opts.named_account.clone(),
                     )
                     .await
                     {
@@ -868,6 +873,7 @@ pub(crate) async fn persist_tokens_async(
     refresh_token: String,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
     keyring_backend_kind: AuthKeyringBackendKind,
+    named_account: Option<crate::NamedChatgptAccount>,
 ) -> io::Result<()> {
     // Reuse existing synchronous logic but run it off the async runtime.
     let codex_home = codex_home.to_path_buf();
@@ -893,12 +899,15 @@ pub(crate) async fn persist_tokens_async(
             personal_access_token: None,
             bedrock_api_key: None,
         };
-        save_auth(
-            &codex_home,
-            &auth,
-            auth_credentials_store_mode,
-            keyring_backend_kind,
-        )
+        match named_account {
+            Some(account) => crate::save_named_account_auth(&codex_home, &account, &auth),
+            None => save_auth(
+                &codex_home,
+                &auth,
+                auth_credentials_store_mode,
+                keyring_backend_kind,
+            ),
+        }
     })
     .await
     .map_err(|e| io::Error::other(format!("persist task failed: {e}")))?

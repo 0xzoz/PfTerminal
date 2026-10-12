@@ -177,3 +177,46 @@ fn bedrock_accounts_hold_a_validated_aws_profile_name() -> Result<()> {
         .stdout("No named accounts. Every provider uses its default account.\n");
     Ok(())
 }
+
+/// PF-84-S06 slice B: `corbanu login --account` signs a named OpenAI account
+/// in (here with an API key) without touching the default login; list,
+/// status and logout see only that account and never print the key.
+#[test]
+fn named_openai_account_login_list_status_logout() -> Result<()> {
+    let home = TempDir::new()?;
+    let canary = "sk-pf84-s06-cli-canary-0001";
+    corbanu(home.path())?
+        .args(["login", "--account", "work", "--with-api-key"])
+        .write_stdin(canary)
+        .assert()
+        .failure()
+        .stderr(contains("named accounts are off"));
+    corbanu(home.path())?
+        .args(["login", "--account", "work", "--with-api-key", "--enable", "named_accounts"])
+        .write_stdin(canary)
+        .assert()
+        .success()
+        .stderr(contains("Signed in OpenAI account `work` (OpenAI API key).").and(contains(canary).not()));
+    assert!(!home.path().join("auth.json").exists(), "the default login is untouched");
+    corbanu(home.path())?
+        .args(["account", "list", "openai", "--enable", "named_accounts"])
+        .assert()
+        .success()
+        .stdout("openai\twork\tchatgpt_auth\tOpenAI API key\n");
+    corbanu(home.path())?
+        .args(["login", "--account", "work", "status", "--enable", "named_accounts"])
+        .assert()
+        .success()
+        .stderr(contains("OpenAI account `work`: OpenAI API key").and(contains(canary).not()));
+    corbanu(home.path())?
+        .args(["logout", "--account", "work", "--enable", "named_accounts"])
+        .assert()
+        .success()
+        .stderr(contains("Signed out OpenAI account `work`"));
+    corbanu(home.path())?
+        .args(["login", "--account", "work", "status", "--enable", "named_accounts"])
+        .assert()
+        .failure()
+        .stderr(contains("is not signed in"));
+    Ok(())
+}

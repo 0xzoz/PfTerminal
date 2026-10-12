@@ -16,6 +16,7 @@ fn row(provider_id: &str, account: &str) -> NamedAccountRow {
         kinds: vec![ProviderAccountKind::ApiKey],
         fingerprint: Some("0123456789ab".to_string()),
         aws_profile: None,
+        sign_in: None,
     }
 }
 
@@ -62,7 +63,18 @@ fn only_providers_that_can_hold_accounts_offer_add() {
         ..Default::default()
     };
     assert_eq!(add_methods("zai", &api_key), vec![AddAccountMethod::ApiKey]);
-    // OpenAI sign-in stays default-only until the pending S06 decision.
+    // PF-84-S06: the OpenAI sign-in provider takes ChatGPT and API-key sign-ins.
+    assert_eq!(
+        add_methods(
+            "openai",
+            &ModelProviderInfo::create_openai_provider(/*base_url*/ None)
+        ),
+        vec![
+            AddAccountMethod::ChatgptDeviceCode,
+            AddAccountMethod::OpenaiApiKey
+        ]
+    );
+    // An OpenAI-auth provider that also takes an env key stays default-only.
     let openai_login = ModelProviderInfo {
         env_key: Some("OPENAI_API_KEY".to_string()),
         requires_openai_auth: true,
@@ -214,4 +226,49 @@ fn aws_profile_accounts_store_and_show_the_profile_name() {
     let mut row = rows[0].clone();
     row.fingerprint = Some("0123456789ab".to_string());
     assert_eq!(row_detail(&row), "AWS profile `corp-dev` · fp 0123456789ab");
+}
+
+/// PF-84-S06: an OpenAI API-key sign-in is stored as that account's whole
+/// sign-in and the row shows only its kind; the key never appears.
+#[test]
+fn openai_api_key_accounts_store_a_sign_in_and_show_no_key() {
+    let home = tempfile::tempdir().expect("home");
+    let canary = "sk-pf84-s06-canary-0001";
+    save_account(
+        home.path().to_path_buf(),
+        "openai",
+        &name("work"),
+        AddAccountMethod::OpenaiApiKey,
+        AccountValue::new(format!(" {canary}\n")),
+    )
+    .expect("save");
+    let rows = load_rows(home.path()).expect("rows");
+    assert_eq!(
+        rows.iter()
+            .map(|row| (row.kinds.clone(), row.sign_in.clone()))
+            .collect::<Vec<_>>(),
+        vec![(
+            vec![ProviderAccountKind::ChatgptAuth],
+            Some("OpenAI API key".to_string())
+        )]
+    );
+    assert!(!row_detail(&rows[0]).contains(canary));
+    let stored: codex_login::AuthDotJson = serde_json::from_str(
+        &Vault::new(home.path().to_path_buf())
+            .read_provider_account("openai", &name("work"), ProviderAccountKind::ChatgptAuth)
+            .expect("read")
+            .expect("stored"),
+    )
+    .expect("sign-in json");
+    assert_eq!(stored.openai_api_key.as_deref(), Some(canary));
+    assert_eq!(
+        save_account(
+            home.path().to_path_buf(),
+            "openai",
+            &name("other"),
+            AddAccountMethod::ChatgptDeviceCode,
+            AccountValue::new(String::new()),
+        ),
+        Err("The value cannot be empty.".to_string())
+    );
 }

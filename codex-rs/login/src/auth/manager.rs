@@ -52,6 +52,8 @@ pub use crate::auth::storage::AgentIdentityStorage;
 pub use crate::auth::storage::AuthDotJson;
 pub use crate::auth::storage::AuthKeyringBackendKind;
 use crate::auth::storage::AuthStorageBackend;
+use crate::auth::named_chatgpt::NamedChatgptAccount;
+use crate::auth::named_chatgpt::VaultAccountAuthStorage;
 use crate::auth::storage::create_auth_storage;
 use crate::auth::util::try_parse_error_message;
 use crate::default_client::create_client;
@@ -314,6 +316,32 @@ impl CodexAuth {
         agent_identity_authapi_base_url: Option<&str>,
         auth_route_config: &AuthRouteConfig,
     ) -> std::io::Result<Self> {
+        Self::from_auth_dot_json_with_storage(
+            codex_home,
+            auth_dot_json,
+            auth_credentials_store_mode,
+            chatgpt_base_url,
+            keyring_backend_kind,
+            agent_identity_authapi_base_url,
+            auth_route_config,
+            /*storage*/ None,
+        )
+        .await
+    }
+
+    /// Like [`Self::from_auth_dot_json`]; `storage` (a named account's vault
+    /// store, PF-84-S06) replaces the store a ChatGPT login refreshes into.
+    #[allow(clippy::too_many_arguments)]
+    async fn from_auth_dot_json_with_storage(
+        codex_home: &Path,
+        auth_dot_json: AuthDotJson,
+        auth_credentials_store_mode: AuthCredentialsStoreMode,
+        chatgpt_base_url: Option<&str>,
+        keyring_backend_kind: AuthKeyringBackendKind,
+        agent_identity_authapi_base_url: Option<&str>,
+        auth_route_config: &AuthRouteConfig,
+        storage: Option<Arc<dyn AuthStorageBackend>>,
+    ) -> std::io::Result<Self> {
         let auth_mode = auth_dot_json.resolved_mode();
         if auth_mode == AuthMode::ApiKey {
             let Some(api_key) = auth_dot_json.openai_api_key.as_deref() else {
@@ -387,11 +415,9 @@ impl CodexAuth {
 
         match auth_mode {
             AuthMode::Chatgpt => {
-                let storage = create_auth_storage(
-                    codex_home.to_path_buf(),
-                    storage_mode,
-                    keyring_backend_kind,
-                );
+                let storage = storage.unwrap_or_else(|| {
+                    create_auth_storage(codex_home.to_path_buf(), storage_mode, keyring_backend_kind)
+                });
                 Ok(Self::Chatgpt(ChatgptAuth { state, storage }))
             }
             AuthMode::ChatgptAuthTokens => Ok(Self::ChatgptAuthTokens(ChatgptAuthTokens { state })),
@@ -2469,6 +2495,10 @@ pub struct AuthManager {
     external_auth: RwLock<Option<Arc<dyn ExternalAuth>>>,
     provider_api_key_cache: RwLock<ProviderApiKeyCache>,
     auth_route_config: AuthRouteConfig,
+    /// PF-84-S06: the named sign-in account this manager serves. It loads,
+    /// refreshes and logs out only that account's vault store, never the
+    /// default login, the environment or the ephemeral store.
+    named_account: Option<NamedChatgptAccount>,
 }
 
 #[derive(Debug)]
@@ -2629,6 +2659,7 @@ impl AuthManager {
             agent_identity_bootstrap_cooldown: Mutex::default(),
             external_auth: RwLock::new(None),
             provider_api_key_cache: RwLock::new(ProviderApiKeyCache::new()),
+            named_account: None,
             auth_route_config,
         }
     }
@@ -2657,6 +2688,7 @@ impl AuthManager {
             agent_identity_bootstrap_cooldown: Mutex::default(),
             external_auth: RwLock::new(None),
             provider_api_key_cache: RwLock::new(ProviderApiKeyCache::new()),
+            named_account: None,
             auth_route_config: crate::test_support::transport_default_auth_route_config(),
         })
     }
@@ -2684,6 +2716,7 @@ impl AuthManager {
             agent_identity_bootstrap_cooldown: Mutex::default(),
             external_auth: RwLock::new(None),
             provider_api_key_cache: RwLock::new(ProviderApiKeyCache::new()),
+            named_account: None,
             auth_route_config: crate::test_support::transport_default_auth_route_config(),
         })
     }
@@ -2719,6 +2752,7 @@ impl AuthManager {
             agent_identity_bootstrap_cooldown: Mutex::default(),
             external_auth: RwLock::new(None),
             provider_api_key_cache: RwLock::new(ProviderApiKeyCache::new()),
+            named_account: None,
             auth_route_config: crate::test_support::transport_default_auth_route_config(),
         })
     }
@@ -2765,6 +2799,7 @@ impl AuthManager {
                 account,
             )) as Arc<dyn ExternalAuth>)),
             provider_api_key_cache: RwLock::new(ProviderApiKeyCache::new()),
+            named_account: None,
             // External bearer auth refreshes by running the provider's command and never makes
             // auth-owned HTTP requests, so this route is intentionally inert.
             auth_route_config: AuthRouteConfig::from_http_client_factory(HttpClientFactory::new(
@@ -2801,6 +2836,10 @@ impl AuthManager {
     /// a guarded reload and then refreshes only if the on-disk auth is unchanged.
     #[instrument(level = "trace", skip_all)]
     pub async fn auth(&self) -> Option<CodexAuth> {
+        // A named account loads lazily, and picks up a sign-in added later.
+        if self.named_account.is_some() && self.auth_cached().is_none() {
+            self.reload().await;
+        }
         if self.has_external_auth() {
             self.reload().await;
             return self.auth_cached();
@@ -2973,6 +3012,9 @@ impl AuthManager {
     }
 
     async fn load_auth(&self) -> Option<CodexAuth> {
+        if self.named_account.is_some() {
+            return self.load_named_account_auth().await;
+        }
         if let Some(external_auth) = self.external_auth() {
             return match self.resolve_external_auth(&external_auth).await {
                 Ok(auth) => Some(auth),
@@ -3231,6 +3273,20 @@ impl AuthManager {
                 | CodexAuth::BedrockApiKey(_) => Ok(()),
             }
         };
+        // PF-84-S06: a named account's refresh failure names how to recover it.
+        let result = match (result, self.named_account.as_ref()) {
+            (Err(RefreshTokenError::Permanent(error)), Some(account)) => {
+                Err(RefreshTokenError::Permanent(RefreshTokenFailedError::new(
+                    error.reason,
+                    format!(
+                        "{} (account `{}`: sign in again with `corbanu login --account {}`; \
+                         the default login is unchanged)",
+                        error.message, account.name, account.name
+                    ),
+                )))
+            }
+            (result, _) => result,
+        };
         if let Err(RefreshTokenError::Permanent(error)) = &result {
             self.record_permanent_refresh_failure_if_unchanged(&attempted_auth, error);
         }
@@ -3242,6 +3298,9 @@ impl AuthManager {
     /// reloads the in‑memory auth cache so callers immediately observe the
     /// unauthenticated state.
     pub async fn logout(&self) -> std::io::Result<bool> {
+        if let Some(result) = self.logout_named_account(/*revoke*/ false).await {
+            return result;
+        }
         let removed = logout_all_stores(
             &self.codex_home,
             self.auth_credentials_store_mode,
@@ -3255,6 +3314,9 @@ impl AuthManager {
     }
 
     pub async fn logout_all_credentials(&self) -> std::io::Result<bool> {
+        if let Some(result) = self.logout_named_account(/*revoke*/ false).await {
+            return result;
+        }
         let removed = logout_all_stores(
             &self.codex_home,
             self.auth_credentials_store_mode,
@@ -3266,6 +3328,9 @@ impl AuthManager {
     }
 
     pub async fn logout_with_revoke(&self) -> std::io::Result<bool> {
+        if let Some(result) = self.logout_named_account(/*revoke*/ true).await {
+            return result;
+        }
         let auth_dot_json = self
             .auth_cached()
             .and_then(|auth| auth.get_current_auth_json());
@@ -3487,6 +3552,9 @@ impl AuthManager {
         Ok(())
     }
 }
+
+#[path = "manager_named_account.rs"]
+mod named_account;
 
 #[cfg(test)]
 #[path = "auth_tests.rs"]

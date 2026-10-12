@@ -74,6 +74,10 @@ impl App {
                     ));
                     return;
                 }
+                if method == crate::provider_named_accounts::AddAccountMethod::ChatgptDeviceCode {
+                    self.start_named_chatgpt_sign_in(provider_id, name);
+                    return;
+                }
                 if method == crate::provider_named_accounts::AddAccountMethod::Command {
                     self.app_event_tx
                         .send(AppEvent::ProviderAccount(ProviderAccountEvent::Save {
@@ -199,6 +203,87 @@ impl App {
             Err(message) => self.chat_widget.add_error_message(message),
         }
         self.schedule_provider_manager_refresh();
+    }
+
+    /// PF-84-S06: signs a named account in by device code. The code and URL
+    /// are shown here; the sign-in is saved to that account's vault store
+    /// only, and the same ChatGPT user under another account gets a warning.
+    fn start_named_chatgpt_sign_in(&self, provider_id: String, name: ProviderAccountName) {
+        let account = codex_login::NamedChatgptAccount {
+            provider_id: provider_id.clone(),
+            name: name.as_str().to_string(),
+        };
+        let mut opts = codex_login::ServerOptions::new(
+            self.config.codex_home.to_path_buf(),
+            codex_login::CLIENT_ID.to_string(),
+            self.config.forced_chatgpt_workspace_id.clone(),
+            self.config.cli_auth_credentials_store_mode,
+            self.config.auth_keyring_backend_kind(),
+            self.config.auth_route_config(),
+        );
+        opts.open_browser = false;
+        opts.named_account = Some(account.clone());
+        let codex_home = self.config.codex_home.to_path_buf();
+        let store_mode = self.config.cli_auth_credentials_store_mode;
+        let keyring_kind = self.config.auth_keyring_backend_kind();
+        let tx = self.app_event_tx.clone();
+        let finish = move |result| {
+            tx.send(AppEvent::ProviderAccount(ProviderAccountEvent::Finished {
+                result,
+            }));
+        };
+        tokio::spawn(async move {
+            let code = match codex_login::request_device_code(&opts).await {
+                Ok(code) => code,
+                Err(error) => {
+                    finish(Err(format!(
+                        "Could not start the sign-in of {provider_id} account `{name}`: {error}"
+                    )));
+                    return;
+                }
+            };
+            finish(Ok(format!(
+                "To sign in {provider_id} account `{name}`, open {} and enter code {}. \
+                 Waiting for the sign-in…",
+                code.verification_url, code.user_code
+            )));
+            if let Err(error) = codex_login::complete_device_code_login(opts, code).await {
+                finish(Err(format!(
+                    "Sign-in of {provider_id} account `{name}` failed: {error}"
+                )));
+                return;
+            }
+            let summary = codex_login::named_account_summary(&codex_home, &account)
+                .ok()
+                .flatten()
+                .map(|summary| {
+                    format!(
+                        " ({})",
+                        crate::provider_named_accounts::describe_sign_in(&summary)
+                    )
+                })
+                .unwrap_or_default();
+            let mut message = format!(
+                "Signed in {provider_id} account `{name}`{summary}. Use it from /providers, \
+                 `--account {name}` or a spawn `account`."
+            );
+            let default_auth = codex_login::load_auth_dot_json(&codex_home, store_mode, keyring_kind)
+                .ok()
+                .flatten();
+            let same = codex_login::same_user_sign_ins(&codex_home, &account, default_auth.as_ref())
+                .unwrap_or_default();
+            if !same.is_empty() {
+                message.push_str(&format!(
+                    " Warning: this is the same ChatGPT user as account(s) {}; they share that \
+                     user's limits, and signing out of one can end the other's session.",
+                    same.iter()
+                        .map(|name| format!("`{name}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            finish(Ok(message));
+        });
     }
 
     fn run_provider_account_job(
@@ -466,8 +551,14 @@ impl App {
             }
         }
         let codex_home = self.config.codex_home.to_path_buf();
+        let auth_route_config = self.config.auth_route_config();
         self.run_provider_account_job(move || {
-            crate::provider_named_accounts::remove_account(codex_home, &provider_id, &name)
+            crate::provider_named_accounts::remove_account(
+                codex_home,
+                &provider_id,
+                &name,
+                &auth_route_config,
+            )
         });
     }
 }

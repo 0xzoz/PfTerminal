@@ -142,6 +142,24 @@ pub async fn run_account_command(command: AccountCommand) -> anyhow::Result<()> 
                         )?
                         .map(|profile| format!("\tprofile {}", profile.as_str()))
                         .unwrap_or_default()
+                } else if account.kinds.contains(&ProviderAccountKind::ChatgptAuth) {
+                    // Kind, email hint and plan only; never a token.
+                    codex_login::named_account_summary(
+                        &config.codex_home,
+                        &codex_login::NamedChatgptAccount {
+                            provider_id: account.provider_id.clone(),
+                            name: account.name.as_str().to_string(),
+                        },
+                    )?
+                    .map(|summary| {
+                        let detail = [Some(summary.kind.to_string()), summary.email_hint, summary.plan]
+                            .into_iter()
+                            .flatten()
+                            .collect::<Vec<_>>()
+                            .join(" · ");
+                        format!("\t{detail}")
+                    })
+                    .unwrap_or_default()
                 } else {
                     String::new()
                 };
@@ -179,6 +197,27 @@ pub async fn run_account_command(command: AccountCommand) -> anyhow::Result<()> 
         AccountSubcommand::Remove { provider, name } => {
             ensure_changes_allowed(&persisted_config, &config)?;
             let name = ProviderAccountName::parse(&name)?;
+            // A sign-in account's tokens are revoked (best effort) first.
+            if vault
+                .provider_account_kinds(&provider, &name)?
+                .contains(&ProviderAccountKind::ChatgptAuth)
+            {
+                let account = codex_login::NamedChatgptAccount {
+                    provider_id: provider.clone(),
+                    name: name.as_str().to_string(),
+                };
+                if codex_login::logout_named_account_with_revoke(
+                    &config.codex_home,
+                    &account,
+                    &config.auth_route_config(),
+                )
+                .await?
+                {
+                    writeln!(stdout, "Signed out and removed {provider} account `{name}`.")?;
+                    return Ok(());
+                }
+                bail!("{provider} has no account `{name}`");
+            }
             if vault.remove_provider_account(&provider, &name)? {
                 writeln!(stdout, "Removed {provider} account `{name}`.")?;
             } else {
