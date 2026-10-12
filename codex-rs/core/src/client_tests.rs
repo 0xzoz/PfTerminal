@@ -3234,6 +3234,66 @@ fn chat_freeform_tool_wrappers_are_never_strict() {
 }
 
 #[test]
+fn namespaced_history_replays_under_offered_flat_names() {
+    let call = |namespace: &str, name: &str| ResponseItem::FunctionCall {
+        id: None,
+        name: name.to_string(),
+        namespace: Some(namespace.to_string()),
+        arguments: "{}".to_string(),
+        call_id: format!("call-{name}"),
+        encrypted_function_args: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let function = |name: &str| {
+        codex_tools::ToolSpec::Function(codex_tools::ResponsesApiTool {
+            name: name.to_string(),
+            description: String::new(),
+            strict: false,
+            defer_loading: None,
+            parameters: codex_tools::JsonSchema::object(Default::default(), None, None),
+            output_schema: None,
+        })
+    };
+    let long_namespace = format!("mcp__{}", "s".repeat(70));
+    let long_flat = crate::tools::flat_tool_names::flat_tool_name_for(
+        &codex_tools::ToolName::namespaced(long_namespace.clone(), "tool"),
+    );
+    assert_eq!(long_flat.len(), 64);
+    let tools = vec![
+        function("mcp__orders__lookup"),
+        function("spawn_agent"),
+        function(&long_flat),
+    ];
+    let mut input = vec![
+        call("mcp__orders", "lookup"),
+        // A collaboration call from a Responses parent: chat models are
+        // offered the plain tool, so it keeps its bare name.
+        call("collaboration", "spawn_agent"),
+        call(&long_namespace, "tool"),
+    ];
+
+    super::flatten_namespaced_history(&mut input, &tools);
+
+    let names: Vec<_> = input
+        .iter()
+        .map(|item| match item {
+            ResponseItem::FunctionCall {
+                name, namespace, ..
+            } => (name.clone(), namespace.clone()),
+            other => panic!("unexpected item {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            ("mcp__orders__lookup".to_string(), None),
+            ("spawn_agent".to_string(), None),
+            (long_flat, None),
+        ]
+    );
+}
+
+#[test]
 fn chat_replay_keeps_malformed_tool_calls_and_their_errors_visible() {
     let call = |arguments: &str, call_id: &str| ResponseItem::FunctionCall {
         id: None,

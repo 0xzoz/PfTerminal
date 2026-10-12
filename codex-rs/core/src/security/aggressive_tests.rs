@@ -81,6 +81,7 @@ fn command() -> String {
 
 /// One narrow grant opens exactly its surface and operation, for its uses.
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn pf_23_s02_grant_opens_only_its_surface_operation_and_uses() {
     let thread = ThreadId::new();
     let lineage = chain(&["main"]);
@@ -121,6 +122,7 @@ fn pf_23_s02_grant_opens_only_its_surface_operation_and_uses() {
 /// Expiry, a policy epoch change, the kill switch, another level and a
 /// revocation each end a grant, and an ended grant never comes back.
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn pf_23_s02_grant_ends_with_expiry_policy_change_and_revocation() {
     let lineage = chain(&["main"]);
     let operation = command();
@@ -226,6 +228,7 @@ fn pf_23_s02_grant_ends_with_expiry_policy_change_and_revocation() {
 /// A parent's grant never reaches a child agent: the child's lineage and
 /// session differ. A grant for the child must be derived, and no wider.
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn pf_23_s02_grants_are_not_inherited_and_derive_only_narrower() {
     let parent_thread = ThreadId::new();
     let child_thread = ThreadId::new();
@@ -329,6 +332,7 @@ fn pf_23_s02_grants_are_not_inherited_and_derive_only_narrower() {
 /// Unknown surfaces, extra actions, destinations, other limits, other
 /// agents and tampered grants are refused when issued.
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn pf_23_s02_unknown_or_malformed_grants_are_refused() {
     let thread = ThreadId::new();
     let lineage = chain(&["main"]);

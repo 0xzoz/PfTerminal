@@ -589,6 +589,8 @@ pub(crate) struct ChatWidget {
     runtime_model_provider_base_url: Option<String>,
     pub(crate) remote_connection: Option<RemoteConnectionStatus>,
     token_info: Option<TokenUsageInfo>,
+    // PF-84: per-account usage of every thread in this session, for `/status`.
+    pub(crate) session_account_usage: crate::status::SessionAccountUsage,
     tps_estimator: TpsEstimator,
     rate_limit_snapshots_by_limit_id: BTreeMap<String, RateLimitSnapshotDisplay>,
     refreshing_status_outputs: Vec<(u64, StatusHistoryHandle)>,

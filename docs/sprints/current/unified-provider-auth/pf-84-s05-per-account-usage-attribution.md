@@ -66,12 +66,13 @@ Paths are under `codex-rs/`, at `63ea3d0cbd`.
   provider, account and model, in this conversation (coordinator and spawned agents) and in
   other conversations (`corbanu exec` workers) of the same home, reconciling exactly.
 - [x] Merged behind `named_accounts` with gate evidence: [gate](../../../../qa/provider-auth/pf-84/s05-gate.md).
+- [x] Follow-up (Travis, 2026-10-11, option b): release `/status` shows token totals per account,
+  no cost records ([#528](https://github.com/CorbanuCore/CorbanuTerminal/pull/528), [gate](../../../../qa/provider-auth/pf-84/s05-status-tokens-gate.md)).
 
 ## Remaining
 
 - [ ] Code-blind functional acceptance (independent; not the implementer's), then Travis's sign-off.
-- [ ] Known limits (gate): usage views exist only in developer-accounting builds; a named
-  account's throttle row is keyed by name, so a replaced key keeps an active cooldown.
+- [ ] Known limit: a named account's throttle row is keyed by name; a replaced key keeps its cooldown.
 
 ## Verification
 

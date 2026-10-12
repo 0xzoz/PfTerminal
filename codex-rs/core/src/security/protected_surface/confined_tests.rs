@@ -69,6 +69,7 @@ fn pf_23_s02_moderate_asks_once_per_unconfined_start() {
 /// Aggressive: typing into an unconfined process is refused unless a grant
 /// names this exact start; the grant does not carry to a later start.
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn pf_23_s02_aggressive_needs_a_grant_for_this_start() {
     let thread = ThreadId::new();
     let aggressive_state = state(SecurityLevel::Aggressive, 1, 0);

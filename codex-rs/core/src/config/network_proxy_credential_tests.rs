@@ -12,6 +12,7 @@ fn human() -> PolicyPrincipal {
 }
 
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn credential_authority_revoke_during_use_linearizes_after_the_active_resolution() {
     let revocations = RwLock::new(RevocationState::new());
 

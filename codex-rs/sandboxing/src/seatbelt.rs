@@ -675,6 +675,38 @@ fn build_seatbelt_rename_guard_policy(
     (policy.join("\n"), params)
 }
 
+/// Issue #506: deny listing each directory (reading its entries), in every
+/// spelling Seatbelt may see. `file-read-data` on the directory itself only:
+/// its metadata and every path below it keep the access the rest of the
+/// policy gives them, so commands still run helpers kept below it.
+fn build_seatbelt_unlistable_policy(
+    file_system_sandbox_policy: &FileSystemSandboxPolicy,
+) -> (String, Vec<(String, PathBuf)>) {
+    let spellings = file_system_sandbox_policy
+        .get_unlistable_directories()
+        .into_iter()
+        .flat_map(|directory| sandbox_spellings(directory.as_path()))
+        .collect::<BTreeSet<_>>();
+    let mut params = Vec::new();
+    let literals = spellings
+        .into_iter()
+        .enumerate()
+        .map(|(index, path)| {
+            let key = format!("UNLISTABLE_DIR_{index}");
+            let literal = format!("(literal (param \"{key}\"))");
+            params.push((key, path));
+            literal
+        })
+        .collect::<Vec<_>>();
+    if literals.is_empty() {
+        return (String::new(), params);
+    }
+    (
+        format!("(deny file-read-data {})", literals.join(" ")),
+        params,
+    )
+}
+
 fn build_seatbelt_unreadable_glob_policy(
     file_system_sandbox_policy: &FileSystemSandboxPolicy,
     cwd: &Path,
@@ -879,6 +911,8 @@ pub fn create_seatbelt_command_args(
     // path and every read-only path inside a writable root except the default
     // `.git`/`.codex`/`.agents` carve-outs at the root itself.
     let mut rename_guarded = unreadable_roots.clone();
+    // #506: an unlistable directory renamed elsewhere would leave its rule.
+    rename_guarded.extend(file_system_sandbox_policy.get_unlistable_directories());
     if !unreadable_roots.is_empty() && !file_system_sandbox_policy.has_full_disk_write_access() {
         for root in file_system_sandbox_policy.get_writable_roots_with_cwd(sandbox_policy_cwd) {
             rename_guarded.extend(root.read_only_subpaths.into_iter().filter(|subpath| {
@@ -975,11 +1009,14 @@ pub fn create_seatbelt_command_args(
     let include_platform_defaults = file_system_sandbox_policy.include_platform_defaults();
     let deny_read_policy =
         build_seatbelt_unreadable_glob_policy(file_system_sandbox_policy, sandbox_policy_cwd);
+    let (unlistable_policy, unlistable_params) =
+        build_seatbelt_unlistable_policy(file_system_sandbox_policy);
     let mut policy_sections = vec![
         MACOS_SEATBELT_BASE_POLICY.to_string(),
         file_read_policy,
         file_write_policy,
         deny_read_policy,
+        unlistable_policy,
         rename_guard_policy,
         network_policy,
     ];
@@ -993,6 +1030,7 @@ pub fn create_seatbelt_command_args(
         file_read_dir_params,
         file_write_dir_params,
         rename_guard_params,
+        unlistable_params,
         unix_socket_dir_params(&proxy),
     ]
     .concat();
