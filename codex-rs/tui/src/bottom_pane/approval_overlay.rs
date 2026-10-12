@@ -236,6 +236,16 @@ impl ApprovalOverlay {
         self.typing_guard.on_request_changed();
     }
 
+    /// #523: require a deliberate choice before Enter confirms: the prompt
+    /// opened over another view, or was revealed when the view above it
+    /// closed. Until the user navigates, a key is typed text too.
+    pub(crate) fn require_deliberate_choice(&mut self) {
+        // An open grant review goes back to the approval: a double or held
+        // Enter meant for the view above must not grant.
+        self.grant_review = None;
+        self.typing_guard.on_command_key();
+    }
+
     pub fn enqueue_request(&mut self, req: ApprovalRequest) {
         self.queue.push(req);
     }
@@ -777,6 +787,10 @@ impl ApprovalOverlay {
                 "This is a new request. Choose an option with {up}/{down} or its key, then \
                  {accept}; {cancel} cancels."
             ),
+            Notice::NavigateFirst => format!(
+                "This is a new request. Choose an option with {up}/{down}, then {accept}; \
+                 {cancel} cancels."
+            ),
             Notice::PersistentNeedsArrows => format!(
                 "That option lasts beyond this request, so its key does not choose it. \
                  Highlight it with {up}/{down}, then press {accept}; {cancel} cancels."
@@ -928,6 +942,12 @@ impl BottomPaneView for ApprovalOverlay {
     fn handle_paste(&mut self, _pasted: String) -> bool {
         self.typing_guard.on_typed_input();
         true
+    }
+
+    /// #523: back from under another prompt or view, whose double or held
+    /// Enter must not answer this request.
+    fn on_revealed(&mut self) {
+        self.require_deliberate_choice();
     }
 
     fn on_ctrl_c(&mut self) -> CancellationEvent {

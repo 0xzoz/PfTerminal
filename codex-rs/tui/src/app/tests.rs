@@ -6941,6 +6941,112 @@ async fn claude_adapter_emits_direct_records_without_prose_batching() {
     assert!(!tasks[1].1.contains("Multiple spawn dispatches"));
 }
 
+/// #507: turning the kill switch on interrupts every running Claude pane
+/// turn (its cancel token ends the Claude process), and the pane says why.
+#[tokio::test]
+async fn issue_507_kill_switch_interrupts_running_claude_panes() {
+    let (mut app, _app_event_rx, troll_pane_id, orc_pane_id) =
+        make_child_report_auto_claude_pane_app().await;
+    let codex_home = app.config.codex_home.to_path_buf();
+    let running = app
+        .claude_panes
+        .prepare_turn(&troll_pane_id, "long task".to_string(), &codex_home)
+        .expect("prepare running Troll pane");
+    assert!(app.claude_panes.claude_pane_is_running(&troll_pane_id));
+    assert!(!app.claude_panes.claude_pane_is_running(&orc_pane_id));
+
+    app.stop_claude_panes_for_kill_switch();
+
+    assert!(running.cancel_token.is_cancelled());
+    let said = |pane_id: &str| {
+        app.claude_pane_transcript_cells
+            .get(pane_id)
+            .into_iter()
+            .flatten()
+            .any(|cell| {
+                lines_to_single_string(&cell.display_lines(/*width*/ 400))
+                    .contains("security kill switch was turned on")
+            })
+    };
+    assert!(said(&troll_pane_id));
+    assert!(!said(&orc_pane_id), "an idle pane has nothing to stop");
+}
+
+/// #507: tasks other agents send to Claude panes while the kill switch is on
+/// wait (one per pane, the newest; the older one is recorded as superseded)
+/// and nothing starts. Once the switch is off, an idle pane gets its task as a
+/// turn at once, and a busy pane when its turn ends. (The turns never run:
+/// the test never yields to them.)
+#[tokio::test]
+async fn issue_507_tasks_for_claude_panes_wait_and_are_sent_after_the_switch() {
+    use crate::legacy_core::security_level_change::LevelBasis;
+    use crate::legacy_core::security_level_change::SecurityLevel;
+    use crate::legacy_core::security_revocation::HumanRevocation;
+    use crate::legacy_core::security_revocation::commit_human_revocation;
+    let (mut app, _app_event_rx, troll_pane_id, orc_pane_id) =
+        make_child_report_auto_claude_pane_app().await;
+    let codex_home = app.config.codex_home.to_path_buf();
+    let switch = |choice| {
+        let basis = LevelBasis::read(&codex_home, SecurityLevel::Permissive, None);
+        commit_human_revocation(
+            &codex_home,
+            SecurityLevel::Permissive,
+            /*thread*/ None,
+            &basis,
+            choice,
+            /*now_unix_seconds*/ 1_000,
+        )
+        .expect("commit");
+    };
+    let held = |app: &App| app.kill_switch_held_claude_tasks.clone();
+    switch(HumanRevocation::KillSwitchOn);
+
+    for tick in 1..=3 {
+        app.submit_claude_pane_task(troll_pane_id.clone(), format!("assignment fire {tick}"));
+    }
+    app.submit_claude_pane_task(orc_pane_id.clone(), "orc task".to_string());
+    assert_eq!(
+        held(&app),
+        vec![
+            (troll_pane_id.clone(), "assignment fire 3".to_string()),
+            (orc_pane_id.clone(), "orc task".to_string()),
+        ]
+    );
+    assert!(!app.claude_panes.claude_pane_is_running(&troll_pane_id));
+    assert!(!app.claude_panes.claude_pane_is_running(&orc_pane_id));
+    app.send_held_claude_tasks();
+    assert_eq!(held(&app).len(), 2, "still on: nothing is sent");
+
+    switch(HumanRevocation::KillSwitchOff);
+    // The Troll pane is busy (a turn its operator started right away; that
+    // turn's task has already let go of the pane's lock).
+    drop(
+        app.claude_panes
+            .prepare_turn(&troll_pane_id, "busy".to_string(), &codex_home)
+            .expect("a running turn"),
+    );
+    app.send_held_claude_tasks();
+    assert!(
+        app.claude_panes.claude_pane_is_running(&orc_pane_id),
+        "idle: sent"
+    );
+    assert_eq!(
+        held(&app),
+        vec![(troll_pane_id.clone(), "assignment fire 3".to_string())],
+        "busy: it waits for the turn to end"
+    );
+
+    app.claude_panes
+        .interrupt_turn(&troll_pane_id)
+        .expect("stop the busy turn");
+    app.on_claude_pane_turn_finished(troll_pane_id.clone(), Err("interrupted".to_string()));
+    assert!(
+        app.claude_panes.claude_pane_is_running(&troll_pane_id),
+        "sent when the turn ended"
+    );
+    assert!(held(&app).is_empty());
+}
+
 #[tokio::test]
 async fn child_report_auto_starts_turn_on_idle_claude_pane_parent() {
     let (mut app, mut app_event_rx, troll_pane_id, orc_pane_id) =
@@ -11884,6 +11990,7 @@ pub(super) async fn make_test_app() -> App {
         spawn_processed_terminal_turns: HashSet::new(),
         spawn_auto_loop_state_by_node: HashMap::new(),
         spawn_operator_input_seen: false,
+        kill_switch_held_claude_tasks: Vec::new(),
         spawn_quarantine_notified_by_node: HashSet::new(),
         spawn_context_left_by_thread: HashMap::new(),
         spawn_last_report_seq_by_node: HashMap::new(),
@@ -11990,6 +12097,7 @@ pub(super) async fn make_test_app_with_channels() -> (
             spawn_processed_terminal_turns: HashSet::new(),
             spawn_auto_loop_state_by_node: HashMap::new(),
             spawn_operator_input_seen: false,
+            kill_switch_held_claude_tasks: Vec::new(),
             spawn_quarantine_notified_by_node: HashSet::new(),
             spawn_context_left_by_thread: HashMap::new(),
             spawn_last_report_seq_by_node: HashMap::new(),

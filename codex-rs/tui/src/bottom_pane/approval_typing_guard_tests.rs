@@ -148,3 +148,21 @@ fn persistent_option_key_inside_a_word_is_typed_text() {
     assert_eq!(guard.notice(), Some(Notice::TypedText));
     assert_eq!(guard.on_confirm(), Confirm::Blocked);
 }
+
+/// #523: a prompt that needs a deliberate choice (it opened over another
+/// view or was revealed) says to navigate, takes a key as typed text, and
+/// waits for the arrow keys.
+#[test]
+fn deliberate_choice_says_to_navigate_first() {
+    let mut guard = TypingGuard::default();
+    guard.on_command_key();
+    assert!(guard.awaits_navigation());
+    assert_eq!(guard.on_confirm(), Confirm::Blocked);
+    assert_eq!(guard.notice(), Some(Notice::NavigateFirst));
+    assert_eq!(guard.on_text_key(Some(0)), None);
+    assert_eq!(guard.notice(), Some(Notice::TypedText));
+    assert_eq!(guard.on_confirm(), Confirm::Blocked);
+    guard.reset();
+    assert!(!guard.awaits_navigation());
+    assert_eq!(guard.on_confirm(), Confirm::Highlighted);
+}

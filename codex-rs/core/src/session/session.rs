@@ -1293,6 +1293,18 @@ impl Session {
                 .agent_control
                 .effective_security_policy()
                 .register_revocation_sink(Arc::downgrade(&sess) as _);
+            // #507: turning the kill switch on also stops this session's work.
+            let kill_switch_stop = sess.services.thread_extension_data.get_or_init(|| {
+                crate::security::kill_switch_stop::KillSwitchStop::new(
+                    Arc::downgrade(&sess),
+                    sess.services.agent_control.effective_security_policy(),
+                    tokio::runtime::Handle::current(),
+                )
+            });
+            sess.services
+                .agent_control
+                .effective_security_policy()
+                .register_revocation_sink(Arc::downgrade(&kill_switch_stop) as _);
             // Extensions own their own model clients - image generation ships on
             // by default - and those requests are billed to the operator like
             // any other inference. This is how they record. It is inserted once
