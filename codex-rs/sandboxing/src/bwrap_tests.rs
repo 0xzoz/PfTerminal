@@ -9,9 +9,139 @@ use tempfile::tempdir;
 #[test]
 fn system_bwrap_warning_reports_missing_system_bwrap() {
     assert_eq!(
-        system_bwrap_warning_for_path(/*system_bwrap_path*/ None),
+        system_bwrap_warning_for_path(/*system_bwrap_path*/ None, || true),
         Some(MISSING_BWRAP_WARNING.to_string())
     );
+}
+
+/// Issue #563: without a bundled copy either, the warning does not promise
+/// one: it says sandboxed commands will not run and what to install.
+#[test]
+fn system_bwrap_warning_without_a_bundled_copy_names_what_to_install() {
+    let warning = system_bwrap_warning_for_path(/*system_bwrap_path*/ None, || false);
+    assert_eq!(warning, Some(NO_BWRAP_WARNING.to_string()));
+    assert!(NO_BWRAP_WARNING.contains("will not run"));
+    assert!(NO_BWRAP_WARNING.contains("sudo apt install bubblewrap"));
+    assert!(!NO_BWRAP_WARNING.contains("bundled bubblewrap in the meantime"));
+}
+
+/// Issue #563: the refusal printed when no bubblewrap is found keeps the
+/// marker the tool orchestrator treats as a sandbox startup failure, and
+/// counts as a sandbox denial, as the panic it replaces did; and it names
+/// what to install.
+#[test]
+fn bwrap_unavailable_message_keeps_its_classification_and_names_what_to_install() {
+    use codex_protocol::exec_output::ExecToolCallOutput;
+    use codex_protocol::exec_output::StreamOutput;
+
+    assert!(BWRAP_UNAVAILABLE_MESSAGE.starts_with("bubblewrap is unavailable"));
+    assert!(BWRAP_UNAVAILABLE_MESSAGE.contains("sudo apt install bubblewrap"));
+    assert!(BWRAP_UNAVAILABLE_MESSAGE.contains("did not run"));
+    let output = ExecToolCallOutput {
+        exit_code: 1,
+        stderr: StreamOutput::new(BWRAP_UNAVAILABLE_MESSAGE.to_string()),
+        aggregated_output: StreamOutput::new(BWRAP_UNAVAILABLE_MESSAGE.to_string()),
+        ..Default::default()
+    };
+    assert!(crate::is_likely_sandbox_denied(
+        crate::SandboxType::LinuxSeccomp,
+        &output
+    ));
+}
+
+#[test]
+fn finds_package_layout_bwrap_from_install_context() {
+    use codex_install_context::CodexPackageLayout;
+    use codex_install_context::InstallMethod;
+
+    let temp_dir = tempdir().expect("temp dir");
+    let package_dir = temp_dir.path();
+    let bin_dir = package_dir.join("bin");
+    let resources_dir = package_dir.join("codex-resources");
+    let expected_bwrap = resources_dir.join("bwrap");
+    std::fs::create_dir_all(&bin_dir).expect("create bin dir");
+    write_executable(&expected_bwrap);
+
+    let context = InstallContext {
+        method: InstallMethod::Other,
+        package_layout: Some(CodexPackageLayout {
+            package_dir: AbsolutePathBuf::from_absolute_path(package_dir).expect("absolute"),
+            bin_dir: AbsolutePathBuf::from_absolute_path(&bin_dir).expect("absolute"),
+            resources_dir: Some(
+                AbsolutePathBuf::from_absolute_path(&resources_dir).expect("absolute"),
+            ),
+            path_dir: None,
+        }),
+    };
+
+    assert_eq!(
+        find_bundled_bwrap_for_install_context(&context),
+        Some(AbsolutePathBuf::from_absolute_path(&expected_bwrap).expect("absolute"))
+    );
+}
+
+#[test]
+fn finds_legacy_standalone_bundled_bwrap_next_to_exe_resources() {
+    let temp_dir = tempdir().expect("temp dir");
+    let exe = temp_dir.path().join("codex");
+    let expected_bwrap = temp_dir.path().join("codex-resources").join("bwrap");
+    write_executable(&exe);
+    write_executable(&expected_bwrap);
+
+    assert_eq!(
+        find_legacy_bundled_bwrap_for_exe(&exe),
+        Some(AbsolutePathBuf::from_absolute_path(&expected_bwrap).expect("absolute"))
+    );
+}
+
+#[test]
+fn finds_npm_bundled_bwrap_next_to_target_vendor_dir() {
+    let temp_dir = tempdir().expect("temp dir");
+    let target_dir = temp_dir.path().join("vendor/x86_64-unknown-linux-musl");
+    let exe = target_dir.join("codex").join("codex");
+    let expected_bwrap = target_dir.join("codex-resources").join("bwrap");
+    write_executable(&exe);
+    write_executable(&expected_bwrap);
+
+    assert_eq!(
+        find_legacy_bundled_bwrap_for_exe(&exe),
+        Some(AbsolutePathBuf::from_absolute_path(&expected_bwrap).expect("absolute"))
+    );
+}
+
+#[test]
+fn finds_adjacent_dev_bwrap() {
+    let temp_dir = tempdir().expect("temp dir");
+    let exe = temp_dir.path().join("codex");
+    let expected_bwrap = temp_dir.path().join("bwrap");
+    write_executable(&exe);
+    write_executable(&expected_bwrap);
+
+    assert_eq!(
+        find_legacy_bundled_bwrap_for_exe(&exe),
+        Some(AbsolutePathBuf::from_absolute_path(&expected_bwrap).expect("absolute"))
+    );
+}
+
+/// Issue #563: an executable with nothing next to it has no bundled copy.
+#[test]
+fn finds_no_bundled_bwrap_next_to_a_lone_exe() {
+    let temp_dir = tempdir().expect("temp dir");
+    let exe = temp_dir.path().join("bin").join("codex");
+    write_executable(&exe);
+
+    assert_eq!(find_legacy_bundled_bwrap_for_exe(&exe), None);
+}
+
+fn write_executable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("create parent dir");
+    }
+    std::fs::write(path, b"").expect("write executable");
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+        .expect("set executable permissions");
 }
 
 #[test]
@@ -26,7 +156,7 @@ exit 1
         let fake_bwrap_path: &Path = fake_bwrap.as_ref();
 
         assert_eq!(
-            system_bwrap_warning_for_path(Some(fake_bwrap_path)),
+            system_bwrap_warning_for_path(Some(fake_bwrap_path), || true),
             Some(USER_NAMESPACE_WARNING.to_string()),
             "{failure}",
         );
@@ -43,7 +173,10 @@ exit 1
     );
     let fake_bwrap_path: &Path = fake_bwrap.as_ref();
 
-    assert_eq!(system_bwrap_warning_for_path(Some(fake_bwrap_path)), None);
+    assert_eq!(
+        system_bwrap_warning_for_path(Some(fake_bwrap_path), || true),
+        None
+    );
 }
 
 #[test]

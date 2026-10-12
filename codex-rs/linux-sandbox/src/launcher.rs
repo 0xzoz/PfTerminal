@@ -40,13 +40,24 @@ pub(crate) fn exec_bwrap(argv: Vec<String>, preserved_files: Vec<File>) -> ! {
     match preferred_bwrap_launcher() {
         BubblewrapLauncher::System(launcher) => exec_system_bwrap(&launcher, argv, preserved_files),
         BubblewrapLauncher::Bundled(launcher) => launcher.exec(argv, preserved_files),
-        BubblewrapLauncher::Unavailable => {
-            panic!(
-                "bubblewrap is unavailable: no system bwrap was found on PATH and no bundled \
-                 codex-resources/bwrap binary was found next to the Codex executable"
-            )
-        }
+        BubblewrapLauncher::Unavailable => exit_bwrap_unavailable(),
     }
+}
+
+/// Issue #563: with no usable bubblewrap, refuse the command with a message
+/// that names what to install, before anything is forked. This was a panic:
+/// exit status 101, or an abort (134) without any message where the helper
+/// runs from a constructor (test binaries dispatch on arg0 that way). Either
+/// way the command never ran outside the sandbox.
+pub(crate) fn ensure_bwrap_available() {
+    if preferred_bwrap_launcher() == BubblewrapLauncher::Unavailable {
+        exit_bwrap_unavailable();
+    }
+}
+
+fn exit_bwrap_unavailable() -> ! {
+    eprintln!("{}", codex_sandboxing::BWRAP_UNAVAILABLE_MESSAGE);
+    std::process::exit(1);
 }
 
 fn preferred_bwrap_launcher() -> BubblewrapLauncher {

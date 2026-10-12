@@ -6,13 +6,11 @@ use std::os::fd::AsRawFd;
 use std::os::raw::c_char;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use crate::bazel_bwrap;
 use crate::exec_util::argv_to_cstrings;
 use crate::exec_util::make_files_inheritable;
-use codex_install_context::InstallContext;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use sha2::Digest as _;
 use sha2::Sha256;
@@ -26,10 +24,18 @@ pub(crate) struct BundledBwrapLauncher {
 }
 
 pub(crate) fn launcher() -> Option<BundledBwrapLauncher> {
-    let current_exe = std::env::current_exe().ok()?;
-    find_for_install_context(InstallContext::current())
-        .or_else(|| find_legacy_for_exe(&current_exe))
+    codex_sandboxing::find_bundled_bwrap()
+        .or_else(bazel_bwrap_candidate)
         .map(|program| BundledBwrapLauncher { program })
+}
+
+/// The bubblewrap a Bazel test run provides (debug builds only).
+fn bazel_bwrap_candidate() -> Option<AbsolutePathBuf> {
+    let path = bazel_bwrap::candidate()?;
+    path.metadata()
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        .then(|| AbsolutePathBuf::from_absolute_path(&path).ok())
+        .flatten()
 }
 
 impl BundledBwrapLauncher {
@@ -67,50 +73,6 @@ impl BundledBwrapLauncher {
             self.program.as_path().display()
         );
     }
-}
-
-fn find_for_install_context(context: &InstallContext) -> Option<AbsolutePathBuf> {
-    context
-        .bundled_resource("bwrap")
-        .filter(|path| is_executable_file(path))
-}
-
-fn find_legacy_for_exe(exe: &Path) -> Option<AbsolutePathBuf> {
-    legacy_candidates_for_exe(exe)
-        .into_iter()
-        .find(|candidate| is_executable_file(candidate))
-        .map(|path| {
-            AbsolutePathBuf::from_absolute_path(&path).unwrap_or_else(|err| {
-                panic!(
-                    "failed to normalize bundled bubblewrap path {}: {err}",
-                    path.display()
-                )
-            })
-        })
-}
-
-fn legacy_candidates_for_exe(exe: &Path) -> Vec<PathBuf> {
-    let Some(exe_dir) = exe.parent() else {
-        return Vec::new();
-    };
-
-    let mut candidates = Vec::new();
-    candidates.push(exe_dir.join("codex-resources").join("bwrap"));
-    if let Some(package_target_dir) = exe_dir.parent() {
-        candidates.push(package_target_dir.join("codex-resources").join("bwrap"));
-    }
-    candidates.push(exe_dir.join("bwrap"));
-    if let Some(path) = bazel_bwrap::candidate() {
-        candidates.push(path);
-    }
-    candidates
-}
-
-fn is_executable_file(path: &Path) -> bool {
-    let Ok(metadata) = path.metadata() else {
-        return false;
-    };
-    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
 }
 
 fn expected_sha256() -> Option<[u8; 32]> {
@@ -189,84 +151,9 @@ fn bytes_to_hex(bytes: &[u8; 32]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codex_install_context::CodexPackageLayout;
-    use codex_install_context::InstallContext;
-    use codex_install_context::InstallMethod;
     use pretty_assertions::assert_eq;
     use std::fs;
     use tempfile::NamedTempFile;
-    use tempfile::tempdir;
-
-    #[test]
-    fn finds_package_layout_bwrap_from_install_context() {
-        let temp_dir = tempdir().expect("temp dir");
-        let package_dir = temp_dir.path();
-        let bin_dir = package_dir.join("bin");
-        let resources_dir = package_dir.join("codex-resources");
-        let expected_bwrap = resources_dir.join("bwrap");
-        fs::create_dir_all(&bin_dir).expect("create bin dir");
-        write_executable(&expected_bwrap);
-
-        let context = InstallContext {
-            method: InstallMethod::Other,
-            package_layout: Some(CodexPackageLayout {
-                package_dir: AbsolutePathBuf::from_absolute_path(package_dir).expect("absolute"),
-                bin_dir: AbsolutePathBuf::from_absolute_path(&bin_dir).expect("absolute"),
-                resources_dir: Some(
-                    AbsolutePathBuf::from_absolute_path(&resources_dir).expect("absolute"),
-                ),
-                path_dir: None,
-            }),
-        };
-
-        assert_eq!(
-            find_for_install_context(&context),
-            Some(AbsolutePathBuf::from_absolute_path(&expected_bwrap).expect("absolute"))
-        );
-    }
-
-    #[test]
-    fn finds_legacy_standalone_bundled_bwrap_next_to_exe_resources() {
-        let temp_dir = tempdir().expect("temp dir");
-        let exe = temp_dir.path().join("codex");
-        let expected_bwrap = temp_dir.path().join("codex-resources").join("bwrap");
-        write_executable(&exe);
-        write_executable(&expected_bwrap);
-
-        assert_eq!(
-            find_legacy_for_exe(&exe),
-            Some(AbsolutePathBuf::from_absolute_path(&expected_bwrap).expect("absolute"))
-        );
-    }
-
-    #[test]
-    fn finds_npm_bundled_bwrap_next_to_target_vendor_dir() {
-        let temp_dir = tempdir().expect("temp dir");
-        let target_dir = temp_dir.path().join("vendor/x86_64-unknown-linux-musl");
-        let exe = target_dir.join("codex").join("codex");
-        let expected_bwrap = target_dir.join("codex-resources").join("bwrap");
-        write_executable(&exe);
-        write_executable(&expected_bwrap);
-
-        assert_eq!(
-            find_legacy_for_exe(&exe),
-            Some(AbsolutePathBuf::from_absolute_path(&expected_bwrap).expect("absolute"))
-        );
-    }
-
-    #[test]
-    fn finds_adjacent_dev_bwrap() {
-        let temp_dir = tempdir().expect("temp dir");
-        let exe = temp_dir.path().join("codex");
-        let expected_bwrap = temp_dir.path().join("bwrap");
-        write_executable(&exe);
-        write_executable(&expected_bwrap);
-
-        assert_eq!(
-            find_legacy_for_exe(&exe),
-            Some(AbsolutePathBuf::from_absolute_path(&expected_bwrap).expect("absolute"))
-        );
-    }
 
     #[test]
     fn digest_verification_skips_missing_expected_digest() {
@@ -303,14 +190,5 @@ mod tests {
         assert_eq!(parse_sha256_hex(&"00".repeat(32)), Ok(NULL_SHA256_DIGEST));
         assert!(parse_sha256_hex("ab").is_err());
         assert!(parse_sha256_hex(&format!("{}xx", "00".repeat(31))).is_err());
-    }
-
-    fn write_executable(path: &Path) {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("create parent dir");
-        }
-        fs::write(path, b"").expect("write executable");
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755))
-            .expect("set executable permissions");
     }
 }

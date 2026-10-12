@@ -221,6 +221,9 @@ pub fn run_main() -> ! {
         // Outer stage: bubblewrap first, then re-enter this binary in the
         // sandboxed environment to apply seccomp. This path never falls back
         // to legacy Landlock on failure.
+        // #563: without a usable bubblewrap, refuse here, before the proxy
+        // bridge is prepared and before the `/proc` preflight forks a child.
+        crate::launcher::ensure_bwrap_available();
         let proxy_route_spec = if allow_network_for_proxy {
             let (proxy_route_spec, socket_dir) = prepare_host_proxy_route_spec()
                 .unwrap_or_else(|err| panic!("failed to prepare host proxy routing bridge: {err}"));
