@@ -1125,8 +1125,10 @@ fn cleanup_synthetic_mount_targets(targets: &[SyntheticMountTargetRegistration])
             // removing) goes as its record says, also when this run only
             // held it as an existing path.
             match read_synthetic_mount_target_record(&target.marker_dir) {
-                Some(made) => remove_synthetic_mount_target(&made),
-                None => remove_synthetic_mount_target(&target.target),
+                Some(made) if target.target.pre_existing_path_is_unchanged() => {
+                    remove_synthetic_mount_target(&made);
+                }
+                _ => remove_synthetic_mount_target(&target.target),
             }
             remove_synthetic_mount_target_record(&target.marker_dir);
             match fs::remove_dir(&target.marker_dir) {
@@ -1313,7 +1315,19 @@ fn write_synthetic_mount_target_record(
     let mut record = format!("{kind}\n").into_bytes();
     record.extend_from_slice(target.path().as_os_str().as_bytes());
     let path = marker_dir.join(SYNTHETIC_MOUNT_TARGET_RECORD);
-    fs::write(&path, record).unwrap_or_else(|err| {
+    // Only this user may change it (the registry folder may be group
+    // writable).
+    let written = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&path)
+        .and_then(|mut file| {
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+            std::io::Write::write_all(&mut file, &record)
+        });
+    written.unwrap_or_else(|err| {
         panic!(
             "failed to record synthetic bubblewrap mount target {}: {err}",
             path.display()
@@ -1357,11 +1371,14 @@ fn read_synthetic_mount_target_record(
     }
 }
 
-/// Whether `path` is a file (or folder) of this user that not everyone may
-/// write: another user who made the shared temporary folder's registry
-/// first must not be able to plant records. (Group write is allowed: with
-/// per-user groups, umask 002 is the default on Ubuntu.)
+/// Whether `path` is a record (or the registry folder) of this user that no
+/// other user may write: one who made the shared temporary folder's
+/// registry first, or shares the user's group, must not plant records. The
+/// folder may be group writable (umask 002 is Ubuntu's default, with
+/// per-user groups); a record never is.
 fn owned_by_this_user(path: &Path, file: bool) -> bool {
+    // Records are made 0600; the registry folder follows the umask.
+    let not_writable_by = if file { 0o022 } else { 0o002 };
     // SAFETY: `geteuid` has no preconditions.
     let euid = unsafe { libc::geteuid() };
     fs::symlink_metadata(path).is_ok_and(|metadata| {
@@ -1371,7 +1388,7 @@ fn owned_by_this_user(path: &Path, file: bool) -> bool {
         } else {
             metadata.file_type().is_dir()
         };
-        kind && metadata.uid() == euid && metadata.mode() & 0o002 == 0
+        kind && metadata.uid() == euid && metadata.mode() & not_writable_by == 0
     })
 }
 
@@ -1389,7 +1406,14 @@ fn owned_by_this_user(path: &Path, file: bool) -> bool {
 /// never fails a run: without a usable registry it does nothing, and what
 /// cannot be removed keeps its record for a later run.
 fn remove_stale_synthetic_mount_targets() {
-    let registry_root = synthetic_mount_registry_root();
+    // Found without the panicking checks of `synthetic_mount_registry_root`:
+    // a run without placeholders must not fail here.
+    let Ok(temp_dir) = std::env::temp_dir().canonicalize() else {
+        return;
+    };
+    // SAFETY: `geteuid` has no preconditions.
+    let euid = unsafe { libc::geteuid() };
+    let registry_root = temp_dir.join(format!("codex-bwrap-synthetic-mount-targets-{euid}"));
     if !owned_by_this_user(&registry_root, /*file*/ false) {
         return;
     }
@@ -1428,8 +1452,12 @@ fn remove_stale_synthetic_mount_targets() {
                 crate::bwrap::SyntheticMountTargetKind::EmptyFile => {
                     fs::remove_file(target.path()).is_ok()
                 }
+                // A folder that is no longer empty is no longer a placeholder.
                 crate::bwrap::SyntheticMountTargetKind::EmptyDirectory => {
-                    fs::remove_dir(target.path()).is_ok()
+                    match fs::remove_dir(target.path()) {
+                        Ok(()) => true,
+                        Err(err) => err.kind() == std::io::ErrorKind::DirectoryNotEmpty,
+                    }
                 }
             },
         };
