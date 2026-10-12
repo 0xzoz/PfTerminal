@@ -160,10 +160,13 @@ sign-in or a masked OpenAI API key. Rows show only the kind, an email hint
   one sign-in and refresh lock per account; other processes pick a refresh
   up from the vault.
 - A session on a named account uses it for what needs the sign-in: model
-  requests, refresh, connectors, usage and the `/status` account line. The
-  model list is fetched with the account the process started on, and the
-  rate limits `/status` shows before the first reply come from the default
-  login.
+  requests, refresh, connectors, plugin installs, usage, the model list and
+  the `/status` account line. A mid-session switch to another provider moves
+  all of them to that provider's account (or the default login). The process
+  has one model list: the last session started or switched decides its
+  account, and a process started on a provider without OpenAI sign-in keeps
+  that provider's list. The rate limits `/status` shows before the first
+  reply, and the `/apps` directory, come from the default login.
 - `forced_login_method` and `forced_chatgpt_workspace_id` apply to named
   accounts too: a sign-in of the other kind or another workspace is refused.
 - Signing the same ChatGPT user in under two accounts (or as `default` and a
