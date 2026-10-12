@@ -1027,6 +1027,32 @@ mod tests {
 
         assert_eq!(websocket(&attributed), websocket(&unattributed));
         assert_eq!(compaction(&attributed), compaction(&unattributed));
+
+        // #578: the local producer is removed the same way, also where it is
+        // the only metadata (a message labelling rebuilt from another one).
+        let mut produced = unattributed.clone();
+        produced[0].set_producer("openai");
+        assert_eq!(websocket(&produced), websocket(&unattributed));
+        assert_eq!(compaction(&produced), compaction(&unattributed));
+        let bare = |producer: Option<&str>| {
+            let mut item = ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "labelled".to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            };
+            if let Some(producer) = producer {
+                item.set_producer(producer);
+            }
+            [item]
+        };
+        assert_eq!(
+            websocket(&bare(Some("openai:work"))),
+            websocket(&bare(/*producer*/ None))
+        );
     }
 
     #[test]

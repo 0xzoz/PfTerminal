@@ -3,7 +3,8 @@
 //! A session can switch providers between turns. Items one provider produced (reasoning, its
 //! item IDs, encrypted or signed state) mean nothing to another one, and a stateless provider
 //! can only read an item ID as a reference to an item it stored. Request building compares the
-//! recorded producer with the provider it is about to call. It never reaches a model provider.
+//! recorded producer with the provider it is about to call. It is removed from every provider
+//! request payload and from text built from items for a model (labelled history, memories).
 
 use super::InternalChatMessageMetadataPassthrough;
 use super::ResponseItem;

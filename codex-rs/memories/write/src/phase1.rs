@@ -568,13 +568,16 @@ mod job {
             return None;
         }
 
-        Some(ResponseItem::Message {
+        let mut item = ResponseItem::Message {
             id: id.clone(),
             role: role.clone(),
             content,
             phase: phase.clone(),
             internal_chat_message_metadata_passthrough: metadata.clone(),
-        })
+        };
+        // #578: local provenance (producer) is not part of the memory text.
+        item.clear_local_provenance();
+        Some(item)
     }
 
     fn is_memory_excluded_contextual_user_fragment(content_item: &ContentItem) -> bool {
