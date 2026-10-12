@@ -201,10 +201,12 @@ type FingerprintKey = (PathBuf, String, String);
 #[derive(Default)]
 struct FingerprintEntry {
     /// The last read that finished: when, and what it found (`None`: the
-    /// account has no fingerprint, or the vault could not be read).
+    /// account has no fingerprint). A read that failed keeps what was found
+    /// before.
     read: Option<(Instant, Option<String>)>,
-    /// Set while a read runs; it changes when the read finishes.
-    reading: Option<tokio::sync::watch::Receiver<()>>,
+    /// Set while a read runs: when it started, and a receiver that changes
+    /// when it finishes.
+    reading: Option<(Instant, tokio::sync::watch::Receiver<()>)>,
     /// The fallback to the name has been logged.
     warned: bool,
 }
@@ -220,16 +222,49 @@ fn fingerprints() -> std::sync::MutexGuard<'static, HashMap<FingerprintKey, Fing
         .unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Ends a background fingerprint read, however its task ends (even if it
+/// never runs), so the account can be read again.
+struct FinishRead {
+    key: FingerprintKey,
+    /// `Some(found)` when the vault answered, `None` when it could not be read.
+    found: Option<Option<String>>,
+    done: tokio::sync::watch::Sender<()>,
+}
+
+impl FinishRead {
+    /// End the read with what it found.
+    fn with(mut self, found: Option<Option<String>>) {
+        self.found = found;
+    }
+}
+
+impl Drop for FinishRead {
+    fn drop(&mut self) {
+        let mut entries = fingerprints();
+        let entry = entries.entry(self.key.clone()).or_default();
+        entry.reading = None;
+        let found = match self.found.take() {
+            Some(found) => found,
+            // A failed read never replaces a fingerprint read before.
+            None => entry.read.take().and_then(|(_, fingerprint)| fingerprint),
+        };
+        entry.read = Some((Instant::now(), found));
+        drop(entries);
+        self.done.send_replace(());
+    }
+}
+
 /// The vault's per-home salted fingerprint of a named account's credential
 /// (the one S05 records in the ledger). The read never creates a vault, key
 /// or salt and never writes (#474).
 ///
-/// A request waits at most `FINGERPRINT_BUDGET` for a read, then goes on with
-/// the last fingerprint this process read, if any. The read itself runs to
-/// the end and is kept for the next request, and only one runs per account.
-/// `None` when the account holds nothing, its vault has no fingerprint salt
-/// yet (every account in it was added before S05), or nothing could be read
-/// in time: the account is then keyed by name.
+/// A fingerprint read in the last minute is used as it is. An older one is
+/// used at once while a background read refreshes it. With none, a request
+/// waits for the read, but no longer than `FINGERPRINT_BUDGET` after the read
+/// started, so a hung vault costs that once, not on every request. Only one
+/// read runs per account. `None` when the account holds nothing, its vault has
+/// no fingerprint salt yet (every account in it was added before S05), or the
+/// vault has not answered: the account is then keyed by name.
 async fn named_account_fingerprint(
     codex_home: &Path,
     account: &NamedProviderAccount,
@@ -239,37 +274,52 @@ async fn named_account_fingerprint(
         account.provider_id.clone(),
         account.name.clone(),
     );
-    let mut reading = {
+    let mut start_read = None;
+    let wait = {
         let mut entries = fingerprints();
         let entry = entries.entry(key.clone()).or_default();
-        if let Some((read_at, fingerprint)) = &entry.read
+        let known = entry.read.clone();
+        if let Some((read_at, fingerprint)) = &known
             && read_at.elapsed() < FINGERPRINT_FRESH_FOR
         {
             return fingerprint.clone();
         }
-        match &entry.reading {
+        let (started, reading) = match &entry.reading {
             Some(reading) => reading.clone(),
             None => {
                 let (done, reading) = tokio::sync::watch::channel(());
-                entry.reading = Some(reading.clone());
-                let (home, selected, key) =
-                    (codex_home.to_path_buf(), account.clone(), key.clone());
-                drop(tokio::task::spawn_blocking(move || {
-                    let fingerprint = read_named_account_fingerprint(home, &selected);
-                    let mut entries = fingerprints();
-                    let entry = entries.entry(key).or_default();
-                    entry.read = Some((Instant::now(), fingerprint));
-                    entry.reading = None;
-                    drop(entries);
-                    done.send_replace(());
-                }));
-                reading
+                entry.reading = Some((Instant::now(), reading.clone()));
+                start_read = Some(FinishRead {
+                    key: key.clone(),
+                    found: None,
+                    done,
+                });
+                (Instant::now(), reading)
             }
+        };
+        match known {
+            // An older fingerprint serves while the read refreshes it.
+            Some((_, Some(fingerprint))) => Err(fingerprint),
+            _ => Ok(FINGERPRINT_BUDGET
+                .checked_sub(started.elapsed())
+                .map(|left| (left, reading))),
         }
     };
-    let finished = tokio::time::timeout(FINGERPRINT_BUDGET, reading.changed())
-        .await
-        .is_ok();
+    // Started with the lock released: `FinishRead` takes it when dropped.
+    if let Some(finish) = start_read {
+        let (home, selected) = (codex_home.to_path_buf(), account.clone());
+        drop(tokio::task::spawn_blocking(move || {
+            finish.with(read_named_account_fingerprint(home, &selected).ok());
+        }));
+    }
+    let wait = match wait {
+        Ok(wait) => wait,
+        Err(older) => return Some(older),
+    };
+    let finished = match wait {
+        Some((left, mut reading)) => tokio::time::timeout(left, reading.changed()).await.is_ok(),
+        None => false,
+    };
     let mut entries = fingerprints();
     let entry = entries.entry(key).or_default();
     let fingerprint = entry
@@ -281,25 +331,29 @@ async fn named_account_fingerprint(
         warn!(
             provider = %account.provider_id,
             read_in_time = finished,
-            "a named account has no credential fingerprint; throttling it by name"
+            "a named account has no credential fingerprint yet; throttling it by name"
         );
     }
     fingerprint
 }
 
+/// `Ok(None)`: the account has no fingerprint. `Err`: the vault could not be
+/// read.
 fn read_named_account_fingerprint(
     codex_home: PathBuf,
     account: &NamedProviderAccount,
-) -> Option<String> {
-    let name = codex_vault::ProviderAccountName::parse(&account.name).ok()?;
+) -> Result<Option<String>, ()> {
+    let Ok(name) = codex_vault::ProviderAccountName::parse(&account.name) else {
+        return Ok(None);
+    };
     let vault = codex_vault::Vault::new(codex_home);
+    // Checked first, so the read below never sets up a vault's storage.
     if vault.key_storage() == codex_vault::VaultKeyStorage::NotInitialized {
-        return None;
+        return Ok(None);
     }
     vault
         .provider_account_fingerprint(&account.provider_id, &name)
-        .ok()
-        .flatten()
+        .map_err(|_| ())
 }
 
 /// #482: an environment key's throttle identity, salted per home so the same

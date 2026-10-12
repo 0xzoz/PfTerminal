@@ -36,7 +36,8 @@ off no attempt names an account and nothing below changes.
   one key share a cooldown and lease, and two keys of one provider never do. The fingerprint is
   read as the ledger reads it (never creating or writing the vault, at most 2 s, reused for a
   minute). An account without one, because every account in its vault predates S05, is keyed by
-  `account:<name>` until the next `corbanu account add` or rename. An active cooldown or lease
+  `account:<name>` until the next `corbanu account add` or rename; so is an account whose vault
+  has not answered yet (a slow or unreadable vault), until a read succeeds. An active cooldown or lease
   kept under `account:<name>` moves to the fingerprint row on the account's next request (the
   later cooldown wins when several names merge), and the name's rows are dropped. The default
   account's key is fingerprinted with a per-home salt kept in the state DB (#482, follow-up); an

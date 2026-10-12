@@ -322,9 +322,9 @@ pub(crate) fn assert_rate_limited_then_blocked(first: &CodexErr, second: &CodexE
     assert!(second.to_string().contains("Last status: 429"), "{second}");
 }
 
-/// A vault read that hangs holds a request up for `FINGERPRINT_BUDGET` at
-/// most: the request goes on with the last fingerprint read, else by name,
-/// and no second read starts while one runs.
+/// A vault read that hangs costs one `FINGERPRINT_BUDGET`, not one per
+/// request: later requests go on at once, with an older fingerprint if one was
+/// read, else by name. No second read starts while one runs.
 #[tokio::test]
 async fn a_hung_vault_read_falls_back_within_the_budget() {
     let home = tempfile::tempdir().expect("tempdir");
@@ -342,7 +342,7 @@ async fn a_hung_vault_read_falls_back_within_the_budget() {
     fingerprints().insert(
         key.clone(),
         FingerprintEntry {
-            reading: Some(reading),
+            reading: Some((Instant::now(), reading)),
             ..Default::default()
         },
     );
@@ -352,16 +352,53 @@ async fn a_hung_vault_read_falls_back_within_the_budget() {
     assert!(waited >= FINGERPRINT_BUDGET, "{waited:?}");
     assert!(waited < FINGERPRINT_BUDGET * 2, "{waited:?}");
 
-    // A stale fingerprint from an earlier read is used meanwhile.
+    // The next request does not wait again.
+    let started = Instant::now();
+    assert_eq!(named_account_fingerprint(home.path(), &account).await, None);
+    assert!(started.elapsed() < FINGERPRINT_BUDGET / 2);
+
+    // An older fingerprint is used at once meanwhile.
     let stale = Instant::now()
         .checked_sub(FINGERPRINT_FRESH_FOR * 2)
         .expect("an instant two minutes ago");
     fingerprints().get_mut(&key).expect("entry").read =
         Some((stale, Some("0123456789ab".to_string())));
+    let started = Instant::now();
     assert_eq!(
         named_account_fingerprint(home.path(), &account).await,
         Some("0123456789ab".to_string())
     );
+    assert!(started.elapsed() < FINGERPRINT_BUDGET / 2);
     assert!(fingerprints().get(&key).expect("entry").reading.is_some());
     fingerprints().remove(&key);
+}
+
+/// A read whose task ends without reading (it failed, or never ran) leaves
+/// the fingerprint read before, and the account can be read again.
+#[test]
+fn a_failed_read_keeps_the_older_fingerprint() {
+    let key: FingerprintKey = (
+        PathBuf::from("/nonexistent/failed-read-home"),
+        "zai".to_string(),
+        "failed".to_string(),
+    );
+    let (done, _reading) = tokio::sync::watch::channel(());
+    fingerprints().insert(
+        key.clone(),
+        FingerprintEntry {
+            read: Some((Instant::now(), Some("0123456789ab".to_string()))),
+            ..Default::default()
+        },
+    );
+    drop(FinishRead {
+        key: key.clone(),
+        found: None,
+        done,
+    });
+    let entry = fingerprints().remove(&key).expect("entry");
+    assert!(entry.reading.is_none());
+    assert_eq!(
+        entry.read.and_then(|(_, fingerprint)| fingerprint),
+        Some("0123456789ab".to_string())
+    );
 }

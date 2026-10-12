@@ -604,8 +604,9 @@ impl StateRuntime {
         {
             return;
         }
-        // Not done: try again on a later request, once the throttle uses the
-        // DB again (a paused DB answers this check without waiting).
+        // Not done because the DB was busy: try again on a later request, once
+        // the throttle uses the DB again (a paused DB answers without waiting).
+        // A DB that cannot be written is not retried.
         let not_adopted = || {
             memory
                 .adopted_legacy_keys
@@ -613,12 +614,10 @@ impl StateRuntime {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .remove(&adopted);
         };
-        if self
-            .provider_request_state_db_unready(now_ms)
-            .await
-            .is_some()
-        {
-            not_adopted();
+        if let Some(unready) = self.provider_request_state_db_unready(now_ms).await {
+            if unready == StateDbFallback::Busy {
+                not_adopted();
+            }
             return;
         }
         let started = Instant::now();
@@ -681,9 +680,10 @@ WHERE provider_id = ?2 AND key_fingerprint = ?3
             adopt,
         )
         .await
+            && self.pause_state_db("adopt named account provider request key", &error)
+                == StateDbFallback::Busy
         {
             not_adopted();
-            self.pause_state_db("adopt named account provider request key", &error);
         }
     }
 
