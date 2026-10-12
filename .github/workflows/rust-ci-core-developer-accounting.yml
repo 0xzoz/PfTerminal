@@ -37,12 +37,14 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-ci
+      # bubblewrap: the integration tests run commands in the Linux sandbox,
+      # as rust-ci-full's nextest job does.
       - name: Install Linux build dependencies
         working-directory: .
         run: |
           set -euo pipefail
           sudo apt-get update -y
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev bubblewrap
       - name: Enable unprivileged user namespaces
         run: |
           sudo sysctl -w kernel.unprivileged_userns_clone=1
@@ -89,6 +91,9 @@ jobs:
           # Neither depends on codex-core.
           cargo build --locked -p codex-code-mode-host -p codex-rmcp-client --bins
 
+      - name: Disk space after the helper builds
+        run: df -h . "${CARGO_TARGET_DIR}"
+
       # Skipped until #564 is fixed: it fails only with developer-accounting.
       - name: "cargo nextest codex-core --features developer-accounting"
         run: |
@@ -100,6 +105,15 @@ jobs:
             cargo nextest run --locked --no-fail-fast \
               -p codex-core --features developer-accounting \
               -E 'not test(token_budget_auto_compact_fallback_uses_buffer_until_new_context)'
+
+      - name: Upload the nextest report
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: nextest-core-developer-accounting
+          path: ${{ env.CARGO_TARGET_DIR }}/nextest/default/junit.xml
+          if-no-files-found: ignore
 
       # Main keeps the cache warm.
       - name: Save sccache cache

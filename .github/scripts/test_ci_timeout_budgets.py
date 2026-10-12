@@ -122,6 +122,16 @@ class NightlyHeavyJobsTest(unittest.TestCase):
                     rf"    with:\n      cold_bazel: true$",
                 )
 
+    def test_nightly_runs_core_developer_accounting_tests_only_nightly(self) -> None:
+        self.assertRegex(
+            self.workflow("nightly-ci.yml"),
+            r"(?m)^    uses: \./\.github/workflows/rust-ci-core-developer-accounting\.yml$",
+        )
+        triggers = self.workflow("rust-ci-core-developer-accounting.yml").split("\njobs:")[0]
+        for trigger in ("pull_request", "push"):
+            with self.subTest(trigger=trigger):
+                self.assertNotRegex(triggers, rf"(?m)^  {trigger}:")
+
     def test_slow_argument_lint_platforms_are_gated(self) -> None:
         rust_ci = self.workflow("rust-ci.yml")
         self.assertIn('if [[ "$PLATFORM" != "Windows" && "$COLD_BAZEL" != "true" ]]', rust_ci)
