@@ -149,7 +149,7 @@ enum Subcommand {
     Account(account_cmd::AccountCommand),
 
     /// Internal: print the active Claude Code OAuth token for the Corbanu Terminal-native Claude Plan provider.
-    #[clap(hide = true, name = "internal-claude-oauth-token")]
+    #[clap(hide = true, name = codex_login::auth::CLAUDE_PLAN_TOKEN_HELPER_SUBCOMMAND)]
     InternalClaudeOauthToken {
         /// PF-84: a named Claude account instead of the home's selection.
         /// Defaults to `CORBANU_PROVIDER_ACCOUNT`, which Corbanu sets for its
@@ -167,7 +167,7 @@ enum Subcommand {
     },
 
     /// Internal: print one rental endpoint token for command-backed provider authentication.
-    #[clap(hide = true, name = "internal-gpu-endpoint-token")]
+    #[clap(hide = true, name = codex_login::auth::GPU_ENDPOINT_TOKEN_HELPER_SUBCOMMAND)]
     InternalGpuEndpointToken { rental_id: String },
 
     /// Internal: reconcile durable GPU rentals independently of any TUI process.
