@@ -492,47 +492,70 @@ pub(crate) struct RuntimeDbInitLock {
     _file: Option<std::fs::File>,
 }
 
+fn lock_file_options() -> std::fs::OpenOptions {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    options
+}
+
 fn open_lock_file(path: &Path) -> std::io::Result<std::fs::File> {
-    let open = || {
-        std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(path)
-    };
-    match open() {
-        #[cfg(unix)]
-        Err(err)
-            if err.kind() == std::io::ErrorKind::PermissionDenied
-                && make_placeholder_writable(path) =>
-        {
-            open()
+    let result = lock_file_options().open(path);
+    #[cfg(unix)]
+    if let Err(err) = &result
+        && err.kind() == std::io::ErrorKind::PermissionDenied
+    {
+        if let Some(file) = reopen_placeholder(path) {
+            return Ok(file);
         }
-        result => result,
+        // The placeholder's run ended and removed it meanwhile: a new file.
+        if std::fs::symlink_metadata(path)
+            .is_err_and(|err| err.kind() == std::io::ErrorKind::NotFound)
+        {
+            return lock_file_options().open(path);
+        }
     }
+    result
 }
 
 /// #586: the lock is denied to protected agent commands even before it
 /// exists, so on Linux bubblewrap holds a missing one with an empty `0444`
 /// placeholder for the command's run. A placeholder left behind by a killed
-/// sandbox helper would turn the lock off for every later launch. An empty
-/// regular file this user owns (only the owner can change its mode) is made
-/// writable again; the sandbox sees its own mount, not the host file's mode.
+/// sandbox helper would turn the lock off for every later launch, so an
+/// empty regular file at the path is made writable for its owner (only the
+/// owner can) and opened. The mode change goes through a descriptor of the
+/// file checked at the path (not a link), and the read-write descriptor
+/// must be that same file. The sandbox sees its own mount, not this mode.
 #[cfg(unix)]
-fn make_placeholder_writable(path: &Path) -> bool {
+fn reopen_placeholder(path: &Path) -> Option<std::fs::File> {
+    use std::os::unix::fs::MetadataExt;
     use std::os::unix::fs::PermissionsExt;
-    std::fs::symlink_metadata(path)
-        .is_ok_and(|metadata| metadata.file_type().is_file() && metadata.len() == 0)
-        && std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).is_ok()
+    let at_path = std::fs::symlink_metadata(path).ok()?;
+    if !at_path.file_type().is_file() || at_path.len() != 0 {
+        return None;
+    }
+    let same = |metadata: &std::fs::Metadata| {
+        metadata.dev() == at_path.dev() && metadata.ino() == at_path.ino()
+    };
+    let placeholder = std::fs::File::open(path).ok()?;
+    let metadata = placeholder.metadata().ok()?;
+    if !same(&metadata) || metadata.len() != 0 {
+        return None;
+    }
+    let mode = (metadata.mode() & 0o7777) | 0o200;
+    placeholder
+        .set_permissions(std::fs::Permissions::from_mode(mode))
+        .ok()?;
+    let file = lock_file_options().open(path).ok()?;
+    same(&file.metadata().ok()?).then_some(file)
 }
 
 /// #586: the lock file is never left empty. On Linux an empty file at its
 /// path can be the sandbox's placeholder for a protected command's run (see
-/// [`make_placeholder_writable`]). The run's cleanup removes an empty
-/// placeholder even while a launch holds it locked, and the next launch would
-/// then lock a new file. (Cleanup and a launch running as root can still race
-/// between its length check and the removal; the window is tiny.)
+/// [`reopen_placeholder`]). The run's cleanup removes an empty placeholder
+/// even while a launch holds it locked, and the next launch would then lock
+/// a new file. (Cleanup can still race a launch between its length check and
+/// the removal; then two launches lock different files once, which the
+/// migration retry covers.)
 fn keep_lock_file_nonempty(mut file: &std::fs::File) {
     use std::io::Write;
     if file.metadata().is_ok_and(|metadata| metadata.len() == 0) {

@@ -247,10 +247,20 @@ async fn a_leftover_read_only_placeholder_becomes_the_lock() -> anyhow::Result<(
     let lock = sqlite_home.join(DB_INIT_LOCK_FILENAME);
     std::fs::write(&lock, b"")?;
     std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o444))?;
+    if std::fs::OpenOptions::new().write(true).open(&lock).is_ok() {
+        // Root ignores the mode: nothing to repair, nothing to prove.
+        eprintln!("skipped: the read-only placeholder is writable for this user");
+        return Ok(());
+    }
     let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
     let held = sqlite.lock_runtime_db_init().await;
     assert!(held._file.is_some(), "the placeholder is locked");
     assert_eq!(std::fs::metadata(&lock)?.len(), 1);
+    // Only the owner's write bit is added.
+    assert_eq!(
+        std::fs::metadata(&lock)?.permissions().mode() & 0o777,
+        0o644
+    );
     // Another holder now waits for it.
     let other = std::fs::OpenOptions::new()
         .read(true)
@@ -259,5 +269,39 @@ async fn a_leftover_read_only_placeholder_becomes_the_lock() -> anyhow::Result<(
     assert!(other.try_lock().is_err());
     drop(held);
     assert!(other.try_lock().is_ok());
+    Ok(())
+}
+
+/// #586: a link at the lock path is never repaired through: its target keeps
+/// its mode, and the launch opens the databases unlocked.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_link_at_the_lock_path_is_not_repaired() -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home).await?;
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let target = sqlite_home.join("target");
+    std::fs::write(&target, b"")?;
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o444))?;
+    if std::fs::OpenOptions::new()
+        .write(true)
+        .open(&target)
+        .is_ok()
+    {
+        eprintln!("skipped: the read-only target is writable for this user");
+        return Ok(());
+    }
+    std::os::unix::fs::symlink(&target, sqlite_home.join(DB_INIT_LOCK_FILENAME))?;
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let held = sqlite.lock_runtime_db_init().await;
+    assert!(held._file.is_none());
+    assert_eq!(
+        std::fs::metadata(&target)?.permissions().mode() & 0o777,
+        0o444
+    );
+    assert_eq!(std::fs::metadata(&target)?.len(), 0);
     Ok(())
 }
