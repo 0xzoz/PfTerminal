@@ -46,6 +46,10 @@ const FORWARDED_SIGNALS: &[libc::c_int] =
 const SYNTHETIC_MOUNT_MARKER_SYNTHETIC: &[u8] = b"synthetic\n";
 const SYNTHETIC_MOUNT_MARKER_EXISTING: &[u8] = b"existing\n";
 const PROTECTED_CREATE_MARKER: &[u8] = b"protected-create\n";
+/// #582: in a marker folder, what the placeholder is and where (`file` or
+/// `directory`, a newline, then the path), so a later run can remove it when
+/// its owner is gone without cleaning up (killed with SIGKILL).
+const SYNTHETIC_MOUNT_TARGET_RECORD: &str = "target";
 
 #[derive(Debug)]
 struct SyntheticMountTargetRegistration {
@@ -407,6 +411,9 @@ fn build_bwrap_argv(
     command_cwd: &Path,
     options: BwrapOptions,
 ) -> CodexResult<crate::bwrap::BwrapArgs> {
+    // #582: before the arguments are built, so a stale placeholder is not
+    // taken for an existing path (or a file where a folder belongs).
+    remove_stale_synthetic_mount_targets();
     let bwrap_args = create_bwrap_command_args(
         inner,
         file_system_sandbox_policy,
@@ -973,6 +980,9 @@ fn register_synthetic_mount_targets(
                 } else {
                     target.clone()
                 };
+                if !target.preserves_pre_existing_path() {
+                    write_synthetic_mount_target_record(&marker_dir, &target);
+                }
                 let marker_file = marker_dir.join(std::process::id().to_string());
                 fs::write(&marker_file, synthetic_mount_marker_contents(&target)).unwrap_or_else(
                     |err| {
@@ -1112,6 +1122,7 @@ fn cleanup_synthetic_mount_targets(targets: &[SyntheticMountTargetRegistration])
                 continue;
             }
             remove_synthetic_mount_target(&target.target);
+            remove_synthetic_mount_target_record(&target.marker_dir);
             match fs::remove_dir(&target.marker_dir) {
                 Ok(()) => {}
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -1280,6 +1291,144 @@ fn remove_synthetic_mount_target(target: &crate::bwrap::SyntheticMountTarget) {
             ),
         },
     }
+}
+
+/// #582: records the placeholder this run makes, for
+/// [`remove_stale_synthetic_mount_targets`]. Kept until the last run using
+/// the placeholder ends.
+fn write_synthetic_mount_target_record(
+    marker_dir: &Path,
+    target: &crate::bwrap::SyntheticMountTarget,
+) {
+    let kind = match target.kind() {
+        crate::bwrap::SyntheticMountTargetKind::EmptyFile => "file",
+        crate::bwrap::SyntheticMountTargetKind::EmptyDirectory => "directory",
+    };
+    let mut record = format!("{kind}\n").into_bytes();
+    record.extend_from_slice(target.path().as_os_str().as_bytes());
+    let path = marker_dir.join(SYNTHETIC_MOUNT_TARGET_RECORD);
+    fs::write(&path, record).unwrap_or_else(|err| {
+        panic!(
+            "failed to record synthetic bubblewrap mount target {}: {err}",
+            path.display()
+        )
+    });
+}
+
+fn remove_synthetic_mount_target_record(marker_dir: &Path) {
+    let path = marker_dir.join(SYNTHETIC_MOUNT_TARGET_RECORD);
+    match fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => panic!(
+            "failed to remove synthetic bubblewrap mount target record {}: {err}",
+            path.display()
+        ),
+    }
+}
+
+fn read_synthetic_mount_target_record(
+    marker_dir: &Path,
+) -> Option<crate::bwrap::SyntheticMountTarget> {
+    let record = fs::read(marker_dir.join(SYNTHETIC_MOUNT_TARGET_RECORD)).ok()?;
+    let newline = record.iter().position(|byte| *byte == b'\n')?;
+    let path = Path::new(std::ffi::OsStr::from_bytes(&record[newline + 1..]));
+    // The record must name the path its folder is for.
+    if !path.is_absolute() || synthetic_mount_marker_dir(path) != marker_dir {
+        return None;
+    }
+    match &record[..newline] {
+        b"file" => Some(crate::bwrap::SyntheticMountTarget::missing(path)),
+        b"directory" => Some(crate::bwrap::SyntheticMountTarget::missing_empty_directory(
+            path,
+        )),
+        _ => None,
+    }
+}
+
+/// #582: removes the placeholders whose runs all ended without cleaning up
+/// (the helper killed with SIGKILL, for example on a timeout), as their own
+/// cleanup would have: an empty file, or an empty folder, at the recorded
+/// path. Before, such a placeholder stayed: later runs took it for an
+/// existing path, and one where a folder belongs (an empty read-only
+/// `~/Library` for `~/Library/Keychains`) failed every protected run until
+/// #579 held it in place. A marker folder with a live run, or a marker of
+/// another kind (a protected-create target), is left alone.
+fn remove_stale_synthetic_mount_targets() {
+    let registry_root = synthetic_mount_registry_root();
+    // Nothing was ever registered: do not create the registry.
+    if !registry_root.is_dir() {
+        return;
+    }
+    with_synthetic_mount_registry_lock(|| {
+        let Ok(entries) = fs::read_dir(&registry_root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let marker_dir = entry.path();
+            let Some(target) = read_synthetic_mount_target_record(&marker_dir) else {
+                continue;
+            };
+            if !made_only_by_ended_runs(&marker_dir) {
+                continue;
+            }
+            // Never fails the run: what cannot be removed stays as before.
+            if let Ok(metadata) = fs::symlink_metadata(target.path())
+                && target.should_remove_after_bwrap(&metadata)
+            {
+                let _ = match target.kind() {
+                    crate::bwrap::SyntheticMountTargetKind::EmptyFile => {
+                        fs::remove_file(target.path())
+                    }
+                    crate::bwrap::SyntheticMountTargetKind::EmptyDirectory => {
+                        fs::remove_dir(target.path())
+                    }
+                };
+            }
+            let _ = fs::remove_file(marker_dir.join(SYNTHETIC_MOUNT_TARGET_RECORD));
+            let _ = fs::remove_dir(&marker_dir);
+        }
+    });
+}
+
+/// Whether every run in `marker_dir` has ended, one of which made the
+/// placeholder. Their markers are then removed.
+fn made_only_by_ended_runs(marker_dir: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(marker_dir) else {
+        return false;
+    };
+    let mut ended = Vec::new();
+    let mut made = false;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(pid) = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.parse::<libc::pid_t>().ok())
+        else {
+            continue;
+        };
+        if process_is_active(pid) {
+            return false;
+        }
+        match fs::read(&path) {
+            Ok(contents) if contents == SYNTHETIC_MOUNT_MARKER_SYNTHETIC => made = true,
+            Ok(contents) if contents == SYNTHETIC_MOUNT_MARKER_EXISTING => {}
+            Ok(_) => return false,
+            Err(_) => continue,
+        }
+        ended.push(path);
+    }
+    if !made {
+        return false;
+    }
+    for marker in ended {
+        let _ = fs::remove_file(marker);
+    }
+    true
 }
 
 fn process_is_active(pid: libc::pid_t) -> bool {

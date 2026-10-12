@@ -1502,6 +1502,74 @@ async fn a_file_where_a_denied_paths_folder_would_be_stays_in_place() {
     assert!(!home.join("Moved").exists());
 }
 
+/// #582: a placeholder whose run was killed (SIGKILL on a timeout) before
+/// it could clean up is removed by the next protected run, instead of
+/// staying for good: an empty read-only `~/Library` once broke every
+/// protected run on a machine (#579 then held it in place).
+#[tokio::test]
+async fn issue_582_a_placeholder_left_by_a_killed_run_is_removed_by_the_next() {
+    if should_skip_bwrap_tests().await {
+        eprintln!("skipping bwrap test: bwrap sandbox prerequisites are unavailable");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base = dir.path().canonicalize().expect("canonical");
+    let home = base.join("home");
+    std::fs::create_dir_all(&home).expect("home");
+    let policy = FileSystemSandboxPolicy::restricted(vec![
+        FileSystemSandboxEntry {
+            path: FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            },
+            access: FileSystemAccessMode::Write,
+            missing_path_behavior: None,
+        },
+        FileSystemSandboxEntry::skip_missing_path(
+            FileSystemPath::Path {
+                path: AbsolutePathBuf::from_absolute_path(home.join("Library/Keychains"))
+                    .expect("absolute"),
+            },
+            FileSystemAccessMode::Deny,
+        ),
+    ]);
+    let run = |script: &'static str, timeout_ms: u64| {
+        let cwd = AbsolutePathBuf::from_absolute_path(&base).expect("absolute base");
+        let profile =
+            PermissionProfile::from_runtime_permissions(&policy, NetworkSandboxPolicy::Restricted);
+        async move {
+            run_cmd_result_with_permission_profile_for_cwd(
+                &["bash", "-c", script],
+                cwd,
+                profile,
+                create_env_from_core_vars(),
+                timeout_ms,
+                /*use_legacy_landlock*/ false,
+            )
+            .await
+        }
+    };
+    // Killed on its timeout while its placeholder is in place.
+    let killed = run("sleep 30", 2_000).await;
+    assert!(
+        matches!(
+            killed.as_ref().err().map(|err| err.details()),
+            Some(CodexErrorDetails::Sandbox(SandboxErr::Timeout { .. }))
+        ),
+        "{killed:?}"
+    );
+    let library = home.join("Library");
+    let stale = std::fs::symlink_metadata(&library).expect("the placeholder stays");
+    assert!(stale.is_file() && stale.len() == 0, "{stale:?}");
+    let output = run("echo ran-582", NETWORK_TIMEOUT_MS)
+        .await
+        .expect("the next run starts");
+    assert!(output.stdout.text.contains("ran-582"), "{output:?}");
+    assert!(
+        std::fs::symlink_metadata(&library).is_err(),
+        "the stale placeholder is removed, and the next run cleans up its own"
+    );
+}
+
 /// #493: under a full-write profile with a denial, the writable `/` bind
 /// must not cover the minimal `/dev` (bubblewrap binds `nodev`), so
 /// `/dev/null` stays usable while the denied file stays unreadable.
