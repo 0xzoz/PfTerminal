@@ -1688,9 +1688,32 @@ pub(crate) async fn notify_openai_api_key_env_fallback(sess: &Session, turn_cont
     }
 }
 
-/// #578: retries of one sampling request without an item the provider
-/// reported missing.
+/// #578: retries of one request without an item the provider reported
+/// missing.
 const MAX_UNRESOLVABLE_ITEM_RETRIES: usize = 8;
+
+/// #578: whether to send a failed request again without an item a stateless
+/// Responses host reported missing (`Item with id '…' not found`). Each ID is
+/// retried once, at most [`MAX_UNRESOLVABLE_ITEM_RETRIES`] per request; the
+/// client leaves the ID out of its later requests.
+pub(crate) fn retry_without_unresolvable_item(
+    client_session: &ModelClientSession,
+    err: &CodexErr,
+    retries: &mut usize,
+) -> bool {
+    if *retries >= MAX_UNRESOLVABLE_ITEM_RETRIES {
+        return false;
+    }
+    let Some(item_id) = client_session.note_unresolvable_item_reference(err) else {
+        return false;
+    };
+    *retries += 1;
+    warn!(
+        item_id,
+        "the provider could not find an item this request referenced; retrying without it"
+    );
+    true
+}
 
 #[allow(clippy::too_many_arguments)]
 #[allow(deprecated)]
@@ -1827,14 +1850,18 @@ async fn run_sampling_request(
         // #578: a stateless Responses host could not find an item this
         // request referenced. Retry without it (each ID once) rather than
         // failing this and every later turn.
-        if unresolvable_item_retries < MAX_UNRESOLVABLE_ITEM_RETRIES
-            && let Some(item_id) = client_session.note_unresolvable_item_reference(&err)
-        {
-            unresolvable_item_retries += 1;
-            warn!(
-                item_id,
-                "the provider could not find an item this request referenced; retrying without it"
-            );
+        if retry_without_unresolvable_item(client_session, &err, &mut unresolvable_item_retries) {
+            turn_context.turn_timing_state.record_sampling_retry();
+            sess.send_event(
+                &turn_context,
+                EventMsg::Warning(WarningEvent {
+                    message: "The provider could not find an earlier item this request referred \
+                              to (for example after a provider switch); it was left out and the \
+                              request was sent again."
+                        .to_string(),
+                }),
+            )
+            .await;
             continue;
         }
 

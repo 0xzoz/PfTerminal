@@ -14,21 +14,28 @@
 //! - Items from the same provider are sent as they are, so its requests and
 //!   prompt cache are unchanged.
 //! - Another provider's items are adapted to the target wire:
-//!   - Responses: its reasoning, hosted web searches and image generations
-//!     are dropped (another host's encrypted or plain reasoning cannot be
-//!     sent to a Responses host, only referenced); its other items keep
-//!     their content but lose their IDs and encrypted function arguments, so
-//!     they are sent inline, never as references.
+//!   - Responses: its reasoning, hosted web searches, image generations and
+//!     remote-compaction summaries are dropped (another host's encrypted or
+//!     plain reasoning and summaries cannot be sent to a Responses host, only
+//!     referenced; Chat and Anthropic requests leave them out too); its other
+//!     items keep their content but lose their IDs and encrypted function
+//!     arguments, so they are sent inline, never as references.
 //!   - Anthropic: its reasoning (another host's signed thinking) and
 //!     web-search blocks are dropped. Messages and tool calls carry no item
 //!     IDs on this wire.
 //!   - Chat Completions: unchanged. This wire sends no item IDs or encrypted
 //!     state; reasoning text is sent inline where the model replays it.
 //! - Items with no recorded producer (sessions recorded before #578, or items
-//!   the host built itself) are left as they are, except reasoning a
-//!   `store: false` Responses request could only send as a reference: one
-//!   with no encrypted content, or an Anthropic thinking block. Those are
-//!   dropped, and so are Anthropic web-search blocks.
+//!   the host built itself) are left as they are, except what a
+//!   `store: false` Responses request could only send as a reference:
+//!   reasoning or a compaction with no encrypted content, or an Anthropic
+//!   thinking block. Those are dropped, and so are Anthropic web-search
+//!   blocks.
+//!
+//! The producer is the provider id and named account, not the model: a model
+//! switch inside one multi-vendor gateway (Vercel, OpenRouter) is not a
+//! provider switch. Encrypted content inside local items (agent mail, tool
+//! outputs) carries no producer and is sent as before.
 
 use crate::session::turn_context::TurnContext;
 use codex_model_provider_info::WireApi;
@@ -83,7 +90,18 @@ fn adapt_foreign(item: &mut ResponseItem, wire: WireApi) -> bool {
                 ResponseItem::Reasoning { .. }
                     | ResponseItem::WebSearchCall { .. }
                     | ResponseItem::ImageGenerationCall { .. }
+                    | ResponseItem::Compaction { .. }
+                    | ResponseItem::ContextCompaction { .. }
             ) {
+                if matches!(
+                    item,
+                    ResponseItem::Compaction { .. } | ResponseItem::ContextCompaction { .. }
+                ) {
+                    tracing::warn!(
+                        "another provider's compaction summary is left out of this request; \
+                         this provider cannot read it"
+                    );
+                }
                 return false;
             }
             item.set_id(/*new_id*/ None);
@@ -118,6 +136,9 @@ fn keep_unattributed(item: &ResponseItem, target: &ProviderTarget) -> bool {
             anthropic_content_block,
             ..
         } => anthropic_content_block.is_none(),
+        ResponseItem::ContextCompaction {
+            encrypted_content, ..
+        } => target.stores_items || encrypted_content.is_some(),
         _ => true,
     }
 }

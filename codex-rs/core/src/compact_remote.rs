@@ -283,9 +283,19 @@ async fn run_remote_compact_task_inner_impl(
         }
     };
     let RemoteCompactAttempt {
-        new_history,
+        mut new_history,
         trace_input_history,
     } = attempt;
+    // #578: the encrypted summary is sealed for this provider (and account).
+    let producer = compaction_turn_context.output_producer();
+    for item in &mut new_history {
+        if matches!(
+            item,
+            ResponseItem::Compaction { .. } | ResponseItem::ContextCompaction { .. }
+        ) {
+            item.set_producer(&producer);
+        }
+    }
     let (new_window_number, new_window_ids) = sess.advance_auto_compact_window().await;
     let (new_history, world_state_baseline) =
         process_compacted_history(sess.as_ref(), new_history, &initial_context_injection).await;

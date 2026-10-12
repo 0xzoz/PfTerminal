@@ -270,3 +270,78 @@ fn unattributed_items_keep_only_what_the_target_can_read() {
         assert_eq!(adapted(items.clone(), &target), items);
     }
 }
+
+fn compaction(producer: Option<&str>) -> ResponseItem {
+    from(
+        producer,
+        ResponseItem::Compaction {
+            id: id("cmp_1"),
+            encrypted_content: "sealed summary".into(),
+            internal_chat_message_metadata_passthrough: None,
+        },
+    )
+}
+
+fn context_compaction(producer: Option<&str>, sealed: bool) -> ResponseItem {
+    from(
+        producer,
+        ResponseItem::ContextCompaction {
+            id: id("cmp_2"),
+            encrypted_content: sealed.then(|| "sealed".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        },
+    )
+}
+
+/// Remote compaction summaries are sealed for the provider (and account)
+/// that made them, like reasoning.
+#[test]
+fn another_providers_compaction_is_dropped_on_responses() {
+    let items = vec![
+        compaction(Some("openai")),
+        context_compaction(Some("openai"), /*sealed*/ true),
+        assistant(Some("openai")),
+    ];
+    assert_eq!(
+        adapted(
+            items.clone(),
+            &target("openai", WireApi::Responses, /*stores_items*/ false)
+        ),
+        items
+    );
+    assert_eq!(
+        adapted(
+            items,
+            &target(
+                "openai:work",
+                WireApi::Responses,
+                /*stores_items*/ false
+            )
+        ),
+        vec![without_id(assistant(Some("openai")))]
+    );
+}
+
+/// An unattributed compaction without encrypted content is a reference.
+#[test]
+fn an_unattributed_compaction_reference_is_dropped_when_nothing_is_stored() {
+    let items = vec![
+        compaction(None),
+        context_compaction(None, /*sealed*/ true),
+        context_compaction(None, /*sealed*/ false),
+    ];
+    assert_eq!(
+        adapted(
+            items.clone(),
+            &target("openai", WireApi::Responses, /*stores_items*/ false)
+        ),
+        items[..2].to_vec()
+    );
+    assert_eq!(
+        adapted(
+            items.clone(),
+            &target("azure", WireApi::Responses, /*stores_items*/ true)
+        ),
+        items
+    );
+}

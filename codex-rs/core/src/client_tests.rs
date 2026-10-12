@@ -3591,8 +3591,14 @@ fn anthropic_tool_use_ids_fit_its_alphabet() {
         super::anthropic_tool_use_id("toolu_01A-b"),
         std::borrow::Cow::Borrowed("toolu_01A-b")
     );
-    assert_eq!(
-        super::anthropic_tool_use_id("functions.shell:0"),
-        "functions_shell_0"
+    let mapped = super::anthropic_tool_use_id("functions.shell:0");
+    assert!(mapped.starts_with("functions_shell_0_"), "{mapped}");
+    assert!(
+        mapped
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     );
+    // Stable, and distinct for IDs that differ only in other characters.
+    assert_eq!(super::anthropic_tool_use_id("functions.shell:0"), mapped);
+    assert_ne!(super::anthropic_tool_use_id("functions:shell.0"), mapped);
 }

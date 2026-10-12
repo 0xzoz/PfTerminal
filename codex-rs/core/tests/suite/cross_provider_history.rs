@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use codex_features::Feature;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
 use codex_protocol::protocol::EventMsg;
@@ -23,10 +24,14 @@ use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses::chat_completions_tool_call_sse;
+use core_test_support::responses::ev_assistant_message;
+use core_test_support::responses::ev_completed;
+use core_test_support::responses::ev_response_created;
+use core_test_support::responses::start_websocket_server;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
-use core_test_support::wait_for_event;
+use core_test_support::wait_for_event_with_timeout;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
@@ -87,6 +92,16 @@ impl MockHost {
                     forgotten.remove(index);
                     return not_found(id);
                 }
+            }
+            if item["type"] == "compaction"
+                && !item["encrypted_content"]
+                    .as_str()
+                    .is_some_and(|sealed| sealed.starts_with(self.seal))
+            {
+                return ResponseTemplate::new(400).set_body_json(json!({"error": {
+                    "message": format!("The encrypted content for item {id} could not be verified."),
+                    "type": "invalid_request_error",
+                }}));
             }
             if item["type"] == "reasoning" {
                 match item["encrypted_content"].as_str() {
@@ -237,6 +252,17 @@ async fn mount(mock: &MockHost) -> MockServer {
         .respond_with(mock.clone())
         .mount(&server)
         .await;
+    if let Host::Responses = mock.host {
+        // Remote compaction: a summary sealed for this host.
+        Mock::given(method("POST"))
+            .and(path_regex(".*/responses/compact$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"output": [{
+                "type": "compaction",
+                "encrypted_content": format!("{}:summary", mock.seal),
+            }]})))
+            .mount(&server)
+            .await;
+    }
     server
 }
 
@@ -248,6 +274,15 @@ struct Session {
 /// A session whose first provider is `providers[0]`; the others can be
 /// switched to by id.
 async fn session(providers: &[(&'static str, &MockHost)]) -> anyhow::Result<Session> {
+    session_named(providers, /*openai_name*/ false).await
+}
+
+/// With `openai_name`, every provider is named like the built-in OpenAI one,
+/// so it compacts remotely (like two OpenAI accounts).
+async fn session_named(
+    providers: &[(&'static str, &MockHost)],
+    openai_name: bool,
+) -> anyhow::Result<Session> {
     let mut servers = Vec::new();
     let mut infos = Vec::new();
     for (id, mock) in providers {
@@ -265,7 +300,11 @@ async fn session(providers: &[(&'static str, &MockHost)]) -> anyhow::Result<Sess
         .with_config(move |config| {
             for (id, base_url, wire_api) in &infos {
                 let info = ModelProviderInfo {
-                    name: format!("fixture {id}"),
+                    name: if openai_name {
+                        "OpenAI".to_string()
+                    } else {
+                        format!("fixture {id}")
+                    },
                     base_url: Some(base_url.clone()),
                     wire_api: *wire_api,
                     request_max_retries: Some(0),
@@ -286,6 +325,11 @@ async fn session(providers: &[(&'static str, &MockHost)]) -> anyhow::Result<Sess
             config.model_catalog = Some(
                 codex_models_manager::bundled_models_response().expect("bundled model catalog"),
             );
+            // The `/responses/compact` endpoint.
+            config
+                .features
+                .disable(Feature::RemoteCompactionV2)
+                .expect("remote compaction v1");
         })
         .build(&servers[0])
         .await?;
@@ -317,26 +361,40 @@ impl Session {
 
     /// Runs one turn; returns the errors it reported.
     async fn turn(&self, text: &str) -> anyhow::Result<Vec<String>> {
-        self.test
-            .codex
-            .submit(Op::UserInput {
-                items: vec![UserInput::Text {
-                    text: text.into(),
-                    text_elements: Vec::new(),
-                }],
-                final_output_json_schema: None,
-                responsesapi_client_metadata: None,
-                additional_context: Default::default(),
-                thread_settings: Default::default(),
-            })
-            .await?;
-        let mut errors = Vec::new();
-        loop {
-            match wait_for_event(&self.test.codex, |_| true).await {
-                EventMsg::Error(error) => errors.push(error.message),
-                EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_) => return Ok(errors),
-                _ => {}
-            }
+        turn(&self.test, text).await
+    }
+
+    /// Compacts the history; returns the errors it reported.
+    async fn compact(&self) -> anyhow::Result<Vec<String>> {
+        self.test.codex.submit(Op::Compact).await?;
+        finish(&self.test).await
+    }
+}
+
+async fn turn(test: &TestCodex, text: &str) -> anyhow::Result<Vec<String>> {
+    test.codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: text.into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await?;
+    finish(test).await
+}
+
+/// Waits for the running turn to end; returns the errors it reported.
+async fn finish(test: &TestCodex) -> anyhow::Result<Vec<String>> {
+    let mut errors = Vec::new();
+    loop {
+        match wait_for_event_with_timeout(&test.codex, |_| true, Duration::from_secs(20)).await {
+            EventMsg::Error(error) => errors.push(error.message),
+            EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_) => return Ok(errors),
+            _ => {}
         }
     }
 }
@@ -479,7 +537,8 @@ async fn chat_tool_call_ids_reach_anthropic_in_its_alphabet() -> anyhow::Result<
         .iter()
         .find(|block| block["type"] == "tool_result")
         .expect("its result is replayed");
-    assert_eq!(tool_use["id"], "functions_no_such_tool_0");
+    let id = tool_use["id"].as_str().unwrap();
+    assert!(id.starts_with("functions_no_such_tool_0_"), "{id}");
     assert_eq!(tool_result["tool_use_id"], tool_use["id"]);
     Ok(())
 }
@@ -534,5 +593,105 @@ async fn a_missing_item_404_recovers_the_turn() -> anyhow::Result<()> {
     assert!(!has_reasoning_id(&bodies[2], "rs_A_0"));
     assert!(!has_reasoning_id(&bodies[3], "rs_A_0"));
     assert!(has_reasoning_id(&bodies[3], "rs_A_2"));
+    Ok(())
+}
+
+/// A remote compaction summary is sealed for the provider (or account) that
+/// made it: another one does not get it, the same one gets it back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn another_accounts_compaction_summary_is_dropped() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    let first = MockHost::new(Host::Responses, "A");
+    let second = MockHost::new(Host::Responses, "B");
+    let session = session_named(
+        &[("first", &first), ("second", &second)],
+        /*openai_name*/ true,
+    )
+    .await?;
+    assert_eq!(session.turn("first").await?, Vec::<String>::new());
+    assert_eq!(session.compact().await?, Vec::<String>::new());
+    session.switch("second").await?;
+    assert_eq!(session.turn("second").await?, Vec::<String>::new());
+    session.switch("first").await?;
+    assert_eq!(session.turn("third").await?, Vec::<String>::new());
+
+    let compaction = |body: &Value| {
+        input_items(body)
+            .iter()
+            .any(|item| item["type"] == "compaction")
+    };
+    assert!(!compaction(&second.bodies()[0]));
+    assert!(compaction(&first.bodies().pop().unwrap()));
+    Ok(())
+}
+
+/// The same recovery when the 404 arrives over the Responses WebSocket
+/// (OpenAI's default transport).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_missing_item_404_over_websocket_recovers_the_turn() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    let reasoning = json!({"type": "response.output_item.done", "item": {
+        "type": "reasoning", "id": "rs_ws_1", "summary": [], "encrypted_content": "sealed",
+    }});
+    let not_found = json!({
+        "type": "error",
+        "status": 404,
+        "error": {
+            "type": "invalid_request_error",
+            "message": "Item with id 'rs_ws_1' not found. Items are not persisted when `store` is set to false.",
+        },
+    });
+    let answer = |id: &str| {
+        vec![
+            ev_response_created(id),
+            ev_assistant_message(&format!("msg_{id}"), "websocket reply"),
+            ev_completed(id),
+        ]
+    };
+    let server = start_websocket_server(vec![
+        vec![
+            vec![ev_response_created("warm"), ev_completed("warm")],
+            vec![
+                ev_response_created("one"),
+                reasoning,
+                ev_assistant_message("msg_one", "websocket reply"),
+                ev_completed("one"),
+            ],
+            vec![not_found],
+            answer("two"),
+            answer("three"),
+        ],
+        vec![answer("two"), answer("three")],
+    ])
+    .await;
+    let test = test_codex()
+        .with_config(|config| {
+            config.model_provider.request_max_retries = Some(0);
+            config.model_provider.stream_max_retries = Some(0);
+        })
+        .build_with_websocket_server(&server)
+        .await?;
+    assert_eq!(turn(&test, "first").await?, Vec::<String>::new());
+    assert_eq!(turn(&test, "second").await?, Vec::<String>::new());
+
+    let requests: Vec<Value> = server
+        .connections()
+        .into_iter()
+        .flatten()
+        .map(|request| request.body_json())
+        .collect();
+    let rejected = requests
+        .iter()
+        .position(|body| body.to_string().contains("second"))
+        .expect("the second turn was sent");
+    let after: Vec<&Value> = requests[rejected + 1..].iter().collect();
+    assert!(!after.is_empty(), "the second turn was retried");
+    assert!(
+        after
+            .iter()
+            .all(|body| !body["input"].to_string().contains("rs_ws_1")),
+        "{after:?}"
+    );
+    server.shutdown().await;
     Ok(())
 }

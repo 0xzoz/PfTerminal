@@ -5503,20 +5503,25 @@ fn append_anthropic_message_for_response_item(
 
 /// Anthropic accepts only `tool_use` IDs matching `^[a-zA-Z0-9_-]+$`. Another
 /// provider's call IDs (a Chat host's `functions.shell:0`) are mapped onto
-/// that alphabet, the same way for a call and its result (#578). Valid IDs,
-/// Anthropic's own included, are unchanged.
+/// that alphabet, the same way for a call and its result (#578), with a hash
+/// of the original so two IDs that differ only in other characters stay
+/// distinct. Valid IDs, Anthropic's own included, are unchanged.
 fn anthropic_tool_use_id(call_id: &str) -> Cow<'_, str> {
     let valid = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
     if call_id.chars().all(valid) {
-        Cow::Borrowed(call_id)
-    } else {
-        Cow::Owned(
-            call_id
-                .chars()
-                .map(|c| if valid(c) { c } else { '_' })
-                .collect(),
-        )
+        return Cow::Borrowed(call_id);
     }
+    let mapped: String = call_id
+        .chars()
+        .map(|c| if valid(c) { c } else { '_' })
+        .collect();
+    // FNV-1a: stable across builds, so a replayed history maps the same way.
+    let hash = call_id
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+    Cow::Owned(format!("{mapped}_{hash:016x}"))
 }
 
 /// The item ID in a Responses `Item with id '<id>' not found` error (#578).

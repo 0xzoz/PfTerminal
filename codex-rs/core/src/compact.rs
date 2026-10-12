@@ -269,6 +269,7 @@ async fn run_compact_task_inner_impl(
 
     let max_retries = turn_context.provider.info().stream_max_retries();
     let mut retries = 0;
+    let mut unresolvable_item_retries = 0;
     let mut client_session = sess.services.new_model_client_session();
     // A compaction is inference the operator paid for - and `/compact` is one they
     // asked for directly - so it is collected like any other turn rather than
@@ -353,6 +354,16 @@ async fn run_compact_task_inner_impl(
                 let event = EventMsg::Error(e.to_error_event(/*message_prefix*/ None));
                 sess.send_event(&turn_context, event).await;
                 return Err(e);
+            }
+            // #578: the provider could not find an item this request referenced.
+            Err(e)
+                if crate::session::turn::retry_without_unresolvable_item(
+                    &client_session,
+                    &e,
+                    &mut unresolvable_item_retries,
+                ) =>
+            {
+                continue;
             }
             Err(e) => {
                 if retries < max_retries {
