@@ -36,7 +36,9 @@ pub struct AwsSignedRequest {
 }
 
 /// Errors returned by credential loading or SigV4 signing.
-#[derive(Debug, Error)]
+/// `Debug` prints [`AwsAuthError::detailed_message`], so a `{error:?}` in a
+/// log line cannot carry a credential helper's stderr (#548).
+#[derive(Error)]
 pub enum AwsAuthError {
     #[error("AWS service name must not be empty")]
     EmptyService,
@@ -141,6 +143,12 @@ impl AwsAuthContext {
     }
 }
 
+impl std::fmt::Debug for AwsAuthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.detailed_message())
+    }
+}
+
 impl AwsAuthError {
     /// This error and its sources, for messages that must say why (the
     /// SDK's top-level credential errors are terse). A `credential_process`
@@ -163,7 +171,8 @@ impl AwsAuthError {
             }
             source = error.source();
         }
-        message
+        // Other SDK credential errors can quote what they failed to parse.
+        codex_log_guard::redact_credentials(&message).into_owned()
     }
 
     /// Returns whether retrying the outbound request can reasonably recover from this auth error.

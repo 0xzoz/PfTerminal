@@ -63,6 +63,9 @@ pub(crate) fn include_runtime_model(
 #[derive(Debug)]
 pub(crate) struct ModelCatalog {
     models: RwLock<Vec<ModelPreset>>,
+    /// Ids of the models the app server's `model/list` returned; the rest
+    /// (runtime and GPU providers) are added here.
+    listed_ids: RwLock<Vec<String>>,
     provider_policy: RwLock<Option<crate::chatwidget::provider_model_policy::ProviderModelPolicy>>,
     session_recovery_only: AtomicBool,
 }
@@ -71,9 +74,49 @@ impl ModelCatalog {
     pub(crate) fn new(models: Vec<ModelPreset>) -> Self {
         Self {
             models: RwLock::new(models),
+            listed_ids: RwLock::new(Vec::new()),
             provider_policy: RwLock::new(None),
             session_recovery_only: AtomicBool::new(false),
         }
+    }
+
+    /// Records which of the models came from `model/list`.
+    pub(crate) fn mark_listed(&self, listed: &[ModelPreset]) {
+        *self
+            .listed_ids
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            listed.iter().map(|preset| preset.id.clone()).collect();
+    }
+
+    /// PF-84: replaces the `model/list` models with a fresh list (fetched
+    /// with the sign-in of the account the session now uses), keeping the
+    /// models added for runtime and GPU providers.
+    pub(crate) fn replace_listed_models(&self, listed: Vec<ModelPreset>) {
+        let mut listed_ids = self
+            .listed_ids
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut models = self
+            .models
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let new_ids: Vec<String> = listed.iter().map(|preset| preset.id.clone()).collect();
+        // An added model the new list now carries itself is dropped.
+        let added: Vec<ModelPreset> = models
+            .drain(..)
+            .filter(|preset| {
+                !listed_ids.contains(&preset.id)
+                    && !listed.iter().any(|listed| {
+                        listed.id == preset.id
+                            || (listed.model == preset.model
+                                && listed.provider_id == preset.provider_id)
+                    })
+            })
+            .collect();
+        *models = listed;
+        models.extend(added);
+        *listed_ids = new_ids;
     }
 
     pub(crate) fn set_session_recovery_only(&self, session_only: bool) {

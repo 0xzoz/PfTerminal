@@ -3069,7 +3069,7 @@ async fn pf_60_s03_memory_summarize_is_recorded() -> anyhow::Result<()> {
     let client_session = owner.services.new_model_client_session();
     let provider = owner.provider().await;
     let (accounting, provider_id) = owner.accounting_binding().await;
-    let auth = owner.services.auth_manager.auth().await;
+    let auth = owner.services.auth_manager().auth().await;
     let _scopes = crate::accounting::attach_scopes(
         &owner,
         &accounting,

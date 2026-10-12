@@ -5,6 +5,7 @@
 
 use super::resize_reflow::trailing_run_start;
 use super::session_lifecycle::ThreadAttachPresentation;
+use super::thread_settings::SettingsUpdateOutcome;
 use super::*;
 use crate::app_event::WalletUnlockContinuation;
 use crate::app_server_session::ForkGoalContinuation;
@@ -268,6 +269,33 @@ impl App {
             }
         }
         tui.frame_requester().schedule_frame();
+    }
+
+    /// PF-84: the model list again, after the session moved to another
+    /// account's sign-in (the app server lists with that account now).
+    /// Returns whether the list was replaced.
+    pub(super) async fn refresh_model_list(&mut self, app_server: &mut AppServerSession) -> bool {
+        match app_server.list_models().await {
+            Ok(models) if !models.is_empty() => {
+                self.model_catalog.replace_listed_models(models);
+                let model = self.chat_widget.current_model().to_string();
+                let provider_id = self.chat_widget.config_ref().model_provider_id.clone();
+                self.model_catalog.sync_runtime_models(
+                    [provider_id.as_str()],
+                    Some(&model),
+                    &provider_id,
+                );
+                true
+            }
+            Ok(_) => {
+                tracing::warn!("model/list returned no models after an account switch");
+                false
+            }
+            Err(error) => {
+                tracing::warn!("model/list failed after an account switch: {error}");
+                false
+            }
+        }
     }
 
     pub(super) async fn refresh_gpu_runtime_overlay(&mut self) {
@@ -2079,6 +2107,9 @@ impl App {
                         return Ok(AppRunControl::Continue);
                     }
                 }
+                // PF-84: a switch to another sign-in account waits until the
+                // session has moved to it, then fetches that account's list.
+                let mut account_switch = None;
                 if let Some(model_provider) = provider.as_ref() {
                     let Some(provider_info) =
                         self.config.model_providers.get(model_provider).cloned()
@@ -2088,6 +2119,8 @@ impl App {
                         ));
                         return Ok(AppRunControl::Continue);
                     };
+                    account_switch =
+                        sign_in_account_switch(&self.config.model_provider, &provider_info);
                     self.config.model_provider_id = model_provider.clone();
                     self.config.model_provider = provider_info.clone();
                     self.chat_widget
@@ -2097,8 +2130,33 @@ impl App {
                 }
                 self.chat_widget.set_model(&model);
                 self.refresh_session_header(tui)?;
-                self.sync_active_thread_model_selection(app_server, model, provider)
+                let outcome = self
+                    .sync_active_thread_model_selection(
+                        app_server,
+                        model,
+                        provider,
+                        account_switch.is_some(),
+                    )
                     .await;
+                // Only once core has moved: otherwise the list (and the
+                // message) could still be the old account's.
+                if let Some(account) = account_switch {
+                    let message = match outcome {
+                        SettingsUpdateOutcome::Confirmed => {
+                            if self.refresh_model_list(app_server).await {
+                                Some(account_switch_message(account.as_ref()))
+                            } else {
+                                Some(SWITCH_LIST_NOT_REFRESHED.to_string())
+                            }
+                        }
+                        SettingsUpdateOutcome::Accepted => Some(SWITCH_NOT_CONFIRMED.to_string()),
+                        // A failure already says so; nothing was sent otherwise.
+                        SettingsUpdateOutcome::Failed | SettingsUpdateOutcome::NotSent => None,
+                    };
+                    if let Some(message) = message {
+                        self.chat_widget.add_info_message(message, /*hint*/ None);
+                    }
+                }
                 self.sync_active_thread_service_tier_to_cached_session()
                     .await;
             }
@@ -6625,6 +6683,27 @@ impl App {
             }
         }
     }
+}
+
+const SWITCH_LIST_NOT_REFRESHED: &str = "The account switch applied, but the model list could not be refreshed; switch accounts again or restart to refresh it.";
+const SWITCH_NOT_CONFIRMED: &str = "The account switch was not confirmed, so the model list was not refreshed; switch accounts again or restart to refresh it.";
+
+/// PF-84: `Some(account)` when moving from `current` to `next` changes the
+/// sign-in account the session uses (`Some(None)`: to the default login).
+pub(super) fn sign_in_account_switch(
+    current: &codex_model_provider_info::ModelProviderInfo,
+    next: &codex_model_provider_info::ModelProviderInfo,
+) -> Option<Option<codex_login::NamedChatgptAccount>> {
+    let account = codex_model_provider::named_sign_in_account(next);
+    (codex_model_provider::named_sign_in_account(current) != account).then_some(account)
+}
+
+pub(super) fn account_switch_message(account: Option<&codex_login::NamedChatgptAccount>) -> String {
+    let label = match account {
+        Some(account) => format!("{} account `{}`", account.provider_id, account.name),
+        None => "the default account".to_string(),
+    };
+    format!("Connectors, usage and the model list now use {label}; model list refreshed.")
 }
 
 #[cfg(test)]

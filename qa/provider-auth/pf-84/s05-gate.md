@@ -46,6 +46,11 @@ off no attempt names an account and nothing below changes.
 
   A named account is keyed by name rather than by credential (review note 5), so replacing its
   key under the same name keeps an active cooldown.
+
+  Follow-up #510: Z.AI's transport retry of a 429 (kept for its transient overloads, which send
+  no `Retry-After`) now waits out a `Retry-After` of up to 5 s and stops at once on a longer one,
+  so the throttle's cooldown starts on the first 429 instead of after five quick retries.
+
 - **`/cost`.** Rows, provider pages and request links are grouped by provider, account and model.
   The "Other conversations" rows are grouped the same way. Accounts are named, `default`
   included, only when the view holds work from a named account. The per-account rows add up
