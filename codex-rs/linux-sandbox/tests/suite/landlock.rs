@@ -20,6 +20,7 @@ use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
 use std::collections::HashMap;
+use std::path::Path;
 use std::path::PathBuf;
 use tempfile::NamedTempFile;
 
@@ -1488,14 +1489,90 @@ async fn sandbox_denies_reads_through_a_nested_link_workspace() {
             "{denied:?} denied: exit {}, stdout {stdout}, stderr {}",
             output.exit_code, output.stderr.text
         );
+        // #502: a denial spelled through the absolute link runs too (it
+        // used to fail every command) and stays denied in every spelling.
         assert!(!stdout.contains("API_KEY"), "{report}");
-        if denied == &link {
-            // Masking a path spelled through an absolute link fails closed:
-            // bubblewrap cannot create the mount point, so nothing runs.
-            assert_ne!(output.exit_code, 0, "{report}");
-            continue;
-        }
         for line in ["dot=1", "real=1", "link=1", "other=0"] {
+            assert!(stdout.contains(line), "{line} missing: {report}");
+        }
+    }
+}
+
+/// #501: under restricted reads, a read-only root reached through a link is
+/// mounted at the link's path. A denial spelled by the real path (or through
+/// the link) stays unreadable through that mount, and the rest stays
+/// readable.
+#[tokio::test]
+async fn restricted_reads_deny_through_a_read_only_linked_root() {
+    if should_skip_bwrap_tests().await {
+        eprintln!("skipping bwrap test: bwrap sandbox prerequisites are unavailable");
+        return;
+    }
+    let tmpdir = tempfile::tempdir().expect("tempdir");
+    let base = tmpdir.path().canonicalize().expect("canonical");
+    let real = base.join("real");
+    let link = base.join("link");
+    let work = base.join("work");
+    std::fs::create_dir_all(&real).expect("real");
+    std::fs::create_dir_all(&work).expect("work");
+    std::fs::write(real.join("secret"), "API_KEY=x\n").expect("secret");
+    std::fs::write(real.join("other"), "ok\n").expect("other");
+    std::os::unix::fs::symlink(&real, &link).expect("link");
+    let sandbox_helper_dir = codex_linux_sandbox_exe()
+        .parent()
+        .expect("sandbox helper should have a parent")
+        .to_path_buf();
+    let entry = |path: &Path, access| FileSystemSandboxEntry {
+        path: FileSystemPath::Path {
+            path: AbsolutePathBuf::try_from(path).expect("absolute path"),
+        },
+        access,
+        missing_path_behavior: None,
+    };
+    let script = format!(
+        "cat {link}/secret; echo link=$?; cat {link}/other; echo other=$?",
+        link = link.display(),
+    );
+    // The last denial holds the linked root's whole target.
+    for (denied, other) in [
+        (real.join("secret"), "other=0"),
+        (link.join("secret"), "other=0"),
+        (real.clone(), "other=1"),
+    ] {
+        let file_system_sandbox_policy = FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Minimal,
+                },
+                access: FileSystemAccessMode::Read,
+                missing_path_behavior: None,
+            },
+            entry(&sandbox_helper_dir, FileSystemAccessMode::Read),
+            entry(&link, FileSystemAccessMode::Read),
+            entry(&work, FileSystemAccessMode::Write),
+            entry(&denied, FileSystemAccessMode::Deny),
+        ]);
+        let permission_profile = PermissionProfile::from_runtime_permissions(
+            &file_system_sandbox_policy,
+            NetworkSandboxPolicy::Restricted,
+        );
+        let output = run_cmd_result_with_permission_profile_for_cwd(
+            &["bash", "-c", &script],
+            AbsolutePathBuf::try_from(work.as_path()).expect("absolute cwd"),
+            permission_profile,
+            create_env_from_core_vars(),
+            LONG_TIMEOUT_MS,
+            /*use_legacy_landlock*/ false,
+        )
+        .await
+        .expect("sandboxed command should execute");
+        let stdout = &output.stdout.text;
+        let report = format!(
+            "{denied:?} denied: exit {}, stdout {stdout}, stderr {}",
+            output.exit_code, output.stderr.text
+        );
+        assert!(!stdout.contains("API_KEY"), "{report}");
+        for line in ["link=1", other] {
             assert!(stdout.contains(line), "{line} missing: {report}");
         }
     }
@@ -1575,4 +1652,165 @@ async fn writable_symlink_to_root_keeps_shallower_root_protections() {
         std::fs::read_to_string(base.join("outside.txt")).expect("outside"),
         "ok\n"
     );
+}
+
+/// #506: under real bubblewrap, a directory the policy may not list cannot
+/// be listed or have its mode changed, under a read-only and a full-write
+/// base; its entries stay usable and a denied entry stays denied.
+#[tokio::test]
+async fn issue_506_unlistable_directory_under_bwrap() {
+    if should_skip_bwrap_tests().await {
+        eprintln!("skipping bwrap test: bwrap sandbox prerequisites are unavailable");
+        return;
+    }
+    let tmpdir = tempfile::tempdir().expect("tempdir");
+    let base = tmpdir.path().canonicalize().expect("canonical");
+    let home = base.join("home");
+    std::fs::create_dir_all(home.join("tmp")).expect("tmp");
+    std::fs::write(home.join("tmp/helper.txt"), "helper-506").expect("helper");
+    std::fs::write(home.join("listing-canary-506"), "x").expect("canary");
+    std::fs::write(home.join("secret.txt"), "secret-506").expect("secret");
+    std::os::unix::fs::symlink("tmp", home.join("link")).expect("link");
+    let home_path = AbsolutePathBuf::try_from(home.as_path()).expect("absolute home");
+    let home_str = home.to_string_lossy().into_owned();
+    let script = format!(
+        "ls {home_str}; echo ls=$?; ls {home_str}/tmp/..; echo ls-dotdot=$?; \
+         chmod 755 {home_str}; echo chmod=$?; ls {home_str}; echo ls-after-chmod=$?; \
+         touch {home_str}/new 2>/dev/null; echo touch=$?; \
+         cat {home_str}/tmp/helper.txt; echo; ls {home_str}/tmp; echo ls-tmp=$?; \
+         cat {home_str}/link/helper.txt; echo; \
+         cat {home_str}/secret.txt; echo cat-secret=$?"
+    );
+    for root_access in [FileSystemAccessMode::Read, FileSystemAccessMode::Write] {
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                access: root_access,
+                missing_path_behavior: None,
+            },
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Path {
+                    path: home_path.join("secret.txt"),
+                },
+                access: FileSystemAccessMode::Deny,
+                missing_path_behavior: None,
+            },
+            FileSystemSandboxEntry::deny_directory_listing(&home_path),
+        ]);
+        let permission_profile =
+            PermissionProfile::from_runtime_permissions(&policy, NetworkSandboxPolicy::Enabled);
+        let output = match run_cmd_result_with_permission_profile(
+            &["bash", "-c", &script],
+            permission_profile,
+            LONG_TIMEOUT_MS,
+            /*use_legacy_landlock*/ false,
+        )
+        .await
+        {
+            Ok(output) => output,
+            Err(err) => match err.details() {
+                CodexErrorDetails::Sandbox(SandboxErr::Denied { output, .. }) => {
+                    output.as_ref().clone()
+                }
+                details => panic!("{root_access:?}: {details:?}"),
+            },
+        };
+        let stdout = &output.stdout.text;
+        let context = format!("{root_access:?}: {stdout} / {}", output.stderr.text);
+        for expected in [
+            "ls=2",
+            "ls-dotdot=2",
+            "chmod=1",
+            "ls-after-chmod=2",
+            "touch=1",
+            "ls-tmp=0",
+            "cat-secret=1",
+        ] {
+            assert!(stdout.contains(expected), "{expected} {context}");
+        }
+        assert!(!stdout.contains("listing-canary-506"), "{context}");
+        assert_eq!(stdout.matches("helper-506").count(), 2, "{context}");
+        assert!(stdout.contains("helper.txt"), "{context}");
+        assert!(!stdout.contains("secret-506"), "{context}");
+        assert!(!home.join("new").exists(), "{context}");
+    }
+}
+
+/// #506 review: a Corbanu home named `.codex` directly in a writable
+/// workspace is read-only there and still cannot be listed under real
+/// bubblewrap; its entries stay readable but not writable.
+#[tokio::test]
+async fn issue_506_unlistable_dot_codex_home_in_a_writable_workspace_under_bwrap() {
+    if should_skip_bwrap_tests().await {
+        eprintln!("skipping bwrap test: bwrap sandbox prerequisites are unavailable");
+        return;
+    }
+    let tmpdir = tempfile::tempdir().expect("tempdir");
+    let workspace = tmpdir.path().canonicalize().expect("canonical").join("ws");
+    let home = workspace.join(".codex");
+    std::fs::create_dir_all(home.join("tmp")).expect("tmp");
+    std::fs::write(home.join("tmp/helper.txt"), "helper-506").expect("helper");
+    std::fs::write(home.join("listing-canary-506"), "x").expect("canary");
+    let home_path = AbsolutePathBuf::try_from(home.as_path()).expect("absolute home");
+    let home_str = home.to_string_lossy().into_owned();
+    let policy = FileSystemSandboxPolicy::restricted(vec![
+        FileSystemSandboxEntry {
+            path: FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            },
+            access: FileSystemAccessMode::Read,
+            missing_path_behavior: None,
+        },
+        FileSystemSandboxEntry {
+            path: FileSystemPath::Path {
+                path: AbsolutePathBuf::try_from(workspace.as_path()).expect("absolute ws"),
+            },
+            access: FileSystemAccessMode::Write,
+            missing_path_behavior: None,
+        },
+        FileSystemSandboxEntry {
+            path: FileSystemPath::Path {
+                path: home_path.join("wallet"),
+            },
+            access: FileSystemAccessMode::Deny,
+            missing_path_behavior: Some(
+                codex_protocol::permissions::FileSystemSandboxEntryMissingPathBehavior::Skip,
+            ),
+        },
+        FileSystemSandboxEntry::deny_directory_listing(&home_path),
+    ]);
+    let script = format!(
+        "ls {home_str}; echo ls=$?; cat {home_str}/tmp/helper.txt; echo; \
+         touch {home_str}/tmp/new 2>/dev/null; echo touch=$?; \
+         touch {}/ok && echo workspace-writable",
+        workspace.display()
+    );
+    let output = run_cmd_result_with_permission_profile_for_cwd(
+        &["bash", "-c", &script],
+        AbsolutePathBuf::try_from(workspace.as_path()).expect("cwd"),
+        PermissionProfile::from_runtime_permissions(&policy, NetworkSandboxPolicy::Enabled),
+        create_env_from_core_vars(),
+        LONG_TIMEOUT_MS,
+        /*use_legacy_landlock*/ false,
+    )
+    .await;
+    let output = match output {
+        Ok(output) => output,
+        Err(err) => match err.details() {
+            CodexErrorDetails::Sandbox(SandboxErr::Denied { output, .. }) => {
+                output.as_ref().clone()
+            }
+            details => panic!("{details:?}"),
+        },
+    };
+    let stdout = &output.stdout.text;
+    let context = format!("{stdout} / {}", output.stderr.text);
+    assert!(stdout.contains("ls=2"), "{context}");
+    assert!(!stdout.contains("listing-canary-506"), "{context}");
+    assert!(stdout.contains("helper-506"), "{context}");
+    assert!(stdout.contains("touch=1"), "{context}");
+    assert!(stdout.contains("workspace-writable"), "{context}");
+    assert!(!home.join("tmp/new").exists(), "{context}");
 }
