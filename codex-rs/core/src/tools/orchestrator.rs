@@ -177,6 +177,9 @@ impl ToolOrchestrator {
         // asked. A cached approval or a permission hook may still answer
         // without them; then no review is shown and nothing is confirmed.
         let mut grant_offer = None;
+        // Issue #513: under Moderate, the persistence file a person's approval
+        // of this request would let it write, for the approval prompt.
+        let mut persistence_note = None;
         // PF-30-S03: a protected action after untrusted content needs fresh,
         // exact human approval, whatever the requirement above would allow.
         let post_taint = post_taint_action(tool, req, tool_ctx, &requirement).await;
@@ -228,7 +231,12 @@ impl ToolOrchestrator {
             );
             // Issue #524: building the denials reads folders; off the async
             // thread. A failed check refuses (fail closed).
-            let opened = tokio::task::spawn_blocking(move || {
+            // Where a person decides, say which persistence file approving
+            // opens (the second check refuses it for any other approver).
+            let note_persistence = state.level == codex_security_policy::SecurityLevel::Moderate
+                && !human_route
+                && person_may_decide;
+            let checked = tokio::task::spawn_blocking(move || {
                 let denials = crate::security::protected_surface::ReadDenials::for_turn(
                     &codex_home,
                     &turn_cwd,
@@ -245,13 +253,31 @@ impl ToolOrchestrator {
                     writes,
                 };
                 let cwds: Vec<&std::path::Path> = cwds.iter().map(AsRef::as_ref).collect();
-                protected_additional::opened(check, &additional, &cwds)
+                let liftable = note_persistence
+                    .then(|| {
+                        protected_additional::opened_read_only_path(
+                            &denials,
+                            protected.as_ref(),
+                            &additional,
+                            &cwds,
+                            protected_additional::ReadOnlyScope::Kept,
+                        )
+                    })
+                    .flatten();
+                (
+                    protected_additional::opened(check, &additional, &cwds),
+                    liftable,
+                )
             })
             .await
-            .unwrap_or(Some(
-                crate::security::protected_additional::Opened::Unchecked,
+            .unwrap_or((
+                Some(crate::security::protected_additional::Opened::Unchecked),
+                None,
             ));
+            let (opened, liftable) = checked;
             refuse_opened(opened, state.level, tool_ctx).await?;
+            persistence_note = liftable
+                .map(|path| protected_additional::persistence_note(&path.display().to_string()));
         }
         if let Some(action) = &post_taint {
             if let Some(refusal) = action.refused_up_front() {
@@ -432,11 +458,17 @@ impl ToolOrchestrator {
                     session: &tool_ctx.session,
                     turn: &tool_ctx.turn,
                     call_id: &tool_ctx.call_id,
-                    retry_reason: match (reason, &protected_read_note) {
-                        (Some(reason), Some(note)) => Some(format!("{reason} {note}")),
-                        (None, Some(note)) => Some(note.clone()),
-                        (reason, None) => reason.clone(),
-                    },
+                    retry_reason: [
+                        reason.as_ref(),
+                        protected_read_note.as_ref(),
+                        persistence_note
+                            .as_ref()
+                            .filter(|_| reviewer == ApprovalReviewer::User),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .cloned()
+                    .reduce(|joined, part| format!("{joined} {part}")),
                     network_approval_context: None,
                     fresh_human_authority: false,
                 };
@@ -530,12 +562,33 @@ impl ToolOrchestrator {
             .unwrap_or(permission_profile);
         let file_system_sandbox_policy = permissions.file_system_sandbox_policy();
 
+        // Issue #540: where the protected-path rules apply, a run leaves the
+        // sandbox only where a person approves running it outside: a request
+        // to (`require_escalated`, which needs a person's approval under
+        // these levels), or the retry after a sandbox denial of a protected
+        // action (asked afresh, checked below). Never through an exec-policy
+        // allow rule: in a run whose rules a person lifted, only the sandbox
+        // keeps the Corbanu home's runtime entries read-only. (Elsewhere the
+        // rules' read denials already keep such runs sandboxed.)
+        let keeps_sandbox =
+            crate::security::protected_additional::protected_level(&tool_ctx.session).is_some()
+                && !tool
+                    .sandbox_permissions(req)
+                    .requires_escalated_permissions();
+        let unsandboxed_allowed_for_run =
+            unsandboxed_execution_allowed(&file_system_sandbox_policy)
+                && (!keeps_sandbox || post_taint.is_some());
+
         // 2) First attempt under the selected sandbox.
-        let sandbox_override = sandbox_override_for_first_attempt(
-            tool.sandbox_permissions(req),
-            &requirement,
-            &file_system_sandbox_policy,
-        );
+        let sandbox_override = if keeps_sandbox {
+            SandboxOverride::NoOverride
+        } else {
+            sandbox_override_for_first_attempt(
+                tool.sandbox_permissions(req),
+                &requirement,
+                &file_system_sandbox_policy,
+            )
+        };
         let managed_network_active = turn_ctx.network.is_some();
         let sandbox_preference = tool.sandbox_preference();
         let sandbox_requested = match sandbox_override {
@@ -649,8 +702,7 @@ impl ToolOrchestrator {
                 }
                 let sandbox_startup_failure =
                     is_sandbox_startup_failure(initial_sandbox, output.as_ref());
-                let unsandboxed_allowed =
-                    unsandboxed_execution_allowed(&file_system_sandbox_policy);
+                let unsandboxed_allowed = unsandboxed_allowed_for_run;
                 // Under `Never` or `OnRequest`, do not retry without sandbox;
                 // surface a concise sandbox denial that preserves the original
                 // output. Exception: if the platform sandbox itself failed to
@@ -732,7 +784,7 @@ impl ToolOrchestrator {
                     };
 
                     let permission_request_run_id = format!("{}:retry", tool_ctx.call_id);
-                    resolve_tool_apporval(
+                    let retry_approved_by = resolve_tool_apporval(
                         tool,
                         req,
                         &permission_request_run_id,
@@ -749,6 +801,16 @@ impl ToolOrchestrator {
                     .await?;
                     if let Some(action) = &post_taint {
                         post_taint_recheck(action, tool_ctx)?;
+                    }
+                    // Issue #540: leaving the sandbox here takes a person.
+                    if keeps_sandbox
+                        && unsandboxed_allowed
+                        && retry_approved_by != ApprovalResolutionSource::User
+                    {
+                        return Err(ToolError::Rejected(
+                            "running outside the sandbox needs a person's approval here"
+                                .to_string(),
+                        ));
                     }
                 }
 

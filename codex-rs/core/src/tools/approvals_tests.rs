@@ -88,7 +88,7 @@ async fn issue_513_a_remembered_approval_is_not_a_person_asked_now() {
     let services = &session.services;
     let ask = |decision: ReviewDecision| move || async move { decision };
     assert_eq!(
-        asking_person(with_cached_approval(
+        asking_person(|| with_cached_approval(
             services,
             "shell",
             vec!["issue-513"],
@@ -99,7 +99,7 @@ async fn issue_513_a_remembered_approval_is_not_a_person_asked_now() {
         (ReviewDecision::ApprovedForSession, true)
     );
     assert_eq!(
-        asking_person(with_cached_approval(
+        asking_person(|| with_cached_approval(
             services,
             "shell",
             vec!["issue-513"],
@@ -110,7 +110,7 @@ async fn issue_513_a_remembered_approval_is_not_a_person_asked_now() {
         (ReviewDecision::ApprovedForSession, false)
     );
     assert_eq!(
-        asking_person(with_cached_approval(
+        asking_person(|| with_cached_approval(
             services,
             "shell",
             vec!["issue-513"],
@@ -122,7 +122,7 @@ async fn issue_513_a_remembered_approval_is_not_a_person_asked_now() {
     );
     // Nothing marked: not asked (fail closed).
     assert_eq!(
-        asking_person(async { ReviewDecision::Approved }).await,
+        asking_person(|| async { ReviewDecision::Approved }).await,
         (ReviewDecision::Approved, false)
     );
 }

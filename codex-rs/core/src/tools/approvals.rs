@@ -353,9 +353,9 @@ where
             .await
         }
         ApprovalReviewer::User => {
-            let (decision, asked) = crate::tools::sandboxing::asking_person(
-                tool.start_approval_async(req, ctx.clone()),
-            )
+            let (decision, asked) = crate::tools::sandboxing::asking_person(|| {
+                tool.start_approval_async(req, ctx.clone())
+            })
             .await;
             let source = if asked {
                 ApprovalResolutionSource::User

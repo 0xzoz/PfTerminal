@@ -1334,12 +1334,15 @@ async fn issue_540_runtime_entries_stay_read_only_when_a_person_lifts_the_rules(
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
     let mut wrong = Vec::new();
-    // (level, outside the sandbox, launcher replaced)
-    for (level, escalated, replaced) in [
-        (SecurityLevel::Moderate, false, false),
+    // (level, outside the sandbox, exec-policy allow rule, launcher replaced)
+    for (level, escalated, allowed_by_rule, replaced) in [
+        (SecurityLevel::Moderate, false, false, false),
+        // An allow rule (it would skip the sandbox) does not take the run
+        // outside it either (review r1).
+        (SecurityLevel::Moderate, false, true, false),
         // No sandbox runs it, so nothing can hold the rule.
-        (SecurityLevel::Moderate, true, true),
-        (SecurityLevel::Permissive, false, true),
+        (SecurityLevel::Moderate, true, false, true),
+        (SecurityLevel::Permissive, false, false, true),
     ] {
         let home = Arc::new(TempDir::new()?);
         let root = home.path().canonicalize()?;
@@ -1347,10 +1350,20 @@ async fn issue_540_runtime_entries_stay_read_only_when_a_person_lifts_the_rules(
         let launcher = root.join("tmp/issue540-launcher");
         std::fs::write(&launcher, "original")?;
         std::fs::write(root.join("auth.json"), CANARY)?;
+        std::fs::write(root.join("issue540-new"), "replaced")?;
+        if allowed_by_rule {
+            std::fs::create_dir_all(root.join("rules"))?;
+            std::fs::write(
+                root.join("rules/policy.rules"),
+                "prefix_rule(pattern=[\"cat\"], decision=\"allow\")\n\
+                 prefix_rule(pattern=[\"cp\"], decision=\"allow\")\n",
+            )?;
+        }
         let mut arguments = json!({
             "command": format!(
-                "cat '{}'; printf replaced > '{}' && echo wrote-540",
+                "cat '{}'; cp '{}' '{}'",
                 root.join("auth.json").display(),
+                root.join("issue540-new").display(),
                 launcher.display()
             ),
         });
@@ -1394,7 +1407,7 @@ async fn issue_540_runtime_entries_stay_read_only_when_a_person_lifts_the_rules(
         let lifted = asked == 1 && output.contains(CANARY);
         if (now == "replaced") != replaced || (level == SecurityLevel::Moderate && !lifted) {
             wrong.push(format!(
-                "{level:?} escalated={escalated}: asked={asked} \
+                "{level:?} escalated={escalated} rule={allowed_by_rule}: asked={asked} \
                  launcher={now:?}: {output}"
             ));
         }

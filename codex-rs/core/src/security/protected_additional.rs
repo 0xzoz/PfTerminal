@@ -456,6 +456,17 @@ pub(crate) fn refusal(level: SecurityLevel, path: &str) -> String {
     }
 }
 
+/// Issue #513: the note on a Moderate approval prompt whose additional
+/// write permission opens the persistence file `path`: approving it is what
+/// lets this one command change it.
+pub(crate) fn persistence_note(path: &str) -> String {
+    let path = super::protected_reads::shown_path(path);
+    format!(
+        "Approving lets this command write `{path}`, which runs code or sets policy later \
+         (Moderate keeps it read-only otherwise)."
+    )
+}
+
 /// Issue #513: the refusal for an additional permission that would make the
 /// read-only `path` writable under `level`, by what may lift it (`rule`).
 pub(crate) fn write_refusal(level: SecurityLevel, path: &str, rule: WriteRule) -> String {

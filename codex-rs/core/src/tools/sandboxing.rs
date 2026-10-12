@@ -88,12 +88,14 @@ tokio::task_local! {
 /// whether a person was asked during it, as opposed to an answer remembered
 /// from earlier (the approval cache) or a stored grant. Unmarked counts as
 /// not asked (fail closed).
-pub(crate) async fn asking_person(
-    approval: impl Future<Output = ReviewDecision>,
-) -> (ReviewDecision, bool) {
+pub(crate) async fn asking_person<Fut>(approval: impl FnOnce() -> Fut) -> (ReviewDecision, bool)
+where
+    Fut: Future<Output = ReviewDecision>,
+{
+    // The whole call, its synchronous part included, runs in the scope.
     PERSON_ASKED
         .scope(std::cell::Cell::new(false), async {
-            let decision = approval.await;
+            let decision = approval().await;
             (decision, PERSON_ASKED.with(std::cell::Cell::get))
         })
         .await
