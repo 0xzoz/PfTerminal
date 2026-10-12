@@ -165,7 +165,7 @@ API key in `auth.json`; a decoy `OPENAI_API_KEY` is set throughout. Captures: [s
   - Runs 3 and 4 (review and final heads) start on `openai · work` and switch GLM → OpenAI → GLM.
   - Core logged each switch (`default` / `openai:work`) before the TUI's `model/list`. The ledger attributes each
     attempt to the account that served it. Leak scan for both real keys: 0 files.
-- **Video:** [pf84-switch-follow](https://github.com/CorbanuCore/CorbanuTerminal/releases/download/demos/pf-84-s06-pf84-switch-follow-2ca2c0615658-2026-10-12.mp4)
+- **Video:** [pf84-switch-follow](https://github.com/CorbanuCore/CorbanuTerminal/releases/download/demos/pf-84-s06-pf84-switch-follow-40cbb034ec7e-2026-10-12.mp4)
   (final head, leak-scanned): `/providers` *Use for this session* `work`, `/model` OpenAI answered via `work`, back to
   GLM answered via the default account, each switch announced.
 - **Seen, not caused here (#578):** after GLM → OpenAI in the same session, OpenAI rejected the turn with 404 for a
