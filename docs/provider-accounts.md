@@ -67,7 +67,7 @@ apply.
 - **The recorded provider has no credentials in this home:** the TUI exits
   and says how to set them up (`corbanu -c model_provider="zai"`), instead of
   the configured provider's sign-in. If this home does not define that
-  provider at all, the TUI says so.
+  provider at all, the TUI names it instead of showing the sign-in.
 
 `corbanu fork` keeps the launch check: a missing `[provider_accounts]` entry
 refuses it before the fork is chosen, even though the fork would run on the
