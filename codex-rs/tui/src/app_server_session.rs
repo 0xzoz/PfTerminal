@@ -324,9 +324,7 @@ impl PermissionConfirmationResult {
         reply: std::result::Result<ThreadSettingsUpdateResponse, TypedRequestError>,
     ) -> Self {
         match reply {
-            Ok(ThreadSettingsUpdateResponse::Confirmed {
-                outcome: codex_app_server_protocol::ThreadSettingsUpdateOutcome::Applied,
-            }) => Self::Applied,
+            Ok(response) if applied_before_reply(&response) => Self::Applied,
             Ok(ThreadSettingsUpdateResponse::Accepted {}) => Self::Unsupported,
             Err(TypedRequestError::Server { source, .. }) => {
                 if is_thread_settings_update_unsupported(&source) {

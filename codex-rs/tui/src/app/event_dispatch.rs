@@ -6650,8 +6650,8 @@ impl App {
     }
 }
 
-const SWITCH_LIST_NOT_REFRESHED: &str = "The account switch applied, but the model list could not be refreshed; reopen /model later to see its models.";
-const SWITCH_NOT_CONFIRMED: &str = "The account switch was not confirmed, so the model list was not refreshed; reopen /model later to see the new account's models.";
+const SWITCH_LIST_NOT_REFRESHED: &str = "The account switch applied, but the model list could not be refreshed; switch accounts again or restart to refresh it.";
+const SWITCH_NOT_CONFIRMED: &str = "The account switch was not confirmed, so the model list was not refreshed; switch accounts again or restart to refresh it.";
 
 /// PF-84: `Some(account)` when moving from `current` to `next` changes the
 /// sign-in account the session uses (`Some(None)`: to the default login).

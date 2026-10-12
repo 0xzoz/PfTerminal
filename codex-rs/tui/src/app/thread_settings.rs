@@ -175,8 +175,10 @@ impl App {
         }
     }
 
-    /// Whether core confirmed the update (`params.confirm`) before this
-    /// returned, accepted it unconfirmed, or it failed.
+    /// Whether core applied the update before replying (`Confirmed`, only
+    /// for `params.confirm` answered `Confirmed { Applied }`), accepted it
+    /// without that (`Accepted`: unconfirmed, uncertain, or a server without
+    /// the method), it failed, or nothing was sent (`NotSent`).
     pub(super) async fn send_thread_settings_update(
         &mut self,
         app_server: &mut AppServerSession,
