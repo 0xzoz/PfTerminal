@@ -1,10 +1,10 @@
 use std::ffi::CStr;
 use std::ffi::CString;
 use std::fs::File;
-use std::io::Read;
 use std::os::fd::AsRawFd;
 use std::os::fd::RawFd;
 use std::os::raw::c_char;
+use std::os::unix::fs::FileExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::OnceLock;
@@ -31,7 +31,8 @@ pub(crate) struct BundledBwrapLauncher {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AppArmorLauncher {
     aa_exec: AbsolutePathBuf,
-    /// The digest-verified copy, open (close-on-exec) for the helper's life.
+    /// The digest-verified copy's descriptor (`VERIFIED_BWRAP`), open
+    /// (close-on-exec) for the helper's life.
     fd: RawFd,
 }
 
@@ -54,12 +55,24 @@ pub(crate) fn launcher() -> Option<BundledBwrapLauncher> {
 /// place. `None` when the copy creates user namespaces by itself (or cannot
 /// be verified: the run then fails as before).
 fn apparmor_launcher(program: &AbsolutePathBuf) -> Option<AppArmorLauncher> {
+    apparmor_launcher_with(program, expected_sha256())
+}
+
+fn apparmor_launcher_with(
+    program: &AbsolutePathBuf,
+    expected: Option<[u8; 32]>,
+) -> Option<AppArmorLauncher> {
     let file = File::open(program.as_path()).ok()?;
-    verify_digest(&file, expected_sha256(), program.as_path()).ok()?;
-    let fd = file.as_raw_fd();
-    let aa_exec = codex_sandboxing::find_apparmor_bwrap_launcher_for_fd(fd)?;
+    // Above the standard streams: with one of them closed when the helper
+    // started, the copy could otherwise become the command's stdin, stdout
+    // or stderr.
+    if file.as_raw_fd() <= libc::STDERR_FILENO {
+        return None;
+    }
+    verify_digest(&file, expected, program.as_path()).ok()?;
+    let aa_exec = codex_sandboxing::find_apparmor_bwrap_launcher_for_fd(file.as_raw_fd())?;
     let aa_exec = AbsolutePathBuf::from_absolute_path(aa_exec).ok()?;
-    VERIFIED_BWRAP.set(file).ok()?;
+    let fd = VERIFIED_BWRAP.get_or_init(|| file).as_raw_fd();
     Some(AppArmorLauncher { aa_exec, fd })
 }
 
@@ -84,7 +97,7 @@ impl BundledBwrapLauncher {
 
     pub(crate) fn exec(&self, argv: Vec<String>, preserved_files: Vec<File>) -> ! {
         if let Some(apparmor) = &self.apparmor {
-            exec_through_apparmor(apparmor, argv, preserved_files);
+            exec_through_apparmor(apparmor, self.program.as_path(), argv, preserved_files);
         }
         let bwrap_file = File::open(self.program.as_path()).unwrap_or_else(|err| {
             panic!(
@@ -125,9 +138,15 @@ impl BundledBwrapLauncher {
 /// verified copy, made inheritable for this exec only.
 fn exec_through_apparmor(
     apparmor: &AppArmorLauncher,
+    program: &Path,
     argv: Vec<String>,
     preserved_files: Vec<File>,
 ) -> ! {
+    // Verified again right before it runs (the probes, the `/proc` check and
+    // the setup ran since): what `aa-exec` starts is this file as hashed now.
+    if let Some(file) = VERIFIED_BWRAP.get() {
+        verify_digest(file, expected_sha256(), program).unwrap_or_else(|err| panic!("{err}"));
+    }
     make_files_inheritable(&preserved_files);
     // SAFETY: clears close-on-exec on a descriptor this process keeps open
     // (`VERIFIED_BWRAP`).
@@ -179,13 +198,13 @@ fn verify_digest(file: &File, expected: Option<[u8; 32]>, path: &Path) -> Result
         return Ok(());
     };
 
-    let mut file = file
-        .try_clone()
-        .map_err(|err| format!("failed to clone bundled bubblewrap fd: {err}"))?;
+    // Read by offset: the descriptor may be verified again (#581) and its
+    // shared file offset is left as it is.
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 8192];
+    let mut offset = 0_u64;
     loop {
-        let read = file.read(&mut buffer).map_err(|err| {
+        let read = file.read_at(&mut buffer, offset).map_err(|err| {
             format!(
                 "failed to read bundled bubblewrap {} for digest verification: {err}",
                 path.display()
@@ -195,6 +214,7 @@ fn verify_digest(file: &File, expected: Option<[u8; 32]>, path: &Path) -> Result
             break;
         }
         hasher.update(&buffer[..read]);
+        offset += read as u64;
     }
 
     let actual: [u8; 32] = hasher.finalize().into();
@@ -271,6 +291,29 @@ mod tests {
         let err = verify_digest(file.as_file(), Some([0xab; 32]), file.path())
             .expect_err("mismatched digest should fail");
         assert!(err.contains("bundled bubblewrap digest mismatch"));
+    }
+
+    /// #581: a copy whose digest does not match is never probed (nor run
+    /// through `aa-exec`).
+    #[test]
+    fn a_copy_that_fails_verification_gets_no_apparmor_launcher() {
+        let file = NamedTempFile::new().expect("temp file");
+        fs::write(file.path(), b"#!/bin/sh\ntouch \"$0.ran\"\n").expect("write file");
+        let program = AbsolutePathBuf::from_absolute_path(file.path()).expect("absolute");
+        assert_eq!(apparmor_launcher_with(&program, Some([0xab; 32])), None);
+        assert!(!file.path().with_extension("ran").exists());
+    }
+
+    /// The digest is read by offset, so verifying a descriptor twice gives
+    /// the same answer (#581 verifies again right before `aa-exec`).
+    #[test]
+    fn digest_verification_can_repeat_on_one_descriptor() {
+        let file = NamedTempFile::new().expect("temp file");
+        fs::write(file.path(), b"contents").expect("write file");
+        let expected: [u8; 32] = Sha256::digest(b"contents").into();
+        for _ in 0..2 {
+            verify_digest(file.as_file(), Some(expected), file.path()).expect("verifies");
+        }
     }
 
     #[test]

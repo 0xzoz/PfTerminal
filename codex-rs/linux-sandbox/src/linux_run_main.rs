@@ -190,6 +190,13 @@ pub fn run_main() -> ! {
     // Inner stage: apply seccomp/no_new_privs after bubblewrap has already
     // established the filesystem view.
     if apply_seccomp_then_exec {
+        // #581: first, so nothing started here (proxy bridges) inherits it.
+        if let Some(fd) = close_inherited_fd.filter(|fd| *fd > libc::STDERR_FILENO) {
+            // SAFETY: closes a descriptor this process does not use.
+            unsafe {
+                libc::close(fd);
+            }
+        }
         if allow_network_for_proxy {
             let spec = proxy_route_spec
                 .as_deref()
@@ -207,12 +214,6 @@ pub fn run_main() -> ! {
             proxy_routing_active,
         ) {
             panic!("error applying Linux sandbox restrictions: {e:?}");
-        }
-        if let Some(fd) = close_inherited_fd.filter(|fd| *fd > libc::STDERR_FILENO) {
-            // SAFETY: closes a descriptor this process does not use.
-            unsafe {
-                libc::close(fd);
-            }
         }
         exec_or_panic(command);
     }
