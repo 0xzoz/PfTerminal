@@ -277,9 +277,13 @@ impl OnboardingScreen {
                             id.clone(),
                             crate::provider_named_accounts::add_methods(id, provider)
                                 .into_iter()
-                                // Onboarding takes pasted secrets; paths are in /providers.
+                                // Onboarding takes pasted secrets; paths and AWS profiles are in /providers.
                                 .filter(|method| {
-                                    *method != crate::provider_named_accounts::AddAccountMethod::ClaudeConfigDir
+                                    !matches!(
+                                        method,
+                                        crate::provider_named_accounts::AddAccountMethod::ClaudeConfigDir
+                                            | crate::provider_named_accounts::AddAccountMethod::AwsProfile
+                                    )
                                 })
                                 .collect::<Vec<_>>(),
                         )

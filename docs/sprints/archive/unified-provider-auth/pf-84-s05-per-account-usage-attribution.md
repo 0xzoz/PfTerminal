@@ -1,7 +1,7 @@
 ---
 sprint_id: "PF-84-S05"
 title: "Per-account usage and rate-limit attribution"
-status: ready
+status: completed
 plan_file: "docs/plans/active/unified-provider-auth.md"
 plan_feature: "PF-84"
 execution_order: 27
@@ -20,6 +20,34 @@ gate_evidence: "qa/provider-auth/pf-84/s05-gate.md"
 ---
 
 # PF-84-S05 — Per-account usage and rate-limit attribution
+
+## Closure — 2026-10-11
+
+Completed. Travis **accepted** PF-84-S05 on 2026-10-11 behind the default-off `named_accounts` flag
+([comment on #483](https://github.com/CorbanuCore/CorbanuTerminal/pull/483)); the flag stays off. The independent run
+was source-blind, not the isolated code-blind VM run; Travis accepted on that evidence, recorded here as the
+limited-testing agreement. Archived by the PF-84-S06 worker.
+
+Evidence:
+
+- [Gate](../../../../qa/provider-auth/pf-84/s05-gate.md) and PR #469 (implementation).
+- [S05 independent acceptance](../../../../qa/provider-auth/pf-84/independent-acceptance-s05-20261011/README.md)
+  (PR #483, [review](../../../../qa/provider-auth/pf-84/independent-acceptance-s05-20261011/REVIEW.md)): throttle and
+  `exec` rows partial; issues #474, #475, #476, #480, #481, #482, all fixed in #485, #486, #489 and #490 (not re-run by
+  an independent tester).
+- Follow-up #528 (Travis, option b): release `/status` shows token totals per account
+  ([gate](../../../../qa/provider-auth/pf-84/s05-status-tokens-gate.md)); merged after the acceptance, not independently
+  re-tested.
+
+Known limits (tracked, not blockers):
+
+- A named account's throttle row is keyed by name, so a replaced key keeps its cooldown. Travis decided on
+  2026-10-11 to key it by key fingerprint; a separate worker owns that change.
+- Only a turn's own model requests check and record the throttle (compaction, the turn-completion check and memory
+  extraction bypass it); Z.AI's transport retries a 429 five times before the cooldown starts.
+- Usage pages per account (`/cost`) exist only in developer-accounting builds; rate-limit snapshots per account need
+  named ChatGPT sign-ins (PF-84-S06 slice B). The acceptance's 2 s fingerprint timeout and Claude panes rows were not
+  verifiable.
 
 ## Execution mandate
 
@@ -71,8 +99,8 @@ Paths are under `codex-rs/`, at `63ea3d0cbd`.
 
 ## Remaining
 
-- [ ] Code-blind functional acceptance (independent; not the implementer's), then Travis's sign-off.
-- [ ] Known limit: a named account's throttle row is keyed by name; a replaced key keeps its cooldown.
+- [x] Independent acceptance: a source-blind run (PR #483) instead of the isolated code-blind run; Travis accepted it 2026-10-11 as limited testing.
+- [x] Known limit recorded (Closure): the throttle row is keyed by name until the fingerprint-keying follow-up.
 
 ## Verification
 
@@ -84,7 +112,7 @@ Paths are under `codex-rs/`, at `63ea3d0cbd`.
   `fake` records one failed request with no tokens and no spend.
 - [x] Video: `pf84-usage-by-account.toml` ([mp4](https://github.com/CorbanuCore/CorbanuTerminal/releases/download/demos/pf-84-s05-pf84-usage-by-account-a1921d736bfa-2026-10-11.mp4)).
 - [x] One independent review (Opus 5.5 High): APPROVE, non-blocking items handled (gate).
-- [ ] Independent code-blind functional execution (acceptance step, not the implementer).
+- [x] Independent acceptance run linked (PR #483); Travis signed off 2026-10-11.
 
 ## Security notes
 
@@ -95,6 +123,6 @@ Paths are under `codex-rs/`, at `63ea3d0cbd`.
 
 - [x] Implementation commit and PR recorded (branch `feat/pf-84-s05-usage-by-account`, PR [#469](https://github.com/CorbanuCore/CorbanuTerminal/pull/469)).
 - [x] Test output, tmux log and video path linked ([gate](../../../../qa/provider-auth/pf-84/s05-gate.md)).
-- [ ] Code-blind handoff checker passes, or limited-testing agreement recorded.
+- [x] Limited-testing agreement recorded (Closure, 2026-10-11).
 - [x] `Done` and `Remaining` ledgers reflect reality.
-- [ ] Completed record moved to `docs/sprints/archive/unified-provider-auth/`.
+- [x] Completed record moved to `docs/sprints/archive/unified-provider-auth/`.

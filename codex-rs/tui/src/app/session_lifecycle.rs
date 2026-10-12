@@ -10,6 +10,7 @@ use super::agent_picker::AGENT_PICKER_VIEW_ID;
 use super::*;
 use crate::app_server_session::source_agent_path;
 use crate::app_server_session::thread_blocks_direct_input;
+use crate::session_resume::RecordedProviderAccount;
 use codex_config::types::ResumeCwdMode;
 use std::collections::HashSet;
 
@@ -693,6 +694,8 @@ impl App {
         // Start a fresh in-memory session while preserving resumability via persisted rollout
         // history. If an initial message is provided, `enqueue_primary_thread_session` suppresses it
         // until the new session is configured and any replayed turns have been rendered.
+        // A new thread starts without the account a resumed thread recorded.
+        self.harness_overrides.inherited_provider_account = None;
         self.refresh_in_memory_config_from_disk_best_effort("starting a new thread")
             .await;
         let model = self.chat_widget.current_model().to_string();
@@ -1050,18 +1053,37 @@ impl App {
             } else {
                 (current_cwd, resume_cwd)
             };
+        // PF-84 (#545): the thread resumes on the account it recorded, so the
+        // config this session keeps for it names that account too.
+        let recorded_account = self.resume_target_recorded_account(&target_session).await;
+        let previous_thread_account = std::mem::replace(
+            &mut self.harness_overrides.inherited_provider_account,
+            recorded_account
+                .as_ref()
+                .map(RecordedProviderAccount::selection),
+        );
         let mut resume_config = match self
             .rebuild_config_for_resume_or_fallback(&config_current_cwd, config_resume_cwd)
             .await
         {
             Ok(cfg) => cfg,
             Err(err) => {
+                self.harness_overrides.inherited_provider_account = previous_thread_account;
                 self.chat_widget.add_error_message(format!(
                     "Failed to rebuild configuration for resume: {err}"
                 ));
                 return Ok(AppRunControl::Continue);
             }
         };
+        if let Some(recorded) = recorded_account.as_ref()
+            && let Some(message) =
+                crate::resume_launch::resume_account_error(&resume_config, recorded)
+        {
+            self.harness_overrides.inherited_provider_account = previous_thread_account;
+            self.chat_widget.add_error_message(message);
+            tui.frame_requester().schedule_frame();
+            return Ok(AppRunControl::Continue);
+        }
         self.apply_runtime_policy_overrides(&mut resume_config);
 
         let summary = session_summary(
@@ -1149,6 +1171,7 @@ impl App {
                 }
             }
             Err(err) => {
+                self.harness_overrides.inherited_provider_account = previous_thread_account;
                 let path_display = target_session.display_label();
                 self.chat_widget.add_error_message(format!(
                     "Failed to resume session from {path_display}: {err}"
@@ -1157,6 +1180,20 @@ impl App {
         }
 
         Ok(AppRunControl::Continue)
+    }
+
+    /// PF-84 (#545): the named account `target` ran on (see
+    /// `crate::resume_launch::resume_recorded_provider_account`).
+    async fn resume_target_recorded_account(
+        &self,
+        target: &SessionTarget,
+    ) -> Option<RecordedProviderAccount> {
+        crate::resume_launch::resume_recorded_provider_account(
+            &crate::resume_picker::SessionSelection::Resume(target.clone()),
+            &self.config,
+            self.app_server_target.uses_remote_workspace(),
+        )
+        .await
     }
 }
 
