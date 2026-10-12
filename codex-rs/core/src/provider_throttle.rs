@@ -152,9 +152,10 @@ pub(crate) fn provider_request_key_identity<A: std::fmt::Debug>(
 ) -> ProviderKeyIdentity {
     // A named account never uses the provider's environment key, so that key
     // is not part of its identity.
-    let label = if let Some(account) = provider.account.as_ref() {
+    if let Some(account) = provider.account.as_ref() {
         return ProviderKeyIdentity::NamedAccount(account.clone());
-    } else if let Some(env_key) = provider.env_key.as_deref() {
+    }
+    let label = if let Some(env_key) = provider.env_key.as_deref() {
         match std::env::var(env_key)
             .ok()
             .filter(|value| !value.trim().is_empty())
@@ -194,80 +195,111 @@ pub(crate) fn named_account_key(fingerprint: &str) -> String {
     format!("account-key:{fingerprint}")
 }
 
-type FingerprintCache = HashMap<(PathBuf, String, String), (Instant, String)>;
+type FingerprintKey = (PathBuf, String, String);
 
-/// Fingerprints read in this process, so a request reads the vault at most
-/// once a minute per account.
-static NAMED_ACCOUNT_FINGERPRINTS: LazyLock<Mutex<FingerprintCache>> =
+/// What this process knows of one named account's fingerprint.
+#[derive(Default)]
+struct FingerprintEntry {
+    /// The last read that finished: when, and what it found (`None`: the
+    /// account has no fingerprint, or the vault could not be read).
+    read: Option<(Instant, Option<String>)>,
+    /// Set while a read runs; it changes when the read finishes.
+    reading: Option<tokio::sync::watch::Receiver<()>>,
+    /// The fallback to the name has been logged.
+    warned: bool,
+}
+
+/// Fingerprints read in this process. A request reads the vault at most once
+/// a minute per account, and never twice at the same time.
+static NAMED_ACCOUNT_FINGERPRINTS: LazyLock<Mutex<HashMap<FingerprintKey, FingerprintEntry>>> =
     LazyLock::new(Mutex::default);
+
+fn fingerprints() -> std::sync::MutexGuard<'static, HashMap<FingerprintKey, FingerprintEntry>> {
+    NAMED_ACCOUNT_FINGERPRINTS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
 
 /// The vault's per-home salted fingerprint of a named account's credential
 /// (the one S05 records in the ledger). The read never creates a vault, key
-/// or salt and never writes (#474); it waits at most `FINGERPRINT_BUDGET`,
-/// then falls back to the last fingerprint read in this process. `None` when
-/// the account holds nothing or its vault has no fingerprint salt yet (every
-/// account in it was added before S05): the account is then keyed by name.
+/// or salt and never writes (#474).
+///
+/// A request waits at most `FINGERPRINT_BUDGET` for a read, then goes on with
+/// the last fingerprint this process read, if any. The read itself runs to
+/// the end and is kept for the next request, and only one runs per account.
+/// `None` when the account holds nothing, its vault has no fingerprint salt
+/// yet (every account in it was added before S05), or nothing could be read
+/// in time: the account is then keyed by name.
 async fn named_account_fingerprint(
     codex_home: &Path,
     account: &NamedProviderAccount,
 ) -> Option<String> {
-    let cache_key = (
+    let key: FingerprintKey = (
         codex_home.to_path_buf(),
         account.provider_id.clone(),
         account.name.clone(),
     );
-    let cached = NAMED_ACCOUNT_FINGERPRINTS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get(&cache_key)
-        .cloned();
-    if let Some((read_at, fingerprint)) = &cached
-        && read_at.elapsed() < FINGERPRINT_FRESH_FOR
-    {
-        return Some(fingerprint.clone());
+    let mut reading = {
+        let mut entries = fingerprints();
+        let entry = entries.entry(key.clone()).or_default();
+        if let Some((read_at, fingerprint)) = &entry.read
+            && read_at.elapsed() < FINGERPRINT_FRESH_FOR
+        {
+            return fingerprint.clone();
+        }
+        match &entry.reading {
+            Some(reading) => reading.clone(),
+            None => {
+                let (done, reading) = tokio::sync::watch::channel(());
+                entry.reading = Some(reading.clone());
+                let (home, selected, key) =
+                    (codex_home.to_path_buf(), account.clone(), key.clone());
+                drop(tokio::task::spawn_blocking(move || {
+                    let fingerprint = read_named_account_fingerprint(home, &selected);
+                    let mut entries = fingerprints();
+                    let entry = entries.entry(key).or_default();
+                    entry.read = Some((Instant::now(), fingerprint));
+                    entry.reading = None;
+                    drop(entries);
+                    done.send_replace(());
+                }));
+                reading
+            }
+        }
+    };
+    let finished = tokio::time::timeout(FINGERPRINT_BUDGET, reading.changed())
+        .await
+        .is_ok();
+    let mut entries = fingerprints();
+    let entry = entries.entry(key).or_default();
+    let fingerprint = entry
+        .read
+        .as_ref()
+        .and_then(|(_, fingerprint)| fingerprint.clone());
+    if fingerprint.is_none() && !entry.warned {
+        entry.warned = true;
+        warn!(
+            provider = %account.provider_id,
+            read_in_time = finished,
+            "a named account has no credential fingerprint; throttling it by name"
+        );
     }
-    let home = codex_home.to_path_buf();
-    let selected = account.clone();
-    let lookup = tokio::task::spawn_blocking(move || {
-        let name = codex_vault::ProviderAccountName::parse(&selected.name).ok()?;
-        let vault = codex_vault::Vault::new(home);
-        if vault.key_storage() == codex_vault::VaultKeyStorage::NotInitialized {
-            return None;
-        }
-        vault
-            .provider_account_fingerprint(&selected.provider_id, &name)
-            .ok()
-            .flatten()
-    });
-    match tokio::time::timeout(FINGERPRINT_BUDGET, lookup).await {
-        Ok(Ok(Some(fingerprint))) => {
-            NAMED_ACCOUNT_FINGERPRINTS
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .insert(cache_key, (Instant::now(), fingerprint.clone()));
-            Some(fingerprint)
-        }
-        Ok(Ok(None)) => {
-            NAMED_ACCOUNT_FINGERPRINTS
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .remove(&cache_key);
-            warn!(
-                provider = %account.provider_id,
-                account = %account.name,
-                "named account has no credential fingerprint; throttling it by name"
-            );
-            None
-        }
-        Ok(Err(_)) | Err(_) => {
-            warn!(
-                provider = %account.provider_id,
-                account = %account.name,
-                "named account fingerprint unavailable in time"
-            );
-            cached.map(|(_, fingerprint)| fingerprint)
-        }
+    fingerprint
+}
+
+fn read_named_account_fingerprint(
+    codex_home: PathBuf,
+    account: &NamedProviderAccount,
+) -> Option<String> {
+    let name = codex_vault::ProviderAccountName::parse(&account.name).ok()?;
+    let vault = codex_vault::Vault::new(codex_home);
+    if vault.key_storage() == codex_vault::VaultKeyStorage::NotInitialized {
+        return None;
     }
+    vault
+        .provider_account_fingerprint(&account.provider_id, &name)
+        .ok()
+        .flatten()
 }
 
 /// #482: an environment key's throttle identity, salted per home so the same
@@ -486,6 +518,8 @@ impl AdmittedProviderRequest {
             || route.auth_mode,
         )
         .await;
+        // A rough estimate. The check stores it as the key's last preflight, so a
+        // later block message may show this request's figures, not the turn's.
         let input_bytes = serde_json::to_vec(&prompt.input).map_or(0, |bytes| bytes.len());
         let preflight = ProviderRequestPreflight {
             input_tokens: i64::try_from(input_bytes / 4).unwrap_or(i64::MAX),

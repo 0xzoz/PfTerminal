@@ -78,14 +78,19 @@ pub(super) async fn run_remote_compact_attempt(
         window_id,
         CodexResponsesRequestKind::Compaction(compaction_metadata),
     );
-    // #509: remote compaction is a model request on the turn's key.
-    let admitted = AdmittedProviderRequest::admit_for_turn(
-        AuxiliaryRequest::Compaction,
-        sess,
-        turn_context,
-        &prompt,
-    )
-    .await?;
+    // #509: remote compaction is a model request on the turn's key. An empty
+    // history sends nothing.
+    let admitted = if prompt.input.is_empty() {
+        None
+    } else {
+        AdmittedProviderRequest::admit_for_turn(
+            AuxiliaryRequest::Compaction,
+            sess,
+            turn_context,
+            &prompt,
+        )
+        .await?
+    };
     let new_history = sess
         .services
         .model_client()
@@ -114,4 +119,73 @@ pub(super) async fn run_remote_compact_attempt(
         new_history,
         trace_input_history,
     })
+}
+
+#[cfg(test)]
+mod throttle_tests {
+    use super::*;
+    use crate::provider_throttle::tests::RateLimitedSession;
+    use crate::provider_throttle::tests::assert_rate_limited_then_blocked;
+    use codex_analytics::CompactionImplementation;
+    use codex_analytics::CompactionPhase;
+    use codex_analytics::CompactionReason;
+    use codex_analytics::CompactionTrigger;
+
+    /// #509: a remote compaction respects the key's cooldown and records its
+    /// own 429.
+    #[tokio::test]
+    async fn remote_compaction_respects_and_records_the_provider_request_throttle() {
+        let RateLimitedSession {
+            server,
+            session,
+            turn_context,
+            home: _home,
+        } = RateLimitedSession::start().await;
+        session
+            .record_conversation_items(
+                &turn_context,
+                &[ResponseItem::Message {
+                    id: None,
+                    role: "user".to_string(),
+                    content: vec![codex_protocol::models::ContentItem::InputText {
+                        text: "compact this".to_string(),
+                    }],
+                    phase: None,
+                    internal_chat_message_metadata_passthrough: None,
+                }],
+            )
+            .await;
+        let step_context = StepContext::for_test(Arc::new(turn_context));
+        let session = Arc::new(session);
+        let client_session = session.services.model_client().new_session();
+        let attempt = async || {
+            let mut analytics = CompactionAnalyticsDetails::default();
+            match run_remote_compact_attempt(
+                &session,
+                &step_context,
+                &client_session,
+                /*turn_state*/ None,
+                &CompactionTraceContext::disabled(),
+                CompactionTurnMetadata::new(
+                    CompactionTrigger::Manual,
+                    CompactionReason::UserRequested,
+                    CompactionImplementation::ResponsesCompact,
+                    CompactionPhase::StandaloneTurn,
+                ),
+                &mut analytics,
+            )
+            .await
+            {
+                Ok(_) => panic!("the provider refuses every request"),
+                Err(error) => error,
+            }
+        };
+        let first = attempt().await;
+        let second = attempt().await;
+        assert_rate_limited_then_blocked(&first, &second);
+        assert_eq!(
+            server.received_requests().await.unwrap_or_default().len(),
+            1
+        );
+    }
 }

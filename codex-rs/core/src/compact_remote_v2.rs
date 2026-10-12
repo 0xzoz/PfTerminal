@@ -637,6 +637,38 @@ mod tests {
         }
     }
 
+    /// #509: each remote compaction v2 attempt respects the key's cooldown and
+    /// records its own 429.
+    #[tokio::test]
+    async fn remote_compaction_v2_respects_and_records_the_provider_request_throttle() {
+        use crate::provider_throttle::tests::RateLimitedSession;
+        use crate::provider_throttle::tests::assert_rate_limited_then_blocked;
+
+        let fixture = RateLimitedSession::start().await;
+        let mut client_session = fixture.session.services.model_client().new_session();
+        let metadata = fixture.metadata();
+        let prompt = Prompt {
+            input: vec![message("user", "compact this", None)],
+            ..Default::default()
+        };
+        let mut attempt = async || match run_remote_compaction_request_v2(
+            &fixture.session,
+            &fixture.turn_context,
+            &mut client_session,
+            &prompt,
+            &metadata,
+        )
+        .await
+        {
+            Ok(_) => panic!("the provider refuses every request"),
+            Err(error) => error,
+        };
+        let first = attempt().await;
+        let second = attempt().await;
+        assert_rate_limited_then_blocked(&first, &second);
+        assert_eq!(fixture.requests().await, 1);
+    }
+
     #[test]
     fn build_v2_compacted_history_filters_to_installed_retention_shape() {
         let input = vec![

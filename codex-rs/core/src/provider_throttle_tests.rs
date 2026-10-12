@@ -171,6 +171,37 @@ async fn names_on_one_key_share_a_cooldown_and_other_keys_do_not() {
     assert!(!home.blocked(&gamma).await);
 }
 
+/// Every file under `dir` but the state DB's, with its bytes.
+fn files_outside_the_state_db(dir: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+    let mut files = std::collections::BTreeMap::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir)
+            .expect("read dir")
+            .filter_map(Result::ok)
+        {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if !path.to_string_lossy().contains("sqlite") {
+                files.insert(path.clone(), std::fs::read(&path).expect("read"));
+            }
+        }
+    }
+    files
+}
+
+/// #474: keying a request reads the vault and never writes it.
+#[tokio::test]
+async fn keying_a_named_account_never_writes_the_vault() {
+    let home = Home::new().await;
+    home.enroll("alpha", "fixture-shared-key");
+    let before = files_outside_the_state_db(home.dir.path());
+    let key = home.key("alpha").await;
+    assert!(key.key_fingerprint.starts_with("account-key:"), "{key:?}");
+    assert_eq!(files_outside_the_state_db(home.dir.path()), before);
+}
+
 /// An account with no fingerprint (no vault here; a vault whose accounts all
 /// predate S05 has no fingerprint salt either, and the request path never
 /// adds one, #474) is keyed by name, and no vault is created for it.
@@ -289,4 +320,48 @@ pub(crate) fn assert_rate_limited_then_blocked(first: &CodexErr, second: &CodexE
     assert_eq!(first.http_status_code_value(), Some(429), "{first}");
     assert!(is_provider_request_block(second), "{second}");
     assert!(second.to_string().contains("Last status: 429"), "{second}");
+}
+
+/// A vault read that hangs holds a request up for `FINGERPRINT_BUDGET` at
+/// most: the request goes on with the last fingerprint read, else by name,
+/// and no second read starts while one runs.
+#[tokio::test]
+async fn a_hung_vault_read_falls_back_within_the_budget() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let account = NamedProviderAccount {
+        provider_id: "zai".to_string(),
+        name: "hung".to_string(),
+    };
+    let key: FingerprintKey = (
+        home.path().to_path_buf(),
+        account.provider_id.clone(),
+        account.name.clone(),
+    );
+    // A read that never finishes, as if the vault lock were held.
+    let (_never_done, reading) = tokio::sync::watch::channel(());
+    fingerprints().insert(
+        key.clone(),
+        FingerprintEntry {
+            reading: Some(reading),
+            ..Default::default()
+        },
+    );
+    let started = Instant::now();
+    assert_eq!(named_account_fingerprint(home.path(), &account).await, None);
+    let waited = started.elapsed();
+    assert!(waited >= FINGERPRINT_BUDGET, "{waited:?}");
+    assert!(waited < FINGERPRINT_BUDGET * 2, "{waited:?}");
+
+    // A stale fingerprint from an earlier read is used meanwhile.
+    let stale = Instant::now()
+        .checked_sub(FINGERPRINT_FRESH_FOR * 2)
+        .expect("an instant two minutes ago");
+    fingerprints().get_mut(&key).expect("entry").read =
+        Some((stale, Some("0123456789ab".to_string())));
+    assert_eq!(
+        named_account_fingerprint(home.path(), &account).await,
+        Some("0123456789ab".to_string())
+    );
+    assert!(fingerprints().get(&key).expect("entry").reading.is_some());
+    fingerprints().remove(&key);
 }

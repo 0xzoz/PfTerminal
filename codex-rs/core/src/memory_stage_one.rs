@@ -635,7 +635,8 @@ impl StageOneMemoryClient {
             AuxiliaryRequest::MemoryExtraction,
             AuxiliaryRoute {
                 state_db: owner.state_db(),
-                codex_home: &self.codex_home,
+                // Where the request reads a named account's key from.
+                codex_home: owner.services.auth_manager.codex_home(),
                 provider_id: &self.accounting_provider_id,
                 provider: &self.binding.provider,
                 model: &request.model_info.slug,
