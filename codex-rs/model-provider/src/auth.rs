@@ -220,8 +220,34 @@ pub(crate) fn auth_manager_for_provider(
                 account,
             ))
         }
-        None => auth_manager,
+        // PF-84-S06: a named sign-in account uses its own manager (its own
+        // vault store and refresh lock), never the default login.
+        None => match named_sign_in_account(provider) {
+            Some(account) => {
+                auth_manager.map(|auth_manager| auth_manager.for_named_account(account))
+            }
+            // A session swapped to a named account's manager must not lend
+            // that account to an OpenAI-auth provider on its default login.
+            None if provider.requires_openai_auth => {
+                auth_manager.map(|auth_manager| auth_manager.default_account_manager())
+            }
+            None => auth_manager,
+        },
     }
+}
+
+/// PF-84-S06: the named ChatGPT/OpenAI sign-in account `provider` selects.
+pub fn named_sign_in_account(
+    provider: &ModelProviderInfo,
+) -> Option<codex_login::NamedChatgptAccount> {
+    if !provider.requires_openai_auth || provider.aws.is_some() || provider.auth.is_some() {
+        return None;
+    }
+    let account = provider.account.as_ref()?;
+    Some(codex_login::NamedChatgptAccount {
+        provider_id: account.provider_id.clone(),
+        name: account.name.clone(),
+    })
 }
 
 /// PF-84: the named account `provider`'s auth command must serve, checked
@@ -1407,3 +1433,7 @@ mod tests {
         assert_eq!(registration_count.load(Ordering::SeqCst), 3);
     }
 }
+
+#[cfg(test)]
+#[path = "named_sign_in_tests.rs"]
+mod named_sign_in_tests;

@@ -1888,3 +1888,32 @@ fn a_correction_keeps_the_target_providers_own_account() {
         Some(own)
     );
 }
+
+/// PF-84-S06: a rejected named sign-in or AWS profile account names its own
+/// recovery, not `corbanu account add`.
+#[test]
+fn named_account_rejections_name_the_recovery_for_their_kind() {
+    let openai = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
+    let bedrock = ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None);
+    assert_eq!(
+        [
+            named_account_rejection_message("OpenAI", "openai", "work", Some(&openai)),
+            named_account_rejection_message(
+                "Amazon Bedrock",
+                "amazon-bedrock",
+                "prod",
+                Some(&bedrock)
+            ),
+        ],
+        [
+            "OpenAI (openai) account `work` was rejected. Sign it in again with `corbanu login \
+             --account work` (add `--with-api-key` for an API key), or choose another account. \
+             The default OpenAI credential is unchanged."
+                .to_string(),
+            "Amazon Bedrock (amazon-bedrock) account `prod` was rejected. Check account `prod`'s \
+             AWS profile and its credentials (`corbanu account list amazon-bedrock`), or choose \
+             another account. The default Amazon Bedrock credential is unchanged."
+                .to_string(),
+        ]
+    );
+}

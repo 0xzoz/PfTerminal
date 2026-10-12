@@ -723,6 +723,21 @@ fn status_account_value(
     account_display: Option<&StatusAccountDisplay>,
 ) -> Option<String> {
     let provider = &config.model_provider;
+    // PF-84-S06: a named sign-in account describes itself, never the default
+    // login (kind, email hint and plan only).
+    if let Some(account) = codex_model_provider::named_sign_in_account(provider) {
+        let summary = codex_login::named_account_summary(&config.codex_home, &account)
+            .ok()
+            .flatten();
+        return Some(match summary {
+            Some(summary) => format!(
+                "{} (account {})",
+                crate::provider_named_accounts::describe_sign_in(&summary),
+                account.name
+            ),
+            None => format!("account {} is not signed in", account.name),
+        });
+    }
     if provider.auth.is_some() {
         return Some(format!("{} account connected", provider.name));
     }

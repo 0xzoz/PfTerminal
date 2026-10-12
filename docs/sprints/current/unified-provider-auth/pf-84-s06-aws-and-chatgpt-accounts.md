@@ -1,7 +1,7 @@
 ---
 sprint_id: "PF-84-S06"
 title: "Named AWS profile and ChatGPT/OpenAI sign-in accounts"
-status: in_progress
+status: ready
 plan_file: "docs/plans/active/unified-provider-auth.md"
 plan_feature: "PF-84"
 execution_order: 28
@@ -9,12 +9,14 @@ owner: "Codex PF-84-S06 worker"
 parallel_lane: "account-kinds"
 write_scope: "codex-rs/core/, codex-rs/vault/, codex-rs/login/, codex-rs/model-provider/, codex-rs/model-provider-info/, codex-rs/aws-auth/, codex-rs/cli/, codex-rs/tui/, codex-rs/exec/, codex-rs/app-server/, codex-rs/app-server-protocol/, codex-rs/Cargo.lock, MODULE.bazel.lock, docs/provider-accounts.md, qa/provider-auth/pf-84/s06a-gate.md, qa/provider-auth/pf-84/s06b-gate.md, qa/provider-auth/pf-84/s06/, qa/demos/specs/pf84-aws-profile-account.toml, qa/demos/specs/pf84-chatgpt-account.toml, qa/demos/index/PF-84-S06.md, docs/sprints/current/unified-provider-auth/pf-84-s06-aws-and-chatgpt-accounts.md, docs/sprints/current/unified-provider-auth/index.md"
 integration_gate: "Codex PF-84-S06 worker merges each slice (A, then B) to main after just test on the touched crates with and without developer-accounting, Linux clippy -D warnings on glitch, macOS clippy, the tmux run in a disposable home and one Opus 5.5 High review per slice"
-worktree: "/Volumes/CorbanuDrive/Corbanu/worktrees/pf84-s06-accounts"
-branch: "feat/pf-84-s06-accounts"
-base_commit: "8026ce9963f64d411b4dd930d46eabacd859c688"
+worktree: "/Volumes/CorbanuDrive/Corbanu/worktrees/pf84-s06b-chatgpt"
+branch: "feat/pf-84-s06b-chatgpt-accounts"
+base_commit: "511ec41249ba7897d1474915a17333360e070edd"
 depends_on: "PF-84-S05"
 created: 2026-10-11
 updated: 2026-10-11
+merged_behind_flag: "named_accounts"
+gate_evidence: "qa/provider-auth/pf-84/s06b-gate.md"
 ---
 
 # PF-84-S06 — Named AWS profile and ChatGPT/OpenAI sign-in accounts
@@ -54,25 +56,26 @@ Paths are under `codex-rs/`, at `ee530a0e26`.
 - [x] Sprint record created as a draft from Travis's 2026-10-11 decision (option (a)).
 - [x] Slice A (A1–A3), merged behind `named_accounts`: AWS profile accounts for Amazon Bedrock, profile-only
   signing, refusal before any request; CLI add/list/rename/remove and the `/providers` row. Gate:
-  [s06a-gate.md](../../../../qa/provider-auth/pf-84/s06a-gate.md) (live Bedrock pending: no test profile).
+  [s06a-gate.md](../../../../qa/provider-auth/pf-84/s06a-gate.md) (live Bedrock pending: no test profile). PR #543.
+- [x] Slice B (B1–B5), merged behind `named_accounts`: named ChatGPT/OpenAI sign-in accounts in the vault, refresh
+  written back per account, `corbanu login|logout --account`, `/providers` device-code and API-key adds, the default
+  login untouched, rows with email hint/plan/fingerprint and the same-user warning. Gate:
+  [s06b-gate.md](../../../../qa/provider-auth/pf-84/s06b-gate.md) (live ChatGPT pending: no disposable account).
 
 ## Remaining
 
-- [ ] B1: `AuthStorageBackend` per account over vault label `provider/openai/accounts/<name>/chatgpt_auth` (whole `AuthDotJson`: ChatGPT tokens or an OpenAI API-key login). It creates no `Codex Auth` keychain item.
-- [ ] B2: refresh writes back through that account's storage only, under a per-account refresh lock. A mock-server test proves that refreshing `work` never touches `default` and that a rotated refresh token lands in `work`.
-- [ ] B3: `corbanu login --account <name>` (browser and device code) and the S04 "add account" row sign into the named account. Logout or remove clears only that account and revokes only its tokens.
-- [ ] B4: migration. `default` keeps reading today's `Codex Auth` item or `auth.json` in place, byte for byte, with no copy or delete (D1). A test proves an upgraded home still resolves the same login.
-- [ ] B5: the row shows only the email hint, plan type and the 12-hex fingerprint. A second sign-in to the same ChatGPT user ID gets a warning (open point 2).
-- [ ] Code-blind functional design frozen before test-result disclosure.
+- [ ] Code-blind functional design frozen before test-result disclosure (independent acceptance).
+- [ ] Before the flag is removed: the slice B known limits in the gate (mid-session switch keeps MCP/accounting on the
+  named account; model list and early rate limits from the starting/default login).
 
 ## Verification
 
-- [ ] Focused: `just test -p codex-core -p codex-login -p codex-model-provider -p codex-aws-auth -p codex-vault` (plus touched crates); Linux clippy `-D warnings` on glitch. Slice A: done ([gate](../../../../qa/provider-auth/pf-84/s06a-gate.md)).
-- [ ] tmux SOP (disposable homes, `CORBANU_TEST_NO_NATIVE_KEYRING=1`): A, with a fake profile and a missing profile, refused while env AWS keys are set. B, with an expired fake `work` store, shows "sign in again" while `default` stays intact. Restart is durable.
-- [ ] GLM run: coordinator `-m glm-5.3-flash -c model_provider="zai"`; workers `--account amazon-bedrock:fake` and `--account openai:work` (fake) get visible refusals, with no fallback, and the coordinator still replies.
+- [x] Focused: `just test -p codex-core -p codex-login -p codex-model-provider -p codex-aws-auth -p codex-vault` (plus touched crates); Linux clippy `-D warnings` on glitch; macOS clippy. Both slices ([A](../../../../qa/provider-auth/pf-84/s06a-gate.md), [B](../../../../qa/provider-auth/pf-84/s06b-gate.md)).
+- [x] tmux SOP (disposable homes, `CORBANU_TEST_NO_NATIVE_KEYRING=1`): A, with a fake profile and a missing profile, refused while env AWS keys are set. B, with an expired fake `work` store, shows "sign in again" while `default` stays intact. Restart is durable.
+- [x] GLM run: coordinator `-m glm-5.3-flash -c model_provider="zai"`; workers `--account amazon-bedrock:fake` and `--account openai:work` (fake) get visible refusals, with no fallback, and the coordinator still replies.
 - [ ] A live (pending; limited testing, Travis 2026-10-11): **NOT VERIFIABLE** without a test AWS profile. Travis would need to provide an AWS account with Bedrock model access in one region and a named model. He would also need a least-privilege IAM user or role (`bedrock:InvokeModel*`), its profile in a disposable `AWS_CONFIG_FILE`, with keys in the vault fetched only via `auth-helper`, and a spend cap.
-- [ ] B live: a second real ChatGPT login signed in by Travis via device code in a disposable home; otherwise only the mock-server and fake-token tests count.
-- [ ] Videos: `pf84-aws-profile-account.toml` (done, [index](../../../../qa/demos/index/PF-84-S06.md)), `pf84-chatgpt-account.toml` (`--sprint PF-84-S06 --publish`). One Opus 5.5 High review per slice (A: APPROVE WITH NITS, round 3).
+- [ ] B live (pending; no disposable ChatGPT account, Travis's login not used): a second real ChatGPT login signed in by Travis via device code in a disposable home; otherwise only the mock-server and fake-token tests count.
+- [x] Videos: `pf84-aws-profile-account.toml`, `pf84-chatgpt-account.toml` ([index](../../../../qa/demos/index/PF-84-S06.md)). One Opus 5.5 High review per slice (A and B: APPROVE WITH NITS, round 3).
 
 ## Security notes
 
@@ -90,8 +93,8 @@ Paths are under `codex-rs/`, at `ee530a0e26`.
 
 ## Exit evidence
 
-- [ ] Implementation commits and PRs (A, then B) recorded.
-- [ ] Test output, tmux logs, canary scan and video paths linked.
+- [x] Implementation commits and PRs (A #543, then B) recorded.
+- [x] Test output, tmux logs, canary scan and video paths linked (gates).
 - [ ] Code-blind handoff checker passes, or limited-testing agreement recorded (A live).
-- [ ] `Done` and `Remaining` ledgers reflect reality.
+- [x] `Done` and `Remaining` ledgers reflect reality.
 - [ ] Completed record moved to `docs/sprints/archive/unified-provider-auth/`.
