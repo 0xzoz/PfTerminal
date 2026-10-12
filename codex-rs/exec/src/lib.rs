@@ -946,6 +946,9 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                     .await
                     .map_err(anyhow::Error::msg)?;
                     trace_exec_timing("after_thread_resume", exec_session_started_at);
+                    if let Some(account) = response.provider_account.as_deref() {
+                        event_processor.set_provider_account(&config, account);
+                    }
                     let session_configured =
                         session_configured_from_thread_resume_response(&response, &config)
                             .map_err(anyhow::Error::msg)?;

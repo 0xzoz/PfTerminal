@@ -7,24 +7,7 @@ use codex_app_server_protocol::ServerNotification;
 use super::ChatWidget;
 
 fn is_credential_rejection(info: Option<&CodexErrorInfo>) -> bool {
-    matches!(
-        info,
-        Some(
-            CodexErrorInfo::Unauthorized
-                | CodexErrorInfo::HttpConnectionFailed {
-                    http_status_code: Some(401)
-                }
-                | CodexErrorInfo::ResponseStreamConnectionFailed {
-                    http_status_code: Some(401)
-                }
-                | CodexErrorInfo::ResponseStreamDisconnected {
-                    http_status_code: Some(401)
-                }
-                | CodexErrorInfo::ResponseTooManyFailedAttempts {
-                    http_status_code: Some(401)
-                }
-        )
-    )
+    info.is_some_and(CodexErrorInfo::is_credential_rejection)
 }
 
 impl ChatWidget {
@@ -144,23 +127,11 @@ fn named_account_rejection_warning(
     account: &codex_provider_auth::NamedCredentialAccount,
     provider: Option<&codex_model_provider_info::ModelProviderInfo>,
 ) -> String {
-    let codex_provider_auth::NamedCredentialAccount {
-        provider_id: id,
-        name,
-    } = account;
-    let recovery = if provider
-        .is_some_and(codex_model_provider_info::ModelProviderInfo::is_claude_plan)
-    {
-        format!(
-            "Replace its token with `corbanu account add {id} {name} --kind claude-token` (reads stdin) or sign in again in its Claude Code config directory"
-        )
-    } else if provider.is_some_and(|provider| provider.auth.is_some()) {
-        format!("Check what the provider's auth command returns for account `{name}`")
-    } else {
-        format!("Replace its key with `corbanu account add {id} {name}` (reads stdin)")
-    };
-    format!(
-        "{display_name} ({id}) account `{name}` was rejected. {recovery}, or choose another account. The default {display_name} credential is unchanged."
+    codex_model_provider_info::named_account_rejection_message(
+        display_name,
+        &account.provider_id,
+        &account.name,
+        provider,
     )
 }
 

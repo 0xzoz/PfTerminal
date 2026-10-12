@@ -35,6 +35,7 @@ use codex_protocol::models::MessagePhase;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::CompactedItem;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::EventMsg;
@@ -1125,6 +1126,26 @@ async fn on_event_updates_status_from_task_complete() {
     }));
     let expected = AgentStatus::Completed(Some("done".to_string()));
     assert_eq!(status, Some(expected));
+}
+
+/// #481: a turn that completed with a terminal error (a child whose account
+/// was rejected with 401) reports that error, not "Completed".
+#[tokio::test]
+async fn on_event_reports_a_turn_that_ended_on_an_error_as_errored() {
+    let message = "unexpected status 401 Unauthorized: Authentication Failed";
+    let status = agent_status_from_event(&EventMsg::TurnComplete(TurnCompleteEvent {
+        turn_id: "turn-1".to_string(),
+        started_at: None,
+        last_agent_message: None,
+        error: Some(ErrorEvent {
+            message: message.to_string(),
+            codex_error_info: Some(CodexErrorInfo::Unauthorized),
+        }),
+        completed_at: None,
+        duration_ms: None,
+        time_to_first_token_ms: None,
+    }));
+    assert_eq!(status, Some(AgentStatus::Errored(message.to_string())));
 }
 
 #[tokio::test]

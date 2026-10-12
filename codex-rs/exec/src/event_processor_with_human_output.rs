@@ -41,6 +41,9 @@ pub(crate) struct EventProcessorWithHumanOutput {
     last_total_token_usage: Option<ThreadTokenUsage>,
     /// Config warnings already printed; the session repeats them once (#419).
     shown_config_warnings: Vec<String>,
+    /// PF-84 (#480): what to print when the provider rejects the named
+    /// account this session runs on; `None` on the default account.
+    rejected_account_message: Option<String>,
 }
 
 impl EventProcessorWithHumanOutput {
@@ -67,7 +70,24 @@ impl EventProcessorWithHumanOutput {
             emit_final_message_on_shutdown: false,
             last_total_token_usage: None,
             shown_config_warnings: Vec::new(),
+            rejected_account_message: config
+                .model_providers
+                .get(&config.model_provider_id)
+                .and_then(|provider| provider.account.as_ref())
+                .and_then(|account| rejected_account_message(config, &account.to_string())),
         }
+    }
+
+    /// The error lines for a failed turn: the error, then (#480) the named
+    /// account it was rejected on and how to replace its credential.
+    fn failed_turn_lines(&self, error: &codex_app_server_protocol::TurnError) -> Vec<String> {
+        let rejected = error
+            .codex_error_info
+            .as_ref()
+            .is_some_and(codex_app_server_protocol::CodexErrorInfo::is_credential_rejection);
+        std::iter::once(error.to_string())
+            .chain(self.rejected_account_message.clone().filter(|_| rejected))
+            .collect()
     }
 
     fn render_item_started(&self, item: &ThreadItem) {
@@ -214,6 +234,10 @@ impl EventProcessorWithHumanOutput {
 }
 
 impl EventProcessor for EventProcessorWithHumanOutput {
+    fn set_provider_account(&mut self, config: &Config, account: &str) {
+        self.rejected_account_message = rejected_account_message(config, account);
+    }
+
     fn print_config_summary(
         &mut self,
         config: &Config,
@@ -325,7 +349,9 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                     self.final_message_rendered = false;
                     self.emit_final_message_on_shutdown = false;
                     if let Some(error) = notification.turn.error {
-                        eprintln!("{} {}", "ERROR:".style(self.red).style(self.bold), error);
+                        for line in self.failed_turn_lines(&error) {
+                            eprintln!("{} {line}", "ERROR:".style(self.red).style(self.bold));
+                        }
                     }
                     CodexStatus::InitiateShutdown
                 }
@@ -563,3 +589,20 @@ fn should_print_final_message_to_tty(
 #[cfg(test)]
 #[path = "event_processor_with_human_output_tests.rs"]
 mod tests;
+
+/// PF-84 (#480): the account line for a rejected credential, as the TUI shows
+/// it, for `account` (`<provider>:<name>`); `None` for the default account.
+fn rejected_account_message(config: &Config, account: &str) -> Option<String> {
+    let (provider_id, name) = account.split_once(':')?;
+    if name == "default" {
+        return None;
+    }
+    let provider = config.model_providers.get(provider_id);
+    let display_name = provider.map_or(provider_id, |provider| provider.name.as_str());
+    Some(codex_model_provider_info::named_account_rejection_message(
+        display_name,
+        provider_id,
+        name,
+        provider,
+    ))
+}
