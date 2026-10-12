@@ -137,24 +137,10 @@ pub(crate) async fn spawn_windows_sandbox_session_elevated_for_permission_profil
             permission_profile,
             workspace_roots,
         )?;
-    let elevated = prepare_elevated_spawn_context_for_permissions(
-        permissions.clone(),
-        codex_home,
-        cwd,
-        &mut env_map,
-        &command,
-        read_roots_override,
-        read_roots_include_platform_defaults,
-        write_roots_override,
-        deny_read_override,
-        &deny_write_paths_override,
-        proxy_enforced,
-        proxy_settings_mode,
-    )?;
-
     // #442 (Travis, 2026-10-12): a credential file that appears while the
     // command runs stops it, as on Linux. The watch starts before the runner;
-    // its stop is queued for the runner if it comes first.
+    // its stop is queued for the runner if it comes first. It starts before the
+    // sandbox (and the deny ACEs) are set up for this command.
     let (outbound_tx, outbound_rx) = std::sync::mpsc::channel::<FramedMessage>();
     let credential_watch = {
         let outbound_tx = outbound_tx.clone();
@@ -179,6 +165,21 @@ pub(crate) async fn spawn_windows_sandbox_session_elevated_for_permission_profil
         )
         .map_err(anyhow::Error::msg)?
     };
+
+    let elevated = prepare_elevated_spawn_context_for_permissions(
+        permissions.clone(),
+        codex_home,
+        cwd,
+        &mut env_map,
+        &command,
+        read_roots_override,
+        read_roots_include_platform_defaults,
+        write_roots_override,
+        deny_read_override,
+        &deny_write_paths_override,
+        proxy_enforced,
+        proxy_settings_mode,
+    )?;
 
     let sandbox_creds = elevated.sandbox_creds;
     let request = RunnerTransportRequest {

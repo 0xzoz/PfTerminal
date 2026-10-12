@@ -97,7 +97,7 @@ pub(crate) fn start_runner_stdout_reader(
         let stopped_by_watch = || {
             credential_watch
                 .as_ref()
-                .and_then(crate::credential_watch::CredentialWatch::found)
+                .and_then(crate::credential_watch::CredentialWatch::finish)
         };
         loop {
             let msg = match crate::ipc_framed::read_frame(&mut pipe_read) {

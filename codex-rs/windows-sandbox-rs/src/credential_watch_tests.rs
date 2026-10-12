@@ -250,3 +250,94 @@ fn own_env_star_glob_still_covers_templates() {
     assert!(within(LATENCY, || stopped.load(Ordering::SeqCst)));
     assert!(watch.found().unwrap().ends_with(".env.example"));
 }
+
+/// Names come from the policy: under a person's own `**/.env.*` alone, an
+/// existing `.env` or `.envrc` (not denied by it) does not refuse commands.
+#[test]
+fn only_the_denied_patterns_count() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = root(&dir);
+    std::fs::write(work.join(".env"), "").unwrap();
+    std::fs::write(work.join(".envrc"), "").unwrap();
+    let own = FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry::new(
+        FileSystemPath::GlobPattern {
+            pattern: format!(
+                "{}{sep}**{sep}.env.*",
+                work.to_string_lossy(),
+                sep = std::path::MAIN_SEPARATOR
+            ),
+        },
+        FileSystemAccessMode::Deny,
+    )]);
+    assert!(
+        CredentialWatch::start(&own, &work, &[], Box::new(|| {}))
+            .expect("not refused")
+            .is_some()
+    );
+}
+
+/// When changes were lost, everything is scanned again: a denied file that
+/// is still the same file is fine; one saved over it, or a new credential
+/// file, stops the command. A failed watch stops it too.
+#[test]
+fn lost_changes_rescan_by_identity_and_failures_stop() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = root(&dir);
+    std::fs::write(work.join(".env"), "API_KEY=old").unwrap();
+    let names = Names::for_policy(&policy(&work), &work).unwrap();
+    let known: HashMap<PathBuf, Option<FileId>> = [(
+        key(&real_spelling(&work.join(".env"))),
+        file_id(&work.join(".env")),
+    )]
+    .into_iter()
+    .collect();
+    assert_eq!(must_stop(Change::Lost, &known, &names), None);
+    std::fs::write(work.join("save.tmp"), "API_KEY=new").unwrap();
+    std::fs::rename(work.join("save.tmp"), work.join(".env")).unwrap();
+    assert!(
+        must_stop(Change::Lost, &known, &names)
+            .expect("stopped")
+            .ends_with(".env")
+    );
+    assert!(
+        must_stop(Change::Failed("boom".to_string()), &known, &names)
+            .expect("stopped")
+            .contains("the watch failed")
+    );
+}
+
+/// The output of a stopped command says why and is a failure.
+#[test]
+fn stopped_output_reports_the_stop() {
+    let mut stderr = b"partial".to_vec();
+    assert_eq!(
+        stopped_output(Some("C:/w/.env".to_string()), 0, &mut stderr),
+        1
+    );
+    let text = String::from_utf8(stderr).unwrap();
+    assert!(
+        text.starts_with("partial\nOperation not permitted"),
+        "{text}"
+    );
+    assert!(text.contains("(C:/w/.env) appeared while it ran"), "{text}");
+    let mut untouched = b"out".to_vec();
+    assert_eq!(stopped_output(None, 0, &mut untouched), 0);
+    assert_eq!(untouched, b"out");
+    assert_eq!(stopped_output(Some("x".to_string()), 7, &mut Vec::new()), 7);
+}
+
+/// On Windows paths match in any letter case: a denied file named with
+/// another case is still known.
+#[cfg(windows)]
+#[test]
+fn known_files_match_in_any_case() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = root(&dir);
+    std::fs::write(work.join(".env"), "").unwrap();
+    let upper = PathBuf::from(work.to_string_lossy().to_uppercase()).join(".ENV");
+    assert!(
+        CredentialWatch::start(&policy(&work), &work, &[upper], Box::new(|| {}))
+            .expect("not refused")
+            .is_some()
+    );
+}
