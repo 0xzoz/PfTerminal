@@ -291,16 +291,16 @@ fn lost_changes_rescan_by_identity_and_failures_stop() {
     )]
     .into_iter()
     .collect();
-    assert_eq!(must_stop(Change::Lost, &known, &names), None);
+    assert_eq!(must_stop(Change::Lost, &known, &names, None), None);
     std::fs::write(work.join("save.tmp"), "API_KEY=new").unwrap();
     std::fs::rename(work.join("save.tmp"), work.join(".env")).unwrap();
     assert!(
-        must_stop(Change::Lost, &known, &names)
+        must_stop(Change::Lost, &known, &names, None)
             .expect("stopped")
             .ends_with(".env")
     );
     assert!(
-        must_stop(Change::Failed("boom".to_string()), &known, &names)
+        must_stop(Change::Failed("boom".to_string()), &known, &names, None)
             .expect("stopped")
             .contains("the watch failed")
     );
@@ -340,4 +340,86 @@ fn known_files_match_in_any_case() {
             .expect("not refused")
             .is_some()
     );
+}
+
+/// The change records Windows returns: created and renamed-to names are
+/// read; a truncated record or an offset past the end counts as lost.
+#[test]
+fn notify_records_are_parsed_and_malformed_ones_are_lost() {
+    fn record(next: u32, action: u32, name: &str) -> Vec<u8> {
+        let units: Vec<u8> = name.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&next.to_le_bytes());
+        bytes.extend_from_slice(&action.to_le_bytes());
+        bytes.extend_from_slice(&u32::try_from(units.len()).unwrap().to_le_bytes());
+        bytes.extend_from_slice(&units);
+        while bytes.len() % 4 != 0 {
+            bytes.push(0);
+        }
+        bytes
+    }
+    let first = record(0, 1, "app\\.env");
+    let mut both = record(u32::try_from(first.len()).unwrap(), 1, "app\\.env");
+    both.extend(record(0, 5, ".envrc"));
+    assert_eq!(
+        parse_notify_entries(&both),
+        Some(vec![
+            (1, "app\\.env".to_string()),
+            (5, ".envrc".to_string())
+        ])
+    );
+    assert_eq!(parse_notify_entries(&first[..first.len() - 4]), None);
+    assert_eq!(parse_notify_entries(&first[..6]), None);
+    let past_end = record(4096, 1, ".env");
+    assert_eq!(parse_notify_entries(&past_end), None);
+}
+
+/// A file at a denied path that did not exist when it was denied (the
+/// folder the sandbox made there was replaced) is new.
+#[test]
+fn a_file_at_a_denied_path_that_was_missing_is_new() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = root(&dir);
+    let names = Names::for_policy(&policy(&work), &work).unwrap();
+    let known: HashMap<PathBuf, Option<FileId>> =
+        [(key(&work.join(".env")), None)].into_iter().collect();
+    std::fs::write(work.join(".env"), "API_KEY=dummy").unwrap();
+    assert!(
+        must_stop(Change::Lost, &known, &names, None)
+            .expect("stopped")
+            .ends_with(".env")
+    );
+}
+
+/// Nested folders: an outer folder's own `.env.*` glob keeps covering the
+/// templates inside an inner folder under the whole rule, and the inner
+/// folder's `.env` does not count in the outer folder.
+#[test]
+fn nested_folders_keep_their_own_patterns() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = root(&dir);
+    std::fs::create_dir(work.join("inner")).unwrap();
+    let sep = std::path::MAIN_SEPARATOR;
+    let mut entries = vec![FileSystemSandboxEntry::new(
+        FileSystemPath::GlobPattern {
+            pattern: format!("{}{sep}**{sep}.env.*", work.to_string_lossy()),
+        },
+        FileSystemAccessMode::Deny,
+    )];
+    entries.extend(
+        credential_file_globs(&work.join("inner").to_string_lossy())
+            .into_iter()
+            .map(|pattern| {
+                FileSystemSandboxEntry::new(
+                    FileSystemPath::GlobPattern { pattern },
+                    FileSystemAccessMode::Deny,
+                )
+            }),
+    );
+    let names = Names::for_policy(&FileSystemSandboxPolicy::restricted(entries), &work).unwrap();
+    assert_eq!(names.roots, vec![work.clone()]);
+    assert!(names.is_credential(&work.join("inner").join(".env.example")));
+    assert!(names.is_credential(&work.join("inner").join(".env")));
+    assert!(!names.is_credential(&work.join(".env")));
+    assert!(names.is_credential(&work.join(".env.local")));
 }

@@ -87,9 +87,10 @@ impl CredentialWatch {
         if names.roots.is_empty() {
             return Ok(None);
         }
+        let max_depth = policy.glob_scan_max_depth;
         let (tx, rx) = mpsc::channel::<Change>();
         let mut folders = Vec::new();
-        for (root, _) in &names.roots {
+        for root in &names.roots {
             folders.push(
                 backend::FolderWatch::start(root, tx.clone()).map_err(|reason| {
                     refused_message(&format!(
@@ -109,8 +110,8 @@ impl CredentialWatch {
                 .map(|path| (key(&real_spelling(path)), file_id(path)))
                 .collect(),
         );
-        for (root, _) in &names.roots {
-            match scan(root, &known, &names, policy.glob_scan_max_depth) {
+        for root in &names.roots {
+            match scan(root, &known, &names, max_depth) {
                 Ok(None) => {}
                 Ok(Some(found)) => {
                     return Err(refused_message(&format!(
@@ -127,8 +128,21 @@ impl CredentialWatch {
             .name("corbanu-credential-watch".to_string())
             .spawn(move || {
                 // Ends when every folder watch is dropped (the channel closes).
-                for change in rx {
-                    if let Some(found) = must_stop(change, &known, &names) {
+                while let Ok(first) = rx.recv() {
+                    // Everything queued is taken at once: new paths first,
+                    // then one rescan for any number of lost changes.
+                    let mut batch = vec![first];
+                    batch.extend(rx.try_iter());
+                    let lost = batch.iter().any(|change| matches!(change, Change::Lost));
+                    let found = batch
+                        .into_iter()
+                        .filter(|change| !matches!(change, Change::Lost))
+                        .find_map(|change| must_stop(change, &known, &names, max_depth))
+                        .or_else(|| {
+                            lost.then(|| must_stop(Change::Lost, &known, &names, max_depth))
+                                .flatten()
+                        });
+                    if let Some(found) = found {
                         *thread_found.lock().unwrap_or_else(PoisonError::into_inner) = Some(found);
                         stop();
                         return;
@@ -162,16 +176,19 @@ impl CredentialWatch {
 /// only.
 pub fn credential_watch_roots(policy: &FileSystemSandboxPolicy, cwd: &Path) -> Vec<PathBuf> {
     Names::for_policy(policy, cwd)
-        .map(|names| names.roots.into_iter().map(|(root, _)| root).collect())
+        .map(|names| names.roots)
         .unwrap_or_default()
 }
 
 /// Which file names count as credential files where, from the policy.
 struct Names {
-    /// Each watched folder, and the credential name patterns denied below it
-    /// (also those of folders inside it).
-    roots: Vec<(PathBuf, Vec<&'static str>)>,
-    /// Folders below which the whole rule applies: the templates are exempt.
+    /// The folders to watch (outermost, real spelling).
+    roots: Vec<PathBuf>,
+    /// Each folder a credential glob covers (compared spelling) and its name
+    /// pattern; a pattern applies below its own folder.
+    covered: Vec<(PathBuf, &'static str)>,
+    /// Folders where the whole rule applies: their `.env.*` leaves the
+    /// templates out.
     template_roots: Vec<PathBuf>,
 }
 
@@ -179,6 +196,7 @@ impl Names {
     fn for_policy(policy: &FileSystemSandboxPolicy, cwd: &Path) -> Result<Self, String> {
         let globs = policy.get_unreadable_globs_with_cwd(cwd);
         let mut covered: Vec<(PathBuf, &'static str)> = Vec::new();
+        let mut real_folders: Vec<PathBuf> = Vec::new();
         for glob in &globs {
             let Some(root) = credential_file_glob_root(glob) else {
                 continue;
@@ -194,7 +212,7 @@ impl Names {
             }
             if root.parent().is_none() || root.parent() == Some(Path::new("")) {
                 return Err(refused_message(&format!(
-                    "{} is a drive root, which cannot be watched; start from a folder",
+                    "{} is a drive root, which is too broad to watch; start from a folder",
                     root.display()
                 )));
             }
@@ -208,27 +226,19 @@ impl Names {
                 )));
             }
             covered.push((key(&real), name));
+            real_folders.push(real);
         }
-        let mut roots: Vec<(PathBuf, Vec<&'static str>)> = Vec::new();
-        let mut folders: Vec<PathBuf> = covered.iter().map(|(root, _)| root.clone()).collect();
-        folders.sort();
-        folders.dedup();
-        for folder in &folders {
-            if folders
-                .iter()
-                .any(|other| other != folder && folder.starts_with(other))
-            {
-                continue;
-            }
-            let mut patterns: Vec<&'static str> = covered
-                .iter()
-                .filter(|(root, _)| root.starts_with(folder))
-                .map(|(_, name)| *name)
-                .collect();
-            patterns.sort_unstable();
-            patterns.dedup();
-            roots.push((folder.clone(), patterns));
-        }
+        real_folders.sort();
+        real_folders.dedup_by(|a, b| key(a) == key(b));
+        let roots = real_folders
+            .iter()
+            .filter(|folder| {
+                !real_folders
+                    .iter()
+                    .any(|other| key(other) != key(folder) && key(folder).starts_with(key(other)))
+            })
+            .cloned()
+            .collect();
         let template_roots = credential_rule_roots(&globs)
             .into_iter()
             .filter_map(|root| dunce::canonicalize(root).ok())
@@ -236,6 +246,7 @@ impl Names {
             .collect();
         Ok(Self {
             roots,
+            covered,
             template_roots,
         })
     }
@@ -244,24 +255,26 @@ impl Names {
         let Some(name) = path.file_name() else {
             return false;
         };
-        let path = key(path);
-        let Some((_, patterns)) = self.roots.iter().find(|(root, _)| path.starts_with(root)) else {
-            return false;
+        let name = name.to_string_lossy();
+        // A `name:stream` alternate data stream belongs to the file `name`.
+        let name = if cfg!(windows) {
+            name.split(':').next().unwrap_or_default().to_string()
+        } else {
+            name.into_owned()
         };
-        // The templates are not credential files where the whole rule
-        // applies; everywhere else the denied patterns decide.
-        if is_credential_template_name(name)
-            && self
-                .template_roots
-                .iter()
-                .any(|root| path.starts_with(root))
-        {
-            return false;
-        }
-        let lower = name.to_string_lossy().to_ascii_lowercase();
-        patterns.iter().any(|pattern| match *pattern {
-            ".env.*" => lower.starts_with(".env."),
-            exact => lower == exact,
+        let lower = name.to_ascii_lowercase();
+        let template = is_credential_template_name(std::ffi::OsStr::new(&name));
+        let path = key(path);
+        self.covered.iter().any(|(folder, pattern)| {
+            path.starts_with(folder)
+                && match *pattern {
+                    // Under the whole rule the templates are not credentials.
+                    ".env.*" => {
+                        lower.starts_with(".env.")
+                            && !(template && self.template_roots.contains(folder))
+                    }
+                    exact => lower == exact,
+                }
         })
     }
 }
@@ -271,12 +284,13 @@ fn must_stop(
     change: Change,
     known: &HashMap<PathBuf, Option<FileId>>,
     names: &Names,
+    max_depth: Option<usize>,
 ) -> Option<String> {
     let path = match change {
         Change::Appeared(path) => path,
         Change::Lost => {
-            for (root, _) in &names.roots {
-                match scan(root, known, names, None) {
+            for root in &names.roots {
+                match scan(root, known, names, max_depth) {
                     Ok(None) => {}
                     Ok(Some(found)) => return Some(found),
                     Err(reason) => {
@@ -350,9 +364,10 @@ fn scan(
             if kind.is_dir() || !names.is_credential(&path) {
                 continue;
             }
+            // Only the very file that was denied is fine: a file at a denied
+            // path that did not exist then, or was replaced since, is new.
             match known.get(&key(&path)) {
-                Some(id) if id.is_some() && file_id(&path) == *id => {}
-                Some(None) => {}
+                Some(Some(id)) if file_id(&path) == Some(*id) => {}
                 _ => return Ok(Some(path.display().to_string())),
             }
         }
@@ -432,10 +447,19 @@ fn unwatchable(folder: &Path) -> Option<&'static str> {
     use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
     const DRIVE_REMOTE: u32 = 4;
     let text = folder.to_string_lossy();
-    if text.starts_with(r"\\") {
-        return Some("network or WSL share");
-    }
-    let drive: String = text.chars().take(2).collect();
+    let local = match text.strip_prefix(r"\\?\") {
+        Some(rest)
+            if rest
+                .get(..4)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("UNC\\")) =>
+        {
+            return Some("network or WSL share");
+        }
+        Some(rest) => rest.to_string(),
+        None if text.starts_with(r"\\") => return Some("network or WSL share"),
+        None => text.to_string(),
+    };
+    let drive: String = local.chars().take(2).collect();
     let root = crate::winutil::to_wide(format!("{drive}\\"));
     // SAFETY: a NUL-terminated wide string.
     (unsafe { GetDriveTypeW(root.as_ptr()) } == DRIVE_REMOTE).then_some("network drive")
@@ -550,24 +574,28 @@ mod backend {
         thread: Option<JoinHandle<()>>,
     }
 
+    /// One folder's handle, event, buffer and OVERLAPPED. Always boxed: the
+    /// system writes to the OVERLAPPED and buffer addresses of a pending
+    /// read, so they never move while one is pending.
     struct Read {
         dir: HANDLE,
         event: HANDLE,
         overlapped: OVERLAPPED,
         buffer: Vec<u64>,
+        pending: bool,
     }
 
-    // SAFETY: the handles are plain kernel handles, used by one thread at a
+    // SAFETY: plain kernel handles and owned memory, used by one thread at a
     // time (the starting thread, then the watch thread).
     unsafe impl Send for Read {}
 
     impl Read {
         /// Ask for the next changes; `false` when the read cannot be issued.
         fn issue(&mut self) -> bool {
-            // SAFETY: the event is valid; the buffer and OVERLAPPED live in
-            // this `Read`, which outlives the read (it is cancelled and
-            // waited for before being dropped).
-            unsafe {
+            // SAFETY: the event is valid; `self` is boxed, so the buffer and
+            // OVERLAPPED stay at these addresses until the read completes or
+            // `drop` has cancelled it and waited.
+            let issued = unsafe {
                 ResetEvent(self.event);
                 self.overlapped = std::mem::zeroed();
                 self.overlapped.hEvent = self.event;
@@ -581,15 +609,26 @@ mod backend {
                     &mut self.overlapped,
                     None,
                 ) != 0
-            }
+            };
+            self.pending = issued;
+            issued
         }
     }
 
     impl Drop for Read {
         fn drop(&mut self) {
-            // SAFETY: owned handles, closed once.
+            // SAFETY: a pending read was issued on this handle with this very
+            // OVERLAPPED; it is cancelled and waited for before the memory and
+            // handles go away. The handles are owned and closed once.
             unsafe {
-                CloseHandle(self.event);
+                if self.pending {
+                    CancelIoEx(self.dir, &self.overlapped);
+                    let mut ignored = 0_u32;
+                    GetOverlappedResult(self.dir, &self.overlapped, &mut ignored, 1);
+                }
+                if self.event != 0 {
+                    CloseHandle(self.event);
+                }
                 CloseHandle(self.dir);
             }
         }
@@ -616,13 +655,14 @@ mod backend {
             // SAFETY: plain calls; null names and attributes.
             let event = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
             let stop = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
-            let mut read = Read {
+            let mut read = Box::new(Read {
                 dir,
                 event,
                 // SAFETY: plain data, set before use.
                 overlapped: unsafe { std::mem::zeroed() },
                 buffer: vec![0; BUFFER_WORDS],
-            };
+                pending: false,
+            });
             if event == 0 || stop == 0 {
                 // SAFETY: closes what was created.
                 unsafe {
@@ -641,10 +681,19 @@ mod backend {
                 return Err(err.to_string());
             }
             let root = root.to_path_buf();
-            let thread = std::thread::Builder::new()
+            // On failure the closure, and the boxed read with it, is dropped:
+            // the pending read is cancelled and waited for.
+            let thread = match std::thread::Builder::new()
                 .name("corbanu-credential-folder".to_string())
                 .spawn(move || run(read, stop, &root, &tx))
-                .map_err(|err| err.to_string())?;
+            {
+                Ok(thread) => thread,
+                Err(err) => {
+                    // SAFETY: owned, closed once.
+                    unsafe { CloseHandle(stop) };
+                    return Err(err.to_string());
+                }
+            };
             Ok(Self {
                 stop,
                 thread: Some(thread),
@@ -665,20 +714,14 @@ mod backend {
         }
     }
 
-    fn run(mut read: Read, stop: HANDLE, root: &Path, tx: &Sender<Change>) {
+    fn run(mut read: Box<Read>, stop: HANDLE, root: &Path, tx: &Sender<Change>) {
         loop {
             let handles = [read.event, stop];
             // SAFETY: two valid event handles.
             let woke = unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, INFINITE) };
             if woke != WAIT_OBJECT_0 {
-                // Stopped (or the wait failed): end the read before the
-                // buffer goes away.
-                // SAFETY: the read was issued on this handle and OVERLAPPED.
-                unsafe {
-                    CancelIoEx(read.dir, &read.overlapped);
-                    let mut ignored = 0_u32;
-                    GetOverlappedResult(read.dir, &read.overlapped, &mut ignored, 1);
-                }
+                // Stopped (or the wait failed); dropping `read` cancels the
+                // pending read and waits for it.
                 if woke != WAIT_OBJECT_0 + 1 {
                     let _ = tx.send(Change::Failed("waiting for changes failed".to_string()));
                 }
@@ -687,6 +730,7 @@ mod backend {
             let mut bytes = 0_u32;
             // SAFETY: the read completed (its event is set).
             let ok = unsafe { GetOverlappedResult(read.dir, &read.overlapped, &mut bytes, 0) };
+            read.pending = false;
             let change_sent = if ok == 0 {
                 // SAFETY: plain call.
                 let code = unsafe { GetLastError() };
@@ -712,49 +756,56 @@ mod backend {
         }
     }
 
-    /// `FILE_NOTIFY_INFORMATION` entries: next offset, action, name length
-    /// (bytes), then the UTF-16 name relative to the folder.
+    /// Sends the created and renamed-to paths of one completed read.
     fn send_entries(buffer: &[u64], len: usize, root: &Path, tx: &Sender<Change>) -> bool {
         // SAFETY: viewing the initialized words as bytes.
         let bytes: &[u8] =
             unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), buffer.len() * 8) };
-        let bytes = &bytes[..len.min(bytes.len())];
-        let word = |at: usize| -> Option<u32> {
-            Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
+        let Some(entries) = super::parse_notify_entries(&bytes[..len.min(bytes.len())]) else {
+            return tx.send(Change::Lost).is_ok();
         };
-        let mut at = 0_usize;
-        loop {
-            let (Some(next), Some(action), Some(name_len)) = (word(at), word(at + 4), word(at + 8))
-            else {
-                return tx.send(Change::Lost).is_ok();
-            };
-            let start = at + 12;
-            let end = usize::try_from(name_len)
-                .ok()
-                .and_then(|name_len| start.checked_add(name_len));
-            let Some(name) = end.and_then(|end| bytes.get(start..end)) else {
-                return tx.send(Change::Lost).is_ok();
-            };
-            if action == FILE_ACTION_ADDED || action == FILE_ACTION_RENAMED_NEW_NAME {
-                let units: Vec<u16> = name
-                    .chunks_exact(2)
-                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-                    .collect();
-                let relative = PathBuf::from(String::from_utf16_lossy(&units));
-                if tx.send(Change::Appeared(root.join(relative))).is_err() {
-                    return false;
-                }
+        for (action, name) in entries {
+            if (action == FILE_ACTION_ADDED || action == FILE_ACTION_RENAMED_NEW_NAME)
+                && tx
+                    .send(Change::Appeared(root.join(PathBuf::from(name))))
+                    .is_err()
+            {
+                return false;
             }
-            if next == 0 {
-                return true;
-            }
-            at = usize::try_from(next)
-                .ok()
-                .and_then(|next| at.checked_add(next))
-                .unwrap_or(usize::MAX);
-            if at >= bytes.len() {
-                return tx.send(Change::Lost).is_ok();
-            }
+        }
+        true
+    }
+}
+
+/// `FILE_NOTIFY_INFORMATION` entries (next offset, action, name length in
+/// bytes, then the UTF-16 name relative to the folder) as (action, name);
+/// `None` when the buffer is malformed (treated as lost changes).
+#[cfg(any(windows, test))]
+fn parse_notify_entries(bytes: &[u8]) -> Option<Vec<(u32, String)>> {
+    let word = |at: usize| -> Option<u32> {
+        Some(u32::from_le_bytes(
+            bytes.get(at..at.checked_add(4)?)?.try_into().ok()?,
+        ))
+    };
+    let mut entries = Vec::new();
+    let mut at = 0_usize;
+    loop {
+        let next = word(at)?;
+        let action = word(at.checked_add(4)?)?;
+        let name_len = usize::try_from(word(at.checked_add(8)?)?).ok()?;
+        let start = at.checked_add(12)?;
+        let name = bytes.get(start..start.checked_add(name_len)?)?;
+        let units: Vec<u16> = name
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        entries.push((action, String::from_utf16_lossy(&units)));
+        if next == 0 {
+            return Some(entries);
+        }
+        at = at.checked_add(usize::try_from(next).ok()?)?;
+        if at >= bytes.len() {
+            return None;
         }
     }
 }
