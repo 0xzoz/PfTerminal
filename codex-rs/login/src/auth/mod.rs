@@ -23,6 +23,7 @@ pub use external_bearer::CLAUDE_PLAN_TOKEN_HELPER_SUBCOMMAND;
 pub use external_bearer::ExternalBearerAccount;
 pub use external_bearer::ExternalBearerAccountServer;
 pub use external_bearer::ExternalBearerCachePolicy;
+pub use external_bearer::GPU_ENDPOINT_TOKEN_HELPER_SUBCOMMAND;
 pub use external_bearer::PROVIDER_ACCOUNT_ENV_VAR;
 pub use external_bearer::is_claude_plan_token_helper;
 pub use external_bearer::validate_provider_auth_command;
