@@ -1,7 +1,7 @@
 ---
 sprint_id: "PF-84-S04"
 title: "Account management in /providers and onboarding"
-status: ready
+status: completed
 plan_file: "docs/plans/active/unified-provider-auth.md"
 plan_feature: "PF-84"
 execution_order: 26
@@ -15,9 +15,34 @@ base_commit: "0558c52cc320422d1fc187f4a98afff7a1530286"
 depends_on: "PF-84-S03"
 created: 2026-10-08
 updated: 2026-10-11
+merged_behind_flag: "named_accounts"
+gate_evidence: "qa/provider-auth/pf-84/s04-gate.md"
 ---
 
 # PF-84-S04 — Account management in /providers and onboarding
+
+## Closure — 2026-10-11
+
+Completed. Travis **accepted** PF-84-S04 on 2026-10-11 behind the default-off `named_accounts` flag
+([comment on #465](https://github.com/CorbanuCore/CorbanuTerminal/pull/465)); the flag stays off, except for the
+duplicate-row fix, which is not behind it. The independent run was code-blind on a debug build, not the full isolated
+code-blind VM run; Travis accepted on that evidence, which is recorded here as the limited-testing agreement.
+Archived by the PF-84-S06 worker.
+
+Evidence:
+
+- [Gate evidence](../../../../qa/provider-auth/pf-84/s04-gate.md) (tests, tmux/GLM 5.3 Flash runs, review, videos).
+- [S04 independent acceptance](../../../../qa/provider-auth/pf-84/independent-acceptance-s04-20261011/README.md)
+  (PR #465, [review](../../../../qa/provider-auth/pf-84/independent-acceptance-s04-20261011/REVIEW.md)): 14 pass;
+  S04-8 and the onboarding half of S04-12 failed on #461; S04-2b, S04-16b and S04-17 not verifiable.
+- [#461/#462 fixes](../../../../qa/provider-auth/pf-84/fix-461-462-20261011/README.md) (PR #472): `q` no longer quits
+  onboarding text fields; #462 (pre-existing) fixed too. Not re-run by an independent tester.
+- PRs: #430 (implementation), #465 (acceptance), #472 (#461, #462 fixes).
+
+Known limits (gate): one session selection covers one provider at a time; *Use for this session* starts a new session;
+`corbanu account add` replaces an existing account; multi-agent v2 spawns do not show the account; a Claude Code login
+directory is accepted without checking it holds a login (S04-2b). Named ChatGPT sign-ins and AWS profiles move to
+PF-84-S06 (D4).
 
 ## Execution mandate
 
@@ -72,7 +97,7 @@ Paths are under `codex-rs/`, at `63ea3d0cbd`.
 
 ## Remaining
 
-- [ ] Code-blind functional design and execution (independent acceptance step, not the implementer).
+- [x] Independent acceptance: a code-blind run on a debug build (PR #465) instead of the isolated VM run; Travis accepted it 2026-10-11 as limited testing.
 
 ## Verification
 
@@ -84,7 +109,7 @@ Paths are under `codex-rs/`, at `63ea3d0cbd`.
   replying and the session switched to a fake second key giving a 401.
 - [x] Videos: `pf84-add-account.toml`, `pf84-switch-account.toml`, `pf84-no-duplicate-rows.toml`.
 - [x] One independent review (Opus 5.5 High), plus one scoped follow-up check.
-- [ ] Independent code-blind functional execution (acceptance step, not the implementer).
+- [x] Independent code-blind functional execution linked (PR #465); Travis signed off 2026-10-11.
 
 ## Security notes
 
@@ -95,6 +120,6 @@ Paths are under `codex-rs/`, at `63ea3d0cbd`.
 
 - [x] Implementation commit and PR recorded (branch `feat/pf-84-s04-provider-accounts-ui`, code at `7a1ab9bc9d`).
 - [x] Snapshots, tmux logs, canary scan and video paths linked (gate file).
-- [ ] Code-blind handoff checker passes, or limited-testing agreement recorded.
+- [x] Limited-testing agreement recorded (Closure, 2026-10-11).
 - [x] `Done` and `Remaining` ledgers reflect reality.
-- [ ] Completed record moved to `docs/sprints/archive/unified-provider-auth/`.
+- [x] Completed record moved to `docs/sprints/archive/unified-provider-auth/`.
