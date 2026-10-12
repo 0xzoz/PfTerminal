@@ -648,6 +648,7 @@ fn managed_proxy_inner_command_includes_route_spec() {
         permission_profile: &permission_profile,
         allow_network_for_proxy: true,
         proxy_route_spec: Some("{\"routes\":[]}".to_string()),
+        close_inherited_fd: None,
         command: vec!["/bin/true".to_string()],
     });
 
@@ -664,6 +665,7 @@ fn inner_command_includes_permission_profile_flag() {
         permission_profile: &permission_profile,
         allow_network_for_proxy: false,
         proxy_route_spec: None,
+        close_inherited_fd: None,
         command: vec!["/bin/true".to_string()],
     });
 
@@ -672,6 +674,31 @@ fn inner_command_includes_permission_profile_flag() {
         args.windows(2)
             .any(|window| { window == ["--command-cwd", "/tmp/link"] })
     );
+}
+
+/// #581: the inner stage is told which inherited descriptor to close (the
+/// verified bundled bubblewrap run through `aa-exec`), and only then.
+#[test]
+fn inner_command_names_the_inherited_descriptor_to_close() {
+    let permission_profile = read_only_permission_profile();
+    for (fd, expected) in [(Some(7), true), (None, false)] {
+        let args = build_inner_seccomp_command(InnerSeccompCommandArgs {
+            sandbox_policy_cwd: Path::new("/tmp"),
+            command_cwd: None,
+            permission_profile: &permission_profile,
+            allow_network_for_proxy: false,
+            proxy_route_spec: None,
+            close_inherited_fd: fd,
+            command: vec!["/bin/true".to_string()],
+        });
+        let separator = args.iter().position(|arg| arg == "--").expect("separator");
+        assert_eq!(
+            args[..separator]
+                .windows(2)
+                .any(|window| window == ["--close-inherited-fd", "7"]),
+            expected
+        );
+    }
 }
 
 #[test]
@@ -683,6 +710,7 @@ fn non_managed_inner_command_omits_route_spec() {
         permission_profile: &permission_profile,
         allow_network_for_proxy: false,
         proxy_route_spec: None,
+        close_inherited_fd: None,
         command: vec!["/bin/true".to_string()],
     });
 
@@ -699,6 +727,7 @@ fn managed_proxy_inner_command_requires_route_spec() {
             permission_profile: &permission_profile,
             allow_network_for_proxy: true,
             proxy_route_spec: None,
+            close_inherited_fd: None,
             command: vec!["/bin/true".to_string()],
         })
     });

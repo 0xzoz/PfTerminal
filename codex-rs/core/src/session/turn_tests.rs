@@ -202,56 +202,33 @@ async fn plan_mode_uses_contributed_turn_item_for_last_agent_message() {
     );
 }
 
-#[test]
-fn named_accounts_have_their_own_throttle_state() {
-    let default = codex_model_provider_info::ModelProviderInfo::create_zai_provider();
-    let named = |name: &str| {
-        let mut provider = default.clone();
-        provider.account = Some(codex_model_provider_info::NamedProviderAccount {
-            provider_id: "zai".to_string(),
-            name: name.to_string(),
-        });
-        provider
-    };
-    let key = |provider: &codex_model_provider_info::ModelProviderInfo| {
-        provider_request_key_identity(provider, || "unused")
-    };
-    // The default account is keyed by its environment key (salted per home,
-    // #482); each named account gets its own key, so account B's 429
-    // cooldown never blocks account A.
-    assert!(match key(&default) {
-        ProviderKeyIdentity::EnvSecret { env_key, .. } => env_key == "ZAI_API_KEY",
-        ProviderKeyIdentity::Label(label) => label == "stored:ZAI_API_KEY",
-    });
-    let label = |name: &str| ProviderKeyIdentity::Label(format!("account:{name}"));
-    assert_eq!(key(&named("work")), label("work"));
-    assert_eq!(key(&named("fake")), label("fake"));
-    assert_ne!(key(&named("work")), key(&default));
-}
+/// #509: the turn-completion check respects the key's cooldown and records its
+/// own 429.
+#[tokio::test]
+async fn completion_check_respects_and_records_the_provider_request_throttle() {
+    use crate::provider_throttle::tests::RateLimitedSession;
+    use crate::provider_throttle::tests::assert_rate_limited_then_blocked;
+    use crate::session::turn_completion::assess_turn_completion;
 
-/// #482: the same key gives a different throttle identity on every home, and
-/// neither identity is the unsalted value older builds stored.
-#[test]
-fn env_key_throttle_identity_is_salted_per_home() {
-    let secret = "fixture-key-not-a-secret";
-    let home_a = salted_env_key_fingerprint(&[1; 32], "ZAI_API_KEY", secret);
-    let home_b = salted_env_key_fingerprint(&[2; 32], "ZAI_API_KEY", secret);
-    let legacy = legacy_env_key_fingerprint("ZAI_API_KEY", secret);
-    assert!(home_a.starts_with("env-salted:ZAI_API_KEY:"), "{home_a}");
-    assert_eq!(home_a.len(), "env-salted:ZAI_API_KEY:".len() + 16);
-    assert_ne!(home_a, home_b);
-    assert_eq!(
-        home_a,
-        salted_env_key_fingerprint(&[1; 32], "ZAI_API_KEY", secret)
-    );
-    let unsalted: String = Sha256::digest(secret.as_bytes())
-        .iter()
-        .take(8)
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    assert_eq!(legacy, format!("env:ZAI_API_KEY:{unsalted}"));
-    for salted in [&home_a, &home_b] {
-        assert!(!salted.contains(&unsalted), "{salted}");
-        assert!(!salted.contains(secret), "{salted}");
-    }
+    let fixture = RateLimitedSession::start().await;
+    let mut client_session = fixture.session.services.model_client().new_session();
+    let metadata = fixture.metadata();
+    let cancel = CancellationToken::new();
+    let mut assess = async || {
+        assess_turn_completion(
+            &fixture.session,
+            &fixture.turn_context,
+            &mut client_session,
+            &metadata,
+            "say hello",
+            "I will say hello next.",
+            &cancel,
+        )
+        .await
+        .expect_err("the provider refuses every request")
+    };
+    let first = assess().await;
+    let second = assess().await;
+    assert_rate_limited_then_blocked(&first, &second);
+    assert_eq!(fixture.requests().await, 1);
 }

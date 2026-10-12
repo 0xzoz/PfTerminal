@@ -143,6 +143,16 @@ fn system_bwrap_launcher_for_path_with_probe(
     })
 }
 
+/// #581: a descriptor bubblewrap inherits and passes on to the command
+/// (the verified bundled copy run through `aa-exec`), which the inner stage
+/// must close before running the command.
+pub(crate) fn preferred_bwrap_inherited_fd() -> Option<std::os::fd::RawFd> {
+    match preferred_bwrap_launcher() {
+        BubblewrapLauncher::Bundled(launcher) => launcher.inherited_fd(),
+        BubblewrapLauncher::System(_) | BubblewrapLauncher::Unavailable => None,
+    }
+}
+
 pub(crate) fn preferred_bwrap_supports_argv0() -> bool {
     match preferred_bwrap_launcher() {
         BubblewrapLauncher::System(launcher) => launcher.supports_argv0,
