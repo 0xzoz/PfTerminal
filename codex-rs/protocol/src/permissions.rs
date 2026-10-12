@@ -637,7 +637,10 @@ impl FileSystemSandboxPolicy {
     pub fn has_denied_read_restrictions(&self) -> bool {
         matches!(self.kind, FileSystemSandboxKind::Restricted)
             && self.entries.iter().any(|entry| {
+                // #598: a no-move entry denies no read; a run a person
+                // approves outside the sandbox may drop it.
                 entry.access == FileSystemAccessMode::Deny
+                    && entry.unmovable_path().is_none()
                     && !matches!(
                         &entry.path,
                         FileSystemPath::Special {
@@ -4105,6 +4108,7 @@ mod tests {
         assert!(full.get_unmovable_paths().is_empty());
         assert!(policy.has_full_disk_write_access());
         assert!(policy.get_unreadable_roots_with_cwd(cwd).is_empty());
+        assert!(!policy.has_denied_read_restrictions());
         assert!(policy.can_write_path_with_cwd(home.as_path(), cwd));
         assert!(policy.can_read_path_with_cwd(home.as_path(), cwd));
         assert!(policy.needs_direct_runtime_enforcement(NetworkSandboxPolicy::Restricted, cwd));
