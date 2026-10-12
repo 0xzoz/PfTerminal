@@ -851,7 +851,8 @@ pub(crate) struct App {
     /// False after resume until a live operator/non-auto turn proves current intent.
     pub(crate) spawn_operator_input_seen: bool,
     /// #507: the task another agent last sent to each Claude pane while the
-    /// kill switch was on (one per pane); sent once it is turned off.
+    /// kill switch was on (one per pane); it goes with that pane's next turn
+    /// after the switch is off (turning it off sends nothing).
     pub(crate) kill_switch_held_claude_tasks: Vec<(String, String)>,
     pub(crate) spawn_quarantine_notified_by_node: HashSet<String>,
     pub(crate) spawn_context_left_by_thread: HashMap<ThreadId, i64>,
@@ -1214,6 +1215,7 @@ impl App {
         }
         let mut model = config.model.clone().unwrap_or(bootstrap.default_model);
         let mut available_models = bootstrap.available_models;
+        let listed_models = available_models.clone();
         if let Some(state_db) = state_db.as_ref() {
             match state_db.list_gpu_runtime_providers().await {
                 Ok(providers) => {
@@ -1260,6 +1262,7 @@ impl App {
         ) && matches!(&session_selection, SessionSelection::Resume(_));
         let shared_provider_status_host = Some(provider_runtime.policy.host());
         let model_catalog = Arc::new(ModelCatalog::new(available_models.clone()));
+        model_catalog.mark_listed(&listed_models);
         model_catalog.set_provider_policy(provider_runtime.policy);
         model_catalog.set_session_recovery_only(session_recovery_only);
         let feedback_audience = bootstrap.feedback_audience;

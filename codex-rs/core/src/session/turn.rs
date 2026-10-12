@@ -45,6 +45,7 @@ use crate::provider_throttle::provider_request_key;
 use crate::provider_throttle::provider_request_result_from_error;
 use crate::provider_throttle::provider_request_result_kind;
 use crate::provider_throttle::record_unleased_provider_request_result;
+use crate::provider_throttle::turn_auth;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_retry::ResponsesStreamRequest;
@@ -1863,7 +1864,7 @@ pub(crate) async fn prepare_tool_recommendations(
         .await;
     let tool_suggest_is_enabled = tool_suggest_enabled(turn_context);
     let auth = if tool_suggest_is_enabled {
-        sess.services.auth_manager.auth().await
+        sess.services.auth_manager().auth().await
     } else {
         None
     };
@@ -2618,13 +2619,14 @@ async fn acquire_provider_request_lease(
         return Ok(ProviderRequestThrottle::default());
     };
 
+    let (codex_home, auth_mode) = turn_auth(sess, turn_context);
     let Ok(key) = provider_request_key(
         &state_db,
-        sess.services.auth_manager.codex_home(),
+        &codex_home,
         turn_context.config.model_provider_id.as_str(),
         turn_context.provider.info(),
         turn_context.model_info.slug.as_str(),
-        || sess.services.auth_manager.auth_mode(),
+        || auth_mode,
     )
     .boxed()
     .or_cancel(cancellation_token)
@@ -2660,7 +2662,10 @@ async fn acquire_provider_request_lease(
             turn_context.reasoning_summary,
             turn_context.config.service_tier.clone(),
             responses_metadata,
-            sess.services.auth_manager.auth_mode(),
+            turn_context
+                .auth_manager
+                .as_ref()
+                .and_then(|auth_manager| auth_manager.auth_mode()),
         )
         .map(|bytes| i64::try_from(bytes).unwrap_or(i64::MAX))
         .unwrap_or_else(|err| {
@@ -3182,7 +3187,10 @@ async fn try_run_sampling_request(
         approval_policy = turn_context.approval_policy.value(),
         sandbox_policy = &turn_context.sandbox_policy(),
         effort = turn_context.reasoning_effort,
-        auth_mode = sess.services.auth_manager.auth_mode(),
+        auth_mode = turn_context
+            .auth_manager
+            .as_ref()
+            .and_then(|auth_manager| auth_manager.auth_mode()),
         features = sess.features.enabled_features(),
     );
     let inference_trace = sess.services.rollout_thread_trace.inference_trace_context(
@@ -3600,11 +3608,19 @@ async fn try_run_sampling_request(
                 should_emit_token_count = true;
             }
             ResponseEvent::ModelsEtag(etag) => {
-                // Update internal state with latest models etag
-                sess.services
+                // Update internal state with latest models etag. PF-84: only
+                // a response from the provider and account the process list
+                // follows says anything about that list.
+                if sess
+                    .services
                     .models_manager
-                    .refresh_if_new_etag(etag, turn_context.config.http_client_factory())
-                    .await;
+                    .lists_for_provider(turn_context.provider.info())
+                {
+                    sess.services
+                        .models_manager
+                        .refresh_if_new_etag(etag, turn_context.config.http_client_factory())
+                        .await;
+                }
             }
             ResponseEvent::Completed {
                 response_id,

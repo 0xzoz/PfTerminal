@@ -382,7 +382,7 @@ impl StageOneMemoryClient {
             binding.floor.max(config.security_level).max(policy.level) != SecurityLevel::Permissive;
         binding.check().await?;
         let client = ModelClient::new(
-            Some(Arc::clone(&session.services.auth_manager)),
+            Some(session.services.auth_manager()),
             AgentIdentityAuthPolicy::JwtOnly,
             expected_owner,
             config.model_provider.clone(),
@@ -577,7 +577,7 @@ impl StageOneMemoryClient {
         if self.client.provider_info() != &self.binding.provider {
             return Ok(None);
         }
-        let auth = owner.services.auth_manager.auth().await;
+        let auth = owner.services.auth_manager().auth().await;
         let auth_mode = auth.as_ref().map(codex_login::CodexAuth::auth_mode);
         let endpoint = self
             .binding
@@ -631,16 +631,17 @@ impl StageOneMemoryClient {
         let Some(owner) = self.binding.owner.upgrade() else {
             return Ok(None);
         };
+        let auth_manager = owner.services.auth_manager();
         let (admitted, _fallback) = AdmittedProviderRequest::admit(
             AuxiliaryRequest::MemoryExtraction,
             AuxiliaryRoute {
                 state_db: owner.state_db(),
                 // Where the request reads a named account's key from.
-                codex_home: owner.services.auth_manager.codex_home(),
+                codex_home: auth_manager.codex_home(),
                 provider_id: &self.accounting_provider_id,
                 provider: &self.binding.provider,
                 model: &request.model_info.slug,
-                auth_mode: owner.services.auth_manager.auth_mode(),
+                auth_mode: auth_manager.auth_mode(),
                 thread_id: Some(self.binding.owner_id.to_string()),
                 turn_id: None,
             },

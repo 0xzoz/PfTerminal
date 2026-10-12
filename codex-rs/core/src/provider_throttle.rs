@@ -514,6 +514,23 @@ pub(crate) async fn notify_state_db_fallback(
         .await;
 }
 
+/// The home a turn's credentials are read from and its auth mode: the turn's
+/// own auth manager (it follows a mid-session account switch), else the
+/// session's.
+pub(crate) fn turn_auth(
+    sess: &Session,
+    turn_context: &TurnContext,
+) -> (PathBuf, Option<codex_protocol::auth::AuthMode>) {
+    let auth_manager = turn_context
+        .auth_manager
+        .clone()
+        .unwrap_or_else(|| sess.services.auth_manager());
+    (
+        auth_manager.codex_home().to_path_buf(),
+        auth_manager.auth_mode(),
+    )
+}
+
 /// Which model request outside the turn's sampling loop is being admitted.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum AuxiliaryRequest {
@@ -610,16 +627,16 @@ impl AdmittedProviderRequest {
         turn_context: &TurnContext,
         prompt: &Prompt,
     ) -> CodexResult<Option<Self>> {
-        let auth_manager = &sess.services.auth_manager;
+        let (codex_home, auth_mode) = turn_auth(sess, turn_context);
         let (admitted, fallback) = Self::admit(
             request,
             AuxiliaryRoute {
                 state_db: sess.state_db(),
-                codex_home: auth_manager.codex_home(),
+                codex_home: &codex_home,
                 provider_id: turn_context.config.model_provider_id.as_str(),
                 provider: turn_context.provider.info(),
                 model: turn_context.model_info.slug.as_str(),
-                auth_mode: auth_manager.auth_mode(),
+                auth_mode,
                 thread_id: Some(sess.thread_id.to_string()),
                 turn_id: Some(turn_context.sub_id.clone()),
             },
