@@ -3,11 +3,11 @@
 │ >_ Corbanu Terminal (v0.1.48)                        │
 │                                                      │
 │ model:     loading   /model to change                │
-│ directory: <repo-root>/…/after2/ws │
+│ directory: <repo-root>/…/after3/ws │
 ╰──────────────────────────────────────────────────────╯
 
 
-› Improve documentation in @filename
+› Write tests for @filename
 
   Z.AI GLM 5.3 Flash via zai default · <run>/ws · Corbanu Terminal · TPS: -- tok/s
 
@@ -15,7 +15,7 @@
 │ >_ Corbanu Terminal (v0.1.48)                        │
 │                                                      │
 │ model:     glm-5.3-flash   /model to change          │
-│ directory: <repo-root>/…/after2/ws │
+│ directory: <repo-root>/…/after3/ws │
 ╰──────────────────────────────────────────────────────╯
 
 Grants and kill switch

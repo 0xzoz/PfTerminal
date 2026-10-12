@@ -1,2 +1,2 @@
-confirm->B stop message: 1.14 s (includes A writing the file)
-off confirm->B notice: 1.22 s
+confirm->B stop message: 1.09 s (includes A writing the file)
+off confirm->B notice: 1.09 s

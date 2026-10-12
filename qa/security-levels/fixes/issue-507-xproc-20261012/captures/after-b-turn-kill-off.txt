@@ -3,11 +3,11 @@
 │ >_ Corbanu Terminal (v0.1.48)                        │
 │                                                      │
 │ model:     loading   /model to change                │
-│ directory: <repo-root>/…/after2/ws │
+│ directory: <repo-root>/…/after3/ws │
 ╰──────────────────────────────────────────────────────╯
 
 
-› Use /skills to list available skills
+› Explain this codebase
 
   Z.AI GLM 5.3 Flash via zai default · <run>/ws · Corbanu Terminal · TPS: -- tok/s
 
@@ -15,7 +15,7 @@
 │ >_ Corbanu Terminal (v0.1.48)                        │
 │                                                      │
 │ model:     glm-5.3-flash   /model to change          │
-│ directory: <repo-root>/…/after2/ws │
+│ directory: <repo-root>/…/after3/ws │
 ╰──────────────────────────────────────────────────────╯
 
 
@@ -38,19 +38,19 @@ the model until it is turned off in /security (here or there). Messages and task
 ■ Not sent: the security kill switch is on, so Corbanu sends nothing to the model, and this message was not kept. To turn it off, open /security, press g,
 choose "Turn the kill switch off" and confirm.
 
-• The security kill switch was turned off in another Corbanu Terminal on this home. Turns are sent to the model again; tasks held for Claude panes are sent now.
-Stopped replies and commands do not restart.
+• The security kill switch was turned off in another Corbanu Terminal on this home. Turns are sent to the model again. Nothing restarts by itself here: stopped
+replies and commands do not restart, and tasks that waited for Claude panes are not sent now.
 
 
 › What is 3+3?
 
 
-• 3+3 = 6
+• 6
 
 
-› Use /skills to list available skills
+› Explain this codebase
 
-  Z.AI GLM 5.3 Flash via zai default · <run>/ws · Corbanu Terminal · TPS: 18.5 tok/s
+  Z.AI GLM 5.3 Flash via zai default · <run>/ws · Corbanu Terminal · TPS: 7.9 tok/s
 
 
 
