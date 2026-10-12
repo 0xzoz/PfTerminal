@@ -160,15 +160,16 @@ fn input_after_escape_is_not_read_with_the_escape() -> Result<()> {
     let Some(server) = server_or_skip("escape_then_text")? else {
         return Ok(());
     };
-    // Prints the bytes of each read(2) on its own line. The pause between
-    // reads stands in for a busy TUI: without a gap, Esc and the text that
-    // follows it land in one read, which crossterm parses as Alt+`/`.
+    // Polls the terminal every 150 ms without blocking (`min 0 time 0`) and
+    // prints the bytes of each nonempty read(2) on its own line, like a busy
+    // TUI. Without a gap, Esc and the text that follows it land in one read,
+    // which crossterm parses as Alt+`/`.
     let session = server.new_session(SessionSpec::new(
         "escape",
         TerminalSize::new(/*columns*/ 40, /*rows*/ 8),
         command_for_shell(
-            "stty raw -echo; printf 'ready\r\n'; \
-             while :; do sleep 0.1; dd bs=64 count=1 2>/dev/null | od -An -tx1; printf '\r'; done",
+            "stty raw -echo min 0 time 0; printf 'ready\r\n'; \
+             while :; do sleep 0.15; dd bs=64 count=1 2>/dev/null | od -An -tx1; printf '\r'; done",
         ),
     ))?;
     let pane = session.primary_pane();
