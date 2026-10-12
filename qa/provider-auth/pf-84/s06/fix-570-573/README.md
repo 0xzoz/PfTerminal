@@ -19,6 +19,8 @@ The TUI runs on a private tmux socket (`scripts/env.sh`).
 
 Regression tests failing on BASE source and passing on CAND: [tests-before-after.txt](captures/tests-before-after.txt),
 [test-resume-before.txt](captures/test-resume-before.txt); final Linux gate (commit named inside):
-[gate-final.txt](captures/gate-final.txt); macOS `just test`: [mac-just-test.txt](captures/mac-just-test.txt) (its tmux onboarding
-failures also fail on `origin/main`: [onboarding-linux-main.txt](captures/onboarding-linux-main.txt)). The TUI test
+[gate-final.txt](captures/gate-final.txt); macOS `just test`: [mac-just-test.txt](captures/mac-just-test.txt) (failure causes listed there: the stale test, four tests
+hitting the macOS socket-path limit that pass on Linux, and six tmux onboarding tests that fail on `origin/main` too:
+[onboarding-linux-main.txt](captures/onboarding-linux-main.txt); that main run's untracked leftovers are not referenced by main's
+module lists, so they were not compiled). The TUI test
 `a_session_account_that_cannot_load_changes_nothing` fails on BASE too (stale since S06; fixed by the switch-follow branch).
