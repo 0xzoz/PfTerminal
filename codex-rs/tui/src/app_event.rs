@@ -638,6 +638,12 @@ pub(crate) enum AppEvent {
     /// was interrupted, timed out, or Claude Code cancelled them); their
     /// popups close.
     ClaudePaneApprovalsSettled,
+    /// #554: a new contained Claude pane cannot run the Claude Code on PATH
+    /// (too old, or it does not run); `problem` says why and what to do.
+    ClaudePaneLaunchProblem {
+        pane_id: String,
+        problem: String,
+    },
     /// A Claude Code headless pane emitted bounded live progress.
     ClaudePaneTurnProgress {
         progress: crate::claude_panes::ClaudePaneTurnProgress,

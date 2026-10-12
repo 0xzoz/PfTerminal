@@ -125,6 +125,83 @@ fn issue_506_listing_denial_is_attributed_through_variables_and_dot_dot() {
     assert!(text.contains("not even once"), "{text}");
 }
 
+/// #554: `find ~` or `ls -aR ~` reports the home's listing denial below the
+/// folder the command names; the line is attributed to the home as it
+/// spells it, in BSD and GNU forms and relative to the folder a `cd` names.
+#[test]
+fn issue_554_recursive_listing_of_a_parent_is_attributed_to_the_home() {
+    let cwd = Path::new("/work/project");
+    let user_home = Path::new("/users/me");
+    let codex_home = Path::new("/users/me/.corbanu");
+    let unlistable = |path: &Path| {
+        AbsolutePathBuf::from_absolute_path(path).is_ok_and(|path| path.as_path() == codex_home)
+    };
+    let found = |script: &str, line: &str| {
+        unlistable_path_in_lines(
+            &shell(script),
+            cwd,
+            Some(user_home),
+            codex_home,
+            &[line.to_string()],
+            &unlistable,
+        )
+    };
+    for (script, line, expected) in [
+        (
+            "find ~ -name '*.toml'",
+            "find: /users/me/.corbanu: Operation not permitted",
+            "/users/me/.corbanu",
+        ),
+        (
+            "ls -aR \"$HOME\"",
+            "ls: /users/me/.corbanu: Operation not permitted",
+            "/users/me/.corbanu",
+        ),
+        (
+            "find /users/me",
+            "find: \u{2018}/users/me/.corbanu\u{2019}: Permission denied",
+            "/users/me/.corbanu",
+        ),
+        (
+            "ls -aR /users/me",
+            "ls: cannot open directory '/users/me/.corbanu': Permission denied",
+            "/users/me/.corbanu",
+        ),
+        (
+            "cd ~ && find .",
+            "find: ./.corbanu: Operation not permitted",
+            "./.corbanu",
+        ),
+        (
+            "ls -aR ../../users/me",
+            "ls: ../../users/me/.corbanu: Operation not permitted",
+            "../../users/me/.corbanu",
+        ),
+    ] {
+        assert_eq!(found(script, line), Some(expected.to_string()), "{script}");
+    }
+    for (script, line) in [
+        // Another folder, or a name that only starts like the home's.
+        (
+            "find ~",
+            "find: /users/me/Library/Mail: Operation not permitted",
+        ),
+        (
+            "find ~",
+            "find: /users/me/.corbanu-old: Operation not permitted",
+        ),
+        // A path below the home, not the home itself.
+        (
+            "find ~",
+            "find: /users/me/.corbanu/vault: Operation not permitted",
+        ),
+        // Relative to a folder the command does not name.
+        ("find .", "find: ./.corbanu: Operation not permitted"),
+    ] {
+        assert_eq!(found(script, line), None, "{script}: {line}");
+    }
+}
+
 /// #442 (milestone AGG-09): under Aggressive a denied read of a protected
 /// file is explained where it failed, naming the level and /security; it is
 /// not explained under Permissive, for a command that succeeded, or for a
@@ -181,4 +258,39 @@ async fn issue_442_denied_protected_read_is_explained_under_aggressive() {
         protected_path_in_command(&session, &turn, &command, cwd.as_path()).await,
         Some(home.join("auth.json").display().to_string())
     );
+}
+
+/// #554: under Aggressive, `find` of the folder above the Corbanu home is
+/// explained like a direct listing of the home (#506); not under Permissive,
+/// and not for a denial of another folder.
+#[tokio::test]
+async fn issue_554_find_above_the_home_is_explained_under_aggressive() {
+    let (session, turn) = crate::session::tests::make_session_and_context().await;
+    #[allow(deprecated)]
+    let cwd = turn.cwd.clone();
+    let home = turn.config.codex_home.to_path_buf();
+    std::fs::create_dir_all(&home).unwrap();
+    let parent = home.parent().expect("the home has a parent").to_path_buf();
+    let command = shell(&format!("find '{}' -name '*.toml'", parent.display()));
+    let denial = format!("find: {}: Operation not permitted\n", home.display());
+    let explain = async |output: &str| {
+        denial_explanation(&session, &turn, &command, cwd.as_path(), Some(1), output).await
+    };
+    assert_eq!(explain(&denial).await, None, "Permissive: unchanged");
+
+    let client = (*session.services.model_client())
+        .clone()
+        .with_ingress_level(SecurityLevel::Aggressive)
+        .with_source_envelopes(true);
+    session.services.replace_model_client(client);
+    let explanation = explain(&denial).await.expect("explained under Aggressive");
+    assert_eq!(
+        explanation,
+        listing_explanation(&home.display().to_string())
+    );
+    let other = format!(
+        "find: {}: Operation not permitted\n",
+        parent.join("elsewhere").display()
+    );
+    assert_eq!(explain(&other).await, None);
 }

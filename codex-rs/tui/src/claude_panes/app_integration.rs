@@ -750,6 +750,26 @@ impl App {
                     Some("Type normally; turns will run through Claude Code headless.".to_string()),
                 );
                 tracing::info!(pane_id = %id, profile = ?profile, "created Claude headless pane");
+                // #554: a contained pane checks its Claude Code now, so an
+                // old one is explained before the first task.
+                let tx = self.app_event_tx.clone();
+                let codex_home = self.config.codex_home.to_path_buf();
+                let cwd = self.config.cwd.to_path_buf();
+                tokio::spawn(async move {
+                    if let Some(problem) =
+                        crate::claude_panes::execution::contained_claude_launch_problem(
+                            codex_home,
+                            id.clone(),
+                            cwd,
+                        )
+                        .await
+                    {
+                        tx.send(AppEvent::ClaudePaneLaunchProblem {
+                            pane_id: id,
+                            problem,
+                        });
+                    }
+                });
             }
             Err(err) => self.chat_widget.add_error_message(err.to_string()),
         }
@@ -906,6 +926,28 @@ impl App {
         true
     }
 
+    /// #554: shows why a new contained Claude pane cannot run yet, in that
+    /// pane.
+    pub(crate) fn on_claude_pane_launch_problem(&mut self, pane_id: &str, problem: String) {
+        if !self
+            .claude_panes
+            .panes()
+            .iter()
+            .any(|pane| pane.id == pane_id)
+        {
+            return;
+        }
+        let message = format!("This Claude pane cannot run yet. {problem}");
+        if self.claude_panes.active_claude_pane_id() == Some(pane_id) {
+            self.chat_widget.add_warning_message(message);
+        } else {
+            self.append_inactive_claude_pane_transcript_cell(
+                pane_id,
+                Arc::new(crate::history_cell::new_warning_event(message)),
+            );
+        }
+    }
+
     /// #507: the kill switch was turned on: every running Claude pane turn
     /// is interrupted (its Claude process and the commands it runs end), with
     /// the reason in that pane.
@@ -918,7 +960,7 @@ impl App {
             .filter(|pane_id| self.claude_panes.claude_pane_is_running(pane_id))
             .collect();
         for pane_id in running {
-            if let Err(err) = self.claude_panes.interrupt_turn(&pane_id) {
+            if let Err(err) = self.claude_panes.interrupt_turn_for_kill_switch(&pane_id) {
                 tracing::warn!(pane_id, %err, "kill switch: could not interrupt the Claude pane");
                 continue;
             }
@@ -1095,9 +1137,19 @@ impl App {
         pane_id: String,
         result: Result<ClaudePaneTurnOutput, String>,
     ) {
+        // #554: a turn the kill switch stopped says so once, under the
+        // switch's message, instead of "interrupted by user".
+        let kill_switch_stopped = self.claude_panes.take_kill_switch_stop(&pane_id);
         match result {
             Ok(mut output) => {
                 let is_active = self.claude_panes.active_user_pane_id() == pane_id;
+                let failure_message = if kill_switch_stopped
+                    && output.status == super::pane::ClaudePaneTurnStatus::Interrupted
+                {
+                    crate::chatwidget::KILL_SWITCH_TURN_STOPPED.to_string()
+                } else {
+                    output.failure_message()
+                };
                 let source_node_id = crate::spawn_orchestration::pane_node_id(&pane_id);
                 if output.status.is_success() {
                     self.dispatch_orchestrate_blocks_from_text(&source_node_id, &output.text);
@@ -1125,7 +1177,7 @@ impl App {
                 self.claude_panes.finish_turn(&pane_id, &Ok(output.clone()));
                 let report_status = output.status.label().to_string();
                 let report_text = if output.text.trim().is_empty() {
-                    output.failure_message()
+                    failure_message.clone()
                 } else {
                     output.text.clone()
                 };
@@ -1190,8 +1242,7 @@ impl App {
                         );
                     }
                 } else if is_active {
-                    self.chat_widget
-                        .fail_external_pane_turn(output.failure_message());
+                    self.chat_widget.fail_external_pane_turn(failure_message);
                     self.chat_widget.add_info_message(
                         "Claude pane turn audit recorded.".to_string(),
                         Some(hint),
@@ -1199,9 +1250,7 @@ impl App {
                 } else {
                     self.append_inactive_claude_pane_transcript_cell(
                         &pane_id,
-                        Arc::new(crate::history_cell::new_error_event(
-                            output.failure_message(),
-                        )),
+                        Arc::new(crate::history_cell::new_error_event(failure_message)),
                     );
                     self.append_inactive_claude_pane_transcript_cell(
                         &pane_id,
