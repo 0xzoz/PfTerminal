@@ -1176,11 +1176,19 @@ async fn refuse_opened(
     let Some(opened) = opened else {
         return Ok(());
     };
-    tracing::warn!(
-        target: "codex_core::security::tainted_action",
-        call_id = %tool_ctx.call_id,
-        "additional permissions would open a protected path; refused"
-    );
+    if opened == crate::security::protected_additional::Opened::Unchecked {
+        tracing::warn!(
+            target: "codex_core::security::tainted_action",
+            call_id = %tool_ctx.call_id,
+            "additional permissions could not be checked against the protected paths; refused"
+        );
+    } else {
+        tracing::warn!(
+            target: "codex_core::security::tainted_action",
+            call_id = %tool_ctx.call_id,
+            "additional permissions would open a protected path; refused"
+        );
+    }
     let refusal = opened.refusal(level);
     crate::security::protected_reads::notify(&tool_ctx.session, &tool_ctx.turn, refusal.clone())
         .await;

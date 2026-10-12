@@ -434,3 +434,65 @@ fn issue_513_write_refusals_say_whether_a_grant_can_lift_them() {
         ReadOnlyScope::Runtime
     );
 }
+
+/// Review r2 (#524): a grant is checked with the workspace roots, so a write
+/// to a second root's `.agents` is dropped under Aggressive (it would make
+/// every later command fail) and kept under Moderate (unchanged there).
+#[test]
+fn issue_524_grants_are_checked_with_every_workspace_root() {
+    let f = fixture();
+    let second = f.user_home.join("second");
+    std::fs::create_dir_all(&second).unwrap();
+    let roots: Vec<AbsolutePathBuf> = [&f.project, &second]
+        .iter()
+        .map(|root| AbsolutePathBuf::from_absolute_path(root.as_path()).unwrap())
+        .collect();
+    let profile = codex_protocol::models::PermissionProfile::from_runtime_permissions(
+        &FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry::new(
+                FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                FileSystemAccessMode::Read,
+            ),
+            entry(&f.project, FileSystemAccessMode::Write),
+            entry(&second, FileSystemAccessMode::Write),
+        ]),
+        codex_protocol::permissions::NetworkSandboxPolicy::Restricted,
+    );
+    let configs = [GrantCheckConfig {
+        cwd: roots[0].clone(),
+        workspace_roots: roots.clone(),
+        profile,
+    }];
+    let grant = write(&second.join(".agents/skill.md"));
+    let (kept, refusal) = strip_grant(
+        SecurityLevel::Aggressive,
+        &f.codex_home,
+        &configs,
+        grant.clone(),
+    );
+    assert_eq!(kept, None);
+    let refusal = refusal.expect("a refusal");
+    assert!(refusal.contains("blocked writing to"), "{refusal}");
+    assert_eq!(
+        strip_grant(
+            SecurityLevel::Moderate,
+            &f.codex_home,
+            &configs,
+            grant.clone()
+        ),
+        (Some(grant), None)
+    );
+}
+
+#[test]
+fn issue_524_a_failed_check_is_refused_and_explained() {
+    let text = Opened::Unchecked.refusal(SecurityLevel::Aggressive);
+    assert_eq!(text, unchecked_refusal(SecurityLevel::Aggressive));
+    assert!(
+        text.starts_with("Security level Aggressive could not check"),
+        "{text}"
+    );
+    assert!(text.contains("Permissive in /security"), "{text}");
+}
