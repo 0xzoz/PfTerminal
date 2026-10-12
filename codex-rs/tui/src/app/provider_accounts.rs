@@ -223,6 +223,12 @@ impl App {
         );
         opts.open_browser = false;
         opts.named_account = Some(account.clone());
+        // QA only: debug builds can sign in against a mock issuer.
+        if cfg!(debug_assertions)
+            && let Ok(issuer) = std::env::var("CORBANU_TEST_LOGIN_ISSUER")
+        {
+            opts.issuer = issuer;
+        }
         let codex_home = self.config.codex_home.to_path_buf();
         let store_mode = self.config.cli_auth_credentials_store_mode;
         let keyring_kind = self.config.auth_keyring_backend_kind();

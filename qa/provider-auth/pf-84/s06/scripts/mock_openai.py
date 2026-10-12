@@ -2,7 +2,7 @@
 """Mock OpenAI auth issuer + Responses endpoint for PF-84-S06 slice B (stdlib only).
 
 Device-code sign-in (`/api/accounts/deviceauth/*`, `/oauth/token` code exchange) signs in
-the user last set with POST /_next_user {"user": "<name>"}. Every token is fake and
+the user last set with POST /_next_user {"user": "<name>", "ttl": <access token seconds, default 60>}. Every token is fake and
 encodes only `<user>` and a generation number; the access token expires 60 s after it is
 issued, so the first request refreshes it. A refresh must present the newest refresh
 token of that user (rotation; an older one gets `refresh_token_reused`), and users whose
@@ -95,6 +95,7 @@ def main():
             path = self.path.split("?")[0]
             if path == "/_next_user":
                 STATE["next_user"] = body["user"]
+                STATE["ttl"] = int(body.get("ttl", 60))
                 return self.reply(200, {})
             if path.endswith("/deviceauth/usercode"):
                 return self.reply(200, {"device_auth_id": "dev-1", "user_code": "MOCK-0001", "interval": "0"})
@@ -111,7 +112,7 @@ def main():
                     with LOCK:
                         STATE["gen"][user] = 1
                     log(event="sign-in", user=user)
-                    return self.reply(200, issue(user, 1, access_ttl=60))
+                    return self.reply(200, issue(user, 1, access_ttl=STATE.get("ttl", 60)))
                 rt = body.get("refresh_token", "")
                 user, gen = rt[3:].rsplit("-", 1) if rt.startswith("rt-") else ("?", "0")
                 if user.startswith("bad"):

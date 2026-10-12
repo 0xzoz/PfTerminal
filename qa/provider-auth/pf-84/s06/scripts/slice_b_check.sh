@@ -85,16 +85,18 @@ T="tmux -L pf84s06b"
 cap() { $T capture-pane -p -t a > "$OUT/$1.txt"; }
 waitfor() { for _ in $(seq 1 60); do $T capture-pane -p -t a | grep -qE "$1" && return 0; sleep 1; done; return 1; }
 send() { $T send-keys -t a -l "$1"; sleep 0.5; $T send-keys -t a Enter; }
+select_row() { for _ in $(seq 1 30); do $T capture-pane -p -t a | grep -qE "› +[0-9]+\. +$1" && return 0; $T send-keys -t a Down; sleep 0.3; done; return 1; }
 $T kill-server 2>/dev/null
 $T new-session -d -s a -x 120 -y 40 -e HOME="$HOME" -e CODEX_HOME="$CODEX_HOME" \
   -e CORBANU_TEST_NO_NATIVE_KEYRING=1 -e OPENAI_API_KEY=sk-fake-envdecoy \
   -e CODEX_REFRESH_TOKEN_URL_OVERRIDE="$CODEX_REFRESH_TOKEN_URL_OVERRIDE" \
+  -e CORBANU_TEST_LOGIN_ISSUER="$URL" \
   "$BIN" -C "$RUN/ws" --account work
 waitfor "(›|>) "; sleep 2
 send "/status"; waitfor "account work"; sleep 1; cap tui-1-status
 $T send-keys -t a Escape; sleep 1
 send "Reply with exactly: pong"; waitfor "authorized as"; sleep 1; cap tui-2-turn
-send "/providers"; waitfor "Providers"; sleep 1; cap tui-3-providers
+send "/providers"; waitfor "Providers"; sleep 1; select_row "OpenAI · default"; sleep 1; cap tui-3-providers
 $T send-keys -t a Enter; waitfor "Add another account"; sleep 1; cap tui-4-manage
 $T send-keys -t a Enter; waitfor "Account name"; sleep 0.5
 next_user tui
