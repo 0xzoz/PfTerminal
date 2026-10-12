@@ -884,10 +884,19 @@ impl Session {
                     }),
                 });
             }
+            // Issue #535: configured writable links into another root's
+            // read-only path are left out of the sandbox; say so at launch.
+            let excluded_writable_links =
+                crate::tools::writable_root_notices::excluded_writable_link_warnings(
+                    thread_id,
+                    &session_configuration.file_system_sandbox_policy(),
+                    session_configuration.cwd().as_path(),
+                );
             for message in config
                 .startup_warnings
                 .iter()
                 .chain(security_recovery_warning.iter())
+                .chain(excluded_writable_links.iter())
             {
                 post_session_configured_events.push(Event {
                     id: "".to_owned(),

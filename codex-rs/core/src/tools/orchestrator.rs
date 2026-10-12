@@ -635,6 +635,33 @@ impl ToolOrchestrator {
             network_proxy: None,
         };
 
+        // Issue #535: a writable root this run adds (or the session has)
+        // that is a link into another root's read-only path is left out of
+        // the sandbox; explain it before the run.
+        if initial_sandbox != SandboxType::None
+            && let Ok(policy_cwd) = sandbox_policy_cwd.to_abs_path()
+        {
+            let effective =
+                codex_sandboxing::policy_transforms::effective_file_system_sandbox_policy(
+                    &file_system_sandbox_policy,
+                    tool.additional_permissions(req),
+                );
+            for message in crate::tools::writable_root_notices::excluded_writable_link_warnings(
+                tool_ctx.session.thread_id(),
+                &effective,
+                policy_cwd.as_path(),
+            ) {
+                tool_ctx
+                    .session
+                    .send_event(
+                        &tool_ctx.turn,
+                        codex_protocol::protocol::EventMsg::Warning(
+                            codex_protocol::protocol::WarningEvent { message },
+                        ),
+                    )
+                    .await;
+            }
+        }
         let initial_attempt_start = Instant::now();
         let (first_result, first_deferred_network_approval) = Self::run_attempt(
             tool,
