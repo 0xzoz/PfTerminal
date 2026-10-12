@@ -2787,6 +2787,10 @@ impl App {
                 self.handle_provider_account_event(tui, app_server, event)
                     .await;
             }
+            AppEvent::NamedBedrockAccountChecked {
+                generation,
+                offered,
+            } => self.named_bedrock_account_checked(generation, offered),
             AppEvent::ProviderManagerMetadataResolved {
                 generation,
                 metadata,

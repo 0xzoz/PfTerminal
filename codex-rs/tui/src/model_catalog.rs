@@ -65,6 +65,9 @@ pub(crate) struct ModelCatalog {
     models: RwLock<Vec<ModelPreset>>,
     /// Ids [`ModelCatalog::set_provider_models`] added, per provider.
     provider_model_ids: RwLock<std::collections::HashMap<String, Vec<String>>>,
+    /// Numbers the background checks that decide those models; only the
+    /// newest one's answer is applied.
+    provider_models_check: std::sync::atomic::AtomicU64,
     provider_policy: RwLock<Option<crate::chatwidget::provider_model_policy::ProviderModelPolicy>>,
     session_recovery_only: AtomicBool,
 }
@@ -74,6 +77,7 @@ impl ModelCatalog {
         Self {
             models: RwLock::new(models),
             provider_model_ids: RwLock::new(std::collections::HashMap::new()),
+            provider_models_check: std::sync::atomic::AtomicU64::new(0),
             provider_policy: RwLock::new(None),
             session_recovery_only: AtomicBool::new(false),
         }
@@ -182,6 +186,16 @@ impl ModelCatalog {
             };
             include_runtime_model(&mut models, &model, runtime_provider_id);
         }
+    }
+
+    /// Starts a new provider-models check and returns its number.
+    pub(crate) fn begin_provider_models_check(&self) -> u64 {
+        self.provider_models_check.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// Whether `generation` is the newest provider-models check.
+    pub(crate) fn is_latest_provider_models_check(&self, generation: u64) -> bool {
+        self.provider_models_check.load(Ordering::SeqCst) == generation
     }
 
     /// Sets the models offered for `runtime_provider_id` beyond its own list:

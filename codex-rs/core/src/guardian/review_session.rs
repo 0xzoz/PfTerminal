@@ -722,15 +722,12 @@ async fn run_review_on_session(
 
         (send_followup_reminder, prompt_mode)
     };
-    let model_info = params
-        .parent_session
-        .services
-        .models_manager
-        .get_model_info(
-            params.model.as_str(),
-            &params.spawn_config.to_models_manager_config(),
-        )
-        .await;
+    let model_info = crate::model_info_for_provider::model_info_for_config(
+        &params.parent_session.services.models_manager,
+        params.model.as_str(),
+        &params.spawn_config,
+    )
+    .await;
     let guardian_reasoning_effort = params
         .reasoning_effort
         .clone()

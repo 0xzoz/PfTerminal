@@ -204,9 +204,10 @@ impl App {
         }
         // #572: an added (or the last removed) Bedrock account changes
         // whether Bedrock is reachable.
-        super::provider_management_status::sync_named_bedrock_models(
+        super::provider_management_status::check_named_bedrock_account(
             &self.model_catalog,
             &self.config,
+            &self.app_event_tx,
         );
         self.schedule_provider_manager_refresh();
     }

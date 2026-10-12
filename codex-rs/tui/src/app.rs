@@ -1261,7 +1261,11 @@ impl App {
         let model_catalog = Arc::new(ModelCatalog::new(available_models.clone()));
         model_catalog.set_provider_policy(provider_runtime.policy);
         // #572: Bedrock models for a session that may switch to a named Bedrock account.
-        provider_management_status::sync_named_bedrock_models(&model_catalog, &config);
+        provider_management_status::check_named_bedrock_account(
+            &model_catalog,
+            &config,
+            &app_event_tx,
+        );
         model_catalog.set_session_recovery_only(session_recovery_only);
         let feedback_audience = bootstrap.feedback_audience;
         let auth_mode = bootstrap.auth_mode;

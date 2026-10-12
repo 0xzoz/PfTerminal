@@ -55,37 +55,52 @@ fn sync_provider_manager_model_policy(
 /// provider (`/providers` → *Use for this session*, `--account
 /// amazon-bedrock:<name>` or `[provider_accounts]`), so while the vault holds
 /// one, `/model` offers Bedrock's models too; they go again once none is
-/// left. The vault read blocks, so it runs off the runtime.
-pub(super) fn sync_named_bedrock_models(
-    catalog: &std::sync::Arc<crate::model_catalog::ModelCatalog>,
+/// left. The vault read blocks, so it runs off the runtime and reports back
+/// with [`AppEvent::NamedBedrockAccountChecked`]; only the newest check is
+/// applied, on the UI thread.
+pub(super) fn check_named_bedrock_account(
+    catalog: &crate::model_catalog::ModelCatalog,
     config: &crate::legacy_core::config::Config,
+    tx: &crate::app_event_sender::AppEventSender,
 ) {
-    let catalog = std::sync::Arc::clone(catalog);
+    let generation = catalog.begin_provider_models_check();
     let config = config.clone();
+    let tx = tx.clone();
     spawn_provider_status_job(move || {
-        apply_named_bedrock_models(&catalog, holds_named_bedrock_account(&config));
+        let offered = holds_named_bedrock_account(&config);
+        tx.send(AppEvent::NamedBedrockAccountChecked {
+            generation,
+            offered,
+        });
     });
 }
 
 /// Whether a named Bedrock account can be reached from this session's
 /// config (feature on, Bedrock configured, an AWS-profile account in the
-/// vault). Reads vault labels only, never a credential.
-pub(super) fn holds_named_bedrock_account(config: &crate::legacy_core::config::Config) -> bool {
+/// vault); `None` when the vault cannot be read. Blocking (it reads the vault
+/// index); no credential value is read.
+pub(super) fn holds_named_bedrock_account(
+    config: &crate::legacy_core::config::Config,
+) -> Option<bool> {
     use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
-    config
+    if !config
         .features
         .enabled(codex_features::Feature::NamedAccounts)
-        && config
+        || !config
             .model_providers
             .get(AMAZON_BEDROCK_PROVIDER_ID)
             .is_some_and(codex_model_provider_info::ModelProviderInfo::is_amazon_bedrock)
-        && crate::provider_named_accounts::holds_named_account(
-            &config.codex_home,
-            AMAZON_BEDROCK_PROVIDER_ID,
-            codex_vault::ProviderAccountKind::AwsProfile,
-        )
+    {
+        return Some(false);
+    }
+    crate::provider_named_accounts::holds_named_account(
+        &config.codex_home,
+        AMAZON_BEDROCK_PROVIDER_ID,
+        codex_vault::ProviderAccountKind::AwsProfile,
+    )
 }
 
+/// Offers Bedrock's models (or withdraws the ones offered earlier).
 pub(super) fn apply_named_bedrock_models(
     catalog: &crate::model_catalog::ModelCatalog,
     offered: bool,
@@ -98,10 +113,25 @@ pub(super) fn apply_named_bedrock_models(
             Vec::new()
         },
     );
-    catalog.refresh_provider_policy();
 }
 
 impl App {
+    /// Applies the newest named-Bedrock-account check (#572) and puts the
+    /// current model back if withdrawing Bedrock's models removed it.
+    pub(super) fn named_bedrock_account_checked(&mut self, generation: u64, offered: Option<bool>) {
+        let Some(offered) = offered else {
+            return;
+        };
+        if !self
+            .model_catalog
+            .is_latest_provider_models_check(generation)
+        {
+            return;
+        }
+        apply_named_bedrock_models(&self.model_catalog, offered);
+        sync_provider_manager_model_policy(&self.model_catalog, &self.config);
+    }
+
     pub(super) fn reusable_provider_status_host(
         &self,
     ) -> Option<crate::provider_status_host::ProviderStatusHost> {
@@ -114,7 +144,7 @@ impl App {
 
     pub(super) fn open_provider_manager(&mut self, _app_server: &AppServerSession) {
         sync_provider_manager_model_policy(&self.model_catalog, &self.config);
-        sync_named_bedrock_models(&self.model_catalog, &self.config);
+        check_named_bedrock_account(&self.model_catalog, &self.config, &self.app_event_tx);
         let generation = self.next_provider_management_generation();
         self.provider_management_host = None;
         let config = self.config.clone();

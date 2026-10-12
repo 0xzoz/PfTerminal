@@ -123,10 +123,10 @@ async fn a_default_set_by_a_higher_layer_is_reported() {
 /// session on another provider is offered Bedrock's models in `/model` (and
 /// the provider policy lets them be picked), so an account chosen with *Use
 /// for this session* is reachable. Without one, with the feature off, or
-/// once the last one is removed, Bedrock stays out of the list as before.
+/// once the last one is removed, Bedrock stays out of the list as before,
+/// except the model the session is on. Only the newest check is applied.
 #[tokio::test]
 async fn named_bedrock_account_offers_bedrock_models() {
-    use super::super::provider_management_status::apply_named_bedrock_models;
     use super::super::provider_management_status::holds_named_bedrock_account;
     use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
     let bedrock_models = |app: &App| {
@@ -137,7 +137,7 @@ async fn named_bedrock_account_offers_bedrock_models() {
             .filter(|preset| preset.provider_id.as_deref() == Some(AMAZON_BEDROCK_PROVIDER_ID))
             .collect::<Vec<_>>()
     };
-    let (app, home) = app_with_named_accounts("").await;
+    let (mut app, home) = app_with_named_accounts("").await;
     app.model_catalog.set_provider_policy(
         crate::chatwidget::provider_model_policy::ProviderModelPolicy::new(
             crate::provider_status_host::ProviderStatusHost::from_config(
@@ -147,8 +147,13 @@ async fn named_bedrock_account_offers_bedrock_models() {
             codex_provider_auth::ProviderRuntimeAuthorizations::default(),
         ),
     );
-    assert!(!holds_named_bedrock_account(&app.config));
-    apply_named_bedrock_models(&app.model_catalog, holds_named_bedrock_account(&app.config));
+    let check = |app: &mut App| {
+        let offered = holds_named_bedrock_account(&app.config);
+        let generation = app.model_catalog.begin_provider_models_check();
+        app.named_bedrock_account_checked(generation, offered);
+    };
+    assert_eq!(holds_named_bedrock_account(&app.config), Some(false));
+    check(&mut app);
     assert!(bedrock_models(&app).is_empty());
 
     let vault = codex_vault::Vault::new(home.path().to_path_buf());
@@ -165,14 +170,17 @@ async fn named_bedrock_account_offers_bedrock_models() {
         .features
         .disable(codex_features::Feature::NamedAccounts)
         .expect("named accounts can be turned off");
-    assert!(!holds_named_bedrock_account(&feature_off));
-    assert!(holds_named_bedrock_account(&app.config));
+    assert_eq!(holds_named_bedrock_account(&feature_off), Some(false));
+    assert_eq!(holds_named_bedrock_account(&app.config), Some(true));
 
-    apply_named_bedrock_models(&app.model_catalog, holds_named_bedrock_account(&app.config));
+    // A stale check's answer is dropped.
+    let stale = app.model_catalog.begin_provider_models_check();
+    check(&mut app);
+    app.named_bedrock_account_checked(stale, Some(false));
     let offered = bedrock_models(&app);
     assert!(
         offered.iter().any(
-            |preset| preset.model == codex_model_provider_info::AMAZON_BEDROCK_GPT_5_5_MODEL_ID
+            |preset| preset.model == codex_model_provider_info::AMAZON_BEDROCK_GPT_5_4_MODEL_ID
         ),
         "{offered:?}"
     );
@@ -183,9 +191,19 @@ async fn named_bedrock_account_offers_bedrock_models() {
         "{offered:?}"
     );
 
+    // The session switches to one of them; removing the last account then
+    // withdraws the others but keeps the model the session is on.
+    app.config.model_provider_id = AMAZON_BEDROCK_PROVIDER_ID.to_string();
+    app.config.model = Some(codex_model_provider_info::AMAZON_BEDROCK_GPT_5_4_MODEL_ID.to_string());
     vault
         .remove_provider_account(AMAZON_BEDROCK_PROVIDER_ID, &name("work"))
         .expect("remove account");
-    apply_named_bedrock_models(&app.model_catalog, holds_named_bedrock_account(&app.config));
-    assert!(bedrock_models(&app).is_empty());
+    check(&mut app);
+    assert_eq!(
+        bedrock_models(&app)
+            .into_iter()
+            .map(|preset| preset.model)
+            .collect::<Vec<_>>(),
+        vec![codex_model_provider_info::AMAZON_BEDROCK_GPT_5_4_MODEL_ID.to_string()]
+    );
 }

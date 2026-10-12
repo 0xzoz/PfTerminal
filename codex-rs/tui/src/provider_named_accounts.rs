@@ -134,22 +134,23 @@ pub(crate) fn persisted_defaults(config: &Config) -> BTreeMap<String, String> {
         .collect()
 }
 
-/// Whether the vault holds a named account of `provider_id` of `kind`.
-/// Blocking (it reads the vault index); no credential value is read. An
-/// unreadable vault holds none.
+/// Whether the vault holds a named account of `provider_id` of `kind`;
+/// `None` when the vault cannot be read. Blocking (it reads the vault
+/// index); no credential value is read.
 pub(crate) fn holds_named_account(
     codex_home: &Path,
     provider_id: &str,
     kind: ProviderAccountKind,
-) -> bool {
+) -> Option<bool> {
     let vault = Vault::new(codex_home.to_path_buf());
     if vault.key_storage() == VaultKeyStorage::NotInitialized {
-        return false;
+        return Some(false);
     }
     vault
         .list_provider_accounts()
         .inspect_err(|error| tracing::warn!(%error, "could not list named accounts"))
-        .is_ok_and(|accounts| {
+        .ok()
+        .map(|accounts| {
             accounts
                 .iter()
                 .any(|account| account.provider_id == provider_id && account.kinds.contains(&kind))
