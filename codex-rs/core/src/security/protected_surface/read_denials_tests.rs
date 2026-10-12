@@ -487,6 +487,32 @@ fn issue_603_read_later_folders_are_created_only_for_a_command_in_the_home() {
     assert!(!fx.codex_home.join("hooks.json").exists());
 }
 
+/// #603 review: a kept folder that is a link (`build -> ~/.ssh`) does not
+/// skip the denial of what it points to; only top-level aliases are
+/// resolved when a denial is matched against the kept folders.
+#[cfg(unix)]
+#[test]
+fn issue_603_a_kept_link_does_not_skip_a_credential_denial() {
+    let fx = fixture();
+    let ssh = fx.user_home.join(".ssh");
+    std::fs::create_dir_all(&ssh).unwrap();
+    std::fs::write(ssh.join("id_ed25519"), "key").unwrap();
+    let project = fx.user_home.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let build = project.join("build");
+    std::os::unix::fs::symlink(&ssh, &build).unwrap();
+    for cwd in [project.clone(), build.clone()] {
+        let keep = [abs(&project), abs(&build)];
+        let policy = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &keep)
+            .apply(&PermissionProfile::Disabled)
+            .unwrap()
+            .file_system_sandbox_policy();
+        let key = ssh.join("id_ed25519");
+        assert!(!policy.can_read_path_with_cwd(&key, &cwd), "{cwd:?}");
+        assert!(!policy.can_write_path_with_cwd(&key, &cwd), "{cwd:?}");
+    }
+}
+
 /// #603 review: a `worktrees` link (to the home, above it, or `/`) does not
 /// switch the protection off for a command working in the home.
 #[cfg(unix)]

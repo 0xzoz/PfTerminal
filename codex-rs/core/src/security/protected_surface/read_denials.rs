@@ -479,13 +479,17 @@ impl ReadDenials {
         }
         // #603: also by real location, as the sandboxes compare them (a home
         // spelled through `/tmp` with the working folder below it spelled by
-        // its real location).
+        // its real location). A kept folder is resolved only through
+        // top-level aliases: one that is or sits below a link (`build ->
+        // ~/.ssh`) must not skip the denial of what it points to.
         let Ok(real) = std::fs::canonicalize(path.as_path()) else {
             return false;
         };
-        keep.iter().any(|kept| {
-            std::fs::canonicalize(kept.as_path()).is_ok_and(|kept| kept.starts_with(&real))
-        })
+        keep.iter()
+            .filter(|kept| !has_nested_link(kept.as_path()))
+            .any(|kept| {
+                std::fs::canonicalize(kept.as_path()).is_ok_and(|kept| kept.starts_with(&real))
+            })
     }
 
     fn push_existing(&mut self, path: AbsolutePathBuf, keep: &[AbsolutePathBuf]) {

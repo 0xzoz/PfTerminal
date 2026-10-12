@@ -1901,7 +1901,7 @@ async fn issue_603_a_command_in_the_corbanu_home_cannot_create_names_corbanu_rea
     let mut wrong = Vec::new();
     // The working folder spelled as the home is, and by its real location
     // (they differ where the home is under a link such as `/tmp` on macOS).
-    for (in_other, real_cwd) in [(false, false), (true, false), (true, true)] {
+    for (in_other, real_cwd) in [(false, false), (false, true), (true, false), (true, true)] {
         for (level, created) in [
             (SecurityLevel::Moderate, false),
             (SecurityLevel::Aggressive, false),
