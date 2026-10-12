@@ -758,6 +758,138 @@ async fn issue_442_aggressive_denied_protected_read_is_explained() -> anyhow::Re
     Ok(())
 }
 
+/// #442 (Travis, 2026-10-11): under Aggressive's credential-name rules an
+/// agent command cannot create a `.env` file, and one the person created
+/// (in no deny list, only matched by name) cannot be read; that denial is
+/// explained like any other protected read.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_442_env_file_matched_by_name_is_denied_and_explained() -> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
+    use codex_protocol::permissions::FileSystemAccessMode;
+    use codex_protocol::permissions::FileSystemPath;
+    use codex_protocol::permissions::FileSystemSandboxEntry;
+    use codex_protocol::permissions::credential_file_globs;
+
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let (test, captured) = start_turn_in(
+        None,
+        SecurityLevel::Aggressive,
+        AskForApproval::Never,
+        vec![
+            shell_step(
+                "call-make",
+                "printf API_KEY=dummy-442-agent > .env.new; echo made=$?",
+            ),
+            shell_step("call-read", "cat .env.local"),
+            done_step(),
+        ],
+        |config| {
+            // Aggressive's profile: write in the workspace, credential names
+            // denied below it (`tui::security::aggressive`).
+            std::fs::write(config.cwd.join(".env.local"), "API_KEY=dummy-442-new")
+                .expect("the person's .env.local");
+            let cwd = config.cwd.to_string_lossy().into_owned();
+            let (mut file_system, network) =
+                PermissionProfile::workspace_write().to_runtime_permissions();
+            file_system
+                .entries
+                .extend(credential_file_globs(&cwd).into_iter().map(|pattern| {
+                    FileSystemSandboxEntry::new(
+                        FileSystemPath::GlobPattern { pattern },
+                        FileSystemAccessMode::Deny,
+                    )
+                }));
+            config
+                .permissions
+                .set_permission_profile(PermissionProfile::from_runtime_permissions(
+                    &file_system,
+                    network,
+                ))
+                .expect("profile");
+        },
+    )
+    .await?;
+    let warning = match wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+            || matches!(event, EventMsg::Warning(warning)
+                if warning.message.starts_with("Security level Aggressive"))
+    })
+    .await
+    {
+        EventMsg::Warning(warning) => warning.message,
+        other => panic!("no warning before the turn ended: {other:?}"),
+    };
+    assert!(
+        warning.starts_with("Security level Aggressive blocked access to `.env.local`"),
+        "{warning}"
+    );
+    assert!(warning.contains("also ones created"), "{warning}");
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    let requests = captured.requests();
+    let made = output_text(&requests[requests.len() - 2], "call-make");
+    assert!(made.contains("made=1"), "{made}");
+    assert!(!test.cwd_path().join(".env.new").exists());
+    let output = output_text(&requests[requests.len() - 1], "call-read");
+    assert!(!output.contains("dummy-442-new"), "{output}");
+    assert!(output.contains("Operation not permitted"), "{output}");
+    assert!(std::fs::read_to_string(test.cwd_path().join(".env.local"))?.contains("dummy-442-new"));
+    Ok(())
+}
+
+/// #442: Permissive is unchanged by the Aggressive decisions: an agent
+/// command still writes the project's `.codex` and `.agents` and reads a
+/// `.env` created mid-session, with no explanation added.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_442_permissive_is_unchanged() -> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
+
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let (test, captured) = start_turn_in(
+        None,
+        SecurityLevel::Permissive,
+        AskForApproval::Never,
+        vec![
+            shell_step(
+                "call-write",
+                "mkdir -p .codex .agents && printf x > .codex/p.toml && printf x > .agents/p.md \
+                 && printf API_KEY=dummy-442-permissive > .env.local; echo wrote=$?",
+            ),
+            shell_step("call-read", "cat .env.local"),
+            done_step(),
+        ],
+        |config| {
+            config
+                .permissions
+                .set_permission_profile(PermissionProfile::workspace_write())
+                .expect("profile");
+        },
+    )
+    .await?;
+    let warned = matches!(
+        wait_for_event(&test.codex, |event| {
+            matches!(event, EventMsg::TurnComplete(_))
+                || matches!(event, EventMsg::Warning(warning)
+                    if warning.message.starts_with("Security level Aggressive"))
+        })
+        .await,
+        EventMsg::Warning(_)
+    );
+    assert!(!warned);
+    let requests = captured.requests();
+    let wrote = output_text(&requests[requests.len() - 2], "call-write");
+    assert!(wrote.contains("wrote=0"), "{wrote}");
+    let read = output_text(&requests[requests.len() - 1], "call-read");
+    assert!(read.contains("dummy-442-permissive"), "{read}");
+    Ok(())
+}
+
 /// Issue #245: a command's additional permissions never reopen a protected
 /// path. An additional read of a file inside a denied folder (the home's
 /// `wallet`) is refused under Aggressive and Moderate, before and after

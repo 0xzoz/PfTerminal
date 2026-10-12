@@ -19,6 +19,11 @@ use codex_execpolicy::Decision;
 use codex_features::Feature;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::WebSearchMode;
+use codex_protocol::permissions::CREDENTIAL_FILE_NAME_PATTERNS;
+use codex_protocol::permissions::ReadDenyMatcher;
+use codex_protocol::permissions::credential_entry_problem;
+use codex_protocol::permissions::credential_file_globs;
+use codex_protocol::permissions::is_credential_file_name;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::shell_environment::create_env_from_vars;
 
@@ -39,7 +44,7 @@ const SECRET_ENV_PATTERNS: [&str; 4] = ["*VAULT*", "*PASSWORD*", "*PASSPHRASE*",
 pub(crate) const ROWS: [(&str, &str); 6] = [
     (
         "Sandbox",
-        "write only in the current folder (where the Corbanu home and the nested-launch registry stay read-only): no extra writable folders, no /tmp or $TMPDIR; approved commands stay inside it too; escalation and permission-request tools are off; reading credential files (.env files found at start, SSH, cloud and CLI tokens) or Corbanu's sign-in, vault, config and history is denied to agent commands and is never granted, not even once (switch to Permissive in /security to allow it)",
+        "write only in the current folder (where the Corbanu home and the nested-launch registry stay read-only): no extra writable folders, no /tmp or $TMPDIR; approved commands stay inside it too; escalation and permission-request tools are off; the project's .codex and .agents stay read-only, even with Grant once; reading credential files (.env, .env.* and .envrc files, also ones created later, on Windows from the next command on; SSH, cloud and CLI tokens) or Corbanu's sign-in, vault, config and history is denied to agent commands and is never granted, not even once (switch to Permissive in /security to allow it)",
     ),
     (
         "Approvals",
@@ -160,6 +165,20 @@ pub(crate) fn base_overrides_with_registry(
         // contains it (the home folder) cannot delete its entries.
         if let Some(registry) = registry.and_then(registry_profile_key) {
             filesystem.insert(registry.to_string(), string("read"));
+        }
+        // #442 (Travis, 2026-10-11): credential files by name, so one created
+        // after launch is denied too, not only those the preflight found.
+        let workspace = CREDENTIAL_FILE_NAME_PATTERNS
+            .iter()
+            .map(|name| (format!("**/{name}"), string("deny")))
+            .collect::<toml::Table>();
+        filesystem.insert(":workspace_roots".to_string(), workspace.into());
+        // Seatbelt matches the names everywhere by regex; the other sandboxes
+        // can only expand them below the workspace (see `verify_sandbox`).
+        if cfg!(target_os = "macos") {
+            for glob in credential_file_globs("/") {
+                filesystem.insert(glob, string("deny"));
+            }
         }
     }
     vec![
@@ -416,6 +435,126 @@ fn verify_sandbox(config: &Config, failures: &mut Vec<String>) {
             failures.push(format!("Sandbox: {} is writable", outside.display()));
         }
     }
+    verify_credential_names(&file_system, cwd, failures);
+}
+
+/// #442: a credential file created after launch is denied by its name: below
+/// the current folder on every system (the exact globs the Linux sandbox
+/// watches for), and anywhere under Seatbelt.
+fn verify_credential_names(
+    file_system: &codex_protocol::permissions::FileSystemSandboxPolicy,
+    cwd: &Path,
+    failures: &mut Vec<String>,
+) {
+    if cwd
+        .to_string_lossy()
+        .contains(['*', '?', '[', ']', '{', '}'])
+    {
+        failures.push(format!(
+            "Sandbox: the current folder's path ({}) contains glob characters, so credential files created later cannot be denied by name; start from another folder",
+            cwd.display()
+        ));
+        return;
+    }
+    let globs = file_system.get_unreadable_globs_with_cwd(cwd);
+    let mut expected = credential_file_globs(&cwd.to_string_lossy());
+    if cfg!(target_os = "macos") {
+        expected.extend(credential_file_globs("/"));
+    }
+    let matcher = ReadDenyMatcher::try_new(file_system, cwd).ok().flatten();
+    let probe = |path: &Path| matcher.as_ref().is_some_and(|m| m.is_read_denied(path));
+    let probes_denied = [".env", "app/.env.local", ".envrc"]
+        .iter()
+        .all(|name| probe(&cwd.join("corbanu-new").join(name)));
+    if !probes_denied || expected.iter().any(|glob| !globs.contains(glob)) {
+        failures.push(format!(
+            "Sandbox: credential files created later ({}) would be readable to agent commands",
+            CREDENTIAL_FILE_NAME_PATTERNS.join(", ")
+        ));
+    }
+    failures.extend(unsafe_credential_entries(cwd));
+}
+
+/// Folder entries [`unsafe_credential_entries`] looks at, at most.
+const MAX_CHECKED_ENTRIES: usize = 1_000_000;
+
+/// #442: credential-named entries in the current folder that the sandbox
+/// cannot protect, because what the person writes to them could land where
+/// agent commands can read it (links, extra hard links, pipes). Agent
+/// commands cannot create such names under Aggressive on macOS; this catches
+/// ones made before (another session, a checkout). Only the current folder
+/// is checked.
+fn unsafe_credential_entries(cwd: &Path) -> Vec<String> {
+    let Ok(root) = std::fs::canonicalize(cwd) else {
+        return vec![format!("Sandbox: cannot read {}", cwd.display())];
+    };
+    let mut problems = Vec::new();
+    let mut pending = vec![root];
+    let mut seen = 0_usize;
+    while let Some(folder) = pending.pop() {
+        let entries = match std::fs::read_dir(&folder) {
+            Ok(entries) => entries,
+            Err(err) => {
+                problems.push(format!(
+                    "Sandbox: cannot check {} for unsafe credential files: {err}",
+                    folder.display()
+                ));
+                continue;
+            }
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(err) => {
+                    problems.push(format!(
+                        "Sandbox: cannot check {} for unsafe credential files: {err}",
+                        folder.display()
+                    ));
+                    continue;
+                }
+            };
+            seen += 1;
+            if seen > MAX_CHECKED_ENTRIES {
+                problems.push(format!(
+                    "Sandbox: more than {MAX_CHECKED_ENTRIES} files below {} to check for unsafe credential files; start from a smaller folder",
+                    cwd.display()
+                ));
+                return problems;
+            }
+            let path = entry.path();
+            let metadata = match std::fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(err) => {
+                    problems.push(format!(
+                        "Sandbox: cannot check {} for unsafe credential files: {err}",
+                        path.display()
+                    ));
+                    continue;
+                }
+            };
+            if metadata.is_dir() {
+                pending.push(path);
+            } else if is_credential_file_name(&entry.file_name())
+                && let Some(problem) = credential_entry_problem(&metadata)
+            {
+                let target = std::fs::read_link(&path)
+                    .map(|target| {
+                        let target = folder.join(target);
+                        format!(
+                            "; anything written to it went to {}, so check or delete that file too",
+                            target.display()
+                        )
+                    })
+                    .unwrap_or_default();
+                problems.push(format!(
+                    "Sandbox: the credential file {} {problem}, so what is written to it could be read under another name; remove or rename it{target}",
+                    path.display()
+                ));
+            }
+        }
+    }
+    problems
 }
 
 /// The registry nested-launch detection reads must be read-only to agent

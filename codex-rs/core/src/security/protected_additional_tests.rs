@@ -331,9 +331,8 @@ fn issue_513_a_write_never_reopens_the_runtime_entries() {
 #[test]
 fn issue_513_other_write_protections_count_under_aggressive_until_a_grant_lifts_them() {
     let f = fixture();
-    let agents = f.project.join(".agents");
     let protected = protected_policy(&f.denials, &[f.project.as_path()]);
-    let check = |denials: &ReadDenials, writes| {
+    let check = |denials: &ReadDenials, writes, target: &Path| {
         opened(
             Check {
                 denials,
@@ -341,20 +340,10 @@ fn issue_513_other_write_protections_count_under_aggressive_until_a_grant_lifts_
                 reads: true,
                 writes,
             },
-            &write(&agents.join("skill.md")),
+            &write(target),
             &[f.project.as_path()],
         )
     };
-    assert_eq!(
-        check(&f.denials, ReadOnlyScope::Kept),
-        Some(Opened::Write {
-            path: agents.display().to_string(),
-            grantable: true,
-        })
-    );
-    // Moderate: unchanged (#513 decision).
-    assert_eq!(check(&f.denials, ReadOnlyScope::Runtime), None);
-    // An Aggressive grant lifts it; never the runtime entries.
     let mut granted = ReadDenials::collect(
         &f.codex_home,
         Some(&f.user_home),
@@ -362,23 +351,42 @@ fn issue_513_other_write_protections_count_under_aggressive_until_a_grant_lifts_
         &[AbsolutePathBuf::from_absolute_path(&f.project).unwrap()],
     );
     granted.lift_write_rules();
-    assert_eq!(check(&granted, ReadOnlyScope::Kept), None);
-    let runtime = f.codex_home.join("tmp");
-    assert_eq!(
-        opened(
-            Check {
-                denials: &granted,
-                protected: Some(&protected),
-                reads: true,
-                writes: ReadOnlyScope::Kept,
-            },
-            &write(&runtime),
-            &[f.project.as_path()],
+    // A git hook counts until an Aggressive grant lifts it. The project's
+    // `.agents` (#442, Travis 2026-10-11) and the runtime entries never
+    // lift. Moderate is unchanged (#513 decision).
+    for (protected_path, target, grantable) in [
+        (
+            f.project.join(".git/hooks"),
+            f.project.join(".git/hooks/pre-commit"),
+            true,
         ),
-        Some(Opened::Write {
-            path: runtime.display().to_string(),
-            grantable: false,
-        })
+        (
+            f.project.join(".agents"),
+            f.project.join(".agents/skill.md"),
+            false,
+        ),
+        (f.codex_home.join("tmp"), f.codex_home.join("tmp"), false),
+    ] {
+        let refused = Some(Opened::Write {
+            path: protected_path.display().to_string(),
+            grantable,
+        });
+        assert_eq!(check(&f.denials, ReadOnlyScope::Kept, &target), refused);
+        let after_grant = if grantable { None } else { refused.clone() };
+        assert_eq!(
+            check(&granted, ReadOnlyScope::Kept, &target),
+            after_grant,
+            "{}",
+            target.display()
+        );
+    }
+    assert_eq!(
+        check(
+            &f.denials,
+            ReadOnlyScope::Runtime,
+            &f.project.join(".agents/skill.md")
+        ),
+        None
     );
 }
 

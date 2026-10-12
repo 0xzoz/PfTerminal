@@ -34,6 +34,7 @@ mod paths;
 mod shell;
 
 pub(crate) use paths::USER_PERSISTENCE;
+pub(crate) use paths::WORKSPACE_AGENT_SETTINGS;
 pub(crate) use paths::WORKSPACE_PERSISTENCE;
 
 /// Protected surfaces a tainted session may not reach on model authority.
