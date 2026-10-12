@@ -970,9 +970,11 @@ impl App {
         }
         if on {
             self.stop_claude_panes_for_kill_switch();
-        } else {
+        } else if !elsewhere {
             self.send_held_claude_tasks();
         }
+        // Turned off elsewhere: nothing starts here by itself (Travis,
+        // 2026-10-12); waiting Claude-pane tasks stay held.
     }
 
     /// #507 (Travis, 2026-10-12): a kill switch turned on or off by another
@@ -1642,4 +1644,4 @@ fn rename_claude_pane_shortcut(pane_id: String) -> SelectionShortcutAction {
 pub(crate) const KILL_SWITCH_ON_ELSEWHERE: &str = "The security kill switch was turned on in another Corbanu Terminal on this home. Work running here was stopped (Claude panes included), and nothing is sent to the model until it is turned off in /security (here or there). Messages and tasks from other agents wait until then.";
 
 /// #507: shown when another Corbanu Terminal on this home turned it off.
-pub(crate) const KILL_SWITCH_OFF_ELSEWHERE: &str = "The security kill switch was turned off in another Corbanu Terminal on this home. Turns are sent to the model again; tasks held for Claude panes are sent now. Stopped replies and commands do not restart.";
+pub(crate) const KILL_SWITCH_OFF_ELSEWHERE: &str = "The security kill switch was turned off in another Corbanu Terminal on this home. Turns are sent to the model again. Nothing restarts by itself here: stopped replies and commands do not restart, and tasks that waited for Claude panes are not sent now.";

@@ -196,15 +196,18 @@ async fn issue_507_kill_switch_stops_the_running_command_and_its_turn() -> anyho
 /// off: it saves `security_state.json` there and reaches no session of this
 /// process directly. Its save is made in a scratch home and moved into place
 /// the way a commit writes it (an atomic replace).
-fn other_process_switch(home: &Path, choice: HumanRevocation, now: i64) -> anyhow::Result<()> {
-    let scratch = home.with_extension("other-process");
-    std::fs::create_dir_all(&scratch)?;
+fn other_process_switch(
+    home: &Path,
+    scratch: &Path,
+    choice: HumanRevocation,
+    now: i64,
+) -> anyhow::Result<()> {
     if let Ok(saved) = std::fs::read(home.join("security_state.json")) {
         std::fs::write(scratch.join("security_state.json"), saved)?;
     }
-    let basis = LevelBasis::read(&scratch, SecurityLevel::Aggressive, None);
+    let basis = LevelBasis::read(scratch, SecurityLevel::Aggressive, None);
     commit_human_revocation(
-        &scratch,
+        scratch,
         SecurityLevel::Aggressive,
         /*thread*/ None,
         &basis,
@@ -244,8 +247,9 @@ async fn issue_507_kill_switch_from_another_process_stops_the_running_command() 
     })
     .await;
 
+    let other = tempfile::TempDir::new()?;
     let started = std::time::Instant::now();
-    other_process_switch(&home, HumanRevocation::KillSwitchOn, 1_000)?;
+    other_process_switch(&home, other.path(), HumanRevocation::KillSwitchOn, 1_000)?;
     expect_stopped(&test).await;
     let latency = started.elapsed();
     assert!(
@@ -257,7 +261,7 @@ async fn issue_507_kill_switch_from_another_process_stops_the_running_command() 
     assert!(!marker.exists(), "{} was written", marker.display());
     assert_eq!(captured.requests().len(), 1);
 
-    other_process_switch(&home, HumanRevocation::KillSwitchOff, 1_001)?;
+    other_process_switch(&home, other.path(), HumanRevocation::KillSwitchOff, 1_001)?;
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     while kill_switch_on(&home) && std::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(20)).await;

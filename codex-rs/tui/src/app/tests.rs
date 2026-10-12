@@ -6975,7 +6975,8 @@ async fn issue_507_kill_switch_interrupts_running_claude_panes() {
 /// #507 (Travis, 2026-10-12): a kill switch another Corbanu Terminal process
 /// on this home turns on stops this app's running Claude panes too and says
 /// where it came from; the same change reported again (by `/security` here
-/// or the watch) is handled once; turning it off there is announced as well.
+/// or the watch) is handled once; turning it off there is announced and
+/// starts nothing here.
 #[tokio::test]
 async fn issue_507_kill_switch_from_another_process_stops_claude_panes_once() {
     let (mut app, mut app_event_rx, troll_pane_id, orc_pane_id) =
@@ -7016,12 +7017,21 @@ async fn issue_507_kill_switch_from_another_process_stops_claude_panes_once() {
     assert!(!later.cancel_token.is_cancelled());
     assert!(!rendered(&mut app_event_rx).contains("another Corbanu Terminal"));
 
+    // Turned off elsewhere: nothing starts here by itself (Travis,
+    // 2026-10-12); a task held for a Claude pane stays held.
+    app.kill_switch_held_claude_tasks
+        .push((troll_pane_id.clone(), "held task".to_string()));
     app.on_kill_switch_changed(/*on*/ false, /*elsewhere*/ true);
     assert!(!app.kill_switch_known_on);
     let text = rendered(&mut app_event_rx);
     assert!(
         text.contains("turned off in another Corbanu Terminal on this home"),
         "{text}"
+    );
+    assert!(text.contains("Nothing restarts by itself here"), "{text}");
+    assert_eq!(
+        app.kill_switch_held_claude_tasks,
+        vec![(troll_pane_id.clone(), "held task".to_string())]
     );
 }
 

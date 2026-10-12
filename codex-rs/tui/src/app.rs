@@ -1621,8 +1621,6 @@ See the Corbanu Terminal keymap documentation for supported actions and examples
                     .collect()
             })
             .unwrap_or_default();
-        let kill_switch_known_on =
-            crate::legacy_core::security_revocation::kill_switch_on(config.codex_home.as_ref());
 
         let mut app = Self {
             model_catalog,
@@ -1715,7 +1713,8 @@ See the Corbanu Terminal keymap documentation for supported actions and examples
             spawn_auto_loop_state_by_node: HashMap::new(),
             spawn_operator_input_seen: false,
             kill_switch_held_claude_tasks: Vec::new(),
-            kill_switch_known_on,
+            // Set from the home's watch at start (`watch_kill_switch_elsewhere`).
+            kill_switch_known_on: false,
             spawn_quarantine_notified_by_node: HashSet::new(),
             spawn_context_left_by_thread: HashMap::new(),
             spawn_last_report_seq_by_node: HashMap::new(),

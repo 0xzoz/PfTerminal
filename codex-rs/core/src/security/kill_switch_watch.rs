@@ -214,12 +214,12 @@ fn trees_on(home: &Path) -> Vec<Arc<SharedEffectivePolicy>> {
 /// many took a change.
 pub(super) fn apply(home: &Path) -> usize {
     let home = canonical(home);
-    let Ok(Some(stored)) = crate::security::recovery::load(&home) else {
-        return 0;
-    };
     // Never between a commit of this process saving the file and applying
     // it: the commit's own trees take it then, under its epoch.
     let _commit = COMMITS.lock().unwrap_or_else(PoisonError::into_inner);
+    let Ok(Some(stored)) = crate::security::recovery::load(&home) else {
+        return 0;
+    };
     let mut reached = 0;
     for tree in trees_on(&home) {
         let turned_on = {
@@ -229,6 +229,13 @@ pub(super) fn apply(home: &Path) -> usize {
             };
             let held = state.persisted.revocations.kill_switch_event_id().cloned();
             if held.as_ref() == stored.revocations.kill_switch_event_id() {
+                continue;
+            }
+            // Off here and off there (turned on and off within one wake-up):
+            // nothing to stop, and nothing to end.
+            if !stored.revocations.kill_switch_active
+                && !state.persisted.revocations.kill_switch_active
+            {
                 continue;
             }
             // A release only ends the switch the releasing process had seen.
