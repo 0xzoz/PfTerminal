@@ -279,7 +279,7 @@ async fn session(providers: &[(&'static str, &MockHost)]) -> anyhow::Result<Sess
                 }
                 config.model_providers.insert(id.clone(), info);
             }
-            config.model_provider_id = first.clone();
+            config.model_provider_id = first;
             // One model for every wire; Anthropic requests need its catalogued
             // output limit.
             config.model = Some("claude-opus-5".into());
