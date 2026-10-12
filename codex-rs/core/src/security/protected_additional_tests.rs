@@ -382,6 +382,14 @@ fn issue_513_other_write_protections_count_under_aggressive_until_a_grant_lifts_
         } else {
             refused.clone()
         };
+        // #565: before the approval only what no grant lifts counts, so it
+        // is refused before anyone is asked; a git hook waits for the grant.
+        assert_eq!(
+            check(&f.denials, ReadOnlyScope::NeverLifted, &target),
+            after_grant,
+            "{}",
+            target.display()
+        );
         assert_eq!(
             check(&granted, ReadOnlyScope::Kept, &target),
             after_grant,
@@ -445,6 +453,8 @@ fn issue_513_write_refusals_say_whether_a_grant_can_lift_them() {
     );
     assert!(hook.starts_with("Security level Aggressive"), "{hook}");
     assert!(hook.contains("\"Grant once\""), "{hook}");
+    // #565: "Grant once" never lifts .codex or .agents under Aggressive.
+    assert!(!hook.contains(".agents"), "{hook}");
     assert!(!hook.contains("cannot be granted"), "{hook}");
     // #520: kept even with a grant under Aggressive.
     let kept = write_refusal(
@@ -487,13 +497,18 @@ fn issue_513_moderate_scope_follows_the_approver() {
     use SecurityLevel::Aggressive;
     use SecurityLevel::Moderate;
     use SecurityLevel::Permissive;
-    let (runtime, kept) = (ReadOnlyScope::Runtime, ReadOnlyScope::Kept);
+    let (runtime, never_lifted, kept) = (
+        ReadOnlyScope::Runtime,
+        ReadOnlyScope::NeverLifted,
+        ReadOnlyScope::Kept,
+    );
     for (level, person, before, after) in [
         (Moderate, true, runtime, runtime),
         (Moderate, false, kept, kept),
-        // Aggressive: a grant for the run is known only after the approval.
-        (Aggressive, true, runtime, kept),
-        (Aggressive, false, runtime, kept),
+        // Aggressive: a grant for the run is known only after the approval;
+        // what no grant lifts is refused before anyone is asked (#565).
+        (Aggressive, true, never_lifted, kept),
+        (Aggressive, false, never_lifted, kept),
         (Permissive, false, runtime, runtime),
     ] {
         assert_eq!(
