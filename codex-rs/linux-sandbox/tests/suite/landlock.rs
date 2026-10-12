@@ -2294,18 +2294,19 @@ async fn the_helper_refuses_a_root_swapped_after_the_check() {
     codex_sandboxing::writable_root_ledger::record_writable_roots(&policy, &workspace);
     let pinned =
         codex_sandboxing::writable_root_ledger::check_writable_roots(&policy, &workspace).unwrap();
-    let mut args = codex_sandboxing::landlock::create_linux_sandbox_command_args_for_permission_profile(
-        vec![
-            "bash".to_string(),
-            "-c".to_string(),
-            "echo pwned > target/planted; echo wrote=$?".to_string(),
-        ],
-        &workspace,
-        &profile,
-        &workspace,
-        /*use_legacy_landlock*/ false,
-        /*allow_network_for_proxy*/ false,
-    );
+    let mut args =
+        codex_sandboxing::landlock::create_linux_sandbox_command_args_for_permission_profile(
+            vec![
+                "bash".to_string(),
+                "-c".to_string(),
+                "echo pwned > target/planted; echo wrote=$?".to_string(),
+            ],
+            &workspace,
+            &profile,
+            &workspace,
+            /*use_legacy_landlock*/ false,
+            /*allow_network_for_proxy*/ false,
+        );
     codex_sandboxing::landlock::insert_pinned_writable_roots_arg(&mut args, &pinned);
     // Swapped after the check, before the helper runs.
     std::fs::rename(&target, workspace.join("moved")).unwrap();

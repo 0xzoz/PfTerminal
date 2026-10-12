@@ -126,22 +126,8 @@ pub fn check_writable_roots(
                 now: now.clone(),
             });
         }
-        let holders: Vec<usize> = roots
-            .iter()
-            .enumerate()
-            .filter(|(other, holder)| *other != index && holds(holder, &reals[*other], root))
-            .map(|(other, _)| other)
-            .collect();
-        if let Some(first) = holders.first()
-            && !holders
-                .iter()
-                .any(|holder| now.starts_with(&reals[*holder]))
-        {
-            return Err(WritableRootRefusal::OutsideHolder {
-                root: root.root.to_path_buf(),
-                real: now.clone(),
-                holder: roots[*first].root.to_path_buf(),
-            });
+        if let Some(refusal) = outside_holders(&roots, &reals, index) {
+            return Err(refusal);
         }
         pinned.push(PinnedWritableRoot {
             root: root.root.clone(),
@@ -149,6 +135,50 @@ pub fn check_writable_roots(
         });
     }
     Ok(pinned)
+}
+
+/// The check of [`check_writable_roots`] that needs no record: no writable
+/// root held by another leads outside every root holding it. The Linux
+/// helper applies it to the roots it computes itself (a `:tmpdir` root
+/// follows the command's `TMPDIR`, which the caller may not share).
+pub fn check_held_links(
+    policy: &FileSystemSandboxPolicy,
+    cwd: &Path,
+) -> Result<(), WritableRootRefusal> {
+    let roots = policy.get_writable_roots_with_cwd(cwd);
+    let reals: Vec<PathBuf> = roots
+        .iter()
+        .map(|root| real_path(root.root.as_path()))
+        .collect();
+    match (0..roots.len()).find_map(|index| outside_holders(&roots, &reals, index)) {
+        Some(refusal) => Err(refusal),
+        None => Ok(()),
+    }
+}
+
+/// The refusal for `roots[index]` when it is held by other roots and leads
+/// outside all of them (`reals` are the roots' real locations).
+fn outside_holders(
+    roots: &[WritableRoot],
+    reals: &[PathBuf],
+    index: usize,
+) -> Option<WritableRootRefusal> {
+    let root = &roots[index];
+    let holders: Vec<usize> = roots
+        .iter()
+        .enumerate()
+        .filter(|(other, holder)| *other != index && holds(holder, &reals[*other], root))
+        .map(|(other, _)| other)
+        .collect();
+    let first = holders.first()?;
+    (!holders
+        .iter()
+        .any(|holder| reals[index].starts_with(&reals[*holder])))
+    .then(|| WritableRootRefusal::OutsideHolder {
+        root: root.root.to_path_buf(),
+        real: reals[index].clone(),
+        holder: roots[*first].root.to_path_buf(),
+    })
 }
 
 /// The real location recorded for `root`, if this process has seen it.

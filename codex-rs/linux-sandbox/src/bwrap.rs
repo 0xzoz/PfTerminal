@@ -435,6 +435,12 @@ fn create_filesystem_args(
     glob_scan_max_depth: Option<usize>,
 ) -> Result<BwrapArgs> {
     let unreadable_globs = file_system_sandbox_policy.get_unreadable_globs_with_cwd(cwd);
+    // #536: for a session's command, no writable root held by another may
+    // lead outside every root holding it, including the roots computed here.
+    if PINNED_WRITABLE_ROOTS.get().is_some() {
+        codex_sandboxing::writable_root_ledger::check_held_links(file_system_sandbox_policy, cwd)
+            .map_err(|refusal| CodexErr::UnsupportedOperation(refusal.to_string()))?;
+    }
     // Bubblewrap requires bind mount targets to exist. Skip missing writable
     // roots so mixed-platform configs can keep harmless paths for other
     // environments without breaking Linux command startup.
@@ -757,21 +763,13 @@ fn create_filesystem_args(
 
         // #536: a root pinned by the caller is bound from the folder at its
         // pinned real location, opened and checked here.
-        let pinned = match PINNED_WRITABLE_ROOTS.get() {
-            Some(pinned) => Some(
-                pinned
-                    .iter()
-                    .find(|pinned| pinned.root == writable_root.root)
-                    .ok_or_else(|| {
-                        CodexErr::UnsupportedOperation(format!(
-                            "Refused to run the command: the writable folder `{}` was not \
-                             checked before the run.",
-                            root.display()
-                        ))
-                    })?,
-            ),
-            None => None,
-        };
+        // Roots the caller did not see (a `:tmpdir` root follows this
+        // command's `TMPDIR`) passed the held-link check above.
+        let pinned = PINNED_WRITABLE_ROOTS.get().and_then(|pinned| {
+            pinned
+                .iter()
+                .find(|pinned| pinned.root == writable_root.root)
+        });
         match pinned {
             Some(pinned) => {
                 let file = open_pinned_writable_root(root, mount_root, pinned)?;
