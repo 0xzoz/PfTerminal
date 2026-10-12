@@ -16,6 +16,7 @@ use crate::environment_selection::ThreadEnvironments;
 use crate::exec_policy::ExecPolicyManager;
 use crate::guardian::GuardianRejectionCircuitBreaker;
 use crate::mcp::McpManager;
+use crate::state::ActiveAuthManager;
 use crate::tools::ExecutedToolCallRecorder;
 use crate::tools::code_mode::CodeModeService;
 use crate::tools::handlers::ToolSearchHandlerCache;
@@ -58,7 +59,8 @@ pub(crate) struct SessionServices {
     pub(crate) user_shell: Arc<crate::shell::Shell>,
     pub(crate) show_raw_agent_reasoning: bool,
     pub(crate) exec_policy: Arc<ExecPolicyManager>,
-    pub(crate) auth_manager: Arc<AuthManager>,
+    /// The sign-in of the session's current provider; see [`ActiveAuthManager`].
+    pub(crate) active_auth: ActiveAuthManager,
     /// Upload-only clients shared across turns without logging signed blob URLs.
     pub(crate) openai_file_upload_client_pool: RouteAwareClientPool,
     pub(crate) models_manager: SharedModelsManager,
@@ -101,6 +103,12 @@ pub(crate) struct SessionServices {
 }
 
 impl SessionServices {
+    /// The sign-in account-bound services use now (PF-84): it follows a
+    /// mid-session provider switch, so take it per use, not once.
+    pub(crate) fn auth_manager(&self) -> Arc<AuthManager> {
+        self.active_auth.get()
+    }
+
     pub(crate) fn model_client(&self) -> Arc<ModelClient> {
         self.model_client.load_full()
     }

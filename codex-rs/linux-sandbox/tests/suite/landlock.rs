@@ -41,7 +41,7 @@ const NETWORK_TIMEOUT_MS: u64 = 10_000;
 #[cfg(target_arch = "aarch64")]
 const NETWORK_TIMEOUT_MS: u64 = 10_000;
 
-const BWRAP_UNAVAILABLE_ERR: &str = "bubblewrap is unavailable: no system bwrap was found";
+const BWRAP_UNAVAILABLE_ERR: &str = "bubblewrap is unavailable:";
 
 fn create_env_from_core_vars() -> HashMap<String, String> {
     let policy = ShellEnvironmentPolicy::default();
@@ -1182,11 +1182,11 @@ async fn sandbox_blocks_dev_tcp_redirection() {
 }
 
 /// PF-23-S02 on Linux, full-write profiles: what the protected-path rules
-/// hold (a read-only file stays read-only, also through a symlinked dotfile
-/// and after its folder is renamed) and the limits the gate records (the
-/// link itself can be removed, the folder renamed and the path rebuilt,
-/// because bind mounts move with their folder). macOS blocks those too
-/// (`seatbelt_tests::renaming_a_folder_above_a_protected_path_is_denied`).
+/// hold (a read-only file stays read-only, also through a symlinked dotfile;
+/// since #587 its folder cannot be renamed either, as on macOS:
+/// `seatbelt_tests::renaming_a_folder_above_a_protected_path_is_denied`)
+/// and the limits the gate records (the link itself can be removed, and a
+/// new file created next to the protected one).
 #[tokio::test]
 async fn pf_23_s02_full_write_profile_keeps_protected_files_read_only() {
     if should_skip_bwrap_tests().await {
@@ -1240,11 +1240,11 @@ async fn pf_23_s02_full_write_profile_keeps_protected_files_read_only() {
     .await
     .expect("full-write profile runs under bubblewrap");
     let stdout = output.stdout.text;
-    for held in ["link-write=1", "write=1", "moved-write=1"] {
+    for held in ["link-write=1", "write=1", "mv=1", "moved-write=1"] {
         assert!(stdout.contains(held), "{held}: {stdout}");
     }
-    // Recorded Linux limits: the rename and the link removal go through.
-    for limit in ["other=0", "mv=0", "rm-link=0"] {
+    // Recorded Linux limits: the link removal and a new file go through.
+    for limit in ["other=0", "rm-link=0"] {
         assert!(stdout.contains(limit), "{limit}: {stdout}");
     }
     assert_eq!(
@@ -1252,9 +1252,113 @@ async fn pf_23_s02_full_write_profile_keeps_protected_files_read_only() {
         "ok\n"
     );
     assert_eq!(
-        std::fs::read_to_string(base.join("moved/fish/config.fish")).expect("moved config"),
+        std::fs::read_to_string(config.join("fish/config.fish")).expect("config"),
         "ok\n"
     );
+    assert!(!base.join("moved").exists());
+}
+
+/// #587: under a profile that can write the Corbanu home's parent (full
+/// access, or a workspace holding it) with protected paths, a command
+/// cannot move the home (or a folder above it) aside and plant a new one:
+/// the new folder would have none of the rules, and a later command could
+/// read the moved copy's denied stores under the moved name.
+#[tokio::test]
+async fn issue_587_protected_home_and_its_folders_cannot_be_moved_aside() {
+    if should_skip_bwrap_tests().await {
+        eprintln!("skipping bwrap test: bwrap sandbox prerequisites are unavailable");
+        return;
+    }
+    for full_access in [true, false] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().canonicalize().expect("canonical");
+        let home = base.join("outer/home");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::write(home.join("auth.json"), "secret-587\n").expect("store");
+        std::fs::write(home.join("AGENTS.md"), "original\n").expect("AGENTS.md");
+        let entry = |path: std::path::PathBuf, access| {
+            FileSystemSandboxEntry::skip_missing_path(
+                FileSystemPath::Path {
+                    path: AbsolutePathBuf::from_absolute_path(path).expect("absolute"),
+                },
+                access,
+            )
+        };
+        let writable = if full_access {
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                access: FileSystemAccessMode::Write,
+                missing_path_behavior: None,
+            }
+        } else {
+            entry(base.clone(), FileSystemAccessMode::Write)
+        };
+        // As `ReadDenials` builds it: denied stores (one not created yet)
+        // and read-only runtime entries (one missing).
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                access: FileSystemAccessMode::Read,
+                missing_path_behavior: None,
+            },
+            writable,
+            entry(home.join("auth.json"), FileSystemAccessMode::Deny),
+            entry(home.join("secrets"), FileSystemAccessMode::Deny),
+            entry(home.join("AGENTS.md"), FileSystemAccessMode::Read),
+            entry(home.join("skills"), FileSystemAccessMode::Read),
+        ]);
+        let run = |script: &'static str| {
+            let cwd = AbsolutePathBuf::from_absolute_path(&base).expect("absolute base");
+            let profile = PermissionProfile::from_runtime_permissions(
+                &policy,
+                NetworkSandboxPolicy::Restricted,
+            );
+            async move {
+                run_cmd_result_with_permission_profile_for_cwd(
+                    &["bash", "-c", script],
+                    cwd,
+                    profile,
+                    create_env_from_core_vars(),
+                    LONG_TIMEOUT_MS,
+                    /*use_legacy_landlock*/ false,
+                )
+                .await
+            }
+        };
+        let output = run("mv outer/home outer/home.old; echo mv-home=$?; \
+                          mv outer outer.old; echo mv-outer=$?; \
+                          mkdir -p outer/home; echo planted > outer/home/AGENTS.md; echo plant=$?")
+        .await
+        .expect("the profile runs under bubblewrap");
+        let stdout = output.stdout.text;
+        let stderr = output.stderr.text;
+        for held in ["mv-home=1", "mv-outer=1", "plant=1"] {
+            assert!(
+                stdout.contains(held),
+                "full access {full_access}: {held}: {stdout}\nstderr: {stderr}"
+            );
+        }
+        assert!(!base.join("outer/home.old").exists());
+        assert!(!base.join("outer.old").exists());
+        assert_eq!(
+            std::fs::read_to_string(home.join("AGENTS.md")).expect("AGENTS.md"),
+            "original\n"
+        );
+        // A later command with the same rules: on main the moved store was
+        // readable under its new name.
+        let output = run("cat outer/home.old/auth.json outer.old/home/auth.json; true")
+            .await
+            .expect("the profile runs under bubblewrap");
+        assert!(
+            !output.stdout.text.contains("secret-587"),
+            "full access {full_access}: {}",
+            output.stdout.text
+        );
+    }
 }
 
 /// #473: under a full-write profile `~/.claude` is read-only (it runs hooks)
@@ -1340,6 +1444,166 @@ async fn missing_denied_paths_below_read_only_or_missing_folders_run_and_stay_hi
         "secret-473\n"
     );
     assert!(!base.join(".config").exists(), "placeholder removed");
+}
+
+/// #562: two overlapping runs that share placeholders for missing protected
+/// paths (a read-only `AGENTS.md`, a denied `AGENTS.override.md`, and a
+/// denied path below a missing folder). The second run starts while the
+/// first holds them. When the first ends, its cleanup must not remove them
+/// from under the second (unlinking a mount point detaches it in every
+/// mount namespace), and the second must still run where a placeholder file
+/// stands in for a missing folder. Nothing is created, and nothing is left.
+#[tokio::test]
+async fn overlapping_runs_keep_shared_placeholders_until_the_last_ends() {
+    if should_skip_bwrap_tests().await {
+        eprintln!("skipping bwrap test: bwrap sandbox prerequisites are unavailable");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base = dir.path().canonicalize().expect("canonical");
+    let home = base.join("home");
+    std::fs::create_dir_all(&home).expect("home");
+    let entry = |path: &std::path::Path, access| {
+        FileSystemSandboxEntry::skip_missing_path(
+            FileSystemPath::Path {
+                path: AbsolutePathBuf::from_absolute_path(path).expect("absolute"),
+            },
+            access,
+        )
+    };
+    // As `ReadDenials` builds it on Linux for a full-write profile.
+    let policy = FileSystemSandboxPolicy::restricted(vec![
+        FileSystemSandboxEntry {
+            path: FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            },
+            access: FileSystemAccessMode::Write,
+            missing_path_behavior: None,
+        },
+        entry(&home.join("AGENTS.md"), FileSystemAccessMode::Read),
+        entry(&home.join("AGENTS.override.md"), FileSystemAccessMode::Deny),
+        entry(&home.join("Library/Keychains"), FileSystemAccessMode::Deny),
+    ]);
+    let run = |script: String| {
+        let base = base.clone();
+        let policy = policy.clone();
+        async move {
+            run_cmd_result_with_permission_profile_for_cwd(
+                &["bash", "-c", &script],
+                AbsolutePathBuf::from_absolute_path(&base).expect("absolute base"),
+                PermissionProfile::from_runtime_permissions(
+                    &policy,
+                    NetworkSandboxPolicy::Restricted,
+                ),
+                create_env_from_core_vars(),
+                NETWORK_TIMEOUT_MS,
+                /*use_legacy_landlock*/ false,
+            )
+            .await
+        }
+    };
+    let wait_for = |name: &str| {
+        format!("i=0; while [ ! -e {name} ] && [ $i -lt 120 ]; do sleep 0.05; i=$((i+1)); done")
+    };
+    // The first run waits until the second has started, then ends.
+    let first_script = format!("touch first-started; {}; true", wait_for("second-started"));
+    // The second starts once the first holds the placeholders, waits until
+    // the first has ended, then tries to create every protected path.
+    let second_script = format!(
+        "touch second-started; {}; \
+         printf x > home/AGENTS.md; echo agents=$?; \
+         printf x > home/AGENTS.override.md; echo override=$?; \
+         mkdir -p home/Library/Keychains; echo keychains=$?; true",
+        wait_for("first-ended")
+    );
+    let first = async {
+        let output = run(first_script).await;
+        std::fs::write(base.join("first-ended"), "").expect("first-ended");
+        output
+    };
+    let second = async {
+        for _ in 0..200 {
+            if base.join("first-started").exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(
+            home.join("AGENTS.md").exists(),
+            "the first run's placeholder"
+        );
+        run(second_script).await
+    };
+    let (first, second) = tokio::join!(first, second);
+    let first = first.expect("first run");
+    assert_eq!(first.exit_code, 0, "first: {}", first.stderr.text);
+    let second = second.expect("second run");
+    let stdout = second.stdout.text;
+    let stderr = second.stderr.text;
+    assert_eq!(second.exit_code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    for held in ["agents=1", "override=1", "keychains=1"] {
+        assert!(stdout.contains(held), "{held}: {stdout}\nstderr: {stderr}");
+    }
+    for name in ["AGENTS.md", "AGENTS.override.md", "Library"] {
+        assert!(!home.join(name).exists(), "{name} left in the home");
+    }
+}
+
+/// #562: a file left where a denied path's folder would be (here a stale
+/// placeholder for `home/Library` from a run that was killed) used to fail
+/// every run (`Can't mkdir parents … Not a directory`). The run now works,
+/// and the file stays in place: the command can neither remove it nor create
+/// the denied path below it.
+#[tokio::test]
+async fn a_file_where_a_denied_paths_folder_would_be_stays_in_place() {
+    if should_skip_bwrap_tests().await {
+        eprintln!("skipping bwrap test: bwrap sandbox prerequisites are unavailable");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base = dir.path().canonicalize().expect("canonical");
+    let home = base.join("home");
+    std::fs::create_dir_all(&home).expect("home");
+    std::fs::write(home.join("Library"), "").expect("stale placeholder");
+    let policy = FileSystemSandboxPolicy::restricted(vec![
+        FileSystemSandboxEntry {
+            path: FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            },
+            access: FileSystemAccessMode::Write,
+            missing_path_behavior: None,
+        },
+        FileSystemSandboxEntry::skip_missing_path(
+            FileSystemPath::Path {
+                path: AbsolutePathBuf::from_absolute_path(home.join("Library/Keychains"))
+                    .expect("absolute"),
+            },
+            FileSystemAccessMode::Deny,
+        ),
+    ]);
+    let output = run_cmd_result_with_permission_profile_for_cwd(
+        &[
+            "bash",
+            "-c",
+            "rm -f home/Library; echo rm=$?; mv home/Library home/Moved; echo mv=$?; \
+             mkdir -p home/Library/Keychains; echo mkdir=$?; true",
+        ],
+        AbsolutePathBuf::from_absolute_path(&base).expect("absolute base"),
+        PermissionProfile::from_runtime_permissions(&policy, NetworkSandboxPolicy::Restricted),
+        create_env_from_core_vars(),
+        NETWORK_TIMEOUT_MS,
+        /*use_legacy_landlock*/ false,
+    )
+    .await
+    .expect("the run starts");
+    let stdout = output.stdout.text;
+    let stderr = output.stderr.text;
+    assert_eq!(output.exit_code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    for held in ["rm=1", "mv=1", "mkdir=1"] {
+        assert!(stdout.contains(held), "{held}: {stdout}\nstderr: {stderr}");
+    }
+    assert!(home.join("Library").is_file(), "the file stays");
+    assert!(!home.join("Moved").exists());
 }
 
 /// #493: under a full-write profile with a denial, the writable `/` bind

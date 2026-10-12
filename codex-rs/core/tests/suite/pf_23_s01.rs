@@ -1144,7 +1144,8 @@ enum WriteTarget {
 /// PF-23-S02 write protection the run keeps. The Corbanu home's runtime
 /// entries (`tmp` holds the sandbox launchers) are refused under Aggressive
 /// and Moderate, before anyone is asked, even where a person's approval
-/// lifts the other rules (#239). Under Aggressive the other read-only paths
+/// lifts the other rules (#239); so are the project's `.codex` and `.agents`
+/// under Aggressive (#565). Under Aggressive the other read-only paths
 /// are refused too unless a grant lifts them; under Moderate unless a
 /// person approved the command when asked (see
 /// `issue_513_moderate_only_a_persons_fresh_approval_lifts_a_write_protection`
@@ -1170,8 +1171,10 @@ async fn issue_513_additional_writes_never_reopen_a_write_protection() -> anyhow
         (aggressive, true, true, RuntimeFile, false, false),
         // As Corbanu Terminal launches Aggressive: permission requests off.
         (aggressive, false, false, RuntimeFile, false, false),
-        // Refused once the run's grant is known (none here), after asking.
-        (aggressive, false, true, ProjectAgents, false, true),
+        // #565: no grant lifts it under Aggressive (#520), so it is refused
+        // before anyone is asked, with permission requests on or off.
+        (aggressive, false, true, ProjectAgents, false, false),
+        (aggressive, false, false, ProjectAgents, false, false),
         (moderate, false, true, RuntimeFolder, false, false),
         // After untrusted content a person's approval of this protected
         // command would lift the other rules (#239); never this one.
@@ -1242,7 +1245,12 @@ async fn issue_513_additional_writes_never_reopen_a_write_protection() -> anyhow
         let output = output_text(&requests[requests.len() - 1], "call-write");
         let launcher_now = std::fs::read_to_string(&launcher)?;
         let wrote = output.contains("wrote-513") || launcher_now != "original";
-        let explained = output.contains("blocked writing to") && output.contains("/security");
+        let explained = output.contains("blocked writing to")
+            && output.contains("/security")
+            // #565: the #520 explanation for what no grant lifts.
+            && (level != aggressive
+                || !matches!(target, ProjectAgents)
+                || output.contains("neither an additional permission nor"));
         if wrote != writable || (!writable && !explained) || asked != asked_first {
             wrong.push(format!(
                 "{level:?} tainted={tainted} requests_on={requests_on} {target:?}: \
@@ -1568,6 +1576,161 @@ async fn issue_540_runtime_entries_stay_read_only_when_a_person_lifts_the_rules(
                 "{level:?} escalated={escalated} rule={allowed_by_rule}: asked={asked} \
                  launcher={now:?}: {output}"
             ));
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
+/// Issue #562: a protected command cannot create a missing runtime entry of
+/// the Corbanu home either (`AGENTS.md`, `skills`, `plugins`, `packages`), nor the
+/// `AGENTS.override.md` read ahead of it, even with full access and with
+/// the path built at run time (only the sandbox can stop it). On Linux no
+/// placeholder is left behind. Permissive is unchanged.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_562_missing_runtime_entries_cannot_be_created() -> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let mut wrong = Vec::new();
+    for (level, created) in [
+        (SecurityLevel::Moderate, false),
+        (SecurityLevel::Aggressive, false),
+        (SecurityLevel::Permissive, true),
+    ] {
+        let home = Arc::new(TempDir::new()?);
+        let root = home.path().canonicalize()?;
+        let path = root.to_string_lossy().into_owned();
+        // Split inside the home folder's own name: neither part names it.
+        let (head, tail) = path.split_at(path.len() - 2);
+        let command = format!(
+            "h=\"$(printf '{head}%s' {tail})\"; a=\"AGE$(printf NTS)\"; \
+             printf x > \"$h/$a.md\"; printf x > \"$h/$a.override.md\"; \
+             mkdir -p \"$h/skills/issue562\" \"$h/plugins/issue562\" \"$h/packages/issue562\"; \
+             echo ran-562"
+        );
+        let (test, captured) = start_turn_in(
+            Some(home.clone()),
+            level,
+            AskForApproval::Never,
+            vec![
+                call(
+                    "call-create",
+                    "shell_command",
+                    json!({ "command": command }),
+                ),
+                done_step(),
+            ],
+            |config| {
+                config
+                    .permissions
+                    .set_permission_profile(PermissionProfile::Disabled)
+                    .expect("full access");
+            },
+        )
+        .await?;
+        assert!(next_exec_approval(&test).await.is_none());
+        let requests = captured.requests();
+        let output = output_text(&requests[requests.len() - 1], "call-create");
+        let entries = [
+            "AGENTS.md",
+            "AGENTS.override.md",
+            "skills/issue562",
+            "plugins/issue562",
+            "packages/issue562",
+        ];
+        let present: Vec<&str> = entries
+            .into_iter()
+            .filter(|entry| root.join(entry).exists())
+            .collect();
+        let expected = if created {
+            entries.to_vec()
+        } else {
+            Vec::new()
+        };
+        if !output.contains("ran-562") || present != expected {
+            wrong.push(format!("{level:?}: present={present:?}: {output}"));
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
+/// #587: under a protected level, with full access or a workspace-write
+/// profile (whose temporary-folder root holds the test's Corbanu home, like
+/// a workspace covering `$HOME`), a command cannot move the Corbanu home
+/// aside and plant a new one (which would have none of the rules, and leave
+/// the old stores readable under the moved name), on either platform.
+/// Permissive is unchanged.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_587_the_corbanu_home_cannot_be_moved_aside() -> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let mut wrong = Vec::new();
+    for (level, moved, full_access) in [
+        (SecurityLevel::Moderate, false, true),
+        (SecurityLevel::Moderate, false, false),
+        (SecurityLevel::Aggressive, false, true),
+        (SecurityLevel::Permissive, true, true),
+        (SecurityLevel::Permissive, true, false),
+    ] {
+        let home = Arc::new(TempDir::new()?);
+        let root = home.path().canonicalize()?;
+        std::fs::write(root.join("AGENTS.md"), "original\n")?;
+        let old = root.with_file_name(format!(
+            "{}.old",
+            root.file_name().unwrap_or_default().to_string_lossy()
+        ));
+        let path = root.to_string_lossy().into_owned();
+        // Split inside the home folder's own name: neither part names it.
+        let (head, tail) = path.split_at(path.len() - 2);
+        let command = format!(
+            "h=\"$(printf '{head}%s' {tail})\"; mv \"$h\" \"$h.old\"; echo mv=$?; \
+             mkdir \"$h\" && echo planted > \"$h/AGENTS.md\"; echo ran-587"
+        );
+        let (test, captured) = start_turn_in(
+            Some(home.clone()),
+            level,
+            AskForApproval::Never,
+            vec![
+                call("call-move", "shell_command", json!({ "command": command })),
+                done_step(),
+            ],
+            move |config| {
+                let profile = if full_access {
+                    PermissionProfile::Disabled
+                } else {
+                    PermissionProfile::workspace_write()
+                };
+                config
+                    .permissions
+                    .set_permission_profile(profile)
+                    .expect("profile");
+            },
+        )
+        .await?;
+        assert!(next_exec_approval(&test).await.is_none());
+        let requests = captured.requests();
+        let output = output_text(&requests[requests.len() - 1], "call-move");
+        let agents = std::fs::read_to_string(root.join("AGENTS.md")).unwrap_or_default();
+        let was_moved = old.exists();
+        if !output.contains("ran-587")
+            || was_moved != moved
+            || (agents == "planted\n") != moved
+            || output.contains("mv=0") != moved
+        {
+            wrong.push(format!(
+                "{level:?} full_access={full_access}: moved={was_moved} AGENTS.md={agents:?}: {output}"
+            ));
+        }
+        drop(test);
+        if was_moved {
+            // Put the original home back so the temporary folder removes it.
+            std::fs::remove_dir_all(&root)?;
+            std::fs::rename(&old, &root)?;
         }
     }
     assert_eq!(wrong, Vec::<String>::new());

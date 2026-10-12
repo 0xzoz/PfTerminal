@@ -58,6 +58,9 @@ const CORBANU_STORES: &[&str] = &[
     "security_level.toml",
     "security_state.json",
     "security_state.lock",
+    // #562: read as instructions ahead of AGENTS.md; a command may not
+    // create it either.
+    "AGENTS.override.md",
     "wallet",
     "run",
     "log",
@@ -78,6 +81,9 @@ const CORBANU_READ_ONLY: &[&str] = &[
     "packages",
     "AGENTS.md",
 ];
+
+/// The one runtime entry that is a file (#562).
+const DEFAULT_AGENTS_MD: &str = "AGENTS.md";
 
 /// State and log databases, created after launch.
 const CORBANU_DATABASES: &str = "*.sqlite*";
@@ -160,7 +166,7 @@ impl ReadDenials {
             denials.home = Some(codex_home.clone());
         }
         for entry in CORBANU_READ_ONLY {
-            denials.push_home_read_only(codex_home.join(entry), keep);
+            denials.push_runtime_read_only(codex_home.join(entry), keep);
         }
         denials.runtime_read_only = std::mem::take(&mut denials.read_only);
         // #442 (Travis, 2026-10-11): the project's agent settings stay
@@ -243,6 +249,14 @@ impl ReadDenials {
         workspace_roots: &[AbsolutePathBuf],
         profile: &PermissionProfile,
     ) -> Self {
+        // #562: only where the command could otherwise create them.
+        if cfg!(target_os = "linux")
+            && profile
+                .file_system_sandbox_policy()
+                .can_write_path_with_cwd(codex_home, turn_cwd.as_path())
+        {
+            create_missing_runtime_folders(codex_home);
+        }
         let mut keep = vec![turn_cwd.clone()];
         keep.extend(workspace_roots.iter().cloned());
         keep.extend(
@@ -293,6 +307,16 @@ impl ReadDenials {
         if cfg!(target_os = "linux") && std::fs::metadata(path.as_path()).is_err() {
             return;
         }
+        self.push_read_only(path, keep);
+    }
+
+    /// #562: a runtime entry of the Corbanu home, also when it is missing,
+    /// so a protected command cannot create it (`AGENTS.md`, `skills`). On
+    /// Linux bubblewrap holds a missing path with an empty read-only
+    /// placeholder for the command's run, as it does for the Corbanu stores;
+    /// `for_turn` first creates the missing runtime folders where the
+    /// profile could write them ([`create_missing_runtime_folders`]).
+    fn push_runtime_read_only(&mut self, path: AbsolutePathBuf, keep: &[AbsolutePathBuf]) {
         self.push_read_only(path, keep);
     }
 
@@ -496,6 +520,23 @@ impl ReadDenials {
             &file_system,
             network,
         ))
+    }
+}
+
+/// #562 (Linux): creates the Corbanu home's missing runtime folders, empty,
+/// as Corbanu would. They are then held read-only as they are, so bubblewrap
+/// never puts a placeholder file where Corbanu expects a folder (a skill or
+/// plugin install while a command runs, or one left behind). A runtime
+/// entry that is a link to a missing folder is left as it is (its target
+/// gets the placeholder). `AGENTS.md`, a file, keeps its placeholder: an
+/// empty one adds no instructions.
+pub(crate) fn create_missing_runtime_folders(codex_home: &Path) {
+    for entry in CORBANU_READ_ONLY {
+        if *entry != DEFAULT_AGENTS_MD {
+            // Fails harmlessly where it exists (also as a link) or the home
+            // is missing; the entry is protected either way.
+            let _ = std::fs::create_dir(codex_home.join(entry));
+        }
     }
 }
 
