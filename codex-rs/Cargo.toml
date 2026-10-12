@@ -618,6 +618,25 @@ opt-level = 3
 [profile.dev.package.salsa20]
 opt-level = 3
 
+# SQLite itself: the state DB is shared by every Corbanu process on a home, and
+# a write transaction holds its one write lock for as long as its statements
+# run. Unoptimized, SQLite's C code ran the ledger's scans 3-4x slower, so a
+# debug build held the lock several times longer and other sessions waited.
+[profile.dev.package.libsqlite3-sys]
+opt-level = 3
+
+[profile.dev.package.codex-state]
+opt-level = 2
+
+[profile.dev.package.sqlx-sqlite]
+opt-level = 2
+
+[profile.dev.package.sqlx-core]
+opt-level = 2
+
+[profile.dev.package.serde_json]
+opt-level = 2
+
 [profile.test.package.scrypt]
 opt-level = 3
 

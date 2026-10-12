@@ -5974,6 +5974,9 @@ impl App {
             AppEvent::ClaudePaneApprovalRequested(request) => {
                 self.chat_widget.show_claude_approval(*request);
             }
+            AppEvent::ClaudePaneLaunchProblem { pane_id, problem } => {
+                self.on_claude_pane_launch_problem(&pane_id, problem);
+            }
             AppEvent::ClaudePaneApprovalsSettled => {
                 self.chat_widget.remove_settled_claude_approvals();
             }

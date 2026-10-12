@@ -2138,3 +2138,104 @@ fn unlistable_directory_cannot_be_listed_but_its_entries_stay_usable() {
         assert!(!stdout.contains("secret-506"), "{context}");
     }
 }
+
+/// #442 (Travis, 2026-10-11), real `sandbox-exec`: under credential-name deny
+/// globs an agent command can neither read such a file nor create, link,
+/// rename to or overwrite one, in any letter case, so it cannot plant a link or
+/// pipe that the person's later `.env` would be written through. A folder
+/// with such a name (a `.env` virtualenv) and other files stay usable.
+#[test]
+fn credential_names_cannot_be_read_created_or_planted() {
+    let tmp = TempDir::new().expect("tempdir");
+    let work = tmp.path().canonicalize().expect("canonical");
+    fs::write(work.join(".env"), "API_KEY=dummy-442-person").expect("env");
+    fs::write(work.join("notes"), "plain-notes").expect("notes");
+    let mut entries = vec![
+        FileSystemSandboxEntry::new(
+            FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            },
+            FileSystemAccessMode::Read,
+        ),
+        FileSystemSandboxEntry::new(
+            FileSystemPath::Path {
+                path: AbsolutePathBuf::from_absolute_path(&work).expect("absolute"),
+            },
+            FileSystemAccessMode::Write,
+        ),
+    ];
+    entries.extend(
+        codex_protocol::permissions::credential_file_globs(&work.to_string_lossy())
+            .into_iter()
+            .map(|pattern| {
+                FileSystemSandboxEntry::new(
+                    FileSystemPath::GlobPattern { pattern },
+                    FileSystemAccessMode::Deny,
+                )
+            }),
+    );
+    let policy = FileSystemSandboxPolicy::restricted(entries);
+    let script = "cat .env; echo read=$?; cat .ENV; echo case=$?; \
+         printf x > .env; echo overwrite=$?; printf x >> .env; echo append=$?; \
+         printf x > .env.local; echo create=$?; ln notes .env.hard; echo hard=$?; \
+         ln -s notes .envrc; echo sym=$?; mkfifo .env.pipe; echo fifo=$?; \
+         cp notes n2 && mv n2 .env.moved; echo moved=$?; mv .env gone; echo away=$?; \
+         printf x > .ENV.Local; echo upper=$?; ln -s notes .ENVRC; echo upperlink=$?; \
+         mkdir .env.venv && printf ok > .env.venv/bin; echo venv=$?; \
+         printf ok > other; cat other; echo other=$?";
+    let args = create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
+        command: vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
+        file_system_sandbox_policy: &policy,
+        network_sandbox_policy: NetworkSandboxPolicy::Restricted,
+        sandbox_policy_cwd: &work,
+        enforce_managed_network: false,
+        managed_network: None,
+        environment_id: None,
+        network: None,
+        extra_allow_unix_sockets: &[],
+    })
+    .expect("args");
+    let output = Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
+        .args(&args)
+        .current_dir(&work)
+        .output()
+        .expect("sandbox-exec");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("dummy-442"), "{stdout}");
+    for line in [
+        "read=1",
+        "case=1",
+        "overwrite=1",
+        "append=1",
+        "create=1",
+        "hard=1",
+        "sym=1",
+        "fifo=1",
+        "moved=1",
+        "away=1",
+        "upper=1",
+        "upperlink=1",
+        "venv=0",
+        "okother=0",
+    ] {
+        assert!(stdout.contains(line), "{line} not in {stdout}");
+    }
+    assert_eq!(
+        fs::read_to_string(work.join(".env")).expect("env"),
+        "API_KEY=dummy-442-person"
+    );
+    for planted in [
+        ".env.local",
+        ".env.hard",
+        ".envrc",
+        ".env.pipe",
+        ".env.moved",
+        ".ENV.Local",
+        ".ENVRC",
+    ] {
+        assert!(
+            fs::symlink_metadata(work.join(planted)).is_err(),
+            "{planted} was created"
+        );
+    }
+}

@@ -17,6 +17,9 @@ const FIRST_PAUSE: Duration = Duration::from_millis(50);
 const MAX_PAUSE: Duration = Duration::from_secs(1);
 const SQLITE_BUSY: i32 = 5;
 const SQLITE_READONLY: i32 = 8;
+const SQLITE_IOERR: i32 = 10;
+const SQLITE_FULL: i32 = 13;
+const SQLITE_CANTOPEN: i32 = 14;
 
 /// Whether `error` is SQLITE_BUSY, in any of its extended codes: another
 /// connection held the lock past the busy timeout. Nothing else is retried; a
@@ -31,6 +34,15 @@ pub(crate) fn is_busy(error: &anyhow::Error) -> bool {
 /// database file (or its directory) cannot be written.
 pub(crate) fn is_read_only(error: &anyhow::Error) -> bool {
     has_primary_code(error, SQLITE_READONLY)
+}
+
+/// Whether `error` is the storage failing for now - full (SQLITE_FULL), an
+/// I/O error (SQLITE_IOERR) or a file that cannot be opened (SQLITE_CANTOPEN) -
+/// rather than the data being refused.
+pub(crate) fn is_storage_failure(error: &anyhow::Error) -> bool {
+    [SQLITE_IOERR, SQLITE_FULL, SQLITE_CANTOPEN]
+        .into_iter()
+        .any(|primary| has_primary_code(error, primary))
 }
 
 fn has_primary_code(error: &anyhow::Error, primary: i32) -> bool {
@@ -111,6 +123,43 @@ where
                 return Err(error);
             }
         }
+    }
+}
+
+/// How long the state DB counts as busy after a write met another
+/// connection's lock, unless a write gets through first.
+pub(crate) const CONTENDED_FOR: Duration = Duration::from_secs(10);
+
+/// Whether this process recently found the shared state DB's write lock held
+/// by someone else. Writes that may be put off (thread metadata, accounting)
+/// skip their attempt while it is set and are applied later instead, so a
+/// model request does not wait the lock out again and again.
+#[derive(Debug, Default)]
+pub(crate) struct Contention {
+    until: std::sync::Mutex<Option<Instant>>,
+}
+
+impl Contention {
+    pub(crate) fn note(&self) {
+        let until = Instant::now() + CONTENDED_FOR;
+        *self
+            .until
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(until);
+    }
+
+    pub(crate) fn clear(&self) {
+        *self
+            .until
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
+    pub(crate) fn active(&self) -> bool {
+        self.until
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some_and(|until| Instant::now() < until)
     }
 }
 

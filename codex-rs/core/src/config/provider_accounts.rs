@@ -224,7 +224,28 @@ pub fn apply_recorded_provider_account(
 /// explicit account of another provider.
 pub fn session_account_error(config: &super::Config) -> Option<String> {
     selected_account_error(config.codex_home.as_path(), &config.model_provider)
+        .or_else(|| sign_in_restriction_error(config))
         .or_else(|| other_provider_account_error(config))
+}
+
+/// Why a spawned agent cannot start on its provider's account: not
+/// configured, or a sign-in the login restrictions rule out.
+pub fn subagent_account_error(config: &super::Config) -> Option<String> {
+    selected_account_error(config.codex_home.as_path(), &config.model_provider)
+        .or_else(|| sign_in_restriction_error(config))
+}
+
+/// PF-84-S06: a named OpenAI sign-in of the kind or workspace the
+/// configuration's login restrictions rule out is refused before the session
+/// starts (its manager also refuses to load it).
+fn sign_in_restriction_error(config: &super::Config) -> Option<String> {
+    let account = codex_model_provider::named_sign_in_account(&config.model_provider)?;
+    codex_login::named_account_restriction_error(
+        config.codex_home.as_path(),
+        &account,
+        config.forced_login_method,
+        config.forced_chatgpt_workspace_id.as_deref(),
+    )
 }
 
 /// Splits `[<provider>:]<name>`; the provider defaults to the session's.
@@ -257,10 +278,13 @@ pub(crate) fn stamp_provider_account(
         Some(name) => {
             validate_provider_account_provider_id(provider_id)
                 .map_err(|error| invalid_selection(provider_id, error.to_string()))?;
-            // The Claude account helper serves the built-in Claude Plan only.
+            // The Claude account helper serves the built-in Claude Plan only,
+            // and named sign-ins (`corbanu login --account`) the built-in OpenAI.
             if !supports_named_accounts(provider)
                 || (provider.is_claude_plan()
                     && provider_id != codex_model_provider_info::CLAUDE_PLAN_PROVIDER_ID)
+                || (provider.requires_openai_auth
+                    && provider_id != codex_model_provider_info::OPENAI_PROVIDER_ID)
             {
                 return Err(invalid_selection(
                     provider_id,
@@ -292,13 +316,14 @@ pub(crate) fn configured_account_names(codex_home: &Path, provider_id: &str) -> 
         .collect()
 }
 
-/// API-key providers, `auth.command` providers (including Claude Plan) and
-/// Amazon Bedrock without command auth (an AWS profile per account,
-/// PF-84-S06). OpenAI sign-in is not supported yet, so selecting an account
-/// for it fails instead of silently using the default credential.
+/// API-key providers, `auth.command` providers (including Claude Plan),
+/// Amazon Bedrock without command auth (an AWS profile per account) and
+/// OpenAI sign-in providers (a ChatGPT or OpenAI API-key sign-in per account,
+/// PF-84-S06). Selecting an account of any other provider fails instead of
+/// silently using the default credential.
 pub fn supports_named_accounts(provider: &ModelProviderInfo) -> bool {
     if provider.requires_openai_auth {
-        return false;
+        return provider.env_key.is_none() && provider.auth.is_none() && provider.aws.is_none();
     }
     if provider.aws.is_some() {
         return provider.is_amazon_bedrock() && provider.auth.is_none();
@@ -319,6 +344,7 @@ mod tests {
                 "openai".to_string(),
                 ModelProviderInfo::create_openai_provider(/*base_url*/ None),
             ),
+            ("plain".to_string(), ModelProviderInfo::default()),
         ])
     }
 
@@ -395,14 +421,34 @@ mod tests {
         let mut model_providers = providers();
         let error = apply_provider_accounts(
             &mut model_providers,
+            Some(&accounts(&[("plain", "work")])),
+            /*named_accounts_enabled*/ true,
+            &mut Vec::new(),
+        )
+        .expect_err("a provider without credentials cannot hold accounts");
+        assert_eq!(
+            error.to_string(),
+            "provider_accounts.plain: provider `plain` does not support named accounts yet"
+        );
+    }
+
+    /// PF-84-S06 slice B: OpenAI sign-in providers take named accounts.
+    #[test]
+    fn openai_sign_in_accounts_are_stamped() {
+        let mut model_providers = providers();
+        apply_provider_accounts(
+            &mut model_providers,
             Some(&accounts(&[("openai", "work")])),
             /*named_accounts_enabled*/ true,
             &mut Vec::new(),
         )
-        .expect_err("openai sign-in accounts are not supported yet");
+        .expect("openai sign-in account");
         assert_eq!(
-            error.to_string(),
-            "provider_accounts.openai: provider `openai` does not support named accounts yet"
+            model_providers["openai"].account,
+            Some(NamedProviderAccount {
+                provider_id: "openai".to_string(),
+                name: "work".to_string(),
+            })
         );
     }
 
@@ -518,14 +564,14 @@ mod tests {
             [
                 error("work", false, &mut model_providers),
                 error("gone:work", true, &mut model_providers),
-                error("openai:work", true, &mut model_providers),
+                error("plain:work", true, &mut model_providers),
             ],
             [
                 "--account zai:work: named accounts need the `named_accounts` feature \
                  (`--enable named_accounts`); `--account default` uses the default credentials"
                     .to_string(),
                 "--account gone:work: unknown provider `gone`".to_string(),
-                "--account openai:work: provider `openai` does not support named accounts yet"
+                "--account plain:work: provider `plain` does not support named accounts yet"
                     .to_string(),
             ]
         );

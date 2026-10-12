@@ -1,6 +1,5 @@
 use super::*;
 use crate::ProviderRequestKey;
-use crate::ProviderRequestPreflight;
 use crate::StateRuntime;
 use crate::runtime::test_support::unique_temp_dir;
 use pretty_assertions::assert_eq;
@@ -27,19 +26,10 @@ fn key() -> ProviderRequestKey {
     }
 }
 
-fn preflight() -> ProviderRequestPreflight {
-    ProviderRequestPreflight {
-        input_tokens: 1,
-        cached_input_tokens: 0,
-        request_bytes: 1,
-        thread_id: None,
-        turn_id: None,
-    }
-}
-
-/// Another process holds the write lock past SQLite's 5 s busy timeout. The
-/// turn's throttle check used to fail the turn with "failed to check provider
-/// request throttle state: ... database is locked"; it now waits the lock out.
+/// Another process holds the write lock past SQLite's 5 s busy timeout. A
+/// write retried with `retry_busy` waits the lock out. (The throttle's steps
+/// on a turn's path wait only `QUICK_BUSY_TIMEOUT` and then fall back to this
+/// process's own throttle; see `provider_request_fallback`.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_write_outlasts_a_lock_held_past_the_busy_timeout() -> anyhow::Result<()> {
     let home = unique_temp_dir();
@@ -51,12 +41,19 @@ async fn a_write_outlasts_a_lock_held_past_the_busy_timeout() -> anyhow::Result<
         held.rollback().await
     });
     let started = Instant::now();
-    let throttle = runtime
-        .check_provider_request_cooldown(&key(), &preflight(), /*now_ms*/ 1)
+    // Releasing a lease is off the turn's path: it waits the lock out.
+    let lease = crate::ProviderRequestLease {
+        key: key(),
+        owner: "fixture".to_string(),
+        lease_until_ms: 10,
+        in_state_db: true,
+    };
+    let released = runtime
+        .release_provider_request_lease(&lease, /*now_ms*/ 1)
         .await;
     let waited = started.elapsed();
     release.await??;
-    assert_eq!(throttle?, None);
+    assert_eq!(released?, 0);
     assert!(waited >= Duration::from_secs(6), "{waited:?}");
     runtime.close().await;
     let _ = std::fs::remove_dir_all(home);

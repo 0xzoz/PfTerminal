@@ -751,6 +751,62 @@ async fn issue_506_file_tools_cannot_list_the_home_under_aggressive() {
     }
 }
 
+/// #540: where a person's approval lifts Moderate's rules for one command,
+/// only the runtime entries' rule stays: they remain read-only, also under
+/// full access (which then gets a sandbox for it), while credential reads
+/// and persistence writes are lifted.
+#[test]
+fn issue_540_runtime_entries_stay_read_only_when_the_rules_are_lifted() {
+    let fx = fixture();
+    let cwd = fx.user_home.join("project");
+    std::fs::write(fx.user_home.join(".bashrc"), "x").unwrap();
+    for profile in [workspace(&fx.user_home), PermissionProfile::Disabled] {
+        let all = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)]);
+        assert!(all.read_only_paths().count() > all.runtime_read_only_paths().count());
+        let denials = all.runtime_only();
+        assert_eq!(denials.paths().count(), 0);
+        assert_eq!(
+            denials.read_only_paths().count(),
+            denials.runtime_read_only_paths().count()
+        );
+        assert!(denials.matcher().is_none());
+        let lifted = denials.apply(&profile).expect("not an external sandbox");
+        let policy = lifted.file_system_sandbox_policy();
+        assert_eq!(
+            policy.kind,
+            FileSystemSandboxKind::Restricted,
+            "{profile:?}"
+        );
+        let writable = |path: &Path| policy.can_write_path_with_cwd(path, &cwd);
+        for runtime in ["tmp", "tmp/arg0/launcher", "shell_snapshots", "skills"] {
+            assert!(
+                !writable(&fx.codex_home.join(runtime)),
+                "{runtime}: {profile:?}"
+            );
+        }
+        // Persistence files are lifted (the profile's own rules aside).
+        assert!(writable(&fx.user_home.join(".bashrc")), "{profile:?}");
+        assert!(writable(&cwd.join("notes.txt")), "{profile:?}");
+        assert!(
+            policy.can_read_path_with_cwd(&fx.user_home.join(".ssh/id_ed25519"), &cwd),
+            "{profile:?}"
+        );
+        assert!(
+            policy.can_read_path_with_cwd(&fx.codex_home.join("auth.json"), &cwd),
+            "{profile:?}"
+        );
+    }
+    // Full access keeps its network.
+    let lifted = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)])
+        .runtime_only()
+        .apply(&PermissionProfile::Disabled)
+        .unwrap();
+    assert_eq!(
+        lifted.network_sandbox_policy(),
+        NetworkSandboxPolicy::Enabled
+    );
+}
+
 /// A user home reached through a link (`user -> real-user`) holding a
 /// dummy SSH key, with a workspace whose `.agents` links to that key.
 struct LinkedHome {
@@ -983,4 +1039,37 @@ fn issue_518_a_home_name_above_the_active_home_stays_denied() {
         .unwrap()
         .file_system_sandbox_policy();
     assert!(!readable_under(&policy, &legacy.join("auth.json"), &cwd));
+}
+
+/// #442 (Travis, 2026-10-11): a grant never lifts the project's `.codex` and
+/// `.agents`, existing or not; it still lifts git hooks and config.
+#[test]
+fn issue_442_a_grant_keeps_codex_and_agents_read_only() {
+    let fx = fixture();
+    let cwd = fx.user_home.join("project");
+    std::fs::create_dir_all(cwd.join(".git/hooks")).unwrap();
+    std::fs::create_dir_all(cwd.join(".codex")).unwrap();
+    let mut denials = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)]);
+    denials.lift_write_rules();
+    let policy = denials
+        .apply(&PermissionProfile::Disabled)
+        .unwrap()
+        .file_system_sandbox_policy();
+    for kept in [
+        ".codex/config.toml",
+        ".codex",
+        ".agents/skills/x/SKILL.md",
+        ".agents",
+    ] {
+        assert!(
+            !policy.can_write_path_with_cwd(&cwd.join(kept), &cwd),
+            "{kept}"
+        );
+    }
+    for lifted in [".git/hooks/pre-commit", ".git/config"] {
+        assert!(
+            policy.can_write_path_with_cwd(&cwd.join(lifted), &cwd),
+            "{lifted}"
+        );
+    }
 }

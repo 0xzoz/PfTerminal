@@ -133,3 +133,41 @@ region or whose credentials fail is refused with that reason before any
 request; Corbanu never falls back to another profile. The `default` account
 keeps today's order (managed key, then `AWS_BEARER_TOKEN_BEDROCK`, then the
 AWS SDK chain).
+
+## OpenAI: ChatGPT and API-key sign-in accounts
+
+A named OpenAI account holds its own sign-in, ChatGPT or OpenAI API key, in the
+encrypted vault (no keychain item, never `auth.json`):
+
+```
+corbanu login --account work                  # browser sign-in
+corbanu login --account work --device-auth    # device code
+printenv WORK_OPENAI_KEY | corbanu login --account work --with-api-key
+corbanu login --account work status
+corbanu logout --account work                 # revokes and clears only `work`
+corbanu exec --account work "..."
+```
+
+In `/providers`, _Add another account_ on OpenAI offers a device-code ChatGPT
+sign-in or a masked OpenAI API key. Rows show only the kind, an email hint
+(`w…@example.com`), the plan and a fingerprint.
+
+- The default login stays where it is (`auth.json` or the `Codex Auth`
+  keychain item) and is never read, refreshed, replaced or logged out by a
+  named account. `OPENAI_API_KEY`, `CODEX_API_KEY` and externally provided
+  tokens are never used for a named account.
+- A refreshed token is saved back to that account only. One process shares
+  one sign-in and refresh lock per account; other processes pick a refresh
+  up from the vault.
+- A session on a named account uses it for what needs the sign-in: model
+  requests, refresh, connectors, usage and the `/status` account line. The
+  model list is fetched with the account the process started on, and the
+  rate limits `/status` shows before the first reply come from the default
+  login.
+- `forced_login_method` and `forced_chatgpt_workspace_id` apply to named
+  accounts too: a sign-in of the other kind or another workspace is refused.
+- Signing the same ChatGPT user in under two accounts (or as `default` and a
+  named account) is allowed with a warning: they share that user's limits,
+  and signing out of one can end the other's session.
+- A refresh the server rejects ends the turn and names the recovery,
+  `corbanu login --account <name>`; the default login is unchanged.

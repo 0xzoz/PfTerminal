@@ -568,6 +568,14 @@ impl Session {
             session_configuration.collaboration_mode.model(),
             session_configuration.provider
         );
+        // PF-84-S06: a session on a named OpenAI sign-in account uses that
+        // account's manager for everything (requests, refresh, connectors),
+        // never the default login.
+        let auth_manager =
+            match codex_model_provider::named_sign_in_account(&session_configuration.provider) {
+                Some(account) => auth_manager.for_named_account_loaded(account).await,
+                None => auth_manager,
+            };
         // PF-27-S05: provider credentials move into the broker before anything
         // (MCP servers, hooks, tools) starts from this process.
         crate::model_broker_auth::install_for_config(config.as_ref()).await;

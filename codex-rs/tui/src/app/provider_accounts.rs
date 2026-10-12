@@ -74,6 +74,10 @@ impl App {
                     ));
                     return;
                 }
+                if method == crate::provider_named_accounts::AddAccountMethod::ChatgptDeviceCode {
+                    self.start_named_chatgpt_sign_in(provider_id, name);
+                    return;
+                }
                 if method == crate::provider_named_accounts::AddAccountMethod::Command {
                     self.app_event_tx
                         .send(AppEvent::ProviderAccount(ProviderAccountEvent::Save {
@@ -201,6 +205,79 @@ impl App {
         self.schedule_provider_manager_refresh();
     }
 
+    /// PF-84-S06: signs a named account in by device code. The code and URL
+    /// are shown here; the sign-in is saved to that account's vault store
+    /// only, and the same ChatGPT user under another account gets a warning.
+    fn start_named_chatgpt_sign_in(&self, provider_id: String, name: ProviderAccountName) {
+        let account = codex_login::NamedChatgptAccount {
+            provider_id: provider_id.clone(),
+            name: name.as_str().to_string(),
+        };
+        let mut opts = codex_login::ServerOptions::new(
+            self.config.codex_home.to_path_buf(),
+            codex_login::CLIENT_ID.to_string(),
+            self.config.forced_chatgpt_workspace_id.clone(),
+            self.config.cli_auth_credentials_store_mode,
+            self.config.auth_keyring_backend_kind(),
+            self.config.auth_route_config(),
+        );
+        opts.open_browser = false;
+        opts.named_account = Some(account.clone());
+        // Adding never replaces an existing account (or a concurrent add).
+        opts.named_account_must_be_new = true;
+        // QA only: debug builds can sign in against a mock issuer.
+        if cfg!(debug_assertions)
+            && let Ok(issuer) = std::env::var("CORBANU_TEST_LOGIN_ISSUER")
+        {
+            opts.issuer = issuer;
+        }
+        let codex_home = self.config.codex_home.to_path_buf();
+        let store_mode = self.config.cli_auth_credentials_store_mode;
+        let keyring_kind = self.config.auth_keyring_backend_kind();
+        let tx = self.app_event_tx.clone();
+        let finish = move |result| {
+            tx.send(AppEvent::ProviderAccount(ProviderAccountEvent::Finished {
+                result,
+            }));
+        };
+        tokio::spawn(async move {
+            let code = match codex_login::request_device_code(&opts).await {
+                Ok(code) => code,
+                Err(error) => {
+                    finish(Err(format!(
+                        "Could not start the sign-in of {provider_id} account `{name}`: {error}"
+                    )));
+                    return;
+                }
+            };
+            finish(Ok(format!(
+                "To sign in {provider_id} account `{name}`, open {} and enter code {}. \
+                 Waiting for the sign-in…",
+                code.verification_url, code.user_code
+            )));
+            if let Err(error) = codex_login::complete_device_code_login(opts, code).await {
+                finish(Err(format!(
+                    "Sign-in of {provider_id} account `{name}` failed: {error}"
+                )));
+                return;
+            }
+            // Vault and default-login reads block; keep them off the runtime.
+            let message = tokio::task::spawn_blocking(move || {
+                signed_in_message(
+                    &codex_home,
+                    &provider_id,
+                    &name,
+                    &account,
+                    store_mode,
+                    keyring_kind,
+                )
+            })
+            .await
+            .unwrap_or_else(|_| "Signed in.".to_string());
+            finish(Ok(message));
+        });
+    }
+
     fn run_provider_account_job(
         &self,
         job: impl FnOnce() -> Result<String, String> + Send + 'static,
@@ -224,11 +301,25 @@ impl App {
         &self,
         provider_id: &str,
     ) -> Vec<crate::provider_named_accounts::AddAccountMethod> {
-        self.config
+        use crate::provider_named_accounts::AddAccountMethod;
+        use codex_protocol::config_types::ForcedLoginMethod;
+        let mut methods = self
+            .config
             .model_providers
             .get(provider_id)
             .map(|provider| crate::provider_named_accounts::add_methods(provider_id, provider))
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // A required login method rules out the other kind of sign-in.
+        match self.config.forced_login_method {
+            Some(ForcedLoginMethod::Chatgpt) => {
+                methods.retain(|method| *method != AddAccountMethod::OpenaiApiKey);
+            }
+            Some(ForcedLoginMethod::Api) => {
+                methods.retain(|method| *method != AddAccountMethod::ChatgptDeviceCode);
+            }
+            None => {}
+        }
+        methods
     }
 
     fn provider_account_exists(&self, provider_id: &str, name: &ProviderAccountName) -> bool {
@@ -466,10 +557,58 @@ impl App {
             }
         }
         let codex_home = self.config.codex_home.to_path_buf();
+        let auth_route_config = self.config.auth_route_config();
         self.run_provider_account_job(move || {
-            crate::provider_named_accounts::remove_account(codex_home, &provider_id, &name)
+            crate::provider_named_accounts::remove_account(
+                codex_home,
+                &provider_id,
+                &name,
+                &auth_route_config,
+            )
         });
     }
+}
+
+/// The message after a named sign-in: its kind, email hint and plan, and a
+/// warning when the same ChatGPT user is signed in under another account.
+fn signed_in_message(
+    codex_home: &std::path::Path,
+    provider_id: &str,
+    name: &ProviderAccountName,
+    account: &codex_login::NamedChatgptAccount,
+    store_mode: codex_login::AuthCredentialsStoreMode,
+    keyring_kind: codex_login::AuthKeyringBackendKind,
+) -> String {
+    let summary = codex_login::named_account_summary(codex_home, account)
+        .ok()
+        .flatten()
+        .map(|summary| {
+            format!(
+                " ({})",
+                crate::provider_named_accounts::describe_sign_in(&summary)
+            )
+        })
+        .unwrap_or_default();
+    let mut message = format!(
+        "Signed in {provider_id} account `{name}`{summary}. Use it from /providers, \
+         `--account {name}` or a spawn `account`."
+    );
+    let default_auth = codex_login::load_auth_dot_json(codex_home, store_mode, keyring_kind)
+        .ok()
+        .flatten();
+    let same = codex_login::same_user_sign_ins(codex_home, account, default_auth.as_ref())
+        .unwrap_or_default();
+    if !same.is_empty() {
+        message.push_str(&format!(
+            " Warning: this is the same ChatGPT user as account(s) {}; they share that \
+             user's limits, and signing out of one can end the other's session.",
+            same.iter()
+                .map(|name| format!("`{name}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    message
 }
 
 #[cfg(test)]

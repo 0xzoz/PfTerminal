@@ -186,12 +186,21 @@ fn recorded_account_applies(
 /// thread `corbanu resume` chose, which ran on `recorded`, and why it cannot
 /// resume, if it cannot. A thread recorded on another provider is resolved on
 /// that provider, so the session provider's onboarding does not apply.
+/// `default_openai` is the default login's state; a checked named sign-in
+/// account of the resolved provider counts as signed in (PF-84-S06).
 pub(crate) async fn check_resume_before_onboarding(
     selection: &resume_picker::SessionSelection,
     config: &Config,
     recorded: &RecordedProviderAccount,
-    openai: OpenAiAuthMetadata,
+    default_openai: OpenAiAuthMetadata,
 ) -> (StartupProviderResolution, Option<String>) {
+    let openai = |config: &Config| {
+        if codex_model_provider::named_sign_in_account(&config.model_provider).is_some() {
+            OpenAiAuthMetadata::Account
+        } else {
+            default_openai
+        }
+    };
     let mut thread_config = None;
     if recorded.provider_id != config.model_provider_id
         && let resume_picker::SessionSelection::Resume(target) = selection
@@ -204,12 +213,13 @@ pub(crate) async fn check_resume_before_onboarding(
         .await;
         thread_config = recorded_provider_config(config, recorded, model);
         if thread_config.is_none() {
-            let resolution = crate::startup_provider::resolve(config, Some(openai)).await;
+            let resolution = crate::startup_provider::resolve(config, Some(openai(config))).await;
             return (resolution, Some(unknown_recorded_provider_error(recorded)));
         }
     }
     let check_config = thread_config.as_ref().unwrap_or(config);
-    let resolution = crate::startup_provider::resolve(check_config, Some(openai)).await;
+    let resolution =
+        crate::startup_provider::resolve(check_config, Some(openai(check_config))).await;
     let refusal = resume_account_error(check_config, recorded, AccountRecovery::CommandLine)
         .or_else(|| {
             (thread_config.is_some() && resolution.requires_provider_onboarding)

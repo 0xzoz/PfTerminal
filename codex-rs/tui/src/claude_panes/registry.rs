@@ -1,5 +1,6 @@
 //! Registry of Claude panes with layout persistence.
 
+use std::collections::HashSet;
 use std::fs;
 #[cfg(unix)]
 use std::fs::File;
@@ -69,6 +70,9 @@ struct PersistedPaneLayoutEnvelope {
 pub(crate) struct ClaudePaneRegistry {
     active_user_pane_id: String,
     pub(crate) panes: Vec<ClaudePane>,
+    /// #554: panes whose running turn the kill switch stopped, until that
+    /// turn's end is handled.
+    kill_switch_stopped: HashSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +86,7 @@ impl ClaudePaneRegistry {
         Self {
             active_user_pane_id: CODEX_MAIN_PANE_ID.to_string(),
             panes: Vec::new(),
+            kill_switch_stopped: HashSet::new(),
         }
     }
 
@@ -104,6 +109,7 @@ impl ClaudePaneRegistry {
         Self {
             active_user_pane_id,
             panes,
+            kill_switch_stopped: HashSet::new(),
         }
     }
 
@@ -450,11 +456,26 @@ impl ClaudePaneRegistry {
         Ok(())
     }
 
+    /// #554: interrupts the pane's running turn for the security kill
+    /// switch; [`Self::take_kill_switch_stop`] then reports it once.
+    pub(crate) fn interrupt_turn_for_kill_switch(&mut self, pane_id: &str) -> Result<()> {
+        self.interrupt_turn(pane_id)?;
+        self.kill_switch_stopped.insert(pane_id.to_string());
+        Ok(())
+    }
+
+    /// #554: whether the kill switch stopped the pane's turn that just
+    /// ended (asked once, before [`Self::finish_turn`]).
+    pub(crate) fn take_kill_switch_stop(&mut self, pane_id: &str) -> bool {
+        self.kill_switch_stopped.remove(pane_id)
+    }
+
     pub(crate) fn finish_turn(
         &mut self,
         pane_id: &str,
         result: &Result<ClaudePaneTurnOutput, String>,
     ) {
+        self.kill_switch_stopped.remove(pane_id);
         let Some(pane) = self.panes.iter_mut().find(|pane| pane.id == pane_id) else {
             return;
         };

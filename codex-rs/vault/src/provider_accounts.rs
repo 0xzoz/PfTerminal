@@ -519,6 +519,13 @@ impl Vault {
                     .is_some_and(|meta| meta.credential_type == kind.credential_type())
                     && let Some(value) = self.read_secret(label)?
                 {
+                    // A sign-in's tokens rotate on refresh; its identity does not.
+                    let value = if *kind == ProviderAccountKind::ChatgptAuth {
+                        let raw = Zeroizing::new(value);
+                        sign_in_identity(&raw).unwrap_or_else(|| raw.to_string())
+                    } else {
+                        value
+                    };
                     material.push((*kind, Zeroizing::new(value)));
                 }
             }
@@ -597,3 +604,63 @@ fn account_label(
 #[cfg(test)]
 #[path = "provider_accounts_tests.rs"]
 mod tests;
+
+/// The stable identity of a stored sign-in (`auth.json` contents), so its
+/// fingerprint survives token refreshes: the ChatGPT workspace and user, or
+/// the API key of an API-key sign-in. `None` when it cannot be read.
+fn sign_in_identity(raw: &str) -> Option<String> {
+    let json: serde_json::Value = serde_json::from_str(raw).ok()?;
+    if let Some(tokens) = json.get("tokens").filter(|tokens| !tokens.is_null()) {
+        let workspace = tokens.get("account_id").and_then(serde_json::Value::as_str);
+        let user = tokens
+            .get("id_token")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|jwt| jwt.split('.').nth(1))
+            .and_then(base64url_decode)
+            .and_then(|payload| serde_json::from_slice::<serde_json::Value>(&payload).ok())
+            .and_then(|claims| {
+                claims
+                    .get("https://api.openai.com/auth")
+                    .and_then(|auth| auth.get("chatgpt_user_id"))
+                    .or_else(|| claims.get("sub"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            });
+        if workspace.is_none() && user.is_none() {
+            return None;
+        }
+        return Some(format!(
+            "chatgpt\0{}\0{}",
+            workspace.unwrap_or_default(),
+            user.unwrap_or_default()
+        ));
+    }
+    json.get("OPENAI_API_KEY")
+        .and_then(serde_json::Value::as_str)
+        .map(|key| format!("api-key\0{key}"))
+}
+
+/// Unpadded base64url, as in a JWT.
+fn base64url_decode(input: &str) -> Option<Vec<u8>> {
+    let mut output = Vec::with_capacity(input.len() * 3 / 4);
+    let mut buffer = 0u32;
+    let mut bits = 0u32;
+    for byte in input.trim_end_matches('=').bytes() {
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'-' | b'+' => 62,
+            b'_' | b'/' => 63,
+            _ => return None,
+        };
+        buffer = (buffer << 6) | u32::from(value);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            output.push((buffer >> bits) as u8);
+            buffer &= (1 << bits) - 1;
+        }
+    }
+    Some(output)
+}

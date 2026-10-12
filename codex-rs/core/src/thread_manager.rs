@@ -2306,7 +2306,7 @@ fn resolve_spawn_multi_agent_version(
 /// agent checks only the account it runs on.
 fn thread_start_account_error(config: &Config, session_source: &SessionSource) -> Option<String> {
     if matches!(session_source, SessionSource::SubAgent(_)) {
-        crate::config::selected_account_error(config.codex_home.as_path(), &config.model_provider)
+        crate::config::subagent_account_error(config)
     } else {
         crate::config::session_account_error(config)
     }

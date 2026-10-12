@@ -16,6 +16,7 @@ use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::UserInput;
 use core_test_support::responses;
+use pretty_assertions::assert_eq;
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::time::timeout;
@@ -137,6 +138,7 @@ stream_max_retries = 0
 // `[provider_accounts]` or `default`.
 
 const PERSONAL_KEY: &str = "pf84-555-personal-account-key";
+const OTHER_KEY: &str = "pf84-555-other-account-key";
 
 fn pong(response_id: &str) -> String {
     responses::sse(vec![
@@ -146,8 +148,8 @@ fn pong(response_id: &str) -> String {
     ])
 }
 
-/// A home whose `[provider_accounts]` selects `personal`, with `work` and
-/// `personal` enrolled and no default key.
+/// A home whose `[provider_accounts]` selects `personal`, with `work`,
+/// `personal` and `other` enrolled and no default key.
 fn fork_home(server_uri: &str) -> Result<TempDir> {
     let codex_home = TempDir::new()?;
     std::fs::write(
@@ -176,7 +178,11 @@ stream_max_retries = 0
         ),
     )?;
     let vault = codex_vault::Vault::new(codex_home.path().to_path_buf());
-    for (name, key) in [("work", WORK_KEY), ("personal", PERSONAL_KEY)] {
+    for (name, key) in [
+        ("work", WORK_KEY),
+        ("personal", PERSONAL_KEY),
+        ("other", OTHER_KEY),
+    ] {
         vault.write_provider_account(
             "mock_provider",
             &codex_vault::ProviderAccountName::parse(name)?,
@@ -324,11 +330,12 @@ async fn an_explicit_fork_account_beats_the_source_account() -> Result<()> {
     let codex_home = fork_home(&server.uri())?;
     let mut app = start_app(&codex_home).await?;
 
+    // `other` is neither the source's account nor `[provider_accounts]`.
     let source = work_thread(&mut app).await?;
-    let forked = fork(&mut app, source, Some("personal")).await?;
+    let forked = fork(&mut app, source, Some("other")).await?;
     assert_eq!(
         forked.provider_account.as_deref(),
-        Some("mock_provider:personal")
+        Some("mock_provider:other")
     );
     say_pong(&mut app, forked.thread.id).await?;
 
@@ -336,7 +343,7 @@ async fn an_explicit_fork_account_beats_the_source_account() -> Result<()> {
         bearers(&response_mock),
         vec![
             Some(format!("Bearer {WORK_KEY}")),
-            Some(format!("Bearer {PERSONAL_KEY}")),
+            Some(format!("Bearer {OTHER_KEY}")),
         ]
     );
     Ok(())

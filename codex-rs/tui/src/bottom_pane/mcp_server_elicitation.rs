@@ -79,8 +79,8 @@ pub(super) const TYPED_TEXT_NOTICE: &str = "Typed text is not sent while this re
      use ↑/↓ and enter to answer, or esc to cancel";
 pub(super) const CHOOSE_FIRST_NOTICE: &str =
     "This is a new request; choose an option with ↑/↓, then enter";
-const FORM_FIRST_NOTICE: &str = "This is a new request; review it, then press enter";
-const FORM_TYPED_NOTICE: &str =
+pub(super) const FORM_FIRST_NOTICE: &str = "This is a new request; review it, then press enter";
+pub(super) const FORM_TYPED_NOTICE: &str =
     "Typed text was not entered in this new request; press ↑/↓ first, then type";
 const TOOL_TYPE_KEY: &str = "tool_type";
 const TOOL_ID_KEY: &str = "tool_id";

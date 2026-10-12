@@ -1,9 +1,7 @@
 //! Native owner selection and main-state deletion for explicitly installed accounting.
 use super::*;
 use codex_protocol::ThreadId;
-use sqlx::Sqlite;
 use sqlx::SqlitePool;
-use sqlx::Transaction;
 
 impl Journal<'_> {
     pub(super) async fn store_on_connection(
@@ -23,7 +21,9 @@ impl Journal<'_> {
             .bind(attempt.attempt_id.to_string())
             .fetch_one(&mut *conn)
             .await?;
-            ensure!(bound, "attempt not admitted");
+            if !bound {
+                return Err(NotAdmitted.into());
+            }
         }
         Self::append_validated_on_connection(
             conn,
@@ -67,7 +67,7 @@ impl Journal<'_> {
         batch: &[Observation],
         as_of_ms: i64,
     ) -> anyhow::Result<()> {
-        let mut tx = self.runtime.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = crate::runtime::db_lock::begin_immediate(&self.runtime.pool).await?;
         match Self::append_native_on_connection(&mut tx, owner, attempt, batch, as_of_ms).await {
             Ok(()) => tx.commit().await?,
             Err(error) => {
@@ -108,11 +108,53 @@ impl Journal<'_> {
             .bind(owner.to_string())
             .fetch_one(&mut *conn)
             .await?;
-        ensure!(exists, "native owner missing");
+        if !exists {
+            return Err(OwnerMissing.into());
+        }
         Self::maintain_for_write_on_connection(conn, as_of_ms, validated_at_ms).await?;
         Self::append_on_connection(conn, attempt, batch).await
     }
 }
+
+/// The conversation a record belongs to has no row in `threads` (yet): its
+/// metadata write may have been put off while the state DB was busy.
+#[derive(Debug)]
+pub(crate) struct OwnerMissing;
+
+impl std::fmt::Display for OwnerMissing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("native owner missing")
+    }
+}
+
+impl std::error::Error for OwnerMissing {}
+
+/// Usage evidence for an attempt whose admission is not in the ledger (yet):
+/// it may still be queued in another process's ledger writer.
+#[derive(Debug)]
+pub(crate) struct NotAdmitted;
+
+impl std::fmt::Display for NotAdmitted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("attempt not admitted")
+    }
+}
+
+impl std::error::Error for NotAdmitted {}
+
+/// A retry whose predecessor attempt is not in the ledger (yet): it may still
+/// be queued in another process's ledger writer. Its message is the one this
+/// check always had.
+#[derive(Debug)]
+pub(crate) struct PredecessorMissing;
+
+impl std::fmt::Display for PredecessorMissing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("invalid retry predecessor")
+    }
+}
+
+impl std::error::Error for PredecessorMissing {}
 
 async fn require_active(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure!(
@@ -137,14 +179,17 @@ async fn installed(conn: &mut SqliteConnection) -> anyhow::Result<bool> {
 /// No concurrent install or ordinary write can invalidate the deletion snapshot.
 pub(in crate::runtime) async fn begin_delete(
     pool: &SqlitePool,
-) -> anyhow::Result<Transaction<'_, Sqlite>> {
-    Ok(pool.begin_with("BEGIN IMMEDIATE").await?)
+) -> anyhow::Result<crate::runtime::db_lock::WriteTx> {
+    Ok(crate::runtime::db_lock::begin_immediate(pool).await?)
 }
 
+/// `validated_at_ms`: when this process validated the ledger this hour, from
+/// `AccountingStore::prepare_delete`; maintenance then stays bounded.
 pub(in crate::runtime) async fn delete_on_connection(
     conn: &mut SqliteConnection,
     owners: &[ThreadId],
     as_of_ms: i64,
+    validated_at_ms: Option<i64>,
 ) -> anyhow::Result<()> {
     if installed(conn).await? {
         if super::store::ledger_exists(conn).await? {
@@ -156,9 +201,10 @@ pub(in crate::runtime) async fn delete_on_connection(
             #[cfg(test)]
             require_active(conn).await?;
         }
-        for owner in owners {
-            Journal::delete_native_on_connection(conn, *owner, as_of_ms).await?;
-        }
+        // One maintenance for the whole deletion, not one per owner: each is
+        // a sweep under the write lock (#324).
+        Journal::delete_native_owners_on_connection(conn, owners, as_of_ms, validated_at_ms)
+            .await?;
     }
     Ok(())
 }
