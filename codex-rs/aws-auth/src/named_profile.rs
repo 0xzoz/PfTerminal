@@ -120,8 +120,9 @@ pub(crate) async fn load_named_profile(
         let refused = asked.lock().ok().and_then(|asked| *asked);
         return Err(match (refused, region) {
             (Some(source), _) => AwsAuthError::RefusedCredentialSource(source.to_string()),
-            // The profile exists but a role chain could not reach STS
-            // without a region: the region is the reason.
+            // The profile exists but its credentials could not be fetched
+            // and it has no region (for a role chain, STS needs one): report
+            // the region first; the other cause shows once it is set.
             (None, Err(region_error))
                 if !matches!(
                     error,

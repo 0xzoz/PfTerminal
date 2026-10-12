@@ -127,12 +127,19 @@ impl NamedBedrockAccount {
         let Self {
             provider_id, name, ..
         } = self;
+        // The file and sign-in hints fit only failures to load credentials.
+        let hint = if matches!(error, AwsAuthError::Credentials(_)) {
+            format!(
+                " Check that the profile is in ~/.aws/config or ~/.aws/credentials (or the files \
+                 AWS_CONFIG_FILE and AWS_SHARED_CREDENTIALS_FILE name) and that its credentials \
+                 work; for an SSO profile run `aws sso login --profile {profile}`."
+            )
+        } else {
+            String::new()
+        };
         CodexErr::Fatal(format!(
             "account `{name}` of provider `{provider_id}` uses AWS profile `{profile}`, which \
-             cannot be used: {}. Check that the profile is in ~/.aws/config or \
-             ~/.aws/credentials (or the files AWS_CONFIG_FILE and AWS_SHARED_CREDENTIALS_FILE \
-             name) and that its credentials work; for an SSO profile run `aws sso login \
-             --profile {profile}`. Corbanu never falls back to another profile or to \
+             cannot be used: {}.{hint} Corbanu never falls back to another profile or to \
              environment credentials.",
             error.detailed_message()
         ))
