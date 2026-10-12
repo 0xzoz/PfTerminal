@@ -266,7 +266,7 @@ struct CachedExternalBearerToken {
 pub const PROVIDER_ACCOUNT_ENV_VAR: &str = "CORBANU_PROVIDER_ACCOUNT";
 
 /// The hidden `corbanu` subcommand that prints a Claude Plan token.
-pub const CLAUDE_PLAN_TOKEN_HELPER_SUBCOMMAND: &str = "internal-claude-oauth-token";
+pub use codex_model_provider_info::CLAUDE_PLAN_TOKEN_HELPER_SUBCOMMAND;
 
 /// Whether `config` runs Corbanu's own Claude Plan token helper, which takes
 /// the account in argv as well (#414).

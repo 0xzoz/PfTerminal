@@ -1439,7 +1439,7 @@ fn failing_helper(
 /// reports it busy (another test's fork can hold the write descriptor).
 #[cfg(unix)]
 async fn failing_helper_message(config: &ModelProviderAuthInfo) -> String {
-    for _ in 0..20 {
+    for _ in 0..40 {
         let message = crate::auth::validate_provider_auth_command(config)
             .await
             .expect_err("failing helper")

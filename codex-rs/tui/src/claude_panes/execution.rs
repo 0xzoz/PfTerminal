@@ -891,7 +891,7 @@ pub(super) async fn resolve_deferred_claude_plan_token(
     deferred: DeferredClaudePlanAuth,
 ) -> Result<Zeroizing<String>> {
     let mut command = Command::new(&deferred.helper_executable);
-    command.arg("internal-claude-oauth-token");
+    command.arg(codex_login::auth::CLAUDE_PLAN_TOKEN_HELPER_SUBCOMMAND);
     // PF-84 (#414): the account goes in argv too, so a helper that predates
     // named accounts refuses instead of printing the default account's token.
     match deferred.account.as_deref() {
