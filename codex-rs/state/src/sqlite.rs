@@ -46,6 +46,8 @@ const DB_INIT_LOCK_FILENAME: &str = "pfterminal_db_init.lock";
 /// A migration can rewrite a large state DB, so this is generous.
 const DB_INIT_LOCK_WAIT: Duration = Duration::from_secs(120);
 const DB_INIT_LOCK_POLL: Duration = Duration::from_millis(20);
+/// A wait longer than this is logged, so a stalled holder can be found.
+const DB_INIT_LOCK_REPORT_AFTER: Duration = Duration::from_secs(1);
 const MIGRATION_RETRY_DELAY: Duration = Duration::from_millis(50);
 
 #[derive(Clone, Copy)]
@@ -243,11 +245,12 @@ impl SqliteConfig {
         &self,
         migrator: &Migrator,
         telemetry_override: Option<&dyn DbTelemetry>,
+        init_lock: Option<&RuntimeDbInitLock>,
     ) -> anyhow::Result<SqlitePool> {
         // New state DBs should use incremental auto-vacuum, but retrofitting an
         // existing DB requires a full VACUUM. Do not attempt that during process
         // startup: it is maintenance work that can contend with foreground writers.
-        self.open_runtime_db(STATE_DB, migrator, telemetry_override)
+        self.open_runtime_db(STATE_DB, migrator, telemetry_override, init_lock)
             .await
     }
 
@@ -278,8 +281,9 @@ impl SqliteConfig {
         &self,
         migrator: &Migrator,
         telemetry_override: Option<&dyn DbTelemetry>,
+        init_lock: Option<&RuntimeDbInitLock>,
     ) -> anyhow::Result<SqlitePool> {
-        self.open_runtime_db(LOGS_DB, migrator, telemetry_override)
+        self.open_runtime_db(LOGS_DB, migrator, telemetry_override, init_lock)
             .await
     }
 
@@ -287,8 +291,9 @@ impl SqliteConfig {
         &self,
         migrator: &Migrator,
         telemetry_override: Option<&dyn DbTelemetry>,
+        init_lock: Option<&RuntimeDbInitLock>,
     ) -> anyhow::Result<SqlitePool> {
-        self.open_runtime_db(GOALS_DB, migrator, telemetry_override)
+        self.open_runtime_db(GOALS_DB, migrator, telemetry_override, init_lock)
             .await
     }
 
@@ -296,8 +301,9 @@ impl SqliteConfig {
         &self,
         migrator: &Migrator,
         telemetry_override: Option<&dyn DbTelemetry>,
+        init_lock: Option<&RuntimeDbInitLock>,
     ) -> anyhow::Result<SqlitePool> {
-        self.open_runtime_db(MEMORIES_DB, migrator, telemetry_override)
+        self.open_runtime_db(MEMORIES_DB, migrator, telemetry_override, init_lock)
             .await
     }
 
@@ -305,20 +311,26 @@ impl SqliteConfig {
         &self,
         migrator: &Migrator,
         telemetry_override: Option<&dyn DbTelemetry>,
+        init_lock: Option<&RuntimeDbInitLock>,
     ) -> anyhow::Result<SqlitePool> {
-        self.open_runtime_db(THREAD_HISTORY_DB, migrator, telemetry_override)
+        self.open_runtime_db(THREAD_HISTORY_DB, migrator, telemetry_override, init_lock)
             .await
     }
 
+    /// Opens and migrates one runtime database under the init lock (#549):
+    /// `init_lock` when the caller holds it already, otherwise taken here.
     async fn open_runtime_db(
         &self,
         spec: RuntimeDbSpec,
         migrator: &Migrator,
         telemetry_override: Option<&dyn DbTelemetry>,
+        init_lock: Option<&RuntimeDbInitLock>,
     ) -> anyhow::Result<SqlitePool> {
         let path = spec.path(self.home());
-        // Held until the pool is open and migrated (#549).
-        let _init_lock = self.lock_runtime_db_init().await;
+        let _own_lock = match init_lock {
+            Some(_) => None,
+            None => Some(self.lock_runtime_db_init().await),
+        };
         let started = Instant::now();
         let pool_result = self
             .open_read_write_pool(&path)
@@ -341,12 +353,13 @@ impl SqliteConfig {
             }
             match migrator.run(&pool).await {
                 // A process that does not take the init lock (an older
-                // build, or one that timed out waiting) may have created
-                // the same tables first; its migration is then recorded and
-                // a second run applies only what is still missing. A failed
-                // migration is rolled back, so the retry starts clean.
+                // build, or one that timed out waiting) may have applied the
+                // same migration first; it is then recorded, and one more run
+                // usually completes (best effort: a process still applying a
+                // long series can collide again). A failed migration is rolled
+                // back, so the retry starts clean.
                 Err(first) => {
-                    tracing::debug!("retrying the {} migration after: {first}", spec.label);
+                    tracing::info!("retrying the {} migration after: {first}", spec.label);
                     tokio::time::sleep(MIGRATION_RETRY_DELAY).await;
                     migrator.run(&pool).await.map_err(anyhow::Error::from)
                 }
@@ -376,12 +389,14 @@ impl SqliteConfig {
     /// `CREATE TABLE`, and the losers failed and ran without a state DB.
     ///
     /// The lock is an OS file lock on [`DB_INIT_LOCK_FILENAME`], released
-    /// when the returned file is dropped, including when a process dies. If
-    /// it can't be had within [`DB_INIT_LOCK_WAIT`] (or the file can't be
-    /// opened), this returns `None` and the caller goes on unlocked; the
+    /// when the returned guard is dropped, including when a process dies. It
+    /// is not re-entrant: take it once and pass it to the `open_*_db` calls.
+    /// If it can't be had within [`DB_INIT_LOCK_WAIT`] (or the file can't be
+    /// opened), the guard holds nothing and the caller goes on unlocked; the
     /// migration retry in [`Self::open_runtime_db`] still covers the race.
-    async fn lock_runtime_db_init(&self) -> Option<std::fs::File> {
+    pub(crate) async fn lock_runtime_db_init(&self) -> RuntimeDbInitLock {
         let path = self.home().join(DB_INIT_LOCK_FILENAME);
+        let unlocked = RuntimeDbInitLock { _file: None };
         let file = match std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -391,34 +406,37 @@ impl SqliteConfig {
         {
             Ok(file) => file,
             Err(err) => {
-                tracing::warn!(
-                    "could not open the database init lock {}; opening unlocked: {err}",
-                    path.display()
-                );
-                return None;
+                log_unlocked(&path, &err);
+                return unlocked;
             }
         };
-        let deadline = Instant::now() + DB_INIT_LOCK_WAIT;
+        let started = Instant::now();
+        let mut reported_wait = false;
         loop {
             match file.try_lock() {
-                Ok(()) => return Some(file),
-                Err(std::fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                Ok(()) => return RuntimeDbInitLock { _file: Some(file) },
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    let waited = started.elapsed();
+                    if waited >= DB_INIT_LOCK_WAIT {
+                        tracing::warn!(
+                            "another process held the database init lock {} for over {:?}; opening unlocked",
+                            path.display(),
+                            DB_INIT_LOCK_WAIT
+                        );
+                        return unlocked;
+                    }
+                    if !reported_wait && waited >= DB_INIT_LOCK_REPORT_AFTER {
+                        reported_wait = true;
+                        tracing::info!(
+                            "waiting for another process to create or migrate the databases ({})",
+                            path.display()
+                        );
+                    }
                     tokio::time::sleep(DB_INIT_LOCK_POLL).await;
                 }
-                Err(std::fs::TryLockError::WouldBlock) => {
-                    tracing::warn!(
-                        "another process held the database init lock {} for over {:?}; opening unlocked",
-                        path.display(),
-                        DB_INIT_LOCK_WAIT
-                    );
-                    return None;
-                }
                 Err(std::fs::TryLockError::Error(err)) => {
-                    tracing::warn!(
-                        "could not take the database init lock {}; opening unlocked: {err}",
-                        path.display()
-                    );
-                    return None;
+                    log_unlocked(&path, &err);
+                    return unlocked;
                 }
             }
         }
@@ -467,6 +485,31 @@ impl SqliteConfig {
             .max_connections(1)
             .connect_with(options)
             .await
+    }
+}
+
+/// Held while the runtime databases are created and migrated (see
+/// [`SqliteConfig::lock_runtime_db_init`]); holds nothing when the lock could
+/// not be had.
+pub(crate) struct RuntimeDbInitLock {
+    _file: Option<std::fs::File>,
+}
+
+/// A read-only or sandboxed home is expected not to take the lock: quiet.
+fn log_unlocked(path: &Path, err: &std::io::Error) {
+    if matches!(
+        err.kind(),
+        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+    ) {
+        tracing::debug!(
+            "no database init lock at {}; opening unlocked: {err}",
+            path.display()
+        );
+    } else {
+        tracing::warn!(
+            "could not take the database init lock {}; opening unlocked: {err}",
+            path.display()
+        );
     }
 }
 

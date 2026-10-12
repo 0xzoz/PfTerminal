@@ -183,6 +183,9 @@ impl StateRuntime {
         telemetry_override: Option<&dyn DbTelemetry>,
     ) -> anyhow::Result<Arc<Self>> {
         tokio::fs::create_dir_all(sqlite.home()).await?;
+        // #549: one hold covers adopting legacy names, validation and
+        // creating or migrating every runtime DB.
+        let init_lock = sqlite.lock_runtime_db_init().await;
         sqlite.migrate_legacy_runtime_db_names().await?;
         let state_migrator = runtime_state_migrator();
         let logs_migrator = runtime_logs_migrator();
@@ -203,7 +206,7 @@ impl StateRuntime {
                 )
             })?;
         let pool = match sqlite
-            .open_state_db(&state_migrator, telemetry_override)
+            .open_state_db(&state_migrator, telemetry_override, Some(&init_lock))
             .await
         {
             Ok(db) => Arc::new(db),
@@ -215,7 +218,7 @@ impl StateRuntime {
         // A new logs database has nothing an older build wrote.
         let logs_db_is_new = !crate::sqlite::database_has_content(&logs_path);
         let logs_pool = match sqlite
-            .open_logs_db(&logs_migrator, telemetry_override)
+            .open_logs_db(&logs_migrator, telemetry_override, Some(&init_lock))
             .await
         {
             Ok(db) => Arc::new(db),
@@ -226,7 +229,7 @@ impl StateRuntime {
             }
         };
         let goals_pool = match sqlite
-            .open_goals_db(&goals_migrator, telemetry_override)
+            .open_goals_db(&goals_migrator, telemetry_override, Some(&init_lock))
             .await
         {
             Ok(db) => Arc::new(db),
@@ -237,7 +240,7 @@ impl StateRuntime {
             }
         };
         let memories_pool = match sqlite
-            .open_memories_db(&memories_migrator, telemetry_override)
+            .open_memories_db(&memories_migrator, telemetry_override, Some(&init_lock))
             .await
         {
             Ok(db) => Arc::new(db),
@@ -250,6 +253,7 @@ impl StateRuntime {
                 return Err(err);
             }
         };
+        drop(init_lock);
         let started = Instant::now();
         let backfill_state_result = ensure_backfill_state_row_in_pool(pool.as_ref()).await;
         crate::telemetry::record_init_result(
@@ -461,7 +465,11 @@ impl StateRuntime {
 
         let memories_migrator = runtime_memories_migrator();
         let pool = sqlite
-            .open_memories_db(&memories_migrator, /*telemetry_override*/ None)
+            .open_memories_db(
+                &memories_migrator,
+                /*telemetry_override*/ None,
+                /*init_lock*/ None,
+            )
             .await?;
         memories::clear_memory_data_in_pool(&pool).await?;
         pool.close().await;
@@ -478,10 +486,15 @@ async fn close_sqlite_pools(pools: &[&SqlitePool]) {
 /// Open and migrate the rebuildable paginated thread-history database.
 pub async fn open_thread_history_db(sqlite: &SqliteConfig) -> anyhow::Result<SqlitePool> {
     tokio::fs::create_dir_all(sqlite.home()).await?;
+    let init_lock = sqlite.lock_runtime_db_init().await;
     sqlite.migrate_legacy_runtime_db_names().await?;
     let migrator = runtime_thread_history_migrator();
     sqlite
-        .open_thread_history_db(&migrator, /*telemetry_override*/ None)
+        .open_thread_history_db(
+            &migrator,
+            /*telemetry_override*/ None,
+            Some(&init_lock),
+        )
         .await
 }
 
@@ -701,7 +714,11 @@ mod tests {
         pool.close().await;
         let tolerant_migrator = runtime_state_migrator();
         let tolerant_pool = sqlite
-            .open_state_db(&tolerant_migrator, /*telemetry_override*/ None)
+            .open_state_db(
+                &tolerant_migrator,
+                /*telemetry_override*/ None,
+                /*init_lock*/ None,
+            )
             .await
             .expect("runtime migrator should tolerate newer applied migrations");
         tolerant_pool.close().await;

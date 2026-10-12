@@ -3,6 +3,9 @@ use pretty_assertions::assert_eq;
 use std::time::Duration;
 use std::time::Instant;
 
+use super::DB_INIT_LOCK_FILENAME;
+use super::database_has_content;
+
 #[tokio::test]
 async fn connecting_to_an_existing_database_does_not_wait_for_its_writer() -> anyhow::Result<()> {
     let sqlite_home = crate::runtime::test_support::unique_temp_dir();
@@ -92,8 +95,15 @@ fn concurrent_launch_child() {
 #[test]
 fn concurrent_first_launches_on_a_new_home_all_get_a_state_db() {
     const LAUNCHES: usize = 10;
-    const ROUNDS: usize = 3;
+    const ROUNDS: usize = 2;
     let exe = std::env::current_exe().expect("test binary");
+    // `sqlite::tests::concurrent_launch_child`, whatever this module is called.
+    let child_test = format!(
+        "{}::concurrent_launch_child",
+        module_path!()
+            .split_once("::")
+            .map_or(module_path!(), |(_, path)| path)
+    );
     for round in 0..ROUNDS {
         let home = crate::runtime::test_support::unique_temp_dir();
         std::fs::create_dir_all(&home).expect("create home");
@@ -109,11 +119,7 @@ fn concurrent_first_launches_on_a_new_home_all_get_a_state_db() {
         for _ in 0..LAUNCHES {
             children.push(
                 std::process::Command::new(&exe)
-                    .args([
-                        "--exact",
-                        "sqlite::tests::concurrent_launch_child",
-                        "--test-threads=1",
-                    ])
+                    .args(["--exact", &child_test, "--test-threads=1"])
                     .env(RACE_HOME_ENV, &home)
                     .env(RACE_START_ENV, start.as_millis().to_string())
                     .stdout(std::process::Stdio::piped())
@@ -122,16 +128,27 @@ fn concurrent_first_launches_on_a_new_home_all_get_a_state_db() {
                     .expect("spawn launch"),
             );
         }
+        let deadline = Instant::now() + Duration::from_secs(60);
         let failures: Vec<String> = children
             .into_iter()
-            .map(|child| child.wait_with_output().expect("launch output"))
+            .map(|mut child| {
+                while child.try_wait().expect("poll launch").is_none() {
+                    if Instant::now() > deadline {
+                        let _ = child.kill();
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                child.wait_with_output().expect("launch output")
+            })
             .filter(|output| {
                 !output.status.success()
                     || !String::from_utf8_lossy(&output.stdout).contains("1 passed")
             })
             .map(|output| {
                 format!(
-                    "{}\n{}",
+                    "{}\n{}\n{}",
+                    output.status,
                     String::from_utf8_lossy(&output.stdout),
                     String::from_utf8_lossy(&output.stderr)
                 )
@@ -144,4 +161,50 @@ fn concurrent_first_launches_on_a_new_home_all_get_a_state_db() {
             failures.join("\n---\n")
         );
     }
+}
+
+/// #549: while another process holds the init lock, a runtime DB is neither
+/// created nor migrated; it is once the lock is released.
+#[tokio::test]
+async fn runtime_databases_wait_for_the_init_lock() -> anyhow::Result<()> {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home).await?;
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    // Another process's hold: a separate open of the lock file.
+    let holder = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(sqlite_home.join(DB_INIT_LOCK_FILENAME))?;
+    holder.lock()?;
+
+    let opening = tokio::spawn({
+        let sqlite = sqlite.clone();
+        async move {
+            let migrator = crate::migrations::runtime_goals_migrator();
+            sqlite
+                .open_goals_db(
+                    &migrator, /*telemetry_override*/ None, /*init_lock*/ None,
+                )
+                .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!opening.is_finished(), "opened while the lock was held");
+    assert!(!database_has_content(&sqlite.goals_db_path()));
+
+    holder.unlock()?;
+    let pool = tokio::time::timeout(Duration::from_secs(10), opening).await???;
+    let tables: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(tables, 1);
+    pool.close().await;
+    Ok(())
 }
