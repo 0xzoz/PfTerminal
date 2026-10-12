@@ -1357,9 +1357,10 @@ fn read_synthetic_mount_target_record(
     }
 }
 
-/// Whether `path` is a file (or folder) of this user that no one else may
+/// Whether `path` is a file (or folder) of this user that not everyone may
 /// write: another user who made the shared temporary folder's registry
-/// first must not be able to plant records.
+/// first must not be able to plant records. (Group write is allowed: with
+/// per-user groups, umask 002 is the default on Ubuntu.)
 fn owned_by_this_user(path: &Path, file: bool) -> bool {
     // SAFETY: `geteuid` has no preconditions.
     let euid = unsafe { libc::geteuid() };
@@ -1370,7 +1371,7 @@ fn owned_by_this_user(path: &Path, file: bool) -> bool {
         } else {
             metadata.file_type().is_dir()
         };
-        kind && metadata.uid() == euid && metadata.mode() & 0o022 == 0
+        kind && metadata.uid() == euid && metadata.mode() & 0o002 == 0
     })
 }
 
