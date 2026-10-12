@@ -58,6 +58,9 @@ pub(crate) struct ContextManager {
     reference_context_item: Option<TurnContextItem>,
     /// World state most recently appended to model-visible history.
     world_state_baseline: Option<WorldStateSnapshot>,
+    /// #578: whether this session already logged that another provider's
+    /// compaction summary is left out (shared by every snapshot).
+    foreign_compaction_warned: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ContextManager {
@@ -70,6 +73,7 @@ impl ContextManager {
             ),
             reference_context_item: None,
             world_state_baseline: None,
+            foreign_compaction_warned: Arc::default(),
         }
     }
 
@@ -150,10 +154,21 @@ impl ContextManager {
     /// another provider produced are adapted first (#578, see
     /// [`super::provider_items`]).
     pub(crate) fn for_turn_prompt(mut self, turn_context: &TurnContext) -> Vec<ResponseItem> {
-        super::provider_items::adapt_for_provider(
+        let dropped_summary = super::provider_items::adapt_for_provider(
             Arc::make_mut(&mut self.items),
             &super::provider_items::ProviderTarget::for_turn(turn_context),
         );
+        // Once per session: prompts are built several times per turn.
+        if dropped_summary
+            && !self
+                .foreign_compaction_warned
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            tracing::warn!(
+                "another provider's compaction summary is left out of requests to this \
+                 provider; it cannot read it"
+            );
+        }
         self.for_prompt(&turn_context.model_info.input_modalities)
     }
 

@@ -43,11 +43,6 @@ use crate::session::turn_context::TurnContext;
 use codex_model_provider_info::NamedProviderAccount;
 use codex_model_provider_info::WireApi;
 use codex_protocol::models::ResponseItem;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
-
-/// Logged once per process: prompts are built several times per turn.
-static WARNED_COMPACTION: AtomicBool = AtomicBool::new(false);
 
 /// The producer recorded on a model output item: `<provider id>`, or
 /// `<provider id>:<account>` for a named account (PF-84).
@@ -84,13 +79,24 @@ impl ProviderTarget {
     }
 }
 
-/// Adapts `items` for `target`; see the module docs.
-pub(crate) fn adapt_for_provider(items: &mut Vec<ResponseItem>, target: &ProviderTarget) {
+/// Adapts `items` for `target`; see the module docs. Returns whether another
+/// provider's compaction summary was left out (the caller tells the user).
+pub(crate) fn adapt_for_provider(items: &mut Vec<ResponseItem>, target: &ProviderTarget) -> bool {
+    let mut dropped_summary = false;
     items.retain(|item| match item.producer() {
         Some(producer) if producer == target.producer => true,
-        Some(_) => adapt_foreign(item, target.wire),
+        Some(_) => {
+            let keep = adapt_foreign(item, target.wire);
+            dropped_summary |= !keep
+                && matches!(
+                    item,
+                    ResponseItem::Compaction { .. } | ResponseItem::ContextCompaction { .. }
+                );
+            keep
+        }
         None => keep_unattributed(item, target),
     });
+    dropped_summary
 }
 
 /// Another provider's item: returns whether it is kept. Kept items stay as
@@ -102,29 +108,14 @@ fn adapt_foreign(item: &ResponseItem, wire: WireApi) -> bool {
             item,
             ResponseItem::Reasoning { .. } | ResponseItem::WebSearchCall { .. }
         ),
-        WireApi::Responses => {
-            if matches!(
-                item,
-                ResponseItem::Reasoning { .. }
-                    | ResponseItem::WebSearchCall { .. }
-                    | ResponseItem::ImageGenerationCall { .. }
-                    | ResponseItem::Compaction { .. }
-                    | ResponseItem::ContextCompaction { .. }
-            ) {
-                if matches!(
-                    item,
-                    ResponseItem::Compaction { .. } | ResponseItem::ContextCompaction { .. }
-                ) && !WARNED_COMPACTION.swap(true, Ordering::Relaxed)
-                {
-                    tracing::warn!(
-                        "another provider's compaction summary is left out of this request; \
-                         this provider cannot read it"
-                    );
-                }
-                return false;
-            }
-            true
-        }
+        WireApi::Responses => !matches!(
+            item,
+            ResponseItem::Reasoning { .. }
+                | ResponseItem::WebSearchCall { .. }
+                | ResponseItem::ImageGenerationCall { .. }
+                | ResponseItem::Compaction { .. }
+                | ResponseItem::ContextCompaction { .. }
+        ),
     }
 }
 

@@ -401,3 +401,24 @@ fn kept_items_stay_as_recorded_until_the_client_strips_them() {
     strip_foreign_references(&mut items, "openai");
     assert!(items.iter().all(|item| item.id().is_none()));
 }
+
+/// The prompt step reports a dropped compaction summary, so the session can
+/// say so once.
+#[test]
+fn a_dropped_compaction_summary_is_reported() {
+    let items = vec![compaction(Some("openai")), assistant(Some("openai"))];
+    let mut same = items.clone();
+    assert!(!adapt_for_provider(
+        &mut same,
+        &target("openai", WireApi::Responses, /*stores_items*/ false)
+    ));
+    let mut other = items;
+    assert!(adapt_for_provider(
+        &mut other,
+        &target(
+            "openai:work",
+            WireApi::Responses,
+            /*stores_items*/ false
+        )
+    ));
+}
