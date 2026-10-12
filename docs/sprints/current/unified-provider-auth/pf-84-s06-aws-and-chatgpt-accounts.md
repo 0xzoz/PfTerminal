@@ -67,12 +67,12 @@ Paths are under `codex-rs/`, at `ee530a0e26`.
 
 ## Verification
 
-- [ ] Focused: `just test -p codex-core -p codex-login -p codex-model-provider -p codex-aws-auth -p codex-vault` (plus touched crates); Linux clippy `-D warnings` on glitch.
+- [ ] Focused: `just test -p codex-core -p codex-login -p codex-model-provider -p codex-aws-auth -p codex-vault` (plus touched crates); Linux clippy `-D warnings` on glitch. Slice A: done ([gate](../../../../qa/provider-auth/pf-84/s06a-gate.md)).
 - [ ] tmux SOP (disposable homes, `CORBANU_TEST_NO_NATIVE_KEYRING=1`): A, with a fake profile and a missing profile, refused while env AWS keys are set. B, with an expired fake `work` store, shows "sign in again" while `default` stays intact. Restart is durable.
 - [ ] GLM run: coordinator `-m glm-5.3-flash -c model_provider="zai"`; workers `--account amazon-bedrock:fake` and `--account openai:work` (fake) get visible refusals, with no fallback, and the coordinator still replies.
-- [ ] A live: **NOT VERIFIABLE** without a test AWS profile. Travis would need to provide an AWS account with Bedrock model access in one region and a named model. He would also need a least-privilege IAM user or role (`bedrock:InvokeModel*`), its profile in a disposable `AWS_CONFIG_FILE`, with keys in the vault fetched only via `auth-helper`, and a spend cap.
+- [ ] A live (pending; limited testing, Travis 2026-10-11): **NOT VERIFIABLE** without a test AWS profile. Travis would need to provide an AWS account with Bedrock model access in one region and a named model. He would also need a least-privilege IAM user or role (`bedrock:InvokeModel*`), its profile in a disposable `AWS_CONFIG_FILE`, with keys in the vault fetched only via `auth-helper`, and a spend cap.
 - [ ] B live: a second real ChatGPT login signed in by Travis via device code in a disposable home; otherwise only the mock-server and fake-token tests count.
-- [ ] Videos: `pf84-aws-profile-account.toml`, `pf84-chatgpt-account.toml` (`--sprint PF-84-S06 --publish`). One Opus 5.5 High review per slice.
+- [ ] Videos: `pf84-aws-profile-account.toml` (done, [index](../../../../qa/demos/index/PF-84-S06.md)), `pf84-chatgpt-account.toml` (`--sprint PF-84-S06 --publish`). One Opus 5.5 High review per slice (A: APPROVE WITH NITS, round 3).
 
 ## Security notes
 
