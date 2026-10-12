@@ -3,6 +3,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::process::Output;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::thread::sleep;
@@ -25,6 +26,13 @@ use super::tmux_process::wait_for_exit as wait_for_process_exit;
 static NEXT_SERVER_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 const STABLE_CAPTURE_INTERVAL: Duration = Duration::from_millis(100);
+/// Minimum gap between a bare Esc and the next input. If the TUI reads Esc
+/// together with what follows, crossterm parses the pair as Alt+<next key>:
+/// Esc then `/exit` types `exit`, and Esc then Enter is Alt+Enter.
+const ESCAPE_SETTLE_MIN: Duration = Duration::from_millis(300);
+/// Upper bound on waiting for the viewport to settle after Esc. Busy screens
+/// (a running turn) may never settle; input then proceeds after this.
+const ESCAPE_SETTLE_MAX: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct TerminalSize {
@@ -182,11 +190,7 @@ impl TmuxServer {
         Ok(TmuxSession {
             server: self,
             name: session_name,
-            primary_pane: TmuxPane {
-                server: self,
-                id: pane_id,
-                pid: pane_pid,
-            },
+            primary_pane: TmuxPane::new(self, pane_id, pane_pid),
         })
     }
 
@@ -372,10 +376,49 @@ pub(crate) struct TmuxPane<'a> {
     pub(super) server: &'a TmuxServer,
     pub(super) id: String,
     pub(super) pid: u32,
+    /// When a bare Esc was sent and no input has followed it yet.
+    escape_sent_at: Mutex<Option<Instant>>,
 }
 
-impl TmuxPane<'_> {
+impl<'a> TmuxPane<'a> {
+    pub(super) fn new(server: &'a TmuxServer, id: String, pid: u32) -> Self {
+        Self {
+            server,
+            id,
+            pid,
+            escape_sent_at: Mutex::new(None),
+        }
+    }
+
+    /// Keeps a bare Esc from reaching the TUI in the same read as the next
+    /// input (see [`ESCAPE_SETTLE_MIN`]). The minimum gap does the work: the
+    /// TUI reads input on its own thread. Two equal captures afterwards are
+    /// a heuristic that it has also finished reacting to the Esc.
+    fn settle_after_escape(&self) -> Result<()> {
+        let sent_at = self
+            .escape_sent_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let Some(sent_at) = sent_at else {
+            return Ok(());
+        };
+        sleep(ESCAPE_SETTLE_MIN.saturating_sub(sent_at.elapsed()));
+        let deadline = Instant::now() + ESCAPE_SETTLE_MAX;
+        let mut previous = self.capture_viewport()?;
+        while Instant::now() < deadline {
+            sleep(STABLE_CAPTURE_INTERVAL);
+            let current = self.capture_viewport()?;
+            if current == previous {
+                break;
+            }
+            previous = current;
+        }
+        Ok(())
+    }
+
     pub(crate) fn send_literal(&self, text: &str) -> Result<()> {
+        self.settle_after_escape()?;
         self.server
             .artifacts
             .record_input(format!("literal bytes={}", text.len()));
@@ -396,6 +439,7 @@ impl TmuxPane<'_> {
     /// Send a secret-bearing literal without recording its value in the
     /// command log or failure reason. The pane still receives real key input.
     pub(crate) fn send_secret_literal(&self, text: &str) -> Result<()> {
+        self.settle_after_escape()?;
         self.server.artifacts.record_input(format!(
             "secret literal bytes={} value=<redacted>",
             text.len()
@@ -426,6 +470,7 @@ impl TmuxPane<'_> {
     }
 
     pub(crate) fn send_key(&self, key: TmuxKey) -> Result<()> {
+        self.settle_after_escape()?;
         self.server
             .artifacts
             .record_input(format!("key {}", key.name()));
@@ -438,6 +483,12 @@ impl TmuxPane<'_> {
                 .arg(key.name()),
             Some(self.id.as_str()),
         )?;
+        if key == TmuxKey::Escape {
+            *self
+                .escape_sent_at
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Instant::now());
+        }
         Ok(())
     }
 
