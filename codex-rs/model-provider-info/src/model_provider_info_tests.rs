@@ -1907,8 +1907,8 @@ fn named_account_rejections_name_the_recovery_for_their_kind() {
         ],
         [
             "OpenAI (openai) account `work` was rejected. Sign it in again with `corbanu login \
-             --account work`, or choose another account. The default OpenAI credential is \
-             unchanged."
+             --account work` (add `--with-api-key` for an API key), or choose another account. \
+             The default OpenAI credential is unchanged."
                 .to_string(),
             "Amazon Bedrock (amazon-bedrock) account `prod` was rejected. Check account `prod`'s \
              AWS profile and its credentials (`corbanu account list amazon-bedrock`), or choose \

@@ -886,7 +886,11 @@ pub(crate) async fn persist_tokens_async(
 ) -> io::Result<()> {
     // Reuse existing synchronous logic but run it off the async runtime.
     let codex_home = codex_home.to_path_buf();
-    let revoke_if_refused = matches!(named_account, Some((_, true)));
+    let codex_home_for_revoke = codex_home.clone();
+    let revoke_if_refused = match &named_account {
+        Some((account, true)) => Some(account.clone()),
+        _ => None,
+    };
     let refused = tokio::task::spawn_blocking(
         move || -> io::Result<Result<(), (io::Error, AuthDotJson)>> {
             let mut tokens = TokenData {
@@ -932,9 +936,14 @@ pub(crate) async fn persist_tokens_async(
     match refused {
         Ok(()) => Ok(()),
         Err((error, auth)) => {
-            if revoke_if_refused
-                && let Err(revoke_error) =
-                    crate::auth::revoke_unsaved_sign_in(&auth, auth_route_config).await
+            if let Some(account) = revoke_if_refused
+                && let Err(revoke_error) = crate::auth::revoke_unsaved_sign_in(
+                    &codex_home_for_revoke,
+                    &account,
+                    &auth,
+                    auth_route_config,
+                )
+                .await
             {
                 tracing::warn!("failed to revoke an unsaved sign-in: {revoke_error}");
             }

@@ -249,17 +249,13 @@ pub async fn revoke_replaced_sign_in(
             .as_ref()
             .map(|tokens| tokens.refresh_token.clone())
     };
-    let user = |auth: &AuthDotJson| {
-        auth.tokens
-            .as_ref()
-            .and_then(|tokens| tokens.id_token.chatgpt_user_id.clone())
-    };
     let current = current_named_sign_in(codex_home, account);
     let same_refresh = current.as_ref().and_then(|current| refresh(&current.0))
         == refresh(&previous.0)
         && refresh(&previous.0).is_some();
-    let same_user = current.as_ref().and_then(|current| user(&current.0)) == user(&previous.0)
-        && user(&previous.0).is_some();
+    let same_user = current
+        .as_ref()
+        .is_some_and(|current| same_chatgpt_user(&current.0, &previous.0));
     if same_refresh || same_user {
         return;
     }
@@ -310,12 +306,30 @@ pub async fn logout_named_account_with_revoke(
     storage.delete()
 }
 
-/// Revokes the tokens of a sign-in that could not be saved (best effort).
+/// Revokes the tokens of a sign-in that could not be saved (best effort),
+/// unless the account already holds a sign-in of the same ChatGPT user
+/// (revoking one sign-in of a user can end the user's other sessions).
 pub(crate) async fn revoke_unsaved_sign_in(
+    codex_home: &Path,
+    account: &NamedChatgptAccount,
     auth: &AuthDotJson,
     auth_route_config: &crate::AuthRouteConfig,
 ) -> std::io::Result<()> {
+    let existing = current_named_sign_in(codex_home, account);
+    if existing.is_some_and(|existing| same_chatgpt_user(&existing.0, auth)) {
+        return Ok(());
+    }
     super::revoke::revoke_auth_tokens(Some(auth), auth_route_config).await
+}
+
+/// Whether two sign-ins belong to the same (known) ChatGPT user.
+fn same_chatgpt_user(a: &AuthDotJson, b: &AuthDotJson) -> bool {
+    let user = |auth: &AuthDotJson| {
+        auth.tokens
+            .as_ref()
+            .and_then(|tokens| tokens.id_token.chatgpt_user_id.clone())
+    };
+    user(a).is_some() && user(a) == user(b)
 }
 
 /// What may be shown about a named sign-in: never a token.

@@ -365,6 +365,18 @@ async fn device_code_sign_in_is_saved_to_the_named_account_only() -> Result<()> 
         })))
         .mount(&server)
         .await;
+    // The refused second add revokes the tokens it could not save.
+    Mock::given(method("POST"))
+        .and(path("/oauth/revoke"))
+        .and(body_partial_json(json!({ "token": "new-refresh" })))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let _revoke = EnvGuard::set(
+        codex_login::REVOKE_TOKEN_URL_OVERRIDE_ENV_VAR,
+        format!("{}/oauth/revoke", server.uri()),
+    );
     let home = TempDir::new()?;
     let options = |name: &str, must_be_new: bool| {
         let mut opts = codex_login::ServerOptions::new(
@@ -398,6 +410,56 @@ async fn device_code_sign_in_is_saved_to_the_named_account_only() -> Result<()> 
             .is_err(),
         "adding an existing account is refused"
     );
+    Ok(())
+}
+
+/// A replaced sign-in is revoked only when the new one is another ChatGPT
+/// user: revoking a same-user sign-in could end the new session too.
+#[serial_test::serial(auth_env)]
+#[tokio::test]
+async fn replaced_sign_ins_are_revoked_only_for_another_user() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/revoke"))
+        .and(body_partial_json(json!({ "token": "work-refresh-1" })))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/revoke"))
+        .and(body_partial_json(json!({ "token": "work-refresh-2" })))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let fixture = fixture(&server).await?;
+    let route = codex_login::test_support::transport_default_auth_route_config();
+    // A sign-in whose ID token names its ChatGPT user.
+    let as_user = |user: &str, refresh: &str| {
+        let mut auth = sign_in("work-user", "access", refresh);
+        if let Some(tokens) = auth.tokens.as_mut() {
+            tokens.id_token = codex_login::token_data::parse_chatgpt_jwt_claims(&jwt(json!({
+                "https://api.openai.com/auth": { "chatgpt_user_id": user },
+            })))
+            .expect("claims");
+        }
+        auth
+    };
+    write_account(&fixture.home, "work", &as_user("u-1", "work-refresh-1"))?;
+    for (user, refresh) in [("u-1", "work-refresh-2"), ("u-2", "other-refresh-1")] {
+        let previous = codex_login::current_named_sign_in(fixture.home.path(), &account("work"))
+            .context("prior sign-in")?;
+        write_account(&fixture.home, "work", &as_user(user, refresh))?;
+        codex_login::revoke_replaced_sign_in(
+            fixture.home.path(),
+            &account("work"),
+            previous,
+            &route,
+        )
+        .await;
+    }
     Ok(())
 }
 

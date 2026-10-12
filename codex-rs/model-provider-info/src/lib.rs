@@ -995,7 +995,9 @@ pub fn named_account_rejection_message(
     } else if provider.is_some_and(|provider| provider.auth.is_some()) {
         format!("Check what the provider's auth command returns for account `{name}`")
     } else if provider.is_some_and(|provider| provider.requires_openai_auth) {
-        format!("Sign it in again with `corbanu login --account {name}`")
+        format!(
+            "Sign it in again with `corbanu login --account {name}` (add `--with-api-key` for an API key)"
+        )
     } else if provider.is_some_and(ModelProviderInfo::is_amazon_bedrock) {
         format!(
             "Check account `{name}`'s AWS profile and its credentials (`corbanu account list {provider_id}`)"
