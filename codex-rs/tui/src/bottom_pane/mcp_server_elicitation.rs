@@ -1946,7 +1946,8 @@ impl BottomPaneView for McpServerElicitationOverlay {
     fn handle_paste(&mut self, pasted: String) -> bool {
         if self.is_approval()
             || self.typing_guard.awaits_navigation()
-            || (self.typing_guard.awaits_choice() && self.current_field_is_select())
+            || ((self.typing_guard.awaits_choice() || self.typing_guard.is_armed())
+                && self.current_field_is_select())
         {
             // A paste is typed text; it never answers an approval.
             self.typing_guard.on_typed_input();
@@ -3121,12 +3122,24 @@ mod tests {
         }
         assert_eq!(resolved_decisions(&mut rx), Vec::new());
 
+        // A paste after the number key is typed text too.
+        let (tx, mut rx) = test_sender();
+        let mut overlay = confirm_form(tx);
+        overlay.require_fresh_choice_after_answer();
+        press(&mut overlay, KeyCode::Char('1'));
+        assert!(overlay.handle_paste("x".to_string()));
+        press(&mut overlay, KeyCode::Enter);
+        assert_eq!(resolved_decisions(&mut rx), Vec::new());
+
         let (tx, mut rx) = test_sender();
         let mut overlay = confirm_form(tx);
         overlay.require_fresh_choice_after_answer();
         press(&mut overlay, KeyCode::Char('1'));
         press(&mut overlay, KeyCode::Enter);
-        assert_eq!(resolved_decisions(&mut rx).len(), 1);
+        assert_eq!(
+            resolved_decisions(&mut rx),
+            vec![(McpServerElicitationAction::Accept, None)]
+        );
     }
 
     /// #192: in a form, a number key chooses an option without submitting.
