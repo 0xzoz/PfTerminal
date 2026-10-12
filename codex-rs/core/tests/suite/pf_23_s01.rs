@@ -452,7 +452,11 @@ text(JSON.stringify(await tools.exec_command({ cmd: next })));
             "{level:?}: {output}"
         );
         // The control: under Permissive the vault command ran.
-        assert_eq!(output.contains("exit_code"), !refused, "{level:?}: {output}");
+        assert_eq!(
+            output.contains("exit_code"),
+            !refused,
+            "{level:?}: {output}"
+        );
     }
     Ok(())
 }
