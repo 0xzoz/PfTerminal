@@ -260,6 +260,147 @@ async fn logout_clears_only_that_account_and_missing_accounts_never_fall_back() 
     Ok(())
 }
 
+/// B2: another process's refresh (a newer sign-in saved to the vault) is
+/// picked up by the guarded reload instead of refreshing again; a refresh the
+/// server rejects names the recovery for that account.
+#[serial_test::serial(auth_env)]
+#[tokio::test]
+async fn refreshes_from_another_process_are_picked_up_and_rejections_name_the_account() -> Result<()>
+{
+    skip_if_no_network!(Ok(()));
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .and(body_partial_json(
+            json!({ "refresh_token": "play-refresh-1" }),
+        ))
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            "error": { "code": "refresh_token_expired" }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let fixture = fixture(&server).await?;
+
+    let work = fixture.base.for_named_account_loaded(account("work")).await;
+    write_account(
+        &fixture.home,
+        "work",
+        &sign_in("work-user", "work-access-9", "work-refresh-9"),
+    )?;
+    work.refresh_token().await.context("guarded reload")?;
+    assert_eq!(
+        work.auth().await.and_then(|auth| auth.get_token().ok()),
+        Some("work-access-9".to_string())
+    );
+
+    let play = fixture.base.for_named_account_loaded(account("play")).await;
+    let error = play
+        .refresh_token_from_authority()
+        .await
+        .expect_err("rejected refresh")
+        .to_string();
+    assert!(
+        error.contains("sign in again with `corbanu login --account play`"),
+        "{error}"
+    );
+    assert_eq!(
+        std::fs::read(fixture.home.path().join("auth.json"))?,
+        fixture.default_bytes
+    );
+    Ok(())
+}
+
+/// A named account without a sign-in never falls back to `OPENAI_API_KEY`,
+/// `CODEX_API_KEY` or the default login, even when they are set.
+#[serial_test::serial(auth_env)]
+#[tokio::test]
+async fn a_named_account_without_a_sign_in_ignores_environment_keys() -> Result<()> {
+    let server = MockServer::start().await;
+    let fixture = fixture(&server).await?;
+    let _openai = EnvGuard::set("OPENAI_API_KEY", "sk-env-openai-canary".to_string());
+    let _codex = EnvGuard::set("CODEX_API_KEY", "sk-env-codex-canary".to_string());
+    let base = AuthManager::shared(
+        fixture.home.path().to_path_buf(),
+        /*enable_codex_api_key_env*/ true,
+        AuthCredentialsStoreMode::File,
+        /*forced_chatgpt_workspace_id*/ None,
+        /*chatgpt_base_url*/ None,
+        AuthKeyringBackendKind::default(),
+        codex_login::test_support::transport_default_auth_route_config(),
+    )
+    .await;
+    let missing = base.for_named_account_loaded(account("missing")).await;
+    assert!(missing.auth().await.is_none());
+    Ok(())
+}
+
+/// B3: a device-code sign-in for a named account lands in its vault store,
+/// never in `auth.json`; a first sign-in never replaces an existing account.
+#[serial_test::serial(auth_env)]
+#[tokio::test]
+async fn device_code_sign_in_is_saved_to_the_named_account_only() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/accounts/deviceauth/usercode"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "device_auth_id": "device-auth-1", "user_code": "CODE-1", "interval": "0"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/accounts/deviceauth/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "authorization_code": "code-1", "code_challenge": "c", "code_verifier": "v"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id_token": jwt(json!({ "sub": "user-new" })),
+            "access_token": "new-access",
+            "refresh_token": "new-refresh",
+        })))
+        .mount(&server)
+        .await;
+    let home = TempDir::new()?;
+    let options = |name: &str, must_be_new: bool| {
+        let mut opts = codex_login::ServerOptions::new(
+            home.path().to_path_buf(),
+            "client-id".to_string(),
+            /*forced_chatgpt_workspace_id*/ None,
+            AuthCredentialsStoreMode::File,
+            AuthKeyringBackendKind::default(),
+            codex_login::test_support::transport_default_auth_route_config(),
+        );
+        opts.issuer = server.uri();
+        opts.open_browser = false;
+        opts.named_account = Some(account(name));
+        opts.named_account_must_be_new = must_be_new;
+        opts
+    };
+    codex_login::run_device_code_login(options("fresh", true)).await?;
+    assert_eq!(
+        (
+            tokens(read_account(&home, "fresh")?),
+            home.path().join("auth.json").exists(),
+        ),
+        (
+            Some(("new-access".to_string(), "new-refresh".to_string())),
+            false,
+        )
+    );
+    assert!(
+        codex_login::run_device_code_login(options("fresh", true))
+            .await
+            .is_err(),
+        "adding an existing account is refused"
+    );
+    Ok(())
+}
+
 struct EnvGuard {
     key: &'static str,
     original: Option<OsString>,

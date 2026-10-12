@@ -226,6 +226,11 @@ pub(crate) fn auth_manager_for_provider(
             Some(account) => {
                 auth_manager.map(|auth_manager| auth_manager.for_named_account(account))
             }
+            // A session swapped to a named account's manager must not lend
+            // that account to an OpenAI-auth provider on its default login.
+            None if provider.requires_openai_auth => {
+                auth_manager.map(|auth_manager| auth_manager.default_account_manager())
+            }
             None => auth_manager,
         },
     }
@@ -1428,3 +1433,7 @@ mod tests {
         assert_eq!(registration_count.load(Ordering::SeqCst), 3);
     }
 }
+
+#[cfg(test)]
+#[path = "named_sign_in_tests.rs"]
+mod named_sign_in_tests;

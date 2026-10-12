@@ -276,3 +276,42 @@ fn openai_api_key_accounts_store_a_sign_in_and_show_no_key() {
         Err("The value cannot be empty.".to_string())
     );
 }
+
+/// PF-84-S06: a ChatGPT sign-in row shows its kind, email hint and plan, and
+/// never a token.
+#[test]
+fn chatgpt_sign_in_rows_show_the_email_hint_and_plan_only() {
+    let home = tempfile::tempdir().expect("home");
+    let jwt = "e30.eyJlbWFpbCI6ImFubkBleGFtcGxlLmNvbSIsImh0dHBzOi8vYXBpLm9wZW5haS5jb20vYXV0aCI6eyJjaGF0Z3B0X3BsYW5fdHlwZSI6InBsdXMiLCJjaGF0Z3B0X3VzZXJfaWQiOiJ1LTEifX0.c2ln";
+    let sign_in = codex_login::AuthDotJson {
+        auth_mode: Some(codex_protocol::auth::AuthMode::Chatgpt),
+        openai_api_key: None,
+        tokens: Some(codex_login::token_data::TokenData {
+            id_token: codex_login::token_data::parse_chatgpt_jwt_claims(jwt).expect("claims"),
+            access_token: "access-canary-0002".to_string(),
+            refresh_token: "refresh-canary-0002".to_string(),
+            account_id: Some("ws-1".to_string()),
+        }),
+        last_refresh: None,
+        agent_identity: None,
+        personal_access_token: None,
+        bedrock_api_key: None,
+    };
+    codex_login::save_named_account_auth(
+        home.path(),
+        &codex_login::NamedChatgptAccount {
+            provider_id: "openai".to_string(),
+            name: "work".to_string(),
+        },
+        &sign_in,
+        /*must_be_new*/ true,
+    )
+    .expect("save");
+    let rows = load_rows(home.path()).expect("rows");
+    let detail = row_detail(&rows[0]);
+    assert!(
+        detail.starts_with("ChatGPT sign-in · a…@example.com · Plus · fp ")
+            && !detail.contains("canary"),
+        "{detail}"
+    );
+}

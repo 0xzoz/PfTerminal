@@ -522,3 +522,38 @@ fn aws_profile_names_are_validated() {
         );
     }
 }
+
+/// PF-84-S06: a sign-in's fingerprint is its identity, so a token refresh
+/// keeps it; another user or workspace gets another fingerprint.
+#[test]
+fn sign_in_fingerprint_survives_token_refresh() {
+    let (_dir, vault) = test_vault();
+    // `{"sub":"user-w","https://api.openai.com/auth":{"chatgpt_user_id":"u-1"}}`
+    let jwt = "e30.eyJzdWIiOiJ1c2VyLXciLCJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF91c2VyX2lkIjoidS0xIn19.c2ln";
+    let sign_in = |access: &str, workspace: &str| {
+        format!(
+            r#"{{"tokens":{{"id_token":"{jwt}","access_token":"{access}","refresh_token":"rt-{access}","account_id":"{workspace}"}}}}"#
+        )
+    };
+    let fingerprint = |raw: &str| {
+        vault
+            .write_provider_account(
+                "openai",
+                &name("work"),
+                ProviderAccountKind::ChatgptAuth,
+                raw,
+            )
+            .expect("write");
+        vault
+            .provider_account_fingerprint("openai", &name("work"))
+            .expect("fingerprint")
+            .expect("salted")
+    };
+    let before = fingerprint(&sign_in("access-1", "ws-1"));
+    assert_eq!(fingerprint(&sign_in("access-2", "ws-1")), before);
+    assert_ne!(fingerprint(&sign_in("access-3", "ws-2")), before);
+    assert_eq!(
+        sign_in_identity(&sign_in("access-1", "ws-1")),
+        Some("chatgpt\0ws-1\0u-1".to_string())
+    );
+}

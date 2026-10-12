@@ -98,7 +98,7 @@ $T send-keys -t a Escape; sleep 1
 send "Reply with exactly: pong"; waitfor "authorized as"; sleep 1; cap tui-2-turn
 send "/providers"; waitfor "Providers"; sleep 1; select_row "OpenAI · default"; sleep 1; cap tui-3-providers
 $T send-keys -t a Enter; waitfor "Add another account"; sleep 1; cap tui-4-manage
-$T send-keys -t a Enter; waitfor "Account name"; sleep 0.5
+select_row "Add another account"; $T send-keys -t a Enter; waitfor "Account name"; sleep 0.5
 next_user tui
 send "tui"; waitfor "device code"; sleep 1; cap tui-5-methods
 $T send-keys -t a Enter; waitfor "Signed in openai account"; sleep 1; cap tui-6-signed-in

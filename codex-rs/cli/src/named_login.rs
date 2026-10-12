@@ -85,14 +85,9 @@ pub async fn run_named_account_login(
         _ => {}
     }
     let auth_route_config = config.auth_route_config();
-    // Replace only this account's earlier sign-in (revoking its tokens).
-    if let Err(error) =
-        logout_named_account_with_revoke(&config.codex_home, &account, &auth_route_config).await
-    {
-        exit_with(format!(
-            "Could not clear account `{name}` before sign-in: {error}"
-        ));
-    }
+    // The earlier sign-in stays until the new one is saved; then only its
+    // tokens are revoked. A cancelled sign-in leaves the account as it was.
+    let previous = codex_login::current_named_sign_in(&config.codex_home, &account);
     let result = match method {
         NamedLoginMethod::ApiKey(api_key) => {
             login_named_account_with_api_key(&config.codex_home, &account, &api_key)
@@ -104,7 +99,7 @@ pub async fn run_named_account_login(
                 config.forced_chatgpt_workspace_id.clone(),
                 config.cli_auth_credentials_store_mode,
                 config.auth_keyring_backend_kind(),
-                auth_route_config,
+                auth_route_config.clone(),
             );
             opts.named_account = Some(account.clone());
             if let Some(issuer) = issuer_base_url {
@@ -129,6 +124,15 @@ pub async fn run_named_account_login(
     };
     if let Err(error) = result {
         exit_with(format!("Error signing in account `{name}`: {error}"));
+    }
+    if let Some(previous) = previous {
+        codex_login::revoke_replaced_sign_in(
+            &config.codex_home,
+            &account,
+            previous,
+            &auth_route_config,
+        )
+        .await;
     }
     match named_account_summary(&config.codex_home, &account) {
         Ok(Some(summary)) => eprintln!(

@@ -257,6 +257,9 @@ pub(crate) fn add_methods(
     } else if provider.is_claude_plan() {
         Vec::new()
     } else if provider.requires_openai_auth {
+        if provider_id != codex_model_provider_info::OPENAI_PROVIDER_ID {
+            return Vec::new();
+        }
         vec![
             AddAccountMethod::ChatgptDeviceCode,
             AddAccountMethod::OpenaiApiKey,

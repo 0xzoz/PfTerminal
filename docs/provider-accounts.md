@@ -129,9 +129,13 @@ sign-in or a masked OpenAI API key. Rows show only the kind, an email hint
 - A refreshed token is saved back to that account only. One process shares
   one sign-in and refresh lock per account; other processes pick a refresh
   up from the vault.
-- A session on a named account uses it for what needs the sign-in (model
-  requests, refresh, connectors, usage); the model list is still fetched
-  with the default login (or the bundled list).
+- A session on a named account uses it for what needs the sign-in: model
+  requests, refresh, connectors, usage and the `/status` account line. The
+  model list is fetched with the account the process started on, and the
+  rate limits `/status` shows before the first reply come from the default
+  login.
+- `forced_login_method` and `forced_chatgpt_workspace_id` apply to named
+  accounts too: a sign-in of the other kind or another workspace is refused.
 - Signing the same ChatGPT user in under two accounts (or as `default` and a
   named account) is allowed with a warning: they share that user's limits,
   and signing out of one can end the other's session.

@@ -9,6 +9,7 @@
 use std::fmt;
 use std::path::Path;
 
+use codex_protocol::config_types::ForcedLoginMethod;
 use codex_vault::ProviderAccountKind;
 use codex_vault::ProviderAccountName;
 use codex_vault::Vault;
@@ -66,6 +67,22 @@ impl VaultAccountAuthStorage {
     }
 }
 
+impl VaultAccountAuthStorage {
+    /// Saves a first sign-in; fails, changing nothing, when the account
+    /// already exists (a concurrent add never overwrites it).
+    pub(super) fn create(&self, auth: &AuthDotJson) -> std::io::Result<()> {
+        let raw = Zeroizing::new(serde_json::to_string(auth).map_err(std::io::Error::other)?);
+        self.vault
+            .create_provider_account(
+                &self.provider_id,
+                &self.name,
+                ProviderAccountKind::ChatgptAuth,
+                &raw,
+            )
+            .map_err(std::io::Error::other)
+    }
+}
+
 impl AuthStorageBackend for VaultAccountAuthStorage {
     fn load(&self) -> std::io::Result<Option<AuthDotJson>> {
         // Never initialise a vault (and its key) just to read.
@@ -120,14 +137,128 @@ impl AuthStorageBackend for VaultAccountAuthStorage {
     }
 }
 
-/// Saves `auth` as the named account's sign-in (creating the account). The
-/// default login is never touched.
+/// Saves `auth` as the named account's sign-in, replacing an earlier one
+/// (or, with `must_be_new`, failing if the account exists). The default
+/// login is never touched.
 pub fn save_named_account_auth(
     codex_home: &Path,
     account: &NamedChatgptAccount,
     auth: &AuthDotJson,
+    must_be_new: bool,
 ) -> std::io::Result<()> {
-    VaultAccountAuthStorage::new(codex_home, account)?.save(auth)
+    let storage = VaultAccountAuthStorage::new(codex_home, account)?;
+    if must_be_new {
+        storage.create(auth)
+    } else {
+        storage.save(auth)
+    }
+}
+
+/// Why a stored sign-in may not be used under the configuration's login
+/// restrictions (`forced_login_method`, `forced_chatgpt_workspace_id`).
+pub(super) fn sign_in_restriction(
+    account: &NamedChatgptAccount,
+    auth: &AuthDotJson,
+    forced_login_method: Option<ForcedLoginMethod>,
+    forced_workspace: Option<&[String]>,
+) -> Option<String> {
+    let name = &account.name;
+    let is_api_key = auth.tokens.is_none() && auth.openai_api_key.is_some();
+    match (forced_login_method, is_api_key) {
+        (Some(ForcedLoginMethod::Chatgpt), true) => {
+            return Some(format!(
+                "account `{name}` holds an OpenAI API key, but this configuration requires a \
+                 ChatGPT sign-in; sign in with `corbanu login --account {name}`"
+            ));
+        }
+        (Some(ForcedLoginMethod::Api), false) => {
+            return Some(format!(
+                "account `{name}` holds a ChatGPT sign-in, but this configuration requires an \
+                 API key; use `corbanu login --account {name} --with-api-key`"
+            ));
+        }
+        _ => {}
+    }
+    let workspaces = forced_workspace?;
+    let workspace = auth.tokens.as_ref().and_then(|tokens| {
+        tokens
+            .account_id
+            .clone()
+            .or(tokens.id_token.chatgpt_account_id.clone())
+    });
+    match workspace {
+        Some(workspace) if workspaces.contains(&workspace) => None,
+        _ if is_api_key => None,
+        _ => Some(format!(
+            "account `{name}` is signed in to a ChatGPT workspace this configuration does not \
+             allow; sign in again with `corbanu login --account {name}`"
+        )),
+    }
+}
+
+/// Why `account` cannot be used under these login restrictions, checked
+/// before a session starts. `None` when it can (or holds no sign-in).
+pub fn named_account_restriction_error(
+    codex_home: &Path,
+    account: &NamedChatgptAccount,
+    forced_login_method: Option<ForcedLoginMethod>,
+    forced_workspace: Option<&[String]>,
+) -> Option<String> {
+    let auth = VaultAccountAuthStorage::new(codex_home, account)
+        .ok()?
+        .load()
+        .ok()
+        .flatten()?;
+    sign_in_restriction(account, &auth, forced_login_method, forced_workspace)
+}
+
+/// The sign-in a named account holds now, kept so its tokens can be
+/// revoked after a new sign-in replaces it. Never printed.
+pub struct PreviousSignIn(AuthDotJson);
+
+impl fmt::Debug for PreviousSignIn {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PreviousSignIn(<redacted>)")
+    }
+}
+
+/// The account's current sign-in, if any (unreadable counts as none).
+pub fn current_named_sign_in(
+    codex_home: &Path,
+    account: &NamedChatgptAccount,
+) -> Option<PreviousSignIn> {
+    VaultAccountAuthStorage::new(codex_home, account)
+        .ok()?
+        .load()
+        .ok()
+        .flatten()
+        .map(PreviousSignIn)
+}
+
+/// Revokes a replaced sign-in's tokens (best effort), unless the account
+/// still holds the same refresh token.
+pub async fn revoke_replaced_sign_in(
+    codex_home: &Path,
+    account: &NamedChatgptAccount,
+    previous: PreviousSignIn,
+    auth_route_config: &crate::AuthRouteConfig,
+) {
+    let refresh = |auth: &AuthDotJson| {
+        auth.tokens
+            .as_ref()
+            .map(|tokens| tokens.refresh_token.clone())
+    };
+    let current = current_named_sign_in(codex_home, account);
+    if current.as_ref().and_then(|current| refresh(&current.0)) == refresh(&previous.0)
+        && refresh(&previous.0).is_some()
+    {
+        return;
+    }
+    if let Err(error) =
+        super::revoke::revoke_auth_tokens(Some(&previous.0), auth_route_config).await
+    {
+        tracing::warn!("failed to revoke a replaced named-account sign-in: {error}");
+    }
 }
 
 /// An OpenAI API-key sign-in for a named account.
@@ -148,6 +279,7 @@ pub fn login_named_account_with_api_key(
             personal_access_token: None,
             bedrock_api_key: None,
         },
+        /*must_be_new*/ false,
     )
 }
 
@@ -159,8 +291,11 @@ pub async fn logout_named_account_with_revoke(
     auth_route_config: &crate::AuthRouteConfig,
 ) -> std::io::Result<bool> {
     let storage = VaultAccountAuthStorage::new(codex_home, account)?;
-    let auth = storage.load()?;
-    if let Err(error) = super::revoke::revoke_auth_tokens(auth.as_ref(), auth_route_config).await {
+    // An unreadable sign-in is still deleted; only the revoke is skipped.
+    if let Ok(auth) = storage.load()
+        && let Err(error) =
+            super::revoke::revoke_auth_tokens(auth.as_ref(), auth_route_config).await
+    {
         tracing::warn!("failed to revoke named account tokens during logout: {error}");
     }
     storage.delete()

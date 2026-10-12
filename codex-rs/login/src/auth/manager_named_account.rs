@@ -11,17 +11,23 @@ use std::sync::Mutex;
 use std::sync::RwLock;
 use std::sync::Weak;
 
+use codex_protocol::auth::AuthMode;
 use tokio::sync::Semaphore;
 use tokio::sync::watch;
 
 use super::AuthManager;
 use super::CachedAuth;
+use super::ChatgptAuth;
+use super::ChatgptAuthState;
 use super::CodexAuth;
 use super::OpenAiApiKeyEnv;
 use super::ProviderApiKeyCache;
+use super::create_default_auth_client;
+use super::refresh_token_endpoint;
 use super::revoke_auth_tokens;
 use crate::auth::named_chatgpt::NamedChatgptAccount;
 use crate::auth::named_chatgpt::VaultAccountAuthStorage;
+use crate::auth::named_chatgpt::sign_in_restriction;
 use crate::auth::storage::AuthDotJson;
 use crate::auth::storage::AuthStorageBackend;
 
@@ -34,11 +40,11 @@ impl AuthManager {
     /// The manager of one named sign-in account of this home, created on
     /// first use with this manager's settings. It never reads the default
     /// login, `OPENAI_API_KEY`, `CODEX_API_KEY` or externally provided tokens.
-    /// Its sign-in is loaded on the first [`AuthManager::auth`]; use
-    /// [`AuthManager::for_named_account_loaded`] where the cache is read
-    /// before that.
-    pub fn for_named_account(&self, account: NamedChatgptAccount) -> Arc<AuthManager> {
-        let key = (self.codex_home.clone(), account.clone());
+    /// A ChatGPT or API-key sign-in is loaded here; other kinds load on the
+    /// first [`AuthManager::auth`].
+    pub fn for_named_account(self: &Arc<Self>, account: NamedChatgptAccount) -> Arc<AuthManager> {
+        let base = self.default_account_manager();
+        let key = (base.codex_home.clone(), account.clone());
         let mut registry = NAMED_ACCOUNT_MANAGERS
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -46,13 +52,18 @@ impl AuthManager {
         if let Some(manager) = registry.get(&key).and_then(Weak::upgrade) {
             return manager;
         }
-        let manager = Arc::new(self.new_named_account_manager(account));
+        let manager = Arc::new(base.new_named_account_manager(account, Arc::clone(&base)));
+        let auth = manager.load_named_account_auth_sync();
+        manager.set_cached_auth(auth);
         registry.insert(key, Arc::downgrade(&manager));
         manager
     }
 
-    /// [`AuthManager::for_named_account`] with its sign-in already loaded.
-    pub async fn for_named_account_loaded(&self, account: NamedChatgptAccount) -> Arc<AuthManager> {
+    /// [`AuthManager::for_named_account`] with any sign-in kind loaded.
+    pub async fn for_named_account_loaded(
+        self: &Arc<Self>,
+        account: NamedChatgptAccount,
+    ) -> Arc<AuthManager> {
         let manager = self.for_named_account(account);
         if manager.auth_cached().is_none() {
             manager.reload().await;
@@ -60,12 +71,24 @@ impl AuthManager {
         manager
     }
 
+    /// The manager of the default login: this one, or the one a named
+    /// account's manager was created from.
+    pub fn default_account_manager(self: &Arc<Self>) -> Arc<AuthManager> {
+        self.base_manager
+            .clone()
+            .unwrap_or_else(|| Arc::clone(self))
+    }
+
     /// The named account this manager serves, if any.
     pub fn named_account(&self) -> Option<&NamedChatgptAccount> {
         self.named_account.as_ref()
     }
 
-    fn new_named_account_manager(&self, account: NamedChatgptAccount) -> AuthManager {
+    fn new_named_account_manager(
+        &self,
+        account: NamedChatgptAccount,
+        base: Arc<AuthManager>,
+    ) -> AuthManager {
         let (auth_change_tx, _auth_change_rx) = watch::channel(0);
         AuthManager {
             codex_home: self.codex_home.clone(),
@@ -88,6 +111,8 @@ impl AuthManager {
             provider_api_key_cache: RwLock::new(ProviderApiKeyCache::new()),
             auth_route_config: self.auth_route_config.clone(),
             named_account: Some(account),
+            forced_login_method: self.forced_login_method,
+            base_manager: Some(base),
         }
     }
 
@@ -101,8 +126,76 @@ impl AuthManager {
         )?)))
     }
 
+    /// The stored sign-in, when it is usable under this configuration's
+    /// login restrictions (a refused one is logged and treated as absent).
+    fn named_account_auth_dot_json(
+        &self,
+    ) -> std::io::Result<Option<(Arc<dyn AuthStorageBackend>, AuthDotJson)>> {
+        let Some(storage) = self.named_account_storage()? else {
+            return Ok(None);
+        };
+        let Some(auth_dot_json) = storage
+            .load()?
+            .filter(AuthDotJson::has_primary_auth_material)
+        else {
+            return Ok(None);
+        };
+        let forced_workspace = self.forced_chatgpt_workspace_id();
+        if let Some(account) = self.named_account.as_ref()
+            && let Some(reason) = sign_in_restriction(
+                account,
+                &auth_dot_json,
+                self.forced_login_method,
+                forced_workspace.as_deref(),
+            )
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                reason,
+            ));
+        }
+        Ok(Some((storage, auth_dot_json)))
+    }
+
+    /// A ChatGPT or API-key sign-in, built without awaiting so a manager
+    /// handed to synchronous readers is loaded from the start.
+    fn load_named_account_auth_sync(&self) -> Option<CodexAuth> {
+        let account = self.named_account.as_ref()?;
+        let result = (|| -> std::io::Result<Option<CodexAuth>> {
+            let Some((storage, auth_dot_json)) = self.named_account_auth_dot_json()? else {
+                return Ok(None);
+            };
+            match auth_dot_json.resolved_mode() {
+                AuthMode::ApiKey => Ok(auth_dot_json
+                    .openai_api_key
+                    .as_deref()
+                    .map(CodexAuth::from_api_key)),
+                AuthMode::Chatgpt => {
+                    let client = create_default_auth_client(
+                        &refresh_token_endpoint(),
+                        &self.auth_route_config,
+                    )?;
+                    Ok(Some(CodexAuth::Chatgpt(ChatgptAuth {
+                        state: ChatgptAuthState {
+                            auth_dot_json: Arc::new(std::sync::Mutex::new(Some(auth_dot_json))),
+                            client,
+                        },
+                        storage,
+                    })))
+                }
+                // Other kinds load on the first `auth()`.
+                _ => Ok(None),
+            }
+        })();
+        result.unwrap_or_else(|error| {
+            tracing::warn!(%account, %error, "named account sign-in unavailable");
+            None
+        })
+    }
+
     /// The named account's sign-in from its vault store only. `None` when the
-    /// account has none (or this is not a named-account manager).
+    /// account has none, it is refused by a login restriction, or this is not
+    /// a named-account manager.
     pub(super) async fn load_named_account_auth(&self) -> Option<CodexAuth> {
         let account = self.named_account.as_ref()?;
         match self.try_load_named_account_auth().await {
@@ -115,13 +208,7 @@ impl AuthManager {
     }
 
     async fn try_load_named_account_auth(&self) -> std::io::Result<Option<CodexAuth>> {
-        let Some(storage) = self.named_account_storage()? else {
-            return Ok(None);
-        };
-        let Some(auth_dot_json) = storage
-            .load()?
-            .filter(AuthDotJson::has_primary_auth_material)
-        else {
+        let Some((storage, auth_dot_json)) = self.named_account_auth_dot_json()? else {
             return Ok(None);
         };
         let mode = auth_dot_json.storage_mode(self.auth_credentials_store_mode);
@@ -139,22 +226,20 @@ impl AuthManager {
         .map(Some)
     }
 
-    /// Logs out of the named account only: revokes its tokens when asked and
-    /// deletes its vault store. `None` when this is not a named manager.
+    /// Logs out of the named account only: revokes the tokens stored now
+    /// (best effort) and deletes its vault store, also when the stored
+    /// sign-in cannot be read. `None` when this is not a named manager.
     pub(super) async fn logout_named_account(&self, revoke: bool) -> Option<std::io::Result<bool>> {
         let storage = match self.named_account_storage() {
             Ok(storage) => storage?,
             Err(error) => return Some(Err(error)),
         };
-        if revoke {
-            let auth_dot_json = self
-                .auth_cached()
-                .and_then(|auth| auth.get_current_auth_json());
-            if let Err(error) =
-                revoke_auth_tokens(auth_dot_json.as_ref(), &self.auth_route_config).await
-            {
-                tracing::warn!("failed to revoke named account tokens during logout: {error}");
-            }
+        if revoke
+            && let Ok(Some(auth_dot_json)) = storage.load()
+            && let Err(error) =
+                revoke_auth_tokens(Some(&auth_dot_json), &self.auth_route_config).await
+        {
+            tracing::warn!("failed to revoke named account tokens during logout: {error}");
         }
         let removed = storage.delete();
         self.reload().await;

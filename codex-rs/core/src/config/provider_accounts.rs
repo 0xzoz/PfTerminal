@@ -191,7 +191,21 @@ fn unused_other_provider_account(
 /// explicit account of another provider.
 pub fn session_account_error(config: &super::Config) -> Option<String> {
     selected_account_error(config.codex_home.as_path(), &config.model_provider)
+        .or_else(|| sign_in_restriction_error(config))
         .or_else(|| other_provider_account_error(config))
+}
+
+/// PF-84-S06: a named OpenAI sign-in of the kind or workspace the
+/// configuration's login restrictions rule out is refused before the session
+/// starts (its manager also refuses to load it).
+fn sign_in_restriction_error(config: &super::Config) -> Option<String> {
+    let account = codex_model_provider::named_sign_in_account(&config.model_provider)?;
+    codex_login::named_account_restriction_error(
+        config.codex_home.as_path(),
+        &account,
+        config.forced_login_method,
+        config.forced_chatgpt_workspace_id.as_deref(),
+    )
 }
 
 /// Splits `[<provider>:]<name>`; the provider defaults to the session's.
@@ -224,10 +238,13 @@ pub(crate) fn stamp_provider_account(
         Some(name) => {
             validate_provider_account_provider_id(provider_id)
                 .map_err(|error| invalid_selection(provider_id, error.to_string()))?;
-            // The Claude account helper serves the built-in Claude Plan only.
+            // The Claude account helper serves the built-in Claude Plan only,
+            // and named sign-ins (`corbanu login --account`) the built-in OpenAI.
             if !supports_named_accounts(provider)
                 || (provider.is_claude_plan()
                     && provider_id != codex_model_provider_info::CLAUDE_PLAN_PROVIDER_ID)
+                || (provider.requires_openai_auth
+                    && provider_id != codex_model_provider_info::OPENAI_PROVIDER_ID)
             {
                 return Err(invalid_selection(
                     provider_id,

@@ -5,8 +5,9 @@ Device-code sign-in (`/api/accounts/deviceauth/*`, `/oauth/token` code exchange)
 the user last set with POST /_next_user {"user": "<name>", "ttl": <access token seconds, default 60>}. Every token is fake and
 encodes only `<user>` and a generation number; the access token expires 60 s after it is
 issued, so the first request refreshes it. A refresh must present the newest refresh
-token of that user (rotation; an older one gets `refresh_token_reused`), and users whose
-name starts with `bad` get `refresh_token_expired`. POST */responses answers with the
+token of that user (rotation; an older one gets `refresh_token_reused`); users whose name
+starts with `bad` get an already expired access token and `refresh_token_expired`. An
+expired access token gets 401 from */responses. POST */responses answers with the
 user and token generation it was authorized as. The log (--log) records users,
 generations and events only.
 """
@@ -123,7 +124,9 @@ def main():
                     with LOCK:
                         STATE["gen"][user] = 1
                     log(event="sign-in", user=user)
-                    return self.reply(200, issue(user, 1, access_ttl=STATE.get("ttl", 60)))
+                    # A `bad` user's access token is already expired.
+                    ttl = -60 if user.startswith("bad") else STATE.get("ttl", 60)
+                    return self.reply(200, issue(user, 1, access_ttl=ttl))
                 rt = body.get("refresh_token", "")
                 user, gen = rt[3:].rsplit("-", 1) if rt.startswith("rt-") else ("?", "0")
                 if user.startswith("bad"):
@@ -141,6 +144,12 @@ def main():
                 return self.reply(200, issue(user, current + 1, access_ttl=3600))
             if path.endswith("/responses"):
                 who = self.who()
+                token = self.headers.get("authorization", "")[7:]
+                payload = claims(token)
+                if payload and payload.get("exp", 0) < time.time():
+                    log(event="responses-rejected", who=who, reason="expired access token")
+                    return self.reply(401, {"error": {"code": "token_expired",
+                                                      "message": "access token expired"}})
                 log(event="responses", who=who)
                 rid = "resp_mock_%d" % int(time.time() * 1000)
                 item = {"type": "message", "role": "assistant", "id": "msg_1",

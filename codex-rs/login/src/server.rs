@@ -81,6 +81,8 @@ pub struct ServerOptions {
     /// PF-84-S06: sign into this named account (its vault store) instead of
     /// the default login.
     pub named_account: Option<crate::NamedChatgptAccount>,
+    /// With `named_account`: fail instead of replacing an existing account.
+    pub named_account_must_be_new: bool,
 }
 
 impl ServerOptions {
@@ -107,6 +109,7 @@ impl ServerOptions {
             auth_keyring_backend_kind,
             auth_route_config,
             named_account: None,
+            named_account_must_be_new: false,
         }
     }
 }
@@ -425,7 +428,9 @@ async fn process_request(
                         tokens.refresh_token.clone(),
                         opts.cli_auth_credentials_store_mode,
                         opts.auth_keyring_backend_kind,
-                        opts.named_account.clone(),
+                        opts.named_account
+                            .clone()
+                            .map(|account| (account, opts.named_account_must_be_new)),
                     )
                     .await
                     {
@@ -875,7 +880,7 @@ pub(crate) async fn persist_tokens_async(
     refresh_token: String,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
     keyring_backend_kind: AuthKeyringBackendKind,
-    named_account: Option<crate::NamedChatgptAccount>,
+    named_account: Option<(crate::NamedChatgptAccount, bool)>,
 ) -> io::Result<()> {
     // Reuse existing synchronous logic but run it off the async runtime.
     let codex_home = codex_home.to_path_buf();
@@ -902,7 +907,9 @@ pub(crate) async fn persist_tokens_async(
             bedrock_api_key: None,
         };
         match named_account {
-            Some(account) => crate::save_named_account_auth(&codex_home, &account, &auth),
+            Some((account, must_be_new)) => {
+                crate::save_named_account_auth(&codex_home, &account, &auth, must_be_new)
+            }
             None => save_auth(
                 &codex_home,
                 &auth,

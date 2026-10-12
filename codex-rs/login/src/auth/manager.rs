@@ -2502,6 +2502,12 @@ pub struct AuthManager {
     /// refreshes and logs out only that account's vault store, never the
     /// default login, the environment or the ephemeral store.
     named_account: Option<NamedChatgptAccount>,
+    /// The login method the configuration requires; a named account's
+    /// sign-in of the other kind is refused.
+    forced_login_method: Option<ForcedLoginMethod>,
+    /// For a named-account manager, the manager of the default login it was
+    /// created from (providers without a named account go back to it).
+    base_manager: Option<Arc<AuthManager>>,
 }
 
 #[derive(Debug)]
@@ -2663,6 +2669,8 @@ impl AuthManager {
             external_auth: RwLock::new(None),
             provider_api_key_cache: RwLock::new(ProviderApiKeyCache::new()),
             named_account: None,
+            forced_login_method: None,
+            base_manager: None,
             auth_route_config,
         }
     }
@@ -2692,6 +2700,8 @@ impl AuthManager {
             external_auth: RwLock::new(None),
             provider_api_key_cache: RwLock::new(ProviderApiKeyCache::new()),
             named_account: None,
+            forced_login_method: None,
+            base_manager: None,
             auth_route_config: crate::test_support::transport_default_auth_route_config(),
         })
     }
@@ -2720,6 +2730,8 @@ impl AuthManager {
             external_auth: RwLock::new(None),
             provider_api_key_cache: RwLock::new(ProviderApiKeyCache::new()),
             named_account: None,
+            forced_login_method: None,
+            base_manager: None,
             auth_route_config: crate::test_support::transport_default_auth_route_config(),
         })
     }
@@ -2756,6 +2768,8 @@ impl AuthManager {
             external_auth: RwLock::new(None),
             provider_api_key_cache: RwLock::new(ProviderApiKeyCache::new()),
             named_account: None,
+            forced_login_method: None,
+            base_manager: None,
             auth_route_config: crate::test_support::transport_default_auth_route_config(),
         })
     }
@@ -2803,6 +2817,8 @@ impl AuthManager {
             )) as Arc<dyn ExternalAuth>)),
             provider_api_key_cache: RwLock::new(ProviderApiKeyCache::new()),
             named_account: None,
+            forced_login_method: None,
+            base_manager: None,
             // External bearer auth refreshes by running the provider's command and never makes
             // auth-owned HTTP requests, so this route is intentionally inert.
             auth_route_config: AuthRouteConfig::from_http_client_factory(HttpClientFactory::new(
@@ -3143,19 +3159,19 @@ impl AuthManager {
         config: &impl AuthManagerConfig,
         enable_codex_api_key_env: bool,
     ) -> Arc<Self> {
-        Arc::new(
-            Self::new_with_openai_api_key_env(
-                config.codex_home(),
-                enable_codex_api_key_env,
-                OpenAiApiKeyEnv::for_forced_login_method(config.forced_login_method()),
-                config.cli_auth_credentials_store_mode(),
-                config.forced_chatgpt_workspace_id(),
-                Some(config.chatgpt_base_url()),
-                config.auth_keyring_backend_kind(),
-                config.auth_route_config(),
-            )
-            .await,
+        let mut manager = Self::new_with_openai_api_key_env(
+            config.codex_home(),
+            enable_codex_api_key_env,
+            OpenAiApiKeyEnv::for_forced_login_method(config.forced_login_method()),
+            config.cli_auth_credentials_store_mode(),
+            config.forced_chatgpt_workspace_id(),
+            Some(config.chatgpt_base_url()),
+            config.auth_keyring_backend_kind(),
+            config.auth_route_config(),
         )
+        .await;
+        manager.forced_login_method = config.forced_login_method();
+        Arc::new(manager)
     }
 
     pub fn unauthorized_recovery(self: &Arc<Self>) -> UnauthorizedRecovery {
