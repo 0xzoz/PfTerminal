@@ -76,7 +76,18 @@ def main():
             self.end_headers()
             self.wfile.write(data)
 
+        def who(self):
+            auth = self.headers.get("authorization", "")
+            token = auth[7:] if auth.lower().startswith("bearer ") else ""
+            payload = claims(token)
+            if payload and "user" in payload:
+                return "%s (token gen %s)" % (payload["user"], payload["gen"])
+            if token.startswith("sk-fake-"):
+                return "api key %s" % token[len("sk-fake-"):]
+            return "unknown" if token else "none"
+
         def do_GET(self):
+            log(event="get", path=self.path.split("?")[0], who=self.who())
             self.reply(404)
 
         def do_POST(self):
@@ -129,15 +140,7 @@ def main():
                 log(event="refresh", user=user, from_gen=current, to_gen=current + 1)
                 return self.reply(200, issue(user, current + 1, access_ttl=3600))
             if path.endswith("/responses"):
-                auth = self.headers.get("authorization", "")
-                token = auth[7:] if auth.lower().startswith("bearer ") else ""
-                payload = claims(token)
-                if payload and "user" in payload:
-                    who = "%s (token gen %s)" % (payload["user"], payload["gen"])
-                elif token.startswith("sk-fake-"):
-                    who = "api key %s" % token[len("sk-fake-"):]
-                else:
-                    who = "unknown"
+                who = self.who()
                 log(event="responses", who=who)
                 rid = "resp_mock_%d" % int(time.time() * 1000)
                 item = {"type": "message", "role": "assistant", "id": "msg_1",
