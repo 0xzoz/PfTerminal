@@ -345,8 +345,9 @@ fn issue_583_the_corbanu_home_takes_no_new_entries() {
         .unwrap()
         .file_system_sandbox_policy();
     assert!(!policy.can_write_path_with_cwd(&worktree.join("file"), &project));
-    // Left as before: a person's approval of one command (#540), a command
-    // working in the home itself, or in a folder of it outside `worktrees`.
+    // The home stays writable for a person's approval of one command (#540),
+    // a command working in the home itself, or in a folder of it outside
+    // `worktrees` (#603 protects only the names Corbanu reads there).
     let other = fx.codex_home.join("other");
     std::fs::create_dir_all(&other).unwrap();
     for (cwd, runtime_only) in [
@@ -369,6 +370,112 @@ fn issue_583_the_corbanu_home_takes_no_new_entries() {
             "{cwd:?}"
         );
     }
+}
+
+/// #603 (owner decision 16): a command working in the Corbanu home itself
+/// (its folder, a workspace root or a writable root), or in a folder of it
+/// outside `worktrees`, cannot create the names Corbanu reads later, even
+/// before they exist; other new names and `worktrees` stay writable, and no
+/// grant lifts it. A person's approval of one command under Moderate does
+/// (owner decision 15).
+#[test]
+fn issue_603_names_corbanu_reads_later_are_protected_in_the_home() {
+    let fx = fixture();
+    let other = fx.codex_home.join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    let project = fx.user_home.join("project");
+    let protected = [
+        "rules",
+        "rules/x.rules",
+        "hooks.json",
+        "agents",
+        "agents/x",
+        "themes/t.tmTheme",
+        "environments.toml",
+        "app-server-control/app-server-control.sock",
+    ];
+    // (working folder, extra kept folder, profile)
+    let cases = [
+        (fx.codex_home.clone(), None, PermissionProfile::Disabled),
+        (fx.codex_home.clone(), None, workspace(&fx.codex_home)),
+        (other.clone(), None, PermissionProfile::Disabled),
+        (
+            project.clone(),
+            Some(fx.codex_home.clone()),
+            PermissionProfile::Disabled,
+        ),
+    ];
+    for (cwd, root, profile) in cases {
+        let mut keep = vec![abs(&cwd)];
+        keep.extend(root.as_deref().map(abs));
+        let mut denials = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &keep);
+        denials.lift_write_rules();
+        let policy = denials
+            .apply(&profile)
+            .unwrap()
+            .file_system_sandbox_policy();
+        let writable = |path: &Path| policy.can_write_path_with_cwd(path, &cwd);
+        for name in protected {
+            assert!(!writable(&fx.codex_home.join(name)), "{name}: {cwd:?}");
+        }
+        for free in ["new.txt", "worktrees/w/file"] {
+            assert!(writable(&fx.codex_home.join(free)), "{free}: {cwd:?}");
+        }
+        assert!(writable(&cwd.join("file")), "{cwd:?}");
+        // A person's approval under Moderate lifts it, as it lifts the
+        // read-only home (#540).
+        let policy = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &keep)
+            .runtime_only()
+            .apply(&profile)
+            .unwrap()
+            .file_system_sandbox_policy();
+        assert!(
+            policy.can_write_path_with_cwd(&fx.codex_home.join("rules/x.rules"), &cwd),
+            "{cwd:?}"
+        );
+    }
+    // A command working in a name it would protect keeps its folder.
+    let rules = fx.codex_home.join("rules");
+    std::fs::create_dir_all(&rules).unwrap();
+    let policy = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&rules)])
+        .apply(&PermissionProfile::Disabled)
+        .unwrap()
+        .file_system_sandbox_policy();
+    assert!(policy.can_write_path_with_cwd(&rules.join("x.rules"), &rules));
+    assert!(!policy.can_write_path_with_cwd(&fx.codex_home.join("hooks.json"), &rules));
+}
+
+/// #603 (Linux): the missing folders Corbanu reads later are made, private,
+/// only for a command working in the home where it could create them, so
+/// bubblewrap puts no placeholder file there.
+#[test]
+fn issue_603_read_later_folders_are_created_only_for_a_command_in_the_home() {
+    let fx = fixture();
+    let home = abs(&fx.codex_home);
+    let project = abs(&fx.user_home.join("project"));
+    for (cwd, profile) in [
+        (project.clone(), PermissionProfile::Disabled),
+        (home.clone(), PermissionProfile::read_only()),
+    ] {
+        ReadDenials::for_turn(&fx.codex_home, &cwd, std::slice::from_ref(&cwd), &profile);
+        assert!(!fx.codex_home.join("rules").exists(), "{cwd:?}");
+    }
+    ReadDenials::for_turn(
+        &fx.codex_home,
+        &home,
+        std::slice::from_ref(&home),
+        &PermissionProfile::Disabled,
+    );
+    for folder in ["rules", "agents", "themes", "app-server-control"] {
+        let path = fx.codex_home.join(folder);
+        assert_eq!(path.is_dir(), cfg!(target_os = "linux"), "{folder}");
+        if cfg!(target_os = "linux") {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o077, 0, "{folder}: {mode:o}");
+        }
+    }
+    assert!(!fx.codex_home.join("hooks.json").exists());
 }
 
 /// #583 review: a `worktrees` link (to a runtime entry, or to the home

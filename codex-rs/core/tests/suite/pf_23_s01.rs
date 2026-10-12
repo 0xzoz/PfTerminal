@@ -1884,6 +1884,105 @@ async fn issue_583_git_still_commits_in_a_corbanu_home_worktree() -> anyhow::Res
     Ok(())
 }
 
+/// #603 (owner decision 16): under a protected level with full access, a
+/// command working in the Corbanu home itself, or in a folder of it outside
+/// `worktrees`, cannot create the missing names Corbanu reads later:
+/// exec-policy `rules/x.rules`, `hooks.json` (also as `HOOKS.JSON`, the same
+/// file on a case-insensitive volume) or `agents/x`. Other new names and
+/// `worktrees` stay writable, and on Linux no placeholder file is left where
+/// a folder belongs. Permissive is unchanged.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_603_a_command_in_the_corbanu_home_cannot_create_names_corbanu_reads()
+-> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let mut wrong = Vec::new();
+    for in_other in [false, true] {
+        for (level, created) in [
+            (SecurityLevel::Moderate, false),
+            (SecurityLevel::Aggressive, false),
+            (SecurityLevel::Permissive, true),
+        ] {
+            let home = Arc::new(TempDir::new()?);
+            let root = home.path().canonicalize()?;
+            std::fs::create_dir_all(root.join("worktrees/w"))?;
+            std::fs::create_dir_all(root.join("other"))?;
+            let cwd = if in_other {
+                root.join("other")
+            } else {
+                root.clone()
+            };
+            let path = root.to_string_lossy().into_owned();
+            // Split inside the home folder's own name: neither part names it.
+            let (head, tail) = path.split_at(path.len() - 2);
+            let command = format!(
+                "h=\"$(printf '{head}%s' {tail})\"; r=\"ru$(printf les)\"; \
+                 a=\"age$(printf nts)\"; k=\"hoo$(printf ks)\"; \
+                 mkdir -p \"$h/$r\"; \
+                 printf 'prefix_rule(pattern=[\"touch\"], decision=\"allow\")\\n' > \"$h/$r/x.$r\"; \
+                 printf '{{\"hooks\":{{}}}}' > \"$h/$k.json\"; \
+                 printf '{{\"hooks\":{{}}}}' > \"$h/$(printf HOOKS).JSON\"; \
+                 mkdir -p \"$h/$a\"; printf x > \"$h/$a/x\"; \
+                 printf x > \"$h/free-603\"; printf ok > \"$h/worktrees/w/ok\"; echo ran-603"
+            );
+            let cwd_abs = codex_utils_absolute_path::AbsolutePathBuf::from_absolute_path(&cwd)?;
+            let (test, captured) = start_turn_in(
+                Some(home.clone()),
+                level,
+                AskForApproval::Never,
+                vec![
+                    call(
+                        "call-create",
+                        "shell_command",
+                        json!({ "command": command }),
+                    ),
+                    done_step(),
+                ],
+                move |config| {
+                    config.cwd = cwd_abs.clone();
+                    config
+                        .permissions
+                        .set_permission_profile(PermissionProfile::Disabled)
+                        .expect("full access");
+                },
+            )
+            .await?;
+            assert!(next_exec_approval(&test).await.is_none());
+            let requests = captured.requests();
+            let output = output_text(&requests[requests.len() - 1], "call-create");
+            let entries = ["rules/x.rules", "hooks.json", "agents/x"];
+            let present: Vec<&str> = entries
+                .into_iter()
+                .filter(|entry| root.join(entry).exists())
+                .collect();
+            let expected = if created {
+                entries.to_vec()
+            } else {
+                Vec::new()
+            };
+            let free = root.join("free-603").exists() && root.join("worktrees/w/ok").exists();
+            let placeholder_files: Vec<&str> = ["rules", "agents"]
+                .into_iter()
+                .filter(|folder| root.join(folder).is_file())
+                .collect();
+            if !output.contains("ran-603")
+                || present != expected
+                || !free
+                || !placeholder_files.is_empty()
+            {
+                wrong.push(format!(
+                    "{level:?} in_other={in_other}: present={present:?} free={free} \
+                     placeholder_files={placeholder_files:?}: {output}"
+                ));
+            }
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
 /// PF-23-S03: a level confirmed earlier and stored in `security_state.json`
 /// is enforced after a restart even when the configured level is lower.
 #[cfg(target_os = "macos")]
