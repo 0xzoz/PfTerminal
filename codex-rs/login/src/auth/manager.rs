@@ -3655,6 +3655,7 @@ impl AuthManager {
     }
 
     fn commit_external_auth(&self, auth: CodexAuth) -> Result<(), RefreshTokenError> {
+        self.clear_hidden_default_login_reason();
         if auth.is_external_chatgpt_tokens() {
             let auth_dot_json = auth.get_current_auth_json().ok_or_else(|| {
                 RefreshTokenError::Transient(std::io::Error::other(

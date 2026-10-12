@@ -522,13 +522,18 @@ async fn start_thread_refuses_a_ruled_out_default_login_without_logging_it_out()
         .features
         .disable(Feature::NamedAccounts)
         .expect("named accounts can be turned off");
-    let mut unrestricted = config.clone();
+    // A process without a restriction hides nothing.
+    let mut unrestricted = named.clone();
     unrestricted.configured_forced_login_method = None;
     unrestricted.forced_login_method = None;
+    let hiding_nothing =
+        AuthManager::shared_from_config(&unrestricted, /*enable_codex_api_key_env*/ false).await;
+    assert!(hiding_nothing.hides_restricted_default_login());
+    assert!(hiding_nothing.auth_cached().is_some());
     for (other, manager) in [
         (&named, &hiding),
         (&feature_off, &hiding),
-        (&unrestricted, &hiding),
+        (&config, &hiding_nothing),
         (&config, &enforcing),
     ] {
         assert_eq!(

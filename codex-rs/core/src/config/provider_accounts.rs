@@ -218,9 +218,9 @@ fn sign_in_restriction_error(config: &super::Config) -> Option<String> {
 }
 
 /// PF-84-S06 (#570): a thread on the default OpenAI login is refused while
-/// that login breaks the configured login restrictions, leaving it unchanged.
-/// Only in a process that left the default login in place at startup, whose
-/// default-login manager hides such a login (see
+/// the process's default-login manager hides that login because the login
+/// restrictions it was built with rule it out (it is left unchanged). Only
+/// in a process that left the default login in place at startup (see
 /// `codex_login::leave_default_login_unenforced`): a session on a named
 /// sign-in account switching to, or spawning an agent on, the default
 /// account, or a resumed or forked default-login thread. The reason is the
