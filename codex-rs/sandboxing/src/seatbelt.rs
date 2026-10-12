@@ -975,6 +975,14 @@ pub fn create_seatbelt_command_args(
     let mut rename_guarded = unreadable_roots.clone();
     // #506: an unlistable directory renamed elsewhere would leave its rule.
     rename_guarded.extend(file_system_sandbox_policy.get_unlistable_directories());
+    // #594/#598: a path the policy says may not be moved (the Corbanu home,
+    // in each spelling: a link to it may not be removed either), also for a
+    // command whose other rules a person's approval lifted.
+    for path in file_system_sandbox_policy.get_unmovable_paths() {
+        if !rename_guarded.contains(&path) {
+            rename_guarded.push(path);
+        }
+    }
     let writable_roots = if file_system_sandbox_policy.has_full_disk_write_access() {
         Vec::new()
     } else {

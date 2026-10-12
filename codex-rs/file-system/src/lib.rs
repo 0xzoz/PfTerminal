@@ -346,10 +346,12 @@ impl FileSystemSandboxContext {
             return true;
         };
         let file_system_policy = permissions.file_system_sandbox_policy();
-        // #506: a directory that may not be listed needs the sandbox too.
+        // #506: a directory that may not be listed needs the sandbox too, and
+        // so does a path that may not be moved (#598).
         matches!(file_system_policy.kind, FileSystemSandboxKind::Restricted)
             && (!file_system_policy.has_full_disk_write_access()
-                || !file_system_policy.get_unlistable_directories().is_empty())
+                || !file_system_policy.get_unlistable_directories().is_empty()
+                || !file_system_policy.get_unmovable_paths().is_empty())
     }
 
     pub fn has_cwd_dependent_permissions(&self) -> bool {
