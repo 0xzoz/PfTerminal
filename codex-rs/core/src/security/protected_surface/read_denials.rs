@@ -133,8 +133,8 @@ pub(crate) struct ReadDenials {
     /// The same for the project's `.codex` and `.agents`: never lifted by a
     /// grant either (#442, Travis 2026-10-11).
     never_lifted: Vec<AbsolutePathBuf>,
-    /// #583: the folder inside the read-only Corbanu home that stays
-    /// writable where the profile can write it: `worktrees`.
+    /// #583: `worktrees` inside the read-only Corbanu home (each spelling),
+    /// which stays writable where the profile can write it.
     home_writable: Vec<AbsolutePathBuf>,
     /// Where the profile's relative entries resolve (the turn's folder).
     cwd: Option<AbsolutePathBuf>,
@@ -259,13 +259,18 @@ impl ReadDenials {
         workspace_roots: &[AbsolutePathBuf],
         profile: &PermissionProfile,
     ) -> Self {
+        let can_write_home = profile
+            .file_system_sandbox_policy()
+            .can_write_path_with_cwd(codex_home, turn_cwd.as_path());
         // #562: only where the command could otherwise create them.
-        if cfg!(target_os = "linux")
-            && profile
-                .file_system_sandbox_policy()
-                .can_write_path_with_cwd(codex_home, turn_cwd.as_path())
-        {
+        if cfg!(target_os = "linux") && can_write_home {
             create_missing_runtime_folders(codex_home);
+        }
+        // #583: the read-only home keeps `worktrees` writable only as a real
+        // folder, so it is made (empty, as Corbanu would) where the command
+        // could have made it before.
+        if !cfg!(windows) && can_write_home {
+            let _ = std::fs::create_dir(codex_home.join(HOME_WRITABLE));
         }
         let mut keep = vec![turn_cwd.clone()];
         keep.extend(workspace_roots.iter().cloned());
@@ -337,13 +342,26 @@ impl ReadDenials {
         {
             return;
         }
-        for home in homes {
-            if !self.never_lifted.contains(&home) {
-                self.never_lifted.push(home);
+        for home in &homes {
+            if !self.never_lifted.contains(home) {
+                self.never_lifted.push(home.clone());
             }
         }
+        // Only a real folder: a link (`worktrees -> tmp`, or `-> .`, which a
+        // command a person approved could plant) would make what it points
+        // to writable instead.
+        let real_folder = std::fs::symlink_metadata(codex_home.join(HOME_WRITABLE).as_path())
+            .is_ok_and(|metadata| metadata.is_dir());
         for folder in worktrees {
-            if !self.home_writable.contains(&folder) {
+            let holds_runtime = self
+                .runtime_read_only
+                .iter()
+                .any(|runtime| runtime.as_path().starts_with(folder.as_path()));
+            if real_folder
+                && inside_home(&folder)
+                && !holds_runtime
+                && !self.home_writable.contains(&folder)
+            {
                 self.home_writable.push(folder);
             }
         }

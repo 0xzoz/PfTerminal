@@ -371,6 +371,50 @@ fn issue_583_the_corbanu_home_takes_no_new_entries() {
     }
 }
 
+/// #583 review: a `worktrees` link (to a runtime entry, or to the home
+/// itself) opens nothing: only a real `worktrees` folder stays writable.
+/// Where the profile could write the home, a missing `worktrees` is made.
+#[test]
+fn issue_583_a_worktrees_link_opens_nothing() {
+    for target in ["tmp", "."] {
+        let fx = fixture();
+        std::fs::remove_dir_all(fx.codex_home.join("worktrees")).unwrap();
+        std::os::unix::fs::symlink(target, fx.codex_home.join("worktrees")).unwrap();
+        let cwd = fx.user_home.join("project");
+        let mut denials =
+            ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)]);
+        denials.lift_write_rules();
+        assert_eq!(denials.home_writable_paths().count(), 0, "{target}");
+        let policy = denials
+            .apply(&PermissionProfile::Disabled)
+            .unwrap()
+            .file_system_sandbox_policy();
+        for path in ["tmp/x", "rules/x.rules", "worktrees/x"] {
+            assert!(
+                !policy.can_write_path_with_cwd(&fx.codex_home.join(path), &cwd),
+                "{target}: {path}"
+            );
+        }
+    }
+    let fx = fixture();
+    std::fs::remove_dir_all(fx.codex_home.join("worktrees")).unwrap();
+    let cwd = abs(&fx.user_home.join("project"));
+    ReadDenials::for_turn(
+        &fx.codex_home,
+        &cwd,
+        std::slice::from_ref(&cwd),
+        &PermissionProfile::read_only(),
+    );
+    assert!(!fx.codex_home.join("worktrees").exists());
+    ReadDenials::for_turn(
+        &fx.codex_home,
+        &cwd,
+        std::slice::from_ref(&cwd),
+        &PermissionProfile::Disabled,
+    );
+    assert!(fx.codex_home.join("worktrees").is_dir());
+}
+
 /// Issue #562: on Linux the missing runtime folders are created, empty,
 /// only where the profile could write the Corbanu home, so bubblewrap never
 /// needs a placeholder file where Corbanu expects a folder. `AGENTS.md` is
