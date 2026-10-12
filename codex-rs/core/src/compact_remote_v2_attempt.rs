@@ -66,7 +66,7 @@ pub(super) async fn run_remote_compact_v2_attempt(
     let trace_input_history = compaction_trace
         .is_enabled()
         .then(|| history.raw_items().to_vec());
-    let mut input = history.for_turn_prompt(&turn_context);
+    let mut input = history.for_turn_prompt(turn_context);
     let tool_router = &step_context.tool_router;
     input.push(ResponseItem::CompactionTrigger {});
     let prompt = Prompt {

@@ -59,7 +59,7 @@ pub(super) async fn run_remote_compact_attempt(
     let trace_input_history = compaction_trace
         .is_enabled()
         .then(|| history.raw_items().to_vec());
-    let prompt_input = history.for_turn_prompt(&turn_context);
+    let prompt_input = history.for_turn_prompt(turn_context);
     let tool_router = &step_context.tool_router;
     let prompt = Prompt {
         input: prompt_input,

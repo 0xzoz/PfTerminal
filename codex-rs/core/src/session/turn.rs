@@ -1688,11 +1688,11 @@ pub(crate) async fn notify_openai_api_key_env_fallback(sess: &Session, turn_cont
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 /// #578: retries of one sampling request without an item the provider
 /// reported missing.
 const MAX_UNRESOLVABLE_ITEM_RETRIES: usize = 8;
 
+#[allow(clippy::too_many_arguments)]
 #[allow(deprecated)]
 #[instrument(level = "trace",
     skip_all,
