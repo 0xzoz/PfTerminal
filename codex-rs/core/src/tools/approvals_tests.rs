@@ -76,3 +76,53 @@ fn sec_437_refused_approvals_are_described_for_the_inspector() {
     assert_eq!(approval_kind("apply_patch"), "file edit approval");
     assert_eq!(approval_kind("mcp__x__y"), "tool approval");
 }
+
+/// Issue #513: an answer from the approval cache ("don't ask again" given
+/// earlier) is not a person asked about this request now; a fresh request
+/// skips the cache and asks.
+#[tokio::test]
+async fn issue_513_a_remembered_approval_is_not_a_person_asked_now() {
+    use crate::tools::sandboxing::asking_person;
+    use crate::tools::sandboxing::with_cached_approval;
+    let (session, _turn) = crate::session::tests::make_session_and_context().await;
+    let services = &session.services;
+    let ask = |decision: ReviewDecision| move || async move { decision };
+    assert_eq!(
+        asking_person(with_cached_approval(
+            services,
+            "shell",
+            vec!["issue-513"],
+            /*fresh_human_authority*/ false,
+            ask(ReviewDecision::ApprovedForSession),
+        ))
+        .await,
+        (ReviewDecision::ApprovedForSession, true)
+    );
+    assert_eq!(
+        asking_person(with_cached_approval(
+            services,
+            "shell",
+            vec!["issue-513"],
+            /*fresh_human_authority*/ false,
+            ask(ReviewDecision::denied("the cache answers first")),
+        ))
+        .await,
+        (ReviewDecision::ApprovedForSession, false)
+    );
+    assert_eq!(
+        asking_person(with_cached_approval(
+            services,
+            "shell",
+            vec!["issue-513"],
+            /*fresh_human_authority*/ true,
+            ask(ReviewDecision::Approved),
+        ))
+        .await,
+        (ReviewDecision::Approved, true)
+    );
+    // Nothing marked: not asked (fail closed).
+    assert_eq!(
+        asking_person(async { ReviewDecision::Approved }).await,
+        (ReviewDecision::Approved, false)
+    );
+}

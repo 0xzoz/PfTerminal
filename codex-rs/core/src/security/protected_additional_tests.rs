@@ -349,10 +349,10 @@ fn issue_513_other_write_protections_count_under_aggressive_until_a_grant_lifts_
         check(&f.denials, ReadOnlyScope::Kept),
         Some(Opened::Write {
             path: agents.display().to_string(),
-            grantable: true,
+            rule: WriteRule::Liftable,
         })
     );
-    // Moderate: unchanged (#513 decision).
+    // Moderate with a person's fresh approval of the command.
     assert_eq!(check(&f.denials, ReadOnlyScope::Runtime), None);
     // An Aggressive grant lifts it; never the runtime entries.
     let mut granted = ReadDenials::collect(
@@ -377,7 +377,7 @@ fn issue_513_other_write_protections_count_under_aggressive_until_a_grant_lifts_
         ),
         Some(Opened::Write {
             path: runtime.display().to_string(),
-            grantable: false,
+            rule: WriteRule::Runtime,
         })
     );
 }
@@ -412,7 +412,7 @@ fn issue_513_write_refusals_say_whether_a_grant_can_lift_them() {
     let runtime = write_refusal(
         SecurityLevel::Moderate,
         "/home/u/.corbanu/tmp\u{1b}[2J",
-        false,
+        WriteRule::Runtime,
     );
     assert!(
         runtime.starts_with("Security level Moderate blocked writing to `/home/u/.corbanu/tmp"),
@@ -421,23 +421,84 @@ fn issue_513_write_refusals_say_whether_a_grant_can_lift_them() {
     assert!(!runtime.contains('\u{1b}'), "{runtime}");
     assert!(runtime.contains("cannot be granted"), "{runtime}");
     assert!(runtime.contains("Permissive in /security"), "{runtime}");
-    let hook = write_refusal(SecurityLevel::Aggressive, "/p/.git/hooks", true);
+    let hook = write_refusal(
+        SecurityLevel::Aggressive,
+        "/p/.git/hooks",
+        WriteRule::Liftable,
+    );
     assert!(hook.starts_with("Security level Aggressive"), "{hook}");
     assert!(hook.contains("\"Grant once\""), "{hook}");
     assert!(!hook.contains("cannot be granted"), "{hook}");
-    assert_eq!(
-        ReadOnlyScope::for_level(SecurityLevel::Aggressive),
-        ReadOnlyScope::Kept
+    // #520: kept even with a grant under Aggressive.
+    let kept = write_refusal(
+        SecurityLevel::Aggressive,
+        "/p/.agents",
+        WriteRule::NeverGranted,
     );
-    assert_eq!(
-        ReadOnlyScope::for_level(SecurityLevel::Moderate),
-        ReadOnlyScope::Runtime
+    assert!(
+        kept.contains("neither an additional permission nor"),
+        "{kept}"
     );
+    assert!(kept.contains("Permissive in /security"), "{kept}");
+    // Moderate: only a person's fresh approval lifts it, whatever the rule
+    // under Aggressive.
+    for rule in [WriteRule::Liftable, WriteRule::NeverGranted] {
+        let hook = write_refusal(SecurityLevel::Moderate, "/p/.git/hooks", rule);
+        assert!(
+            hook.starts_with("Security level Moderate blocked writing to `/p/.git/hooks`"),
+            "{hook}"
+        );
+        assert!(hook.contains("Only a person's own approval"), "{hook}");
+        for approver in [
+            "automatic reviewer",
+            "permission hook",
+            "\"don't ask again\"",
+            "permission grant",
+        ] {
+            assert!(hook.contains(approver), "{approver}: {hook}");
+        }
+        assert!(!hook.contains("Grant once"), "{hook}");
+        assert!(hook.contains("Permissive in /security"), "{hook}");
+    }
+}
+
+/// Issue #513 (Travis, 2026-10-11): which read-only paths count, by level
+/// and approver. Under Moderate only a person's fresh approval of the
+/// command leaves the persistence files to it; grants never carry them.
+#[test]
+fn issue_513_moderate_scope_follows_the_approver() {
+    use SecurityLevel::Aggressive;
+    use SecurityLevel::Moderate;
+    use SecurityLevel::Permissive;
+    let (runtime, kept) = (ReadOnlyScope::Runtime, ReadOnlyScope::Kept);
+    for (level, person, before, after) in [
+        (Moderate, true, runtime, runtime),
+        (Moderate, false, kept, kept),
+        // Aggressive: a grant for the run is known only after the approval.
+        (Aggressive, true, runtime, kept),
+        (Aggressive, false, runtime, kept),
+        (Permissive, false, runtime, runtime),
+    ] {
+        assert_eq!(
+            ReadOnlyScope::before_approval(level, person),
+            before,
+            "{level:?} {person}"
+        );
+        assert_eq!(
+            ReadOnlyScope::after_approval(level, person),
+            after,
+            "{level:?} {person}"
+        );
+    }
+    assert_eq!(ReadOnlyScope::for_grant(Moderate), kept);
+    assert_eq!(ReadOnlyScope::for_grant(Aggressive), kept);
+    assert_eq!(ReadOnlyScope::for_grant(Permissive), runtime);
 }
 
 /// Review r2 (#524): a grant is checked with the workspace roots, so a write
 /// to a second root's `.agents` is dropped under Aggressive (it would make
-/// every later command fail) and kept under Moderate (unchanged there).
+/// every later command fail), and under Moderate too (#513, Travis
+/// 2026-10-11: a grant never lifts it).
 #[test]
 fn issue_524_grants_are_checked_with_every_workspace_root() {
     let f = fixture();
@@ -475,9 +536,23 @@ fn issue_524_grants_are_checked_with_every_workspace_root() {
     assert_eq!(kept, None);
     let refusal = refusal.expect("a refusal");
     assert!(refusal.contains("blocked writing to"), "{refusal}");
+    let (kept, refusal) = strip_grant(
+        SecurityLevel::Moderate,
+        &f.codex_home,
+        &configs,
+        grant.clone(),
+    );
+    assert_eq!(kept, None);
+    let refusal = refusal.expect("a refusal");
+    assert!(
+        refusal.starts_with("Security level Moderate blocked writing to"),
+        "{refusal}"
+    );
+    assert!(refusal.contains("permission grant cannot"), "{refusal}");
+    // Permissive keeps it.
     assert_eq!(
         strip_grant(
-            SecurityLevel::Moderate,
+            SecurityLevel::Permissive,
             &f.codex_home,
             &configs,
             grant.clone()
