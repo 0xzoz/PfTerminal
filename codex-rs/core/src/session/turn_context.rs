@@ -1097,7 +1097,7 @@ impl Session {
             .and_then(|turn_environment| turn_environment.cwd().to_abs_path().ok())
             .unwrap_or_else(|| session_configuration.cwd().clone());
         let per_turn_config = Self::build_per_turn_config(&session_configuration, cwd.clone());
-        let model_info = self
+        let mut model_info = self
             .services
             .models_manager
             .get_model_info(
@@ -1105,6 +1105,23 @@ impl Session {
                 &per_turn_config.to_models_manager_config(),
             )
             .await;
+        // PF-84 (#572): a session switched to Amazon Bedrock from another
+        // provider has that provider's model list; Bedrock's own static
+        // catalog has the model's metadata (no network).
+        if model_info.used_fallback_model_metadata
+            && per_turn_config.model_provider.is_amazon_bedrock()
+        {
+            model_info = create_model_provider(
+                per_turn_config.model_provider.clone(),
+                /*auth_manager*/ None,
+            )
+            .models_manager_without_cache(/*config_model_catalog*/ None)
+            .get_model_info(
+                session_configuration.collaboration_mode.model(),
+                &per_turn_config.to_models_manager_config(),
+            )
+            .await;
+        }
         self.services
             .thread_extension_data
             .insert(model_info.clone());

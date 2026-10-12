@@ -63,6 +63,8 @@ pub(crate) fn include_runtime_model(
 #[derive(Debug)]
 pub(crate) struct ModelCatalog {
     models: RwLock<Vec<ModelPreset>>,
+    /// Ids [`ModelCatalog::set_provider_models`] added, per provider.
+    provider_model_ids: RwLock<std::collections::HashMap<String, Vec<String>>>,
     provider_policy: RwLock<Option<crate::chatwidget::provider_model_policy::ProviderModelPolicy>>,
     session_recovery_only: AtomicBool,
 }
@@ -71,6 +73,7 @@ impl ModelCatalog {
     pub(crate) fn new(models: Vec<ModelPreset>) -> Self {
         Self {
             models: RwLock::new(models),
+            provider_model_ids: RwLock::new(std::collections::HashMap::new()),
             provider_policy: RwLock::new(None),
             session_recovery_only: AtomicBool::new(false),
         }
@@ -181,17 +184,22 @@ impl ModelCatalog {
         }
     }
 
-    /// Adds `presets` as models of `runtime_provider_id`, skipping models
-    /// the catalog already lists for it. They never become the default.
-    pub(crate) fn include_provider_models(
-        &self,
-        runtime_provider_id: &str,
-        presets: Vec<ModelPreset>,
-    ) {
+    /// Sets the models offered for `runtime_provider_id` beyond its own list:
+    /// the ones added by an earlier call are removed, then `presets` are
+    /// added as models of that provider, skipping models the catalog already
+    /// lists for it. They never become the default.
+    pub(crate) fn set_provider_models(&self, runtime_provider_id: &str, presets: Vec<ModelPreset>) {
+        let mut added = self
+            .provider_model_ids
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut models = self
             .models
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous = added.remove(runtime_provider_id).unwrap_or_default();
+        models.retain(|preset| !previous.contains(&preset.id));
+        let mut ids = Vec::new();
         for mut preset in presets {
             if models.iter().any(|listed| {
                 listed.model == preset.model
@@ -206,7 +214,11 @@ impl ModelCatalog {
             preset.id = format!("{runtime_provider_id}:{}", preset.model);
             preset.provider_id = Some(runtime_provider_id.to_string());
             preset.is_default = false;
+            ids.push(preset.id.clone());
             models.push(preset);
+        }
+        if !ids.is_empty() {
+            added.insert(runtime_provider_id.to_string(), ids);
         }
     }
 

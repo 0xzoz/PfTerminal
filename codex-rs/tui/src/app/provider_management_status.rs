@@ -46,7 +46,6 @@ fn sync_provider_manager_model_policy(
         config.model.as_deref(),
         &config.model_provider_id,
     );
-    include_named_bedrock_models(catalog, config);
     catalog.refresh_provider_policy();
 }
 
@@ -55,31 +54,51 @@ fn sync_provider_manager_model_policy(
 /// Bedrock account (an AWS profile) can be chosen from a session on another
 /// provider (`/providers` → *Use for this session*, `--account
 /// amazon-bedrock:<name>` or `[provider_accounts]`), so while the vault holds
-/// one, `/model` offers Bedrock's models too.
-pub(super) fn include_named_bedrock_models(
-    catalog: &crate::model_catalog::ModelCatalog,
+/// one, `/model` offers Bedrock's models too; they go again once none is
+/// left. The vault read blocks, so it runs off the runtime.
+pub(super) fn sync_named_bedrock_models(
+    catalog: &std::sync::Arc<crate::model_catalog::ModelCatalog>,
     config: &crate::legacy_core::config::Config,
 ) {
+    let catalog = std::sync::Arc::clone(catalog);
+    let config = config.clone();
+    spawn_provider_status_job(move || {
+        apply_named_bedrock_models(&catalog, holds_named_bedrock_account(&config));
+    });
+}
+
+/// Whether a named Bedrock account can be reached from this session's
+/// config (feature on, Bedrock configured, an AWS-profile account in the
+/// vault). Reads vault labels only, never a credential.
+pub(super) fn holds_named_bedrock_account(config: &crate::legacy_core::config::Config) -> bool {
     use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
-    if !config
+    config
         .features
         .enabled(codex_features::Feature::NamedAccounts)
-        || !config
+        && config
             .model_providers
             .get(AMAZON_BEDROCK_PROVIDER_ID)
             .is_some_and(codex_model_provider_info::ModelProviderInfo::is_amazon_bedrock)
-        || !crate::provider_named_accounts::holds_named_account(
+        && crate::provider_named_accounts::holds_named_account(
             &config.codex_home,
             AMAZON_BEDROCK_PROVIDER_ID,
             codex_vault::ProviderAccountKind::AwsProfile,
         )
-    {
-        return;
-    }
-    catalog.include_provider_models(
-        AMAZON_BEDROCK_PROVIDER_ID,
-        codex_model_provider::amazon_bedrock_model_presets(),
+}
+
+pub(super) fn apply_named_bedrock_models(
+    catalog: &crate::model_catalog::ModelCatalog,
+    offered: bool,
+) {
+    catalog.set_provider_models(
+        codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID,
+        if offered {
+            codex_model_provider::amazon_bedrock_model_presets()
+        } else {
+            Vec::new()
+        },
     );
+    catalog.refresh_provider_policy();
 }
 
 impl App {
@@ -95,6 +114,7 @@ impl App {
 
     pub(super) fn open_provider_manager(&mut self, _app_server: &AppServerSession) {
         sync_provider_manager_model_policy(&self.model_catalog, &self.config);
+        sync_named_bedrock_models(&self.model_catalog, &self.config);
         let generation = self.next_provider_management_generation();
         self.provider_management_host = None;
         let config = self.config.clone();

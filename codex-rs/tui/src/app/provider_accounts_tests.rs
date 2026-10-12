@@ -120,11 +120,14 @@ async fn a_default_set_by_a_higher_layer_is_reported() {
 }
 
 /// #572: with a named Bedrock account (an AWS profile) in the vault, a
-/// session on another provider is offered Bedrock's models in `/model`, so an
-/// account chosen with *Use for this session* is reachable. Without one, or
-/// with the feature off, Bedrock stays out of the list as before.
+/// session on another provider is offered Bedrock's models in `/model` (and
+/// the provider policy lets them be picked), so an account chosen with *Use
+/// for this session* is reachable. Without one, with the feature off, or
+/// once the last one is removed, Bedrock stays out of the list as before.
 #[tokio::test]
 async fn named_bedrock_account_offers_bedrock_models() {
+    use super::super::provider_management_status::apply_named_bedrock_models;
+    use super::super::provider_management_status::holds_named_bedrock_account;
     use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
     let bedrock_models = |app: &App| {
         app.model_catalog
@@ -132,17 +135,24 @@ async fn named_bedrock_account_offers_bedrock_models() {
             .unwrap()
             .into_iter()
             .filter(|preset| preset.provider_id.as_deref() == Some(AMAZON_BEDROCK_PROVIDER_ID))
-            .map(|preset| preset.model)
             .collect::<Vec<_>>()
     };
     let (app, home) = app_with_named_accounts("").await;
-    super::super::provider_management_status::include_named_bedrock_models(
-        &app.model_catalog,
-        &app.config,
+    app.model_catalog.set_provider_policy(
+        crate::chatwidget::provider_model_policy::ProviderModelPolicy::new(
+            crate::provider_status_host::ProviderStatusHost::from_config(
+                &app.config,
+                crate::provider_status_host::ProviderAccountMetadata::default(),
+            ),
+            codex_provider_auth::ProviderRuntimeAuthorizations::default(),
+        ),
     );
-    assert_eq!(bedrock_models(&app), Vec::<String>::new());
+    assert!(!holds_named_bedrock_account(&app.config));
+    apply_named_bedrock_models(&app.model_catalog, holds_named_bedrock_account(&app.config));
+    assert!(bedrock_models(&app).is_empty());
 
-    codex_vault::Vault::new(home.path().to_path_buf())
+    let vault = codex_vault::Vault::new(home.path().to_path_buf());
+    vault
         .write_provider_account(
             AMAZON_BEDROCK_PROVIDER_ID,
             &name("work"),
@@ -155,23 +165,27 @@ async fn named_bedrock_account_offers_bedrock_models() {
         .features
         .disable(codex_features::Feature::NamedAccounts)
         .expect("named accounts can be turned off");
-    super::super::provider_management_status::include_named_bedrock_models(
-        &app.model_catalog,
-        &feature_off,
-    );
-    assert_eq!(bedrock_models(&app), Vec::<String>::new());
+    assert!(!holds_named_bedrock_account(&feature_off));
+    assert!(holds_named_bedrock_account(&app.config));
 
-    super::super::provider_management_status::include_named_bedrock_models(
-        &app.model_catalog,
-        &app.config,
-    );
+    apply_named_bedrock_models(&app.model_catalog, holds_named_bedrock_account(&app.config));
     let offered = bedrock_models(&app);
     assert!(
-        offered.contains(&codex_model_provider_info::AMAZON_BEDROCK_GPT_5_5_MODEL_ID.to_string()),
+        offered.iter().any(
+            |preset| preset.model == codex_model_provider_info::AMAZON_BEDROCK_GPT_5_5_MODEL_ID
+        ),
         "{offered:?}"
     );
     assert!(
-        app.model_catalog
-            .provider_is_selectable(AMAZON_BEDROCK_PROVIDER_ID, &offered[0])
+        offered
+            .iter()
+            .all(|preset| app.model_catalog.preset_is_selectable(preset)),
+        "{offered:?}"
     );
+
+    vault
+        .remove_provider_account(AMAZON_BEDROCK_PROVIDER_ID, &name("work"))
+        .expect("remove account");
+    apply_named_bedrock_models(&app.model_catalog, holds_named_bedrock_account(&app.config));
+    assert!(bedrock_models(&app).is_empty());
 }

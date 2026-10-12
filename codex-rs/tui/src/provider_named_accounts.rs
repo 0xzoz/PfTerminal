@@ -134,10 +134,9 @@ pub(crate) fn persisted_defaults(config: &Config) -> BTreeMap<String, String> {
         .collect()
 }
 
-/// Lists named accounts with their fingerprints. Blocking; vault metadata
-/// and a salted hash only.
-/// Whether the vault holds a named account of `provider_id` of `kind`
-/// (labels only; no credential is read). An unreadable vault holds none.
+/// Whether the vault holds a named account of `provider_id` of `kind`.
+/// Blocking (it reads the vault index); no credential value is read. An
+/// unreadable vault holds none.
 pub(crate) fn holds_named_account(
     codex_home: &Path,
     provider_id: &str,
@@ -157,6 +156,8 @@ pub(crate) fn holds_named_account(
         })
 }
 
+/// Lists named accounts with their fingerprints. Blocking; vault metadata
+/// and a salted hash only.
 pub(crate) fn load_rows(codex_home: &Path) -> Result<Vec<NamedAccountRow>, String> {
     let vault = Vault::new(codex_home.to_path_buf());
     if vault.key_storage() == VaultKeyStorage::NotInitialized {
