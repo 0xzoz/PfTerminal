@@ -375,9 +375,11 @@ fn helper_stderr_suffix(config: &ModelProviderAuthInfo, stderr: &str) -> String 
         return " (its output is withheld; run the configured auth command yourself to see it)"
             .to_string();
     }
-    let skip = stderr.chars().count().saturating_sub(MAX_CHARS);
-    let tail: String = stderr.chars().skip(skip).collect();
-    format!(": {}", codex_log_guard::redact_credentials(&tail))
+    // Redacted whole first: a cut could split a value from its name.
+    let redacted = codex_log_guard::redact_credentials(stderr);
+    let skip = redacted.chars().count().saturating_sub(MAX_CHARS);
+    let tail: String = redacted.chars().skip(skip).collect();
+    format!(": {tail}")
 }
 
 /// The hidden subcommand that prints a GPU rental endpoint's token.

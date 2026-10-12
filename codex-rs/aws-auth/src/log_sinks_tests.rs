@@ -42,21 +42,41 @@ fn failing_helper_files(dir: &Path) -> ProfileFiles {
         .build()
 }
 
-/// Retried while Linux still reports the new helper busy (another test's
-/// fork can hold its write descriptor).
-async fn load_failing_profile(dir: &Path) -> AwsAuthError {
-    for _ in 0..20 {
+/// The error and every source as text, helper stderr included (the SDK
+/// copies it into a source error).
+fn raw_chain(error: &AwsAuthError) -> String {
+    let mut text = error.to_string();
+    let mut source = std::error::Error::source(error);
+    while let Some(error) = source {
+        text.push_str(" | ");
+        text.push_str(&error.to_string());
+        source = error.source();
+    }
+    text
+}
+
+/// Runs the helper written by `failing_helper_files`. Retried while Linux
+/// reports it busy: another test's child can briefly hold a just-written
+/// file open (`sh` then says "Text file busy" on its stderr). Returns only
+/// once the helper ran and printed the canary.
+async fn load_failing_profile(files: &ProfileFiles) -> AwsAuthError {
+    for _ in 0..40 {
         let error = load_named_profile(
             "canary",
             /*region_override*/ None,
             "bedrock-mantle",
-            Some(failing_helper_files(dir)),
+            Some(files.clone()),
         )
         .await
         .expect_err("the helper fails");
-        if !error.detailed_message().contains("Text file busy") {
+        let chain = raw_chain(&error);
+        if chain.contains(STDERR_CANARY) {
             return error;
         }
+        assert!(
+            chain.contains("Text file busy"),
+            "unexpected failure: {chain}"
+        );
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     panic!("helper stayed busy");
@@ -93,6 +113,7 @@ fn contains(bytes: &[u8], needle: &str) -> bool {
 #[tokio::test(flavor = "current_thread")]
 async fn credential_process_output_reaches_no_log_sink() {
     let dir = tempfile::tempdir().expect("tempdir");
+    let files = failing_helper_files(dir.path());
 
     // Control: the SDK does log the helper's stderr (it redacts the
     // arguments itself; they are checked below all the same).
@@ -107,7 +128,7 @@ async fn credential_process_output_reaches_no_log_sink() {
         );
         let _default = tracing::subscriber::set_default(subscriber);
         tracing::callsite::rebuild_interest_cache();
-        load_failing_profile(dir.path()).await;
+        load_failing_profile(&files).await;
     }
     let control = unguarded.text();
     assert!(
@@ -147,7 +168,7 @@ async fn credential_process_output_reaches_no_log_sink() {
     let error = {
         let _default = tracing::subscriber::set_default(subscriber);
         tracing::callsite::rebuild_interest_cache();
-        let error = load_failing_profile(dir.path()).await;
+        let error = load_failing_profile(&files).await;
         tracing::warn!(error = ?error, "bedrock auth failed: {}", error.detailed_message());
         tracing::info!("marker-548 logged");
         error
