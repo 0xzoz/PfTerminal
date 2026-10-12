@@ -1962,6 +1962,11 @@ impl Config {
         codex_model_provider::named_sign_in_account(&self.model_provider).is_some()
     }
 
+    /// Whether the `named_accounts` feature is on.
+    pub fn named_accounts_enabled(&self) -> bool {
+        self.features.enabled(Feature::NamedAccounts)
+    }
+
     /// Creates the HTTP client factory resolved from the effective feature configuration.
     pub fn http_client_factory(&self) -> HttpClientFactory {
         let outbound_proxy_policy = if self.respect_system_proxy {

@@ -1852,7 +1852,9 @@ impl ThreadManagerState {
         if let Some(message) = thread_start_account_error(&config, &session_source) {
             return Err(CodexErr::InvalidRequest(message));
         }
-        if let Some(message) = crate::config::default_login_restriction_error(&config).await {
+        if let Some(message) =
+            crate::config::default_login_restriction_error(&config, &auth_manager).await
+        {
             return Err(CodexErr::InvalidRequest(message));
         }
         let source_changed_during_startup = Arc::new(AtomicBool::new(false));

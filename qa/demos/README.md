@@ -84,6 +84,7 @@ Specs live in `qa/demos/specs/<id>.toml`; see the two examples there.
 | `config` | Contents of the disposable `config.toml`. The workspace is trusted automatically |
 | `[fixtures]` | Workspace files to create (`"path" = "content"`) |
 | `args`, `cols`, `rows` | Extra CLI args and terminal size (default 120x36) |
+| `setup`, `setup_timeout` | Optional off-screen command run before the candidate starts, like a `run` step (output in `logs/run-step-0.log`); for state the launch needs, such as a sign-in an `--account` argument names |
 | `[[steps]]` | Exactly one of `type`, `key`, `wait`, `pause`, `run` per step |
 
 - `type = "text"`: sends real keys one character at a time, then waits until

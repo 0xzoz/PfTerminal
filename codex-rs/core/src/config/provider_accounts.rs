@@ -219,17 +219,26 @@ fn sign_in_restriction_error(config: &super::Config) -> Option<String> {
 
 /// PF-84-S06 (#570): a thread on the default OpenAI login is refused while
 /// that login breaks the configured login restrictions, leaving it unchanged.
-/// Other sessions log such a login out at startup, so only a session started
-/// on a named sign-in account (which leaves the default login alone) can
-/// reach this: by switching to, or spawning an agent on, the default account.
-pub async fn default_login_restriction_error(config: &super::Config) -> Option<String> {
+/// Only in a process that left the default login in place at startup (its
+/// manager hides such a login; see `codex_login::leave_default_login_unenforced`):
+/// a session on a named sign-in account switching to, or spawning an agent
+/// on, the default account, or a resumed or forked default-login thread.
+/// Other processes enforce (log out) at startup or never did, as before.
+pub async fn default_login_restriction_error(
+    config: &super::Config,
+    auth_manager: &std::sync::Arc<codex_login::AuthManager>,
+) -> Option<String> {
     let provider = &config.model_provider;
-    if !config
-        .features
-        .enabled(codex_features::Feature::NamedAccounts)
+    if !auth_manager
+        .default_account_manager()
+        .hides_restricted_default_login()
+        || !config
+            .features
+            .enabled(codex_features::Feature::NamedAccounts)
         || !provider.requires_openai_auth
         || provider.auth.is_some()
         || provider.aws.is_some()
+        || provider.env_key.is_some()
         || provider.account.is_some()
     {
         return None;

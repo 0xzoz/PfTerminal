@@ -558,6 +558,21 @@ impl ModelProvider for ConfiguredModelProvider {
                     });
                 return Err(CodexErr::Fatal(format!("{}: {reason}", self.info.name)));
             }
+            // PF-84-S06 (#570): the default login this process hides (the
+            // restrictions rule it out) is refused with the reason, not
+            // replaced by an unauthenticated request.
+            if auth.is_none()
+                && self.info.requires_openai_auth
+                && self.info.env_key.is_none()
+                && self.info.auth.is_none()
+                && self.info.account.is_none()
+                && let Some(reason) = self
+                    .auth_manager
+                    .as_ref()
+                    .and_then(|auth_manager| auth_manager.hidden_default_login_reason())
+            {
+                return Err(CodexErr::Fatal(reason));
+            }
             resolve_provider_auth(auth.as_ref(), self.info())
         })
     }

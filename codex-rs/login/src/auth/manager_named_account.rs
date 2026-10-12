@@ -138,6 +138,7 @@ impl AuthManager {
             forced_login_method: self.forced_login_method,
             base_manager: Some(base),
             hide_restricted_default_login: false,
+            hidden_default_login_reason: RwLock::new(None),
         }
     }
 

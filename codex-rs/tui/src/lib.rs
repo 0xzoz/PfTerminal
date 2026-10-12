@@ -1391,8 +1391,19 @@ pub async fn run_main(
 
     // PF-84-S06 (#570): a session on a named sign-in account checks the
     // restrictions against that account at thread start and never reads or
-    // logs out the default login.
-    if !app_server_target.uses_remote_workspace() && !config.runs_on_named_sign_in_account() {
+    // logs out the default login. A resumed or forked thread's account is
+    // known only later, so those launches leave the default login in place
+    // too; this process then never uses a ruled-out default login, and a
+    // thread on it is refused at thread start with the reason.
+    let leaves_default_login = config.runs_on_named_sign_in_account()
+        || (config.named_accounts_enabled()
+            && (is_resume_launch(&cli)
+                || cli.fork_picker
+                || cli.fork_last
+                || cli.fork_session_id.is_some()));
+    if leaves_default_login {
+        codex_login::leave_default_login_unenforced();
+    } else if !app_server_target.uses_remote_workspace() {
         #[allow(clippy::print_stderr)]
         if let Err(err) = enforce_login_restrictions(&config.default_login_restrictions()).await {
             eprintln!("{err}");
@@ -1714,14 +1725,8 @@ async fn run_ratatui_app(
         early_resume_selection = Some(selection);
     }
     let requires_provider_onboarding = startup_provider.requires_provider_onboarding;
-    // PF-84-S06 (#570): a session on a named sign-in account was checked
-    // against the login restrictions before startup; a required ChatGPT
-    // login is about the default login it does not use.
-    let default_login_forced_method = if initial_config.runs_on_named_sign_in_account() {
-        None
-    } else {
-        initial_config.forced_login_method
-    };
+    let default_login_forced_method =
+        startup_provider::default_login_forced_method(&initial_config);
     let should_show_onboarding = startup_provider::should_show_provider_onboarding(
         should_show_trust_screen_flag,
         requires_provider_onboarding,

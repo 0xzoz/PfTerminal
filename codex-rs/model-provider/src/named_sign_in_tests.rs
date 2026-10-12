@@ -80,3 +80,79 @@ async fn named_openai_account_without_a_sign_in_is_refused_not_sent_unauthentica
     assert!(!message.contains("sk-default-canary"), "{message}");
     let _ = std::fs::remove_dir_all(&home);
 }
+
+struct NamedSessionConfig {
+    home: std::path::PathBuf,
+}
+
+impl codex_login::AuthManagerConfig for NamedSessionConfig {
+    fn codex_home(&self) -> std::path::PathBuf {
+        self.home.clone()
+    }
+
+    fn cli_auth_credentials_store_mode(&self) -> codex_login::AuthCredentialsStoreMode {
+        codex_login::AuthCredentialsStoreMode::File
+    }
+
+    fn auth_keyring_backend_kind(&self) -> codex_login::AuthKeyringBackendKind {
+        codex_login::AuthKeyringBackendKind::default()
+    }
+
+    fn forced_chatgpt_workspace_id(&self) -> Option<Vec<String>> {
+        None
+    }
+
+    fn chatgpt_base_url(&self) -> String {
+        "https://chatgpt.com/backend-api/".to_string()
+    }
+
+    fn auth_route_config(&self) -> codex_login::AuthRouteConfig {
+        codex_login::AuthRouteConfig::from_http_client_factory(
+            codex_http_client::HttpClientFactory::new(
+                codex_http_client::OutboundProxyPolicy::ReqwestDefault,
+            ),
+        )
+    }
+
+    fn forced_login_method(&self) -> Option<codex_protocol::config_types::ForcedLoginMethod> {
+        Some(codex_protocol::config_types::ForcedLoginMethod::Chatgpt)
+    }
+
+    fn runs_on_named_sign_in_account(&self) -> bool {
+        true
+    }
+}
+
+/// #570: a process whose session runs on a named account hides a default
+/// login the restrictions rule out; a provider on the default login then
+/// refuses the request with the reason instead of sending it without
+/// credentials, and the login stays in place.
+#[tokio::test]
+async fn hidden_default_login_is_refused_not_sent_unauthenticated() {
+    let home = std::env::temp_dir().join(format!("pf84-s06-hidden-{}", std::process::id()));
+    std::fs::create_dir_all(&home).expect("home");
+    codex_login::login_with_api_key(
+        &home,
+        "sk-default-canary",
+        codex_login::AuthCredentialsStoreMode::File,
+        codex_login::AuthKeyringBackendKind::default(),
+    )
+    .expect("default login");
+    let base = AuthManager::shared_from_config(
+        &NamedSessionConfig { home: home.clone() },
+        /*enable_codex_api_key_env*/ false,
+    )
+    .await;
+    let provider = create_model_provider(openai(/*account*/ None), Some(base));
+    let Err(error) = provider.api_auth().await else {
+        panic!("a hidden default login must not authorize a request");
+    };
+    let message = error.to_string();
+    assert!(
+        message.contains("ChatGPT login is required") && message.contains("left unchanged"),
+        "{message}"
+    );
+    assert!(!message.contains("sk-default-canary"), "{message}");
+    assert!(home.join("auth.json").exists());
+    let _ = std::fs::remove_dir_all(&home);
+}

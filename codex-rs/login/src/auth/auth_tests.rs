@@ -2418,8 +2418,15 @@ async fn shared_from_config_hides_a_restricted_default_login_only_in_named_sessi
         )
         .await;
         assert!(named.auth_cached().is_none());
+        assert!(named.hides_restricted_default_login());
+        assert!(
+            named
+                .hidden_default_login_reason()
+                .is_some_and(|reason| reason.contains("left unchanged"))
+        );
         named.reload().await;
         assert!(named.auth().await.is_none());
+        assert!(named.hidden_default_login_reason().is_some());
 
         let default_session = AuthManager::shared_from_config(
             &config(forced_login_method, workspace, /*named_session*/ false),
@@ -2427,6 +2434,7 @@ async fn shared_from_config_hides_a_restricted_default_login_only_in_named_sessi
         )
         .await;
         assert!(default_session.auth_cached().is_some());
+        assert_eq!(default_session.hidden_default_login_reason(), None);
     }
 
     // An allowed login is used as before.

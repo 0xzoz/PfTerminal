@@ -1671,6 +1671,26 @@ async fn enforce_login_restrictions_with_agent_identity_authapi_base_url(
     }
 }
 
+/// PF-84-S06 (#570): set when this process skipped the startup enforcement
+/// of the login restrictions on the default login, because its session runs
+/// (or a resumed or forked thread may run) on a named account.
+static DEFAULT_LOGIN_LEFT_UNENFORCED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// PF-84-S06 (#570): records that this process left the default login in
+/// place instead of enforcing the login restrictions on it at startup. Every
+/// default-login manager [`AuthManager::shared_from_config`] builds afterwards
+/// treats a login the restrictions rule out as absent, and a thread on the
+/// default login is refused while it is ruled out. Call before any manager
+/// is built.
+pub fn leave_default_login_unenforced() {
+    DEFAULT_LOGIN_LEFT_UNENFORCED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn default_login_left_unenforced() -> bool {
+    DEFAULT_LOGIN_LEFT_UNENFORCED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// PF-84-S06 (#570): why the default login breaks the configured login
 /// restrictions, checked without logging it out. For a thread that would run
 /// on the default login while a session on a named account left it in place.
@@ -1692,13 +1712,14 @@ pub async fn default_login_restriction_error(
         config.forced_login_method,
         config.forced_chatgpt_workspace_id.as_deref(),
     )
-    .map(|violation| {
-        format!(
-            "The default OpenAI login cannot be used: {} It was left unchanged; sign in \
-             with `corbanu login`, or choose a named account with `--account` or /providers.",
-            violation.reason()
-        )
-    }))
+    .map(|violation| default_login_unusable_message(violation.reason())))
+}
+
+fn default_login_unusable_message(reason: &str) -> String {
+    format!(
+        "The default OpenAI login cannot be used: {reason} It was left unchanged; sign in with \
+         `corbanu login`, or choose a named account with `--account` or /providers."
+    )
 }
 
 async fn load_auth_for_restrictions(
@@ -2570,6 +2591,8 @@ pub struct AuthManager {
     /// default login was not checked (and logged out) at startup; one the
     /// login restrictions rule out is treated as absent instead.
     hide_restricted_default_login: bool,
+    /// Why the default login is hidden right now, if it is.
+    hidden_default_login_reason: RwLock<Option<String>>,
 }
 
 #[derive(Debug)]
@@ -2749,6 +2772,7 @@ impl AuthManager {
             forced_login_method: None,
             base_manager: None,
             hide_restricted_default_login: false,
+            hidden_default_login_reason: RwLock::new(None),
             auth_route_config,
         }
     }
@@ -2781,6 +2805,7 @@ impl AuthManager {
             forced_login_method: None,
             base_manager: None,
             hide_restricted_default_login: false,
+            hidden_default_login_reason: RwLock::new(None),
             auth_route_config: crate::test_support::transport_default_auth_route_config(),
         })
     }
@@ -2812,6 +2837,7 @@ impl AuthManager {
             forced_login_method: None,
             base_manager: None,
             hide_restricted_default_login: false,
+            hidden_default_login_reason: RwLock::new(None),
             auth_route_config: crate::test_support::transport_default_auth_route_config(),
         })
     }
@@ -2851,6 +2877,7 @@ impl AuthManager {
             forced_login_method: None,
             base_manager: None,
             hide_restricted_default_login: false,
+            hidden_default_login_reason: RwLock::new(None),
             auth_route_config: crate::test_support::transport_default_auth_route_config(),
         })
     }
@@ -2901,6 +2928,7 @@ impl AuthManager {
             forced_login_method: None,
             base_manager: None,
             hide_restricted_default_login: false,
+            hidden_default_login_reason: RwLock::new(None),
             // External bearer auth refreshes by running the provider's command and never makes
             // auth-owned HTTP requests, so this route is intentionally inert.
             auth_route_config: AuthRouteConfig::from_http_client_factory(HttpClientFactory::new(
@@ -3144,28 +3172,42 @@ impl AuthManager {
         self.without_restricted_default_login(auth)
     }
 
+    /// PF-84-S06 (#570): whether this default-login manager treats a login
+    /// the restrictions rule out as absent, because the process left it in
+    /// place at startup (see [`leave_default_login_unenforced`]).
+    pub fn hides_restricted_default_login(&self) -> bool {
+        self.hide_restricted_default_login && self.named_account.is_none()
+    }
+
+    /// PF-84-S06 (#570): why the default login this manager hides cannot be
+    /// used, while it hides one. Requests on the default login are refused
+    /// with it instead of being sent without credentials.
+    pub fn hidden_default_login_reason(&self) -> Option<String> {
+        self.hidden_default_login_reason
+            .read()
+            .ok()
+            .and_then(|reason| reason.clone())
+    }
+
     /// PF-84-S06 (#570): drops a default login the login restrictions rule
     /// out when this process left it in place for a named-account session.
     fn without_restricted_default_login(&self, auth: Option<CodexAuth>) -> Option<CodexAuth> {
-        let auth = auth?;
-        if !self.hide_restricted_default_login || self.named_account.is_some() {
-            return Some(auth);
+        if !self.hides_restricted_default_login() {
+            return auth;
         }
         let forced_workspace = self.forced_chatgpt_workspace_id();
-        match login_restriction_violation(
-            &auth,
-            self.forced_login_method,
-            forced_workspace.as_deref(),
-        ) {
-            Some(violation) => {
-                tracing::warn!(
-                    "the default login is not used in this session: {}",
-                    violation.reason()
-                );
-                None
-            }
-            None => Some(auth),
+        let reason = auth.as_ref().and_then(|auth| {
+            login_restriction_violation(auth, self.forced_login_method, forced_workspace.as_deref())
+                .map(|violation| default_login_unusable_message(violation.reason()))
+        });
+        if let Some(reason) = &reason {
+            tracing::warn!("the default login is not used in this process: {reason}");
         }
+        let hidden = reason.is_some();
+        if let Ok(mut current) = self.hidden_default_login_reason.write() {
+            *current = reason;
+        }
+        if hidden { None } else { auth }
     }
 
     fn set_cached_auth(&self, new_auth: Option<CodexAuth>) -> bool {
@@ -3278,7 +3320,8 @@ impl AuthManager {
         )
         .await;
         manager.forced_login_method = config.configured_forced_login_method();
-        manager.hide_restricted_default_login = config.runs_on_named_sign_in_account();
+        manager.hide_restricted_default_login =
+            config.runs_on_named_sign_in_account() || default_login_left_unenforced();
         if manager.hide_restricted_default_login
             && let Ok(mut cached) = manager.inner.write()
         {
