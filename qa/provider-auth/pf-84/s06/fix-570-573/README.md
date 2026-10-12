@@ -18,5 +18,7 @@ The TUI runs on a private tmux socket (`scripts/env.sh`).
 | #573 `/providers` → OpenAI → *Add another account* on Z.AI | API key only | device code or API key | [A573](captures/tui-A573-CAND.txt) |
 
 Regression tests failing on BASE source and passing on CAND: [tests-before-after.txt](captures/tests-before-after.txt),
-[test-resume-before.txt](captures/test-resume-before.txt); final gate: [gate-final.txt](captures/gate-final.txt). The TUI test
+[test-resume-before.txt](captures/test-resume-before.txt); final Linux gate (commit named inside):
+[gate-final.txt](captures/gate-final.txt); macOS `just test`: [mac-just-test.txt](captures/mac-just-test.txt) (its tmux onboarding
+failures also fail on `origin/main`: [onboarding-linux-main.txt](captures/onboarding-linux-main.txt)). The TUI test
 `a_session_account_that_cannot_load_changes_nothing` fails on BASE too (stale since S06; fixed by the switch-follow branch).
