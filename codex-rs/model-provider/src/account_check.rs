@@ -24,6 +24,8 @@ fn usable_account_kinds(provider: &ModelProviderInfo) -> &'static [ProviderAccou
         ]
     } else if provider.auth.is_some() {
         &[ProviderAccountKind::Command]
+    } else if provider.is_amazon_bedrock() {
+        &[ProviderAccountKind::AwsProfile]
     } else if provider.env_key.is_some() {
         &[ProviderAccountKind::ApiKey]
     } else {
@@ -44,13 +46,24 @@ pub fn selected_account_error(codex_home: &Path, provider: &ModelProviderInfo) -
     }
     match configured {
         Ok(true) => None,
-        Ok(false) => Some(format!(
-            "account `{name}` of provider `{provider_id}` is not configured; add it with \
-             `corbanu account add {provider_id} {name}` or pick another with `--account` \
-             (see `corbanu account list`)"
-        )),
+        Ok(false) => {
+            let kind = if provider.is_amazon_bedrock() && provider.auth.is_none() {
+                " --kind aws-profile --value <profile>"
+            } else {
+                ""
+            };
+            Some(format!(
+                "account `{name}` of provider `{provider_id}` is not configured; add it with \
+                 `corbanu account add {provider_id} {name}{kind}` or pick another with \
+                 `--account` (see `corbanu account list`)"
+            ))
+        }
         Err(error) => Some(format!(
             "account `{name}` of provider `{provider_id}` is unavailable: {error}"
         )),
     }
 }
+
+#[cfg(test)]
+#[path = "account_check_tests.rs"]
+mod tests;

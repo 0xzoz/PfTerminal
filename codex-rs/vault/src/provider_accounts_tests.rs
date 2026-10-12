@@ -496,3 +496,29 @@ fn reading_a_fingerprint_never_writes_the_vault() {
         kept
     );
 }
+
+#[test]
+fn aws_profile_names_are_validated() {
+    for valid in ["default", "work", "Prod_Admin", "sso.dev-1", "a+b@corp"] {
+        assert_eq!(validate_aws_profile_name(valid), Ok(valid.to_string()));
+    }
+    assert_eq!(
+        validate_aws_profile_name("  work  "),
+        Ok("work".to_string())
+    );
+    for invalid in [
+        "",
+        " ",
+        "-work",
+        "my profile",
+        "a/b",
+        "x\ny",
+        &"p".repeat(65),
+    ] {
+        assert_eq!(
+            validate_aws_profile_name(invalid),
+            Err(ProviderAccountError::InvalidAwsProfile),
+            "{invalid:?}"
+        );
+    }
+}
