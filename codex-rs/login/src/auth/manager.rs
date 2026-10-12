@@ -1691,37 +1691,6 @@ fn default_login_left_unenforced() -> bool {
     DEFAULT_LOGIN_LEFT_UNENFORCED.load(std::sync::atomic::Ordering::SeqCst)
 }
 
-/// PF-84-S06 (#570): why the default login breaks the configured login
-/// restrictions, checked without logging it out. For a thread that would run
-/// on the default login while a session on a named account left it in place.
-pub async fn default_login_restriction_error(
-    config: &AuthConfig,
-) -> std::io::Result<Option<String>> {
-    if config.forced_login_method.is_none() && config.forced_chatgpt_workspace_id.is_none() {
-        return Ok(None);
-    }
-    let agent_identity_authapi_base_url =
-        agent_identity_authapi_base_url(config.chatgpt_base_url.as_deref()).ok();
-    let Some(auth) =
-        load_auth_for_restrictions(config, agent_identity_authapi_base_url.as_deref()).await?
-    else {
-        return Ok(None);
-    };
-    Ok(login_restriction_violation(
-        &auth,
-        config.forced_login_method,
-        config.forced_chatgpt_workspace_id.as_deref(),
-    )
-    .map(|violation| default_login_unusable_message(violation.reason())))
-}
-
-fn default_login_unusable_message(reason: &str) -> String {
-    format!(
-        "The default OpenAI login cannot be used: {reason} It was left unchanged; sign in with \
-         `corbanu login`, or choose a named account with `--account` or /providers."
-    )
-}
-
 async fn load_auth_for_restrictions(
     config: &AuthConfig,
     agent_identity_authapi_base_url: Option<&str>,
@@ -3145,6 +3114,7 @@ impl AuthManager {
             return self.load_named_account_auth().await;
         }
         if let Some(external_auth) = self.external_auth() {
+            self.clear_hidden_default_login_reason();
             return match self.resolve_external_auth(&external_auth).await {
                 Ok(auth) => Some(auth),
                 Err(err) => {
@@ -3246,7 +3216,14 @@ impl AuthManager {
         if let Ok(mut external_auth) = self.external_auth.write()
             && external_auth.take().is_some()
         {
+            self.clear_hidden_default_login_reason();
             self.set_cached_auth(/*new_auth*/ None);
+        }
+    }
+
+    fn clear_hidden_default_login_reason(&self) {
+        if let Ok(mut reason) = self.hidden_default_login_reason.write() {
+            *reason = None;
         }
     }
 

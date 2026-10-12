@@ -219,22 +219,20 @@ fn sign_in_restriction_error(config: &super::Config) -> Option<String> {
 
 /// PF-84-S06 (#570): a thread on the default OpenAI login is refused while
 /// that login breaks the configured login restrictions, leaving it unchanged.
-/// Only in a process that left the default login in place at startup (its
-/// manager hides such a login; see `codex_login::leave_default_login_unenforced`):
-/// a session on a named sign-in account switching to, or spawning an agent
-/// on, the default account, or a resumed or forked default-login thread.
-/// Other processes enforce (log out) at startup or never did, as before.
-pub async fn default_login_restriction_error(
+/// Only in a process that left the default login in place at startup, whose
+/// default-login manager hides such a login (see
+/// `codex_login::leave_default_login_unenforced`): a session on a named
+/// sign-in account switching to, or spawning an agent on, the default
+/// account, or a resumed or forked default-login thread. The reason is the
+/// one requests on that login would be refused with.
+pub fn default_login_restriction_error(
     config: &super::Config,
     auth_manager: &std::sync::Arc<codex_login::AuthManager>,
 ) -> Option<String> {
     let provider = &config.model_provider;
-    if !auth_manager
-        .default_account_manager()
-        .hides_restricted_default_login()
-        || !config
-            .features
-            .enabled(codex_features::Feature::NamedAccounts)
+    if !config
+        .features
+        .enabled(codex_features::Feature::NamedAccounts)
         || !provider.requires_openai_auth
         || provider.auth.is_some()
         || provider.aws.is_some()
@@ -243,12 +241,9 @@ pub async fn default_login_restriction_error(
     {
         return None;
     }
-    codex_login::default_login_restriction_error(&config.default_login_restrictions())
-        .await
-        .unwrap_or_else(|error| {
-            tracing::warn!(%error, "could not check the default login against the login restrictions");
-            None
-        })
+    auth_manager
+        .default_account_manager()
+        .hidden_default_login_reason()
 }
 
 /// Splits `[<provider>:]<name>`; the provider defaults to the session's.

@@ -150,7 +150,10 @@ fingerprint.
   `fork` and `exec resume`, whose thread's account is known only later. Such
   a default login is then not used by that process, and a thread on the
   default account (a switch to it, a spawned agent, a resumed default thread)
-  is refused with the reason instead of logging the login out. Only a
+  is refused with the reason instead of logging the login out. A TUI that
+  reuses a running local app-server daemon still enforces at startup, as
+  before. `corbanu fork` of a named thread then shows the default sign-in
+  screen; pass `--account <name>` to fork it on its account. Only a
   configured `forced_login_method` counts: a session on another provider (such
   as Z.AI) can still sign in, select and use a named ChatGPT account.
 - A named account with no usable sign-in is refused with the reason and its

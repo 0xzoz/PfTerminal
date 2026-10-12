@@ -1853,7 +1853,7 @@ impl ThreadManagerState {
             return Err(CodexErr::InvalidRequest(message));
         }
         if let Some(message) =
-            crate::config::default_login_restriction_error(&config, &auth_manager).await
+            crate::config::default_login_restriction_error(&config, &auth_manager)
         {
             return Err(CodexErr::InvalidRequest(message));
         }

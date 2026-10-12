@@ -511,7 +511,6 @@ async fn start_thread_refuses_a_ruled_out_default_login_without_logging_it_out()
     assert!(!enforcing.hides_restricted_default_login());
 
     let message = crate::config::default_login_restriction_error(&config, &hiding)
-        .await
         .expect("an API key breaks a required ChatGPT login");
     assert!(
         message.contains("ChatGPT login is required") && message.contains("left unchanged"),
@@ -533,7 +532,7 @@ async fn start_thread_refuses_a_ruled_out_default_login_without_logging_it_out()
         (&config, &enforcing),
     ] {
         assert_eq!(
-            crate::config::default_login_restriction_error(other, manager).await,
+            crate::config::default_login_restriction_error(other, manager),
             None
         );
     }

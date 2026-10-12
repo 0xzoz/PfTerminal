@@ -1393,14 +1393,18 @@ pub async fn run_main(
     // restrictions against that account at thread start and never reads or
     // logs out the default login. A resumed or forked thread's account is
     // known only later, so those launches leave the default login in place
-    // too; this process then never uses a ruled-out default login, and a
-    // thread on it is refused at thread start with the reason.
-    let leaves_default_login = config.runs_on_named_sign_in_account()
-        || (config.named_accounts_enabled()
-            && (is_resume_launch(&cli)
-                || cli.fork_picker
-                || cli.fork_last
-                || cli.fork_session_id.is_some()));
+    // too. Only with the embedded app server: this process's managers then
+    // never use a ruled-out default login, and a thread on it is refused at
+    // thread start with the reason. A reused local daemon is another process,
+    // so the TUI enforces at startup for it as before; a remote server
+    // decides for itself.
+    let leaves_default_login = matches!(app_server_target, AppServerTarget::Embedded)
+        && (config.runs_on_named_sign_in_account()
+            || (config.named_accounts_enabled()
+                && (is_resume_launch(&cli)
+                    || cli.fork_picker
+                    || cli.fork_last
+                    || cli.fork_session_id.is_some())));
     if leaves_default_login {
         codex_login::leave_default_login_unenforced();
     } else if !app_server_target.uses_remote_workspace() {
