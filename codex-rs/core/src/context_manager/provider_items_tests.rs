@@ -124,7 +124,7 @@ fn adapted(items: Vec<ResponseItem>, target: &ProviderTarget) -> Vec<ResponseIte
 }
 
 fn without_id(mut item: ResponseItem) -> ResponseItem {
-    item.set_id(None);
+    item.set_id(/*new_id*/ None);
     item
 }
 
@@ -239,19 +239,23 @@ fn chat_requests_keep_every_item() {
 #[test]
 fn unattributed_items_keep_only_what_the_target_can_read() {
     let items = vec![
-        responses_reasoning(None),
-        chat_reasoning(None),
-        anthropic_reasoning(None),
-        anthropic_web_search(None),
-        assistant(None),
-        call(None),
+        responses_reasoning(/*producer*/ None),
+        chat_reasoning(/*producer*/ None),
+        anthropic_reasoning(/*producer*/ None),
+        anthropic_web_search(/*producer*/ None),
+        assistant(/*producer*/ None),
+        call(/*producer*/ None),
     ];
     assert_eq!(
         adapted(
             items.clone(),
             &target("openai", WireApi::Responses, /*stores_items*/ false)
         ),
-        vec![responses_reasoning(None), assistant(None), call(None)]
+        vec![
+            responses_reasoning(/*producer*/ None),
+            assistant(/*producer*/ None),
+            call(/*producer*/ None)
+        ]
     );
     assert_eq!(
         adapted(
@@ -259,10 +263,10 @@ fn unattributed_items_keep_only_what_the_target_can_read() {
             &target("azure", WireApi::Responses, /*stores_items*/ true)
         ),
         vec![
-            responses_reasoning(None),
-            chat_reasoning(None),
-            assistant(None),
-            call(None)
+            responses_reasoning(/*producer*/ None),
+            chat_reasoning(/*producer*/ None),
+            assistant(/*producer*/ None),
+            call(/*producer*/ None)
         ]
     );
     for wire in [WireApi::Chat, WireApi::Anthropic] {
@@ -326,9 +330,9 @@ fn another_providers_compaction_is_dropped_on_responses() {
 #[test]
 fn an_unattributed_compaction_reference_is_dropped_when_nothing_is_stored() {
     let items = vec![
-        compaction(None),
-        context_compaction(None, /*sealed*/ true),
-        context_compaction(None, /*sealed*/ false),
+        compaction(/*producer*/ None),
+        context_compaction(/*producer*/ None, /*sealed*/ true),
+        context_compaction(/*producer*/ None, /*sealed*/ false),
     ];
     assert_eq!(
         adapted(
@@ -350,36 +354,18 @@ fn an_unattributed_compaction_reference_is_dropped_when_nothing_is_stored() {
 /// for the default account (and for other named accounts).
 #[test]
 fn a_named_account_is_its_own_producer() {
-    let work = NamedProviderAccount {
+    let account = |name: &str| NamedProviderAccount {
         provider_id: "openai".into(),
-        name: "work".into(),
+        name: name.into(),
     };
-    assert_eq!(producer_key("openai", /*account*/ None), "openai");
-    assert_eq!(producer_key("openai", Some(&work)), "openai:work");
-    let items = vec![responses_reasoning(Some(&producer_key(
-        "openai",
-        Some(&work),
-    )))];
-    assert_eq!(
-        adapted(
-            items.clone(),
-            &target(
-                &producer_key("openai", Some(&work)),
-                WireApi::Responses,
-                false
-            )
-        ),
-        items
-    );
-    assert_eq!(
-        adapted(
-            items,
-            &target(
-                &producer_key("openai", /*account*/ None),
-                WireApi::Responses,
-                /*stores_items*/ false,
-            )
-        ),
-        Vec::new()
-    );
+    let work = producer_key("openai", Some(&account("work")));
+    let personal = producer_key("openai", Some(&account("personal")));
+    let default = producer_key("openai", /*account*/ None);
+    assert_eq!(default, "openai");
+    assert_eq!(work, "openai:work");
+    let items = vec![responses_reasoning(Some(&work))];
+    let to = |producer: &str| target(producer, WireApi::Responses, /*stores_items*/ false);
+    assert_eq!(adapted(items.clone(), &to(&work)), items);
+    assert_eq!(adapted(items.clone(), &to(&personal)), Vec::new());
+    assert_eq!(adapted(items, &to(&default)), Vec::new());
 }
