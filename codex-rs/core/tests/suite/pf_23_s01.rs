@@ -1670,13 +1670,242 @@ async fn issue_562_missing_runtime_entries_cannot_be_created() -> anyhow::Result
     Ok(())
 }
 
+/// #587: under a protected level, with full access or a workspace-write
+/// profile (whose temporary-folder root holds the test's Corbanu home, like
+/// a workspace covering `$HOME`), a command cannot move the Corbanu home
+/// aside and plant a new one (which would have none of the rules, and leave
+/// the old stores readable under the moved name), on either platform.
+/// Permissive is unchanged.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_587_the_corbanu_home_cannot_be_moved_aside() -> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let mut wrong = Vec::new();
+    for (level, moved, full_access) in [
+        (SecurityLevel::Moderate, false, true),
+        (SecurityLevel::Moderate, false, false),
+        (SecurityLevel::Aggressive, false, true),
+        (SecurityLevel::Permissive, true, true),
+        (SecurityLevel::Permissive, true, false),
+    ] {
+        let home = Arc::new(TempDir::new()?);
+        let root = home.path().canonicalize()?;
+        std::fs::write(root.join("AGENTS.md"), "original\n")?;
+        let old = root.with_file_name(format!(
+            "{}.old",
+            root.file_name().unwrap_or_default().to_string_lossy()
+        ));
+        let path = root.to_string_lossy().into_owned();
+        // Split inside the home folder's own name: neither part names it.
+        let (head, tail) = path.split_at(path.len() - 2);
+        let command = format!(
+            "h=\"$(printf '{head}%s' {tail})\"; mv \"$h\" \"$h.old\"; echo mv=$?; \
+             mkdir \"$h\" && echo planted > \"$h/AGENTS.md\"; echo ran-587"
+        );
+        let (test, captured) = start_turn_in(
+            Some(home.clone()),
+            level,
+            AskForApproval::Never,
+            vec![
+                call("call-move", "shell_command", json!({ "command": command })),
+                done_step(),
+            ],
+            move |config| {
+                let profile = if full_access {
+                    PermissionProfile::Disabled
+                } else {
+                    PermissionProfile::workspace_write()
+                };
+                config
+                    .permissions
+                    .set_permission_profile(profile)
+                    .expect("profile");
+            },
+        )
+        .await?;
+        assert!(next_exec_approval(&test).await.is_none());
+        let requests = captured.requests();
+        let output = output_text(&requests[requests.len() - 1], "call-move");
+        let agents = std::fs::read_to_string(root.join("AGENTS.md")).unwrap_or_default();
+        let was_moved = old.exists();
+        if !output.contains("ran-587")
+            || was_moved != moved
+            || (agents == "planted\n") != moved
+            || output.contains("mv=0") != moved
+        {
+            wrong.push(format!(
+                "{level:?} full_access={full_access}: moved={was_moved} AGENTS.md={agents:?}: {output}"
+            ));
+        }
+        drop(test);
+        if was_moved {
+            // Put the original home back so the temporary folder removes it.
+            std::fs::remove_dir_all(&root)?;
+            std::fs::rename(&old, &root)?;
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
+/// #583: under a protected level with full access, a command cannot create a
+/// missing Corbanu-home entry that Corbanu reads later: exec-policy
+/// `rules/x.rules` (which would approve commands in later sessions) or any
+/// other name. Corbanu's `worktrees` stay writable. Permissive is unchanged.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_583_missing_corbanu_home_entries_cannot_be_created() -> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let mut wrong = Vec::new();
+    for (level, created) in [
+        (SecurityLevel::Moderate, false),
+        (SecurityLevel::Aggressive, false),
+        (SecurityLevel::Permissive, true),
+    ] {
+        let home = Arc::new(TempDir::new()?);
+        let root = home.path().canonicalize()?;
+        std::fs::create_dir_all(root.join("worktrees/w"))?;
+        let path = root.to_string_lossy().into_owned();
+        // Split inside the home folder's own name: neither part names it.
+        let (head, tail) = path.split_at(path.len() - 2);
+        let command = format!(
+            "h=\"$(printf '{head}%s' {tail})\"; r=\"ru$(printf les)\"; \
+             mkdir -p \"$h/$r\"; \
+             printf 'prefix_rule(pattern=[\"touch\"], decision=\"allow\")\\n' > \"$h/$r/x.$r\"; \
+             printf x > \"$h/new-entry\"; printf ok > \"$h/worktrees/w/ok\"; echo ran-583"
+        );
+        let (test, captured) = start_turn_in(
+            Some(home.clone()),
+            level,
+            AskForApproval::Never,
+            vec![
+                call(
+                    "call-create",
+                    "shell_command",
+                    json!({ "command": command }),
+                ),
+                done_step(),
+            ],
+            |config| {
+                config
+                    .permissions
+                    .set_permission_profile(PermissionProfile::Disabled)
+                    .expect("full access");
+            },
+        )
+        .await?;
+        assert!(next_exec_approval(&test).await.is_none());
+        let requests = captured.requests();
+        let output = output_text(&requests[requests.len() - 1], "call-create");
+        let entries = ["rules/x.rules", "new-entry"];
+        let present: Vec<&str> = entries
+            .into_iter()
+            .filter(|entry| root.join(entry).exists())
+            .collect();
+        let expected = if created {
+            entries.to_vec()
+        } else {
+            Vec::new()
+        };
+        let worktree_written = root.join("worktrees/w/ok").exists();
+        if !output.contains("ran-583") || present != expected || !worktree_written {
+            wrong.push(format!(
+                "{level:?}: present={present:?} worktree={worktree_written}: {output}"
+            ));
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
+/// #583 review: with the Corbanu home read-only, a command working in one of
+/// its git worktrees (`worktrees/`) under full access still commits there,
+/// and still cannot create a new home entry.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_583_git_still_commits_in_a_corbanu_home_worktree() -> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let home = Arc::new(TempDir::new()?);
+    let root = home.path().canonicalize()?;
+    let repos = TempDir::new()?;
+    let main = repos.path().canonicalize()?.join("main");
+    let worktree = root.join("worktrees/w/repo");
+    std::fs::create_dir_all(&main)?;
+    std::fs::create_dir_all(root.join("worktrees/w"))?;
+    let git = |args: &[&str], cwd: &std::path::Path| {
+        std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .current_dir(cwd)
+            .output()
+    };
+    git(&["init", "-q"], &main)?;
+    git(&["commit", "-q", "--allow-empty", "-m", "first"], &main)?;
+    let added = git(
+        &[
+            "worktree",
+            "add",
+            "-q",
+            &worktree.to_string_lossy(),
+            "-b",
+            "w",
+        ],
+        &main,
+    )?;
+    assert!(added.status.success(), "{added:?}");
+    let path = root.to_string_lossy().into_owned();
+    let (head, tail) = path.split_at(path.len() - 2);
+    let command = format!(
+        "git -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m second \
+         && echo committed-583; h=\"$(printf '{head}%s' {tail})\"; printf x > \"$h/new-entry\"; \
+         echo ran-583"
+    );
+    let cwd = codex_utils_absolute_path::AbsolutePathBuf::from_absolute_path(&worktree)?;
+    let (test, captured) = start_turn_in(
+        Some(home.clone()),
+        SecurityLevel::Moderate,
+        AskForApproval::Never,
+        vec![
+            call(
+                "call-commit",
+                "shell_command",
+                json!({ "command": command }),
+            ),
+            done_step(),
+        ],
+        move |config| {
+            config.cwd = cwd.clone();
+            config
+                .permissions
+                .set_permission_profile(PermissionProfile::Disabled)
+                .expect("full access");
+        },
+    )
+    .await?;
+    assert!(next_exec_approval(&test).await.is_none());
+    let requests = captured.requests();
+    let output = output_text(&requests[requests.len() - 1], "call-commit");
+    assert!(output.contains("committed-583"), "{output}");
+    assert!(output.contains("ran-583"), "{output}");
+    assert!(!root.join("new-entry").exists(), "{output}");
+    Ok(())
+}
+
 /// Issue #586: a protected command cannot create, and so cannot hold, the
 /// database init lock (#549) where it is missing, by its name or (on a
 /// case-insensitive macOS volume, the same file) in another case, even with
 /// full access and the path built at run time. Holding it would make every
 /// new launch on the home wait out the lock before opening the databases
 /// unlocked. Where the lock exists, a hard link to it cannot be made and
-/// held either. Permissive is unchanged.
+/// held either. The same holds for a command working in the Corbanu home
+/// itself, which #583 leaves writable: the lock is a store. Permissive is
+/// unchanged.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn issue_586_missing_db_init_lock_cannot_be_created_or_held() -> anyhow::Result<()> {
@@ -1684,7 +1913,7 @@ async fn issue_586_missing_db_init_lock_cannot_be_created_or_held() -> anyhow::R
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
     let mut wrong = Vec::new();
-    for missing in [true, false] {
+    for (missing, in_home) in [(true, false), (true, true), (false, false)] {
         for (level, held) in [
             (SecurityLevel::Moderate, false),
             (SecurityLevel::Aggressive, false),
@@ -1716,7 +1945,10 @@ async fn issue_586_missing_db_init_lock_cannot_be_created_or_held() -> anyhow::R
                     call("call-lock", "shell_command", json!({ "command": command })),
                     done_step(),
                 ],
-                |config| {
+                move |config| {
+                    if in_home {
+                        config.cwd = config.codex_home.clone();
+                    }
                     config
                         .permissions
                         .set_permission_profile(PermissionProfile::Disabled)
@@ -1747,7 +1979,7 @@ async fn issue_586_missing_db_init_lock_cannot_be_created_or_held() -> anyhow::R
             };
             if !output.contains("ran-586") || !ok {
                 wrong.push(format!(
-                    "{level:?} missing={missing}: exists={}: {output}",
+                    "{level:?} missing={missing} in_home={in_home}: exists={}: {output}",
                     lock.exists()
                 ));
             }

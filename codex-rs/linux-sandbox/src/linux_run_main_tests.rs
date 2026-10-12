@@ -405,6 +405,114 @@ fn register_synthetic_mount_targets_owns_a_placeholder_that_vanished_before_regi
     assert!(!placeholder.exists());
 }
 
+/// A pid no live process has: a child that has been reaped.
+fn ended_pid() -> u32 {
+    let mut child = std::process::Command::new("true").spawn().expect("spawn");
+    child.wait().expect("wait");
+    child.id()
+}
+
+/// #582: a placeholder made (and recorded) by a run that ended without
+/// cleaning up, with `others` markers (pid, contents) written first: the
+/// record comes last, so a concurrent sweep never sees a state the test
+/// does not mean.
+fn plant_stale_placeholder(placeholder: &Path, others: &[(u32, &[u8])]) -> PathBuf {
+    let marker_dir = synthetic_mount_marker_dir(placeholder);
+    std::fs::create_dir_all(&marker_dir).expect("marker dir");
+    for (pid, contents) in others {
+        std::fs::write(marker_dir.join(pid.to_string()), contents).expect("marker");
+    }
+    std::fs::write(
+        marker_dir.join(ended_pid().to_string()),
+        SYNTHETIC_MOUNT_MARKER_SYNTHETIC,
+    )
+    .expect("the maker's marker");
+    write_synthetic_mount_target_record(
+        &marker_dir,
+        &crate::bwrap::SyntheticMountTarget::missing(placeholder),
+    );
+    marker_dir
+}
+
+/// #582: the next run removes a placeholder whose runs all ended without
+/// cleaning up (as their cleanup would have), its record and marker folder.
+/// One that is no longer an empty file stays, without its record.
+#[test]
+fn stale_placeholders_of_ended_runs_are_removed() {
+    let temp_dir = tempfile::TempDir::new().expect("tempdir");
+    let placeholder = temp_dir.path().join("Library");
+    std::fs::write(&placeholder, "").expect("placeholder");
+    let marker_dir = plant_stale_placeholder(&placeholder, &[]);
+    let changed = temp_dir.path().join("changed");
+    std::fs::write(&changed, "real contents").expect("a real file now");
+    let changed_marker_dir = plant_stale_placeholder(&changed, &[]);
+    let record = marker_dir.join(SYNTHETIC_MOUNT_TARGET_RECORD);
+    assert_eq!(
+        std::fs::metadata(&record)
+            .expect("record")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+
+    remove_stale_synthetic_mount_targets();
+
+    assert!(!placeholder.exists());
+    assert!(!marker_dir.exists());
+    assert_eq!(std::fs::read(&changed).expect("changed"), b"real contents");
+    assert!(!changed_marker_dir.exists());
+}
+
+/// #582: a recorded placeholder a live run still uses (its maker, or a run
+/// that holds it after its maker was killed) stays, as does a marker folder
+/// with a marker of another kind.
+#[test]
+fn stale_placeholder_sweep_leaves_placeholders_in_use() {
+    let temp_dir = tempfile::TempDir::new().expect("tempdir");
+
+    let made = temp_dir.path().join("made");
+    std::fs::write(&made, "").expect("placeholder");
+    let made_registrations =
+        register_synthetic_mount_targets(&[crate::bwrap::SyntheticMountTarget::missing(&made)]);
+
+    // A run holding it (registered first), then its killed maker's record.
+    let held = temp_dir.path().join("held");
+    std::fs::write(&held, "").expect("placeholder");
+    let metadata = std::fs::symlink_metadata(&held).expect("stat");
+    let held_registrations = register_synthetic_mount_targets(&[
+        crate::bwrap::SyntheticMountTarget::existing_empty_file(&held, &metadata),
+    ]);
+    let held_marker_dir = plant_stale_placeholder(&held, &[]);
+    // A run that meets it now holds it too (see `is_live_placeholder`).
+    assert!(is_live_placeholder(&held));
+
+    let other = temp_dir.path().join("other");
+    std::fs::write(&other, "").expect("placeholder");
+    let other_marker_dir =
+        plant_stale_placeholder(&other, &[(ended_pid(), PROTECTED_CREATE_MARKER)]);
+
+    remove_stale_synthetic_mount_targets();
+
+    assert!(made.exists());
+    assert!(held.exists());
+    assert!(held_marker_dir.exists());
+    assert!(other.exists());
+
+    // The last run out removes each as its maker would have (#582 review:
+    // a holder whose maker was killed must not leave it behind).
+    cleanup_synthetic_mount_targets(&made_registrations);
+    cleanup_synthetic_mount_targets(&held_registrations);
+    assert!(!made.exists());
+    assert!(!held.exists());
+    assert!(!held_marker_dir.exists());
+
+    for entry in std::fs::read_dir(&other_marker_dir).expect("other markers") {
+        std::fs::remove_file(entry.expect("entry").path()).expect("remove");
+    }
+    std::fs::remove_dir(&other_marker_dir).expect("other marker dir");
+}
+
 #[test]
 fn cleanup_synthetic_mount_targets_preserves_real_pre_existing_empty_file() {
     let temp_dir = tempfile::TempDir::new().expect("tempdir");
@@ -540,6 +648,7 @@ fn managed_proxy_inner_command_includes_route_spec() {
         permission_profile: &permission_profile,
         allow_network_for_proxy: true,
         proxy_route_spec: Some("{\"routes\":[]}".to_string()),
+        close_inherited_fd: None,
         command: vec!["/bin/true".to_string()],
     });
 
@@ -556,6 +665,7 @@ fn inner_command_includes_permission_profile_flag() {
         permission_profile: &permission_profile,
         allow_network_for_proxy: false,
         proxy_route_spec: None,
+        close_inherited_fd: None,
         command: vec!["/bin/true".to_string()],
     });
 
@@ -564,6 +674,31 @@ fn inner_command_includes_permission_profile_flag() {
         args.windows(2)
             .any(|window| { window == ["--command-cwd", "/tmp/link"] })
     );
+}
+
+/// #581: the inner stage is told which inherited descriptor to close (the
+/// verified bundled bubblewrap run through `aa-exec`), and only then.
+#[test]
+fn inner_command_names_the_inherited_descriptor_to_close() {
+    let permission_profile = read_only_permission_profile();
+    for (fd, expected) in [(Some(7), true), (None, false)] {
+        let args = build_inner_seccomp_command(InnerSeccompCommandArgs {
+            sandbox_policy_cwd: Path::new("/tmp"),
+            command_cwd: None,
+            permission_profile: &permission_profile,
+            allow_network_for_proxy: false,
+            proxy_route_spec: None,
+            close_inherited_fd: fd,
+            command: vec!["/bin/true".to_string()],
+        });
+        let separator = args.iter().position(|arg| arg == "--").expect("separator");
+        assert_eq!(
+            args[..separator]
+                .windows(2)
+                .any(|window| window == ["--close-inherited-fd", "7"]),
+            expected
+        );
+    }
 }
 
 #[test]
@@ -575,6 +710,7 @@ fn non_managed_inner_command_omits_route_spec() {
         permission_profile: &permission_profile,
         allow_network_for_proxy: false,
         proxy_route_spec: None,
+        close_inherited_fd: None,
         command: vec!["/bin/true".to_string()],
     });
 
@@ -591,6 +727,7 @@ fn managed_proxy_inner_command_requires_route_spec() {
             permission_profile: &permission_profile,
             allow_network_for_proxy: true,
             proxy_route_spec: None,
+            close_inherited_fd: None,
             command: vec!["/bin/true".to_string()],
         })
     });
