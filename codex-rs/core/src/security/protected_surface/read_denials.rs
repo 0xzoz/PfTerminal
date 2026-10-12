@@ -332,6 +332,23 @@ impl ReadDenials {
         self.never_lifted.iter().chain(&self.read_only)
     }
 
+    /// Issue #513: the Corbanu home's runtime entries (`tmp` holds the
+    /// sandbox launchers), read-only wherever the rules apply.
+    pub(crate) fn runtime_read_only_paths(&self) -> impl Iterator<Item = &AbsolutePathBuf> {
+        self.runtime_read_only.iter()
+    }
+
+    /// Issue #513: the read-only paths no grant lifts (#442).
+    pub(crate) fn never_lifted_paths(&self) -> impl Iterator<Item = &AbsolutePathBuf> {
+        self.runtime_read_only.iter()
+    }
+
+    /// `path` with its nearest existing folder resolved (links followed),
+    /// as read-only paths are recorded.
+    pub(crate) fn real_location(path: &AbsolutePathBuf) -> Option<AbsolutePathBuf> {
+        real_location(path)
+    }
+
     /// Issue #245: these read denials alone, without the profile's own
     /// entries, as a matcher (subtrees and patterns): what a command's
     /// additional permissions may never open. A malformed pattern matches
