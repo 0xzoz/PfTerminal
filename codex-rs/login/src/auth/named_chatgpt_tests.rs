@@ -36,8 +36,10 @@ fn each_account_reads_and_writes_only_its_own_label() {
     let play = VaultAccountAuthStorage::with_vault(vault.clone(), &account("play")).expect("play");
     assert_eq!(work.load().expect("empty"), None);
 
-    work.save(&api_key_login("sk-canary-work")).expect("save work");
-    play.save(&api_key_login("sk-canary-play")).expect("save play");
+    work.save(&api_key_login("sk-canary-work"))
+        .expect("save work");
+    play.save(&api_key_login("sk-canary-play"))
+        .expect("save play");
     assert_eq!(
         (work.load().expect("work"), play.load().expect("play")),
         (

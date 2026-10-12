@@ -1566,8 +1566,11 @@ async fn cli_main(
             if let Some(account) = login_cli.account.as_deref() {
                 let method = match login_cli.action {
                     Some(LoginSubcommand::Status) => {
-                        codex_cli::run_named_account_login_status(login_cli.config_overrides, account)
-                            .await
+                        codex_cli::run_named_account_login_status(
+                            login_cli.config_overrides,
+                            account,
+                        )
+                        .await
                     }
                     None if login_cli.with_access_token || login_cli.api_key.is_some() => {
                         eprintln!("A named account signs in with ChatGPT or --with-api-key.");

@@ -152,11 +152,15 @@ pub async fn run_account_command(command: AccountCommand) -> anyhow::Result<()> 
                         },
                     )?
                     .map(|summary| {
-                        let detail = [Some(summary.kind.to_string()), summary.email_hint, summary.plan]
-                            .into_iter()
-                            .flatten()
-                            .collect::<Vec<_>>()
-                            .join(" · ");
+                        let detail = [
+                            Some(summary.kind.to_string()),
+                            summary.email_hint,
+                            summary.plan,
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<_>>()
+                        .join(" · ");
                         format!("\t{detail}")
                     })
                     .unwrap_or_default()
@@ -213,7 +217,10 @@ pub async fn run_account_command(command: AccountCommand) -> anyhow::Result<()> 
                 )
                 .await?
                 {
-                    writeln!(stdout, "Signed out and removed {provider} account `{name}`.")?;
+                    writeln!(
+                        stdout,
+                        "Signed out and removed {provider} account `{name}`."
+                    )?;
                     return Ok(());
                 }
                 bail!("{provider} has no account `{name}`");

@@ -46,14 +46,13 @@ use crate::auth::AuthHeaders;
 pub use crate::auth::agent_identity::AgentIdentityAuth;
 pub use crate::auth::agent_identity::AgentIdentityAuthError;
 pub use crate::auth::bedrock_api_key::BedrockApiKeyAuth;
+use crate::auth::named_chatgpt::NamedChatgptAccount;
 pub use crate::auth::personal_access_token::PersonalAccessTokenAuth;
 pub use crate::auth::storage::AgentIdentityAuthRecord;
 pub use crate::auth::storage::AgentIdentityStorage;
 pub use crate::auth::storage::AuthDotJson;
 pub use crate::auth::storage::AuthKeyringBackendKind;
 use crate::auth::storage::AuthStorageBackend;
-use crate::auth::named_chatgpt::NamedChatgptAccount;
-use crate::auth::named_chatgpt::VaultAccountAuthStorage;
 use crate::auth::storage::create_auth_storage;
 use crate::auth::util::try_parse_error_message;
 use crate::default_client::create_client;
@@ -416,7 +415,11 @@ impl CodexAuth {
         match auth_mode {
             AuthMode::Chatgpt => {
                 let storage = storage.unwrap_or_else(|| {
-                    create_auth_storage(codex_home.to_path_buf(), storage_mode, keyring_backend_kind)
+                    create_auth_storage(
+                        codex_home.to_path_buf(),
+                        storage_mode,
+                        keyring_backend_kind,
+                    )
                 });
                 Ok(Self::Chatgpt(ChatgptAuth { state, storage }))
             }

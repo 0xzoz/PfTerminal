@@ -89,7 +89,9 @@ pub async fn run_named_account_login(
     if let Err(error) =
         logout_named_account_with_revoke(&config.codex_home, &account, &auth_route_config).await
     {
-        exit_with(format!("Could not clear account `{name}` before sign-in: {error}"));
+        exit_with(format!(
+            "Could not clear account `{name}` before sign-in: {error}"
+        ));
     }
     let result = match method {
         NamedLoginMethod::ApiKey(api_key) => {
@@ -161,8 +163,8 @@ fn warn_same_user(config: &Config, account: &NamedChatgptAccount) {
     )
     .ok()
     .flatten();
-    let same = same_user_sign_ins(&config.codex_home, account, default_auth.as_ref())
-        .unwrap_or_default();
+    let same =
+        same_user_sign_ins(&config.codex_home, account, default_auth.as_ref()).unwrap_or_default();
     if !same.is_empty() {
         eprintln!(
             "Warning: this is the same ChatGPT user as account(s) {}. They share that user's \

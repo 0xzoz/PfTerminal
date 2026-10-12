@@ -52,10 +52,7 @@ impl AuthManager {
     }
 
     /// [`AuthManager::for_named_account`] with its sign-in already loaded.
-    pub async fn for_named_account_loaded(
-        &self,
-        account: NamedChatgptAccount,
-    ) -> Arc<AuthManager> {
+    pub async fn for_named_account_loaded(&self, account: NamedChatgptAccount) -> Arc<AuthManager> {
         let manager = self.for_named_account(account);
         if manager.auth_cached().is_none() {
             manager.reload().await;
@@ -144,10 +141,7 @@ impl AuthManager {
 
     /// Logs out of the named account only: revokes its tokens when asked and
     /// deletes its vault store. `None` when this is not a named manager.
-    pub(super) async fn logout_named_account(
-        &self,
-        revoke: bool,
-    ) -> Option<std::io::Result<bool>> {
+    pub(super) async fn logout_named_account(&self, revoke: bool) -> Option<std::io::Result<bool>> {
         let storage = match self.named_account_storage() {
             Ok(storage) => storage?,
             Err(error) => return Some(Err(error)),

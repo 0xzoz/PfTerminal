@@ -120,8 +120,16 @@ async fn fixture(server: &MockServer) -> Result<Fixture> {
         AuthCredentialsStoreMode::File,
         AuthKeyringBackendKind::default(),
     )?;
-    write_account(&home, "work", &sign_in("work-user", "work-access-1", "work-refresh-1"))?;
-    write_account(&home, "play", &sign_in("play-user", "play-access-1", "play-refresh-1"))?;
+    write_account(
+        &home,
+        "work",
+        &sign_in("work-user", "work-access-1", "work-refresh-1"),
+    )?;
+    write_account(
+        &home,
+        "play",
+        &sign_in("play-user", "play-access-1", "play-refresh-1"),
+    )?;
     let default_bytes = std::fs::read(home.path().join("auth.json"))?;
     let base = AuthManager::shared(
         home.path().to_path_buf(),
@@ -193,7 +201,11 @@ async fn concurrent_refreshes_write_back_to_their_own_account_only() -> Result<(
         (
             work.auth().await.and_then(|auth| auth.get_token().ok()),
             play.auth().await.and_then(|auth| auth.get_token().ok()),
-            fixture.base.auth().await.and_then(|auth| auth.get_token().ok()),
+            fixture
+                .base
+                .auth()
+                .await
+                .and_then(|auth| auth.get_token().ok()),
         ),
         (
             Some("work-access-2".to_string()),

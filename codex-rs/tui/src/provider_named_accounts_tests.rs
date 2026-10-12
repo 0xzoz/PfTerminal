@@ -5,6 +5,10 @@ use pretty_assertions::assert_eq;
 
 use super::*;
 
+fn route() -> codex_login::AuthRouteConfig {
+    codex_login::test_support::transport_default_auth_route_config()
+}
+
 fn name(raw: &str) -> ProviderAccountName {
     ProviderAccountName::parse(raw).expect("valid name")
 }
@@ -167,7 +171,7 @@ fn save_rename_and_remove_touch_only_that_account() {
         ]
     );
 
-    remove_account(home.path().to_path_buf(), "zai", &name("home")).expect("remove");
+    remove_account(home.path().to_path_buf(), "zai", &name("home"), &route()).expect("remove");
     assert_eq!(
         vault
             .list()
@@ -177,7 +181,7 @@ fn save_rename_and_remove_touch_only_that_account() {
             .collect::<Vec<_>>(),
         vec!["provider/zai/accounts/keep/api_key".to_string()]
     );
-    assert!(remove_account(home.path().to_path_buf(), "zai", &name("home")).is_err());
+    assert!(remove_account(home.path().to_path_buf(), "zai", &name("home"), &route()).is_err());
     assert!(
         save_account(
             home.path().to_path_buf(),

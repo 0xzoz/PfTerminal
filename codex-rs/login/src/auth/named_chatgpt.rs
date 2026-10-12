@@ -243,7 +243,10 @@ pub fn same_user_sign_ins(
     if vault.key_storage() == VaultKeyStorage::NotInitialized {
         return Ok(same);
     }
-    for other in vault.list_provider_accounts().map_err(std::io::Error::other)? {
+    for other in vault
+        .list_provider_accounts()
+        .map_err(std::io::Error::other)?
+    {
         if other.provider_id != account.provider_id
             || other.name.as_str() == account.name
             || !other.kinds.contains(&ProviderAccountKind::ChatgptAuth)

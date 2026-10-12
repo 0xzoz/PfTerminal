@@ -192,19 +192,39 @@ fn named_openai_account_login_list_status_logout() -> Result<()> {
         .failure()
         .stderr(contains("named accounts are off"));
     corbanu(home.path())?
-        .args(["login", "--account", "work", "--with-api-key", "--enable", "named_accounts"])
+        .args([
+            "login",
+            "--account",
+            "work",
+            "--with-api-key",
+            "--enable",
+            "named_accounts",
+        ])
         .write_stdin(canary)
         .assert()
         .success()
-        .stderr(contains("Signed in OpenAI account `work` (OpenAI API key).").and(contains(canary).not()));
-    assert!(!home.path().join("auth.json").exists(), "the default login is untouched");
+        .stderr(
+            contains("Signed in OpenAI account `work` (OpenAI API key).")
+                .and(contains(canary).not()),
+        );
+    assert!(
+        !home.path().join("auth.json").exists(),
+        "the default login is untouched"
+    );
     corbanu(home.path())?
         .args(["account", "list", "openai", "--enable", "named_accounts"])
         .assert()
         .success()
         .stdout("openai\twork\tchatgpt_auth\tOpenAI API key\n");
     corbanu(home.path())?
-        .args(["login", "--account", "work", "status", "--enable", "named_accounts"])
+        .args([
+            "login",
+            "--account",
+            "work",
+            "status",
+            "--enable",
+            "named_accounts",
+        ])
         .assert()
         .success()
         .stderr(contains("OpenAI account `work`: OpenAI API key").and(contains(canary).not()));
@@ -214,7 +234,14 @@ fn named_openai_account_login_list_status_logout() -> Result<()> {
         .success()
         .stderr(contains("Signed out OpenAI account `work`"));
     corbanu(home.path())?
-        .args(["login", "--account", "work", "status", "--enable", "named_accounts"])
+        .args([
+            "login",
+            "--account",
+            "work",
+            "status",
+            "--enable",
+            "named_accounts",
+        ])
         .assert()
         .failure()
         .stderr(contains("is not signed in"));

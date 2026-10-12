@@ -267,11 +267,13 @@ impl App {
                 "Signed in {provider_id} account `{name}`{summary}. Use it from /providers, \
                  `--account {name}` or a spawn `account`."
             );
-            let default_auth = codex_login::load_auth_dot_json(&codex_home, store_mode, keyring_kind)
-                .ok()
-                .flatten();
-            let same = codex_login::same_user_sign_ins(&codex_home, &account, default_auth.as_ref())
-                .unwrap_or_default();
+            let default_auth =
+                codex_login::load_auth_dot_json(&codex_home, store_mode, keyring_kind)
+                    .ok()
+                    .flatten();
+            let same =
+                codex_login::same_user_sign_ins(&codex_home, &account, default_auth.as_ref())
+                    .unwrap_or_default();
             if !same.is_empty() {
                 message.push_str(&format!(
                     " Warning: this is the same ChatGPT user as account(s) {}; they share that \
