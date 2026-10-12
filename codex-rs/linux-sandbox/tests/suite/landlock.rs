@@ -1182,11 +1182,11 @@ async fn sandbox_blocks_dev_tcp_redirection() {
 }
 
 /// PF-23-S02 on Linux, full-write profiles: what the protected-path rules
-/// hold (a read-only file stays read-only, also through a symlinked dotfile
-/// and after its folder is renamed) and the limits the gate records (the
-/// link itself can be removed, the folder renamed and the path rebuilt,
-/// because bind mounts move with their folder). macOS blocks those too
-/// (`seatbelt_tests::renaming_a_folder_above_a_protected_path_is_denied`).
+/// hold (a read-only file stays read-only, also through a symlinked dotfile;
+/// since #587 its folder cannot be renamed either, as on macOS:
+/// `seatbelt_tests::renaming_a_folder_above_a_protected_path_is_denied`)
+/// and the limits the gate records (the link itself can be removed, and a
+/// new file created next to the protected one).
 #[tokio::test]
 async fn pf_23_s02_full_write_profile_keeps_protected_files_read_only() {
     if should_skip_bwrap_tests().await {
@@ -1240,11 +1240,11 @@ async fn pf_23_s02_full_write_profile_keeps_protected_files_read_only() {
     .await
     .expect("full-write profile runs under bubblewrap");
     let stdout = output.stdout.text;
-    for held in ["link-write=1", "write=1", "moved-write=1"] {
+    for held in ["link-write=1", "write=1", "mv=1", "moved-write=1"] {
         assert!(stdout.contains(held), "{held}: {stdout}");
     }
-    // Recorded Linux limits: the rename and the link removal go through.
-    for limit in ["other=0", "mv=0", "rm-link=0"] {
+    // Recorded Linux limits: the link removal and a new file go through.
+    for limit in ["other=0", "rm-link=0"] {
         assert!(stdout.contains(limit), "{limit}: {stdout}");
     }
     assert_eq!(
@@ -1252,8 +1252,77 @@ async fn pf_23_s02_full_write_profile_keeps_protected_files_read_only() {
         "ok\n"
     );
     assert_eq!(
-        std::fs::read_to_string(base.join("moved/fish/config.fish")).expect("moved config"),
+        std::fs::read_to_string(config.join("fish/config.fish")).expect("config"),
         "ok\n"
+    );
+    assert!(!base.join("moved").exists());
+}
+
+/// #587: under a full-write profile with protected paths, a command cannot
+/// move the Corbanu home (or a folder above it) aside and plant a new one:
+/// the new folder would have none of the rules, and the moved copy's denied
+/// stores would be readable under its new name.
+#[tokio::test]
+async fn issue_587_protected_home_and_its_folders_cannot_be_moved_aside() {
+    if should_skip_bwrap_tests().await {
+        eprintln!("skipping bwrap test: bwrap sandbox prerequisites are unavailable");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base = dir.path().canonicalize().expect("canonical");
+    let home = base.join("outer/home");
+    std::fs::create_dir_all(&home).expect("home");
+    std::fs::write(home.join("auth.json"), "secret-587\n").expect("store");
+    std::fs::write(home.join("AGENTS.md"), "original\n").expect("AGENTS.md");
+    let entry = |path: std::path::PathBuf, access| {
+        FileSystemSandboxEntry::skip_missing_path(
+            FileSystemPath::Path {
+                path: AbsolutePathBuf::from_absolute_path(path).expect("absolute"),
+            },
+            access,
+        )
+    };
+    // As `ReadDenials` builds it for full access: denied stores (one not
+    // created yet) and read-only runtime entries (one missing).
+    let policy = FileSystemSandboxPolicy::restricted(vec![
+        FileSystemSandboxEntry {
+            path: FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            },
+            access: FileSystemAccessMode::Write,
+            missing_path_behavior: None,
+        },
+        entry(home.join("auth.json"), FileSystemAccessMode::Deny),
+        entry(home.join("secrets"), FileSystemAccessMode::Deny),
+        entry(home.join("AGENTS.md"), FileSystemAccessMode::Read),
+        entry(home.join("skills"), FileSystemAccessMode::Read),
+    ]);
+    let script = "mv outer/home outer/home.old; echo mv-home=$?; \
+                  mv outer outer.old; echo mv-outer=$?; \
+                  rmdir outer/home; echo rmdir=$?; \
+                  mkdir -p outer/home; echo planted > outer/home/AGENTS.md; echo plant=$?; \
+                  cat outer/home.old/auth.json outer.old/home/auth.json; true";
+    let output = run_cmd_result_with_permission_profile_for_cwd(
+        &["bash", "-c", script],
+        AbsolutePathBuf::from_absolute_path(&base).expect("absolute base"),
+        PermissionProfile::from_runtime_permissions(&policy, NetworkSandboxPolicy::Restricted),
+        create_env_from_core_vars(),
+        LONG_TIMEOUT_MS,
+        /*use_legacy_landlock*/ false,
+    )
+    .await
+    .expect("full-write profile runs under bubblewrap");
+    let stdout = output.stdout.text;
+    let stderr = output.stderr.text;
+    for held in ["mv-home=1", "mv-outer=1", "rmdir=1", "plant=1"] {
+        assert!(stdout.contains(held), "{held}: {stdout}\nstderr: {stderr}");
+    }
+    assert!(!stdout.contains("secret-587"), "{stdout}");
+    assert!(!base.join("outer/home.old").exists());
+    assert!(!base.join("outer.old").exists());
+    assert_eq!(
+        std::fs::read_to_string(home.join("AGENTS.md")).expect("AGENTS.md"),
+        "original\n"
     );
 }
 
