@@ -1691,6 +1691,13 @@ fn default_login_left_unenforced() -> bool {
     DEFAULT_LOGIN_LEFT_UNENFORCED.load(std::sync::atomic::Ordering::SeqCst)
 }
 
+fn default_login_unusable_message(reason: &str) -> String {
+    format!(
+        "The default OpenAI login cannot be used: {reason} It was left unchanged; sign in with \
+         `corbanu login`, or choose a named account with `--account` or /providers."
+    )
+}
+
 async fn load_auth_for_restrictions(
     config: &AuthConfig,
     agent_identity_authapi_base_url: Option<&str>,
