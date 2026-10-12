@@ -1657,10 +1657,12 @@ async fn issue_562_missing_runtime_entries_cannot_be_created() -> anyhow::Result
     Ok(())
 }
 
-/// #587: under a protected level with full access, a command cannot move
-/// the Corbanu home aside and plant a new one (which would have none of the
-/// rules, and leave the old stores readable under the moved name), on
-/// either platform. Permissive is unchanged.
+/// #587: under a protected level, with full access or a workspace-write
+/// profile (whose temporary-folder root holds the test's Corbanu home, like
+/// a workspace covering `$HOME`), a command cannot move the Corbanu home
+/// aside and plant a new one (which would have none of the rules, and leave
+/// the old stores readable under the moved name), on either platform.
+/// Permissive is unchanged.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn issue_587_the_corbanu_home_cannot_be_moved_aside() -> anyhow::Result<()> {
@@ -1668,10 +1670,12 @@ async fn issue_587_the_corbanu_home_cannot_be_moved_aside() -> anyhow::Result<()
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
     let mut wrong = Vec::new();
-    for (level, moved) in [
-        (SecurityLevel::Moderate, false),
-        (SecurityLevel::Aggressive, false),
-        (SecurityLevel::Permissive, true),
+    for (level, moved, full_access) in [
+        (SecurityLevel::Moderate, false, true),
+        (SecurityLevel::Moderate, false, false),
+        (SecurityLevel::Aggressive, false, true),
+        (SecurityLevel::Permissive, true, true),
+        (SecurityLevel::Permissive, true, false),
     ] {
         let home = Arc::new(TempDir::new()?);
         let root = home.path().canonicalize()?;
@@ -1695,11 +1699,16 @@ async fn issue_587_the_corbanu_home_cannot_be_moved_aside() -> anyhow::Result<()
                 call("call-move", "shell_command", json!({ "command": command })),
                 done_step(),
             ],
-            |config| {
+            move |config| {
+                let profile = if full_access {
+                    PermissionProfile::Disabled
+                } else {
+                    PermissionProfile::workspace_write()
+                };
                 config
                     .permissions
-                    .set_permission_profile(PermissionProfile::Disabled)
-                    .expect("full access");
+                    .set_permission_profile(profile)
+                    .expect("profile");
             },
         )
         .await?;
@@ -1714,7 +1723,7 @@ async fn issue_587_the_corbanu_home_cannot_be_moved_aside() -> anyhow::Result<()
             || output.contains("mv=0") != moved
         {
             wrong.push(format!(
-                "{level:?}: moved={was_moved} AGENTS.md={agents:?}: {output}"
+                "{level:?} full_access={full_access}: moved={was_moved} AGENTS.md={agents:?}: {output}"
             ));
         }
         drop(test);

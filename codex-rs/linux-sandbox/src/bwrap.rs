@@ -998,10 +998,11 @@ fn create_filesystem_args(
 /// rules behind: the new folder would have none, and the moved copy's
 /// denied stores would be readable under its new name. Seatbelt denies the
 /// same renames (`build_seatbelt_rename_guard_policy`). The bind is the live
-/// folder, so what is in it is unchanged. Folders at or below a protected
-/// path (masked or read-only already), writable roots (bound already),
-/// links and folders whose parent the user cannot write (they cannot be
-/// renamed anyway, such as `/home`) are left out.
+/// folder, so what is in it is unchanged; a folder gone by then (another
+/// run's placeholder) is skipped (`--bind-try`). Folders at or below a
+/// protected path (masked or read-only already), writable roots (bound
+/// already), links and folders in a parent the user neither owns nor can
+/// write (they cannot be renamed, such as `/home`) are left out.
 fn append_protected_folder_pins(
     bwrap_args: &mut BwrapArgs,
     mount_root: &Path,
@@ -1023,18 +1024,25 @@ fn append_protected_folder_pins(
             !protected.iter().any(|path| folder.starts_with(path))
                 && !allowed_write_paths.iter().any(|root| root == folder)
                 && fs::symlink_metadata(folder).is_ok_and(|metadata| metadata.is_dir())
-                && folder.parent().is_some_and(user_can_write)
+                && folder.parent().is_some_and(user_may_change)
         })
         .collect();
     pins.sort_by_key(|folder| path_depth(folder));
     for folder in pins {
-        bwrap_args.args.push("--bind".to_string());
+        bwrap_args.args.push("--bind-try".to_string());
         bwrap_args.args.push(path_to_string(folder));
         bwrap_args.args.push(path_to_string(folder));
     }
 }
 
-fn user_can_write(folder: &Path) -> bool {
+/// Whether the user could rename an entry of `folder`: it can write it, or
+/// owns it (and so could make it writable first).
+fn user_may_change(folder: &Path) -> bool {
+    // SAFETY: `geteuid` has no preconditions.
+    let euid = unsafe { libc::geteuid() };
+    if fs::metadata(folder).is_ok_and(|metadata| metadata.uid() == euid) {
+        return true;
+    }
     let Ok(folder) = std::ffi::CString::new(folder.as_os_str().as_encoded_bytes()) else {
         return false;
     };
@@ -4175,12 +4183,25 @@ mod tests {
             ),
             read_only.clone(),
         ]);
+        // A folder the user owns but cannot write right now could be made
+        // writable first: its entries are pinned too.
+        let outer = base.join("outer");
+        std::fs::set_permissions(
+            &outer,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o555),
+        )
+        .expect("chmod");
         let args = create_filesystem_args(&policy, &base, NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
             .expect("bwrap fs args")
             .args;
+        std::fs::set_permissions(
+            &outer,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+        )
+        .expect("chmod");
         let binds: Vec<&str> = args
             .windows(3)
-            .filter(|window| window[0] == "--bind" && window[1] == window[2])
+            .filter(|window| window[0] == "--bind-try" && window[1] == window[2])
             .map(|window| window[1].as_str())
             .collect();
         let path = |path: &Path| path_to_string(path);
@@ -4201,18 +4222,13 @@ mod tests {
                 .position(|window| window[0] == flag && window[1] == path(target))
                 .expect("mount")
         };
-        assert!(position("--bind", &home) < position("--ro-bind", &home.join("skills")));
+        assert!(position("--bind-try", &home) < position("--ro-bind", &home.join("skills")));
 
         let workspace = FileSystemSandboxPolicy::restricted(vec![writable, read_only]);
         let args = create_filesystem_args(&workspace, &base, NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
             .expect("bwrap fs args")
             .args;
-        assert!(
-            !args
-                .windows(2)
-                .any(|window| window[0] == "--bind" && window[1] == path(&home)),
-            "{args:?}"
-        );
+        assert!(!args.iter().any(|arg| arg == "--bind-try"), "{args:?}");
     }
 
     /// #473: `~/.claude` read-only (it runs hooks) with no

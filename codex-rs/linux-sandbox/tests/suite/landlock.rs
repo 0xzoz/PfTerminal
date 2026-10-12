@@ -1258,72 +1258,102 @@ async fn pf_23_s02_full_write_profile_keeps_protected_files_read_only() {
     assert!(!base.join("moved").exists());
 }
 
-/// #587: under a full-write profile with protected paths, a command cannot
-/// move the Corbanu home (or a folder above it) aside and plant a new one:
-/// the new folder would have none of the rules, and the moved copy's denied
-/// stores would be readable under its new name.
+/// #587: under a profile that can write the Corbanu home's parent (full
+/// access, or a workspace holding it) with protected paths, a command
+/// cannot move the home (or a folder above it) aside and plant a new one:
+/// the new folder would have none of the rules, and a later command could
+/// read the moved copy's denied stores under the moved name.
 #[tokio::test]
 async fn issue_587_protected_home_and_its_folders_cannot_be_moved_aside() {
     if should_skip_bwrap_tests().await {
         eprintln!("skipping bwrap test: bwrap sandbox prerequisites are unavailable");
         return;
     }
-    let dir = tempfile::tempdir().expect("tempdir");
-    let base = dir.path().canonicalize().expect("canonical");
-    let home = base.join("outer/home");
-    std::fs::create_dir_all(&home).expect("home");
-    std::fs::write(home.join("auth.json"), "secret-587\n").expect("store");
-    std::fs::write(home.join("AGENTS.md"), "original\n").expect("AGENTS.md");
-    let entry = |path: std::path::PathBuf, access| {
-        FileSystemSandboxEntry::skip_missing_path(
-            FileSystemPath::Path {
-                path: AbsolutePathBuf::from_absolute_path(path).expect("absolute"),
+    for full_access in [true, false] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().canonicalize().expect("canonical");
+        let home = base.join("outer/home");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::write(home.join("auth.json"), "secret-587\n").expect("store");
+        std::fs::write(home.join("AGENTS.md"), "original\n").expect("AGENTS.md");
+        let entry = |path: std::path::PathBuf, access| {
+            FileSystemSandboxEntry::skip_missing_path(
+                FileSystemPath::Path {
+                    path: AbsolutePathBuf::from_absolute_path(path).expect("absolute"),
+                },
+                access,
+            )
+        };
+        let writable = if full_access {
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                access: FileSystemAccessMode::Write,
+                missing_path_behavior: None,
+            }
+        } else {
+            entry(base.clone(), FileSystemAccessMode::Write)
+        };
+        // As `ReadDenials` builds it: denied stores (one not created yet)
+        // and read-only runtime entries (one missing).
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                access: FileSystemAccessMode::Read,
+                missing_path_behavior: None,
             },
-            access,
-        )
-    };
-    // As `ReadDenials` builds it for full access: denied stores (one not
-    // created yet) and read-only runtime entries (one missing).
-    let policy = FileSystemSandboxPolicy::restricted(vec![
-        FileSystemSandboxEntry {
-            path: FileSystemPath::Special {
-                value: FileSystemSpecialPath::Root,
-            },
-            access: FileSystemAccessMode::Write,
-            missing_path_behavior: None,
-        },
-        entry(home.join("auth.json"), FileSystemAccessMode::Deny),
-        entry(home.join("secrets"), FileSystemAccessMode::Deny),
-        entry(home.join("AGENTS.md"), FileSystemAccessMode::Read),
-        entry(home.join("skills"), FileSystemAccessMode::Read),
-    ]);
-    let script = "mv outer/home outer/home.old; echo mv-home=$?; \
-                  mv outer outer.old; echo mv-outer=$?; \
-                  rmdir outer/home; echo rmdir=$?; \
-                  mkdir -p outer/home; echo planted > outer/home/AGENTS.md; echo plant=$?; \
-                  cat outer/home.old/auth.json outer.old/home/auth.json; true";
-    let output = run_cmd_result_with_permission_profile_for_cwd(
-        &["bash", "-c", script],
-        AbsolutePathBuf::from_absolute_path(&base).expect("absolute base"),
-        PermissionProfile::from_runtime_permissions(&policy, NetworkSandboxPolicy::Restricted),
-        create_env_from_core_vars(),
-        LONG_TIMEOUT_MS,
-        /*use_legacy_landlock*/ false,
-    )
-    .await
-    .expect("full-write profile runs under bubblewrap");
-    let stdout = output.stdout.text;
-    let stderr = output.stderr.text;
-    for held in ["mv-home=1", "mv-outer=1", "rmdir=1", "plant=1"] {
-        assert!(stdout.contains(held), "{held}: {stdout}\nstderr: {stderr}");
+            writable,
+            entry(home.join("auth.json"), FileSystemAccessMode::Deny),
+            entry(home.join("secrets"), FileSystemAccessMode::Deny),
+            entry(home.join("AGENTS.md"), FileSystemAccessMode::Read),
+            entry(home.join("skills"), FileSystemAccessMode::Read),
+        ]);
+        let run = |script: &'static str| {
+            run_cmd_result_with_permission_profile_for_cwd(
+                &["bash", "-c", script],
+                AbsolutePathBuf::from_absolute_path(&base).expect("absolute base"),
+                PermissionProfile::from_runtime_permissions(
+                    &policy,
+                    NetworkSandboxPolicy::Restricted,
+                ),
+                create_env_from_core_vars(),
+                LONG_TIMEOUT_MS,
+                /*use_legacy_landlock*/ false,
+            )
+        };
+        let output = run("mv outer/home outer/home.old; echo mv-home=$?; \
+                          mv outer outer.old; echo mv-outer=$?; \
+                          mkdir -p outer/home; echo planted > outer/home/AGENTS.md; echo plant=$?")
+        .await
+        .expect("the profile runs under bubblewrap");
+        let stdout = output.stdout.text;
+        let stderr = output.stderr.text;
+        for held in ["mv-home=1", "mv-outer=1", "plant=1"] {
+            assert!(
+                stdout.contains(held),
+                "full access {full_access}: {held}: {stdout}\nstderr: {stderr}"
+            );
+        }
+        assert!(!base.join("outer/home.old").exists());
+        assert!(!base.join("outer.old").exists());
+        assert_eq!(
+            std::fs::read_to_string(home.join("AGENTS.md")).expect("AGENTS.md"),
+            "original\n"
+        );
+        // A later command with the same rules: on main the moved store was
+        // readable under its new name.
+        let output = run("cat outer/home.old/auth.json outer.old/home/auth.json; true")
+            .await
+            .expect("the profile runs under bubblewrap");
+        assert!(
+            !output.stdout.text.contains("secret-587"),
+            "full access {full_access}: {}",
+            output.stdout.text
+        );
     }
-    assert!(!stdout.contains("secret-587"), "{stdout}");
-    assert!(!base.join("outer/home.old").exists());
-    assert!(!base.join("outer.old").exists());
-    assert_eq!(
-        std::fs::read_to_string(home.join("AGENTS.md")).expect("AGENTS.md"),
-        "original\n"
-    );
 }
 
 /// #473: under a full-write profile `~/.claude` is read-only (it runs hooks)
