@@ -2138,11 +2138,11 @@ async fn ordinary_roots_stay_writable_at_every_level() {
         .tempdir_in("/tmp")
         .unwrap();
     let real = dir.path().canonicalize().unwrap();
-    // The whole tree is spelled through a link, like `/tmp` on macOS.
-    let alias = std::env::temp_dir().join(format!(
-        "alias-{}",
-        real.file_name().unwrap().to_string_lossy()
-    ));
+    // The whole tree is spelled through a link, like `/tmp` on macOS: one
+    // outside the writable roots (Linux refuses a read-only path spelled
+    // through a link a command could change).
+    let aliases = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let alias = aliases.path().join("alias");
     std::os::unix::fs::symlink(&real, &alias).unwrap();
     let base = alias.clone();
     let main = base.join("main");
@@ -2194,7 +2194,6 @@ async fn ordinary_roots_stay_writable_at_every_level() {
             std::fs::remove_file(written).unwrap();
         }
     }
-    std::fs::remove_file(&alias).unwrap();
 }
 
 /// #536 (Travis, 2026-10-12), real bubblewrap: at every level, Permissive
