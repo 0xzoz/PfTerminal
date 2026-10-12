@@ -20,7 +20,7 @@ Regression tests:
 ## Resume: other provider, missing `[provider_accounts]` account, Esc, in-app `/resume`
 
 Same disposable-home setup; each conversation first answers `ping` on `--account work` (on Z.AI), then is resumed.
-Before: `e7be21a1a9` (main). After: this branch.
+Before: `e7be21a1a9` (main). After: this branch at `32a78c5b46` (after review round 1; re-run of every case).
 
 | Case | Before | After |
 | --- | --- | --- |

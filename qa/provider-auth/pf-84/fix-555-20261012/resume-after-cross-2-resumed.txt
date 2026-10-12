@@ -10,7 +10,7 @@
 
 • ping
 
-› Use /skills to list available skills
+› Write tests for @filename
 
   Z.AI GLM 5.3 Flash via zai default · /tmp/f555proj · Corbanu Terminal · TPS: -- tok/s
 

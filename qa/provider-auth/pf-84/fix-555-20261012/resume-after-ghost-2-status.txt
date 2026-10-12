@@ -26,15 +26,15 @@
 │  Security:             Requested Permissive; effective protection unverified (/security)   │
 │  Agents.md:            <none>                                                              │
 │  Collaboration mode:   Default                                                             │
-│  Session:              01a12e62-d084-7db3-9b1c-953df1db66f6                                │
+│  Session:              01a12e92-d5a1-7960-9d26-018d2c630565                                │
 │                                                                                            │
-│  Token usage:          22.1K total  (22K input + 28 output)                                │
+│  Token usage:          20.8K total  (20.7K input + 46 output)                              │
 │  Context window:       100% left (14.3K used / 950K)                                       │
-│  Account usage:        work · 22,047 input · 6,528 cached input · 28 output (22 reasoning) │
+│  Account usage:        work · 20,723 input · 7,872 cached input · 46 output (40 reasoning) │
 │  Limits:               data not available yet                                              │
 ╰────────────────────────────────────────────────────────────────────────────────────────────╯
 
-› Run /review on my current changes
+› Summarize recent commits
 
-  Z.AI GLM 5.3 Flash via zai default · /tmp/f555proj · Corbanu Terminal · TPS: 4.8 tok/s
+  Z.AI GLM 5.3 Flash via zai default · /tmp/f555proj · Corbanu Terminal · TPS: 2.6 tok/s
 

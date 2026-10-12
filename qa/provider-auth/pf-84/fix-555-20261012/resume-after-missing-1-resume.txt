@@ -6,7 +6,7 @@
 │ directory: /tmp/f555proj              │
 ╰───────────────────────────────────────╯
 
-› Use /skills to list available skills
+› Implement {feature}
 
   Z.AI GLM 5.3 Flash via zai default · /tmp/f555proj · Corbanu Terminal · TPS: -- tok/s
 
@@ -20,7 +20,7 @@
 
  Type to search                                                                                         Filter: [Cwd] All    Sort: [Updated] Created
 
-  ❯ 15s ago     reply with the single word ping
+  ❯ 14s ago     reply with the single word ping
 
 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── 1 / 1 · 100% ─
  enter resume   esc exit   ctrl+c exit   tab focus sort/filter   ←/→ change option
@@ -29,7 +29,7 @@
 ■ This conversation ran on zai account `work` and resumes on it: account `work` of provider `zai` is not configured; add it or pick another account in
 `/providers`
 
-› Use /skills to list available skills
+› Implement {feature}
 
   Z.AI GLM 5.3 Flash via zai default · /tmp/f555proj · Corbanu Terminal · TPS: -- tok/s
 

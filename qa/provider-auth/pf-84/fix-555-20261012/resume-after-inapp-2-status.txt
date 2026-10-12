@@ -6,7 +6,7 @@
 │ directory: /tmp/f555proj              │
 ╰───────────────────────────────────────╯
 
-› Find and fix a bug in @filename
+› Explain this codebase
 
   Z.AI GLM 5.3 Flash via zai default · /tmp/f555proj · Corbanu Terminal · TPS: -- tok/s
 
@@ -50,7 +50,7 @@
 
 • ping
 
-To continue this session, run corbanu resume 01a12e64-2224-72e2-bff6-c145d8baed37
+To continue this session, run corbanu resume 01a12e94-4d9a-7703-828e-42b405c7e7b8
 
 › reply with the single word pong
 
@@ -69,15 +69,15 @@ To continue this session, run corbanu resume 01a12e64-2224-72e2-bff6-c145d8baed3
 │  Agents.md:            <none>                                                              │
 │  Account:              Z.AI API key configured                                             │
 │  Collaboration mode:   Default                                                             │
-│  Session:              01a12e63-deff-7ec1-986b-05c42f328b72                                │
+│  Session:              01a12e93-fa0a-76a1-a9f8-eaf1c575e82a                                │
 │                                                                                            │
-│  Token usage:          8.44K total  (8.4K input + 40 output)                               │
+│  Token usage:          8.41K total  (8.37K input + 37 output)                              │
 │  Context window:       100% left (14.3K used / 950K)                                       │
-│  Account usage:        work · 8,402 input · 20,160 cached input · 40 output (32 reasoning) │
+│  Account usage:        work · 8,370 input · 20,224 cached input · 37 output (31 reasoning) │
 │  Limits:               data not available yet                                              │
 ╰────────────────────────────────────────────────────────────────────────────────────────────╯
 
-› Run /review on my current changes
+› Improve documentation in @filename
 
-  Z.AI GLM 5.3 Flash via zai default · /tmp/f555proj · Corbanu Terminal · TPS: 18.9 tok/s
+  Z.AI GLM 5.3 Flash via zai default · /tmp/f555proj · Corbanu Terminal · TPS: 0.4 tok/s
 
