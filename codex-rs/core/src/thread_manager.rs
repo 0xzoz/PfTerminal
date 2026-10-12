@@ -1862,6 +1862,12 @@ impl ThreadManagerState {
         if let Some(message) = thread_start_account_error(&config, &session_source) {
             return Err(CodexErr::InvalidRequest(message));
         }
+        // A sign-in made since (e.g. `corbanu login` elsewhere) may have
+        // replaced the hidden login; look again before refusing.
+        let default_manager = auth_manager.default_account_manager();
+        if default_manager.hidden_default_login_reason().is_some() {
+            default_manager.reload().await;
+        }
         if let Some(message) =
             crate::config::default_login_restriction_error(&config, &auth_manager)
         {

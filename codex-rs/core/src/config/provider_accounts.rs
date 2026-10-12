@@ -254,10 +254,11 @@ fn sign_in_restriction_error(config: &super::Config) -> Option<String> {
 /// the process's default-login manager hides that login because the login
 /// restrictions it was built with rule it out (it is left unchanged). Only
 /// in a process that left the default login in place at startup (see
-/// `codex_login::leave_default_login_unenforced`): a session on a named
-/// sign-in account switching to, or spawning an agent on, the default
-/// account, or a resumed or forked default-login thread. The reason is the
-/// one requests on that login would be refused with.
+/// `codex_login::leave_default_login_unenforced`): a new session on the
+/// default account (`/providers` → *Use default account for this session*),
+/// a spawned agent on it, or a resumed or forked default-login thread. A
+/// mid-session provider switch to it is refused at the first request with
+/// the same reason (the provider's `api_auth`).
 pub fn default_login_restriction_error(
     config: &super::Config,
     auth_manager: &std::sync::Arc<codex_login::AuthManager>,
