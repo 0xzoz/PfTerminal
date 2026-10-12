@@ -429,13 +429,10 @@ pub(crate) async fn run_turn(
                 .await?;
 
             // Construct the input that we will send to the model.
-            let mut sampling_request_input: Vec<ResponseItem> = async {
-                sess.clone_history()
-                    .await
-                    .for_prompt(&turn_context.model_info.input_modalities)
-            }
-            .instrument(trace_span!("run_turn.prepare_sampling_request_input"))
-            .await;
+            let mut sampling_request_input: Vec<ResponseItem> =
+                async { sess.clone_history().await.for_turn_prompt(&turn_context) }
+                    .instrument(trace_span!("run_turn.prepare_sampling_request_input"))
+                    .await;
             if std::mem::take(&mut pending_completion_continuation) {
                 sampling_request_input
                     .push(ContextualUserFragment::into(TurnCompletionContinuation));
@@ -1692,6 +1689,10 @@ pub(crate) async fn notify_openai_api_key_env_fallback(sess: &Session, turn_cont
 }
 
 #[allow(clippy::too_many_arguments)]
+/// #578: retries of one sampling request without an item the provider
+/// reported missing.
+const MAX_UNRESOLVABLE_ITEM_RETRIES: usize = 8;
+
 #[allow(deprecated)]
 #[instrument(level = "trace",
     skip_all,
@@ -1751,6 +1752,7 @@ async fn run_sampling_request(
     let max_retries = turn_context.provider.info().stream_max_retries();
     let mut retries = 0;
     let mut same_request_idle_failures = 0;
+    let mut unresolvable_item_retries = 0;
     let mut initial_input = Some(input);
     let mut original_input = None;
     let mut executed_tool_calls_by_output = HashMap::new();
@@ -1758,9 +1760,7 @@ async fn run_sampling_request(
         let prompt_input = if let Some(input) = initial_input.take() {
             input
         } else {
-            sess.clone_history()
-                .await
-                .for_prompt(&turn_context.model_info.input_modalities)
+            sess.clone_history().await.for_turn_prompt(&turn_context)
         };
         let mut prompt_input = prompt_input;
         if let Some(executed_tool_calls) = sess.services.executed_tool_calls.as_ref()
@@ -1822,6 +1822,20 @@ async fn run_sampling_request(
 
         if original_input.is_none() {
             original_input = Some(prompt.input);
+        }
+
+        // #578: a stateless Responses host could not find an item this
+        // request referenced. Retry without it (each ID once) rather than
+        // failing this and every later turn.
+        if unresolvable_item_retries < MAX_UNRESOLVABLE_ITEM_RETRIES
+            && let Some(item_id) = client_session.note_unresolvable_item_reference(&err)
+        {
+            unresolvable_item_retries += 1;
+            warn!(
+                item_id,
+                "the provider could not find an item this request referenced; retrying without it"
+            );
+            continue;
         }
 
         if !err.is_retryable() {
@@ -3565,6 +3579,8 @@ async fn try_run_sampling_request(
             ResponseEvent::Created => {}
             ResponseEvent::OutputItemDone(mut item) => {
                 assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
+                // #578: later requests to another provider adapt this item.
+                item.set_producer(&turn_context.output_producer());
                 let completed_item_id = item.id().map(|item_id| item_id.as_str().to_string());
                 if let Some((_, mut consumer)) = active_tool_argument_diff_consumer.take()
                     && let Ok(Some(event)) = consumer.finish()

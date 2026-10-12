@@ -563,7 +563,7 @@ fn response_item_for_non_anthropic_request(item: &ResponseItem) -> ResponseItem 
         | ResponseItem::ContextCompaction { .. }
         | ResponseItem::Other => {}
     }
-    item.clear_context_fragment_sources();
+    item.clear_local_provenance();
     item
 }
 

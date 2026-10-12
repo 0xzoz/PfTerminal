@@ -1,0 +1,127 @@
+//! #578: history items another provider produced, prepared for the provider a
+//! request goes to.
+//!
+//! A session can switch providers between turns. Model output items carry
+//! provider-bound state: reasoning (encrypted for one organization, signed by
+//! one Anthropic-compatible host, or plain text a Chat host streamed), item
+//! IDs a stateful host could look up, and hosted-tool records. A Responses
+//! request with `store: false` can only read an item ID as a reference to an
+//! item that host stored, so another provider's reasoning there fails every
+//! later turn with `404 Item with id 'rs_…' not found`.
+//!
+//! Model output items record the provider (and named account) that produced
+//! them ([`ResponseItem::producer`]). Before a request is built:
+//! - Items from the same provider are sent as they are, so its requests and
+//!   prompt cache are unchanged.
+//! - Another provider's items are adapted to the target wire:
+//!   - Responses: its reasoning, hosted web searches and image generations
+//!     are dropped (another host's encrypted or plain reasoning cannot be
+//!     sent to a Responses host, only referenced); its other items keep
+//!     their content but lose their IDs and encrypted function arguments, so
+//!     they are sent inline, never as references.
+//!   - Anthropic: its reasoning (another host's signed thinking) and
+//!     web-search blocks are dropped. Messages and tool calls carry no item
+//!     IDs on this wire.
+//!   - Chat Completions: unchanged. This wire sends no item IDs or encrypted
+//!     state; reasoning text is sent inline where the model replays it.
+//! - Items with no recorded producer (sessions recorded before #578, or items
+//!   the host built itself) are left as they are, except reasoning a
+//!   `store: false` Responses request could only send as a reference: one
+//!   with no encrypted content, or an Anthropic thinking block. Those are
+//!   dropped, and so are Anthropic web-search blocks.
+
+use crate::session::turn_context::TurnContext;
+use codex_model_provider_info::WireApi;
+use codex_protocol::models::ResponseItem;
+
+/// The provider a request is about to be sent to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProviderTarget {
+    /// [`TurnContext::output_producer`] of the turn.
+    pub(crate) producer: String,
+    pub(crate) wire: WireApi,
+    /// Whether a Responses host stores items (`store: true`), so an item ID
+    /// can be a valid reference to one of its own items.
+    pub(crate) stores_items: bool,
+}
+
+impl ProviderTarget {
+    pub(crate) fn for_turn(turn_context: &TurnContext) -> Self {
+        let info = turn_context.provider.info();
+        Self {
+            producer: turn_context.output_producer(),
+            wire: info.wire_api,
+            // Mirrors the `store` flag of `ModelClient::build_responses_request`.
+            stores_items: codex_api::is_azure_responses_provider(
+                &info.name,
+                info.base_url.as_deref(),
+            ) || info.is_vercel(),
+        }
+    }
+}
+
+/// Adapts `items` for `target`; see the module docs.
+pub(crate) fn adapt_for_provider(items: &mut Vec<ResponseItem>, target: &ProviderTarget) {
+    items.retain_mut(|item| match item.producer() {
+        Some(producer) if producer == target.producer => true,
+        Some(_) => adapt_foreign(item, target.wire),
+        None => keep_unattributed(item, target),
+    });
+}
+
+/// Another provider's item: returns whether it is kept (adapted in place).
+fn adapt_foreign(item: &mut ResponseItem, wire: WireApi) -> bool {
+    match wire {
+        WireApi::Chat => true,
+        WireApi::Anthropic => !matches!(
+            item,
+            ResponseItem::Reasoning { .. } | ResponseItem::WebSearchCall { .. }
+        ),
+        WireApi::Responses => {
+            if matches!(
+                item,
+                ResponseItem::Reasoning { .. }
+                    | ResponseItem::WebSearchCall { .. }
+                    | ResponseItem::ImageGenerationCall { .. }
+            ) {
+                return false;
+            }
+            item.set_id(/*new_id*/ None);
+            if let ResponseItem::FunctionCall {
+                encrypted_function_args,
+                ..
+            } = item
+            {
+                *encrypted_function_args = None;
+            }
+            true
+        }
+    }
+}
+
+/// An item with no recorded producer: kept unless a Responses request could
+/// only send it as an unresolvable reference, or it is Anthropic-native.
+fn keep_unattributed(item: &ResponseItem, target: &ProviderTarget) -> bool {
+    if target.wire != WireApi::Responses {
+        return true;
+    }
+    match item {
+        ResponseItem::Reasoning {
+            encrypted_content,
+            anthropic_content_block,
+            ..
+        } => {
+            anthropic_content_block.is_none()
+                && (target.stores_items || encrypted_content.is_some())
+        }
+        ResponseItem::WebSearchCall {
+            anthropic_content_block,
+            ..
+        } => anthropic_content_block.is_none(),
+        _ => true,
+    }
+}
+
+#[cfg(test)]
+#[path = "provider_items_tests.rs"]
+mod tests;

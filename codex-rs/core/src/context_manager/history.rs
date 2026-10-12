@@ -146,6 +146,17 @@ impl ContextManager {
         Arc::unwrap_or_clone(self.items)
     }
 
+    /// [`Self::for_prompt`] for a request of `turn_context`'s provider: items
+    /// another provider produced are adapted first (#578, see
+    /// [`super::provider_items`]).
+    pub(crate) fn for_turn_prompt(mut self, turn_context: &TurnContext) -> Vec<ResponseItem> {
+        super::provider_items::adapt_for_provider(
+            Arc::make_mut(&mut self.items),
+            &super::provider_items::ProviderTarget::for_turn(turn_context),
+        );
+        self.for_prompt(&turn_context.model_info.input_modalities)
+    }
+
     /// Returns raw items in the history.
     pub(crate) fn raw_items(&self) -> &[ResponseItem] {
         &self.items
