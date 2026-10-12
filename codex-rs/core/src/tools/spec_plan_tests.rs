@@ -2192,7 +2192,9 @@ async fn flat_mcp_names_never_shadow_registered_plain_tools() {
 
 #[tokio::test]
 async fn flattened_mcp_tools_stay_within_the_tool_count_limit() {
+    // Registered in reverse name order.
     let tool_runtimes = (0..200)
+        .rev()
         .map(|index| {
             mcp_runtime(
                 "bulk",
