@@ -566,6 +566,9 @@ impl ChatWidget {
 
     pub(super) fn on_warning(&mut self, message: impl Into<String>) {
         let message = message.into();
+        if message == crate::legacy_core::security_revocation::KILL_SWITCH_STOPPED {
+            self.turn_lifecycle.kill_switch_stopped = true;
+        }
         if !self.warning_display_state.should_display(&message) {
             return;
         }

@@ -410,6 +410,11 @@ pub(crate) enum AppEvent {
     /// `/security` "restart now" (PF-24-S02): shut down like `/quit`, then
     /// start Corbanu Terminal again so a saved level takes effect.
     RestartForSecurityLevel,
+    /// #507: the kill switch was turned on in `/security`; stop the Claude
+    /// panes' running turns (Core stops its own sessions).
+    KillSwitchTurnedOn,
+    /// #507: the kill switch was turned off; send the Claude pane tasks it held.
+    KillSwitchTurnedOff,
     /// Open the `/spawn` role picker.
     OpenSpawnRolePicker,
     /// Open the `/spawn` Nazgul pane-binding picker.

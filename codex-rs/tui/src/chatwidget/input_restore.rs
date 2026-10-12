@@ -139,6 +139,7 @@ impl ChatWidget {
     /// separated by newlines rather than auto-submitting the next one.
     pub(super) fn on_interrupted_turn(&mut self, reason: TurnAbortReason) {
         const PRESERVED_INTERRUPT_NOTE: &str = "turn interrupted; process preserved";
+        let kill_switch_stopped = std::mem::take(&mut self.turn_lifecycle.kill_switch_stopped);
         for process in &mut self.unified_exec_processes {
             if process.interrupt_notes.last().map(String::as_str) != Some(PRESERVED_INTERRUPT_NOTE)
             {
@@ -157,6 +158,11 @@ impl ChatWidget {
                 self.add_to_history(history_cell::new_info_event(
                     "Model interrupted to submit steer instructions.".to_owned(),
                     /*hint*/ None,
+                ));
+            } else if kill_switch_stopped {
+                // #507: the warning above says why and how to undo it.
+                self.add_to_history(history_cell::new_error_event(
+                    "Turn stopped by the security kill switch.".to_string(),
                 ));
             } else {
                 self.add_to_history(history_cell::new_error_event(
