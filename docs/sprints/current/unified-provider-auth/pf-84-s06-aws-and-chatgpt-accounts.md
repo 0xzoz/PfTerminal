@@ -52,12 +52,12 @@ Paths are under `codex-rs/`, at `ee530a0e26`.
 ## Done
 
 - [x] Sprint record created as a draft from Travis's 2026-10-11 decision (option (a)).
+- [x] Slice A (A1–A3), merged behind `named_accounts`: AWS profile accounts for Amazon Bedrock, profile-only
+  signing, refusal before any request; CLI add/list/rename/remove and the `/providers` row. Gate:
+  [s06a-gate.md](../../../../qa/provider-auth/pf-84/s06a-gate.md) (live Bedrock pending: no test profile).
 
 ## Remaining
 
-- [ ] A1: `corbanu account add amazon-bedrock <name> --kind aws-profile --value <p>` (and the S04 row action) stores the profile name as metadata. Values are validated, never secret, and shown in clear.
-- [ ] A2: a named account sets `aws.profile` and uses a profile-only provider. It ignores the managed Bedrock key, `AWS_BEARER_TOKEN_BEDROCK`, `AWS_PROFILE` and `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`.
-- [ ] A3: refuse with recovery text, before any request, when a profile is missing from the AWS config/credentials files or its credentials fail. Never fall back to `default` or to the SDK default chain. Unit tests cover each env var present.
 - [ ] B1: `AuthStorageBackend` per account over vault label `provider/openai/accounts/<name>/chatgpt_auth` (whole `AuthDotJson`: ChatGPT tokens or an OpenAI API-key login). It creates no `Codex Auth` keychain item.
 - [ ] B2: refresh writes back through that account's storage only, under a per-account refresh lock. A mock-server test proves that refreshing `work` never touches `default` and that a rotated refresh token lands in `work`.
 - [ ] B3: `corbanu login --account <name>` (browser and device code) and the S04 "add account" row sign into the named account. Logout or remove clears only that account and revokes only its tokens.

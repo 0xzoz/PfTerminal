@@ -1,0 +1,40 @@
+
+╭──────────────────────────────────────────────────────────────────────────────────────────╮
+│  >_ Corbanu Terminal (v0.1.48)                                                           │
+│                                                                                          │
+│  Model:                GPT-5.4 (reasoning medium, summaries auto)                        │
+│  Model provider:       Amazon Bedrock - http://127.0.0.1:28900/openai/v1 · account work  │
+│  Directory:            /tmp/tmp.aoiWaLJtgV/ws                                            │
+│  Permissions:          Next turn: Workspace (Ask for approval)                           │
+│  Security:             Requested Permissive; effective protection unverified (/security) │
+│  Agents.md:            <none>                                                            │
+│  Account:              Amazon Bedrock AWS credentials                                    │
+│  Collaboration mode:   Default                                                           │
+│  Session:              01a12d8e-66f6-7643-a1cc-551985a2c2f0                              │
+│                                                                                          │
+│  Token usage:          0 total  (0 input + 0 output)                                     │
+│  Limits:               data not available yet                                            │
+╰──────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+› Reply with exactly: pong
+
+
+• bedrock-mock: signed by AKIDWORKPROFILE
+
+▌ Amazon Bedrock account `prod`
+▌
+▌ AWS profile name from ~/.aws/config (SSO: run aws sso login yourself)
+
+Press enter to confirm or esc to go back
+
+
+
+
+
+
+
+
+
+
+
