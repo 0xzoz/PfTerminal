@@ -259,13 +259,18 @@ pub(crate) fn configured_account_names(codex_home: &Path, provider_id: &str) -> 
         .collect()
 }
 
-/// API-key providers and `auth.command` providers (including Claude Plan).
-/// OpenAI sign-in and AWS providers are not supported yet, so selecting an
-/// account for them fails instead of silently using the default credential.
+/// API-key providers, `auth.command` providers (including Claude Plan) and
+/// Amazon Bedrock without command auth (an AWS profile per account,
+/// PF-84-S06). OpenAI sign-in is not supported yet, so selecting an account
+/// for it fails instead of silently using the default credential.
 pub fn supports_named_accounts(provider: &ModelProviderInfo) -> bool {
-    provider.aws.is_none()
-        && !provider.requires_openai_auth
-        && (provider.env_key.is_some() || provider.auth.is_some())
+    if provider.requires_openai_auth {
+        return false;
+    }
+    if provider.aws.is_some() {
+        return provider.is_amazon_bedrock() && provider.auth.is_none();
+    }
+    provider.env_key.is_some() || provider.auth.is_some()
 }
 
 #[cfg(test)]
@@ -368,24 +373,56 @@ mod tests {
         );
     }
 
+    /// PF-84-S06: Bedrock takes AWS profile accounts; Bedrock behind an
+    /// `auth.command` and other AWS-configured providers still fail closed.
     #[test]
-    fn aws_providers_fail_closed() {
-        let mut model_providers = HashMap::from([(
-            "amazon-bedrock".to_string(),
-            ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None),
-        )]);
-        let error = apply_provider_accounts(
+    fn bedrock_takes_profile_accounts_but_other_aws_providers_fail_closed() {
+        let mut command_bedrock =
+            ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None);
+        command_bedrock.auth = Some(
+            serde_json::from_value(serde_json::json!({ "command": "token-fetcher" }))
+                .expect("auth"),
+        );
+        let mut custom_aws = ModelProviderInfo::create_zai_provider();
+        custom_aws.aws = ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None).aws;
+        let mut model_providers = HashMap::from([
+            (
+                "amazon-bedrock".to_string(),
+                ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None),
+            ),
+            ("command-bedrock".to_string(), command_bedrock),
+            ("custom-aws".to_string(), custom_aws),
+        ]);
+        apply_provider_accounts(
             &mut model_providers,
             Some(&accounts(&[("amazon-bedrock", "work")])),
             /*named_accounts_enabled*/ true,
             &mut Vec::new(),
         )
-        .expect_err("aws accounts are not supported yet");
-        assert!(
-            error
-                .to_string()
-                .ends_with("does not support named accounts yet")
+        .expect("bedrock profile accounts");
+        assert_eq!(
+            model_providers["amazon-bedrock"].account,
+            Some(NamedProviderAccount {
+                provider_id: "amazon-bedrock".to_string(),
+                name: "work".to_string(),
+            })
         );
+        for provider_id in ["command-bedrock", "custom-aws"] {
+            let error = apply_provider_accounts(
+                &mut model_providers,
+                Some(&accounts(&[(provider_id, "work")])),
+                /*named_accounts_enabled*/ true,
+                &mut Vec::new(),
+            )
+            .expect_err("not supported");
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "provider_accounts.{provider_id}: provider `{provider_id}` does not support \
+                     named accounts yet"
+                )
+            );
+        }
     }
 
     #[test]

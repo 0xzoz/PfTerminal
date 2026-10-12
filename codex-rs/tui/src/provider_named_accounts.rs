@@ -27,6 +27,9 @@ pub(crate) struct NamedAccountRow {
     pub(crate) name: ProviderAccountName,
     pub(crate) kinds: Vec<ProviderAccountKind>,
     pub(crate) fingerprint: Option<String>,
+    /// PF-84-S06: the AWS profile name an `aws_profile` account uses; not
+    /// secret, so it is shown.
+    pub(crate) aws_profile: Option<String>,
 }
 
 /// What `/providers` knows about accounts: the named rows, the account this
@@ -146,11 +149,27 @@ pub(crate) fn load_rows(codex_home: &Path) -> Result<Vec<NamedAccountRow>, Strin
                 .provider_account_fingerprint(&account.provider_id, &account.name)
                 .ok()
                 .flatten();
+            let aws_profile = account
+                .kinds
+                .contains(&ProviderAccountKind::AwsProfile)
+                .then(|| {
+                    vault
+                        .read_provider_account(
+                            &account.provider_id,
+                            &account.name,
+                            ProviderAccountKind::AwsProfile,
+                        )
+                        .ok()
+                        .flatten()
+                        .map(|profile| profile.as_str().to_string())
+                })
+                .flatten();
             NamedAccountRow {
                 provider_id: account.provider_id,
                 name: account.name,
                 kinds: account.kinds,
                 fingerprint,
+                aws_profile,
             }
         })
         .collect())
@@ -163,6 +182,7 @@ pub(crate) enum AddAccountMethod {
     ClaudeToken,
     ClaudeConfigDir,
     Command,
+    AwsProfile,
 }
 
 impl AddAccountMethod {
@@ -172,6 +192,7 @@ impl AddAccountMethod {
             Self::ClaudeToken => ProviderAccountKind::ClaudeOauthToken,
             Self::ClaudeConfigDir => ProviderAccountKind::ClaudeConfigDir,
             Self::Command => ProviderAccountKind::Command,
+            Self::AwsProfile => ProviderAccountKind::AwsProfile,
         }
     }
 
@@ -181,6 +202,7 @@ impl AddAccountMethod {
             Self::ClaudeToken => "Claude subscription token (claude setup-token)",
             Self::ClaudeConfigDir => "Claude Code login (its CLAUDE_CONFIG_DIR)",
             Self::Command => "External command account",
+            Self::AwsProfile => "AWS profile (from ~/.aws/config)",
         }
     }
 
@@ -191,7 +213,7 @@ impl AddAccountMethod {
 }
 
 /// The ways a provider can take a named account; empty when it cannot hold
-/// one (OpenAI sign-in and AWS are a pending product decision).
+/// one (OpenAI sign-in is PF-84-S06 slice B).
 pub(crate) fn add_methods(
     provider_id: &str,
     provider: &ModelProviderInfo,
@@ -212,6 +234,8 @@ pub(crate) fn add_methods(
         vec![AddAccountMethod::ApiKey]
     } else if provider.auth.is_some() {
         vec![AddAccountMethod::Command]
+    } else if provider.is_amazon_bedrock() {
+        vec![AddAccountMethod::AwsProfile]
     } else {
         Vec::new()
     }
@@ -246,12 +270,16 @@ pub(crate) fn kinds_label(kinds: &[ProviderAccountKind]) -> String {
         .join(" + ")
 }
 
-/// `token · fp 1a2b3c4d5e6f` for one row.
+/// `token · fp 1a2b3c4d5e6f` for one row; an AWS profile is named.
 pub(crate) fn row_detail(row: &NamedAccountRow) -> String {
-    match row.fingerprint.as_deref() {
-        Some(fingerprint) => format!("{} · fp {fingerprint}", kinds_label(&row.kinds)),
-        None => kinds_label(&row.kinds),
+    let mut detail = kinds_label(&row.kinds);
+    if let Some(profile) = row.aws_profile.as_deref() {
+        detail.push_str(&format!(" `{profile}`"));
     }
+    if let Some(fingerprint) = row.fingerprint.as_deref() {
+        detail.push_str(&format!(" · fp {fingerprint}"));
+    }
+    detail
 }
 
 /// A value on its way from masked entry to the vault.
@@ -284,6 +312,9 @@ pub(crate) fn save_account(
     let cleaned = match method {
         AddAccountMethod::Command => Zeroizing::new("1".to_string()),
         _ if cleaned.is_empty() => return Err("The value cannot be empty.".to_string()),
+        AddAccountMethod::AwsProfile => Zeroizing::new(
+            codex_vault::validate_aws_profile_name(&cleaned).map_err(|error| error.to_string())?,
+        ),
         _ => cleaned,
     };
     // Adding never replaces an existing account's credential.

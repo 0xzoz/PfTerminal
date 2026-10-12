@@ -33,6 +33,7 @@ const ACCOUNT_LABEL_PREFIX: &str = "provider/";
 const ACCOUNTS_SEGMENT: &str = "accounts";
 const MAX_ACCOUNT_NAME_BYTES: usize = 32;
 const MAX_PROVIDER_ID_BYTES: usize = 48;
+const MAX_AWS_PROFILE_BYTES: usize = 64;
 
 /// Why an account name or provider id was rejected.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -47,6 +48,10 @@ pub enum ProviderAccountError {
         "this provider id cannot hold named accounts: use lowercase letters, digits, '-', '_' or '.'"
     )]
     InvalidProviderId,
+    #[error(
+        "invalid AWS profile name: use 1-64 letters, digits or '-', '_', '.', '+', '@', starting with a letter or digit"
+    )]
+    InvalidAwsProfile,
 }
 
 /// A validated, non-default account name: `[a-z0-9][a-z0-9-]{0,31}`.
@@ -97,6 +102,23 @@ pub fn parse_provider_account_selection(
         return Ok(None);
     }
     ProviderAccountName::parse(raw).map(Some)
+}
+
+/// Validates the AWS profile name an `aws_profile` account stores. The name
+/// is not secret; it is checked so it reads cleanly in lists and messages.
+pub fn validate_aws_profile_name(raw: &str) -> Result<String, ProviderAccountError> {
+    let profile = raw.trim();
+    let valid = !profile.is_empty()
+        && profile.len() <= MAX_AWS_PROFILE_BYTES
+        && profile.as_bytes()[0].is_ascii_alphanumeric()
+        && profile.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'+' | b'@')
+        });
+    if valid {
+        Ok(profile.to_string())
+    } else {
+        Err(ProviderAccountError::InvalidAwsProfile)
+    }
 }
 
 /// Validates a provider id for use in account labels.

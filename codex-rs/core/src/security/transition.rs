@@ -573,6 +573,29 @@ pub(crate) fn live_controller(home: &Path, thread: ThreadId) -> Option<TrustedSe
         .map(|shared| TrustedSecurityController { shared })
 }
 
+/// #507: whether a person's kill switch is on in a policy tree of this
+/// process on `home`; `None` when no tree of this process is on it.
+pub(crate) fn live_kill_switch(home: &Path) -> Option<bool> {
+    let home = canonical(home);
+    let trees: Vec<Arc<SharedEffectivePolicy>> = {
+        let mut trees = TREES.lock().unwrap_or_else(PoisonError::into_inner);
+        trees.retain(|(_, tree)| tree.strong_count() > 0);
+        trees
+            .iter()
+            .filter(|(tree_home, _)| *tree_home == home)
+            .filter_map(|(_, tree)| tree.upgrade())
+            .collect()
+    };
+    let mut on = None;
+    for tree in trees {
+        let guard = tree.state.read().unwrap_or_else(PoisonError::into_inner);
+        if let Some(state) = guard.as_ref() {
+            on = Some(on.unwrap_or(false) || state.persisted.revocations.kill_switch_active);
+        }
+    }
+    on
+}
+
 /// Swap in a level and revocation state: the epoch moves and every grant of
 /// the tree is dropped.
 fn adopt(

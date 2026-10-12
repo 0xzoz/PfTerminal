@@ -235,6 +235,10 @@ impl ChatWidget {
                     method.label(),
                     if method.is_secret() {
                         "Paste it into masked entry."
+                    } else if *method
+                        == crate::provider_named_accounts::AddAccountMethod::AwsProfile
+                    {
+                        "Enter the profile name; it is not secret."
                     } else {
                         "Enter the path; it is not secret."
                     },
@@ -265,10 +269,18 @@ impl ChatWidget {
         use crate::provider_named_accounts::AddAccountMethod;
         let tx = self.app_event_tx.clone();
         let title = format!("{provider_display_name} account `{name}`");
-        if method == AddAccountMethod::ClaudeConfigDir {
+        if matches!(
+            method,
+            AddAccountMethod::ClaudeConfigDir | AddAccountMethod::AwsProfile
+        ) {
+            let placeholder = if method == AddAccountMethod::AwsProfile {
+                "AWS profile name from ~/.aws/config (SSO: run aws sso login yourself)"
+            } else {
+                "Path of the CLAUDE_CONFIG_DIR you signed in with (claude /login)"
+            };
             let view = CustomPromptView::new(
                 title,
-                "Path of the CLAUDE_CONFIG_DIR you signed in with (claude /login)".to_string(),
+                placeholder.to_string(),
                 /*initial_text*/ String::new(),
                 /*context_label*/ None,
                 Box::new(move |path: String| {
@@ -651,7 +663,11 @@ fn push_default_account_items(
 ) {
     items.push(account_event_item(
         "Add another account",
-        "Name it, then paste its key or token into masked entry.",
+        if provider_id == codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID {
+            "Name it, then enter the AWS profile it uses (not secret)."
+        } else {
+            "Name it, then paste its key or token into masked entry."
+        },
         ProviderAccountEvent::AddStart {
             provider_id: provider_id.to_string(),
         },
@@ -889,6 +905,7 @@ mod tests {
             name: codex_vault::ProviderAccountName::parse(name).unwrap(),
             kinds: vec![kind],
             fingerprint: Some(fingerprint.to_string()),
+            aws_profile: None,
         };
         let accounts = AccountsView {
             rows: vec![

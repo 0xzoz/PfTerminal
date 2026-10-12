@@ -152,6 +152,41 @@ fn pf_25_s02_restart_after_a_change() {
     assert_eq!(restart, true);
 }
 
+/// #507: turning the kill switch on asks the app to stop the Claude panes'
+/// running turns (Core stops its own sessions); turning it off or "Revoke
+/// all" does not.
+#[test]
+fn issue_507_kill_switch_on_stops_claude_panes() {
+    let home = TempDir::new().unwrap();
+    let (tx, mut rx) = unbounded_channel::<AppEvent>();
+    let mut view = view(&home, Some(AppEventSender::new(tx)));
+    let stops = |rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>| {
+        let mut stops = 0;
+        while let Ok(event) = rx.try_recv() {
+            stops += usize::from(matches!(event, AppEvent::KillSwitchTurnedOn));
+        }
+        stops
+    };
+    // Revoke all: nothing to stop.
+    key(&mut view, KeyCode::Enter);
+    key(&mut view, KeyCode::Enter);
+    assert_eq!(stops(&mut rx), 0);
+    key(&mut view, KeyCode::Enter);
+    // Kill switch on.
+    key(&mut view, KeyCode::Down);
+    key(&mut view, KeyCode::Enter);
+    key(&mut view, KeyCode::Enter);
+    assert!(kill_switch_saved(&home));
+    assert_eq!(stops(&mut rx), 1);
+    // Kill switch off.
+    key(&mut view, KeyCode::Enter);
+    key(&mut view, KeyCode::Enter);
+    key(&mut view, KeyCode::Down);
+    key(&mut view, KeyCode::Enter);
+    assert!(!kill_switch_saved(&home));
+    assert_eq!(stops(&mut rx), 0);
+}
+
 fn grant(id: &str, command: &str) -> HeldGrant {
     HeldGrant {
         thread: codex_protocol::ThreadId::from_string("019a0000-0000-7000-8000-000000000002")
@@ -296,7 +331,12 @@ fn pf_25_s02_only_this_view_revokes() {
         })
         .filter_map(|path| path.strip_prefix(workspace).ok())
         .map(|path| path.display().to_string())
-        .filter(|path| !path.ends_with("_tests.rs") && !path.contains("/tests/"))
+        .filter(|path| {
+            !path.ends_with("_tests.rs")
+                && path != "tui/src/claude_panes/tests.rs"
+                && path != "tui/src/app/tests.rs"
+                && !path.contains("/tests/")
+        })
         .filter(|path| !path.starts_with("core/src/security/"))
         .collect();
     assert_eq!(

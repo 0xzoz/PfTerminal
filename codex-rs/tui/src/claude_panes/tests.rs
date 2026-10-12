@@ -4779,6 +4779,58 @@ fn aggressive_refuses_turns_in_existing_panes_without_side_effects() {
     );
 }
 
+/// #507: with the kill switch on, a Claude pane turn is refused the same
+/// way as a Codex turn, before anything starts; turning it off lets turns
+/// through again.
+#[test]
+fn kill_switch_refuses_claude_pane_turns() {
+    use crate::legacy_core::security_level_change::LevelBasis;
+    use crate::legacy_core::security_level_change::SecurityLevel;
+    use crate::legacy_core::security_revocation::HumanRevocation;
+    use crate::legacy_core::security_revocation::KILL_SWITCH_REFUSAL;
+    use crate::legacy_core::security_revocation::commit_human_revocation;
+    let codex_home = tempfile::tempdir().expect("codex home");
+    let mut registry = ClaudePaneRegistry::new();
+    let pane_id = registry
+        .create_pane(
+            ClaudeProviderProfileKind::ClaudePlan,
+            std::env::current_dir().expect("cwd"),
+            codex_home.path(),
+        )
+        .expect("create pane");
+    let switch = |choice| {
+        let basis = LevelBasis::read(codex_home.path(), SecurityLevel::Permissive, None);
+        commit_human_revocation(
+            codex_home.path(),
+            SecurityLevel::Permissive,
+            /*thread*/ None,
+            &basis,
+            choice,
+            /*now_unix_seconds*/ 1_000,
+        )
+        .expect("commit");
+    };
+    switch(HumanRevocation::KillSwitchOn);
+    let Err(error) = registry.prepare_turn(&pane_id, "hi".to_string(), codex_home.path()) else {
+        panic!("the kill switch refuses Claude turns");
+    };
+    assert_eq!(error.to_string(), KILL_SWITCH_REFUSAL);
+    let pane = registry
+        .panes()
+        .iter()
+        .find(|pane| pane.id == pane_id)
+        .expect("pane");
+    assert_eq!(
+        (pane.status.clone(), pane.next_turn_index),
+        (ClaudePaneStatus::Idle, 1)
+    );
+
+    switch(HumanRevocation::KillSwitchOff);
+    if let Err(error) = registry.prepare_turn(&pane_id, "hi".to_string(), codex_home.path()) {
+        assert_ne!(error.to_string(), KILL_SWITCH_REFUSAL);
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn aggressive_refuses_to_start_a_claude_process() {

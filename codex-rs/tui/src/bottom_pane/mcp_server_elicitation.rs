@@ -73,12 +73,15 @@ const APPROVAL_CANCEL_VALUE: &str = "cancel";
 const APPROVAL_TOOL_PARAM_DISPLAY_LIMIT: usize = 3;
 const APPROVAL_TOOL_PARAM_VALUE_TRUNCATE_GRAPHEMES: usize = 60;
 const PERSISTENT_OPTIONS_TIP: &str = "↑/↓ then enter for options that last beyond this request";
-const PERSISTENT_OPTION_KEY_ERROR: &str =
+pub(super) const PERSISTENT_OPTION_KEY_ERROR: &str =
     "That option lasts beyond this request; choose it with ↑/↓, then enter";
-const TYPED_TEXT_NOTICE: &str = "Typed text is not sent while this request is open; \
+pub(super) const TYPED_TEXT_NOTICE: &str = "Typed text is not sent while this request is open; \
      use ↑/↓ and enter to answer, or esc to cancel";
-const CHOOSE_FIRST_NOTICE: &str = "This is a new request; choose an option with ↑/↓, then enter";
+pub(super) const CHOOSE_FIRST_NOTICE: &str =
+    "This is a new request; choose an option with ↑/↓, then enter";
 const FORM_FIRST_NOTICE: &str = "This is a new request; review it, then press enter";
+const FORM_TYPED_NOTICE: &str =
+    "Typed text was not entered in this new request; press ↑/↓ first, then type";
 const TOOL_TYPE_KEY: &str = "tool_type";
 const TOOL_ID_KEY: &str = "tool_id";
 const TOOL_SUGGEST_SUGGEST_TYPE_KEY: &str = "suggest_type";
@@ -1164,15 +1167,58 @@ impl McpServerElicitationOverlay {
         self.typing_guard.on_command_key();
     }
 
+    /// #523: the form opened just after another view closed: a double or
+    /// held Enter must not answer it.
+    pub(crate) fn require_fresh_choice_after_answer(&mut self) {
+        self.typing_guard.on_request_changed();
+    }
+
+    /// #523: deliberate navigation in a form: the arrow, Page, Home and End
+    /// keys, and configured list keys that are neither a character nor a
+    /// chord.
+    fn is_navigation(&self, key_event: KeyEvent) -> bool {
+        if key_hint::is_plain_text_key_event(key_event)
+            || key_hint::has_ctrl_or_alt(key_event.modifiers)
+        {
+            return false;
+        }
+        let keymap = &self.list_keymap;
+        matches!(
+            key_event.code,
+            KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::Left
+                | KeyCode::Right
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+                | KeyCode::Home
+                | KeyCode::End
+        ) || [
+            &keymap.move_up,
+            &keymap.move_down,
+            &keymap.move_left,
+            &keymap.move_right,
+            &keymap.page_up,
+            &keymap.page_down,
+            &keymap.jump_top,
+            &keymap.jump_bottom,
+        ]
+        .iter()
+        .any(|bindings| bindings.is_pressed(key_event))
+    }
+
     fn approval_notice(&self) -> Option<&'static str> {
         let notice = self.typing_guard.notice()?;
         if !self.is_approval() {
-            return matches!(notice, Notice::ChooseFirst | Notice::TypedText)
-                .then_some(FORM_FIRST_NOTICE);
+            return match notice {
+                Notice::TypedText => Some(FORM_TYPED_NOTICE),
+                Notice::ChooseFirst | Notice::NavigateFirst => Some(FORM_FIRST_NOTICE),
+                Notice::PersistentNeedsArrows => None,
+            };
         }
         Some(match notice {
             Notice::TypedText => TYPED_TEXT_NOTICE,
-            Notice::ChooseFirst => CHOOSE_FIRST_NOTICE,
+            Notice::ChooseFirst | Notice::NavigateFirst => CHOOSE_FIRST_NOTICE,
             Notice::PersistentNeedsArrows => PERSISTENT_OPTION_KEY_ERROR,
         })
     }
@@ -1710,6 +1756,38 @@ impl BottomPaneView for McpServerElicitationOverlay {
             {
                 return;
             }
+        } else if self.typing_guard.awaits_navigation() {
+            // #523: a form that opened while the user typed (or over another
+            // view), or took typed text since, takes nothing but navigation:
+            // no text, editing keys or shortcuts reach its fields.
+            if !self.is_navigation(key_event) {
+                self.typing_guard.on_typed_input();
+                return;
+            }
+            self.typing_guard.reset();
+        } else if self.current_field_is_select()
+            && (self.typing_guard.awaits_choice() || self.typing_guard.is_armed())
+        {
+            // #523: on a new request a select field takes one number key
+            // (which arms its option for Enter) or navigation; anything else,
+            // including a key after the number, is typed text and Enter
+            // waits.
+            let digit = match key_event.code {
+                KeyCode::Char(ch) if key_hint::is_plain_text_key_event(key_event) => {
+                    self.option_index_for_digit(ch)
+                }
+                _ => None,
+            };
+            if self.is_navigation(key_event) {
+                self.typing_guard.reset();
+            } else if let Some(idx) = digit
+                && self.typing_guard.on_text_key(Some(idx)).is_some()
+            {
+                // Falls through: the select handler highlights it.
+            } else {
+                self.typing_guard.on_typed_input();
+                return;
+            }
         } else {
             self.typing_guard.reset();
         }
@@ -1785,14 +1863,27 @@ impl BottomPaneView for McpServerElicitationOverlay {
         if self.current_field_is_select() {
             self.validation_error = None;
             let options_len = self.options_len();
+            let plain = !key_hint::has_ctrl_or_alt(key_event.modifiers);
             match key_event.code {
-                KeyCode::Up | KeyCode::Char('k') => {
+                KeyCode::Up => {
                     if let Some(answer) = self.current_answer_mut() {
                         answer.selection.move_up_wrap(options_len);
                         answer.answer_committed = false;
                     }
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
+                KeyCode::Char('k') if plain => {
+                    if let Some(answer) = self.current_answer_mut() {
+                        answer.selection.move_up_wrap(options_len);
+                        answer.answer_committed = false;
+                    }
+                }
+                KeyCode::Down => {
+                    if let Some(answer) = self.current_answer_mut() {
+                        answer.selection.move_down_wrap(options_len);
+                        answer.answer_committed = false;
+                    }
+                }
+                KeyCode::Char('j') if plain => {
                     if let Some(answer) = self.current_answer_mut() {
                         answer.selection.move_down_wrap(options_len);
                         answer.answer_committed = false;
@@ -1807,7 +1898,7 @@ impl BottomPaneView for McpServerElicitationOverlay {
                     self.go_next_or_submit();
                 }
                 // #192: a number key chooses its option; Enter submits.
-                KeyCode::Char(ch) => {
+                KeyCode::Char(ch) if plain => {
                     if let Some(option_idx) = self.option_index_for_digit(ch) {
                         self.highlight_option(option_idx);
                         self.select_current_option(/*committed*/ true);
@@ -1853,7 +1944,11 @@ impl BottomPaneView for McpServerElicitationOverlay {
     }
 
     fn handle_paste(&mut self, pasted: String) -> bool {
-        if self.is_approval() {
+        if self.is_approval()
+            || self.typing_guard.awaits_navigation()
+            || ((self.typing_guard.awaits_choice() || self.typing_guard.is_armed())
+                && self.current_field_is_select())
+        {
             // A paste is typed text; it never answers an approval.
             self.typing_guard.on_typed_input();
             return true;
@@ -2857,6 +2952,194 @@ mod tests {
         press(&mut overlay, KeyCode::Enter);
         assert_eq!(resolved_decisions(&mut rx).len(), 1);
         assert!(overlay.is_complete());
+    }
+
+    /// #523: a form with a text field that opened while the user typed (or
+    /// over another view) takes none of their text, typed or pasted, and
+    /// Enter submits nothing; after an arrow key it takes text as before.
+    #[test]
+    fn issue_523_form_opened_mid_typing_takes_no_typed_text() {
+        let (tx, mut rx) = test_sender();
+        let request = from_form_request(
+            ThreadId::default(),
+            form_request(
+                "Your name?",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "title": "Name" }
+                    },
+                    "required": ["name"],
+                }),
+                /*meta*/ None,
+            ),
+        )
+        .expect("expected supported form");
+        let mut overlay = McpServerElicitationOverlay::new(
+            request, tx, /*has_input_focus*/ true, /*enhanced_keys_supported*/ false,
+            /*disable_paste_burst*/ true,
+        );
+        overlay.require_fresh_choice();
+
+        for ch in "secret".chars() {
+            press(&mut overlay, KeyCode::Char(ch));
+        }
+        press(&mut overlay, KeyCode::Backspace);
+        assert!(overlay.handle_paste("more".to_string()));
+        press(&mut overlay, KeyCode::Enter);
+        let contents = |rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>| {
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .filter_map(|event| match event {
+                    AppEvent::SubmitThreadOp {
+                        op: Op::ResolveElicitation { content, .. },
+                        ..
+                    } => Some(content),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(contents(&mut rx), Vec::<Option<Value>>::new());
+        assert!(!overlay.is_complete());
+        assert_eq!(overlay.approval_notice(), Some(FORM_TYPED_NOTICE));
+
+        press(&mut overlay, KeyCode::Down);
+        for ch in "ok".chars() {
+            press(&mut overlay, KeyCode::Char(ch));
+        }
+        press(&mut overlay, KeyCode::Enter);
+        assert_eq!(
+            contents(&mut rx),
+            vec![Some(serde_json::json!({ "name": "ok" }))]
+        );
+    }
+
+    /// #523: a select form shown just after another prompt was answered
+    /// takes a letter (and a digit after it) as typed text, not a choice;
+    /// Enter submits only after the arrow keys or a single number key.
+    #[test]
+    fn issue_523_select_form_after_an_answer_takes_no_letter() {
+        let (tx, mut rx) = test_sender();
+        let request = from_form_request(
+            ThreadId::default(),
+            form_request(
+                "Allow this request?",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "confirmed": { "type": "boolean", "title": "Confirm" }
+                    },
+                    "required": ["confirmed"],
+                }),
+                /*meta*/ None,
+            ),
+        )
+        .expect("expected supported form");
+        let mut overlay = McpServerElicitationOverlay::new(
+            request, tx, /*has_input_focus*/ true, /*enhanced_keys_supported*/ false,
+            /*disable_paste_burst*/ false,
+        );
+        overlay.require_fresh_choice_after_answer();
+
+        press(&mut overlay, KeyCode::Char('x'));
+        press(&mut overlay, KeyCode::Enter);
+        press(&mut overlay, KeyCode::Char('1'));
+        press(&mut overlay, KeyCode::Enter);
+        assert_eq!(resolved_decisions(&mut rx), Vec::new());
+        assert!(!overlay.is_complete());
+
+        press(&mut overlay, KeyCode::Down);
+        press(&mut overlay, KeyCode::Up);
+        press(&mut overlay, KeyCode::Enter);
+        assert_eq!(
+            resolved_decisions(&mut rx),
+            vec![(McpServerElicitationAction::Accept, None)]
+        );
+    }
+
+    fn confirm_form(tx: AppEventSender) -> McpServerElicitationOverlay {
+        let request = from_form_request(
+            ThreadId::default(),
+            form_request(
+                "Allow this request?",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "confirmed": { "type": "boolean", "title": "Confirm" }
+                    },
+                    "required": ["confirmed"],
+                }),
+                /*meta*/ None,
+            ),
+        )
+        .expect("expected supported form");
+        McpServerElicitationOverlay::new(
+            request, tx, /*has_input_focus*/ true, /*enhanced_keys_supported*/ false,
+            /*disable_paste_burst*/ false,
+        )
+    }
+
+    /// Review r2 (#523): shortcuts and editing keys are typed text too: on a
+    /// form shown mid-typing or over a view, Ctrl+J (the composer's newline)
+    /// or Ctrl+W does not clear the guard, and after an answer Tab or
+    /// Backspace does not either. Only navigation does.
+    #[test]
+    fn issue_523_shortcuts_and_editing_keys_never_answer_a_new_form() {
+        let ctrl = |ch| KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL);
+        let (tx, mut rx) = test_sender();
+        let mut overlay = confirm_form(tx);
+        overlay.require_fresh_choice();
+        press(&mut overlay, KeyCode::Char('x'));
+        overlay.handle_key_event(ctrl('j'));
+        press(&mut overlay, KeyCode::Char('y'));
+        overlay.handle_key_event(ctrl('w'));
+        press(&mut overlay, KeyCode::Enter);
+        assert_eq!(resolved_decisions(&mut rx), Vec::new());
+
+        for key in [KeyCode::Tab, KeyCode::Backspace, KeyCode::Delete] {
+            let (tx, mut rx) = test_sender();
+            let mut overlay = confirm_form(tx);
+            overlay.require_fresh_choice_after_answer();
+            press(&mut overlay, key);
+            press(&mut overlay, KeyCode::Enter);
+            assert_eq!(resolved_decisions(&mut rx), Vec::new(), "{key:?}");
+            press(&mut overlay, KeyCode::Down);
+            press(&mut overlay, KeyCode::Up);
+            press(&mut overlay, KeyCode::Enter);
+            assert_eq!(resolved_decisions(&mut rx).len(), 1, "{key:?}");
+        }
+    }
+
+    /// Review r3 (#523): on a select form shown just after an answer, a
+    /// number key arms its option; a key after it is typed text, so `1x`
+    /// then Enter answers nothing, while `1` then Enter does.
+    #[test]
+    fn issue_523_a_key_after_the_number_is_typed_text() {
+        let (tx, mut rx) = test_sender();
+        let mut overlay = confirm_form(tx);
+        overlay.require_fresh_choice_after_answer();
+        for key in [KeyCode::Char('1'), KeyCode::Char('x'), KeyCode::Enter] {
+            press(&mut overlay, key);
+        }
+        assert_eq!(resolved_decisions(&mut rx), Vec::new());
+
+        // A paste after the number key is typed text too.
+        let (tx, mut rx) = test_sender();
+        let mut overlay = confirm_form(tx);
+        overlay.require_fresh_choice_after_answer();
+        press(&mut overlay, KeyCode::Char('1'));
+        assert!(overlay.handle_paste("x".to_string()));
+        press(&mut overlay, KeyCode::Enter);
+        assert_eq!(resolved_decisions(&mut rx), Vec::new());
+
+        let (tx, mut rx) = test_sender();
+        let mut overlay = confirm_form(tx);
+        overlay.require_fresh_choice_after_answer();
+        press(&mut overlay, KeyCode::Char('1'));
+        press(&mut overlay, KeyCode::Enter);
+        assert_eq!(
+            resolved_decisions(&mut rx),
+            vec![(McpServerElicitationAction::Accept, None)]
+        );
     }
 
     /// #192: in a form, a number key chooses an option without submitting.
