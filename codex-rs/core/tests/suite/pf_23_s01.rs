@@ -454,7 +454,7 @@ fn canary_home() -> anyhow::Result<(Arc<TempDir>, String, String)> {
     Ok((home, evading, format!("cat '{path}'")))
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(target_os = "macos")]
 fn shell_step(call_id: &str, command: &str) -> Step {
     call(call_id, "shell_command", json!({ "command": command }))
 }

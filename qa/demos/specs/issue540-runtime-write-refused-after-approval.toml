@@ -35,7 +35,7 @@ run = "mkdir -p \"$CODEX_HOME/tmp\" && printf 'original\\n' > \"$CODEX_HOME/tmp/
 capture = "c"
 
 [[steps]]
-type = "Use your shell tool twice, one command per call: first run: echo ready -- then run: printf replaced > {c}/tmp/issue540-launcher. Then report both results."
+type = "Use your shell tool twice, one command per call: first run: echo ready -- then run: printf replaced > {c}/tmp/issue540-launcher. If a command fails, do not retry it and do not ask for other permissions. Then report both results."
 [[steps]]
 key = "Enter"
 [[steps]]
