@@ -130,6 +130,7 @@ fn held_by(thread: ThreadId) -> Vec<String> {
 /// process on the home, is saved, and holds at the next start; turning it
 /// off keeps the level.
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn security_revocation_kill_switch_applies_now_saves_and_releases_without_lowering() {
     let home = TempDir::new().unwrap();
     let (view, root) = live_tree(&home, SecurityLevel::Aggressive);
@@ -176,6 +177,7 @@ fn security_revocation_kill_switch_applies_now_saves_and_releases_without_loweri
 
 /// Only a kill switch the person saw can be turned off.
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn security_revocation_cannot_release_a_kill_switch_that_is_off() {
     let home = TempDir::new().unwrap();
     let (_view, root) = live_tree(&home, SecurityLevel::Aggressive);
@@ -186,6 +188,7 @@ fn security_revocation_cannot_release_a_kill_switch_that_is_off() {
 /// Without a session the kill switch is saved for the next start, and
 /// released from the saved state.
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn security_revocation_kill_switch_without_a_session_is_saved() {
     let home = TempDir::new().unwrap();
     let report = revoke(&home, None, HumanRevocation::KillSwitchOn).unwrap();
@@ -204,6 +207,7 @@ fn security_revocation_kill_switch_without_a_session_is_saved() {
 /// Revoking all active authority ends every grant now and is saved; the
 /// kill switch stays off and the level stays.
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn security_revocation_all_active_authority_ends_grants() {
     let home = TempDir::new().unwrap();
     let (view, root) = live_tree(&home, SecurityLevel::Aggressive);
@@ -226,6 +230,7 @@ fn security_revocation_all_active_authority_ends_grants() {
 /// A state changed since the review (another session turned the kill
 /// switch on) is refused: nothing changes.
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn security_revocation_refuses_a_state_changed_since_review() {
     let home = TempDir::new().unwrap();
     let (_view, root) = live_tree(&home, SecurityLevel::Aggressive);
@@ -247,6 +252,7 @@ fn security_revocation_refuses_a_state_changed_since_review() {
 
 /// One grant ends; the others stay.
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn security_revocation_one_grant_ends_only_that_grant() {
     let thread = ThreadId::new();
     let first = hold_grant(thread, "cat one");
@@ -259,6 +265,7 @@ fn security_revocation_one_grant_ends_only_that_grant() {
 /// Turning the switch off reaches the other sessions of the process that
 /// hold the same switch.
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn security_revocation_release_reaches_the_other_sessions() {
     let home = TempDir::new().unwrap();
     let (_view, root) = live_tree(&home, SecurityLevel::Aggressive);
@@ -274,6 +281,7 @@ fn security_revocation_release_reaches_the_other_sessions() {
 /// Without a session, a release is for the switch the person saw: one
 /// turned off and on again elsewhere since the review is refused.
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn security_revocation_release_is_for_the_switch_reviewed() {
     let home = TempDir::new().unwrap();
     revoke(&home, None, HumanRevocation::KillSwitchOn).unwrap();
@@ -301,6 +309,7 @@ fn security_revocation_release_is_for_the_switch_reviewed() {
 /// Without a session, a kill switch that cannot be saved changed nothing
 /// and says so.
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn security_revocation_unsaved_without_a_session_is_an_error() {
     let home = TempDir::new().unwrap();
     std::fs::create_dir(home.path().join("security_state.lock")).unwrap();
@@ -313,6 +322,7 @@ fn security_revocation_unsaved_without_a_session_is_an_error() {
 
 /// Revoke all also ends grants of sessions outside this home's trees.
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn security_revocation_all_ends_every_grant_of_the_process() {
     let home = TempDir::new().unwrap();
     let (_view, root) = live_tree(&home, SecurityLevel::Aggressive);
@@ -325,6 +335,7 @@ fn security_revocation_all_ends_every_grant_of_the_process() {
 /// A release reaches only the sessions that hold the switch released; a
 /// session whose switch is another one keeps it (and its epoch).
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn security_revocation_release_reaches_only_the_same_switch() {
     let home = TempDir::new().unwrap();
     let other_home = TempDir::new().unwrap();
@@ -342,6 +353,7 @@ fn security_revocation_release_reaches_only_the_same_switch() {
 /// Without a session but with another live session on the home, an unsaved
 /// kill switch applied there, and the report says so.
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn security_revocation_unsaved_but_taken_by_another_session_is_reported() {
     let home = TempDir::new().unwrap();
     let (_view, other) = live_tree(&home, SecurityLevel::Aggressive);

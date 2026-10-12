@@ -2260,6 +2260,68 @@ impl TokenUsageInfo {
 pub struct TokenCountEvent {
     pub info: Option<TokenUsageInfo>,
     pub rate_limits: Option<RateLimitSnapshot>,
+    /// PF-84: this thread's provider-reported usage per (provider, named
+    /// account), `default` included. Present only while named accounts are
+    /// on, so other rollouts and notifications keep their bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub account_usage: Option<Vec<AccountTokenUsage>>,
+}
+
+/// PF-84: provider-reported token usage of one named provider account. Holds
+/// the provider id and account name only, never credential material.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct AccountTokenUsage {
+    pub provider_id: String,
+    pub account: String,
+    pub usage: TokenUsage,
+}
+
+impl AccountTokenUsage {
+    /// Adds `usage` to the entry for (`provider_id`, `account`), creating it
+    /// in first-use order.
+    pub fn accumulate(
+        entries: &mut Vec<AccountTokenUsage>,
+        provider_id: &str,
+        account: &str,
+        usage: &TokenUsage,
+    ) {
+        match entries
+            .iter_mut()
+            .find(|entry| entry.provider_id == provider_id && entry.account == account)
+        {
+            Some(entry) => entry.usage.add_assign(usage),
+            None => entries.push(AccountTokenUsage {
+                provider_id: provider_id.to_string(),
+                account: account.to_string(),
+                usage: usage.clone(),
+            }),
+        }
+    }
+
+    /// What `current` (a running total per account) added since `previous`,
+    /// leaving out accounts with nothing new.
+    pub fn increase_since(
+        previous: &[AccountTokenUsage],
+        current: &[AccountTokenUsage],
+    ) -> Vec<AccountTokenUsage> {
+        current
+            .iter()
+            .filter_map(|entry| {
+                let usage = match previous.iter().find(|old| {
+                    old.provider_id == entry.provider_id && old.account == entry.account
+                }) {
+                    Some(old) => entry.usage.saturating_sub(&old.usage),
+                    None => entry.usage.clone(),
+                };
+                (usage != TokenUsage::default()).then(|| AccountTokenUsage {
+                    provider_id: entry.provider_id.clone(),
+                    account: entry.account.clone(),
+                    usage,
+                })
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema, TS)]
@@ -2375,6 +2437,25 @@ impl TokenUsage {
         ((remaining as f64 / effective_window as f64) * 100.0)
             .clamp(0.0, 100.0)
             .round() as i64
+    }
+
+    /// Each count less `other`'s, never below zero.
+    pub fn saturating_sub(&self, other: &TokenUsage) -> TokenUsage {
+        let less = |now: i64, then: i64| (now - then).max(0);
+        TokenUsage {
+            input_tokens: less(self.input_tokens, other.input_tokens),
+            cached_input_tokens: less(self.cached_input_tokens, other.cached_input_tokens),
+            cache_write_input_tokens: less(
+                self.cache_write_input_tokens,
+                other.cache_write_input_tokens,
+            ),
+            output_tokens: less(self.output_tokens, other.output_tokens),
+            reasoning_output_tokens: less(
+                self.reasoning_output_tokens,
+                other.reasoning_output_tokens,
+            ),
+            total_tokens: less(self.total_tokens, other.total_tokens),
+        }
     }
 
     /// In-place element-wise sum of token counts.

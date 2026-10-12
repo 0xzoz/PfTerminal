@@ -48,3 +48,33 @@ A resumed thread runs on its recorded account; with the feature off, the
 resume is refused and names the recorded account (`--account
 <provider>:default` resumes on the default credentials). A rejected key names the account and
 its `corbanu account add` recovery; the default credential is unchanged.
+
+## Usage per account in `/status`
+
+With the feature on, `/status` names the session's account on the provider
+line and adds an **Account usage** line: the tokens this session used on each
+account of the current provider, as the provider reported them. It covers the
+whole session: spawned agents (each toward its own account), side
+conversations, automatic and `/review` reviews, and memory extraction. Only
+token counts are shown: no prices and no cost records.
+
+- One account is one line, such as
+  `work · 35,100 input · 12,000 cached input · 6,247 output (300 reasoning)`.
+  Before the first reply it reads `no usage yet`.
+- Several accounts are a short table with the session's account marked
+  `(active)`.
+- **Input** is the uncached part, as on the **Token usage** line; cached input
+  and reasoning appear only when the provider reports them, and reasoning is
+  part of the output. Reviews are counted here but not on **Token usage**, so
+  the rows can add up to more.
+- Accounts appear by name only. Other providers' accounts are not listed; switch
+  to that provider to see them.
+- A new session starts from zero. A resumed conversation shows its earlier
+  counts again, its spawned agents' included once the TUI reattaches them.
+  Memory extraction outside a turn shows with the next count.
+
+Developer-accounting builds also have `/cost`, which shows the same requests by
+provider, account and model for one UTC day. For a session that stays within
+one day, its token counts per account match these, except for background
+memory consolidation, which `/cost` records under the conversation and
+`/status` does not show.

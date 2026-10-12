@@ -45,6 +45,17 @@ pub(crate) fn explanation(path: &str) -> String {
     )
 }
 
+/// #506: the explanation shown when listing the folder `path` was denied.
+pub(crate) fn listing_explanation(path: &str) -> String {
+    format!(
+        "Security level Aggressive blocked listing `{}`: agent commands can never list the \
+         Corbanu home or read its protected files (Corbanu's sign-in, vault, config and \
+         history), and this cannot be granted, not even once. To allow it, a person can switch \
+         to Permissive in /security (it applies after a restart).",
+        shown_path(path)
+    )
+}
+
 /// `path` as an explanation shows it: it is the command's own spelling, so
 /// escaped and bounded.
 pub(crate) fn shown_path(path: &str) -> String {
@@ -113,12 +124,14 @@ impl ReadPolicyInputs {
     /// The deny-read matcher of the session's read policy; `None` for a
     /// profile that cannot take the rules (an external sandbox).
     fn matcher(&self, cwd: &Path) -> Option<ReadDenyMatcher> {
-        let denials = ReadDenials::for_turn(
+        let mut denials = ReadDenials::for_turn(
             &self.codex_home,
             &self.turn_cwd,
             &self.workspace_roots,
             &self.profile,
         );
+        // Captured only under Aggressive (see `capture`).
+        denials.deny_home_listing();
         let policy = denials.apply(&self.profile)?.file_system_sandbox_policy();
         // A malformed pattern denies every path; explain nothing then.
         ReadDenyMatcher::try_new(&policy, cwd).ok().flatten()
@@ -166,42 +179,96 @@ pub(crate) async fn denial_explanation(
         if matcher.is_read_denied(&cwd) {
             return Some(explanation(&cwd.display().to_string()));
         }
-        denied_word(
-            &command,
-            &cwd,
-            inputs.user_home.as_deref(),
-            &inputs.codex_home,
-            |path| matcher.is_read_denied(path),
-            Some(&denial_lines),
-        )
-        .map(|word| explanation(&word))
+        let word = |denied: &dyn Fn(&Path) -> bool| {
+            denied_word(
+                &command,
+                &cwd,
+                inputs.user_home.as_deref(),
+                &inputs.codex_home,
+                denied,
+                Some(&denial_lines),
+            )
+        };
+        word(&|path| matcher.is_read_denied(path))
+            .map(|word| explanation(&word))
+            .or_else(|| {
+                word(&|path| matcher.is_listing_denied(path)).map(|word| listing_explanation(&word))
+            })
+            // #506: `ls` run in the Corbanu home itself (the denial names the
+            // folder as `.` or by its name).
+            .or_else(|| {
+                let name = cwd.file_name()?.to_str()?.to_string();
+                (matcher.is_listing_denied(&cwd)
+                    && denial_lines.iter().any(|line| {
+                        line.contains(&name) || line.contains(" .:") || line.contains("'.'")
+                    }))
+                .then(|| listing_explanation(&cwd.display().to_string()))
+            })
     })
     .await
 }
 
 /// #442: the protected path `command` names, under Aggressive: a grant for
 /// it would never apply, so none is offered.
+#[cfg(test)]
 pub(crate) async fn protected_path_in_command(
     session: &Session,
     turn: &TurnContext,
     command: &[String],
     cwd: &Path,
 ) -> Option<String> {
+    match protected_note_in_command(session, turn, command, cwd).await? {
+        ProtectedNote::Read(path) => Some(path),
+        ProtectedNote::Listing(_) => None,
+    }
+}
+
+/// What a command names that no grant opens under Aggressive.
+pub(crate) enum ProtectedNote {
+    /// A protected path it reads (#442).
+    Read(String),
+    /// A folder it lists that may not be listed (#506).
+    Listing(String),
+}
+
+impl ProtectedNote {
+    /// The explanation for the approval prompt.
+    pub(crate) fn explanation(&self) -> String {
+        match self {
+            Self::Read(path) => explanation(path),
+            Self::Listing(path) => listing_explanation(path),
+        }
+    }
+}
+
+/// The protected path `command` names (#442), or else the folder it lists
+/// that may not be listed (#506).
+pub(crate) async fn protected_note_in_command(
+    session: &Session,
+    turn: &TurnContext,
+    command: &[String],
+    cwd: &Path,
+) -> Option<ProtectedNote> {
     let inputs = ReadPolicyInputs::capture(session, turn)?;
     let (command, cwd) = (command.to_vec(), cwd.to_path_buf());
     off_thread(move || {
         let matcher = inputs.matcher(&cwd)?;
         if matcher.is_read_denied(&cwd) {
-            return Some(cwd.display().to_string());
+            return Some(ProtectedNote::Read(cwd.display().to_string()));
         }
-        denied_word(
-            &command,
-            &cwd,
-            inputs.user_home.as_deref(),
-            &inputs.codex_home,
-            |path| matcher.is_read_denied(path),
-            /*denial_lines*/ None,
-        )
+        let word = |denied: &dyn Fn(&Path) -> bool| {
+            denied_word(
+                &command,
+                &cwd,
+                inputs.user_home.as_deref(),
+                &inputs.codex_home,
+                denied,
+                /*denial_lines*/ None,
+            )
+        };
+        word(&|path| matcher.is_read_denied(path))
+            .map(ProtectedNote::Read)
+            .or_else(|| word(&|path| matcher.is_listing_denied(path)).map(ProtectedNote::Listing))
     })
     .await
 }
@@ -274,16 +341,31 @@ pub(super) fn denied_word(
             parts
         })
         .filter(|word| !word.is_empty() && !word.starts_with('-'))
-        .filter(|word| {
-            denial_lines.is_none_or(|lines| {
+        .find(|word| {
+            let Some(path) = resolve(word, cwd, user_home, codex_home) else {
+                return false;
+            };
+            // As spelled, or as resolved (`$CODEX_HOME`, `dir/..`; #506).
+            let resolved = AbsolutePathBuf::from_absolute_path(&path)
+                .ok()
+                .and_then(|path| {
+                    path.as_path()
+                        .file_name()
+                        .map(std::ffi::OsStr::to_os_string)
+                });
+            let names = [
                 Path::new(word)
                     .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| lines.iter().any(|line| line.contains(name)))
-            })
-        })
-        .find(|word| {
-            resolve(word, cwd, user_home, codex_home).is_some_and(|path| denied(path.as_path()))
+                    .map(std::ffi::OsStr::to_os_string),
+                resolved,
+            ];
+            denial_lines.is_none_or(|lines| {
+                names
+                    .iter()
+                    .flatten()
+                    .filter_map(|name| name.to_str())
+                    .any(|name| lines.iter().any(|line| line.contains(name)))
+            }) && denied(path.as_path())
         })
 }
 

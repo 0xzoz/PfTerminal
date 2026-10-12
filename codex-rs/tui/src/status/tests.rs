@@ -841,6 +841,7 @@ async fn status_model_provider_uses_bedrock_runtime_base_url_and_gates_usage_lin
         /*reasoning_effort_override*/ None,
         "<none>".to_string(),
         /*refreshing_rate_limits*/ false,
+        /*account_usage*/ None,
     );
     let rendered = render_lines(&composite.display_lines(/*width*/ 120)).join("\n");
 
@@ -882,6 +883,7 @@ async fn status_model_provider_uses_bedrock_runtime_base_url_and_gates_usage_lin
         /*reasoning_effort_override*/ None,
         "<none>".to_string(),
         /*refreshing_rate_limits*/ false,
+        /*account_usage*/ None,
     );
     let rendered = render_lines(&composite.display_lines(/*width*/ 120)).join("\n");
 
@@ -1878,6 +1880,7 @@ async fn status_snapshot_uses_default_reasoning_when_config_empty() {
         /*reasoning_effort_override*/ Some(Some(ReasoningEffort::Medium)),
         "<none>".to_string(),
         /*refreshing_rate_limits*/ false,
+        /*account_usage*/ None,
     );
     let mut rendered_lines = render_lines(&composite.display_lines(/*width*/ 80));
     if cfg!(windows) {
@@ -1987,6 +1990,7 @@ async fn transcript_overlay_remeasures_status_after_rate_limit_refresh() {
         /*reasoning_effort_override*/ None,
         "<none>".to_string(),
         /*refreshing_rate_limits*/ true,
+        /*account_usage*/ None,
     );
     let mut overlay =
         TranscriptOverlay::new(vec![Arc::new(status)], RuntimeKeymap::defaults().pager);
@@ -2435,4 +2439,173 @@ async fn status_context_window_uses_last_usage() {
         !context_line.contains("102K"),
         "context line should not use total aggregated tokens, got: {context_line}"
     );
+}
+
+/// PF-84: a Z.AI session on `account` with named accounts on or off.
+async fn named_account_status(
+    named_accounts: bool,
+    account: Option<&str>,
+    account_usage: Option<super::StatusAccountUsage>,
+    width: u16,
+) -> String {
+    let temp_home = TempDir::new().expect("temp home");
+    let mut config = test_config(&temp_home).await;
+    config.model_provider_id = "zai".to_string();
+    config.model_provider = ModelProviderInfo {
+        name: "Z.AI".to_string(),
+        // Unset in the test environment: the key lives in the vault.
+        env_key: Some("PF84_STATUS_ACCOUNT_USAGE_UNSET_KEY".to_string()),
+        account: account.map(|name| codex_model_provider_info::NamedProviderAccount {
+            provider_id: "zai".to_string(),
+            name: name.to_string(),
+        }),
+        ..Default::default()
+    };
+    if named_accounts {
+        config
+            .features
+            .enable(codex_features::Feature::NamedAccounts)
+            .expect("enable named accounts");
+    }
+    set_workspace_cwd(&mut config, test_path_buf("/workspace/tests").abs());
+    // The session's own token usage: what the account rows add up to.
+    let usage = account_usage
+        .as_ref()
+        .map(|summary| {
+            summary
+                .rows
+                .iter()
+                .fold(TokenUsage::default(), |mut total, (_, usage)| {
+                    total.input_tokens += usage.input_tokens;
+                    total.cached_input_tokens += usage.cached_input_tokens;
+                    total.output_tokens += usage.output_tokens;
+                    total.reasoning_output_tokens += usage.reasoning_output_tokens;
+                    total.total_tokens += usage.total_tokens;
+                    total
+                })
+        })
+        .unwrap_or_else(|| {
+            account_tokens(
+                /*input*/ 47_100, /*cached*/ 12_000, /*output*/ 6_247,
+                /*reasoning*/ 300,
+            )
+        });
+    let now = chrono::Local
+        .with_ymd_and_hms(2026, 10, 11, 4, 5, 6)
+        .single()
+        .expect("timestamp");
+    let account_display = StatusAccountDisplay::ApiKey { env_var: None };
+    let (composite, _) = new_status_output_with_rate_limits_handle(
+        &config,
+        /*runtime_model_provider_base_url*/ None,
+        /*remote_connection*/ None,
+        Some(&account_display),
+        /*token_info*/ None,
+        &usage,
+        &None,
+        /*thread_name*/ None,
+        /*forked_from*/ None,
+        &[],
+        /*plan_type*/ None,
+        now,
+        "glm-5.3-flash",
+        /*collaboration_mode*/ None,
+        /*reasoning_effort_override*/ None,
+        "<none>".to_string(),
+        /*refreshing_rate_limits*/ false,
+        account_usage,
+    );
+    let mut rendered_lines = render_lines(&composite.display_lines(width));
+    if cfg!(windows) {
+        for line in &mut rendered_lines {
+            *line = line.replace('\\', "/");
+        }
+    }
+    sanitize_directory(rendered_lines).join("\n")
+}
+
+fn account_tokens(input: i64, cached: i64, output: i64, reasoning: i64) -> TokenUsage {
+    TokenUsage {
+        input_tokens: input,
+        cached_input_tokens: cached,
+        output_tokens: output,
+        reasoning_output_tokens: reasoning,
+        total_tokens: input + output,
+    }
+}
+
+/// PF-84: with named accounts off, `/status` has no account usage.
+#[tokio::test]
+async fn status_snapshot_account_usage_flag_off() {
+    let rendered = named_account_status(
+        /*named_accounts*/ false, /*account*/ None, /*account_usage*/ None,
+        /*width*/ 100,
+    )
+    .await;
+    assert!(!rendered.contains("Account usage"), "{rendered}");
+    assert_snapshot!(rendered);
+}
+
+#[tokio::test]
+async fn status_snapshot_account_usage_no_usage_yet() {
+    let rendered = named_account_status(
+        /*named_accounts*/ true,
+        Some("work"),
+        Some(super::StatusAccountUsage {
+            rows: vec![("work".to_string(), TokenUsage::default())],
+        }),
+        /*width*/ 100,
+    )
+    .await;
+    assert_snapshot!(rendered);
+}
+
+#[tokio::test]
+async fn status_snapshot_account_usage_one_account() {
+    let rendered = named_account_status(
+        /*named_accounts*/ true,
+        Some("work"),
+        Some(super::StatusAccountUsage {
+            rows: vec![(
+                "work".to_string(),
+                account_tokens(
+                    /*input*/ 47_100, /*cached*/ 12_000, /*output*/ 6_247,
+                    /*reasoning*/ 300,
+                ),
+            )],
+        }),
+        // Narrow enough that the one account's line wraps.
+        /*width*/ 80,
+    )
+    .await;
+    assert_snapshot!(rendered);
+}
+
+#[tokio::test]
+async fn status_snapshot_account_usage_several_accounts() {
+    let rendered = named_account_status(
+        /*named_accounts*/ true,
+        /*account*/ None,
+        Some(super::StatusAccountUsage {
+            rows: vec![
+                (
+                    "default".to_string(),
+                    account_tokens(
+                        /*input*/ 40_100, /*cached*/ 12_000, /*output*/ 6_015,
+                        /*reasoning*/ 300,
+                    ),
+                ),
+                (
+                    "work".to_string(),
+                    account_tokens(
+                        /*input*/ 7_000, /*cached*/ 0, /*output*/ 232,
+                        /*reasoning*/ 0,
+                    ),
+                ),
+            ],
+        }),
+        /*width*/ 100,
+    )
+    .await;
+    assert_snapshot!(rendered);
 }

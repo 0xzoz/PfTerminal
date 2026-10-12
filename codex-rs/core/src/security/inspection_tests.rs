@@ -60,6 +60,7 @@ fn agent(thread: ThreadId, depth: usize, level: SecurityLevel, stricter: bool) -
 }
 
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn pf_41_s01_live_tree_reports_levels_children_and_generation() {
     let home = TempDir::new().unwrap();
     let (view, root) = live_tree(&home, SecurityLevel::Moderate);
@@ -98,6 +99,7 @@ fn pf_41_s01_live_tree_reports_levels_children_and_generation() {
 }
 
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn pf_41_s01_without_a_session_reads_stored_state_and_unreadable_fails_closed() {
     let home = TempDir::new().unwrap();
     assert_eq!(
@@ -196,6 +198,7 @@ fn grant_for(root: ThreadId, expires: i64) -> (PostTaintState, BoundedGrant) {
 }
 
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn pf_41_s01_grants_show_expiry_and_uses_without_ids_and_end_on_expiry() {
     let home = TempDir::new().unwrap();
     let (_view, root) = live_tree(&home, SecurityLevel::Aggressive);
@@ -232,6 +235,7 @@ fn pf_41_s01_grants_show_expiry_and_uses_without_ids_and_end_on_expiry() {
 }
 
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn pf_41_s01_grants_of_a_stopped_session_are_not_listed() {
     let home = TempDir::new().unwrap();
     let view = EffectivePolicyView::default();
@@ -265,6 +269,7 @@ fn pf_41_s01_grants_of_a_stopped_session_are_not_listed() {
 }
 
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn pf_41_s01_denials_are_fixed_text_and_correlated_to_the_session_tree() {
     let home = TempDir::new().unwrap();
     let (view, root) = live_tree(&home, SecurityLevel::Aggressive);

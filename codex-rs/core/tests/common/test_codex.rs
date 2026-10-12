@@ -304,6 +304,7 @@ pub struct TestCodexBuilder {
     external_time_provider: Option<Arc<dyn TimeProvider>>,
     code_mode_host_program: Option<PathBuf>,
     history_mode: Option<ThreadHistoryMode>,
+    auth_in_home: bool,
 }
 
 impl TestCodexBuilder {
@@ -317,6 +318,13 @@ impl TestCodexBuilder {
 
     pub fn with_auth(mut self, auth: CodexAuth) -> Self {
         self.auth = auth;
+        self
+    }
+
+    /// Gives the session's auth manager the test home, so credentials kept in
+    /// that home's vault (such as named provider accounts) are readable.
+    pub fn with_auth_in_home(mut self) -> Self {
+        self.auth_in_home = true;
         self
     }
 
@@ -623,7 +631,14 @@ impl TestCodexBuilder {
                     config.codex_home.clone(),
                 ))
             });
-        let auth_manager = codex_core::test_support::auth_manager_from_auth(auth.clone());
+        let auth_manager = if self.auth_in_home {
+            codex_core::test_support::auth_manager_from_auth_with_home(
+                auth.clone(),
+                config.codex_home.to_path_buf(),
+            )
+        } else {
+            codex_core::test_support::auth_manager_from_auth(auth.clone())
+        };
         let thread_manager = ThreadManager::new(
             &config,
             auth_manager.clone(),
@@ -1251,6 +1266,7 @@ pub fn test_codex() -> TestCodexBuilder {
         external_time_provider: None,
         code_mode_host_program: None,
         history_mode: None,
+        auth_in_home: false,
     }
 }
 
