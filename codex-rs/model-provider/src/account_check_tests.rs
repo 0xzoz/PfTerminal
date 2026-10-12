@@ -25,3 +25,22 @@ fn unconfigured_bedrock_account_names_the_profile_kind() {
         )
     );
 }
+
+/// PF-84 #555: inside the TUI the recovery is `/providers`, not a CLI flag.
+#[test]
+fn tui_recovery_points_to_providers() {
+    let home = std::env::temp_dir().join("pf84-555-home-without-a-vault");
+    let mut provider = ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None);
+    provider.account = Some(NamedProviderAccount {
+        provider_id: "amazon-bedrock".to_string(),
+        name: "work".to_string(),
+    });
+    assert_eq!(
+        selected_account_error_with_recovery(&home, &provider, AccountRecovery::Providers),
+        Some(
+            "account `work` of provider `amazon-bedrock` is not configured; add it or pick \
+             another account in `/providers`"
+                .to_string()
+        )
+    );
+}

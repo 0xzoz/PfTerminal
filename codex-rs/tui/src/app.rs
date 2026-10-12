@@ -222,6 +222,7 @@ pub(crate) mod app_server_requests;
 mod background_child;
 mod background_requests;
 mod config_persistence;
+pub(crate) use config_persistence::resume_model_settings_for_overrides;
 mod event_dispatch;
 mod history_ui;
 mod input;
