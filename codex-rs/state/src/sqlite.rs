@@ -523,7 +523,7 @@ fn open_lock_file(path: &Path) -> std::io::Result<std::fs::File> {
 /// file checked at the path (not a link), and the read-write descriptor
 /// must be that same file. The sandbox sees its own mount, not this mode.
 /// (A FIFO swapped in after the check would block the read-only open; that
-/// needs write access to the Corbanu home, which protected commands lack.)
+/// needs write access to the lock path, which protected commands lack.)
 #[cfg(unix)]
 fn reopen_placeholder(path: &Path) -> Option<std::fs::File> {
     use std::os::unix::fs::MetadataExt;
