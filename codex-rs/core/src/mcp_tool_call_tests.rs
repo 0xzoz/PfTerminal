@@ -2385,7 +2385,7 @@ async fn guardian_mode_skips_auto_when_annotations_do_not_require_approval() {
     let config = Arc::new(config);
     let models_manager = models_manager_with_provider(
         config.codex_home.to_path_buf(),
-        Arc::clone(&session.services.auth_manager),
+        session.services.auth_manager(),
         config.model_provider.clone(),
     );
     session.services.models_manager = models_manager;
@@ -2687,7 +2687,7 @@ async fn guardian_mode_mcp_denial_returns_rationale_message() {
     let config = Arc::new(config);
     let models_manager = models_manager_with_provider(
         config.codex_home.to_path_buf(),
-        Arc::clone(&session.services.auth_manager),
+        session.services.auth_manager(),
         config.model_provider.clone(),
     );
     session.services.models_manager = models_manager;
@@ -2923,7 +2923,7 @@ async fn approve_mode_skips_guardian_in_every_permission_mode() {
         let config = Arc::new(config);
         let models_manager = models_manager_with_provider(
             config.codex_home.to_path_buf(),
-            Arc::clone(&session.services.auth_manager),
+            session.services.auth_manager(),
             config.model_provider.clone(),
         );
         session.services.models_manager = models_manager;

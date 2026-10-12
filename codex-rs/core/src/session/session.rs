@@ -570,11 +570,13 @@ impl Session {
         );
         // PF-84-S06: a session on a named OpenAI sign-in account uses that
         // account's manager for everything (requests, refresh, connectors),
-        // never the default login.
+        // never the default login; any other provider uses the default login,
+        // also when spawned from a session on a named account (as after a
+        // mid-session switch, `ActiveAuthManager::follow_provider`).
         let auth_manager =
             match codex_model_provider::named_sign_in_account(&session_configuration.provider) {
                 Some(account) => auth_manager.for_named_account_loaded(account).await,
-                None => auth_manager,
+                None => auth_manager.default_account_manager(),
             };
         // PF-27-S05: provider credentials move into the broker before anything
         // (MCP servers, hooks, tools) starts from this process.
@@ -1181,7 +1183,7 @@ impl Session {
                 user_shell: Arc::new(default_shell),
                 show_raw_agent_reasoning: config.show_raw_agent_reasoning,
                 exec_policy,
-                auth_manager: Arc::clone(&auth_manager),
+                active_auth: crate::state::ActiveAuthManager::new(Arc::clone(&auth_manager)),
                 openai_file_upload_client_pool: RouteAwareClientPool::new_without_request_logging(
                     config.http_client_factory(),
                     ClientRouteClass::Api,
@@ -1354,7 +1356,7 @@ impl Session {
             if startup_auth_changed {
                 mcp_auth_changes.mark_unchanged();
             }
-            let latest_auth = sess.services.auth_manager.auth().await;
+            let latest_auth = sess.services.auth_manager().auth().await;
             let mcp_projection = if startup_auth_changed
                 || mcp_auth_changes.has_changed().unwrap_or(false)
             {

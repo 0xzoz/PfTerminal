@@ -377,7 +377,7 @@ impl StageOneMemoryClient {
             binding.floor.max(config.security_level).max(policy.level) != SecurityLevel::Permissive;
         binding.check().await?;
         let client = ModelClient::new(
-            Some(Arc::clone(&session.services.auth_manager)),
+            Some(session.services.auth_manager()),
             AgentIdentityAuthPolicy::JwtOnly,
             expected_owner,
             config.model_provider.clone(),
@@ -572,7 +572,7 @@ impl StageOneMemoryClient {
         if self.client.provider_info() != &self.binding.provider {
             return Ok(None);
         }
-        let auth = owner.services.auth_manager.auth().await;
+        let auth = owner.services.auth_manager().auth().await;
         let auth_mode = auth.as_ref().map(codex_login::CodexAuth::auth_mode);
         let endpoint = self
             .binding

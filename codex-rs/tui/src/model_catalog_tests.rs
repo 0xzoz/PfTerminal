@@ -187,3 +187,31 @@ fn runtime_refresh_does_not_clone_models_into_incompatible_provider_tabs() {
         );
     }
 }
+
+/// PF-84: a model list fetched for another account replaces the listed
+/// models (one the old account had is gone, a new one appears) and keeps the
+/// models added for runtime and GPU providers.
+#[test]
+fn listed_models_are_replaced_for_another_account() {
+    let listed = vec![preset("shared", None), preset("chatgpt-only", None)];
+    let mut all = listed.clone();
+    all.push(preset("rental", Some("gpu-a")));
+    let catalog = ModelCatalog::new(all);
+    catalog.mark_listed(&listed);
+    include_runtime_model(
+        &mut catalog.models.write().expect("models"),
+        "custom",
+        "zai",
+    );
+
+    catalog.replace_listed_models(vec![preset("shared", None), preset("api-only", None)]);
+
+    let models = catalog.try_list_models().expect("infallible catalog read");
+    assert_eq!(
+        models
+            .iter()
+            .map(|preset| preset.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["shared", "api-only", "rental", "zai:custom"]
+    );
+}
