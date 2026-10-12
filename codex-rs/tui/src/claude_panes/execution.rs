@@ -885,7 +885,7 @@ pub(super) fn contained_claude_version_problem(
     let (major, minor, patch) = CONTAINED_CLAUDE_MIN_VERSION;
     let path = claude.display();
     let reported = match found {
-        Some((a, b, c)) => format!("`{path}` is Claude Code {a}.{b}.{c}"),
+        Some((a, b, c)) => format!("the `claude` found on PATH (`{path}`) is {a}.{b}.{c}"),
         None => {
             let status = exit_code.map_or_else(
                 || "it was stopped by a signal".to_string(),
@@ -900,14 +900,17 @@ pub(super) fn contained_claude_version_problem(
                     format!(": {}", super::approval::escape_plain(&line))
                 })
                 .unwrap_or_default();
-            format!("`{path} --version` reported no version ({status}{reason})")
+            format!(
+                "`claude --version` with the `claude` found on PATH (`{path}`) reported no \
+                 version ({status}{reason})"
+            )
         }
     };
     format!(
         "Claude panes run in Corbanu's sandbox here (contained), which needs Claude Code \
          {major}.{minor}.{patch} or later, and {reported}. Update Claude Code (`claude update`, \
-         or the way you installed it) or put a newer `claude` first on PATH, then send the task \
-         again. Codex panes are not affected."
+         or the way you installed it) or put a newer `claude` first on PATH; Codex panes are not \
+         affected."
     )
 }
 

@@ -509,7 +509,10 @@ async fn issue_554_old_or_broken_claude_code_is_explained() {
         .await
         .expect_err("2.1.92 is too old");
     assert!(old.contains("needs Claude Code 2.1.292 or later"), "{old}");
-    assert!(old.contains("claude-old` is Claude Code 2.1.92"), "{old}");
+    assert!(
+        old.contains("the `claude` found on PATH (`") && old.contains("claude-old`) is 2.1.92"),
+        "{old}"
+    );
     assert!(old.contains("Update Claude Code (`claude update`"), "{old}");
     assert!(old.contains("first on PATH"), "{old}");
 
@@ -521,7 +524,7 @@ async fn issue_554_old_or_broken_claude_code_is_explained() {
     .expect_err("no version");
     assert!(
         broken.contains(
-            "claude-broken --version` reported no version (exit status 1: SyntaxError: Unexpected token)"
+            "claude-broken`) reported no version (exit status 1: SyntaxError: Unexpected token)"
         ),
         "{broken}"
     );
