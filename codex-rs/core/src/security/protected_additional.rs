@@ -20,10 +20,12 @@
 //! - the Corbanu home's runtime entries (`tmp` holds the sandbox launchers),
 //!   under Moderate and Aggressive, even where an approval lifted the other
 //!   rules, and never with a grant (#442);
+//! - under Aggressive, the project's `.codex` and `.agents`, never with a
+//!   grant either (#520), refused before anyone is asked (#565);
 //! - under Aggressive, the other read-only paths (start-up files, git hooks
-//!   and config, the project's `.codex` and `.agents`) unless an Aggressive
-//!   grant for the run lifted them;
-//! - under Moderate, those other paths unless a person's fresh approval of
+//!   and config) unless an Aggressive grant for the run lifted them;
+//! - under Moderate, the other read-only paths and the project's `.codex`
+//!   and `.agents` unless a person's fresh approval of
 //!   this command allowed it (Travis, 2026-10-11): not the automatic
 //!   reviewer, a permission hook, a remembered approval or a stored grant.
 //!   Grants never carry them, at either level.
@@ -49,6 +51,11 @@ pub(crate) enum ReadOnlyScope {
     /// person's fresh approval decides the run, and before the approval
     /// wherever one may still lift the others.
     Runtime,
+    /// The read-only paths no grant lifts (`ReadDenials::never_lifted_paths`:
+    /// the runtime entries and the project's `.codex` and `.agents`): under
+    /// Aggressive before the approval, so nobody is asked about a write that
+    /// is refused afterwards whatever the answer (#565).
+    NeverLifted,
     /// Every read-only path the denials keep (Aggressive, where a grant for
     /// the run has already lifted what it lifts; Moderate without a person's
     /// fresh approval; grants).
@@ -59,9 +66,12 @@ impl ReadOnlyScope {
     /// The scope before the run's approval. Under Moderate the persistence
     /// files count up front where no person will decide the run
     /// (`person_may_decide`: the automatic reviewer or nobody is asked).
+    /// Under Aggressive the paths no grant lifts count up front (#565); the
+    /// others wait for the run's grant, known after the approval.
     pub(crate) fn before_approval(level: SecurityLevel, person_may_decide: bool) -> Self {
         match level {
             SecurityLevel::Moderate if !person_may_decide => Self::Kept,
+            SecurityLevel::Aggressive => Self::NeverLifted,
             _ => Self::Runtime,
         }
     }
@@ -173,6 +183,7 @@ pub(crate) fn opened_read_only_path(
     let entries = &additional.file_system.as_ref()?.entries;
     let paths: Vec<&AbsolutePathBuf> = match scope {
         ReadOnlyScope::Runtime => denials.runtime_read_only_paths().collect(),
+        ReadOnlyScope::NeverLifted => denials.never_lifted_paths().collect(),
         ReadOnlyScope::Kept => denials.read_only_paths().collect(),
     };
     if paths.is_empty() {
@@ -487,8 +498,8 @@ pub(crate) fn write_refusal(level: SecurityLevel, path: &str, rule: WriteRule) -
         }
         (WriteRule::Liftable, SecurityLevel::Aggressive) => format!(
             "Security level Aggressive blocked writing to `{path}`: files that run code or set \
-             policy later (shell start-up files, git hooks and config, the project's .codex and \
-             .agents) stay read-only, and an additional permission cannot change that. Where a \
+             policy later (shell start-up files, git hooks and config) stay read-only, and an \
+             additional permission cannot change that. Where a \
              person approving the command is offered \"Grant once\", it lifts this for that \
              command; otherwise {switch}"
         ),

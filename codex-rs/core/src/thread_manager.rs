@@ -313,6 +313,16 @@ pub fn build_models_manager(
     config: &Config,
     auth_manager: Arc<AuthManager>,
 ) -> SharedModelsManager {
+    // PF-84: an OpenAI sign-in provider's list follows the account the
+    // active session uses.
+    if let Some(manager) = crate::account_models_manager::AccountModelsManager::for_provider(
+        &config.model_provider,
+        Arc::clone(&auth_manager),
+        config.codex_home.to_path_buf(),
+        config.model_catalog.clone(),
+    ) {
+        return Arc::new(manager);
+    }
     let provider = create_model_provider(config.model_provider.clone(), Some(auth_manager));
     provider.models_manager(
         config.codex_home.to_path_buf(),

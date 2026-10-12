@@ -104,7 +104,7 @@ async fn request_permissions_routes_to_guardian_when_reviewer_is_enabled() {
     let config = Arc::new(config);
     let models_manager = models_manager_with_provider(
         config.codex_home.to_path_buf(),
-        Arc::clone(&session.services.auth_manager),
+        session.services.auth_manager(),
         config.model_provider.clone(),
     );
     session.services.models_manager = models_manager;
@@ -192,7 +192,7 @@ async fn request_permissions_guardian_review_stops_when_cancelled() {
     let config = Arc::new(config);
     let models_manager = models_manager_with_provider(
         config.codex_home.to_path_buf(),
-        Arc::clone(&session.services.auth_manager),
+        session.services.auth_manager(),
         config.model_provider.clone(),
     );
     Arc::get_mut(&mut session)
@@ -315,7 +315,7 @@ async fn guardian_allows_shell_command_additional_permissions_requests_past_poli
     let config = Arc::new(config);
     let models_manager = models_manager_with_provider(
         config.codex_home.to_path_buf(),
-        Arc::clone(&session.services.auth_manager),
+        session.services.auth_manager(),
         config.model_provider.clone(),
     );
     session.services.models_manager = models_manager;
@@ -422,7 +422,7 @@ async fn strict_auto_review_turn_grant_forces_guardian_for_shell_command_policy_
     let config = Arc::new(config);
     let models_manager = models_manager_with_provider(
         config.codex_home.to_path_buf(),
-        Arc::clone(&session.services.auth_manager),
+        session.services.auth_manager(),
         config.model_provider.clone(),
     );
     session.services.models_manager = models_manager;

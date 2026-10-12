@@ -3064,3 +3064,38 @@ fn glm_5_3_flash_routes_use_standard_base_with_work_pattern() {
         );
     }
 }
+
+/// PF-84: a list that needs a fetch is current only with a fresh cache of
+/// this client version, the same check refreshing applies.
+#[tokio::test]
+async fn load_cached_list_needs_a_usable_cache() {
+    let codex_home = tempdir().expect("temp dir");
+    let endpoint = TestModelsEndpoint::new(vec![vec![remote_model("cached-model", "Cached", 1)]]);
+    let manager = openai_manager_for_tests(codex_home.path().to_path_buf(), endpoint.clone());
+    assert!(!manager.load_cached_list().await, "no cache yet");
+
+    manager
+        .list_models(RefreshStrategy::Online, DEFAULT_HTTP_CLIENT_FACTORY)
+        .await;
+    let reloaded = openai_manager_for_tests(codex_home.path().to_path_buf(), endpoint);
+    assert!(reloaded.load_cached_list().await, "fresh cache");
+    reloaded
+        .cache_manager
+        .as_ref()
+        .expect("cache manager")
+        .manipulate_cache_for_test(|fetched_at| {
+            *fetched_at = Utc::now() - chrono::Duration::hours(1);
+        })
+        .await
+        .expect("age the cache");
+    assert!(!reloaded.load_cached_list().await, "stale cache");
+
+    let no_fetch = openai_manager_for_tests(
+        tempdir().expect("temp dir").path().to_path_buf(),
+        TestModelsEndpoint::without_refresh(Vec::new()),
+    );
+    assert!(
+        no_fetch.load_cached_list().await,
+        "an API-key list needs no fetch"
+    );
+}
