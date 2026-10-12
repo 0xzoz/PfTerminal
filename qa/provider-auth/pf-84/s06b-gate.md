@@ -138,8 +138,10 @@ API key in `auth.json`; a decoy `OPENAI_API_KEY` is set throughout. Captures: [s
   `AccountModelsManager` that follows the account of a user's session (not sub-agents) at session start and on a
   switch; each named account has its own cache (`models-cache/<provider>/<name>/`). A switch to an account whose
   cache is fresh (the check refreshing uses: this client version, under 5 minutes) shows it at once and refetches in
-  the background; otherwise the switch waits for the fetch (at most 5 s; API-key sign-ins fetch nothing). Only
-  responses from that provider (same base URL) and account refresh it. The TUI sends an account-changing model selection with `confirm` (falling back to an
+  the background; otherwise the switch waits for the fetch (at most 5 s; API-key sign-ins fetch nothing). If the fetch
+  takes longer, the TUI shows the bundled list until its next refetch (a later switch or restart); core has the
+  fetched list once it arrives. Only responses from that provider (same base URL) and account refresh it. With two
+  user sessions switching at once, one may check the other's list (last one wins, as above). The TUI sends an account-changing model selection with `confirm` (falling back to an
   unconfirmed update if confirmation is unavailable); only once core confirms the switch does it fetch `model/list`
   again and say *Connectors, usage and the model list now use …*.
 - **Limits.** The process has one list: with several user sessions on different accounts (an app-server client with

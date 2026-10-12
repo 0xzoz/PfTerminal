@@ -2129,7 +2129,7 @@ impl App {
                 }
                 self.chat_widget.set_model(&model);
                 self.refresh_session_header(tui)?;
-                let confirmed = self
+                let outcome = self
                     .sync_active_thread_model_selection(
                         app_server,
                         model,
@@ -2139,19 +2139,23 @@ impl App {
                     .await;
                 // Only once core has moved: otherwise the list (and the
                 // message) could still be the old account's.
-                match account_switch {
-                    Some(account) if confirmed && self.refresh_model_list(app_server).await => {
-                        self.chat_widget.add_info_message(
-                            account_switch_message(account.as_ref()),
-                            /*hint*/ None,
-                        );
+                if let Some(account) = account_switch {
+                    use super::thread_settings::SettingsUpdateOutcome;
+                    let message = match outcome {
+                        SettingsUpdateOutcome::Confirmed => {
+                            if self.refresh_model_list(app_server).await {
+                                Some(account_switch_message(account.as_ref()))
+                            } else {
+                                Some("The account switch applied, but the model list could not be refreshed; reopen /model later to see its models.".to_string())
+                            }
+                        }
+                        SettingsUpdateOutcome::Accepted => Some("The account switch was not confirmed, so the model list was not refreshed; reopen /model later to see the new account's models.".to_string()),
+                        // A failure already says so; nothing was sent otherwise.
+                        SettingsUpdateOutcome::Failed | SettingsUpdateOutcome::NotSent => None,
+                    };
+                    if let Some(message) = message {
+                        self.chat_widget.add_info_message(message, /*hint*/ None);
                     }
-                    Some(_) if confirmed => {}
-                    Some(_) => self.chat_widget.add_info_message(
-                        "The account switch was not confirmed, so the model list was not refreshed; reopen /model later to see the new account's models.".to_string(),
-                        /*hint*/ None,
-                    ),
-                    None => {}
                 }
                 self.sync_active_thread_service_tier_to_cached_session()
                     .await;

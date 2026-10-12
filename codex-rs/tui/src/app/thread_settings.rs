@@ -43,9 +43,9 @@ impl App {
         model: String,
         model_provider: Option<String>,
         confirm: bool,
-    ) -> bool {
+    ) -> SettingsUpdateOutcome {
         let Some(thread_id) = self.active_thread_id else {
-            return false;
+            return SettingsUpdateOutcome::NotSent;
         };
         let params = ThreadSettingsUpdateParams {
             thread_id: thread_id.to_string(),
@@ -175,19 +175,21 @@ impl App {
         }
     }
 
-    /// Returns whether a confirmed update (`params.confirm`) was applied by
-    /// core before this returned.
+    /// Whether core confirmed the update (`params.confirm`) before this
+    /// returned, accepted it unconfirmed, or it failed.
     pub(super) async fn send_thread_settings_update(
         &mut self,
         app_server: &mut AppServerSession,
         params: ThreadSettingsUpdateParams,
-    ) -> bool {
+    ) -> SettingsUpdateOutcome {
         if !thread_settings_update_has_changes(&params) {
-            return false;
+            return SettingsUpdateOutcome::NotSent;
         }
         let mut params = params;
         let mut result = app_server.thread_settings_update(params.clone()).await;
-        let confirmed = params.confirm && result.is_ok();
+        if params.confirm && result.is_ok() {
+            return SettingsUpdateOutcome::Confirmed;
+        }
         if params.confirm
             && let Err(err) = &result
         {
@@ -199,13 +201,29 @@ impl App {
             params.confirm = false;
             result = app_server.thread_settings_update(params).await;
         }
-        if let Err(err) = result {
-            tracing::warn!("failed to update app-server thread settings from TUI: {err}");
-            self.chat_widget
-                .add_error_message(format!("Failed to update thread settings: {err}"));
+        match result {
+            Ok(_) => SettingsUpdateOutcome::Accepted,
+            Err(err) => {
+                tracing::warn!("failed to update app-server thread settings from TUI: {err}");
+                self.chat_widget
+                    .add_error_message(format!("Failed to update thread settings: {err}"));
+                SettingsUpdateOutcome::Failed
+            }
         }
-        confirmed
     }
+}
+
+/// How a thread settings update went (PF-84: an account switch refetches the
+/// model list only once core confirmed it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SettingsUpdateOutcome {
+    /// Nothing changed, or there is no active thread.
+    NotSent,
+    /// Core applied it before the reply.
+    Confirmed,
+    /// Accepted for core to apply later (not confirmed).
+    Accepted,
+    Failed,
 }
 
 /// #437: [`ThreadSettings`] carries only the legacy sandbox projection of a
