@@ -415,6 +415,12 @@ pub(crate) enum AppEvent {
     KillSwitchTurnedOn,
     /// #507: the kill switch was turned off; send the Claude pane tasks it held.
     KillSwitchTurnedOff,
+    /// #507 (Travis, 2026-10-12): another Corbanu Terminal process on this
+    /// home turned the kill switch on or off; Core already applied it to
+    /// this process's sessions.
+    KillSwitchChangedElsewhere {
+        on: bool,
+    },
     /// Open the `/spawn` role picker.
     OpenSpawnRolePicker,
     /// Open the `/spawn` Nazgul pane-binding picker.

@@ -1339,10 +1339,13 @@ impl App {
                 return Ok(AppRunControl::Exit(ExitReason::Restart));
             }
             AppEvent::KillSwitchTurnedOn => {
-                self.stop_claude_panes_for_kill_switch();
+                self.on_kill_switch_changed(/*on*/ true, /*elsewhere*/ false);
             }
             AppEvent::KillSwitchTurnedOff => {
-                self.send_held_claude_tasks();
+                self.on_kill_switch_changed(/*on*/ false, /*elsewhere*/ false);
+            }
+            AppEvent::KillSwitchChangedElsewhere { on } => {
+                self.on_kill_switch_changed(on, /*elsewhere*/ true);
             }
             AppEvent::FatalExitRequest(message) => {
                 return Ok(AppRunControl::Exit(ExitReason::Fatal(message)));

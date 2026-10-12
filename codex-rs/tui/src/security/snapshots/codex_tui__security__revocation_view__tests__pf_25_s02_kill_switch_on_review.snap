@@ -14,7 +14,9 @@ turn is refused with a message saying so), messages from other agents wait (Code
 get them with their first turn after you turn it off; tasks for Claude panes are sent
 when you turn it off), no grant can be issued, protected actions after untrusted content
 are refused, the browser and memory writes are refused, and the credential broker stays
-closed. Another Corbanu Terminal on this home takes the switch when it next starts.
+closed.
+Other Corbanu Terminals running on this home take it too, within about a second: their
+running work stops the same way and they refuse new turns.
 Saved in security_state.json: it holds after a restart. The level stays Permissive.
 
 enter confirm · esc cancel, nothing changes

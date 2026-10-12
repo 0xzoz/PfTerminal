@@ -25,7 +25,9 @@
 //! downgrade applies at the next start (the launch-time controls of this
 //! process cannot be widened in place; a new session in this process is such
 //! a start), while its revocation applies now. A downgrade or kill-switch
-//! release that cannot be saved changes nothing.
+//! release that cannot be saved changes nothing. The kill switch, on or off,
+//! also reaches the other processes running on the home, through their watch
+//! of the saved state ([`kill_switch_watch`], #507).
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -717,8 +719,11 @@ impl super::EffectivePolicyView {
             .iter()
             .any(|(_, tree)| std::ptr::eq(tree.as_ptr(), Arc::as_ptr(&self.shared)))
         {
-            trees.push((home, Arc::downgrade(&self.shared)));
+            trees.push((home.clone(), Arc::downgrade(&self.shared)));
         }
+        drop(trees);
+        // #507: a kill switch saved by another process reaches this tree.
+        kill_switch_watch::ensure(&home);
     }
 }
 
@@ -756,6 +761,9 @@ fn notify(shared: &SharedEffectivePolicy) {
         sink.revoke();
     }
 }
+
+#[path = "kill_switch_watch.rs"]
+pub(crate) mod kill_switch_watch;
 
 #[cfg(test)]
 #[path = "transition_tests.rs"]

@@ -852,6 +852,9 @@ pub(crate) struct App {
     /// #507: the task another agent last sent to each Claude pane while the
     /// kill switch was on (one per pane); sent once it is turned off.
     pub(crate) kill_switch_held_claude_tasks: Vec<(String, String)>,
+    /// #507: whether this app last saw the kill switch on, so a change
+    /// reported twice (here and by the home's watch) is handled once.
+    pub(crate) kill_switch_known_on: bool,
     pub(crate) spawn_quarantine_notified_by_node: HashSet<String>,
     pub(crate) spawn_context_left_by_thread: HashMap<ThreadId, i64>,
     pub(crate) spawn_last_report_seq_by_node: HashMap<String, u64>,
@@ -1618,6 +1621,8 @@ See the Corbanu Terminal keymap documentation for supported actions and examples
                     .collect()
             })
             .unwrap_or_default();
+        let kill_switch_known_on =
+            crate::legacy_core::security_revocation::kill_switch_on(config.codex_home.as_ref());
 
         let mut app = Self {
             model_catalog,
@@ -1710,6 +1715,7 @@ See the Corbanu Terminal keymap documentation for supported actions and examples
             spawn_auto_loop_state_by_node: HashMap::new(),
             spawn_operator_input_seen: false,
             kill_switch_held_claude_tasks: Vec::new(),
+            kill_switch_known_on,
             spawn_quarantine_notified_by_node: HashSet::new(),
             spawn_context_left_by_thread: HashMap::new(),
             spawn_last_report_seq_by_node: HashMap::new(),
@@ -1754,6 +1760,7 @@ See the Corbanu Terminal keymap documentation for supported actions and examples
         // every startup; its process lock deduplicates concurrent Corbanu Terminal processes and it
         // exits immediately when there is no potentially billable work.
         app.start_gpu_controller();
+        app.watch_kill_switch_elsewhere();
         let telegram_home = app.config.codex_home.clone().to_path_buf();
         tokio::spawn(async move {
             let result = tokio::task::spawn_blocking(move || {

@@ -6972,6 +6972,59 @@ async fn issue_507_kill_switch_interrupts_running_claude_panes() {
     assert!(!said(&orc_pane_id), "an idle pane has nothing to stop");
 }
 
+/// #507 (Travis, 2026-10-12): a kill switch another Corbanu Terminal process
+/// on this home turns on stops this app's running Claude panes too and says
+/// where it came from; the same change reported again (by `/security` here
+/// or the watch) is handled once; turning it off there is announced as well.
+#[tokio::test]
+async fn issue_507_kill_switch_from_another_process_stops_claude_panes_once() {
+    let (mut app, mut app_event_rx, troll_pane_id, orc_pane_id) =
+        make_child_report_auto_claude_pane_app().await;
+    let codex_home = app.config.codex_home.to_path_buf();
+    let rendered = |rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>| {
+        let mut text = String::new();
+        while let Ok(event) = rx.try_recv() {
+            if let AppEvent::InsertHistoryCell(cell) = event {
+                text.push_str(&lines_to_single_string(&cell.display_lines(/*width*/ 400)));
+            }
+        }
+        text
+    };
+    let _ = rendered(&mut app_event_rx);
+    let running = app
+        .claude_panes
+        .prepare_turn(&troll_pane_id, "long task".to_string(), &codex_home)
+        .expect("prepare running Troll pane");
+    assert!(!app.kill_switch_known_on);
+
+    app.on_kill_switch_changed(/*on*/ true, /*elsewhere*/ true);
+    assert!(running.cancel_token.is_cancelled());
+    assert!(app.kill_switch_known_on);
+    let text = rendered(&mut app_event_rx);
+    assert!(
+        text.contains("turned on in another Corbanu Terminal on this home"),
+        "{text}"
+    );
+
+    // Reported again: nothing more is stopped or said.
+    let later = app
+        .claude_panes
+        .prepare_turn(&orc_pane_id, "later".to_string(), &codex_home)
+        .expect("prepare a later turn");
+    app.on_kill_switch_changed(/*on*/ true, /*elsewhere*/ false);
+    app.on_kill_switch_changed(/*on*/ true, /*elsewhere*/ true);
+    assert!(!later.cancel_token.is_cancelled());
+    assert!(!rendered(&mut app_event_rx).contains("another Corbanu Terminal"));
+
+    app.on_kill_switch_changed(/*on*/ false, /*elsewhere*/ true);
+    assert!(!app.kill_switch_known_on);
+    let text = rendered(&mut app_event_rx);
+    assert!(
+        text.contains("turned off in another Corbanu Terminal on this home"),
+        "{text}"
+    );
+}
+
 fn interrupted_claude_turn(app: &App) -> crate::claude_panes::ClaudePaneTurnOutput {
     crate::claude_panes::ClaudePaneTurnOutput {
         text: String::new(),
@@ -12063,6 +12116,7 @@ pub(super) async fn make_test_app() -> App {
         spawn_auto_loop_state_by_node: HashMap::new(),
         spawn_operator_input_seen: false,
         kill_switch_held_claude_tasks: Vec::new(),
+        kill_switch_known_on: false,
         spawn_quarantine_notified_by_node: HashSet::new(),
         spawn_context_left_by_thread: HashMap::new(),
         spawn_last_report_seq_by_node: HashMap::new(),
@@ -12170,6 +12224,7 @@ pub(super) async fn make_test_app_with_channels() -> (
             spawn_auto_loop_state_by_node: HashMap::new(),
             spawn_operator_input_seen: false,
             kill_switch_held_claude_tasks: Vec::new(),
+            kill_switch_known_on: false,
             spawn_quarantine_notified_by_node: HashSet::new(),
             spawn_context_left_by_thread: HashMap::new(),
             spawn_last_report_seq_by_node: HashMap::new(),
