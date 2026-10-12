@@ -2,7 +2,6 @@ use std::any::TypeId;
 
 use tracing::Dispatch;
 use tracing::Event;
-use tracing::Level;
 use tracing::Metadata;
 use tracing::Subscriber;
 use tracing::level_filters::LevelFilter;
@@ -11,38 +10,40 @@ use tracing::subscriber::Interest;
 
 /// Most verbose level kept for each target (the crate and its modules).
 /// A trailing `*` matches every crate with that prefix.
-const TARGET_CAPS: &[(&str, Level)] = &[
+const TARGET_CAPS: &[(&str, LevelFilter)] = &[
     // The client handshake logs the whole upgrade request, `Authorization`
     // included, at TRACE (#380).
-    ("tungstenite", Level::DEBUG),
-    ("tokio_tungstenite", Level::DEBUG),
+    ("tungstenite", LevelFilter::DEBUG),
+    ("tokio_tungstenite", LevelFilter::DEBUG),
     // Hex-dumps every request byte at TRACE (sentry's transport).
-    ("ureq_proto", Level::DEBUG),
-    ("ureq", Level::DEBUG),
+    ("ureq_proto", LevelFilter::DEBUG),
+    ("ureq", LevelFilter::DEBUG),
     // Dumps raw connection bytes at TRACE when `connection_verbose` is on.
-    ("reqwest", Level::DEBUG),
+    ("reqwest", LevelFilter::DEBUG),
     // HTTP/1, HTTP/2, TLS and SSE internals. Their TRACE output carries no
     // header values today; capped so an upgrade can't add one unnoticed.
-    ("hyper", Level::DEBUG),
-    ("hyper_util", Level::DEBUG),
-    ("h2", Level::DEBUG),
-    ("rustls", Level::DEBUG),
-    ("tokio_rustls", Level::DEBUG),
-    ("eventsource_stream", Level::DEBUG),
+    ("hyper", LevelFilter::DEBUG),
+    ("hyper_util", LevelFilter::DEBUG),
+    ("h2", LevelFilter::DEBUG),
+    ("rustls", LevelFilter::DEBUG),
+    ("tokio_rustls", LevelFilter::DEBUG),
+    ("eventsource_stream", LevelFilter::DEBUG),
     // The network proxy's HTTP stack (a hyper/h2 fork) carries injected
     // credentials.
-    ("rama_*", Level::DEBUG),
-    // aws-sigv4 logs the canonical request, `x-amz-security-token` value
-    // included, and aws-smithy-runtime every request, at TRACE.
-    ("aws_*", Level::DEBUG),
-    // Logs the ECS container authorization token at WARN when it is
-    // malformed (a trailing newline is enough).
-    ("aws_config::ecs", Level::ERROR),
+    ("rama_*", LevelFilter::DEBUG),
+    // The AWS SDK logs credential failures with their whole error chain at
+    // WARN and ERROR (#548): a `credential_process` helper's stderr, which
+    // may echo anything, the helper's command line (TRACE), the ECS
+    // container token, mis-indented config-file lines, and at TRACE the
+    // canonical request with `x-amz-security-token` (#380). None of it is
+    // kept; Corbanu reports AWS failures itself, with helper output withheld
+    // (`AwsAuthError::detailed_message`).
+    ("aws_*", LevelFilter::OFF),
     // Logs `OTEL_EXPORTER_OTLP_HEADERS` values at DEBUG.
-    ("opentelemetry-otlp", Level::INFO),
-    ("opentelemetry_otlp", Level::INFO),
+    ("opentelemetry-otlp", LevelFilter::INFO),
+    ("opentelemetry_otlp", LevelFilter::INFO),
     // Logs OAuth token exchange results at DEBUG.
-    ("rmcp::transport::auth", Level::INFO),
+    ("rmcp::transport::auth", LevelFilter::INFO),
 ];
 
 /// Whether `metadata` is more verbose than its target's cap.

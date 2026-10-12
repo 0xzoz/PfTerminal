@@ -323,11 +323,7 @@ async fn run_provider_auth_command(
     if !output.status.success() {
         let status = output.status;
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stderr_suffix = if stderr.is_empty() {
-            String::new()
-        } else {
-            format!(": {stderr}")
-        };
+        let stderr_suffix = helper_stderr_suffix(config, &stderr);
         if let Some(account) = helper_account
             && stderr.contains("unexpected argument '--account'")
         {
@@ -363,6 +359,38 @@ async fn run_provider_auth_command(
     }
 
     Ok(access_token)
+}
+
+/// The part of a failed helper's stderr that may go into its error (#548).
+/// The error is shown and logged, so another program's stderr, which may
+/// echo anything, is withheld. Corbanu's own `internal-*` helpers write
+/// actionable messages; theirs is kept, capped and with credential-shaped
+/// values redacted.
+fn helper_stderr_suffix(config: &ModelProviderAuthInfo, stderr: &str) -> String {
+    const MAX_CHARS: usize = 500;
+    if stderr.is_empty() {
+        return String::new();
+    }
+    if !is_corbanu_internal_helper(config) {
+        return format!(
+            " (its output is withheld; run `{}` yourself to see it)",
+            config.command
+        );
+    }
+    let capped: String = stderr.chars().take(MAX_CHARS).collect();
+    format!(": {}", codex_log_guard::redact_credentials(&capped))
+}
+
+/// Whether `config` runs one of Corbanu's own hidden `internal-*` helpers.
+fn is_corbanu_internal_helper(config: &ModelProviderAuthInfo) -> bool {
+    let program = Path::new(&config.command)
+        .file_stem()
+        .and_then(|stem| stem.to_str());
+    program.is_some_and(|program| program == "corbanu")
+        && config
+            .args
+            .first()
+            .is_some_and(|arg| arg.starts_with("internal-"))
 }
 
 /// Verifies that a provider's external bearer-token command can currently

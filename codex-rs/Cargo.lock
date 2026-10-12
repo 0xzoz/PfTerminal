@@ -2360,13 +2360,18 @@ dependencies = [
  "aws-sigv4",
  "aws-types",
  "bytes",
+ "codex-feedback",
  "codex-log-guard",
+ "codex-state",
+ "codex-utils-absolute-path",
  "http 1.4.0",
  "pretty_assertions",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "walkdir",
 ]
 
 [[package]]
@@ -3638,6 +3643,7 @@ dependencies = [
  "codex-config",
  "codex-http-client",
  "codex-keyring-store",
+ "codex-log-guard",
  "codex-model-provider-info",
  "codex-otel",
  "codex-protocol",

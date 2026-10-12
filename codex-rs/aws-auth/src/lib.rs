@@ -36,7 +36,9 @@ pub struct AwsSignedRequest {
 }
 
 /// Errors returned by credential loading or SigV4 signing.
-#[derive(Debug, Error)]
+/// `Debug` prints [`AwsAuthError::detailed_message`], so a `{error:?}` in a
+/// log line cannot carry a credential helper's stderr (#548).
+#[derive(Error)]
 pub enum AwsAuthError {
     #[error("AWS service name must not be empty")]
     EmptyService,
@@ -138,6 +140,12 @@ impl AwsAuthContext {
     ) -> Result<AwsSignedRequest, AwsAuthError> {
         let credentials = self.credentials_provider.provide_credentials().await?;
         signing::sign_request(&credentials, &self.region, &self.service, request, time)
+    }
+}
+
+impl std::fmt::Debug for AwsAuthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.detailed_message())
     }
 }
 
