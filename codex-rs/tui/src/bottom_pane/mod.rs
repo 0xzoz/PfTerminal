@@ -2604,7 +2604,7 @@ mod tests {
         let tx = AppEventSender::new(tx_raw);
         let mut pane = test_pane(tx.clone());
         pane.show_selection_view(picker());
-        pane.show_app_link_view(url_link_view(tx.clone()));
+        pane.show_app_link_view(url_link_view(tx));
         press_keys(
             &mut pane,
             &[KeyCode::Enter, KeyCode::Char('1'), KeyCode::Enter],
