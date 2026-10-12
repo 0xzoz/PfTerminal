@@ -38,11 +38,18 @@ pub(super) async fn expire_batch_on_connection(
     let mut unbound = BTreeSet::new();
     let due: Vec<String> = sqlx::query_scalar(
         "SELECT attempt_id FROM draft_accounting_attempts
-            WHERE json_extract(payload, '$.dispatched_at_ms') + ? <= ?
-            ORDER BY attempt_id LIMIT ?",
+            WHERE json_extract(payload, '$.dispatched_at_ms') <= ?
+            ORDER BY json_extract(payload, '$.dispatched_at_ms'), attempt_id LIMIT ?",
     )
-    .bind(DETAIL_MS)
-    .bind(as_of_ms)
+    // `dispatched + DETAIL_MS <= as_of`, with the arithmetic on the bound, and
+    // oldest first, so the dispatch index (`accounting_indexes.rs`) answers it
+    // under the lock; ordering by `attempt_id` alone made SQLite walk the
+    // primary key through every attempt.
+    .bind(
+        as_of_ms
+            .checked_sub(DETAIL_MS)
+            .context("detail expiry underflow")?,
+    )
     .bind(limit)
     .fetch_all(&mut *conn)
     .await?;

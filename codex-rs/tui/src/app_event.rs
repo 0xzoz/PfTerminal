@@ -413,8 +413,15 @@ pub(crate) enum AppEvent {
     /// #507: the kill switch was turned on in `/security`; stop the Claude
     /// panes' running turns (Core stops its own sessions).
     KillSwitchTurnedOn,
-    /// #507: the kill switch was turned off; send the Claude pane tasks it held.
+    /// #507: the kill switch was turned off. Nothing restarts; the person is
+    /// told which Claude panes have a task waiting for their next turn.
     KillSwitchTurnedOff,
+    /// #507 (Travis, 2026-10-12): another Corbanu Terminal process on this
+    /// home turned the kill switch on or off; Core already applied it to
+    /// this process's sessions.
+    KillSwitchChangedElsewhere {
+        on: bool,
+    },
     /// Open the `/spawn` role picker.
     OpenSpawnRolePicker,
     /// Open the `/spawn` Nazgul pane-binding picker.
@@ -638,6 +645,12 @@ pub(crate) enum AppEvent {
     /// was interrupted, timed out, or Claude Code cancelled them); their
     /// popups close.
     ClaudePaneApprovalsSettled,
+    /// #554: a new contained Claude pane cannot run the Claude Code on PATH
+    /// (too old, or it does not run); `problem` says why and what to do.
+    ClaudePaneLaunchProblem {
+        pane_id: String,
+        problem: String,
+    },
     /// A Claude Code headless pane emitted bounded live progress.
     ClaudePaneTurnProgress {
         progress: crate::claude_panes::ClaudePaneTurnProgress,
@@ -1660,6 +1673,12 @@ pub(crate) enum AppEvent {
     },
     /// PF-84-S04: a named-account action from `/providers`.
     ProviderAccount(crate::provider_named_accounts::ProviderAccountEvent),
+    /// PF-84 (#572): whether the vault holds a named Bedrock account (`None`
+    /// when it could not be read), for the check numbered `generation`.
+    NamedBedrockAccountChecked {
+        generation: u64,
+        offered: Option<bool>,
+    },
     ProviderManagerMetadataResolved {
         generation: u64,
         metadata: crate::provider_status_host::ProviderAccountMetadata,

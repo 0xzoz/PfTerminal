@@ -5,6 +5,7 @@
 
 use super::resize_reflow::trailing_run_start;
 use super::session_lifecycle::ThreadAttachPresentation;
+use super::thread_settings::SettingsUpdateOutcome;
 use super::*;
 use crate::app_event::WalletUnlockContinuation;
 use crate::app_server_session::ForkGoalContinuation;
@@ -268,6 +269,33 @@ impl App {
             }
         }
         tui.frame_requester().schedule_frame();
+    }
+
+    /// PF-84: the model list again, after the session moved to another
+    /// account's sign-in (the app server lists with that account now).
+    /// Returns whether the list was replaced.
+    pub(super) async fn refresh_model_list(&mut self, app_server: &mut AppServerSession) -> bool {
+        match app_server.list_models().await {
+            Ok(models) if !models.is_empty() => {
+                self.model_catalog.replace_listed_models(models);
+                let model = self.chat_widget.current_model().to_string();
+                let provider_id = self.chat_widget.config_ref().model_provider_id.clone();
+                self.model_catalog.sync_runtime_models(
+                    [provider_id.as_str()],
+                    Some(&model),
+                    &provider_id,
+                );
+                true
+            }
+            Ok(_) => {
+                tracing::warn!("model/list returned no models after an account switch");
+                false
+            }
+            Err(error) => {
+                tracing::warn!("model/list failed after an account switch: {error}");
+                false
+            }
+        }
     }
 
     pub(super) async fn refresh_gpu_runtime_overlay(&mut self) {
@@ -1339,10 +1367,13 @@ impl App {
                 return Ok(AppRunControl::Exit(ExitReason::Restart));
             }
             AppEvent::KillSwitchTurnedOn => {
-                self.stop_claude_panes_for_kill_switch();
+                self.on_kill_switch_changed(/*on*/ true, /*elsewhere*/ false);
             }
             AppEvent::KillSwitchTurnedOff => {
-                self.send_held_claude_tasks();
+                self.on_kill_switch_changed(/*on*/ false, /*elsewhere*/ false);
+            }
+            AppEvent::KillSwitchChangedElsewhere { on } => {
+                self.on_kill_switch_changed(on, /*elsewhere*/ true);
             }
             AppEvent::FatalExitRequest(message) => {
                 return Ok(AppRunControl::Exit(ExitReason::Fatal(message)));
@@ -2079,6 +2110,9 @@ impl App {
                         return Ok(AppRunControl::Continue);
                     }
                 }
+                // PF-84: a switch to another sign-in account waits until the
+                // session has moved to it, then fetches that account's list.
+                let mut account_switch = None;
                 if let Some(model_provider) = provider.as_ref() {
                     let Some(provider_info) =
                         self.config.model_providers.get(model_provider).cloned()
@@ -2088,6 +2122,8 @@ impl App {
                         ));
                         return Ok(AppRunControl::Continue);
                     };
+                    account_switch =
+                        sign_in_account_switch(&self.config.model_provider, &provider_info);
                     self.config.model_provider_id = model_provider.clone();
                     self.config.model_provider = provider_info.clone();
                     self.chat_widget
@@ -2097,8 +2133,33 @@ impl App {
                 }
                 self.chat_widget.set_model(&model);
                 self.refresh_session_header(tui)?;
-                self.sync_active_thread_model_selection(app_server, model, provider)
+                let outcome = self
+                    .sync_active_thread_model_selection(
+                        app_server,
+                        model,
+                        provider,
+                        account_switch.is_some(),
+                    )
                     .await;
+                // Only once core has moved: otherwise the list (and the
+                // message) could still be the old account's.
+                if let Some(account) = account_switch {
+                    let message = match outcome {
+                        SettingsUpdateOutcome::Confirmed => {
+                            if self.refresh_model_list(app_server).await {
+                                Some(account_switch_message(account.as_ref()))
+                            } else {
+                                Some(SWITCH_LIST_NOT_REFRESHED.to_string())
+                            }
+                        }
+                        SettingsUpdateOutcome::Accepted => Some(SWITCH_NOT_CONFIRMED.to_string()),
+                        // A failure already says so; nothing was sent otherwise.
+                        SettingsUpdateOutcome::Failed | SettingsUpdateOutcome::NotSent => None,
+                    };
+                    if let Some(message) = message {
+                        self.chat_widget.add_info_message(message, /*hint*/ None);
+                    }
+                }
                 self.sync_active_thread_service_tier_to_cached_session()
                     .await;
             }
@@ -2787,6 +2848,10 @@ impl App {
                 self.handle_provider_account_event(tui, app_server, event)
                     .await;
             }
+            AppEvent::NamedBedrockAccountChecked {
+                generation,
+                offered,
+            } => self.named_bedrock_account_checked(generation, offered),
             AppEvent::ProviderManagerMetadataResolved {
                 generation,
                 metadata,
@@ -5337,6 +5402,12 @@ impl App {
                     content: task.clone(),
                     trigger_turn: true,
                 };
+                // #507: with the kill switch on the task waits in the mailbox
+                // for that pane's next turn; nothing runs, before or after the
+                // switch is turned off.
+                let kill_switch_on = crate::legacy_core::security_revocation::kill_switch_on(
+                    self.config.codex_home.as_ref(),
+                );
                 match app_server.send_agent_message(params).await {
                     Ok(_) => {
                         self.spawn_processed_dispatch_origins.insert(origin_id);
@@ -5355,15 +5426,24 @@ impl App {
                             "durably admitted to the native mailbox",
                             /*notify*/ false,
                         );
-                        self.spawn_status_by_thread.insert(
-                            thread_id,
-                            codex_app_server_protocol::CollabAgentState {
-                                status: codex_app_server_protocol::CollabAgentStatus::Running,
-                                message: None,
-                            },
-                        );
-                        self.agent_navigation
-                            .set_running(thread_id, /*is_running*/ true);
+                        if kill_switch_on {
+                            self.chat_widget.add_info_message(
+                                format!(
+                                    "A task for {label} waits: the security kill switch is on. Turning it off starts nothing: the task goes with that pane's next turn, when someone types in it or it gets new work."
+                                ),
+                                /*hint*/ None,
+                            );
+                        } else {
+                            self.spawn_status_by_thread.insert(
+                                thread_id,
+                                codex_app_server_protocol::CollabAgentState {
+                                    status: codex_app_server_protocol::CollabAgentStatus::Running,
+                                    message: None,
+                                },
+                            );
+                            self.agent_navigation
+                                .set_running(thread_id, /*is_running*/ true);
+                        }
                         self.agent_navigation.set_last_task_message(
                             thread_id,
                             Some(task.chars().take(240).collect()),
@@ -5501,6 +5581,22 @@ impl App {
                         "task is {} bytes; maximum is {} bytes",
                         task.len(),
                         crate::dispatch_queue::MAX_DISPATCH_TASK_BYTES
+                    );
+                    self.record_spawn_dispatch_failed_for_task(&target_node_id, &task, &detail);
+                    self.chat_widget.add_error_message(detail);
+                    return Ok(AppRunControl::Continue);
+                }
+                // #507: with the kill switch on, a task for a pane the person
+                // opened is a user turn, which is refused and not kept; say so
+                // to the sender and the person instead of reporting it sent.
+                // Checked before the store-lock retry below, so a retry never
+                // starts it once the switch is off.
+                if crate::legacy_core::security_revocation::kill_switch_on(
+                    self.config.codex_home.as_ref(),
+                ) {
+                    let detail = format!(
+                        "Not sent to {}: the security kill switch is on, and a task for a pane you opened is not kept (as a typed message is not). Send it again after turning the switch off.",
+                        self.thread_label(thread_id)
                     );
                     self.record_spawn_dispatch_failed_for_task(&target_node_id, &task, &detail);
                     self.chat_widget.add_error_message(detail);
@@ -5973,6 +6069,9 @@ impl App {
             }
             AppEvent::ClaudePaneApprovalRequested(request) => {
                 self.chat_widget.show_claude_approval(*request);
+            }
+            AppEvent::ClaudePaneLaunchProblem { pane_id, problem } => {
+                self.on_claude_pane_launch_problem(&pane_id, problem);
             }
             AppEvent::ClaudePaneApprovalsSettled => {
                 self.chat_widget.remove_settled_claude_approvals();
@@ -6543,6 +6642,7 @@ impl App {
             {
                 Ok(removed) => {
                     self.claude_pane_transcript_cells.remove(&pane_id);
+                    self.drop_held_claude_task_of_removed_pane(&pane_id);
                     self.persist_pane_state();
                     tracing::info!(
                         pane_id,
@@ -6590,6 +6690,27 @@ impl App {
             }
         }
     }
+}
+
+const SWITCH_LIST_NOT_REFRESHED: &str = "The account switch applied, but the model list could not be refreshed; switch accounts again or restart to refresh it.";
+const SWITCH_NOT_CONFIRMED: &str = "The account switch was not confirmed, so the model list was not refreshed; switch accounts again or restart to refresh it.";
+
+/// PF-84: `Some(account)` when moving from `current` to `next` changes the
+/// sign-in account the session uses (`Some(None)`: to the default login).
+pub(super) fn sign_in_account_switch(
+    current: &codex_model_provider_info::ModelProviderInfo,
+    next: &codex_model_provider_info::ModelProviderInfo,
+) -> Option<Option<codex_login::NamedChatgptAccount>> {
+    let account = codex_model_provider::named_sign_in_account(next);
+    (codex_model_provider::named_sign_in_account(current) != account).then_some(account)
+}
+
+pub(super) fn account_switch_message(account: Option<&codex_login::NamedChatgptAccount>) -> String {
+    let label = match account {
+        Some(account) => format!("{} account `{}`", account.provider_id, account.name),
+        None => "the default account".to_string(),
+    };
+    format!("Connectors, usage and the model list now use {label}; model list refreshed.")
 }
 
 #[cfg(test)]

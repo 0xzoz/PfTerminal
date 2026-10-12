@@ -78,6 +78,34 @@ impl ApprovalStore {
     }
 }
 
+tokio::task_local! {
+    /// Issue #513: set once a person is asked about the approval being
+    /// resolved (see [`asking_person`]).
+    static PERSON_ASKED: std::cell::Cell<bool>;
+}
+
+/// Issue #513: runs `approval` (a runtime's `start_approval_async`) and says
+/// whether a person was asked during it, as opposed to an answer remembered
+/// from earlier (the approval cache) or a stored grant. Unmarked counts as
+/// not asked (fail closed).
+pub(crate) async fn asking_person<Fut>(approval: impl FnOnce() -> Fut) -> (ReviewDecision, bool)
+where
+    Fut: Future<Output = ReviewDecision>,
+{
+    // The whole call, its synchronous part included, runs in the scope.
+    PERSON_ASKED
+        .scope(std::cell::Cell::new(false), async {
+            let decision = approval().await;
+            (decision, PERSON_ASKED.with(std::cell::Cell::get))
+        })
+        .await
+}
+
+/// Issue #513: a person is being asked about this approval now.
+pub(crate) fn note_person_asked() {
+    let _ = PERSON_ASKED.try_with(|asked| asked.set(true));
+}
+
 /// Takes a vector of approval keys and returns a ReviewDecision.
 /// There will be one key in most cases, but apply_patch can modify multiple files at once.
 ///
@@ -102,6 +130,7 @@ where
     Fut: Future<Output = ReviewDecision>,
 {
     if fresh_human_authority {
+        note_person_asked();
         return match fetch().await {
             ReviewDecision::ApprovedForSession => ReviewDecision::Approved,
             decision => decision,
@@ -109,6 +138,7 @@ where
     }
     // To be defensive here, don't bother with checking the cache if keys are empty.
     if keys.is_empty() {
+        note_person_asked();
         return fetch().await;
     }
 
@@ -125,6 +155,7 @@ where
         return ReviewDecision::ApprovedForSession;
     }
 
+    note_person_asked();
     let decision = fetch().await;
 
     services.session_telemetry.counter(

@@ -27,6 +27,7 @@ use std::process::Command;
 use crate::linux_run_main::synthetic_mount_registry_root;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result;
+use codex_protocol::permissions::PinnedWritableRoot;
 use codex_protocol::permissions::is_protected_metadata_name;
 use codex_protocol::protocol::FileSystemAccessMode;
 use codex_protocol::protocol::FileSystemPath;
@@ -56,6 +57,16 @@ const LINUX_PLATFORM_DEFAULT_READ_ROOTS: &[&str] = &[
 
 const MAX_UNREADABLE_GLOB_MATCHES: usize = 8192;
 
+/// #536: the writable roots the caller pinned (`--pinned-writable-roots`).
+/// Every writable root is then bound from the folder this helper opened and
+/// checked at its pinned location (`--bind-fd`), never by path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WritableRootPins {
+    pub(crate) roots: &'static [PinnedWritableRoot],
+    /// Whether the bubblewrap that runs supports `--bind-fd` (0.8+).
+    pub(crate) bind_fd: bool,
+}
+
 /// Options that control how bubblewrap is invoked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BwrapOptions {
@@ -71,6 +82,8 @@ pub(crate) struct BwrapOptions {
     /// Keep this uncapped by default so existing nested deny-read matches are
     /// masked before the sandboxed command starts.
     pub glob_scan_max_depth: Option<usize>,
+    /// #536: the caller's pinned writable roots, for a session's command.
+    pub pins: Option<WritableRootPins>,
 }
 
 impl Default for BwrapOptions {
@@ -79,6 +92,7 @@ impl Default for BwrapOptions {
             mount_proc: true,
             network_mode: BwrapNetworkMode::FullAccess,
             glob_scan_max_depth: None,
+            pins: None,
         }
     }
 }
@@ -194,6 +208,18 @@ impl SyntheticMountTarget {
 
     pub(crate) fn preserves_pre_existing_path(&self) -> bool {
         self.pre_existing_path.is_some()
+    }
+
+    /// #562: whether the file or folder found when the arguments were built
+    /// is still the one at the path. Another run's cleanup may have removed
+    /// it since; bubblewrap then makes a new mount target, which is this
+    /// run's own placeholder.
+    pub(crate) fn pre_existing_path_is_unchanged(&self) -> bool {
+        let Some(identity) = self.pre_existing_path else {
+            return true;
+        };
+        fs::symlink_metadata(&self.path)
+            .is_ok_and(|metadata| FileIdentity::from_metadata(&metadata) == identity)
     }
 
     pub(crate) fn path(&self) -> &Path {
@@ -318,12 +344,13 @@ fn create_bwrap_flags(
         preserved_files,
         synthetic_mount_targets,
         protected_create_targets,
-    } = create_filesystem_args(
+    } = create_filesystem_args_with_pins(
         file_system_sandbox_policy,
         sandbox_policy_cwd,
         options
             .glob_scan_max_depth
             .or(file_system_sandbox_policy.glob_scan_max_depth),
+        options.pins,
     )?;
     let normalized_command_cwd = normalize_command_cwd_for_bwrap(command_cwd);
     let mut args = Vec::new();
@@ -375,16 +402,40 @@ fn create_bwrap_flags(
 ///    root above `/dev` (the `/` of a full-write profile) is followed by a
 ///    fresh `--dev /dev`: its bind would otherwise cover the minimal `/dev`
 ///    with the host's, mounted `nodev`, so even `/dev/null` fails (#493).
+///    For a session's command, `--bind-fd <checked folder> <root>` (#536).
 /// 5. `--ro-bind <subpath> <subpath>` re-applies read-only protections under
 ///    those writable roots so protected subpaths win.
 /// 6. Nested unreadable carveouts under a writable root are masked after that
 ///    root is bound, and unrelated unreadable roots are masked afterward.
+#[cfg(test)]
 fn create_filesystem_args(
     file_system_sandbox_policy: &FileSystemSandboxPolicy,
     cwd: &Path,
     glob_scan_max_depth: Option<usize>,
 ) -> Result<BwrapArgs> {
+    create_filesystem_args_with_pins(
+        file_system_sandbox_policy,
+        cwd,
+        glob_scan_max_depth,
+        /*pins*/ None,
+    )
+}
+
+/// [`create_filesystem_args`] for a session's command, whose writable roots
+/// the caller pinned (#536).
+fn create_filesystem_args_with_pins(
+    file_system_sandbox_policy: &FileSystemSandboxPolicy,
+    cwd: &Path,
+    glob_scan_max_depth: Option<usize>,
+    pins: Option<WritableRootPins>,
+) -> Result<BwrapArgs> {
     let unreadable_globs = file_system_sandbox_policy.get_unreadable_globs_with_cwd(cwd);
+    // #536: for a session's command, no writable root held by another may
+    // lead outside every root holding it, including the roots computed here.
+    let checked = match pins {
+        Some(_) => crate::pinned::check_held_links(file_system_sandbox_policy, cwd)?,
+        None => Vec::new(),
+    };
     // Bubblewrap requires bind mount targets to exist. Skip missing writable
     // roots so mixed-platform configs can keep harmless paths for other
     // environments without breaking Linux command startup.
@@ -669,6 +720,9 @@ fn create_filesystem_args(
         append_unreadable_root_args(&mut bwrap_args, unreadable_root, &allowed_write_paths)?;
     }
 
+    // #587: once the policy denies reads (as Seatbelt's rename guard), the
+    // folders above each protected path inside a writable root are pinned.
+    let pin_protected_folders = !unreadable_roots.is_empty();
     // `:root = write` (full access with denials), not a project at `/`.
     let full_write_root = file_system_sandbox_policy.entries.iter().any(|entry| {
         entry.access == FileSystemAccessMode::Write
@@ -705,9 +759,36 @@ fn create_filesystem_args(
             append_mount_target_parent_dir_args(&mut bwrap_args.args, mount_root, masking_root);
         }
 
-        bwrap_args.args.push("--bind".to_string());
-        bwrap_args.args.push(path_to_string(mount_root));
-        bwrap_args.args.push(path_to_string(mount_root));
+        // #536: for a session's command, every writable root is bound from
+        // the folder opened and checked at its pinned location.
+        match pins {
+            Some(pins) => {
+                if !pins.bind_fd {
+                    return Err(CodexErr::UnsupportedOperation(
+                        "Refused to run the command: binding a checked writable folder needs \
+                         bubblewrap 0.8 or newer (`--bind-fd`), and none was found."
+                            .to_string(),
+                    ));
+                }
+                let real =
+                    crate::pinned::expected_location(pins.roots, &checked, &writable_root.root);
+                let file = crate::pinned::open_at(&[root, mount_root], &real)?;
+                // `--ro-bind-data` masks read the first preserved file as
+                // `/dev/null`; keep it first.
+                if bwrap_args.preserved_files.is_empty() {
+                    bwrap_args.preserved_files.push(File::open("/dev/null")?);
+                }
+                bwrap_args.args.push("--bind-fd".to_string());
+                bwrap_args.args.push(file.as_raw_fd().to_string());
+                bwrap_args.args.push(path_to_string(mount_root));
+                bwrap_args.preserved_files.push(file);
+            }
+            None => {
+                bwrap_args.args.push("--bind".to_string());
+                bwrap_args.args.push(path_to_string(mount_root));
+                bwrap_args.args.push(path_to_string(mount_root));
+            }
+        }
         // #493: restore the minimal `/dev` (step 2) before the deny masks of
         // this pass and before deeper `/dev/*` writable roots (sorted later).
         let dev = Path::new("/dev");
@@ -845,6 +926,24 @@ fn create_filesystem_args(
                 (*unlistable, read_only)
             })
             .collect();
+        if pin_protected_folders {
+            let protected: Vec<&Path> = read_only_subpaths
+                .iter()
+                .chain(&nested_unreadable_roots)
+                .map(PathBuf::as_path)
+                .chain(
+                    pass_unlistable
+                        .iter()
+                        .map(|unlistable| unlistable.target.as_path()),
+                )
+                .collect();
+            append_protected_folder_pins(
+                &mut bwrap_args,
+                mount_root,
+                &protected,
+                &allowed_write_paths,
+            );
+        }
         for subpath in &read_only_subpaths {
             let depth = path_depth(subpath);
             for (unlistable, read_only) in pending_unlistable
@@ -956,6 +1055,65 @@ fn create_filesystem_args(
     }
 
     Ok(bwrap_args)
+}
+
+/// #587: binds each folder between `mount_root` and a protected path onto
+/// itself, before the pass's masks. A mount point cannot be renamed or
+/// removed (`EBUSY`), so a command cannot move a protected path's folder
+/// aside (`mv ~/.corbanu x`, then plant a new `~/.corbanu`) and so leave the
+/// rules behind: the new folder would have none, and the moved copy's
+/// denied stores would be readable under its new name. Seatbelt denies the
+/// same renames (`build_seatbelt_rename_guard_policy`). The bind is the live
+/// folder, so what is in it is unchanged; a folder gone by then (another
+/// run's placeholder) is skipped (`--bind-try`). Folders at or below a
+/// protected path (masked or read-only already), writable roots (bound
+/// already), links and folders in a parent the user neither owns nor can
+/// write (they cannot be renamed, such as `/home`) are left out.
+fn append_protected_folder_pins(
+    bwrap_args: &mut BwrapArgs,
+    mount_root: &Path,
+    protected: &[&Path],
+    allowed_write_paths: &[PathBuf],
+) {
+    let mut folders = BTreeSet::new();
+    for path in protected {
+        for folder in path.ancestors().skip(1) {
+            if folder == mount_root || !folder.starts_with(mount_root) {
+                break;
+            }
+            folders.insert(folder);
+        }
+    }
+    let mut pins: Vec<&Path> = folders
+        .into_iter()
+        .filter(|folder| {
+            !protected.iter().any(|path| folder.starts_with(path))
+                && !allowed_write_paths.iter().any(|root| root == folder)
+                && fs::symlink_metadata(folder).is_ok_and(|metadata| metadata.is_dir())
+                && folder.parent().is_some_and(user_may_change)
+        })
+        .collect();
+    pins.sort_by_key(|folder| path_depth(folder));
+    for folder in pins {
+        bwrap_args.args.push("--bind-try".to_string());
+        bwrap_args.args.push(path_to_string(folder));
+        bwrap_args.args.push(path_to_string(folder));
+    }
+}
+
+/// Whether the user could rename an entry of `folder`: it can write it, or
+/// owns it (and so could make it writable first).
+fn user_may_change(folder: &Path) -> bool {
+    // SAFETY: `geteuid` has no preconditions.
+    let euid = unsafe { libc::geteuid() };
+    if fs::metadata(folder).is_ok_and(|metadata| metadata.uid() == euid) {
+        return true;
+    }
+    let Ok(folder) = std::ffi::CString::new(folder.as_os_str().as_encoded_bytes()) else {
+        return false;
+    };
+    // SAFETY: `folder` is a valid NUL-terminated string for the call.
+    unsafe { libc::access(folder.as_ptr(), libc::W_OK) == 0 }
 }
 
 /// #506: one unlistable directory, as the sandbox shows it.
@@ -1517,8 +1675,10 @@ fn append_read_only_subpath_args(
         && is_within_allowed_write_paths(subpath, allowed_write_paths)
     {
         // Another concurrent bwrap setup can leave an empty mount target at
-        // a missing metadata path. Treat it like the missing case instead of
-        // binding that transient host path as the stable source.
+        // a missing path (#562: any name, not only metadata). Treat it like
+        // the missing case instead of binding that transient host path as
+        // the stable source, so its owner's cleanup cannot remove it from
+        // under this run.
         match metadata {
             EmptyProtectedMetadataPath::File(metadata) => {
                 append_existing_empty_file_bind_data_args(bwrap_args, subpath, &metadata)?;
@@ -1533,6 +1693,11 @@ fn append_read_only_subpath_args(
     if !subpath.exists() {
         if let Some(first_missing_component) = find_first_non_existent_component(subpath)
             && is_within_allowed_write_paths(&first_missing_component, allowed_write_paths)
+            && !hold_file_above_missing_path(
+                bwrap_args,
+                &first_missing_component,
+                allowed_write_paths,
+            )?
         {
             append_missing_read_only_subpath_args(bwrap_args, &first_missing_component)?;
         }
@@ -1730,13 +1895,83 @@ fn append_unreadable_root_args(
     if !unreadable_root.exists() {
         if let Some(first_missing_component) = find_first_non_existent_component(unreadable_root)
             && is_within_allowed_write_paths(&first_missing_component, allowed_write_paths)
+            && !hold_file_above_missing_path(
+                bwrap_args,
+                &first_missing_component,
+                allowed_write_paths,
+            )?
         {
             append_missing_empty_file_bind_data_args(bwrap_args, &first_missing_component)?;
         }
         return Ok(());
     }
 
+    // #562: another live run's placeholder (made in that run's writable
+    // root, which need not be one of this run's): mask it as before, and
+    // register it so that run's cleanup cannot remove it from under this one.
+    if let Some(metadata) = live_placeholder_file(unreadable_root) {
+        if has_synthetic_mount_target(bwrap_args, unreadable_root) {
+            return Ok(());
+        }
+        bwrap_args.args.push("--perms".to_string());
+        bwrap_args.args.push("000".to_string());
+        return append_existing_empty_file_bind_data_args(bwrap_args, unreadable_root, &metadata);
+    }
+
     append_existing_unreadable_path_args(bwrap_args, unreadable_root, allowed_write_paths)
+}
+
+/// #562: the folder `missing` would go in is a regular file, so `missing`
+/// needs no placeholder of its own (bubblewrap would fail the run: `Can't
+/// mkdir parents … Not a directory`). The file stays in place instead, so the
+/// command cannot remove it and create the path: another live run's
+/// placeholder (for a path below it, such as `~/Library` for
+/// `~/Library/Keychains`) is held as one (masked and registered, so that
+/// run's cleanup cannot remove it from under this one); any other file in a
+/// writable root is bound read-only where it is (a mount point cannot be
+/// removed or renamed). Returns whether `missing` needs nothing more.
+fn hold_file_above_missing_path(
+    bwrap_args: &mut BwrapArgs,
+    missing: &Path,
+    allowed_write_paths: &[PathBuf],
+) -> Result<bool> {
+    let Some(parent) = missing.parent() else {
+        return Ok(false);
+    };
+    if !fs::symlink_metadata(parent).is_ok_and(|metadata| metadata.file_type().is_file()) {
+        return Ok(false);
+    }
+    if has_synthetic_mount_target(bwrap_args, parent) || has_read_only_bind(bwrap_args, parent) {
+        return Ok(true);
+    }
+    if let Some(metadata) = live_placeholder_file(parent) {
+        append_existing_empty_file_bind_data_args(bwrap_args, parent, &metadata)?;
+    } else if is_within_allowed_write_paths(parent, allowed_write_paths) {
+        bwrap_args.args.push("--ro-bind".to_string());
+        bwrap_args.args.push(path_to_string(parent));
+        bwrap_args.args.push(path_to_string(parent));
+    }
+    Ok(true)
+}
+
+fn has_read_only_bind(bwrap_args: &BwrapArgs, path: &Path) -> bool {
+    let path = path_to_string(path);
+    bwrap_args
+        .args
+        .windows(3)
+        .any(|window| window[0] == "--ro-bind" && window[1] == path && window[2] == path)
+}
+
+/// #562: `path` when it is an empty file another live run registered as its
+/// placeholder.
+fn live_placeholder_file(path: &Path) -> Option<Metadata> {
+    let metadata = empty_file_metadata(path)?;
+    crate::linux_run_main::is_live_placeholder(path).then_some(metadata)
+}
+
+fn empty_file_metadata(path: &Path) -> Option<Metadata> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    (metadata.file_type().is_file() && metadata.len() == 0).then_some(metadata)
 }
 
 fn append_existing_unreadable_path_args(
@@ -1797,7 +2032,8 @@ enum EmptyProtectedMetadataPath {
 
 fn transient_empty_metadata_path(path: &Path) -> Option<EmptyProtectedMetadataPath> {
     if !path.file_name().is_some_and(is_protected_metadata_name) {
-        return None;
+        // #562: another live run's placeholder, whatever its name.
+        return live_placeholder_file(path).map(EmptyProtectedMetadataPath::File);
     }
 
     let metadata = fs::symlink_metadata(path).ok()?;
@@ -2975,9 +3211,109 @@ mod tests {
         assert!(target_bind < read_only_bind, "{:?}", args.args);
     }
 
-    /// #503: a writable link to a workspace's `.git` is bound after the
-    /// workspace (deeper target) and the workspace's read-only `.git` is
-    /// applied again over it.
+    /// #536: with pinned roots, each writable root is bound with `--bind-fd`
+    /// from the folder opened at its pinned location (never `--bind` by
+    /// path), `/dev/null` stays the first preserved file for the
+    /// `--ro-bind-data` masks, a root swapped for a link is refused, and so
+    /// is a bubblewrap without `--bind-fd`.
+    #[test]
+    fn pinned_writable_roots_are_bound_from_checked_folders() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let base = temp_dir.path().canonicalize().expect("canonical");
+        let workspace = base.join("ws");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let secret = workspace.join("secret.txt");
+        std::fs::write(&secret, "x").expect("secret");
+        let entry = |path: &Path, access| FileSystemSandboxEntry {
+            path: FileSystemPath::Path {
+                path: AbsolutePathBuf::try_from(path).expect("absolute path"),
+            },
+            access,
+            missing_path_behavior: None,
+        };
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                access: FileSystemAccessMode::Read,
+                missing_path_behavior: None,
+            },
+            entry(&workspace, FileSystemAccessMode::Write),
+            entry(&secret, FileSystemAccessMode::Deny),
+        ]);
+        let roots: &'static [PinnedWritableRoot] = Box::leak(
+            vec![PinnedWritableRoot {
+                root: AbsolutePathBuf::try_from(workspace.as_path()).expect("absolute"),
+                real: workspace.clone(),
+            }]
+            .into_boxed_slice(),
+        );
+        let pins = |bind_fd| Some(WritableRootPins { roots, bind_fd });
+        let args = create_filesystem_args_with_pins(
+            &policy,
+            &workspace,
+            NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH,
+            pins(true),
+        )
+        .expect("filesystem args");
+        let ws = path_to_string(&workspace);
+        assert!(
+            !args
+                .args
+                .windows(3)
+                .any(|window| window == ["--bind", ws.as_str(), ws.as_str()]),
+            "{:?}",
+            args.args
+        );
+        let bind = args
+            .args
+            .windows(3)
+            .find(|window| window[0] == "--bind-fd" && window[2] == ws)
+            .expect("bound with --bind-fd");
+        let fd_target =
+            |fd: &str| std::fs::read_link(format!("/proc/self/fd/{fd}")).expect("preserved fd");
+        assert_eq!(fd_target(&bind[1]), workspace);
+        assert_eq!(
+            fd_target(&args.preserved_files[0].as_raw_fd().to_string()),
+            PathBuf::from("/dev/null")
+        );
+        assert!(
+            args.args
+                .windows(3)
+                .any(|window| window[0] == "--ro-bind-data"
+                    && window[1] == args.preserved_files[0].as_raw_fd().to_string()),
+            "{:?}",
+            args.args
+        );
+
+        assert!(
+            create_filesystem_args_with_pins(
+                &policy,
+                &workspace,
+                NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH,
+                pins(false),
+            )
+            .is_err()
+        );
+        std::fs::rename(&workspace, base.join("moved")).expect("move away");
+        std::fs::create_dir(base.join("elsewhere")).expect("elsewhere");
+        std::os::unix::fs::symlink(base.join("elsewhere"), &workspace).expect("link");
+        let err = create_filesystem_args_with_pins(
+            &policy,
+            &workspace,
+            NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH,
+            pins(true),
+        )
+        .expect_err("a swapped root is refused");
+        assert!(
+            err.to_string().contains("Refused to run the command"),
+            "{err}"
+        );
+    }
+
+    /// #503: a writable link to a workspace's `.git` cannot make it writable;
+    /// since #535 the link is no writable root at all.
     #[cfg(unix)]
     #[test]
     fn writable_link_to_protected_git_keeps_it_read_only() {
@@ -3001,17 +3337,23 @@ mod tests {
             create_filesystem_args(&policy, temp_dir.path(), NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
                 .expect("filesystem args");
         let git = path_to_string(&git);
-        let git_bind = args
-            .args
-            .windows(3)
-            .position(|window| window == ["--bind", git.as_str(), git.as_str()])
-            .expect("link should be bound at `.git`");
-        let git_read_only = args
-            .args
-            .windows(3)
-            .rposition(|window| window == ["--ro-bind", git.as_str(), git.as_str()])
-            .expect("`.git` should be bound read-only");
-        assert!(git_bind < git_read_only, "{:?}", args.args);
+        // #535 (Travis, 2026-10-12): the link is no grant, so `.git` is never
+        // bound writable, and stays read-only.
+        assert!(
+            !args
+                .args
+                .windows(3)
+                .any(|window| window == ["--bind", git.as_str(), git.as_str()]),
+            "{:?}",
+            args.args
+        );
+        assert!(
+            args.args
+                .windows(3)
+                .any(|window| window == ["--ro-bind", git.as_str(), git.as_str()]),
+            "{:?}",
+            args.args
+        );
     }
 
     /// #503: a denial spelled through a link is masked at the link's target.
@@ -3979,6 +4321,86 @@ mod tests {
         } else {
             FileSystemSandboxEntry::new(path, access)
         }
+    }
+
+    /// #587: with denials, each folder between the writable root and a
+    /// protected path is bound onto itself before the pass's masks (a mount
+    /// point cannot be renamed); the protected folder itself and folders
+    /// below it are not. Without denials (Permissive) nothing is pinned.
+    #[test]
+    fn folders_above_protected_paths_are_pinned_before_their_masks() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let base = temp_dir.path().canonicalize().expect("canonical");
+        let home = base.join("outer/home");
+        std::fs::create_dir_all(home.join("skills/inner")).expect("home");
+        std::fs::write(home.join("auth.json"), "x").expect("store");
+        let writable = FileSystemSandboxEntry {
+            path: FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            },
+            access: FileSystemAccessMode::Write,
+            missing_path_behavior: None,
+        };
+        let read_only = path_entry(
+            &home.join("skills"),
+            FileSystemAccessMode::Read,
+            /*skip_missing*/ true,
+        );
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            writable.clone(),
+            path_entry(
+                &home.join("auth.json"),
+                FileSystemAccessMode::Deny,
+                /*skip_missing*/ true,
+            ),
+            read_only.clone(),
+        ]);
+        // A folder the user owns but cannot write right now could be made
+        // writable first: its entries are pinned too.
+        let outer = base.join("outer");
+        std::fs::set_permissions(
+            &outer,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o555),
+        )
+        .expect("chmod");
+        let args = create_filesystem_args(&policy, &base, NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
+            .expect("bwrap fs args")
+            .args;
+        std::fs::set_permissions(
+            &outer,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+        )
+        .expect("chmod");
+        let binds: Vec<&str> = args
+            .windows(3)
+            .filter(|window| window[0] == "--bind-try" && window[1] == window[2])
+            .map(|window| window[1].as_str())
+            .collect();
+        let path = |path: &Path| path_to_string(path);
+        for folder in [&base, &base.join("outer"), &home] {
+            assert!(
+                binds.contains(&path(folder).as_str()),
+                "{folder:?}: {args:?}"
+            );
+        }
+        for folder in [home.join("skills"), home.join("skills/inner")] {
+            assert!(
+                !binds.contains(&path(&folder).as_str()),
+                "{folder:?}: {args:?}"
+            );
+        }
+        let position = |flag: &str, target: &Path| {
+            args.windows(2)
+                .position(|window| window[0] == flag && window[1] == path(target))
+                .expect("mount")
+        };
+        assert!(position("--bind-try", &home) < position("--ro-bind", &home.join("skills")));
+
+        let workspace = FileSystemSandboxPolicy::restricted(vec![writable, read_only]);
+        let args = create_filesystem_args(&workspace, &base, NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
+            .expect("bwrap fs args")
+            .args;
+        assert!(!args.iter().any(|arg| arg == "--bind-try"), "{args:?}");
     }
 
     /// #473: `~/.claude` read-only (it runs hooks) with no

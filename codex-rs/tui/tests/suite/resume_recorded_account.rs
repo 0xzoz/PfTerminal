@@ -30,10 +30,10 @@ use crate::support::tmux::TmuxKey;
 use crate::support::tmux::TmuxPane;
 use crate::support::tmux::TmuxServer;
 
-const READY_TIMEOUT: Duration = Duration::from_secs(30);
-const PROMPT: &str = "pf84 545 recorded account prompt";
-const REPLY: &str = "pf84 545 recorded account reply";
-const ONBOARDING: &str = "Use your Z.AI API key";
+pub(super) const READY_TIMEOUT: Duration = Duration::from_secs(30);
+pub(super) const PROMPT: &str = "pf84 545 recorded account prompt";
+pub(super) const REPLY: &str = "pf84 545 recorded account reply";
+pub(super) const ONBOARDING: &str = "Use your Z.AI API key";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tmux_resume_uses_recorded_named_account_without_default_key() -> Result<()> {
@@ -121,7 +121,42 @@ async fn tmux_resume_names_a_missing_recorded_account_with_recovery() -> Result<
     Ok(())
 }
 
-fn wait_resumed_on_work(pane: &TmuxPane<'_>) -> Result<()> {
+/// PF-84 #555: `corbanu fork <id>` runs the fork on the account the
+/// conversation recorded, and `/status` names it, rather than the
+/// `[provider_accounts]` account.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tmux_fork_runs_on_the_recorded_account() -> Result<()> {
+    if !TmuxServer::should_run("PF-84 #555 fork on the recorded account")? {
+        return Ok(());
+    }
+    let repo_root = codex_utils_cargo_bin::repo_root()?;
+    let binary = corbanu_binary(&repo_root)?;
+    let home = tempdir()?;
+    write_config_with(
+        home.path(),
+        &repo_root,
+        "\n[provider_accounts]\nzai = \"personal\"\n",
+    )?;
+    add_account(&binary, home.path(), "work")?;
+    add_account(&binary, home.path(), "personal")?;
+    let thread_id = seed_rollout(home.path(), &repo_root, "work")?;
+
+    let tmux = TmuxServer::start("pf84_555_fork_recorded_account")?;
+    let session = tmux.new_session(launch_spec(
+        "pf84-555-fork-id",
+        &binary,
+        &repo_root,
+        home.path(),
+        Some("fork"),
+        &[thread_id.to_string()],
+    ))?;
+    let pane = session.primary_pane();
+    wait_resumed_on_work(pane)?;
+    exit_tui(pane)?;
+    Ok(())
+}
+
+pub(super) fn wait_resumed_on_work(pane: &TmuxPane<'_>) -> Result<()> {
     let screen = pane.wait_stable_until(
         "the resumed conversation, or onboarding",
         READY_TIMEOUT,
@@ -140,9 +175,9 @@ fn wait_resumed_on_work(pane: &TmuxPane<'_>) -> Result<()> {
     Ok(())
 }
 
-/// Exits through `/exit`; the wrapper shell reports the exit status.
-fn exit_tui(pane: &TmuxPane<'_>) -> Result<()> {
-    pane.send_key(TmuxKey::Escape)?;
+/// Exits through `/exit`; the wrapper shell reports the exit status. No Esc
+/// first: Esc right before the text can arrive as Alt+`/`.
+pub(super) fn exit_tui(pane: &TmuxPane<'_>) -> Result<()> {
     pane.send_literal("/exit")?;
     pane.wait_stable_contains("/exit", READY_TIMEOUT)?;
     pane.send_key(TmuxKey::Enter)?;
@@ -152,11 +187,23 @@ fn exit_tui(pane: &TmuxPane<'_>) -> Result<()> {
 
 /// Runs `corbanu resume <args>` with no Z.AI key in the environment and keeps
 /// the pane open after exit so the error and exit status stay visible.
-fn resume_spec(
+pub(super) fn resume_spec(
     name: &str,
     binary: &Path,
     repo_root: &Path,
     home: &Path,
+    args: &[String],
+) -> SessionSpec {
+    launch_spec(name, binary, repo_root, home, Some("resume"), args)
+}
+
+/// Runs `corbanu <subcommand> <args>` like [`resume_spec`].
+pub(super) fn launch_spec(
+    name: &str,
+    binary: &Path,
+    repo_root: &Path,
+    home: &Path,
+    subcommand: Option<&str>,
     args: &[String],
 ) -> SessionSpec {
     let mut command = CommandSpec::new("/bin/sh")
@@ -164,9 +211,13 @@ fn resume_spec(
         .env("CORBANU_HOME", home)
         .env("PFTERMINAL_HOME", home)
         .arg("-c")
-        .arg("unset ZAI_API_KEY; \"$0\" \"$@\"; echo \"EXITED $?\"; sleep 600")
-        .arg(binary)
-        .arg("resume");
+        .arg(
+            "unset ZAI_API_KEY OPENAI_API_KEY CODEX_API_KEY; \"$0\" \"$@\"; echo \"EXITED $?\"; sleep 600",
+        )
+        .arg(binary);
+    if let Some(subcommand) = subcommand {
+        command = command.arg(subcommand);
+    }
     for arg in args {
         command = command.arg(arg);
     }
@@ -186,13 +237,32 @@ fn resume_spec(
     .current_dir(repo_root)
 }
 
-fn write_config(home: &Path, repo_root: &Path) -> Result<()> {
+pub(super) fn write_config(home: &Path, repo_root: &Path) -> Result<()> {
+    write_config_with(home, repo_root, "")
+}
+
+/// [`write_config`] plus `extra` TOML tables.
+pub(super) fn write_config_with(home: &Path, repo_root: &Path, extra: &str) -> Result<()> {
+    write_config_on(
+        home,
+        repo_root,
+        "model = \"glm-5.3-flash\"\nmodel_provider = \"zai\"",
+        extra,
+    )
+}
+
+/// [`write_config_with`] for the model and provider `session` selects.
+pub(super) fn write_config_on(
+    home: &Path,
+    repo_root: &Path,
+    session: &str,
+    extra: &str,
+) -> Result<()> {
     fs::create_dir_all(home.join("log"))?;
     fs::write(
         home.join("config.toml"),
         format!(
-            r#"model = "glm-5.3-flash"
-model_provider = "zai"
+            r#"{session}
 suppress_unstable_features_warning = true
 check_for_update_on_startup = false
 log_dir = "{}"
@@ -202,7 +272,7 @@ named_accounts = true
 
 [projects."{}"]
 trust_level = "trusted"
-"#,
+{extra}"#,
             home.join("log").display(),
             repo_root.display(),
         ),
@@ -211,7 +281,7 @@ trust_level = "trusted"
 }
 
 /// Enrols a named Z.AI account with a synthetic key, as a user would.
-fn add_account(binary: &Path, home: &Path, name: &str) -> Result<()> {
+pub(super) fn add_account(binary: &Path, home: &Path, name: &str) -> Result<()> {
     let mut child = Command::new(binary)
         .args(["account", "add", "zai", name])
         .env("CODEX_HOME", home)
@@ -238,7 +308,7 @@ fn add_account(binary: &Path, home: &Path, name: &str) -> Result<()> {
 }
 
 /// A one-turn conversation whose turn context recorded `zai` account `account`.
-fn seed_rollout(home: &Path, repo_root: &Path, account: &str) -> Result<ThreadId> {
+pub(super) fn seed_rollout(home: &Path, repo_root: &Path, account: &str) -> Result<ThreadId> {
     let thread_id = ThreadId::new();
     let dir = home.join("sessions/2026/10/11");
     fs::create_dir_all(&dir)?;
@@ -299,7 +369,7 @@ fn seed_rollout(home: &Path, repo_root: &Path, account: &str) -> Result<ThreadId
     Ok(thread_id)
 }
 
-fn corbanu_binary(repo_root: &Path) -> Result<PathBuf> {
+pub(super) fn corbanu_binary(repo_root: &Path) -> Result<PathBuf> {
     for name in ["corbanu", "codex"] {
         if let Ok(binary) = codex_utils_cargo_bin::cargo_bin(name) {
             return Ok(binary);

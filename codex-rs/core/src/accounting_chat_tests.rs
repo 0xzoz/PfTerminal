@@ -18,7 +18,6 @@ use codex_state::accounting::Observation;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use futures::FutureExt;
 use futures::StreamExt;
-use futures::poll;
 use pretty_assertions::assert_eq;
 use std::sync::atomic::AtomicUsize;
 
@@ -492,15 +491,14 @@ async fn accounting_chat_bootstrap_cancel_scope_and_latch() -> anyhow::Result<()
             .is_none()
     );
     assert!(deferred.check().is_err());
+    // Opening a sampling writes nothing, so another connection holding the
+    // state DB's write lock does not hold it up.
     let fixture = Fixture::new().await?;
-    let permit = crate::accounting::writes().acquire().await?;
-    let mut pending = Box::pin(fixture.resolve());
-    assert!(poll!(&mut pending).is_pending());
-    drop(pending);
-    drop(permit);
-    assert!(fixture.deferred.check().is_err());
-    assert!(!fixture.deferred.sampling.initialized());
-    assert!(fixture.rows::<Attempt>(ATTEMPTS).await.is_err());
+    let mut lock = crate::accounting::tests_support::hold_write_lock(&fixture.db).await?;
+    tokio::time::timeout(std::time::Duration::from_secs(5), fixture.resolve()).await??;
+    fixture.deferred.check()?;
+    assert!(fixture.deferred.sampling.initialized());
+    sqlx::query("ROLLBACK").execute(&mut *lock).await?;
     fixture.db.close().await;
     let fixture = Fixture::new().await?;
     let slot = Slot::default();

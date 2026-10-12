@@ -28,6 +28,7 @@ use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::FileSystemSandboxEntry;
 use codex_protocol::permissions::FileSystemSandboxKind;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
+use codex_protocol::permissions::FileSystemSpecialPath;
 use codex_protocol::permissions::ReadDenyMatcher;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use std::path::Path;
@@ -57,6 +58,9 @@ const CORBANU_STORES: &[&str] = &[
     "security_level.toml",
     "security_state.json",
     "security_state.lock",
+    // #562: read as instructions ahead of AGENTS.md; a command may not
+    // create it either.
+    "AGENTS.override.md",
     "wallet",
     "run",
     "log",
@@ -77,6 +81,13 @@ const CORBANU_READ_ONLY: &[&str] = &[
     "packages",
     "AGENTS.md",
 ];
+
+/// #583: the Corbanu home folder commands keep writing in, also when the
+/// home itself is read-only (Corbanu's own git worktrees).
+const HOME_WRITABLE: &str = "worktrees";
+
+/// The one runtime entry that is a file (#562).
+const DEFAULT_AGENTS_MD: &str = "AGENTS.md";
 
 /// State and log databases, created after launch.
 const CORBANU_DATABASES: &str = "*.sqlite*";
@@ -122,6 +133,9 @@ pub(crate) struct ReadDenials {
     /// The same for the project's `.codex` and `.agents`: never lifted by a
     /// grant either (#442, Travis 2026-10-11).
     never_lifted: Vec<AbsolutePathBuf>,
+    /// #583: `worktrees` inside the read-only Corbanu home (each spelling),
+    /// which stays writable where the profile can write it.
+    home_writable: Vec<AbsolutePathBuf>,
     /// Where the profile's relative entries resolve (the turn's folder).
     cwd: Option<AbsolutePathBuf>,
     /// The Corbanu home, unless it is a folder the command keeps.
@@ -159,7 +173,7 @@ impl ReadDenials {
             denials.home = Some(codex_home.clone());
         }
         for entry in CORBANU_READ_ONLY {
-            denials.push_home_read_only(codex_home.join(entry), keep);
+            denials.push_runtime_read_only(codex_home.join(entry), keep);
         }
         denials.runtime_read_only = std::mem::take(&mut denials.read_only);
         // #442 (Travis, 2026-10-11): the project's agent settings stay
@@ -170,6 +184,9 @@ impl ReadDenials {
             }
         }
         denials.never_lifted = std::mem::take(&mut denials.read_only);
+        if denials.home.is_some() {
+            denials.protect_home(&codex_home, keep);
+        }
         for root in keep {
             for entry in WORKSPACE_PERSISTENCE {
                 if !WORKSPACE_AGENT_SETTINGS.contains(entry) {
@@ -242,6 +259,19 @@ impl ReadDenials {
         workspace_roots: &[AbsolutePathBuf],
         profile: &PermissionProfile,
     ) -> Self {
+        let can_write_home = profile
+            .file_system_sandbox_policy()
+            .can_write_path_with_cwd(codex_home, turn_cwd.as_path());
+        // #562: only where the command could otherwise create them.
+        if cfg!(target_os = "linux") && can_write_home {
+            create_missing_runtime_folders(codex_home);
+        }
+        // #583: the read-only home keeps `worktrees` writable only as a real
+        // folder, so it is made (empty, as Corbanu would) where the command
+        // could have made it before.
+        if !cfg!(windows) && can_write_home {
+            let _ = std::fs::create_dir(codex_home.join(HOME_WRITABLE));
+        }
         let mut keep = vec![turn_cwd.clone()];
         keep.extend(workspace_roots.iter().cloned());
         keep.extend(
@@ -259,6 +289,90 @@ impl ReadDenials {
                 .map(Path::new),
             &keep,
         )
+    }
+
+    /// #583: the Corbanu home itself is read-only, so a protected command
+    /// cannot create an entry Corbanu reads later where it is missing:
+    /// exec-policy `rules/` (which would approve commands in later
+    /// sessions), `hooks.json`, `agents/` or any other name; every existing
+    /// entry is already denied or read-only. Like the project's `.codex`, no
+    /// grant lifts it; a person's approval of one command under Moderate
+    /// does (#540), as it does the other rules. `worktrees` stays writable
+    /// where the profile can write it, also when the command works in it.
+    ///
+    /// Left as before (the home stays writable but for its other rules):
+    /// a command working in the home itself, or in a folder of it outside
+    /// `worktrees` (a writable carve-out there would become a sandbox root
+    /// with its own default protections, such as a read-only git folder);
+    /// and Windows, whose sandbox drops these entries anyway. On Linux a
+    /// missing store below the home makes bubblewrap mount it as a read-only
+    /// snapshot of its entries (#473), so nothing created in it after launch
+    /// is visible either.
+    fn protect_home(&mut self, codex_home: &AbsolutePathBuf, keep: &[AbsolutePathBuf]) {
+        if cfg!(windows) {
+            return;
+        }
+        if real_location(codex_home).is_none() {
+            return;
+        }
+        // As read-only paths: the real location, and on macOS the link name.
+        let spellings = |path: &AbsolutePathBuf| {
+            let mut spellings: Vec<AbsolutePathBuf> = real_location(path).into_iter().collect();
+            if cfg!(target_os = "macos") && !spellings.contains(path) {
+                spellings.push(path.clone());
+            }
+            spellings
+        };
+        let homes = spellings(codex_home);
+        let worktrees = spellings(&codex_home.join(HOME_WRITABLE));
+        let inside_home = |folder: &AbsolutePathBuf| {
+            homes.iter().any(|home| {
+                folder.as_path() != home.as_path() && folder.as_path().starts_with(home.as_path())
+            })
+        };
+        let in_worktrees = |folder: &AbsolutePathBuf| {
+            worktrees
+                .iter()
+                .any(|worktrees| folder.as_path().starts_with(worktrees.as_path()))
+        };
+        if keep
+            .iter()
+            .flat_map(spellings)
+            .any(|kept| inside_home(&kept) && !in_worktrees(&kept))
+        {
+            return;
+        }
+        for home in &homes {
+            if !self.never_lifted.contains(home) {
+                self.never_lifted.push(home.clone());
+            }
+        }
+        // Only a real folder: a link (`worktrees -> tmp`, or `-> .`, which a
+        // command a person approved could plant) would make what it points
+        // to writable instead.
+        let real_folder = std::fs::symlink_metadata(codex_home.join(HOME_WRITABLE).as_path())
+            .is_ok_and(|metadata| metadata.is_dir());
+        for folder in worktrees {
+            // A spelling through a link below the top-level folders (a home
+            // reached through `~/.corbanu -> /Volumes/x/home`) is left out:
+            // Seatbelt resolves a writable root, so it would open the link's
+            // target, which the profile's own rules never matched. The real
+            // location is kept, where the profile can write it.
+            if has_nested_link(folder.as_path()) {
+                continue;
+            }
+            let holds_runtime = self
+                .runtime_read_only
+                .iter()
+                .any(|runtime| runtime.as_path().starts_with(folder.as_path()));
+            if real_folder
+                && inside_home(&folder)
+                && !holds_runtime
+                && !self.home_writable.contains(&folder)
+            {
+                self.home_writable.push(folder);
+            }
+        }
     }
 
     fn holds_kept(path: &AbsolutePathBuf, keep: &[AbsolutePathBuf]) -> bool {
@@ -295,6 +409,16 @@ impl ReadDenials {
         self.push_read_only(path, keep);
     }
 
+    /// #562: a runtime entry of the Corbanu home, also when it is missing,
+    /// so a protected command cannot create it (`AGENTS.md`, `skills`). On
+    /// Linux bubblewrap holds a missing path with an empty read-only
+    /// placeholder for the command's run, as it does for the Corbanu stores;
+    /// `for_turn` first creates the missing runtime folders where the
+    /// profile could write them ([`create_missing_runtime_folders`]).
+    fn push_runtime_read_only(&mut self, path: AbsolutePathBuf, keep: &[AbsolutePathBuf]) {
+        self.push_read_only(path, keep);
+    }
+
     /// A read-only path, by its real location: below a symlinked folder the
     /// Linux sandbox cannot bind the link name. A path below a regular file
     /// (`.git` in a worktree) cannot exist and is left out. On macOS the link
@@ -324,6 +448,18 @@ impl ReadDenials {
         self.read_only.clear();
     }
 
+    /// Issue #540: only the rule that keeps the Corbanu home's runtime
+    /// entries read-only, for a command whose other rules a person's
+    /// approval lifted (Moderate, #239).
+    pub(crate) fn runtime_only(self) -> Self {
+        Self {
+            runtime_read_only: self.runtime_read_only,
+            cwd: self.cwd,
+            skipped: self.skipped,
+            ..Self::default()
+        }
+    }
+
     /// #506: under Aggressive, agent commands may not list the Corbanu home
     /// either. What is below it keeps these rules: its runtime entries stay
     /// readable, everything else stays denied.
@@ -345,6 +481,12 @@ impl ReadDenials {
     /// sandbox launchers), read-only wherever the rules apply.
     pub(crate) fn runtime_read_only_paths(&self) -> impl Iterator<Item = &AbsolutePathBuf> {
         self.runtime_read_only.iter()
+    }
+
+    /// #583: the folder inside the read-only Corbanu home that stays
+    /// writable where the profile can write it (`worktrees`).
+    pub(crate) fn home_writable_paths(&self) -> impl Iterator<Item = &AbsolutePathBuf> {
+        self.home_writable.iter()
     }
 
     /// Issue #513: the read-only paths no grant lifts (#442): the runtime
@@ -437,7 +579,16 @@ impl ReadDenials {
             return Some(profile.clone());
         }
         // Turns an unrestricted policy into full write access plus the
-        // denials, and appends them to a restricted one.
+        // denials, and appends them to a restricted one. Read-only paths
+        // alone (#540) turn it into full write access too.
+        if file_system.kind == FileSystemSandboxKind::Unrestricted && entries.is_empty() {
+            file_system = FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry::new(
+                FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                FileSystemAccessMode::Write,
+            )]);
+        }
         file_system
             .preserve_deny_read_restrictions_from(&FileSystemSandboxPolicy::restricted(entries));
         if file_system.kind != FileSystemSandboxKind::Restricted {
@@ -450,6 +601,19 @@ impl ReadDenials {
             .as_ref()
             .map_or_else(|| Path::new("/"), AbsolutePathBuf::as_path);
         let readable = Readability::new(&file_system, cwd);
+        // #583: what stays writable inside the read-only Corbanu home, where
+        // the profile could write it (more specific than the home's entry).
+        let home_writable: Vec<FileSystemSandboxEntry> = self
+            .home_writable
+            .iter()
+            .filter(|path| file_system.can_write_path_with_cwd(path.as_path(), cwd))
+            .map(|path| {
+                FileSystemSandboxEntry::skip_missing_path(
+                    FileSystemPath::Path { path: path.clone() },
+                    FileSystemAccessMode::Write,
+                )
+            })
+            .collect();
         let read_only: Vec<FileSystemSandboxEntry> = self
             .read_only_paths()
             .filter(|path| file_system.can_write_path_with_cwd(path.as_path(), cwd))
@@ -470,11 +634,40 @@ impl ReadDenials {
             })
             .collect();
         file_system.entries.extend(read_only);
+        file_system.entries.extend(home_writable);
         Some(PermissionProfile::from_runtime_permissions(
             &file_system,
             network,
         ))
     }
+}
+
+/// #562 (Linux): creates the Corbanu home's missing runtime folders, empty,
+/// as Corbanu would. They are then held read-only as they are, so bubblewrap
+/// never puts a placeholder file where Corbanu expects a folder (a skill or
+/// plugin install while a command runs, or one left behind). A runtime
+/// entry that is a link to a missing folder is left as it is (its target
+/// gets the placeholder). `AGENTS.md`, a file, keeps its placeholder: an
+/// empty one adds no instructions.
+pub(crate) fn create_missing_runtime_folders(codex_home: &Path) {
+    for entry in CORBANU_READ_ONLY {
+        if *entry != DEFAULT_AGENTS_MD {
+            // Fails harmlessly where it exists (also as a link) or the home
+            // is missing; the entry is protected either way.
+            let _ = std::fs::create_dir(codex_home.join(entry));
+        }
+    }
+}
+
+/// Whether a folder of `path` below the top-level ones is a link (top-level
+/// aliases such as `/tmp` on macOS are not counted), as Seatbelt tells them.
+fn has_nested_link(path: &Path) -> bool {
+    path.ancestors()
+        .filter(|ancestor| ancestor.parent().and_then(Path::parent).is_some())
+        .any(|ancestor| {
+            std::fs::symlink_metadata(ancestor)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        })
 }
 
 /// `path` with its nearest existing folder resolved, or `None` when that

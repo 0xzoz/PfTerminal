@@ -307,7 +307,12 @@ async fn accounting_chat_native_cancellation_and_two_reopens() -> anyhow::Result
     terminal(&test).await?;
     sqlx::query("ROLLBACK").execute(&mut lock).await?;
     gate.no_pending();
-    assert!(attempts(&db).await.unwrap_or_default().is_empty());
+    // The interrupt came while the sampling was still waiting for the ledger
+    // to open (the writer's first try waits up to `QUICK_BUSY_TIMEOUT`, here
+    // past the 100 ms above), so no admission was handed over.
+    assert!(db.flush_accounting(Duration::from_secs(30)).await);
+    assert_eq!(attempts(&db).await.unwrap_or_default().len(), 0);
+    assert!(observations(&db).await.unwrap_or_default().is_empty());
     stop(&test).await;
     for prefix in [false, true] {
         let server = MockServer::start().await;

@@ -6,7 +6,10 @@ mod model_key_broker;
 mod models_endpoint;
 mod provider;
 
+pub use account_check::AccountRecovery;
 pub use account_check::selected_account_error;
+pub use account_check::selected_account_error_with_recovery;
+pub use amazon_bedrock::amazon_bedrock_model_presets;
 pub use amazon_bedrock::is_supported_amazon_bedrock_region;
 pub use auth::AgentIdentitySessionFallback;
 pub use auth::ProviderApiKey;
@@ -15,6 +18,7 @@ pub use auth::ProviderAuthScope;
 pub use auth::ResolvedProviderAuth;
 pub use auth::auth_provider_from_auth;
 pub use auth::auth_provider_from_auth_manager;
+pub use auth::named_sign_in_account;
 pub use auth::provider_api_key;
 pub use auth::unauthenticated_auth_provider;
 pub use bearer_auth_provider::BearerAuthProvider;

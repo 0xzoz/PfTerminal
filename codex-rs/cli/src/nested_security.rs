@@ -64,8 +64,14 @@ pub(crate) fn nested_launch_kind(
         Subcommand::StdioToUds(_) => ("stdio-to-uds", Host),
         Subcommand::Vault(_) => ("vault", Credentials),
         Subcommand::Account(_) => ("account", Credentials),
-        Subcommand::InternalClaudeOauthToken { .. } => ("internal-claude-oauth-token", Credentials),
-        Subcommand::InternalGpuEndpointToken { .. } => ("internal-gpu-endpoint-token", Credentials),
+        Subcommand::InternalClaudeOauthToken { .. } => (
+            codex_login::auth::CLAUDE_PLAN_TOKEN_HELPER_SUBCOMMAND,
+            Credentials,
+        ),
+        Subcommand::InternalGpuEndpointToken { .. } => (
+            codex_login::auth::GPU_ENDPOINT_TOKEN_HELPER_SUBCOMMAND,
+            Credentials,
+        ),
         Subcommand::InternalGpuController(_) => ("internal-gpu-controller", Credentials),
         Subcommand::InternalClaudeLoginHealth { .. } => {
             ("internal-claude-login-health", Credentials)

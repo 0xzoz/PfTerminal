@@ -5,6 +5,7 @@
 // the TUI or the tracing stack).
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
+mod account_models_manager;
 mod anthropic_payload;
 mod apply_patch;
 mod apps;
@@ -60,6 +61,7 @@ pub(crate) mod mcp;
 mod mcp_skill_dependencies;
 mod mcp_tool_approval_templates;
 mod mcp_tool_exposure;
+mod model_info_for_provider;
 mod network_policy_decision;
 pub use mcp::McpManager;
 mod original_image_detail;
@@ -219,6 +221,7 @@ pub mod compact;
 pub mod memory_stage_one;
 mod memory_usage;
 mod model_broker_auth;
+mod provider_throttle;
 pub use model_broker_auth::BrokerModelAuthOrigin;
 pub use model_broker_auth::install_for_config as install_broker_model_auth;
 pub use model_broker_auth::removed_environment_keys as broker_removed_environment_keys;

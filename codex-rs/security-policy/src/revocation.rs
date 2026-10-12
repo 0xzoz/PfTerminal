@@ -415,6 +415,12 @@ impl RevocationState {
             .map(|event| &event.event_id)
     }
 
+    /// Whether the event `event_id` is part of this history (applied here or
+    /// merged in), e.g. whether a released kill switch was the one seen.
+    pub fn has_applied(&self, event_id: &BoundedText) -> bool {
+        self.applied_event_ids.contains(event_id)
+    }
+
     pub fn validate(&self) -> Result<(), RevocationError> {
         if self.schema_version != REVOCATION_SCHEMA_VERSION {
             return Err(RevocationError::UnsupportedSchemaVersion {

@@ -1568,6 +1568,75 @@ async fn pf_33_s02_guard_limits_seatbelt_egress_to_proxy_ports() -> anyhow::Resu
     Ok(())
 }
 
+/// #583: a writable root inside a read-only folder (the Corbanu home's
+/// `worktrees`) cannot be renamed or removed, so no link can take its place
+/// before the next command; writing inside it still works.
+#[test]
+fn a_writable_root_inside_a_read_only_folder_cannot_be_moved() {
+    let dir = TempDir::new().expect("tempdir");
+    let base = dir.path().canonicalize().expect("canonical");
+    let home = base.join("home");
+    fs::create_dir_all(home.join("worktrees")).expect("worktrees");
+    let entry = |path: &Path, access| FileSystemSandboxEntry {
+        path: FileSystemPath::Path {
+            path: AbsolutePathBuf::from_absolute_path(path).expect("absolute"),
+        },
+        access,
+        missing_path_behavior: None,
+    };
+    // A workspace covering the home, as `ReadDenials::apply` builds it.
+    let policy = FileSystemSandboxPolicy::restricted(vec![
+        FileSystemSandboxEntry {
+            path: FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            },
+            access: FileSystemAccessMode::Read,
+            missing_path_behavior: None,
+        },
+        entry(&base, FileSystemAccessMode::Write),
+        entry(&home.join("auth.json"), FileSystemAccessMode::Deny),
+        entry(&home, FileSystemAccessMode::Read),
+        entry(&home.join("worktrees"), FileSystemAccessMode::Write),
+    ]);
+    let script = "mv home/worktrees wt; echo mv=$?; rmdir home/worktrees; echo rmdir=$?; \
+                  echo ok > home/worktrees/ok && echo wrote";
+    let args = create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
+        command: vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
+        file_system_sandbox_policy: &policy,
+        network_sandbox_policy: NetworkSandboxPolicy::Restricted,
+        sandbox_policy_cwd: &base,
+        enforce_managed_network: false,
+        managed_network: None,
+        environment_id: None,
+        network: None,
+        extra_allow_unix_sockets: &[],
+    })
+    .expect("args");
+    // Guarded explicitly, whatever its protected names do.
+    let worktrees = format!("={}", home.join("worktrees").display());
+    assert!(
+        args.iter()
+            .any(|arg| arg.starts_with("-DRENAME_GUARD_") && arg.ends_with(&worktrees)),
+        "{args:?}"
+    );
+    let output = Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
+        .args(&args)
+        .current_dir(&base)
+        .output()
+        .expect("run seatbelt");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if String::from_utf8_lossy(&output.stderr)
+        .contains("sandbox-exec: sandbox_apply: Operation not permitted")
+    {
+        return;
+    }
+    for held in ["mv=1", "rmdir=1", "wrote"] {
+        assert!(stdout.contains(held), "{held}: {stdout}");
+    }
+    assert!(home.join("worktrees").is_dir());
+    assert!(!base.join("wt").exists());
+}
+
 /// PF-23-S02: once a policy denies reads, a protected path's folders cannot
 /// be renamed (which would move it out from under its rule), and a
 /// protected symlink cannot be removed; writing elsewhere in those folders
@@ -2071,6 +2140,245 @@ fn sandboxed_commands_cannot_read_denied_files_through_a_nested_link() {
     }
 }
 
+fn path_entry(path: &Path, access: FileSystemAccessMode) -> FileSystemSandboxEntry {
+    FileSystemSandboxEntry {
+        path: FileSystemPath::Path {
+            path: AbsolutePathBuf::from_absolute_path(path).expect("absolute"),
+        },
+        access,
+        missing_path_behavior: None,
+    }
+}
+
+fn run_in_seatbelt(policy: &FileSystemSandboxPolicy, cwd: &Path, script: &str) -> String {
+    let args = seatbelt_args(
+        policy,
+        cwd,
+        vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
+    );
+    let output = Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
+        .args(&args)
+        .current_dir(cwd)
+        .output()
+        .expect("run seatbelt");
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// #529: a writable root that is a link to the workspace's `.git` cannot
+/// reopen it (Linux since #511), nor can a writable link into another root
+/// reopen that root's read-only path. Each stays read-only through the link
+/// and under its real path; the rest stays writable.
+#[test]
+fn writable_links_cannot_reopen_read_only_paths_of_other_roots() {
+    let base = TempDir::new().expect("tempdir");
+    let base = base.path().canonicalize().expect("canonical");
+    let workspace = base.join("ws");
+    let git = workspace.join(".git");
+    fs::create_dir_all(&git).expect(".git");
+    fs::write(git.join("HEAD"), "ref: refs/heads/main\n").expect("HEAD");
+    let git_link = base.join("gitlink");
+    std::os::unix::fs::symlink(&git, &git_link).expect("link to .git");
+    let outer = base.join("outer");
+    let target = outer.join("c");
+    let read_only = target.join("ro");
+    fs::create_dir_all(&read_only).expect("ro");
+    let link = base.join("link");
+    std::os::unix::fs::symlink(&target, &link).expect("link into outer");
+    let denied = base.join("denied");
+    fs::write(&denied, "x").expect("denied");
+    let root_read = FileSystemSandboxEntry {
+        path: FileSystemPath::Special {
+            value: FileSystemSpecialPath::Root,
+        },
+        access: FileSystemAccessMode::Read,
+        missing_path_behavior: None,
+    };
+    let policy = FileSystemSandboxPolicy::restricted(vec![
+        root_read,
+        path_entry(&workspace, FileSystemAccessMode::Write),
+        path_entry(&git_link, FileSystemAccessMode::Write),
+        path_entry(&outer, FileSystemAccessMode::Write),
+        path_entry(&link, FileSystemAccessMode::Write),
+        path_entry(&read_only, FileSystemAccessMode::Read),
+        path_entry(&denied, FileSystemAccessMode::Deny),
+    ]);
+    let script = format!(
+        "echo x >> '{git}/HEAD'; echo git=$?; echo x >> '{git_link}/HEAD'; echo gitlink=$?; \
+         echo x > '{read_only}/a'; echo ro=$?; echo x > '{link}/ro/b'; echo linkro=$?; \
+         echo x > '{workspace}/file'; echo ws=$?; echo x > '{link}/file'; echo link=$?",
+        git = git.display(),
+        git_link = git_link.display(),
+        read_only = read_only.display(),
+        link = link.display(),
+        workspace = workspace.display(),
+    );
+    let stdout = run_in_seatbelt(&policy, &workspace, &script);
+    assert_lines(
+        &stdout,
+        &["git=1", "gitlink=1", "ro=1", "linkro=1", "ws=0", "link=0"],
+    );
+    assert_eq!(
+        fs::read_to_string(git.join("HEAD")).expect("HEAD"),
+        "ref: refs/heads/main\n"
+    );
+    assert!(!read_only.join("a").exists() && !read_only.join("b").exists());
+}
+
+/// #529: a policy without denied paths (Permissive's shape) keeps today's
+/// write clauses for an outer root holding the workspace: the change applies
+/// only once the policy denies reads. #535 (Travis, 2026-10-12): a writable
+/// link to the workspace's `.git` is no grant at either.
+#[test]
+fn writable_link_clauses_are_unchanged_without_denials() {
+    let base = TempDir::new().expect("tempdir");
+    let base = base.path().canonicalize().expect("canonical");
+    let workspace = base.join("ws");
+    fs::create_dir_all(workspace.join(".git")).expect(".git");
+    let git_link = base.join("gitlink");
+    std::os::unix::fs::symlink(workspace.join(".git"), &git_link).expect("link");
+    let root_read = FileSystemSandboxEntry {
+        path: FileSystemPath::Special {
+            value: FileSystemSpecialPath::Root,
+        },
+        access: FileSystemAccessMode::Read,
+        missing_path_behavior: None,
+    };
+    let with_link = |outer: bool, denied: bool| {
+        let mut entries = vec![
+            root_read.clone(),
+            path_entry(&workspace, FileSystemAccessMode::Write),
+            path_entry(&git_link, FileSystemAccessMode::Write),
+        ];
+        if outer {
+            entries.push(path_entry(&base, FileSystemAccessMode::Write));
+        }
+        if denied {
+            entries.push(path_entry(&base.join("denied"), FileSystemAccessMode::Deny));
+        }
+        let args = seatbelt_args(
+            &FileSystemSandboxPolicy::restricted(entries),
+            &workspace,
+            vec!["/bin/true".to_string()],
+        );
+        generated_clauses(&args, "WRITABLE_ROOT")
+    };
+    let head = workspace.join(".git/HEAD");
+    assert!(!clauses_allow(&with_link(false, false), &head));
+    assert!(clauses_allow(&with_link(true, false), &head));
+    let write = with_link(true, true);
+    assert!(!clauses_allow(&write, &head));
+    assert!(clauses_allow(&write, &workspace.join("file")));
+}
+
+fn assert_lines(stdout: &str, expected: &[&str]) {
+    for line in expected {
+        assert!(
+            stdout.lines().any(|got| got == *line),
+            "{line} not in {stdout}"
+        );
+    }
+}
+
+fn root_read_entry() -> FileSystemSandboxEntry {
+    FileSystemSandboxEntry {
+        path: FileSystemPath::Special {
+            value: FileSystemSpecialPath::Root,
+        },
+        access: FileSystemAccessMode::Read,
+        missing_path_behavior: None,
+    }
+}
+
+/// #529 review: a writable folder holding the workspace (like `/tmp`)
+/// cannot write, create or rename-around the workspace's protected
+/// metadata, whether it exists or not.
+#[test]
+fn an_outer_writable_root_keeps_the_workspace_metadata_protected() {
+    let base = TempDir::new().expect("tempdir");
+    let base = base.path().canonicalize().expect("canonical");
+    let outer = base.join("outer");
+    let workspace = outer.join("ws");
+    fs::create_dir_all(workspace.join(".git")).expect(".git");
+    fs::write(workspace.join(".git/HEAD"), "ref\n").expect("HEAD");
+    let policy = FileSystemSandboxPolicy::restricted(vec![
+        root_read_entry(),
+        path_entry(&outer, FileSystemAccessMode::Write),
+        path_entry(&workspace, FileSystemAccessMode::Write),
+        path_entry(&base.join("denied"), FileSystemAccessMode::Deny),
+    ]);
+    let script = format!(
+        "echo x >> '{ws}/.git/HEAD'; echo git=$?; mkdir '{ws}/.agents'; echo agents=$?; \
+         mkdir '{ws}/.codex'; echo codex=$?; mv '{ws}' '{outer}/moved'; echo moved=$?; \
+         mv '{ws}/.git' '{outer}/git'; echo gitmoved=$?; echo x > '{ws}/file'; echo ws=$?; \
+         echo x > '{outer}/file'; echo outer=$?",
+        ws = workspace.display(),
+        outer = outer.display(),
+    );
+    let stdout = run_in_seatbelt(&policy, &workspace, &script);
+    assert_lines(
+        &stdout,
+        &[
+            "git=1",
+            "agents=1",
+            "codex=1",
+            "moved=1",
+            "gitmoved=1",
+            "ws=0",
+            "outer=0",
+        ],
+    );
+    assert!(workspace.join(".git/HEAD").exists() && !workspace.join(".agents").exists());
+}
+
+/// #529 review: an explicit writable root stays writable when another root
+/// spells its folder through a link (the workspace opened through a nested
+/// link, its real `.git` granted).
+#[test]
+fn an_explicit_writable_root_stays_writable_under_another_spelling() {
+    let base = TempDir::new().expect("tempdir");
+    let base = base.path().canonicalize().expect("canonical");
+    let real = base.join("real");
+    fs::create_dir_all(real.join(".git")).expect(".git");
+    let link = base.join("link");
+    std::os::unix::fs::symlink(&real, &link).expect("link");
+    let policy = FileSystemSandboxPolicy::restricted(vec![
+        root_read_entry(),
+        path_entry(&link, FileSystemAccessMode::Write),
+        path_entry(&real.join(".git"), FileSystemAccessMode::Write),
+        path_entry(&base.join("denied"), FileSystemAccessMode::Deny),
+    ]);
+    let script = format!(
+        "echo x > '{real}/.git/HEAD'; echo git=$?; echo x > '{link}/.git/config'; echo linkgit=$?",
+        real = real.display(),
+        link = link.display(),
+    );
+    let stdout = run_in_seatbelt(&policy, &link, &script);
+    assert_lines(&stdout, &["git=0", "linkgit=0"]);
+}
+
+/// #529 review: a configured writable root not created yet inside another
+/// writable root (a `target` folder before the first build) can be created.
+#[test]
+fn a_missing_writable_root_inside_another_root_can_be_created() {
+    let base = TempDir::new().expect("tempdir");
+    let base = base.path().canonicalize().expect("canonical");
+    let workspace = base.join("ws");
+    fs::create_dir_all(&workspace).expect("ws");
+    let target = workspace.join("target");
+    let policy = FileSystemSandboxPolicy::restricted(vec![
+        root_read_entry(),
+        path_entry(&workspace, FileSystemAccessMode::Write),
+        path_entry(&target, FileSystemAccessMode::Write),
+        path_entry(&base.join("denied"), FileSystemAccessMode::Deny),
+    ]);
+    let script = format!(
+        "mkdir '{target}'; echo target=$?; echo x > '{target}/out'; echo out=$?",
+        target = target.display(),
+    );
+    let stdout = run_in_seatbelt(&policy, &workspace, &script);
+    assert_lines(&stdout, &["target=0", "out=0"]);
+}
+
 /// #506: a directory the policy may not list cannot be listed, by any
 /// spelling, under a read-only or a full-write base; its entries, their
 /// metadata and its own metadata stay as the rest of the policy leaves them,
@@ -2238,4 +2546,396 @@ fn credential_names_cannot_be_read_created_or_planted() {
             "{planted} was created"
         );
     }
+}
+
+/// Policies shaped like each security level, for the #535 tests: Permissive
+/// (a workspace-write config with extra writable roots, no denials), Moderate
+/// (the same with a denied path) and Aggressive (as Moderate, with the
+/// temporary folders not writable).
+fn level_policies(
+    workspace: &Path,
+    extra_writable: &[&Path],
+    denied: &Path,
+) -> Vec<(&'static str, FileSystemSandboxPolicy)> {
+    let workspace_write = |exclude_tmp: bool| {
+        FileSystemSandboxPolicy::from_legacy_sandbox_policy_for_cwd(
+            &SandboxPolicy::WorkspaceWrite {
+                writable_roots: extra_writable
+                    .iter()
+                    .map(|path| AbsolutePathBuf::from_absolute_path(path).expect("absolute"))
+                    .collect(),
+                network_access: false,
+                exclude_tmpdir_env_var: exclude_tmp,
+                exclude_slash_tmp: exclude_tmp,
+            },
+            workspace,
+        )
+    };
+    let denial = path_entry(denied, FileSystemAccessMode::Deny);
+    let permissive = workspace_write(false);
+    let mut moderate = permissive.entries.clone();
+    moderate.push(denial.clone());
+    let mut aggressive = workspace_write(true).entries;
+    aggressive.push(denial);
+    vec![
+        ("permissive", permissive),
+        ("moderate", FileSystemSandboxPolicy::restricted(moderate)),
+        (
+            "aggressive",
+            FileSystemSandboxPolicy::restricted(aggressive),
+        ),
+    ]
+}
+
+/// #535 (Travis, 2026-10-12: option B), real `sandbox-exec`: a writable root
+/// that is a link into another root's read-only path (a workspace's
+/// `.git/hooks`, or its `.git` itself) is not a grant at any level: the hooks
+/// and `.git` stay read-only through it, while the workspace stays writable.
+#[test]
+fn writable_links_into_a_read_only_path_are_not_grants_at_any_level() {
+    let base = TempDir::new().expect("tempdir");
+    let base = base.path().canonicalize().expect("canonical");
+    let workspace = base.join("ws");
+    let hooks = workspace.join(".git").join("hooks");
+    fs::create_dir_all(&hooks).expect("hooks");
+    fs::write(hooks.join("pre-commit"), "#!/bin/sh\n").expect("hook");
+    let hooks_link = base.join("hooks-link");
+    std::os::unix::fs::symlink(&hooks, &hooks_link).expect("link to hooks");
+    let git_link = base.join("git-link");
+    std::os::unix::fs::symlink(workspace.join(".git"), &git_link).expect("link to .git");
+    let denied = base.join("denied");
+    fs::write(&denied, "x").expect("denied");
+    // #535 review: on a filesystem that ignores case (macOS's default), links
+    // spelled in another case, and a link root typed in another case.
+    let ignores_case = base.join("WS").exists();
+    let case_hooks = base.join("case-hooks");
+    std::os::unix::fs::symlink(workspace.join(".GIT").join("hooks"), &case_hooks)
+        .expect("case link to hooks");
+    let case_git = base.join("case-git");
+    std::os::unix::fs::symlink(workspace.join(".Git"), &case_git).expect("case link to .git");
+    let typed = base.join("HOOKS-LINK");
+    let mut links: Vec<&Path> = vec![&hooks_link, &git_link];
+    if ignores_case {
+        links.extend([case_hooks.as_path(), case_git.as_path(), typed.as_path()]);
+    }
+    for (level, policy) in level_policies(&workspace, &links, &denied) {
+        let exclusions = policy.writable_links_into_read_only_paths(&workspace);
+        assert_eq!(exclusions.len(), links.len(), "{level}: {exclusions:?}");
+        let script = format!(
+            "echo x >> '{hooks_link}/pre-commit'; echo hook=$?; echo x > '{hooks_link}/new'; \
+             echo hooknew=$?; echo x > '{git_link}/HEAD'; echo gitlink=$?; \
+             echo x > '{hooks}/direct'; echo direct=$?; echo x > '{workspace}/file'; echo ws=$?; \
+             echo x > '{case_hooks}/case'; echo casehooks=$?; echo x > '{case_git}/HEAD'; \
+             echo casegit=$?; echo x > '{typed}/typed'; echo typed=$?",
+            hooks_link = hooks_link.display(),
+            git_link = git_link.display(),
+            hooks = hooks.display(),
+            workspace = workspace.display(),
+            case_hooks = case_hooks.display(),
+            case_git = case_git.display(),
+            typed = typed.display(),
+        );
+        let stdout = run_in_seatbelt(&policy, &workspace, &script);
+        for line in [
+            "hook=1",
+            "hooknew=1",
+            "gitlink=1",
+            "direct=1",
+            "ws=0",
+            "casehooks=1",
+            "casegit=1",
+            "typed=1",
+        ] {
+            assert!(
+                stdout.lines().any(|got| got == line),
+                "{level}: {line} not in {stdout}"
+            );
+        }
+        assert_eq!(
+            fs::read_to_string(hooks.join("pre-commit")).expect("hook"),
+            "#!/bin/sh\n",
+            "{level}"
+        );
+        assert!(!hooks.join("new").exists() && !workspace.join(".git/HEAD").exists());
+        assert!(!hooks.join("case").exists() && !hooks.join("typed").exists());
+        fs::remove_file(workspace.join("file")).expect("ws file");
+    }
+}
+
+/// #535: what stays a grant at every level: an explicit root spelled through
+/// the read-only path (the person names `.git/hooks` itself), a link that
+/// leads elsewhere, a workspace spelled through `/tmp` (`/private/tmp`), and
+/// a git worktree with the main checkout as an extra root.
+#[test]
+fn ordinary_roots_stay_writable_at_every_level() {
+    let base = tempfile::Builder::new()
+        .prefix("roots-535-")
+        .tempdir_in("/tmp")
+        .expect("tempdir in /tmp");
+    // Spelled through the `/tmp` alias on purpose.
+    let base = base.path().to_path_buf();
+    assert!(base.starts_with("/tmp"));
+    let main = base.join("main");
+    let gitdir = main.join(".git").join("worktrees").join("wt");
+    fs::create_dir_all(&gitdir).expect("gitdir");
+    fs::create_dir_all(main.join(".git/hooks")).expect("hooks");
+    let worktree = base.join("wt");
+    fs::create_dir_all(&worktree).expect("worktree");
+    fs::write(
+        worktree.join(".git"),
+        format!("gitdir: {}\n", gitdir.display()),
+    )
+    .expect(".git file");
+    let elsewhere = base.join("elsewhere");
+    fs::create_dir_all(&elsewhere).expect("elsewhere");
+    // A link inside `/tmp` (itself writable) that leads elsewhere in it.
+    let link = base.join("cache");
+    std::os::unix::fs::symlink(&elsewhere, &link).expect("link elsewhere");
+    let hooks = main.join(".git/hooks");
+    let denied = base.join("denied");
+    fs::write(&denied, "x").expect("denied");
+    for (level, policy) in level_policies(&worktree, &[&main, &hooks, &link], &denied) {
+        assert_eq!(
+            policy.writable_links_into_read_only_paths(&worktree),
+            Vec::new(),
+            "{level}"
+        );
+        let script = format!(
+            "echo x > file; echo wt=$?; echo x > '{main}/file'; echo main=$?; \
+             echo x > '{hooks}/explicit'; echo hooks=$?; echo x > '{link}/file'; echo link=$?",
+            main = main.display(),
+            link = link.display(),
+            hooks = hooks.display(),
+        );
+        let stdout = run_in_seatbelt(&policy, &worktree, &script);
+        for line in ["wt=0", "main=0", "hooks=0", "link=0"] {
+            assert!(
+                stdout.lines().any(|got| got == line),
+                "{level}: {line} not in {stdout}"
+            );
+        }
+        assert!(elsewhere.join("file").exists(), "{level}");
+        for written in [
+            worktree.join("file"),
+            main.join("file"),
+            hooks.join("explicit"),
+            elsewhere.join("file"),
+        ] {
+            fs::remove_file(written).expect("written");
+        }
+    }
+}
+
+/// A folder for test files outside every writable root and outside the
+/// source tree: the test binary's folder.
+fn outside_temp_root() -> PathBuf {
+    std::env::current_exe()
+        .expect("test binary")
+        .parent()
+        .expect("test binary folder")
+        .to_path_buf()
+}
+
+/// Runs `script` in `cwd` the way a session does: through
+/// [`crate::SandboxManager::transform`] (which checks the writable roots,
+/// #536) and real `sandbox-exec`. `Err` carries a refusal.
+fn run_transformed(
+    policy: &FileSystemSandboxPolicy,
+    cwd: &Path,
+    script: &str,
+) -> Result<String, String> {
+    use codex_protocol::config_types::WindowsSandboxLevel;
+    use codex_protocol::models::PermissionProfile;
+    use codex_utils_path_uri::PathUri;
+
+    let cwd_uri = PathUri::from_abs_path(&AbsolutePathBuf::from_absolute_path(cwd).expect("cwd"));
+    let permissions =
+        PermissionProfile::from_runtime_permissions(policy, NetworkSandboxPolicy::Restricted);
+    let request = crate::SandboxManager::new()
+        .transform(crate::SandboxTransformRequest {
+            command: crate::SandboxCommand {
+                program: "/bin/sh".into(),
+                args: vec!["-c".to_string(), script.to_string()],
+                cwd: cwd_uri.clone(),
+                env: std::collections::HashMap::new(),
+                managed_network: None,
+                additional_permissions: None,
+            },
+            permissions: &permissions,
+            sandbox: crate::SandboxType::MacosSeatbelt,
+            enforce_managed_network: false,
+            environment_id: None,
+            network: None,
+            sandbox_policy_cwd: &cwd_uri,
+            codex_linux_sandbox_exe: None,
+            use_legacy_landlock: false,
+            windows_sandbox_level: WindowsSandboxLevel::Disabled,
+            windows_sandbox_private_desktop: false,
+        })
+        .map_err(|err| err.to_string())?;
+    let output = Command::new(&request.command[0])
+        .args(&request.command[1..])
+        .current_dir(cwd)
+        .output()
+        .expect("sandbox-exec");
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// #536 (Travis, 2026-10-12), real `sandbox-exec` through the sandbox
+/// manager: at every level, Permissive included, a configured writable root
+/// that does not exist yet and is created by a command as a link elsewhere
+/// does not move write access there; the next command is refused and says
+/// why. Removing the link lets commands run again.
+#[test]
+fn a_root_created_as_a_link_during_the_session_is_refused_at_every_level() {
+    let base = TempDir::new().expect("tempdir");
+    let base = base.path().canonicalize().expect("canonical");
+    // Outside every writable root at every level (not in a temporary folder).
+    let outside = tempfile::tempdir_in(outside_temp_root()).expect("outside");
+    let outside = outside.path().canonicalize().expect("canonical");
+    let denied = base.join("denied");
+    fs::write(&denied, "x").expect("denied");
+    for (level, policy) in level_policies_with(&base, "ws", &["target"], &denied) {
+        let workspace = base.join(level).join("ws");
+        let target = workspace.join("target");
+        crate::writable_root_ledger::record_writable_roots(&policy, &workspace);
+        let made = run_transformed(
+            &policy,
+            &workspace,
+            &format!("ln -s '{}' target; echo link=$?", outside.display()),
+        )
+        .expect("the first command runs");
+        assert!(made.contains("link=0"), "{level}: {made}");
+        assert!(target.is_symlink());
+        let refusal = run_transformed(
+            &policy,
+            &workspace,
+            "echo pwned > target/planted; echo wrote=$?",
+        )
+        .expect_err("the next command is refused");
+        assert!(
+            refusal.contains("Refused to run the command")
+                && refusal.contains(&target.display().to_string()),
+            "{level}: {refusal}"
+        );
+        assert!(!outside.join("planted").exists(), "{level}");
+        fs::remove_file(&target).expect("remove the link");
+        let again = run_transformed(&policy, &workspace, "echo ok > file; echo ws=$?")
+            .expect("runs again without the link");
+        assert!(again.contains("ws=0"), "{level}: {again}");
+    }
+}
+
+/// The level shapes of [`level_policies`] for a workspace `base/<level>/<name>`
+/// (created) with extra writable roots below it (not created).
+fn level_policies_with(
+    base: &Path,
+    name: &str,
+    extra_below_workspace: &[&str],
+    denied: &Path,
+) -> Vec<(&'static str, FileSystemSandboxPolicy)> {
+    ["permissive", "moderate", "aggressive"]
+        .into_iter()
+        .map(|level| {
+            let workspace = base.join(level).join(name);
+            fs::create_dir_all(&workspace).expect("workspace");
+            let extra: Vec<PathBuf> = extra_below_workspace
+                .iter()
+                .map(|child| workspace.join(child))
+                .collect();
+            let extra: Vec<&Path> = extra.iter().map(PathBuf::as_path).collect();
+            let policy = level_policies(&workspace, &extra, denied)
+                .into_iter()
+                .find(|(shape, _)| *shape == level)
+                .map(|(_, policy)| policy)
+                .expect("level");
+            (level, policy)
+        })
+        .collect()
+}
+
+/// #536: through the sandbox manager, ordinary roots still run at every
+/// level: a workspace spelled through `/tmp` (`/private/tmp`), a git
+/// worktree with its main checkout, and a configured root created during the
+/// session as a real folder.
+#[test]
+fn ordinary_roots_still_run_through_the_manager_at_every_level() {
+    let base = tempfile::Builder::new()
+        .prefix("roots-536-")
+        .tempdir_in("/tmp")
+        .expect("tempdir in /tmp");
+    let base = base.path().to_path_buf();
+    assert!(base.starts_with("/tmp"));
+    let denied = base.join("denied");
+    fs::write(&denied, "x").expect("denied");
+    for level in ["permissive", "moderate", "aggressive"] {
+        let main = base.join(level).join("main");
+        let gitdir = main.join(".git").join("worktrees").join("wt");
+        fs::create_dir_all(&gitdir).expect("gitdir");
+        let worktree = base.join(level).join("wt");
+        fs::create_dir_all(&worktree).expect("worktree");
+        fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", gitdir.display()),
+        )
+        .expect(".git file");
+        let build = worktree.join("build");
+        let (_, policy) = level_policies(&worktree, &[&main, &build], &denied)
+            .into_iter()
+            .find(|(shape, _)| *shape == level)
+            .expect("level");
+        crate::writable_root_ledger::record_writable_roots(&policy, &worktree);
+        let script = format!(
+            "mkdir build && echo x > build/out; echo build=$?; echo x > file; echo wt=$?; \
+             echo x > '{}/file'; echo main=$?",
+            main.display()
+        );
+        let stdout = run_transformed(&policy, &worktree, &script).expect("runs");
+        for line in ["build=0", "wt=0", "main=0"] {
+            assert!(
+                stdout.lines().any(|got| got == line),
+                "{level}: {line} not in {stdout}"
+            );
+        }
+        let again = run_transformed(&policy, &worktree, "echo x >> build/out; echo again=$?")
+            .expect("a root created as a real folder keeps running");
+        assert!(again.contains("again=0"), "{level}: {again}");
+    }
+}
+
+/// #536: the Seatbelt arguments grant a writable root at the real location
+/// recorded when the session first saw it, not wherever the root leads when
+/// they are built: a root swapped for a link after the check grants nothing
+/// through the link (real `sandbox-exec`).
+#[test]
+fn seatbelt_grants_writable_roots_at_their_pinned_location() {
+    let base = TempDir::new().expect("tempdir");
+    let base = base.path().canonicalize().expect("canonical");
+    let workspace = base.join("ws");
+    let target = workspace.join("target");
+    fs::create_dir_all(&target).expect("target");
+    let outside = tempfile::tempdir_in(outside_temp_root()).expect("outside");
+    let outside = outside.path().canonicalize().expect("canonical");
+    let policy = FileSystemSandboxPolicy::restricted(vec![
+        root_read_entry(),
+        path_entry(&workspace, FileSystemAccessMode::Read),
+        path_entry(&target, FileSystemAccessMode::Write),
+    ]);
+    crate::writable_root_ledger::record_writable_roots(&policy, &workspace);
+    // Swapped after the check, before the arguments are built.
+    fs::rename(&target, workspace.join("moved")).expect("move away");
+    std::os::unix::fs::symlink(&outside, &target).expect("link");
+    let args = seatbelt_args(&policy, &workspace, vec!["/bin/true".to_string()]);
+    let write = generated_clauses(&args, "WRITABLE_ROOT");
+    assert_eq!(
+        write
+            .iter()
+            .map(|(root, _)| root.clone())
+            .collect::<Vec<_>>(),
+        vec![target]
+    );
+    assert!(!clauses_allow(&write, &outside.join("file")));
+    let stdout = run_in_seatbelt(&policy, &workspace, "echo x > target/file; echo wrote=$?");
+    assert!(stdout.contains("wrote=1"), "{stdout}");
+    assert!(!outside.join("file").exists());
 }

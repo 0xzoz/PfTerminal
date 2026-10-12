@@ -2,8 +2,9 @@ name: nightly-ci
 
 # Cold Bazel jobs (Linux test, clippy and release verify; Linux and macOS
 # argument comment lint; the SDK build) take close to their 180-minute limit without a remote cache, so they run here
-# once a day instead of blocking every PR. Failures here do not block merges;
-# check this workflow before cutting a release.
+# once a day instead of blocking every PR. So do codex-core's tests built with
+# `developer-accounting`, a full extra codex-core build (#546). Failures here do
+# not block merges; check this workflow before cutting a release.
 on:
   schedule:
     - cron: "17 9 * * *" # 09:17 UTC daily
@@ -39,6 +40,10 @@ jobs:
       cold_bazel: true
     secrets: inherit
 
+  core_developer_accounting:
+    name: codex-core developer-accounting tests
+    uses: ./.github/workflows/rust-ci-core-developer-accounting.yml
+
   results:
     name: Nightly CI results
     if: ${{ always() }}
@@ -46,6 +51,7 @@ jobs:
       - bazel
       - rust-ci
       - sdk
+      - core_developer_accounting
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2

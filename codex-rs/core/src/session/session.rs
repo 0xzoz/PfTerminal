@@ -568,6 +568,16 @@ impl Session {
             session_configuration.collaboration_mode.model(),
             session_configuration.provider
         );
+        // PF-84-S06: a session on a named OpenAI sign-in account uses that
+        // account's manager for everything (requests, refresh, connectors),
+        // never the default login; any other provider uses the default login,
+        // also when spawned from a session on a named account (as after a
+        // mid-session switch, `ActiveAuthManager::follow_provider`).
+        let auth_manager =
+            match codex_model_provider::named_sign_in_account(&session_configuration.provider) {
+                Some(account) => auth_manager.for_named_account_loaded(account).await,
+                None => auth_manager.default_account_manager(),
+            };
         // PF-27-S05: provider credentials move into the broker before anything
         // (MCP servers, hooks, tools) starts from this process.
         crate::model_broker_auth::install_for_config(config.as_ref()).await;
@@ -876,10 +886,31 @@ impl Session {
                     }),
                 });
             }
+            let session_file_system_policy = session_configuration.file_system_sandbox_policy();
+            // Issue #536: where each writable root leads when the session
+            // starts; a command is refused once one leads elsewhere.
+            codex_sandboxing::writable_root_ledger::record_writable_roots(
+                &session_file_system_policy,
+                session_configuration.cwd().as_path(),
+            );
+            // Issue #535: configured writable links into another root's
+            // read-only path are left out of the sandbox; say so at launch
+            // (once, not again in each sub-agent's thread).
+            let excluded_writable_links = if session_configuration.session_source.is_non_root_agent()
+            {
+                Vec::new()
+            } else {
+                crate::tools::writable_root_notices::excluded_writable_link_warnings(
+                    thread_id,
+                    &session_file_system_policy,
+                    session_configuration.cwd().as_path(),
+                )
+            };
             for message in config
                 .startup_warnings
                 .iter()
                 .chain(security_recovery_warning.iter())
+                .chain(excluded_writable_links.iter())
             {
                 post_session_configured_events.push(Event {
                     id: "".to_owned(),
@@ -1173,7 +1204,7 @@ impl Session {
                 user_shell: Arc::new(default_shell),
                 show_raw_agent_reasoning: config.show_raw_agent_reasoning,
                 exec_policy,
-                auth_manager: Arc::clone(&auth_manager),
+                active_auth: crate::state::ActiveAuthManager::new(Arc::clone(&auth_manager)),
                 openai_file_upload_client_pool: RouteAwareClientPool::new_without_request_logging(
                     config.http_client_factory(),
                     ClientRouteClass::Api,
@@ -1346,7 +1377,7 @@ impl Session {
             if startup_auth_changed {
                 mcp_auth_changes.mark_unchanged();
             }
-            let latest_auth = sess.services.auth_manager.auth().await;
+            let latest_auth = sess.services.auth_manager().auth().await;
             let mcp_projection = if startup_auth_changed
                 || mcp_auth_changes.has_changed().unwrap_or(false)
             {

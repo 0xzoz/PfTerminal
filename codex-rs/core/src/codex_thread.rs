@@ -103,6 +103,9 @@ pub enum TryStartTurnIfIdleRejectionReason {
     /// Another turn or task is active, or the idle reservation was lost before
     /// the automatic turn could start.
     Busy,
+    /// #507: the security kill switch is on. Automatic idle work (a goal
+    /// continuation) waits for a turn someone starts after it is turned off.
+    KillSwitch,
 }
 
 /// Rejection returned when an extension asks to start automatic idle work but

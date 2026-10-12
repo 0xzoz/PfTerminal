@@ -2360,13 +2360,18 @@ dependencies = [
  "aws-sigv4",
  "aws-types",
  "bytes",
+ "codex-feedback",
  "codex-log-guard",
+ "codex-state",
+ "codex-utils-absolute-path",
  "http 1.4.0",
  "pretty_assertions",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "walkdir",
 ]
 
 [[package]]
@@ -2917,6 +2922,7 @@ dependencies = [
  "insta",
  "libc",
  "maplit",
+ "notify",
  "once_cell",
  "openssl-sys",
  "opentelemetry",
@@ -3581,7 +3587,6 @@ version = "0.1.48"
 dependencies = [
  "clap",
  "codex-core",
- "codex-install-context",
  "codex-network-proxy",
  "codex-process-hardening",
  "codex-protocol",
@@ -3638,6 +3643,7 @@ dependencies = [
  "codex-config",
  "codex-http-client",
  "codex-keyring-store",
+ "codex-log-guard",
  "codex-model-provider-info",
  "codex-otel",
  "codex-protocol",
@@ -4258,6 +4264,7 @@ name = "codex-sandboxing"
 version = "0.1.48"
 dependencies = [
  "anyhow",
+ "codex-install-context",
  "codex-network-proxy",
  "codex-protocol",
  "codex-utils-absolute-path",

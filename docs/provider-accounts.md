@@ -11,8 +11,11 @@ list`). Turn the feature on with `--enable named_accounts` or
 
 For a provider, the first of these wins: an explicit `--account` for that
 provider (or a spawn's `account`), the account a resumed thread recorded (or a
-worker's parent runs on), `[provider_accounts] <provider> = "<name>"`,
-`default`.
+worker's parent, or a fork's source conversation, runs on),
+`[provider_accounts] <provider> = "<name>"`, `default`.
+
+A fork (`/fork`, editing an earlier prompt, `/side`, `corbanu fork`) runs on
+the account its source conversation runs on, and `/status` names it.
 
 - `--account <name>` selects an account of the provider you launch with. On
   `resume`, write `<provider>:<name>` if the thread runs on another provider.
@@ -42,17 +45,39 @@ account `ghost` of provider `zai` is not configured; add it with
 ```
 
 `corbanu exec` and resume fail at thread start. The TUI exits with this text
-before any sign-in screen, also when resuming (choose the account with
-`--account`); with a remote app server, the server refuses at thread start.
-A resumed thread runs on its recorded account. `corbanu resume` (an id,
-`--last` or the picker) and `/resume` use it without `--account`, also in a
-home with no default key: the TUI picks the thread first, so no API-key screen
-appears. If that account no longer exists, the TUI prefixes the text above with
-"This conversation ran on zai account `ghost` and resumes on it:". An explicit
-`--account` of the same provider still wins. With the feature off, the
-resume is refused and names the recorded account (`--account
-<provider>:default` resumes on the default credentials). A rejected key names the account and
-its `corbanu account add` recovery; the default credential is unchanged.
+before any sign-in screen; with a remote app server, the server refuses at
+thread start.
+
+A resumed thread runs on its recorded provider and account. `corbanu resume`
+(an id, `--last` or the picker) and `/resume` use them without `--account`.
+With `-m`, `-c model_provider` or a profile model, the thread runs on the
+session's provider instead, and another provider's recorded account does not
+apply.
+
+- **No default key, or a home configured for another provider:** the TUI
+  picks the thread first, so no sign-in screen appears. Esc in that picker
+  quits, because a new session would need a sign-in.
+- **`[provider_accounts]` names a missing account:** that entry does not
+  apply to the thread, so resume works on the recorded account.
+- **The recorded account no longer exists:** the TUI exits with the text
+  above, prefixed with "This conversation ran on zai account `ghost` and
+  resumes on it:". Inside a session, `/resume` shows it and stays on the
+  current conversation; there the recovery is "add it or pick another account
+  in `/providers`".
+- **The recorded provider has no credentials in this home:** the TUI exits
+  and says how to set them up (`corbanu -c model_provider="zai"`), instead of
+  the configured provider's sign-in. If this home does not define that
+  provider at all, the TUI names it instead of showing the sign-in.
+
+`corbanu fork` keeps the launch check: a missing `[provider_accounts]` entry
+refuses it before the fork is chosen, even though the fork would run on the
+source conversation's account; `--account` picks another one.
+
+An explicit `--account` of the same provider still wins. With the feature off,
+the resume is refused and names the recorded account (`--account
+<provider>:default` resumes on the default credentials). A rejected key names
+the account and its `corbanu account add` recovery; the default credential is
+unchanged.
 
 ## Usage per account in `/status`
 
@@ -108,3 +133,66 @@ region or whose credentials fail is refused with that reason before any
 request; Corbanu never falls back to another profile. The `default` account
 keeps today's order (managed key, then `AWS_BEARER_TOKEN_BEDROCK`, then the
 AWS SDK chain).
+
+While the vault holds a named Bedrock account, `/model` in a session on
+another provider also offers Bedrock's models, so an account chosen with
+_Use for this session_ (or `--account amazon-bedrock:<name>`) can be reached.
+Picking one without choosing an account (there, or with a
+`[provider_accounts]` default) uses Bedrock's `default` account.
+
+## OpenAI: ChatGPT and API-key sign-in accounts
+
+A named OpenAI account holds its own sign-in, ChatGPT or OpenAI API key, in the
+encrypted vault (no keychain item, never `auth.json`):
+
+```
+corbanu login --account work                  # browser sign-in
+corbanu login --account work --device-auth    # device code
+printenv WORK_OPENAI_KEY | corbanu login --account work --with-api-key
+corbanu login --account work status
+corbanu logout --account work                 # revokes and clears only `work`
+corbanu exec --account work "..."
+```
+
+In `/providers`, _Add another account_ on OpenAI offers a device-code ChatGPT
+sign-in or a masked OpenAI API key, whatever provider the session runs on.
+Rows show only the kind, an email hint (`w…@example.com`), the plan and a
+fingerprint.
+
+- The default login stays where it is (`auth.json` or the `Codex Auth`
+  keychain item) and is never read, refreshed, replaced or logged out by a
+  named account. `OPENAI_API_KEY`, `CODEX_API_KEY` and externally provided
+  tokens are never used for a named account.
+- A refreshed token is saved back to that account only. One process shares
+  one sign-in and refresh lock per account; other processes pick a refresh
+  up from the vault.
+- A session on a named account uses it for what needs the sign-in: model
+  requests, refresh, connectors, plugin installs, usage, the model list and
+  the `/status` account line. A mid-session switch to another provider moves
+  all of them to that provider's account (or the default login). The process
+  has one model list: the last session started or switched decides its
+  account, and a process started on a provider without OpenAI sign-in keeps
+  that provider's list. The rate limits `/status` shows before the first
+  reply, and the `/apps` directory, come from the default login.
+- `forced_login_method` and `forced_chatgpt_workspace_id` apply to named
+  accounts too: a sign-in of the other kind or another workspace is refused.
+  A session on a named account checks them against that account only and
+  leaves the default login alone even when they rule it out; so do `resume`,
+  `fork` and `exec resume`, whose thread's account is known only later. Such
+  a default login is then not used by that process, and a thread on the
+  default account (a switch to it, a spawned agent, a resumed default thread)
+  is refused with the reason instead of logging the login out. A TUI that
+  reuses a running local app-server daemon (another process) still enforces
+  on the default login at startup, as before, also for a session on a named
+  account. While a forced login rules the default out, `corbanu fork` of a
+  named thread without `--account` shows the default sign-in screen; pass
+  `--account <name>` to fork it on its account. Only a
+  configured `forced_login_method` counts: a session on another provider (such
+  as Z.AI) can still sign in, select and use a named ChatGPT account.
+- A named account with no usable sign-in is refused with the reason and its
+  recovery; a request is never sent without its credentials.
+- Signing the same ChatGPT user in under two accounts (or as `default` and a
+  named account) is allowed with a warning: they share that user's limits,
+  and signing out of one can end the other's session.
+- A refresh the server rejects ends the turn and names the recovery,
+  `corbanu login --account <name>`; the default login is unchanged.

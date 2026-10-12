@@ -53,6 +53,9 @@ const DEFAULT_REQUEST_MAX_RETRIES: u64 = 4;
 pub const DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS: u64 = 15_000;
 /// Canonical executable guaranteed by every supported Corbanu Terminal install.
 const CORBANU_PROVIDER_AUTH_COMMAND: &str = "corbanu";
+/// The hidden `corbanu` subcommand that prints a Claude Plan token (the
+/// built-in Claude Plan provider's auth command).
+pub const CLAUDE_PLAN_TOKEN_HELPER_SUBCOMMAND: &str = "internal-claude-oauth-token";
 /// Hard cap for user-configured `stream_max_retries`.
 const MAX_STREAM_MAX_RETRIES: u64 = 100;
 /// Hard cap for user-configured `request_max_retries`.
@@ -994,6 +997,14 @@ pub fn named_account_rejection_message(
         )
     } else if provider.is_some_and(|provider| provider.auth.is_some()) {
         format!("Check what the provider's auth command returns for account `{name}`")
+    } else if provider.is_some_and(|provider| provider.requires_openai_auth) {
+        format!(
+            "Sign it in again with `corbanu login --account {name}` (add `--with-api-key` for an API key)"
+        )
+    } else if provider.is_some_and(ModelProviderInfo::is_amazon_bedrock) {
+        format!(
+            "Check account `{name}`'s AWS profile and its credentials (`corbanu account list {provider_id}`)"
+        )
     } else {
         format!("Replace its key with `corbanu account add {provider_id} {name}` (reads stdin)")
     };
@@ -1410,7 +1421,7 @@ impl ModelProviderInfo {
             experimental_bearer_token: None,
             auth: Some(ModelProviderAuthInfo {
                 command: CORBANU_PROVIDER_AUTH_COMMAND.to_string(),
-                args: vec!["internal-claude-oauth-token".to_string()],
+                args: vec![CLAUDE_PLAN_TOKEN_HELPER_SUBCOMMAND.to_string()],
                 timeout_ms: claude_provider_auth_timeout_ms(),
                 // The selected Claude source has its own revision marker and
                 // 401 recovery path. Proactive reruns add no freshness while
@@ -2003,6 +2014,9 @@ impl ModelProviderInfo {
         self.name == AMAZON_BEDROCK_PROVIDER_NAME
     }
 
+    /// Z.AI answers a transient overload (code 1305) with a 429, so its
+    /// transport retries one. A 429 with a `Retry-After` over a few seconds is
+    /// not retried there: the provider-request throttle owns that wait (#510).
     fn retries_transient_rate_limits(&self) -> bool {
         self.is_zai()
     }

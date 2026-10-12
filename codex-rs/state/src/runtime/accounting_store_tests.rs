@@ -2197,7 +2197,13 @@ async fn absent_store_delete_locks_before_inspection_and_ordinary_writer() -> an
     );
     assert_eq!(whole(&mut deletion).await?, before);
     assert_eq!(
-        StateRuntime::delete_threads_on_connection(&mut deletion, &[owner], /*as_of_ms*/ 0).await?,
+        StateRuntime::delete_threads_on_connection(
+            &mut deletion,
+            &[owner],
+            /*as_of_ms*/ 0,
+            /*validated_at_ms*/ None
+        )
+        .await?,
         1
     );
     deletion.commit().await?;
@@ -2335,7 +2341,8 @@ async fn price_bound_admission_and_native_delete_contend_in_both_orders_with_sna
                     StateRuntime::delete_threads_on_connection(
                         &mut tx,
                         &[a.thread_id],
-                        /*as_of_ms*/ 1
+                        /*as_of_ms*/ 1,
+                        /*validated_at_ms*/ None,
                     )
                     .await?,
                     1

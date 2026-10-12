@@ -292,23 +292,7 @@ pub(crate) fn build_claude_command_plan(
         if let Some(base_url) = base_url_override.as_deref() {
             env.insert("HTTP_PROXY".to_string(), base_url.to_string());
         }
-        env.insert(
-            "CLAUDE_CONFIG_DIR".to_string(),
-            containment.config_dir().to_string_lossy().into_owned(),
-        );
-        // Claude Code keeps its own temporary files (the Bash tool's working
-        // folder) under `CLAUDE_CODE_TMPDIR`, not `TMPDIR`.
-        for name in ["TMPDIR", "CLAUDE_CODE_TMPDIR"] {
-            env.insert(
-                name.to_string(),
-                containment.tmp_dir().to_string_lossy().into_owned(),
-            );
-        }
-        env.insert(
-            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_string(),
-            "1".to_string(),
-        );
-        env.insert("DISABLE_AUTOUPDATER".to_string(), "1".to_string());
+        env.extend(containment.claude_env());
     }
     if profile.uses_bare_mode {
         env.insert(

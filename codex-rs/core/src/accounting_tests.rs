@@ -675,12 +675,54 @@ async fn accounting_actual_transport_retries_and_old_response_keep_distinct_owne
     Ok(())
 }
 
+/// The saved records of `fixture`'s ledger writer not yet in the ledger.
+fn pending_records(fixture: &Fixture) -> usize {
+    std::fs::read_dir(
+        fixture
+            .db
+            .sqlite()
+            .home()
+            .join(codex_state::accounting::PENDING_DIR),
+    )
+    .map(|listing| {
+        listing
+            .flatten()
+            .filter(|item| item.path().extension().is_some_and(|ext| ext == "json"))
+            .count()
+    })
+    .unwrap_or(0)
+}
+
+/// The admission is durable before the request is sent: in the ledger, or,
+/// while another process holds the state DB's write lock, saved for the
+/// ledger writer. A busy state DB holds the request up for at most about
+/// `QUICK_BUSY_TIMEOUT`.
 #[tokio::test]
-async fn accounting_writer_barrier_prevents_send_until_durable_admission() -> anyhow::Result<()> {
+async fn accounting_admission_is_durable_before_send_and_a_busy_state_db_does_not_hold_it_up()
+-> anyhow::Result<()> {
     let fixture = Fixture::new().await?;
+    // Uncontended: in the ledger before the send.
+    let sends = Arc::new(AtomicUsize::new(0));
+    AccountingTransport::new(
+        Probe {
+            sends: sends.clone(),
+            fail_first: false,
+        },
+        Some(ResponseEvidence::new(fixture.sampling.clone())),
+        "claude-opus-5".into(),
+    )
+    .stream(request())
+    .await?;
+    assert_eq!(
+        (
+            fixture.attempts().await?.len(),
+            sends.load(Ordering::SeqCst)
+        ),
+        (1, 1)
+    );
+
     let mut conn = fixture.connection().await?;
     let transaction = conn.begin_with("BEGIN IMMEDIATE").await?;
-    let sends = Arc::new(AtomicUsize::new(0));
     let transport = AccountingTransport::new(
         Probe {
             sends: sends.clone(),
@@ -689,20 +731,30 @@ async fn accounting_writer_barrier_prevents_send_until_durable_admission() -> an
         Some(ResponseEvidence::new(fixture.sampling.clone())),
         "claude-opus-5".into(),
     );
-    let task = tokio::spawn(async move { transport.stream(request()).await });
-    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
-    assert!(!task.is_finished());
-    assert_eq!(sends.load(Ordering::SeqCst), 0);
-    assert_eq!(fixture.attempts().await?, vec![]);
-    transaction.commit().await?;
-    task.await??;
-    assert_eq!(
-        (
-            fixture.attempts().await?.len(),
-            sends.load(Ordering::SeqCst)
-        ),
-        (1, 1)
+    let started = std::time::Instant::now();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        transport.stream(request()),
+    )
+    .await??;
+    assert!(
+        started.elapsed() < codex_state::QUICK_BUSY_TIMEOUT + std::time::Duration::from_millis(750),
+        "held up {:?}",
+        started.elapsed()
     );
+    assert_eq!(sends.load(Ordering::SeqCst), 2);
+    // Saved, not yet in the ledger.
+    assert_eq!(pending_records(&fixture), 1);
+    transaction.rollback().await?;
+    assert!(
+        fixture
+            .db
+            .flush_accounting(std::time::Duration::from_secs(30))
+            .await
+    );
+    assert_eq!(fixture.attempts().await?.len(), 2);
+    assert_eq!(pending_records(&fixture), 0);
+    fixture.sampling.check()?;
     Ok(())
 }
 
@@ -826,19 +878,16 @@ async fn accounting_scope_drop_clears_cancelled_sampling_and_observation_failure
     Ok(())
 }
 
-/// Another Corbanu process sharing the state DB can hold its write lock past
-/// SQLite's 5 s busy timeout - an hourly ledger sweep did, for 10-17 s. That
-/// used to fail the admission or observation and end the turn with the
-/// accounting failure. A contended write wrote nothing, so it waits and retries;
-/// the request is sent only after its admission is durable.
+/// Another Corbanu process sharing the state DB can hold its write lock for
+/// seconds. That used to hold every admission and observation up for up to
+/// 15 s and then send the request unrecorded, losing its record. Now the
+/// records are put off: the request and its stream go on at once, and the
+/// records are written once the lock is free.
 #[tokio::test]
 #[tracing_test::traced_test]
-async fn accounting_waits_out_another_process_holding_the_state_db_past_its_busy_timeout()
--> anyhow::Result<()> {
-    // Comfortably past the 5 s busy timeout: on Windows SQLite's short busy
-    // sleeps round up to the ~15 ms timer tick, so a 5.6 s hold could end
-    // before the busy wait gave up and no retry would ever be logged.
-    const HELD: std::time::Duration = std::time::Duration::from_millis(8_000);
+async fn accounting_puts_records_off_while_another_process_holds_the_state_db() -> anyhow::Result<()>
+{
+    const HELD: std::time::Duration = std::time::Duration::from_millis(3_000);
     let fixture = Fixture::new().await?;
     let sends = Arc::new(AtomicUsize::new(0));
     let evidence = ResponseEvidence::new(fixture.sampling.clone());
@@ -853,33 +902,22 @@ async fn accounting_waits_out_another_process_holding_the_state_db_past_its_busy
 
     let mut conn = fixture.connection().await?;
     let held = conn.begin_with("BEGIN IMMEDIATE").await?;
-    let admission = tokio::spawn(async move { transport.stream(request()).await.map(drop) });
-    tokio::time::sleep(HELD).await;
-    assert!(!admission.is_finished());
-    assert_eq!(sends.load(Ordering::SeqCst), 0);
+    let started = std::time::Instant::now();
+    transport.stream(request()).await?;
+    evidence
+        .observe(/*position*/ 1, Ok(usage(/*value*/ 7)))
+        .await?;
+    assert!(started.elapsed() < HELD, "held up {:?}", started.elapsed());
+    assert_eq!(sends.load(Ordering::SeqCst), 1);
+    tokio::time::sleep(HELD.saturating_sub(started.elapsed())).await;
     held.commit().await?;
-    admission.await??;
-    assert_eq!(
-        (
-            fixture.attempts().await?.len(),
-            sends.load(Ordering::SeqCst)
-        ),
-        (1, 1)
+    assert!(
+        fixture
+            .db
+            .flush_accounting(std::time::Duration::from_secs(30))
+            .await
     );
-
-    let held = conn.begin_with("BEGIN IMMEDIATE").await?;
-    let observing = {
-        let evidence = evidence.clone();
-        tokio::spawn(async move {
-            evidence
-                .observe(/*position*/ 1, Ok(usage(/*value*/ 7)))
-                .await
-        })
-    };
-    tokio::time::sleep(HELD).await;
-    assert!(!observing.is_finished());
-    held.commit().await?;
-    observing.await??;
+    assert_eq!(fixture.attempts().await?.len(), 1);
     let rows: Vec<String> = sqlx::query_scalar(
         "SELECT json_extract(payload, '$.patch') FROM draft_accounting_observations",
     )
@@ -887,9 +925,7 @@ async fn accounting_waits_out_another_process_holding_the_state_db_past_its_busy
     .await?;
     assert_eq!(rows, vec![r#"{"input":7}"#]);
     assert!(fixture.sampling.check().is_ok());
-    // It waited by retrying, not by one long busy wait.
-    assert!(logs_contain("state DB busy; retrying"));
-    assert!(logs_contain("succeeded after state DB contention"));
+    assert!(logs_contain("records are written once it is free"));
     Ok(())
 }
 

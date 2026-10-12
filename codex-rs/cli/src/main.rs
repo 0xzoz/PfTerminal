@@ -149,7 +149,7 @@ enum Subcommand {
     Account(account_cmd::AccountCommand),
 
     /// Internal: print the active Claude Code OAuth token for the Corbanu Terminal-native Claude Plan provider.
-    #[clap(hide = true, name = "internal-claude-oauth-token")]
+    #[clap(hide = true, name = codex_login::auth::CLAUDE_PLAN_TOKEN_HELPER_SUBCOMMAND)]
     InternalClaudeOauthToken {
         /// PF-84: a named Claude account instead of the home's selection.
         /// Defaults to `CORBANU_PROVIDER_ACCOUNT`, which Corbanu sets for its
@@ -167,7 +167,7 @@ enum Subcommand {
     },
 
     /// Internal: print one rental endpoint token for command-backed provider authentication.
-    #[clap(hide = true, name = "internal-gpu-endpoint-token")]
+    #[clap(hide = true, name = codex_login::auth::GPU_ENDPOINT_TOKEN_HELPER_SUBCOMMAND)]
     InternalGpuEndpointToken { rental_id: String },
 
     /// Internal: reconcile durable GPU rentals independently of any TUI process.
@@ -539,6 +539,11 @@ struct LoginCommand {
     #[arg(long = "device-auth")]
     use_device_code: bool,
 
+    /// Sign in a named OpenAI account (needs the `named_accounts` feature);
+    /// the default login is left untouched.
+    #[arg(long = "account", value_name = "NAME")]
+    account: Option<String>,
+
     /// EXPERIMENTAL: Use custom OAuth issuer base URL (advanced)
     /// Override the OAuth issuer base URL (advanced)
     #[arg(long = "experimental_issuer", value_name = "URL", hide = true)]
@@ -561,8 +566,12 @@ enum LoginSubcommand {
 #[derive(Debug, Parser)]
 struct LogoutCommand {
     /// Also remove provider API keys from the vault and legacy provider auth storage.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "account")]
     all: bool,
+
+    /// Sign out only this named OpenAI account (revoking its tokens).
+    #[arg(long = "account", value_name = "NAME")]
+    account: Option<String>,
 
     #[clap(skip)]
     config_overrides: CliConfigOverrides,
@@ -1554,6 +1563,33 @@ async fn cli_main(
                 &mut login_cli.config_overrides,
                 root_config_overrides.clone(),
             );
+            if let Some(account) = login_cli.account.as_deref() {
+                let method = match login_cli.action {
+                    Some(LoginSubcommand::Status) => {
+                        codex_cli::run_named_account_login_status(
+                            login_cli.config_overrides,
+                            account,
+                        )
+                        .await
+                    }
+                    None if login_cli.with_access_token || login_cli.api_key.is_some() => {
+                        eprintln!("A named account signs in with ChatGPT or --with-api-key.");
+                        std::process::exit(1);
+                    }
+                    None if login_cli.with_api_key => {
+                        codex_cli::NamedLoginMethod::ApiKey(read_api_key_from_stdin())
+                    }
+                    None if login_cli.use_device_code => codex_cli::NamedLoginMethod::DeviceCode,
+                    None => codex_cli::NamedLoginMethod::Browser,
+                };
+                codex_cli::run_named_account_login(
+                    login_cli.config_overrides,
+                    account,
+                    method,
+                    login_cli.issuer_base_url.clone(),
+                )
+                .await;
+            }
             match login_cli.action {
                 Some(LoginSubcommand::Status) => {
                     run_login_status(login_cli.config_overrides).await;
@@ -1598,6 +1634,9 @@ async fn cli_main(
                 &mut logout_cli.config_overrides,
                 root_config_overrides.clone(),
             );
+            if let Some(account) = logout_cli.account.as_deref() {
+                codex_cli::run_named_account_logout(logout_cli.config_overrides, account).await;
+            }
             run_logout(logout_cli.config_overrides, logout_cli.all).await;
         }
         Some(Subcommand::Vault(mut vault_cli)) => {

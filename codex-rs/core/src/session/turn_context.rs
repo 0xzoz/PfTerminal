@@ -524,9 +524,9 @@ impl TurnContext {
     ) -> Self {
         let mut config = (*self.config).clone();
         config.model = Some(model.clone());
-        let model_info = models_manager
-            .get_model_info(model.as_str(), &config.to_models_manager_config())
-            .await;
+        let model_info =
+            crate::model_info_for_provider::model_info_for_config(models_manager, &model, &config)
+                .await;
         let supported_reasoning_levels = model_info
             .supported_reasoning_levels
             .iter()
@@ -971,6 +971,12 @@ impl Session {
                         .model_provider_id
                         != next.original_config_do_not_use.model_provider_id
                         || state.session_configuration.provider != next.provider;
+                    // PF-84: as in update_settings, the account follows first.
+                    if model_provider_changed {
+                        self.follow_provider_account(&next);
+                    }
+                    let follows_model_list =
+                        model_provider_changed && self.model_list_follows_this_session(&next);
                     if model_provider_changed {
                         // Match update_settings: frame guards must see this provider
                         // before its configuration is published, under the same writer lock.
@@ -998,6 +1004,7 @@ impl Session {
                         previous_config,
                         new_config,
                         stale_startup_prewarm,
+                        follows_model_list,
                     ))
                 }
                 Err(err) => Err(CodexErr::InvalidRequest(err.to_string())),
@@ -1011,6 +1018,7 @@ impl Session {
             previous_config,
             new_config,
             stale_startup_prewarm,
+            follows_model_list,
         ) = match update_result {
             Ok(update) => update,
             Err(err) => {
@@ -1029,6 +1037,9 @@ impl Session {
         self.emit_config_changed_contributors(previous_config.as_ref(), new_config.as_ref());
         if mcp_inputs_changed {
             self.schedule_mcp_prewarm();
+        }
+        if follows_model_list {
+            self.follow_model_list_account().await;
         }
 
         if let Some(startup_prewarm) = stale_startup_prewarm {
@@ -1097,14 +1108,13 @@ impl Session {
             .and_then(|turn_environment| turn_environment.cwd().to_abs_path().ok())
             .unwrap_or_else(|| session_configuration.cwd().clone());
         let per_turn_config = Self::build_per_turn_config(&session_configuration, cwd.clone());
-        let model_info = self
-            .services
-            .models_manager
-            .get_model_info(
-                session_configuration.collaboration_mode.model(),
-                &per_turn_config.to_models_manager_config(),
-            )
-            .await;
+        // PF-84 (#572): Bedrock's own metadata after a switch to Bedrock.
+        let model_info = crate::model_info_for_provider::model_info_for_config(
+            &self.services.models_manager,
+            session_configuration.collaboration_mode.model(),
+            &per_turn_config,
+        )
+        .await;
         self.services
             .thread_extension_data
             .insert(model_info.clone());
@@ -1145,7 +1155,7 @@ impl Session {
         let mut turn_context: TurnContext = Self::make_turn_context(
             self.thread_id(),
             self.session_id(),
-            Some(Arc::clone(&self.services.auth_manager)),
+            Some(self.services.auth_manager()),
             &self.services.session_telemetry,
             session_configuration.provider.clone(),
             &session_configuration,

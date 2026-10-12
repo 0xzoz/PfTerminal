@@ -10,11 +10,18 @@ mod spawn;
 mod violation;
 mod windows;
 mod windows_legacy_warning;
+pub mod writable_root_ledger;
 
 #[cfg(target_os = "linux")]
 pub use bwrap::APPARMOR_BWRAP_USERNS_PROFILE;
 #[cfg(target_os = "linux")]
+pub use bwrap::BWRAP_UNAVAILABLE_MESSAGE;
+#[cfg(target_os = "linux")]
 pub use bwrap::find_apparmor_bwrap_launcher;
+#[cfg(target_os = "linux")]
+pub use bwrap::find_apparmor_bwrap_launcher_for_fd;
+#[cfg(target_os = "linux")]
+pub use bwrap::find_bundled_bwrap;
 #[cfg(target_os = "linux")]
 pub use bwrap::find_system_bwrap_in_path;
 #[cfg(target_os = "linux")]
@@ -76,6 +83,9 @@ impl From<SandboxTransformError> for CodexErr {
             }
             SandboxTransformError::EnvironmentNetworkProxy(message) => {
                 CodexErr::UnsupportedOperation(message)
+            }
+            SandboxTransformError::WritableRootRefused(refusal) => {
+                CodexErr::UnsupportedOperation(refusal.to_string())
             }
             #[cfg(target_os = "linux")]
             SandboxTransformError::Wsl1UnsupportedForBubblewrap => {

@@ -25,6 +25,7 @@ use crate::bwrap::BwrapOptions;
 use crate::bwrap::create_bwrap_command_args;
 use crate::landlock::apply_permission_profile_to_current_thread;
 use crate::launcher::exec_bwrap;
+use crate::launcher::preferred_bwrap_inherited_fd;
 use crate::launcher::preferred_bwrap_supports_argv0;
 use crate::proxy_routing::activate_proxy_routes_in_netns;
 use crate::proxy_routing::prepare_host_proxy_route_spec;
@@ -46,6 +47,10 @@ const FORWARDED_SIGNALS: &[libc::c_int] =
 const SYNTHETIC_MOUNT_MARKER_SYNTHETIC: &[u8] = b"synthetic\n";
 const SYNTHETIC_MOUNT_MARKER_EXISTING: &[u8] = b"existing\n";
 const PROTECTED_CREATE_MARKER: &[u8] = b"protected-create\n";
+/// #582: in a marker folder, what the placeholder is and where (`file` or
+/// `directory`, a newline, then the path), so a later run can remove it when
+/// its owner is gone without cleaning up (killed with SIGKILL).
+const SYNTHETIC_MOUNT_TARGET_RECORD: &str = "target";
 
 #[derive(Debug)]
 struct SyntheticMountTargetRegistration {
@@ -133,11 +138,26 @@ pub struct LandlockCommand {
     #[arg(long = "proxy-route-spec", hide = true)]
     pub proxy_route_spec: Option<String>,
 
+    /// Internal (#536): the writable roots' real locations as the caller
+    /// pinned them; each root is bound there, and the command is refused
+    /// when a root no longer leads there.
+    #[arg(
+        long = "pinned-writable-roots",
+        hide = true,
+        value_parser = parse_pinned_writable_roots
+    )]
+    pub pinned_writable_roots: Option<PinnedWritableRoots>,
+
     /// When set, skip mounting a fresh `/proc` even though PID isolation is
     /// still enabled. This is primarily intended for restrictive container
     /// environments that deny `--proc /proc`.
     #[arg(long = "no-proc", default_value_t = false)]
     pub no_proc: bool,
+
+    /// Internal (#581): a descriptor the inner stage closes before running
+    /// the command (the verified bundled bubblewrap that `aa-exec` ran).
+    #[arg(long = "close-inherited-fd", hide = true)]
+    pub close_inherited_fd: Option<i32>,
 
     /// Full command args to run under the Linux sandbox helper.
     #[arg(trailing_var_arg = true)]
@@ -160,7 +180,9 @@ pub fn run_main() -> ! {
         apply_seccomp_then_exec,
         allow_network_for_proxy,
         proxy_route_spec,
+        pinned_writable_roots,
         no_proc,
+        close_inherited_fd,
         command,
     } = LandlockCommand::parse();
 
@@ -183,6 +205,13 @@ pub fn run_main() -> ! {
     // Inner stage: apply seccomp/no_new_privs after bubblewrap has already
     // established the filesystem view.
     if apply_seccomp_then_exec {
+        // #581: first, so nothing started here (proxy bridges) inherits it.
+        if let Some(fd) = close_inherited_fd.filter(|fd| *fd > libc::STDERR_FILENO) {
+            // SAFETY: closes a descriptor this process does not use.
+            unsafe {
+                libc::close(fd);
+            }
+        }
         if allow_network_for_proxy {
             let spec = proxy_route_spec
                 .as_deref()
@@ -217,6 +246,12 @@ pub fn run_main() -> ! {
         exec_or_panic(command);
     }
 
+    if let Some(PinnedWritableRoots(pinned)) = pinned_writable_roots {
+        // #536: bubblewrap and legacy Landlock grant each writable root on
+        // the folder opened and checked at its pinned location.
+        crate::pinned::set(pinned);
+    }
+
     if !use_legacy_landlock {
         // Outer stage: bubblewrap first, then re-enter this binary in the
         // sandboxed environment to apply seccomp. This path never falls back
@@ -238,6 +273,7 @@ pub fn run_main() -> ! {
             permission_profile: &permission_profile,
             allow_network_for_proxy,
             proxy_route_spec,
+            close_inherited_fd: preferred_bwrap_inherited_fd(),
             command,
         });
         run_bwrap_with_proc_fallback(
@@ -282,6 +318,16 @@ impl fmt::Display for ResolvePermissionProfileError {
             Self::MissingConfiguration => write!(f, "missing permission profile configuration"),
         }
     }
+}
+
+/// The `--pinned-writable-roots` value (#536).
+#[derive(Debug, Clone)]
+pub struct PinnedWritableRoots(pub Vec<codex_protocol::permissions::PinnedWritableRoot>);
+
+fn parse_pinned_writable_roots(value: &str) -> std::result::Result<PinnedWritableRoots, String> {
+    serde_json::from_str(value)
+        .map(PinnedWritableRoots)
+        .map_err(|err| format!("invalid pinned writable roots: {err}"))
 }
 
 fn parse_permission_profile(value: &str) -> std::result::Result<PermissionProfile, String> {
@@ -336,6 +382,9 @@ fn run_bwrap_with_proc_fallback(
     let network_mode = bwrap_network_mode(network_sandbox_policy, allow_network_for_proxy);
     let mut mount_proc = mount_proc;
     let command_cwd = command_cwd.unwrap_or(sandbox_policy_cwd);
+    // #582: once, before any arguments are built, so a stale placeholder is
+    // not taken for an existing path (or a file where a folder belongs).
+    remove_stale_synthetic_mount_targets();
 
     if mount_proc
         && !preflight_proc_mount_support(network_mode)
@@ -349,6 +398,10 @@ fn run_bwrap_with_proc_fallback(
     let options = BwrapOptions {
         mount_proc,
         network_mode,
+        pins: crate::pinned::get().map(|roots| crate::bwrap::WritableRootPins {
+            roots,
+            bind_fd: crate::launcher::bind_fd_available(),
+        }),
         ..Default::default()
     };
     // #442: watch before the existing credential files are found and hidden,
@@ -951,8 +1004,14 @@ fn register_synthetic_mount_targets(
                         marker_dir.display()
                     )
                 });
+                // #562: another live run made it, or (checked under this
+                // lock, separately from the check when the arguments were
+                // built) it has gone since: then the mount target bubblewrap
+                // makes is this run's own placeholder, and its marker must
+                // say so for later runs.
                 let target = if target.preserves_pre_existing_path()
-                    && synthetic_mount_marker_dir_has_active_synthetic_owner(&marker_dir)
+                    && (synthetic_mount_marker_dir_has_active_synthetic_owner(&marker_dir)
+                        || !target.pre_existing_path_is_unchanged())
                 {
                     match target.kind() {
                         crate::bwrap::SyntheticMountTargetKind::EmptyFile => {
@@ -967,6 +1026,9 @@ fn register_synthetic_mount_targets(
                 } else {
                     target.clone()
                 };
+                if !target.preserves_pre_existing_path() {
+                    write_synthetic_mount_target_record(&marker_dir, &target);
+                }
                 let marker_file = marker_dir.join(std::process::id().to_string());
                 fs::write(&marker_file, synthetic_mount_marker_contents(&target)).unwrap_or_else(
                     |err| {
@@ -1105,7 +1167,16 @@ fn cleanup_synthetic_mount_targets(targets: &[SyntheticMountTargetRegistration])
             if synthetic_mount_marker_dir_has_active_process(&target.marker_dir) {
                 continue;
             }
-            remove_synthetic_mount_target(&target.target);
+            // #582: a placeholder another run made (and was killed before
+            // removing) goes as its record says, also when this run only
+            // held it as an existing path.
+            match read_synthetic_mount_target_record(&target.marker_dir) {
+                Some(made) if target.target.pre_existing_path_is_unchanged() => {
+                    remove_synthetic_mount_target(&made);
+                }
+                _ => remove_synthetic_mount_target(&target.target),
+            }
+            remove_synthetic_mount_target_record(&target.marker_dir);
             match fs::remove_dir(&target.marker_dir) {
                 Ok(()) => {}
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -1276,6 +1347,218 @@ fn remove_synthetic_mount_target(target: &crate::bwrap::SyntheticMountTarget) {
     }
 }
 
+/// #582: records the placeholder this run makes, for
+/// [`remove_stale_synthetic_mount_targets`]. Kept until the last run using
+/// the placeholder ends.
+fn write_synthetic_mount_target_record(
+    marker_dir: &Path,
+    target: &crate::bwrap::SyntheticMountTarget,
+) {
+    let kind = match target.kind() {
+        crate::bwrap::SyntheticMountTargetKind::EmptyFile => "file",
+        crate::bwrap::SyntheticMountTargetKind::EmptyDirectory => "directory",
+    };
+    let mut record = format!("{kind}\n").into_bytes();
+    record.extend_from_slice(target.path().as_os_str().as_bytes());
+    let path = marker_dir.join(SYNTHETIC_MOUNT_TARGET_RECORD);
+    // Only this user may change it (the registry folder may be group
+    // writable).
+    let written = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&path)
+        .and_then(|mut file| {
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+            std::io::Write::write_all(&mut file, &record)
+        });
+    written.unwrap_or_else(|err| {
+        panic!(
+            "failed to record synthetic bubblewrap mount target {}: {err}",
+            path.display()
+        )
+    });
+}
+
+fn remove_synthetic_mount_target_record(marker_dir: &Path) {
+    let path = marker_dir.join(SYNTHETIC_MOUNT_TARGET_RECORD);
+    match fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => panic!(
+            "failed to remove synthetic bubblewrap mount target record {}: {err}",
+            path.display()
+        ),
+    }
+}
+
+/// The placeholder recorded in `marker_dir`, if the record is ours and
+/// names the path its folder is for.
+fn read_synthetic_mount_target_record(
+    marker_dir: &Path,
+) -> Option<crate::bwrap::SyntheticMountTarget> {
+    let path = marker_dir.join(SYNTHETIC_MOUNT_TARGET_RECORD);
+    if !owned_by_this_user(&path, /*file*/ true) {
+        return None;
+    }
+    let record = fs::read(path).ok()?;
+    let newline = record.iter().position(|byte| *byte == b'\n')?;
+    let path = Path::new(std::ffi::OsStr::from_bytes(&record[newline + 1..]));
+    if !path.is_absolute() || synthetic_mount_marker_dir(path) != marker_dir {
+        return None;
+    }
+    match &record[..newline] {
+        b"file" => Some(crate::bwrap::SyntheticMountTarget::missing(path)),
+        b"directory" => Some(crate::bwrap::SyntheticMountTarget::missing_empty_directory(
+            path,
+        )),
+        _ => None,
+    }
+}
+
+/// Whether `path` is a record (or the registry folder) of this user that no
+/// other user may write: one who made the shared temporary folder's
+/// registry first, or shares the user's group, must not plant records. The
+/// folder may be group writable (umask 002 is Ubuntu's default, with
+/// per-user groups); a record never is.
+fn owned_by_this_user(path: &Path, file: bool) -> bool {
+    // Records are made 0600; the registry folder follows the umask.
+    let not_writable_by = if file { 0o022 } else { 0o002 };
+    // SAFETY: `geteuid` has no preconditions.
+    let euid = unsafe { libc::geteuid() };
+    fs::symlink_metadata(path).is_ok_and(|metadata| {
+        use std::os::unix::fs::MetadataExt;
+        let kind = if file {
+            metadata.file_type().is_file()
+        } else {
+            metadata.file_type().is_dir()
+        };
+        kind && metadata.uid() == euid && metadata.mode() & not_writable_by == 0
+    })
+}
+
+/// #582: removes the placeholders whose runs all ended without cleaning up
+/// (the helper killed with SIGKILL, for example on a timeout), as their own
+/// cleanup would have: an empty file, or an empty folder, at the recorded
+/// path. Before, such a placeholder stayed: later runs took it for an
+/// existing path, and one where a folder belongs (an empty read-only
+/// `~/Library` for `~/Library/Keychains`) failed every protected run until
+/// #579 held it in place.
+///
+/// A run that meets a recorded placeholder holds it (registers itself,
+/// [`is_live_placeholder`]), so one with any live marker is left alone, as
+/// is a marker folder of another kind (a protected-create target). This
+/// never fails a run: without a usable registry it does nothing, and what
+/// cannot be removed keeps its record for a later run.
+fn remove_stale_synthetic_mount_targets() {
+    // Found without the panicking checks of `synthetic_mount_registry_root`:
+    // a run without placeholders must not fail here.
+    let Ok(temp_dir) = std::env::temp_dir().canonicalize() else {
+        return;
+    };
+    // SAFETY: `geteuid` has no preconditions.
+    let euid = unsafe { libc::geteuid() };
+    let registry_root = temp_dir.join(format!("codex-bwrap-synthetic-mount-targets-{euid}"));
+    if !owned_by_this_user(&registry_root, /*file*/ false) {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(&registry_root) else {
+        return;
+    };
+    // Without the lock first: most runs find nothing recorded.
+    let recorded: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|marker_dir| marker_dir.join(SYNTHETIC_MOUNT_TARGET_RECORD).is_file())
+        .collect();
+    if recorded.is_empty() {
+        return;
+    }
+    // A registry this run cannot lock (read-only in a nested sandbox) is
+    // left as it is.
+    let Ok(lock_file) = File::open(registry_root.join("lock")) else {
+        return;
+    };
+    // SAFETY: locks a descriptor this function owns.
+    if unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) } < 0 {
+        return;
+    }
+    for marker_dir in recorded {
+        let Some(target) = read_synthetic_mount_target_record(&marker_dir) else {
+            continue;
+        };
+        if !only_ended_runs(&marker_dir) {
+            continue;
+        }
+        let removed = match fs::symlink_metadata(target.path()) {
+            Err(err) => err.kind() == std::io::ErrorKind::NotFound,
+            Ok(metadata) if !target.should_remove_after_bwrap(&metadata) => true,
+            Ok(_) => match target.kind() {
+                crate::bwrap::SyntheticMountTargetKind::EmptyFile => {
+                    fs::remove_file(target.path()).is_ok()
+                }
+                // A folder that is no longer empty is no longer a placeholder.
+                crate::bwrap::SyntheticMountTargetKind::EmptyDirectory => {
+                    match fs::remove_dir(target.path()) {
+                        Ok(()) => true,
+                        Err(err) => err.kind() == std::io::ErrorKind::DirectoryNotEmpty,
+                    }
+                }
+            },
+        };
+        if removed {
+            remove_ended_markers(&marker_dir);
+            let _ = fs::remove_file(marker_dir.join(SYNTHETIC_MOUNT_TARGET_RECORD));
+            let _ = fs::remove_dir(&marker_dir);
+        }
+    }
+    // The lock is released when `lock_file` closes.
+}
+
+/// Whether every marker in `marker_dir` is a run (that made or held the
+/// placeholder) which has ended.
+fn only_ended_runs(marker_dir: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(marker_dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(pid) = marker_pid(&path) else {
+            continue;
+        };
+        if process_is_active(pid) {
+            return false;
+        }
+        match fs::read(&path) {
+            Ok(contents)
+                if contents == SYNTHETIC_MOUNT_MARKER_SYNTHETIC
+                    || contents == SYNTHETIC_MOUNT_MARKER_EXISTING => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn remove_ended_markers(marker_dir: &Path) {
+    let Ok(entries) = fs::read_dir(marker_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if marker_pid(&path).is_some() {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+fn marker_pid(path: &Path) -> Option<libc::pid_t> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.parse::<libc::pid_t>().ok())
+}
+
 fn process_is_active(pid: libc::pid_t) -> bool {
     let result = unsafe { libc::kill(pid, 0) };
     if result == 0 {
@@ -1322,6 +1605,28 @@ fn with_synthetic_mount_registry_lock<T>(f: impl FnOnce() -> T) -> T {
         );
     }
     result
+}
+
+/// #562: whether a live run registered a placeholder it made at `path`
+/// (an empty file standing in for a missing protected path). A run that
+/// finds one must register it too, so the owner's cleanup leaves it in
+/// place until the last run using it ends.
+pub(crate) fn is_live_placeholder(path: &Path) -> bool {
+    let marker_dir = synthetic_mount_marker_dir(path);
+    // A run registers its marker before bubblewrap makes the placeholder, so
+    // without a marker folder there is no placeholder to share (and no need
+    // to take the lock or create the registry).
+    if !marker_dir.is_dir() {
+        return false;
+    }
+    with_synthetic_mount_registry_lock(|| {
+        synthetic_mount_marker_dir_has_active_synthetic_owner(&marker_dir)
+            // #582: one whose maker was killed before removing it: held as
+            // a placeholder too, so a sweep leaves it while this run uses it,
+            // and the last run out removes it.
+            || read_synthetic_mount_target_record(&marker_dir)
+                .is_some_and(|made| made.path() == path)
+    })
 }
 
 fn synthetic_mount_marker_dir(path: &Path) -> PathBuf {
@@ -1502,6 +1807,7 @@ struct InnerSeccompCommandArgs<'a> {
     permission_profile: &'a PermissionProfile,
     allow_network_for_proxy: bool,
     proxy_route_spec: Option<String>,
+    close_inherited_fd: Option<i32>,
     command: Vec<String>,
 }
 
@@ -1513,6 +1819,7 @@ fn build_inner_seccomp_command(args: InnerSeccompCommandArgs<'_>) -> Vec<String>
         permission_profile,
         allow_network_for_proxy,
         proxy_route_spec,
+        close_inherited_fd,
         command,
     } = args;
     let current_exe = match std::env::current_exe() {
@@ -1544,6 +1851,10 @@ fn build_inner_seccomp_command(args: InnerSeccompCommandArgs<'_>) -> Vec<String>
             .unwrap_or_else(|| panic!("managed proxy mode requires a proxy route spec"));
         inner.push("--proxy-route-spec".to_string());
         inner.push(proxy_route_spec);
+    }
+    if let Some(fd) = close_inherited_fd {
+        inner.push("--close-inherited-fd".to_string());
+        inner.push(fd.to_string());
     }
     inner.push("--".to_string());
     inner.extend(command);

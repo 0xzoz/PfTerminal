@@ -11,11 +11,14 @@
 //!   ([`refuse_tool_call`]), so nothing slips through between the switch and
 //!   the interruption.
 //!
-//! Only this process's sessions are stopped: another Corbanu Terminal on the
-//! same home refuses turns once it reads the saved switch (at its start).
+//! Another Corbanu Terminal process running on the same home takes the saved
+//! switch within about a second (#507, Travis 2026-10-12: its watch of the
+//! saved state, `effective_policy::transition::kill_switch_watch`) and stops
+//! its work the same way.
 //!
-//! Agent messages that arrive while the switch is on keep waiting (#445): no
-//! turn starts for them until a person turns the switch off.
+//! Agent messages that arrive while the switch is on keep waiting (#445), and
+//! turning it off starts no turn for them either: they go with the next turn
+//! someone starts.
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -32,7 +35,7 @@ use crate::function_tool::FunctionCallError;
 use crate::session::session::Session;
 
 /// Shown in a session whose work the kill switch stopped.
-pub const KILL_SWITCH_STOPPED: &str = "Stopped: the security kill switch was turned on, so Corbanu ended this reply and the commands it was running, and sends nothing to the model until the switch is turned off. Messages from other agents wait until then. To turn it off, open /security, press g, choose \"Turn the kill switch off\" and confirm.";
+pub const KILL_SWITCH_STOPPED: &str = "Stopped: the security kill switch was turned on, so Corbanu ended this reply and the commands it was running, and sends nothing to the model until the switch is turned off. Turning it off restarts nothing: messages and tasks from other agents wait for the next turn someone starts. To turn it off, open /security, press g, choose \"Turn the kill switch off\" and confirm.";
 
 /// What the model is told for a tool call that was not run.
 const KILL_SWITCH_TOOL_REFUSAL: &str = "Not run: the security kill switch is on, so Corbanu runs no tool calls until a person turns it off in /security.";

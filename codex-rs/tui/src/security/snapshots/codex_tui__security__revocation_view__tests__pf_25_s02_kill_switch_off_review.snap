@@ -6,11 +6,13 @@ Grants and kill switch
 Core's level: Permissive · Kill switch: on
 
 Turn the kill switch off?
-Turns are sent to the model again, in Codex and Claude panes. Messages from other agents
-that waited reach Codex panes with their next turn (turning it off does not start one);
-tasks held for Claude panes are sent now. Protected actions can be approved again and
-grants can be issued. Revoked grants and approvals do not come back; stopped replies and
-commands do not restart.
+Turns are sent to the model again, in Codex and Claude panes, but nothing restarts on
+its own: no pane starts a turn, stopped replies and commands do not restart, and paused
+assignments and whips stay paused until you resume them. Messages and tasks from other
+agents that waited go with each pane's next turn, when someone types in it or it gets new
+work. Protected actions can be approved again and grants can be issued. Revoked grants and
+approvals do not come back. Other Corbanu Terminals running on this home take it within
+about a second.
 The level stays Permissive: turning the kill switch off never lowers it.
 
 › Back (the kill switch stays on)

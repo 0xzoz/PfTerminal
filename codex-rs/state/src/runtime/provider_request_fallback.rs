@@ -83,7 +83,8 @@ pub(crate) struct ProviderRequestMemory {
     pending_releases: Mutex<Vec<ProviderRequestLease>>,
     /// The per-home key fingerprint salt, once read.
     pub(super) key_salt: tokio::sync::OnceCell<Arc<[u8]>>,
-    /// Salted keys whose legacy unsalted rows this process already adopted.
+    /// Salted keys whose legacy unsalted rows, and named accounts whose rows
+    /// kept by name, this process already adopted.
     pub(super) adopted_legacy_keys: Mutex<HashSet<String>>,
 }
 
@@ -324,11 +325,25 @@ impl StateRuntime {
                 .release_provider_request_lease_briefly(&lease, now_ms)
                 .await
             {
-                return Some(memory.pause("release provider request lease", &error));
+                return Some(self.pause_state_db("release provider request lease", &error));
             }
             memory.released(&lease);
         }
         None
+    }
+
+    /// `ProviderRequestMemory::pause`, and a busy DB is noted for this
+    /// process's other writes that can be put off (`state_db_contended`).
+    pub(super) fn pause_state_db(
+        &self,
+        operation: &'static str,
+        error: &anyhow::Error,
+    ) -> StateDbFallback {
+        let fallback = self.provider_request_memory.pause(operation, error);
+        if fallback == StateDbFallback::Busy {
+            self.note_state_db_contended();
+        }
+        fallback
     }
 
     /// Whether a request may be sent now, or a cooldown holds it back. Never
@@ -368,7 +383,7 @@ impl StateRuntime {
                     );
                 }
                 Err(error) => {
-                    fallback = Some(memory.pause("check provider request cooldown", &error));
+                    fallback = Some(self.pause_state_db("check provider request cooldown", &error));
                 }
             }
         }
@@ -436,7 +451,9 @@ impl StateRuntime {
                             memory.released(&lease);
                             None
                         }
-                        Err(error) => Some(memory.pause("release provider request lease", &error)),
+                        Err(error) => {
+                            Some(self.pause_state_db("release provider request lease", &error))
+                        }
                     };
                     return ProviderRequestThrottled::new(
                         ProviderRequestLeaseDecision::Blocked(block),
@@ -451,7 +468,7 @@ impl StateRuntime {
                     );
                 }
                 Err(error) => {
-                    fallback = Some(memory.pause("acquire provider request lease", &error));
+                    fallback = Some(self.pause_state_db("acquire provider request lease", &error));
                 }
             }
         }
@@ -516,7 +533,8 @@ impl StateRuntime {
                         });
                     }
                     Err(error) => {
-                        fallback = Some(memory.pause("record provider request result", &error));
+                        fallback =
+                            Some(self.pause_state_db("record provider request result", &error));
                     }
                 }
             }
@@ -560,7 +578,7 @@ impl StateRuntime {
                     }
                 }),
                 Err(error) => {
-                    fallback = Some(memory.pause("record provider request result", &error));
+                    fallback = Some(self.pause_state_db("record provider request result", &error));
                 }
             }
         }

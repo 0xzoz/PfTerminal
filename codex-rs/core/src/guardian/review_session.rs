@@ -672,7 +672,7 @@ async fn spawn_guardian_review_session(
     };
     let (session, io) = Box::pin(run_codex_thread_interactive(
         spawn_config,
-        parent_session.services.auth_manager.clone(),
+        parent_session.services.auth_manager(),
         parent_session.services.models_manager.clone(),
         Arc::clone(parent_session),
         Arc::clone(parent_turn),
@@ -722,15 +722,12 @@ async fn run_review_on_session(
 
         (send_followup_reminder, prompt_mode)
     };
-    let model_info = params
-        .parent_session
-        .services
-        .models_manager
-        .get_model_info(
-            params.model.as_str(),
-            &params.spawn_config.to_models_manager_config(),
-        )
-        .await;
+    let model_info = crate::model_info_for_provider::model_info_for_config(
+        &params.parent_session.services.models_manager,
+        params.model.as_str(),
+        &params.spawn_config,
+    )
+    .await;
     let guardian_reasoning_effort = params
         .reasoning_effort
         .clone()

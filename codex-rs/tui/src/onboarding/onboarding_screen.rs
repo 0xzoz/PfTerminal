@@ -277,12 +277,14 @@ impl OnboardingScreen {
                             id.clone(),
                             crate::provider_named_accounts::add_methods(id, provider)
                                 .into_iter()
-                                // Onboarding takes pasted secrets; paths and AWS profiles are in /providers.
+                                // Onboarding takes pasted secrets; paths, AWS profiles and OpenAI sign-ins are in /providers.
                                 .filter(|method| {
                                     !matches!(
                                         method,
                                         crate::provider_named_accounts::AddAccountMethod::ClaudeConfigDir
                                             | crate::provider_named_accounts::AddAccountMethod::AwsProfile
+                                            | crate::provider_named_accounts::AddAccountMethod::ChatgptDeviceCode
+                                            | crate::provider_named_accounts::AddAccountMethod::OpenaiApiKey
                                     )
                                 })
                                 .collect::<Vec<_>>(),

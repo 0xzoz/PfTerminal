@@ -20,12 +20,13 @@ S01, S02 and S03 on 2026-10-11 and they are archived: S02 and S03 behind the
 default-off `named_accounts` flag, S03 with limits (#425, #426 and #428 must be
 resolved before the flag is removed; S02-15 stays open). Travis accepted S04 and S05 on 2026-10-11 and they are archived (behind the
 flag). S06 (named AWS profile,
-then ChatGPT/OpenAI sign-in accounts, per decision D4) is in progress. See the plan's PF-84 section.
+then ChatGPT/OpenAI sign-in accounts, per decision D4) is `ready`: both slices merged
+behind the flag (#543 and slice B), awaiting independent acceptance. See the plan's PF-84 section.
 
 | Order | Sprint | Outcome | Status | Depends on |
 | ---: | --- | --- | --- | --- |
 | 22 | [PF-58-S01](pf-58-s01-credential-health-and-reauth.md) | Credential-scoped health and keyboard reauthentication | draft residual qualification; human-accepted for main integration | PF-57-S01 |
-| 28 | [PF-84-S06](pf-84-s06-aws-and-chatgpt-accounts.md) | Named AWS profile, then ChatGPT/OpenAI sign-in accounts | in_progress | PF-84-S05 |
+| 28 | [PF-84-S06](pf-84-s06-aws-and-chatgpt-accounts.md) | Named AWS profile, then ChatGPT/OpenAI sign-in accounts | ready | PF-84-S05 |
 | 23 | [PF-84-S01](../../archive/unified-provider-auth/pf-84-s01-home-override-hygiene.md) | Home override hygiene (wrapper pitfall) | completed | none |
 | 24 | [PF-84-S02](../../archive/unified-provider-auth/pf-84-s02-account-registry-and-resolution.md) | Named account registry, storage and resolution | completed | none |
 | 25 | [PF-84-S03](../../archive/unified-provider-auth/pf-84-s03-account-selection-and-propagation.md) | Account selection per session, CLI and worker | completed | PF-84-S02 |

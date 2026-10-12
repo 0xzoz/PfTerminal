@@ -75,7 +75,6 @@ use codex_core::path_utils;
 use codex_core::windows_sandbox::WindowsSandboxLevelExt;
 use codex_feedback::CodexFeedback;
 use codex_git_utils::get_git_repo_root;
-use codex_login::AuthConfig;
 use codex_login::default_client::set_default_client_residency_requirement;
 use codex_login::default_client::set_default_originator;
 use codex_login::enforce_login_restrictions;
@@ -576,17 +575,17 @@ pub async fn run_main_enforced(
 
     set_default_client_residency_requirement(config.enforce_residency.value());
 
-    let auth_route_config = config.auth_route_config();
-    if let Err(err) = enforce_login_restrictions(&AuthConfig {
-        codex_home: config.codex_home.to_path_buf(),
-        auth_credentials_store_mode: config.cli_auth_credentials_store_mode,
-        keyring_backend_kind: config.auth_keyring_backend_kind(),
-        forced_login_method: config.configured_forced_login_method,
-        forced_chatgpt_workspace_id: config.forced_chatgpt_workspace_id.clone(),
-        chatgpt_base_url: Some(config.chatgpt_base_url.clone()),
-        auth_route_config,
-    })
-    .await
+    // PF-84-S06 (#570): a session on a named sign-in account checks the
+    // restrictions against that account at thread start and never reads or
+    // logs out the default login. A resumed thread's account is known only
+    // later, so `exec resume` leaves the default login in place too; this
+    // process then never uses a ruled-out default login, and a thread on it
+    // is refused at thread start with the reason.
+    let leaves_default_login = config.runs_on_named_sign_in_account()
+        || (config.named_accounts_enabled() && matches!(command, Some(ExecCommand::Resume(_))));
+    if leaves_default_login {
+        codex_login::leave_default_login_unenforced();
+    } else if let Err(err) = enforce_login_restrictions(&config.default_login_restrictions()).await
     {
         eprintln!("{err}");
         std::process::exit(1);
@@ -777,6 +776,14 @@ async fn load_bootstrap_config_or_exit(
         }
     }
 }
+
+/// The longest `exec` waits at exit for this process's ledger writer; see
+/// `StateRuntime::settle_accounting`. It waits only while the writer makes
+/// progress itself: usually for its last records, once an hour possibly for
+/// the ledger's whole-ledger validation if this process took that on (tens of
+/// seconds on a large ledger in a debug build). Records waiting on another
+/// process are left for the next writer at once.
+const ACCOUNTING_EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
 
 async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     let exec_session_started_at = std::time::Instant::now();
@@ -1204,6 +1211,11 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
 
     if let Err(err) = client.shutdown().await {
         warn!("in-process app-server shutdown failed: {err}");
+    }
+    // Ledger records this process can still write are written before it
+    // exits; any waiting on another process stay saved for the next writer.
+    if let Some(state_db) = state_db.as_ref() {
+        state_db.settle_accounting(ACCOUNTING_EXIT_WAIT).await;
     }
     let error_seen = session?;
     event_processor.print_final_output();

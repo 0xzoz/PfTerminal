@@ -576,6 +576,7 @@ fn sample_thread_fork_response() -> ClientResponsePayload {
         active_permission_profile: None,
         reasoning_effort: None,
         multi_agent_mode: Default::default(),
+        provider_account: None,
     })
 }
 
