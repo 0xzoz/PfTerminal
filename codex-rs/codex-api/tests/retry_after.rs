@@ -307,6 +307,29 @@ async fn the_requested_wait_is_read_like_the_throttle_reads_it() {
             Duration::ZERO,
         ),
         (
+            "Retry-After 0 falls through to a long reset",
+            429,
+            vec![
+                ("retry-after", text("0")),
+                (
+                    "x-ratelimit-reset-ms",
+                    text(&unix_ms_in(Duration::from_secs(60)).to_string()),
+                ),
+            ],
+            false,
+            Duration::ZERO,
+        ),
+        (
+            "ms short wins over a date",
+            429,
+            vec![
+                ("retry-after-ms", text("300")),
+                ("retry-after", text("Wed, 21 Oct 2099 07:28:00 GMT")),
+            ],
+            true,
+            Duration::from_millis(300),
+        ),
+        (
             "5xx unchanged",
             503,
             vec![("retry-after", text("120"))],
