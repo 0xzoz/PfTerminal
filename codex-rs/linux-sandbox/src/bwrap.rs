@@ -1740,10 +1740,10 @@ fn append_unreadable_root_args(
         return Ok(());
     }
 
-    // #562: an empty file here may be another run's placeholder (made in
-    // that run's writable root, which need not be one of this run's); hold
-    // it as one so that run's cleanup cannot remove it from under this one.
-    if let Some(metadata) = empty_file_metadata(unreadable_root) {
+    // #562: another live run's placeholder (made in that run's writable
+    // root, which need not be one of this run's): mask it as before, and
+    // register it so that run's cleanup cannot remove it from under this one.
+    if let Some(metadata) = live_placeholder_file(unreadable_root) {
         if has_synthetic_mount_target(bwrap_args, unreadable_root) {
             return Ok(());
         }
@@ -1756,26 +1756,32 @@ fn append_unreadable_root_args(
 }
 
 /// #562: `missing` cannot be created when the folder it would go in is a
-/// regular file. An empty one in a writable root may be another run's
-/// placeholder (for a path below it, such as `~/Library` for
-/// `~/Library/Keychains`): it is held as one here, read-only and registered,
-/// so that run's cleanup cannot remove it while this one runs. Returns
-/// whether `missing` needs nothing more. Before, bubblewrap failed the run
-/// (`Can't mkdir parents … Not a directory`).
+/// regular file, so it needs no placeholder (bubblewrap would fail the run:
+/// `Can't mkdir parents … Not a directory`). Where that file is another live
+/// run's placeholder (for a path below it, such as `~/Library` for
+/// `~/Library/Keychains`), it is held as one: masked and registered, so this
+/// command cannot remove it from under that run, nor that run's cleanup from
+/// under this one. Returns whether `missing` needs nothing more.
 fn hold_file_above_missing_path(bwrap_args: &mut BwrapArgs, missing: &Path) -> Result<bool> {
     let Some(parent) = missing.parent() else {
         return Ok(false);
     };
-    let Ok(metadata) = fs::symlink_metadata(parent) else {
-        return Ok(false);
-    };
-    if !metadata.file_type().is_file() {
+    if !fs::symlink_metadata(parent).is_ok_and(|metadata| metadata.file_type().is_file()) {
         return Ok(false);
     }
-    if metadata.len() == 0 && !has_synthetic_mount_target(bwrap_args, parent) {
+    if let Some(metadata) = live_placeholder_file(parent)
+        && !has_synthetic_mount_target(bwrap_args, parent)
+    {
         append_existing_empty_file_bind_data_args(bwrap_args, parent, &metadata)?;
     }
     Ok(true)
+}
+
+/// #562: `path` when it is an empty file another live run registered as its
+/// placeholder.
+fn live_placeholder_file(path: &Path) -> Option<Metadata> {
+    let metadata = empty_file_metadata(path)?;
+    crate::linux_run_main::is_live_placeholder(path).then_some(metadata)
 }
 
 fn empty_file_metadata(path: &Path) -> Option<Metadata> {
@@ -1840,15 +1846,16 @@ enum EmptyProtectedMetadataPath {
 }
 
 fn transient_empty_metadata_path(path: &Path) -> Option<EmptyProtectedMetadataPath> {
-    // #562: every placeholder file is empty, whatever its name.
-    if let Some(metadata) = empty_file_metadata(path) {
-        return Some(EmptyProtectedMetadataPath::File(metadata));
-    }
     if !path.file_name().is_some_and(is_protected_metadata_name) {
-        return None;
+        // #562: another live run's placeholder, whatever its name.
+        return live_placeholder_file(path).map(EmptyProtectedMetadataPath::File);
     }
 
     let metadata = fs::symlink_metadata(path).ok()?;
+    if metadata.file_type().is_file() && metadata.len() == 0 {
+        return Some(EmptyProtectedMetadataPath::File(metadata));
+    }
+
     if metadata.file_type().is_dir() && directory_is_empty(path) {
         return Some(EmptyProtectedMetadataPath::Directory(metadata));
     }

@@ -1324,6 +1324,16 @@ fn with_synthetic_mount_registry_lock<T>(f: impl FnOnce() -> T) -> T {
     result
 }
 
+/// #562: whether a live run registered a placeholder it made at `path`
+/// (an empty file standing in for a missing protected path). A run that
+/// finds one must register it too, so the owner's cleanup leaves it in
+/// place until the last run using it ends.
+pub(crate) fn is_live_placeholder(path: &Path) -> bool {
+    with_synthetic_mount_registry_lock(|| {
+        synthetic_mount_marker_dir_has_active_synthetic_owner(&synthetic_mount_marker_dir(path))
+    })
+}
+
 fn synthetic_mount_marker_dir(path: &Path) -> PathBuf {
     synthetic_mount_registry_root().join(format!("{:016x}", hash_path(path)))
 }
