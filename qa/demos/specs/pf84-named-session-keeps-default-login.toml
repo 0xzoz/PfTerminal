@@ -61,7 +61,7 @@ wait = "Press enter to confirm or esc to go back"
 [[steps]]
 key = "Escape"
 [[steps]]
-wait = "left unchanged"
+wait = "The default OpenAI login cannot be used"
 [[steps]]
 run = "shasum -a 256 -c {logs}/auth-before.sha256"
 [[steps]]

@@ -414,3 +414,60 @@ async fn enrolled_named_account_configures_its_provider_without_a_default_key() 
         );
     }
 }
+
+/// PF-84 (#571): OpenAI on a named sign-in account selected for the session
+/// (`--account openai:work` from a Z.AI session) is configured by that
+/// account even without a default OpenAI login, so `/model` offers it; an
+/// unenrolled account is not configured, and without a selection the
+/// default login decides as before.
+#[tokio::test]
+async fn openai_on_a_named_sign_in_account_is_configured_without_a_default_login() {
+    let home = tempdir().unwrap();
+    let mut config = crate::legacy_core::config::ConfigBuilder::default()
+        .codex_home(home.path().to_path_buf())
+        .build()
+        .await
+        .unwrap();
+    config.model_provider_id = "zai".into();
+    config.model = Some("glm-5.3-flash".into());
+    let host = |config: &crate::legacy_core::config::Config, enrolled: bool| {
+        ProviderStatusHost::from_config_with_account_registry(
+            config,
+            ProviderAccountMetadata::default(),
+            |account, kind| {
+                enrolled
+                    && account.provider_id == "openai"
+                    && account.name == "work"
+                    && kind == ProviderAccountKind::ChatgptAuth
+            },
+        )
+    };
+    assert_eq!(
+        host(&config, /*enrolled*/ true)
+            .resolve_provider("openai")
+            .unwrap()
+            .configuration,
+        ProviderConfigurationState::NotConfigured
+    );
+    config
+        .model_providers
+        .get_mut("openai")
+        .expect("built-in openai provider")
+        .account = Some(NamedProviderAccount {
+        provider_id: "openai".into(),
+        name: "work".into(),
+    });
+    for (enrolled, expected) in [
+        (true, ProviderConfigurationState::Configured),
+        (false, ProviderConfigurationState::NotConfigured),
+    ] {
+        assert_eq!(
+            host(&config, enrolled)
+                .resolve_provider("openai")
+                .unwrap()
+                .configuration,
+            expected,
+            "enrolled = {enrolled}"
+        );
+    }
+}

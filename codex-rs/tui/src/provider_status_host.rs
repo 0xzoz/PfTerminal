@@ -157,6 +157,9 @@ fn named_account_enrollment(
             ]
         } else if provider.auth.is_some() {
             &[ProviderAccountKind::Command]
+        } else if codex_model_provider::named_sign_in_account(provider).is_some() {
+            // PF-84-S06: an OpenAI ChatGPT or API-key sign-in.
+            &[ProviderAccountKind::ChatgptAuth]
         } else {
             &[ProviderAccountKind::ApiKey]
         };
@@ -394,10 +397,18 @@ impl ProviderStatusHost {
         let first = entry.setup_capabilities.iter().next();
         let named = self.named_accounts.get(entry.id.as_str()).copied();
         match first {
+            // PF-84 (#571): OpenAI on a named sign-in account (selected for
+            // this session) is configured by that account, not the default
+            // login, so `/model` offers OpenAI from a session on another
+            // provider with no default OpenAI login.
             Some(ProviderSetupCapability::OpenAiAccount)
             | Some(ProviderSetupCapability::ApiKey {
                 storage: ApiKeyStorage::OpenAiAuth,
-            }) => ProviderMetadata::OpenAi(account.openai),
+            }) => ProviderMetadata::OpenAi(match named {
+                Some(true) => codex_login::OpenAiAuthMetadata::Account,
+                Some(false) => codex_login::OpenAiAuthMetadata::Missing,
+                None => account.openai,
+            }),
             Some(ProviderSetupCapability::ApiKey {
                 storage: ApiKeyStorage::EnvironmentVariable { .. },
             }) if named.is_some() => {
