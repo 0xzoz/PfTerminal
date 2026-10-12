@@ -4031,7 +4031,7 @@ mod tests {
             vec![
                 (links.join("codex"), workspace.join(".codex")),
                 (links.join("git"), git.clone()),
-                (nested.clone(), git.clone()),
+                (nested, git.clone()),
                 (links.join("hooks"), git.clone()),
                 (links.join("relative"), git),
             ]
