@@ -28,6 +28,17 @@ impl ResponseItem {
         }
     }
 
+    /// Passthrough metadata carrying only this item's producer, for an item
+    /// rebuilt from this one (labelled history), so request building still
+    /// knows whose it was. `None` when no producer is recorded.
+    pub fn producer_only_metadata(&self) -> Option<InternalChatMessageMetadataPassthrough> {
+        self.producer()
+            .map(|producer| InternalChatMessageMetadataPassthrough {
+                producer: Some(producer.to_string()),
+                ..Default::default()
+            })
+    }
+
     /// Removes all local-only provenance (fragment sources and producer) before the item is
     /// serialized for a model provider or a client, leaving the payload it had without it.
     pub fn clear_local_provenance(&mut self) {
