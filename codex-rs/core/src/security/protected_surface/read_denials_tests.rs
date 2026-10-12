@@ -495,7 +495,9 @@ fn issue_603_a_worktrees_link_keeps_the_names_protected() {
     for target in [".", "..", "/"] {
         let fx = fixture();
         let worktrees = fx.codex_home.join("worktrees");
-        let _ = std::fs::remove_dir(&worktrees);
+        if worktrees.exists() {
+            std::fs::rename(&worktrees, fx.codex_home.join("worktrees.old")).unwrap();
+        }
         std::os::unix::fs::symlink(target, &worktrees).unwrap();
         let cwd = fx.codex_home.clone();
         let policy = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)])

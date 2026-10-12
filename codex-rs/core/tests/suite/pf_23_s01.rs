@@ -1909,10 +1909,12 @@ async fn issue_603_a_command_in_the_corbanu_home_cannot_create_names_corbanu_rea
             let root = home.path().canonicalize()?;
             std::fs::create_dir_all(root.join("worktrees/w"))?;
             std::fs::create_dir_all(root.join("other"))?;
+            // The working folder spelled as the home is (`/tmp/...` on
+            // macOS with `TMPDIR=/tmp`); paths checked by its real location.
             let cwd = if in_other {
-                root.join("other")
+                home.path().join("other")
             } else {
-                root.clone()
+                home.path().to_path_buf()
             };
             let path = root.to_string_lossy().into_owned();
             // Split inside the home folder's own name: neither part names it.
