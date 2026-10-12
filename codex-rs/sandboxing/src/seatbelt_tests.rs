@@ -2385,6 +2385,7 @@ fn credential_templates_stay_usable() {
     fs::write(work.join(".env"), "API_KEY=dummy-442-person").expect("env");
     fs::write(work.join(".env.example"), "API_KEY=example-442").expect("example");
     fs::write(work.join(".ENV.SAMPLE"), "API_KEY=sample-442").expect("sample");
+    fs::write(work.join("notes"), "plain-notes").expect("notes");
     let mut entries = vec![
         FileSystemSandboxEntry::new(
             FileSystemPath::Special {
@@ -2421,7 +2422,9 @@ fn credential_templates_stay_usable() {
          ln -s .env .env.sample; cat .env.sample; echo link=$?; \
          rm .env.template; ln .env .env.template; cat .env.template; echo readtpl=$?; \
          ln .env hard-copy; cat hard-copy; echo hardcopy=$?; \
-         mv .env .env.example; echo mvenv=$?";
+         mv .env .env.example; echo mvenv=$?; \
+         ln -s notes xlink; mv xlink .env.sample; echo mvlink=$?; \
+         mkfifo xfifo; mv xfifo .env.sample; echo mvfifo=$?";
     let args = create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
         command: vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
         file_system_sandbox_policy: &policy,
@@ -2458,6 +2461,8 @@ fn credential_templates_stay_usable() {
         "readtpl=1",
         "hardcopy=1",
         "mvenv=1",
+        "mvlink=1",
+        "mvfifo=1",
     ] {
         assert!(stdout.contains(line), "{line} not in {stdout}");
     }

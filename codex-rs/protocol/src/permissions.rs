@@ -116,8 +116,9 @@ pub fn unsafe_credential_entry_message(
             Some(target) => (
                 format!(" to {}", target.display()),
                 format!(
-                    " What was written to it is in {}, which agent commands may have read: move \
-                     that file out of the workspace too, and change any secret in it.",
+                    " What was written to it is in {}, which agent commands may have read: \
+                     delete that file too (moving it does not hide it), and change any secret in \
+                     it.",
                     target.display()
                 ),
             ),
@@ -132,9 +133,9 @@ pub fn unsafe_credential_entry_message(
     } else if problem == HARD_LINKED {
         format!(
             "the credential file {shown} has other hard links: the same file under other names \
-             agent commands could read. To fix it, delete the other names (find them with \
-             `find . -samefile {shown}`) or replace the file with a regular copy, {away}; any \
-             secret in it may have been read, so change it."
+             agent commands could read. To fix it, delete the other names (`find` with \
+             `-samefile` lists them) or replace the file with a regular copy, {away}; any secret \
+             in it may have been read, so change it."
         )
     } else {
         format!(
@@ -177,13 +178,29 @@ fn hard_links(_metadata: &std::fs::Metadata) -> u64 {
 }
 
 /// The deny globs that cover every credential file name below `root`, now
-/// and created later.
+/// and created later, spelled as the filesystem policy resolves them (with
+/// `\\` on Windows).
 pub fn credential_file_globs(root: &str) -> Vec<String> {
-    let root = root.trim_end_matches('/');
+    let separator = std::path::MAIN_SEPARATOR;
+    let root = root.trim_end_matches(['/', separator]);
     CREDENTIAL_FILE_NAME_PATTERNS
         .iter()
-        .map(|name| format!("{root}/**/{name}"))
+        .map(|name| format!("{root}{separator}**{separator}{name}"))
         .collect()
+}
+
+/// The folder and credential name pattern of a glob from
+/// [`credential_file_globs`], with either separator.
+fn credential_glob_parts(pattern: &str) -> Option<(PathBuf, &'static str)> {
+    CREDENTIAL_FILE_NAME_PATTERNS.iter().find_map(|name| {
+        let rest = pattern.strip_suffix(name)?;
+        let rest = rest.strip_suffix(['/', '\\'])?.strip_suffix("**")?;
+        let root = rest.strip_suffix(['/', '\\'])?;
+        Some((
+            PathBuf::from(if root.is_empty() { "/" } else { root }),
+            *name,
+        ))
+    })
 }
 
 /// #442 (Travis, 2026-10-12): the folders whose credential names `globs`
@@ -192,17 +209,19 @@ pub fn credential_file_globs(root: &str) -> Vec<String> {
 /// templates ([`CREDENTIAL_FILE_TEMPLATE_NAMES`]) exempt: a person's own
 /// `**/.env.*` glob alone keeps covering them.
 pub fn credential_rule_roots<S: AsRef<str>>(globs: &[S]) -> Vec<PathBuf> {
-    let mut roots: Vec<PathBuf> = globs
+    let parts: Vec<(PathBuf, &str)> = globs
         .iter()
-        .filter_map(|glob| credential_file_glob_root(glob.as_ref()))
+        .filter_map(|glob| credential_glob_parts(glob.as_ref()))
         .collect();
+    let mut roots: Vec<PathBuf> = parts.iter().map(|(root, _)| root.clone()).collect();
     roots.sort();
     roots.dedup();
     roots.retain(|root| {
-        let root = root.to_string_lossy();
-        credential_file_globs(&root)
-            .iter()
-            .all(|wanted| globs.iter().any(|glob| glob.as_ref() == wanted))
+        CREDENTIAL_FILE_NAME_PATTERNS.iter().all(|wanted| {
+            parts
+                .iter()
+                .any(|(other, name)| other == root && name == wanted)
+        })
     });
     roots
 }
@@ -216,10 +235,7 @@ pub fn credential_glob_exempts_templates(pattern: &str, rule_roots: &[PathBuf]) 
 /// The folder a deny glob from [`credential_file_globs`] covers, so a sandbox
 /// that can only hide existing files can also watch for new ones.
 pub fn credential_file_glob_root(pattern: &str) -> Option<PathBuf> {
-    CREDENTIAL_FILE_NAME_PATTERNS.iter().find_map(|name| {
-        let root = pattern.strip_suffix(name)?.strip_suffix("/**/")?;
-        Some(PathBuf::from(if root.is_empty() { "/" } else { root }))
-    })
+    credential_glob_parts(pattern).map(|(root, _)| root)
 }
 
 /// Returns the protected workspace metadata name when an agent write to `path`
@@ -3822,14 +3838,24 @@ mod tests {
         for name in [".envrcx", "x.env", ".environment", "env", ".en"] {
             assert!(!is_credential_file_name(OsStr::new(name)), "{name}");
         }
-        assert_eq!(
-            credential_file_globs("/work/"),
-            vec!["/work/**/.env", "/work/**/.env.*", "/work/**/.envrc"]
-        );
-        assert_eq!(
-            credential_file_globs("/"),
-            vec!["/**/.env", "/**/.env.*", "/**/.envrc"]
-        );
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                credential_file_globs("/work/"),
+                vec!["/work/**/.env", "/work/**/.env.*", "/work/**/.envrc"]
+            );
+            assert_eq!(
+                credential_file_globs("/"),
+                vec!["/**/.env", "/**/.env.*", "/**/.envrc"]
+            );
+        }
+        // Either separator (Windows resolves policy globs with `\\`).
+        for glob in [r"C:\work\**\.env.*", "C:/work/**/.env.*"] {
+            assert_eq!(
+                credential_file_glob_root(glob),
+                Some(PathBuf::from(&glob[..7]))
+            );
+        }
         for root in ["/work", "/"] {
             for glob in credential_file_globs(root) {
                 assert_eq!(
@@ -3978,6 +4004,44 @@ mod tests {
                 &policy,
                 temp.as_path()
             ));
+        }
+    }
+
+    /// #442 (Travis, 2026-10-12): the credential rule as a profile writes it
+    /// (`**/.env` and so on below a folder), resolved by the policy with the
+    /// platform's separator, is recognised as the whole rule, so the
+    /// templates are exempt on every system, Windows included.
+    #[test]
+    fn credential_rule_is_recognised_as_the_policy_resolves_it() {
+        let temp = TempDir::new().expect("tempdir");
+        let cwd = temp.path();
+        let policy = FileSystemSandboxPolicy::restricted(
+            CREDENTIAL_FILE_NAME_PATTERNS
+                .iter()
+                .map(|name| {
+                    FileSystemSandboxEntry::new(
+                        FileSystemPath::GlobPattern {
+                            pattern: format!("**/{name}"),
+                        },
+                        FileSystemAccessMode::Deny,
+                    )
+                })
+                .collect(),
+        );
+        let globs = policy.get_unreadable_globs_with_cwd(cwd);
+        let roots = credential_rule_roots(&globs);
+        assert_eq!(roots.len(), 1, "{globs:?}");
+        let mut expected = credential_file_globs(&roots[0].to_string_lossy());
+        expected.sort();
+        assert_eq!(globs, expected);
+        for allowed in [".env.example", "app/.env.sample"] {
+            assert!(
+                !is_read_denied(&cwd.join(allowed), &policy, cwd),
+                "{allowed}"
+            );
+        }
+        for denied in [".env", "app/.env.local", ".envrc"] {
+            assert!(is_read_denied(&cwd.join(denied), &policy, cwd), "{denied}");
         }
     }
 

@@ -164,7 +164,7 @@ fn issue_442_grant_once_says_what_it_lifts() {
     for said in [
         "lets one command write files that run code later",
         "only inside the current folder",
-        "core.hooksPath",
+        "git hooks and config kept outside a .git folder",
         "your shell and git start-up files",
         "login agents and services, and .claude settings",
         "the project's .git, .codex and .agents stay read-only",

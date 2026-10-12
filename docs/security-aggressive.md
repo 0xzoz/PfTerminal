@@ -16,9 +16,11 @@ To allow it, switch to Permissive.
 write them, so agent commands can read, create and change them on every
 system. A name such as `.env.example.local` is still a credential file.
 Because an agent can make a template, don't rename one into `.env` when
-you fill in real values: copy it instead (`cp .env.example .env`). On macOS
-an agent command can't make a template a link or pipe; on Linux a `.env`
-that is a link or has other names is refused, as below.
+you fill in real values: copy it instead (`cp .env.example .env`). A
+template an agent made can be a hard link to a file it reads, and on Linux
+and Windows also a link; on macOS an agent command can't create one as a
+symbolic link or pipe. A `.env` that is a link or has other names is refused,
+as below.
 
 A deny rule of your own for `**/.env.*` in a permission profile still covers
 the templates. Only a profile that denies all three of `**/.env`,
@@ -49,9 +51,10 @@ and where the link points.
 
 To fix a link, replace it with a regular file (delete the link, then create
 the file in its place), or move it out of the workspace. What was written to
-it is in the file it pointed to, which agent commands may have read: move that
-file out of the workspace too, and change any secret in it. For a file with
-other hard links, delete the other names (`find . -samefile .env` lists them)
+it is in the file it pointed to, which agent commands may have read: delete
+that file too (moving it does not hide it from agent commands), and change any
+secret in it. For a file with
+other hard links, delete the other names (`find` with `-samefile` lists them)
 or replace the file with a regular copy, and change any secret in it.
 
 ## Grant once
@@ -61,8 +64,9 @@ lets one command write the files that run code later, which Aggressive
 otherwise keeps read-only, and only inside the current folder (the only place
 Aggressive lets commands write):
 
-- a git hooks folder the project sets with `core.hooksPath`, such as Husky's
-  `.husky`;
+- git hooks and config kept outside a `.git` folder: a hooks folder set with
+  `core.hooksPath`, such as Husky's `.husky`, or a git folder with another
+  name (`--separate-git-dir`, a `.bare` layout);
 - when the current folder holds your home folder: your shell and git start-up
   files (such as `.zshrc`, `.profile`, `.gitconfig`, `.config/git` and
   `.local/bin`), login agents and services (`Library/LaunchAgents`,
@@ -70,7 +74,7 @@ Aggressive lets commands write):
 
 A file written this way runs code later, outside the sandbox. Nothing else
 changes: credential files and Corbanu's sign-in, vault, config and history stay
-unreadable; Corbanu's own files and the project's `.git` (its hooks and config
+unreadable; Corbanu's own files and the project's `.git` folder (its hooks and config
 included), `.codex` and `.agents` stay read-only; other folders and the
 network stay closed.
 

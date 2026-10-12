@@ -1057,10 +1057,7 @@ async fn issue_442_launch_check_names_unsafe_credential_files() {
         "{failures:?}"
     );
     // The exposed target is named, with what to do about it.
-    assert!(
-        failures[1].contains("move that file out of the workspace too"),
-        "{failures:?}"
-    );
+    assert!(failures[1].contains("delete that file too"), "{failures:?}");
 }
 
 /// #442 (Travis, 2026-10-12): `.env.example`, `.env.sample` and

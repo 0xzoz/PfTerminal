@@ -346,9 +346,7 @@ mod tests {
                 })
                 .collect()
         };
-        let rule = codex_protocol::permissions::credential_file_globs(
-            &root.to_string_lossy().replace('\\', "/"),
-        );
+        let rule = codex_protocol::permissions::credential_file_globs(&root.to_string_lossy());
         assert_eq!(
             resolve(rule),
             [".env", ".env.local"]
@@ -358,8 +356,9 @@ mod tests {
         );
         assert_eq!(
             resolve(vec![format!(
-                "{}/**/.env.*",
-                root.to_string_lossy().replace('\\', "/")
+                "{}{sep}**{sep}.env.*",
+                root.to_string_lossy(),
+                sep = std::path::MAIN_SEPARATOR
             )]),
             [
                 ".env.local",
