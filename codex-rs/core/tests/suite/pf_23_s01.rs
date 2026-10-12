@@ -1737,10 +1737,13 @@ async fn issue_586_missing_db_init_lock_cannot_be_created_or_held() -> anyhow::R
             let requests = captured.requests();
             let output = output_text(&requests[requests.len() - 1], "call-lock");
             let ok = if missing {
-                // In another case it is the same file where the volume ignores case.
+                // `exists()` is the check for the upper-case probe too: on a
+                // case-insensitive volume (default macOS) it is this file. On
+                // a case-sensitive one it is another, harmless file.
                 output.contains("held-lower") == held && lock.exists() == held
             } else {
                 output.contains("held-link") == held
+                    && test.config.cwd.join("link586").exists() == held
             };
             if !output.contains("ran-586") || !ok {
                 wrong.push(format!(

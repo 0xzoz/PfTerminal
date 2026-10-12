@@ -397,13 +397,7 @@ impl SqliteConfig {
     pub(crate) async fn lock_runtime_db_init(&self) -> RuntimeDbInitLock {
         let path = self.home().join(DB_INIT_LOCK_FILENAME);
         let unlocked = RuntimeDbInitLock { _file: None };
-        let file = match std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
-        {
+        let file = match open_lock_file(&path) {
             Ok(file) => file,
             Err(err) => {
                 log_unlocked(&path, &err);
@@ -498,12 +492,47 @@ pub(crate) struct RuntimeDbInitLock {
     _file: Option<std::fs::File>,
 }
 
-/// A read-only or sandboxed home is expected not to take the lock: quiet.
+fn open_lock_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let open = || {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+    };
+    match open() {
+        #[cfg(unix)]
+        Err(err)
+            if err.kind() == std::io::ErrorKind::PermissionDenied
+                && make_placeholder_writable(path) =>
+        {
+            open()
+        }
+        result => result,
+    }
+}
+
+/// #586: the lock is denied to protected agent commands even before it
+/// exists, so on Linux bubblewrap holds a missing one with an empty `0444`
+/// placeholder for the command's run. A placeholder left behind by a killed
+/// sandbox helper would turn the lock off for every later launch. An empty
+/// regular file this user owns (only the owner can change its mode) is made
+/// writable again; the sandbox sees its own mount, not the host file's mode.
+#[cfg(unix)]
+fn make_placeholder_writable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::symlink_metadata(path)
+        .is_ok_and(|metadata| metadata.file_type().is_file() && metadata.len() == 0)
+        && std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).is_ok()
+}
+
 /// #586: the lock file is never left empty. On Linux an empty file at its
-/// path can be the sandbox's placeholder for a protected command's run (the
-/// lock is denied to agent commands even before it exists). The run's cleanup
-/// removes an empty placeholder even while a launch holds it locked, and the
-/// next launch would then lock a new file.
+/// path can be the sandbox's placeholder for a protected command's run (see
+/// [`make_placeholder_writable`]). The run's cleanup removes an empty
+/// placeholder even while a launch holds it locked, and the next launch would
+/// then lock a new file. (Cleanup and a launch running as root can still race
+/// between its length check and the removal; the window is tiny.)
 fn keep_lock_file_nonempty(mut file: &std::fs::File) {
     use std::io::Write;
     if file.metadata().is_ok_and(|metadata| metadata.len() == 0) {
@@ -511,6 +540,7 @@ fn keep_lock_file_nonempty(mut file: &std::fs::File) {
     }
 }
 
+/// A read-only or sandboxed home is expected not to take the lock: quiet.
 fn log_unlocked(path: &Path, err: &std::io::Error) {
     if matches!(
         err.kind(),

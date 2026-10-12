@@ -232,3 +232,32 @@ async fn the_init_lock_file_is_not_left_empty() -> anyhow::Result<()> {
     drop(held);
     Ok(())
 }
+
+/// #586: a Linux sandbox placeholder (an empty `0444` file) left at the lock
+/// path does not turn the lock off: it is made writable and becomes the lock.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_leftover_read_only_placeholder_becomes_the_lock() -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home).await?;
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let lock = sqlite_home.join(DB_INIT_LOCK_FILENAME);
+    std::fs::write(&lock, b"")?;
+    std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o444))?;
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let held = sqlite.lock_runtime_db_init().await;
+    assert!(held._file.is_some(), "the placeholder is locked");
+    assert_eq!(std::fs::metadata(&lock)?.len(), 1);
+    // Another holder now waits for it.
+    let other = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock)?;
+    assert!(other.try_lock().is_err());
+    drop(held);
+    assert!(other.try_lock().is_ok());
+    Ok(())
+}
