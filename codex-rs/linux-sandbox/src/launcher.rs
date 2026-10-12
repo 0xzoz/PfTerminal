@@ -49,12 +49,41 @@ pub(crate) fn exec_bwrap(argv: Vec<String>, preserved_files: Vec<File>) -> ! {
     match launcher {
         BubblewrapLauncher::System(launcher) => exec_system_bwrap(&launcher, argv, preserved_files),
         BubblewrapLauncher::Bundled(launcher) => launcher.exec(argv, preserved_files),
-        BubblewrapLauncher::Unavailable => {
-            panic!(
-                "bubblewrap is unavailable: no system bwrap was found on PATH and no bundled \
-                 codex-resources/bwrap binary was found next to the Codex executable"
-            )
+        BubblewrapLauncher::Unavailable => exit_bwrap_unavailable(),
+    }
+}
+
+/// Issue #563: with no usable bubblewrap, refuse the command with a message
+/// that names what to install, exactly where bubblewrap would have started.
+/// This was a panic: exit status 101, or an abort (134) without a message
+/// where the helper runs from a constructor (test binaries dispatch on arg0
+/// that way). Either way the command never ran. Everything before it runs
+/// and fails as before; only the message and the status (1) differ. This may
+/// run in a forked child (the `/proc` probe, the run with placeholders to
+/// clean up), so it avoids allocation and locks itself: only `write` and
+/// `_exit`.
+fn exit_bwrap_unavailable() -> ! {
+    write_all_to_stderr(codex_sandboxing::BWRAP_UNAVAILABLE_MESSAGE.as_bytes());
+    write_all_to_stderr(b"\n");
+    // SAFETY: ends the process at once, without unwinding or atexit handlers.
+    unsafe { libc::_exit(1) }
+}
+
+fn write_all_to_stderr(mut bytes: &[u8]) {
+    while !bytes.is_empty() {
+        // SAFETY: writes from a live buffer of `bytes.len()` bytes to stderr.
+        let written =
+            unsafe { libc::write(libc::STDERR_FILENO, bytes.as_ptr().cast(), bytes.len()) };
+        let Ok(written) = usize::try_from(written) else {
+            if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return;
+        };
+        if written == 0 {
+            return;
         }
+        bytes = &bytes[written..];
     }
 }
 

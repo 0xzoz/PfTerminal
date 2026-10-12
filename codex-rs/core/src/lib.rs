@@ -5,6 +5,7 @@
 // the TUI or the tracing stack).
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
+mod account_models_manager;
 mod anthropic_payload;
 mod apply_patch;
 mod apps;

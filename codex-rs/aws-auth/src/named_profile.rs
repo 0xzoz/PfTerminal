@@ -145,3 +145,7 @@ pub(crate) async fn load_named_profile(
 #[cfg(test)]
 #[path = "named_profile_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "log_sinks_tests.rs"]
+mod log_sinks_tests;

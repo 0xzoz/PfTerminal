@@ -97,8 +97,7 @@ impl ExtensionAccounting {
     ) -> Option<Arc<ResponseEvidence>> {
         let owner = self.owner.upgrade()?;
         let (accounting, provider_id) = owner.accounting_binding().await;
-        let auth = owner.services.auth_manager.auth().await;
-        let auth_mode = auth.as_ref().map(codex_login::CodexAuth::auth_mode);
+        let auth_mode = accounting_auth_mode(&owner, provider).await;
         let mut mode = if matches!(accounting, AccountingMode::Provider { .. }) {
             crate::accounting::turn_mode(&accounting, &provider_id, provider, auth_mode, endpoint)
         } else {
@@ -348,6 +347,24 @@ impl<T: HttpTransport> HttpTransport for Accounted<T> {
     async fn stream(&self, request: Request) -> Result<StreamResponse, TransportError> {
         self.inner.stream(request).await
     }
+}
+
+/// The sign-in mode the ledger prices a request to `provider` under: that
+/// provider's account (a named one, or the default login), the same source
+/// the request authenticates with, so a switch mid-turn prices each request
+/// under its own account (PF-84).
+pub(crate) async fn accounting_auth_mode(
+    owner: &Session,
+    provider: &ModelProviderInfo,
+) -> Option<codex_protocol::auth::AuthMode> {
+    owner
+        .services
+        .active_auth
+        .for_provider(provider)
+        .auth()
+        .await
+        .as_ref()
+        .map(codex_login::CodexAuth::auth_mode)
 }
 
 #[cfg(test)]

@@ -1,8 +1,11 @@
 use crate::policy_transforms::should_require_platform_sandbox;
+use codex_install_context::InstallContext;
 use codex_protocol::models::PermissionProfile;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use std::io::ErrorKind;
 use std::io::Read;
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -20,6 +23,28 @@ const MISSING_BWRAP_WARNING: &str = concat!(
     "See the sandbox prerequisites: ",
     "https://developers.openai.com/codex/concepts/sandboxing#prerequisites. ",
     "Corbanu Terminal will use the bundled bubblewrap in the meantime.",
+);
+/// Issue #563: neither a system nor a bundled bubblewrap, so every sandboxed
+/// command is refused (see [`BWRAP_UNAVAILABLE_MESSAGE`]).
+const NO_BWRAP_WARNING: &str = concat!(
+    "Corbanu Terminal could not find bubblewrap on PATH, and no bundled copy came with it, ",
+    "so it cannot run commands in its Linux sandbox. ",
+    "Install bubblewrap with your OS package manager ",
+    "(for example `sudo apt install bubblewrap` or `sudo dnf install bubblewrap`). ",
+    "See the sandbox prerequisites: ",
+    "https://developers.openai.com/codex/concepts/sandboxing#prerequisites.",
+);
+/// Issue #563: what the Linux sandbox helper prints, before exiting with
+/// status 1, when it finds no usable bubblewrap. The command does not run.
+/// It starts with the startup-failure marker the tool orchestrator matches
+/// ("bubblewrap is unavailable") and names the sandbox, so a run is handled
+/// exactly as it was when this was a panic.
+pub const BWRAP_UNAVAILABLE_MESSAGE: &str = concat!(
+    "bubblewrap is unavailable: Corbanu Terminal's Linux sandbox found no usable `bwrap` on ",
+    "PATH and no bundled copy, so the command did not run. ",
+    "Install or update bubblewrap with your OS package manager ",
+    "(for example `sudo apt install bubblewrap` or `sudo dnf install bubblewrap`), ",
+    "then try again.",
 );
 const USER_NAMESPACE_WARNING: &str =
     "Corbanu Terminal's Linux sandbox uses bubblewrap and needs access to create user namespaces.";
@@ -44,7 +69,9 @@ pub fn system_bwrap_warning(permission_profile: &PermissionProfile) -> Option<St
     }
 
     let system_bwrap_path = find_system_bwrap_in_path();
-    system_bwrap_warning_for_path(system_bwrap_path.as_deref())
+    system_bwrap_warning_for_path(system_bwrap_path.as_deref(), || {
+        find_bundled_bwrap().is_some()
+    })
 }
 
 fn should_warn_about_system_bwrap(permission_profile: &PermissionProfile) -> bool {
@@ -56,13 +83,21 @@ fn should_warn_about_system_bwrap(permission_profile: &PermissionProfile) -> boo
     )
 }
 
-fn system_bwrap_warning_for_path(system_bwrap_path: Option<&Path>) -> Option<String> {
+fn system_bwrap_warning_for_path(
+    system_bwrap_path: Option<&Path>,
+    has_bundled_bwrap: impl FnOnce() -> bool,
+) -> Option<String> {
     if is_wsl1() {
         return Some(WSL1_BWRAP_WARNING.to_string());
     }
 
     let Some(system_bwrap_path) = system_bwrap_path else {
-        return Some(MISSING_BWRAP_WARNING.to_string());
+        let warning = if has_bundled_bwrap() {
+            MISSING_BWRAP_WARNING
+        } else {
+            NO_BWRAP_WARNING
+        };
+        return Some(warning.to_string());
     };
 
     if !system_bwrap_has_user_namespace_access(system_bwrap_path, SYSTEM_BWRAP_PROBE_TIMEOUT)
@@ -223,6 +258,48 @@ fn find_system_bwrap_in_search_paths(
                 Some(path)
             }
         })
+}
+
+/// The bubblewrap that came with Corbanu Terminal: in the install's
+/// resources, or next to the executable (older package layouts and
+/// development builds).
+pub fn find_bundled_bwrap() -> Option<AbsolutePathBuf> {
+    let current_exe = std::env::current_exe().ok()?;
+    find_bundled_bwrap_for_install_context(InstallContext::current())
+        .or_else(|| find_legacy_bundled_bwrap_for_exe(&current_exe))
+}
+
+fn find_bundled_bwrap_for_install_context(context: &InstallContext) -> Option<AbsolutePathBuf> {
+    context
+        .bundled_resource("bwrap")
+        .filter(|path| is_executable_file(path))
+}
+
+fn find_legacy_bundled_bwrap_for_exe(exe: &Path) -> Option<AbsolutePathBuf> {
+    legacy_bundled_bwrap_candidates_for_exe(exe)
+        .into_iter()
+        .find(|candidate| is_executable_file(candidate))
+        .and_then(|path| AbsolutePathBuf::from_absolute_path(&path).ok())
+}
+
+fn legacy_bundled_bwrap_candidates_for_exe(exe: &Path) -> Vec<PathBuf> {
+    let Some(exe_dir) = exe.parent() else {
+        return Vec::new();
+    };
+
+    let mut candidates = vec![exe_dir.join("codex-resources").join("bwrap")];
+    if let Some(package_target_dir) = exe_dir.parent() {
+        candidates.push(package_target_dir.join("codex-resources").join("bwrap"));
+    }
+    candidates.push(exe_dir.join("bwrap"));
+    candidates
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
 }
 
 #[cfg(test)]

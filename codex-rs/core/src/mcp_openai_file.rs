@@ -38,7 +38,7 @@ pub(crate) async fn rewrite_mcp_tool_arguments_for_openai_files(
     let Some(arguments) = arguments_value.as_object() else {
         return Ok(Some(arguments_value));
     };
-    let auth = sess.services.auth_manager.auth().await;
+    let auth = sess.services.auth_manager().auth().await;
     // PF-23-S01: after untrusted content these host-side reads honour the
     // same read denials as agent commands.
     let read_policy =
@@ -947,9 +947,11 @@ mod tests {
 
     #[tokio::test]
     async fn rewrite_mcp_tool_arguments_for_openai_files_surfaces_upload_failures() {
-        let (mut session, turn_context) = make_session_and_context().await;
-        session.services.auth_manager = crate::test_support::auth_manager_from_auth(
-            CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+        let (session, turn_context) = make_session_and_context().await;
+        session.services.active_auth.replace_for_testing(
+            crate::test_support::auth_manager_from_auth(
+                CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+            ),
         );
         let step_context = StepContext::for_test(Arc::new(turn_context));
         let error = rewrite_mcp_tool_arguments_for_openai_files(

@@ -22,7 +22,7 @@ use std::process::Stdio;
 use std::time::Duration;
 use tokio::process::Command;
 
-const BWRAP_UNAVAILABLE_ERR: &str = "bubblewrap is unavailable: no system bwrap was found";
+const BWRAP_UNAVAILABLE_ERR: &str = "bubblewrap is unavailable:";
 const NETWORK_TIMEOUT_MS: u64 = 4_000;
 const MANAGED_PROXY_PERMISSION_ERR_SNIPPETS: &[&str] = &[
     "loopback: Failed RTM_NEWADDR",
