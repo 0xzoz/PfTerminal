@@ -27,8 +27,10 @@ pub(super) struct NamedBedrockAccount {
     name: String,
     home: Option<PathBuf>,
     profile_source: ProfileSource,
-    /// The signing context of the profile last loaded, so its credentials
-    /// (and an SSO token cache) are resolved once, not on every request.
+    /// The signing context of the profile last loaded. Its credentials
+    /// provider (with the SDK's SSO token cache) is kept for the session;
+    /// credentials are still fetched for every request, as on the default
+    /// path. Edits to `~/.aws` apply from the next session.
     loaded: Arc<std::sync::Mutex<Option<(String, AwsAuthContext)>>>,
 }
 
@@ -90,8 +92,9 @@ impl NamedBedrockAccount {
             .map_err(|error| self.profile_error(&profile, &error))
     }
 
-    /// The profile's signing context. Its credentials are resolved when the
-    /// profile is first loaded (or changes), before any request is signed.
+    /// The profile's signing context. When the profile is first loaded (or
+    /// the account's profile changes) its credentials are resolved once
+    /// before any request, so a broken profile is refused up front.
     pub(super) async fn context(&self, aws: &ModelProviderAwsAuthInfo) -> Result<AwsAuthContext> {
         let profile = self.profile()?;
         if let Some(context) = self.loaded_context(&profile) {

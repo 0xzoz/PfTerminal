@@ -21,7 +21,8 @@ fn files() -> ProfileFiles {
              [profile work]\nregion = us-west-2\n\
              [profile noregion]\n\
              [profile envsourced]\nregion = us-west-2\nrole_arn = arn:aws:iam::123456789012:role/demo\ncredential_source = Environment\n\
-             [profile imdssourced]\nregion = us-west-2\nrole_arn = arn:aws:iam::123456789012:role/demo\ncredential_source = Ec2InstanceMetadata\n",
+             [profile imdssourced]\nregion = us-west-2\nrole_arn = arn:aws:iam::123456789012:role/demo\ncredential_source = Ec2InstanceMetadata\n\
+             [profile ecssourced]\nregion = us-west-2\nrole_arn = arn:aws:iam::123456789012:role/demo\ncredential_source = EcsContainer\n",
         )
         .with_contents(
             ProfileFileKind::Credentials,
@@ -128,6 +129,7 @@ async fn credential_sources_outside_the_files_are_refused() {
     for (profile, source) in [
         ("envsourced", "Environment"),
         ("imdssourced", "Ec2InstanceMetadata"),
+        ("ecssourced", "EcsContainer"),
     ] {
         let error = load_named_profile(
             profile,
@@ -149,11 +151,14 @@ async fn credential_sources_outside_the_files_are_refused() {
 #[test]
 fn provider_failure_details_are_withheld() {
     let error = AwsAuthError::Credentials(CredentialsError::provider_error(
-        "credential_process stderr: helper-secret-canary",
+        "Error retrieving credentials from external process: exited with code 1. Stderr: \
+         helper-secret-canary",
     ));
     let message = error.detailed_message();
     assert!(
-        !message.contains("helper-secret-canary") && message.contains("details withheld"),
+        !message.contains("helper-secret-canary")
+            && message.contains("exited with code 1")
+            && message.contains("(helper output withheld)"),
         "{message}"
     );
 }

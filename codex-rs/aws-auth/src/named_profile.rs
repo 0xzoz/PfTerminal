@@ -118,9 +118,20 @@ pub(crate) async fn load_named_profile(
     // A missing profile reports itself before a missing region would.
     if let Err(error) = provider.provide_credentials().await {
         let refused = asked.lock().ok().and_then(|asked| *asked);
-        return Err(match refused {
-            Some(source) => AwsAuthError::RefusedCredentialSource(source.to_string()),
-            None => error.into(),
+        return Err(match (refused, region) {
+            (Some(source), _) => AwsAuthError::RefusedCredentialSource(source.to_string()),
+            // The profile exists but a role chain could not reach STS
+            // without a region: the region is the reason.
+            (None, Err(region_error))
+                if !matches!(
+                    error,
+                    CredentialsError::InvalidConfiguration(_)
+                        | CredentialsError::CredentialsNotLoaded(_)
+                ) =>
+            {
+                region_error
+            }
+            (None, _) => error.into(),
         });
     }
     Ok(AwsAuthContext {

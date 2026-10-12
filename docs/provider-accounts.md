@@ -52,7 +52,8 @@ its `corbanu account add` recovery; the default credential is unchanged.
 ## Amazon Bedrock: AWS profile accounts
 
 A Bedrock account stores only the name of an AWS profile (not secret, shown in
-`corbanu account list` and `/providers`; letters, digits and `-_.+@`, up to 64):
+`corbanu account list` and `/providers`; up to 64 letters, digits and `-_.+@`,
+starting with a letter or digit):
 
 ```
 corbanu account add amazon-bedrock work --kind aws-profile --value corp-dev
