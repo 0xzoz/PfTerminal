@@ -70,6 +70,8 @@ pub(crate) enum Opened {
     /// A read-only path it would make writable. `grantable`: an Aggressive
     /// grant for the command would lift this protection (#442).
     Write { path: String, grantable: bool },
+    /// The check itself failed (#524): refused.
+    Unchecked,
 }
 
 impl Opened {
@@ -78,6 +80,7 @@ impl Opened {
         match self {
             Self::Read(path) => refusal(level, path),
             Self::Write { path, grantable } => write_refusal(level, path, *grantable),
+            Self::Unchecked => unchecked_refusal(level),
         }
     }
 }
@@ -296,24 +299,33 @@ pub(crate) fn protected_level(session: &crate::session::session::Session) -> Opt
 /// read-only one under `level`'s rules, and the refusal to show when any
 /// were dropped. Every later command and file tool carries the grant, and
 /// no Aggressive grant is known here, so under Aggressive every read-only
-/// path counts. Each of `configs` (folder, permission profile) is checked;
-/// an entry any of them refuses is dropped. Reads folders: call it off the
-/// async thread ([`strip_grant_off_thread`]).
+/// path counts. Each of `configs` is checked as the orchestrator checks a
+/// command; an entry any of them refuses is dropped. Reads folders: call it
+/// off the async thread ([`strip_grant_off_thread`]).
 pub(crate) fn strip_grant(
     level: SecurityLevel,
     codex_home: &Path,
-    configs: &[(AbsolutePathBuf, codex_protocol::models::PermissionProfile)],
+    configs: &[GrantCheckConfig],
     grant: AdditionalPermissionProfile,
 ) -> (Option<AdditionalPermissionProfile>, Option<String>) {
     let mut kept = Some(grant);
     let mut refusal = None;
-    for (cwd, profile) in configs {
+    for config in configs {
         let Some(grant) = kept.take() else {
             break;
         };
-        let denials = ReadDenials::for_turn(codex_home, cwd, &[], profile);
+        let GrantCheckConfig {
+            cwd,
+            workspace_roots,
+            profile,
+        } = config;
+        // As the orchestrator sees a command: project roots expanded.
+        let profile = profile
+            .clone()
+            .materialize_project_roots_with_workspace_roots(workspace_roots);
+        let denials = ReadDenials::for_turn(codex_home, cwd, workspace_roots, &profile);
         let protected = denials
-            .apply(profile)
+            .apply(&profile)
             .map(|protected| protected.file_system_sandbox_policy());
         let check = Check {
             denials: &denials,
@@ -321,7 +333,8 @@ pub(crate) fn strip_grant(
             reads: true,
             writes: ReadOnlyScope::for_level(level),
         };
-        let cwds = [cwd.as_path()];
+        let mut cwds = vec![cwd.as_path()];
+        cwds.extend(workspace_roots.iter().map(AbsolutePathBuf::as_path));
         let Some(opened) = opened(check, &grant, &cwds) else {
             kept = Some(grant);
             continue;
@@ -338,12 +351,21 @@ pub(crate) fn strip_grant(
     (kept, refusal)
 }
 
+/// A folder, its workspace roots and the permission profile a grant is
+/// checked against (issue #524).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct GrantCheckConfig {
+    pub(crate) cwd: AbsolutePathBuf,
+    pub(crate) workspace_roots: Vec<AbsolutePathBuf>,
+    pub(crate) profile: codex_protocol::models::PermissionProfile,
+}
+
 /// [`strip_grant`] on a blocking thread (issue #524). If that fails the
-/// grant is dropped (fail closed).
+/// grant is dropped and the person is told (fail closed).
 pub(crate) async fn strip_grant_off_thread(
     level: SecurityLevel,
     codex_home: std::path::PathBuf,
-    configs: Vec<(AbsolutePathBuf, codex_protocol::models::PermissionProfile)>,
+    configs: Vec<GrantCheckConfig>,
     grant: AdditionalPermissionProfile,
 ) -> (Option<AdditionalPermissionProfile>, Option<String>) {
     tokio::task::spawn_blocking(move || strip_grant(level, &codex_home, &configs, grant))
@@ -353,8 +375,21 @@ pub(crate) async fn strip_grant_off_thread(
                 target: "codex_core::security::tainted_action",
                 "the permission grant could not be checked; dropped"
             );
-            (None, None)
+            (None, Some(unchecked_refusal(level)))
         })
+}
+
+/// Issue #524: the refusal when the protected-path check itself failed.
+pub(crate) fn unchecked_refusal(level: SecurityLevel) -> String {
+    let level = match level {
+        SecurityLevel::Aggressive => "Aggressive",
+        _ => "Moderate",
+    };
+    format!(
+        "Security level {level} could not check the additional permissions against the \
+         protected paths, so they were refused. Try again; to allow it without the check, a \
+         person can switch to Permissive in /security (it applies after a restart)."
+    )
 }
 
 /// The refusal for an additional permission that would open `path`, in the
@@ -388,16 +423,17 @@ pub(crate) fn write_refusal(level: SecurityLevel, path: &str, grantable: bool) -
         format!(
             "Security level {level} blocked writing to `{path}`: files that run code or set \
              policy later (shell start-up files, git hooks and config, the project's .codex and \
-             .agents) stay read-only, and an additional permission cannot change that. A person \
-             can lift it for one command with \"Grant once\" when approving it, or switch to \
-             Permissive in /security (it applies after a restart)."
+             .agents) stay read-only, and an additional permission cannot change that. Where a \
+             person approving the command is offered \"Grant once\", it lifts this for that \
+             command; otherwise a person can switch to Permissive in /security (it applies \
+             after a restart)."
         )
     } else {
         format!(
             "Security level {level} blocked writing to `{path}`: Corbanu's runtime files (the \
-             sandbox helpers in its tmp folder, shell snapshots, skills and plugins) stay \
-             read-only, and this cannot be granted, not even once. To allow it, a person can \
-             switch to Permissive in /security (it applies after a restart)."
+             sandbox helpers in its tmp folder, shell snapshots, skills, plugins, packages and \
+             AGENTS.md) stay read-only, and this cannot be granted, not even once. To allow it, \
+             a person can switch to Permissive in /security (it applies after a restart)."
         )
     }
 }

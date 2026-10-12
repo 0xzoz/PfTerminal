@@ -233,12 +233,9 @@ impl ToolOrchestrator {
                 protected_additional::opened(check, &additional, &cwds)
             })
             .await
-            .unwrap_or_else(|_| {
-                Some(crate::security::protected_additional::Opened::Write {
-                    path: tool_ctx.turn.config.codex_home.display().to_string(),
-                    grantable: false,
-                })
-            });
+            .unwrap_or(Some(
+                crate::security::protected_additional::Opened::Unchecked,
+            ));
             refuse_opened(opened, state.level, tool_ctx).await?;
         }
         if let Some(action) = &post_taint {

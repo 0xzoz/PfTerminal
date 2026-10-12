@@ -3333,25 +3333,32 @@ impl Session {
         .0
     }
 
-    /// Issue #524: the Corbanu home, and the folders and permission profiles
-    /// a grant is checked against: `cwd` (or the session's original folder)
-    /// with the original profile, and the session's current folder and
-    /// profile, which may have changed since.
+    /// Issue #524: the Corbanu home, and what a grant is checked against:
+    /// `cwd` (or the session's original folder) with the original profile,
+    /// and the session's current folder and profile, which may have changed
+    /// since, each with the current workspace roots.
     async fn grant_check_configs(
         &self,
         cwd: Option<&AbsolutePathBuf>,
     ) -> (
         std::path::PathBuf,
-        Vec<(AbsolutePathBuf, codex_protocol::models::PermissionProfile)>,
+        Vec<crate::security::protected_additional::GrantCheckConfig>,
     ) {
+        use crate::security::protected_additional::GrantCheckConfig;
         let state = self.state.lock().await;
         let current = &state.session_configuration;
         let config = &current.original_config_do_not_use;
-        let mut configs = vec![(
-            cwd.unwrap_or(&config.cwd).clone(),
-            config.permissions.permission_profile().clone(),
-        )];
-        let now = (current.cwd().clone(), current.permission_profile());
+        let workspace_roots = current.primary_workspace_roots();
+        let mut configs = vec![GrantCheckConfig {
+            cwd: cwd.unwrap_or(&config.cwd).clone(),
+            workspace_roots: workspace_roots.clone(),
+            profile: config.permissions.permission_profile().clone(),
+        }];
+        let now = GrantCheckConfig {
+            cwd: current.cwd().clone(),
+            workspace_roots,
+            profile: current.permission_profile(),
+        };
         if !configs.contains(&now) {
             configs.push(now);
         }
