@@ -20,7 +20,7 @@ fn system_bwrap_warning_reports_missing_system_bwrap() {
 fn system_bwrap_warning_without_a_bundled_copy_names_what_to_install() {
     let warning = system_bwrap_warning_for_path(/*system_bwrap_path*/ None, || false);
     assert_eq!(warning, Some(NO_BWRAP_WARNING.to_string()));
-    assert!(NO_BWRAP_WARNING.contains("will not run"));
+    assert!(NO_BWRAP_WARNING.contains("cannot run commands in its Linux sandbox"));
     assert!(NO_BWRAP_WARNING.contains("sudo apt install bubblewrap"));
     assert!(!NO_BWRAP_WARNING.contains("bundled bubblewrap in the meantime"));
 }

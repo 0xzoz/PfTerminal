@@ -1455,12 +1455,10 @@ mod tests {
             &denied_output("bubblewrap is unavailable: no system bwrap was found"),
         ));
         // #563: the helper's refusal when no bubblewrap is found.
+        #[cfg(target_os = "linux")]
         assert!(is_sandbox_startup_failure(
             SandboxType::LinuxSeccomp,
-            &denied_output(
-                "bubblewrap is unavailable: Corbanu Terminal's Linux sandbox found no usable \
-                 `bwrap` on PATH and no bundled copy, so the command did not run."
-            ),
+            &denied_output(codex_sandboxing::BWRAP_UNAVAILABLE_MESSAGE),
         ));
         assert!(!is_sandbox_startup_failure(
             SandboxType::LinuxSeccomp,

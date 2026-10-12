@@ -14,7 +14,6 @@ workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
-codex-install-context = { workspace = true }
 codex-network-proxy = { workspace = true }
 codex-protocol = { workspace = true }
 codex-utils-absolute-path = { workspace = true }
@@ -28,6 +27,9 @@ regex-lite = { workspace = true }
 tracing = { workspace = true, features = ["log"] }
 url = { workspace = true }
 which = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+codex-install-context = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 codex-utils-home-dir = { workspace = true }

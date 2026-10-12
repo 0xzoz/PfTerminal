@@ -28,7 +28,7 @@ const MISSING_BWRAP_WARNING: &str = concat!(
 /// command is refused (see [`BWRAP_UNAVAILABLE_MESSAGE`]).
 const NO_BWRAP_WARNING: &str = concat!(
     "Corbanu Terminal could not find bubblewrap on PATH, and no bundled copy came with it, ",
-    "so commands that need its Linux sandbox will not run. ",
+    "so it cannot run commands in its Linux sandbox. ",
     "Install bubblewrap with your OS package manager ",
     "(for example `sudo apt install bubblewrap` or `sudo dnf install bubblewrap`). ",
     "See the sandbox prerequisites: ",
@@ -42,7 +42,7 @@ const NO_BWRAP_WARNING: &str = concat!(
 pub const BWRAP_UNAVAILABLE_MESSAGE: &str = concat!(
     "bubblewrap is unavailable: Corbanu Terminal's Linux sandbox found no usable `bwrap` on ",
     "PATH and no bundled copy, so the command did not run. ",
-    "Install bubblewrap with your OS package manager ",
+    "Install or update bubblewrap with your OS package manager ",
     "(for example `sudo apt install bubblewrap` or `sudo dnf install bubblewrap`), ",
     "then try again.",
 );

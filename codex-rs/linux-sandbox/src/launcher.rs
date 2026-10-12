@@ -40,17 +40,22 @@ pub(crate) fn exec_bwrap(argv: Vec<String>, preserved_files: Vec<File>) -> ! {
     match preferred_bwrap_launcher() {
         BubblewrapLauncher::System(launcher) => exec_system_bwrap(&launcher, argv, preserved_files),
         BubblewrapLauncher::Bundled(launcher) => launcher.exec(argv, preserved_files),
+        // Not reached: `ensure_bwrap_available` refuses first (#563).
         BubblewrapLauncher::Unavailable => exit_bwrap_unavailable(),
     }
 }
 
+pub(crate) fn bwrap_is_available() -> bool {
+    preferred_bwrap_launcher() != BubblewrapLauncher::Unavailable
+}
+
 /// Issue #563: with no usable bubblewrap, refuse the command with a message
-/// that names what to install, before anything is forked. This was a panic:
-/// exit status 101, or an abort (134) without any message where the helper
-/// runs from a constructor (test binaries dispatch on arg0 that way). Either
-/// way the command never ran outside the sandbox.
+/// that names what to install, before bubblewrap would be started or a child
+/// forked for it. This was a panic: exit status 101, or an abort (134)
+/// without any message where the helper runs from a constructor (test
+/// binaries dispatch on arg0 that way). Either way the command never ran.
 pub(crate) fn ensure_bwrap_available() {
-    if preferred_bwrap_launcher() == BubblewrapLauncher::Unavailable {
+    if !bwrap_is_available() {
         exit_bwrap_unavailable();
     }
 }

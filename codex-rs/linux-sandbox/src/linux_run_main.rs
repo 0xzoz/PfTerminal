@@ -221,9 +221,6 @@ pub fn run_main() -> ! {
         // Outer stage: bubblewrap first, then re-enter this binary in the
         // sandboxed environment to apply seccomp. This path never falls back
         // to legacy Landlock on failure.
-        // #563: without a usable bubblewrap, refuse here, before the proxy
-        // bridge is prepared and before the `/proc` preflight forks a child.
-        crate::launcher::ensure_bwrap_available();
         let proxy_route_spec = if allow_network_for_proxy {
             let (proxy_route_spec, socket_dir) = prepare_host_proxy_route_spec()
                 .unwrap_or_else(|err| panic!("failed to prepare host proxy routing bridge: {err}"));
@@ -340,7 +337,10 @@ fn run_bwrap_with_proc_fallback(
     let mut mount_proc = mount_proc;
     let command_cwd = command_cwd.unwrap_or(sandbox_policy_cwd);
 
+    // #563: without a usable bubblewrap there is nothing to probe (the
+    // probe's child used to panic there, and its result was unused).
     if mount_proc
+        && crate::launcher::bwrap_is_available()
         && !preflight_proc_mount_support(network_mode)
             .unwrap_or_else(|err| exit_with_bwrap_build_error(err))
     {
@@ -387,6 +387,10 @@ fn run_bwrap_with_proc_fallback(
     )
     .unwrap_or_else(|err| exit_with_bwrap_build_error(err));
     apply_inner_command_argv0(&mut bwrap_args.args);
+    // #563: refuse where bubblewrap would have been started (the panic was
+    // here or in the child forked below), so every earlier error is reported
+    // as before.
+    crate::launcher::ensure_bwrap_available();
     run_or_exec_bwrap(bwrap_args, credential_watcher);
 }
 

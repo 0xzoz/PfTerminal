@@ -21,9 +21,12 @@ use tempfile::TempDir;
 
 const RAN: &str = "issue563-command-ran";
 
-/// The helper, copied into a folder of its own: nothing bundled next to it.
+/// The helper, copied into a folder of its own: nothing bundled next to it
+/// (every place it looks for a bundled copy is inside `dir`).
 fn lone_helper(dir: &Path) -> PathBuf {
-    let helper = dir.join("codex-linux-sandbox");
+    let bin = dir.join("bin");
+    std::fs::create_dir(&bin).expect("create bin folder");
+    let helper = bin.join("codex-linux-sandbox");
     std::fs::copy(env!("CARGO_BIN_EXE_codex-linux-sandbox"), &helper).expect("copy the helper");
     helper
 }
@@ -109,7 +112,7 @@ fn without_bubblewrap_on_path_the_helper_uses_its_bundled_copy() {
     }
     let dir = TempDir::new().expect("temp dir");
     let helper = lone_helper(dir.path());
-    let resources = dir.path().join("codex-resources");
+    let resources = dir.path().join("bin/codex-resources");
     std::fs::create_dir(&resources).expect("create codex-resources");
     std::fs::copy(&built, resources.join("bwrap")).expect("copy bwrap");
     let empty_path = dir.path().join("empty-path");
