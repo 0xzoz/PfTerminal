@@ -463,6 +463,9 @@ use self::user_messages::QueueDrain;
 use self::user_messages::QueuedUserMessage;
 use self::user_messages::ShellEscapePolicy;
 use self::user_messages::ThreadComposerState;
+/// #507/#554: the line under the kill switch's message for a turn it
+/// stopped, in Codex and Claude panes alike.
+pub(crate) const KILL_SWITCH_TURN_STOPPED: &str = "Turn stopped by the security kill switch.";
 pub(crate) use self::user_messages::ThreadInputState;
 pub(crate) use self::user_messages::ThreadInputStateRestoreMode;
 pub(crate) use self::user_messages::UserMessage;
