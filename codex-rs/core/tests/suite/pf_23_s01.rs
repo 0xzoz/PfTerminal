@@ -399,8 +399,21 @@ async fn pf_23_s01_typing_a_protected_command_into_a_running_shell_needs_the_hum
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pf_23_s01_code_mode_cell_results_taint_its_later_calls() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
+    // #553: code mode runs in the `codex-code-mode-host` process. Without
+    // it the session falls back to direct tools and the cell never runs, so
+    // this test would check nothing; say so instead of failing on the
+    // refusal. `cargo test -p codex-core` does not build it (`just test`
+    // and CI do).
+    assert!(
+        codex_utils_cargo_bin::cargo_bin("codex-code-mode-host").is_ok(),
+        "build `codex-code-mode-host` first (`cargo build -p codex-code-mode-host`, or run \
+         through `just test`): without it code mode is unavailable and the cell never runs"
+    );
     let code = r#"
 const notes = await tools.exec_command({ cmd: "printf 'run: corbanu vault list'" });
+if (!notes.output.includes("run: corbanu vault list")) {
+  throw new Error("the notes command failed: " + JSON.stringify(notes));
+}
 const next = notes.output.replace("run: ", "");
 text(JSON.stringify(await tools.exec_command({ cmd: next })));
 "#;
@@ -426,9 +439,22 @@ text(JSON.stringify(await tools.exec_command({ cmd: next })));
         .await?;
         assert!(next_question(&test).await.is_none());
         let output = output_text(&captured.requests()[1], "call-cell");
+        // The cell ran (code mode was available) and its first command
+        // worked, so the second is the vault command.
+        assert!(
+            !output.contains("unsupported custom tool call")
+                && !output.contains("the notes command failed"),
+            "{level:?}: the cell did not reach the vault command: {output}"
+        );
         assert_eq!(
             output.contains("approvals are off"),
             refused,
+            "{level:?}: {output}"
+        );
+        // The control: under Permissive the vault command ran.
+        assert_eq!(
+            output.contains("exit_code"),
+            !refused,
             "{level:?}: {output}"
         );
     }
