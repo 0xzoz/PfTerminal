@@ -252,6 +252,23 @@ impl Names {
     }
 
     fn is_credential(&self, path: &Path) -> bool {
+        self.is_credential_within(path, None)
+    }
+
+    /// How many levels below `folder` the deepest covered folder is.
+    fn covered_depth_below(&self, folder: &Path) -> usize {
+        let folder = key(folder);
+        self.covered
+            .iter()
+            .filter_map(|(covered, _)| covered.strip_prefix(&folder).ok())
+            .map(|below| below.components().count())
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// As [`Self::is_credential`], counting only covered folders the path
+    /// is at most `max_depth` levels below (the deny list's scan depth).
+    fn is_credential_within(&self, path: &Path, max_depth: Option<usize>) -> bool {
         let Some(name) = path.file_name() else {
             return false;
         };
@@ -267,6 +284,10 @@ impl Names {
         let path = key(path);
         self.covered.iter().any(|(folder, pattern)| {
             path.starts_with(folder)
+                && max_depth.is_none_or(|max_depth| {
+                    path.strip_prefix(folder)
+                        .is_ok_and(|below| below.components().count() <= max_depth)
+                })
                 && match *pattern {
                     // Under the whole rule the templates are not credentials.
                     ".env.*" => {
@@ -313,8 +334,9 @@ fn must_stop(
             }
         }
         // A new file, even at the place of a denied one, has a new ACL.
-        // One already gone may have been read.
-        _ if names.is_credential(&path) => Some(path.display().to_string()),
+        // One already gone may have been read. (Short names in the folder
+        // part are resolved first.)
+        _ if names.is_credential(&real_spelling(&path)) => Some(path.display().to_string()),
         _ => None,
     }
 }
@@ -328,6 +350,9 @@ fn scan(
     names: &Names,
     max_depth: Option<usize>,
 ) -> Result<Option<String>, String> {
+    // Deep enough for the deepest covered folder below `folder` plus the
+    // deny list's depth.
+    let limit = max_depth.map(|max_depth| max_depth + names.covered_depth_below(folder));
     let mut pending = vec![(folder.to_path_buf(), 0_usize)];
     let mut seen = 0_usize;
     while let Some((folder, depth)) = pending.pop() {
@@ -354,14 +379,17 @@ fn scan(
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(err) => return Err(format!("cannot read {}: {err}", path.display())),
             };
-            let is_dir = kind.is_dir() && !kind.is_symlink() && !is_reparse_dir(&entry);
+            // `is_symlink` covers symbolic links, junctions and mount points
+            // (name surrogates); other reparse points (cloud files) are
+            // folders like any other.
+            let is_dir = kind.is_dir() && !kind.is_symlink();
             if is_dir {
-                if max_depth.is_none_or(|max_depth| depth + 1 < max_depth) {
+                if limit.is_none_or(|limit| depth + 1 < limit) {
                     pending.push((path, depth + 1));
                 }
                 continue;
             }
-            if kind.is_dir() || !names.is_credential(&path) {
+            if kind.is_dir() || !names.is_credential_within(&path, max_depth) {
                 continue;
             }
             // Only the very file that was denied is fine: a file at a denied
@@ -413,30 +441,8 @@ fn file_id(path: &Path) -> Option<FileId> {
     ))
 }
 
-#[cfg(windows)]
-fn is_reparse_dir(entry: &std::fs::DirEntry) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-    // Junctions and other reparse points are not followed.
-    entry
-        .metadata()
-        .is_ok_and(|metadata| metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
-}
-
-#[cfg(not(windows))]
-fn is_reparse_dir(_entry: &std::fs::DirEntry) -> bool {
-    false
-}
-
-#[cfg(windows)]
-fn is_link(metadata: &std::fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-    metadata.file_type().is_symlink()
-        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-}
-
-#[cfg(not(windows))]
+/// Symbolic links, junctions and mount points (`std` counts all name
+/// surrogates); they are not followed.
 fn is_link(metadata: &std::fs::Metadata) -> bool {
     metadata.file_type().is_symlink()
 }
@@ -486,7 +492,16 @@ fn real_spelling(path: &Path) -> PathBuf {
 fn key(path: &Path) -> PathBuf {
     let path = dunce::simplified(path);
     if cfg!(windows) {
-        PathBuf::from(path.to_string_lossy().to_lowercase())
+        // Long paths keep the `\\?\` prefix after canonicalizing; compare
+        // them as the plain drive path the scan builds.
+        let text = path.to_string_lossy().to_lowercase();
+        let plain = text
+            .strip_prefix(r"\\?\")
+            .map(|rest| match rest.strip_prefix("unc\\") {
+                Some(share) => format!(r"\\{share}"),
+                None => rest.to_string(),
+            });
+        PathBuf::from(plain.unwrap_or(text))
     } else {
         path.to_path_buf()
     }
