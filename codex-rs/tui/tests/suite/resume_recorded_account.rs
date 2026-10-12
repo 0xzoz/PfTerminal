@@ -175,9 +175,9 @@ fn wait_resumed_on_work(pane: &TmuxPane<'_>) -> Result<()> {
     Ok(())
 }
 
-/// Exits through `/exit`; the wrapper shell reports the exit status.
+/// Exits through `/exit`; the wrapper shell reports the exit status. No Esc
+/// first: Esc right before the text can arrive as Alt+`/`.
 fn exit_tui(pane: &TmuxPane<'_>) -> Result<()> {
-    pane.send_key(TmuxKey::Escape)?;
     pane.send_literal("/exit")?;
     pane.wait_stable_contains("/exit", READY_TIMEOUT)?;
     pane.send_key(TmuxKey::Enter)?;
