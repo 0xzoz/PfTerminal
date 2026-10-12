@@ -173,6 +173,11 @@ fn issue_554_recursive_listing_of_a_parent_is_attributed_to_the_home() {
             "./.corbanu",
         ),
         (
+            "cd ~; find .",
+            "find: ./.corbanu: Operation not permitted",
+            "./.corbanu",
+        ),
+        (
             "ls -aR ../../users/me",
             "ls: ../../users/me/.corbanu: Operation not permitted",
             "../../users/me/.corbanu",

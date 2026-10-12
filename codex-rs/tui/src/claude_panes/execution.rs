@@ -951,7 +951,7 @@ pub(crate) async fn contained_claude_launch_problem(
             &containment,
             &claude_path.to_string_lossy(),
             &["--version".to_string()],
-            &std::collections::BTreeMap::new(),
+            &containment.claude_env(),
             &cwd,
             port,
         )?;

@@ -239,7 +239,11 @@ pub(super) fn unlistable_path_in_lines(
                 shlex::split(argument)
                     .unwrap_or_else(|| argument.split_whitespace().map(str::to_string).collect())
             })
-            .filter(|word| !word.starts_with('-'))
+            .map(|word| {
+                word.trim_matches(|c: char| matches!(c, ';' | '|' | '&' | '(' | ')'))
+                    .to_string()
+            })
+            .filter(|word| !word.is_empty() && !word.starts_with('-'))
             .filter_map(|word| resolve(&word, cwd, user_home, codex_home)),
     );
     // Only the Corbanu home is unlistable: skip the other lines (`find ~`
