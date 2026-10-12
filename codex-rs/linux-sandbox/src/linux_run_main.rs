@@ -951,8 +951,14 @@ fn register_synthetic_mount_targets(
                         marker_dir.display()
                     )
                 });
+                // #562: another live run made it, or (checked under this
+                // lock, separately from the check when the arguments were
+                // built) it has gone since: then the mount target bubblewrap
+                // makes is this run's own placeholder, and its marker must
+                // say so for later runs.
                 let target = if target.preserves_pre_existing_path()
-                    && synthetic_mount_marker_dir_has_active_synthetic_owner(&marker_dir)
+                    && (synthetic_mount_marker_dir_has_active_synthetic_owner(&marker_dir)
+                        || !target.pre_existing_path_is_unchanged())
                 {
                     match target.kind() {
                         crate::bwrap::SyntheticMountTargetKind::EmptyFile => {
@@ -1322,6 +1328,23 @@ fn with_synthetic_mount_registry_lock<T>(f: impl FnOnce() -> T) -> T {
         );
     }
     result
+}
+
+/// #562: whether a live run registered a placeholder it made at `path`
+/// (an empty file standing in for a missing protected path). A run that
+/// finds one must register it too, so the owner's cleanup leaves it in
+/// place until the last run using it ends.
+pub(crate) fn is_live_placeholder(path: &Path) -> bool {
+    let marker_dir = synthetic_mount_marker_dir(path);
+    // A run registers its marker before bubblewrap makes the placeholder, so
+    // without a marker folder there is no placeholder to share (and no need
+    // to take the lock or create the registry).
+    if !marker_dir.is_dir() {
+        return false;
+    }
+    with_synthetic_mount_registry_lock(|| {
+        synthetic_mount_marker_dir_has_active_synthetic_owner(&marker_dir)
+    })
 }
 
 fn synthetic_mount_marker_dir(path: &Path) -> PathBuf {

@@ -231,6 +231,78 @@ async fn pf_23_s01_upload_reads_follow_the_denials_after_taint() {
     assert!(readable_under(&policy, &plain, cwd.as_path()));
 }
 
+/// Issue #562: the Corbanu home's runtime entries stay read-only where they
+/// are missing too (on Linux too: bubblewrap holds a missing one with a
+/// placeholder), and `AGENTS.override.md` is denied before it exists.
+#[test]
+fn issue_562_missing_runtime_entries_stay_read_only() {
+    let fx = fixture();
+    let cwd = fx.user_home.join("project");
+    for missing in [
+        "plugins",
+        "packages",
+        ".tmp",
+        "AGENTS.md",
+        "AGENTS.override.md",
+    ] {
+        assert!(!fx.codex_home.join(missing).exists(), "{missing}");
+    }
+    let denials = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)]);
+    let policy = denials
+        .apply(&PermissionProfile::Disabled)
+        .unwrap()
+        .file_system_sandbox_policy();
+    let writable = |path: &Path| policy.can_write_path_with_cwd(path, &cwd);
+    let readable = |path: &Path| policy.can_read_path_with_cwd(path, &cwd);
+    for runtime in [
+        fx.codex_home.join("AGENTS.md"),
+        fx.codex_home.join("plugins/p/plugin.json"),
+        fx.codex_home.join("packages/x"),
+        fx.codex_home.join(".tmp/x"),
+    ] {
+        assert!(!writable(&runtime), "{}", runtime.display());
+        assert!(readable(&runtime), "{}", runtime.display());
+    }
+    let override_md = fx.codex_home.join("AGENTS.override.md");
+    assert!(!writable(&override_md));
+    assert!(!readable(&override_md));
+}
+
+/// Issue #562: on Linux the missing runtime folders are created, empty,
+/// only where the profile could write the Corbanu home, so bubblewrap never
+/// needs a placeholder file where Corbanu expects a folder. `AGENTS.md` is
+/// never created.
+#[test]
+fn issue_562_missing_runtime_folders_are_created_only_where_writable() {
+    let fx = fixture();
+    let cwd = abs(&fx.user_home.join("project"));
+    let folders = ["plugins", "packages", ".tmp"];
+    ReadDenials::for_turn(
+        &fx.codex_home,
+        &cwd,
+        std::slice::from_ref(&cwd),
+        &PermissionProfile::read_only(),
+    );
+    for folder in folders {
+        assert!(!fx.codex_home.join(folder).exists(), "{folder}");
+    }
+    ReadDenials::for_turn(
+        &fx.codex_home,
+        &cwd,
+        std::slice::from_ref(&cwd),
+        &PermissionProfile::Disabled,
+    );
+    for folder in folders {
+        assert_eq!(
+            fx.codex_home.join(folder).is_dir(),
+            cfg!(target_os = "linux"),
+            "{folder}"
+        );
+    }
+    assert!(!fx.codex_home.join("AGENTS.md").exists());
+    assert!(!fx.codex_home.join("AGENTS.override.md").exists());
+}
+
 /// PF-23-S02: files that run code later become read-only wherever the
 /// command could write them; ordinary files stay writable.
 #[test]

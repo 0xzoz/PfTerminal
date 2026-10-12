@@ -45,17 +45,39 @@ account `ghost` of provider `zai` is not configured; add it with
 ```
 
 `corbanu exec` and resume fail at thread start. The TUI exits with this text
-before any sign-in screen, also when resuming (choose the account with
-`--account`); with a remote app server, the server refuses at thread start.
-A resumed thread runs on its recorded account. `corbanu resume` (an id,
-`--last` or the picker) and `/resume` use it without `--account`, also in a
-home with no default key: the TUI picks the thread first, so no API-key screen
-appears. If that account no longer exists, the TUI prefixes the text above with
-"This conversation ran on zai account `ghost` and resumes on it:". An explicit
-`--account` of the same provider still wins. With the feature off, the
-resume is refused and names the recorded account (`--account
-<provider>:default` resumes on the default credentials). A rejected key names the account and
-its `corbanu account add` recovery; the default credential is unchanged.
+before any sign-in screen; with a remote app server, the server refuses at
+thread start.
+
+A resumed thread runs on its recorded provider and account. `corbanu resume`
+(an id, `--last` or the picker) and `/resume` use them without `--account`.
+With `-m`, `-c model_provider` or a profile model, the thread runs on the
+session's provider instead, and another provider's recorded account does not
+apply.
+
+- **No default key, or a home configured for another provider:** the TUI
+  picks the thread first, so no sign-in screen appears. Esc in that picker
+  quits, because a new session would need a sign-in.
+- **`[provider_accounts]` names a missing account:** that entry does not
+  apply to the thread, so resume works on the recorded account.
+- **The recorded account no longer exists:** the TUI exits with the text
+  above, prefixed with "This conversation ran on zai account `ghost` and
+  resumes on it:". Inside a session, `/resume` shows it and stays on the
+  current conversation; there the recovery is "add it or pick another account
+  in `/providers`".
+- **The recorded provider has no credentials in this home:** the TUI exits
+  and says how to set them up (`corbanu -c model_provider="zai"`), instead of
+  the configured provider's sign-in. If this home does not define that
+  provider at all, the TUI names it instead of showing the sign-in.
+
+`corbanu fork` keeps the launch check: a missing `[provider_accounts]` entry
+refuses it before the fork is chosen, even though the fork would run on the
+source conversation's account; `--account` picks another one.
+
+An explicit `--account` of the same provider still wins. With the feature off,
+the resume is refused and names the recorded account (`--account
+<provider>:default` resumes on the default credentials). A rejected key names
+the account and its `corbanu account add` recovery; the default credential is
+unchanged.
 
 ## Usage per account in `/status`
 
@@ -138,10 +160,13 @@ sign-in or a masked OpenAI API key. Rows show only the kind, an email hint
   one sign-in and refresh lock per account; other processes pick a refresh
   up from the vault.
 - A session on a named account uses it for what needs the sign-in: model
-  requests, refresh, connectors, usage and the `/status` account line. The
-  model list is fetched with the account the process started on, and the
-  rate limits `/status` shows before the first reply come from the default
-  login.
+  requests, refresh, connectors, plugin installs, usage, the model list and
+  the `/status` account line. A mid-session switch to another provider moves
+  all of them to that provider's account (or the default login). The process
+  has one model list: the last session started or switched decides its
+  account, and a process started on a provider without OpenAI sign-in keeps
+  that provider's list. The rate limits `/status` shows before the first
+  reply, and the `/apps` directory, come from the default login.
 - `forced_login_method` and `forced_chatgpt_workspace_id` apply to named
   accounts too: a sign-in of the other kind or another workspace is refused.
 - Signing the same ChatGPT user in under two accounts (or as `default` and a

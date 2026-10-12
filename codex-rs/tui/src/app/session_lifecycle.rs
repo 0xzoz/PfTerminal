@@ -1076,8 +1076,11 @@ impl App {
             }
         };
         if let Some(recorded) = recorded_account.as_ref()
-            && let Some(message) =
-                crate::resume_launch::resume_account_error(&resume_config, recorded)
+            && let Some(message) = crate::resume_launch::resume_account_error(
+                &resume_config,
+                recorded,
+                codex_model_provider::AccountRecovery::Providers,
+            )
         {
             self.harness_overrides.inherited_provider_account = previous_thread_account;
             self.chat_widget.add_error_message(message);
@@ -1192,6 +1195,7 @@ impl App {
             &crate::resume_picker::SessionSelection::Resume(target.clone()),
             &self.config,
             self.app_server_target.uses_remote_workspace(),
+            self.resume_model_settings(),
         )
         .await
     }

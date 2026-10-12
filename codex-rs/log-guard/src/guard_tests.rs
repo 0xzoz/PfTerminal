@@ -134,6 +134,22 @@ fn tracing_events_from_capped_targets_are_dropped() {
     }
 }
 
+/// #548: the AWS SDK's credential errors carry a `credential_process`
+/// helper's stderr; no level of them reaches a sink.
+#[test]
+fn aws_sdk_credential_errors_are_dropped_at_every_level() {
+    let (subscriber, file, feedback) = sinks("trace");
+    tracing::subscriber::with_default(guard(subscriber), || {
+        tracing::warn!(target: "aws_config::profile::credentials", "Stderr: {SENTINEL}");
+        tracing::error!(target: "aws_config::credential_process", "Stderr: {SENTINEL}");
+        tracing::warn!(target: "codex_aws_auth", "corbanu aws kept");
+    });
+    for text in [file.text(), feedback.text()] {
+        assert!(!text.contains(SENTINEL), "{text}");
+        assert!(text.contains("corbanu aws kept"), "{text}");
+    }
+}
+
 #[test]
 fn caps_match_crates_and_their_modules_only() {
     let capped = |target: &str, level: Level| {
@@ -159,9 +175,16 @@ fn caps_match_crates_and_their_modules_only() {
             Level::TRACE,
             true,
         ),
-        ("aws_config::profile", Level::DEBUG, false),
+        // #548: helper stderr arrives at WARN and ERROR.
+        ("aws_config::profile::credentials", Level::WARN, true),
+        ("aws_config::credential_process", Level::ERROR, true),
+        ("aws_config::meta::credentials::chain", Level::WARN, true),
+        (
+            "aws_smithy_runtime_api::client::interceptors",
+            Level::ERROR,
+            true,
+        ),
         ("aws_config::ecs", Level::WARN, true),
-        ("aws_config::ecs", Level::ERROR, false),
         ("codex_aws_auth", Level::TRACE, false),
         ("opentelemetry-otlp", Level::DEBUG, true),
         ("opentelemetry-otlp", Level::INFO, false),
