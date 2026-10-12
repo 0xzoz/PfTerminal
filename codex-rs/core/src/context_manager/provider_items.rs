@@ -38,8 +38,23 @@
 //! outputs) carries no producer and is sent as before.
 
 use crate::session::turn_context::TurnContext;
+use codex_model_provider_info::NamedProviderAccount;
 use codex_model_provider_info::WireApi;
 use codex_protocol::models::ResponseItem;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+
+/// Logged once per process: prompts are built several times per turn.
+static WARNED_COMPACTION: AtomicBool = AtomicBool::new(false);
+
+/// The producer recorded on a model output item: `<provider id>`, or
+/// `<provider id>:<account>` for a named account (PF-84).
+pub(crate) fn producer_key(provider_id: &str, account: Option<&NamedProviderAccount>) -> String {
+    match account {
+        Some(account) => account.to_string(),
+        None => provider_id.to_string(),
+    }
+}
 
 /// The provider a request is about to be sent to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,7 +111,8 @@ fn adapt_foreign(item: &mut ResponseItem, wire: WireApi) -> bool {
                 if matches!(
                     item,
                     ResponseItem::Compaction { .. } | ResponseItem::ContextCompaction { .. }
-                ) {
+                ) && !WARNED_COMPACTION.swap(true, Ordering::Relaxed)
+                {
                     tracing::warn!(
                         "another provider's compaction summary is left out of this request; \
                          this provider cannot read it"

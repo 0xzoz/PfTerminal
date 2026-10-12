@@ -597,9 +597,11 @@ async fn a_missing_item_404_recovers_the_turn() -> anyhow::Result<()> {
 }
 
 /// A remote compaction summary is sealed for the provider (or account) that
-/// made it: another one does not get it, the same one gets it back.
+/// made it: another one does not get it, the same one gets it back. Two
+/// providers named like OpenAI stand in for two OpenAI accounts (a named
+/// account is its own producer, see the `provider_items` unit tests).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn another_accounts_compaction_summary_is_dropped() -> anyhow::Result<()> {
+async fn another_providers_compaction_summary_is_dropped() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
     let first = MockHost::new(Host::Responses, "A");
     let second = MockHost::new(Host::Responses, "B");
@@ -671,8 +673,8 @@ async fn a_missing_item_404_over_websocket_recovers_the_turn() -> anyhow::Result
         })
         .build_with_websocket_server(&server)
         .await?;
-    assert_eq!(turn(&test, "first").await?, Vec::<String>::new());
-    assert_eq!(turn(&test, "second").await?, Vec::<String>::new());
+    assert_eq!(turn(&test, "ws-turn-one").await?, Vec::<String>::new());
+    assert_eq!(turn(&test, "ws-turn-two").await?, Vec::<String>::new());
 
     let requests: Vec<Value> = server
         .connections()
@@ -682,10 +684,22 @@ async fn a_missing_item_404_over_websocket_recovers_the_turn() -> anyhow::Result
         .collect();
     let rejected = requests
         .iter()
-        .position(|body| body.to_string().contains("second"))
+        .position(|body| body.to_string().contains("ws-turn-two"))
         .expect("the second turn was sent");
     let after: Vec<&Value> = requests[rejected + 1..].iter().collect();
     assert!(!after.is_empty(), "the second turn was retried");
+    // The rejected request continued the first response; without the item the
+    // history no longer extends it, so the retry sends it in full, without
+    // the missing item.
+    let retry = after[0];
+    assert!(
+        retry["input"].to_string().contains("ws-turn-one"),
+        "{retry}"
+    );
+    assert!(
+        retry.get("previous_response_id").is_none_or(Value::is_null),
+        "{retry}"
+    );
     assert!(
         after
             .iter()

@@ -345,3 +345,41 @@ fn an_unattributed_compaction_reference_is_dropped_when_nothing_is_stored() {
         items
     );
 }
+
+/// A named account is its own producer: its items are another provider's
+/// for the default account (and for other named accounts).
+#[test]
+fn a_named_account_is_its_own_producer() {
+    let work = NamedProviderAccount {
+        provider_id: "openai".into(),
+        name: "work".into(),
+    };
+    assert_eq!(producer_key("openai", /*account*/ None), "openai");
+    assert_eq!(producer_key("openai", Some(&work)), "openai:work");
+    let items = vec![responses_reasoning(Some(&producer_key(
+        "openai",
+        Some(&work),
+    )))];
+    assert_eq!(
+        adapted(
+            items.clone(),
+            &target(
+                &producer_key("openai", Some(&work)),
+                WireApi::Responses,
+                false
+            )
+        ),
+        items
+    );
+    assert_eq!(
+        adapted(
+            items,
+            &target(
+                &producer_key("openai", /*account*/ None),
+                WireApi::Responses,
+                /*stores_items*/ false,
+            )
+        ),
+        Vec::new()
+    );
+}

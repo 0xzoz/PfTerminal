@@ -674,10 +674,10 @@ impl TurnContext {
     /// this turn's model output items: `<provider id>`, or
     /// `<provider id>:<account>` for a named account.
     pub(crate) fn output_producer(&self) -> String {
-        match self.provider.info().account.as_ref() {
-            Some(account) => account.to_string(),
-            None => self.config.model_provider_id.clone(),
-        }
+        crate::context_manager::provider_items::producer_key(
+            &self.config.model_provider_id,
+            self.provider.info().account.as_ref(),
+        )
     }
 
     pub(crate) fn to_turn_context_item(&self) -> TurnContextItem {
