@@ -2382,6 +2382,7 @@ async fn issue_442_templates_stay_usable_and_never_reach_the_env() {
     assert!(!text.contains("read="), "{text}");
     assert!(text.contains("has other hard links"), "{text}");
     assert!(text.contains("delete the other names"), "{text}");
+}
 
 /// A folder for test files outside every writable root (not a temporary
 /// folder): Cargo's target scratch folder, or the crate where a build tool
