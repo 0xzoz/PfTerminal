@@ -198,7 +198,11 @@ fn where_apparmor_restricts_user_namespaces_the_bundled_copy_runs_through_aa_exe
             .arg("--permission-profile")
             .arg(serde_json::to_string(&profile).expect("profile json"))
             .arg("--")
-            .args(["/bin/sh", "-c", &format!("echo {RAN}; ls -l /proc/self/fd/")])
+            .args([
+                "/bin/sh",
+                "-c",
+                &format!("echo {RAN}; /bin/ls -l /proc/self/fd/"),
+            ])
             .output()
             .expect("run the helper");
         let stdout = String::from_utf8_lossy(&output.stdout);
