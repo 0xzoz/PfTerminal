@@ -575,6 +575,104 @@ impl StateRuntime {
         }
     }
 
+    /// Carry a named account's active cooldown and lease from the row it was
+    /// kept under by name (`by_name`) to the one for its credential
+    /// (`by_key`), and drop the name's rows for `provider_id`; idle ones carry
+    /// nothing worth keeping. Several names can hold one credential, so an
+    /// existing credential row keeps the later cooldown and its own lease
+    /// when that is still active.
+    ///
+    /// Tried once per name, key and process, and like the other steps it
+    /// waits one short try for a busy DB, then pauses it; a later process
+    /// carries the rows over.
+    pub async fn adopt_named_account_provider_request_key(
+        &self,
+        provider_id: &str,
+        by_name: &str,
+        by_key: &str,
+        now_ms: i64,
+    ) {
+        let memory = &self.provider_request_memory;
+        if !memory
+            .adopted_legacy_keys
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(format!("{provider_id}\0{by_name}\0{by_key}"))
+        {
+            return;
+        }
+        if self
+            .provider_request_state_db_unready(now_ms)
+            .await
+            .is_some()
+        {
+            return;
+        }
+        let started = Instant::now();
+        let adopt = || async {
+            let now_ms = since(now_ms, started);
+            let mut tx = crate::runtime::db_lock::begin_immediate(&self.quick().pool).await?;
+            // SET expressions read the row as it was before the update.
+            sqlx::query(
+                r#"
+UPDATE provider_request_state AS current SET
+    cooldown_until_ms = MAX(current.cooldown_until_ms, named.cooldown_until_ms),
+    consecutive_429_count = MAX(current.consecutive_429_count, named.consecutive_429_count),
+    last_status = CASE WHEN named.cooldown_until_ms > current.cooldown_until_ms
+        THEN named.last_status ELSE current.last_status END,
+    last_request_id = CASE WHEN named.cooldown_until_ms > current.cooldown_until_ms
+        THEN named.last_request_id ELSE current.last_request_id END,
+    lease_owner = CASE WHEN current.lease_until_ms <= ?1 AND named.lease_until_ms > ?1
+        THEN named.lease_owner ELSE current.lease_owner END,
+    lease_until_ms = CASE WHEN current.lease_until_ms <= ?1 AND named.lease_until_ms > ?1
+        THEN named.lease_until_ms ELSE current.lease_until_ms END
+FROM provider_request_state AS named
+WHERE current.provider_id = ?2 AND current.key_fingerprint = ?4
+    AND named.provider_id = current.provider_id AND named.model = current.model
+    AND named.key_fingerprint = ?3
+    AND (named.cooldown_until_ms > ?1 OR named.lease_until_ms > ?1)
+                "#,
+            )
+            .bind(now_ms)
+            .bind(provider_id)
+            .bind(by_name)
+            .bind(by_key)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                r#"
+UPDATE OR IGNORE provider_request_state SET key_fingerprint = ?4
+WHERE provider_id = ?2 AND key_fingerprint = ?3
+    AND (cooldown_until_ms > ?1 OR lease_until_ms > ?1)
+                "#,
+            )
+            .bind(now_ms)
+            .bind(provider_id)
+            .bind(by_name)
+            .bind(by_key)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "DELETE FROM provider_request_state WHERE provider_id = ? AND key_fingerprint = ?",
+            )
+            .bind(provider_id)
+            .bind(by_name)
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            anyhow::Ok(())
+        };
+        if let Err(error) = retry_busy_within(
+            "adopt named account provider request key",
+            super::QUICK_BUSY_TIMEOUT,
+            adopt,
+        )
+        .await
+        {
+            self.pause_state_db("adopt named account provider request key", &error);
+        }
+    }
+
     /// `release_provider_request_lease`, waiting only as long as a step on the
     /// turn's path does.
     pub(crate) async fn release_provider_request_lease_briefly(

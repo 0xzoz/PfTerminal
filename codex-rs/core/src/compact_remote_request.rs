@@ -5,6 +5,9 @@ use super::trim_function_call_history_to_fit_context_window;
 use crate::Prompt;
 use crate::client::CompactConversationRequestSettings;
 use crate::compact::CompactionAnalyticsDetails;
+use crate::provider_throttle::AdmittedProviderRequest;
+use crate::provider_throttle::AuxiliaryRequest;
+use crate::provider_throttle::record_auxiliary_outcome;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_metadata::CompactionTurnMetadata;
 use crate::session::session::Session;
@@ -75,6 +78,14 @@ pub(super) async fn run_remote_compact_attempt(
         window_id,
         CodexResponsesRequestKind::Compaction(compaction_metadata),
     );
+    // #509: remote compaction is a model request on the turn's key.
+    let admitted = AdmittedProviderRequest::admit_for_turn(
+        AuxiliaryRequest::Compaction,
+        sess,
+        turn_context,
+        &prompt,
+    )
+    .await?;
     let new_history = sess
         .services
         .model_client()
@@ -96,7 +107,9 @@ pub(super) async fn run_remote_compact_attempt(
             &responses_metadata,
             &client_session.responses_accounting,
         )
-        .await?;
+        .await;
+    record_auxiliary_outcome(admitted.as_ref(), &new_history).await;
+    let new_history = new_history?;
     Ok(RemoteCompactAttempt {
         new_history,
         trace_input_history,

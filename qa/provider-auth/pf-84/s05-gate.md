@@ -31,21 +31,30 @@ off no attempt names an account and nothing below changes.
   same provider and account. Requests reported by another client (the Claude panes bridge)
   record no account.
 - **Rate-limit state.** The throttle row for the 429 cooldown and request lease is keyed by
-  `account:<name>` for a named account, so account B's 429 never blocks account A. The default
+  the credential (owner decision 2026-10-11, providers limit by key): a named account by
+  `account-key:<fingerprint>`, the vault's per-home salted fingerprint above, so two names holding
+  one key share a cooldown and lease, and two keys of one provider never do. The fingerprint is
+  read as the ledger reads it (never creating or writing the vault, at most 2 s, reused for a
+  minute). An account without one, because every account in its vault predates S05, is keyed by
+  `account:<name>` until the next `corbanu account add` or rename. An active cooldown or lease
+  kept under `account:<name>` moves to the fingerprint row on the account's next request (the
+  later cooldown wins when several names merge), and the name's rows are dropped. The default
   account's key is fingerprinted with a per-home salt kept in the state DB (#482, follow-up); an
   older unsalted row moves to it on the key's next request, and idle ones are deleted.
 
   Follow-up #476: until then only a leased request recorded its result, so no human-driven
   session ever recorded a 429. Every turn sampling request now records it: a 429 holds that key
   back in every session on the home for the provider's `Retry-After` (else 30 s, 60 s, 120 s, up to
-  5 min; a burst of 429s counts once), and no result shortens an active cooldown. Compaction, the
-  turn-completion check and memory extraction call the model outside that path and still neither
-  check nor record it. The request lease is taken only by a spawned sub-agent sending a large
-  request (32k input tokens or 128 KiB) whose cache hit is unknown or under 70%; human-driven
-  sessions never wait on it.
+  5 min; a burst of 429s counts once), and no result shortens an active cooldown. Follow-up #509:
+  compaction, the turn-completion check and memory extraction now respect an active cooldown on
+  their key and record their own results the same way; they never take the lease. The request
+  lease is taken only by a spawned sub-agent sending a large request (32k input tokens or
+  128 KiB) whose cache hit is unknown or under 70%; human-driven sessions never wait on it.
 
-  A named account is keyed by name rather than by credential (review note 5), so replacing its
-  key under the same name keeps an active cooldown.
+  The default account (an environment key) and a named account are keyed apart even when they
+  hold the same key: the default key is fingerprinted with the state DB's salt, a named one with
+  the vault's.
+
 - **`/cost`.** Rows, provider pages and request links are grouped by provider, account and model.
   The "Other conversations" rows are grouped the same way. Accounts are named, `default`
   included, only when the view holds work from a named account. The per-account rows add up

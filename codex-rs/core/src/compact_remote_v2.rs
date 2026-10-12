@@ -18,6 +18,9 @@ use crate::hook_runtime::PostCompactHookOutcome;
 use crate::hook_runtime::PreCompactHookOutcome;
 use crate::hook_runtime::run_post_compact_hooks;
 use crate::hook_runtime::run_pre_compact_hooks;
+use crate::provider_throttle::AdmittedProviderRequest;
+use crate::provider_throttle::AuxiliaryRequest;
+use crate::provider_throttle::record_auxiliary_outcome;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CompactionTurnMetadata;
 use crate::responses_retry::ResponsesStreamRequest;
@@ -346,6 +349,14 @@ async fn run_remote_compaction_request_v2(
     let mut retries = 0;
     loop {
         ensure_gpu_runtime_provider_active(sess, turn_context).await?;
+        // #509: each attempt is a model request on the turn's key.
+        let admitted = AdmittedProviderRequest::admit_for_turn(
+            AuxiliaryRequest::Compaction,
+            sess,
+            turn_context,
+            prompt,
+        )
+        .await?;
         let attempt_started_at = std::time::Instant::now();
         let result = match client_session
             .stream_with_same_turn_attempt(
@@ -364,6 +375,7 @@ async fn run_remote_compaction_request_v2(
             Ok(stream) => collect_compaction_output(stream).await,
             Err(err) => Err(err),
         };
+        record_auxiliary_outcome(admitted.as_ref(), &result).await;
         let attempt_elapsed = attempt_started_at.elapsed();
 
         match result {

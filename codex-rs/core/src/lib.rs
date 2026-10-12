@@ -219,6 +219,7 @@ pub mod compact;
 pub mod memory_stage_one;
 mod memory_usage;
 mod model_broker_auth;
+mod provider_throttle;
 pub use model_broker_auth::BrokerModelAuthOrigin;
 pub use model_broker_auth::install_for_config as install_broker_model_auth;
 pub use model_broker_auth::removed_environment_keys as broker_removed_environment_keys;
