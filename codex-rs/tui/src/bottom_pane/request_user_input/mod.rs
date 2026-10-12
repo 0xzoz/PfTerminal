@@ -3,9 +3,14 @@
 //! Core behaviors:
 //! - Each question can be answered by selecting one option and/or providing notes.
 //! - Notes are stored per question and appended as extra answers.
-//! - Typing while focused on options jumps into notes to keep freeform input fast.
 //! - The composer submit binding advances to the next question; the last question submits all answers.
 //! - Freeform-only questions submit an empty answer list when empty.
+//! - #544: option keys go through the approval prompts' `TypingGuard`. A
+//!   number key only highlights its option and Enter confirms it; typed
+//!   text, pastes and held keys never answer. A question shown by answering
+//!   the previous one (or a new request) needs a fresh choice before Enter,
+//!   and one shown while the user typed, over another view, or revealed
+//!   takes only navigation first (#523), also in a freeform answer field.
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -26,11 +31,19 @@ use crate::bottom_pane::CancellationEvent;
 use crate::bottom_pane::ChatComposer;
 use crate::bottom_pane::ChatComposerConfig;
 use crate::bottom_pane::InputResult;
+use crate::bottom_pane::approval_typing_guard::Confirm;
+use crate::bottom_pane::approval_typing_guard::Notice;
+use crate::bottom_pane::approval_typing_guard::TypingGuard;
 use crate::bottom_pane::bottom_pane_view::BottomPaneView;
+use crate::bottom_pane::mcp_server_elicitation::CHOOSE_FIRST_NOTICE;
+use crate::bottom_pane::mcp_server_elicitation::FORM_FIRST_NOTICE;
+use crate::bottom_pane::mcp_server_elicitation::FORM_TYPED_NOTICE;
+use crate::bottom_pane::mcp_server_elicitation::TYPED_TEXT_NOTICE;
 use crate::bottom_pane::scroll_state::ScrollState;
 use crate::bottom_pane::selection_popup_common::GenericDisplayRow;
 use crate::bottom_pane::selection_popup_common::measure_rows_height;
 use crate::history_cell;
+use crate::key_hint;
 use crate::key_hint::KeyBinding;
 use crate::key_hint::KeyBindingListExt;
 use crate::keymap::ListKeymap;
@@ -172,6 +185,8 @@ pub(crate) struct RequestUserInputOverlay {
     composer_submit_keys: Vec<KeyBinding>,
     interrupt_turn_keys: Vec<KeyBinding>,
     list_keymap: ListKeymap,
+    /// #544: keeps typed text, pastes and held keys from answering.
+    typing_guard: TypingGuard,
 }
 
 impl RequestUserInputOverlay {
@@ -230,11 +245,92 @@ impl RequestUserInputOverlay {
             composer_submit_keys: keymap.composer.submit.clone(),
             interrupt_turn_keys: keymap.chat.interrupt_turn.clone(),
             list_keymap: keymap.list,
+            typing_guard: TypingGuard::default(),
         };
         overlay.reset_for_request();
         overlay.ensure_focus_available();
         overlay.restore_current_draft();
         overlay
+    }
+
+    /// #544: require a deliberate choice before Enter answers: the view
+    /// opened while the user was typing, over another view, or was revealed
+    /// when the view above it closed. Until they navigate, a number key is
+    /// typed text too, and a freeform answer field takes no text.
+    pub(crate) fn require_fresh_choice(&mut self) {
+        self.typing_guard.on_command_key();
+    }
+
+    /// #544: the view opened just after another prompt was answered: a
+    /// double or held Enter must not answer it.
+    pub(crate) fn require_fresh_choice_after_answer(&mut self) {
+        self.typing_guard.on_request_changed();
+    }
+
+    /// #544: the explanation shown while Enter is ignored.
+    fn notice(&self) -> Option<&'static str> {
+        let notice = self.typing_guard.notice()?;
+        if self.confirm_unanswered_active() || (self.has_options() && !self.focus_is_notes()) {
+            return Some(match notice {
+                Notice::TypedText => TYPED_TEXT_NOTICE,
+                Notice::ChooseFirst | Notice::NavigateFirst => CHOOSE_FIRST_NOTICE,
+                Notice::PersistentNeedsArrows => return None,
+            });
+        }
+        match notice {
+            Notice::TypedText => Some(FORM_TYPED_NOTICE),
+            Notice::ChooseFirst | Notice::NavigateFirst => Some(FORM_FIRST_NOTICE),
+            Notice::PersistentNeedsArrows => None,
+        }
+    }
+
+    /// #544: deliberate navigation, as in the approval prompts: the arrow,
+    /// Page, Home and End keys, and configured list keys that are neither a
+    /// character nor a chord.
+    fn is_navigation(&self, key_event: KeyEvent) -> bool {
+        if key_hint::is_plain_text_key_event(key_event)
+            || key_hint::has_ctrl_or_alt(key_event.modifiers)
+        {
+            return false;
+        }
+        let keymap = &self.list_keymap;
+        matches!(
+            key_event.code,
+            KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::Left
+                | KeyCode::Right
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+                | KeyCode::Home
+                | KeyCode::End
+        ) || [
+            &keymap.move_up,
+            &keymap.move_down,
+            &keymap.move_left,
+            &keymap.move_right,
+            &keymap.page_up,
+            &keymap.page_down,
+            &keymap.jump_top,
+            &keymap.jump_bottom,
+        ]
+        .iter()
+        .any(|bindings| bindings.is_pressed(key_event))
+    }
+
+    /// Enter, or the configured accept keys that cannot be typed text.
+    fn is_accept(&self, key_event: KeyEvent) -> bool {
+        let mut bindings = self
+            .list_keymap
+            .accept
+            .iter()
+            .filter(|binding| !matches!(binding.parts(), (KeyCode::Char(_), _)))
+            .peekable();
+        if bindings.peek().is_none() {
+            return key_event.code == KeyCode::Enter
+                && !key_hint::has_ctrl_or_alt(key_event.modifiers);
+        }
+        bindings.any(|binding| binding.is_press(key_event))
     }
 
     fn current_index(&self) -> usize {
@@ -267,6 +363,8 @@ impl RequestUserInputOverlay {
             self.reset_for_request();
             self.ensure_focus_available();
             self.restore_current_draft();
+            // A double or held Enter must not answer a request not yet seen.
+            self.typing_guard.on_request_changed();
         } else {
             self.done = true;
         }
@@ -581,6 +679,9 @@ impl RequestUserInputOverlay {
 
     fn footer_tips(&self) -> Vec<FooterTip> {
         let mut tips = Vec::new();
+        if let Some(notice) = self.notice() {
+            tips.push(FooterTip::highlighted(notice));
+        }
         let notes_visible = self.notes_ui_visible();
         if self.has_options() {
             if self.selected_option_index().is_some() && !notes_visible {
@@ -867,11 +968,15 @@ impl RequestUserInputOverlay {
             self.save_current_draft();
             if self.unanswered_count() > 0 {
                 self.open_unanswered_confirmation();
+                // #544: a double Enter must not submit with questions left.
+                self.typing_guard.on_request_changed();
             } else {
                 self.submit_answers();
             }
         } else {
             self.move_question(/*next*/ true);
+            // #544: nor answer the next question.
+            self.typing_guard.on_request_changed();
         }
     }
 
@@ -1139,48 +1244,181 @@ impl RequestUserInputOverlay {
         if key_event.kind == KeyEventKind::Release {
             return;
         }
-        let Some(state) = self.confirm_unanswered.as_mut() else {
+        if self.confirm_unanswered.is_none() {
             return;
-        };
+        }
 
+        // #544: as for the options: a number key only highlights, Enter
+        // confirms, and typed text, pastes and held keys never answer.
+        if self.is_accept(key_event) {
+            if key_event.kind == KeyEventKind::Repeat {
+                return;
+            }
+            let selected = match self.typing_guard.on_confirm() {
+                Confirm::Option(idx) => idx,
+                Confirm::Highlighted => self
+                    .confirm_unanswered
+                    .as_ref()
+                    .and_then(|state| state.selected_idx)
+                    .unwrap_or(0),
+                Confirm::Blocked => return,
+            };
+            self.close_unanswered_confirmation();
+            if selected == 0 {
+                self.submit_answers();
+            } else if let Some(idx) = self.first_unanswered_index() {
+                self.jump_to_question(idx);
+            }
+            return;
+        }
+        let navigation = !key_hint::is_plain_text_key_event(key_event)
+            && !key_hint::has_ctrl_or_alt(key_event.modifiers);
         match key_event.code {
             KeyCode::Esc | KeyCode::Backspace => {
+                self.typing_guard.reset();
                 self.close_unanswered_confirmation();
                 if let Some(idx) = self.first_unanswered_index() {
                     self.jump_to_question(idx);
                 }
             }
-            KeyCode::Up | KeyCode::Char('k') => {
-                state.move_up_wrap(/*len*/ 2);
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                state.move_down_wrap(/*len*/ 2);
-            }
-            KeyCode::Enter => {
-                let selected = state.selected_idx.unwrap_or(0);
-                self.close_unanswered_confirmation();
-                if selected == 0 {
-                    self.submit_answers();
-                } else if let Some(idx) = self.first_unanswered_index() {
-                    self.jump_to_question(idx);
+            KeyCode::Up if navigation => {
+                self.typing_guard.reset();
+                if let Some(state) = self.confirm_unanswered.as_mut() {
+                    state.move_up_wrap(/*len*/ 2);
                 }
             }
-            KeyCode::Char('1') | KeyCode::Char('2') => {
-                let idx = if matches!(key_event.code, KeyCode::Char('1')) {
-                    0
-                } else {
-                    1
-                };
-                state.selected_idx = Some(idx);
+            KeyCode::Down if navigation => {
+                self.typing_guard.reset();
+                if let Some(state) = self.confirm_unanswered.as_mut() {
+                    state.move_down_wrap(/*len*/ 2);
+                }
             }
-            _ => {}
+            KeyCode::Char(ch)
+                if key_hint::is_plain_text_key_event(key_event)
+                    && key_event.kind != KeyEventKind::Repeat =>
+            {
+                let option = match ch {
+                    '1' => Some(0),
+                    '2' => Some(1),
+                    _ => None,
+                };
+                if let Some(idx) = self.typing_guard.on_text_key(option)
+                    && let Some(state) = self.confirm_unanswered.as_mut()
+                {
+                    state.selected_idx = Some(idx);
+                }
+            }
+            _ => self.typing_guard.on_typed_input(),
         }
+    }
+
+    /// #544: keys on a question's options, as in the approval prompts. A
+    /// number key only highlights its option and Enter confirms it; the
+    /// arrow, Page, Home and End keys navigate. Any other input (letters,
+    /// space, Tab while a choice is pending, editing keys, chords, held keys)
+    /// is typed text and never answers.
+    fn handle_option_key(&mut self, key_event: KeyEvent) {
+        let options_len = self.options_len();
+        if self.is_accept(key_event) {
+            // A held Enter repeats; only a fresh press confirms.
+            if key_event.kind == KeyEventKind::Repeat {
+                return;
+            }
+            match self.typing_guard.on_confirm() {
+                Confirm::Option(idx) => {
+                    self.highlight_option(idx);
+                    self.select_current_option(/*committed*/ true);
+                    self.go_next_or_submit();
+                }
+                Confirm::Highlighted => {
+                    if self.selected_option_index().is_some() {
+                        self.select_current_option(/*committed*/ true);
+                    }
+                    self.go_next_or_submit();
+                }
+                Confirm::Blocked => {}
+            }
+            return;
+        }
+        if self.is_navigation(key_event) {
+            self.typing_guard.reset();
+            let keymap = &self.list_keymap;
+            let code = key_event.code;
+            let pressed = |code_match: bool, bindings: &[KeyBinding]| {
+                code_match || bindings.is_pressed(key_event)
+            };
+            if pressed(code == KeyCode::Left, &keymap.move_left)
+                || pressed(code == KeyCode::PageUp, &keymap.page_up)
+            {
+                self.move_question(/*next*/ false);
+                return;
+            }
+            if pressed(code == KeyCode::Right, &keymap.move_right)
+                || pressed(code == KeyCode::PageDown, &keymap.page_down)
+            {
+                self.move_question(/*next*/ true);
+                return;
+            }
+            let target = if pressed(code == KeyCode::Up, &keymap.move_up) {
+                self.selected_option_index().map_or(0, |idx| {
+                    idx.checked_sub(1).unwrap_or(options_len.saturating_sub(1))
+                })
+            } else if pressed(code == KeyCode::Down, &keymap.move_down) {
+                self.selected_option_index()
+                    .map_or(0, |idx| if idx + 1 >= options_len { 0 } else { idx + 1 })
+            } else if pressed(code == KeyCode::Home, &keymap.jump_top) {
+                0
+            } else {
+                options_len.saturating_sub(1)
+            };
+            if options_len > 0 {
+                self.highlight_option(target);
+            }
+            return;
+        }
+        let idle_plain =
+            self.typing_guard.is_idle() && !key_hint::has_ctrl_or_alt(key_event.modifiers);
+        match key_event.code {
+            // Clearing the selection answers nothing (an unanswered question
+            // still asks before it is submitted).
+            KeyCode::Backspace | KeyCode::Delete if idle_plain => self.clear_selection(),
+            // Notes are a text field: only opened deliberately.
+            KeyCode::Tab if idle_plain && self.selected_option_index().is_some() => {
+                self.focus = Focus::Notes;
+                self.ensure_selected_for_notes();
+            }
+            KeyCode::Char(ch)
+                if key_hint::is_plain_text_key_event(key_event)
+                    && key_event.kind != KeyEventKind::Repeat =>
+            {
+                let option = self.option_index_for_digit(ch);
+                if let Some(idx) = self.typing_guard.on_text_key(option) {
+                    self.highlight_option(idx);
+                }
+            }
+            _ => self.typing_guard.on_typed_input(),
+        }
+    }
+
+    /// Moves the highlight to option `idx` without answering.
+    fn highlight_option(&mut self, idx: usize) {
+        if let Some(answer) = self.current_answer_mut() {
+            answer.options_state.selected_idx = Some(idx);
+            answer.answer_committed = false;
+        }
+        self.sync_composer_placeholder();
     }
 }
 
 impl BottomPaneView for RequestUserInputOverlay {
     fn prefer_esc_to_handle_key_event(&self) -> bool {
         true
+    }
+
+    /// #544: back from under another prompt or view, whose double or held
+    /// Enter must not answer this request.
+    fn on_revealed(&mut self) {
+        self.require_fresh_choice();
     }
 
     fn will_interrupt_turn_on_key_event(&self, key_event: KeyEvent) -> bool {
@@ -1223,7 +1461,19 @@ impl BottomPaneView for RequestUserInputOverlay {
             return;
         }
 
-        if self.focus_is_notes() && self.composer_submit_keys.is_pressed(key_event) {
+        if !self.focus_is_notes() {
+            self.handle_option_key(key_event);
+            return;
+        }
+
+        // A freeform answer, or the notes of a chosen option.
+        if self.composer_submit_keys.is_pressed(key_event) {
+            // #544: a held key, or one before a fresh choice, never submits.
+            if key_event.kind == KeyEventKind::Repeat
+                || matches!(self.typing_guard.on_confirm(), Confirm::Blocked)
+            {
+                return;
+            }
             self.ensure_selected_for_notes();
             self.pending_submission_draft = Some(self.capture_composer_draft());
             let (result, _) = self.composer.handle_key_event(key_event);
@@ -1236,8 +1486,20 @@ impl BottomPaneView for RequestUserInputOverlay {
             }
             return;
         }
+        if self.typing_guard.awaits_navigation() {
+            // #544 (#523): an answer field that opened while the user typed
+            // (or over another view), or took typed text since, takes nothing
+            // but navigation: no text, editing keys or shortcuts.
+            if self.is_navigation(key_event) {
+                self.typing_guard.reset();
+            } else {
+                self.typing_guard.on_typed_input();
+            }
+            return;
+        }
+        self.typing_guard.reset();
 
-        // Question navigation is always available.
+        // Question navigation.
         match key_event {
             KeyEvent {
                 code: KeyCode::Char('p'),
@@ -1265,173 +1527,71 @@ impl BottomPaneView for RequestUserInputOverlay {
                 self.move_question(/*next*/ true);
                 return;
             }
-            KeyEvent {
-                code: KeyCode::Char('h'),
-                modifiers: KeyModifiers::NONE,
-                ..
-            }
-            | KeyEvent {
-                code: KeyCode::Left,
-                modifiers: KeyModifiers::NONE,
-                ..
-            } if self.has_options() && matches!(self.focus, Focus::Options) => {
-                self.move_question(/*next*/ false);
-                return;
-            }
-            _ if self.has_options()
-                && matches!(self.focus, Focus::Options)
-                && self.list_keymap.move_left.is_pressed(key_event) =>
-            {
-                self.move_question(/*next*/ false);
-                return;
-            }
-            KeyEvent {
-                code: KeyCode::Char('l'),
-                modifiers: KeyModifiers::NONE,
-                ..
-            }
-            | KeyEvent {
-                code: KeyCode::Right,
-                modifiers: KeyModifiers::NONE,
-                ..
-            } if self.has_options() && matches!(self.focus, Focus::Options) => {
-                self.move_question(/*next*/ true);
-                return;
-            }
-            _ if self.has_options()
-                && matches!(self.focus, Focus::Options)
-                && self.list_keymap.move_right.is_pressed(key_event) =>
-            {
-                self.move_question(/*next*/ true);
-                return;
-            }
             _ => {}
         }
 
-        match self.focus {
-            Focus::Options => {
-                let options_len = self.options_len();
-                // Keep selection synchronized as the user moves.
-                match key_event.code {
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        let moved = if let Some(answer) = self.current_answer_mut() {
-                            answer.options_state.move_up_wrap(options_len);
-                            answer.answer_committed = false;
-                            true
-                        } else {
-                            false
-                        };
-                        if moved {
-                            self.sync_composer_placeholder();
-                        }
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        let moved = if let Some(answer) = self.current_answer_mut() {
-                            answer.options_state.move_down_wrap(options_len);
-                            answer.answer_committed = false;
-                            true
-                        } else {
-                            false
-                        };
-                        if moved {
-                            self.sync_composer_placeholder();
-                        }
-                    }
-                    KeyCode::Char(' ') => {
-                        self.select_current_option(/*committed*/ true);
-                    }
-                    KeyCode::Backspace | KeyCode::Delete => {
-                        self.clear_selection();
-                    }
-                    KeyCode::Tab if self.selected_option_index().is_some() => {
-                        self.focus = Focus::Notes;
-                        self.ensure_selected_for_notes();
-                    }
-                    KeyCode::Enter => {
-                        let has_selection = self.selected_option_index().is_some();
-                        if has_selection {
-                            self.select_current_option(/*committed*/ true);
-                        }
-                        self.go_next_or_submit();
-                    }
-                    KeyCode::Char(ch) => {
-                        if let Some(option_idx) = self.option_index_for_digit(ch) {
-                            if let Some(answer) = self.current_answer_mut() {
-                                answer.options_state.selected_idx = Some(option_idx);
-                            }
-                            self.select_current_option(/*committed*/ true);
-                            self.go_next_or_submit();
-                        }
-                    }
-                    _ => {}
-                }
+        let notes_empty = self.composer.current_text_with_pending().trim().is_empty();
+        if self.has_options() && matches!(key_event.code, KeyCode::Tab) {
+            self.clear_notes_and_focus_options();
+            return;
+        }
+        if self.has_options() && matches!(key_event.code, KeyCode::Backspace) && notes_empty {
+            self.save_current_draft();
+            if let Some(answer) = self.current_answer_mut() {
+                answer.notes_visible = false;
             }
-            Focus::Notes => {
-                let notes_empty = self.composer.current_text_with_pending().trim().is_empty();
-                if self.has_options() && matches!(key_event.code, KeyCode::Tab) {
-                    self.clear_notes_and_focus_options();
-                    return;
-                }
-                if self.has_options() && matches!(key_event.code, KeyCode::Backspace) && notes_empty
-                {
-                    self.save_current_draft();
-                    if let Some(answer) = self.current_answer_mut() {
-                        answer.notes_visible = false;
-                    }
-                    self.focus = Focus::Options;
-                    self.sync_composer_placeholder();
-                    return;
-                }
-                if self.has_options() && matches!(key_event.code, KeyCode::Up | KeyCode::Down) {
-                    let options_len = self.options_len();
-                    match key_event.code {
-                        KeyCode::Up => {
-                            let moved = if let Some(answer) = self.current_answer_mut() {
-                                answer.options_state.move_up_wrap(options_len);
-                                answer.answer_committed = false;
-                                true
-                            } else {
-                                false
-                            };
-                            if moved {
-                                self.sync_composer_placeholder();
-                            }
-                        }
-                        KeyCode::Down => {
-                            let moved = if let Some(answer) = self.current_answer_mut() {
-                                answer.options_state.move_down_wrap(options_len);
-                                answer.answer_committed = false;
-                                true
-                            } else {
-                                false
-                            };
-                            if moved {
-                                self.sync_composer_placeholder();
-                            }
-                        }
-                        _ => {}
-                    }
-                    return;
-                }
-                self.ensure_selected_for_notes();
-                if matches!(
-                    key_event.code,
-                    KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Delete
-                ) && let Some(answer) = self.current_answer_mut()
-                {
-                    answer.answer_committed = false;
-                }
-                let before = self.capture_composer_draft();
-                let (result, _) = self.composer.handle_key_event(key_event);
-                let submitted = self.handle_composer_input_result(result);
-                if !submitted {
-                    let after = self.capture_composer_draft();
-                    if before != after
-                        && let Some(answer) = self.current_answer_mut()
-                    {
+            self.focus = Focus::Options;
+            self.sync_composer_placeholder();
+            return;
+        }
+        if self.has_options() && matches!(key_event.code, KeyCode::Up | KeyCode::Down) {
+            let options_len = self.options_len();
+            match key_event.code {
+                KeyCode::Up => {
+                    let moved = if let Some(answer) = self.current_answer_mut() {
+                        answer.options_state.move_up_wrap(options_len);
                         answer.answer_committed = false;
+                        true
+                    } else {
+                        false
+                    };
+                    if moved {
+                        self.sync_composer_placeholder();
                     }
                 }
+                KeyCode::Down => {
+                    let moved = if let Some(answer) = self.current_answer_mut() {
+                        answer.options_state.move_down_wrap(options_len);
+                        answer.answer_committed = false;
+                        true
+                    } else {
+                        false
+                    };
+                    if moved {
+                        self.sync_composer_placeholder();
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+        self.ensure_selected_for_notes();
+        if matches!(
+            key_event.code,
+            KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Delete
+        ) && let Some(answer) = self.current_answer_mut()
+        {
+            answer.answer_committed = false;
+        }
+        let before = self.capture_composer_draft();
+        let (result, _) = self.composer.handle_key_event(key_event);
+        let submitted = self.handle_composer_input_result(result);
+        if !submitted {
+            let after = self.capture_composer_draft();
+            if before != after
+                && let Some(answer) = self.current_answer_mut()
+            {
+                answer.answer_committed = false;
             }
         }
     }
@@ -1470,9 +1630,14 @@ impl BottomPaneView for RequestUserInputOverlay {
             return false;
         }
         self.snooze_auto_resolution();
-        if matches!(self.focus, Focus::Options) {
-            // Treat pastes the same as typing: switch into notes.
-            self.focus = Focus::Notes;
+        // #544: a paste is typed text; it never answers or opens notes, nor
+        // enters an answer field that still waits for navigation.
+        if self.confirm_unanswered_active()
+            || !self.focus_is_notes()
+            || self.typing_guard.awaits_navigation()
+        {
+            self.typing_guard.on_typed_input();
+            return true;
         }
         self.ensure_selected_for_notes();
         if let Some(answer) = self.current_answer_mut() {
@@ -2220,6 +2385,12 @@ mod tests {
             "unexpected AppEvent before full submission"
         );
 
+        // #544: a double Enter does not answer the next question.
+        overlay.handle_key_event(KeyEvent::from(KeyCode::Enter));
+        assert!(rx.try_recv().is_err(), "a double Enter answered");
+        assert_eq!(overlay.notice(), Some(CHOOSE_FIRST_NOTICE));
+        overlay.handle_key_event(KeyEvent::from(KeyCode::Down));
+        overlay.handle_key_event(KeyEvent::from(KeyCode::Up));
         overlay.handle_key_event(KeyEvent::from(KeyCode::Enter));
         let event = rx.try_recv().expect("expected AppEvent");
         let AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) = event else {
@@ -2242,7 +2413,7 @@ mod tests {
     }
 
     #[test]
-    fn number_keys_select_and_submit_options() {
+    fn number_keys_highlight_and_enter_submits_options() {
         let (tx, mut rx) = test_sender();
         let mut overlay = RequestUserInputOverlay::new(
             request_event("turn-1", vec![question_with_options("q1", "Pick one")]),
@@ -2252,7 +2423,11 @@ mod tests {
             /*disable_paste_burst*/ false,
         );
 
+        // #544: the number only highlights; Enter answers.
         overlay.handle_key_event(KeyEvent::from(KeyCode::Char('2')));
+        assert!(rx.try_recv().is_err(), "a number key answered");
+        assert_eq!(overlay.selected_option_index(), Some(1));
+        overlay.handle_key_event(KeyEvent::from(KeyCode::Enter));
 
         let event = rx.try_recv().expect("expected AppEvent");
         let AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) = event else {
@@ -2262,9 +2437,233 @@ mod tests {
         assert_eq!(answer.answers, vec!["Option 2".to_string()]);
     }
 
+    fn answered(rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>) -> Option<Vec<String>> {
+        std::iter::from_fn(|| rx.try_recv().ok()).find_map(|event| match event {
+            AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) => {
+                let mut answers: Vec<String> = response
+                    .answers
+                    .into_values()
+                    .flat_map(|answer| answer.answers)
+                    .collect();
+                answers.sort();
+                Some(answers)
+            }
+            _ => None,
+        })
+    }
+
+    fn press(overlay: &mut RequestUserInputOverlay, codes: &[KeyCode]) {
+        for code in codes {
+            overlay.handle_key_event(KeyEvent::from(*code));
+        }
+    }
+
+    fn options_overlay(tx: AppEventSender) -> RequestUserInputOverlay {
+        RequestUserInputOverlay::new(
+            request_event("turn-1", vec![question_with_options("q1", "Pick one")]),
+            tx,
+            /*has_input_focus*/ true,
+            /*enhanced_keys_supported*/ false,
+            /*disable_paste_burst*/ false,
+        )
+    }
+
+    /// #544: on a question with options, typed text, pastes and held keys
+    /// never answer, and never open the notes; a number key only highlights.
     #[test]
-    fn vim_keys_move_option_selection() {
-        let (tx, _rx) = test_sender();
+    fn issue_544_typed_text_pastes_and_held_keys_never_answer() {
+        let held = |code| KeyEvent::new_with_kind(code, KeyModifiers::NONE, KeyEventKind::Repeat);
+        type Input = Box<dyn Fn(&mut RequestUserInputOverlay)>;
+        let inputs: Vec<(&str, Input)> = vec![
+            ("letter", Box::new(|o| press(o, &[KeyCode::Char('x')]))),
+            ("space", Box::new(|o| press(o, &[KeyCode::Char(' ')]))),
+            (
+                "two digits",
+                Box::new(|o| press(o, &[KeyCode::Char('1'), KeyCode::Char('2')])),
+            ),
+            (
+                "Tab after text",
+                Box::new(|o| press(o, &[KeyCode::Char('a'), KeyCode::Tab, KeyCode::Char('b')])),
+            ),
+            (
+                "paste",
+                Box::new(|o| {
+                    o.handle_paste("2".to_string());
+                }),
+            ),
+            (
+                "held digit",
+                Box::new(move |o| {
+                    o.handle_key_event(KeyEvent::from(KeyCode::Char('2')));
+                    o.handle_key_event(held(KeyCode::Char('2')));
+                }),
+            ),
+            (
+                "chord",
+                Box::new(|o| {
+                    o.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL))
+                }),
+            ),
+        ];
+        for (name, input) in inputs {
+            let (tx, mut rx) = test_sender();
+            let mut overlay = options_overlay(tx);
+            input(&mut overlay);
+            overlay.handle_key_event(KeyEvent::from(KeyCode::Enter));
+            assert_eq!(answered(&mut rx), None, "{name}");
+            assert!(!overlay.notes_ui_visible(), "{name}");
+            assert_eq!(overlay.composer.current_text_with_pending(), "", "{name}");
+            assert_eq!(overlay.notice(), Some(TYPED_TEXT_NOTICE), "{name}");
+            // Navigation, then Enter, answers.
+            press(
+                &mut overlay,
+                &[KeyCode::Home, KeyCode::Down, KeyCode::Enter],
+            );
+            assert_eq!(
+                answered(&mut rx),
+                Some(vec!["Option 2".to_string()]),
+                "{name}"
+            );
+        }
+
+        // A held Enter never answers.
+        let (tx, mut rx) = test_sender();
+        let mut overlay = options_overlay(tx);
+        overlay.handle_key_event(held(KeyCode::Enter));
+        assert_eq!(answered(&mut rx), None);
+        // A number key then Enter does.
+        press(&mut overlay, &[KeyCode::Char('3'), KeyCode::Enter]);
+        assert_eq!(answered(&mut rx), Some(vec!["Option 3".to_string()]));
+    }
+
+    /// #544: shown over another view, while the user typed, or revealed,
+    /// the view needs navigation before a number key or Enter counts; shown
+    /// just after another prompt closed, it takes no double Enter.
+    #[test]
+    fn issue_544_fresh_choice_needs_navigation() {
+        for revealed in [false, true] {
+            let (tx, mut rx) = test_sender();
+            let mut overlay = options_overlay(tx);
+            if revealed {
+                overlay.on_revealed();
+            } else {
+                overlay.require_fresh_choice();
+            }
+            press(
+                &mut overlay,
+                &[KeyCode::Enter, KeyCode::Char('2'), KeyCode::Enter],
+            );
+            assert_eq!(answered(&mut rx), None, "revealed={revealed}");
+            assert_eq!(overlay.selected_option_index(), Some(0));
+            press(
+                &mut overlay,
+                &[KeyCode::Down, KeyCode::Up, KeyCode::Char('2')],
+            );
+            assert_eq!(answered(&mut rx), None);
+            press(&mut overlay, &[KeyCode::Enter]);
+            assert_eq!(answered(&mut rx), Some(vec!["Option 2".to_string()]));
+        }
+
+        let (tx, mut rx) = test_sender();
+        let mut overlay = options_overlay(tx);
+        overlay.require_fresh_choice_after_answer();
+        press(&mut overlay, &[KeyCode::Enter]);
+        assert_eq!(answered(&mut rx), None);
+        assert_eq!(overlay.notice(), Some(CHOOSE_FIRST_NOTICE));
+        press(&mut overlay, &[KeyCode::Char('2'), KeyCode::Enter]);
+        assert_eq!(answered(&mut rx), Some(vec!["Option 2".to_string()]));
+    }
+
+    /// #544 (#523): a freeform answer field shown while the user typed takes
+    /// no text, editing keys or pastes until they navigate; shown just after
+    /// an answer, it takes no double Enter.
+    #[test]
+    fn issue_544_freeform_field_takes_no_typed_text_first() {
+        let (tx, mut rx) = test_sender();
+        let mut overlay = RequestUserInputOverlay::new(
+            request_event("turn-1", vec![question_without_options("q1", "Details")]),
+            tx,
+            /*has_input_focus*/ true,
+            /*enhanced_keys_supported*/ false,
+            /*disable_paste_burst*/ true,
+        );
+        overlay.require_fresh_choice();
+        press(
+            &mut overlay,
+            &[KeyCode::Char('y'), KeyCode::Char('e'), KeyCode::Char('s')],
+        );
+        overlay.handle_paste("pasted".to_string());
+        overlay.handle_key_event(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        press(&mut overlay, &[KeyCode::Enter]);
+        assert_eq!(answered(&mut rx), None);
+        assert_eq!(overlay.composer.current_text_with_pending(), "");
+        assert_eq!(overlay.notice(), Some(FORM_TYPED_NOTICE));
+        press(
+            &mut overlay,
+            &[
+                KeyCode::Down,
+                KeyCode::Char('o'),
+                KeyCode::Char('k'),
+                KeyCode::Enter,
+            ],
+        );
+        assert_eq!(answered(&mut rx), Some(vec!["user_note: ok".to_string()]));
+
+        let (tx, mut rx) = test_sender();
+        let mut overlay = RequestUserInputOverlay::new(
+            request_event("turn-1", vec![question_without_options("q1", "Details")]),
+            tx,
+            /*has_input_focus*/ true,
+            /*enhanced_keys_supported*/ false,
+            /*disable_paste_burst*/ true,
+        );
+        overlay.require_fresh_choice_after_answer();
+        press(&mut overlay, &[KeyCode::Enter]);
+        assert_eq!(answered(&mut rx), None);
+        assert_eq!(overlay.notice(), Some(FORM_FIRST_NOTICE));
+        press(&mut overlay, &[KeyCode::Char('x'), KeyCode::Enter]);
+        assert_eq!(answered(&mut rx), Some(vec!["user_note: x".to_string()]));
+    }
+
+    /// #544: a queued request, and the "unanswered questions" confirmation,
+    /// shown by an Enter take no second Enter.
+    #[test]
+    fn issue_544_next_request_and_confirmation_take_no_double_enter() {
+        let (tx, mut rx) = test_sender();
+        let mut overlay = options_overlay(tx);
+        assert!(
+            overlay
+                .try_consume_user_input_request(request_event(
+                    "turn-2",
+                    vec![question_with_options("q2", "Pick two")],
+                ))
+                .is_none()
+        );
+        press(&mut overlay, &[KeyCode::Enter]);
+        assert_eq!(answered(&mut rx), Some(vec!["Option 1".to_string()]));
+        press(&mut overlay, &[KeyCode::Enter]);
+        assert_eq!(answered(&mut rx), None);
+        press(&mut overlay, &[KeyCode::Char('1'), KeyCode::Enter]);
+        assert_eq!(answered(&mut rx), Some(vec!["Option 1".to_string()]));
+
+        let (tx, mut rx) = test_sender();
+        let mut overlay = options_overlay(tx);
+        // Clearing the selection answers nothing; Enter asks to confirm.
+        press(&mut overlay, &[KeyCode::Backspace, KeyCode::Enter]);
+        assert!(overlay.confirm_unanswered_active());
+        press(
+            &mut overlay,
+            &[KeyCode::Enter, KeyCode::Char('x'), KeyCode::Enter],
+        );
+        assert_eq!(answered(&mut rx), None);
+        assert!(overlay.confirm_unanswered_active());
+        press(&mut overlay, &[KeyCode::Down, KeyCode::Up, KeyCode::Enter]);
+        assert_eq!(answered(&mut rx), Some(Vec::new()));
+    }
+
+    #[test]
+    fn letters_are_typed_text_and_arrows_move_the_selection() {
+        let (tx, mut rx) = test_sender();
         let mut overlay = RequestUserInputOverlay::new(
             request_event("turn-1", vec![question_with_options("q1", "Pick one")]),
             tx,
@@ -2275,13 +2674,22 @@ mod tests {
         let answer = overlay.current_answer().expect("answer missing");
         assert_eq!(answer.options_state.selected_idx, Some(0));
 
+        // #544: `j` and `k` are typed text, as in the approval prompts.
         overlay.handle_key_event(KeyEvent::from(KeyCode::Char('j')));
-        let answer = overlay.current_answer().expect("answer missing");
-        assert_eq!(answer.options_state.selected_idx, Some(1));
+        assert_eq!(overlay.selected_option_index(), Some(0));
+        overlay.handle_key_event(KeyEvent::from(KeyCode::Enter));
+        assert!(rx.try_recv().is_err(), "typed text answered");
+        assert_eq!(overlay.notice(), Some(TYPED_TEXT_NOTICE));
 
-        overlay.handle_key_event(KeyEvent::from(KeyCode::Char('k')));
-        let answer = overlay.current_answer().expect("answer missing");
-        assert_eq!(answer.options_state.selected_idx, Some(0));
+        overlay.handle_key_event(KeyEvent::from(KeyCode::Down));
+        assert_eq!(overlay.selected_option_index(), Some(1));
+        assert_eq!(overlay.notice(), None);
+        overlay.handle_key_event(KeyEvent::from(KeyCode::Up));
+        assert_eq!(overlay.selected_option_index(), Some(0));
+        overlay.handle_key_event(KeyEvent::from(KeyCode::End));
+        assert_eq!(overlay.selected_option_index(), Some(2));
+        overlay.handle_key_event(KeyEvent::from(KeyCode::Home));
+        assert_eq!(overlay.selected_option_index(), Some(0));
     }
 
     #[test]
@@ -2311,7 +2719,7 @@ mod tests {
     }
 
     #[test]
-    fn h_l_move_between_questions_in_options() {
+    fn h_l_are_typed_text_and_page_keys_move_between_questions() {
         let (tx, _rx) = test_sender();
         let mut overlay = RequestUserInputOverlay::new(
             request_event(
@@ -2327,10 +2735,15 @@ mod tests {
             /*disable_paste_burst*/ false,
         );
 
+        // #544: letters are typed text; the arrow and Page keys move.
         assert_eq!(overlay.current_index(), 0);
         overlay.handle_key_event(KeyEvent::from(KeyCode::Char('l')));
+        assert_eq!(overlay.current_index(), 0);
+        overlay.handle_key_event(KeyEvent::from(KeyCode::PageDown));
         assert_eq!(overlay.current_index(), 1);
         overlay.handle_key_event(KeyEvent::from(KeyCode::Char('h')));
+        assert_eq!(overlay.current_index(), 1);
+        overlay.handle_key_event(KeyEvent::from(KeyCode::PageUp));
         assert_eq!(overlay.current_index(), 0);
     }
 
@@ -2359,7 +2772,7 @@ mod tests {
     }
 
     #[test]
-    fn horizontal_list_keys_move_between_questions_in_options() {
+    fn horizontal_list_chords_are_typed_text_in_options() {
         let (tx, _rx) = test_sender();
         let mut overlay = RequestUserInputOverlay::new(
             request_event(
@@ -2375,11 +2788,16 @@ mod tests {
             /*disable_paste_burst*/ false,
         );
 
+        // #544: chords are typed text here (they edit text in the
+        // composer), as in the approval prompts.
         assert_eq!(overlay.current_index(), 0);
         overlay.handle_key_event(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL));
+        assert_eq!(overlay.current_index(), 0);
+        assert_eq!(overlay.notice(), Some(TYPED_TEXT_NOTICE));
+        overlay.handle_key_event(KeyEvent::from(KeyCode::Right));
         assert_eq!(overlay.current_index(), 1);
         overlay.handle_key_event(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL));
-        assert_eq!(overlay.current_index(), 0);
+        assert_eq!(overlay.current_index(), 1);
     }
 
     #[test]

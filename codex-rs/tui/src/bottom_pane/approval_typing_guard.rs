@@ -199,6 +199,12 @@ impl TypingGuard {
         }
     }
 
+    /// #544: whether nothing waits: no fresh choice, typed text or armed
+    /// key. Only then may a key open a text field (notes) of a request.
+    pub(super) fn is_idle(&self) -> bool {
+        self.state == State::Idle
+    }
+
     /// #523: whether a number key armed an option for Enter.
     pub(super) fn is_armed(&self) -> bool {
         matches!(self.state, State::Armed(_))
