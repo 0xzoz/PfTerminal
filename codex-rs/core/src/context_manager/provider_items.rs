@@ -80,7 +80,8 @@ impl ProviderTarget {
 }
 
 /// Adapts `items` for `target`; see the module docs. Returns whether another
-/// provider's compaction summary was left out (the caller tells the user).
+/// provider's compaction summary was left out (the caller logs it once per
+/// session).
 pub(crate) fn adapt_for_provider(items: &mut Vec<ResponseItem>, target: &ProviderTarget) -> bool {
     let mut dropped_summary = false;
     items.retain(|item| match item.producer() {
