@@ -316,8 +316,10 @@ impl App {
             .get(provider_id)
             .map(|provider| crate::provider_named_accounts::add_methods(provider_id, provider))
             .unwrap_or_default();
-        // A required login method rules out the other kind of sign-in.
-        match self.config.forced_login_method {
+        // A required login method rules out the other kind of sign-in. Only
+        // the configured one: the API-key-only default a third-party session
+        // provider implies is about the default login (#573).
+        match self.config.configured_forced_login_method {
             Some(ForcedLoginMethod::Chatgpt) => {
                 methods.retain(|method| *method != AddAccountMethod::OpenaiApiKey);
             }

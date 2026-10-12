@@ -952,3 +952,57 @@ async fn pf_23_s03_past_session_level_is_a_floor_for_its_memory() {
         ))
     ));
 }
+
+/// #509: memory extraction respects the owner's key cooldown and records its
+/// own 429.
+#[tokio::test]
+async fn memory_extraction_respects_and_records_the_provider_request_throttle() {
+    use crate::provider_throttle::tests::RateLimitedSession;
+    use crate::provider_throttle::tests::assert_rate_limited_then_blocked;
+
+    let fixture = RateLimitedSession::start().await;
+    let metadata = fixture.metadata();
+    let RateLimitedSession {
+        server,
+        mut session,
+        turn_context,
+        home: _home,
+    } = fixture;
+    session.services.agent_control = session
+        .services
+        .agent_control
+        .clone()
+        .with_effective_security_policy(
+            SecurityLevel::Permissive,
+            session.thread_id,
+            /*inherits_from_spawn_parent*/ false,
+        )
+        .unwrap();
+    let owner = Arc::new(session);
+    let mut client = client(&owner).await.unwrap();
+    let prompt = Prompt::default();
+    let mut extract = async || match client
+        .extract(StageOneMemoryRequest {
+            prompt: &prompt,
+            model_info: &turn_context.model_info,
+            session_telemetry: &turn_context.session_telemetry,
+            reasoning_effort: None,
+            reasoning_summary: ReasoningSummary::default(),
+            service_tier: None,
+            responses_metadata: &metadata,
+            labelled_input: None,
+        })
+        .await
+    {
+        Err(StageOneMemoryError::Request(error)) => error,
+        Err(StageOneMemoryError::Denied(denial)) => panic!("denied: {denial}"),
+        Ok(_) => panic!("the provider refuses every request"),
+    };
+    let first = extract().await;
+    let second = extract().await;
+    assert_rate_limited_then_blocked(&first, &second);
+    assert_eq!(
+        server.received_requests().await.unwrap_or_default().len(),
+        1
+    );
+}

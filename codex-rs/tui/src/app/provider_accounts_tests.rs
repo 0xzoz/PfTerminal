@@ -214,6 +214,56 @@ async fn named_bedrock_account_offers_bedrock_models() {
     assert!(!kept[0].supported_reasoning_efforts.is_empty(), "{kept:?}");
 }
 
+/// #573: with a third-party provider configured, `/providers` still offers a
+/// device-code ChatGPT sign-in for a named OpenAI account; only a configured
+/// `forced_login_method` narrows the choice.
+#[tokio::test]
+async fn openai_add_methods_follow_only_the_configured_login_method() {
+    use crate::provider_named_accounts::AddAccountMethod;
+    let both = vec![
+        AddAccountMethod::ChatgptDeviceCode,
+        AddAccountMethod::OpenaiApiKey,
+    ];
+    for (extra_config, expected) in [
+        ("", both.clone()),
+        (
+            "model_provider = \"zai\"\nmodel = \"glm-5.3-flash\"\n",
+            both.clone(),
+        ),
+        (
+            "forced_login_method = \"api\"\n",
+            vec![AddAccountMethod::OpenaiApiKey],
+        ),
+        (
+            "forced_login_method = \"chatgpt\"\n",
+            vec![AddAccountMethod::ChatgptDeviceCode],
+        ),
+    ] {
+        let (app, _home) = app_with_named_accounts_at_top(extra_config).await;
+        assert_eq!(
+            app.provider_account_methods("openai"),
+            expected,
+            "{extra_config:?}"
+        );
+    }
+}
+
+/// Like [`app_with_named_accounts`], with `top` before the `[features]` table.
+async fn app_with_named_accounts_at_top(top: &str) -> (App, TempDir) {
+    let mut app = make_test_app().await;
+    let home = tempdir().expect("home");
+    std::fs::write(
+        home.path().join("config.toml"),
+        format!("{top}[features]\nnamed_accounts = true\n"),
+    )
+    .expect("config");
+    app.config.codex_home = home.path().to_path_buf().abs();
+    app.refresh_in_memory_config_from_disk()
+        .await
+        .expect("load config");
+    (app, home)
+}
+
 /// PF-84: only a model switch that changes the sign-in account refreshes the
 /// model list (and says so); one between models of the same account does not.
 #[test]
