@@ -2423,8 +2423,10 @@ fn credential_templates_stay_usable() {
          rm .env.template; ln .env .env.template; cat .env.template; echo readtpl=$?; \
          ln .env hard-copy; cat hard-copy; echo hardcopy=$?; \
          mv .env .env.example; echo mvenv=$?; \
-         ln -s notes xlink; mv xlink .env.sample; echo mvlink=$?; \
-         mkfifo xfifo; mv xfifo .env.sample; echo mvfifo=$?";
+         ln -s notes xlink; echo mklink=$?; mv xlink .env.sample; echo mvlink=$?; \
+         mkfifo xfifo; echo mkfifo=$?; mv xfifo .env.sample; echo mvfifo=$?; \
+         ln -s notes ylink; mv ylink .env.example; echo mvover=$?; \
+         cp notes y2; mv y2 .env.template; echo mvreg=$?; cat .env.template; echo";
     let args = create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
         command: vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
         file_system_sandbox_policy: &policy,
@@ -2461,8 +2463,13 @@ fn credential_templates_stay_usable() {
         "readtpl=1",
         "hardcopy=1",
         "mvenv=1",
+        "mklink=0",
         "mvlink=1",
+        "mkfifo=0",
         "mvfifo=1",
+        "mvover=1",
+        "mvreg=0",
+        "plain-notes",
     ] {
         assert!(stdout.contains(line), "{line} not in {stdout}");
     }

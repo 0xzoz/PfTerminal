@@ -116,9 +116,9 @@ pub fn unsafe_credential_entry_message(
             Some(target) => (
                 format!(" to {}", target.display()),
                 format!(
-                    " What was written to it is in {}, which agent commands may have read: \
-                     delete that file too (moving it does not hide it), and change any secret in \
-                     it.",
+                    " What was written to it is in {}: unless that is a credential file too, \
+                     agent commands may have read it, so delete that file too (moving it does not \
+                     hide it) and change any secret in it.",
                     target.display()
                 ),
             ),
@@ -189,13 +189,18 @@ pub fn credential_file_globs(root: &str) -> Vec<String> {
         .collect()
 }
 
+/// `/`, and on Windows also `\\` (policy globs are resolved with it there).
+fn is_glob_separator(ch: char) -> bool {
+    ch == '/' || (cfg!(windows) && ch == '\\')
+}
+
 /// The folder and credential name pattern of a glob from
 /// [`credential_file_globs`], with either separator.
 fn credential_glob_parts(pattern: &str) -> Option<(PathBuf, &'static str)> {
     CREDENTIAL_FILE_NAME_PATTERNS.iter().find_map(|name| {
         let rest = pattern.strip_suffix(name)?;
-        let rest = rest.strip_suffix(['/', '\\'])?.strip_suffix("**")?;
-        let root = rest.strip_suffix(['/', '\\'])?;
+        let rest = rest.strip_suffix(is_glob_separator)?.strip_suffix("**")?;
+        let root = rest.strip_suffix(is_glob_separator)?;
         Some((
             PathBuf::from(if root.is_empty() { "/" } else { root }),
             *name,
@@ -3849,7 +3854,8 @@ mod tests {
                 vec!["/**/.env", "/**/.env.*", "/**/.envrc"]
             );
         }
-        // Either separator (Windows resolves policy globs with `\\`).
+        // Windows resolves policy globs with `\\`.
+        #[cfg(windows)]
         for glob in [r"C:\work\**\.env.*", "C:/work/**/.env.*"] {
             assert_eq!(
                 credential_file_glob_root(glob),

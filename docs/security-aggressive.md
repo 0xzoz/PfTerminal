@@ -51,11 +51,13 @@ and where the link points.
 
 To fix a link, replace it with a regular file (delete the link, then create
 the file in its place), or move it out of the workspace. What was written to
-it is in the file it pointed to, which agent commands may have read: delete
-that file too (moving it does not hide it from agent commands), and change any
-secret in it. For a file with
-other hard links, delete the other names (`find` with `-samefile` lists them)
-or replace the file with a regular copy, and change any secret in it.
+it is in the file it pointed to: unless that is a credential file too, agent
+commands may have read it, so delete that file too (moving it does not hide it)
+and change any secret in it.
+
+For a file with other hard links, delete the other names (`find` with
+`-samefile` lists them) or replace the file with a regular copy, and change
+any secret in it.
 
 ## Grant once
 
