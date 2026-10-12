@@ -137,20 +137,14 @@ struct Run {
     default_login: Option<Vec<u8>>,
 }
 
-async fn run(default_login: DefaultLogin, restriction: &str, account: Option<&str>) -> Run {
-    let test: TestCodexExecBuilder = test_codex_exec();
-    let server = start_mock_server().await;
-    let responses: ResponseMock = mount_sse_repeating(
-        &server,
-        sse(vec![
-            ev_response_created("resp-1"),
-            ev_assistant_message("msg-1", "pong"),
-            ev_completed("resp-1"),
-        ]),
-    )
-    .await;
-    let before = seed_home(test.home_path(), default_login);
-    let mut cmd = test.cmd_with_server(&server);
+/// `codex-exec` on the mock with named accounts on, no key in the
+/// environment and `restriction` (a `-c` override), if any.
+fn exec_cmd(
+    test: &TestCodexExecBuilder,
+    server: &wiremock::MockServer,
+    restriction: Option<&str>,
+) -> assert_cmd::Command {
+    let mut cmd = test.cmd_with_server(server);
     cmd.env_remove(CODEX_API_KEY_ENV_VAR)
         .env_remove(OPENAI_API_KEY_ENV_VAR)
         .env_remove("CODEX_ACCESS_TOKEN")
@@ -164,9 +158,27 @@ async fn run(default_login: DefaultLogin, restriction: &str, account: Option<&st
             server.uri()
         ))
         .arg("-c")
-        .arg("features.named_accounts=true")
-        .arg("-c")
-        .arg(restriction);
+        .arg("features.named_accounts=true");
+    if let Some(restriction) = restriction {
+        cmd.arg("-c").arg(restriction);
+    }
+    cmd
+}
+
+async fn run(default_login: DefaultLogin, restriction: &str, account: Option<&str>) -> Run {
+    let test: TestCodexExecBuilder = test_codex_exec();
+    let server = start_mock_server().await;
+    let responses: ResponseMock = mount_sse_repeating(
+        &server,
+        sse(vec![
+            ev_response_created("resp-1"),
+            ev_assistant_message("msg-1", "pong"),
+            ev_completed("resp-1"),
+        ]),
+    )
+    .await;
+    let before = seed_home(test.home_path(), default_login);
+    let mut cmd = exec_cmd(&test, &server, Some(restriction));
     if let Some(account) = account {
         cmd.arg("--account").arg(account);
     }
@@ -370,4 +382,67 @@ async fn named_session_restriction_names_only_its_own_account() {
     assert!(!run.stderr.contains("ws-main"), "{}", run.stderr);
     assert!(run.authorizations.is_empty());
     assert_default_unchanged(&run);
+}
+
+/// Review of #570: `exec resume --last` of a thread recorded on named account
+/// `chat`, without `--account`, while `forced_login_method = "chatgpt"` rules
+/// out the default API key. The thread's account is known only after
+/// startup, so the default login must not be logged out first; the thread
+/// resumes on `chat`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resumed_named_thread_keeps_the_default_login() {
+    let test = test_codex_exec();
+    let server = start_mock_server().await;
+    let responses: ResponseMock = mount_sse_repeating(
+        &server,
+        sse(vec![
+            ev_response_created("resp-1"),
+            ev_assistant_message("msg-1", "pong"),
+            ev_completed("resp-1"),
+        ]),
+    )
+    .await;
+    let before = seed_home(test.home_path(), DefaultLogin::ApiKey);
+    let first = exec_cmd(&test, &server, /*restriction*/ None)
+        .arg("--account")
+        .arg("chat")
+        .arg("--skip-git-repo-check")
+        .arg("-C")
+        .arg(test.cwd_path())
+        .arg("Reply with exactly: pong")
+        .output()
+        .unwrap();
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let resumed = exec_cmd(&test, &server, Some("forced_login_method=\"chatgpt\""))
+        .arg("--skip-git-repo-check")
+        .arg("-C")
+        .arg(test.cwd_path())
+        .arg("Reply with exactly: pong again")
+        .arg("resume")
+        .arg("--last")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&resumed.stderr);
+    assert!(resumed.status.success(), "{stderr}");
+    assert!(!stderr.contains("Logging out"), "{stderr}");
+    let authorizations = responses
+        .requests()
+        .iter()
+        .map(|request| request.header("authorization"))
+        .collect::<Vec<_>>();
+    assert!(authorizations.len() >= 2, "{authorizations:?}");
+    assert!(
+        authorizations
+            .iter()
+            .all(|auth| *auth == bearer(&access_token(NAMED_ACCESS))),
+        "{authorizations:?} {stderr}"
+    );
+    assert!(
+        std::fs::read(test.home_path().join("auth.json")).ok() == Some(before),
+        "default login changed"
+    );
 }
