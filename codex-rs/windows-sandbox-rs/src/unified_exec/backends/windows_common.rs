@@ -26,6 +26,7 @@ pub(crate) fn finish_driver_spawn(driver: ProcessDriver, stdin_open: bool) -> Sp
     spawned
 }
 
+#[cfg(test)]
 pub(crate) fn start_runner_pipe_writer(pipe_write: File) -> std::sync::mpsc::Sender<FramedMessage> {
     let (outbound_tx, outbound_rx) = std::sync::mpsc::channel::<FramedMessage>();
     start_runner_pipe_writer_from(pipe_write, outbound_rx);

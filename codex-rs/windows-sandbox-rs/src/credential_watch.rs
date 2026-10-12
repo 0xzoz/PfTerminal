@@ -252,7 +252,7 @@ impl Names {
     }
 
     fn is_credential(&self, path: &Path) -> bool {
-        self.is_credential_within(path, None)
+        self.is_credential_within(path, /*max_depth*/ None)
     }
 
     /// How many levels below `folder` the deepest covered folder is.
@@ -328,7 +328,7 @@ fn must_stop(
     match std::fs::symlink_metadata(&path) {
         // A folder created or moved in: anything inside it is new.
         Ok(metadata) if metadata.is_dir() && !is_link(&metadata) => {
-            match scan(&path, &HashMap::new(), names, None) {
+            match scan(&path, &HashMap::new(), names, /*max_depth*/ None) {
                 Ok(found) => found,
                 Err(reason) => Some(format!("a folder that could not be checked ({reason})")),
             }
