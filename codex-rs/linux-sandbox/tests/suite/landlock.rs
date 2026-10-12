@@ -1312,17 +1312,22 @@ async fn issue_587_protected_home_and_its_folders_cannot_be_moved_aside() {
             entry(home.join("skills"), FileSystemAccessMode::Read),
         ]);
         let run = |script: &'static str| {
-            run_cmd_result_with_permission_profile_for_cwd(
-                &["bash", "-c", script],
-                AbsolutePathBuf::from_absolute_path(&base).expect("absolute base"),
-                PermissionProfile::from_runtime_permissions(
-                    &policy,
-                    NetworkSandboxPolicy::Restricted,
-                ),
-                create_env_from_core_vars(),
-                LONG_TIMEOUT_MS,
-                /*use_legacy_landlock*/ false,
-            )
+            let cwd = AbsolutePathBuf::from_absolute_path(&base).expect("absolute base");
+            let profile = PermissionProfile::from_runtime_permissions(
+                &policy,
+                NetworkSandboxPolicy::Restricted,
+            );
+            async move {
+                run_cmd_result_with_permission_profile_for_cwd(
+                    &["bash", "-c", script],
+                    cwd,
+                    profile,
+                    create_env_from_core_vars(),
+                    LONG_TIMEOUT_MS,
+                    /*use_legacy_landlock*/ false,
+                )
+                .await
+            }
         };
         let output = run("mv outer/home outer/home.old; echo mv-home=$?; \
                           mv outer outer.old; echo mv-outer=$?; \
