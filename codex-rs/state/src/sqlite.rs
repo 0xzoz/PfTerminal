@@ -507,12 +507,9 @@ fn open_lock_file(path: &Path) -> std::io::Result<std::fs::File> {
         if let Some(file) = reopen_placeholder(path) {
             return Ok(file);
         }
-        // The placeholder's run ended and removed it meanwhile: a new file.
-        if std::fs::symlink_metadata(path)
-            .is_err_and(|err| err.kind() == std::io::ErrorKind::NotFound)
-        {
-            return lock_file_options().open(path);
-        }
+        // Once more, plainly: the placeholder's run may have ended and
+        // removed it meanwhile. Anything still read-only fails again.
+        return lock_file_options().open(path);
     }
     result
 }
@@ -525,6 +522,8 @@ fn open_lock_file(path: &Path) -> std::io::Result<std::fs::File> {
 /// owner can) and opened. The mode change goes through a descriptor of the
 /// file checked at the path (not a link), and the read-write descriptor
 /// must be that same file. The sandbox sees its own mount, not this mode.
+/// (A FIFO swapped in after the check would block the read-only open; that
+/// needs write access to the Corbanu home, which protected commands lack.)
 #[cfg(unix)]
 fn reopen_placeholder(path: &Path) -> Option<std::fs::File> {
     use std::os::unix::fs::MetadataExt;
