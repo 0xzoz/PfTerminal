@@ -557,6 +557,12 @@ fn estimate_response_item_model_visible_bytes(item: &ResponseItem) -> i64 {
                 audio_data_url_estimate_adjustment(item);
             let (encrypted_payload_bytes, encrypted_replacement_bytes) =
                 encrypted_function_output_estimate_adjustment(item);
+            // #578: the local producer never reaches the model
+            // (`,"producer":"…"` in the passthrough metadata).
+            let local_provenance_bytes = item.producer().map_or(0, |producer| {
+                i64::try_from(producer.len() + r#","producer":"""#.len()).unwrap_or(0)
+            });
+            let raw = raw.saturating_sub(local_provenance_bytes);
             // Replace raw base64 payload bytes with per-modality estimates.
             // We intentionally preserve the data URL prefix and JSON
             // wrapper bytes already included in `raw`.

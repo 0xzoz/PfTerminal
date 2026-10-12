@@ -369,3 +369,14 @@ fn a_named_account_is_its_own_producer() {
     assert_eq!(adapted(items.clone(), &to(&personal)), Vec::new());
     assert_eq!(adapted(items, &to(&default)), Vec::new());
 }
+
+/// The local producer never reaches the model, so it is not counted.
+#[test]
+fn the_producer_is_not_counted_as_context() {
+    let plain = from(/*producer*/ None, assistant(/*producer*/ None));
+    let stamped = assistant(Some("a-provider-with-a-long-name"));
+    assert_eq!(
+        crate::context_manager::estimate_item_token_count(&stamped),
+        crate::context_manager::estimate_item_token_count(&plain)
+    );
+}
