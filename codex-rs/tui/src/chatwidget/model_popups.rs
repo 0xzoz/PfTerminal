@@ -1133,14 +1133,15 @@ impl ChatWidget {
             .position(|choice| Some(choice) == selection_choice.as_ref())
             .or_else(|| {
                 // #653: another connection of the session's model keeps an
-                // advanced effort preselected under "More reasoning…", which
-                // follows the standard choices.
+                // advanced effort (the session's, or the model default it runs
+                // on) preselected under "More reasoning…", which follows the
+                // standard choices.
                 (is_session_model
                     && !is_current_model
                     && !advanced_choices.is_empty()
-                    && highlight_choice
-                        .as_ref()
-                        .is_some_and(Self::is_advanced_reasoning_effort))
+                    && Self::is_advanced_reasoning_effort(
+                        highlight_choice.as_ref().unwrap_or(&default_effort),
+                    ))
                 .then_some(choices.len())
             });
         let mut items: Vec<SelectionItem> = Vec::new();

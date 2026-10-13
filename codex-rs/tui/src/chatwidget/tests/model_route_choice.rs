@@ -116,6 +116,7 @@ async fn picking_a_connection_switches_and_saves_that_provider_both_ways() {
         (ZAI_ANTHROPIC_PROVIDER_ID, OPENAI_STYLE, ZAI_PROVIDER_ID),
     ] {
         let (mut chat, mut rx, _op_rx) = zai_session(from).await;
+        chat.set_reasoning_effort(Some(ReasoningEffortConfig::High));
         open_all_models(&mut chat);
         let preset = select_row(&mut chat, &mut rx, label);
         assert_eq!(preset.model, FLASH);
@@ -132,6 +133,17 @@ async fn picking_a_connection_switches_and_saves_that_provider_both_ways() {
             chosen(&events),
             (Some(to.to_string()), Some(to.to_string())),
             "{from} -> {to}"
+        );
+        // The session's effort is kept.
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AppEvent::PersistModelSelection {
+                    effort: Some(ReasoningEffortConfig::High),
+                    ..
+                }
+            )),
+            "{events:?}"
         );
     }
 }
@@ -223,11 +235,18 @@ async fn connections_on_different_named_accounts_name_them() {
     );
 }
 
-/// Switching connection keeps the session's effort, even an advanced one.
+/// Switching connection keeps the session's effort, even an advanced one:
+/// chosen explicitly, or GLM 5.3 Flash's default (Max) when none was chosen.
 #[tokio::test]
 async fn switching_connection_keeps_the_sessions_max_effort() {
+    for session_effort in [Some(ReasoningEffortConfig::Max), None] {
+        switch_to_claude_style_keeping_max(session_effort).await;
+    }
+}
+
+async fn switch_to_claude_style_keeping_max(session_effort: Option<ReasoningEffortConfig>) {
     let (mut chat, mut rx, _op_rx) = zai_session(ZAI_PROVIDER_ID).await;
-    chat.set_reasoning_effort(Some(ReasoningEffortConfig::Max));
+    chat.set_reasoning_effort(session_effort);
     open_all_models(&mut chat);
     let preset = select_row(&mut chat, &mut rx, CLAUDE_STYLE);
     chat.open_reasoning_popup(preset);
