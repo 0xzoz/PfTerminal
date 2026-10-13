@@ -78,6 +78,31 @@ async fn issue_646_claude_plan_pane_can_be_the_crew_root_without_an_allowlist() 
     assert_crew_ready_and_valid(&app);
 }
 
+/// Without an allowlist the crew ceiling lists every Claude Code pane, not only
+/// those whose provider is also configured natively (here Z.AI's pane).
+#[tokio::test]
+async fn issue_646_any_claude_code_pane_joins_a_crew_without_an_allowlist() {
+    let mut app = make_test_app().await;
+    let authorized = app.authorized_spawn_providers();
+    for profile in ClaudeProviderProfileKind::creation_options() {
+        assert!(
+            authorized.contains(&profile.crew_runtime_provider_id()),
+            "{profile:?} missing from {authorized:?}"
+        );
+    }
+    app.ensure_custom_spawn_root(crate::claude_panes::CODEX_MAIN_PANE_ID)
+        .expect("bind custom root");
+    app.record_custom_spawn_member(
+        "pane:claude-zai-orc",
+        crate::claude_panes::CODEX_MAIN_PANE_ID,
+        crate::spawn_orchestration::SpawnRole::Orc,
+        "Grishnakh".to_string(),
+        claude_pane_runtime(&ClaudeProviderProfileKind::ZaiGlm52.crew_runtime_provider_id()),
+    )
+    .expect("a Z.AI Claude Code Orc must join an unrestricted crew");
+    assert_crew_ready_and_valid(&app);
+}
+
 #[tokio::test]
 async fn issue_646_claude_plan_in_the_allowlist_allows_claude_plan_panes() {
     let mut app = make_test_app().await;

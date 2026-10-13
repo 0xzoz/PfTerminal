@@ -129,7 +129,9 @@ pub struct CrewPolicy {
 /// Runtime provider a Claude Code pane on Claude Plan records as a crew member.
 pub const CLAUDE_PLAN_PANE_PROVIDER_ID: &str = "external-claude:claudeplan";
 
-/// Built-in provider id of the Claude Plan subscription.
+/// Built-in provider id of the Claude Plan subscription
+/// (`codex_model_provider_info::CLAUDE_PLAN_PROVIDER_ID`, which this crate does not depend
+/// on; `codex-tui`'s `issue_646` tests use that one, so the two cannot drift apart).
 const CLAUDE_PLAN_PROVIDER_ID: &str = "claude-plan";
 
 /// Whether a non-empty provider allowlist authorizes `provider_id`.

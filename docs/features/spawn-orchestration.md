@@ -94,7 +94,12 @@ or restarting.
 
 - **With an allowlist:** `claude-plan` also allows Claude Code panes on Claude Plan.
   Other Claude Code panes need their own entry, such as `external-claude:zaiglm52`.
-- **Without one:** a crew accepts every configured provider and every Claude Code pane.
+- **Without one:** a crew accepts the providers usable for spawning when it was created,
+  and every Claude Code pane.
+
+A crew keeps the list it was created with. A crew created before Claude Code panes
+were accepted, or one that says "Crew recovery is read-only until repaired" because
+a Claude Code member couldn't join, needs to be removed and created again.
 
 ## Main implementation
 
