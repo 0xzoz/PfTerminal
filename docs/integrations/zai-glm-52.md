@@ -45,7 +45,12 @@ The visible Z.AI model is bundled in `codex-rs/models-manager/models.json`:
 
 Corbanu Terminal maps model selections to providers in `codex-rs/tui/src/chatwidget/model_popups.rs`:
 
-- `glm-*` and `glm-5.2` resolve to provider `zai`.
+- `glm-*` and `glm-5.2` resolve to provider `zai` (OpenAI-style) by default.
+- The same GLM models are also served by `zai-anthropic`, Z.AI's Anthropic-compatible
+  connection (the GLM Coding Plan route) with the same `ZAI_API_KEY`. `/model` lists both
+  connections in the Z.AI tab, e.g. **GLM 5.3 Flash · Z.AI (OpenAI-style)** and
+  **GLM 5.3 Flash · Z.AI (Claude-style)**; see
+  [Choosing the connection](../features/model-providers.md#choosing-the-connection).
 - `zai-org/*` resolves to provider `ambient`.
 - The all-models popup only shows Corbanu Terminal-relevant Ambient and Z.AI models by default.
 

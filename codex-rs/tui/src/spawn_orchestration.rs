@@ -1279,9 +1279,11 @@ impl App {
             String::new(),
             Some("Task".to_string()),
             Box::new(move |task| {
+                // A person's own task: held only while the switch is on.
                 tx.send(AppEvent::SubmitSpawnClaudePaneTask {
                     pane_id: pane_id.clone(),
                     task,
+                    sent_while_kill_switch_on: false,
                 });
             }),
         );
@@ -1560,8 +1562,12 @@ impl App {
                             .insert(origin_id.to_string());
                     }
                     self.register_spawn_dispatch_acks_for_task(&target_node_id, &task, vec![ack]);
-                    self.app_event_tx
-                        .send(AppEvent::SubmitSpawnClaudePaneTask { pane_id, task });
+                    let sent_while_kill_switch_on = self.kill_switch_on_now();
+                    self.app_event_tx.send(AppEvent::SubmitSpawnClaudePaneTask {
+                        pane_id,
+                        task,
+                        sent_while_kill_switch_on,
+                    });
                     self.record_spawn_dispatch_queued(
                         source_pane_id,
                         source_is_active,
@@ -1907,6 +1913,7 @@ impl App {
                     self.app_event_tx.send(AppEvent::SubmitSpawnClaudePaneTask {
                         pane_id: parent_pane_id.to_string(),
                         task: trigger_prompt,
+                        sent_while_kill_switch_on: self.kill_switch_on_now(),
                     });
                 } else {
                     if self.spawn_auto_processing_quarantined() {
