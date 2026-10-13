@@ -5,9 +5,11 @@ use std::sync::RwLock;
 
 use codex_login::OpenAiAuthMetadata;
 use codex_login::ProviderAccountKind;
+use codex_login::ProviderAccountSignIn;
 use codex_model_provider_info::CORBANU_API_KEY_ENV_VARS;
 use codex_model_provider_info::NamedProviderAccount;
 use codex_model_provider_info::PFTERMINAL_PLAN_API_KEY_ENV_VAR;
+use codex_protocol::config_types::ForcedLoginMethod;
 use codex_provider_auth::ApiKeyAuthTarget;
 use codex_provider_auth::ApiKeyCredentialMetadata;
 use codex_provider_auth::ApiKeyStorage;
@@ -143,6 +145,14 @@ pub(crate) struct ProviderStatusHost {
     /// does not hold it. Kept apart from the default login's metadata, which
     /// a refresh re-reads.
     session_sign_in_entry: Option<String>,
+    /// #609: by entry id, what the enrolled named sign-in account the entry
+    /// runs on holds (a ChatGPT sign-in or an OpenAI API key), as its vault
+    /// metadata records it; absent when not recorded (shown as a ChatGPT
+    /// sign-in, as before). Never read from the sign-in itself.
+    named_sign_ins: Arc<BTreeMap<String, ProviderAccountSignIn>>,
+    /// #609: the configured `forced_login_method`, which can rule out a
+    /// named sign-in account by what it holds.
+    forced_login_method: Option<ForcedLoginMethod>,
     /// Reads an API-key environment variable (tests replace it).
     environment: fn(&str) -> EnvironmentCredentialMetadata,
 }
@@ -305,12 +315,71 @@ impl ProviderStatusHost {
             .collect()
     }
 
+    /// #609: by entry id, what the named sign-in account in
+    /// [`Self::status_accounts`] holds, as its metadata records it, and why
+    /// `forced_login_method` rules it out: shown on the `/providers` row.
+    pub(crate) fn status_account_details(&self) -> BTreeMap<String, String> {
+        let status_accounts = self.status_accounts();
+        self.named_sign_ins
+            .iter()
+            .filter(|(entry_id, _)| status_accounts.contains_key(entry_id.as_str()))
+            .map(|(entry_id, sign_in)| {
+                let detail = match (sign_in, self.forced_login_method) {
+                    (ProviderAccountSignIn::ApiKey, Some(ForcedLoginMethod::Chatgpt)) => {
+                        "an OpenAI API key; this configuration requires a ChatGPT sign-in"
+                    }
+                    (ProviderAccountSignIn::Chatgpt, Some(ForcedLoginMethod::Api)) => {
+                        "a ChatGPT sign-in; this configuration requires an API key"
+                    }
+                    (ProviderAccountSignIn::ApiKey, _) => "an OpenAI API key",
+                    (ProviderAccountSignIn::Chatgpt, _) => "a ChatGPT sign-in",
+                };
+                (entry_id.clone(), detail.to_string())
+            })
+            .collect()
+    }
+
     pub(crate) fn from_config(config: &Config, account: ProviderAccountMetadata) -> Self {
         let codex_home = config.codex_home.to_path_buf();
         Self::from_config_with_account_registry(config, account, |named, kind| {
             codex_login::provider_account_holds(&codex_home, &named.provider_id, &named.name, kind)
                 .unwrap_or(false)
         })
+        .with_named_sign_ins(config, |named| {
+            codex_login::provider_account_sign_in(&codex_home, &named.provider_id, &named.name)
+                .ok()
+                .flatten()
+        })
+    }
+
+    /// #609: records what each enrolled named sign-in account an entry runs
+    /// on holds, as `recorded` reports it from the account registry's
+    /// metadata (the sign-in itself is never read).
+    pub(crate) fn with_named_sign_ins(
+        mut self,
+        config: &Config,
+        recorded: impl Fn(&NamedProviderAccount) -> Option<ProviderAccountSignIn>,
+    ) -> Self {
+        let mut sign_ins = BTreeMap::new();
+        for entry in self.catalog.entries() {
+            if self.named_accounts.get(entry.id.as_str()) != Some(&true) {
+                continue;
+            }
+            let selected = entry.runtime_provider_ids.iter().find_map(|id| {
+                config
+                    .model_providers
+                    .get(id.as_str())
+                    .and_then(|provider| Some((provider, provider.account.as_ref()?)))
+            });
+            if let Some((provider, account)) = selected
+                && codex_model_provider::named_sign_in_account(provider).is_some()
+                && let Some(sign_in) = recorded(account)
+            {
+                sign_ins.insert(entry.id.as_str().to_string(), sign_in);
+            }
+        }
+        self.named_sign_ins = Arc::new(sign_ins);
+        self
     }
 
     pub(crate) fn from_config_with_account_registry(
@@ -338,6 +407,11 @@ impl ProviderStatusHost {
             named_account_names,
             connection_credentials,
             session_sign_in_entry,
+            named_sign_ins: Arc::default(),
+            // As the named account's manager checks it: only what the
+            // operator configured, not the API-key onboarding default a
+            // third-party session provider implies (#571).
+            forced_login_method: config.configured_forced_login_method,
             environment: environment_metadata,
             catalog,
             codex_home: config.codex_home.to_path_buf(),
@@ -627,7 +701,7 @@ impl ProviderStatusHost {
             | Some(ProviderSetupCapability::ApiKey {
                 storage: ApiKeyStorage::OpenAiAuth,
             }) => ProviderMetadata::OpenAi(match (named, account.openai) {
-                (Some(true), _) => codex_login::OpenAiAuthMetadata::Account,
+                (Some(true), _) => self.named_sign_in_metadata(entry.id.as_str()),
                 // Startup already vetted the session's own named account;
                 // the local vault may not hold it (a remote app server), so
                 // that answer stands. The default login's state says nothing
@@ -684,6 +758,26 @@ impl ProviderStatusHost {
             }
             Some(ProviderSetupCapability::StatusOnly { .. }) => ProviderMetadata::StatusOnly,
             None => ProviderMetadata::Unavailable,
+        }
+    }
+
+    /// #609: an enrolled named sign-in account's status, from what its
+    /// metadata records it holds: an OpenAI API key is reported as one, and
+    /// a sign-in `forced_login_method` rules out is not configured (its use
+    /// is refused with the reason). Not recorded: a ChatGPT sign-in, as
+    /// before.
+    fn named_sign_in_metadata(&self, entry_id: &str) -> codex_login::OpenAiAuthMetadata {
+        use codex_login::OpenAiAuthMetadata;
+        match (
+            self.named_sign_ins.get(entry_id).copied(),
+            self.forced_login_method,
+        ) {
+            (Some(ProviderAccountSignIn::ApiKey), Some(ForcedLoginMethod::Chatgpt))
+            | (Some(ProviderAccountSignIn::Chatgpt), Some(ForcedLoginMethod::Api)) => {
+                OpenAiAuthMetadata::Missing
+            }
+            (Some(ProviderAccountSignIn::ApiKey), _) => OpenAiAuthMetadata::ApiKey,
+            (Some(ProviderAccountSignIn::Chatgpt) | None, _) => OpenAiAuthMetadata::Account,
         }
     }
 

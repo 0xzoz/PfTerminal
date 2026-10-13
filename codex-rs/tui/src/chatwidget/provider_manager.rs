@@ -592,7 +592,14 @@ fn provider_item(
             // #609: when a named account decided the status, it is that
             // account's, not the default account's this row is named for.
             if let Some(status_account) = accounts.status_account(status.id.as_str()) {
-                description = format!("{description} (status of account `{status_account}`)");
+                description = match accounts.status_account_detail(status.id.as_str()) {
+                    // #609: and what it holds (an OpenAI API key or a
+                    // ChatGPT sign-in), from the account registry.
+                    Some(detail) => format!(
+                        "{description} (status of account `{status_account}`, which holds {detail})"
+                    ),
+                    None => format!("{description} (status of account `{status_account}`)"),
+                };
             }
             description.push_str(
                 &accounts.markers(&account.provider_id, codex_vault::DEFAULT_PROVIDER_ACCOUNT),
@@ -943,6 +950,7 @@ mod tests {
                 "zai".to_string(),
                 "fake".to_string(),
             )]),
+            status_account_details: std::collections::BTreeMap::new(),
         };
         let rows = provider_manager_rows(&catalog, &statuses, Some(&accounts));
         assert_eq!(rows.len(), 4, "{rows:?}");
@@ -975,6 +983,26 @@ mod tests {
         let rendered =
             crate::chatwidget::tests::helpers::render_bottom_popup(&chat, /*width*/ 100);
         assert!(!rendered.contains("status of account"), "{rendered}");
+        // #609: and what that account holds, when the status host knows it.
+        let detailed = AccountsView {
+            status_account_details: std::collections::BTreeMap::from([(
+                "zai".to_string(),
+                "an OpenAI API key".to_string(),
+            )]),
+            ..accounts.clone()
+        };
+        chat.open_provider_manager(
+            &catalog,
+            &statuses,
+            /*focused_provider*/ None,
+            Some(&detailed),
+        );
+        let rendered =
+            crate::chatwidget::tests::helpers::render_bottom_popup(&chat, /*width*/ 200);
+        assert!(
+            rendered.contains("(status of account `fake`, which holds an OpenAI API key)"),
+            "{rendered}"
+        );
         chat.open_provider_manager(
             &catalog,
             &statuses,

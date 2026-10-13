@@ -45,6 +45,10 @@ pub(crate) struct AccountsView {
     /// #609: by catalog entry id, the named account a provider's shown
     /// status was computed from (from the status host that computed it).
     pub(crate) status_accounts: BTreeMap<String, String>,
+    /// #609: by catalog entry id, what that account holds when the status
+    /// host knows it (an OpenAI API key or a ChatGPT sign-in, and why the
+    /// configuration rules it out), from the account registry's metadata.
+    pub(crate) status_account_details: BTreeMap<String, String>,
 }
 
 impl AccountsView {
@@ -69,6 +73,7 @@ impl AccountsView {
             session,
             defaults,
             status_accounts: BTreeMap::new(),
+            status_account_details: BTreeMap::new(),
         }
     }
 
@@ -79,12 +84,20 @@ impl AccountsView {
         status_host: &crate::provider_status_host::ProviderStatusHost,
     ) -> Self {
         self.status_accounts = status_host.status_accounts();
+        self.status_account_details = status_host.status_account_details();
         self
     }
 
     /// The named account `entry_id`'s shown status was computed from.
     pub(crate) fn status_account(&self, entry_id: &str) -> Option<&str> {
         self.status_accounts.get(entry_id).map(String::as_str)
+    }
+
+    /// #609: what [`Self::status_account`] holds, when known.
+    pub(crate) fn status_account_detail(&self, entry_id: &str) -> Option<&str> {
+        self.status_account_details
+            .get(entry_id)
+            .map(String::as_str)
     }
 
     pub(crate) fn session_account(&self, provider_id: &str) -> &str {

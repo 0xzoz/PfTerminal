@@ -557,3 +557,86 @@ fn sign_in_fingerprint_survives_token_refresh() {
         Some("chatgpt\0ws-1\0u-1".to_string())
     );
 }
+
+/// #609: what a named sign-in holds is kept in its metadata (not secret),
+/// read from the index alone, so a status refresh never reads the sign-in or
+/// writes the vault. Only a `chatgpt_auth` entry takes it; a rename keeps
+/// it; recording writes the index once, and nothing for another kind.
+#[test]
+fn what_a_sign_in_holds_is_index_metadata_only() {
+    let (dir, vault) = test_vault();
+    let work = name("work");
+    let kind = ProviderAccountKind::ChatgptAuth;
+    vault
+        .create_provider_account_with_sign_in(
+            "openai",
+            &work,
+            kind,
+            "{\"OPENAI_API_KEY\":\"sk-canary\"}",
+            Some(ProviderAccountSignIn::ApiKey),
+        )
+        .expect("create");
+    let before = snapshot(dir.path());
+    for _ in 0..2 {
+        assert_eq!(
+            vault
+                .provider_account_sign_in("openai", &work)
+                .expect("read"),
+            Some(ProviderAccountSignIn::ApiKey)
+        );
+    }
+    assert_eq!(snapshot(dir.path()), before, "a read changed the vault");
+    assert!(
+        !vault
+            .record_provider_account_sign_in("openai", &work, ProviderAccountSignIn::ApiKey)
+            .expect("same")
+    );
+    assert_eq!(snapshot(dir.path()), before, "an unchanged record wrote");
+    let (value, recorded) = vault
+        .read_provider_account_sign_in("openai", &work)
+        .expect("read")
+        .expect("held");
+    assert_eq!(
+        (value.as_str(), recorded),
+        (
+            "{\"OPENAI_API_KEY\":\"sk-canary\"}",
+            Some(ProviderAccountSignIn::ApiKey)
+        )
+    );
+
+    vault
+        .rename_provider_account("openai", &work, &name("job"))
+        .expect("rename");
+    assert_eq!(
+        vault
+            .provider_account_sign_in("openai", &name("job"))
+            .expect("read"),
+        Some(ProviderAccountSignIn::ApiKey)
+    );
+
+    // Another kind takes none, and recording leaves it alone.
+    vault
+        .write_provider_account_with_sign_in(
+            "zai",
+            &work,
+            ProviderAccountKind::ApiKey,
+            "zai-key",
+            Some(ProviderAccountSignIn::ApiKey),
+        )
+        .expect("write");
+    assert!(
+        !vault
+            .record_provider_account_sign_in("zai", &work, ProviderAccountSignIn::Chatgpt)
+            .expect("no sign-in")
+    );
+    assert!(
+        vault
+            .list()
+            .expect("list")
+            .iter()
+            .filter(|meta| meta.label.starts_with("provider/zai/"))
+            .all(|meta| meta.sign_in.is_none())
+    );
+    let metadata = serde_json::to_string(&vault.list().expect("list")).expect("json");
+    assert!(!metadata.contains("canary"), "{metadata}");
+}

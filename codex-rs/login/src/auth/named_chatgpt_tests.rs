@@ -226,3 +226,52 @@ fn login_restrictions_refuse_the_other_kind_and_other_workspaces() {
         );
     }
 }
+
+/// #609: what a named sign-in holds (a ChatGPT sign-in or an OpenAI API key)
+/// is recorded in its vault metadata when it is saved, never its value. One
+/// saved before it was recorded gets it on its next read, once.
+#[test]
+fn what_a_sign_in_holds_is_recorded_in_its_metadata() {
+    let home = tempfile::tempdir().expect("home");
+    let vault = Vault::new_with_keyring_store(
+        home.path().to_path_buf(),
+        Arc::new(MockKeyringStore::default()),
+    );
+    let recorded = |name: &str| {
+        vault
+            .provider_account_sign_in("openai", &ProviderAccountName::parse(name).expect("name"))
+            .expect("recorded")
+    };
+    let work = VaultAccountAuthStorage::with_vault(vault.clone(), &account("work")).expect("work");
+    work.create(&api_key_login("sk-canary-work"))
+        .expect("create");
+    assert_eq!(recorded("work"), Some(ProviderAccountSignIn::ApiKey));
+    work.save(&chatgpt_sign_in("work", "ws-1")).expect("save");
+    assert_eq!(recorded("work"), Some(ProviderAccountSignIn::Chatgpt));
+
+    // Saved by an earlier build: nothing recorded until it is read.
+    let old_name = ProviderAccountName::parse("old").expect("name");
+    let raw = serde_json::to_string(&api_key_login("sk-canary-old")).expect("json");
+    vault
+        .write_provider_account("openai", &old_name, ProviderAccountKind::ChatgptAuth, &raw)
+        .expect("write");
+    assert_eq!(recorded("old"), None);
+    let old = VaultAccountAuthStorage::with_vault(vault.clone(), &account("old")).expect("old");
+    assert_eq!(
+        old.load().expect("load"),
+        Some(api_key_login("sk-canary-old"))
+    );
+    assert_eq!(recorded("old"), Some(ProviderAccountSignIn::ApiKey));
+    // Once recorded, nothing more is written.
+    assert!(
+        !vault
+            .record_provider_account_sign_in("openai", &old_name, ProviderAccountSignIn::ApiKey)
+            .expect("record")
+    );
+
+    let metadata = serde_json::to_string(&vault.list().expect("list")).expect("json");
+    assert!(
+        metadata.contains("\"sign_in\":\"api_key\"") && !metadata.contains("canary"),
+        "{metadata}"
+    );
+}

@@ -30,6 +30,7 @@ fn view() -> AccountsView {
         session: BTreeMap::from([("zai".to_string(), "work".to_string())]),
         defaults: BTreeMap::from([("kimi".to_string(), "alt".to_string())]),
         status_accounts: BTreeMap::new(),
+        status_account_details: BTreeMap::new(),
     }
 }
 
