@@ -38,6 +38,7 @@ use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
 #[cfg(unix)]
 use core_test_support::skip_if_sandbox;
+use core_test_support::skip_if_wine_exec;
 use core_test_support::stdio_server_bin;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
@@ -249,6 +250,10 @@ fn output_text(request: &ResponsesRequest, call_id: &str) -> String {
 async fn pf_23_s01_protected_mcp_call_after_untrusted_content_needs_the_human() -> anyhow::Result<()>
 {
     skip_if_no_network!(Ok(()));
+    skip_if_wine_exec!(
+        Ok(()),
+        "this security test runs host shell commands; Wine-exec routes them to a Windows executor with a non-native cwd"
+    );
     let protected = "~/.ssh/id_ed25519";
     let mcp_turn = |level, approval, message: &str| {
         start_turn(
@@ -414,6 +419,10 @@ async fn pf_23_s01_typing_a_protected_command_into_a_running_shell_needs_the_hum
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pf_23_s01_code_mode_cell_results_taint_its_later_calls() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
+    skip_if_wine_exec!(
+        Ok(()),
+        "this security test runs host shell commands; Wine-exec routes them to a Windows executor with a non-native cwd"
+    );
     // #553: code mode runs in the `codex-code-mode-host` process. Without
     // it the session falls back to direct tools and the cell never runs, so
     // this test would check nothing; say so instead of failing on the

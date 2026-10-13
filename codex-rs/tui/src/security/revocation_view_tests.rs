@@ -316,6 +316,12 @@ fn pf_25_s02_only_this_view_revokes() {
             }
         }
     }
+    // This scans the whole codex-rs source tree. Bazel runs tests from
+    // runfiles, which hold only this crate's declared inputs, so the scan
+    // would find nothing there; `cargo test` (postmerge CI) runs it.
+    if option_env!("BAZEL_PACKAGE").is_some() {
+        return;
+    }
     let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("codex-rs");
