@@ -738,6 +738,9 @@ def record(args: argparse.Namespace) -> Path:
         for option in (
             ("status", "off"),
             ("remain-on-exit", "on"),
+            # The default "Pane is dead" line is written on the last row with a
+            # newline, scrolling the top row (often a launch refusal) away.
+            ("remain-on-exit-format", ""),
             ("window-size", "manual"),
             ("default-terminal", "xterm-256color"),
         ):

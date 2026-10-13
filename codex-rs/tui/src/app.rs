@@ -1035,6 +1035,7 @@ fn active_turn_steer_race(error: &TypedRequestError) -> Option<ActiveTurnSteerRa
 /// [`session_start_failure`], and for a refusal the app server is shut down
 /// as on the other early exits.
 async fn end_session_start(
+    tui: &mut tui::Tui,
     app_server: AppServerSession,
     action: &str,
     target_session: &SessionTarget,
@@ -1042,6 +1043,8 @@ async fn end_session_start(
 ) -> Result<AppExitInfo> {
     let result = session_start_failure(action, target_session, err);
     if result.is_ok() {
+        // As for a missing session: the message prints on a clean screen.
+        let _ = tui.terminal.clear();
         app_server
             .shutdown()
             .await
@@ -1445,7 +1448,8 @@ impl App {
                 {
                     Ok(resumed) => resumed,
                     Err(err) => {
-                        return end_session_start(app_server, "resume", &target_session, err).await;
+                        return end_session_start(tui, app_server, "resume", &target_session, err)
+                            .await;
                     }
                 };
                 apply_persisted_resume_runtime(
@@ -1511,7 +1515,8 @@ impl App {
                 {
                     Ok(forked) => forked,
                     Err(err) => {
-                        return end_session_start(app_server, "fork", &target_session, err).await;
+                        return end_session_start(tui, app_server, "fork", &target_session, err)
+                            .await;
                     }
                 };
                 let init = crate::chatwidget::ChatWidgetInit {
