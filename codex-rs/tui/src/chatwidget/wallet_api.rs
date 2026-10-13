@@ -515,7 +515,7 @@ async fn load_read_only_account(
         // #641: a key from the environment wins over a stored replacement.
         let notice = match &api_key {
             super::wallet_http::CorbanuAccountKey::HeldByBroker => {
-                "The Corbanu API key from the environment (CORBANU_API_KEY) is no longer valid. Replace it there, or unset it and unlock this wallet to create a replacement key."
+                "The Corbanu API key from the environment (CORBANU_API_KEY) is no longer valid. Replace it there and restart Corbanu Terminal, or unset it, restart, and unlock this wallet to create a replacement key."
             }
             super::wallet_http::CorbanuAccountKey::Value(_) => {
                 "The stored Corbanu API key is no longer valid. Unlock this wallet to load its balance or create a replacement key."
