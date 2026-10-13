@@ -314,8 +314,14 @@ fn sec_win_341_commands_start_in_the_launchers_window_station() {
     }
     let station = current_window_station_name().expect("window station");
     assert!(station.starts_with("Service-0x0-"), "{station}");
-    let shared = LaunchDesktop::prepare(/*use_private_desktop*/ false, None).expect("desktop");
-    let private = LaunchDesktop::prepare(/*use_private_desktop*/ true, None).expect("desktop");
+    let shared = LaunchDesktop::prepare(
+        /*use_private_desktop*/ false, /*low_integrity*/ false, None,
+    )
+    .expect("desktop");
+    let private = LaunchDesktop::prepare(
+        /*use_private_desktop*/ true, /*low_integrity*/ false, None,
+    )
+    .expect("desktop");
     let name = |desktop: &LaunchDesktop| {
         let start = desktop.startup_info_desktop();
         let len = (0..).take_while(|&i| unsafe { *start.add(i) } != 0).count();

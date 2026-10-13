@@ -35,6 +35,9 @@ use windows_sys::Win32::Security::EqualSid;
 use windows_sys::Win32::Security::GetAce;
 use windows_sys::Win32::Security::GetAclInformation;
 use windows_sys::Win32::Security::GetLengthSid;
+use windows_sys::Win32::Security::GetSidSubAuthority;
+use windows_sys::Win32::Security::GetSidSubAuthorityCount;
+use windows_sys::Win32::Security::GetTokenInformation;
 use windows_sys::Win32::Security::INHERIT_ONLY_ACE;
 use windows_sys::Win32::Security::InitializeAcl;
 use windows_sys::Win32::Security::LABEL_SECURITY_INFORMATION;
@@ -43,11 +46,16 @@ use windows_sys::Win32::Security::SID_AND_ATTRIBUTES;
 use windows_sys::Win32::Security::SetTokenInformation;
 use windows_sys::Win32::Security::TOKEN_MANDATORY_LABEL;
 use windows_sys::Win32::Security::TokenIntegrityLevel;
+use windows_sys::Win32::Storage::FileSystem::READ_CONTROL;
+use windows_sys::Win32::Storage::FileSystem::WRITE_OWNER;
+use windows_sys::Win32::System::StationsAndDesktops::CloseDesktop;
+use windows_sys::Win32::System::StationsAndDesktops::OpenDesktopW;
 use windows_sys::Win32::System::SystemServices::SE_GROUP_INTEGRITY;
 use windows_sys::Win32::System::SystemServices::SYSTEM_MANDATORY_LABEL_ACE_TYPE;
 use windows_sys::Win32::System::SystemServices::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP;
 
 const LOW_INTEGRITY_SID: &str = "S-1-16-4096";
+const LOW_INTEGRITY_RID: u32 = 0x1000;
 
 /// Lowers `h_token` to Low integrity.
 ///
@@ -216,10 +224,10 @@ unsafe fn sacl_has_low_label(p_sacl: *mut ACL, flags: u32) -> bool {
 ///
 /// # Safety
 /// `handle` must be a desktop handle opened with `WRITE_OWNER`.
-pub(crate) unsafe fn label_window_object_low(handle: isize) -> Result<()> {
+pub(crate) unsafe fn label_window_object_low(handle: HANDLE) -> Result<()> {
     let mut acl = LowLabelAcl::new(/*flags*/ 0)?;
     let code = SetSecurityInfo(
-        handle as HANDLE,
+        handle,
         SE_WINDOW_OBJECT,
         LABEL_SECURITY_INFORMATION,
         std::ptr::null_mut(),
@@ -231,4 +239,51 @@ pub(crate) unsafe fn label_window_object_low(handle: isize) -> Result<()> {
         return Err(anyhow!("SetSecurityInfo(label) failed for desktop: {code}"));
     }
     Ok(())
+}
+
+/// Labels this process's desktop `name` (of its own, non-interactive window
+/// station) Low, for a Low-integrity command started on it.
+pub(crate) fn label_desktop_low(name: &str) -> Result<()> {
+    let wide = to_wide(name);
+    // SAFETY: opens a desktop of this process's window station; closed below.
+    let handle = unsafe { OpenDesktopW(wide.as_ptr(), 0, 0, READ_CONTROL | WRITE_OWNER) };
+    if handle == 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    // SAFETY: `handle` was opened with WRITE_OWNER above.
+    let result = unsafe { label_window_object_low(handle) };
+    // SAFETY: opened above.
+    unsafe {
+        CloseDesktop(handle);
+    }
+    result
+}
+
+/// Whether `h_token` runs at Low integrity or below.
+pub(crate) fn token_is_low_integrity(h_token: HANDLE) -> bool {
+    let mut buffer = [0u64; 16];
+    let mut needed = 0u32;
+    // SAFETY: the buffer outlives the call and its size is passed.
+    let ok = unsafe {
+        GetTokenInformation(
+            h_token,
+            TokenIntegrityLevel,
+            buffer.as_mut_ptr() as *mut c_void,
+            (buffer.len() * 8) as u32,
+            &mut needed,
+        )
+    };
+    if ok == 0 {
+        return false;
+    }
+    // SAFETY: GetTokenInformation filled a TOKEN_MANDATORY_LABEL whose SID
+    // points into `buffer`.
+    unsafe {
+        let label = &*(buffer.as_ptr() as *const TOKEN_MANDATORY_LABEL);
+        let count = *GetSidSubAuthorityCount(label.Label.Sid);
+        if count == 0 {
+            return false;
+        }
+        *GetSidSubAuthority(label.Label.Sid, u32::from(count) - 1) <= LOW_INTEGRITY_RID
+    }
 }
