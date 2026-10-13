@@ -744,10 +744,19 @@ fn issue_603_a_grant_below_a_swapped_worktrees_is_refused() {
         /*claude_config_dir*/ None,
         &[abs(&cwd)],
     );
+    // The project only: no temporary folders, which hold the fixture.
+    let project_only = PermissionProfile::workspace_write_with(
+        &[],
+        NetworkSandboxPolicy::Restricted,
+        /*exclude_tmpdir_env_var*/ true,
+        /*exclude_slash_tmp*/ true,
+    )
+    .materialize_project_roots_with_workspace_roots(&[abs(&cwd)]);
     let mut policy = denials
-        .apply(&workspace(&cwd))
+        .apply(&project_only)
         .unwrap()
         .file_system_sandbox_policy();
+    assert!(!policy.can_write_path_with_cwd(&fx.codex_home.join("worktrees/x"), &cwd));
     let grant = fx.codex_home.join("worktrees/w");
     policy.entries.push(FileSystemSandboxEntry::new(
         FileSystemPath::Path { path: abs(&grant) },
