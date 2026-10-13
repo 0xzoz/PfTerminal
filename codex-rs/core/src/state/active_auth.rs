@@ -81,6 +81,14 @@ impl ActiveAuthManager {
         true
     }
 
+    /// #658: whether a client is attached to this user session; a session
+    /// the user left does not count for the process's own backend requests.
+    pub(crate) fn set_user_attached(&self, attached: bool) {
+        if let Some(user_session) = &self.user_session {
+            user_session.set_attached(attached);
+        }
+    }
+
     pub(crate) fn subscribe_switches(&self) -> watch::Receiver<u64> {
         self.switches.subscribe()
     }

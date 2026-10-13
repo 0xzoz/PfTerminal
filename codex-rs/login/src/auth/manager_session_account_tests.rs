@@ -53,7 +53,7 @@ async fn the_session_manager_follows_the_sessions_and_never_falls_back_to_the_de
         Some("sk-canary-work")
     );
 
-    // The first session replaces the configured stand-in; a Z.AI pane does not count.
+    // A session overrides the configured stand-in; a Z.AI pane does not count.
     let main = work_manager.register_session_sign_in(SessionSignIn::Named(account("work")));
     let zai = base.register_session_sign_in(SessionSignIn::NotOpenAi);
     for manager in [base.for_session(), work_manager.for_session()] {
@@ -62,6 +62,30 @@ async fn the_session_manager_follows_the_sessions_and_never_falls_back_to_the_de
         assert_eq!(key(Some(manager)).await.as_deref(), Some("sk-canary-work"));
     }
     assert_eq!(base.session_account_conflict(), None);
+
+    // A conversation the user left (no client attached) does not count.
+    let left = base.register_session_sign_in(SessionSignIn::Default);
+    assert!(base.for_session().is_none());
+    left.set_attached(false);
+    assert_eq!(
+        key(base.for_session()).await.as_deref(),
+        Some("sk-canary-work")
+    );
+    left.update(SessionSignIn::Named(account("play")));
+    assert_eq!(
+        key(base.for_session()).await.as_deref(),
+        Some("sk-canary-work")
+    );
+    left.set_attached(true);
+    assert!(base.for_session().is_none());
+    drop(left);
+
+    // The configured stand-in, set again later, does not count over sessions.
+    base.register_configured_sign_in(SessionSignIn::Unknown);
+    assert_eq!(
+        key(base.for_session()).await.as_deref(),
+        Some("sk-canary-work")
+    );
 
     // A pane on the default login, or another named account: nothing is sent.
     let default_pane = base.register_session_sign_in(SessionSignIn::Default);
@@ -82,9 +106,12 @@ async fn the_session_manager_follows_the_sessions_and_never_falls_back_to_the_de
     main.update(SessionSignIn::Named(account("ghost")));
     assert_eq!(key(base.for_session()).await, None);
 
-    // Back on the default login, and after every session has ended.
+    // Back on the default login; after every session has ended the
+    // configured stand-in counts again.
     main.update(SessionSignIn::Default);
     assert!(Arc::ptr_eq(&base.for_session().expect("default"), &base));
     drop((main, zai));
+    assert!(base.session_account_unknown());
+    base.register_configured_sign_in(SessionSignIn::Default);
     assert!(Arc::ptr_eq(&base.for_session().expect("default"), &base));
 }

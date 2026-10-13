@@ -14,6 +14,7 @@ use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
+use codex_app_server_protocol::ThreadUnsubscribeParams;
 use codex_config::types::AuthCredentialsStoreMode;
 use pretty_assertions::assert_eq;
 use serde_json::json;
@@ -90,7 +91,7 @@ async fn mount_usage(server: &MockServer) {
         .await;
 }
 
-async fn start_thread(app: &mut TestAppServer, account: Option<&str>) -> Result<()> {
+async fn start_thread(app: &mut TestAppServer, account: Option<&str>) -> Result<String> {
     let request = app
         .send_thread_start_request(ThreadStartParams {
             model: Some("mock-model".to_string()),
@@ -103,8 +104,18 @@ async fn start_thread(app: &mut TestAppServer, account: Option<&str>) -> Result<
         app.read_stream_until_response_message(RequestId::Integer(request)),
     )
     .await??;
-    let _ = to_response::<ThreadStartResponse>(response)?;
-    Ok(())
+    let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(response)?;
+    Ok(thread.id)
+}
+
+async fn rate_limits_refusal(app: &mut TestAppServer) -> Result<String> {
+    let request = app.send_get_account_rate_limits_request().await?;
+    let error: JSONRPCError = timeout(
+        DEFAULT_TIMEOUT,
+        app.read_stream_until_error_message(RequestId::Integer(request)),
+    )
+    .await??;
+    Ok(error.error.message)
 }
 
 async fn read_rate_limits(app: &mut TestAppServer) -> Result<()> {
@@ -194,16 +205,21 @@ async fn backend_requests_follow_a_thread_started_on_a_named_account() -> Result
         .with_env_overrides(&[("OPENAI_API_KEY", None)])
         .build_initialized_with_timeout(DEFAULT_TIMEOUT)
         .await?;
-    // No session yet: the default login (control).
-    read_rate_limits(&mut app).await?;
-
+    // No conversation yet: with named accounts on, a server's clients choose
+    // their accounts per thread, so nothing is sent until one starts.
+    let refusal = rate_limits_refusal(&mut app).await?;
+    assert!(
+        refusal.contains("not known until its conversation starts"),
+        "{refusal}"
+    );
     start_thread(&mut app, Some("work")).await?;
     read_rate_limits(&mut app).await?;
 
     assert_eq!(
         tokens_for(&server, "/api/codex/usage").await,
-        vec![DEFAULT_TOKEN.to_string(), WORK_TOKEN.to_string()]
+        vec![WORK_TOKEN.to_string()]
     );
+    assert!(!default_login_was_sent(&server).await);
     Ok(())
 }
 
@@ -226,24 +242,81 @@ async fn sessions_on_different_accounts_send_neither_login() -> Result<()> {
     start_thread(&mut app, Some("work")).await?;
     start_thread(&mut app, /*account*/ None).await?;
 
-    let request = app.send_get_account_rate_limits_request().await?;
-    let error: JSONRPCError = timeout(
-        DEFAULT_TIMEOUT,
-        app.read_stream_until_error_message(RequestId::Integer(request)),
-    )
-    .await??;
+    let refusal = rate_limits_refusal(&mut app).await?;
     assert!(
-        error
-            .error
-            .message
-            .contains("sessions on different accounts are open"),
-        "{}",
-        error.error.message
+        refusal.contains("sessions on different accounts are open"),
+        "{refusal}"
     );
     // (The pane on the default login sends its own requests with it.)
     assert_eq!(
         tokens_for(&server, "/api/codex/usage").await,
         Vec::<String>::new()
+    );
+    Ok(())
+}
+
+/// A session on the default login (named accounts on) uses it, as before.
+#[tokio::test]
+async fn a_session_on_the_default_login_still_uses_it() -> Result<()> {
+    let server = MockServer::start().await;
+    mount_usage(&server).await;
+    let home = TempDir::new()?;
+    write_home(home.path(), &server, "")?;
+
+    let mut app = TestAppServer::builder()
+        .with_codex_home(home.path())
+        .without_auto_env()
+        .with_env_overrides(&[("OPENAI_API_KEY", None)])
+        .build_initialized_with_timeout(DEFAULT_TIMEOUT)
+        .await?;
+    start_thread(&mut app, /*account*/ None).await?;
+    read_rate_limits(&mut app).await?;
+
+    assert_eq!(
+        tokens_for(&server, "/api/codex/usage").await,
+        vec![DEFAULT_TOKEN.to_string()]
+    );
+    Ok(())
+}
+
+/// A conversation the user left (no client subscribed; the server keeps it
+/// loaded for a while) does not count: after leaving the default-login thread,
+/// requests outside a conversation use `work` again.
+#[tokio::test]
+async fn a_thread_the_user_left_does_not_count() -> Result<()> {
+    let server = MockServer::start().await;
+    mount_usage(&server).await;
+    let home = TempDir::new()?;
+    write_home(home.path(), &server, "")?;
+
+    let mut app = TestAppServer::builder()
+        .with_codex_home(home.path())
+        .without_auto_env()
+        .with_env_overrides(&[("OPENAI_API_KEY", None)])
+        .build_initialized_with_timeout(DEFAULT_TIMEOUT)
+        .await?;
+    start_thread(&mut app, Some("work")).await?;
+    let left = start_thread(&mut app, /*account*/ None).await?;
+    assert!(
+        rate_limits_refusal(&mut app)
+            .await?
+            .contains("sessions on different accounts are open")
+    );
+
+    let request = app
+        .send_thread_unsubscribe_request(ThreadUnsubscribeParams { thread_id: left })
+        .await?;
+    let _: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        app.read_stream_until_response_message(RequestId::Integer(request)),
+    )
+    .await??;
+    // The registration follows the subscription asynchronously.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    read_rate_limits(&mut app).await?;
+    assert_eq!(
+        tokens_for(&server, "/api/codex/usage").await,
+        vec![WORK_TOKEN.to_string()]
     );
     Ok(())
 }

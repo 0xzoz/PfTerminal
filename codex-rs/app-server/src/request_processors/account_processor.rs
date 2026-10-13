@@ -1058,6 +1058,8 @@ impl AccountRequestProcessor {
             Some(auth_manager) => (auth_manager, true),
             None => (Arc::clone(&self.auth_manager), false),
         };
+        // Nor is its token handed out then.
+        let include_token = include_token && may_refresh;
         let cached_codex_backend_auth = status_manager
             .auth_cached()
             .is_some_and(|auth| auth.uses_codex_backend());

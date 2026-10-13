@@ -4,7 +4,8 @@
 //! named account is in use.
 //!
 //! Every user (root) session registers the OpenAI sign-in it runs on and
-//! updates it on a switch; the registration ends with the session. Kept per
+//! updates it on a switch; the registration ends with the session and does
+//! not count while no client is attached to it. Kept per
 //! home rather than per manager, so a manager built later from the same
 //! configuration (the ChatGPT connector helpers build their own) sees it.
 //!
@@ -50,7 +51,7 @@ pub enum SessionSignIn {
 }
 
 /// Registration key 0 is the account the configuration starts the process on,
-/// used until the first user session registers.
+/// which counts only while no user session is registered.
 const CONFIGURED: u64 = 0;
 
 type Registrations = BTreeMap<u64, SessionSignIn>;
@@ -95,22 +96,24 @@ fn resolve(home: &PathBuf) -> Resolved {
         let Some(registrations) = sessions.get(home) else {
             return Resolved::Default;
         };
-        if registrations
-            .values()
-            .any(|sign_in| *sign_in == SessionSignIn::Unknown)
-        {
+        // The configured stand-in counts only while no session is registered.
+        let sessions_only = registrations.keys().any(|id| *id != CONFIGURED);
+        let sign_ins: Vec<&SessionSignIn> = registrations
+            .iter()
+            .filter(|(id, _)| !sessions_only || **id != CONFIGURED)
+            .map(|(_, sign_in)| sign_in)
+            .collect();
+        if sign_ins.contains(&&SessionSignIn::Unknown) {
             return Resolved::Unknown;
         }
-        let named: BTreeSet<&NamedChatgptAccount> = registrations
-            .values()
+        let named: BTreeSet<&NamedChatgptAccount> = sign_ins
+            .iter()
             .filter_map(|sign_in| match sign_in {
                 SessionSignIn::Named(account) => Some(account),
                 _ => None,
             })
             .collect();
-        let default = registrations
-            .values()
-            .any(|sign_in| *sign_in == SessionSignIn::Default);
+        let default = sign_ins.contains(&&SessionSignIn::Default);
         let mut accounts = named.into_iter();
         match (accounts.next(), accounts.next(), default) {
             (None, _, _) => Resolved::Default,
@@ -128,11 +131,15 @@ fn resolve(home: &PathBuf) -> Resolved {
     })
 }
 
-/// A user session's registration; it ends when this is dropped.
+/// A user session's registration; it ends when this is dropped. While no
+/// client is attached to the session (a conversation the user left, kept
+/// loaded for a while) it is suspended and does not count.
 #[derive(Debug)]
 pub struct SessionSignInRegistration {
     home: PathBuf,
     id: u64,
+    /// The sign-in, and whether a client is attached.
+    state: Mutex<(SessionSignIn, bool)>,
 }
 
 impl SessionSignInRegistration {
@@ -141,6 +148,32 @@ impl SessionSignInRegistration {
         let sign_in = match sign_in {
             SessionSignIn::Unknown => SessionSignIn::NotOpenAi,
             sign_in => sign_in,
+        };
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.0 = sign_in.clone();
+        if state.1 {
+            set(&self.home, self.id, sign_in);
+        }
+    }
+
+    /// Whether a client is attached to the session; a detached session does
+    /// not count until one attaches again.
+    pub fn set_attached(&self, attached: bool) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.1 == attached {
+            return;
+        }
+        state.1 = attached;
+        let sign_in = if attached {
+            state.0.clone()
+        } else {
+            SessionSignIn::NotOpenAi
         };
         set(&self.home, self.id, sign_in);
     }
@@ -153,25 +186,25 @@ impl Drop for SessionSignInRegistration {
 }
 
 impl AuthManager {
-    /// Registers a user session that runs on `sign_in` (#658). It also ends
-    /// the configured account's stand-in for this home.
+    /// Registers a user session that runs on `sign_in` (#658), attached.
+    /// While any session is registered the configured stand-in does not count.
     pub fn register_session_sign_in(&self, sign_in: SessionSignIn) -> SessionSignInRegistration {
         let sign_in = match sign_in {
             SessionSignIn::Unknown => SessionSignIn::NotOpenAi,
             sign_in => sign_in,
         };
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        set(&self.codex_home, CONFIGURED, SessionSignIn::NotOpenAi);
-        set(&self.codex_home, id, sign_in);
+        set(&self.codex_home, id, sign_in.clone());
         SessionSignInRegistration {
             home: self.codex_home.clone(),
             id,
+            state: Mutex::new((sign_in, true)),
         }
     }
 
-    /// The account the configuration starts the process on, used until the
-    /// first user session registers (#658): an app server's requests before
-    /// any thread exists.
+    /// The account the configuration starts the process on (#658), which
+    /// counts while no user session of this home is registered: an app
+    /// server's requests before any thread exists.
     pub fn register_configured_sign_in(&self, sign_in: SessionSignIn) {
         set(&self.codex_home, CONFIGURED, sign_in);
     }

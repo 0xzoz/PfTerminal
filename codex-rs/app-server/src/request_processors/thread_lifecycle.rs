@@ -229,6 +229,25 @@ pub(super) async fn ensure_listener_task_running(
             "thread {conversation_id} is closing; retry after the thread is closed"
         )));
     };
+    // #658: a thread nobody is attached to does not count toward the account
+    // of the process's own backend requests (it stays loaded for a while).
+    // Holds the thread weakly, so it never keeps a session alive.
+    {
+        let mut has_subscribers_rx = unloading_state.has_subscribers_rx.clone();
+        let thread = Arc::downgrade(&conversation);
+        tokio::spawn(async move {
+            loop {
+                let attached = *has_subscribers_rx.borrow_and_update();
+                match thread.upgrade() {
+                    Some(thread) => thread.set_client_attached(attached),
+                    None => return,
+                }
+                if has_subscribers_rx.changed().await.is_err() {
+                    return;
+                }
+            }
+        });
+    }
     let config = conversation.config().await;
     let environments = conversation.environment_selections().await;
     let watch_registration = listener_task_context

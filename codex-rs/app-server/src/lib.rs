@@ -1387,18 +1387,23 @@ fn loader_overrides_with_test_user_config_file(
 /// PF-84-S06 (#658): until a thread starts, the server's own ChatGPT backend
 /// requests (plugin listings, settings, usage, analytics) use the account the
 /// configuration starts the session on, never the default login when that is
-/// a named sign-in account. An embedded server of a launch whose account is
-/// known only when its thread starts (resume or fork with named accounts on,
-/// which leaves the default login in place) sends none of them until then.
+/// a named sign-in account. Where the account is known only when a thread
+/// starts, none of them is sent until then: an embedded server of a resume or
+/// fork launch with named accounts on (which leaves the default login in
+/// place), and a standalone server or daemon with named accounts on, whose
+/// clients choose their accounts per thread.
 pub(crate) fn follow_configured_session_account(
     auth_manager: &Arc<AuthManager>,
     config: &Config,
     embedded: bool,
 ) {
+    let account_known_later = if embedded {
+        codex_login::default_login_left_unenforced()
+    } else {
+        config.named_accounts_enabled()
+    };
     let sign_in = match codex_model_provider::session_sign_in(&config.model_provider) {
-        codex_login::SessionSignIn::Default
-            if embedded && codex_login::default_login_left_unenforced() =>
-        {
+        codex_login::SessionSignIn::Default if account_known_later => {
             codex_login::SessionSignIn::Unknown
         }
         sign_in => sign_in,
