@@ -2330,6 +2330,54 @@ fn an_outer_writable_root_keeps_the_workspace_metadata_protected() {
     assert!(workspace.join(".git/HEAD").exists() && !workspace.join(".agents").exists());
 }
 
+/// Whether `dir` is on a volume that ignores case (macOS's default).
+fn ignores_case(dir: &Path) -> bool {
+    let probe = dir.join("case-probe-606");
+    fs::write(&probe, "x").expect("probe");
+    let ignores = dir.join("CASE-PROBE-606").exists();
+    fs::remove_file(&probe).expect("remove probe");
+    ignores
+}
+
+/// #606: on a volume that ignores case, a `.GIT`, `.Codex` or `.AGENTS` made
+/// where the name is missing is the folder git or Corbanu opens. Once the
+/// policy denies reads (Moderate and Aggressive) none can be created in a
+/// writable root; a policy without denied paths keeps today's rules.
+#[test]
+fn metadata_names_are_protected_in_any_case_once_reads_are_denied() {
+    let base = TempDir::new().expect("tempdir");
+    let base = base.path().canonicalize().expect("canonical");
+    if !ignores_case(&base) {
+        eprintln!("{} does not ignore case; skipping", base.display());
+        return;
+    }
+    for denies_reads in [true, false] {
+        let workspace = base.join(format!("ws-{denies_reads}"));
+        fs::create_dir_all(&workspace).expect("ws");
+        let mut entries = vec![
+            root_read_entry(),
+            path_entry(&workspace, FileSystemAccessMode::Write),
+        ];
+        if denies_reads {
+            entries.push(path_entry(&base.join("denied"), FileSystemAccessMode::Deny));
+        }
+        let policy = FileSystemSandboxPolicy::restricted(entries);
+        let script = format!(
+            "mkdir '{ws}/.GIT'; echo git=$?; mkdir '{ws}/.Codex'; echo codex=$?; \
+             mkdir '{ws}/.AGENTS'; echo agents=$?; mkdir '{ws}/.gitx'; echo gitx=$?; \
+             echo x > '{ws}/file'; echo ws=$?",
+            ws = workspace.display(),
+        );
+        let stdout = run_in_seatbelt(&policy, &workspace, &script);
+        let expected = if denies_reads {
+            ["git=1", "codex=1", "agents=1", "gitx=0", "ws=0"]
+        } else {
+            ["git=0", "codex=0", "agents=0", "gitx=0", "ws=0"]
+        };
+        assert_lines(&stdout, &expected);
+    }
+}
+
 /// #529 review: an explicit writable root stays writable when another root
 /// spells its folder through a link (the workspace opened through a nested
 /// link, its real `.git` granted).

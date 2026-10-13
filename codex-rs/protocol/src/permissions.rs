@@ -1591,6 +1591,36 @@ impl FileSystemSandboxPolicy {
             .collect()
     }
 
+    /// #606: whether `path` may be written as [`Self::can_write_path_with_cwd`]
+    /// says, and not through a writable root
+    /// [`Self::get_writable_roots_with_cwd`] leaves out (#535, `excluded`
+    /// from [`Self::writable_links_into_read_only_paths`]): the sandboxes
+    /// grant nothing there, so approvals must not count it as writable
+    /// either (fail closed).
+    pub fn can_write_path_outside_excluded_links(
+        &self,
+        path: &Path,
+        cwd: &Path,
+        excluded: &[WritableLinkIntoReadOnlyPath],
+    ) -> bool {
+        if !self.can_write_path_with_cwd(path, cwd) {
+            return false;
+        }
+        if excluded.is_empty() {
+            return true;
+        }
+        let Some(target) = resolve_candidate_path(path, cwd) else {
+            return false;
+        };
+        let normalized = normalize_effective_absolute_path(target.clone());
+        !excluded.iter().any(|excluded| {
+            target.as_path().starts_with(excluded.link.as_path())
+                || normalized.as_path().starts_with(
+                    normalize_effective_absolute_path(excluded.link.clone()).as_path(),
+                )
+        })
+    }
+
     fn writable_roots_including_links_into_read_only_paths(&self, cwd: &Path) -> Vec<WritableRoot> {
         if self.has_full_disk_write_access() {
             return Vec::new();
@@ -2625,11 +2655,15 @@ fn has_explicit_resolved_path_entry(
     entries.iter().any(|entry| &entry.path == path)
 }
 
-fn metadata_path_name(name: &OsStr) -> Option<&'static str> {
+/// The protected metadata name `name` is; with `any_case` also in another
+/// case (#606).
+fn metadata_path_name(name: &OsStr, any_case: bool) -> Option<&'static str> {
     PROTECTED_METADATA_PATH_NAMES
         .iter()
         .copied()
-        .find(|metadata_name| name == OsStr::new(metadata_name))
+        .find(|metadata_name| {
+            name == OsStr::new(metadata_name) || (any_case && name.eq_ignore_ascii_case(metadata_name))
+        })
 }
 
 fn metadata_child_of_writable_root(
@@ -2637,6 +2671,11 @@ fn metadata_child_of_writable_root(
     target: &Path,
     cwd: &Path,
 ) -> Option<(AbsolutePathBuf, &'static str)> {
+    // #606: macOS volumes ignore case, so a `.GIT` made where `.git` is
+    // missing is the folder git opens as `.git`. Only once the policy denies
+    // reads (Moderate and Aggressive), as Seatbelt matches it; a policy
+    // without denied paths keeps today's rules.
+    let any_case = cfg!(target_os = "macos") && policy.has_denied_read_restrictions();
     policy
         .resolved_entries_with_cwd(cwd)
         .iter()
@@ -2644,8 +2683,10 @@ fn metadata_child_of_writable_root(
         .filter_map(|entry| {
             let relative_path = target.strip_prefix(entry.path.as_path()).ok()?;
             let first_component = relative_path.components().next()?;
-            let metadata_name = metadata_path_name(first_component.as_os_str())?;
-            Some((entry.path.join(metadata_name), metadata_name))
+            let metadata_name = metadata_path_name(first_component.as_os_str(), any_case)?;
+            // As spelled (#606: `.GIT` on macOS), so only an explicit entry
+            // for that spelling opens it.
+            Some((entry.path.join(first_component), metadata_name))
         })
         .next()
 }
@@ -4901,5 +4942,114 @@ mod tests {
             .map(|root| root.root.into_path_buf())
             .collect();
         assert_eq!(roots, vec![workspace, links.join("elsewhere"), hooks]);
+    }
+
+    /// #606: approvals agree with the sandboxes, which grant nothing through
+    /// a writable link they leave out (#535): a path through one is not
+    /// writable (fail closed); other paths are as before.
+    #[cfg(unix)]
+    #[test]
+    fn paths_through_excluded_links_are_not_writable_for_approvals() {
+        let dir = TempDir::new().expect("tempdir");
+        let base = dir.path().canonicalize().expect("canonical");
+        let workspace = base.join("ws");
+        fs::create_dir_all(workspace.join(".git").join("hooks")).expect("hooks");
+        let link = base.join("git-link");
+        symlink_dir(&workspace.join(".git"), &link).expect("link");
+        let entry = |path: &Path| {
+            FileSystemSandboxEntry::new(
+                FileSystemPath::Path {
+                    path: AbsolutePathBuf::from_absolute_path(path).expect("absolute"),
+                },
+                FileSystemAccessMode::Write,
+            )
+        };
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry::new(
+                FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                FileSystemAccessMode::Read,
+            ),
+            entry(&workspace),
+            entry(&link),
+        ]);
+        let excluded = policy.writable_links_into_read_only_paths(&workspace);
+        assert_eq!(excluded.len(), 1);
+        let hook = link.join("hooks").join("pre-commit");
+        // The literal check still counts it (the disagreement #606 names).
+        assert!(policy.can_write_path_with_cwd(&hook, &workspace));
+        for path in [hook.as_path(), link.as_path(), &link.join("config")] {
+            assert!(
+                !policy.can_write_path_outside_excluded_links(path, &workspace, &excluded),
+                "{}",
+                path.display()
+            );
+        }
+        assert!(policy.can_write_path_outside_excluded_links(
+            &workspace.join("src/main.rs"),
+            &workspace,
+            &excluded
+        ));
+        assert!(!policy.can_write_path_outside_excluded_links(
+            &workspace.join(".git/config"),
+            &workspace,
+            &excluded
+        ));
+        assert!(policy.can_write_path_outside_excluded_links(
+            &workspace.join("src/main.rs"),
+            &workspace,
+            &[]
+        ));
+    }
+
+    /// #606: macOS volumes ignore case, so `.GIT`, `.Codex` and `.AGENTS`
+    /// are protected like `.git`, `.codex` and `.agents` once the policy
+    /// denies reads; a policy without denied paths keeps today's rules.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metadata_names_match_in_any_case_once_reads_are_denied() {
+        let dir = TempDir::new().expect("tempdir");
+        let workspace = dir.path().canonicalize().expect("canonical").join("ws");
+        let absolute = |path: &Path| AbsolutePathBuf::from_absolute_path(path).expect("absolute");
+        let entries = vec![
+            FileSystemSandboxEntry::new(
+                FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                FileSystemAccessMode::Read,
+            ),
+            FileSystemSandboxEntry::new(
+                FileSystemPath::Path {
+                    path: absolute(&workspace),
+                },
+                FileSystemAccessMode::Write,
+            ),
+        ];
+        let open = FileSystemSandboxPolicy::restricted(entries.clone());
+        let mut denying = entries;
+        denying.push(FileSystemSandboxEntry::new(
+            FileSystemPath::Path {
+                path: absolute(&dir.path().join("denied")),
+            },
+            FileSystemAccessMode::Deny,
+        ));
+        let denying = FileSystemSandboxPolicy::restricted(denying);
+        for (name, metadata) in [(".GIT", ".git"), (".Codex", ".codex"), (".AGENTS", ".agents")] {
+            let path = workspace.join(name).join("config");
+            assert!(!denying.can_write_path_with_cwd(&path, &workspace), "{name}");
+            assert_eq!(
+                forbidden_agent_metadata_write(&path, &workspace, &denying),
+                Some(metadata),
+                "{name}"
+            );
+            assert!(open.can_write_path_with_cwd(&path, &workspace), "{name}");
+            assert_eq!(
+                forbidden_agent_metadata_write(&path, &workspace, &open),
+                None,
+                "{name}"
+            );
+        }
+        assert!(denying.can_write_path_with_cwd(&workspace.join(".gitx/config"), &workspace));
     }
 }
