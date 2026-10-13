@@ -670,6 +670,16 @@ impl TurnContext {
             .then_some(file_system_sandbox_policy)
     }
 
+    /// #578: the provider (and named account) recorded as the producer of
+    /// this turn's model output items: `<provider id>`, or
+    /// `<provider id>:<account>` for a named account.
+    pub(crate) fn output_producer(&self) -> String {
+        crate::context_manager::provider_items::producer_key(
+            &self.config.model_provider_id,
+            self.provider.info().account.as_ref(),
+        )
+    }
+
     pub(crate) fn to_turn_context_item(&self) -> TurnContextItem {
         let workspace_roots = self.config.effective_workspace_roots();
         #[allow(deprecated)]

@@ -515,7 +515,12 @@ impl StageOneMemoryClient {
             .project_labelled(&conversation)
             .iter()
             .filter_map(keep_for_stage_one)
-            .filter_map(|item| serde_json::to_string(&item).ok())
+            .filter_map(|mut item| {
+                // #578: local provenance (fragment sources and producer) is
+                // not part of the memory text.
+                item.clear_local_provenance();
+                serde_json::to_string(&item).ok()
+            })
             .collect();
         // Drop whole items from the middle (keeping head and tail, as the
         // Permissive text cut does) until the text fits: one pass to size,

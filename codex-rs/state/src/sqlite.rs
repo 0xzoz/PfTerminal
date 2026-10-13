@@ -397,13 +397,7 @@ impl SqliteConfig {
     pub(crate) async fn lock_runtime_db_init(&self) -> RuntimeDbInitLock {
         let path = self.home().join(DB_INIT_LOCK_FILENAME);
         let unlocked = RuntimeDbInitLock { _file: None };
-        let file = match std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
-        {
+        let file = match open_lock_file(&path) {
             Ok(file) => file,
             Err(err) => {
                 log_unlocked(&path, &err);
@@ -414,7 +408,10 @@ impl SqliteConfig {
         let mut reported_wait = false;
         loop {
             match file.try_lock() {
-                Ok(()) => return RuntimeDbInitLock { _file: Some(file) },
+                Ok(()) => {
+                    keep_lock_file_nonempty(&file);
+                    return RuntimeDbInitLock { _file: Some(file) };
+                }
                 Err(std::fs::TryLockError::WouldBlock) => {
                     let waited = started.elapsed();
                     if waited >= DB_INIT_LOCK_WAIT {
@@ -493,6 +490,76 @@ impl SqliteConfig {
 /// not be had.
 pub(crate) struct RuntimeDbInitLock {
     _file: Option<std::fs::File>,
+}
+
+fn lock_file_options() -> std::fs::OpenOptions {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    options
+}
+
+fn open_lock_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let result = lock_file_options().open(path);
+    #[cfg(unix)]
+    if let Err(err) = &result
+        && err.kind() == std::io::ErrorKind::PermissionDenied
+    {
+        if let Some(file) = reopen_placeholder(path) {
+            return Ok(file);
+        }
+        // Once more, plainly: the placeholder's run may have ended and
+        // removed it meanwhile. Anything still read-only fails again.
+        return lock_file_options().open(path);
+    }
+    result
+}
+
+/// #586: the lock is denied to protected agent commands even before it
+/// exists, so on Linux bubblewrap holds a missing one with an empty `0444`
+/// placeholder for the command's run. A placeholder left behind by a killed
+/// sandbox helper would turn the lock off for every later launch, so an
+/// empty regular file at the path is made writable for its owner (only the
+/// owner can) and opened. The mode change goes through a descriptor of the
+/// file checked at the path (not a link), and the read-write descriptor
+/// must be that same file. The sandbox sees its own mount, not this mode.
+/// (A FIFO swapped in after the check would block the read-only open; that
+/// needs write access to the lock path, which protected commands lack.)
+#[cfg(unix)]
+fn reopen_placeholder(path: &Path) -> Option<std::fs::File> {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
+    let at_path = std::fs::symlink_metadata(path).ok()?;
+    if !at_path.file_type().is_file() || at_path.len() != 0 {
+        return None;
+    }
+    let same = |metadata: &std::fs::Metadata| {
+        metadata.dev() == at_path.dev() && metadata.ino() == at_path.ino()
+    };
+    let placeholder = std::fs::File::open(path).ok()?;
+    let metadata = placeholder.metadata().ok()?;
+    if !same(&metadata) || metadata.len() != 0 {
+        return None;
+    }
+    let mode = (metadata.mode() & 0o7777) | 0o200;
+    placeholder
+        .set_permissions(std::fs::Permissions::from_mode(mode))
+        .ok()?;
+    let file = lock_file_options().open(path).ok()?;
+    same(&file.metadata().ok()?).then_some(file)
+}
+
+/// #586: the lock file is never left empty. On Linux an empty file at its
+/// path can be the sandbox's placeholder for a protected command's run (see
+/// [`reopen_placeholder`]). The run's cleanup removes an empty placeholder
+/// even while a launch holds it locked, and the next launch would then lock
+/// a new file. (Cleanup can still race a launch between its length check and
+/// the removal; then two launches lock different files once, which the
+/// migration retry covers.)
+fn keep_lock_file_nonempty(mut file: &std::fs::File) {
+    use std::io::Write;
+    if file.metadata().is_ok_and(|metadata| metadata.len() == 0) {
+        let _ = file.write_all(b"\n");
+    }
 }
 
 /// A read-only or sandboxed home is expected not to take the lock: quiet.

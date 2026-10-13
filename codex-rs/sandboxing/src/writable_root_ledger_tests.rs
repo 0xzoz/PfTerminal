@@ -28,7 +28,6 @@ fn base() -> (tempfile::TempDir, PathBuf) {
 
 /// #536: a configured root that does not exist yet, created as a link
 /// during the session, is refused from then on, wherever the link leads.
-#[cfg(unix)]
 #[test]
 fn a_missing_root_created_as_a_link_is_refused() {
     let (_dir, base) = base();
@@ -72,7 +71,6 @@ fn a_missing_root_created_as_a_link_is_refused() {
 /// #536: a held root that is a link leading outside every root holding it is
 /// refused even when it existed before the session; one created as a real
 /// folder, or one no root holds, stays writable.
-#[cfg(unix)]
 #[test]
 fn a_held_link_leading_outside_its_holders_is_refused() {
     let (_dir, base) = base();
@@ -110,7 +108,6 @@ fn a_held_link_leading_outside_its_holders_is_refused() {
 
 /// #536: a workspace spelled through a link (as `/tmp` on macOS) and a git
 /// worktree with its main checkout pass, pinned at their real locations.
-#[cfg(unix)]
 #[test]
 fn aliases_and_worktrees_pass() {
     let (_dir, base) = base();
@@ -142,7 +139,6 @@ fn aliases_and_worktrees_pass() {
 /// #536: a link found at the start that leads outside its holder is refused;
 /// once the person removes it, commands run again, and a link made again is
 /// refused as made during the session.
-#[cfg(unix)]
 #[test]
 fn removing_a_refused_link_lets_commands_run_again() {
     let (_dir, base) = base();
@@ -172,7 +168,6 @@ fn removing_a_refused_link_lets_commands_run_again() {
 
 /// #536: the refusal names the link on the path (here a folder above the
 /// root), quoted for the shell.
-#[cfg(unix)]
 #[test]
 fn the_refusal_names_the_link_on_the_path() {
     let (_dir, base) = base();
@@ -206,7 +201,6 @@ fn the_refusal_names_the_link_on_the_path() {
 /// #536 review: with the workspace itself reached through a link (a linked
 /// code folder), the refusal names the link made in the workspace, not the
 /// person's folder link above it.
-#[cfg(unix)]
 #[test]
 fn the_refusal_names_the_link_that_changed() {
     let (_dir, base) = base();
@@ -237,7 +231,6 @@ fn the_refusal_names_the_link_that_changed() {
 /// #536 review: a root that was already a link to a folder inside the
 /// workspace (reached through a linked code folder) and is pointed elsewhere
 /// names that link, the only one a command could have made.
-#[cfg(unix)]
 #[test]
 fn the_refusal_names_a_repointed_link() {
     let (_dir, base) = base();

@@ -137,7 +137,10 @@ impl NativeIngress {
                     role: "user".into(),
                     content,
                     phase: None,
-                    internal_chat_message_metadata_passthrough: None,
+                    // #578: still another provider's item for request
+                    // building (its ID is removed there); removed from the
+                    // provider payload like all local provenance.
+                    internal_chat_message_metadata_passthrough: item.producer_only_metadata(),
                 })
             }
             ResponseItem::AgentMessage {
@@ -216,12 +219,17 @@ impl NativeIngress {
                 if self.is_model_item(item) {
                     return Some(item.clone());
                 }
-                let text = serde_json::to_string(item).unwrap_or_default();
+                // #578: local provenance is not shown to the model as text.
+                let mut sent = item.clone();
+                sent.clear_local_provenance();
+                let text = serde_json::to_string(&sent).unwrap_or_default();
                 Some(self.labelled_message(SourceKind::Unknown, "call", &text, now))
             }
             ResponseItem::ToolSearchOutput { call_id, .. } => match call_id {
                 Some(call_id) if unrecorded_calls.contains(call_id) => {
-                    let text = serde_json::to_string(item).unwrap_or_default();
+                    let mut sent = item.clone();
+                    sent.clear_local_provenance();
+                    let text = serde_json::to_string(&sent).unwrap_or_default();
                     Some(self.labelled_message(SourceKind::Unknown, call_id, &text, now))
                 }
                 // MCP-supplied tool descriptions are not yet labelled (known gap).
