@@ -384,7 +384,13 @@ impl Vault {
         kind: ProviderAccountKind,
         value: &str,
     ) -> Result<(), VaultError> {
-        self.create_provider_account_with_sign_in(provider_id, name, kind, value, None)
+        self.create_provider_account_with_sign_in(
+            provider_id,
+            name,
+            kind,
+            value,
+            /*sign_in*/ None,
+        )
     }
 
     /// [`Self::create_provider_account`], recording what a sign-in holds
@@ -412,7 +418,13 @@ impl Vault {
         kind: ProviderAccountKind,
         value: &str,
     ) -> Result<(), VaultError> {
-        self.write_provider_account_with_sign_in(provider_id, name, kind, value, None)
+        self.write_provider_account_with_sign_in(
+            provider_id,
+            name,
+            kind,
+            value,
+            /*sign_in*/ None,
+        )
     }
 
     /// [`Self::write_provider_account`], recording what a sign-in holds

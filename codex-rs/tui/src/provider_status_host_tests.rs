@@ -747,7 +747,7 @@ async fn a_named_openai_account_reports_what_it_holds() {
     codex_login::login_named_account_with_api_key(home.path(), &account, "sk-canary-609")
         .expect("api key");
     assert_eq!(
-        status(&config, None),
+        status(&config, /*forced*/ None),
         configured(ProviderCredentialSource::OpenAiApiKey)
     );
     assert_eq!(
@@ -755,7 +755,10 @@ async fn a_named_openai_account_reports_what_it_holds() {
         configured(ProviderCredentialSource::OpenAiApiKey)
     );
     assert_eq!(status(&config, Some(ForcedLoginMethod::Chatgpt)), ruled_out);
-    assert_eq!(detail(&config, None).as_deref(), Some("an OpenAI API key"));
+    assert_eq!(
+        detail(&config, /*forced*/ None).as_deref(),
+        Some("an OpenAI API key")
+    );
     assert_eq!(
         detail(&config, Some(ForcedLoginMethod::Chatgpt)).as_deref(),
         Some("an OpenAI API key; this configuration requires a ChatGPT sign-in")
@@ -784,7 +787,7 @@ async fn a_named_openai_account_reports_what_it_holds() {
     )
     .expect("sign in");
     assert_eq!(
-        status(&config, None),
+        status(&config, /*forced*/ None),
         configured(ProviderCredentialSource::OpenAiAccount)
     );
     assert_eq!(status(&config, Some(ForcedLoginMethod::Api)), ruled_out);
@@ -814,17 +817,17 @@ async fn a_named_openai_account_reports_what_it_holds() {
         )
         .expect("earlier build");
     assert_eq!(
-        status(&config, None),
+        status(&config, /*forced*/ None),
         configured(ProviderCredentialSource::OpenAiAccount)
     );
-    assert_eq!(detail(&config, None), None);
+    assert_eq!(detail(&config, /*forced*/ None), None);
     assert!(
         codex_login::named_account_summary(home.path(), &account)
             .expect("use")
             .is_some()
     );
     assert_eq!(
-        status(&config, None),
+        status(&config, /*forced*/ None),
         configured(ProviderCredentialSource::OpenAiApiKey)
     );
 }
