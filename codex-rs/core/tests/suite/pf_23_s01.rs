@@ -242,6 +242,16 @@ fn output_text(request: &ResponsesRequest, call_id: &str) -> String {
         .unwrap_or_default()
 }
 
+/// #615: what the interactive shell printed when it started, for failures
+/// where typing into it found no session (the shell had already exited).
+fn shell_start_output(captured: &ResponseMock) -> String {
+    captured
+        .requests()
+        .iter()
+        .find_map(|request| request.function_call_output_text("call-open"))
+        .unwrap_or_else(|| "<no call-open output was sent>".to_string())
+}
+
 /// An MCP call whose arguments reach a credential needs the human after
 /// untrusted content, even where the server's tools run unasked and the tool
 /// calls itself read-only; with approvals off it is refused, and ordinary or
@@ -348,9 +358,12 @@ async fn pf_23_s01_typing_a_protected_command_into_a_running_shell_needs_the_hum
     };
 
     let (test, captured) = stdin_turn(AskForApproval::OnRequest, "corbanu vault list\n").await?;
-    let question = next_question(&test)
-        .await
-        .expect("typing the vault command asks");
+    let Some(question) = next_question(&test).await else {
+        panic!(
+            "typing the vault command asks; the shell started with: {}",
+            shell_start_output(&captured)
+        );
+    };
     let text = &question.questions[0].question;
     assert!(text.contains("corbanu vault list"), "{text}");
     assert!(
@@ -2779,7 +2792,11 @@ async fn pf_23_s02_typing_into_a_shell_started_before_untrusted_content_is_confi
         assert!(next_question(&test).await.is_none(), "{approval:?}");
         let requests = captured.requests();
         let typed = output_text(&requests[2], "call-stdin");
-        assert!(typed.contains("typed-one"), "{typed}");
+        assert!(
+            typed.contains("typed-one"),
+            "{typed}\nthe shell started with: {}",
+            shell_start_output(&captured)
+        );
         assert!(!typed.contains(CANARY), "{approval:?}: {typed}");
         assert!(output_text(&requests[3], "call-again").contains("typed-two"));
     }
