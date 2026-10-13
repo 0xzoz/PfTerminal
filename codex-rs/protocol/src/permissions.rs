@@ -1092,8 +1092,9 @@ impl FileSystemSandboxPolicy {
     /// `path` normalized alike, as [`Self::can_read_effective_path_with_cwd`]
     /// does: Seatbelt normalizes a writable root spelled `/tmp` to
     /// `/private/tmp`, so `/private/tmp/x` is writable through it (#619).
-    /// Protected metadata names are matched as the policy spells its roots,
-    /// so this errs towards writable: for callers that only narrow access.
+    /// Everything else, protected metadata names included, is decided as
+    /// [`Self::can_write_path_with_cwd`] decides it for the normalized
+    /// policy.
     pub fn can_write_effective_path_with_cwd(&self, path: &Path, cwd: &Path) -> bool {
         match self.kind {
             FileSystemSandboxKind::Unrestricted | FileSystemSandboxKind::ExternalSandbox => {
@@ -1104,20 +1105,32 @@ impl FileSystemSandboxPolicy {
         let Some(path) = resolve_candidate_path(path, cwd) else {
             return false;
         };
-        let path = normalize_effective_absolute_path(path);
-        let can_write = self
-            .resolved_entries_with_cwd(cwd)
-            .into_iter()
-            .map(|entry| ResolvedFileSystemEntry {
-                path: normalize_effective_absolute_path(entry.path),
-                access: entry.access,
-            })
-            .filter(|entry| path.as_path().starts_with(entry.path.as_path()))
-            .max_by_key(resolved_entry_precedence)
-            .is_some_and(|entry| entry.access.can_write());
-        can_write
-            && (self.has_full_disk_write_access()
-                || !self.is_metadata_write_denied(path.as_path(), cwd))
+        // Each entry naming a folder, by its normalized path; the others
+        // (the filesystem root, patterns) as they are.
+        let cwd_absolute = AbsolutePathBuf::from_absolute_path(cwd).ok();
+        let normalized = Self {
+            kind: self.kind,
+            glob_scan_max_depth: self.glob_scan_max_depth,
+            entries: self
+                .entries
+                .iter()
+                .map(|entry| match &entry.path {
+                    FileSystemPath::Special {
+                        value: FileSystemSpecialPath::Root,
+                    } => entry.clone(),
+                    path => match resolve_entry_path(path, cwd_absolute.as_ref()) {
+                        Some(path) => FileSystemSandboxEntry {
+                            path: FileSystemPath::Path {
+                                path: normalize_effective_absolute_path(path),
+                            },
+                            ..entry.clone()
+                        },
+                        None => entry.clone(),
+                    },
+                })
+                .collect(),
+        };
+        normalized.can_write_path_with_cwd(normalize_effective_absolute_path(path).as_path(), cwd)
     }
 
     pub fn can_write_path_with_cwd(&self, path: &Path, cwd: &Path) -> bool {
@@ -3465,6 +3478,13 @@ mod tests {
             );
         }
         assert!(!policy.can_write_effective_path_with_cwd(Path::new("/etc/x"), &physical));
+        // The root's protected metadata stays protected in either spelling.
+        for path in [physical.join(".codex/x"), logical.join(".git/x")] {
+            assert!(
+                !policy.can_write_effective_path_with_cwd(&path, &physical),
+                "{path:?}"
+            );
+        }
     }
 
     /// Seatbelt matches a denial to a readable root by its normalized

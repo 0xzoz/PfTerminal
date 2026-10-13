@@ -633,6 +633,80 @@ fn issue_583_a_linked_home_outside_the_workspace_gets_no_carve_out() {
     assert_eq!(worktree_writes, Vec::<&FileSystemSandboxEntry>::new());
 }
 
+/// #619: a Corbanu home below a writable root spelled through the `/tmp`
+/// link (recorded at `/private/tmp`, where Seatbelt matches the root) gets
+/// its read-only entries and the `worktrees` carve-out. A home named `.codex`
+/// at that root's top stays protected as the root's metadata: no carve-out
+/// opens its `worktrees` (#619 review).
+#[cfg(target_os = "macos")]
+#[test]
+fn issue_619_a_home_below_a_tmp_spelled_root_is_protected() {
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let logical = dir.path().to_path_buf();
+    let real = logical.canonicalize().unwrap();
+    assert!(real.starts_with("/private/tmp"), "{real:?}");
+    let workspace = |root: &Path| {
+        PermissionProfile::from_runtime_permissions(
+            &FileSystemSandboxPolicy::restricted(vec![
+                FileSystemSandboxEntry::new(
+                    FileSystemPath::Special {
+                        value: FileSystemSpecialPath::Root,
+                    },
+                    FileSystemAccessMode::Read,
+                ),
+                FileSystemSandboxEntry::new(
+                    FileSystemPath::Path { path: abs(root) },
+                    FileSystemAccessMode::Write,
+                ),
+            ]),
+            NetworkSandboxPolicy::Restricted,
+        )
+    };
+    let worktree_writes = |policy: &FileSystemSandboxPolicy| -> Vec<FileSystemSandboxEntry> {
+        policy
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry.access == FileSystemAccessMode::Write
+                    && matches!(&entry.path, FileSystemPath::Path { path } if path.as_path().ends_with("worktrees"))
+            })
+            .cloned()
+            .collect()
+    };
+    let cwd = real.join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    // The home below the root.
+    let home = real.join("dot/home");
+    std::fs::create_dir_all(home.join("worktrees")).unwrap();
+    let profile = workspace(&logical);
+    let denials = ReadDenials::collect(&home, None, None, &[abs(&cwd)]);
+    let policy = denials
+        .apply(&profile)
+        .unwrap()
+        .file_system_sandbox_policy();
+    for path in ["AGENTS.md", "rules/x.rules"] {
+        assert!(
+            !policy.can_write_effective_path_with_cwd(&home.join(path), &cwd),
+            "{path}"
+        );
+    }
+    assert!(policy.can_write_effective_path_with_cwd(&home.join("worktrees/w"), &cwd));
+    assert_eq!(worktree_writes(&policy).len(), 1);
+    // A home that is the root's `.codex`: the root's metadata.
+    let home = real.join(".codex");
+    std::fs::create_dir_all(home.join("worktrees")).unwrap();
+    let denials = ReadDenials::collect(&home, None, None, &[abs(&cwd)]);
+    let policy = denials
+        .apply(&profile)
+        .unwrap()
+        .file_system_sandbox_policy();
+    assert_eq!(
+        worktree_writes(&policy),
+        Vec::<FileSystemSandboxEntry>::new()
+    );
+    assert!(!policy.can_write_effective_path_with_cwd(&home.join("worktrees/w"), &cwd));
+}
+
 /// Issue #586: the database init lock is denied before it exists, so a
 /// protected command can neither create it nor hold it, also where #583
 /// leaves the Corbanu home writable (a command working in the home or in a
