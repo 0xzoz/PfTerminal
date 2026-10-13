@@ -77,6 +77,17 @@ pub(super) fn settings_name_in(text: &str) -> Option<String> {
 /// `word` with its `{a,b}` groups expanded (the shell's brace expansion); a
 /// word without one is itself. `None` past [`MAX_VARIANTS`].
 fn brace_variants(word: &str) -> Option<Vec<String>> {
+    // Nested groups (`{{s,},x}`) and sequences (`{a..z}`) are not expanded
+    // here: such a word is named whole.
+    let nested_or_sequence = word.match_indices('{').any(|(open, _)| {
+        word[open + 1..].find('}').is_some_and(|close| {
+            let inside = &word[open + 1..open + 1 + close];
+            inside.contains('{') || inside.contains("..")
+        })
+    });
+    if nested_or_sequence {
+        return None;
+    }
     let mut variants = vec![word.to_string()];
     let mut done = Vec::new();
     while let Some(variant) = variants.pop() {
@@ -260,6 +271,13 @@ mod tests {
         }
         assert_eq!(settings_name_in("ln -s src/notes.py n"), None);
         assert_eq!(settings_name_in("ln -s .agents-old x"), None);
+    }
+
+    #[test]
+    fn issue_623_nested_braces_and_sequences_are_named_whole() {
+        assert!(settings_name_in("ln -s .agent{{s,},x} ag").is_some());
+        assert!(settings_name_in("ln -s .agent{s..s} ag").is_some());
+        assert_eq!(settings_name_in("ln -s notes{1,2} ag"), None);
     }
 
     #[test]

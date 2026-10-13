@@ -2714,6 +2714,9 @@ impl Session {
             .append_amendment_and_update(
                 &codex_home,
                 amendment,
+                // Aggressive in force now (an unreadable live level counts
+                // as Aggressive, as it is enforced): the person approved it
+                // under Aggressive.
                 if self.services.model_client().live_level_is_aggressive() {
                     crate::exec_policy::ApprovedUnder::Aggressive
                 } else {

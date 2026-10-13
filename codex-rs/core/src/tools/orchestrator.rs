@@ -175,7 +175,9 @@ impl ToolOrchestrator {
         let grant_operation = aggressive_grant_operation(tool, req, tool_ctx);
         // #623: under Aggressive, a command that creates a link to the
         // project's `.codex` or `.agents` (or Corbanu's own files) is refused
-        // before anyone is asked, so nothing is created; it says why.
+        // before anyone is asked, so nothing is created; it says why. Shell
+        // and exec_command requests carry their command here; a new runtime
+        // whose `approval_action` has none is not checked.
         if !matches!(requirement, ExecApprovalRequirement::Forbidden { .. })
             && let Some((_, Some((command, cwd)))) = grant_operation.as_ref()
             && let Some(refusal) = crate::security::protected_links::refusal(

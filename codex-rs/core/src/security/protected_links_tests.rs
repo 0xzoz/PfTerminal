@@ -317,6 +317,7 @@ fn project() -> Project {
     let turn_cwd = AbsolutePathBuf::from_absolute_path(&root).expect("absolute");
     let inputs = Inputs {
         codex_home: home.path().canonicalize().expect("real home"),
+        sqlite_home: home.path().canonicalize().expect("real home"),
         turn_cwd: turn_cwd.clone(),
         workspace_roots: vec![turn_cwd],
         profile: PermissionProfile::workspace_write_with(
