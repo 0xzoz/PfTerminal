@@ -14,8 +14,9 @@ const MAX_MODULE_DEPTH: usize = 8;
 /// git folder; for a `.git` file (worktree, submodule) the file itself and the
 /// same entries in the folder it points to and its common folder; the folders
 /// `core.hooksPath` names in its config, `~/.gitconfig` or
-/// `~/.config/git/config`; and the same entries of every folder below
-/// `.git/modules` (submodule git folders, also nested ones).
+/// `~/.config/git/config`; the same entries of every folder below
+/// `.git/modules` (submodule git folders, also nested ones); and those of
+/// every linked worktree's folder, also the other worktrees' (#650).
 ///
 /// On Linux a missing commondir, hooks folder or module entry is left out:
 /// the sandbox would put an empty placeholder there, which breaks git.
@@ -129,11 +130,56 @@ fn repository_paths(
     for dir in &git_dirs {
         paths.extend(entries(dir, /*below_modules*/ false));
         paths.extend(module_paths(dir));
+        paths.extend(worktree_admin_paths(dir));
         for config in [dir.join("config"), dir.join("config.worktree")] {
             paths.extend(protected_hooks_path(&config, &work_tree, home));
         }
     }
     Ok((paths, work_tree))
+}
+
+/// #650: what git reads from every linked worktree's folder
+/// (`<git_dir>/worktrees/<name>`), also the other worktrees': with one's
+/// `commondir` or `config.worktree` rewritten, the person's later git runs
+/// in that worktree would read a planted config (which can run code); and
+/// its `gitdir` (where git finds the worktree). On Linux a missing
+/// `commondir` or `gitdir` is left out. Past the limit, or when the folder
+/// cannot be read, `worktrees` as a whole (fail closed).
+fn worktree_admin_paths(git_dir: &AbsolutePathBuf) -> Vec<AbsolutePathBuf> {
+    let worktrees = git_dir.join("worktrees");
+    let closed = || vec![worktrees.clone()];
+    let children = match std::fs::read_dir(worktrees.as_path()) {
+        Ok(children) => children,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(_) => return closed(),
+    };
+    let mut paths = Vec::new();
+    let mut visited = 0;
+    for child in children {
+        let Ok(child) = child else {
+            return closed();
+        };
+        let Ok(kind) = child.file_type() else {
+            return closed();
+        };
+        if !kind.is_dir() {
+            continue;
+        }
+        visited += 1;
+        if visited > MAX_MODULE_DIRS {
+            return closed();
+        }
+        let admin = worktrees.join(child.file_name());
+        for entry in ["commondir", "config.worktree", "gitdir"] {
+            let path = admin.join(entry);
+            // Like a git folder's own `config.worktree`, also when missing
+            // (an empty placeholder is an empty config).
+            if !cfg!(target_os = "linux") || entry == "config.worktree" || !missing(&path) {
+                paths.push(path);
+            }
+        }
+    }
+    paths
 }
 
 /// The hooks folder `config` names, when it should be protected (on Linux
