@@ -367,7 +367,8 @@ fn aggressive(session: &Session) {
     session.services.replace_model_client(client);
 }
 
-/// The recent denials the inspector shows for `session`.
+/// The recent denials the inspector shows for `session` (not the
+/// process-wide ones other tests in this process may have recorded).
 fn recent_denials(session: &Session, turn: &TurnContext) -> Vec<(&'static str, &'static str)> {
     crate::security::inspection::observe(
         turn.config.codex_home.as_path(),
@@ -377,6 +378,7 @@ fn recent_denials(session: &Session, turn: &TurnContext) -> Vec<(&'static str, &
     )
     .denials
     .into_iter()
+    .filter(|denial| denial.thread == Some(session.thread_id()))
     .map(|denial| (denial.reason, denial.outcome))
     .collect()
 }
