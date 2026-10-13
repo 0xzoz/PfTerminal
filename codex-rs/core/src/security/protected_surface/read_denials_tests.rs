@@ -731,11 +731,13 @@ fn issue_603_a_worktrees_link_swapped_in_after_the_check_is_refused() {
 }
 
 /// #603 (launch race) with the real sandbox (`sandbox-exec`, bubblewrap): a
-/// `worktrees` link to the home swapped in after the rules were built opens
-/// nothing; before, the command created `hooks.json` in the home through it.
+/// command whose `worktrees` was swapped for a link to the home after the
+/// rules were built is refused, and creates no `hooks.json` in the home.
+/// Before, it ran with the root granted at the home (the home's own
+/// read-only rule still refused that write).
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
-fn issue_603_a_worktrees_link_swapped_in_opens_nothing_in_the_real_sandbox() {
+fn issue_603_a_worktrees_link_swapped_in_refuses_the_command_in_the_real_sandbox() {
     use codex_sandboxing::SandboxCommand;
     use codex_sandboxing::SandboxManager;
     use codex_sandboxing::SandboxTransformRequest;
