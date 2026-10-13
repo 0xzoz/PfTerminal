@@ -90,6 +90,26 @@ pub fn provider_account_holds(
         .map_err(std::io::Error::other)
 }
 
+/// PF-84 (#609): what a named sign-in account holds (a ChatGPT sign-in or
+/// an OpenAI API key), as its vault metadata records it. Reads the vault
+/// index only, never the sign-in; `Ok(None)` when it holds none or it was
+/// not recorded yet (saved by an earlier build and not used since).
+pub fn provider_account_sign_in(
+    codex_home: &Path,
+    provider_id: &str,
+    account_name: &str,
+) -> std::io::Result<Option<codex_vault::ProviderAccountSignIn>> {
+    let name = codex_vault::ProviderAccountName::parse(account_name)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    let vault = Vault::new(codex_home.to_path_buf());
+    if vault.key_storage() == VaultKeyStorage::NotInitialized {
+        return Ok(None);
+    }
+    vault
+        .provider_account_sign_in(provider_id, &name)
+        .map_err(std::io::Error::other)
+}
+
 fn read_provider_account_kind(
     vault: &Vault,
     provider_id: &str,
