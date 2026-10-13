@@ -21,7 +21,6 @@ use codex_app_server_protocol::UserInput as V2UserInput;
 use codex_core::test_support::all_model_presets;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use core_test_support::responses;
-use core_test_support::skip_if_remote;
 use core_test_support::skip_if_wine_exec;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
@@ -145,6 +144,8 @@ fn assert_permission_effects(path: &std::path::Path, count: usize) -> Result<()>
     Ok(())
 }
 
+/// Every test here checks authorization against probes and fixtures on the
+/// host, so its app-server uses the local executor (#157).
 async fn native_permission_fixture(
     workspace: &std::path::Path,
     script: Vec<String>,
@@ -153,6 +154,7 @@ async fn native_permission_fixture(
     let home = TempDir::new()?;
     create_config_toml(home.path(), &server.uri())?;
     let mut mcp = TestAppServer::builder()
+        .with_local_auto_env()
         .with_codex_home(home.path())
         .build_initialized_with_timeout(Duration::from_secs(60))
         .await?;
@@ -183,10 +185,6 @@ async fn pending_permission_probe(mcp: &mut TestAppServer, call_id: &str) -> Res
 
 #[tokio::test]
 async fn thread_settings_f05_pending_decline_is_not_approval_or_replay() -> Result<()> {
-    skip_if_remote!(
-        Ok(()),
-        "the permission probes and their fixtures are on the host (#157)"
-    );
     skip_if_wine_exec!(
         Ok(()),
         "shell-command approval routing requires a host-native cwd under Wine-exec"
@@ -196,10 +194,6 @@ async fn thread_settings_f05_pending_decline_is_not_approval_or_replay() -> Resu
 
 #[tokio::test]
 async fn thread_settings_f05_pending_accept_runs_once_and_next_turn_is_full() -> Result<()> {
-    skip_if_remote!(
-        Ok(()),
-        "the permission probes and their fixtures are on the host (#157)"
-    );
     skip_if_wine_exec!(
         Ok(()),
         "shell-command approval routing requires a host-native cwd under Wine-exec"
@@ -285,10 +279,6 @@ async fn wait_permission_barrier(fixture: &std::path::Path) -> Result<()> {
 
 #[tokio::test]
 async fn thread_settings_f06_f09_inflight_restricted_to_full_keeps_old_boundary() -> Result<()> {
-    skip_if_remote!(
-        Ok(()),
-        "the permission probes and their fixtures are on the host (#157)"
-    );
     skip_if_wine_exec!(
         Ok(()),
         "shell-command approval routing requires a host-native cwd under Wine-exec"
@@ -298,10 +288,6 @@ async fn thread_settings_f06_f09_inflight_restricted_to_full_keeps_old_boundary(
 
 #[tokio::test]
 async fn thread_settings_f06_f09_inflight_full_to_restricted_keeps_old_boundary() -> Result<()> {
-    skip_if_remote!(
-        Ok(()),
-        "the permission probes and their fixtures are on the host (#157)"
-    );
     skip_if_wine_exec!(
         Ok(()),
         "shell-command approval routing requires a host-native cwd under Wine-exec"
@@ -367,10 +353,6 @@ async fn inflight_permission_case(
 
 #[tokio::test]
 async fn thread_settings_f07_rapid_conflicts_end_full() -> Result<()> {
-    skip_if_remote!(
-        Ok(()),
-        "the permission probes and their fixtures are on the host (#157)"
-    );
     skip_if_wine_exec!(
         Ok(()),
         "shell-command approval routing requires a host-native cwd under Wine-exec"
@@ -475,10 +457,6 @@ async fn thread_settings_f10_restart_effective_restricted_reports_probe_authorit
 
 #[tokio::test]
 async fn thread_settings_f10_restart_effective_full_reports_probe_authority() -> Result<()> {
-    skip_if_remote!(
-        Ok(()),
-        "the permission probes and their fixtures are on the host (#157)"
-    );
     skip_if_wine_exec!(
         Ok(()),
         "shell-command approval routing requires a host-native cwd under Wine-exec"
@@ -528,6 +506,7 @@ async fn restart_settled_permission_case(
     )
     .await;
     let mut restarted = TestAppServer::builder()
+        .with_local_auto_env()
         .with_codex_home(home.path())
         .build_initialized_with_timeout(Duration::from_secs(60))
         .await?;
@@ -612,6 +591,7 @@ async fn thread_settings_f10_restart_does_not_accept_pending_approval() -> Resul
     )
     .await;
     let mut restarted = TestAppServer::builder()
+        .with_local_auto_env()
         .with_codex_home(home.path())
         .build_initialized_with_timeout(Duration::from_secs(60))
         .await?;
@@ -715,6 +695,7 @@ async fn thread_settings_confirmation_f04_restricts_work_steered_after_applied()
     let home = TempDir::new()?;
     create_config_toml(home.path(), &server.uri())?;
     let mut mcp = TestAppServer::builder()
+        .with_local_auto_env()
         .with_codex_home(home.path())
         .build_initialized_with_timeout(Duration::from_secs(60))
         .await?;
@@ -846,6 +827,7 @@ async fn thread_settings_inject_items_waits_for_latest_authorization() -> Result
     let home = TempDir::new()?;
     create_config_toml(home.path(), &server.uri())?;
     let mut mcp = TestAppServer::builder()
+        .with_local_auto_env()
         .with_codex_home(home.path())
         .build_initialized_with_timeout(Duration::from_secs(60))
         .await?;
@@ -912,6 +894,7 @@ async fn thread_settings_authorization_boundary_returns_input_and_discriminator(
     let home = TempDir::new()?;
     create_config_toml(home.path(), &server.uri())?;
     let mut mcp = TestAppServer::builder()
+        .with_local_auto_env()
         .with_codex_home(home.path())
         .build_initialized_with_timeout(Duration::from_secs(60))
         .await?;
@@ -978,10 +961,6 @@ async fn thread_settings_authorization_boundary_returns_input_and_discriminator(
 
 #[tokio::test]
 async fn thread_settings_confirmation_next_turn_tightening_and_loosening() -> Result<()> {
-    skip_if_remote!(
-        Ok(()),
-        "the permission probes and their fixtures are on the host (#157)"
-    );
     skip_if_wine_exec!(
         Ok(()),
         "shell-command approval routing requires a host-native cwd under Wine-exec"
@@ -998,6 +977,7 @@ async fn thread_settings_confirmation_next_turn_tightening_and_loosening() -> Re
     let server = create_mock_responses_server_sequence_unchecked(script).await;
     create_config_toml(home.path(), &server.uri())?;
     let mut mcp = TestAppServer::builder()
+        .with_local_auto_env()
         .with_codex_home(home.path())
         .build_initialized_with_timeout(Duration::from_secs(60))
         .await?;
@@ -1022,10 +1002,6 @@ async fn thread_settings_confirmation_next_turn_tightening_and_loosening() -> Re
 
 #[tokio::test]
 async fn thread_settings_confirmation_preserves_pending_approval() -> Result<()> {
-    skip_if_remote!(
-        Ok(()),
-        "the permission probes and their fixtures are on the host (#157)"
-    );
     skip_if_wine_exec!(
         Ok(()),
         "shell-command approval routing requires a host-native cwd under Wine-exec"
@@ -1044,6 +1020,7 @@ async fn thread_settings_confirmation_preserves_pending_approval() -> Result<()>
     .await;
     create_config_toml(home.path(), &server.uri())?;
     let mut mcp = TestAppServer::builder()
+        .with_local_auto_env()
         .with_codex_home(home.path())
         .build_initialized_with_timeout(Duration::from_secs(60))
         .await?;
@@ -1127,6 +1104,7 @@ async fn preserve_running_authority_after_confirmation(
     let home = TempDir::new()?;
     create_config_toml(home.path(), &server.uri())?;
     let mut mcp = TestAppServer::builder()
+        .with_local_auto_env()
         .with_codex_home(home.path())
         .build_initialized_with_timeout(Duration::from_secs(60))
         .await?;
@@ -1168,10 +1146,6 @@ async fn preserve_running_authority_after_confirmation(
 
 #[tokio::test]
 async fn thread_settings_confirmation_loosening_preserves_running_work_authority() -> Result<()> {
-    skip_if_remote!(
-        Ok(()),
-        "the permission probes and their fixtures are on the host (#157)"
-    );
     skip_if_wine_exec!(
         Ok(()),
         "shell-command approval routing requires a host-native cwd under Wine-exec"
@@ -1182,10 +1156,6 @@ async fn thread_settings_confirmation_loosening_preserves_running_work_authority
 
 #[tokio::test]
 async fn thread_settings_confirmation_tightening_preserves_granted_approval() -> Result<()> {
-    skip_if_remote!(
-        Ok(()),
-        "the permission probes and their fixtures are on the host (#157)"
-    );
     skip_if_wine_exec!(
         Ok(()),
         "shell-command approval routing requires a host-native cwd under Wine-exec"
@@ -1198,10 +1168,6 @@ async fn thread_settings_confirmation_tightening_preserves_granted_approval() ->
 
 #[tokio::test]
 async fn thread_settings_confirmation_leaves_mcp_status_responses_unaffected() -> Result<()> {
-    skip_if_remote!(
-        Ok(()),
-        "the permission probes and their fixtures are on the host (#157)"
-    );
     skip_if_wine_exec!(
         Ok(()),
         "the stdio MCP fixture does not start under Wine-exec"
@@ -1225,6 +1191,7 @@ async fn thread_settings_confirmation_leaves_mcp_status_responses_unaffected() -
         };
         config("echo")?;
         let mut mcp = TestAppServer::builder()
+            .with_local_auto_env()
             .with_codex_home(home.path())
             .build_initialized_with_timeout(Duration::from_secs(60))
             .await?;
@@ -1292,6 +1259,7 @@ async fn thread_settings_confirmation_noop_concurrent_and_legacy() -> Result<()>
     create_config_toml(codex_home.path(), &server.uri())?;
     write_models_cache(codex_home.path())?;
     let mut mcp = TestAppServer::builder()
+        .with_local_auto_env()
         .with_codex_home(codex_home.path())
         .build_initialized_with_timeout(DEFAULT_TIMEOUT)
         .await?;
@@ -1370,6 +1338,7 @@ async fn thread_settings_update_emits_notification_and_updates_future_turns() ->
     let (model_id, service_tier_id) = service_tier_model_and_tier_id()?;
 
     let mut mcp = TestAppServer::builder()
+        .with_local_auto_env()
         .with_codex_home(codex_home.path())
         .build_initialized_with_timeout(DEFAULT_TIMEOUT)
         .await?;
@@ -1436,6 +1405,7 @@ async fn thread_settings_update_cwd_retargets_default_environment() -> Result<()
     create_config_toml(codex_home.path(), &server.uri())?;
 
     let mut mcp = TestAppServer::builder()
+        .with_local_auto_env()
         .with_codex_home(codex_home.path())
         .build_initialized_with_timeout(DEFAULT_TIMEOUT)
         .await?;
@@ -1503,6 +1473,7 @@ async fn thread_settings_update_while_turn_is_active_emits_notification() -> Res
     create_config_toml(codex_home.path(), &server.uri())?;
 
     let mut mcp = TestAppServer::builder()
+        .with_local_auto_env()
         .with_codex_home(codex_home.path())
         .build_initialized_with_timeout(DEFAULT_TIMEOUT)
         .await?;
@@ -1548,6 +1519,7 @@ async fn thread_settings_update_null_service_tier_uses_default() -> Result<()> {
     let (model_id, service_tier_id) = service_tier_model_and_tier_id()?;
 
     let mut mcp = TestAppServer::builder()
+        .with_local_auto_env()
         .with_codex_home(codex_home.path())
         .build_initialized_with_timeout(DEFAULT_TIMEOUT)
         .await?;
@@ -1616,6 +1588,7 @@ async fn thread_settings_update_rejects_sandbox_policy_with_permissions() -> Res
     create_config_toml(codex_home.path(), &server.uri())?;
 
     let mut mcp = TestAppServer::builder()
+        .with_local_auto_env()
         .with_codex_home(codex_home.path())
         .build_initialized_with_timeout(DEFAULT_TIMEOUT)
         .await?;
@@ -1653,6 +1626,7 @@ async fn turn_start_settings_override_emits_thread_settings_updated() -> Result<
     create_config_toml(codex_home.path(), &server.uri())?;
 
     let mut mcp = TestAppServer::builder()
+        .with_local_auto_env()
         .with_codex_home(codex_home.path())
         .build_initialized_with_timeout(DEFAULT_TIMEOUT)
         .await?;

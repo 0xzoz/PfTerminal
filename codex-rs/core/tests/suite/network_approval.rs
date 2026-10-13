@@ -1141,7 +1141,7 @@ async fn remote_guardian_network_decisions_are_scoped_to_each_request_and_enviro
 {
     core_test_support::skip_if_remote!(
         Ok(()),
-        "network requests from inside the remote container do not reach the host-side network approval proxy (#157 follow-up)"
+        "network requests from inside the remote container do not reach the host-side network approval proxy (#708)"
     );
     skip_if_target_windows!(Ok(()), "uses the POSIX/Python network fixture");
     skip_if_host_windows!(Ok(()));
@@ -1363,7 +1363,7 @@ async fn remote_guardian_network_decisions_are_scoped_to_each_request_and_enviro
 async fn approved_network_host_for_one_environment_still_prompts_in_another() -> Result<()> {
     core_test_support::skip_if_remote!(
         Ok(()),
-        "network requests from inside the remote container do not reach the host-side network approval proxy (#157 follow-up)"
+        "network requests from inside the remote container do not reach the host-side network approval proxy (#708)"
     );
     skip_if_target_windows!(Ok(()), "uses the POSIX/Python network fixture");
     skip_if_host_windows!(Ok(()));

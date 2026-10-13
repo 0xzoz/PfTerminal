@@ -2605,8 +2605,8 @@ async fn permission_request_hook_allow_bypasses_strict_auto_review() -> Result<(
                 .enable(Feature::RequestPermissionsTool)
                 .expect("test config should allow feature update");
         });
-    // shell_command is only exposed for local environments, so pin this test
-    // to the local executor even in the remote test lane.
+    // this shell_command test fails only in the remote lane (#157, #708), so pin
+    // it to the local executor even in the remote test lane.
     let test = builder.build(&server).await?;
 
     let marker = test

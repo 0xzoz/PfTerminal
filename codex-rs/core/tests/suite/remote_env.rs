@@ -2118,7 +2118,7 @@ async fn apply_patch_freeform_routes_to_selected_remote_environment() -> Result<
 async fn apply_patch_approvals_are_remembered_per_environment() -> Result<()> {
     core_test_support::skip_if_remote!(
         Ok(()),
-        "the remote executor does not request approval for this patch; needs a product fix (#157 follow-up)"
+        "the remote executor does not request approval for this patch; possible approval scoping bug, triage in #709"
     );
     skip_if_no_network!(Ok(()));
     // TODO(anp): Remove after remote path fixtures use target-native paths.

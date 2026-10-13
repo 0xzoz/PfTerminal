@@ -818,10 +818,6 @@ async fn unified_exec_full_lifecycle_with_background_end_event() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unified_exec_network_denial_emits_failed_background_end_event() -> Result<()> {
-    core_test_support::skip_if_remote!(
-        Ok(()),
-        "network requests from inside the remote container do not reach the host-side network approval proxy (#157 follow-up)"
-    );
     // TODO(anp): Remove after network-denial fixtures use target-native commands.
     skip_if_target_windows!(Ok(()), "uses the POSIX/Python network-denial fixture");
     skip_if_no_network!(Ok(()));
@@ -866,10 +862,6 @@ async fn unified_exec_network_denial_emits_failed_background_end_event() -> Resu
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unified_exec_short_lived_network_denial_emits_failed_end_event() -> Result<()> {
-    core_test_support::skip_if_remote!(
-        Ok(()),
-        "network requests from inside the remote container do not reach the host-side network approval proxy (#157 follow-up)"
-    );
     // TODO(anp): Remove after network-denial fixtures use target-native commands.
     skip_if_target_windows!(Ok(()), "uses the POSIX/Python network-denial fixture");
     skip_if_no_network!(Ok(()));
@@ -955,7 +947,9 @@ allow_local_binding = true
                 .set_permission_profile(permission_profile_for_config)
                 .expect("set permission profile");
         });
-    let test = builder.build_with_auto_env(server).await?;
+    // The host-side network proxy can't see requests from the remote
+    // container (#708), so these run on the local executor.
+    let test = builder.build(server).await?;
     assert!(
         test.config.permissions.network.is_some(),
         "expected managed network proxy config to be present"
@@ -2929,7 +2923,7 @@ async fn unified_exec_formats_large_output_summary() -> Result<()> {
             .enable(Feature::UnifiedExec)
             .expect("test config should allow feature update");
     });
-    // Pinned to the local executor; the remote lane does not cover this path yet.
+    // Pinned to the local executor: fails only in the remote lane (#157, #708).
     let test = builder.build(&server).await?;
 
     let output_line = "token token \n";

@@ -149,8 +149,8 @@ async fn granular_complex_forced_rm_denial_explains_why_the_command_was_rejected
 
     let server = start_mock_server().await;
     let mut builder = test_codex();
-    // shell_command is only exposed for local environments, so pin this test
-    // to the local executor even in the remote test lane.
+    // this shell_command test fails only in the remote lane (#157, #708), so pin
+    // it to the local executor even in the remote test lane.
     let test = builder.build(&server).await?;
     let call_id = "forced-rm-denied";
     let args = json!({
@@ -215,8 +215,8 @@ async fn granular_complex_forced_rm_requests_approval_when_allowed() -> Result<(
 
     let server = start_mock_server().await;
     let mut builder = test_codex();
-    // shell_command is only exposed for local environments, so pin this test
-    // to the local executor even in the remote test lane.
+    // this shell_command test fails only in the remote lane (#157, #708), so pin
+    // it to the local executor even in the remote test lane.
     let test = builder.build(&server).await?;
     let call_id = "forced-rm-approval";
     let args = json!({
