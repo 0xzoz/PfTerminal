@@ -42,6 +42,9 @@ pub(crate) struct AccountsView {
     pub(crate) rows: Vec<NamedAccountRow>,
     pub(crate) session: BTreeMap<String, String>,
     pub(crate) defaults: BTreeMap<String, String>,
+    /// #609: by catalog entry id, the named account a provider's shown
+    /// status was computed from (from the status host that computed it).
+    pub(crate) status_accounts: BTreeMap<String, String>,
 }
 
 impl AccountsView {
@@ -65,7 +68,23 @@ impl AccountsView {
             rows,
             session,
             defaults,
+            status_accounts: BTreeMap::new(),
         }
+    }
+
+    /// #609: which named account each entry's status is about, as reported
+    /// by the status host whose statuses are shown with this view.
+    pub(crate) fn with_status_accounts(
+        mut self,
+        status_host: &crate::provider_status_host::ProviderStatusHost,
+    ) -> Self {
+        self.status_accounts = status_host.status_accounts();
+        self
+    }
+
+    /// The named account `entry_id`'s shown status was computed from.
+    pub(crate) fn status_account(&self, entry_id: &str) -> Option<&str> {
+        self.status_accounts.get(entry_id).map(String::as_str)
     }
 
     pub(crate) fn session_account(&self, provider_id: &str) -> &str {

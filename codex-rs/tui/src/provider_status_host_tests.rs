@@ -622,6 +622,15 @@ async fn each_connection_on_a_mixed_account_entry_needs_its_own_credential() {
     check(&config, /*enrolled*/ true, &[], Configured);
     // The default key alone sets the entry up for `zai-anthropic`.
     check(&config, /*enrolled*/ false, &["zai"], Configured);
+    // #609: `/providers` names the account only when it set the entry up.
+    assert_eq!(
+        host(&config, /*enrolled*/ true).status_accounts(),
+        std::collections::BTreeMap::from([("zai".to_string(), "work".to_string())])
+    );
+    assert_eq!(
+        host(&config, /*enrolled*/ false).status_accounts(),
+        std::collections::BTreeMap::new()
+    );
 }
 
 /// #665: a key in the environment (or held by the credential broker, which

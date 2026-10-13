@@ -292,12 +292,16 @@ impl App {
     pub(super) fn provider_manager_accounts_view(
         &self,
     ) -> Option<crate::provider_named_accounts::AccountsView> {
-        let rows = self.provider_management_host.as_ref()?.named_accounts()?;
-        Some(crate::provider_named_accounts::AccountsView::new(
-            rows.to_vec(),
-            self.chat_widget.config_ref(),
-            &self.config,
-        ))
+        let host = self.provider_management_host.as_ref()?;
+        let rows = host.named_accounts()?;
+        Some(
+            crate::provider_named_accounts::AccountsView::new(
+                rows.to_vec(),
+                self.chat_widget.config_ref(),
+                &self.config,
+            )
+            .with_status_accounts(host.status_host()),
+        )
     }
 
     /// The catalog provider of a `/providers` row, account rows included.

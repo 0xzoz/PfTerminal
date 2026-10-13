@@ -306,12 +306,11 @@ fn only_a_sign_in_account_change_is_a_switch() {
         "Connectors, usage and the model list now use the default account; model list refreshed."
     );
     // #609: a process that left a ruled-out default login in place hides it.
-    let hidden = account_switch_message_for(
-        /*account*/ None, /*default_login_left_in_place*/ true,
-    );
-    assert!(
-        hidden.contains("rule out the default login, this session does not use it"),
-        "{hidden}"
+    assert_eq!(
+        account_switch_message_for(
+            /*account*/ None, /*default_login_left_in_place*/ true
+        ),
+        "Switched to the default account; model list refreshed. If your login restrictions (`forced_login_method`, `forced_chatgpt_workspace_id`) rule out the default login, this session cannot use it and its next request is refused with the reason; sign in with `corbanu login`, or pick a named account in /providers."
     );
     assert_eq!(
         account_switch_message_for(

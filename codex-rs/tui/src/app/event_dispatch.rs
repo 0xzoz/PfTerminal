@@ -6784,14 +6784,10 @@ pub(super) fn account_switch_message_for(
         Some(account) => format!("{} account `{}`", account.provider_id, account.name),
         None => "the default account".to_string(),
     };
-    let message =
-        format!("Connectors, usage and the model list now use {label}; model list refreshed.");
     if account.is_none() && default_login_left_in_place {
-        format!(
-            "{message} If your login restrictions (`forced_login_method`, `forced_chatgpt_workspace_id`) rule out the default login, this session does not use it and its next request is refused with the reason; sign in with `corbanu login`, or pick a named account in /providers."
-        )
+        "Switched to the default account; model list refreshed. If your login restrictions (`forced_login_method`, `forced_chatgpt_workspace_id`) rule out the default login, this session cannot use it and its next request is refused with the reason; sign in with `corbanu login`, or pick a named account in /providers.".to_string()
     } else {
-        message
+        format!("Connectors, usage and the model list now use {label}; model list refreshed.")
     }
 }
 

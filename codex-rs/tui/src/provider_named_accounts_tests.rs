@@ -29,6 +29,7 @@ fn view() -> AccountsView {
         rows: vec![row("zai", "work"), row("zai", "spare"), row("kimi", "alt")],
         session: BTreeMap::from([("zai".to_string(), "work".to_string())]),
         defaults: BTreeMap::from([("kimi".to_string(), "alt".to_string())]),
+        status_accounts: BTreeMap::new(),
     }
 }
 
