@@ -130,10 +130,19 @@ pub(crate) struct ProviderStatusHost {
     /// account, and whether the vault holds that account. Such an entry's
     /// status comes from the account, never from the default credential.
     named_accounts: Arc<BTreeMap<String, bool>>,
+    /// #609: the name of each of those accounts, by entry id.
+    named_account_names: Arc<BTreeMap<String, String>>,
     /// #665: for API-key entries served by several connections where one runs
     /// on a named account, each connection's own credential (by entry id,
     /// then runtime provider id). Each connection authenticates with its own.
     connection_credentials: Arc<BTreeMap<String, BTreeMap<String, ConnectionCredential>>>,
+    /// PF-84 (#609): the catalog entry of the session's own provider when it
+    /// runs on a named sign-in account. Startup checked that account before
+    /// the session began (with a remote app server, the server checks it at
+    /// thread start), so it counts as signed in even when this home's vault
+    /// does not hold it. Kept apart from the default login's metadata, which
+    /// a refresh re-reads.
+    session_sign_in_entry: Option<String>,
     /// Reads an API-key environment variable (tests replace it).
     environment: fn(&str) -> EnvironmentCredentialMetadata,
 }
@@ -244,7 +253,58 @@ fn named_account_enrollment(
     enrollment
 }
 
+/// #609: the named account each catalog entry's status follows (the same
+/// selection as [`named_account_enrollment`]), by entry id.
+fn named_account_names(catalog: &ProviderCatalog, config: &Config) -> BTreeMap<String, String> {
+    catalog
+        .entries()
+        .iter()
+        .filter_map(|entry| {
+            let account = entry.runtime_provider_ids.iter().find_map(|id| {
+                config
+                    .model_providers
+                    .get(id.as_str())
+                    .and_then(|provider| provider.account.as_ref())
+            })?;
+            Some((entry.id.as_str().to_string(), account.name.clone()))
+        })
+        .collect()
+}
+
 impl ProviderStatusHost {
+    /// #609: by entry id, the named account whose enrollment decided the
+    /// entry's status in [`Self::resolve`]. An entry whose connections run on
+    /// different accounts (#665) counts only when an enrolled named account
+    /// set it up; otherwise its default key did. Setup kinds the account does
+    /// not decide never count.
+    pub(crate) fn status_accounts(&self) -> BTreeMap<String, String> {
+        self.named_account_names
+            .iter()
+            .filter(|(entry_id, _)| {
+                self.connection_credentials
+                    .get(entry_id.as_str())
+                    .is_none_or(|connections| {
+                        connections.values().any(|credential| {
+                            *credential == ConnectionCredential::NamedAccount { enrolled: true }
+                        })
+                    })
+            })
+            .filter(|(entry_id, _)| {
+                self.catalog.get(entry_id.as_str()).is_some_and(|entry| {
+                    matches!(
+                        entry.setup_capabilities.iter().next(),
+                        Some(
+                            ProviderSetupCapability::OpenAiAccount
+                                | ProviderSetupCapability::ApiKey { .. }
+                                | ProviderSetupCapability::ClaudeAccount
+                        )
+                    )
+                })
+            })
+            .map(|(entry_id, name)| (entry_id.clone(), name.clone()))
+            .collect()
+    }
+
     pub(crate) fn from_config(config: &Config, account: ProviderAccountMetadata) -> Self {
         let codex_home = config.codex_home.to_path_buf();
         Self::from_config_with_account_registry(config, account, |named, kind| {
@@ -260,10 +320,24 @@ impl ProviderStatusHost {
     ) -> Self {
         let catalog = ProviderCatalog::from_runtime_providers(&config.model_providers);
         let named_accounts = Arc::new(named_account_enrollment(&catalog, config, &holds));
+        let named_account_names = Arc::new(named_account_names(&catalog, config));
         let connection_credentials = Arc::new(connection_credentials(&catalog, config, &holds));
+        let session_sign_in_entry =
+            codex_model_provider::named_sign_in_account(&config.model_provider)
+                .and_then(|_| {
+                    catalog.entries().iter().find(|entry| {
+                        entry
+                            .runtime_provider_ids
+                            .iter()
+                            .any(|id| id.as_str() == config.model_provider_id)
+                    })
+                })
+                .map(|entry| entry.id.as_str().to_string());
         Self {
             named_accounts,
+            named_account_names,
             connection_credentials,
+            session_sign_in_entry,
             environment: environment_metadata,
             catalog,
             codex_home: config.codex_home.to_path_buf(),
@@ -554,10 +628,13 @@ impl ProviderStatusHost {
                 storage: ApiKeyStorage::OpenAiAuth,
             }) => ProviderMetadata::OpenAi(match (named, account.openai) {
                 (Some(true), _) => codex_login::OpenAiAuthMetadata::Account,
-                // Startup already vetted the session's own named account
-                // (`Account`); the local vault may not hold it (a remote
-                // app server), so that answer stands.
-                (Some(false), codex_login::OpenAiAuthMetadata::Account) => {
+                // Startup already vetted the session's own named account;
+                // the local vault may not hold it (a remote app server), so
+                // that answer stands. The default login's state says nothing
+                // about a named account (#609), and a refresh re-reads it.
+                (Some(false), _)
+                    if self.session_sign_in_entry.as_deref() == Some(entry.id.as_str()) =>
+                {
                     codex_login::OpenAiAuthMetadata::Account
                 }
                 (Some(false), _) => codex_login::OpenAiAuthMetadata::Missing,

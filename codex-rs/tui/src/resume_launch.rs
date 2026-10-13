@@ -61,9 +61,12 @@ pub(crate) fn chosen_thread_account_error(
     config: &Config,
     recorded: Option<&RecordedProviderAccount>,
     deferred: bool,
+    opening: ThreadOpening,
 ) -> Option<String> {
     match recorded {
-        Some(recorded) => resume_account_error(config, recorded, AccountRecovery::CommandLine),
+        Some(recorded) => {
+            resume_account_error(config, recorded, AccountRecovery::CommandLine, opening)
+        }
         None if deferred => crate::legacy_core::config::session_account_error(config),
         None => None,
     }
@@ -220,21 +223,51 @@ pub(crate) async fn check_resume_before_onboarding(
     let check_config = thread_config.as_ref().unwrap_or(config);
     let resolution =
         crate::startup_provider::resolve(check_config, Some(openai(check_config))).await;
-    let refusal = resume_account_error(check_config, recorded, AccountRecovery::CommandLine)
-        .or_else(|| {
-            (thread_config.is_some() && resolution.requires_provider_onboarding)
-                .then(|| missing_provider_credentials_error(recorded))
-        });
+    let refusal = resume_account_error(
+        check_config,
+        recorded,
+        AccountRecovery::CommandLine,
+        ThreadOpening::of(selection),
+    )
+    .or_else(|| {
+        (thread_config.is_some() && resolution.requires_provider_onboarding)
+            .then(|| missing_provider_credentials_error(recorded))
+    });
     (resolution, refusal)
 }
 
-/// PF-84 (#545): why the thread cannot resume on the account it ran on, with
-/// the same recovery as the account line, instead of asking for a default key.
-/// `recovery` is `Providers` inside a running TUI (#555).
+/// How a recorded thread is opened, for the account messages (#588).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ThreadOpening {
+    Resume,
+    Fork,
+}
+
+impl ThreadOpening {
+    pub(crate) fn of(selection: &resume_picker::SessionSelection) -> Self {
+        match selection {
+            resume_picker::SessionSelection::Fork(_) => Self::Fork,
+            _ => Self::Resume,
+        }
+    }
+
+    fn runs_on_it(self) -> &'static str {
+        match self {
+            Self::Resume => "resumes on it",
+            Self::Fork => "the fork runs on it",
+        }
+    }
+}
+
+/// PF-84 (#545): why the thread cannot resume (or be forked, #588) on the
+/// account it ran on, with the same recovery as the account line, instead of
+/// asking for a default key. `recovery` is `Providers` inside a running TUI
+/// (#555).
 pub(crate) fn resume_account_error(
     config: &Config,
     recorded: &RecordedProviderAccount,
     recovery: AccountRecovery,
+    opening: ThreadOpening,
 ) -> Option<String> {
     // The thread resumes on the provider it recorded (#555), which can be
     // another provider than the session's.
@@ -254,8 +287,10 @@ pub(crate) fn resume_account_error(
         recovery,
     )?;
     Some(format!(
-        "This conversation ran on {} account `{}` and resumes on it: {message}",
-        recorded.provider_id, recorded.account
+        "This conversation ran on {} account `{}` and {}: {message}",
+        recorded.provider_id,
+        recorded.account,
+        opening.runs_on_it()
     ))
 }
 
@@ -368,6 +403,7 @@ mod tests {
             &config,
             &recorded("zai", "work"),
             AccountRecovery::CommandLine,
+            ThreadOpening::Resume,
         );
 
         assert_eq!(
@@ -378,12 +414,28 @@ mod tests {
                  or pick another with `--account` (see `corbanu account list`)"
             )
         );
+        // #588: a fork says so.
+        assert_eq!(
+            resume_account_error(
+                &config,
+                &recorded("zai", "work"),
+                AccountRecovery::CommandLine,
+                ThreadOpening::Fork,
+            )
+            .as_deref(),
+            Some(
+                "This conversation ran on zai account `work` and the fork runs on it: account \
+                 `work` of provider `zai` is not configured; add it with `corbanu account add zai \
+                 work` or pick another with `--account` (see `corbanu account list`)"
+            )
+        );
         // Inside the TUI (`/resume`) the recovery is `/providers` (#555).
         assert_eq!(
             resume_account_error(
                 &config,
                 &recorded("zai", "work"),
-                AccountRecovery::Providers
+                AccountRecovery::Providers,
+                ThreadOpening::Resume
             )
             .as_deref(),
             Some(
@@ -405,7 +457,8 @@ mod tests {
             resume_account_error(
                 &config,
                 &recorded("zai", "work"),
-                AccountRecovery::CommandLine
+                AccountRecovery::CommandLine,
+                ThreadOpening::Resume
             ),
             None
         );
@@ -418,7 +471,8 @@ mod tests {
             resume_account_error(
                 &config,
                 &recorded("kimi-code", "work"),
-                AccountRecovery::CommandLine
+                AccountRecovery::CommandLine,
+                ThreadOpening::Resume
             ),
             None
         );
@@ -518,7 +572,8 @@ mod tests {
             resume_account_error(
                 &config,
                 &recorded("kimi-code", "work"),
-                AccountRecovery::CommandLine
+                AccountRecovery::CommandLine,
+                ThreadOpening::Resume
             )
             .as_deref(),
             Some(
