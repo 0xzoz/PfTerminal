@@ -716,6 +716,52 @@ fn issue_619_a_home_below_a_tmp_spelled_root_is_protected() {
     assert!(!policy.can_write_effective_path_with_cwd(&home.join("worktrees/w"), &cwd));
 }
 
+/// Issue #652: a profile naming the folder holding the Corbanu home in two
+/// spellings with different access (`/tmp/x` writable, `/private/tmp/x`
+/// read-only). Seatbelt grants the writable one, so the home's entries are
+/// still made read-only, but no `worktrees` write carve-out is added: one
+/// reading of the profile keeps it read-only.
+#[cfg(target_os = "macos")]
+#[test]
+fn issue_652_a_folder_named_twice_adds_no_worktrees_carve_out() {
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let logical = dir.path().to_path_buf();
+    let real = logical.canonicalize().unwrap();
+    let entry = |path: &Path, access| {
+        FileSystemSandboxEntry::new(FileSystemPath::Path { path: abs(path) }, access)
+    };
+    let profile = PermissionProfile::from_runtime_permissions(
+        &FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry::new(
+                FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                FileSystemAccessMode::Read,
+            ),
+            entry(&logical, FileSystemAccessMode::Write),
+            entry(&real, FileSystemAccessMode::Read),
+        ]),
+        NetworkSandboxPolicy::Restricted,
+    );
+    let cwd = real.join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let home = real.join("home");
+    std::fs::create_dir_all(home.join("worktrees")).unwrap();
+    let denials = ReadDenials::collect(&home, None, None, &[abs(&cwd)]);
+    let policy = denials
+        .apply(&profile)
+        .unwrap()
+        .file_system_sandbox_policy();
+    assert!(!policy.can_write_effective_path_with_cwd(&home.join("AGENTS.md"), &cwd));
+    assert!(!policy.can_write_effective_path_with_cwd(&home.join("worktrees/w"), &cwd));
+    assert!(
+        !policy.entries.iter().any(|entry| entry.access == FileSystemAccessMode::Write
+            && matches!(&entry.path, FileSystemPath::Path { path } if path.as_path().ends_with("worktrees"))),
+        "{:?}",
+        policy.entries
+    );
+}
+
 /// Issue #586: the database init lock is denied before it exists, so a
 /// protected command can neither create it nor hold it, also where #583
 /// leaves the Corbanu home writable (a command working in the home or in a
