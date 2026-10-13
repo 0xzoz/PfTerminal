@@ -258,16 +258,10 @@ impl SyntheticMountTarget {
         self.kind
     }
 
-    pub(crate) fn should_remove_after_bwrap(&self, metadata: &Metadata) -> bool {
-        self.should_remove(
-            metadata.file_type().is_file() && metadata.len() == 0,
-            metadata.file_type().is_dir(),
-            (metadata.dev(), metadata.ino()),
-        )
-    }
-
-    /// [`Self::should_remove_after_bwrap`] for what is at the path: whether
-    /// it is an empty file, a folder, and its `(dev, ino)`.
+    /// Whether what is at the path after bubblewrap ran is still this
+    /// placeholder: an empty file, or a folder (`empty_file`, `dir`), and not
+    /// the pre-existing path found when the arguments were built (`identity`
+    /// is its `(dev, ino)`).
     pub(crate) fn should_remove(&self, empty_file: bool, dir: bool, identity: (u64, u64)) -> bool {
         match self.kind {
             SyntheticMountTargetKind::EmptyFile => {
@@ -3075,7 +3069,11 @@ mod tests {
         );
         let metadata = std::fs::symlink_metadata(&dot_git).expect("stat .git");
         assert!(
-            !args.synthetic_mount_targets[0].should_remove_after_bwrap(&metadata),
+            !args.synthetic_mount_targets[0].should_remove(
+                metadata.file_type().is_file() && metadata.len() == 0,
+                metadata.file_type().is_dir(),
+                (metadata.dev(), metadata.ino()),
+            ),
             "pre-existing empty preserved files must not be cleaned up as synthetic targets",
         );
     }

@@ -1032,11 +1032,10 @@ fn register_synthetic_mount_targets(
                 let target = target.with_real_path(real_path);
                 // #607: a placeholder another run made (still there) keeps
                 // its record, whose time is when it was made.
-                if !target.preserves_pre_existing_path()
-                    && !(fs::symlink_metadata(target.path()).is_ok()
-                        && read_synthetic_mount_target_record(&marker_dir)
-                            .is_some_and(|made| made.path() == target.path()))
-                {
+                let made_by_another_run = fs::symlink_metadata(target.path()).is_ok()
+                    && read_synthetic_mount_target_record(&marker_dir)
+                        .is_some_and(|made| made.path() == target.path());
+                if !target.preserves_pre_existing_path() && !made_by_another_run {
                     write_synthetic_mount_target_record(&marker_dir, &target);
                 }
                 let marker_file = marker_dir.join(std::process::id().to_string());
