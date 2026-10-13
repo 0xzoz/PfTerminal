@@ -5349,11 +5349,14 @@ impl App {
                     let target_node_id = self.logical_native_node_for_thread(thread_id);
                     let acks = self.take_spawn_dispatch_acks_for_task(&target_node_id, task.trim());
                     self.release_spawn_dispatch_origins(&acks);
-                    self.record_spawn_dispatch_acks(
+                    // #660: a task sent while the switch was on starts no turn
+                    // in its sender, also when it fails after switch-off.
+                    self.record_spawn_dispatch_acks_with_turns(
                         &acks,
                         "failed",
                         "crew identity or creation state is not reconciled",
                         /*notify*/ true,
+                        /*start_turns*/ !sent_while_kill_switch_on,
                     );
                     self.chat_widget.add_error_message(
                         "This /spawn hierarchy is read-only until its crew identity and creation \
@@ -5523,13 +5526,14 @@ impl App {
                                     }
                                     Err(retry_error) => {
                                         self.release_spawn_dispatch_origins(&acks);
-                                        self.record_spawn_dispatch_acks(
+                                        self.record_spawn_dispatch_acks_with_turns(
                                             &acks,
                                             "failed",
-                                            format!(
+                                            &format!(
                                                 "native mailbox admission still failed after Core materialized the saved agent: {retry_error:#}"
                                             ),
                                             /*notify*/ true,
+                                            /*start_turns*/ !hold,
                                         );
                                         self.chat_widget.add_error_message(format!(
                                             "Could not admit task for {label}: {retry_error:#}"
@@ -5539,13 +5543,14 @@ impl App {
                             }
                             Err(materialization_error) => {
                                 self.release_spawn_dispatch_origins(&acks);
-                                self.record_spawn_dispatch_acks(
+                                self.record_spawn_dispatch_acks_with_turns(
                                     &acks,
                                     "failed",
-                                    format!(
+                                    &format!(
                                         "native mailbox target was unavailable and Core could not materialize the saved agent: {materialization_error:#}"
                                     ),
                                     /*notify*/ true,
+                                    /*start_turns*/ !hold,
                                 );
                                 self.chat_widget.add_error_message(format!(
                                     "Could not admit task for {label}: {materialization_error:#}"
@@ -5555,11 +5560,12 @@ impl App {
                     }
                     Err(error) => {
                         self.release_spawn_dispatch_origins(&acks);
-                        self.record_spawn_dispatch_acks(
+                        self.record_spawn_dispatch_acks_with_turns(
                             &acks,
                             "failed",
-                            format!("native mailbox admission failed: {error:#}"),
+                            &format!("native mailbox admission failed: {error:#}"),
                             /*notify*/ true,
+                            /*start_turns*/ !hold,
                         );
                         self.chat_widget.add_error_message(format!(
                             "Could not admit task for {label}; no automatic replay was attempted: {error:#}"
@@ -5573,6 +5579,9 @@ impl App {
                 sent_while_kill_switch_on,
             } => {
                 let task = task.trim().to_string();
+                // #660: a task sent while the switch was on starts no turn in
+                // its sender, also when it fails after switch-off.
+                let report_turns = !sent_while_kill_switch_on;
                 let target_node_id = self.logical_native_node_for_thread(thread_id);
                 let is_operator_pane = self
                     .agent_navigation
@@ -5581,15 +5590,21 @@ impl App {
                 if !is_operator_pane {
                     let detail =
                         format!("native thread {thread_id} is not an operator-owned user pane");
-                    self.record_spawn_dispatch_failed_for_task(&target_node_id, &task, &detail);
+                    self.record_spawn_dispatch_failed_for_task_with_turns(
+                        &target_node_id,
+                        &task,
+                        &detail,
+                        report_turns,
+                    );
                     self.chat_widget.add_error_message(detail);
                     return Ok(AppRunControl::Continue);
                 }
                 if task.is_empty() {
-                    self.record_spawn_dispatch_failed_for_task(
+                    self.record_spawn_dispatch_failed_for_task_with_turns(
                         &target_node_id,
                         &task,
                         "operator pane task cannot be empty",
+                        report_turns,
                     );
                     self.chat_widget
                         .add_error_message("Operator pane task cannot be empty.".to_string());
@@ -5601,7 +5616,12 @@ impl App {
                         task.len(),
                         crate::dispatch_queue::MAX_DISPATCH_TASK_BYTES
                     );
-                    self.record_spawn_dispatch_failed_for_task(&target_node_id, &task, &detail);
+                    self.record_spawn_dispatch_failed_for_task_with_turns(
+                        &target_node_id,
+                        &task,
+                        &detail,
+                        report_turns,
+                    );
                     self.chat_widget.add_error_message(detail);
                     return Ok(AppRunControl::Continue);
                 }
@@ -5735,7 +5755,14 @@ impl App {
                         task.len(),
                         crate::dispatch_queue::MAX_DISPATCH_TASK_BYTES
                     );
-                    self.record_spawn_dispatch_acks(&acks, "failed", &detail, /*notify*/ true);
+                    // #660: no sender turn for a task sent while on.
+                    self.record_spawn_dispatch_acks_with_turns(
+                        &acks,
+                        "failed",
+                        &detail,
+                        /*notify*/ true,
+                        /*start_turns*/ !sent_while_kill_switch_on,
+                    );
                     self.chat_widget.add_error_message(detail);
                     return Ok(AppRunControl::Continue);
                 }

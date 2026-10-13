@@ -2103,7 +2103,8 @@ impl App {
     }
 
     /// `start_turns` false (#660): the Manager is told without starting a
-    /// turn in it (a dispatch held or refused because of the kill switch).
+    /// turn in it (a dispatch sent while the kill switch was on, or held or
+    /// refused because of it).
     pub(crate) fn note_assignment_dispatch_failure_with_turns(
         &mut self,
         holder_node_id: &str,

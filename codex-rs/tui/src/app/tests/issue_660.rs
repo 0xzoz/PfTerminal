@@ -109,3 +109,79 @@ async fn issue_660_held_claude_task_failure_starts_no_sender_turn() {
     );
     assert_eq!(report_turns(&mut app_event_rx), vec![false]);
 }
+
+/// #660 (round 2): ordinary failures of tasks sent while the switch was on,
+/// handled after it was turned off, tell the native sender without starting
+/// a turn in it: an oversize task for a `/panes` pane, a task for a managed
+/// pane of a crew that is read-only, and an oversize Claude-pane task.
+#[tokio::test]
+async fn issue_660_failures_of_tasks_sent_while_on_start_no_sender_turn() -> Result<()> {
+    let (mut app, mut app_event_rx, mut op_rx) = make_test_app_with_channels().await;
+    let config = app.chat_widget.config_ref().clone();
+    let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(&config)).await?;
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    let pane = ThreadId::from_string("00000000-0000-0000-0000-000000006604")?;
+    let managed = ThreadId::from_string("00000000-0000-0000-0000-000000006605")?;
+    let sender = ThreadId::from_string("00000000-0000-0000-0000-000000006606")?;
+    app.upsert_agent_picker_thread(
+        pane,
+        Some("Gorbag".to_string()),
+        /*agent_role*/ None,
+        /*is_closed*/ false,
+    );
+    issue_507_switch(&app, HumanRevocation::KillSwitchOn);
+    let sent_while_kill_switch_on = app.kill_switch_on_now();
+    issue_507_switch(&app, HumanRevocation::KillSwitchOff);
+    let oversize = "x".repeat(crate::dispatch_queue::MAX_DISPATCH_TASK_BYTES + 1);
+
+    for sent in [sent_while_kill_switch_on, false] {
+        let pane_target = app.logical_native_node_for_thread(pane);
+        register_native_ack(&mut app, sender, &pane_target, &oversize, 6604);
+        let managed_target = app.logical_native_node_for_thread(managed);
+        register_native_ack(&mut app, sender, &managed_target, "pf660 managed", 6605);
+        let claude_target = crate::spawn_orchestration::pane_node_id("claude-660");
+        register_native_ack(&mut app, sender, &claude_target, &oversize, 6606);
+        while app_event_rx.try_recv().is_ok() {}
+
+        Box::pin(app.handle_event(
+            &mut tui,
+            &mut app_server,
+            AppEvent::SubmitCodexUserPaneTask {
+                thread_id: pane,
+                task: oversize.clone(),
+                sent_while_kill_switch_on: sent,
+            },
+        ))
+        .await?;
+        app.spawn_legacy_read_only = true;
+        Box::pin(app.handle_event(
+            &mut tui,
+            &mut app_server,
+            AppEvent::SubmitSpawnAgentTask {
+                thread_id: managed,
+                task: "pf660 managed".to_string(),
+                sent_while_kill_switch_on: sent,
+            },
+        ))
+        .await?;
+        app.spawn_legacy_read_only = false;
+        Box::pin(app.handle_event(
+            &mut tui,
+            &mut app_server,
+            AppEvent::SubmitSpawnClaudePaneTask {
+                pane_id: "claude-660".to_string(),
+                task: oversize.clone(),
+                sent_while_kill_switch_on: sent,
+            },
+        ))
+        .await?;
+        assert!(op_rx.try_recv().is_err(), "no user turn was submitted");
+        // Control (unstamped): the same failures report with a turn.
+        assert_eq!(
+            report_turns(&mut app_event_rx),
+            vec![!sent; 3],
+            "stamped: {sent}"
+        );
+    }
+    Ok(())
+}

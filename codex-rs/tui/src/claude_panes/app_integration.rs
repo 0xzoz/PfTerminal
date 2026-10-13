@@ -1090,7 +1090,13 @@ impl App {
         if let Some(reason) = crate::security::level::external_agent_block_reason() {
             let node_key = crate::spawn_orchestration::pane_node_id(&pane_id);
             self.abort_spawn_auto_processing_turn(&node_key);
-            self.record_spawn_dispatch_failed_for_task(&target_node_id, &task, reason.clone());
+            // #660: no sender turn for a task sent while the switch was on.
+            self.record_spawn_dispatch_failed_for_task_with_turns(
+                &target_node_id,
+                &task,
+                &reason,
+                /*start_turns*/ !sent_while_kill_switch_on,
+            );
             self.chat_widget.add_error_message(reason);
             return;
         }

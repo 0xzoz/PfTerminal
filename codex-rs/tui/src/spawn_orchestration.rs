@@ -2117,7 +2117,8 @@ impl App {
         );
     }
 
-    fn record_spawn_dispatch_failed_for_task_with_turns(
+    /// `start_turns` false (#660): as `record_kill_switch_dispatch_failed_for_task`.
+    pub(crate) fn record_spawn_dispatch_failed_for_task_with_turns(
         &mut self,
         target_node_id: &str,
         task: &str,
@@ -2160,9 +2161,28 @@ impl App {
         detail: impl AsRef<str>,
         notify: bool,
     ) {
-        let detail = detail.as_ref();
+        self.record_spawn_dispatch_acks_with_turns(
+            acks,
+            status,
+            detail.as_ref(),
+            notify,
+            /*start_turns*/ true,
+        );
+    }
+
+    /// `start_turns` false (#660): the senders are told without a turn
+    /// starting in them (a task another agent sent while the kill switch was
+    /// on, also when it fails just after switch-off).
+    pub(crate) fn record_spawn_dispatch_acks_with_turns(
+        &mut self,
+        acks: &[SpawnDispatchAck],
+        status: &str,
+        detail: &str,
+        notify: bool,
+        start_turns: bool,
+    ) {
         for ack in acks {
-            self.record_spawn_dispatch_ack(ack, status, detail, notify, /*start_turns*/ true);
+            self.record_spawn_dispatch_ack(ack, status, detail, notify, start_turns);
         }
     }
 
