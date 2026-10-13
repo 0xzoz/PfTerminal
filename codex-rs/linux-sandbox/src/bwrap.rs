@@ -4427,7 +4427,7 @@ mod tests {
             std::fs::write(root.join(name), "x").expect("write");
         }
         let expand = |globs: Vec<String>| {
-            expand_unreadable_globs_with_ripgrep(&globs, root, None)
+            expand_unreadable_globs_with_ripgrep(&globs, root, /*max_depth*/ None)
                 .expect("expand")
                 .into_iter()
                 .map(|path| path.as_path().file_name().expect("name").to_os_string())
@@ -4544,7 +4544,7 @@ mod tests {
         // writable first: its entries are pinned too.
         let outer = base.join("outer");
         let args = {
-            let _read_only = ModeGuard::set(&outer, 0o555);
+            let _read_only = ModeGuard::set(&outer, /*mode*/ 0o555);
             create_filesystem_args(&policy, &base, NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
                 .expect("bwrap fs args")
                 .args
