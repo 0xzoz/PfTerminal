@@ -192,6 +192,13 @@ async fn probe_with(
     configure_turn: impl FnOnce(&mut TurnContext),
     inputs: ToolPlanInputs,
 ) -> ToolPlanProbe {
+    ToolPlanProbe::from_router(planned_router(configure_turn, inputs).await)
+}
+
+async fn planned_router(
+    configure_turn: impl FnOnce(&mut TurnContext),
+    inputs: ToolPlanInputs,
+) -> ToolRouter {
     let (_session, mut turn) = make_session_and_context().await;
     use_openai_provider(&mut turn);
     configure_turn(&mut turn);
@@ -211,13 +218,12 @@ async fn probe_with(
         inputs.extension_tool_executors,
         &inputs.dynamic_tools,
     );
-    let router = ToolRouter::from_tools(
+    ToolRouter::from_tools(
         step_context.turn.as_ref(),
         tool_runtimes,
         hosted_specs,
         &Default::default(),
-    );
-    ToolPlanProbe::from_router(router)
+    )
 }
 
 async fn probe(configure_turn: impl FnOnce(&mut TurnContext)) -> ToolPlanProbe {
@@ -2244,7 +2250,11 @@ async fn mcp_tools_are_flattened_and_resolved_on_wires_without_namespace_tools()
             else {
                 panic!("expected flat MCP function `{flat}` in {specs:?}");
             };
-            assert_eq!(tool.description, format!("{name} test tool"));
+            // The namespace is not sent, so the tool carries the server's description.
+            assert_eq!(
+                tool.description,
+                format!("{name} test tool\n\nTools from orders.")
+            );
             assert_eq!(tool.defer_loading, None);
 
             let resolved = router.resolve_flat_tool_call(flat_call(flat));
@@ -2258,6 +2268,142 @@ async fn mcp_tools_are_flattened_and_resolved_on_wires_without_namespace_tools()
         let unknown = router.resolve_flat_tool_call(flat_call("mcp__orders__missing"));
         assert_eq!(unknown.tool_name, ToolName::plain("mcp__orders__missing"));
     }
+}
+
+/// #547: every grouped tool, not only MCP tools, is offered under a flat name
+/// on wires without namespaces and routed back to its namespaced runtime.
+#[tokio::test]
+async fn non_mcp_namespaced_tools_are_flattened_and_resolved_without_namespace_tools() {
+    for configure_turn in [
+        use_zai_provider as fn(&mut TurnContext),
+        use_claude_plan_provider,
+        use_generic_chat_provider,
+    ] {
+        let router = planned_router(
+            |turn| {
+                configure_turn(turn);
+                set_feature(turn, Feature::SleepTool, /*enabled*/ true);
+            },
+            ToolPlanInputs {
+                extension_tool_executors: vec![Arc::new(TestNamespaceExtensionTool {
+                    namespace: "registry_extension",
+                    tool_name: "lookup",
+                })],
+                dynamic_tools: vec![dynamic_tool(
+                    Some("registry_dynamic"),
+                    "lookup",
+                    /*defer_loading*/ false,
+                )],
+                ..ToolPlanInputs::default()
+            },
+        )
+        .await;
+        let specs = router.model_visible_specs();
+        assert!(
+            !specs
+                .iter()
+                .any(|spec| matches!(spec, ToolSpec::Namespace(_))),
+            "{specs:?}"
+        );
+        for (flat, namespace, name, namespace_description) in [
+            (
+                "clock__sleep",
+                "clock",
+                "sleep",
+                "Tools for reading and waiting on time.",
+            ),
+            (
+                "registry_extension__lookup",
+                "registry_extension",
+                "lookup",
+                "Test namespace.",
+            ),
+            (
+                "registry_dynamic__lookup",
+                "registry_dynamic",
+                "lookup",
+                "registry_dynamic dynamic tools",
+            ),
+        ] {
+            let Some(ToolSpec::Function(tool)) = specs.iter().find(|spec| spec.name() == flat)
+            else {
+                panic!("expected flat function `{flat}` in {specs:?}");
+            };
+            assert!(
+                tool.description.ends_with(namespace_description),
+                "{flat}: {}",
+                tool.description
+            );
+            let resolved = router.resolve_flat_tool_call(flat_call(flat));
+            assert_eq!(resolved.tool_name, ToolName::namespaced(namespace, name));
+            assert!(router.tool_runtime(&resolved).is_some(), "{flat}");
+        }
+    }
+}
+
+/// #547: V1 sub-agent tools reach every provider without namespace tools (a
+/// custom Chat Completions provider, Claude on the Anthropic wire), as plain
+/// aliases, and are not offered twice.
+#[tokio::test]
+async fn v1_multi_agent_tools_reach_every_provider_without_namespace_tools() {
+    for configure_turn in [
+        use_generic_chat_provider as fn(&mut TurnContext),
+        use_claude_plan_provider,
+        use_zai_provider,
+    ] {
+        let plan = probe(|turn| {
+            configure_turn(turn);
+            set_feature(turn, Feature::Collab, /*enabled*/ true);
+            set_feature(turn, Feature::MultiAgentV2, /*enabled*/ false);
+        })
+        .await;
+        plan.assert_visible_contains(&[
+            "spawn_agent_v1",
+            "send_input_v1",
+            "wait_agent_v1",
+            "close_agent_v1",
+        ]);
+        plan.assert_visible_lacks(&[
+            MULTI_AGENT_V1_NAMESPACE,
+            "spawn_agent",
+            "multi_agent_v1__spawn_agent",
+        ]);
+    }
+}
+
+/// Built-in grouped tools are kept before MCP tools when the tool-count limit
+/// leaves room for only some of them.
+#[tokio::test]
+async fn flattened_builtin_tools_keep_their_place_before_mcp_tools() {
+    let tool_runtimes = (0..200)
+        .map(|index| {
+            mcp_runtime(
+                "bulk",
+                "mcp__bulk",
+                &format!("tool_{index:03}"),
+                ToolExposure::Direct,
+            )
+        })
+        .collect();
+    let router = planned_router(
+        |turn| {
+            use_zai_provider(turn);
+            set_feature(turn, Feature::SleepTool, /*enabled*/ true);
+        },
+        ToolPlanInputs {
+            tool_runtimes,
+            ..ToolPlanInputs::default()
+        },
+    )
+    .await;
+    let specs = router.model_visible_specs();
+    assert_eq!(specs.len(), 128);
+    assert!(specs.iter().any(|spec| spec.name() == "clock__sleep"));
+    assert!(
+        specs
+            .iter()
+            .any(|spec| spec.name() == "mcp__bulk__tool_000")
+    );
 }
 
 #[tokio::test]
