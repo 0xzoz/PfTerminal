@@ -66,7 +66,7 @@ async fn the_session_manager_follows_the_sessions_and_never_falls_back_to_the_de
     // A conversation the user left (no client attached) does not count.
     let left = base.register_session_sign_in(SessionSignIn::Default);
     assert!(base.for_session().is_none());
-    left.set_attached(false);
+    left.set_attached(/*attached*/ false);
     assert_eq!(
         key(base.for_session()).await.as_deref(),
         Some("sk-canary-work")
@@ -76,7 +76,7 @@ async fn the_session_manager_follows_the_sessions_and_never_falls_back_to_the_de
         key(base.for_session()).await.as_deref(),
         Some("sk-canary-work")
     );
-    left.set_attached(true);
+    left.set_attached(/*attached*/ true);
     assert!(base.for_session().is_none());
     drop(left);
 

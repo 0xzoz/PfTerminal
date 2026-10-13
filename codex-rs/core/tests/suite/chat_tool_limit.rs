@@ -88,7 +88,7 @@ async fn tools_over_the_chat_limit_are_reported_once_per_session() -> anyhow::Re
     let thread = base
         .thread_manager
         .start_thread(StartThreadOptions {
-            dynamic_tools: vec![bulk_namespace(200)],
+            dynamic_tools: vec![bulk_namespace(/*count*/ 200)],
             ..StartThreadOptions::new(base.config.clone())
         })
         .await?;
