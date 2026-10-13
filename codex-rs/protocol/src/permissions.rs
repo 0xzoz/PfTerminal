@@ -1615,9 +1615,9 @@ impl FileSystemSandboxPolicy {
         let normalized = normalize_effective_absolute_path(target.clone());
         !excluded.iter().any(|excluded| {
             target.as_path().starts_with(excluded.link.as_path())
-                || normalized.as_path().starts_with(
-                    normalize_effective_absolute_path(excluded.link.clone()).as_path(),
-                )
+                || normalized
+                    .as_path()
+                    .starts_with(normalize_effective_absolute_path(excluded.link.clone()).as_path())
         })
     }
 
@@ -2662,7 +2662,8 @@ fn metadata_path_name(name: &OsStr, any_case: bool) -> Option<&'static str> {
         .iter()
         .copied()
         .find(|metadata_name| {
-            name == OsStr::new(metadata_name) || (any_case && name.eq_ignore_ascii_case(metadata_name))
+            name == OsStr::new(metadata_name)
+                || (any_case && name.eq_ignore_ascii_case(metadata_name))
         })
 }
 
@@ -2672,9 +2673,10 @@ fn metadata_child_of_writable_root(
     cwd: &Path,
 ) -> Option<(AbsolutePathBuf, &'static str)> {
     // #606: macOS volumes ignore case, so a `.GIT` made where `.git` is
-    // missing is the folder git opens as `.git`. Only once the policy denies
-    // reads (Moderate and Aggressive), as Seatbelt matches it; a policy
-    // without denied paths keeps today's rules.
+    // missing is the folder git opens as `.git`, and Seatbelt refuses it
+    // (its rules match without regard to case there). Approvals agree once
+    // the policy denies reads (Moderate and Aggressive); a policy without
+    // denied paths keeps today's answers.
     let any_case = cfg!(target_os = "macos") && policy.has_denied_read_restrictions();
     policy
         .resolved_entries_with_cwd(cwd)
@@ -5035,9 +5037,16 @@ mod tests {
             FileSystemAccessMode::Deny,
         ));
         let denying = FileSystemSandboxPolicy::restricted(denying);
-        for (name, metadata) in [(".GIT", ".git"), (".Codex", ".codex"), (".AGENTS", ".agents")] {
+        for (name, metadata) in [
+            (".GIT", ".git"),
+            (".Codex", ".codex"),
+            (".AGENTS", ".agents"),
+        ] {
             let path = workspace.join(name).join("config");
-            assert!(!denying.can_write_path_with_cwd(&path, &workspace), "{name}");
+            assert!(
+                !denying.can_write_path_with_cwd(&path, &workspace),
+                "{name}"
+            );
             assert_eq!(
                 forbidden_agent_metadata_write(&path, &workspace, &denying),
                 Some(metadata),

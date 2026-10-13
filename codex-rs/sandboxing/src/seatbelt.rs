@@ -366,9 +366,6 @@ struct SeatbeltAccessRoot {
     root: AbsolutePathBuf,
     excluded_subpaths: Vec<AbsolutePathBuf>,
     protected_metadata_names: Vec<String>,
-    /// #606: match `protected_metadata_names` in any case (macOS volumes
-    /// ignore case: a `.GIT` made where `.git` is missing is git's `.git`).
-    metadata_names_any_case: bool,
     /// #536: `root` is the real location pinned when the session first saw
     /// the writable root; it is emitted as is, never resolved again, so a
     /// link swapped in since cannot move the grant.
@@ -383,7 +380,6 @@ struct SeatbeltClause {
     root: AbsolutePathBuf,
     excluded: Vec<AbsolutePathBuf>,
     protected_metadata_names: Vec<String>,
-    metadata_names_any_case: bool,
 }
 
 impl SeatbeltClause {
@@ -405,7 +401,6 @@ impl SeatbeltClause {
             root,
             excluded,
             protected_metadata_names: access_root.protected_metadata_names,
-            metadata_names_any_case: access_root.metadata_names_any_case,
         }
     }
 
@@ -499,7 +494,6 @@ fn seatbelt_read_access(policy: &FileSystemSandboxPolicy, cwd: &Path) -> Seatbel
             root: root_absolute_path(),
             excluded_subpaths: unreadable_roots,
             protected_metadata_names: Vec::new(),
-            metadata_names_any_case: false,
         }]
     } else {
         // Each denied path is excluded from every readable root that
@@ -515,7 +509,6 @@ fn seatbelt_read_access(policy: &FileSystemSandboxPolicy, cwd: &Path) -> Seatbel
                     .cloned()
                     .collect(),
                 protected_metadata_names: Vec::new(),
-            metadata_names_any_case: false,
                 root,
             })
             .collect()
@@ -573,7 +566,6 @@ fn build_seatbelt_clause_policy(
             root,
             excluded,
             protected_metadata_names,
-            metadata_names_any_case,
         } = clause;
         let root_param = format!("{param_prefix}_{index}");
         params.push((root_param.clone(), root.clone().into_path_buf()));
@@ -598,12 +590,8 @@ fn build_seatbelt_clause_policy(
             ));
         }
         for metadata_name in protected_metadata_names {
-            let regex = seatbelt_protected_metadata_name_regex(
-                &root,
-                &metadata_name,
-                metadata_names_any_case,
-            )
-            .replace('"', "\\\"");
+            let regex =
+                seatbelt_protected_metadata_name_regex(&root, &metadata_name).replace('"', "\\\"");
             require_parts.push(format!(r#"(require-not (regex #"{regex}"))"#));
         }
         policy_components.push(format!("(require-all {} )", require_parts.join(" ")));
@@ -619,30 +607,13 @@ fn build_seatbelt_clause_policy(
     }
 }
 
-fn seatbelt_protected_metadata_name_regex(
-    root: &AbsolutePathBuf,
-    name: &str,
-    any_case: bool,
-) -> String {
+fn seatbelt_protected_metadata_name_regex(root: &AbsolutePathBuf, name: &str) -> String {
     let mut root = root.to_string_lossy().to_string();
     while root.len() > 1 && root.ends_with('/') {
         root.pop();
     }
     let root = regex_lite::escape(&root);
-    let mut name = regex_lite::escape(name);
-    if any_case {
-        // #606: each letter as a class of both cases (`.git` matches `.GIT`).
-        name = name
-            .chars()
-            .map(|ch| {
-                if ch.is_ascii_alphabetic() {
-                    format!("[{}{}]", ch.to_ascii_lowercase(), ch.to_ascii_uppercase())
-                } else {
-                    ch.to_string()
-                }
-            })
-            .collect();
-    }
+    let name = regex_lite::escape(name);
     if root == "/" {
         format!(r#"^/{name}(/.*)?$"#)
     } else {
@@ -785,7 +756,6 @@ fn platform_tmp_policy(
                 .cloned()
                 .collect(),
             protected_metadata_names: Vec::new(),
-            metadata_names_any_case: false,
             pinned: false,
             root,
         });
@@ -1264,7 +1234,6 @@ pub fn create_seatbelt_command_args(
                         root: root_absolute_path(),
                         excluded_subpaths: unreadable_roots,
                         protected_metadata_names: Vec::new(),
-            metadata_names_any_case: false,
                     }],
                 )
             }
@@ -1312,10 +1281,6 @@ pub fn create_seatbelt_command_args(
                                 &root,
                                 sandbox_policy_cwd,
                             ),
-                            // #606: once the policy denies reads (Moderate
-                            // and Aggressive); a policy without denied paths
-                            // keeps today's rules.
-                            metadata_names_any_case: !unreadable_roots.is_empty(),
                             pinned: pinned.is_some(),
                             root: pinned.unwrap_or(root.root),
                             excluded_subpaths,

@@ -2340,15 +2340,14 @@ fn ignores_case(dir: &Path) -> bool {
 }
 
 /// #606: on a volume that ignores case, a `.GIT`, `.Codex` or `.AGENTS` made
-/// where the name is missing is the folder git or Corbanu opens. Once the
-/// policy denies reads (Moderate and Aggressive) none can be created in a
-/// writable root; a policy without denied paths keeps today's rules.
+/// where the name is missing is the folder git or Corbanu opens. Seatbelt
+/// matches the protected-name rules without regard to case there, at every
+/// level, so none can be created in a writable root.
 #[test]
-fn metadata_names_are_protected_in_any_case_once_reads_are_denied() {
+fn metadata_names_are_protected_in_any_case() {
     let base = TempDir::new().expect("tempdir");
     let base = base.path().canonicalize().expect("canonical");
     if !ignores_case(&base) {
-        eprintln!("{} does not ignore case; skipping", base.display());
         return;
     }
     for denies_reads in [true, false] {
@@ -2369,12 +2368,10 @@ fn metadata_names_are_protected_in_any_case_once_reads_are_denied() {
             ws = workspace.display(),
         );
         let stdout = run_in_seatbelt(&policy, &workspace, &script);
-        let expected = if denies_reads {
-            ["git=1", "codex=1", "agents=1", "gitx=0", "ws=0"]
-        } else {
-            ["git=0", "codex=0", "agents=0", "gitx=0", "ws=0"]
-        };
-        assert_lines(&stdout, &expected);
+        assert_lines(
+            &stdout,
+            &["git=1", "codex=1", "agents=1", "gitx=0", "ws=0"],
+        );
     }
 }
 
