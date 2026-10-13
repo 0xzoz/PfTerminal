@@ -6,9 +6,9 @@
 //!   explained where it failed (the level, never grantable, how to change
 //!   it), instead of a bare "Operation not permitted";
 //! - the approval prompt for such a command offers no grant and says why;
-//! - #620: the same for a start-up file outside the current folder
-//!   (`~/.zshrc`): Aggressive's sandbox never writes there, so no grant
-//!   could let the command write it;
+//! - #620: the same for a start-up file outside the current folder that a
+//!   command writes (`>> ~/.zshrc`): Aggressive's sandbox never writes
+//!   there, so no grant could let the command write it;
 //! - #622: such a denial is listed under the inspector's recent denials.
 //!
 //! Explanation only: it never changes what runs or what is denied (it only
@@ -75,7 +75,7 @@ pub(crate) fn startup_explanation(path: &str) -> String {
         "Security level Aggressive blocks writing `{}`: it is a start-up file outside the \
          current folder, and agent commands can write only inside the current folder, even \
          when you approve them; this cannot be granted, not even once (Grant once lifts the \
-         start-up file protections only inside the current folder). To allow it, a person can \
+         start-up file and git write protections only inside the current folder). To allow it, a person can \
          switch to Permissive in /security (it applies after a restart).",
         shown_path(path)
     )
@@ -163,10 +163,9 @@ impl ReadPolicyInputs {
     }
 
     /// #620: whether `path` is one of the user's start-up files (`~/.zshrc`,
-    /// login items; [`USER_PERSISTENCE`]) that the session's sandbox cannot
-    /// write at all: outside the current folder, so no grant could let a
-    /// command write it. One reached through a link counts where the link
-    /// points.
+    /// login items; [`USER_PERSISTENCE`]), as spelled or where a link to it
+    /// points, that the sandbox the command runs in cannot write at all:
+    /// outside its writable folders, so no grant could let it be written.
     fn unwritable_startup_file(&self, path: &Path) -> bool {
         let (Some(user_home), Ok(path)) = (
             self.user_home.as_deref(),
@@ -174,15 +173,31 @@ impl ReadPolicyInputs {
         ) else {
             return false;
         };
-        if !USER_PERSISTENCE
-            .iter()
-            .any(|entry| path.as_path().starts_with(user_home.join(entry)))
-        {
+        let real = ReadDenials::real_location(&path);
+        let mut homes = vec![user_home.to_path_buf()];
+        homes.extend(std::fs::canonicalize(user_home).ok());
+        let is_startup = |path: &AbsolutePathBuf| {
+            homes.iter().any(|home| {
+                USER_PERSISTENCE
+                    .iter()
+                    .any(|entry| path.as_path().starts_with(home.join(entry)))
+            })
+        };
+        if !is_startup(&path) && !real.as_ref().is_some_and(is_startup) {
             return false;
         }
-        let target = ReadDenials::real_location(&path).unwrap_or(path);
+        // The profile as the orchestrator runs it: project roots are the
+        // workspace roots (or the current folder).
+        let roots = if self.workspace_roots.is_empty() {
+            vec![self.turn_cwd.clone()]
+        } else {
+            self.workspace_roots.clone()
+        };
+        let target = real.unwrap_or(path);
         !self
             .profile
+            .clone()
+            .materialize_project_roots_with_workspace_roots(&roots)
             .file_system_sandbox_policy()
             .can_write_path_with_cwd(target.as_path(), self.turn_cwd.as_path())
     }
@@ -282,7 +297,15 @@ pub(crate) async fn denial_explanation(
             })
             // #620: a start-up file outside the current folder.
             .or_else(|| {
-                word(&|path| inputs.unwritable_startup_file(path)).map(ProtectedNote::Startup)
+                written_word(
+                    &command,
+                    &cwd,
+                    inputs.user_home.as_deref(),
+                    &inputs.codex_home,
+                    &|path| inputs.unwritable_startup_file(path),
+                    Some(&denial_lines),
+                )
+                .map(ProtectedNote::Startup)
             })
             // #621: a protected path the denial line reports that no word
             // of the command names (built at run time). Bounded: only the
@@ -299,6 +322,10 @@ pub(crate) async fn denial_explanation(
 
 /// Denial lines looked at for a path the command does not name (#621).
 const MAX_REPORTED_LINES: usize = 32;
+
+/// Folders a relative path in a denial line is resolved against, besides
+/// the command's own.
+const MAX_BASES: usize = 64;
 
 /// #554: the path a denial line reports, as it spells it, that `unlistable`
 /// accepts. A relative path is taken from the command's folder or from a
@@ -348,7 +375,8 @@ fn path_in_lines(
                     .to_string()
             })
             .filter(|word| !word.is_empty() && !word.starts_with('-'))
-            .filter_map(|word| resolve(&word, cwd, user_home, codex_home)),
+            .filter_map(|word| resolve(&word, cwd, user_home, codex_home))
+            .take(MAX_BASES),
     );
     denial_lines
         .iter()
@@ -468,7 +496,15 @@ pub(crate) async fn protected_note_in_command(
                     .map(ProtectedNote::Listing)
             })
             .or_else(|| {
-                word(&|path| inputs.unwritable_startup_file(path)).map(ProtectedNote::Startup)
+                written_word(
+                    &command,
+                    &cwd,
+                    inputs.user_home.as_deref(),
+                    &inputs.codex_home,
+                    &|path| inputs.unwritable_startup_file(path),
+                    /*denial_lines*/ None,
+                )
+                .map(ProtectedNote::Startup)
             })
     })
     .await
@@ -605,6 +641,125 @@ pub(super) fn denied_word(
         })
 }
 
+/// #620: the first word of `command` that it writes to (see
+/// [`write_targets`]) and `accept` accepts, as the command spelled it. With
+/// `denial_lines`, only a word whose file name one of those lines mentions.
+fn written_word(
+    command: &[String],
+    cwd: &Path,
+    user_home: Option<&Path>,
+    codex_home: &Path,
+    accept: &dyn Fn(&Path) -> bool,
+    denial_lines: Option<&[String]>,
+) -> Option<String> {
+    write_targets(command).into_iter().find(|word| {
+        let Some(path) = resolve(word, cwd, user_home, codex_home) else {
+            return false;
+        };
+        denial_lines.is_none_or(|lines| {
+            Path::new(word)
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .is_some_and(|name| lines.iter().any(|line| line.contains(name)))
+        }) && accept(&path)
+    })
+}
+
+/// Programs whose path arguments (after the first, for `sed`'s script) are
+/// written, and those whose last argument is.
+const WRITES_EVERY_ARGUMENT: [&str; 5] = ["tee", "touch", "truncate", "rm", "chmod"];
+const WRITES_LAST_ARGUMENT: [&str; 5] = ["cp", "mv", "ln", "install", "rsync"];
+
+/// #620: the words a shell command writes to, as spelled: redirection
+/// targets (`>`, `>>`, `2>`, `&>`, attached or not), every path argument of
+/// `tee`, `touch`, `truncate`, `rm` and `chmod`, the destination of `cp`,
+/// `mv`, `ln`, `install` and `rsync`, the files of `sed -i`, and `dd of=`.
+/// Text-based and incomplete; it only decides whether a grant offer is
+/// withheld as useless, never what runs.
+fn write_targets(command: &[String]) -> Vec<String> {
+    let mut targets = Vec::new();
+    for argument in command {
+        let words = shlex::split(argument)
+            .unwrap_or_else(|| argument.split_whitespace().map(str::to_string).collect());
+        let mut segment: Vec<String> = Vec::new();
+        let mut redirect_next = false;
+        for word in words {
+            if redirect_next {
+                redirect_next = false;
+                targets.push(word.trim_end_matches([';', '&', '|', ')']).to_string());
+                continue;
+            }
+            let ends_segment =
+                word.ends_with(';') || matches!(word.as_str(), "&&" | "||" | "|" | "&");
+            let trimmed = word.trim_end_matches(';');
+            // `>`, `>>`, `2>`, `&>`, `>|`, alone or attached to its target
+            // or to the word before (`x>>~/.zshrc`); `2>&1` writes nothing.
+            if let Some(index) = trimmed.find('>').filter(|_| !trimmed.contains(">&")) {
+                let before =
+                    trimmed[..index].trim_end_matches(|c: char| c.is_ascii_digit() || c == '&');
+                if !before.is_empty() {
+                    segment.push(before.to_string());
+                }
+                let target = trimmed[index..].trim_start_matches(['>', '|']);
+                if target.is_empty() {
+                    redirect_next = !ends_segment;
+                } else {
+                    targets.push(target.to_string());
+                }
+            } else if !trimmed.is_empty() && !matches!(trimmed, "&&" | "||" | "|" | "&") {
+                segment.push(trimmed.to_string());
+            }
+            if ends_segment {
+                targets.extend(segment_targets(&std::mem::take(&mut segment)));
+            }
+        }
+        targets.extend(segment_targets(&segment));
+    }
+    targets
+}
+
+/// The words one simple command writes to, by its program (see
+/// [`write_targets`]).
+fn segment_targets(segment: &[String]) -> Vec<String> {
+    // Skip `VAR=value` prefixes and `sudo`/`command`/`env`.
+    let mut words = segment
+        .iter()
+        .skip_while(|word| {
+            (word.contains('=') && !word.starts_with('-'))
+                || matches!(word.as_str(), "sudo" | "command" | "env" | "exec" | "nohup")
+        })
+        .map(String::as_str);
+    let Some(program) = words.next() else {
+        return Vec::new();
+    };
+    let program = program.rsplit('/').next().unwrap_or(program);
+    let words: Vec<&str> = words.collect();
+    let paths = || words.iter().filter(|word| !word.starts_with('-'));
+    let to_owned = |words: Vec<&&str>| {
+        words
+            .into_iter()
+            .map(std::string::ToString::to_string)
+            .collect()
+    };
+    if WRITES_EVERY_ARGUMENT.contains(&program) {
+        to_owned(paths().collect())
+    } else if WRITES_LAST_ARGUMENT.contains(&program) {
+        to_owned(paths().next_back().into_iter().collect())
+    } else if program == "sed" && words.iter().any(|word| word.starts_with("-i")) {
+        // Every path after the script (or all of them with `-e`).
+        let skip = usize::from(!words.contains(&"-e"));
+        to_owned(paths().skip(skip).collect())
+    } else if program == "dd" {
+        words
+            .iter()
+            .filter_map(|word| word.strip_prefix("of="))
+            .map(str::to_string)
+            .collect()
+    } else {
+        Vec::new()
+    }
+}
+
 /// Characters that end a path inside code.
 const CODE_DELIMITERS: [char; 16] = [
     '\'', '"', '`', '(', ')', '[', ']', '{', '}', ',', ';', '+', ' ', '\t', '\n', '\r',
@@ -613,11 +768,13 @@ const CODE_DELIMITERS: [char; 16] = [
 /// Paths looked at inside one word that is code.
 const MAX_EMBEDDED_PATHS: usize = 64;
 
-/// #621: the path literals in `word` when it is code rather than a path
-/// (`import os; print(os.listdir('/x'))`): the quoted strings, and the
-/// tokens that start like a path (`/`, `~`, `$`). Bounded; a path built at
-/// run time is not found here, and is explained where the sandbox denies it
-/// instead.
+/// #621: the path literals in `word` when it may be code rather than a path
+/// (any word with quotes, brackets, separators or spaces, such as
+/// `import os; print(os.listdir('/x'))`): the quoted strings, and the tokens
+/// that start like a path (`/`, `~`, `$`). Text in a message counts too: a
+/// protected path it names withholds the grant (reads are never granted
+/// anyway). Bounded; a path built at run time is not found here, and is
+/// explained where the sandbox denies it instead.
 fn embedded_paths(word: &str) -> Vec<String> {
     if !word.contains(CODE_DELIMITERS) {
         return Vec::new();

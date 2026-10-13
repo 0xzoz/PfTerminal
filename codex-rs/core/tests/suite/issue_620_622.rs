@@ -18,6 +18,7 @@ use codex_core::security_grant;
 use codex_core::security_inspection;
 use codex_features::Feature;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
@@ -59,8 +60,13 @@ struct Run {
 }
 
 /// Runs `command` (built from the Corbanu home's path) in an Aggressive
-/// session, approves it once (y, no grant) and reports what happened.
-async fn run(command: impl FnOnce(&str) -> String) -> anyhow::Result<Run> {
+/// session, approves it once (y, no grant) and reports what happened. With
+/// `shell_home`, agent commands get that folder as `HOME`.
+async fn run(
+    command: impl FnOnce(&str) -> String,
+    shell_home: Option<&std::path::Path>,
+) -> anyhow::Result<Run> {
+    let shell_home = shell_home.map(|home| home.display().to_string());
     let home = Arc::new(TempDir::new()?);
     let path = home.path().canonicalize()?;
     std::fs::write(path.join(CANARY), "x")?;
@@ -89,14 +95,27 @@ async fn run(command: impl FnOnce(&str) -> String) -> anyhow::Result<Run> {
     let test = test_codex()
         .with_home(home)
         .with_model("test-gpt-5.1-codex")
-        .with_config(|config| {
+        .with_config(move |config| {
+            if let Some(home) = shell_home {
+                config
+                    .permissions
+                    .shell_environment_policy
+                    .r#set
+                    .insert("HOME".to_string(), home);
+            }
             config.security_level = SecurityLevel::Aggressive;
             config.permissions.approval_policy =
                 Constrained::allow_any(AskForApproval::UnlessTrusted);
-            // Aggressive's own sandbox: writes only in the current folder.
+            // Aggressive's own sandbox: writes only in the current folder,
+            // not in /tmp or $TMPDIR either.
             config
                 .permissions
-                .set_permission_profile(PermissionProfile::workspace_write())
+                .set_permission_profile(PermissionProfile::workspace_write_with(
+                    &[],
+                    NetworkSandboxPolicy::Restricted,
+                    /*exclude_tmpdir_env_var*/ true,
+                    /*exclude_slash_tmp*/ true,
+                ))
                 .expect("workspace write");
             config
                 .features
@@ -171,9 +190,10 @@ async fn run(command: impl FnOnce(&str) -> String) -> anyhow::Result<Run> {
     })
 }
 
-fn python3_runs() -> bool {
-    std::process::Command::new("python3")
-        .args(["-c", "0"])
+/// Whether `program` runs here (outside any sandbox).
+fn runs(program: &str, args: &[&str]) -> bool {
+    std::process::Command::new(program)
+        .args(args)
         .output()
         .is_ok_and(|output| output.status.success())
 }
@@ -189,12 +209,13 @@ async fn issue_621_622_interpreter_listing_of_the_home_is_never_granted_and_is_l
     fn perl(home: &str) -> String {
         format!("perl -e 'opendir(my $d, \"{home}\") or die \"$!: {home}\\n\"; print readdir($d)'")
     }
-    let mut commands: Vec<(&str, Command)> = vec![("perl", perl)];
-    if python3_runs() {
-        commands.push(("python3", python));
-    }
+    let commands: Vec<(&str, Command)> = [("perl", perl as Command), ("python3", python)]
+        .into_iter()
+        .filter(|(program, _)| runs(program, &["-e", "0"]) || runs(program, &["-c", "0"]))
+        .collect();
+    assert!(!commands.is_empty(), "neither perl nor python3 runs here");
     for (name, command) in commands {
-        let run = run(command).await?;
+        let run = run(command, /*shell_home*/ None).await?;
         assert!(!run.offered, "{name}: no grant for a protected read");
         assert!(run.reason.contains(NEVER), "{name}: {}", run.reason);
         assert!(!run.output.contains(CANARY), "{name}: {}", run.output);
@@ -225,9 +246,16 @@ async fn issue_621_622_interpreter_listing_of_the_home_is_never_granted_and_is_l
 async fn issue_620_startup_file_outside_the_folder_is_offered_no_grant() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
-    // Appends nothing: the person's real start-up file stays as it is even
-    // if the sandbox let the write through (it does not).
-    let run = run(|_| "printf '' >> ~/.zshrc".to_string()).await?;
+    // The command's `~` is a folder of its own (Core still names the start-up
+    // file by the real home folder), and it appends nothing: no start-up
+    // file of the person running the test is touched, whatever happens.
+    let shell_home = TempDir::new()?;
+    let run = run(
+        |_| "printf '' >> ~/.zshrc".to_string(),
+        Some(shell_home.path()),
+    )
+    .await?;
+    assert!(!shell_home.path().join(".zshrc").exists());
     assert!(!run.offered, "no grant for ~/.zshrc");
     assert!(
         run.reason

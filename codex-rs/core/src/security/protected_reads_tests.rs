@@ -490,7 +490,37 @@ async fn issue_620_startup_file_outside_the_folder_is_never_granted() {
         note(&shell("echo '# x' >> \"$HOME/.bash_profile\"")).await,
         Some(startup_explanation("$HOME/.bash_profile"))
     );
-    assert_eq!(note(&shell("echo '# x' >> notes.txt")).await, None);
+    assert_eq!(
+        note(&shell(
+            "cp notes.txt ~/.bashrc && tee -a ~/.zshenv < notes.txt"
+        ))
+        .await,
+        Some(startup_explanation("~/.bashrc"))
+    );
+    assert_eq!(
+        note(&shell("printf x>>~/.zshrc")).await,
+        Some(startup_explanation("~/.zshrc"))
+    );
+    // Only where the command writes it: reading one, running a program from
+    // `~/.local/bin` or naming one in a message keeps the grant (it may lift
+    // a git write in the current folder).
+    for script in [
+        "echo '# x' >> notes.txt",
+        "cat ~/.gitconfig >> .git/config",
+        "grep x ~/.bashrc > .git/hooks/pre-commit 2>&1",
+        "~/.local/bin/pre-commit install",
+        "git commit -m 'document ~/.zshrc > notes'",
+    ] {
+        assert_eq!(note(&shell(script)).await, None, "{script}");
+    }
+    // A link in the current folder to a start-up file counts where it points.
+    let link_dir = tempfile::tempdir().unwrap();
+    let link = link_dir.path().join("rc-link");
+    std::os::unix::fs::symlink(user_home.join(".zshrc"), &link).unwrap();
+    assert_eq!(
+        note(&shell(&format!("echo x >> '{}'", link.display()))).await,
+        Some(startup_explanation(&link.display().to_string()))
+    );
     assert_eq!(
         denial_explanation(&session, &turn, &append, cwd.as_path(), Some(1), &denied).await,
         Some(startup_explanation("~/.zshrc"))
