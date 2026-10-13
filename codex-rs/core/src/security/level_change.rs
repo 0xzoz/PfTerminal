@@ -270,6 +270,9 @@ pub fn commit_human_level_change(
         &HomeTransitionStore::new(codex_home),
         now_unix_seconds,
     )?;
+    if live {
+        note_confirmed_here(codex_home, committed.level);
+    }
     Ok(LevelChangeReport {
         kind: match committed.kind {
             TransitionKind::Restrictive => LevelChangeKind::Stricter,
@@ -283,6 +286,34 @@ pub fn commit_human_level_change(
         live,
         not_saved: committed.not_saved,
     })
+}
+
+/// #505: Corbanu homes where a person confirmed Aggressive in `/security` in
+/// this process (raising the live policy of its sessions before the restart
+/// that loads the Aggressive rules). Lowering the level removes the home.
+static CONFIRMED_AGGRESSIVE: std::sync::Mutex<Vec<std::path::PathBuf>> =
+    std::sync::Mutex::new(Vec::new());
+
+fn note_confirmed_here(codex_home: &Path, level: SecurityLevel) {
+    let mut homes = CONFIRMED_AGGRESSIVE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    homes.retain(|home| home != codex_home);
+    if level == SecurityLevel::Aggressive {
+        homes.push(codex_home.to_path_buf());
+    }
+}
+
+/// #505: whether a person confirmed Aggressive for `codex_home` in this
+/// process, so its sessions run Aggressive before the restart that loads its
+/// rules (`corbanu exec` or an IDE session started over a stored Aggressive
+/// level was not confirmed here).
+pub(crate) fn aggressive_confirmed_here(codex_home: &Path) -> bool {
+    CONFIRMED_AGGRESSIVE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .any(|home| home == codex_home)
 }
 
 /// A policy tree built from the stored state, for a commit made while no

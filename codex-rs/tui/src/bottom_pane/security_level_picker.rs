@@ -737,9 +737,9 @@ impl SecurityLevelPicker {
                     && self.core_aggressive_now() =>
             {
                 lines.push(format!(
-                    "Saved: Aggressive. Core's protections ({}) apply in this session now; the sandbox, approval, network, environment, model-key and child-agent rows take effect when you restart Corbanu Terminal.",
+                    "Saved: Aggressive. Core's protections ({}) apply in this session now; the sandbox, network, environment, model-key and child-agent rows take effect when you restart Corbanu Terminal.",
                     if self.core_effects_now() == CORE_EFFECTS {
-                        "vault refusal, protected paths"
+                        "vault refusal, protected paths, approval for every command"
                     } else {
                         "vault refusal"
                     }
@@ -1136,10 +1136,10 @@ impl SecurityLevelPicker {
 }
 
 /// What Core's Aggressive level does in a running session (PF-23, #443).
-const CORE_EFFECTS: &str = "agent commands cannot run `corbanu vault …` and cannot open protected paths (the vault store, sign-in and credential files, and Corbanu's config, history and state), sensitive surfaces need a grant, external content reaches the model labelled untrusted, and memory summaries stop";
+const CORE_EFFECTS: &str = "agent commands cannot run `corbanu vault …` and cannot open protected paths (the vault store, sign-in and credential files, and Corbanu's config, history and state), sensitive surfaces need a grant, external content reaches the model labelled untrusted, memory summaries stop, and from each pane's next turn you approve every command that is not known read-only (never the automatic reviewer)";
 
 /// Issue #443: what only the restart applies after Aggressive is saved.
-const AT_RESTART: &str = "Starts when you restart: the Aggressive sandbox (writes only in the current folder, approved commands stay inside it), approval for every command that is not known read-only, network and web search off, secret-like environment variables removed and login profiles and shell snapshots unused, model keys held by the credential broker, and the child-agent rules. Until then this session keeps your own settings for these, and commands already running keep the permissions they started with until they end.";
+const AT_RESTART: &str = "Starts when you restart: the Aggressive sandbox (writes only in the current folder, approved commands stay inside it), network and web search off, secret-like environment variables removed and login profiles and shell snapshots unused, model keys held by the credential broker, and the child-agent rules. Until then this session keeps your own settings for these, and commands already running keep the permissions they started with until they end.";
 
 /// Core's Aggressive effects without the untrusted-content labels
 /// (`source_envelopes` off): only the vault rule is sure to hold now.

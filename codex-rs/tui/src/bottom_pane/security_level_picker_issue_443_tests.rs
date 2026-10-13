@@ -161,7 +161,7 @@ fn issue_443_screen_07_names_what_applies_now_and_at_restart() {
     picker.screen = Screen::List { note: None };
     let list = text(&picker);
     assert!(
-        list.contains("Saved: Aggressive. Core's protections (vault refusal, protected paths) apply in this session now"),
+        list.contains("Saved: Aggressive. Core's protections (vault refusal, protected paths, approval for every command) apply in this session now"),
         "{list}"
     );
     assert!(!list.contains("It takes effect when you restart"), "{list}");

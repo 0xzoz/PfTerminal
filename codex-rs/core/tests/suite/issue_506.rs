@@ -161,12 +161,29 @@ async fn run(
         })
         .await?;
     let mut warnings = Vec::new();
-    while let EventMsg::Warning(warning) = wait_for_event(&test.codex, |event| {
-        matches!(event, EventMsg::TurnComplete(_) | EventMsg::Warning(_))
-    })
-    .await
-    {
-        warnings.push(warning.message);
+    // #505: once Aggressive is confirmed a person approves every command
+    // that is not known read-only; approve it (the sandbox still decides).
+    loop {
+        match wait_for_event(&test.codex, |event| {
+            matches!(
+                event,
+                EventMsg::TurnComplete(_) | EventMsg::Warning(_) | EventMsg::ExecApprovalRequest(_)
+            )
+        })
+        .await
+        {
+            EventMsg::Warning(warning) => warnings.push(warning.message),
+            EventMsg::ExecApprovalRequest(approval) => {
+                test.codex
+                    .submit(Op::ExecApproval {
+                        id: approval.effective_approval_id(),
+                        turn_id: None,
+                        decision: codex_protocol::protocol::ReviewDecision::Approved,
+                    })
+                    .await?;
+            }
+            _ => break,
+        }
     }
     let requests = captured.requests();
     let last = requests.last().expect("the model was asked again");
