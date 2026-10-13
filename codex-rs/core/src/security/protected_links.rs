@@ -13,11 +13,20 @@
 //! zsh-fork shell intercepts each program a script starts, that program's
 //! own arguments (so a script file's `ln` is seen there too).
 //!
-//! Out of reach: a target built at run time (`ln -s "$(cat f)" x`), a link
-//! made by a script file without zsh-fork, keys typed into a running shell
-//! (`write_stdin`) and remote environments. Writes through such a link stay
-//! refused by the sandbox; a hard link to a protected file is refused by the
-//! sandbox itself.
+//! Keys typed into a running shell (`write_stdin`) are read the same way, one
+//! write at a time. Any target whose text names a `.codex` or `.agents`
+//! folder (also through a glob such as `.agen*`), anywhere, is refused too,
+//! so a link cannot be made in two steps (`ln -s y/.agents x`, then `ln -s .
+//! y`).
+//!
+//! Out of reach: a target built at run time (`ln -s "$(cat f)" x`); a link
+//! made by a script file without zsh-fork, or typed across several writes;
+//! links copied, moved or unpacked (`cp -a`, `mv`, `rsync -l`, `tar`, `git
+//! checkout`); tools not listed (`awk system()`, `Rscript`, PowerShell
+//! `-EncodedCommand`); remote environments. Text that only looks like a
+//! command (a heredoc's documentation, `find -name ln`) may be refused.
+//! Writes through such a link stay refused by the sandbox; a hard link to a
+//! protected file is refused by the sandbox itself.
 
 use std::path::Component;
 use std::path::Path;
@@ -36,7 +45,7 @@ mod parse;
 use parse::Candidate;
 #[cfg(test)]
 use parse::calls_link;
-use parse::link_targets;
+pub(crate) use parse::link_targets;
 
 /// What a person is told when such a command is refused.
 pub(crate) fn explanation(target: &str) -> String {
@@ -59,20 +68,25 @@ pub(crate) async fn refusal(
     command: &[String],
     cwd: &Path,
 ) -> Option<String> {
-    let candidates = link_targets(command);
-    let first = candidates.first()?.target.clone();
     let inputs = Inputs::capture(session, turn)?;
-    let cwd = cwd.to_path_buf();
-    let found = match tokio::time::timeout(
-        LOOKUP_TIMEOUT,
-        tokio::task::spawn_blocking(move || inputs.protected_target(&candidates, &cwd)),
-    )
-    .await
-    {
-        Ok(Ok(found)) => found?,
-        // The lookups did not finish: refused (nothing is created), naming
-        // the first link target.
-        Ok(Err(_)) | Err(_) => first,
+    let found = link_targets(command);
+    let first = found.candidates.first()?.target.clone();
+    let found = if found.overflow {
+        // Too many paths to look at: refused, naming the first.
+        first
+    } else {
+        let (candidates, cwd) = (found.candidates, cwd.to_path_buf());
+        match tokio::time::timeout(
+            LOOKUP_TIMEOUT,
+            tokio::task::spawn_blocking(move || inputs.protected_target(&candidates, &cwd)),
+        )
+        .await
+        {
+            Ok(Ok(found)) => found?,
+            // The lookups did not finish: refused (nothing is created),
+            // naming the first link target.
+            Ok(Err(_)) | Err(_) => first,
+        }
     };
     let refusal = explanation(&found);
     super::protected_reads::notify(session, turn, refusal.clone()).await;
@@ -147,18 +161,54 @@ impl Inputs {
         kept.extend(real);
         let writable: Vec<&AbsolutePathBuf> = denials.home_writable_paths().collect();
         candidates.iter().find_map(|candidate| {
-            bases(candidate, cwd)
-                .iter()
-                .flat_map(|base| self.resolve(&candidate.target, base))
-                .any(|path| lands_in(&path, &kept, &writable))
-                .then(|| candidate.target.clone())
+            (names_agent_settings(&candidate.target)
+                || self
+                    .bases(candidate, cwd)
+                    .iter()
+                    .flat_map(|base| self.resolve(&candidate.target, base))
+                    .any(|path| lands_in(&path, &kept, &writable)))
+            .then(|| candidate.target.clone())
         })
+    }
+
+    /// The folders a candidate's relative target may be read from: the
+    /// command's, and each of the candidate's folders (expanded as targets
+    /// are, from the command's folder).
+    fn bases(&self, candidate: &Candidate, cwd: &Path) -> Vec<PathBuf> {
+        let mut bases = vec![cwd.to_path_buf()];
+        for folder in &candidate.link_folders {
+            let folder = match self.expand(folder, cwd) {
+                Some(folder) => cwd.join(folder),
+                None => continue,
+            };
+            if !bases.contains(&folder) {
+                bases.push(folder);
+            }
+        }
+        bases
     }
 
     /// Where `word` points from `base`: as written (`..` taken from the text)
     /// and as the system reads it (`..` taken after following each link on
     /// the way, `ln -s evil/../.agents` with `evil` a link).
     fn resolve(&self, word: &str, base: &Path) -> Vec<AbsolutePathBuf> {
+        let Some(expanded) = self.expand(word, base) else {
+            return Vec::new();
+        };
+        let written = AbsolutePathBuf::resolve_path_against_base(&expanded, base);
+        let mut resolved = vec![written];
+        if let Some(physical) = physical(base, Path::new(&expanded))
+            && !resolved.contains(&physical)
+        {
+            resolved.push(physical);
+        }
+        resolved
+    }
+
+    /// `word` with the home, Corbanu home and shell folder variables
+    /// expanded (the shell's folder is `base`); `None` where another
+    /// variable is left.
+    fn expand(&self, word: &str, base: &Path) -> Option<String> {
         let codex_home = self.codex_home.to_string_lossy();
         let base_text = base.to_string_lossy();
         let mut expanded = word.to_string();
@@ -181,30 +231,68 @@ impl Inputs {
                 expanded = format!("{home}/{rest}");
             }
         }
-        if expanded.is_empty() || expanded.contains('$') || expanded.starts_with('~') {
-            return Vec::new();
-        }
-        let written = AbsolutePathBuf::resolve_path_against_base(&expanded, base);
-        let mut resolved = vec![written];
-        if let Some(physical) = physical(base, Path::new(&expanded))
-            && !resolved.contains(&physical)
-        {
-            resolved.push(physical);
-        }
-        resolved
+        (!expanded.is_empty() && !expanded.contains('$') && !expanded.starts_with('~'))
+            .then_some(expanded)
     }
 }
 
-/// The folders a candidate's relative target may be read from.
-fn bases(candidate: &Candidate, cwd: &Path) -> Vec<PathBuf> {
-    let mut bases = vec![cwd.to_path_buf()];
-    for folder in &candidate.link_folders {
-        let folder = cwd.join(folder);
-        if !bases.contains(&folder) {
-            bases.push(folder);
+/// The agent settings folder names (any letter case: macOS and Windows
+/// disks ignore it).
+const AGENT_SETTINGS: [&str; 2] = [".codex", ".agents"];
+
+/// Whether `target`, as written, names a `.codex` or `.agents` folder (or
+/// one a glob in it could match) anywhere on its way.
+fn names_agent_settings(target: &str) -> bool {
+    target.split(['/', '\\']).any(|name| {
+        AGENT_SETTINGS.iter().any(|settings| {
+            name.eq_ignore_ascii_case(settings)
+                || (name.contains(['*', '?', '[']) && glob_matches(name, settings))
+        })
+    })
+}
+
+/// Whether the shell glob `pattern` (`*`, `?`, `[…]`) matches `name`, any
+/// letter case. As in a shell, a leading `.` must be written.
+fn glob_matches(pattern: &str, name: &str) -> bool {
+    fn matches(pattern: &[char], name: &[char]) -> bool {
+        match pattern.split_first() {
+            None => name.is_empty(),
+            Some(('*', rest)) => (0..=name.len()).any(|skip| matches(rest, &name[skip..])),
+            Some(('?', rest)) => !name.is_empty() && matches(rest, &name[1..]),
+            Some(('[', rest)) => {
+                let Some(close) = rest.iter().skip(1).position(|c| *c == ']').map(|i| i + 1) else {
+                    return name.first() == Some(&'[') && matches(rest, &name[1..]);
+                };
+                let (set, after) = (&rest[..close], &rest[close + 1..]);
+                let (negated, set) = match set.split_first() {
+                    Some(('!' | '^', set)) => (true, set),
+                    _ => (false, set),
+                };
+                let Some(first) = name.first() else {
+                    return false;
+                };
+                let mut found = false;
+                let mut index = 0;
+                while index < set.len() {
+                    if index + 2 < set.len() && set[index + 1] == '-' {
+                        found |= (set[index]..=set[index + 2]).contains(first);
+                        index += 3;
+                    } else {
+                        found |= set[index] == *first;
+                        index += 1;
+                    }
+                }
+                found != negated && matches(after, &name[1..])
+            }
+            Some((c, rest)) => name.first() == Some(c) && matches(rest, &name[1..]),
         }
     }
-    bases
+    let pattern: Vec<char> = pattern.to_ascii_lowercase().chars().collect();
+    let name: Vec<char> = name.to_ascii_lowercase().chars().collect();
+    if name.first() == Some(&'.') && pattern.first() != Some(&'.') {
+        return false;
+    }
+    matches(&pattern, &name)
 }
 
 /// `path` from `base`, each existing name followed to where it links before

@@ -45,7 +45,7 @@ const KEYWORDS: [&str; 12] = [
 /// `Path.symlink_to(`, `os.link(`, Ruby's `FileUtils.ln_s(`, perl's
 /// `symlink "a", "b"`…), matched where no letter, digit or `_` comes before
 /// them, so `unlink(`, `readlink(` and `is_symlink(` do not count.
-const LINK_CALLS: [&str; 11] = [
+const LINK_CALLS: [&str; 15] = [
     "symlink(",
     "symlink ",
     "symlinkSync(",
@@ -56,12 +56,17 @@ const LINK_CALLS: [&str; 11] = [
     "linkSync(",
     "ln_s(",
     "ln_sf(",
+    "ln_s ",
+    "ln_sf ",
     "ln(",
+    "CreateSymbolicLink(",
+    "CreateHardLink(",
 ];
 /// Scripts inside scripts (and code) looked into.
 const MAX_DEPTH: usize = 4;
-/// Paths (and folders) kept for one command.
-const MAX_CANDIDATES: usize = 64;
+/// Paths (and folders) kept for one command; past it the command is
+/// refused (see [`Found::overflow`]).
+const MAX_CANDIDATES: usize = 256;
 
 /// A path a command links to, as spelled, and the folders a relative one may
 /// be read from besides the command's own.
@@ -83,11 +88,14 @@ pub(crate) struct Candidate {
 /// and every folder a script changes to (`cd sub && ln -s ../.agents x`):
 /// more folders than the one it is relative to, so a link may be refused that
 /// would not point into a protected path, never the reverse.
-pub(crate) fn link_targets(command: &[String]) -> Vec<Candidate> {
+pub(crate) fn link_targets(command: &[String]) -> Found {
     let mut scan = Scan::default();
     simple_command(command, MAX_DEPTH, &mut scan);
-    let Scan { mut found, folders } = scan;
-    found.truncate(MAX_CANDIDATES);
+    let Scan {
+        mut found,
+        folders,
+        overflow,
+    } = scan;
     for candidate in &mut found {
         for folder in &folders {
             if !candidate.link_folders.contains(folder) {
@@ -95,7 +103,19 @@ pub(crate) fn link_targets(command: &[String]) -> Vec<Candidate> {
             }
         }
     }
-    found
+    Found {
+        candidates: found,
+        overflow,
+    }
+}
+
+/// What [`link_targets`] found.
+#[derive(Debug, Default)]
+pub(crate) struct Found {
+    pub(crate) candidates: Vec<Candidate>,
+    /// More was found than is looked at: the command is refused, so a
+    /// protected target cannot hide behind many others.
+    pub(crate) overflow: bool,
 }
 
 #[derive(Default)]
@@ -103,6 +123,7 @@ struct Scan {
     found: Vec<Candidate>,
     /// Folders a script changes to.
     folders: Vec<String>,
+    overflow: bool,
 }
 
 pub(super) fn program_name(word: &str) -> String {
@@ -129,7 +150,9 @@ fn known(name: &str) -> bool {
         || INTERPRETERS.contains(&name)
         || matches!(
             name,
-            "ln" | "cp"
+            "ln" | "gln"
+                | "cp"
+                | "gcp"
                 | "mklink"
                 | "new-item"
                 | "ni"
@@ -148,6 +171,10 @@ fn known(name: &str) -> bool {
 fn command_words(words: &[String]) -> Vec<&str> {
     let mut command: Vec<&str> = Vec::new();
     for word in words {
+        // `f() {`, `f(){`: a function's header; its body is the command.
+        if command.is_empty() && word.contains("()") {
+            continue;
+        }
         let word = word.trim_end_matches([')', '}', '`']);
         if !command.is_empty() {
             command.push(word);
@@ -161,6 +188,7 @@ fn command_words(words: &[String]) -> Vec<&str> {
         if word.is_empty()
             || KEYWORDS.contains(&word)
             || (word.contains('=') && !word.starts_with('-'))
+            || word.ends_with('{')
         {
             continue;
         }
@@ -204,14 +232,16 @@ fn simple_command(words: &[String], depth: usize, found: &mut Scan) {
     }
     match name {
         "cd" | "pushd" => {
-            if let Some(folder) = arguments.iter().find(|word| !word.starts_with('-'))
-                && found.folders.len() < MAX_CANDIDATES
-            {
-                found.folders.push((*folder).to_string());
+            if let Some(folder) = arguments.iter().find(|word| !word.starts_with('-')) {
+                if found.folders.len() < MAX_CANDIDATES {
+                    found.folders.push((*folder).to_string());
+                } else {
+                    found.overflow = true;
+                }
             }
         }
-        "ln" => ln(arguments, found),
-        "cp" => cp(arguments, found),
+        "ln" | "gln" => ln(arguments, found),
+        "cp" | "gcp" => cp(arguments, found),
         "mklink" => {
             // `mklink [/D|/H|/J] link target`
             let paths: Vec<&&str> = arguments
@@ -250,6 +280,8 @@ fn simple_command(words: &[String], depth: usize, found: &mut Scan) {
                     });
                     simple_command(&words, depth.saturating_sub(1), found);
                 }
+                // `[IO.File]::CreateSymbolicLink('ag', '.agents')`.
+                code(&script, depth, found);
             }
         }
         _ if INTERPRETERS.contains(&name) => {
@@ -294,10 +326,11 @@ fn parse<'a>(arguments: &[&'a str]) -> Parsed<'a> {
                         parsed.folder = value;
                     }
                 }
-                None => parsed.flags.push_str(&format!(" --{long}")),
+                None => parsed.flags.push_str(&format!(" --{long} ")),
             }
         } else {
             let cluster = &word[1..];
+            parsed.flags.push(' ');
             match cluster.find(['t', 'S']) {
                 Some(index) => {
                     parsed.flags.push_str(&cluster[..index]);
@@ -389,11 +422,13 @@ fn push(found: &mut Scan, target: &str, link_folders: Vec<String>) {
         target,
         link_folders,
     };
-    if !candidate.target.is_empty()
-        && found.found.len() < MAX_CANDIDATES
-        && !found.found.contains(&candidate)
-    {
+    if candidate.target.is_empty() || found.found.contains(&candidate) {
+        return;
+    }
+    if found.found.len() < MAX_CANDIDATES {
         found.found.push(candidate);
+    } else {
+        found.overflow = true;
     }
 }
 
@@ -417,8 +452,11 @@ fn shell_script(script: &str, depth: usize, found: &mut Scan) {
     // A line ends a command (a quoted string over several lines is cut into
     // words too), and so do `;`, `&&`, `||`, `|` and `&` between words (not
     // inside quoted code).
-    for line in script.lines() {
-        let words = shlex::split(line)
+    // A backslash at a line's end continues it.
+    let joined = script.replace("\\\r\n", " ").replace("\\\n", " ");
+    for line in joined.lines() {
+        let line = spaced_operators(line);
+        let words = shlex::split(&line)
             .unwrap_or_else(|| line.split_whitespace().map(str::to_string).collect());
         for word in words {
             if matches!(word.as_str(), "&&" | "||" | "|" | "&" | ";") {
@@ -441,6 +479,38 @@ fn shell_script(script: &str, depth: usize, found: &mut Scan) {
     }
 }
 
+/// `line` with a space on each side of every `;`, `&` and `|` outside
+/// quotes (`true;ln …`, `cd x&&ln …`), so they separate words.
+fn spaced_operators(line: &str) -> String {
+    let mut spaced = String::with_capacity(line.len() + 8);
+    let mut quote = None;
+    let mut escaped = false;
+    for c in line.chars() {
+        if escaped {
+            escaped = false;
+        } else if quote == Some('\'') {
+            if c == '\'' {
+                quote = None;
+            }
+        } else if c == '\\' {
+            escaped = true;
+        } else if let Some(open) = quote {
+            if c == open {
+                quote = None;
+            }
+        } else if matches!(c, '\'' | '"' | '`') {
+            quote = Some(c);
+        } else if matches!(c, ';' | '&' | '|') {
+            spaced.push(' ');
+            spaced.push(c);
+            spaced.push(' ');
+            continue;
+        }
+        spaced.push(c);
+    }
+    spaced
+}
+
 /// Code an interpreter runs: when it calls a link function, every string it
 /// quotes is a candidate target; a string that is a command (`os.system('ln
 /// -s …')`) or the start of one (`['ln', '-s', …]`) is read as one.
@@ -448,7 +518,14 @@ fn code(text: &str, depth: usize, found: &mut Scan) {
     let Some(depth) = depth.checked_sub(1) else {
         return;
     };
-    let literals = literals(text);
+    let (literals, overflow) = literals(text);
+    // Past the bound only where a link could hide: code that calls a link
+    // function or names `ln`.
+    found.overflow |= overflow
+        && (calls_link(text)
+            || ["'ln'", "\"ln\"", "ln -", "mklink"]
+                .iter()
+                .any(|word| text.contains(word)));
     if calls_link(text) {
         for literal in &literals {
             if !literal.contains('\n') {
@@ -470,8 +547,9 @@ fn code(text: &str, depth: usize, found: &mut Scan) {
     }
 }
 
-/// The strings `code` quotes (`'…'`, `"…"`, `` `…` ``), in order, bounded.
-fn literals(code: &str) -> Vec<String> {
+/// The strings `code` quotes (`'…'`, `"…"`, `` `…` ``), in order, and
+/// whether there were more than are kept.
+fn literals(code: &str) -> (Vec<String>, bool) {
     let mut literals = Vec::new();
     let mut chars = code.chars();
     while let Some(c) = chars.next() {
@@ -492,14 +570,15 @@ fn literals(code: &str) -> Vec<String> {
                 literal.push(next);
             }
         }
-        if !literal.is_empty() && literal.len() < 4096 {
-            literals.push(literal);
+        if literal.is_empty() {
+            continue;
         }
-        if literals.len() == MAX_CANDIDATES {
-            break;
+        if literals.len() == MAX_CANDIDATES || literal.len() > 4096 {
+            return (literals, true);
         }
+        literals.push(literal);
     }
-    literals
+    (literals, false)
 }
 
 /// Whether `code` calls one of [`LINK_CALLS`].

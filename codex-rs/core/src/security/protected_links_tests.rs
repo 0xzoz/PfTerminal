@@ -15,6 +15,7 @@ fn argv(words: &[&str]) -> Vec<String> {
 
 fn targets(command: &[String]) -> Vec<String> {
     link_targets(command)
+        .candidates
         .into_iter()
         .map(|candidate| candidate.target)
         .collect()
@@ -71,7 +72,7 @@ fn issue_623_finds_what_ln_cp_and_windows_links_point_to() {
         Vec::<String>::new()
     );
     // The link's own name is not a target.
-    let found = link_targets(&shell("ln -s .agents sub/ag"));
+    let found = link_targets(&shell("ln -s .agents sub/ag")).candidates;
     assert_eq!(
         found[0].link_folders,
         vec!["sub".to_string(), "sub/ag".to_string()]
@@ -158,7 +159,7 @@ fn issue_623_finds_links_behind_keywords_wrappers_and_interpreter_commands() {
     }
     assert_eq!(targets(&shell("ln -st links .agents")), vec![".agents"]);
     assert_eq!(
-        link_targets(&shell("ln -sft links .agents"))[0].link_folders,
+        link_targets(&shell("ln -sft links .agents")).candidates[0].link_folders,
         vec!["links".to_string()]
     );
     assert_eq!(targets(&shell("ln -tlinks -s .codex")), vec![".codex"]);
@@ -197,6 +198,75 @@ fn issue_623_finds_links_behind_keywords_wrappers_and_interpreter_commands() {
     );
 }
 
+/// Review r2: operators inside words, line continuations, `cp` options
+/// before `-s`, functions, Ruby without parentheses, PowerShell's .NET call,
+/// GNU `gln`, and a bound that refuses instead of dropping.
+#[test]
+fn issue_623_finds_links_behind_operators_continuations_and_more_tools() {
+    for script in [
+        "true;ln -s .agents ag",
+        "cd sub&&ln -s ../.agents x",
+        "ls||ln -s .agents ag",
+        "ln -s \\\n  .agents ag",
+        "cp --verbose -s .agents x",
+        "f(){ ln -s .agents ag; }; f",
+        "f() { ln -s .agents ag; }",
+        "ruby -e \"require 'fileutils'; FileUtils.ln_s '.agents', 'ag'\"",
+        "gln -s .agents ag",
+    ] {
+        assert!(
+            targets(&shell(script))
+                .iter()
+                .any(|target| target.ends_with(".agents")),
+            "{script}: {:?}",
+            targets(&shell(script))
+        );
+    }
+    assert!(
+        targets(&argv(&[
+            "pwsh",
+            "-Command",
+            "[IO.File]::CreateSymbolicLink('ag', '.agents')"
+        ]))
+        .contains(&".agents".to_string())
+    );
+    // Quoted operators stay in their word.
+    assert_eq!(
+        targets(&shell("echo 'a;ln -s .agents ag' > notes.txt")),
+        Vec::<String>::new()
+    );
+    let many = (0..300)
+        .map(|index| format!("'x{index}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let code = format!("import os; [{many}]; os.symlink('.agents', 'ag')");
+    assert!(link_targets(&argv(&["python3", "-c", &code])).overflow);
+    // Many strings in code that makes no link are not a reason to refuse.
+    let quiet = format!("print([{many}])");
+    assert!(!link_targets(&argv(&["python3", "-c", &quiet])).overflow);
+}
+
+#[test]
+fn issue_623_names_agent_settings_in_any_case_or_glob() {
+    for target in [
+        ".agents",
+        "sub/.agents",
+        "y/.agents/notes.md",
+        ".AGENTS",
+        ".Codex",
+        ".agen*",
+        ".a?ents",
+        ".[a]gents",
+        ".[!x]odex",
+        "..\\.agents",
+    ] {
+        assert!(names_agent_settings(target), "{target}");
+    }
+    for target in [".agents-old", "agents", "*", ".a", "notes.md", ".[!a]gents"] {
+        assert!(!names_agent_settings(target), "{target}");
+    }
+}
+
 #[test]
 fn issue_623_only_calls_that_create_a_link_count() {
     for code in [
@@ -226,7 +296,7 @@ fn issue_623_only_calls_that_create_a_link_count() {
 
 #[test]
 fn issue_623_reads_relative_targets_from_folders_the_script_changes_to() {
-    let found = link_targets(&shell("cd sub && ln -s ../.agents x"));
+    let found = link_targets(&shell("cd sub && ln -s ../.agents x")).candidates;
     assert_eq!(found.len(), 1);
     assert!(
         found[0].link_folders.contains(&"sub".to_string()),
@@ -272,7 +342,9 @@ fn project() -> Project {
 
 #[cfg(unix)]
 fn refused(project: &Project, command: &[String], cwd: &Path) -> Option<String> {
-    project.inputs.protected_target(&link_targets(command), cwd)
+    project
+        .inputs
+        .protected_target(&link_targets(command).candidates, cwd)
 }
 
 #[cfg(unix)]
@@ -331,6 +403,21 @@ fn issue_623_refuses_relative_and_absolute_links_into_agent_settings() {
         ),
         Some("evil/../.agents".to_string())
     );
+    // Two steps: a link whose text names `.agents` anywhere is refused.
+    assert_eq!(
+        refused(&project, &shell("ln -s y/.agents x"), root),
+        Some("y/.agents".to_string())
+    );
+    assert_eq!(
+        refused(&project, &shell("ln -s .agen* ag"), root),
+        Some(".agen*".to_string())
+    );
+    // Folders a script changes to are expanded like targets.
+    let home = format!(
+        "cd {} && ln -s rules r",
+        project.inputs.codex_home.display()
+    );
+    assert!(refused(&project, &shell(&home), root).is_some());
     // A link to the Corbanu home is refused too.
     let home = format!("ln -s {} h", project.inputs.codex_home.display());
     assert!(refused(&project, &shell(&home), root).is_some());
@@ -343,7 +430,6 @@ fn issue_623_other_links_are_not_refused() {
     let root = project.root.as_path();
     for script in [
         "ln -s src/notes.py n",
-        "ln -s sub/.agents x",
         "ln -s .agents-old x",
         "ln -s . self",
         "python3 -c \"import os; os.symlink('notes.txt', 'n')\"",

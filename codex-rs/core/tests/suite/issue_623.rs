@@ -52,6 +52,18 @@ struct Run {
 /// Runs `command` (built from the project's path) at `level` in a project
 /// holding `.agents/notes.md`, approving it if asked.
 async fn run(level: SecurityLevel, command: impl FnOnce(&Path) -> String) -> anyhow::Result<Run> {
+    run_calls(level, |root| {
+        vec![("call-0", "exec_command", json!({ "cmd": command(root) }))]
+    })
+    .await
+}
+
+/// [`run`] for several tool calls, one model step each; the last call's
+/// output is reported.
+async fn run_calls(
+    level: SecurityLevel,
+    calls: impl FnOnce(&Path) -> Vec<(&'static str, &'static str, serde_json::Value)>,
+) -> anyhow::Result<Run> {
     let server = start_mock_server().await;
     let test = test_codex()
         .with_home(Arc::new(TempDir::new()?))
@@ -79,27 +91,24 @@ async fn run(level: SecurityLevel, command: impl FnOnce(&Path) -> String) -> any
     let root = test.cwd_path().canonicalize()?;
     std::fs::create_dir_all(root.join(".agents"))?;
     std::fs::write(root.join(".agents").join("notes.md"), "orig\n")?;
-    let command = command(&root);
-    let captured = mount_sse_sequence(
-        &server,
-        vec![
+    let calls = calls(&root);
+    let last = calls.last().map(|(id, _, _)| *id).unwrap_or_default();
+    let mut steps: Vec<_> = calls
+        .iter()
+        .map(|(id, tool, arguments)| {
             sse(vec![
-                ev_response_created("call-0"),
-                ev_function_call(
-                    "call-0",
-                    "exec_command",
-                    &json!({ "cmd": command }).to_string(),
-                ),
-                ev_completed("call-0"),
-            ]),
-            sse(vec![
-                ev_response_created("done"),
-                ev_assistant_message("msg-done", "done"),
-                ev_completed("done"),
-            ]),
-        ],
-    )
-    .await;
+                ev_response_created(id),
+                ev_function_call(id, tool, &arguments.to_string()),
+                ev_completed(id),
+            ])
+        })
+        .collect();
+    steps.push(sse(vec![
+        ev_response_created("done"),
+        ev_assistant_message("msg-done", "done"),
+        ev_completed("done"),
+    ]));
+    let captured = mount_sse_sequence(&server, steps).await;
     std::mem::forget(server);
     let thread = test.session_configured.thread_id;
     test.codex
@@ -142,7 +151,7 @@ async fn run(level: SecurityLevel, command: impl FnOnce(&Path) -> String) -> any
     let output = captured
         .requests()
         .last()
-        .and_then(|request| request.function_call_output_text("call-0"))
+        .and_then(|request| request.function_call_output_text(last))
         .unwrap_or_default();
     let denials =
         security_inspection::observe(test.codex_home_path(), level, Some(thread), i64::MAX / 2)
@@ -215,6 +224,35 @@ async fn issue_623_link_into_agent_settings_is_not_created_under_aggressive() ->
         .await?;
         assert_refused("python3", &python);
     }
+    Ok(())
+}
+
+/// Review r2: typing the link command into a running shell is refused too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_623_link_typed_into_a_running_shell_is_not_created() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let typed = run_calls(SecurityLevel::Aggressive, |_| {
+        vec![
+            (
+                "call-open",
+                "exec_command",
+                json!({ "cmd": "/bin/sh -i", "yield_time_ms": 300, "tty": true }),
+            ),
+            (
+                "call-stdin",
+                "write_stdin",
+                json!({ "session_id": 1000, "chars": "ln -s .agents ag\n", "yield_time_ms": 500 }),
+            ),
+        ]
+    })
+    .await?;
+    assert!(
+        !typed.created,
+        "the typed link was created: {}",
+        typed.output
+    );
+    assert!(typed.output.contains(REFUSED), "{}", typed.output);
     Ok(())
 }
 

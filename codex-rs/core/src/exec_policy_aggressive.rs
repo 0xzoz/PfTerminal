@@ -10,6 +10,12 @@
 //! is suspended, not deleted: the person is asked as usual, the prompt says
 //! which remembered approval was not applied, and under Permissive the rules
 //! apply as before. `prompt` and `forbidden` rules always apply.
+//!
+//! The mark means "the Corbanu home's rules file says so": anything that can
+//! write that file outside Aggressive (a person, a command run with full
+//! access) can add one. That is no weaker than before, when every rule in it
+//! applied under Aggressive; under Aggressive the file is read-only to agent
+//! commands.
 
 use std::path::Path;
 
