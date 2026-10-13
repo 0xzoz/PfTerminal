@@ -4957,9 +4957,13 @@ fn flatten_namespaced_history(
         };
         let tool_name = codex_tools::ToolName::namespaced(namespace, name.clone());
         let flat = if flat_tool_names.is_empty() {
-            Some(crate::tools::flat_tool_names::flat_tool_name_for(&tool_name))
+            Some(crate::tools::flat_tool_names::flat_tool_name_for(
+                &tool_name,
+            ))
         } else {
-            flat_tool_names.flat_name_for(&tool_name).map(str::to_string)
+            flat_tool_names
+                .flat_name_for(&tool_name)
+                .map(str::to_string)
         };
         if let Some(flat) = flat.filter(|flat| offered.contains(flat.as_str())) {
             *name = flat;

@@ -60,7 +60,10 @@ async fn omitted_tools_are_reported_once_per_session() {
         state.note_omitted_tools(&[tool("a"), tool("b")]),
         vec![tool("a"), tool("b")]
     );
-    assert_eq!(state.note_omitted_tools(&[tool("a"), tool("b")]), Vec::new());
+    assert_eq!(
+        state.note_omitted_tools(&[tool("a"), tool("b")]),
+        Vec::new()
+    );
     // A tool newly left out later (another MCP server connected) is reported.
     assert_eq!(
         state.note_omitted_tools(&[tool("a"), tool("b"), tool("c")]),

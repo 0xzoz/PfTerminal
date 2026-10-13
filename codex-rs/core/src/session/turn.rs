@@ -2083,10 +2083,7 @@ fn omitted_tools_notice(names: &[String]) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     if names.len() > OMITTED_TOOLS_NAMED {
-        listed.push_str(&format!(
-            " and {} more",
-            names.len() - OMITTED_TOOLS_NAMED
-        ));
+        listed.push_str(&format!(" and {} more", names.len() - OMITTED_TOOLS_NAMED));
     }
     let count = names.len();
     format!(
