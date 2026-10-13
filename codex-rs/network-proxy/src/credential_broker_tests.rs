@@ -862,7 +862,7 @@ fn pf_28_s02_legacy_route_returns_a_gate_for_the_injected_value() {
     let Ok(CredentialRouting::Direct(Some(gate))) = broker.route_request_credentials(
         "https",
         "api.github.com",
-        443,
+        /*port*/ 443,
         "GET",
         "/user",
         &mut headers,
@@ -885,7 +885,7 @@ fn pf_28_s02_legacy_route_is_unchanged_without_the_gate() {
     let routing = broker.route_request_credentials(
         "https",
         "github.com",
-        443,
+        /*port*/ 443,
         "GET",
         "/settings/tokens",
         &mut headers,

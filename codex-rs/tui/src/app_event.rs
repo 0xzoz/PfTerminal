@@ -476,11 +476,19 @@ pub(crate) enum AppEvent {
     SubmitSpawnAgentTask {
         thread_id: codex_protocol::ThreadId,
         task: String,
+        /// #660: another agent sent it while the security kill switch was
+        /// on: it waits in the mailbox for the pane's next turn even when it
+        /// is handled after the switch was turned off.
+        sent_while_kill_switch_on: bool,
     },
     /// Start a normal turn in an operator-owned native user pane.
     SubmitCodexUserPaneTask {
         thread_id: codex_protocol::ThreadId,
         task: String,
+        /// #660: another agent sent it while the security kill switch was
+        /// on: it is reported not sent even when it is handled after the
+        /// switch was turned off.
+        sent_while_kill_switch_on: bool,
     },
     /// Deliver an edge-adapter message through the canonical native mailbox.
     SendSpawnAgentMailboxMessage {

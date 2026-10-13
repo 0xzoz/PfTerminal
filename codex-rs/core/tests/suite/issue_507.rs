@@ -205,7 +205,7 @@ fn other_process_switch(
     if let Ok(saved) = std::fs::read(home.join("security_state.json")) {
         std::fs::write(scratch.join("security_state.json"), saved)?;
     }
-    let basis = LevelBasis::read(scratch, SecurityLevel::Aggressive, None);
+    let basis = LevelBasis::read(scratch, SecurityLevel::Aggressive, /*thread*/ None);
     commit_human_revocation(
         scratch,
         SecurityLevel::Aggressive,
@@ -249,7 +249,12 @@ async fn issue_507_kill_switch_from_another_process_stops_the_running_command() 
 
     let other = tempfile::TempDir::new()?;
     let started = std::time::Instant::now();
-    other_process_switch(&home, other.path(), HumanRevocation::KillSwitchOn, 1_000)?;
+    other_process_switch(
+        &home,
+        other.path(),
+        HumanRevocation::KillSwitchOn,
+        /*now*/ 1_000,
+    )?;
     expect_stopped(&test).await;
     let latency = started.elapsed();
     assert!(
@@ -261,7 +266,12 @@ async fn issue_507_kill_switch_from_another_process_stops_the_running_command() 
     assert!(!marker.exists(), "{} was written", marker.display());
     assert_eq!(captured.requests().len(), 1);
 
-    other_process_switch(&home, other.path(), HumanRevocation::KillSwitchOff, 1_001)?;
+    other_process_switch(
+        &home,
+        other.path(),
+        HumanRevocation::KillSwitchOff,
+        /*now*/ 1_001,
+    )?;
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     while kill_switch_on(&home) && std::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -306,7 +316,7 @@ async fn issue_507_kill_switch_cancels_a_streaming_reply_and_its_tool_calls() ->
         .await?;
     submit(&test, "start a reply").await?;
     let _ = first_gate.send(());
-    server.wait_for_request_count(1).await;
+    server.wait_for_request_count(/*count*/ 1).await;
     // The reply has started streaming and waits for the rest.
     tokio::time::sleep(Duration::from_millis(500)).await;
 

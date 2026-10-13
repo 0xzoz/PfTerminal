@@ -3,8 +3,10 @@
 //! restrictions rule out in place, never logs it out, refuses a thread on it
 //! with the reason, and says so at initialize. Named accounts off: unchanged.
 
+#[cfg(unix)]
 use anyhow::Context;
 use anyhow::Result;
+#[cfg(unix)]
 use app_test_support::DISABLE_PLUGIN_STARTUP_TASKS_ARG;
 use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
@@ -224,13 +226,13 @@ async fn reused_local_daemon_leaves_a_ruled_out_default_login_and_refuses_it() -
 
     websocket
         .send(request(
-            1,
+            /*id*/ 1,
             "initialize",
             json!({"clientInfo": {"name": "codex-tui", "version": "0.0.0-test"},
                    "capabilities": {"experimentalApi": true}}),
         ))
         .await?;
-    let initialize = read_response(&mut websocket, 1).await?;
+    let initialize = read_response(&mut websocket, /*id*/ 1).await?;
     websocket
         .send(Message::Text(
             json!({"jsonrpc": "2.0", "method": "initialized"})
@@ -240,9 +242,13 @@ async fn reused_local_daemon_leaves_a_ruled_out_default_login_and_refuses_it() -
         .await?;
 
     websocket
-        .send(request(2, "thread/start", default_thread_start()?))
+        .send(request(
+            /*id*/ 2,
+            "thread/start",
+            default_thread_start()?,
+        ))
         .await?;
-    let refused = read_response(&mut websocket, 2).await?;
+    let refused = read_response(&mut websocket, /*id*/ 2).await?;
     let message = refused["error"]["message"].as_str().unwrap_or_default();
     assert!(
         message.contains("ChatGPT login is required") && message.contains("left unchanged"),

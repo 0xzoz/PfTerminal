@@ -2094,6 +2094,24 @@ impl App {
         cause: &str,
         will_retry: bool,
     ) {
+        self.note_assignment_dispatch_failure_with_turns(
+            holder_node_id,
+            cause,
+            will_retry,
+            /*start_turns*/ true,
+        );
+    }
+
+    /// `start_turns` false (#660): the Manager is told without starting a
+    /// turn in it (a dispatch sent while the kill switch was on, or held or
+    /// refused because of it).
+    pub(crate) fn note_assignment_dispatch_failure_with_turns(
+        &mut self,
+        holder_node_id: &str,
+        cause: &str,
+        will_retry: bool,
+        start_turns: bool,
+    ) {
         let holder_node_id = normalize_orchestrate_node_id(holder_node_id);
         let Some((id, worker_node_id)) =
             self.assignment_dispatch_target_for_holder(&holder_node_id)
@@ -2134,9 +2152,11 @@ impl App {
         // The active UI can change between an automated dispatch and its failure. Persist the
         // operational notice to the Manager as a report as well, so switching panes cannot hide
         // the retry or pause reason from the operator or the Manager's next turn.
-        self.record_spawn_parent_report(
+        self.record_spawn_parent_report_with_notify(
             holder_node_id,
             format!("assignment_dispatch_notice; {message}"),
+            /*notify*/ true,
+            start_turns,
         );
         self.persist_pane_state();
     }

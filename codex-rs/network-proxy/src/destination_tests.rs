@@ -95,7 +95,7 @@ async fn url(url: &str, method: &str) -> Result<NormalizedDestination, Destinati
 
 #[tokio::test]
 async fn pf_33_s01_every_dns_answer_must_be_public() {
-    assert_eq!(tunnel("public.example", 443).await, Ok(()));
+    assert_eq!(tunnel("public.example", /*port*/ 443).await, Ok(()));
     for (host, code) in [
         ("rebind.example", "private_destination"),
         ("mapped.example", "private_destination"),
@@ -110,7 +110,11 @@ async fn pf_33_s01_every_dns_answer_must_be_public() {
         ("nxdomain.example", "dns_failure"),
         ("many.example", "dns_answers_too_many"),
     ] {
-        assert_eq!(denial_code(tunnel(host, 443).await), code, "{host}");
+        assert_eq!(
+            denial_code(tunnel(host, /*port*/ 443).await),
+            code,
+            "{host}"
+        );
     }
 }
 
@@ -125,25 +129,25 @@ async fn pf_33_s01_literals_and_reserved_names_need_a_private_grant() {
         "fe80::1",
     ] {
         assert_eq!(
-            denial_code(tunnel(host, 443).await),
+            denial_code(tunnel(host, /*port*/ 443).await),
             "private_destination",
             "{host}"
         );
     }
     for host in ["localhost", "intranet", "printer.local", "db.internal"] {
         assert_eq!(
-            denial_code(tunnel(host, 443).await),
+            denial_code(tunnel(host, /*port*/ 443).await),
             "private_destination",
             "{host}"
         );
     }
-    assert_eq!(tunnel(PUBLIC_V4, 443).await, Ok(()));
+    assert_eq!(tunnel(PUBLIC_V4, /*port*/ 443).await, Ok(()));
 }
 
 #[tokio::test]
 async fn pf_33_s01_scheme_port_and_method_are_authorized() {
     assert_eq!(
-        denial_code(tunnel("public.example", 22).await),
+        denial_code(tunnel("public.example", /*port*/ 22).await),
         "scheme_port_or_method"
     );
     assert_eq!(
@@ -280,7 +284,14 @@ async fn pf_33_s01_every_redirect_hop_is_reauthorized() {
         .await
         .expect("first hop");
     assert_eq!(
-        redirect(&ledger, &first, 302, "/next?x=1", false).await,
+        redirect(
+            &ledger,
+            &first,
+            /*status*/ 302,
+            "/next?x=1",
+            /*has_body*/ false
+        )
+        .await,
         Ok("https://public.example/next?x=1".to_string())
     );
     for (location, code) in [
@@ -300,13 +311,25 @@ async fn pf_33_s01_every_redirect_hop_is_reauthorized() {
         ("", "redirect_location"),
     ] {
         assert_eq!(
-            denial_code(redirect(&ledger, &first, 302, location, false).await),
+            denial_code(
+                redirect(
+                    &ledger, &first, /*status*/ 302, location, /*has_body*/ false
+                )
+                .await
+            ),
             code,
             "{location}"
         );
     }
     assert_eq!(
-        redirect(&ledger, &first, 302, "/next?x=1#section", false).await,
+        redirect(
+            &ledger,
+            &first,
+            /*status*/ 302,
+            "/next?x=1#section",
+            /*has_body*/ false
+        )
+        .await,
         Ok("https://public.example/next?x=1".to_string())
     );
     let second = start(&ledger, "https://public.example/next?x=1", "GET")
@@ -321,26 +344,68 @@ async fn pf_33_s01_redirect_method_and_body_replay() {
     let post = start(&ledger, "https://public.example/form", "POST")
         .await
         .expect("post");
-    assert!(redirect(&ledger, &post, 307, "/again", true).await.is_ok());
-    assert!(redirect(&ledger, &post, 308, "/again", true).await.is_ok());
-    assert!(redirect(&ledger, &post, 303, "/done", true).await.is_ok());
+    assert!(
+        redirect(
+            &ledger, &post, /*status*/ 307, "/again", /*has_body*/ true
+        )
+        .await
+        .is_ok()
+    );
+    assert!(
+        redirect(
+            &ledger, &post, /*status*/ 308, "/again", /*has_body*/ true
+        )
+        .await
+        .is_ok()
+    );
+    assert!(
+        redirect(
+            &ledger, &post, /*status*/ 303, "/done", /*has_body*/ true
+        )
+        .await
+        .is_ok()
+    );
     assert_eq!(
-        denial_code(redirect(&ledger, &post, 302, "/moved", true).await),
+        denial_code(
+            redirect(
+                &ledger, &post, /*status*/ 302, "/moved", /*has_body*/ true
+            )
+            .await
+        ),
         "redirect_body"
     );
     assert_eq!(
-        denial_code(redirect(&ledger, &post, 301, "/moved", false).await),
+        denial_code(
+            redirect(
+                &ledger, &post, /*status*/ 301, "/moved", /*has_body*/ false
+            )
+            .await
+        ),
         "redirect_body"
     );
     let get = start(&ledger, "https://public.example/page", "GET")
         .await
         .expect("get");
     assert_eq!(
-        denial_code(redirect(&ledger, &get, 300, "/choice", false).await),
+        denial_code(
+            redirect(
+                &ledger, &get, /*status*/ 300, "/choice", /*has_body*/ false
+            )
+            .await
+        ),
         "redirect_status"
     );
     assert_eq!(
-        denial_code(redirect(&ledger, &get, 302, "https://[bad/", false).await),
+        denial_code(
+            redirect(
+                &ledger,
+                &get,
+                /*status*/ 302,
+                "https://[bad/",
+                /*has_body*/ false
+            )
+            .await
+        ),
         "redirect_location"
     );
 }
@@ -351,14 +416,29 @@ async fn pf_33_s01_redirect_chains_have_a_hop_limit() {
     let mut current = "https://public.example/0".to_string();
     for hop in 1..=MAX_REDIRECT_HOPS {
         let request = start(&ledger, &current, "GET").await.expect("hop");
-        current = redirect(&ledger, &request, 302, &format!("/{hop}"), false)
-            .await
-            .expect("within the limit");
+        current = redirect(
+            &ledger,
+            &request,
+            /*status*/ 302,
+            &format!("/{hop}"),
+            /*has_body*/ false,
+        )
+        .await
+        .expect("within the limit");
     }
     let last = start(&ledger, &current, "GET").await.expect("last hop");
     assert_eq!(last.chain.hops, MAX_REDIRECT_HOPS);
     assert_eq!(
-        denial_code(redirect(&ledger, &last, 302, "/one-more", false).await),
+        denial_code(
+            redirect(
+                &ledger,
+                &last,
+                /*status*/ 302,
+                "/one-more",
+                /*has_body*/ false
+            )
+            .await
+        ),
         "redirect_hop_limit"
     );
 }
@@ -373,7 +453,12 @@ async fn pf_33_s01_redirect_chains_have_a_time_limit() {
         .checked_sub(MAX_CHAIN_AGE + Duration::from_secs(1))
         .expect("monotonic clock has run long enough");
     assert_eq!(
-        denial_code(redirect(&ledger, &request, 302, "/later", false).await),
+        denial_code(
+            redirect(
+                &ledger, &request, /*status*/ 302, "/later", /*has_body*/ false
+            )
+            .await
+        ),
         "redirect_chain_expired"
     );
 }
@@ -385,15 +470,27 @@ async fn pf_33_s01_credentials_do_not_cross_origins() {
         .await
         .expect("first");
     assert!(!stripped(&first));
-    let target = redirect(&ledger, &first, 302, "https://other.example/cdn", false)
-        .await
-        .expect("cross-origin redirect is allowed without credentials");
+    let target = redirect(
+        &ledger,
+        &first,
+        /*status*/ 302,
+        "https://other.example/cdn",
+        /*has_body*/ false,
+    )
+    .await
+    .expect("cross-origin redirect is allowed without credentials");
     let second = start(&ledger, &target, "GET").await.expect("second");
     assert!(stripped(&second));
     // Returning to the chain origin restores normal credential handling.
-    let target = redirect(&ledger, &second, 302, "https://public.example/home", false)
-        .await
-        .expect("back to origin");
+    let target = redirect(
+        &ledger,
+        &second,
+        /*status*/ 302,
+        "https://public.example/home",
+        /*has_body*/ false,
+    )
+    .await
+    .expect("back to origin");
     let third = start(&ledger, &target, "GET").await.expect("third");
     assert!(!stripped(&third));
     assert_eq!(third.chain.hops, 2);
@@ -540,8 +637,8 @@ async fn pf_33_s01_unlisted_redirect_targets_never_reach_the_resolver() {
         let result = guard
             .authorize_redirect(
                 &first,
-                false,
-                302,
+                /*has_body*/ false,
+                /*status*/ 302,
                 location,
                 RedirectScope {
                     hosts: &hosts(),
@@ -569,7 +666,7 @@ async fn pf_33_s01_response_check_rewrites_or_refuses_location() {
             let result = DestinationGuard::protected()
                 .check_response(
                     first,
-                    false,
+                    /*has_body*/ false,
                     status,
                     &mut headers,
                     RedirectScope {
@@ -663,7 +760,7 @@ async fn pf_33_s02_authorized_request_pins_exactly_the_checked_answers() {
         request.pinned_peers(),
         PinnedPeers::new(
             "public.example",
-            443,
+            /*port*/ 443,
             [
                 PUBLIC_V4.parse().expect("v4"),
                 PUBLIC_V6.parse().expect("v6"),

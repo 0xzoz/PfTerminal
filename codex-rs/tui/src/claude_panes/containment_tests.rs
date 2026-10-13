@@ -52,14 +52,22 @@ fn launch_env_keeps_only_the_allowlist_without_proxies_then_adds_the_pane() {
 #[test]
 fn state_dir_is_outside_codex_home_and_keyed_by_home_and_pane() {
     let codex_home = Path::new("/tmp/corbanu-home-a");
-    let first = state_dir(codex_home, "claude-1", None).unwrap();
+    let first = state_dir(codex_home, "claude-1", /*state_root*/ None).unwrap();
     assert!(first.is_absolute());
     assert!(!first.starts_with(codex_home));
     assert!(first.ends_with("claude-1"));
-    assert_ne!(first, state_dir(codex_home, "claude-2", None).unwrap());
     assert_ne!(
         first,
-        state_dir(Path::new("/tmp/corbanu-home-b"), "claude-1", None).unwrap()
+        state_dir(codex_home, "claude-2", /*state_root*/ None).unwrap()
+    );
+    assert_ne!(
+        first,
+        state_dir(
+            Path::new("/tmp/corbanu-home-b"),
+            "claude-1",
+            /*state_root*/ None
+        )
+        .unwrap()
     );
 }
 

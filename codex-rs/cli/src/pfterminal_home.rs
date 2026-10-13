@@ -233,14 +233,31 @@ mod tests {
     fn debug_entrypoint_keeps_a_caller_set_stable_home() {
         let user_home = Some(PathBuf::from("/home/tester"));
         for vars in [
-            variables(None, Some("/homes/b"), None),
-            variables(None, Some("/homes/b"), Some("/homes/c")),
-            variables(None, None, Some("/homes/c")),
+            variables(
+                /*corbanu_debug*/ None,
+                Some("/homes/b"),
+                /*codex*/ None,
+            ),
+            variables(
+                /*corbanu_debug*/ None,
+                Some("/homes/b"),
+                Some("/homes/c"),
+            ),
+            variables(
+                /*corbanu_debug*/ None,
+                /*corbanu*/ None,
+                Some("/homes/c"),
+            ),
         ] {
             assert_eq!(debug_home(&vars, user_home.clone()), Some(None));
         }
         assert_eq!(
-            debug_home(&variables(None, None, None), user_home),
+            debug_home(
+                &variables(
+                    /*corbanu_debug*/ None, /*corbanu*/ None, /*codex*/ None
+                ),
+                user_home
+            ),
             Some(Some(PathBuf::from("/home/tester/.corbanu-debug")))
         );
     }
@@ -248,7 +265,7 @@ mod tests {
     /// #418: a debug home outranks `CORBANU_HOME`, and the conflict is reported.
     #[test]
     fn debug_home_outranks_corbanu_home_with_one_warning() {
-        let vars = variables(Some("/homes/d"), Some("/homes/b"), None);
+        let vars = variables(Some("/homes/d"), Some("/homes/b"), /*codex*/ None);
         assert_eq!(
             debug_home(&vars, Some(PathBuf::from("/home/tester"))),
             Some(Some(PathBuf::from("/homes/d")))

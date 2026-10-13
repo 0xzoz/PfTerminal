@@ -48,6 +48,7 @@ use crate::tools::handlers::multi_agents::WaitAgentHandler;
 use crate::tools::handlers::multi_agents_common::DEFAULT_WAIT_TIMEOUT_MS;
 use crate::tools::handlers::multi_agents_common::MAX_WAIT_TIMEOUT_MS;
 use crate::tools::handlers::multi_agents_common::MIN_WAIT_TIMEOUT_MS;
+use crate::tools::handlers::multi_agents_spec::MULTI_AGENT_V1_NAMESPACE;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentRuntime;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
 use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
@@ -104,6 +105,7 @@ use codex_tools::default_namespace_description;
 use codex_tools::request_user_input_available_modes;
 use codex_tools::shell_command_backend_for_features;
 use codex_tools::shell_type_for_model_and_features;
+use codex_utils_string::take_bytes_at_char_boundary;
 use futures::future::BoxFuture;
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
@@ -115,6 +117,10 @@ use tracing::warn;
 /// smallest documented limit among them (OpenAI Chat Completions rejects more
 /// than 128 tools).
 const MAX_TOOLS_WITHOUT_NAMESPACES: usize = 128;
+/// The share of a namespace's description each of its flat tools repeats.
+const MAX_FLAT_NAMESPACE_DESCRIPTION_BYTES: usize = 300;
+/// `ext/memories` tool namespace.
+const MEMORY_TOOLS_NAMESPACE: &str = "memories";
 const MULTI_AGENT_V2_NAMESPACE_DESCRIPTION: &str = "Tools for spawning and managing sub-agents.";
 const IMAGE_GEN_NAMESPACE: &str = "image_gen";
 const IMAGEGEN_TOOL_NAME: &str = "imagegen";
@@ -321,8 +327,11 @@ fn build_model_visible_specs(
 ) -> (Vec<ToolSpec>, FlatToolNames) {
     let namespace_tools = namespace_tools_enabled(turn_context);
     let mut specs = Vec::new();
-    // Without namespace support, MCP tools are offered under flat names instead
-    // of being dropped with their namespace (#515, #227).
+    // Without namespace support, namespaced tools are offered under flat names
+    // instead of being dropped with their namespace: MCP tools (#515, #227)
+    // and every other grouped tool (#547). Built-in tools go first so MCP tools
+    // cannot push them past the tool-count limit.
+    let mut flattened_builtin_tools = Vec::new();
     let mut flattened_mcp_tools = Vec::new();
     for runtime in registry.runtimes() {
         let tool_name = runtime.tool_name();
@@ -337,16 +346,30 @@ fn build_model_visible_specs(
                 runtime.spec(),
             );
             match spec {
-                ToolSpec::Namespace(namespace)
-                    if !namespace_tools && runtime.tool_origin() == ToolOrigin::Mcp =>
-                {
-                    // Each MCP runtime is one tool; key it by its registry name
-                    // so the flat name routes back to exactly this runtime.
-                    debug_assert_eq!(namespace.tools.len(), 1);
-                    if let Some(ResponsesApiNamespaceTool::Function(tool)) =
-                        namespace.tools.into_iter().next()
-                    {
+                ToolSpec::Namespace(namespace) if !namespace_tools => {
+                    // V1 sub-agent tools have plain aliases here (`spawn_agent_v1`, ...).
+                    if namespace.name == MULTI_AGENT_V1_NAMESPACE {
+                        continue;
+                    }
+                    // Memory reads would send stored memories to providers that
+                    // never saw them; that disclosure is a product decision, so
+                    // they stay off these wires for now (#547).
+                    if namespace.name == MEMORY_TOOLS_NAMESPACE {
+                        continue;
+                    }
+                    let Some(tool) = flat_namespace_function(namespace, &tool_name) else {
+                        warn!(
+                            tool = %tool_name,
+                            "namespaced tool has no single function; not offered without namespace tools"
+                        );
+                        continue;
+                    };
+                    // Key it by its registry name so the flat name routes back
+                    // to exactly this runtime.
+                    if runtime.tool_origin() == ToolOrigin::Mcp {
                         flattened_mcp_tools.push((tool_name, tool));
+                    } else {
+                        flattened_builtin_tools.push((tool_name, tool));
                     }
                 }
                 spec => specs.push(spec),
@@ -359,19 +382,27 @@ fn build_model_visible_specs(
         .into_iter()
         .filter(|spec| namespace_tools || !matches!(spec, ToolSpec::Namespace(_)))
         .collect();
-    if flattened_mcp_tools.is_empty() {
+    if flattened_builtin_tools.is_empty() && flattened_mcp_tools.is_empty() {
         return (specs, FlatToolNames::default());
     }
-    let budget = MAX_TOOLS_WITHOUT_NAMESPACES.saturating_sub(specs.len());
-    if flattened_mcp_tools.len() > budget {
-        flattened_mcp_tools.sort_by(|(left, _), (right, _)| left.cmp(right));
-        let omitted = flattened_mcp_tools.split_off(budget);
-        warn!(
-            offered = budget,
-            omitted = omitted.len(),
-            first_omitted = %omitted[0].0,
-            "too many MCP tools for a provider without namespace tools; omitting the rest"
-        );
+    let mut budget = MAX_TOOLS_WITHOUT_NAMESPACES.saturating_sub(specs.len());
+    let mut flattened = Vec::new();
+    for (mut tools, kind) in [
+        (flattened_builtin_tools, "built-in"),
+        (flattened_mcp_tools, "MCP"),
+    ] {
+        if tools.len() > budget {
+            tools.sort_by(|(left, _), (right, _)| left.cmp(right));
+            let omitted = tools.split_off(budget);
+            warn!(
+                offered = budget,
+                omitted = omitted.len(),
+                first_omitted = %omitted[0].0,
+                "too many {kind} tools for a provider without namespace tools; omitting the rest"
+            );
+        }
+        budget -= tools.len();
+        flattened.extend(tools);
     }
     // A flat name must not shadow any visible tool or any registered plain tool,
     // because the router resolves registered plain names first.
@@ -386,9 +417,46 @@ fn build_model_visible_specs(
                 .map(|tool_name| tool_name.name),
         )
         .collect();
-    let (tools, flat_tool_names) = flatten_namespaced_tools(flattened_mcp_tools, &reserved);
+    let (tools, flat_tool_names) = flatten_namespaced_tools(flattened, &reserved);
     specs.extend(tools.into_iter().map(ToolSpec::Function));
     (specs, flat_tool_names)
+}
+
+/// The function a namespaced runtime offers, for a wire without namespaces.
+/// The namespace is not sent, so its description (an MCP server's, say) is
+/// carried into the tool's own, bounded per tool because every tool of the
+/// namespace repeats it.
+fn flat_namespace_function(
+    namespace: ResponsesApiNamespace,
+    tool_name: &ToolName,
+) -> Option<ResponsesApiTool> {
+    let namespace_description = take_bytes_at_char_boundary(
+        namespace.description.trim(),
+        MAX_FLAT_NAMESPACE_DESCRIPTION_BYTES,
+    )
+    .to_string();
+    let mut tools = namespace
+        .tools
+        .into_iter()
+        .map(|tool| match tool {
+            ResponsesApiNamespaceTool::Function(tool) => tool,
+        })
+        .collect::<Vec<_>>();
+    // A runtime is one tool; with several, take the one it is named for.
+    let index = if tools.len() == 1 {
+        0
+    } else {
+        tools.iter().position(|tool| tool.name == tool_name.name)?
+    };
+    let mut tool = tools.swap_remove(index);
+    if !namespace_description.is_empty() && !tool.description.contains(&namespace_description) {
+        tool.description = if tool.description.trim().is_empty() {
+            namespace_description
+        } else {
+            format!("{}\n\n{namespace_description}", tool.description)
+        };
+    }
+    Some(tool)
 }
 
 fn spec_for_model_request(
@@ -1121,6 +1189,10 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
                     CloseAgentHandler,
                     "close_agent_v1",
                 ));
+                registry.register_trusted(multi_agent_v1_plain_function_handler(
+                    ResumeAgentHandler,
+                    "resume_agent_v1",
+                ));
             }
         }
     }
@@ -1224,15 +1296,10 @@ fn multi_agent_v2_handler(
     }
 }
 
+/// V1 sub-agent tools are namespaced; every provider without namespace tools
+/// (Chat Completions and Anthropic Messages wires) gets plain aliases (#547).
 fn v1_plain_function_subagents_enabled(turn_context: &TurnContext) -> bool {
-    let provider_info = turn_context.provider.info();
     !namespace_tools_enabled(turn_context)
-        && (provider_info.is_ambient()
-            || provider_info.is_kimi_code()
-            || provider_info.is_zai()
-            || provider_info.is_openrouter()
-            || provider_info.is_baseten()
-            || provider_info.is_vercel())
 }
 
 fn spawn_agent_available_models(

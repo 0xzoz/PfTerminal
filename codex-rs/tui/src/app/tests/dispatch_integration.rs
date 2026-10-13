@@ -46,9 +46,9 @@ async fn operator_assignment_birth_brief_routes_as_normal_user_pane_turn() {
     let mut manager_tasks = Vec::new();
     while let Ok(event) = app_event_rx.try_recv() {
         match event {
-            AppEvent::SubmitCodexUserPaneTask { thread_id, task }
-                if thread_id == manager_thread_id =>
-            {
+            AppEvent::SubmitCodexUserPaneTask {
+                thread_id, task, ..
+            } if thread_id == manager_thread_id => {
                 manager_tasks.push(task);
             }
             AppEvent::SubmitSpawnAgentTask { thread_id, .. } if thread_id == manager_thread_id => {
@@ -446,6 +446,7 @@ fn direct_orc_task_reaches_provider_through_core_mailbox_without_prompt_wrapper(
             .send(AppEvent::SubmitSpawnAgentTask {
                 thread_id: target,
                 task: "run the direct acceptance command".to_string(),
+                sent_while_kill_switch_on: false,
             });
 
         fixture
@@ -506,6 +507,7 @@ fn operator_pane_dispatch_starts_normal_turn_with_target_session_model() -> Resu
             .send(AppEvent::SubmitCodexUserPaneTask {
                 thread_id: target,
                 task: task.to_string(),
+                sent_while_kill_switch_on: false,
             });
         fixture
             .route_until(std::time::Duration::from_secs(20), |app| {
@@ -591,6 +593,7 @@ fn operator_pane_dispatch_defers_contended_store_without_blocking_ui() -> Result
                 AppEvent::SubmitCodexUserPaneTask {
                     thread_id: target,
                     task: task.to_string(),
+                    sent_while_kill_switch_on: false,
                 },
             ),
         )
@@ -663,6 +666,7 @@ fn cold_restored_orc_task_is_readmitted_through_core_mailbox() -> Result<()> {
             .send(AppEvent::SubmitSpawnAgentTask {
                 thread_id: target,
                 task: "seed the child rollout before restart".to_string(),
+                sent_while_kill_switch_on: false,
             });
         fixture
             .route_until(std::time::Duration::from_secs(20), |app| {
@@ -710,6 +714,7 @@ fn cold_restored_orc_task_is_readmitted_through_core_mailbox() -> Result<()> {
             .send(AppEvent::SubmitSpawnAgentTask {
                 thread_id: target,
                 task: "run the cold-restored acceptance command".to_string(),
+                sent_while_kill_switch_on: false,
             });
         fixture
             .route_until(std::time::Duration::from_secs(20), |app| {
@@ -765,6 +770,7 @@ fn real_event_path_preserves_fifo_when_mailbox_coalesces_turns() -> Result<()> {
                 .send(AppEvent::SubmitSpawnAgentTask {
                     thread_id: target,
                     task: task.to_string(),
+                    sent_while_kill_switch_on: false,
                 });
         }
 
@@ -905,6 +911,7 @@ fn three_real_turns_saturate_and_one_release_schedules_one_followup() -> Result<
                 .send(AppEvent::SubmitSpawnAgentTask {
                     thread_id: *target,
                     task: format!("capacity-target-{index}-initial"),
+                    sent_while_kill_switch_on: false,
                 });
         }
 
@@ -925,6 +932,7 @@ fn three_real_turns_saturate_and_one_release_schedules_one_followup() -> Result<
                 .send(AppEvent::SubmitSpawnAgentTask {
                     thread_id: *target,
                     task: format!("capacity-target-{index}-followup"),
+                    sent_while_kill_switch_on: false,
                 });
         }
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
@@ -1000,6 +1008,7 @@ fn mailbox_delivery_wakes_waiting_target_without_turn_start_fallback() -> Result
             .send(AppEvent::SubmitSpawnAgentTask {
                 thread_id: target,
                 task: initial_task.to_string(),
+                sent_while_kill_switch_on: false,
             });
         fixture
             .route_until(std::time::Duration::from_secs(10), |app| {
@@ -1016,6 +1025,7 @@ fn mailbox_delivery_wakes_waiting_target_without_turn_start_fallback() -> Result
             .send(AppEvent::SubmitSpawnAgentTask {
                 thread_id: target,
                 task: steer_task.to_string(),
+                sent_while_kill_switch_on: false,
             });
         fixture
             .route_until(std::time::Duration::from_secs(10), |_| {
@@ -1058,6 +1068,7 @@ fn queue_bound_rejection_is_visible_and_accepts_nothing() -> Result<()> {
             .send(AppEvent::SubmitSpawnAgentTask {
                 thread_id: target,
                 task: "x".repeat(crate::dispatch_queue::MAX_DISPATCH_TASK_BYTES + 1),
+                sent_while_kill_switch_on: false,
             });
         for _ in 0..20 {
             fixture.route_once().await?;
@@ -1111,6 +1122,7 @@ fn low_context_agent_compacts_and_continues_real_dispatch() -> Result<()> {
             .send(AppEvent::SubmitSpawnAgentTask {
                 thread_id: target,
                 task: before.to_string(),
+                sent_while_kill_switch_on: false,
             });
         fixture
             .route_until(std::time::Duration::from_secs(10), |_| {
@@ -1158,6 +1170,7 @@ fn low_context_agent_compacts_and_continues_real_dispatch() -> Result<()> {
             .send(AppEvent::SubmitSpawnAgentTask {
                 thread_id: target,
                 task: after.to_string(),
+                sent_while_kill_switch_on: false,
             });
         fixture
             .route_until(std::time::Duration::from_secs(10), |_| {
@@ -1169,6 +1182,181 @@ fn low_context_agent_compacts_and_continues_real_dispatch() -> Result<()> {
         assert!(pending_agent_message_text(&requests[0]).contains(before));
         assert!(pending_agent_message_text(&requests[2]).contains(after));
         pretty_assertions::assert_eq!(requests.len(), 3);
+        fixture.server.shutdown().await?;
+        Ok(())
+    })
+}
+
+/// #660: routes events for `duration`, whatever happens.
+async fn route_for(fixture: &mut RealDispatchFixture, duration: std::time::Duration) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + duration;
+    while tokio::time::Instant::now() < deadline {
+        fixture.route_once().await?;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    Ok(())
+}
+
+/// #660: agent send paths stamp whether the switch was on when they sent.
+#[tokio::test]
+async fn issue_660_agent_sends_stamp_the_kill_switch() {
+    use crate::legacy_core::security_revocation::HumanRevocation;
+    let (app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    let thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000660").expect("thread id");
+    let stamps = |rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>| {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|event| match event {
+                AppEvent::SubmitSpawnAgentTask {
+                    sent_while_kill_switch_on,
+                    ..
+                }
+                | AppEvent::SubmitCodexUserPaneTask {
+                    sent_while_kill_switch_on,
+                    ..
+                } => Some(sent_while_kill_switch_on),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    while app_event_rx.try_recv().is_ok() {}
+    super::issue_507_switch(&app, HumanRevocation::KillSwitchOn);
+    app.send_native_task_event(thread_id, "pf660 while on".to_string());
+    pretty_assertions::assert_eq!(stamps(&mut app_event_rx), vec![true]);
+    super::issue_507_switch(&app, HumanRevocation::KillSwitchOff);
+    app.send_native_task_event(thread_id, "pf660 while off".to_string());
+    pretty_assertions::assert_eq!(stamps(&mut app_event_rx), vec![false]);
+}
+
+/// #660: a task another agent sent to a managed Codex pane while the switch
+/// was on, handled only after it was turned off, waits in the mailbox for the
+/// pane's next turn instead of starting one (nothing restarts after
+/// switch-off, #507).
+#[test]
+fn issue_660_agent_task_sent_while_on_and_handled_after_off_waits() -> Result<()> {
+    run_dispatch_integration(|| async {
+        use crate::legacy_core::security_revocation::HumanRevocation;
+        let mock = MockServer::start().await;
+        let responses = mount_sse_repeating(&mock, sse_completed("pf660-response")).await;
+        let mut fixture = RealDispatchFixture::start(&mock, /*max_threads*/ 3).await?;
+        let target = fixture.spawn_target("Snaga").await?;
+        super::issue_507_switch(&fixture.app, HumanRevocation::KillSwitchOn);
+        let sent_while_kill_switch_on = fixture.app.kill_switch_on_now();
+        assert!(sent_while_kill_switch_on);
+        super::issue_507_switch(&fixture.app, HumanRevocation::KillSwitchOff);
+        fixture
+            .app
+            .app_event_tx
+            .send(AppEvent::SubmitSpawnAgentTask {
+                thread_id: target,
+                task: "pf660 queued".to_string(),
+                sent_while_kill_switch_on,
+            });
+        route_for(&mut fixture, std::time::Duration::from_secs(2)).await?;
+        assert!(responses.requests().is_empty(), "no turn started");
+        assert!(
+            fixture
+                .app
+                .agent_navigation
+                .get(&target)
+                .is_some_and(|entry| !entry.is_running)
+        );
+
+        // Control: a task sent after switch-off starts the pane's turn, and
+        // the waiting task goes with it.
+        fixture
+            .app
+            .app_event_tx
+            .send(AppEvent::SubmitSpawnAgentTask {
+                thread_id: target,
+                task: "pf660 after".to_string(),
+                sent_while_kill_switch_on: false,
+            });
+        fixture
+            .route_until(std::time::Duration::from_secs(20), |_| {
+                !responses.requests().is_empty()
+            })
+            .await?;
+        let presented = responses
+            .requests()
+            .iter()
+            .map(|request| request.body_json().to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(presented.contains("pf660 queued"), "{presented}");
+        assert!(presented.contains("pf660 after"), "{presented}");
+        fixture.server.shutdown().await?;
+        Ok(())
+    })
+}
+
+/// #660: a task another agent sent to a pane the person opened in `/panes`
+/// while the switch was on, handled only after it was turned off, is
+/// reported not sent instead of being submitted as a user turn.
+#[test]
+fn issue_660_operator_pane_task_sent_while_on_and_handled_after_off_is_not_sent() -> Result<()> {
+    run_dispatch_integration(|| async {
+        use crate::legacy_core::security_revocation::HumanRevocation;
+        let mock = MockServer::start().await;
+        let responses = mount_sse_repeating(&mock, sse_completed("pf660-operator")).await;
+        let mut fixture = RealDispatchFixture::start(&mock, /*max_threads*/ 3).await?;
+        fixture
+            .app
+            .handle_event(
+                &mut fixture.tui,
+                &mut fixture.server,
+                AppEvent::CreateCodexPane {
+                    model: "dispatch-worker-model".to_string(),
+                    provider: Some("dispatch_mock".to_string()),
+                    effort: None,
+                    display_name: Some("Worker".to_string()),
+                },
+            )
+            .await?;
+        let target = fixture
+            .app
+            .active_thread_id
+            .expect("created operator pane is selected");
+        fixture.app.active_thread_id = Some(fixture.root);
+        super::issue_507_switch(&fixture.app, HumanRevocation::KillSwitchOn);
+        let sent_while_kill_switch_on = fixture.app.kill_switch_on_now();
+        assert!(sent_while_kill_switch_on);
+        super::issue_507_switch(&fixture.app, HumanRevocation::KillSwitchOff);
+        fixture
+            .app
+            .app_event_tx
+            .send(AppEvent::SubmitCodexUserPaneTask {
+                thread_id: target,
+                task: "pf660 operator queued".to_string(),
+                sent_while_kill_switch_on,
+            });
+        route_for(&mut fixture, std::time::Duration::from_secs(2)).await?;
+        assert!(responses.requests().is_empty(), "no user turn submitted");
+        assert!(
+            fixture
+                .app
+                .agent_navigation
+                .get(&target)
+                .is_some_and(|entry| !entry.is_running)
+        );
+
+        // Control: the person's own task after switch-off is submitted.
+        fixture
+            .app
+            .app_event_tx
+            .send(AppEvent::SubmitCodexUserPaneTask {
+                thread_id: target,
+                task: "pf660 operator after".to_string(),
+                sent_while_kill_switch_on: false,
+            });
+        fixture
+            .route_until(std::time::Duration::from_secs(20), |_| {
+                !responses.requests().is_empty()
+            })
+            .await?;
+        let presented = responses.requests()[0].body_json().to_string();
+        assert!(presented.contains("pf660 operator after"), "{presented}");
+        assert!(!presented.contains("pf660 operator queued"), "{presented}");
         fixture.server.shutdown().await?;
         Ok(())
     })

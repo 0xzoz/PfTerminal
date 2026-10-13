@@ -69,28 +69,28 @@ fn declared_basis_decides_the_economics() {
             "kimi-code",
             built_in("kimi-code"),
             Some(AuthMode::ApiKey),
-            own_route("kimi-code", None),
+            own_route("kimi-code", /*auth*/ None),
             PriceAuthority::PlanRate,
         ),
         (
             "zai-anthropic",
             built_in("zai-anthropic"),
             Some(AuthMode::ApiKey),
-            own_route("zai-anthropic", None),
+            own_route("zai-anthropic", /*auth*/ None),
             PriceAuthority::PlanRate,
         ),
         (
             "zai",
             built_in("zai"),
             Some(AuthMode::ApiKey),
-            own_route("zai", None),
+            own_route("zai", /*auth*/ None),
             PriceAuthority::ApiKeyRates,
         ),
         (
             "claude-plan",
             built_in("claude-plan"),
             None,
-            own_route("claude-plan", None),
+            own_route("claude-plan", /*auth*/ None),
             PriceAuthority::PlanRate,
         ),
         // A command login on Bedrock is still pay per use; AWS routes carry no
@@ -122,7 +122,7 @@ fn declared_basis_decides_the_economics() {
             "ollama",
             built_in("ollama"),
             None,
-            own_route("ollama", None),
+            own_route("ollama", /*auth*/ None),
             PriceAuthority::Local,
         ),
         (
@@ -178,7 +178,12 @@ fn configured_basis_overrides_and_is_recorded() {
     let mut zai = built_in("zai");
     zai.billing = Some(BillingBasis::Subscription);
     assert_eq!(
-        bound("zai", &zai, Some(AuthMode::ApiKey), &own_route("zai", None)),
+        bound(
+            "zai",
+            &zai,
+            Some(AuthMode::ApiKey),
+            &own_route("zai", /*auth*/ None)
+        ),
         (PriceAuthority::PlanRate, BasisSource::UserConfig)
     );
     let custom = ModelProviderInfo {
@@ -187,7 +192,12 @@ fn configured_basis_overrides_and_is_recorded() {
         ..ModelProviderInfo::default()
     };
     assert_eq!(
-        bound("my-box", &custom, None, "http://192.168.1.5:8000/v1"),
+        bound(
+            "my-box",
+            &custom,
+            /*auth*/ None,
+            "http://192.168.1.5:8000/v1"
+        ),
         (PriceAuthority::Local, BasisSource::UserConfig)
     );
 }
@@ -444,14 +454,20 @@ async fn admission_records_the_named_account() -> anyhow::Result<()> {
         &mode(PriceAuthority::Unavailable, BasisSource::BuiltIn),
         "my-llm",
         &provider,
-        None,
+        /*auth_mode*/ None,
         endpoint,
     );
     provider.account = Some(codex_model_provider_info::NamedProviderAccount {
         provider_id: "my-llm".into(),
         name: "work".into(),
     });
-    let mut named_mode = turn_mode(&default_mode, "my-llm", &provider, None, endpoint);
+    let mut named_mode = turn_mode(
+        &default_mode,
+        "my-llm",
+        &provider,
+        /*auth_mode*/ None,
+        endpoint,
+    );
     let account_of = |mode: &AccountingMode| match mode {
         AccountingMode::Provider { account, .. } => account.clone(),
         _ => panic!("{mode:?}"),
@@ -471,13 +487,25 @@ async fn admission_records_the_named_account() -> anyhow::Result<()> {
     };
     assert_eq!(account_of(&named_mode), Some(expected.clone()));
     // Rebinding the same account keeps its fingerprint; another account's does not.
-    let rebound = turn_mode(&named_mode, "my-llm", &provider, None, endpoint);
+    let rebound = turn_mode(
+        &named_mode,
+        "my-llm",
+        &provider,
+        /*auth_mode*/ None,
+        endpoint,
+    );
     assert_eq!(account_of(&rebound), Some(expected.clone()));
     let mut other = provider.clone();
     other.account.as_mut().unwrap().name = "other".into();
     assert_eq!(
-        account_of(&turn_mode(&named_mode, "my-llm", &other, None, endpoint))
-            .and_then(|account| account.fingerprint),
+        account_of(&turn_mode(
+            &named_mode,
+            "my-llm",
+            &other,
+            /*auth_mode*/ None,
+            endpoint
+        ))
+        .and_then(|account| account.fingerprint),
         None
     );
     // Nor does a same-named account of another provider.
@@ -486,7 +514,7 @@ async fn admission_records_the_named_account() -> anyhow::Result<()> {
             &named_mode,
             "other-llm",
             &provider,
-            None,
+            /*auth_mode*/ None,
             endpoint
         ))
         .and_then(|account| account.fingerprint),
@@ -600,7 +628,7 @@ async fn account_fingerprint_without_a_vault_is_name_only_and_creates_nothing() 
         &mode(PriceAuthority::Unavailable, BasisSource::BuiltIn),
         "my-llm",
         &provider,
-        None,
+        /*auth_mode*/ None,
         endpoint,
     );
     bind_account_fingerprint(&mut bound, &provider, home.path().to_path_buf()).await;

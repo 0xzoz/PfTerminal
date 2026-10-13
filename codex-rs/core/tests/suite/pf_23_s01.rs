@@ -134,7 +134,7 @@ async fn start_turn(
     steps: Vec<Step>,
     tweak: impl Fn(&mut Config) + Send + Sync + 'static,
 ) -> anyhow::Result<(TestCodex, ResponseMock)> {
-    start_turn_in(None, level, approval, steps, tweak).await
+    start_turn_in(/*home*/ None, level, approval, steps, tweak).await
 }
 
 async fn start_turn_in(
@@ -815,7 +815,7 @@ async fn issue_442_env_file_matched_by_name_is_denied_and_explained() -> anyhow:
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
     let (test, captured) = start_turn_in(
-        None,
+        /*home*/ None,
         SecurityLevel::Aggressive,
         AskForApproval::Never,
         vec![
@@ -893,7 +893,7 @@ async fn issue_442_permissive_is_unchanged() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
     let (test, captured) = start_turn_in(
-        None,
+        /*home*/ None,
         SecurityLevel::Permissive,
         AskForApproval::Never,
         vec![
@@ -1907,7 +1907,7 @@ async fn issue_594_a_linked_corbanu_home_cannot_be_replaced() -> anyhow::Result<
         let home = LinkedHome::new()?;
         let spelled = home.spelled(through_link)?;
         let (test, captured) = start_turn_in(
-            None,
+            /*home*/ None,
             level,
             AskForApproval::Never,
             vec![
@@ -1961,7 +1961,7 @@ async fn issue_598_an_approved_command_cannot_move_the_corbanu_home() -> anyhow:
         let home = LinkedHome::new()?;
         let spelled = home.spelled(through_link)?;
         let (test, captured) = start_turn_in(
-            None,
+            /*home*/ None,
             level,
             AskForApproval::OnRequest,
             vec![
@@ -2401,7 +2401,7 @@ async fn issue_611_a_separate_database_folder_is_protected() -> anyhow::Result<(
         let sqlite_home = AbsolutePathBuf::from_absolute_path(&folder)?;
         let (canary, missing_lock) = (folder.join("canary.sqlite"), lock.clone());
         let (test, captured) = start_turn_after(
-            None,
+            /*home*/ None,
             level,
             AskForApproval::Never,
             vec![
@@ -2440,6 +2440,169 @@ async fn issue_611_a_separate_database_folder_is_protected() -> anyhow::Result<(
         }
         drop(test);
         drop(databases);
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
+/// #650: a protected command with full access, working in a linked git
+/// worktree, cannot rewrite another worktree's folder in the shared
+/// repository folder (its `commondir`, `config.worktree` or `gitdir`, which
+/// would point the person's later git runs there at a planted config), nor
+/// move that folder aside, with the paths built at run time. Its own
+/// worktree's files stay writable. Permissive is unchanged.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_650_other_worktrees_git_folders_stay_read_only() -> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let mut wrong = Vec::new();
+    for (level, open) in [
+        (SecurityLevel::Moderate, false),
+        (SecurityLevel::Aggressive, false),
+        (SecurityLevel::Permissive, true),
+    ] {
+        let base = TempDir::new()?;
+        let x = base.path().canonicalize()?;
+        let common = x.join("main/.git");
+        std::fs::create_dir_all(common.join("hooks"))?;
+        std::fs::write(common.join("config"), "[core]\n")?;
+        for name in ["wt", "other"] {
+            let admin = common.join("worktrees").join(name);
+            std::fs::create_dir_all(&admin)?;
+            std::fs::write(admin.join("HEAD"), "ref\n")?;
+            std::fs::write(admin.join("commondir"), "../..\n")?;
+            std::fs::write(
+                admin.join("gitdir"),
+                format!("{}/.git\n", x.join(name).display()),
+            )?;
+            std::fs::create_dir_all(x.join(name))?;
+            std::fs::write(
+                x.join(name).join(".git"),
+                format!("gitdir: {}\n", admin.display()),
+            )?;
+        }
+        let other = common.join("worktrees/other");
+        let path = x.to_string_lossy().into_owned();
+        // Split inside the folder's own name: neither part names it.
+        let (head, tail) = path.split_at(path.len() - 2);
+        let command = format!(
+            "x=\"$(printf '{head}%s' {tail})\"; o=\"$x/main/.g$(printf it)/worktrees/other\"; \
+             printf /planted > \"$o/common$(printf dir)\"; \
+             printf '[core]\\n' > \"$o/config.$(printf worktree)\"; \
+             printf /planted > \"$o/git$(printf dir)\"; \
+             mv \"$o\" \"$x/moved650\"; echo x > \"$x/wt/file650\"; echo ran-650"
+        );
+        let cwd = AbsolutePathBuf::from_absolute_path(x.join("wt"))?;
+        let (test, captured) = start_turn_in(
+            None,
+            level,
+            AskForApproval::Never,
+            vec![
+                call("call-650", "shell_command", json!({ "command": command })),
+                done_step(),
+            ],
+            move |config| {
+                config.cwd = cwd.clone();
+                config
+                    .permissions
+                    .set_permission_profile(PermissionProfile::Disabled)
+                    .expect("full access");
+            },
+        )
+        .await?;
+        assert!(next_exec_approval(&test).await.is_none());
+        let requests = captured.requests();
+        let output = output_text(&requests[requests.len() - 1], "call-650");
+        // Where the folder is now (Permissive moves it).
+        let now = if other.exists() {
+            other.clone()
+        } else {
+            x.join("moved650")
+        };
+        let read = |name: &str| std::fs::read_to_string(now.join(name)).unwrap_or_default();
+        let achieved = [
+            read("commondir") != "../..\n",
+            !read("config.worktree").is_empty(),
+            !read("gitdir").starts_with(&x.to_string_lossy().into_owned()),
+            // Moved aside (`mv` copies what a pinned folder keeps from
+            // being renamed, and fails to remove the protected entries).
+            !other.exists(),
+        ];
+        if !output.contains("ran-650") || achieved != [open; 4] || !x.join("wt/file650").exists() {
+            wrong.push(format!("{level:?}: {achieved:?}: {output}"));
+        }
+        drop(test);
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
+/// Issue #651: a protected command working inside a separate database
+/// folder whose path holds glob syntax runs (bubblewrap's glob scan accepts
+/// the escaped pattern) and still cannot read a database there, write the
+/// backups folder, or (macOS, whose sandbox matches the pattern itself) read
+/// a database created during the command. Permissive is unchanged.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_651_a_database_folder_with_glob_syntax_is_protected() -> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let mut wrong = Vec::new();
+    for (level, open) in [
+        (SecurityLevel::Moderate, false),
+        (SecurityLevel::Aggressive, false),
+        (SecurityLevel::Permissive, true),
+    ] {
+        let base = TempDir::new()?;
+        let folder = base.path().canonicalize()?.join("db[1]{2");
+        let work = folder.join("work");
+        std::fs::create_dir_all(&work)?;
+        let command = "cat ../canary.sqlite; echo; printf later-651 > ../new.sqlite; \
+                       cat ../new.sqlite; echo; printf x > ../db-backups/planted; echo ran-651";
+        let sqlite_home = AbsolutePathBuf::from_absolute_path(&folder)?;
+        let cwd = AbsolutePathBuf::from_absolute_path(&work)?;
+        let canary = folder.join("canary.sqlite");
+        let (test, captured) = start_turn_after(
+            None,
+            level,
+            AskForApproval::Never,
+            vec![
+                call("call-651", "shell_command", json!({ "command": command })),
+                done_step(),
+            ],
+            move |config| {
+                config.cwd = cwd.clone();
+                config.sqlite = codex_state::SqliteConfig::from_sqlite_home(sqlite_home.clone());
+                config
+                    .permissions
+                    .set_permission_profile(PermissionProfile::Disabled)
+                    .expect("full access");
+            },
+            move |_| {
+                std::fs::write(&canary, CANARY).expect("canary database");
+                let folder = canary.parent().expect("database folder");
+                std::fs::create_dir_all(folder.join("db-backups")).expect("backups");
+            },
+        )
+        .await?;
+        assert!(next_exec_approval(&test).await.is_none());
+        let requests = captured.requests();
+        let output = output_text(&requests[requests.len() - 1], "call-651");
+        let mut achieved = vec![
+            output.contains(CANARY),
+            folder.join("db-backups/planted").exists(),
+        ];
+        if cfg!(target_os = "macos") {
+            achieved.push(output.contains("later-651"));
+        }
+        if !output.contains("ran-651") || achieved.iter().any(|got| *got != open) {
+            wrong.push(format!("{level:?}: {achieved:?}: {output}"));
+        }
+        drop(test);
+        drop(base);
     }
     assert_eq!(wrong, Vec::<String>::new());
     Ok(())
@@ -2493,7 +2656,7 @@ async fn issue_605_minimal_reads_keep_git_below_tmp_read_only() -> anyhow::Resul
         );
         let cwd = AbsolutePathBuf::from_absolute_path(&workspace)?;
         let (test, captured) = start_turn_in(
-            None,
+            /*home*/ None,
             level,
             AskForApproval::Never,
             vec![

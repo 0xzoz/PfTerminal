@@ -340,6 +340,7 @@ async fn accounting_inspect_app_off_and_old_usage_routes() -> anyhow::Result<()>
 mod advanced_reasoning_tests;
 mod dispatch_integration;
 mod issue_613;
+mod issue_660;
 mod model_catalog;
 mod plugin_catalog;
 mod rate_limits;
@@ -3550,12 +3551,12 @@ fn drain_spawn_agent_tasks_for(
     let mut matched = Vec::new();
     while let Ok(event) = rx.try_recv() {
         match event {
-            AppEvent::SubmitSpawnAgentTask { thread_id: t, task }
-            | AppEvent::SubmitCodexUserPaneTask { thread_id: t, task }
-                if t == thread_id =>
-            {
-                matched.push(task)
+            AppEvent::SubmitSpawnAgentTask {
+                thread_id: t, task, ..
             }
+            | AppEvent::SubmitCodexUserPaneTask {
+                thread_id: t, task, ..
+            } if t == thread_id => matched.push(task),
             _ => {}
         }
     }
@@ -7115,7 +7116,7 @@ fn issue_507_switch(app: &App, choice: crate::legacy_core::security_revocation::
     use crate::legacy_core::security_level_change::SecurityLevel;
     use crate::legacy_core::security_revocation::commit_human_revocation;
     let codex_home = app.config.codex_home.to_path_buf();
-    let basis = LevelBasis::read(&codex_home, SecurityLevel::Permissive, None);
+    let basis = LevelBasis::read(&codex_home, SecurityLevel::Permissive, /*thread*/ None);
     commit_human_revocation(
         &codex_home,
         SecurityLevel::Permissive,
@@ -7493,6 +7494,7 @@ async fn issue_507_operator_codex_pane_task_is_reported_not_sent() -> Result<()>
         AppEvent::SubmitCodexUserPaneTask {
             thread_id,
             task: "pf507 operator task".to_string(),
+            sent_while_kill_switch_on: false,
         },
     ))
     .await?;
@@ -13638,7 +13640,7 @@ fn turn_start_capacity_classifier_rejects_message_only_match() {
 }
 
 #[test]
-fn session_start_error_surfaces_archived_guidance_without_rollout_path() {
+fn session_start_failure_surfaces_archived_guidance_without_rollout_path() {
     let thread_id =
         ThreadId::from_string("019e72f4-e09a-70f2-b2c2-a153a57b8cc0").expect("thread id");
     let target_session = SessionTarget {
@@ -13660,11 +13662,78 @@ fn session_start_error_surfaces_archived_guidance_without_rollout_path() {
             "thread/{action} failed during TUI bootstrap: thread/{action} failed: {server_message} (code -32600)"
         );
 
-        assert_eq!(
-            session_start_error(action, &target_session, err).to_string(),
-            expected
+        assert_fatal_exit(
+            session_start_failure(action, &target_session, err),
+            &expected,
         );
     }
+}
+
+fn assert_fatal_exit(result: Result<AppExitInfo>, expected: &str) {
+    match result.expect("a refusal ends the launch with a plain message") {
+        AppExitInfo {
+            exit_reason: ExitReason::Fatal(message),
+            thread_id: None,
+            resume_hint: None,
+            ..
+        } => assert_eq!(message, expected),
+        other => panic!("expected a fatal exit, got {other:?}"),
+    }
+}
+
+#[test]
+fn session_start_failure_turns_a_server_refusal_into_a_plain_message() {
+    let thread_id =
+        ThreadId::from_string("019e72f4-e09a-70f2-b2c2-a153a57b8cc0").expect("thread id");
+    let target_session = SessionTarget {
+        path: Some(std::path::PathBuf::from(
+            "/Users/me/.corbanu/sessions/2026/10/13/rollout-01a13453.jsonl",
+        )),
+        thread_id,
+    };
+    let refusal = "failed to load configuration: the thread's recorded account zai:work: named accounts need the `named_accounts` feature (`--enable named_accounts`); resume with `--account zai:default` to use the default credentials instead";
+
+    for action in ["resume", "fork"] {
+        for suffix in ["", r#", data: {"reason":"cloudRequirements"}"#] {
+            let odd = "a message mentioning (code 7) itself";
+            let err = color_eyre::eyre::eyre!(
+                "thread/{action} failed during TUI bootstrap: thread/{action} failed: {odd} (code -32600){suffix}"
+            );
+            assert_fatal_exit(
+                session_start_failure(action, &target_session, err),
+                &format!("Could not {action} session {thread_id}: {odd}"),
+            );
+            let err = color_eyre::eyre::eyre!(
+                "thread/{action} failed during TUI bootstrap: thread/{action} failed: {refusal} (code -32600){suffix}"
+            );
+            assert_fatal_exit(
+                session_start_failure(action, &target_session, err),
+                &format!("Could not {action} session {thread_id}: {refusal}"),
+            );
+        }
+    }
+}
+
+#[test]
+fn session_start_failure_keeps_a_report_for_transport_errors() {
+    let thread_id =
+        ThreadId::from_string("019e72f4-e09a-70f2-b2c2-a153a57b8cc0").expect("thread id");
+    let target_session = SessionTarget {
+        path: None,
+        thread_id,
+    };
+    let err = color_eyre::eyre::eyre!(
+        "thread/resume failed during TUI bootstrap: thread/resume transport error: broken pipe"
+    );
+
+    let report = session_start_failure("resume", &target_session, err)
+        .expect_err("a transport failure is not a refusal");
+    assert_eq!(
+        report.to_string(),
+        format!(
+            "Failed to resume session from thread {thread_id}: thread/resume failed during TUI bootstrap: thread/resume transport error: broken pipe"
+        )
+    );
 }
 
 #[test]

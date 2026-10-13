@@ -361,8 +361,8 @@ fn pf_27_s02_env_for_applies_the_launch_contract() {
             Some(&contract),
             command(&["-c", "true"], &[("LEAK", RAW), ("PATH", "/usr/bin")]),
             options(),
-            None,
-            None,
+            /*network*/ None,
+            /*environment_id*/ None,
         )
         .expect("protected launch");
     assert!(request.env.values().all(|value| value != RAW));
@@ -379,8 +379,8 @@ fn pf_27_s02_env_for_applies_the_launch_contract() {
             Some(&contract),
             command(&["-lc", "true"], &[]),
             options(),
-            None,
-            None,
+            /*network*/ None,
+            /*environment_id*/ None,
         ))
         .contains("Protected launch refused: login shells")
     );
@@ -389,8 +389,8 @@ fn pf_27_s02_env_for_applies_the_launch_contract() {
             Some(&contract),
             command(&["-c", &format!("echo {RAW}")], &[]),
             options(),
-            None,
-            None,
+            /*network*/ None,
+            /*environment_id*/ None,
         ))
         .contains("command line contains a managed secret")
     );
@@ -409,19 +409,19 @@ fn pf_27_s02_env_for_applies_the_launch_contract() {
             Some(&contract),
             command(&["-c", "true"], &[]),
             options(),
-            None,
-            None,
+            /*network*/ None,
+            /*environment_id*/ None,
         ))
         .contains("outside the OS sandbox")
     );
     // Without a contract the same unsandboxed launch is unchanged.
     assert_eq!(
         refusal(attempt.env_for_with_contract(
-            None,
+            /*contract*/ None,
             command(&["-c", "true"], &[]),
             options(),
-            None,
-            None,
+            /*network*/ None,
+            /*environment_id*/ None,
         )),
         "accepted"
     );

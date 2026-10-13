@@ -1680,7 +1680,11 @@ async fn append_execpolicy_amendment_updates_policy_and_file() {
     let manager = ExecPolicyManager::default();
 
     manager
-        .append_amendment_and_update(codex_home.path(), &ExecPolicyAmendment::from(prefix))
+        .append_amendment_and_update(
+            codex_home.path(),
+            &ExecPolicyAmendment::from(prefix),
+            ApprovedUnder::LessStrict,
+        )
         .await
         .expect("update policy");
     let updated_policy = manager.current();
@@ -1719,7 +1723,11 @@ async fn append_execpolicy_amendment_keeps_credentials_out_of_the_file() {
     let manager = ExecPolicyManager::default();
 
     let scope = manager
-        .append_amendment_and_update(codex_home.path(), &ExecPolicyAmendment::from(prefix))
+        .append_amendment_and_update(
+            codex_home.path(),
+            &ExecPolicyAmendment::from(prefix),
+            ApprovedUnder::LessStrict,
+        )
         .await
         .expect("update policy");
     assert_eq!(scope, AmendmentScope::Session);
@@ -1822,7 +1830,11 @@ async fn append_execpolicy_amendment_rejects_empty_prefix() {
     let manager = ExecPolicyManager::default();
 
     let result = manager
-        .append_amendment_and_update(codex_home.path(), &ExecPolicyAmendment::from(vec![]))
+        .append_amendment_and_update(
+            codex_home.path(),
+            &ExecPolicyAmendment::from(vec![]),
+            ApprovedUnder::LessStrict,
+        )
         .await;
 
     assert!(matches!(

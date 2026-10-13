@@ -239,7 +239,10 @@ fn provider_models_are_added_once_with_exact_identity_and_never_as_default() {
 /// models added for runtime and GPU providers.
 #[test]
 fn listed_models_are_replaced_for_another_account() {
-    let listed = vec![preset("shared", None), preset("chatgpt-only", None)];
+    let listed = vec![
+        preset("shared", /*provider_id*/ None),
+        preset("chatgpt-only", /*provider_id*/ None),
+    ];
     let mut all = listed.clone();
     all.push(preset("rental", Some("gpu-a")));
     let catalog = ModelCatalog::new(all);
@@ -250,7 +253,10 @@ fn listed_models_are_replaced_for_another_account() {
         "zai",
     );
 
-    catalog.replace_listed_models(vec![preset("shared", None), preset("api-only", None)]);
+    catalog.replace_listed_models(vec![
+        preset("shared", /*provider_id*/ None),
+        preset("api-only", /*provider_id*/ None),
+    ]);
 
     let models = catalog.try_list_models().expect("infallible catalog read");
     assert_eq!(

@@ -452,7 +452,7 @@ impl ModelProvider for ConfiguredModelProvider {
             }
         } else if self.info.wire_api == WireApi::Chat {
             // Chat Completions has no namespace container either. Core offers
-            // MCP tools under flat names and drops other namespaced tools.
+            // namespaced tools under flat names (#515, #547).
             ProviderCapabilities {
                 namespace_tools: false,
                 image_generation: false,
@@ -1534,7 +1534,7 @@ mod tests {
         let auth = provider.auth().await.expect("placeholder auth");
         let api_auth = provider.api_auth().await.expect("brokered auth");
         let account = provider.account_state().expect("account state");
-        crate::model_key_broker::set_test_model_key_broker(None);
+        crate::model_key_broker::set_test_model_key_broker(/*broker*/ None);
 
         assert_eq!(auth.api_key(), Some(crate::BROKERED_KEY_PLACEHOLDER));
         assert!(api_auth.to_auth_headers().is_empty());

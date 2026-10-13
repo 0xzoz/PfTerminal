@@ -4664,7 +4664,13 @@ impl App {
                                     .unwrap_or_else(|| provider_id.to_string())
                             }
                         });
-                        let mut message = if let Some(provider_label) = provider_label {
+                        // #653: a model served over several connections names the one chosen.
+                        let route = provider.as_deref().and_then(|provider_id| {
+                            codex_model_provider_info::model_route(&model, provider_id)
+                        });
+                        let mut message = if let Some(route) = route {
+                            format!("Model changed to {}", route.model_label(&model_label))
+                        } else if let Some(provider_label) = provider_label {
                             format!("Model changed to {model_label} via {provider_label}")
                         } else {
                             format!("Model changed to {model_label}")
@@ -5336,7 +5342,11 @@ impl App {
             AppEvent::OpenSpawnClaudePaneTaskPrompt { pane_id } => {
                 self.open_spawn_claude_pane_task_prompt(pane_id);
             }
-            AppEvent::SubmitSpawnAgentTask { thread_id, task } => {
+            AppEvent::SubmitSpawnAgentTask {
+                thread_id,
+                task,
+                sent_while_kill_switch_on,
+            } => {
                 if self.spawn_legacy_read_only
                     || self.spawn_crew.as_ref().is_some_and(|crew| {
                         !matches!(crew.status, crate::crew_state::CrewCreationStatus::Ready)
@@ -5345,11 +5355,14 @@ impl App {
                     let target_node_id = self.logical_native_node_for_thread(thread_id);
                     let acks = self.take_spawn_dispatch_acks_for_task(&target_node_id, task.trim());
                     self.release_spawn_dispatch_origins(&acks);
-                    self.record_spawn_dispatch_acks(
+                    // #660: a task sent while the switch was on starts no turn
+                    // in its sender, also when it fails after switch-off.
+                    self.record_spawn_dispatch_acks_with_turns(
                         &acks,
                         "failed",
                         "crew identity or creation state is not reconciled",
                         /*notify*/ true,
+                        /*start_turns*/ !sent_while_kill_switch_on,
                     );
                     self.chat_widget.add_error_message(
                         "This /spawn hierarchy is read-only until its crew identity and creation \
@@ -5393,6 +5406,15 @@ impl App {
                     &source_node_id,
                     &target_node_id,
                 );
+                // #507: with the kill switch on the task waits in the mailbox
+                // for that pane's next turn; nothing runs, before or after the
+                // switch is turned off. #660: also when another agent sent it
+                // while the switch was on and it is handled only after
+                // switch-off; it asks for no turn.
+                // `trigger_turn` is part of a mailbox message's identity. The ID
+                // comes from the dispatch origin, admitted once, so the same ID
+                // is not sent again on the other side of a switch change.
+                let hold = sent_while_kill_switch_on || self.kill_switch_on_now();
                 let params = ThreadAgentMessageParams {
                     source_thread_id: source_thread_id.to_string(),
                     target_thread_id: thread_id.to_string(),
@@ -5400,14 +5422,8 @@ impl App {
                     assignment_id: Some(message_id.clone()),
                     kind: AgentMessageKind::Assignment,
                     content: task.clone(),
-                    trigger_turn: true,
+                    trigger_turn: !hold,
                 };
-                // #507: with the kill switch on the task waits in the mailbox
-                // for that pane's next turn; nothing runs, before or after the
-                // switch is turned off.
-                let kill_switch_on = crate::legacy_core::security_revocation::kill_switch_on(
-                    self.config.codex_home.as_ref(),
-                );
                 match app_server.send_agent_message(params).await {
                     Ok(_) => {
                         self.spawn_processed_dispatch_origins.insert(origin_id);
@@ -5426,11 +5442,9 @@ impl App {
                             "durably admitted to the native mailbox",
                             /*notify*/ false,
                         );
-                        if kill_switch_on {
+                        if hold {
                             self.chat_widget.add_info_message(
-                                format!(
-                                    "A task for {label} waits: the security kill switch is on. Turning it off starts nothing: the task goes with that pane's next turn, when someone types in it or it gets new work."
-                                ),
+                                self.kill_switch_held_native_task_message(&label),
                                 /*hint*/ None,
                             );
                         } else {
@@ -5458,6 +5472,9 @@ impl App {
                             .await
                         {
                             Ok(materialized_thread_id) => {
+                                // The switch may have gone on (in another
+                                // process) while the agent was materialized.
+                                let hold = hold || self.kill_switch_on_now();
                                 let materialized_source_thread_id = self
                                     .spawn_node_backing_thread_id(&source_node_id)
                                     .or(self.primary_thread_id)
@@ -5469,7 +5486,7 @@ impl App {
                                     assignment_id: Some(message_id),
                                     kind: AgentMessageKind::Assignment,
                                     content: task.clone(),
-                                    trigger_turn: true,
+                                    trigger_turn: !hold,
                                 };
                                 match app_server.send_agent_message(retry_params).await {
                                     Ok(_) => {
@@ -5489,17 +5506,24 @@ impl App {
                                             "cold-restored agent was materialized and the assignment was durably admitted to its native mailbox",
                                             /*notify*/ false,
                                         );
-                                        self.spawn_status_by_thread.insert(
-                                            materialized_thread_id,
-                                            codex_app_server_protocol::CollabAgentState {
-                                                status: codex_app_server_protocol::CollabAgentStatus::Running,
-                                                message: None,
-                                            },
-                                        );
-                                        self.agent_navigation.set_running(
-                                            materialized_thread_id,
-                                            /*is_running*/ true,
-                                        );
+                                        if hold {
+                                            self.chat_widget.add_info_message(
+                                                self.kill_switch_held_native_task_message(&label),
+                                                /*hint*/ None,
+                                            );
+                                        } else {
+                                            self.spawn_status_by_thread.insert(
+                                                materialized_thread_id,
+                                                codex_app_server_protocol::CollabAgentState {
+                                                    status: codex_app_server_protocol::CollabAgentStatus::Running,
+                                                    message: None,
+                                                },
+                                            );
+                                            self.agent_navigation.set_running(
+                                                materialized_thread_id,
+                                                /*is_running*/ true,
+                                            );
+                                        }
                                         self.agent_navigation.set_last_task_message(
                                             materialized_thread_id,
                                             Some(task.chars().take(240).collect()),
@@ -5508,13 +5532,14 @@ impl App {
                                     }
                                     Err(retry_error) => {
                                         self.release_spawn_dispatch_origins(&acks);
-                                        self.record_spawn_dispatch_acks(
+                                        self.record_spawn_dispatch_acks_with_turns(
                                             &acks,
                                             "failed",
-                                            format!(
+                                            &format!(
                                                 "native mailbox admission still failed after Core materialized the saved agent: {retry_error:#}"
                                             ),
                                             /*notify*/ true,
+                                            /*start_turns*/ !hold,
                                         );
                                         self.chat_widget.add_error_message(format!(
                                             "Could not admit task for {label}: {retry_error:#}"
@@ -5524,13 +5549,14 @@ impl App {
                             }
                             Err(materialization_error) => {
                                 self.release_spawn_dispatch_origins(&acks);
-                                self.record_spawn_dispatch_acks(
+                                self.record_spawn_dispatch_acks_with_turns(
                                     &acks,
                                     "failed",
-                                    format!(
+                                    &format!(
                                         "native mailbox target was unavailable and Core could not materialize the saved agent: {materialization_error:#}"
                                     ),
                                     /*notify*/ true,
+                                    /*start_turns*/ !hold,
                                 );
                                 self.chat_widget.add_error_message(format!(
                                     "Could not admit task for {label}: {materialization_error:#}"
@@ -5540,11 +5566,12 @@ impl App {
                     }
                     Err(error) => {
                         self.release_spawn_dispatch_origins(&acks);
-                        self.record_spawn_dispatch_acks(
+                        self.record_spawn_dispatch_acks_with_turns(
                             &acks,
                             "failed",
-                            format!("native mailbox admission failed: {error:#}"),
+                            &format!("native mailbox admission failed: {error:#}"),
                             /*notify*/ true,
+                            /*start_turns*/ !hold,
                         );
                         self.chat_widget.add_error_message(format!(
                             "Could not admit task for {label}; no automatic replay was attempted: {error:#}"
@@ -5552,8 +5579,15 @@ impl App {
                     }
                 }
             }
-            AppEvent::SubmitCodexUserPaneTask { thread_id, task } => {
+            AppEvent::SubmitCodexUserPaneTask {
+                thread_id,
+                task,
+                sent_while_kill_switch_on,
+            } => {
                 let task = task.trim().to_string();
+                // #660: a task sent while the switch was on starts no turn in
+                // its sender, also when it fails after switch-off.
+                let report_turns = !sent_while_kill_switch_on;
                 let target_node_id = self.logical_native_node_for_thread(thread_id);
                 let is_operator_pane = self
                     .agent_navigation
@@ -5562,15 +5596,21 @@ impl App {
                 if !is_operator_pane {
                     let detail =
                         format!("native thread {thread_id} is not an operator-owned user pane");
-                    self.record_spawn_dispatch_failed_for_task(&target_node_id, &task, &detail);
+                    self.record_spawn_dispatch_failed_for_task_with_turns(
+                        &target_node_id,
+                        &task,
+                        &detail,
+                        report_turns,
+                    );
                     self.chat_widget.add_error_message(detail);
                     return Ok(AppRunControl::Continue);
                 }
                 if task.is_empty() {
-                    self.record_spawn_dispatch_failed_for_task(
+                    self.record_spawn_dispatch_failed_for_task_with_turns(
                         &target_node_id,
                         &task,
                         "operator pane task cannot be empty",
+                        report_turns,
                     );
                     self.chat_widget
                         .add_error_message("Operator pane task cannot be empty.".to_string());
@@ -5582,7 +5622,12 @@ impl App {
                         task.len(),
                         crate::dispatch_queue::MAX_DISPATCH_TASK_BYTES
                     );
-                    self.record_spawn_dispatch_failed_for_task(&target_node_id, &task, &detail);
+                    self.record_spawn_dispatch_failed_for_task_with_turns(
+                        &target_node_id,
+                        &task,
+                        &detail,
+                        report_turns,
+                    );
                     self.chat_widget.add_error_message(detail);
                     return Ok(AppRunControl::Continue);
                 }
@@ -5590,15 +5635,23 @@ impl App {
                 // opened is a user turn, which is refused and not kept; say so
                 // to the sender and the person instead of reporting it sent.
                 // Checked before the store-lock retry below, so a retry never
-                // starts it once the switch is off.
-                if crate::legacy_core::security_revocation::kill_switch_on(
-                    self.config.codex_home.as_ref(),
-                ) {
-                    let detail = format!(
-                        "Not sent to {}: the security kill switch is on, and a task for a pane you opened is not kept (as a typed message is not). Send it again after turning the switch off.",
-                        self.thread_label(thread_id)
-                    );
-                    self.record_spawn_dispatch_failed_for_task(&target_node_id, &task, &detail);
+                // starts it once the switch is off. #660: also when another
+                // agent sent it while the switch was on and it is handled only
+                // after switch-off.
+                let kill_switch_on = self.kill_switch_on_now();
+                if sent_while_kill_switch_on || kill_switch_on {
+                    let label = self.thread_label(thread_id);
+                    let detail = if kill_switch_on {
+                        format!(
+                            "Not sent to {label}: the security kill switch is on, and a task for a pane you opened is not kept (as a typed message is not). Send it again after turning the switch off."
+                        )
+                    } else {
+                        format!(
+                            "Not sent to {label}: it was sent while the security kill switch was on, and a task for a pane you opened is not kept (as a typed message is not). It was not started when the switch was turned off; send it again."
+                        )
+                    };
+                    // #660: the sender is told; no turn starts for it there.
+                    self.record_kill_switch_dispatch_failed_for_task(&target_node_id, &task, &detail);
                     self.chat_widget.add_error_message(detail);
                     return Ok(AppRunControl::Continue);
                 }
@@ -5615,8 +5668,11 @@ impl App {
                             tokio::spawn(async move {
                                 let store_guard = store.lock().await;
                                 drop(store_guard);
-                                app_event_tx
-                                    .send(AppEvent::SubmitCodexUserPaneTask { thread_id, task });
+                                app_event_tx.send(AppEvent::SubmitCodexUserPaneTask {
+                                    thread_id,
+                                    task,
+                                    sent_while_kill_switch_on,
+                                });
                             });
                             return Ok(AppRunControl::Continue);
                         }
@@ -5705,7 +5761,14 @@ impl App {
                         task.len(),
                         crate::dispatch_queue::MAX_DISPATCH_TASK_BYTES
                     );
-                    self.record_spawn_dispatch_acks(&acks, "failed", &detail, /*notify*/ true);
+                    // #660: no sender turn for a task sent while on.
+                    self.record_spawn_dispatch_acks_with_turns(
+                        &acks,
+                        "failed",
+                        &detail,
+                        /*notify*/ true,
+                        /*start_turns*/ !sent_while_kill_switch_on,
+                    );
                     self.chat_widget.add_error_message(detail);
                     return Ok(AppRunControl::Continue);
                 }
