@@ -1237,7 +1237,12 @@ impl App {
             String::new(),
             Some("Task".to_string()),
             Box::new(move |task| {
-                tx.send(AppEvent::SubmitSpawnAgentTask { thread_id, task });
+                // A person's own task: held only while the switch is on.
+                tx.send(AppEvent::SubmitSpawnAgentTask {
+                    thread_id,
+                    task,
+                    sent_while_kill_switch_on: false,
+                });
             }),
         );
         self.chat_widget.show_custom_prompt_view(view);
@@ -1261,12 +1266,36 @@ impl App {
             .agent_navigation
             .get(&thread_id)
             .is_some_and(|entry| self.is_operator_owned_codex_user_pane(thread_id, entry));
+        // #660: only agents (assignment fires, model dispatch) send through
+        // here; a task sent while the switch is on never starts a turn, even
+        // when it is handled just after switch-off.
+        let sent_while_kill_switch_on = self.kill_switch_on_now();
         if is_operator_pane {
-            self.app_event_tx
-                .send(AppEvent::SubmitCodexUserPaneTask { thread_id, task });
+            self.app_event_tx.send(AppEvent::SubmitCodexUserPaneTask {
+                thread_id,
+                task,
+                sent_while_kill_switch_on,
+            });
         } else {
-            self.app_event_tx
-                .send(AppEvent::SubmitSpawnAgentTask { thread_id, task });
+            self.app_event_tx.send(AppEvent::SubmitSpawnAgentTask {
+                thread_id,
+                task,
+                sent_while_kill_switch_on,
+            });
+        }
+    }
+
+    /// #507/#660: what the person is told when a task for a managed Codex
+    /// pane waits in its mailbox because of the kill switch.
+    pub(crate) fn kill_switch_held_native_task_message(&self, label: &str) -> String {
+        if self.kill_switch_on_now() {
+            format!(
+                "A task for {label} waits: the security kill switch is on. Turning it off starts nothing: the task goes with that pane's next turn, when someone types in it or it gets new work."
+            )
+        } else {
+            format!(
+                "A task for {label} waits: it was sent while the security kill switch was on, and turning the switch off starts nothing. It goes with that pane's next turn, when someone types in it or it gets new work."
+            )
         }
     }
 

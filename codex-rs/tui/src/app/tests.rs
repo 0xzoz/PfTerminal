@@ -3550,12 +3550,12 @@ fn drain_spawn_agent_tasks_for(
     let mut matched = Vec::new();
     while let Ok(event) = rx.try_recv() {
         match event {
-            AppEvent::SubmitSpawnAgentTask { thread_id: t, task }
-            | AppEvent::SubmitCodexUserPaneTask { thread_id: t, task }
-                if t == thread_id =>
-            {
-                matched.push(task)
+            AppEvent::SubmitSpawnAgentTask {
+                thread_id: t, task, ..
             }
+            | AppEvent::SubmitCodexUserPaneTask {
+                thread_id: t, task, ..
+            } if t == thread_id => matched.push(task),
             _ => {}
         }
     }
@@ -7493,6 +7493,7 @@ async fn issue_507_operator_codex_pane_task_is_reported_not_sent() -> Result<()>
         AppEvent::SubmitCodexUserPaneTask {
             thread_id,
             task: "pf507 operator task".to_string(),
+            sent_while_kill_switch_on: false,
         },
     ))
     .await?;
