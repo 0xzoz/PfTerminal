@@ -286,7 +286,8 @@ async fn issue_584_a_command_writing_only_agent_settings_is_offered_no_grant() -
     );
     let reason = approval.reason.clone().unwrap_or_default();
     assert!(reason.contains(NEVER), "{reason}");
-    assert!(reason.contains(".codex"), "{reason}");
+    // The first path it writes, as spelled.
+    assert!(reason.contains("`.agents/issue584.md`"), "{reason}");
     test.codex
         .submit(Op::ExecApproval {
             id: approval.effective_approval_id(),
@@ -303,8 +304,11 @@ async fn issue_584_a_command_writing_only_agent_settings_is_offered_no_grant() -
     assert!(output.contains("Exit code: 1"), "{output}");
     assert!(!cwd.join(".codex/issue584.toml").as_path().exists());
     assert!(!cwd.join(".agents/issue584.md").as_path().exists());
+    // The denial names the write that failed last (the command's status).
     assert!(
-        warnings.iter().any(|warning| warning.contains(NEVER)),
+        warnings
+            .iter()
+            .any(|warning| warning.contains(NEVER) && warning.contains("issue584")),
         "the denial is explained: {warnings:?} / {output}"
     );
     Ok(())

@@ -3056,13 +3056,15 @@ impl Session {
                 strict_auto_review: false,
             }));
         };
-        let requested_permissions = self
-            .grantable_request(
+        let requested_permissions = tokio::select! {
+            biased;
+            _ = cancellation_token.cancelled() => return Ok(None),
+            kept = self.grantable_request(
                 turn_context.as_ref(),
                 requested_permissions,
                 &native_environment_cwd,
-            )
-            .await?;
+            ) => kept?,
+        };
 
         if crate::guardian::routes_approval_to_guardian(turn_context.as_ref()) {
             let originating_turn_state = {
@@ -3429,11 +3431,13 @@ impl Session {
         let Some(refusal) = refusal else {
             return Ok(requested);
         };
+        let unchecked = refusal == crate::security::protected_additional::unchecked_refusal(level);
         crate::security::inspection::record_refusal(
             self.thread_id(),
             "a permission request naming a protected path",
             match kept {
                 Some(_) => "those paths were left out before anyone was asked",
+                None if unchecked => "refused before anyone was asked; it could not be checked",
                 None => "refused before anyone was asked; never granted under Aggressive",
             },
         );

@@ -86,13 +86,15 @@ pub(crate) fn startup_explanation(path: &str) -> String {
 }
 
 /// #584: the explanation for a write to a path no grant lifts under
-/// Aggressive (#520: the project's `.codex` and `.agents`; the Corbanu home).
+/// Aggressive (#520: the project's `.codex` and `.agents`; the Corbanu home
+/// outside `worktrees`).
 pub(crate) fn never_writable_explanation(path: &str) -> String {
     format!(
         "Security level Aggressive blocks writing `{}`: agent commands can never write the \
-         project's .codex and .agents folders (agent settings) or Corbanu's own files, even \
-         when you approve them, and this cannot be granted, not even once. To allow it, a \
-         person can switch to Permissive in /security (it applies after a restart).",
+         project's .codex and .agents folders (agent settings) or the Corbanu home (outside its \
+         worktrees folder), even when you approve them, and this cannot be granted, not even \
+         once. To allow it, a person can switch to Permissive in /security (it applies after a \
+         restart).",
         shown_path(path)
     )
 }
@@ -238,8 +240,9 @@ impl ReadPolicyInputs {
 
 /// #584: whether a write to `path` lands, as spelled, through a link on the
 /// way or where it finally points, in one of `kept` (or one's real
-/// location), and not in a folder of `writable` inside it (`worktrees` in
-/// the Corbanu home, #583).
+/// location). Not where any spelling of it, its real location included, is
+/// in a folder of `writable` (`worktrees` in the Corbanu home, #583, which
+/// may be listed by its real location only).
 fn lands_in<'a>(
     path: &Path,
     kept: impl Iterator<Item = &'a AbsolutePathBuf>,
@@ -250,17 +253,25 @@ fn lands_in<'a>(
     };
     let mut spellings = link_chain(&path);
     spellings.extend(ReadDenials::real_location(&path));
-    let mut kept: Vec<AbsolutePathBuf> = kept.cloned().collect();
-    let real: Vec<AbsolutePathBuf> = kept.iter().filter_map(ReadDenials::real_location).collect();
-    kept.extend(real);
+    let with_real = |paths: Vec<AbsolutePathBuf>| {
+        let real: Vec<AbsolutePathBuf> = paths
+            .iter()
+            .filter_map(ReadDenials::real_location)
+            .collect();
+        paths.into_iter().chain(real).collect::<Vec<_>>()
+    };
+    let writable = with_real(writable.iter().map(|folder| (*folder).clone()).collect());
+    if spellings.iter().any(|spelling| {
+        writable
+            .iter()
+            .any(|folder| spelling.as_path().starts_with(folder.as_path()))
+    }) {
+        return false;
+    }
+    let kept = with_real(kept.cloned().collect());
     spellings.iter().any(|spelling| {
-        kept.iter().any(|kept| {
-            spelling.as_path().starts_with(kept.as_path())
-                && !writable.iter().any(|folder| {
-                    spelling.as_path().starts_with(folder.as_path())
-                        && folder.as_path().starts_with(kept.as_path())
-                })
-        })
+        kept.iter()
+            .any(|kept| spelling.as_path().starts_with(kept.as_path()))
     })
 }
 
@@ -283,7 +294,7 @@ fn only_never_writable_word(
         };
         if lands_in(&path, denials.never_lifted_paths(), &writable) {
             found.get_or_insert(word);
-        } else if lands_in(&path, denials.liftable_read_only_paths(), &writable) {
+        } else if lands_in(&path, denials.liftable_read_only_paths(), &[]) {
             return None;
         }
     }
@@ -582,14 +593,18 @@ impl ProtectedNote {
             Self::Read(_) => "reading a protected file",
             Self::Listing(_) => "listing the Corbanu home",
             Self::Startup(_) => "writing a start-up file outside the current folder",
-            Self::NeverWritable(_) => "writing the project's .codex or .agents, or Corbanu's files",
+            Self::NeverWritable(_) => {
+                "writing the project's .codex or .agents, or the Corbanu home"
+            }
         }
     }
 }
 
 /// The protected path `command` names (#442), or else the folder it lists
 /// that may not be listed (#506), or else a start-up file outside the
-/// current folder it names (#620): no grant could apply to any of them.
+/// current folder it names (#620), or else, when it writes no path a grant
+/// lifts, a path no grant lifts that it writes (#584: the project's `.codex`
+/// and `.agents`, the Corbanu home): no grant could apply to any of them.
 pub(crate) async fn protected_note_in_command(
     session: &Session,
     turn: &TurnContext,
@@ -634,15 +649,21 @@ pub(crate) async fn protected_note_in_command(
                 )
                 .map(ProtectedNote::Startup)
             })
+            // Windows drops the read-only entry of a missing path, so a
+            // missing `.codex` may well be written there (#554 likewise).
             .or_else(|| {
-                only_never_writable_word(
-                    &command,
-                    &cwd,
-                    inputs.user_home.as_deref(),
-                    &inputs.codex_home,
-                    &inputs.denials(),
-                )
-                .map(ProtectedNote::NeverWritable)
+                (!cfg!(windows))
+                    .then(|| {
+                        only_never_writable_word(
+                            &command,
+                            &cwd,
+                            inputs.user_home.as_deref(),
+                            &inputs.codex_home,
+                            &inputs.denials(),
+                        )
+                    })
+                    .flatten()
+                    .map(ProtectedNote::NeverWritable)
             })
     })
     .await
