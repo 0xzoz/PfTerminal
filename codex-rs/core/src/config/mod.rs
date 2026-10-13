@@ -4460,8 +4460,10 @@ impl Config {
         let model = model.map(|model| {
             retired_model_replacement(&model, &model_provider_id).map_or(model, str::to_string)
         });
+        // Only when the retirement is what changed it: another fallback (an
+        // incompatible provider, a provider's own default) says so itself.
         if let (Some(retired), Some(current)) = (retired_pin.as_deref(), model.as_deref())
-            && retired != current
+            && retired_model_replacement(retired, &model_provider_id) == Some(current)
         {
             tracing::warn!(
                 retired,

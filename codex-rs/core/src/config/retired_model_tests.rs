@@ -10,6 +10,7 @@ use codex_model_provider_info::ANTHROPIC_PROVIDER_ID;
 use codex_model_provider_info::CLAUDE_PLAN_LEGACY_OPUS_4_8_MODEL;
 use codex_model_provider_info::CLAUDE_PLAN_MODEL;
 use codex_model_provider_info::CLAUDE_PLAN_PROVIDER_ID;
+use codex_model_provider_info::PFTERMINAL_PLAN_ANTHROPIC_PROVIDER_ID;
 use core_test_support::TempDirExt;
 use pretty_assertions::assert_eq;
 use tempfile::tempdir;
@@ -112,5 +113,49 @@ async fn current_claude_plan_model_has_no_retirement_notice() -> std::io::Result
         "{:?}",
         config.startup_warnings
     );
+    Ok(())
+}
+
+/// Providers with their own catalogues are left alone, and a replacement that
+/// is not the retirement's (the provider's own default) carries no notice.
+#[tokio::test]
+async fn other_providers_keep_their_handling_without_a_retirement_notice() -> std::io::Result<()> {
+    let no_notice = |config: &Config| {
+        assert!(
+            !config
+                .startup_warnings
+                .iter()
+                .any(|warning| warning.contains("has been retired")),
+            "{:?}",
+            config.startup_warnings
+        );
+    };
+    let config = load(
+        "",
+        ConfigOverrides {
+            model: Some(ANTHROPIC_LEGACY_OPUS_4_8_MODEL.to_string()),
+            model_provider: Some(PFTERMINAL_PLAN_ANTHROPIC_PROVIDER_ID.to_string()),
+            ..ConfigOverrides::default()
+        },
+    )
+    .await?;
+    assert_eq!(
+        config.model.as_deref(),
+        Some(ANTHROPIC_LEGACY_OPUS_4_8_MODEL)
+    );
+    no_notice(&config);
+
+    let config = load(
+        &format!(
+            "model_provider = {PFTERMINAL_PLAN_ANTHROPIC_PROVIDER_ID:?}\nmodel = {ANTHROPIC_LEGACY_OPUS_4_8_MODEL:?}\n"
+        ),
+        ConfigOverrides::default(),
+    )
+    .await?;
+    assert_ne!(
+        config.model.as_deref(),
+        Some(ANTHROPIC_LEGACY_OPUS_4_8_MODEL)
+    );
+    no_notice(&config);
     Ok(())
 }
