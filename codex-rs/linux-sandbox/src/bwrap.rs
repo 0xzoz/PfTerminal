@@ -28,6 +28,9 @@ use crate::linux_run_main::synthetic_mount_registry_root;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result;
 use codex_protocol::permissions::PinnedWritableRoot;
+use codex_protocol::permissions::credential_glob_exempts_templates;
+use codex_protocol::permissions::credential_rule_roots;
+use codex_protocol::permissions::is_credential_template_name;
 use codex_protocol::permissions::is_protected_metadata_name;
 use codex_protocol::protocol::FileSystemAccessMode;
 use codex_protocol::protocol::FileSystemPath;
@@ -1378,13 +1381,19 @@ fn expand_unreadable_globs_with_ripgrep(
     // Group each pattern by the static path prefix before its first glob
     // metacharacter. That keeps scans narrow, avoids searching from `/`, and
     // lets one `rg --files` call handle all patterns under the same root.
-    let mut patterns_by_search_root: BTreeMap<AbsolutePathBuf, Vec<String>> = BTreeMap::new();
+    // The whole credential rule's globs are scanned apart: their matches
+    // leave out the template names (#442, Travis 2026-10-12), which other
+    // globs still cover.
+    let rule_roots = credential_rule_roots(patterns);
+    let mut patterns_by_search_root: BTreeMap<(AbsolutePathBuf, bool), Vec<String>> =
+        BTreeMap::new();
     for pattern in patterns {
         if let Some((search_root, glob)) = split_pattern_for_ripgrep(pattern, cwd)
             && search_root.as_path().is_dir()
         {
+            let credential = credential_glob_exempts_templates(pattern, &rule_roots);
             patterns_by_search_root
-                .entry(search_root)
+                .entry((search_root, credential))
                 .or_default()
                 .push(glob);
         }
@@ -1394,8 +1403,16 @@ fn expand_unreadable_globs_with_ripgrep(
     // overlay needs the resolved target to prevent a readable symlink path from
     // bypassing an unreadable glob match.
     let mut expanded_paths = BTreeSet::new();
-    for (search_root, globs) in patterns_by_search_root {
+    for ((search_root, credential), globs) in patterns_by_search_root {
         for path in ripgrep_files(search_root.as_path(), &globs, max_depth)? {
+            if credential
+                && path
+                    .as_path()
+                    .file_name()
+                    .is_some_and(is_credential_template_name)
+            {
+                continue;
+            }
             if let Some(target) = canonical_target_if_symlinked_path(path.as_path()) {
                 expanded_paths.insert(AbsolutePathBuf::from_absolute_path_checked(target)?);
             }
@@ -4331,6 +4348,43 @@ mod tests {
                 .any(|arg| arg == &path_to_string(&too_deep_env)),
             "max depth should keep deeper matches out of bwrap args: {:#?}",
             args.args
+        );
+    }
+
+    /// #442 (Travis, 2026-10-12): the credential globs hide `.env` and
+    /// `.env.local` but not the templates `.env.example`, `.env.sample` and
+    /// `.env.template`; a person's own glob that covers a template still
+    /// hides it.
+    #[test]
+    fn credential_globs_leave_templates_readable() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let root = temp_dir.path();
+        for name in [
+            ".env",
+            ".env.local",
+            ".env.example",
+            ".env.sample",
+            ".env.template",
+        ] {
+            std::fs::write(root.join(name), "x").expect("write");
+        }
+        let expand = |globs: Vec<String>| {
+            expand_unreadable_globs_with_ripgrep(&globs, root, None)
+                .expect("expand")
+                .into_iter()
+                .map(|path| path.as_path().file_name().expect("name").to_os_string())
+                .collect::<Vec<_>>()
+        };
+        let credential =
+            codex_protocol::permissions::credential_file_globs(&root.to_string_lossy());
+        assert_eq!(expand(credential.clone()), vec![".env", ".env.local"]);
+        let mut own = credential;
+        own.push(format!("{}/**/*.sample", root.display()));
+        assert_eq!(expand(own), vec![".env", ".env.local", ".env.sample"]);
+        // A person's own `**/.env.*` alone is not the credential rule.
+        assert_eq!(
+            expand(vec![format!("{}/**/.env.*", root.display())]),
+            vec![".env.example", ".env.local", ".env.sample", ".env.template"]
         );
     }
 

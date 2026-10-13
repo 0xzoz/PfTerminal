@@ -94,6 +94,7 @@ nav:
       - Exec: exec.md
       - Exec Policy: execpolicy.md
       - Sandbox: sandbox.md
+      - "Security: Aggressive protected files": security-aggressive.md
       - Skills: skills.md
       - AGENTS.md: agents_md.md
   - Project:

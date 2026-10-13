@@ -407,7 +407,7 @@ fn pf_41_s01_children_grants_taint_and_denials_are_correlated() {
     }
     facts.grants = vec![GrantFacts {
         thread: root,
-        surface: "one command without the write protections",
+        surface: "one command may write hooks and start-up files",
         expires_at: NOW + 240,
         used: 1,
         limit: Some(2),
@@ -437,13 +437,13 @@ fn pf_41_s01_children_grants_taint_and_denials_are_correlated() {
     assert_eq!(
         values("Grants"),
         vec![
-            "main session: one command without the write protections; expires in 4m; used 1 of 2"
+            "main session: one command may write hooks and start-up files; expires in 4m; used 1 of 2"
                 .to_string(),
             // #442: what a grant never lifts.
-            "Protected reads: never granted under Aggressive, not even once: credential files (.env, .env.* and .envrc files, also ones created later, on Windows from the next command on; SSH, cloud and CLI tokens) and Corbanu's sign-in, vault, config and history stay unreadable to agent commands; switch to Permissive in /security to allow them"
+            "Protected reads: never granted under Aggressive, not even once: credential files (.env, .env.* and .envrc files, also ones created later, on Windows from the next command on; not .env.example, .env.sample or .env.template; SSH, cloud and CLI tokens) and Corbanu's sign-in, vault, config and history stay unreadable to agent commands; switch to Permissive in /security to allow them. On Linux a command is stopped when such a file appears while it runs; a process already waiting for that file can read it in the moment before the stop"
                 .to_string(),
-            "Agent settings: always read-only under Aggressive, even with Grant once: the project's .codex and .agents (they set agent policy and can run code later)"
-                .to_string(),
+            // #442 (Travis, 2026-10-12): what Grant once lifts, and what not.
+            format!("Grant once: {}", crate::security::aggressive::GRANT_ONCE_LIFTS),
         ]
     );
     assert_eq!(

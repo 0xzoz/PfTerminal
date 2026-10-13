@@ -3,7 +3,7 @@
 //!
 //! Bubblewrap can only hide paths that exist when a command starts, and
 //! neither seccomp nor Landlock can match a file name. So under a policy that
-//! denies the credential names ([`CREDENTIAL_FILE_NAME_PATTERNS`]) below a
+//! denies the credential names (`CREDENTIAL_FILE_NAME_PATTERNS`, templates aside) below a
 //! folder:
 //! - every command hides the matches that exist when it starts (the policy's
 //!   glob expansion, plus every letter case);
@@ -41,11 +41,13 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::thread;
 
-use codex_protocol::permissions::CREDENTIAL_FILE_NAME_PATTERNS;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
-use codex_protocol::permissions::credential_entry_problem;
 use codex_protocol::permissions::credential_file_glob_root;
+use codex_protocol::permissions::credential_file_names_shown;
+use codex_protocol::permissions::credential_rule_roots;
 use codex_protocol::permissions::is_credential_file_name;
+use codex_protocol::permissions::is_credential_template_name;
+use codex_protocol::permissions::unsafe_credential_entry_message;
 
 /// Folders watched for one command, at most. Past it the command is refused.
 const MAX_WATCHED_FOLDERS: usize = 100_000;
@@ -112,6 +114,10 @@ enum Scan {
 pub(crate) struct CredentialWatcher {
     fd: OwnedFd,
     roots: Vec<PathBuf>,
+    /// Below these the whole credential rule applies, so the templates are
+    /// not credential files (#442, Travis 2026-10-12); below a folder only a
+    /// person's own `**/.env.*` covers, they are.
+    template_roots: Vec<PathBuf>,
     folders: HashMap<libc::c_int, PathBuf>,
     /// Credential files present at the start (hidden by the glob
     /// expansion), with their inode.
@@ -149,10 +155,15 @@ impl CredentialWatcher {
                 std::io::Error::last_os_error()
             ));
         }
+        let template_roots = credential_rule_roots(&policy.get_unreadable_globs_with_cwd(cwd))
+            .into_iter()
+            .filter_map(|root| std::fs::canonicalize(root).ok())
+            .collect();
         let mut watcher = Self {
             // SAFETY: `fd` is a fresh descriptor nothing else owns.
             fd: unsafe { OwnedFd::from_raw_fd(fd) },
             roots: roots.clone(),
+            template_roots,
             folders: HashMap::new(),
             known: HashMap::new(),
             placeholders: HashSet::new(),
@@ -256,13 +267,13 @@ impl CredentialWatcher {
                     pending.push((path, Some(device)));
                     continue;
                 }
-                if !is_credential_file_name(&name) || self.placeholders.contains(&path) {
+                if !self.is_credential(&path, &name) || self.placeholders.contains(&path) {
                     continue;
                 }
                 match scan {
                     Scan::Start => {
-                        if let Some(problem) = credential_entry_problem(&metadata) {
-                            return Some(unsafe_entry_message(&path, problem));
+                        if let Some(message) = unsafe_credential_entry_message(&path, &metadata) {
+                            return Some(message);
                         }
                         if metadata.is_file() {
                             self.existing.push(path.clone());
@@ -277,6 +288,16 @@ impl CredentialWatcher {
             }
         }
         None
+    }
+
+    /// Whether `name` (of `path`) is a credential file name here.
+    fn is_credential(&self, path: &Path, name: &OsStr) -> bool {
+        is_credential_file_name(name)
+            || (is_credential_template_name(name)
+                && !self
+                    .template_roots
+                    .iter()
+                    .any(|root| path.starts_with(root)))
     }
 
     /// Starts watching beside the command `child`, which is killed as soon
@@ -389,7 +410,7 @@ impl CredentialWatcher {
                 if let Some(found) = self.watch_tree(&path, Scan::Running) {
                     return Some(found);
                 }
-            } else if is_credential_file_name(name) && !self.placeholders.contains(&path) {
+            } else if self.is_credential(&path, name) && !self.placeholders.contains(&path) {
                 return Some(path.display().to_string());
             }
         }
@@ -410,27 +431,6 @@ impl CredentialMonitor {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
     }
-}
-
-/// Why `path`, an unsafe credential entry, refuses the command, and what the
-/// person should check.
-fn unsafe_entry_message(path: &Path, problem: &str) -> String {
-    let target = std::fs::read_link(path)
-        .map(|target| {
-            let target = path
-                .parent()
-                .map_or(target.clone(), |parent| parent.join(&target));
-            format!(
-                "; anything written to it went to {}, so check or delete that file too",
-                target.display()
-            )
-        })
-        .unwrap_or_default();
-    format!(
-        "the credential file {} {problem}, so what is written to it could be read under another \
-         name; remove or rename it{target}",
-        path.display()
-    )
 }
 
 /// `path` with its folder resolved, the way the watcher spells paths.
@@ -469,7 +469,7 @@ pub(crate) fn refused_message(reason: &str) -> String {
     format!(
         "Operation not permitted: the sandbox refuses to run this command because it cannot keep \
          credential files ({}) hidden from it: {reason}.",
-        CREDENTIAL_FILE_NAME_PATTERNS.join(", ")
+        credential_file_names_shown()
     )
 }
 
@@ -480,7 +480,7 @@ pub(crate) fn stopped_message(found: &str) -> String {
          ({found}) appeared while it ran. Files named {} are hidden from agent commands; one \
          created after a command starts cannot be hidden from it, so the command is stopped. \
          Later commands cannot read it.",
-        CREDENTIAL_FILE_NAME_PATTERNS.join(", ")
+        credential_file_names_shown()
     )
 }
 

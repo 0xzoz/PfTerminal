@@ -2340,6 +2340,50 @@ async fn issue_442_a_planted_env_link_refuses_later_commands() {
     assert!(after.stdout.text.contains("notes=0"), "{after:?}");
 }
 
+/// #442 (Travis, 2026-10-12), real bubblewrap: `.env.example`,
+/// `.env.sample` and `.env.template` (any case) are not credential files:
+/// commands read, create and change them without being stopped. A template
+/// name that is a link to the person's `.env` still reads nothing, and a
+/// hard link from a template name to `.env` refuses later commands, as any
+/// extra name of `.env` does.
+#[tokio::test]
+async fn issue_442_templates_stay_usable_and_never_reach_the_env() {
+    let Some((_tmpdir, work)) = credential_workspace().await else {
+        return;
+    };
+    std::fs::write(work.join(".env"), "API_KEY=dummy-442-person").unwrap();
+    std::fs::write(work.join(".env.example"), "API_KEY=example-442").unwrap();
+    std::fs::write(work.join("app/.ENV.SAMPLE"), "API_KEY=sample-442").unwrap();
+    let used = run_in(
+        &work,
+        "cat .env.example; echo example=$?; cat app/.ENV.SAMPLE; echo sample=$?; \
+         printf tpl > .env.template; sleep 1; cat .env.template; echo template=$?; \
+         ln -s .env .env.sample; sleep 1; cat .env.sample; echo link=$?; cat .env; echo env=$?",
+    )
+    .await;
+    let text = format!("{}{}", used.stdout.text, used.stderr.text);
+    assert!(!text.contains("dummy-442"), "{text}");
+    assert!(!text.contains("stopped this command"), "{text}");
+    for line in [
+        "API_KEY=example-442example=0",
+        "API_KEY=sample-442sample=0",
+        "tpltemplate=0",
+        "link=1",
+        "env=1",
+    ] {
+        assert!(used.stdout.text.contains(line), "{line} not in {text}");
+    }
+
+    std::fs::remove_file(work.join(".env.sample")).unwrap();
+    std::fs::hard_link(work.join(".env"), work.join(".env.sample")).unwrap();
+    let refused = run_in(&work, "cat .env.sample; echo read=$?").await;
+    let text = format!("{}{}", refused.stdout.text, refused.stderr.text);
+    assert!(!text.contains("dummy-442"), "{text}");
+    assert!(!text.contains("read="), "{text}");
+    assert!(text.contains("has other hard links"), "{text}");
+    assert!(text.contains("delete the other names"), "{text}");
+}
+
 /// A folder for test files outside every writable root (not a temporary
 /// folder): Cargo's target scratch folder, or the crate where a build tool
 /// does not set it. Cargo creates the scratch folder when it builds the

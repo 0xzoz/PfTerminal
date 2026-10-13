@@ -866,7 +866,8 @@ impl ApprovalOverlay {
                         &command,
                     ))
                     .bold(),
-                    format!(" without the Aggressive write protections (expires {expires})").into(),
+                    format!(" permission to write hooks and start-up files (expires {expires})")
+                        .into(),
                 ]
                 .into(),
             ]),
@@ -1321,8 +1322,7 @@ fn same_command(command: &[String], shown: &[String]) -> bool {
 
 fn grant_option() -> ApprovalOption {
     ApprovalOption {
-        label: "Grant once: run without the Aggressive write protections (review first)"
-            .to_string(),
+        label: "Grant once: also let it write hooks and start-up files (review first)".to_string(),
         decision: ApprovalDecision::SecurityGrant,
         shortcuts: vec![key_hint::plain(KeyCode::Char('g'))],
         persistent: false,

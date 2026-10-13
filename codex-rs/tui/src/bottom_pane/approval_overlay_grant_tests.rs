@@ -143,6 +143,41 @@ fn pf_25_s01_grant_option_only_when_core_offers_one() {
     }
 }
 
+/// #442 (Travis, 2026-10-12): the option and the review say what Grant once
+/// actually lifts under Aggressive (writing hooks and start-up files
+/// where commands may write), and that `.git`, `.codex` and `.agents` stay
+/// read-only.
+#[test]
+fn issue_442_grant_once_says_what_it_lifts() {
+    let (mut view, _rx) = overlay(Some(offer()), true);
+    let option = render(&view, 160);
+    assert!(
+        option.contains("Grant once: also let it write hooks and start-up files"),
+        "{option}"
+    );
+    key(&mut view, KeyCode::Char('g'));
+    key(&mut view, KeyCode::Enter);
+    let review = render(&view, 400)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for said in [
+        "lets one command write files that run code later",
+        "only inside the current folder",
+        "git hooks and config kept outside a .git folder",
+        "your shell and git start-up files",
+        "login agents and services, and .claude settings",
+        "the project's .git, .codex and .agents stay read-only",
+        "credential files and Corbanu's sign-in, vault, config and history stay unreadable",
+    ] {
+        assert!(review.contains(said), "{said} not in {review}");
+    }
+    assert!(
+        !review.contains("without the write protections"),
+        "{review}"
+    );
+}
+
 /// `g` highlights the option; Enter opens the review with every field, and
 /// nothing is answered yet.
 #[test]

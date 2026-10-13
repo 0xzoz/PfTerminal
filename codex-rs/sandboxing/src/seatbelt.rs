@@ -3,10 +3,13 @@ use codex_network_proxy::NetworkProxy;
 use codex_network_proxy::PROXY_URL_ENV_KEYS;
 use codex_network_proxy::has_proxy_url_env_vars;
 use codex_network_proxy::proxy_url_env_value;
+use codex_protocol::permissions::CREDENTIAL_FILE_TEMPLATE_NAMES;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::permissions::PROTECTED_METADATA_PATH_NAMES;
 use codex_protocol::permissions::credential_file_glob_root;
+use codex_protocol::permissions::credential_glob_exempts_templates;
+use codex_protocol::permissions::credential_rule_roots;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::WritableRoot;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -758,8 +761,10 @@ fn build_seatbelt_unreadable_glob_policy(
         return String::new();
     }
 
+    let rule_roots = credential_rule_roots(&unreadable_globs);
     let mut policy_components = Vec::new();
     for pattern in unreadable_globs {
+        let exempts_templates = credential_glob_exempts_templates(&pattern, &rule_roots);
         let mut regexes = BTreeSet::new();
         if let Some(regex) = seatbelt_regex_for_unreadable_glob(&pattern) {
             regexes.insert(regex);
@@ -782,17 +787,56 @@ fn build_seatbelt_unreadable_glob_policy(
         }
         for regex in regexes {
             let regex = regex.replace('"', "\\\"");
+            if credential_name {
+                // #442 (Travis, 2026-10-12): under the whole credential rule
+                // the template names stay usable, except as a link or pipe
+                // that a person's later `.env` could be renamed from.
+                let matches = if exempts_templates {
+                    let template = credential_template_regex();
+                    policy_components.push(format!(
+                        r#"(deny file-write-create (require-all (regex #"{regex}") (regex #"{template}") (require-any (vnode-type SYMLINK) (vnode-type FIFO))))"#
+                    ));
+                    format!(
+                        r#"(require-all (regex #"{regex}") (require-not (regex #"{template}")))"#
+                    )
+                } else {
+                    format!(r#"(regex #"{regex}")"#)
+                };
+                policy_components.push(format!("(deny file-read* {matches})"));
+                policy_components.push(format!("(deny file-write-unlink {matches})"));
+                policy_components.push(format!(
+                    "(deny file-write* (require-all {matches} (require-not (vnode-type DIRECTORY))))"
+                ));
+                continue;
+            }
             policy_components.push(format!(r#"(deny file-read* (regex #"{regex}"))"#));
             policy_components.push(format!(r#"(deny file-write-unlink (regex #"{regex}"))"#));
-            if credential_name {
-                policy_components.push(format!(
-                    r#"(deny file-write* (require-all (regex #"{regex}") (require-not (vnode-type DIRECTORY))))"#
-                ));
-            }
         }
     }
 
     policy_components.join("\n")
+}
+
+/// #442 (Travis, 2026-10-12): a path ending in a template name
+/// ([`CREDENTIAL_FILE_TEMPLATE_NAMES`]), in any case.
+fn credential_template_regex() -> String {
+    let any_case = |text: &str| {
+        text.chars()
+            .map(|ch| {
+                if ch.is_ascii_alphabetic() {
+                    format!("[{}{}]", ch.to_ascii_lowercase(), ch.to_ascii_uppercase())
+                } else {
+                    regex_lite::escape(&ch.to_string())
+                }
+            })
+            .collect::<String>()
+    };
+    let names = CREDENTIAL_FILE_TEMPLATE_NAMES
+        .iter()
+        .map(|name| any_case(name))
+        .collect::<Vec<_>>()
+        .join("|");
+    format!("/({names})$")
 }
 
 /// #442: the regex of a credential-name glob with the name matching in any

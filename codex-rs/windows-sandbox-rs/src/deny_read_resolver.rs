@@ -5,6 +5,9 @@ use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::FileSystemSandboxEntry;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::ReadDenyMatcher;
+use codex_protocol::permissions::credential_glob_exempts_templates;
+use codex_protocol::permissions::credential_rule_roots;
+use codex_protocol::permissions::is_credential_template_name;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use std::collections::HashSet;
 use std::path::Path;
@@ -42,7 +45,12 @@ pub fn resolve_windows_deny_read_targets(
         targets.add(DenyReadRule::Path(path.to_path_buf()), vec![path]);
     }
 
-    for pattern in file_system_sandbox_policy.get_unreadable_globs_with_cwd(cwd.as_path()) {
+    let globs = file_system_sandbox_policy.get_unreadable_globs_with_cwd(cwd.as_path());
+    // #442 (Travis, 2026-10-12): under the whole credential rule the
+    // templates (`.env.example`, `.env.sample`, `.env.template`) get no deny.
+    let rule_roots = credential_rule_roots(&globs);
+    for pattern in globs {
+        let exempts_templates = credential_glob_exempts_templates(&pattern, &rule_roots);
         let glob_policy = FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry {
             path: FileSystemPath::GlobPattern {
                 pattern: pattern.clone(),
@@ -63,6 +71,14 @@ pub fn resolve_windows_deny_read_targets(
                 scan_plan.max_depth,
                 /*depth*/ 0,
             )?;
+        }
+        if exempts_templates {
+            paths.retain(|path| {
+                !path
+                    .as_path()
+                    .file_name()
+                    .is_some_and(is_credential_template_name)
+            });
         }
         targets.add(DenyReadRule::Glob(pattern), paths);
     }
@@ -290,6 +306,69 @@ mod tests {
                 )
                 .expect("absolute missing")
             ]
+        );
+    }
+
+    /// #442 (Travis, 2026-10-12): under the whole credential rule the
+    /// templates get no deny ACE while `.env` and `.env.local` do; a person's
+    /// own `**/.env.*` alone still covers them.
+    #[test]
+    fn credential_rule_leaves_templates_out() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = dunce::canonicalize(tmp.path()).expect("canonical");
+        let cwd = AbsolutePathBuf::from_absolute_path(&root).expect("absolute cwd");
+        for name in [
+            ".env",
+            ".env.local",
+            ".env.example",
+            "app/.ENV.SAMPLE",
+            ".env.template",
+        ] {
+            let path = root.join(name);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("parent");
+            std::fs::write(path, "x").expect("write");
+        }
+        let resolve = |globs: Vec<String>| -> HashSet<PathBuf> {
+            let policy = FileSystemSandboxPolicy::restricted(
+                globs.into_iter().map(unreadable_glob_entry).collect(),
+            );
+            resolve_windows_deny_read_paths(&policy, &cwd)
+                .expect("resolve")
+                .into_iter()
+                .map(|path| {
+                    PathBuf::from(
+                        path.as_path()
+                            .strip_prefix(&root)
+                            .expect("below root")
+                            .to_string_lossy()
+                            .replace('\\', "/"),
+                    )
+                })
+                .collect()
+        };
+        let rule = codex_protocol::permissions::credential_file_globs(&root.to_string_lossy());
+        assert_eq!(
+            resolve(rule),
+            [".env", ".env.local"]
+                .into_iter()
+                .map(PathBuf::from)
+                .collect()
+        );
+        assert_eq!(
+            resolve(vec![format!(
+                "{}{sep}**{sep}.env.*",
+                root.to_string_lossy(),
+                sep = std::path::MAIN_SEPARATOR
+            )]),
+            [
+                ".env.local",
+                ".env.example",
+                "app/.ENV.SAMPLE",
+                ".env.template"
+            ]
+            .into_iter()
+            .map(PathBuf::from)
+            .collect()
         );
     }
 
