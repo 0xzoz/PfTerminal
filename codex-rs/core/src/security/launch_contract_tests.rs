@@ -481,7 +481,13 @@ fn issue_651_a_separate_database_folder_is_protected() {
         .expect("protectable");
     let file_system = protected.file_system_sandbox_policy();
     let globs = file_system.get_unreadable_globs_with_cwd(cwd);
-    let escaped = format!("{}/db[[]1][{{]2/*.sqlite*", databases_dir.path().display());
+    // Built with the platform's separator, as the policy resolves globs.
+    let escaped = databases_dir
+        .path()
+        .join("db[[]1][{]2")
+        .join("*.sqlite*")
+        .display()
+        .to_string();
     assert!(globs.contains(&escaped), "{globs:?}");
     for path in [
         fixture.codex_home.join("pfterminal_db_init.lock"),
