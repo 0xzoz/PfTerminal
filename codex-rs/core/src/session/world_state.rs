@@ -107,7 +107,12 @@ impl Session {
         if turn_context.config.include_permissions_instructions {
             let permission_profile = turn_context.permission_profile();
             let model_messages = turn_context.model_info.model_messages.as_ref();
-            let exec_policy = self.services.exec_policy.current();
+            // #626: under Aggressive the model is not told of approvals
+            // suspended there.
+            let exec_policy = self
+                .services
+                .exec_policy
+                .current_for(self.services.model_client().live_level_is_aggressive());
             let permissions = PermissionsState::new(
                 &permission_profile,
                 turn_context.approval_policy.value(),

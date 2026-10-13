@@ -173,6 +173,21 @@ impl ToolOrchestrator {
         // PF-25-S01: while its approval is open, the human may grant it once
         // in the TUI; the offer ends with the approval.
         let grant_operation = aggressive_grant_operation(tool, req, tool_ctx);
+        // #623: under Aggressive, a command that creates a link to the
+        // project's `.codex` or `.agents` (or Corbanu's own files) is refused
+        // before anyone is asked, so nothing is created; it says why.
+        if !matches!(requirement, ExecApprovalRequirement::Forbidden { .. })
+            && let Some((_, Some((command, cwd)))) = grant_operation.as_ref()
+            && let Some(refusal) = crate::security::protected_links::refusal(
+                &tool_ctx.session,
+                turn_ctx,
+                command,
+                std::path::Path::new(cwd),
+            )
+            .await
+        {
+            return Err(ToolError::Rejected(refusal));
+        }
         // Registered just before the user (not an automatic reviewer) is
         // asked. A cached approval or a permission hook may still answer
         // without them; then no review is shown and nothing is confirmed.
