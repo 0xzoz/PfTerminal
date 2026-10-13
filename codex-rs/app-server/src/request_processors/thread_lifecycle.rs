@@ -121,6 +121,11 @@ impl UnloadingState {
     }
 }
 
+/// #658: how long a thread the user left keeps counting after its last turn
+/// ended or its last client left: what the turn records at its end (its
+/// analytics) is resolved under the accounts in use when it ran.
+const DETACH_GRACE: Duration = Duration::from_secs(5);
+
 /// #658: whether a thread counts for the process's own backend requests: a
 /// client is attached to it, or a turn is running.
 fn counts_as_attached(has_subscribers: bool, status: &ThreadStatus) -> bool {
@@ -271,7 +276,8 @@ pub(super) async fn ensure_listener_task_running(
     };
     // #658: a user thread counts toward the account of the process's own
     // backend requests while a client is attached or a turn runs, the rule
-    // unloading uses; one the user left (kept loaded for a while) does not.
+    // unloading uses; one the user left (kept loaded for a while) does not,
+    // after a short grace so what a finished turn records still counts.
     // Holds the thread weakly, so it never keeps a session alive.
     {
         let mut has_subscribers_rx = unloading_state.has_subscribers_rx.clone();
@@ -283,6 +289,20 @@ pub(super) async fn ensure_listener_task_running(
                     *has_subscribers_rx.borrow_and_update(),
                     &thread_status_rx.borrow_and_update(),
                 );
+                let changed = if attached {
+                    None
+                } else {
+                    tokio::select! {
+                        () = tokio::time::sleep(DETACH_GRACE) => None,
+                        changed = has_subscribers_rx.changed() => Some(changed),
+                        changed = thread_status_rx.changed() => Some(changed),
+                    }
+                };
+                match changed {
+                    Some(Ok(())) => continue,
+                    Some(Err(_)) => return,
+                    None => {}
+                }
                 match thread.upgrade() {
                     Some(thread) => thread.set_client_attached(attached),
                     None => return,

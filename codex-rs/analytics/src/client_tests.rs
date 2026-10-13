@@ -226,6 +226,7 @@ fn client_with_receiver() -> (
     let (sender, receiver) = mpsc::channel(8);
     let queue = AnalyticsEventsQueue {
         sender,
+        auth_manager: None,
         app_used_emitted_keys: Arc::new(Mutex::new(HashSet::new())),
         plugin_used_emitted_keys: Arc::new(Mutex::new(HashSet::new())),
     };

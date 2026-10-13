@@ -311,9 +311,9 @@ async fn a_thread_the_user_left_does_not_count() -> Result<()> {
         app.read_stream_until_response_message(RequestId::Integer(request)),
     )
     .await??;
-    // The registration follows the subscription asynchronously.
+    // The registration follows the subscription after a short grace.
     let mut served = false;
-    for _ in 0..50 {
+    for _ in 0..150 {
         let request = app.send_get_account_rate_limits_request().await?;
         if timeout(
             DEFAULT_TIMEOUT,

@@ -182,10 +182,7 @@ fingerprint.
   them and say why. A conversation you left (it stays loaded for a while)
   does not count while no turn runs in it. A `resume` or `fork`, and an app
   server or daemon with named accounts on, send none until a conversation
-  starts, because its account is known only then. Known limit: a TUI that
-  reuses a running local daemon in which another client already has a
-  conversation open follows that conversation's account until its own
-  conversation starts.
+  starts, because its account is known only then.
 - `forced_login_method` and `forced_chatgpt_workspace_id` apply to named
   accounts too: a sign-in of the other kind or another workspace is refused.
   A session on a named account checks them against that account only and
@@ -196,11 +193,10 @@ fingerprint.
   is refused with the reason instead of logging the login out. With
   `named_accounts` on, an app server (`corbanu app-server`, or the local
   daemon a TUI reuses) does the same for every client: it never logs out a
-  default login these settings rule out and refuses to use it. A TUI reuses
-  a running local daemon for such a launch only when the daemon reports this
-  under the same settings (an older daemon, or one started with
-  `named_accounts` off or other settings, is not reused: the TUI starts its
-  own app server). A default session still logs a ruled-out default login
+  default login these settings rule out and refuses to use it. Such a TUI
+  launch never reuses a running local daemon, which may already serve
+  another session on another account: it starts its own app server and
+  says so. A default session still logs a ruled-out default login
   out at startup, daemon or not. While a forced login rules the default
   out, `corbanu fork` of a named thread without `--account` shows the
   default sign-in screen; pass `--account <name>` to fork it on its

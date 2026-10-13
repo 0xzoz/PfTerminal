@@ -154,7 +154,7 @@ fn spawn_daemon(
 }
 
 #[tokio::test]
-async fn named_session_reusing_a_daemon_leaves_the_default_login_in_place() {
+async fn named_session_never_reuses_a_daemon_and_leaves_the_default_login_in_place() {
     let launch = launch(/*named_accounts*/ true, /*named_session*/ true).await;
     let socket_dir = socket_dir();
     let (daemon_target, daemon) = spawn_daemon(socket_dir.path(), Some(launch.policy()));
@@ -162,20 +162,22 @@ async fn named_session_reusing_a_daemon_leaves_the_default_login_in_place() {
     let settled = settle_default_login_at_launch(
         &launch.config,
         /*launches_resume_or_fork*/ false,
-        daemon_target.clone(),
+        daemon_target,
     )
     .await
     .expect("launch");
     launch.assert_default_login_unchanged();
 
     assert!(settled.left_in_place);
-    assert_eq!(settled.app_server_target, daemon_target);
-    assert_eq!(settled.daemon_not_reused, None);
+    // #658: even a daemon that leaves the login in place is not reused; it
+    // may serve another session on another account.
+    assert_eq!(settled.app_server_target, AppServerTarget::Embedded);
+    assert!(settled.daemon_not_reused.is_some());
     daemon.abort();
 }
 
 #[tokio::test]
-async fn resume_reusing_a_daemon_leaves_the_default_login_in_place() {
+async fn resume_never_reuses_a_daemon_and_leaves_the_default_login_in_place() {
     let launch = launch(/*named_accounts*/ true, /*named_session*/ false).await;
     let socket_dir = socket_dir();
     let (daemon_target, daemon) = spawn_daemon(socket_dir.path(), Some(launch.policy()));
@@ -183,15 +185,17 @@ async fn resume_reusing_a_daemon_leaves_the_default_login_in_place() {
     let settled = settle_default_login_at_launch(
         &launch.config,
         /*launches_resume_or_fork*/ true,
-        daemon_target.clone(),
+        daemon_target,
     )
     .await
     .expect("launch");
     launch.assert_default_login_unchanged();
 
     assert!(settled.left_in_place);
-    assert_eq!(settled.app_server_target, daemon_target);
-    assert_eq!(settled.daemon_not_reused, None);
+    // #658: even a daemon that leaves the login in place is not reused; it
+    // may serve another session on another account.
+    assert_eq!(settled.app_server_target, AppServerTarget::Embedded);
+    assert!(settled.daemon_not_reused.is_some());
     daemon.abort();
 }
 
