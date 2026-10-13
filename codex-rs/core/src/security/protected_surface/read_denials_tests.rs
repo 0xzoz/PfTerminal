@@ -746,7 +746,7 @@ fn issue_603_a_worktrees_link_swapped_in_refuses_the_command_in_the_real_sandbox
 
     #[cfg(target_os = "linux")]
     let Ok(linux_sandbox_exe) = codex_utils_cargo_bin::cargo_bin("codex-linux-sandbox") else {
-        eprintln!("codex-linux-sandbox is not built; skipping");
+        // Skipped where the helper is not built.
         return;
     };
     #[cfg(not(target_os = "linux"))]
