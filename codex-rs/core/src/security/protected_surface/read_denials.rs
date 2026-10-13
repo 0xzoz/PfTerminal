@@ -965,9 +965,14 @@ fn separate_database_folder(codex_home: &Path, sqlite_home: &Path) -> Option<Abs
 /// GPU controller lock, empty and private, as Corbanu would. The init lock
 /// keeps #608's placeholder handling.
 fn create_missing_database_folder_entries(folder: &Path) {
-    let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    let builder = {
+        let mut builder = std::fs::DirBuilder::new();
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        builder
+    };
+    #[cfg(not(unix))]
+    let builder = std::fs::DirBuilder::new();
     for name in ["accounting-pending", "db-backups"] {
         // Fails harmlessly where it exists (also as a link).
         let _ = builder.create(folder.join(name));
