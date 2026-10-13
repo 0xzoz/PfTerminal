@@ -134,7 +134,7 @@ async fn start_turn(
     steps: Vec<Step>,
     tweak: impl Fn(&mut Config) + Send + Sync + 'static,
 ) -> anyhow::Result<(TestCodex, ResponseMock)> {
-    start_turn_in(None, level, approval, steps, tweak).await
+    start_turn_in(/*home*/ None, level, approval, steps, tweak).await
 }
 
 async fn start_turn_in(
@@ -815,7 +815,7 @@ async fn issue_442_env_file_matched_by_name_is_denied_and_explained() -> anyhow:
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
     let (test, captured) = start_turn_in(
-        None,
+        /*home*/ None,
         SecurityLevel::Aggressive,
         AskForApproval::Never,
         vec![
@@ -893,7 +893,7 @@ async fn issue_442_permissive_is_unchanged() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
     let (test, captured) = start_turn_in(
-        None,
+        /*home*/ None,
         SecurityLevel::Permissive,
         AskForApproval::Never,
         vec![
@@ -1907,7 +1907,7 @@ async fn issue_594_a_linked_corbanu_home_cannot_be_replaced() -> anyhow::Result<
         let home = LinkedHome::new()?;
         let spelled = home.spelled(through_link)?;
         let (test, captured) = start_turn_in(
-            None,
+            /*home*/ None,
             level,
             AskForApproval::Never,
             vec![
@@ -1961,7 +1961,7 @@ async fn issue_598_an_approved_command_cannot_move_the_corbanu_home() -> anyhow:
         let home = LinkedHome::new()?;
         let spelled = home.spelled(through_link)?;
         let (test, captured) = start_turn_in(
-            None,
+            /*home*/ None,
             level,
             AskForApproval::OnRequest,
             vec![
@@ -2401,7 +2401,7 @@ async fn issue_611_a_separate_database_folder_is_protected() -> anyhow::Result<(
         let sqlite_home = AbsolutePathBuf::from_absolute_path(&folder)?;
         let (canary, missing_lock) = (folder.join("canary.sqlite"), lock.clone());
         let (test, captured) = start_turn_after(
-            None,
+            /*home*/ None,
             level,
             AskForApproval::Never,
             vec![
@@ -2587,7 +2587,7 @@ async fn issue_605_minimal_reads_keep_git_below_tmp_read_only() -> anyhow::Resul
         );
         let cwd = AbsolutePathBuf::from_absolute_path(&workspace)?;
         let (test, captured) = start_turn_in(
-            None,
+            /*home*/ None,
             level,
             AskForApproval::Never,
             vec![

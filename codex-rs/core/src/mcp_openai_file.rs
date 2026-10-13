@@ -557,7 +557,7 @@ mod tests {
         let client = (*session.services.model_client())
             .clone()
             .with_ingress_level(codex_security_policy::SecurityLevel::Moderate)
-            .with_source_envelopes(true);
+            .with_source_envelopes(/*enabled*/ true);
         session.services.replace_model_client(client);
         session
             .services
@@ -649,7 +649,7 @@ mod tests {
         let client = (*session.services.model_client())
             .clone()
             .with_ingress_level(codex_security_policy::SecurityLevel::Moderate)
-            .with_source_envelopes(true);
+            .with_source_envelopes(/*enabled*/ true);
         session.services.replace_model_client(client);
         session
             .services

@@ -96,7 +96,12 @@ async fn sec_439_aggressive_refusals_name_the_level_and_the_way_forward() {
         );
     }
     assert_eq!(
-        blocked(&aggressive, true, None, "Operation not permitted"),
+        blocked(
+            &aggressive,
+            /*sandbox_denied*/ true,
+            /*exit_code*/ None,
+            "Operation not permitted"
+        ),
         None
     );
 
@@ -132,7 +137,7 @@ async fn sec_439_other_levels_are_not_attributed() {
     assert_eq!(
         blocked(
             &permissive,
-            true,
+            /*sandbox_denied*/ true,
             Some(1),
             "touch: /tmp/x: Operation not permitted"
         ),
@@ -141,7 +146,7 @@ async fn sec_439_other_levels_are_not_attributed() {
     assert_eq!(
         blocked(
             &permissive,
-            false,
+            /*sandbox_denied*/ false,
             Some(6),
             "curl: (6) Could not resolve host: x"
         ),

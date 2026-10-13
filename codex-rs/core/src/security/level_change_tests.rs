@@ -21,7 +21,7 @@ fn commit(
     target: SecurityLevel,
     probes: Probes,
 ) -> Result<LevelChangeReport, LevelChangeError> {
-    commit_in(home, None, target, probes)
+    commit_in(home, /*thread*/ None, target, probes)
 }
 
 fn commit_in(
@@ -172,11 +172,11 @@ fn security_transition_downgrade_rewrites_a_stricter_user_config_level_only() {
     )
     .unwrap();
     commit(&home, SecurityLevel::Aggressive, Probes::Passed).unwrap();
-    let basis = LevelBasis::read(home.path(), SecurityLevel::Aggressive, None);
+    let basis = LevelBasis::read(home.path(), SecurityLevel::Aggressive, /*thread*/ None);
     commit_human_level_change(
         home.path(),
         SecurityLevel::Aggressive,
-        None,
+        /*thread*/ None,
         &basis,
         SecurityLevel::Permissive,
         Probes::Passed,
@@ -191,13 +191,13 @@ fn security_transition_downgrade_rewrites_a_stricter_user_config_level_only() {
 #[test]
 fn security_transition_refuses_a_state_that_changed_after_review() {
     let home = TempDir::new().unwrap();
-    let basis = LevelBasis::read(home.path(), SecurityLevel::Permissive, None);
+    let basis = LevelBasis::read(home.path(), SecurityLevel::Permissive, /*thread*/ None);
     // Another process stores Aggressive after the review was shown.
     commit(&home, SecurityLevel::Aggressive, Probes::Passed).unwrap();
     let result = commit_human_level_change(
         home.path(),
         SecurityLevel::Permissive,
-        None,
+        /*thread*/ None,
         &basis,
         SecurityLevel::Permissive,
         Probes::Passed,

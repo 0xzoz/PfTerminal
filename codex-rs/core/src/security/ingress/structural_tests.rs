@@ -135,7 +135,7 @@ fn pf_30_s01_labelled_forged_markers_tokens_and_unicode_are_neutralized() {
 #[test]
 fn pf_30_s01_labelled_conversation_keeps_human_and_model_items_and_labels_the_rest() {
     let mut ingress = NativeIngress::default();
-    ingress.set_labelled_mode(true);
+    ingress.set_labelled_mode(/*enabled*/ true);
     let human = message("user", "please read notes.txt");
     let host = message(
         "developer",
@@ -229,7 +229,7 @@ fn pf_30_s01_labelled_conversation_keeps_human_and_model_items_and_labels_the_re
 #[test]
 fn pf_30_s01_labelled_registration_is_by_host_seam_not_text_or_role() {
     let mut ingress = NativeIngress::default();
-    ingress.set_labelled_mode(true);
+    ingress.set_labelled_mode(/*enabled*/ true);
     let human = message("user", "deploy when ready");
     ingress.register_messages(std::slice::from_ref(&human), MessageOrigin::Human);
     // The same words from a tool, or a different role, gain nothing.
@@ -258,7 +258,7 @@ fn pf_30_s01_labelled_registration_is_by_host_seam_not_text_or_role() {
 #[test]
 fn pf_30_s01_labelled_oversize_is_withheld_never_sent_raw() {
     let mut ingress = NativeIngress::default();
-    ingress.set_labelled_mode(true);
+    ingress.set_labelled_mode(/*enabled*/ true);
     let canary = "oversize-source-canary";
     let text = format!("{canary}{}", "x".repeat(MAX_LABELLED_TEXT_BYTES));
     let projected = ingress.project_labelled(&[tool_output("call-1", &text)]);
@@ -270,8 +270,20 @@ fn pf_30_s01_labelled_oversize_is_withheld_never_sent_raw() {
 
 #[test]
 fn pf_30_s01_labelled_producer_result_is_bound_to_exact_source() {
-    let admitted = admit_labelled(SourceKind::Tool, "call-1", "same text", 1).unwrap();
-    let again = admit_labelled(SourceKind::Tool, "call-1", "same text", 99).unwrap();
+    let admitted = admit_labelled(
+        SourceKind::Tool,
+        "call-1",
+        "same text",
+        /*retrieved_at_unix_ms*/ 1,
+    )
+    .unwrap();
+    let again = admit_labelled(
+        SourceKind::Tool,
+        "call-1",
+        "same text",
+        /*retrieved_at_unix_ms*/ 99,
+    )
+    .unwrap();
     // Deterministic identity: retries do not reissue IDs or timestamps.
     assert_eq!(admitted.into_projection(), again.into_projection());
     // A screened result for one source cannot admit a different pending source.
@@ -307,7 +319,7 @@ fn pf_30_s01_labelled_restored_history_stays_labelled_and_reinjects_host_context
     // Flag off: nothing changes.
     ingress.note_restored_history(&[], std::iter::empty());
     assert!(!ingress.take_host_context_reinjection());
-    ingress.set_labelled_mode(true);
+    ingress.set_labelled_mode(/*enabled*/ true);
     let restored = vec![
         message("user", "earlier human prompt"),
         message(
@@ -344,7 +356,7 @@ fn pf_30_s01_labelled_restored_history_stays_labelled_and_reinjects_host_context
 #[test]
 fn pf_30_s01_labelled_model_structure_needs_the_stream_seam() {
     let mut ingress = NativeIngress::default();
-    ingress.set_labelled_mode(true);
+    ingress.set_labelled_mode(/*enabled*/ true);
     let reasoning = ResponseItem::Reasoning {
         id: None,
         summary: Vec::new(),
@@ -415,7 +427,7 @@ fn pf_30_s01_labelled_model_structure_needs_the_stream_seam() {
 #[test]
 fn pf_30_s01_labelled_human_standing_survives_image_stripping() {
     let mut ingress = NativeIngress::default();
-    ingress.set_labelled_mode(true);
+    ingress.set_labelled_mode(/*enabled*/ true);
     let with_image = ResponseItem::Message {
         id: None,
         role: "user".into(),
@@ -445,7 +457,7 @@ fn pf_30_s01_labelled_human_standing_survives_image_stripping() {
 #[test]
 fn pf_30_s01_labelled_cache_tracks_current_history() {
     let mut ingress = NativeIngress::default();
-    ingress.set_labelled_mode(true);
+    ingress.set_labelled_mode(/*enabled*/ true);
     let first: Vec<_> = (0..50)
         .map(|index| tool_output(&format!("call-{index}"), &format!("output {index}")))
         .collect();
@@ -468,7 +480,7 @@ fn pf_30_s01_labelled_cache_tracks_current_history() {
 fn another_providers_items_stay_recognisable_after_labelling() {
     use crate::context_manager::provider_items::strip_foreign_references;
     let mut ingress = NativeIngress::default();
-    ingress.set_labelled_mode(true);
+    ingress.set_labelled_mode(/*enabled*/ true);
     let mut call = ResponseItem::FunctionCall {
         id: Some(codex_protocol::ResponseItemId::from_server(
             "fc_call_1".into(),

@@ -2152,7 +2152,9 @@ fn use_generic_chat_provider(turn: &mut TurnContext) {
 }
 
 fn plain_dynamic_runtime(name: &str) -> Arc<dyn CoreToolRuntime> {
-    let DynamicToolSpec::Function(function) = dynamic_tool(None, name, false) else {
+    let DynamicToolSpec::Function(function) =
+        dynamic_tool(/*namespace*/ None, name, /*defer_loading*/ false)
+    else {
         unreachable!("plain dynamic tools are functions");
     };
     Arc::new(

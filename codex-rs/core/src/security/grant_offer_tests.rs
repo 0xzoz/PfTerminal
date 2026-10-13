@@ -181,9 +181,24 @@ fn pf_25_s01_until_expiry_is_held_after_approval() {
 fn pf_25_s01_offers_only_under_live_aggressive() {
     let lineage = chain(&["main"]);
     for state in [
-        state(SecurityLevel::Moderate, lineage.clone(), 0, false),
-        state(SecurityLevel::Permissive, lineage.clone(), 0, false),
-        state(SecurityLevel::Aggressive, lineage, 0, true),
+        state(
+            SecurityLevel::Moderate,
+            lineage.clone(),
+            /*epoch*/ 0,
+            /*kill*/ false,
+        ),
+        state(
+            SecurityLevel::Permissive,
+            lineage.clone(),
+            /*epoch*/ 0,
+            /*kill*/ false,
+        ),
+        state(
+            SecurityLevel::Aggressive,
+            lineage,
+            /*epoch*/ 0,
+            /*kill*/ true,
+        ),
         PostTaintState {
             taint_generation: 0,
             policy: PolicyBinding::Unavailable,
@@ -246,10 +261,30 @@ fn pf_25_s01_forged_or_changed_offer_records_nothing() {
 fn pf_25_s01_state_change_records_or_applies_nothing() {
     let lineage = chain(&["main"]);
     let changed = [
-        state(SecurityLevel::Aggressive, lineage.clone(), 1, false),
-        state(SecurityLevel::Aggressive, lineage.clone(), 0, true),
-        state(SecurityLevel::Permissive, lineage, 0, false),
-        state(SecurityLevel::Aggressive, chain(&["other"]), 0, false),
+        state(
+            SecurityLevel::Aggressive,
+            lineage.clone(),
+            /*epoch*/ 1,
+            /*kill*/ false,
+        ),
+        state(
+            SecurityLevel::Aggressive,
+            lineage.clone(),
+            /*epoch*/ 0,
+            /*kill*/ true,
+        ),
+        state(
+            SecurityLevel::Permissive,
+            lineage,
+            /*epoch*/ 0,
+            /*kill*/ false,
+        ),
+        state(
+            SecurityLevel::Aggressive,
+            chain(&["other"]),
+            /*epoch*/ 0,
+            /*kill*/ false,
+        ),
     ];
     for now in changed.clone().into_iter().map(Some).chain([None]) {
         let thread = ThreadId::new();

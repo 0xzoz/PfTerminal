@@ -626,22 +626,35 @@ mod tests {
         let allow_zai = ["zai".to_string()];
         assert_eq!(
             [
-                unused_other_provider_account("zai:work", "zai", false, None),
-                unused_other_provider_account("kimi-code:main", "zai", true, None),
+                unused_other_provider_account(
+                    "zai:work", "zai", /*spawns_possible*/ false,
+                    /*agent_provider_allowlist*/ None
+                ),
                 unused_other_provider_account(
                     "kimi-code:main",
                     "zai",
-                    true,
+                    /*spawns_possible*/ true,
+                    /*agent_provider_allowlist*/ None
+                ),
+                unused_other_provider_account(
+                    "kimi-code:main",
+                    "zai",
+                    /*spawns_possible*/ true,
                     Some(&["kimi-code".to_string()]),
                 ),
-                unused_other_provider_account("kimi-code:default", "zai", false, None),
+                unused_other_provider_account(
+                    "kimi-code:default",
+                    "zai",
+                    /*spawns_possible*/ false,
+                    /*agent_provider_allowlist*/ None
+                ),
             ],
             [None, None, None, None]
         );
         assert_eq!(
             [
-                unused_other_provider_account("kimi-code:main", "zai", false, None),
-                unused_other_provider_account("kimi-code:main", "zai", true, Some(&allow_zai)),
+                unused_other_provider_account("kimi-code:main", "zai", /*spawns_possible*/ false, /*agent_provider_allowlist*/ None),
+                unused_other_provider_account("kimi-code:main", "zai", /*spawns_possible*/ true, Some(&allow_zai)),
             ],
             [
                 Some(
