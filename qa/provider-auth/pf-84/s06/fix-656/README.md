@@ -2,7 +2,7 @@
 
 tmux, disposable home, `CORBANU_TEST_NO_NATIVE_KEYRING=1`, local mock Responses server, fake API keys only.
 A conversation is recorded with `corbanu exec --account work` (named OpenAI API-key account), then
-`corbanu resume <id> --disable named_accounts` runs in a tmux pane (script: `t656.sh`).
+`corbanu resume <id> --disable named_accounts` runs in a tmux pane (script: `t656.sh`, run with `QA_SCRATCH=<scratch dir> t656.sh <label> <corbanu binary>`).
 
 ## BEFORE: installed dev build from main
 ```

@@ -1029,11 +1029,8 @@ fn active_turn_steer_race(error: &TypedRequestError) -> Option<ActiveTurnSteerRa
     Some(ActiveTurnSteerRace::ExpectedTurnMismatch { actual_turn_id })
 }
 
-/// A resume/fork the app server refused (archived thread, account rules, ...)
-/// ends the launch with a plain `ERROR:` line like other launch refusals (#656).
-/// Anything else (transport failure, bad response) stays an error report.
-/// [`session_start_failure`], and for a refusal the app server is shut down
-/// as on the other early exits.
+/// [`session_start_failure`]; for a refusal the screen is cleared and the app
+/// server shut down, as on the other early exits.
 async fn end_session_start(
     tui: &mut tui::Tui,
     app_server: AppServerSession,
@@ -1054,6 +1051,9 @@ async fn end_session_start(
     result
 }
 
+/// A resume/fork the app server refused (archived thread, account rules, ...)
+/// ends the launch with a plain `ERROR:` line like other launch refusals (#656).
+/// Anything else (transport failure, bad response) stays an error report.
 fn session_start_failure(
     action: &str,
     target_session: &SessionTarget,
