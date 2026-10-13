@@ -88,6 +88,35 @@ fn pf_27_s05_requests_are_rewritten_to_plain_http_for_the_broker() {
     }
 }
 
+#[test]
+fn issue_654_brokered_target_url_inverts_the_broker_rewrite() {
+    let request = |url: &str| codex_http_client::Request::new(http::Method::POST, url.to_string());
+    for url in [
+        "https://api.z.ai/api/paas/v4/chat/completions",
+        "https://api.openai.com/v1/responses?stream=true",
+        "https://api.z.ai:8443/v4/chat/completions",
+        "https://203.0.113.7/v1/messages",
+        "https://api.example:80/v1/messages",
+    ] {
+        let brokered = rewritten_for_broker_in_tests(request(url));
+        assert_ne!(brokered.url, url);
+        assert_eq!(
+            brokered_target_url(&brokered).as_deref(),
+            Some(url),
+            "{url}"
+        );
+    }
+    // Only a frame-bearing plain-HTTP URL is the broker's.
+    let unframed = request("http://api.z.ai:443/api/paas/v4/chat/completions");
+    assert_eq!(brokered_target_url(&unframed), None);
+    let mut framed_https = rewritten_for_broker_in_tests(request("https://api.z.ai/v4"));
+    framed_https.url = "https://api.z.ai/v4".to_string();
+    assert_eq!(brokered_target_url(&framed_https), None);
+    let mut framed_user = rewritten_for_broker_in_tests(request("https://api.z.ai/v4"));
+    framed_user.url = "http://user@api.z.ai:443/v4".to_string();
+    assert_eq!(brokered_target_url(&framed_user), None);
+}
+
 fn brokered_request(base_url: &str, source: BrokeredKeySource) -> BrokeredAuthRequest {
     BrokeredAuthRequest {
         base_url: base_url.to_string(),
