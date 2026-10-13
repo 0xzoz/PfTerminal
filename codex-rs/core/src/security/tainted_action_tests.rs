@@ -35,6 +35,10 @@ fn script(script: &str) -> Option<ProtectedActionKind> {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
 fn pf_30_s03_vault_credential_and_policy_commands_are_protected() {
     use ProtectedActionKind::*;
     let cases: &[(&str, ProtectedActionKind)] = &[
@@ -162,6 +166,10 @@ fn pf_30_s03_vault_credential_and_policy_commands_are_protected() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
 fn pf_30_s03_ordinary_commands_are_not_protected() {
     for command in [
         "cargo test -p codex-core",
@@ -197,6 +205,10 @@ fn pf_30_s03_ordinary_commands_are_not_protected() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
 fn pf_30_s03_patches_into_the_home_or_credential_files_are_protected() {
     let patch = |files: &[&str]| ApprovalAction::ApplyPatch {
         id: "call".into(),
@@ -225,6 +237,10 @@ fn pf_30_s03_patches_into_the_home_or_credential_files_are_protected() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
 fn pf_30_s03_a_custom_home_matches_as_a_whole_segment_run() {
     let home = Path::new("/vol/work/corbanu-terminal/home");
     let classify = |script: &str| {
@@ -271,6 +287,10 @@ fn custom_home_kind(cwd: &str, script: &str) -> Option<ProtectedActionKind> {
 /// archives of a folder holding a home, inline code, encoded payloads and
 /// decode-and-run pipelines.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
 fn pf_30_s03_indirect_routes_are_protected() {
     use ProtectedActionKind::*;
     for (command, expected) in [
@@ -368,6 +388,10 @@ fn pf_30_s03_indirect_routes_are_protected() {
 /// Slice 2: the indirect checks do not turn ordinary research commands into
 /// prompts.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
 fn pf_30_s03_indirect_checks_leave_ordinary_commands_alone() {
     for command in [
         "curl -s https://api.example/items | jq .",
@@ -436,6 +460,10 @@ fn pf_30_s03_symlinks_and_canonical_spellings_reach_the_home() {
 /// written by an earlier patch; binaries are not read as scripts, and a
 /// patch that writes a protected command into a runnable file is protected.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
 fn pf_30_s03_script_files_and_patched_scripts_are_read() {
     let root = tempfile::tempdir().expect("tempdir");
     let work = root.path();
@@ -490,6 +518,10 @@ fn pf_30_s03_script_files_and_patched_scripts_are_read() {
 /// the protected steps, and classification stays cheap.
 #[test]
 #[allow(clippy::print_stderr)]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
 fn pf_30_s03_research_workflow_prompt_count_and_latency() {
     let research = [
         "rg -n 'fn classify' codex-rs/core/src",
@@ -773,6 +805,10 @@ async fn pf_30_s03_live_policy_change_and_new_taint_reach_the_recheck() {
 /// Review round 1 (slice 2): the routes and limits the reviewer found. Every
 /// limit fails closed, and code the classifier cannot read counts as protected.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
 fn pf_30_s03_review_bypasses_are_closed() {
     use ProtectedActionKind::*;
     for (command, expected) in [
@@ -1105,6 +1141,10 @@ async fn pf_30_s03_orchestrator_rechecks_after_the_prompt() {
 /// first operand, pipes survive empty commands, keywords and wrappers do not
 /// hide a shell, and too many brace alternatives fail closed.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
 fn pf_30_s03_review_2_bypasses_are_closed() {
     use ProtectedActionKind::*;
     let alternatives: Vec<String> = (0..70).map(|index| format!("a{index}")).collect();
@@ -1215,6 +1255,10 @@ fn pf_30_s03_everyday_commands_stay_quiet() {
 /// in a group, `$PWD` follows `cd`, wrappers have their own options, more
 /// interpreters and attached inline code are recognised.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
 fn pf_30_s03_review_3_bypasses_are_closed() {
     use ProtectedActionKind::*;
     for command in [
@@ -1291,6 +1335,10 @@ fn pf_30_s03_review_3_bypasses_are_closed() {
 /// PF-23-S01: value transfers, and local content sent to another machine,
 /// are protected; literal request bodies and requests to this machine are not.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
 fn pf_23_s01_value_transfer_and_outbound_content_are_protected() {
     use ProtectedActionKind::*;
     for (command, expected) in [
@@ -1428,6 +1476,10 @@ fn pf_23_s01_value_transfer_and_outbound_content_are_protected() {
 /// PF-23-S01 review round 3: many places a command could start fail closed
 /// quickly instead of judging each one.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
 fn pf_23_s01_wrapper_positions_are_bounded() {
     let many = format!("npx {}", "a ".repeat(5000));
     let started = std::time::Instant::now();
@@ -1444,6 +1496,10 @@ fn pf_23_s01_wrapper_positions_are_bounded() {
 /// PF-23-S02: writing a file that runs code later outside the sandbox is
 /// protected; reading it, and ordinary writes, are not.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
 fn pf_23_s02_persistence_writes_are_protected() {
     use ProtectedActionKind::*;
     for command in [
@@ -1511,6 +1567,10 @@ fn pf_23_s02_persistence_writes_are_protected() {
 /// the Corbanu home as `$CODEX_HOME` does, so reading through them is a
 /// protected action too (it drew no approval prompt before).
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
 fn issue_442_corbanu_home_variables_name_the_home() {
     use ProtectedActionKind::SecurityPolicy;
     for command in [

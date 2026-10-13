@@ -90,6 +90,10 @@ fn layer(label: &str, path: Option<PathBuf>, toml: &str) -> ConfigLayerInput {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "PF-27-S06: protected launch is not available on Windows yet, so readiness is never clean (#691)"
+)]
 fn pf_29_s01_empty_machine_is_clean_only_when_controls_are_ready() {
     let fixture = Fixture::new();
     let sources = fixture.sources();
@@ -111,6 +115,10 @@ fn pf_29_s01_empty_machine_is_clean_only_when_controls_are_ready() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "PF-27-S06: protected launch is not available on Windows yet, so readiness is never clean (#691)"
+)]
 fn pf_29_s01_credential_files_and_ssh_keys_are_isolated_not_blocking() {
     let fixture = Fixture::new();
     let home = fixture.home();
@@ -330,6 +338,10 @@ command = "docs-mcp"
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "PF-27-S06: protected launch is not available on Windows yet, so readiness is never clean (#691)"
+)]
 fn pf_29_s01_old_memory_content_blocks_until_removed() {
     let fixture = Fixture::new();
     let memories = fixture.corbanu().join("memories");
@@ -441,6 +453,10 @@ fn nix_is_root() -> bool {
 /// so a locked vault shows up as a store that cannot be read; a damaged
 /// store is the same. An empty `secrets/` (lock file only) is no vault.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "PF-27-S06: protected launch is not available on Windows yet, so readiness is never clean (#691)"
+)]
 fn pf_29_s01_locked_or_damaged_vault_is_incomplete_readiness() {
     let fixture = Fixture::new();
     let store = fixture.corbanu().join("secrets/local.age");
@@ -481,6 +497,10 @@ fn pf_29_s01_locked_or_damaged_vault_is_incomplete_readiness() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "PF-27-S06: protected launch is not available on Windows yet, so readiness is never clean (#691)"
+)]
 fn pf_29_s01_corrupt_snapshots_and_histories_are_isolated() {
     let fixture = Fixture::new();
     let home = fixture.corbanu();
@@ -638,6 +658,10 @@ fn pf_29_s01_devices_and_pipes_neither_hang_nor_exhaust_memory() {
 /// is stored; it is not a secret, so it neither blocks Aggressive nor makes
 /// its config file a "credential file".
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "PF-27-S06: protected launch is not available on Windows yet, so readiness is never clean (#691)"
+)]
 fn pf_29_s01_credential_store_modes_are_not_secrets() {
     let fixture = Fixture::new();
     let system_path = fixture.root.path().join("etc/codex/config.toml");

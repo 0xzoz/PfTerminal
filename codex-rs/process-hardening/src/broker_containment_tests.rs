@@ -2,6 +2,10 @@ use super::*;
 use pretty_assertions::assert_eq;
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "macOS Seatbelt profile; not built for Windows paths (#691)"
+)]
 fn pf_27_s02_broker_profile_denies_exec_and_confines_writes() {
     let dir = tempfile_dir();
     let profile = broker_seatbelt_profile(&dir).expect("profile");
@@ -12,6 +16,10 @@ fn pf_27_s02_broker_profile_denies_exec_and_confines_writes() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "macOS Seatbelt profile; not built for Windows paths (#691)"
+)]
 fn pf_27_s05_broker_profile_leaves_only_the_named_files_writable() {
     let dir = tempfile_dir();
     let lock = dir.join("missing").join(".vault.lock");

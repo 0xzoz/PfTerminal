@@ -170,6 +170,10 @@ fn pf_29_s02_plan_previews_destinations_and_unsupported_items_without_values() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "PF-27-S06: protected launch is not available on Windows yet, so readiness is never clean (#691)"
+)]
 fn pf_29_s02_migration_moves_values_rewrites_references_and_reaudits_clean() {
     let machine = Machine::new();
     assert!(!machine.preflight().is_clean());
@@ -227,6 +231,10 @@ fn pf_29_s02_migration_moves_values_rewrites_references_and_reaudits_clean() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "PF-27-S06: protected launch is not available on Windows yet, so readiness is never clean (#691)"
+)]
 fn pf_29_s02_every_interruption_recovers_to_the_same_result_and_locks_until_then() {
     for point in [
         FailPoint::Prepared,

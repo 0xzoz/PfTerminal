@@ -99,6 +99,10 @@ async fn finish_refuses_a_config_that_misses_a_row() {
 /// A `.rules` file that fails to parse would make the session drop every rule,
 /// including the vault rule, so launch refuses Aggressive.
 #[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "Aggressive cannot be fully applied on a Windows test machine without the Windows sandbox (#691)"
+)]
 async fn finish_refuses_a_broken_rules_file() {
     let home = tempfile::tempdir().unwrap();
     let cwd = tempfile::tempdir().unwrap();
