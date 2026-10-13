@@ -1104,14 +1104,16 @@ impl ChatWidget {
             .then(|| default_effort.clone());
 
         let model_slug = preset.model.to_string();
-        // #653: another connection of the session's model is not the current choice.
-        let is_current_model = self.current_model() == preset.model.as_str()
+        let is_session_model = self.current_model() == preset.model.as_str();
+        // #653: another connection of the session's model keeps its effort
+        // highlighted but is not the current choice.
+        let is_current_model = is_session_model
             && (codex_model_provider_info::model_routes(&preset.model).is_empty()
                 || provider.as_deref() == Some(self.config.model_provider_id.as_str()));
         let highlight_choice = match &purpose {
             ModelSelectionPurpose::SpawnAgent { .. } => spawn_default_effort,
             ModelSelectionPurpose::CodexPane { .. } => default_choice.clone(),
-            ModelSelectionPurpose::Session if is_current_model => {
+            ModelSelectionPurpose::Session if is_session_model => {
                 if in_plan_mode {
                     self.config
                         .plan_mode_reasoning_effort
@@ -1128,7 +1130,19 @@ impl ChatWidget {
         let selection_choice = highlight_choice.clone().or_else(|| default_choice.clone());
         let initial_selected_idx = choices
             .iter()
-            .position(|choice| Some(choice) == selection_choice.as_ref());
+            .position(|choice| Some(choice) == selection_choice.as_ref())
+            .or_else(|| {
+                // #653: another connection of the session's model keeps an
+                // advanced effort preselected under "More reasoning…", which
+                // follows the standard choices.
+                (is_session_model
+                    && !is_current_model
+                    && !advanced_choices.is_empty()
+                    && highlight_choice
+                        .as_ref()
+                        .is_some_and(Self::is_advanced_reasoning_effort))
+                .then_some(choices.len())
+            });
         let mut items: Vec<SelectionItem> = Vec::new();
         for choice in choices.iter() {
             let effort = choice.clone();
@@ -1330,6 +1344,9 @@ impl ChatWidget {
         let highlight_choice = is_current_model
             .then(|| self.effective_reasoning_effort())
             .flatten();
+        // #653: another connection of the session's model is not the current choice.
+        let is_current_route = codex_model_provider_info::model_routes(&model_slug).is_empty()
+            || provider.as_deref() == Some(self.config.model_provider_id.as_str());
         let mut items = Vec::new();
         for effort in choices {
             let description = match &effort {
@@ -1384,7 +1401,9 @@ impl ChatWidget {
             items.push(SelectionItem {
                 name: Self::reasoning_effort_label(&effort),
                 description: Some(description.to_string()),
-                is_current: is_current_model && Some(&effort) == highlight_choice.as_ref(),
+                is_current: is_current_model
+                    && is_current_route
+                    && Some(&effort) == highlight_choice.as_ref(),
                 actions,
                 dismiss_on_select: true,
                 ..Default::default()

@@ -76,6 +76,12 @@ key = "Enter"
 [[steps]]
 wait = "Select Reasoning Level for GLM 5\\.3 Flash · Z\\.AI \\(Claude-style\\)"
 [[steps]]
+wait = "› \\d\\. More reasoning"
+[[steps]]
+key = "Enter"
+[[steps]]
+wait = "Advanced Reasoning"
+[[steps]]
 key = "Enter"
 [[steps]]
 wait = "Model changed to GLM 5\\.3 Flash · Z\\.AI \\(Claude-style\\)"
@@ -105,6 +111,12 @@ pause = 1.0
 key = "Enter"
 [[steps]]
 wait = "Select Reasoning Level for GLM 5\\.3 Flash · Z\\.AI \\(OpenAI-style\\)"
+[[steps]]
+wait = "› \\d\\. More reasoning"
+[[steps]]
+key = "Enter"
+[[steps]]
+wait = "Advanced Reasoning"
 [[steps]]
 key = "Enter"
 [[steps]]

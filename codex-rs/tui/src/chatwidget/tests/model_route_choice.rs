@@ -222,3 +222,49 @@ async fn connections_on_different_named_accounts_name_them() {
         "{popup}"
     );
 }
+
+/// Switching connection keeps the session's effort, even an advanced one.
+#[tokio::test]
+async fn switching_connection_keeps_the_sessions_max_effort() {
+    let (mut chat, mut rx, _op_rx) = zai_session(ZAI_PROVIDER_ID).await;
+    chat.set_reasoning_effort(Some(ReasoningEffortConfig::Max));
+    open_all_models(&mut chat);
+    let preset = select_row(&mut chat, &mut rx, CLAUDE_STYLE);
+    chat.open_reasoning_popup(preset);
+    let effort = render_bottom_popup(&chat, /*width*/ 100);
+    assert!(
+        effort
+            .lines()
+            .any(|line| line.contains('›') && line.contains("More reasoning")),
+        "{effort}"
+    );
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    let advanced = std::iter::from_fn(|| rx.try_recv().ok())
+        .find_map(|event| match event {
+            AppEvent::OpenAdvancedReasoningPopup { model, .. } => Some(model),
+            _ => None,
+        })
+        .expect("the advanced step opens");
+    chat.open_advanced_reasoning_popup(advanced);
+    let popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert!(!popup.contains("(current)"), "{popup}");
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    assert_eq!(
+        chosen(&events),
+        (
+            Some(ZAI_ANTHROPIC_PROVIDER_ID.to_string()),
+            Some(ZAI_ANTHROPIC_PROVIDER_ID.to_string())
+        )
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AppEvent::PersistModelSelection {
+                effort: Some(ReasoningEffortConfig::Max),
+                ..
+            }
+        )),
+        "{events:?}"
+    );
+}
