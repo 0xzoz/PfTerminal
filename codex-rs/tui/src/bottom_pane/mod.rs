@@ -49,6 +49,7 @@ use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::style::Stylize;
 use ratatui::text::Line;
 use std::time::Duration;
 use std::time::Instant;
@@ -1617,7 +1618,12 @@ impl BottomPane {
     /// link) needs a fresh choice as the other request views do (#523).
     pub(crate) fn show_app_link_view(&mut self, mut view: AppLinkView) {
         self.require_fresh_app_link_choice(&mut view);
-        self.push_view(Box::new(view));
+        // #624: a server's link request waits under a view the person opened.
+        if view.answers_request() {
+            self.push_request_view(Box::new(view));
+        } else {
+            self.push_view(Box::new(view));
+        }
     }
 
     fn require_fresh_app_link_choice(&self, view: &mut AppLinkView) {
@@ -1997,12 +2003,34 @@ impl BottomPane {
         self.as_renderable_with_composer_right_reserve(/*composer_right_reserve*/ 0)
     }
 
+    /// #624: whether a request view waits under the view on top.
+    fn request_waits_under_active_view(&self) -> bool {
+        match self.view_stack.split_last() {
+            Some((top, below)) => {
+                !top.answers_request() && below.iter().any(|view| view.answers_request())
+            }
+            None => false,
+        }
+    }
+
     pub(crate) fn as_renderable_with_composer_right_reserve(
         &'_ self,
         composer_right_reserve: u16,
     ) -> RenderableItem<'_> {
         if let Some(view) = self.active_view() {
-            RenderableItem::Borrowed(view)
+            if !self.request_waits_under_active_view() {
+                return RenderableItem::Borrowed(view);
+            }
+            let mut flex = FlexRenderable::new();
+            flex.push(
+                /*flex*/ 0,
+                RenderableItem::Owned(Box::new(Line::from(vec![
+                    "  ! ".magenta().bold(),
+                    "A request is waiting; it shows when you close this.".magenta(),
+                ]))),
+            );
+            flex.push(/*flex*/ 1, RenderableItem::Borrowed(view));
+            RenderableItem::Owned(Box::new(flex))
         } else {
             let mut flex = FlexRenderable::new();
             if let Some(status) = &self.status {
@@ -2645,6 +2673,27 @@ mod tests {
         assert!(approval_answered(&mut rx));
     }
 
+    /// #624: while a request waits under the view on top, that view shows a
+    /// one-line notice above it; the notice goes once nothing waits.
+    #[test]
+    fn a_view_over_a_waiting_request_says_so() {
+        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let features = Features::with_defaults();
+        let mut pane = test_pane(AppEventSender::new(tx_raw));
+        pane.show_selection_view(panes_picker());
+        let area = Rect::new(0, 0, 80, pane.desired_height(/*width*/ 80));
+        assert!(!render_snapshot(&pane, area).contains("A request is waiting"));
+
+        pane.push_approval_request(exec_request(), &features);
+        let area = Rect::new(0, 0, 80, pane.desired_height(/*width*/ 80));
+        let screen = render_snapshot(&pane, area);
+        assert!(
+            screen.contains("A request is waiting; it shows when you close this."),
+            "{screen}"
+        );
+        assert!(screen.contains("Corbanu Terminal - B"), "{screen}");
+    }
+
     /// #624: a second approval while the first waits under the picker joins
     /// the first one's queue instead of opening another prompt.
     #[test]
@@ -2835,6 +2884,17 @@ mod tests {
         let mut pane = test_pane(tx.clone());
         pane.show_selection_view(picker());
         pane.show_app_link_view(url_link_view(tx));
+        press_keys(
+            &mut pane,
+            &[KeyCode::Enter, KeyCode::Char('1'), KeyCode::Enter],
+        );
+        assert!(!link_acted(&mut rx));
+        // #624: it waited under the picker (the picker's arrows don't reach
+        // it either); closing the picker shows it, still needing a choice.
+        press_keys(&mut pane, &[KeyCode::Down, KeyCode::Up, KeyCode::Enter]);
+        assert!(!link_acted(&mut rx));
+        press_keys(&mut pane, &[KeyCode::Esc]);
+        assert_eq!(pane.view_stack.len(), 1);
         press_keys(
             &mut pane,
             &[KeyCode::Enter, KeyCode::Char('1'), KeyCode::Enter],

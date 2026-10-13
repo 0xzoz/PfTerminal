@@ -2,6 +2,7 @@
 source: tui/src/bottom_pane/mod.rs
 expression: "render_snapshot(&pane, area)"
 ---
+  ! A request is waiting; it shows when you close this.     
                                                             
   Panes                                                     
                                                             

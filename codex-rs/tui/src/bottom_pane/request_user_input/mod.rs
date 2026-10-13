@@ -1445,6 +1445,9 @@ impl BottomPaneView for RequestUserInputOverlay {
     /// Enter must not answer this request.
     fn on_revealed(&mut self) {
         self.require_fresh_choice();
+        // #624: the person couldn't see it while it waited under another
+        // view; any auto-resolution countdown starts when it is shown.
+        self.request_started_at = Instant::now();
     }
 
     fn will_interrupt_turn_on_key_event(&self, key_event: KeyEvent) -> bool {
@@ -2118,6 +2121,32 @@ mod tests {
             .expect("expected question prefix in progress line");
         let prefix_x = progress_line[..prefix_byte_idx].width();
         assert_ne!(buf[(prefix_x as u16, 1)].style().fg, Some(Color::Red));
+    }
+
+    /// #624: a question that waited unseen under another view starts its
+    /// auto-resolution countdown when it is shown, instead of answering
+    /// itself at once.
+    #[test]
+    fn auto_resolution_restarts_when_the_question_is_revealed() {
+        let (tx, mut rx) = test_sender();
+        let mut overlay = RequestUserInputOverlay::new(
+            request_event_with_auto_resolution(
+                "turn-1",
+                vec![question_with_options("q1", "First")],
+            ),
+            tx,
+            /*has_input_focus*/ true,
+            /*enhanced_keys_supported*/ false,
+            /*disable_paste_burst*/ false,
+        );
+        let total_timeout = AUTO_RESOLUTION_HIDDEN_GRACE + AUTO_RESOLUTION_VISIBLE_COUNTDOWN;
+        overlay.request_started_at = Instant::now() - total_timeout;
+
+        overlay.on_revealed();
+
+        assert!(!overlay.pre_draw_tick(Instant::now()));
+        assert!(!overlay.done);
+        assert!(rx.try_recv().is_err(), "nothing was answered");
     }
 
     #[test]
