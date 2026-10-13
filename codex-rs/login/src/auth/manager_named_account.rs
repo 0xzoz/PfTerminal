@@ -36,6 +36,13 @@ type Registry = HashMap<(PathBuf, NamedChatgptAccount), Weak<AuthManager>>;
 static NAMED_ACCOUNT_MANAGERS: LazyLock<Mutex<Registry>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// PF-84-S06 (#658): per home, the named sign-in account the process's user
+/// session runs on. Per home rather than per manager, so that a manager built
+/// later from the same configuration (the ChatGPT connector helpers build
+/// their own) serves the same account.
+static SESSION_ACCOUNTS: LazyLock<Mutex<HashMap<PathBuf, NamedChatgptAccount>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
 impl AuthManager {
     /// The manager of one named sign-in account of this home, created on
     /// first use with this manager's settings. It never reads the default
@@ -86,17 +93,15 @@ impl AuthManager {
     /// process (an app-server client with many threads) the last one to
     /// start or switch decides, as for the process's model list. Returns
     /// whether it changed.
-    pub fn follow_session_account(self: &Arc<Self>, account: Option<NamedChatgptAccount>) -> bool {
-        let base = self.default_account_manager();
-        let mut current = base
-            .session_account
-            .write()
+    pub fn follow_session_account(&self, account: Option<NamedChatgptAccount>) -> bool {
+        let mut accounts = SESSION_ACCOUNTS
+            .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if *current == account {
-            return false;
+        let home = self.codex_home.clone();
+        match account {
+            Some(account) => accounts.insert(home, account.clone()) != Some(account),
+            None => accounts.remove(&home).is_some(),
         }
-        *current = account;
-        true
     }
 
     /// PF-84-S06 (#658): the manager of the sign-in the process's user
@@ -109,11 +114,11 @@ impl AuthManager {
     /// default login.
     pub fn for_session(self: &Arc<Self>) -> Arc<AuthManager> {
         let base = self.default_account_manager();
-        let account = base
-            .session_account
-            .read()
+        let account = SESSION_ACCOUNTS
+            .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+            .get(&base.codex_home)
+            .cloned();
         match account {
             Some(account) => base.for_named_account(account),
             None => base,
@@ -180,7 +185,6 @@ impl AuthManager {
             base_manager: Some(base),
             hide_restricted_default_login: false,
             hidden_default_login_reason: RwLock::new(None),
-            session_account: RwLock::new(None),
         }
     }
 

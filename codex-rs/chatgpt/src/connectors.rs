@@ -34,7 +34,9 @@ const DEFAULT_APPS_PRODUCT_SKU: &str = "codex";
 
 async fn apps_enabled(config: &Config) -> bool {
     let auth_manager =
-        AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false).await;
+        AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false)
+            .await
+            .for_session();
     let auth = auth_manager.auth().await;
     config
         .features
@@ -43,7 +45,9 @@ async fn apps_enabled(config: &Config) -> bool {
 
 async fn connector_auth(config: &Config) -> anyhow::Result<CodexAuth> {
     let auth_manager =
-        AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false).await;
+        AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false)
+            .await
+            .for_session();
     let auth = auth_manager
         .auth()
         .await
