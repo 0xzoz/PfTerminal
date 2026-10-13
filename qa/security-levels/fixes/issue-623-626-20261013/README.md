@@ -24,12 +24,13 @@ Landlock and seccomp cannot read the target. The check is in core, so it is the 
 - **Backstop.** Any command that may create a link (an `ln`/`gln`/`mklink` word anywhere, a link call in code, a
   PowerShell link item) and names `.codex` or `.agents` anywhere in its text is refused. The paths of its own folder
   and the workspace roots are left out of that check, so a project kept below a folder named `.codex` is not caught by
-  it. The backstop catches names hidden in variables, `$(…)`, backticks, `eval`, pipes into a shell, globs, braces and
-  other letter cases.
+  it. The backstop catches names hidden in variables, `$(…)`, backticks, `eval`, pipes into a shell, globs (also
+  `[[:alpha:]]`), braces, zsh groups (`.agent(s|)`), quotes or a backslash inside the name, and other letter cases.
+  It is defense in depth against ordinary link commands, not against deliberate obfuscation.
 - **Bounds.** Too many paths to check, or lookups that take longer than 2 s, also refuse.
 
 Out of reach (writes through such a link stay denied by the sandbox):
-- targets built at run time without a protected name in the text;
+- targets or names built at run time (`ln -s "$(cat f)" x`, `$'\x2eagents'`, `$(printf …)`);
 - a script file's links without zsh-fork;
 - a command typed across several writes;
 - links copied, moved or unpacked (`cp -a`, `mv`, `rsync -l`, `tar`, `git checkout`);

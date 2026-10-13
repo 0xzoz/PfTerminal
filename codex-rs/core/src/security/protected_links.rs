@@ -22,7 +22,9 @@
 //! (`.agen*`), a brace (`.agent{s,}`) or another letter case. So a link
 //! cannot be made in two steps (`ln -s y/.agents x`, then `ln -s . y`).
 //!
-//! Out of reach: a target built at run time (`ln -s "$(cat f)" x`); a link
+//! This is defense in depth against ordinary link commands, not against
+//! deliberate obfuscation. Out of reach: a target or name built at run time
+//! (`ln -s "$(cat f)" x`, `$'\x2eagents'`); a link
 //! made by a script file without zsh-fork, or typed across several writes;
 //! links copied, moved or unpacked (`cp -a`, `mv`, `rsync -l`, `tar`, `git
 //! checkout`); tools not listed (`awk system()`, `Rscript`, PowerShell
@@ -153,7 +155,9 @@ struct Inputs {
 }
 
 impl Inputs {
-    /// Only under Aggressive, for a local command.
+    /// Only under Aggressive, for a local command. The level is the one the
+    /// session's protections run at (`post_taint_state`, as #442/#637 and
+    /// Grant once read it).
     fn capture(session: &Session, turn: &TurnContext) -> Option<Self> {
         session
             .services

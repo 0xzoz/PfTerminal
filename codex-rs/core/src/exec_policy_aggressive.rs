@@ -7,7 +7,8 @@
 //! rule is written to the Corbanu home's `rules/default.rules` with
 //! [`APPROVED_UNDER_AGGRESSIVE`] as its justification, and only that file may
 //! say so (a project's `.codex/rules` cannot). Every other `allow` prefix rule
-//! is suspended, not deleted: the person is asked as usual, the prompt says
+//! (also one an administrator or a system layer set) is suspended, not
+//! deleted: the person is asked as usual, the prompt says
 //! which remembered approval was not applied, and under Permissive the rules
 //! apply as before. `prompt` and `forbidden` rules always apply.
 //!

@@ -597,10 +597,12 @@ impl ExecPolicyManager {
         let current_policy = self.current();
         if under_aggressive {
             let mut approved = self.aggressive_approved.load().as_ref().clone();
-            if !approved.contains(&amendment.command) {
-                approved.push(amendment.command.clone());
-                self.aggressive_approved.store(Arc::new(approved));
+            if approved.contains(&amendment.command) {
+                // A marked rule for it is in the policy already.
+                return Ok(scope);
             }
+            approved.push(amendment.command.clone());
+            self.aggressive_approved.store(Arc::new(approved));
             let mut updated_policy = current_policy.as_ref().clone();
             updated_policy.add_prefix_rule_with_justification(
                 &amendment.command,
