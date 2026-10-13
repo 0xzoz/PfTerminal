@@ -2364,6 +2364,102 @@ async fn issue_586_missing_db_init_lock_cannot_be_created_or_held() -> anyhow::R
     Ok(())
 }
 
+/// #605: with a `:minimal`-read profile the macOS platform defaults keep
+/// `/tmp` writable for temporary files. A protected command working in a git
+/// worktree below `/tmp` still cannot write the repository's hooks or the
+/// worktree's git folder, nor create the workspace's `.codex`, as with
+/// `:root` reads; a scratch file in `/tmp` is still written. Permissive is
+/// unchanged.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_605_minimal_reads_keep_git_below_tmp_read_only() -> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
+    use codex_protocol::permissions::FileSystemAccessMode;
+    use codex_protocol::permissions::FileSystemPath;
+    use codex_protocol::permissions::FileSystemSandboxEntry;
+    use codex_protocol::permissions::FileSystemSandboxPolicy;
+    use codex_protocol::permissions::FileSystemSpecialPath;
+    use codex_protocol::permissions::NetworkSandboxPolicy;
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let mut wrong = Vec::new();
+    for (level, open) in [
+        (SecurityLevel::Moderate, false),
+        (SecurityLevel::Permissive, true),
+    ] {
+        // As a person spells it: through the `/tmp` link.
+        let base = tempfile::tempdir_in("/tmp")?;
+        let x = base.path().to_path_buf();
+        let gitdir = x.join("main/.git/worktrees/wt");
+        std::fs::create_dir_all(&gitdir)?;
+        std::fs::create_dir_all(x.join("main/.git/hooks"))?;
+        std::fs::write(x.join("main/.git/config"), "[core]\n")?;
+        std::fs::write(gitdir.join("HEAD"), "ref\n")?;
+        std::fs::write(gitdir.join("commondir"), "../..\n")?;
+        let workspace = x.join("wt");
+        std::fs::create_dir_all(&workspace)?;
+        std::fs::write(
+            workspace.join(".git"),
+            format!("gitdir: {}\n", gitdir.display()),
+        )?;
+        let path = x.to_string_lossy().into_owned();
+        // Split inside the folder's own name: neither part names it.
+        let (head, tail) = path.split_at(path.len() - 2);
+        let command = format!(
+            "x=\"$(printf '{head}%s' {tail})\"; g=\".g$(printf it)\"; \
+             echo x > \"$x/main/$g/hooks/pre-commit\"; echo x >> \"$x/main/$g/worktrees/wt/HEAD\"; \
+             mkdir \"$x/wt/.co$(printf dex)\"; echo x > \"$x/scratch\"; echo ran-605"
+        );
+        let cwd = AbsolutePathBuf::from_absolute_path(&workspace)?;
+        let (test, captured) = start_turn_in(
+            None,
+            level,
+            AskForApproval::Never,
+            vec![
+                call("call-605", "shell_command", json!({ "command": command })),
+                done_step(),
+            ],
+            move |config| {
+                config.cwd = cwd.clone();
+                let file_system = FileSystemSandboxPolicy::restricted(vec![
+                    FileSystemSandboxEntry::new(
+                        FileSystemPath::Special {
+                            value: FileSystemSpecialPath::Minimal,
+                        },
+                        FileSystemAccessMode::Read,
+                    ),
+                    FileSystemSandboxEntry::new(
+                        FileSystemPath::Path { path: cwd.clone() },
+                        FileSystemAccessMode::Write,
+                    ),
+                ]);
+                config
+                    .permissions
+                    .set_permission_profile(PermissionProfile::from_runtime_permissions(
+                        &file_system,
+                        NetworkSandboxPolicy::Restricted,
+                    ))
+                    .expect(":minimal profile");
+            },
+        )
+        .await?;
+        assert!(next_exec_approval(&test).await.is_none());
+        let requests = captured.requests();
+        let output = output_text(&requests[requests.len() - 1], "call-605");
+        let achieved = [
+            x.join("main/.git/hooks/pre-commit").exists(),
+            std::fs::read_to_string(gitdir.join("HEAD"))? != "ref\n",
+            workspace.join(".codex").exists(),
+        ];
+        if !output.contains("ran-605") || achieved != [open; 3] || !x.join("scratch").exists() {
+            wrong.push(format!("{level:?}: {achieved:?}: {output}"));
+        }
+        drop(test);
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
 /// PF-23-S03: a level confirmed earlier and stored in `security_state.json`
 /// is enforced after a restart even when the configured level is lower.
 #[cfg(target_os = "macos")]

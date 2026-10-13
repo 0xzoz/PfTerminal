@@ -797,7 +797,7 @@ impl ReadDenials {
             .collect();
         let read_only: Vec<FileSystemSandboxEntry> = self
             .read_only_paths()
-            .filter(|path| can_write(&file_system, path.as_path(), cwd))
+            .filter(|path| may_write(&file_system, path.as_path(), cwd))
             .map(|path| {
                 // #518: a `Read` entry more specific than a denial would
                 // reopen it. A read-only path that is denied in any spelling
@@ -829,6 +829,29 @@ impl ReadDenials {
 /// home and these paths are recorded).
 fn can_write(policy: &FileSystemSandboxPolicy, path: &Path, cwd: &Path) -> bool {
     policy.can_write_path_with_cwd(path, cwd) || policy.can_write_effective_path_with_cwd(path, cwd)
+}
+
+/// [`can_write`], or (#605) through the macOS platform defaults' scratch
+/// folders, which `:minimal` reads make writable outside the policy's own
+/// roots: where a path becomes read-only. Never used to grant a write.
+fn may_write(policy: &FileSystemSandboxPolicy, path: &Path, cwd: &Path) -> bool {
+    can_write(policy, path, cwd) || platform_tmp_writable(policy, path)
+}
+
+/// #605: whether `path` is in a scratch folder the macOS platform defaults
+/// (`:minimal` reads) let commands write, by its real location.
+fn platform_tmp_writable(policy: &FileSystemSandboxPolicy, path: &Path) -> bool {
+    if !cfg!(target_os = "macos") || !policy.include_platform_defaults() {
+        return false;
+    }
+    AbsolutePathBuf::from_absolute_path(path)
+        .ok()
+        .and_then(|path| real_location(&path))
+        .is_some_and(|real| {
+            ["/private/tmp", "/private/var/tmp"]
+                .iter()
+                .any(|folder| real.as_path().starts_with(folder))
+        })
 }
 
 /// #562 (Linux): creates the Corbanu home's missing runtime folders, empty,
