@@ -117,11 +117,10 @@ pub(crate) async fn list_tool_suggest_discoverable_tools_with_auth(
 pub async fn list_cached_accessible_connectors_from_mcp_tools(
     config: &Config,
 ) -> Option<Vec<AppInfo>> {
-    let auth_manager =
-        AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false)
-            .await
-            .for_session();
-    let auth = auth_manager.auth().await;
+    let auth = AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false)
+        .await
+        .session_auth()
+        .await;
     if !config
         .features
         .apps_enabled_for_auth(auth.as_ref().is_some_and(CodexAuth::uses_codex_backend))
@@ -204,11 +203,15 @@ pub async fn list_accessible_connectors_from_mcp_tools_with_mcp_manager(
     environment_manager: Arc<EnvironmentManager>,
     mcp_manager: Arc<McpManager>,
 ) -> anyhow::Result<AccessibleConnectorsStatus> {
+    // #658: the sign-in the process's user sessions run on.
     let auth_manager =
         AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false)
             .await
             .for_session();
-    let auth = auth_manager.auth().await;
+    let auth = match &auth_manager {
+        Some(auth_manager) => auth_manager.auth().await,
+        None => None,
+    };
     if !config
         .features
         .apps_enabled_for_auth(auth.as_ref().is_some_and(CodexAuth::uses_codex_backend))
@@ -246,9 +249,8 @@ pub async fn list_accessible_connectors_from_mcp_tools_with_mcp_manager(
         McpRuntimeContext::new(Arc::clone(&environment_manager), config.cwd.to_path_buf());
 
     let cancel_token = CancellationToken::new();
-    let codex_apps_auth_manager =
-        codex_mcp::host_owned_codex_apps_enabled(&mcp_config, auth.as_ref())
-            .then(|| Arc::clone(&auth_manager));
+    let codex_apps_auth_manager = auth_manager
+        .filter(|_| codex_mcp::host_owned_codex_apps_enabled(&mcp_config, auth.as_ref()));
     let mcp_runtime = McpRuntime::new(McpRuntimeInput {
         config: Arc::clone(&mcp_config),
         plugins_available: false,
@@ -428,11 +430,11 @@ async fn cached_directory_connectors_for_tool_suggest_with_auth(
     let auth = if let Some(auth) = auth {
         Some(auth)
     } else {
-        let auth_manager =
+        loaded_auth =
             AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false)
                 .await
-                .for_session();
-        loaded_auth = auth_manager.auth().await;
+                .session_auth()
+                .await;
         loaded_auth.as_ref()
     };
     let Some(auth) = auth.filter(|auth| auth.uses_codex_backend()) else {

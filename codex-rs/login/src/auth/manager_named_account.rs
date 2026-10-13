@@ -36,13 +36,6 @@ type Registry = HashMap<(PathBuf, NamedChatgptAccount), Weak<AuthManager>>;
 static NAMED_ACCOUNT_MANAGERS: LazyLock<Mutex<Registry>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// PF-84-S06 (#658): per home, the named sign-in account the process's user
-/// session runs on. Per home rather than per manager, so that a manager built
-/// later from the same configuration (the ChatGPT connector helpers build
-/// their own) serves the same account.
-static SESSION_ACCOUNTS: LazyLock<Mutex<HashMap<PathBuf, NamedChatgptAccount>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
 impl AuthManager {
     /// The manager of one named sign-in account of this home, created on
     /// first use with this manager's settings. It never reads the default
@@ -84,45 +77,6 @@ impl AuthManager {
         self.base_manager
             .clone()
             .unwrap_or_else(|| Arc::clone(self))
-    }
-
-    /// PF-84-S06 (#658): records the named sign-in account the process's
-    /// user session runs on (`None`: the default login), so that
-    /// [`AuthManager::for_session`] serves it. A session calls this when it
-    /// starts and when it switches accounts; with several user sessions in a
-    /// process (an app-server client with many threads) the last one to
-    /// start or switch decides, as for the process's model list. Returns
-    /// whether it changed.
-    pub fn follow_session_account(&self, account: Option<NamedChatgptAccount>) -> bool {
-        let mut accounts = SESSION_ACCOUNTS
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let home = self.codex_home.clone();
-        match account {
-            Some(account) => accounts.insert(home, account.clone()) != Some(account),
-            None => accounts.remove(&home).is_some(),
-        }
-    }
-
-    /// PF-84-S06 (#658): the manager of the sign-in the process's user
-    /// session runs on: its named account's ([`AuthManager::follow_session_account`])
-    /// or the default login's. Requests the process makes for the session
-    /// outside a thread (plugin listings, settings, usage, analytics) use
-    /// this, so a session on a named account never sends the default login.
-    /// A named account without a usable sign-in yields no auth: such a
-    /// request goes out without credentials or not at all, never with the
-    /// default login.
-    pub fn for_session(self: &Arc<Self>) -> Arc<AuthManager> {
-        let base = self.default_account_manager();
-        let account = SESSION_ACCOUNTS
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&base.codex_home)
-            .cloned();
-        match account {
-            Some(account) => base.for_named_account(account),
-            None => base,
-        }
     }
 
     /// The named account this manager serves, if any.

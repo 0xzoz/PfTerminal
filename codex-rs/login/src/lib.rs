@@ -55,6 +55,8 @@ pub use auth::ProviderApiKeyStorageSource;
 pub use auth::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR;
 pub use auth::REVOKE_TOKEN_URL_OVERRIDE_ENV_VAR;
 pub use auth::RefreshTokenError;
+pub use auth::SessionSignIn;
+pub use auth::SessionSignInRegistration;
 pub use auth::UnauthorizedRecovery;
 pub use auth::current_named_sign_in;
 pub use auth::default_client;

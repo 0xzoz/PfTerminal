@@ -9,6 +9,7 @@ use app_test_support::TestAppServer;
 use app_test_support::to_response;
 use app_test_support::write_chatgpt_auth;
 use app_test_support::write_named_chatgpt_auth;
+use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ThreadStartParams;
@@ -87,6 +88,23 @@ async fn mount_usage(server: &MockServer) {
         })))
         .mount(server)
         .await;
+}
+
+async fn start_thread(app: &mut TestAppServer, account: Option<&str>) -> Result<()> {
+    let request = app
+        .send_thread_start_request(ThreadStartParams {
+            model: Some("mock-model".to_string()),
+            provider_account: account.map(str::to_string),
+            ..Default::default()
+        })
+        .await?;
+    let response = timeout(
+        DEFAULT_TIMEOUT,
+        app.read_stream_until_response_message(RequestId::Integer(request)),
+    )
+    .await??;
+    let _ = to_response::<ThreadStartResponse>(response)?;
+    Ok(())
 }
 
 async fn read_rate_limits(app: &mut TestAppServer) -> Result<()> {
@@ -179,24 +197,53 @@ async fn backend_requests_follow_a_thread_started_on_a_named_account() -> Result
     // No session yet: the default login (control).
     read_rate_limits(&mut app).await?;
 
-    let request = app
-        .send_thread_start_request(ThreadStartParams {
-            model: Some("mock-model".to_string()),
-            provider_account: Some("work".to_string()),
-            ..Default::default()
-        })
-        .await?;
-    let response = timeout(
-        DEFAULT_TIMEOUT,
-        app.read_stream_until_response_message(RequestId::Integer(request)),
-    )
-    .await??;
-    let _ = to_response::<ThreadStartResponse>(response)?;
+    start_thread(&mut app, Some("work")).await?;
     read_rate_limits(&mut app).await?;
 
     assert_eq!(
         tokens_for(&server, "/api/codex/usage").await,
         vec![DEFAULT_TOKEN.to_string(), WORK_TOKEN.to_string()]
+    );
+    Ok(())
+}
+
+/// A second user thread (another pane) on the default login while one runs on
+/// `work`: requests outside a conversation are refused with the reason and
+/// not sent with either account.
+#[tokio::test]
+async fn sessions_on_different_accounts_send_neither_login() -> Result<()> {
+    let server = MockServer::start().await;
+    mount_usage(&server).await;
+    let home = TempDir::new()?;
+    write_home(home.path(), &server, "")?;
+
+    let mut app = TestAppServer::builder()
+        .with_codex_home(home.path())
+        .without_auto_env()
+        .with_env_overrides(&[("OPENAI_API_KEY", None)])
+        .build_initialized_with_timeout(DEFAULT_TIMEOUT)
+        .await?;
+    start_thread(&mut app, Some("work")).await?;
+    start_thread(&mut app, /*account*/ None).await?;
+
+    let request = app.send_get_account_rate_limits_request().await?;
+    let error: JSONRPCError = timeout(
+        DEFAULT_TIMEOUT,
+        app.read_stream_until_error_message(RequestId::Integer(request)),
+    )
+    .await??;
+    assert!(
+        error
+            .error
+            .message
+            .contains("sessions on different accounts are open"),
+        "{}",
+        error.error.message
+    );
+    // (The pane on the default login sends its own requests with it.)
+    assert_eq!(
+        tokens_for(&server, "/api/codex/usage").await,
+        Vec::<String>::new()
     );
     Ok(())
 }

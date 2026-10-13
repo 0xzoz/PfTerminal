@@ -624,7 +624,7 @@ async fn send_track_events(
     }
 
     // #658: on the sign-in the process's user session runs on.
-    let Some(auth) = auth_manager.for_session().auth().await else {
+    let Some(auth) = auth_manager.session_auth().await else {
         return;
     };
     if auth.is_api_key_auth() {

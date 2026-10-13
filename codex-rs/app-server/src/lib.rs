@@ -784,7 +784,7 @@ pub async fn run_main_with_transport_options(
 
     let auth_manager =
         AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false).await;
-    follow_configured_session_account(&auth_manager, &config);
+    follow_configured_session_account(&auth_manager, &config, /*embedded*/ false);
 
     let remote_control_enabled = remote_control_policy == RemoteControlPolicy::Allowed
         && remote_control_explicitly_requested
@@ -1387,11 +1387,23 @@ fn loader_overrides_with_test_user_config_file(
 /// PF-84-S06 (#658): until a thread starts, the server's own ChatGPT backend
 /// requests (plugin listings, settings, usage, analytics) use the account the
 /// configuration starts the session on, never the default login when that is
-/// a named sign-in account.
-pub(crate) fn follow_configured_session_account(auth_manager: &Arc<AuthManager>, config: &Config) {
-    auth_manager.follow_session_account(codex_model_provider::named_sign_in_account(
-        &config.model_provider,
-    ));
+/// a named sign-in account. An embedded server of a launch whose account is
+/// known only when its thread starts (resume or fork with named accounts on,
+/// which leaves the default login in place) sends none of them until then.
+pub(crate) fn follow_configured_session_account(
+    auth_manager: &Arc<AuthManager>,
+    config: &Config,
+    embedded: bool,
+) {
+    let sign_in = match codex_model_provider::session_sign_in(&config.model_provider) {
+        codex_login::SessionSignIn::Default
+            if embedded && codex_login::default_login_left_unenforced() =>
+        {
+            codex_login::SessionSignIn::Unknown
+        }
+        sign_in => sign_in,
+    };
+    auth_manager.register_configured_sign_in(sign_in);
 }
 
 fn analytics_rpc_transport(transport: &AppServerTransport) -> AppServerRpcTransport {

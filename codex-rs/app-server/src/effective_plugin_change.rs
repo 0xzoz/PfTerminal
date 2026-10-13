@@ -53,7 +53,7 @@ pub(crate) fn effective_plugins_changed_callback(
                     async move {
                         if let Err(err) = trust_materialized_plugin_hooks(
                             change.materialized_remote_plugins,
-                            &trust_auth_manager.for_session(),
+                            &trust_auth_manager,
                             &trust_thread_manager,
                             &trust_config_manager,
                             &trust_config_processor,
@@ -95,13 +95,14 @@ fn hook_trusted_hash_edit(hook_key: &str, current_hash: &str) -> ConfigEdit {
 
 async fn trust_materialized_plugin_hooks(
     materializations: Vec<RemotePluginMaterialization>,
-    auth_manager: &AuthManager,
+    auth_manager: &Arc<AuthManager>,
     thread_manager: &ThreadManager,
     config_manager: &ConfigManager,
     config_processor: &ConfigRequestProcessor,
 ) -> Result<(), String> {
+    // #658: the sign-in the process's user sessions run on, read again below.
     let Some(current_account_id) = auth_manager
-        .auth_cached()
+        .session_auth_cached()
         .and_then(|auth| auth.get_account_id())
     else {
         return Ok(());
@@ -146,7 +147,7 @@ async fn trust_materialized_plugin_hooks(
         return Ok(());
     }
     if auth_manager
-        .auth_cached()
+        .session_auth_cached()
         .and_then(|auth| auth.get_account_id())
         .as_deref()
         != Some(current_account_id.as_str())

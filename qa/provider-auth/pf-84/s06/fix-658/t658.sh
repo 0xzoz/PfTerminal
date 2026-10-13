@@ -3,13 +3,13 @@
 # login is mock user tuidefault. Usage: t658.sh <label> <corbanu-binary>. Fake tokens only; disposable home.
 set -u
 L=$1 BIN=$2
-S=/Volumes/CorbanuDrive/Corbanu/.codex-work/pf84-fix7-qa
+S=${QA_SCRATCH:?set QA_SCRATCH to a scratch directory}
 SCR=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)/qa/provider-auth/pf-84/independent-acceptance-s06b-20261013/scripts
 P=34781 U=http://127.0.0.1:34781
 H=$S/homes/t658-$L FH=$S/fh-$L LOG=$S/logs/mock-$L.jsonl SOCK=$S/tmux-$L.sock
 mkdir -p $S/logs $S/ws $FH; [ -d $H ] && rm -r $H < /dev/null; mkdir -p $H; : > $LOG
 python3 $SCR/mock.py --port $P --log $LOG > $S/logs/mock-$L.out 2>&1 &
-MOCK=$!; sleep 1
+MOCK=$!; trap 'kill $MOCK 2>/dev/null' EXIT; sleep 1
 cat > $H/config.toml <<EOT
 model = "gpt-5.4"
 model_provider = "openai"
@@ -30,6 +30,11 @@ ctl tuidefault; run login --device-auth --experimental_issuer $U < /dev/null 2>&
 [ "${NAMED:-true}" = true ] && ctl tuiwork && run login --account work --device-auth --experimental_issuer $U < /dev/null 2>&1 | grep -iE "success|logged|signed|error" | head -2
 [ -n "${KEY_ACCOUNT:-}" ] && printf 'sk-fake-658-apikey' | run login --account $KEY_ACCOUNT --with-api-key 2>&1 | tail -1
 [ "${NAMED:-true}" = true ] && run account list 2>&1 | head -6
+if [ -n "${RESUME:-}" ]; then
+  run exec --skip-git-repo-check -C $S/ws --account work "Reply with exactly: pong" < /dev/null > $S/logs/exec-$L.txt 2>&1
+  RID=$(sed -n 's/^session id: //p' $S/logs/exec-$L.txt | head -1); echo "recorded $RID on work"
+  ACCOUNT_ARGS="resume $RID"
+fi
 shasum -a 256 $H/auth.json > $S/logs/auth-before-$L.sha256
 MARK=$(wc -l < $LOG)
 T="tmux -S $SOCK"
@@ -58,4 +63,3 @@ for l in sys.stdin:
 for (ev,p,who),n in sorted(c.items(), key=lambda x:(x[0][1],x[0][2])): print("%4d %-14s %-60s %s"%(n,ev,p,who))
 '
 echo "auth.json unchanged: $(shasum -a 256 -c $S/logs/auth-before-$L.sha256 2>&1 | tail -1)"
-kill $MOCK 2>/dev/null

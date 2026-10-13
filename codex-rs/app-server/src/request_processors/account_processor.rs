@@ -1009,11 +1009,24 @@ impl AccountRequestProcessor {
         Ok(())
     }
 
+    /// #658: the error for a request outside a conversation that has no
+    /// sign-in: none at all, or user sessions on different accounts.
+    pub(super) fn session_auth_missing(&self, message: &str) -> JSONRPCErrorError {
+        match self.auth_manager.session_account_conflict() {
+            Some(reason) => invalid_request(reason),
+            None => invalid_request(message),
+        }
+    }
+
     async fn refresh_token_if_requested(&self, do_refresh: bool) -> RefreshTokenRequestOutcome {
         if self.auth_manager.is_external_chatgpt_auth_active() {
             return RefreshTokenRequestOutcome::NotAttemptedOrSucceeded;
         }
-        if do_refresh && let Err(err) = self.auth_manager.refresh_token().await {
+        // #658: the session's sign-in; nothing while sessions run on different accounts.
+        let Some(auth_manager) = self.auth_manager.for_session() else {
+            return RefreshTokenRequestOutcome::NotAttemptedOrSucceeded;
+        };
+        if do_refresh && let Err(err) = auth_manager.refresh_token().await {
             let failed_reason = err.failed_reason();
             if failed_reason.is_none() {
                 tracing::warn!("failed to refresh token while getting account: {err}");
@@ -1038,8 +1051,14 @@ impl AccountRequestProcessor {
         // then no auth step is required; otherwise, default to requiring auth.
         let config = self.load_latest_config().await;
         let requires_openai_auth = config.model_provider.requires_openai_auth;
-        let cached_codex_backend_auth = self
-            .auth_manager
+        // #658: the sign-in the session runs on. While sessions run on
+        // different accounts the default login is only read from memory,
+        // never refreshed.
+        let (status_manager, may_refresh) = match self.auth_manager.for_session() {
+            Some(auth_manager) => (auth_manager, true),
+            None => (Arc::clone(&self.auth_manager), false),
+        };
+        let cached_codex_backend_auth = status_manager
             .auth_cached()
             .is_some_and(|auth| auth.uses_codex_backend());
 
@@ -1051,15 +1070,15 @@ impl AccountRequestProcessor {
                 has_codex_backend_auth: Some(cached_codex_backend_auth),
             }
         } else {
-            let auth = if do_refresh {
-                self.auth_manager.auth_cached()
+            let auth = if do_refresh || !may_refresh {
+                status_manager.auth_cached()
             } else {
-                self.auth_manager.auth().await
+                status_manager.auth().await
             };
             match auth {
                 Some(auth) => {
                     let permanent_refresh_failure =
-                        self.auth_manager.refresh_failure_for_auth(&auth).is_some();
+                        status_manager.refresh_failure_for_auth(&auth).is_some();
                     let auth_mode = auth_mode_to_api(auth.api_auth_mode());
                     let (reported_auth_method, token_opt) = if matches!(
                         auth,
@@ -1143,8 +1162,8 @@ impl AccountRequestProcessor {
         &self,
     ) -> Result<GetAccountRateLimitsResponse, JSONRPCErrorError> {
         // #658: the account the session runs on, never another one.
-        let Some(auth) = self.auth_manager.for_session().auth().await else {
-            return Err(invalid_request(
+        let Some(auth) = self.auth_manager.session_auth().await else {
+            return Err(self.session_auth_missing(
                 "codex account authentication required to read rate limits",
             ));
         };
@@ -1217,8 +1236,8 @@ impl AccountRequestProcessor {
         &self,
     ) -> Result<GetAccountTokenUsageResponse, JSONRPCErrorError> {
         // #658: the account the session runs on, never another one.
-        let Some(auth) = self.auth_manager.for_session().auth().await else {
-            return Err(invalid_request(
+        let Some(auth) = self.auth_manager.session_auth().await else {
+            return Err(self.session_auth_missing(
                 "codex account authentication required to read token usage",
             ));
         };
@@ -1248,8 +1267,8 @@ impl AccountRequestProcessor {
         &self,
     ) -> Result<GetWorkspaceMessagesResponse, JSONRPCErrorError> {
         // #658: the account the session runs on, never another one.
-        let Some(auth) = self.auth_manager.for_session().auth().await else {
-            return Err(invalid_request(
+        let Some(auth) = self.auth_manager.session_auth().await else {
+            return Err(self.session_auth_missing(
                 "codex account authentication required to read workspace messages",
             ));
         };
@@ -1340,8 +1359,8 @@ impl AccountRequestProcessor {
         params: SendAddCreditsNudgeEmailParams,
     ) -> Result<AddCreditsNudgeEmailStatus, JSONRPCErrorError> {
         // #658: the account the session runs on, never another one.
-        let Some(auth) = self.auth_manager.for_session().auth().await else {
-            return Err(invalid_request(
+        let Some(auth) = self.auth_manager.session_auth().await else {
+            return Err(self.session_auth_missing(
                 "codex account authentication required to notify workspace owner",
             ));
         };

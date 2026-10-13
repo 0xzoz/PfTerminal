@@ -174,10 +174,13 @@ fingerprint.
   example, a plugin listing on an API-key account, or any request on an
   account without a usable sign-in) goes out without it or not at all, never
   on the default login. A mid-session switch to another provider moves all of
-  them to that provider's account (or the default login). The process has one
-  such account, like its one model list: the last session started or switched
-  decides it, and a process started on a provider without OpenAI sign-in keeps
-  the default login for them.
+  them to that provider's account (or the default login). Requests the process
+  makes outside a conversation follow its open sessions: sessions on one named
+  account use it; sessions only on the default login, or on providers without
+  OpenAI sign-in, use the default login; sessions on different OpenAI accounts
+  (for example a pane on `work` and one on the default login) send none of
+  them and say why. A `resume` or `fork` sends none until its conversation
+  starts, because its account is known only then.
 - `forced_login_method` and `forced_chatgpt_workspace_id` apply to named
   accounts too: a sign-in of the other kind or another workspace is refused.
   A session on a named account checks them against that account only and

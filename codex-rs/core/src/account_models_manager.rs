@@ -95,6 +95,17 @@ impl AccountModelsManager {
         Arc::clone(&self.current.load().manager)
     }
 
+    /// #658: while the session's account is not known yet (a resumed or
+    /// forked thread before it starts), the default login's list comes from
+    /// its cache only: it is never fetched with the default login.
+    fn strategy(&self, refresh_strategy: RefreshStrategy) -> RefreshStrategy {
+        if self.current.load().account.is_none() && self.default_auth.session_account_unknown() {
+            RefreshStrategy::Offline
+        } else {
+            refresh_strategy
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn account(&self) -> Option<NamedChatgptAccount> {
         self.current.load().account.clone()
@@ -108,6 +119,7 @@ impl ModelsManager for AccountModelsManager {
         http_client_factory: HttpClientFactory,
     ) -> ModelsManagerFuture<'_, Vec<ModelPreset>> {
         let inner = self.inner();
+        let refresh_strategy = self.strategy(refresh_strategy);
         Box::pin(async move {
             inner
                 .list_models(refresh_strategy, http_client_factory)
@@ -121,6 +133,7 @@ impl ModelsManager for AccountModelsManager {
         http_client_factory: HttpClientFactory,
     ) -> ModelsManagerFuture<'_, ModelsResponse> {
         let inner = self.inner();
+        let refresh_strategy = self.strategy(refresh_strategy);
         Box::pin(async move {
             inner
                 .raw_model_catalog(refresh_strategy, http_client_factory)
@@ -168,6 +181,7 @@ impl ModelsManager for AccountModelsManager {
         http_client_factory: HttpClientFactory,
     ) -> ModelsManagerFuture<'a, String> {
         let inner = self.inner();
+        let refresh_strategy = self.strategy(refresh_strategy);
         Box::pin(async move {
             inner
                 .get_default_model(
@@ -195,7 +209,12 @@ impl ModelsManager for AccountModelsManager {
         http_client_factory: HttpClientFactory,
     ) -> ModelsManagerFuture<'_, ()> {
         let inner = self.inner();
-        Box::pin(async move { inner.refresh_if_new_etag(etag, http_client_factory).await })
+        let offline = self.strategy(RefreshStrategy::Online) == RefreshStrategy::Offline;
+        Box::pin(async move {
+            if !offline {
+                inner.refresh_if_new_etag(etag, http_client_factory).await;
+            }
+        })
     }
 
     /// Only responses from this provider's sign-in, on the account the list
