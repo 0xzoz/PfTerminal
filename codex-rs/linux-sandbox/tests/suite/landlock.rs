@@ -2342,11 +2342,15 @@ async fn issue_442_a_planted_env_link_refuses_later_commands() {
 
 /// A folder for test files outside every writable root (not a temporary
 /// folder): Cargo's target scratch folder, or the crate where a build tool
-/// does not set it.
+/// does not set it. Cargo creates the scratch folder when it builds the
+/// test; a run from a nextest archive on another machine (CI's test shards)
+/// has to create it.
 fn outside_temp_root() -> PathBuf {
-    option_env!("CARGO_TARGET_TMPDIR")
+    let root = option_env!("CARGO_TARGET_TMPDIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    std::fs::create_dir_all(&root).unwrap();
+    root
 }
 
 /// Policies shaped like each security level, for the #535/#536 tests:
