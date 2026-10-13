@@ -1040,6 +1040,11 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
             }
         });
 
+        // #616: created before the turn starts, so a panic while it starts counts.
+        let panic_stall = panic_watch::PanicStallWatch::new(
+            &panic_watch::PROCESS_PANICS,
+            panic_watch::PANIC_STALL_TIMEOUT,
+        );
         let task_id = match initial_operation {
             InitialOperation::UserTurn {
                 items,
@@ -1116,10 +1121,6 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
         let mut error_seen = false;
         let mut interrupt_channel_open = true;
         let primary_thread_id_for_requests = primary_thread_id.to_string();
-        let panic_stall = panic_watch::PanicStallWatch::new(
-            &panic_watch::PROCESS_PANICS,
-            panic_watch::PANIC_STALL_TIMEOUT,
-        );
         loop {
             let server_event = tokio::select! {
                 () = panic_stall.stalled() => {
