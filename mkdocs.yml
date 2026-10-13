@@ -141,7 +141,6 @@ nav:
               - "PF-41-S02 — Tamper-evident audit and safe support export": sprints/current/p1-security-hardening/pf-41-s02-tamper-evident-security-audit.md
           - Current Provider Auth Work:
               - Overview: sprints/current/unified-provider-auth/index.md
-              - "PF-84-S06 — Named AWS profile and ChatGPT accounts": sprints/current/unified-provider-auth/pf-84-s06-aws-and-chatgpt-accounts.md
           - Current Autoreview Work:
               - Overview: sprints/current/arbitrary-model-autoreview/index.md
               - "PF-14 — Arbitrary-model Autoreview":
