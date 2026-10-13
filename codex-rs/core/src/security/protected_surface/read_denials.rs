@@ -61,7 +61,7 @@ const CORBANU_STORES: &[&str] = &[
     "security_state.lock",
     // #586: the database init lock (#549); a command holding it would
     // stall every new launch on this home.
-    "pfterminal_db_init.lock",
+    DB_INIT_LOCK,
     // #562: read as instructions ahead of AGENTS.md; a command may not
     // create it either.
     "AGENTS.override.md",
@@ -158,6 +158,19 @@ const DEFAULT_AGENTS_MD: &str = "AGENTS.md";
 
 /// State and log databases, created after launch.
 const CORBANU_DATABASES: &str = "*.sqlite*";
+
+/// The database init lock (#549), next to the databases.
+const DB_INIT_LOCK: &str = "pfterminal_db_init.lock";
+
+/// #611: what Corbanu keeps in its database folder besides the databases:
+/// the init lock, the GPU controller's lock, pending accounting records
+/// (`codex_state::PENDING_DIR`) and databases set aside by recovery.
+const DATABASE_FOLDER_ENTRIES: &[&str] = &[
+    DB_INIT_LOCK,
+    "gpu-controller.lock",
+    "accounting-pending",
+    "db-backups",
+];
 
 /// Other Corbanu home folders in the user's home: denied whole.
 const OTHER_CORBANU_HOMES: &[&str] = &[".corbanu", ".codex", ".pfterminal"];
@@ -332,9 +345,11 @@ impl ReadDenials {
 
     /// The denials for this host's user: what stays readable is the turn's
     /// working folder, its workspace roots and the profile's writable roots
-    /// resolved against that folder.
+    /// resolved against that folder. `sqlite_home` is the database folder
+    /// (`SqliteConfig::home`), the Corbanu home unless set apart (#611).
     pub(crate) fn for_turn(
         codex_home: &Path,
+        sqlite_home: &Path,
         turn_cwd: &AbsolutePathBuf,
         workspace_roots: &[AbsolutePathBuf],
         profile: &PermissionProfile,
@@ -366,6 +381,17 @@ impl ReadDenials {
                 create_missing_read_later_folders(codex_home);
             }
         }
+        // #611 (Linux): a separate database folder's missing entries, made
+        // as Corbanu would where the command could make them, so bubblewrap
+        // puts no placeholder file where Corbanu expects a folder or a lock.
+        if cfg!(target_os = "linux")
+            && let Some(folder) = separate_database_folder(codex_home, sqlite_home)
+            && profile
+                .file_system_sandbox_policy()
+                .can_write_path_with_cwd(folder.as_path(), turn_cwd.as_path())
+        {
+            create_missing_database_folder_entries(folder.as_path());
+        }
         // #583: the read-only home keeps `worktrees` writable only as a real
         // folder, so it is made (empty, as Corbanu would) where the command
         // could have made it before.
@@ -380,6 +406,7 @@ impl ReadDenials {
                 .map(Path::new),
             &keep,
         );
+        denials.protect_database_folder(codex_home, sqlite_home, &keep);
         // #594: the home variable's own spelling (a link the home was found
         // through; the home itself is its real location).
         if let Ok(codex_home) = AbsolutePathBuf::from_absolute_path(codex_home) {
@@ -392,6 +419,53 @@ impl ReadDenials {
             );
         }
         denials
+    }
+
+    /// #611: a database folder set apart from the Corbanu home (`sqlite_home`
+    /// or `CODEX_SQLITE_HOME`) is denied like the home's stores: whole, as
+    /// Corbanu creates it before any command runs (the databases, the init
+    /// lock, `gpu-controller.lock`, pending accounting records and database
+    /// backups). Where it holds the command's own folder or the Corbanu home
+    /// (whose runtime entries stay readable), what Corbanu keeps there is
+    /// denied one by one instead: each existing database, the database
+    /// pattern (reads of those created later) and [`DATABASE_FOLDER_ENTRIES`]
+    /// also before they exist (the init lock, #586). A command a person
+    /// approved under Moderate (#540) drops them with the other stores.
+    fn protect_database_folder(
+        &mut self,
+        codex_home: &Path,
+        sqlite_home: &Path,
+        keep: &[AbsolutePathBuf],
+    ) {
+        let Some(folder) = separate_database_folder(codex_home, sqlite_home) else {
+            return;
+        };
+        let real_folder = std::fs::canonicalize(folder.as_path()).ok();
+        let holds_home = codex_home.starts_with(folder.as_path())
+            || real_folder.as_ref().is_some_and(|real| {
+                std::fs::canonicalize(codex_home).is_ok_and(|home| home.starts_with(real))
+            });
+        if folder.as_path().is_dir() && !holds_home && !Self::holds_kept(&folder, keep) {
+            self.push_existing(folder, keep);
+            return;
+        }
+        if let Ok(entries) = std::fs::read_dir(folder.as_path()) {
+            for entry in entries.flatten() {
+                if entry.file_name().to_string_lossy().contains(".sqlite") {
+                    self.push_existing(folder.join(entry.file_name()), keep);
+                }
+            }
+        }
+        for name in DATABASE_FOLDER_ENTRIES {
+            self.push_fixed(folder.join(name), keep);
+        }
+        let databases = folder
+            .join(CORBANU_DATABASES)
+            .to_string_lossy()
+            .into_owned();
+        if !self.globs.contains(&databases) {
+            self.globs.push(databases);
+        }
     }
 
     /// #583: the Corbanu home itself is read-only, so a protected command
@@ -871,14 +945,47 @@ pub(crate) fn create_missing_runtime_folders(codex_home: &Path) {
     }
 }
 
+/// #611: the database folder, when it is not the Corbanu home (by any
+/// spelling).
+fn separate_database_folder(codex_home: &Path, sqlite_home: &Path) -> Option<AbsolutePathBuf> {
+    let folder = AbsolutePathBuf::from_absolute_path(sqlite_home).ok()?;
+    let same_folder = sqlite_home == codex_home
+        || std::fs::canonicalize(sqlite_home)
+            .is_ok_and(|real| std::fs::canonicalize(codex_home).is_ok_and(|home| home == real));
+    (!same_folder).then_some(folder)
+}
+
+/// #611 (Linux): creates a separate database folder's missing folders and
+/// GPU controller lock, empty and private, as Corbanu would. The init lock
+/// keeps #608's placeholder handling.
+fn create_missing_database_folder_entries(folder: &Path) {
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    for name in ["accounting-pending", "db-backups"] {
+        // Fails harmlessly where it exists (also as a link).
+        let _ = builder.create(folder.join(name));
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let _ = options.open(folder.join("gpu-controller.lock"));
+}
+
 /// #603 (Linux): creates the missing folders Corbanu reads later, empty and
 /// private (as the socket folders need), and its lock files, for a command
 /// working in the home: held read-only as they are, so bubblewrap puts no
 /// placeholder there.
 fn create_missing_read_later_folders(codex_home: &Path) {
-    let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    let builder = {
+        let mut builder = std::fs::DirBuilder::new();
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        builder
+    };
+    #[cfg(not(unix))]
+    let builder = std::fs::DirBuilder::new();
     for folder in CORBANU_READ_LATER_FOLDERS {
         // Fails harmlessly where it exists (also as a link).
         let _ = builder.create(codex_home.join(folder));
@@ -1020,6 +1127,7 @@ pub(crate) fn protect_file_tool_context(
     // to this call never make a denied folder readable.
     let mut denials = ReadDenials::for_turn(
         turn.config.codex_home.as_path(),
+        turn.config.sqlite.home(),
         &turn_cwd,
         &workspace_roots,
         turn.config.permissions.permission_profile(),
@@ -1062,6 +1170,7 @@ pub(crate) fn post_taint_read_policy(
     let profile = turn.config.permissions.permission_profile();
     let denials = ReadDenials::for_turn(
         turn.config.codex_home.as_path(),
+        turn.config.sqlite.home(),
         &turn_cwd,
         &workspace_roots,
         profile,

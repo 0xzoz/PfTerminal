@@ -59,6 +59,9 @@ version = "0.8"
 [dependencies.dirs-next]
 version = "2.0"
 
+[target.'cfg(not(windows))'.dependencies]
+notify = { workspace = true }
+
 [target.'cfg(windows)'.dependencies]
 codex-process-hardening = { workspace = true }
 

@@ -2364,6 +2364,87 @@ async fn issue_586_missing_db_init_lock_cannot_be_created_or_held() -> anyhow::R
     Ok(())
 }
 
+/// Issue #611: with the databases in their own folder (`sqlite_home`), a
+/// protected command with full access cannot read or write a database there,
+/// create and hold the missing init lock, hold the GPU controller's lock or
+/// plant a pending accounting record, with the paths built at run time.
+/// Permissive is unchanged.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_611_a_separate_database_folder_is_protected() -> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let mut wrong = Vec::new();
+    for (level, open) in [
+        (SecurityLevel::Moderate, false),
+        (SecurityLevel::Aggressive, false),
+        (SecurityLevel::Permissive, true),
+    ] {
+        let databases = TempDir::new()?;
+        let folder = databases.path().canonicalize()?;
+        let lock = folder.join("pfterminal_db_init.lock");
+        let path = folder.to_string_lossy().into_owned();
+        // Split inside the folder's own name: neither part names it.
+        let (head, tail) = path.split_at(path.len() - 2);
+        let command = format!(
+            "d=\"$(printf '{head}%s' {tail})\"; s=\"sql$(printf ite)\"; \
+             cat \"$d/canary.$s\"; echo; printf x >> \"$d/canary.$s\"; \
+             perl -e 'use Fcntl qw(:flock); open(my $f, \">>\", $ARGV[0]) or die \"open: $!\\n\"; \
+             flock($f, LOCK_EX | LOCK_NB) or die \"lock: $!\\n\"' \
+             \"$d/pfterminal_db_$(printf init).lock\" && echo init-held-611; \
+             perl -e 'use Fcntl qw(:flock); open(my $f, \"<\", $ARGV[0]) or die \"open: $!\\n\"; \
+             flock($f, LOCK_EX | LOCK_NB) or die \"lock: $!\\n\"' \
+             \"$d/gpu-controller.$(printf lock)\" && echo gpu-held-611; \
+             printf '{{}}' > \"$d/accounting-$(printf pending)/planted.json\"; echo ran-611"
+        );
+        let sqlite_home = AbsolutePathBuf::from_absolute_path(&folder)?;
+        let (canary, missing_lock) = (folder.join("canary.sqlite"), lock.clone());
+        let (test, captured) = start_turn_after(
+            None,
+            level,
+            AskForApproval::Never,
+            vec![
+                call("call-db", "shell_command", json!({ "command": command })),
+                done_step(),
+            ],
+            move |config| {
+                config.sqlite = codex_state::SqliteConfig::from_sqlite_home(sqlite_home.clone());
+                config
+                    .permissions
+                    .set_permission_profile(PermissionProfile::Disabled)
+                    .expect("full access");
+            },
+            move |_| {
+                std::fs::write(&canary, CANARY).expect("canary database");
+                let folder = canary.parent().expect("database folder");
+                std::fs::write(folder.join("gpu-controller.lock"), "").expect("gpu lock");
+                std::fs::create_dir_all(folder.join("accounting-pending")).expect("pending");
+                // Start-up created it; the command meets it missing.
+                let _ = std::fs::remove_file(&missing_lock);
+            },
+        )
+        .await?;
+        assert!(next_exec_approval(&test).await.is_none());
+        let requests = captured.requests();
+        let output = output_text(&requests[requests.len() - 1], "call-db");
+        let achieved = [
+            output.contains(CANARY),
+            std::fs::read_to_string(folder.join("canary.sqlite")).unwrap_or_default() != CANARY,
+            output.contains("init-held-611") || lock.exists(),
+            output.contains("gpu-held-611"),
+            folder.join("accounting-pending/planted.json").exists(),
+        ];
+        if !output.contains("ran-611") || achieved != [open; 5] {
+            wrong.push(format!("{level:?}: {achieved:?}: {output}"));
+        }
+        drop(test);
+        drop(databases);
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
 /// #605: with a `:minimal`-read profile the macOS platform defaults keep
 /// `/tmp` writable for temporary files. A protected command working in a git
 /// worktree below `/tmp` still cannot write the repository's hooks or the
