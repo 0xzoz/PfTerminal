@@ -397,10 +397,11 @@ impl ReadDenials {
     }
 
     /// #611: a database folder set apart from the Corbanu home (`sqlite_home`
-    /// or `CODEX_SQLITE_HOME`) gets the home's database rules: its databases
-    /// are denied, also those created later, and so is the init lock (#586),
-    /// also before it exists (a command holding it would stall every new
-    /// launch on these databases). A command a person approved under
+    /// or `CODEX_SQLITE_HOME`) gets the home's database rules: each existing
+    /// database file is denied (reads and writes), the database pattern
+    /// denies reading those created later, and the init lock (#586) is
+    /// denied also before it exists (a command holding it would stall every
+    /// new launch on these databases). A command a person approved under
     /// Moderate (#540) drops them with the other stores.
     fn protect_database_folder(
         &mut self,
@@ -416,6 +417,13 @@ impl ReadDenials {
                 .is_ok_and(|real| std::fs::canonicalize(codex_home).is_ok_and(|home| home == real));
         if same_folder {
             return;
+        }
+        if let Ok(entries) = std::fs::read_dir(folder.as_path()) {
+            for entry in entries.flatten() {
+                if entry.file_name().to_string_lossy().contains(".sqlite") {
+                    self.push_existing(folder.join(entry.file_name()), keep);
+                }
+            }
         }
         self.push_fixed(folder.join(DB_INIT_LOCK), keep);
         let databases = folder

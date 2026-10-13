@@ -2394,11 +2394,9 @@ async fn issue_586_missing_db_init_lock_cannot_be_created_or_held() -> anyhow::R
 }
 
 /// Issue #611: with the databases in their own folder (`sqlite_home`), a
-/// protected command with full access cannot read a database there, create
-/// a new one, or create and hold the missing init lock, with the paths built
-/// at run time. Permissive is unchanged. On Linux a database pattern denies
-/// the matching files that exist when the command starts (as in the Corbanu
-/// home), so creating a new name is not checked there.
+/// protected command with full access cannot read or write a database there,
+/// nor create and hold the missing init lock, with the paths built at run
+/// time. Permissive is unchanged.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn issue_611_a_separate_database_folder_is_protected() -> anyhow::Result<()> {
@@ -2419,7 +2417,7 @@ async fn issue_611_a_separate_database_folder_is_protected() -> anyhow::Result<(
         let (head, tail) = path.split_at(path.len() - 2);
         let command = format!(
             "d=\"$(printf '{head}%s' {tail})\"; s=\"sql$(printf ite)\"; \
-             cat \"$d/canary.$s\"; echo; printf x > \"$d/new.$s\"; \
+             cat \"$d/canary.$s\"; echo; printf x >> \"$d/canary.$s\"; \
              perl -e 'use Fcntl qw(:flock); open(my $f, \">>\", $ARGV[0]) or die \"open: $!\\n\"; \
              flock($f, LOCK_EX | LOCK_NB) or die \"lock: $!\\n\"' \
              \"$d/pfterminal_db_$(printf init).lock\" && echo held-611; echo ran-611"
@@ -2453,11 +2451,7 @@ async fn issue_611_a_separate_database_folder_is_protected() -> anyhow::Result<(
         let output = output_text(&requests[requests.len() - 1], "call-db");
         let achieved = [
             output.contains(CANARY),
-            if cfg!(target_os = "linux") {
-                open
-            } else {
-                folder.join("new.sqlite").exists()
-            },
+            std::fs::read_to_string(folder.join("canary.sqlite")).unwrap_or_default() != CANARY,
             output.contains("held-611") || lock.exists(),
         ];
         if !output.contains("ran-611") || achieved != [open; 3] {

@@ -681,8 +681,9 @@ fn issue_586_db_init_lock_denied_before_it_exists() {
 }
 
 /// Issue #611: a database folder set apart from the Corbanu home gets the
-/// home's database rules: its databases (also one created later) and its
-/// init lock (also before it exists) are denied. Other files in it are not.
+/// home's database rules: its databases (reads also of one created later,
+/// writes of existing ones) and its init lock (also before it exists) are
+/// denied. Other files in it are not.
 /// The home's own rules are unchanged when the folder is the home.
 #[test]
 fn issue_611_a_separate_database_folder_is_denied_like_the_home() {
@@ -712,7 +713,8 @@ fn issue_611_a_separate_database_folder_is_denied_like_the_home() {
     ] {
         let path = databases.join(name);
         assert!(matcher.is_read_denied(&path), "{name}");
-        if name == "pfterminal_db_init.lock" {
+        // Existing databases and the lock: not writable either.
+        if ["state_5.sqlite", "pfterminal_db_init.lock"].contains(&name) {
             assert!(
                 !policy.can_write_path_with_cwd(&path, cwd.as_path()),
                 "{name}"
