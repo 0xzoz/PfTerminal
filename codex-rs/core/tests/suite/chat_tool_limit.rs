@@ -23,7 +23,8 @@ use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 
 const MODEL: &str = "glm-5.3-flash";
-const NOTICE: &str = "This provider accepts at most 128 tools per request.";
+const NOTICE: &str =
+    "Corbanu sends at most 128 tools per request to providers without tool namespaces";
 
 fn bulk_namespace(count: usize) -> DynamicToolSpec {
     DynamicToolSpec::Namespace(DynamicToolNamespaceSpec {

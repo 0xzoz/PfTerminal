@@ -4923,15 +4923,11 @@ fn chat_replay_function_arguments(arguments: String) -> String {
 
 /// Chat Completions and Anthropic Messages have no namespaces. A namespaced
 /// call recorded on the Responses wire (before a provider switch or in forked
-/// history) replays under the flat name this request offers for it, such as an
-/// MCP tool's `mcp__server__tool`; otherwise under its bare name, as before.
-///
-/// `flat_tool_names` is the request's own mapping. With it, a call replays
-/// only under the name offered for that exact tool: a tool whose preferred flat
-/// name a plain tool already takes is offered under a hashed name, and its
-/// earlier calls must not appear as calls of the plain tool (#688). Without a
-/// mapping (requests built without a tool router) the preferred name is used
-/// when offered.
+/// history) replays under the flat name this request offers for that exact
+/// tool (`flat_tool_names`, the request's own mapping), such as an MCP tool's
+/// `mcp__server__tool`; otherwise under its bare name, as before. A tool whose
+/// preferred flat name a plain tool already takes is offered under a hashed
+/// name, so its earlier calls never appear as calls of the plain tool (#688).
 fn flatten_namespaced_history(
     input: &mut [ResponseItem],
     tools: &[ToolSpec],
@@ -4956,17 +4952,11 @@ fn flatten_namespaced_history(
             continue;
         };
         let tool_name = codex_tools::ToolName::namespaced(namespace, name.clone());
-        let flat = if flat_tool_names.is_empty() {
-            Some(crate::tools::flat_tool_names::flat_tool_name_for(
-                &tool_name,
-            ))
-        } else {
-            flat_tool_names
-                .flat_name_for(&tool_name)
-                .map(str::to_string)
-        };
-        if let Some(flat) = flat.filter(|flat| offered.contains(flat.as_str())) {
-            *name = flat;
+        if let Some(flat) = flat_tool_names
+            .flat_name_for(&tool_name)
+            .filter(|flat| offered.contains(flat))
+        {
+            *name = flat.to_string();
         }
     }
 }

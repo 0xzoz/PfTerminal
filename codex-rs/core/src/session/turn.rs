@@ -2047,12 +2047,27 @@ pub(crate) async fn built_tools(
 const OMITTED_TOOLS_NAMED: usize = 10;
 
 /// #688: tells the person, once per tool per session, which tools a wire
-/// without namespaces could not carry because of its tool-count limit.
+/// without namespaces could not carry because of its tool-count limit. Review,
+/// compaction and internal sub-sessions stay quiet: their tools are the
+/// parent's, which the parent's own turns report.
 async fn notify_omitted_tools(sess: &Session, turn_context: &TurnContext, omitted: &[ToolName]) {
-    if omitted.is_empty() {
+    use codex_protocol::protocol::SessionSource;
+    use codex_protocol::protocol::SubAgentSource;
+    if omitted.is_empty()
+        || matches!(
+            turn_context.session_source,
+            SessionSource::Internal(_)
+                | SessionSource::SubAgent(
+                    SubAgentSource::Review
+                        | SubAgentSource::Compact
+                        | SubAgentSource::MemoryConsolidation
+                        | SubAgentSource::Other(_)
+                )
+        )
+    {
         return;
     }
-    let newly_omitted = sess.state.lock().await.note_omitted_tools(omitted);
+    let newly_omitted = sess.state.lock().await.unreported_omitted_tools(omitted);
     if newly_omitted.is_empty() {
         return;
     }
@@ -2072,6 +2087,11 @@ async fn notify_omitted_tools(sess: &Session, turn_context: &TurnContext, omitte
         }),
     )
     .await;
+    // Only once shown: an interrupted turn reports them again next time.
+    sess.state
+        .lock()
+        .await
+        .mark_omitted_tools_reported(newly_omitted);
 }
 
 fn omitted_tools_notice(names: &[String]) -> String {
@@ -2087,7 +2107,7 @@ fn omitted_tools_notice(names: &[String]) -> String {
     }
     let count = names.len();
     format!(
-        "This provider accepts at most {limit} tools per request. Not offered to the model this session ({count}): {listed}. Turn off MCP servers you don't need, or use a provider with tool namespaces (such as OpenAI), to offer them."
+        "Corbanu sends at most {limit} tools per request to providers without tool namespaces, so these are not offered to the model ({count}): {listed}. Turn off MCP servers or tools you don't need, or use a provider with tool namespaces (such as OpenAI), to offer them."
     )
 }
 

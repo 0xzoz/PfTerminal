@@ -3244,20 +3244,19 @@ fn namespaced_history_replays_under_offered_flat_names() {
         encrypted_function_args: None,
         internal_chat_message_metadata_passthrough: None,
     };
-    let function = |name: &str| {
-        codex_tools::ToolSpec::Function(codex_tools::ResponsesApiTool {
-            name: name.to_string(),
-            description: String::new(),
-            strict: false,
-            defer_loading: None,
-            parameters: codex_tools::JsonSchema::object(
-                Default::default(),
-                /*required*/ None,
-                /*additional_properties*/ None,
-            ),
-            output_schema: None,
-        })
+    let api_tool = |name: &str| codex_tools::ResponsesApiTool {
+        name: name.to_string(),
+        description: String::new(),
+        strict: false,
+        defer_loading: None,
+        parameters: codex_tools::JsonSchema::object(
+            Default::default(),
+            /*required*/ None,
+            /*additional_properties*/ None,
+        ),
+        output_schema: None,
     };
+    let function = |name: &str| codex_tools::ToolSpec::Function(api_tool(name));
     let long_namespace = format!("mcp__{}", "s".repeat(70));
     let long_flat = crate::tools::flat_tool_names::flat_tool_name_for(
         &codex_tools::ToolName::namespaced(long_namespace.clone(), "tool"),
@@ -3276,7 +3275,22 @@ fn namespaced_history_replays_under_offered_flat_names() {
         call(&long_namespace, "tool"),
     ];
 
-    super::flatten_namespaced_history(&mut input, &tools, &Default::default());
+    // The request's own mapping, as the router builds it.
+    let (_, flat_tool_names) = crate::tools::flat_tool_names::flatten_namespaced_tools(
+        vec![
+            (
+                codex_tools::ToolName::namespaced("mcp__orders", "lookup"),
+                api_tool("lookup"),
+            ),
+            (
+                codex_tools::ToolName::namespaced(long_namespace, "tool"),
+                api_tool("tool"),
+            ),
+        ],
+        &std::collections::HashSet::from(["spawn_agent".to_string()]),
+    );
+
+    super::flatten_namespaced_history(&mut input, &tools, &flat_tool_names);
 
     let names: Vec<_> = input
         .iter()

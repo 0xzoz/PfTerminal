@@ -240,14 +240,14 @@ fn omitted_tools_notice_names_the_left_out_tools() {
     let one = omitted_tools_notice(&["mcp__orders__lookup".to_string()]);
     assert_eq!(
         one,
-        "This provider accepts at most 128 tools per request. Not offered to the model this session (1): `mcp__orders__lookup`. Turn off MCP servers you don't need, or use a provider with tool namespaces (such as OpenAI), to offer them."
+        "Corbanu sends at most 128 tools per request to providers without tool namespaces, so these are not offered to the model (1): `mcp__orders__lookup`. Turn off MCP servers or tools you don't need, or use a provider with tool namespaces (such as OpenAI), to offer them."
     );
     let many: Vec<String> = (0..12)
         .map(|index| format!("mcp__bulk__t{index}"))
         .collect();
     let notice = omitted_tools_notice(&many);
     assert!(
-        notice.contains("this session (12): `mcp__bulk__t0`,"),
+        notice.contains("not offered to the model (12): `mcp__bulk__t0`,"),
         "{notice}"
     );
     assert!(notice.contains("`mcp__bulk__t9` and 2 more."), "{notice}");

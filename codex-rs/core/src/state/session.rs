@@ -98,17 +98,25 @@ impl SessionState {
         newly_in_use
     }
 
-    /// #688: the tools in `omitted` not reported yet this session, which are
-    /// now recorded as reported. Each left-out tool is reported once.
-    pub(crate) fn note_omitted_tools(
-        &mut self,
+    /// #688: the tools in `omitted` not reported yet this session.
+    pub(crate) fn unreported_omitted_tools(
+        &self,
         omitted: &[codex_protocol::ToolName],
     ) -> Vec<codex_protocol::ToolName> {
         omitted
             .iter()
-            .filter(|tool| self.omitted_tools_reported.insert((*tool).clone()))
+            .filter(|tool| !self.omitted_tools_reported.contains(*tool))
             .cloned()
             .collect()
+    }
+
+    /// #688: records `tools` as reported to the person; each left-out tool
+    /// is reported once per session.
+    pub(crate) fn mark_omitted_tools_reported(
+        &mut self,
+        tools: impl IntoIterator<Item = codex_protocol::ToolName>,
+    ) {
+        self.omitted_tools_reported.extend(tools);
     }
 
     // History helpers

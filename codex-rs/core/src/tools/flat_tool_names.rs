@@ -95,6 +95,7 @@ fn portable_chars(name: &str) -> String {
 
 /// The flat name a namespaced tool gets when nothing collides with it: its
 /// preferred name when that is portable, otherwise the hashed form.
+#[cfg(test)]
 pub(crate) fn flat_tool_name_for(tool_name: &ToolName) -> String {
     let preferred = preferred_flat_tool_name(tool_name);
     if is_portable_tool_name(&preferred) {
