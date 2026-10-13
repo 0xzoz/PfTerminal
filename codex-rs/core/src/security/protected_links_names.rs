@@ -75,7 +75,9 @@ pub(super) fn settings_name_in(text: &str) -> Option<String> {
 }
 
 /// `word` with its `{a,b}` groups expanded (the shell's brace expansion); a
-/// word without one is itself. `None` past [`MAX_VARIANTS`].
+/// word without one is itself. `None` past [`MAX_VARIANTS`], and for a word
+/// with a nested group or a sequence (`{a..z}`): such a word is named whole,
+/// so `ln -s src{1..3} d` is refused too (refusing more is intended).
 fn brace_variants(word: &str) -> Option<Vec<String>> {
     // Nested groups (`{{s,},x}`) and sequences (`{a..z}`) are not expanded
     // here: such a word is named whole.

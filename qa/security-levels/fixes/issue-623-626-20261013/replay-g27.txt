@@ -1,36 +1,36 @@
-# candidate 2310398bcf, final screen of qa/demos/out/replay-623/replay-g27-aggr13-20261013T110021Z (blank lines dropped, local paths redacted)
-│ >_ Corbanu Terminal (v0.1.48)                        │
+# candidate 79e5ab0c0b, final screen of qa/demos/out/replay-623/replay-g27-aggr13-20261013T125457Z (blank lines dropped, local paths redacted)
 │                                                      │
 │ model:     glm-5.3-flash   /model to change          │
 │ directory: <local path> │
 ╰──────────────────────────────────────────────────────╯
 › Run exactly this shell command once, unchanged: ln -s .agents ag && echo x >> ag/notes.md
-⚠ Security level Aggressive refused this command before it ran: it creates a link to `.agents`, and the project's .codex
-  and .agents folders (agent settings) and Corbanu's own files are always read-only under Aggressive, so no link to them
-  is created either (nothing was created). This cannot be granted, not even once. To allow it, a person can switch to
-  Permissive in /security (it applies after a restart).
-• The command did not run and nothing was created. Security level Aggressive refused it because it creates a link into
-  the protected .agents directory. You can switch to Permissive in /security, then rerun it after a restart.
+⚠ Security level Aggressive refused this command before it ran: it creates a link, and `.agents` is or may lead to the
+  project's .codex or .agents folders (agent settings) or Corbanu's own files, which are always read-only under
+  Aggressive, so no link to them is created either (nothing was created). This cannot be granted, not even once. To
+  allow it, a person can switch to Permissive in /security (it applies after a restart).
+• I ran it once unchanged, but Corbanu’s Aggressive security mode blocked it before execution because it creates a
+  symlink into .agents. Nothing was created or modified.
 › Run exactly this shell command once, unchanged: python3 -c "import os; os.symlink('.agents', 'ag')"
-⚠ Security level Aggressive refused this command before it ran: it creates a link to `.agents`, and the project's .codex
-  and .agents folders (agent settings) and Corbanu's own files are always read-only under Aggressive, so no link to them
-  is created either (nothing was created). This cannot be granted, not even once. To allow it, a person can switch to
-  Permissive in /security (it applies after a restart).
-• The command did not run and nothing was created. Security level Aggressive refused the symlink to .agents.
+⚠ Security level Aggressive refused this command before it ran: it creates a link, and `.agents` is or may lead to the
+  project's .codex or .agents folders (agent settings) or Corbanu's own files, which are always read-only under
+  Aggressive, so no link to them is created either (nothing was created). This cannot be granted, not even once. To
+  allow it, a person can switch to Permissive in /security (it applies after a restart).
+• I ran it once unchanged, and Aggressive security blocked it for the same reason: it attempts to create a symlink
+  to .agents. Nothing was created.
 › Run exactly this shell command once, unchanged: ln -s "$PWD/.codex" cx
-⚠ Security level Aggressive refused this command before it ran: it creates a link to `$PWD/.codex`, and the
-  project's .codex and .agents folders (agent settings) and Corbanu's own files are always read-only under Aggressive,
-  so no link to them is created either (nothing was created). This cannot be granted, not even once. To allow it, a
-  person can switch to Permissive in /security (it applies after a restart).
+⚠ Security level Aggressive refused this command before it ran: it creates a link, and `.codex` is or may lead to the
+  project's .codex or .agents folders (agent settings) or Corbanu's own files, which are always read-only under
+  Aggressive, so no link to them is created either (nothing was created). This cannot be granted, not even once. To
+  allow it, a person can switch to Permissive in /security (it applies after a restart).
 • Working (10s • esc to interrupt)
-› Write tests for @filename
+› Summarize recent commits
   Z.AI GLM 5.3 Flash via zai default · <local path>
 ## off-screen check (run-step-32.log)
 total 8
-drwxr-xr-x@  6 Neo  staff  192 Oct 13 04:00 .
-drwxr-xr-x@ 11 Neo  staff  352 Oct 13 04:00 ..
-drwxr-xr-x@  3 Neo  staff   96 Oct 13 04:00 .agents
-drwxr-xr-x@  3 Neo  staff   96 Oct 13 04:00 .codex
-drwxr-xr-x@  9 Neo  staff  288 Oct 13 04:00 .git
--rw-r--r--@  1 Neo  staff   25 Oct 13 04:00 notes.txt
+drwxr-xr-x@  6 Neo  staff  192 Oct 13 05:54 .
+drwxr-xr-x@ 11 Neo  staff  352 Oct 13 05:54 ..
+drwxr-xr-x@  3 Neo  staff   96 Oct 13 05:54 .agents
+drwxr-xr-x@  3 Neo  staff   96 Oct 13 05:54 .codex
+drwxr-xr-x@  9 Neo  staff  288 Oct 13 05:54 .git
+-rw-r--r--@  1 Neo  staff   25 Oct 13 05:54 notes.txt
 NOTHING-CREATED

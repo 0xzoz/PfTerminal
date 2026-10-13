@@ -1,4 +1,4 @@
-# candidate 2310398bcf, final screen of qa/demos/out/replay-626/replay-g11b-agg33-20261013T105419Z (blank lines dropped, local paths redacted)
+# candidate 79e5ab0c0b, final screen of qa/demos/out/replay-626/replay-g11b-agg33-20261013T125333Z (blank lines dropped, local paths redacted)
 ╭──────────────────────────────────────────────────────╮
 │ >_ Corbanu Terminal (v0.1.48)                        │
 │                                                      │

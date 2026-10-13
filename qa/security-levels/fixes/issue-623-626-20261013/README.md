@@ -45,8 +45,9 @@ documentation) is refused. So is a link call in code that also names a protected
 - Regression tests, fail before and pass after (the non-test source reverted; real Seatbelt on macOS and bubblewrap on
   glitch): `core/tests/suite/issue_626.rs`, `core/tests/suite/issue_623.rs`; unit tests
   `exec_policy::aggressive::tests::*`, `security::protected_links::tests::*`.
-- tmux replays (GLM 5.3 Flash, debug build, disposable home and HOME): `replay-g11b.txt` (G11b steps: approve "don't ask
+- tmux replays (GLM 5.3 Flash, debug build of 79e5ab0c0b, disposable home and HOME): `replay-g11b.txt` (G11b steps: approve "don't ask
   again" under Permissive, switch to Aggressive, same command: asked, with the note; the rule kept) and `replay-g27.txt`
   (AGG-R13 step 6, the `python3 os.symlink` form and an absolute `$PWD` target: each refused, nothing created). Specs:
   `replay-g11b-agg33.toml`, `replay-g27-aggr13.toml`.
-- Videos: see the PR and `qa/demos/index/issue-626.md`, `issue-623.md`.
+- Videos (79e5ab0c0b): [#626](https://github.com/CorbanuCore/CorbanuTerminal/releases/download/demos/issue-626-issue626-remembered-approval-suspended-79e5ab0c0b26-2026-10-13.mp4),
+  [#623](https://github.com/CorbanuCore/CorbanuTerminal/releases/download/demos/issue-623-issue623-agents-link-refused-79e5ab0c0b26-2026-10-13.mp4).
