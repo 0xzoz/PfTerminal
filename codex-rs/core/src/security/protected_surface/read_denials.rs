@@ -32,6 +32,7 @@ use codex_protocol::permissions::FileSystemSpecialPath;
 use codex_protocol::permissions::ReadDenyMatcher;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use std::path::Path;
+use std::path::PathBuf;
 
 /// Corbanu home entries agent commands keep reading after untrusted content.
 const RUNTIME_READABLE: &[&str] = &[
@@ -58,6 +59,9 @@ const CORBANU_STORES: &[&str] = &[
     "security_level.toml",
     "security_state.json",
     "security_state.lock",
+    // #586: the database init lock (#549); a command holding it would
+    // stall every new launch on this home.
+    "pfterminal_db_init.lock",
     // #562: read as instructions ahead of AGENTS.md; a command may not
     // create it either.
     "AGENTS.override.md",
@@ -206,6 +210,10 @@ pub(crate) struct ReadDenials {
     home: Option<AbsolutePathBuf>,
     /// #506: whether listing [`Self::home`] is denied too (Aggressive).
     home_listing_denied: bool,
+    /// #594/#598: each spelling of the Corbanu home (as given, its real
+    /// location, and a link naming it): it and the folders above it may not
+    /// be moved aside, not even by a command a person approved (#540).
+    unmovable: Vec<AbsolutePathBuf>,
     /// Denials dropped because they hold the command's folder or a writable
     /// root (denying them would deny the workspace itself).
     pub(crate) skipped: Vec<AbsolutePathBuf>,
@@ -240,6 +248,12 @@ impl ReadDenials {
             denials.push_runtime_read_only(codex_home.join(entry), keep);
         }
         denials.runtime_read_only = std::mem::take(&mut denials.read_only);
+        denials.add_home_spellings(
+            &codex_home,
+            user_home
+                .into_iter()
+                .flat_map(|home| OTHER_CORBANU_HOMES.iter().map(|name| home.join(name))),
+        );
         // #442 (Travis, 2026-10-11): the project's agent settings stay
         // read-only even with a grant.
         for root in keep {
@@ -354,14 +368,26 @@ impl ReadDenials {
         if !cfg!(windows) && can_write_home {
             let _ = std::fs::create_dir(codex_home.join(HOME_WRITABLE));
         }
-        Self::collect(
+        let mut denials = Self::collect(
             codex_home,
             dirs::home_dir().as_deref(),
             std::env::var_os("CLAUDE_CONFIG_DIR")
                 .as_deref()
                 .map(Path::new),
             &keep,
-        )
+        );
+        // #594: the home variable's own spelling (a link the home was found
+        // through; the home itself is its real location).
+        if let Ok(codex_home) = AbsolutePathBuf::from_absolute_path(codex_home) {
+            denials.add_home_spellings(
+                &codex_home,
+                ["CORBANU_HOME", "PFTERMINAL_HOME", "CODEX_HOME"]
+                    .into_iter()
+                    .filter_map(std::env::var_os)
+                    .map(PathBuf::from),
+            );
+        }
+        denials
     }
 
     /// #583: the Corbanu home itself is read-only, so a protected command
@@ -560,12 +586,46 @@ impl ReadDenials {
         self.read_only.clear();
     }
 
+    /// #594/#598: records the Corbanu home and each of `candidates` that
+    /// names the same folder (a link to it, such as `~/.corbanu` or the
+    /// value of `CORBANU_HOME`), so none of them can be moved aside.
+    pub(crate) fn add_home_spellings(
+        &mut self,
+        codex_home: &AbsolutePathBuf,
+        candidates: impl IntoIterator<Item = PathBuf>,
+    ) {
+        let Ok(real) = std::fs::canonicalize(codex_home.as_path()) else {
+            return;
+        };
+        let names_home = |path: &Path| std::fs::canonicalize(path).is_ok_and(|path| path == real);
+        let spellings = [codex_home.to_path_buf(), real.clone()].into_iter().chain(
+            candidates
+                .into_iter()
+                .filter(|path| path.is_absolute() && names_home(path)),
+        );
+        for spelling in spellings {
+            if let Ok(spelling) = AbsolutePathBuf::from_absolute_path(spelling)
+                && !self.unmovable.contains(&spelling)
+            {
+                self.unmovable.push(spelling);
+            }
+        }
+    }
+
+    /// #594/#598: the Corbanu home's spellings that may not be moved.
+    #[cfg(test)]
+    pub(crate) fn unmovable_paths(&self) -> impl Iterator<Item = &AbsolutePathBuf> {
+        self.unmovable.iter()
+    }
+
     /// Issue #540: only the rule that keeps the Corbanu home's runtime
     /// entries read-only, for a command whose other rules a person's
-    /// approval lifted (Moderate, #239).
+    /// approval lifted (Moderate, #239). The home and the folders above it
+    /// stay in place too (#598).
     pub(crate) fn runtime_only(self) -> Self {
         Self {
             runtime_read_only: self.runtime_read_only,
+            unmovable: self.unmovable,
             cwd: self.cwd,
             skipped: self.skipped,
             ..Self::default()
@@ -681,6 +741,11 @@ impl ReadDenials {
             .chain(
                 self.unlistable_home()
                     .map(FileSystemSandboxEntry::deny_directory_listing),
+            )
+            .chain(
+                self.unmovable
+                    .iter()
+                    .map(FileSystemSandboxEntry::deny_moving),
             )
             .collect();
         if entries.is_empty()

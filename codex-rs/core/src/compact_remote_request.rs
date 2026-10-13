@@ -62,7 +62,7 @@ pub(super) async fn run_remote_compact_attempt(
     let trace_input_history = compaction_trace
         .is_enabled()
         .then(|| history.raw_items().to_vec());
-    let prompt_input = history.for_prompt(&turn_context.model_info.input_modalities);
+    let prompt_input = history.for_turn_prompt(turn_context);
     let tool_router = &step_context.tool_router;
     let prompt = Prompt {
         input: prompt_input,
@@ -71,6 +71,7 @@ pub(super) async fn run_remote_compact_attempt(
         base_instructions,
         output_schema: None,
         output_schema_strict: true,
+        producer: Some(turn_context.output_producer()),
     };
     let window_id = sess.current_window_id().await;
     let responses_metadata = turn_context.turn_metadata_state.to_responses_metadata(
@@ -91,31 +92,47 @@ pub(super) async fn run_remote_compact_attempt(
         )
         .await?
     };
-    let new_history = sess
-        .services
-        .model_client()
-        .compact_conversation_history(
-            &prompt,
-            &turn_context.model_info,
-            turn_state,
-            CompactConversationRequestSettings {
-                effort: turn_context.reasoning_effort.clone(),
-                summary: turn_context.reasoning_summary,
-                service_tier: if sess.services.auth_manager().auth_mode() == Some(AuthMode::ApiKey)
-                {
-                    None
-                } else {
-                    turn_context.config.service_tier.clone()
+    let mut unresolvable_item_retries = 0;
+    let new_history = loop {
+        let result = sess
+            .services
+            .model_client()
+            .compact_conversation_history(
+                &prompt,
+                &turn_context.model_info,
+                turn_state.clone(),
+                CompactConversationRequestSettings {
+                    effort: turn_context.reasoning_effort.clone(),
+                    summary: turn_context.reasoning_summary,
+                    service_tier: if sess.services.auth_manager().auth_mode()
+                        == Some(AuthMode::ApiKey)
+                    {
+                        None
+                    } else {
+                        turn_context.config.service_tier.clone()
+                    },
                 },
-            },
-            &turn_context.session_telemetry,
-            compaction_trace,
-            &responses_metadata,
-            &client_session.responses_accounting,
-        )
-        .await;
-    record_auxiliary_outcome(admitted.as_ref(), &new_history).await;
-    let new_history = new_history?;
+                &turn_context.session_telemetry,
+                compaction_trace,
+                &responses_metadata,
+                &client_session.responses_accounting,
+            )
+            .await;
+        match result {
+            // #578: the provider could not find an item this request
+            // referenced; the retry is part of the same admitted request.
+            Err(err)
+                if crate::session::turn::retry_without_unresolvable_item(
+                    client_session,
+                    &err,
+                    &mut unresolvable_item_retries,
+                ) => {}
+            result => {
+                record_auxiliary_outcome(admitted.as_ref(), &result).await;
+                break result?;
+            }
+        }
+    };
     Ok(RemoteCompactAttempt {
         new_history,
         trace_input_history,

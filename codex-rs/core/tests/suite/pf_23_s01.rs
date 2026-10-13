@@ -21,6 +21,8 @@ use codex_protocol::request_user_input::RequestUserInputEvent;
 use codex_protocol::request_user_input::RequestUserInputResponse;
 use codex_protocol::user_input::UserInput;
 use codex_security_policy::SecurityLevel;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use codex_utils_absolute_path::AbsolutePathBuf;
 use core_test_support::responses::ResponseMock;
 use core_test_support::responses::ResponsesRequest;
 use core_test_support::responses::ev_assistant_message;
@@ -142,6 +144,18 @@ async fn start_turn_in(
     steps: Vec<Step>,
     tweak: impl Fn(&mut Config) + Send + Sync + 'static,
 ) -> anyhow::Result<(TestCodex, ResponseMock)> {
+    start_turn_after(home, level, approval, steps, tweak, |_| {}).await
+}
+
+/// [`start_turn_in`], running `before_turn` once the session has started.
+async fn start_turn_after(
+    home: Option<Arc<TempDir>>,
+    level: SecurityLevel,
+    approval: AskForApproval,
+    steps: Vec<Step>,
+    tweak: impl Fn(&mut Config) + Send + Sync + 'static,
+    before_turn: impl FnOnce(&TestCodex),
+) -> anyhow::Result<(TestCodex, ResponseMock)> {
     let server = start_mock_server().await;
     let captured = mount_sse_sequence(&server, steps.into_iter().map(sse).collect()).await;
     let mut builder = test_codex();
@@ -166,6 +180,7 @@ async fn start_turn_in(
     if test.config.mcp_servers.get().contains_key("rmcp") {
         wait_for_mcp_server(&test.codex, "rmcp").await?;
     }
+    before_turn(&test);
     test.codex
         .submit(Op::UserInput {
             items: vec![UserInput::Text {
@@ -1737,6 +1752,295 @@ async fn issue_587_the_corbanu_home_cannot_be_moved_aside() -> anyhow::Result<()
     Ok(())
 }
 
+/// #594/#598: a Corbanu home at `<tmp>/dot/home`, also reached through the
+/// link `<tmp>/link`, spelled `link` (as the default `~/.corbanu` is when it
+/// is a link) or by its real location only (as `CORBANU_HOME` given its real
+/// location is; a variable naming the link records the link too).
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+struct LinkedHome {
+    _temp: Arc<TempDir>,
+    root: std::path::PathBuf,
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+impl LinkedHome {
+    fn new() -> anyhow::Result<Self> {
+        let temp = Arc::new(TempDir::new()?);
+        let root = temp.path().canonicalize()?;
+        std::fs::create_dir_all(root.join("dot/home"))?;
+        std::fs::write(root.join("dot/home/AGENTS.md"), "original\n")?;
+        std::fs::write(root.join("dot/home/auth.json"), CANARY)?;
+        std::os::unix::fs::symlink(root.join("dot/home"), root.join("link"))?;
+        Ok(Self { _temp: temp, root })
+    }
+
+    fn real(&self) -> std::path::PathBuf {
+        self.root.join("dot/home")
+    }
+
+    fn link(&self) -> std::path::PathBuf {
+        self.root.join("link")
+    }
+
+    fn spelled(&self, through_link: bool) -> anyhow::Result<AbsolutePathBuf> {
+        let path = if through_link {
+            self.link()
+        } else {
+            self.real()
+        };
+        Ok(AbsolutePathBuf::from_absolute_path(path)?)
+    }
+
+    /// The attack: move the home and the folder above it aside, replace the
+    /// link with a folder, and plant `AGENTS.md` in both. Every path is
+    /// built at run time (the command-text net cannot see it). `read` first
+    /// reads the credential file by its literal path (a protected command,
+    /// for #540's approval).
+    fn command(&self, read: bool) -> String {
+        let path = self.root.to_string_lossy().into_owned();
+        // Split inside the folder's own name: neither part names it.
+        let (head, tail) = path.split_at(path.len() - 2);
+        let read = if read {
+            format!("cat '{}'; echo; ", self.real().join("auth.json").display())
+        } else {
+            String::new()
+        };
+        format!(
+            "{read}t=\"$(printf '{head}%s' {tail})\"; \
+             mv \"$t/dot/home\" \"$t/dot/home.old\"; echo mvhome=$?; \
+             mv \"$t/dot\" \"$t/dot.old\"; echo mvdot=$?; \
+             rm \"$t/link\"; echo rmlink=$?; \
+             mkdir -p \"$t/dot/home\" \"$t/link\"; \
+             echo planted > \"$t/dot/home/AGENTS.md\"; echo planted > \"$t/link/AGENTS.md\"; \
+             echo ran-594"
+        )
+    }
+
+    /// What a protected command may still achieve. Permissive: all of it.
+    /// With the home spelled by its real location the test gives Corbanu no
+    /// link (as when `CORBANU_HOME` was given its real location), so
+    /// replacing the link changes nothing Corbanu uses. On Linux a mount
+    /// cannot hold a link: a home spelled through a link in a writable
+    /// folder makes the sandbox refuse the command while its reads are
+    /// denied, but a command a person approved can replace the link. Known
+    /// Linux limit (#594): a home variable naming a link in a writable folder
+    /// is recorded but only the folders above the link are held, so any
+    /// protected command can replace that link (Seatbelt holds it).
+    fn expected(level: SecurityLevel, through_link: bool, approved: bool) -> Vec<&'static str> {
+        if level == SecurityLevel::Permissive {
+            vec!["moved", "link replaced", "planted"]
+        } else if !through_link || cfg!(target_os = "linux") && approved {
+            vec!["link replaced"]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Whether the command ran: on Linux the sandbox refuses a command while
+    /// its reads are denied through a writable link to the home.
+    fn ran(level: SecurityLevel, through_link: bool, approved: bool, output: &str) -> bool {
+        if cfg!(target_os = "linux")
+            && level != SecurityLevel::Permissive
+            && through_link
+            && !approved
+        {
+            output.contains("crosses writable symlink") && !output.contains("ran-594")
+        } else {
+            output.contains("ran-594")
+        }
+    }
+
+    /// #619 (macOS, pre-existing): with a workspace-write profile a home
+    /// below a temporary-folder root reached through an alias (`/tmp`, or
+    /// `$TMPDIR` in `/var/folders`, both in `/private`) keeps its runtime
+    /// entries writable, so `AGENTS.md` can be planted in place (moving and
+    /// replacing are still refused).
+    fn with_known_exception(
+        &self,
+        mut expected: Vec<&'static str>,
+        level: SecurityLevel,
+        full_access: bool,
+    ) -> Vec<&'static str> {
+        if cfg!(target_os = "macos")
+            && level != SecurityLevel::Permissive
+            && !full_access
+            && self.root.starts_with("/private")
+        {
+            expected.push("planted");
+        }
+        expected
+    }
+
+    /// What the command achieved.
+    fn changed(&self) -> Vec<&'static str> {
+        let mut changed = Vec::new();
+        if self.root.join("dot/home.old").exists() || self.root.join("dot.old").exists() {
+            changed.push("moved");
+        }
+        if !std::fs::symlink_metadata(self.link())
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            changed.push("link replaced");
+        }
+        if std::fs::read_to_string(self.real().join("AGENTS.md")).unwrap_or_default()
+            != "original\n"
+        {
+            changed.push("planted");
+        }
+        changed
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn set_profile(config: &mut Config, full_access: bool) {
+    use codex_protocol::models::PermissionProfile;
+    let profile = if full_access {
+        PermissionProfile::Disabled
+    } else {
+        PermissionProfile::workspace_write()
+    };
+    config
+        .permissions
+        .set_permission_profile(profile)
+        .expect("profile");
+}
+
+/// #594: under a protected level, with full access or a workspace-write
+/// profile (whose temporary-folder root holds the home), a command cannot
+/// move a linked Corbanu home aside, nor the folder above it, nor replace
+/// the link with a planted home, whichever spelling the session uses.
+/// Permissive is unchanged.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_594_a_linked_corbanu_home_cannot_be_replaced() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let mut wrong = Vec::new();
+    for (level, full_access, through_link) in [
+        (SecurityLevel::Moderate, true, true),
+        (SecurityLevel::Moderate, true, false),
+        (SecurityLevel::Moderate, false, true),
+        (SecurityLevel::Moderate, false, false),
+        (SecurityLevel::Aggressive, true, true),
+        (SecurityLevel::Permissive, true, true),
+        (SecurityLevel::Permissive, false, false),
+    ] {
+        let home = LinkedHome::new()?;
+        let spelled = home.spelled(through_link)?;
+        let (test, captured) = start_turn_in(
+            None,
+            level,
+            AskForApproval::Never,
+            vec![
+                call(
+                    "call-replace",
+                    "shell_command",
+                    json!({ "command": home.command(/*read*/ false) }),
+                ),
+                done_step(),
+            ],
+            move |config| {
+                config.codex_home = spelled.clone();
+                set_profile(config, full_access);
+            },
+        )
+        .await?;
+        assert!(next_exec_approval(&test).await.is_none());
+        let requests = captured.requests();
+        let output = output_text(&requests[requests.len() - 1], "call-replace");
+        drop(test);
+        let changed = home.changed();
+        let expected = home.with_known_exception(
+            LinkedHome::expected(level, through_link, /*approved*/ false),
+            level,
+            full_access,
+        );
+        if !LinkedHome::ran(level, through_link, /*approved*/ false, &output) || changed != expected
+        {
+            wrong.push(format!(
+                "{level:?} full_access={full_access} link={through_link}: {changed:?}: {output}"
+            ));
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
+/// #598: a command whose rules a person's approval lifted under Moderate
+/// (#540) still cannot move the Corbanu home or a folder above it aside, nor
+/// replace a link to it, while its other rules are lifted (the credential
+/// file is readable). Permissive is unchanged.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_598_an_approved_command_cannot_move_the_corbanu_home() -> anyhow::Result<()> {
+    use codex_protocol::protocol::ReviewDecision;
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let mut wrong = Vec::new();
+    for (level, full_access, through_link) in [
+        (SecurityLevel::Moderate, true, true),
+        (SecurityLevel::Moderate, true, false),
+        (SecurityLevel::Moderate, false, false),
+        (SecurityLevel::Permissive, true, true),
+    ] {
+        let home = LinkedHome::new()?;
+        let spelled = home.spelled(through_link)?;
+        let (test, captured) = start_turn_in(
+            None,
+            level,
+            AskForApproval::OnRequest,
+            vec![
+                injected_step(),
+                call(
+                    "call-replace",
+                    "shell_command",
+                    json!({ "command": home.command(/*read*/ true) }),
+                ),
+                done_step(),
+            ],
+            move |config| {
+                config.codex_home = spelled.clone();
+                set_profile(config, full_access);
+            },
+        )
+        .await?;
+        let mut asked = 0;
+        while let Some(approval) = next_exec_approval(&test).await {
+            asked += 1;
+            test.codex
+                .submit(Op::ExecApproval {
+                    id: approval.effective_approval_id(),
+                    turn_id: None,
+                    decision: ReviewDecision::Approved,
+                })
+                .await?;
+        }
+        let requests = captured.requests();
+        let output = output_text(&requests[requests.len() - 1], "call-replace");
+        drop(test);
+        let changed = home.changed();
+        let expected = home.with_known_exception(
+            LinkedHome::expected(level, through_link, /*approved*/ true),
+            level,
+            full_access,
+        );
+        // Under Moderate a person was asked and the rules were lifted (the
+        // credential file was readable).
+        let lifted = level == SecurityLevel::Permissive || asked == 1 && output.contains(CANARY);
+        if !LinkedHome::ran(level, through_link, /*approved*/ true, &output)
+            || changed != expected
+            || !lifted
+        {
+            wrong.push(format!(
+                "{level:?} full_access={full_access} link={through_link}: asked={asked} \
+                 {changed:?}: {output}"
+            ));
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
 /// #583: under a protected level with full access, a command cannot create a
 /// missing Corbanu-home entry that Corbanu reads later: exec-policy
 /// `rules/x.rules` (which would approve commands in later sessions) or any
@@ -1989,6 +2293,98 @@ async fn issue_603_a_command_in_the_corbanu_home_cannot_create_names_corbanu_rea
                 wrong.push(format!(
                     "{level:?} in_other={in_other} real_cwd={real_cwd}: present={present:?} free={free} \
                      placeholder_files={placeholder_files:?}: {output}"
+                ));
+            }
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
+/// Issue #586: a protected command cannot create, and so cannot hold, the
+/// database init lock (#549) where it is missing, by its name or (on a
+/// case-insensitive macOS volume, the same file) in another case, even with
+/// full access and the path built at run time. Holding it would make every
+/// new launch on the home wait out the lock before opening the databases
+/// unlocked. Where the lock exists, a hard link to it cannot be made and
+/// held either. The same holds for a command working in the Corbanu home
+/// itself, which #583 leaves writable: the lock is a store. Permissive is
+/// unchanged.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_586_missing_db_init_lock_cannot_be_created_or_held() -> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let mut wrong = Vec::new();
+    for (missing, in_home) in [(true, false), (true, true), (false, false)] {
+        for (level, held) in [
+            (SecurityLevel::Moderate, false),
+            (SecurityLevel::Aggressive, false),
+            (SecurityLevel::Permissive, true),
+        ] {
+            let home = Arc::new(TempDir::new()?);
+            let root = home.path().canonicalize()?;
+            let lock = root.join("pfterminal_db_init.lock");
+            let path = root.to_string_lossy().into_owned();
+            // Split inside the home folder's own name: neither part names it.
+            let (head, tail) = path.split_at(path.len() - 2);
+            let attempts = if missing {
+                "hold \"$h/$n\" lower; hold \"$h/PFTERMINAL_DB_$(printf INIT).LOCK\" upper"
+            } else {
+                "ln \"$h/$n\" ./link586 && hold ./link586 link"
+            };
+            let command = format!(
+                "h=\"$(printf '{head}%s' {tail})\"; n=\"pfterminal_db_$(printf init).lock\"; \
+                 hold() {{ perl -e 'use Fcntl qw(:flock); \
+                 open(my $f, \">>\", $ARGV[0]) or die \"open: $!\\n\"; \
+                 flock($f, LOCK_EX | LOCK_NB) or die \"lock: $!\\n\"' \"$1\" && echo \"held-$2\"; }}; \
+                 {attempts}; echo ran-586"
+            );
+            let (test, captured) = start_turn_after(
+                Some(home.clone()),
+                level,
+                AskForApproval::Never,
+                vec![
+                    call("call-lock", "shell_command", json!({ "command": command })),
+                    done_step(),
+                ],
+                move |config| {
+                    if in_home {
+                        config.cwd = config.codex_home.clone();
+                    }
+                    config
+                        .permissions
+                        .set_permission_profile(PermissionProfile::Disabled)
+                        .expect("full access");
+                },
+                // The session created it here at start-up (so this home holds
+                // the databases); the first command meets it missing.
+                |_| {
+                    if missing {
+                        std::fs::remove_file(&lock).expect("the session created the lock");
+                    } else {
+                        assert!(lock.is_file(), "the session created the lock");
+                    }
+                },
+            )
+            .await?;
+            assert!(next_exec_approval(&test).await.is_none());
+            let requests = captured.requests();
+            let output = output_text(&requests[requests.len() - 1], "call-lock");
+            let ok = if missing {
+                // `exists()` is the check for the upper-case probe too: on a
+                // case-insensitive volume (default macOS) it is this file. On
+                // a case-sensitive one it is another, harmless file.
+                output.contains("held-lower") == held && lock.exists() == held
+            } else {
+                output.contains("held-link") == held
+                    && test.config.cwd.join("link586").exists() == held
+            };
+            if !output.contains("ran-586") || !ok {
+                wrong.push(format!(
+                    "{level:?} missing={missing} in_home={in_home}: exists={}: {output}",
+                    lock.exists()
                 ));
             }
         }

@@ -633,6 +633,44 @@ fn issue_583_a_linked_home_outside_the_workspace_gets_no_carve_out() {
     assert_eq!(worktree_writes, Vec::<&FileSystemSandboxEntry>::new());
 }
 
+/// Issue #586: the database init lock is denied before it exists, so a
+/// protected command can neither create it nor hold it, also where #583
+/// leaves the Corbanu home writable (a command working in the home or in a
+/// folder of it outside `worktrees`).
+#[test]
+fn issue_586_db_init_lock_denied_before_it_exists() {
+    let fx = fixture();
+    let lock = fx.codex_home.join("pfterminal_db_init.lock");
+    assert!(!lock.exists());
+    std::fs::create_dir_all(fx.codex_home.join("other")).unwrap();
+    for cwd in [
+        fx.user_home.join("project"),
+        fx.codex_home.clone(),
+        fx.codex_home.join("other"),
+    ] {
+        let denials = ReadDenials::collect(
+            &fx.codex_home,
+            Some(&fx.user_home),
+            /*claude_config_dir*/ None,
+            &[abs(&cwd)],
+        );
+        let policy = denials
+            .apply(&PermissionProfile::Disabled)
+            .unwrap()
+            .file_system_sandbox_policy();
+        assert!(
+            !policy.can_write_path_with_cwd(&lock, &cwd),
+            "{}",
+            cwd.display()
+        );
+        assert!(
+            !policy.can_read_path_with_cwd(&lock, &cwd),
+            "{}",
+            cwd.display()
+        );
+    }
+}
+
 /// Issue #562: on Linux the missing runtime folders are created, empty,
 /// only where the profile could write the Corbanu home, so bubblewrap never
 /// needs a placeholder file where Corbanu expects a folder. `AGENTS.md` is
@@ -1509,4 +1547,43 @@ fn issue_442_a_grant_keeps_codex_and_agents_read_only() {
             "{lifted}"
         );
     }
+}
+
+/// #594/#598: the Corbanu home may not be moved in any spelling (as given,
+/// its real location, and a home name or home variable linking to it), also
+/// for a command a person approved (#540); a name for another folder is not
+/// recorded.
+#[test]
+fn issue_594_598_the_home_is_unmovable_in_each_spelling() {
+    let fx = fixture();
+    let real = fx.user_home.join("dotfiles/corbanu");
+    std::fs::create_dir_all(fx.user_home.join("dotfiles")).unwrap();
+    std::fs::rename(&fx.codex_home, &real).unwrap();
+    std::os::unix::fs::symlink(&real, &fx.codex_home).unwrap();
+    let elsewhere = fx.user_home.join("project");
+    let cwd = abs(&elsewhere);
+    let mut denials =
+        ReadDenials::collect(&real, Some(&fx.user_home), None, std::slice::from_ref(&cwd));
+    denials.add_home_spellings(
+        &abs(&real),
+        [elsewhere, fx.user_home.join("missing"), "relative".into()],
+    );
+    let expected = vec![abs(&real), abs(&fx.codex_home)];
+    assert_eq!(
+        denials.unmovable_paths().cloned().collect::<Vec<_>>(),
+        expected
+    );
+    let approved = denials.runtime_only();
+    assert_eq!(
+        approved.unmovable_paths().cloned().collect::<Vec<_>>(),
+        expected
+    );
+    let lifted = approved
+        .apply(&PermissionProfile::Disabled)
+        .expect("not an external sandbox");
+    let mut unmovable = lifted.file_system_sandbox_policy().get_unmovable_paths();
+    unmovable.sort();
+    let mut sorted = expected;
+    sorted.sort();
+    assert_eq!(unmovable, sorted);
 }

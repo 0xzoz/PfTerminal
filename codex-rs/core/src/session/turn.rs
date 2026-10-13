@@ -431,13 +431,10 @@ pub(crate) async fn run_turn(
                 .await?;
 
             // Construct the input that we will send to the model.
-            let mut sampling_request_input: Vec<ResponseItem> = async {
-                sess.clone_history()
-                    .await
-                    .for_prompt(&turn_context.model_info.input_modalities)
-            }
-            .instrument(trace_span!("run_turn.prepare_sampling_request_input"))
-            .await;
+            let mut sampling_request_input: Vec<ResponseItem> =
+                async { sess.clone_history().await.for_turn_prompt(&turn_context) }
+                    .instrument(trace_span!("run_turn.prepare_sampling_request_input"))
+                    .await;
             if std::mem::take(&mut pending_completion_continuation) {
                 sampling_request_input
                     .push(ContextualUserFragment::into(TurnCompletionContinuation));
@@ -1647,6 +1644,7 @@ pub(crate) fn build_prompt(
         output_schema_strict: !crate::guardian::is_guardian_reviewer_source(
             &turn_context.session_source,
         ),
+        producer: Some(turn_context.output_producer()),
     }
 }
 
@@ -1691,6 +1689,33 @@ pub(crate) async fn notify_openai_api_key_env_fallback(sess: &Session, turn_cont
         )
         .await;
     }
+}
+
+/// #578: retries of one request without an item the provider reported
+/// missing.
+const MAX_UNRESOLVABLE_ITEM_RETRIES: usize = 8;
+
+/// #578: whether to send a failed request again without an item a stateless
+/// Responses host reported missing (`Item with id '…' not found`). Each ID is
+/// retried once, at most [`MAX_UNRESOLVABLE_ITEM_RETRIES`] per request; the
+/// client leaves the ID out of its later requests.
+pub(crate) fn retry_without_unresolvable_item(
+    client_session: &ModelClientSession,
+    err: &CodexErr,
+    retries: &mut usize,
+) -> bool {
+    if *retries >= MAX_UNRESOLVABLE_ITEM_RETRIES {
+        return false;
+    }
+    let Some(item_id) = client_session.note_unresolvable_item_reference(err) else {
+        return false;
+    };
+    *retries += 1;
+    warn!(
+        item_id,
+        "the provider could not find an item this request referenced; retrying without it"
+    );
+    true
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1753,6 +1778,7 @@ async fn run_sampling_request(
     let max_retries = turn_context.provider.info().stream_max_retries();
     let mut retries = 0;
     let mut same_request_idle_failures = 0;
+    let mut unresolvable_item_retries = 0;
     let mut initial_input = Some(input);
     let mut original_input = None;
     let mut executed_tool_calls_by_output = HashMap::new();
@@ -1760,9 +1786,7 @@ async fn run_sampling_request(
         let prompt_input = if let Some(input) = initial_input.take() {
             input
         } else {
-            sess.clone_history()
-                .await
-                .for_prompt(&turn_context.model_info.input_modalities)
+            sess.clone_history().await.for_turn_prompt(&turn_context)
         };
         let mut prompt_input = prompt_input;
         if let Some(executed_tool_calls) = sess.services.executed_tool_calls.as_ref()
@@ -1824,6 +1848,24 @@ async fn run_sampling_request(
 
         if original_input.is_none() {
             original_input = Some(prompt.input);
+        }
+
+        // #578: a stateless Responses host could not find an item this
+        // request referenced. Retry without it (each ID once) rather than
+        // failing this and every later turn.
+        if retry_without_unresolvable_item(client_session, &err, &mut unresolvable_item_retries) {
+            turn_context.turn_timing_state.record_sampling_retry();
+            sess.send_event(
+                &turn_context,
+                EventMsg::Warning(WarningEvent {
+                    message: "The provider could not find an earlier item this request referred \
+                              to (for example after a provider switch); it was left out and the \
+                              request was sent again."
+                        .to_string(),
+                }),
+            )
+            .await;
+            continue;
         }
 
         if !err.is_retryable() {
@@ -3323,6 +3365,8 @@ async fn try_run_sampling_request(
             ResponseEvent::Created => {}
             ResponseEvent::OutputItemDone(mut item) => {
                 assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
+                // #578: later requests to another provider adapt this item.
+                item.set_producer(&turn_context.output_producer());
                 let completed_item_id = item.id().map(|item_id| item_id.as_str().to_string());
                 if let Some((_, mut consumer)) = active_tool_argument_diff_consumer.take()
                     && let Ok(Some(event)) = consumer.finish()

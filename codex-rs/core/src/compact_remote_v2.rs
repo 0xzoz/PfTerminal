@@ -279,10 +279,12 @@ async fn run_remote_compact_task_inner_impl(
     let RemoteCompactV2Attempt {
         trace_input_history,
         prompt_input,
-        compaction_output,
+        mut compaction_output,
         token_usage,
         owned_client_session: _owned_client_session,
     } = attempt;
+    // #578: its encrypted summary is sealed for this provider (and account).
+    compaction_output.set_producer(&compaction_turn_context.output_producer());
     if let Some(token_usage) = token_usage {
         sess.record_rollout_budget_usage(&token_usage)?;
         analytics_details.active_context_tokens_before = Some(token_usage.input_tokens);
@@ -347,6 +349,7 @@ async fn run_remote_compaction_request_v2(
         .stream_max_retries()
         .min(MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES);
     let mut retries = 0;
+    let mut unresolvable_item_retries = 0;
     loop {
         ensure_gpu_runtime_provider_active(sess, turn_context).await?;
         // #509: each attempt is a model request on the turn's key.
@@ -380,6 +383,13 @@ async fn run_remote_compaction_request_v2(
 
         match result {
             Ok(compaction_output) => return Ok(compaction_output),
+            // #578: the provider could not find an item this request referenced.
+            Err(err)
+                if crate::session::turn::retry_without_unresolvable_item(
+                    client_session,
+                    &err,
+                    &mut unresolvable_item_retries,
+                ) => {}
             Err(err) if !err.is_retryable() => return Err(err),
             Err(err) => {
                 handle_retryable_response_stream_error(

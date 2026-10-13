@@ -3562,3 +3562,43 @@ fn transient_rate_limit_delay_backs_off_and_honors_retry_after() {
         5
     );
 }
+
+/// #578: the ID in OpenAI's `store: false` lookup failure; nothing else.
+#[test]
+fn unresolvable_item_id_reads_only_the_not_found_error() {
+    assert_eq!(
+        super::unresolvable_item_id(
+            "unexpected status 404 Not Found: Item with id 'rs_2026101213421902b19754973e467e' \
+             not found. Items are not persisted when `store` is set to false."
+        ),
+        Some("rs_2026101213421902b19754973e467e".to_string())
+    );
+    for other in [
+        "unexpected status 404 Not Found: model not found",
+        "Item with id '' not found.",
+        "Item with id 'rs_1' could not be verified",
+        "Item with id 'rs 1' not found",
+    ] {
+        assert_eq!(super::unresolvable_item_id(other), None, "{other}");
+    }
+}
+
+/// #578: another provider's call IDs fit Anthropic's `tool_use` ID alphabet;
+/// valid IDs are unchanged.
+#[test]
+fn anthropic_tool_use_ids_fit_its_alphabet() {
+    assert_eq!(
+        super::anthropic_tool_use_id("toolu_01A-b"),
+        std::borrow::Cow::Borrowed("toolu_01A-b")
+    );
+    let mapped = super::anthropic_tool_use_id("functions.shell:0");
+    assert!(mapped.starts_with("functions_shell_0_"), "{mapped}");
+    assert!(
+        mapped
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    );
+    // Stable, and distinct for IDs that differ only in other characters.
+    assert_eq!(super::anthropic_tool_use_id("functions.shell:0"), mapped);
+    assert_ne!(super::anthropic_tool_use_id("functions:shell.0"), mapped);
+}
