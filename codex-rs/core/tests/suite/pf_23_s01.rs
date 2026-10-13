@@ -2711,12 +2711,37 @@ async fn issue_651_a_missing_database_folder_is_protected() -> anyhow::Result<()
 /// create and hold the missing init lock, hold the GPU controller's lock or
 /// plant a pending accounting record or a backup, with the paths built at run
 /// time. Permissive is unchanged.
+///
+/// The scenario sets `TMPDIR` for the whole process, so the test runs it in a
+/// copy of this test binary of its own (`cargo test` runs tests as threads).
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn issue_651_a_shared_database_folder_is_denied_entry_by_entry() -> anyhow::Result<()> {
-    use codex_protocol::models::PermissionProfile;
+    const SUBPROCESS: &str = "CORBANU_TEST_ISSUE_651_SHARED_FOLDER_SUBPROCESS";
+    const NAME: &str =
+        "suite::pf_23_s01::issue_651_a_shared_database_folder_is_denied_entry_by_entry";
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
+    if std::env::var_os(SUBPROCESS).is_some() {
+        return shared_database_folder_scenario().await;
+    }
+    let output = tokio::process::Command::new(std::env::current_exe()?)
+        .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+        .env(SUBPROCESS, "1")
+        .output()
+        .await?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "`{NAME}` in its own process failed\nstdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+async fn shared_database_folder_scenario() -> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
     let mut wrong = Vec::new();
     let original_tmpdir = std::env::var_os("TMPDIR");
     for (level, open) in [
@@ -2771,7 +2796,7 @@ async fn issue_651_a_shared_database_folder_is_denied_entry_by_entry() -> anyhow
                 let _ = std::fs::remove_file(&missing_lock);
                 // The database folder is the temporary folder from here on
                 // (set after the session's own folders were made).
-                // SAFETY: nextest runs each test in its own process.
+                // SAFETY: the scenario runs alone in its own process.
                 unsafe { std::env::set_var("TMPDIR", &shared) };
             },
         )
