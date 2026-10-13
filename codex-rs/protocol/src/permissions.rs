@@ -4254,7 +4254,7 @@ mod tests {
 
         let temp_dir = TempDir::new().expect("tempdir");
         // The real location, so a link's target matches the globs too.
-        let temp = fs::canonicalize(temp_dir.path()).expect("real");
+        let temp = std::fs::canonicalize(temp_dir.path()).expect("real");
         let root = temp.to_string_lossy().into_owned();
         let policy = FileSystemSandboxPolicy::restricted(
             credential_file_globs(&root)
@@ -4300,8 +4300,19 @@ mod tests {
             credential_rule_roots(&[format!("{root}/**/.env.*")]),
             Vec::<PathBuf>::new()
         );
+        // A template name that is a link to a credential file stays denied.
+        #[cfg(unix)]
+        {
+            fs::write(temp.as_path().join(".env"), "SECRET=1").expect("env");
+            std::os::unix::fs::symlink(".env", temp.as_path().join(".env.sample")).expect("link");
+            assert!(is_read_denied(
+                &temp.as_path().join(".env.sample"),
+                &policy,
+                temp.as_path()
+            ));
+        }
         // A user's own deny glob still covers a template name.
-        let mut entries = policy.entries.clone();
+        let mut entries = policy.entries;
         entries.push(FileSystemSandboxEntry::new(
             FileSystemPath::GlobPattern {
                 pattern: format!("{root}/**/*.example"),
@@ -4314,17 +4325,6 @@ mod tests {
             &own,
             temp.as_path()
         ));
-        // A template name that is a link to a credential file stays denied.
-        #[cfg(unix)]
-        {
-            fs::write(temp.as_path().join(".env"), "SECRET=1").expect("env");
-            std::os::unix::fs::symlink(".env", temp.as_path().join(".env.sample")).expect("link");
-            assert!(is_read_denied(
-                &temp.as_path().join(".env.sample"),
-                &policy,
-                temp.as_path()
-            ));
-        }
     }
 
     /// #442 (Travis, 2026-10-12): the credential rule as a profile writes it

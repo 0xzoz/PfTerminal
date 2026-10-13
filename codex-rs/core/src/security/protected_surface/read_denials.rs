@@ -841,9 +841,14 @@ pub(crate) fn create_missing_runtime_folders(codex_home: &Path) {
 /// working in the home: held read-only as they are, so bubblewrap puts no
 /// placeholder there.
 fn create_missing_read_later_folders(codex_home: &Path) {
-    let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    let builder = {
+        let mut builder = std::fs::DirBuilder::new();
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        builder
+    };
+    #[cfg(not(unix))]
+    let builder = std::fs::DirBuilder::new();
     for folder in CORBANU_READ_LATER_FOLDERS {
         // Fails harmlessly where it exists (also as a link).
         let _ = builder.create(codex_home.join(folder));
