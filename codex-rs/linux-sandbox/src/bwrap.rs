@@ -2046,12 +2046,9 @@ fn append_unreadable_root_args(
     if let Some(metadata) = live_placeholder_directory(unreadable_root) {
         append_existing_unreadable_path_args(bwrap_args, unreadable_root, allowed_write_paths)?;
         if !has_synthetic_mount_target(bwrap_args, unreadable_root) {
-            bwrap_args
-                .synthetic_mount_targets
-                .push(SyntheticMountTarget::existing_empty_directory(
-                    unreadable_root,
-                    &metadata,
-                ));
+            bwrap_args.synthetic_mount_targets.push(
+                SyntheticMountTarget::existing_empty_directory(unreadable_root, &metadata),
+            );
         }
         return Ok(());
     }

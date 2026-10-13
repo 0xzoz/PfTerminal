@@ -607,7 +607,11 @@ fn own_placeholders_and_older_records_are_still_removed() {
     std::fs::write(&own, "").expect("placeholder");
     std::fs::File::options()
         .write(true)
-        .open(registrations[0].marker_dir.join(SYNTHETIC_MOUNT_TARGET_RECORD))
+        .open(
+            registrations[0]
+                .marker_dir
+                .join(SYNTHETIC_MOUNT_TARGET_RECORD),
+        )
         .expect("record")
         .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
         .expect("an hour-old record");
