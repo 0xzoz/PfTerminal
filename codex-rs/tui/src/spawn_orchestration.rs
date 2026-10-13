@@ -1285,6 +1285,21 @@ impl App {
         }
     }
 
+    /// #660 follow-up: a task for the managed Codex pane `thread_id` waits in
+    /// its mailbox because of the kill switch, until that pane's next turn.
+    pub(crate) fn note_kill_switch_held_native_task(&mut self, thread_id: ThreadId) {
+        if !self.kill_switch_held_native_tasks.contains(&thread_id) {
+            self.kill_switch_held_native_tasks.push(thread_id);
+        }
+    }
+
+    /// #660 follow-up: a turn started in `thread_id` (its waiting task went
+    /// with it) or the pane closed; it no longer has a waiting task.
+    pub(crate) fn clear_kill_switch_held_native_task(&mut self, thread_id: ThreadId) {
+        self.kill_switch_held_native_tasks
+            .retain(|held| *held != thread_id);
+    }
+
     /// #507/#660: what the person is told when a task for a managed Codex
     /// pane waits in its mailbox because of the kill switch.
     pub(crate) fn kill_switch_held_native_task_message(&self, label: &str) -> String {
