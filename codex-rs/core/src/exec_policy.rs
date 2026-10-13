@@ -279,6 +279,15 @@ pub enum ExecPolicyUpdateError {
     },
 }
 
+/// #626: the level a person approved a remembered approval under.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ApprovedUnder {
+    /// Security level Aggressive was active: the rule applies there too.
+    Aggressive,
+    /// A less strict level: the rule is suspended while Aggressive is active.
+    LessStrict,
+}
+
 pub(crate) struct ExecPolicyManager {
     policy: ArcSwap<Policy>,
     update_lock: Semaphore,
@@ -455,42 +464,47 @@ impl ExecPolicyManager {
                 let prompt_is_rule = evaluation.matched_rules.iter().any(|rule_match| {
                     is_policy_match(rule_match) && rule_match.decision() == Decision::Prompt
                 });
+                // #626: which remembered approvals Aggressive suspended, where
+                // the full policy would have run the command unasked.
+                let suspended_note = live_aggressive
+                    .then(|| {
+                        let full = self
+                            .current()
+                            .merge_overlay(aggressive_vault_policy())
+                            .check_multiple_with_options(
+                                commands.iter(),
+                                &exec_policy_fallback,
+                                &match_options,
+                            );
+                        aggressive::suspended_note(&aggressive::suspended_prefixes(
+                            &full,
+                            &self.aggressive_approved.load(),
+                        ))
+                    })
+                    .flatten();
+                let with_note = |reason: String| match &suspended_note {
+                    Some(note) => format!("{reason} {note}"),
+                    None => reason,
+                };
                 match prompt_is_rejected_by_policy(approval_policy, prompt_is_rule) {
                     Some(reason) if prompt_is_rule => ExecApprovalRequirement::Forbidden {
                         reason: reason.to_string(),
                     },
                     Some(reason) => ExecApprovalRequirement::Forbidden {
-                        reason: derive_rejected_prompt_reason(
+                        reason: with_note(derive_rejected_prompt_reason(
                             reason,
                             dangerous_command_match_for_heuristics(
                                 &evaluation,
                                 Decision::Prompt,
                                 command_origin,
                             ),
-                        ),
+                        )),
                     },
                     None => ExecApprovalRequirement::NeedsApproval {
-                        reason: [
-                            derive_prompt_reason(command, &evaluation),
-                            // #626: say which remembered approval Aggressive
-                            // suspended, where it would have run unasked.
-                            live_aggressive
-                                .then(|| {
-                                    let full = self.current().check_multiple_with_options(
-                                        commands.iter(),
-                                        &exec_policy_fallback,
-                                        &match_options,
-                                    );
-                                    aggressive::suspended_note(&aggressive::suspended_prefixes(
-                                        &full,
-                                        &self.aggressive_approved.load(),
-                                    ))
-                                })
-                                .flatten(),
-                        ]
-                        .into_iter()
-                        .flatten()
-                        .reduce(|joined, part| format!("{joined} {part}")),
+                        reason: match derive_prompt_reason(command, &evaluation) {
+                            Some(reason) => Some(with_note(reason)),
+                            None => suspended_note.clone(),
+                        },
                         proposed_execpolicy_amendment: without_credentials(
                             requested_amendment.or_else(|| {
                                 if auto_amendment_allowed {
@@ -531,15 +545,15 @@ impl ExecPolicyManager {
         }
     }
 
-    /// Saves a remembered approval. #626: `under_aggressive` (Aggressive was
-    /// active when the person approved it) marks the rule so that it applies
-    /// under Aggressive too.
+    /// Saves a remembered approval. #626: one approved while Aggressive was
+    /// active is marked so that it applies under Aggressive too.
     pub(crate) async fn append_amendment_and_update(
         &self,
         codex_home: &Path,
         amendment: &ExecPolicyAmendment,
-        under_aggressive: bool,
+        approved_under: ApprovedUnder,
     ) -> Result<AmendmentScope, ExecPolicyUpdateError> {
+        let under_aggressive = approved_under == ApprovedUnder::Aggressive;
         let _update_guard =
             self.update_lock
                 .acquire()

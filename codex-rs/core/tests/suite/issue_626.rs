@@ -5,7 +5,8 @@
 //! Linux):
 //! - under Aggressive the person is asked, the prompt says the remembered
 //!   approval was not applied, and the rule is kept;
-//! - under Permissive the same rule still runs the command unasked;
+//! - under Permissive and Moderate the same rule still runs the command
+//!   unasked;
 //! - a rule the person saves while Aggressive is active applies there.
 #![cfg(any(target_os = "macos", target_os = "linux"))]
 
@@ -176,12 +177,15 @@ async fn issue_626_rule_remembered_under_permissive_is_suspended_under_aggressiv
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn issue_626_permissive_still_runs_a_remembered_command_unasked() -> anyhow::Result<()> {
+async fn issue_626_permissive_and_moderate_still_run_a_remembered_command_unasked()
+-> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
-    let test = session(SecurityLevel::Permissive, PERMISSIVE_RULE, /*calls*/ 1).await?;
-    assert!(turn(&test).await?.is_none(), "Permissive asked");
-    assert!(test.workspace_path(FILE).exists());
+    for level in [SecurityLevel::Permissive, SecurityLevel::Moderate] {
+        let test = session(level, PERMISSIVE_RULE, /*calls*/ 1).await?;
+        assert!(turn(&test).await?.is_none(), "{level:?} asked");
+        assert!(test.workspace_path(FILE).exists(), "{level:?}");
+    }
     Ok(())
 }
 

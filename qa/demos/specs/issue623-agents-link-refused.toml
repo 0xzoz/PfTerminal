@@ -45,7 +45,7 @@ repeat = 2
 [[steps]]
 key = "Enter"
 [[steps]]
-wait = "Preflight passed"
+wait = "enter confirm and save"
 [[steps]]
 pause = 1.0
 [[steps]]
@@ -74,7 +74,7 @@ pause = 4.0
 [[steps]]
 run = "test ! -e {workspace}/ag && test ! -L {workspace}/ag && grep -qx orig {workspace}/.agents/notes.md"
 [[steps]]
-wait = "(?s)refused this command before it ran.*─{10}.*\\n• "
+wait = "(?s)refused this command before it ran.*\\n• "
 timeout = 120
 compress = 2
 [[steps]]

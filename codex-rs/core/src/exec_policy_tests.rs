@@ -1683,7 +1683,7 @@ async fn append_execpolicy_amendment_updates_policy_and_file() {
         .append_amendment_and_update(
             codex_home.path(),
             &ExecPolicyAmendment::from(prefix),
-            /*under_aggressive*/ false,
+            ApprovedUnder::LessStrict,
         )
         .await
         .expect("update policy");
@@ -1726,7 +1726,7 @@ async fn append_execpolicy_amendment_keeps_credentials_out_of_the_file() {
         .append_amendment_and_update(
             codex_home.path(),
             &ExecPolicyAmendment::from(prefix),
-            /*under_aggressive*/ false,
+            ApprovedUnder::LessStrict,
         )
         .await
         .expect("update policy");
@@ -1833,7 +1833,7 @@ async fn append_execpolicy_amendment_rejects_empty_prefix() {
         .append_amendment_and_update(
             codex_home.path(),
             &ExecPolicyAmendment::from(vec![]),
-            /*under_aggressive*/ false,
+            ApprovedUnder::LessStrict,
         )
         .await;
 

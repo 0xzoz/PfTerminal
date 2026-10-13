@@ -18,6 +18,7 @@ use tempfile::TempDir;
 use toml::Value as TomlValue;
 
 use super::*;
+use crate::exec_policy::ApprovedUnder;
 use crate::exec_policy::ExecApprovalRequest;
 use crate::exec_policy::ExecPolicyManager;
 use crate::sandboxing::SandboxPermissions;
@@ -217,7 +218,7 @@ async fn issue_626_rule_saved_under_aggressive_applies_there() {
         .append_amendment_and_update(
             home.path(),
             &ExecPolicyAmendment::from(words("touch x")),
-            /*under_aggressive*/ true,
+            ApprovedUnder::Aggressive,
         )
         .await
         .expect("saved");
@@ -263,7 +264,7 @@ async fn issue_626_reapproving_under_aggressive_marks_an_existing_rule() {
         .append_amendment_and_update(
             home.path(),
             &ExecPolicyAmendment::from(words("touch x")),
-            /*under_aggressive*/ true,
+            ApprovedUnder::Aggressive,
         )
         .await
         .expect("saved");
@@ -336,6 +337,50 @@ async fn issue_626_note_names_only_suspended_rules() {
         "{reason}"
     );
     assert!(!reason.contains("mkdir"), "{reason}");
+}
+
+/// #626 (review r1): where prompts are rejected (approval policy never),
+/// the rejection says a remembered approval was suspended.
+#[tokio::test]
+async fn issue_626_rejection_names_the_suspended_rule() {
+    let home = TempDir::new().expect("home");
+    let project = TempDir::new().expect("project");
+    write_rules(
+        home.path(),
+        &[r#"prefix_rule(pattern=["touch", "x"], decision="allow")"#.to_string()],
+    );
+    let manager = ExecPolicyManager::load(
+        &stack(home.path(), project.path()),
+        /*strict_rules*/ false,
+    )
+    .await
+    .expect("load");
+    let command = words("touch x");
+    let rejected = manager
+        .create_exec_approval_requirement(
+            ExecApprovalRequest {
+                command: &command,
+                approval_policy: AskForApproval::Never,
+                permission_profile: PermissionProfile::read_only(),
+                windows_sandbox_level: WindowsSandboxLevel::Disabled,
+                sandbox_permissions: SandboxPermissions::UseDefault,
+                prefix_rule: None,
+            },
+            /*live_aggressive*/ true,
+        )
+        .await;
+    match rejected {
+        ExecApprovalRequirement::Forbidden { reason } => {
+            assert!(
+                reason.contains("was not applied because security level Aggressive is on"),
+                "{reason}"
+            );
+        }
+        // Never asking, the command may run sandboxed instead: nothing is
+        // rejected then, and there is nothing to say.
+        ExecApprovalRequirement::Skip { .. } => {}
+        other => panic!("asked although approvals are off: {other:?}"),
+    }
 }
 
 #[test]

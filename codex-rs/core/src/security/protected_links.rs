@@ -7,20 +7,19 @@
 //! is told why.
 //!
 //! No operating-system sandbox can refuse a symbolic link by where it points
-//! (Seatbelt only filters by link name, Landlock and seccomp cannot read the
-//! target), so the command text decides, before anything runs:
-//! - `ln` (`-s` or hard), `cp -s`/`-l`, `mklink` and PowerShell's `New-Item
-//!   -ItemType SymbolicLink|Junction|HardLink`, also inside `sh -c` scripts;
-//!   a relative target is taken from the link's folder and from the command's;
-//! - code an interpreter runs (`python3 -c`, `node -e`, `perl -e`, `ruby -e`,
-//!   or a heredoc in a script) that calls a link function (`os.symlink`,
-//!   `symlink_to`, `fs.symlinkSync`, `File.symlink`, `link`…) and names such a
-//!   path.
+//! (Seatbelt filters only by the link's name or type; Landlock and seccomp
+//! cannot read the target), so the command decides before anything runs:
+//! its text for agent commands (see [`parse::link_targets`]), and, where the
+//! zsh-fork shell intercepts each program a script starts, that program's
+//! own arguments (so a script file's `ln` is seen there too).
 //!
-//! A target built at run time, or a link made by a script file, is out of
-//! reach here; writes through it stay refused by the sandbox. Hard links to a
-//! protected file are refused by the sandbox itself as well.
+//! Out of reach: a target built at run time (`ln -s "$(cat f)" x`), a link
+//! made by a script file without zsh-fork, keys typed into a running shell
+//! (`write_stdin`) and remote environments. Writes through such a link stay
+//! refused by the sandbox; a hard link to a protected file is refused by the
+//! sandbox itself.
 
+use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -31,30 +30,13 @@ use super::protected_surface::ReadDenials;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 
-/// Shells whose `-c` argument is a script.
-const SHELLS: [&str; 6] = ["sh", "bash", "zsh", "dash", "ksh", "fish"];
-/// Interpreters whose `-c`/`-e` argument (or heredoc) is code.
-const INTERPRETERS: [&str; 10] = [
-    "python", "python3", "pypy3", "py", "node", "bun", "deno", "perl", "ruby", "php",
-];
-/// Calls in code that create a link (`os.symlink(`, `fs.symlinkSync(`,
-/// `Path.symlink_to(`, `os.link(`, perl's `symlink "a", "b"`…), matched where
-/// no letter, digit or `_` comes before them, so `unlink(`, `readlink(` and
-/// `is_symlink(` are not calls that create one.
-const LINK_CALLS: [&str; 8] = [
-    "symlink(",
-    "symlink ",
-    "symlinkSync(",
-    "symlink_to(",
-    "hardlink_to(",
-    "link_to(",
-    "link(",
-    "linkSync(",
-];
-/// Scripts inside scripts looked into.
-const MAX_DEPTH: usize = 4;
-/// Paths looked at in one command.
-const MAX_CANDIDATES: usize = 64;
+#[path = "protected_links_parse.rs"]
+mod parse;
+
+use parse::Candidate;
+#[cfg(test)]
+use parse::calls_link;
+use parse::link_targets;
 
 /// What a person is told when such a command is refused.
 pub(crate) fn explanation(target: &str) -> String {
@@ -78,18 +60,20 @@ pub(crate) async fn refusal(
     cwd: &Path,
 ) -> Option<String> {
     let candidates = link_targets(command);
-    if candidates.is_empty() {
-        return None;
-    }
+    let first = candidates.first()?.target.clone();
     let inputs = Inputs::capture(session, turn)?;
     let cwd = cwd.to_path_buf();
-    let found = tokio::time::timeout(
+    let found = match tokio::time::timeout(
         LOOKUP_TIMEOUT,
         tokio::task::spawn_blocking(move || inputs.protected_target(&candidates, &cwd)),
     )
     .await
-    .ok()?
-    .ok()??;
+    {
+        Ok(Ok(found)) => found?,
+        // The lookups did not finish: refused (nothing is created), naming
+        // the first link target.
+        Ok(Err(_)) | Err(_) => first,
+    };
     let refusal = explanation(&found);
     super::protected_reads::notify(session, turn, refusal.clone()).await;
     super::inspection::record_refusal(
@@ -100,8 +84,7 @@ pub(crate) async fn refusal(
     Some(refusal)
 }
 
-/// How long the path lookups may take; past it nothing is refused (writes
-/// through a link stay refused by the sandbox).
+/// How long the path lookups may take before the command is refused anyway.
 const LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// What the protected paths are built from (see `protected_reads`).
@@ -164,22 +147,29 @@ impl Inputs {
         kept.extend(real);
         let writable: Vec<&AbsolutePathBuf> = denials.home_writable_paths().collect();
         candidates.iter().find_map(|candidate| {
-            candidate
-                .bases(cwd)
-                .into_iter()
-                .filter_map(|base| self.resolve(&candidate.target, &base))
+            bases(candidate, cwd)
+                .iter()
+                .flat_map(|base| self.resolve(&candidate.target, base))
                 .any(|path| lands_in(&path, &kept, &writable))
                 .then(|| candidate.target.clone())
         })
     }
 
-    fn resolve(&self, word: &str, base: &Path) -> Option<AbsolutePathBuf> {
+    /// Where `word` points from `base`: as written (`..` taken from the text)
+    /// and as the system reads it (`..` taken after following each link on
+    /// the way, `ln -s evil/../.agents` with `evil` a link).
+    fn resolve(&self, word: &str, base: &Path) -> Vec<AbsolutePathBuf> {
         let codex_home = self.codex_home.to_string_lossy();
+        let base_text = base.to_string_lossy();
         let mut expanded = word.to_string();
         for name in ["CODEX_HOME", "CORBANU_HOME", "PFTERMINAL_HOME"] {
             for spelling in [format!("${{{name}}}"), format!("${name}")] {
                 expanded = expanded.replace(&spelling, &codex_home);
             }
+        }
+        // The shell's folder.
+        for spelling in ["${PWD}", "$PWD", "$(pwd)", "`pwd`"] {
+            expanded = expanded.replace(spelling, &base_text);
         }
         if let Some(home) = self.user_home.as_deref().map(Path::to_string_lossy) {
             for spelling in ["${HOME}", "$HOME"] {
@@ -192,10 +182,56 @@ impl Inputs {
             }
         }
         if expanded.is_empty() || expanded.contains('$') || expanded.starts_with('~') {
-            return None;
+            return Vec::new();
         }
-        Some(AbsolutePathBuf::resolve_path_against_base(expanded, base))
+        let written = AbsolutePathBuf::resolve_path_against_base(&expanded, base);
+        let mut resolved = vec![written];
+        if let Some(physical) = physical(base, Path::new(&expanded))
+            && !resolved.contains(&physical)
+        {
+            resolved.push(physical);
+        }
+        resolved
     }
+}
+
+/// The folders a candidate's relative target may be read from.
+fn bases(candidate: &Candidate, cwd: &Path) -> Vec<PathBuf> {
+    let mut bases = vec![cwd.to_path_buf()];
+    for folder in &candidate.link_folders {
+        let folder = cwd.join(folder);
+        if !bases.contains(&folder) {
+            bases.push(folder);
+        }
+    }
+    bases
+}
+
+/// `path` from `base`, each existing name followed to where it links before
+/// the next `..` applies, as the system reads it. Bounded by the path's
+/// length; `None` where a name cannot be read.
+fn physical(base: &Path, path: &Path) -> Option<AbsolutePathBuf> {
+    let mut current = if path.is_absolute() {
+        PathBuf::new()
+    } else {
+        std::fs::canonicalize(base).unwrap_or_else(|_| base.to_path_buf())
+    };
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => current.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                current.pop();
+            }
+            Component::Normal(name) => {
+                current.push(name);
+                if let Ok(real) = std::fs::canonicalize(&current) {
+                    current = real;
+                }
+            }
+        }
+    }
+    AbsolutePathBuf::from_absolute_path(current).ok()
 }
 
 /// Whether `path`, as spelled, through a link on the way or where it
@@ -215,338 +251,6 @@ fn lands_in(
                     spelling.as_path().starts_with(folder.as_path())
                         && folder.as_path().starts_with(kept.as_path())
                 })
-        })
-    })
-}
-
-/// A path a command links to, as spelled, and where a relative one is read
-/// from besides the command's folder.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Candidate {
-    pub(crate) target: String,
-    /// Folders the link is made in (a relative target is relative to it).
-    pub(crate) link_folders: Vec<String>,
-}
-
-impl Candidate {
-    fn bases(&self, cwd: &Path) -> Vec<PathBuf> {
-        let mut bases = vec![cwd.to_path_buf()];
-        for folder in &self.link_folders {
-            let folder = cwd.join(folder);
-            if !bases.contains(&folder) {
-                bases.push(folder);
-            }
-        }
-        bases
-    }
-}
-
-/// The paths `command` creates links to (see the module docs), bounded. A
-/// relative target is read from the command's folder, the link's folder and
-/// every folder a script changes to (`cd sub && ln -s ../.agents x`): more
-/// folders than the one it is relative to, so a link may be refused that
-/// would not point into a protected path, never the reverse.
-pub(crate) fn link_targets(command: &[String]) -> Vec<Candidate> {
-    let mut scan = Scan::default();
-    simple_command(command, MAX_DEPTH, &mut scan);
-    let Scan { mut found, folders } = scan;
-    found.truncate(MAX_CANDIDATES);
-    for candidate in &mut found {
-        for folder in &folders {
-            if !candidate.link_folders.contains(folder) {
-                candidate.link_folders.push(folder.clone());
-            }
-        }
-    }
-    found
-}
-
-/// What [`link_targets`] collects.
-#[derive(Default)]
-struct Scan {
-    found: Vec<Candidate>,
-    /// Folders a script changes to.
-    folders: Vec<String>,
-}
-
-fn program_name(word: &str) -> String {
-    let name = word.rsplit(['/', '\\']).next().unwrap_or(word);
-    let name = name.to_ascii_lowercase();
-    let name = name
-        .strip_suffix(".exe")
-        .map(str::to_string)
-        .unwrap_or(name);
-    // `python3.12` reads as `python3`.
-    match name.split_once('.') {
-        Some((stem, version))
-            if stem.starts_with("python") && version.chars().all(|c| c.is_ascii_digit()) =>
-        {
-            stem.to_string()
-        }
-        _ => name,
-    }
-}
-
-/// One simple command (already split into words).
-fn simple_command(words: &[String], depth: usize, found: &mut Scan) {
-    let words: Vec<&str> = words
-        .iter()
-        .map(String::as_str)
-        .skip_while(|word| {
-            (word.contains('=') && !word.starts_with('-'))
-                || matches!(
-                    *word,
-                    "sudo" | "command" | "env" | "exec" | "nohup" | "time" | "builtin"
-                )
-        })
-        .collect();
-    let Some((program, arguments)) = words.split_first() else {
-        return;
-    };
-    let name = program_name(program);
-    let name = name.as_str();
-    if SHELLS.contains(&name) {
-        let script = arguments
-            .iter()
-            .skip_while(|argument| {
-                !(argument.starts_with('-')
-                    && !argument.starts_with("--")
-                    && argument.contains('c'))
-            })
-            .nth(1);
-        if let Some(script) = script {
-            shell_script(script, depth, found);
-        }
-        return;
-    }
-    if matches!(name, "cmd") {
-        // `cmd /c mklink …`
-        if let Some(index) = arguments
-            .iter()
-            .position(|word| word.eq_ignore_ascii_case("/c") || word.eq_ignore_ascii_case("/k"))
-        {
-            let rest: Vec<String> = arguments[index + 1..]
-                .iter()
-                .flat_map(|word| word.split_whitespace())
-                .map(str::to_string)
-                .collect();
-            simple_command(&rest, depth, found);
-        }
-        return;
-    }
-    if matches!(name, "powershell" | "pwsh") {
-        if let Some(index) = arguments.iter().position(|word| {
-            word.eq_ignore_ascii_case("-command") || word.eq_ignore_ascii_case("-c")
-        }) {
-            let script = arguments[index + 1..].join(" ");
-            for statement in script.split([';', '\n', '|']) {
-                let words: Vec<String> = shlex::split(statement)
-                    .unwrap_or_else(|| statement.split_whitespace().map(str::to_string).collect());
-                simple_command(&words, depth, found);
-            }
-        }
-        return;
-    }
-    match name {
-        "cd" | "pushd" => {
-            if let Some(folder) = arguments.iter().find(|word| !word.starts_with('-'))
-                && found.folders.len() < MAX_CANDIDATES
-            {
-                found.folders.push((*folder).to_string());
-            }
-        }
-        "ln" => ln(arguments, found),
-        "cp" if arguments.iter().any(|word| {
-            matches!(*word, "--symbolic-link" | "--link")
-                || (word.starts_with('-')
-                    && !word.starts_with("--")
-                    && (word.contains('s') || word.contains('l')))
-        }) =>
-        {
-            let paths = paths_of(arguments, &["-t", "--target-directory", "-S", "--suffix"]);
-            if paths.len() >= 2 {
-                let link_folder = paths[paths.len() - 1].to_string();
-                for target in &paths[..paths.len() - 1] {
-                    push(found, target, vec![link_folder.clone()]);
-                }
-            }
-        }
-        "mklink" => {
-            // `mklink [/D|/H|/J] link target`
-            let paths: Vec<&&str> = arguments
-                .iter()
-                .filter(|word| !word.starts_with('/'))
-                .collect();
-            if let [link, target] = paths.as_slice() {
-                push(found, target, vec![parent_of(link)]);
-            }
-        }
-        "new-item" | "ni" => new_item(arguments, found),
-        _ if INTERPRETERS.contains(&name) => {
-            // Inline code (`-c`, `-e`, `--eval`), or every argument (heredoc
-            // scripts arrive through the shell script instead).
-            for word in arguments {
-                code(word, found);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// `ln [options] target… [link | folder]`, `ln -t folder target…`.
-fn ln(arguments: &[&str], found: &mut Scan) {
-    let mut folder = None;
-    let mut iter = arguments.iter();
-    while let Some(word) = iter.next() {
-        if *word == "-t" || *word == "--target-directory" {
-            folder = iter.next().map(|folder| (*folder).to_string());
-        } else if let Some(value) = word.strip_prefix("--target-directory=") {
-            folder = Some(value.to_string());
-        }
-    }
-    let paths = paths_of(arguments, &["-t", "--target-directory", "-S", "--suffix"]);
-    let (targets, link_folders): (&[&str], Vec<String>) = match (&folder, paths.as_slice()) {
-        (Some(folder), paths) => (paths, vec![folder.clone()]),
-        (None, [target]) => (std::slice::from_ref(target), Vec::new()),
-        (None, [targets @ .., last]) => (targets, vec![parent_of(last), (*last).to_string()]),
-        (None, []) => (&[], Vec::new()),
-    };
-    for target in targets {
-        push(found, target, link_folders.clone());
-    }
-}
-
-/// PowerShell `New-Item -ItemType SymbolicLink|Junction|HardLink -Path link
-/// -Target target` (or `-Value`).
-fn new_item(arguments: &[&str], found: &mut Scan) {
-    let value_of = |names: &[&str]| {
-        arguments
-            .iter()
-            .position(|word| names.iter().any(|name| word.eq_ignore_ascii_case(name)))
-            .and_then(|index| arguments.get(index + 1))
-            .map(|value| value.trim_matches(['\'', '"']).to_string())
-    };
-    let is_link = value_of(&["-ItemType", "-Type"]).is_some_and(|kind| {
-        ["symboliclink", "junction", "hardlink"].contains(&kind.to_ascii_lowercase().as_str())
-    });
-    if !is_link {
-        return;
-    }
-    if let Some(target) = value_of(&["-Target", "-Value"]) {
-        let link_folders = value_of(&["-Path", "-Name"])
-            .map(|link| vec![parent_of(&link)])
-            .unwrap_or_default();
-        push(found, &target, link_folders);
-    }
-}
-
-/// The path arguments: every word that is not an option or an option's
-/// value (`takes_value`).
-fn paths_of<'a>(arguments: &[&'a str], takes_value: &[&str]) -> Vec<&'a str> {
-    let mut paths = Vec::new();
-    let mut skip = false;
-    let mut options_done = false;
-    for word in arguments {
-        if skip {
-            skip = false;
-        } else if !options_done && *word == "--" {
-            options_done = true;
-        } else if !options_done && takes_value.contains(word) {
-            skip = true;
-        } else if options_done || !word.starts_with('-') || *word == "-" {
-            paths.push(*word);
-        }
-    }
-    paths
-}
-
-fn parent_of(path: &str) -> String {
-    Path::new(path)
-        .parent()
-        .map(|parent| parent.to_string_lossy().into_owned())
-        .unwrap_or_default()
-}
-
-fn push(found: &mut Scan, target: &str, link_folders: Vec<String>) {
-    let target = target.trim_matches(['\'', '"']).to_string();
-    let candidate = Candidate {
-        target,
-        link_folders,
-    };
-    if !candidate.target.is_empty() && !found.found.contains(&candidate) {
-        found.found.push(candidate);
-    }
-}
-
-/// A shell script: each simple command in it, and, when it runs an
-/// interpreter on several lines (a heredoc) that call a link function, every
-/// string it quotes.
-fn shell_script(script: &str, depth: usize, found: &mut Scan) {
-    let Some(depth) = depth.checked_sub(1) else {
-        return;
-    };
-    let mut segment: Vec<String> = Vec::new();
-    let mut runs_interpreter = false;
-    let mut finish = |segment: &mut Vec<String>, found: &mut Scan| {
-        if segment
-            .first()
-            .is_some_and(|program| INTERPRETERS.contains(&program_name(program).as_str()))
-        {
-            runs_interpreter = true;
-        }
-        simple_command(&std::mem::take(segment), depth, found);
-    };
-    // A line ends a command (a quoted string over several lines is split
-    // too, which only cuts that string into words), and so do `;`, `&&`,
-    // `||`, `|` and `&` between words (not inside quoted code).
-    for line in script.lines() {
-        let words = shlex::split(line)
-            .unwrap_or_else(|| line.split_whitespace().map(str::to_string).collect());
-        for word in words {
-            if matches!(word.as_str(), "&&" | "||" | "|" | "&" | ";") {
-                finish(&mut segment, found);
-            } else if let Some(word) = word.strip_suffix(';') {
-                if !word.is_empty() {
-                    segment.push(word.to_string());
-                }
-                finish(&mut segment, found);
-            } else {
-                segment.push(word);
-            }
-        }
-        finish(&mut segment, found);
-    }
-    finish(&mut segment, found);
-    // Code fed through a heredoc (`python3 - <<'EOF'`), or over several
-    // lines (cut into words above).
-    if runs_interpreter && (script.contains("<<") || script.contains('\n')) {
-        code(script, found);
-    }
-}
-
-/// Code an interpreter runs: when it calls a link function, every quoted
-/// string in it is a candidate target.
-fn code(code: &str, found: &mut Scan) {
-    if !calls_link(code) {
-        return;
-    }
-    for quote in ['\'', '"', '`'] {
-        for literal in code.split(quote).skip(1).step_by(2) {
-            if !literal.is_empty() && !literal.contains('\n') && literal.len() < 4096 {
-                push(found, literal, Vec::new());
-            }
-        }
-    }
-}
-
-/// Whether `code` calls one of [`LINK_CALLS`].
-fn calls_link(code: &str) -> bool {
-    LINK_CALLS.iter().any(|call| {
-        code.match_indices(call).any(|(index, _)| {
-            !code[..index]
-                .chars()
-                .next_back()
-                .is_some_and(|before| before.is_alphanumeric() || before == '_')
         })
     })
 }

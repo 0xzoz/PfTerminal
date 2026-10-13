@@ -100,7 +100,7 @@ fn issue_623_finds_links_made_by_interpreters() {
             "-e",
             "require('fs').symlinkSync(\".agents\", 'x')"
         ])),
-        vec!["fs", "x", ".agents"]
+        vec!["fs", ".agents", "x"]
     );
     assert_eq!(
         targets(&shell("perl -e 'symlink(\".agents\", \"x\")'")),
@@ -125,6 +125,75 @@ fn issue_623_finds_links_made_by_interpreters() {
             "python3 -c \"print(open('.agents/notes.md').read())\""
         )),
         Vec::<String>::new()
+    );
+}
+
+/// Review r1: commands behind shell keywords, grouping and wrappers, `-t`
+/// in an option cluster, heredocs behind a wrapper, and interpreters that
+/// run `ln` themselves.
+#[test]
+fn issue_623_finds_links_behind_keywords_wrappers_and_interpreter_commands() {
+    for script in [
+        "if [ -d .agents ]; then ln -s .agents ag; fi",
+        "for f in x; do ln -s .agents ag; done",
+        "(cd sub && ln -s ../.agents a)",
+        "{ ln -s .agents ag; }",
+        "x=$(ln -s .agents ag)",
+        "sudo -u root ln -s .agents ag",
+        "env -i PATH=/bin ln -s .agents ag",
+        "nice -n5 ln -s .agents ag",
+        "timeout 5 ln -s .agents ag",
+        "doas ln -s .agents ag",
+        "echo ag | xargs ln -s .agents",
+        "find . -maxdepth 0 -exec ln -s .agents ag \\;",
+        "! ln -s .agents ag",
+    ] {
+        assert!(
+            targets(&shell(script))
+                .iter()
+                .any(|target| target.ends_with(".agents")),
+            "{script}: {:?}",
+            targets(&shell(script))
+        );
+    }
+    assert_eq!(targets(&shell("ln -st links .agents")), vec![".agents"]);
+    assert_eq!(
+        link_targets(&shell("ln -sft links .agents"))[0].link_folders,
+        vec!["links".to_string()]
+    );
+    assert_eq!(targets(&shell("ln -tlinks -s .codex")), vec![".codex"]);
+    assert_eq!(
+        targets(&shell("ln --target-directory=links -s .codex")),
+        vec![".codex"]
+    );
+    for script in [
+        "sudo python3 - <<'EOF'\nimport os\nos.symlink('.agents', 'ag')\nEOF",
+        "/usr/bin/env python3 - <<EOF\nimport os\nos.symlink('.agents', 'ag')\nEOF",
+        "uv run python - <<EOF\nimport os\nos.symlink('.agents', 'ag')\nEOF",
+        "python3 -c \"import os; os.system('ln -s .agents ag')\"",
+        "python3 -c \"import subprocess; subprocess.run(['ln', '-s', '.agents', 'ag'])\"",
+        "node -e \"require('child_process').execSync('ln -s .agents ag')\"",
+        "ruby -e \"require 'fileutils'; FileUtils.ln_s('.agents', 'ag')\"",
+    ] {
+        assert!(
+            targets(&shell(script)).contains(&".agents".to_string()),
+            "{script}: {:?}",
+            targets(&shell(script))
+        );
+    }
+    assert_eq!(
+        targets(&argv(&[
+            "cmd",
+            "/c",
+            "cd",
+            "sub",
+            "&&",
+            "mklink",
+            "/D",
+            "ag",
+            "..\\.agents"
+        ])),
+        vec!["..\\.agents"]
     );
 }
 
@@ -240,6 +309,27 @@ fn issue_623_refuses_relative_and_absolute_links_into_agent_settings() {
     assert_eq!(
         refused(&project, &shell("cd sub && ln -s ../.agents x"), root),
         Some("../.agents".to_string())
+    );
+    // `$PWD` is the shell's folder.
+    assert_eq!(
+        refused(&project, &shell("ln -s \"$PWD/.agents\" ag"), root),
+        Some("$PWD/.agents".to_string())
+    );
+    assert_eq!(
+        refused(&project, &shell("ln -s \"$(pwd)/.codex\" ag"), root),
+        Some("$(pwd)/.codex".to_string())
+    );
+    // From `sub`, `evil/../.agents` reads as `sub/.agents`, but `evil`
+    // links to `inner`, so the system reads the project's `.agents`.
+    std::fs::create_dir_all(root.join("inner")).expect("inner");
+    std::os::unix::fs::symlink(root.join("inner"), root.join("sub/evil")).expect("evil");
+    assert_eq!(
+        refused(
+            &project,
+            &shell("ln -s evil/../.agents x"),
+            &root.join("sub")
+        ),
+        Some("evil/../.agents".to_string())
     );
     // A link to the Corbanu home is refused too.
     let home = format!("ln -s {} h", project.inputs.codex_home.display());

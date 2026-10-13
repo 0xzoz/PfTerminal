@@ -2714,7 +2714,11 @@ impl Session {
             .append_amendment_and_update(
                 &codex_home,
                 amendment,
-                self.services.model_client().live_level_is_aggressive(),
+                if self.services.model_client().live_level_is_aggressive() {
+                    crate::exec_policy::ApprovedUnder::Aggressive
+                } else {
+                    crate::exec_policy::ApprovedUnder::LessStrict
+                },
             )
             .await
     }

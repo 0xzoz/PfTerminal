@@ -134,6 +134,7 @@ pub(crate) fn suspended_prefixes(full: &Evaluation, approved: &[Vec<String>]) ->
             _ => None,
         })
         .collect();
+    prefixes.sort();
     prefixes.dedup();
     prefixes
 }
@@ -151,11 +152,16 @@ pub(crate) fn suspended_note(prefixes: &[Vec<String>]) -> Option<String> {
     if shown.is_empty() {
         return None;
     }
+    let (what, were) = if shown.len() == 1 {
+        ("A remembered approval", "was")
+    } else {
+        ("Remembered approvals", "were")
+    };
     Some(format!(
-        "A remembered approval (don't ask again for commands that start with {}) was not \
-         applied because security level Aggressive is on: approvals remembered under a less \
-         strict level are suspended while Aggressive is active, so you are asked instead. They \
-         are kept and apply again when you return to that level.",
+        "{what} (don't ask again for commands that start with {}) {were} not applied because \
+         security level Aggressive is on: approvals and allow rules saved outside Aggressive are \
+         suspended while it is active, so you are asked instead. They are kept and apply again \
+         when you return to a less strict level.",
         shown.join(", ")
     ))
 }

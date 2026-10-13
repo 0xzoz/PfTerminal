@@ -51,7 +51,7 @@ key = "Enter"
 wait = "You approved Corbanu to always run commands that start with"
 timeout = 60
 [[steps]]
-wait = "(?s)always run commands.*─{10}.*\\n• "
+wait = "(?s)always run commands.*\\n• "
 timeout = 120
 compress = 2
 [[steps]]
@@ -70,7 +70,7 @@ repeat = 2
 [[steps]]
 key = "Enter"
 [[steps]]
-wait = "Preflight passed"
+wait = "enter confirm and save"
 [[steps]]
 key = "Enter"
 [[steps]]
@@ -89,7 +89,7 @@ type = "Run exactly this shell command once, unchanged: touch remembered.txt"
 [[steps]]
 key = "Enter"
 [[steps]]
-wait = "was not applied because security level Aggressive is on"
+wait = "(?s)Reason: A remembered approval.*was not\\s+applied"
 timeout = 180
 compress = 2
 [[steps]]

@@ -226,12 +226,11 @@ async fn issue_623_other_links_and_permissive_are_unchanged() -> anyhow::Result<
     let other = run(SecurityLevel::Aggressive, |_| "ln -s notes ag".to_string()).await?;
     assert!(other.created, "{}", other.output);
     assert!(!other.output.contains(REFUSED));
-    // Permissive is unchanged: the link is made.
-    let permissive = run(SecurityLevel::Permissive, |_| {
-        "ln -s .agents ag".to_string()
-    })
-    .await?;
-    assert!(permissive.created, "{}", permissive.output);
-    assert!(!permissive.output.contains(REFUSED));
+    // Permissive and Moderate are unchanged: the link is made.
+    for level in [SecurityLevel::Permissive, SecurityLevel::Moderate] {
+        let run = run(level, |_| "ln -s .agents ag".to_string()).await?;
+        assert!(run.created, "{level:?}: {}", run.output);
+        assert!(!run.output.contains(REFUSED), "{level:?}");
+    }
     Ok(())
 }
