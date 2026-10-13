@@ -1619,6 +1619,30 @@ impl FileSystemSandboxPolicy {
         )
     }
 
+    /// The explicit read-only paths resolved against `cwd`: entries that
+    /// neither write nor deny reads, and that no more specific entry makes
+    /// writable. Unlike [`WritableRoot::read_only_subpaths`] these are not
+    /// tied to a writable root, nor are the default `.git`/`.codex`/`.agents`
+    /// carve-outs counted.
+    pub fn get_read_only_paths_with_cwd(&self, cwd: &Path) -> Vec<AbsolutePathBuf> {
+        if !matches!(self.kind, FileSystemSandboxKind::Restricted) {
+            return Vec::new();
+        }
+        let root = AbsolutePathBuf::from_absolute_path(cwd)
+            .ok()
+            .map(|cwd| absolute_root_path_for_cwd(&cwd));
+        dedup_absolute_paths(
+            self.resolved_entries_with_cwd(cwd)
+                .into_iter()
+                .filter(|entry| entry.access == FileSystemAccessMode::Read)
+                .filter(|entry| root.as_ref() != Some(&entry.path))
+                .filter(|entry| !self.can_write_path_with_cwd(entry.path.as_path(), cwd))
+                .map(|entry| entry.path)
+                .collect(),
+            /*normalize_effective_paths*/ false,
+        )
+    }
+
     /// Paths agent commands may not move aside (issues #594, #598), from
     /// [`FileSystemSandboxEntry::deny_moving`] entries, as written. Only a
     /// restricted policy carries them.
