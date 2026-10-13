@@ -589,6 +589,16 @@ fn provider_item(
             .collect::<Vec<_>>();
         if let Some(account) = accounts.rows_for(&runtime_ids).next() {
             name.push_str(" · default");
+            // #609: when this session runs on a named account, the status is
+            // that account's, not the default account's this row is named for.
+            if let Some(session_account) = runtime_ids
+                .iter()
+                .map(|id| accounts.session_account(id))
+                .find(|account| *account != codex_vault::DEFAULT_PROVIDER_ACCOUNT)
+            {
+                description =
+                    format!("{description} (status of this session's account `{session_account}`)");
+            }
             description.push_str(
                 &accounts.markers(&account.provider_id, codex_vault::DEFAULT_PROVIDER_ACCOUNT),
             );

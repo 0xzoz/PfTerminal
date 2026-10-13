@@ -6770,11 +6770,29 @@ pub(super) fn sign_in_account_switch(
 }
 
 pub(super) fn account_switch_message(account: Option<&codex_login::NamedChatgptAccount>) -> String {
+    account_switch_message_for(account, codex_login::default_login_left_unenforced())
+}
+
+/// `default_login_left_in_place`: this process skipped the startup
+/// enforcement of the login restrictions on the default login (#570), so a
+/// default login they rule out is hidden rather than used (#609).
+pub(super) fn account_switch_message_for(
+    account: Option<&codex_login::NamedChatgptAccount>,
+    default_login_left_in_place: bool,
+) -> String {
     let label = match account {
         Some(account) => format!("{} account `{}`", account.provider_id, account.name),
         None => "the default account".to_string(),
     };
-    format!("Connectors, usage and the model list now use {label}; model list refreshed.")
+    let message =
+        format!("Connectors, usage and the model list now use {label}; model list refreshed.");
+    if account.is_none() && default_login_left_in_place {
+        format!(
+            "{message} If your login restrictions (`forced_login_method`, `forced_chatgpt_workspace_id`) rule out the default login, this session does not use it and its next request is refused with the reason; sign in with `corbanu login`, or pick a named account in /providers."
+        )
+    } else {
+        message
+    }
 }
 
 #[cfg(test)]

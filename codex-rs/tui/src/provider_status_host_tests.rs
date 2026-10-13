@@ -494,18 +494,11 @@ async fn openai_on_a_named_sign_in_account_is_configured_without_a_default_login
             "enrolled = {enrolled}"
         );
     }
-    // A default API-key login does not configure an unenrolled named
-    // account; the session's own account vetted at startup (`Account`, e.g.
-    // with a remote app server whose vault this home does not hold) stays.
-    for (default_login, expected) in [
-        (
-            codex_login::OpenAiAuthMetadata::ApiKey,
-            ProviderConfigurationState::NotConfigured,
-        ),
-        (
-            codex_login::OpenAiAuthMetadata::Account,
-            ProviderConfigurationState::Configured,
-        ),
+    // #609: from another provider's session, the default login's state says
+    // nothing about an unenrolled named account, whatever kind it is.
+    for default_login in [
+        codex_login::OpenAiAuthMetadata::ApiKey,
+        codex_login::OpenAiAuthMetadata::Account,
     ] {
         let host = ProviderStatusHost::from_config_with_account_registry(
             &config,
@@ -517,7 +510,32 @@ async fn openai_on_a_named_sign_in_account_is_configured_without_a_default_login
         );
         assert_eq!(
             host.resolve_provider("openai").unwrap().configuration,
-            expected,
+            ProviderConfigurationState::NotConfigured,
+            "{default_login:?}"
+        );
+    }
+    // The session's own account, vetted at startup, stays configured even
+    // when this home's vault does not hold it (a remote app server) and a
+    // refresh re-reads a missing default login.
+    config.model_provider_id = "openai".into();
+    config.model_provider = config.model_providers["openai"].clone();
+    for default_login in [
+        codex_login::OpenAiAuthMetadata::Missing,
+        codex_login::OpenAiAuthMetadata::ApiKey,
+        codex_login::OpenAiAuthMetadata::Account,
+    ] {
+        let host = ProviderStatusHost::from_config_with_account_registry(
+            &config,
+            ProviderAccountMetadata::default(),
+            |_, _| false,
+        );
+        host.update_account_metadata(ProviderAccountMetadata {
+            openai: default_login,
+            ..Default::default()
+        });
+        assert_eq!(
+            host.resolve_provider("openai").unwrap().configuration,
+            ProviderConfigurationState::Configured,
             "{default_login:?}"
         );
     }

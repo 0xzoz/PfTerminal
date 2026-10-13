@@ -134,6 +134,12 @@ pub(crate) struct ProviderStatusHost {
     /// on a named account, each connection's own credential (by entry id,
     /// then runtime provider id). Each connection authenticates with its own.
     connection_credentials: Arc<BTreeMap<String, BTreeMap<String, ConnectionCredential>>>,
+    /// PF-84 (#609): the catalog entry of the session's own provider when it
+    /// runs on a named sign-in account. Startup checked that account before
+    /// the session began, so it counts as signed in even when this home's
+    /// vault does not hold it (a remote app server). Kept apart from the
+    /// default login's metadata, which a refresh re-reads.
+    session_sign_in_entry: Option<String>,
     /// Reads an API-key environment variable (tests replace it).
     environment: fn(&str) -> EnvironmentCredentialMetadata,
 }
@@ -261,9 +267,21 @@ impl ProviderStatusHost {
         let catalog = ProviderCatalog::from_runtime_providers(&config.model_providers);
         let named_accounts = Arc::new(named_account_enrollment(&catalog, config, &holds));
         let connection_credentials = Arc::new(connection_credentials(&catalog, config, &holds));
+        let session_sign_in_entry =
+            codex_model_provider::named_sign_in_account(&config.model_provider)
+                .and_then(|_| {
+                    catalog.entries().iter().find(|entry| {
+                        entry
+                            .runtime_provider_ids
+                            .iter()
+                            .any(|id| id.as_str() == config.model_provider_id)
+                    })
+                })
+                .map(|entry| entry.id.as_str().to_string());
         Self {
             named_accounts,
             connection_credentials,
+            session_sign_in_entry,
             environment: environment_metadata,
             catalog,
             codex_home: config.codex_home.to_path_buf(),
@@ -554,10 +572,13 @@ impl ProviderStatusHost {
                 storage: ApiKeyStorage::OpenAiAuth,
             }) => ProviderMetadata::OpenAi(match (named, account.openai) {
                 (Some(true), _) => codex_login::OpenAiAuthMetadata::Account,
-                // Startup already vetted the session's own named account
-                // (`Account`); the local vault may not hold it (a remote
-                // app server), so that answer stands.
-                (Some(false), codex_login::OpenAiAuthMetadata::Account) => {
+                // Startup already vetted the session's own named account;
+                // the local vault may not hold it (a remote app server), so
+                // that answer stands. The default login's state says nothing
+                // about a named account (#609), and a refresh re-reads it.
+                (Some(false), _)
+                    if self.session_sign_in_entry.as_deref() == Some(entry.id.as_str()) =>
+                {
                     codex_login::OpenAiAuthMetadata::Account
                 }
                 (Some(false), _) => codex_login::OpenAiAuthMetadata::Missing,
