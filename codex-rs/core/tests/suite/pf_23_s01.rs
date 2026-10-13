@@ -2496,7 +2496,7 @@ async fn issue_650_other_worktrees_git_folders_stay_read_only() -> anyhow::Resul
         );
         let cwd = AbsolutePathBuf::from_absolute_path(x.join("wt"))?;
         let (test, captured) = start_turn_in(
-            None,
+            /*home*/ None,
             level,
             AskForApproval::Never,
             vec![
@@ -2566,7 +2566,7 @@ async fn issue_651_a_database_folder_with_glob_syntax_is_protected() -> anyhow::
         let cwd = AbsolutePathBuf::from_absolute_path(&work)?;
         let canary = folder.join("canary.sqlite");
         let (test, captured) = start_turn_after(
-            None,
+            /*home*/ None,
             level,
             AskForApproval::Never,
             vec![

@@ -50,7 +50,7 @@ async fn issue_660_not_sent_report_to_a_native_sender_starts_no_turn() -> Result
         /*is_closed*/ false,
     );
     let target = app.logical_native_node_for_thread(pane);
-    register_native_ack(&mut app, sender, &target, "pf660 task", 6601);
+    register_native_ack(&mut app, sender, &target, "pf660 task", /*seq*/ 6601);
     while app_event_rx.try_recv().is_ok() {}
 
     issue_507_switch(&app, HumanRevocation::KillSwitchOn);
@@ -72,7 +72,7 @@ async fn issue_660_not_sent_report_to_a_native_sender_starts_no_turn() -> Result
 
     // Control: another failure after switch-off (the pane has no live
     // session) reports with a turn, as before.
-    register_native_ack(&mut app, sender, &target, "pf660 later", 6602);
+    register_native_ack(&mut app, sender, &target, "pf660 later", /*seq*/ 6602);
     Box::pin(app.handle_event(
         &mut tui,
         &mut app_server,
@@ -97,7 +97,7 @@ async fn issue_660_held_claude_task_failure_starts_no_sender_turn() {
         make_child_report_auto_claude_pane_app().await;
     let sender = ThreadId::from_string("00000000-0000-0000-0000-000000006603").expect("id");
     let target = crate::spawn_orchestration::pane_node_id("claude-missing");
-    register_native_ack(&mut app, sender, &target, "pf660 claude", 6603);
+    register_native_ack(&mut app, sender, &target, "pf660 claude", /*seq*/ 6603);
     while app_event_rx.try_recv().is_ok() {}
 
     issue_507_switch(&app, HumanRevocation::KillSwitchOn);
@@ -139,11 +139,23 @@ async fn issue_660_failures_of_tasks_sent_while_on_start_no_sender_turn() -> Res
 
     for sent in [sent_while_kill_switch_on, false] {
         let pane_target = app.logical_native_node_for_thread(pane);
-        register_native_ack(&mut app, sender, &pane_target, &oversize, 6604);
+        register_native_ack(&mut app, sender, &pane_target, &oversize, /*seq*/ 6604);
         let managed_target = app.logical_native_node_for_thread(managed);
-        register_native_ack(&mut app, sender, &managed_target, "pf660 managed", 6605);
+        register_native_ack(
+            &mut app,
+            sender,
+            &managed_target,
+            "pf660 managed",
+            /*seq*/ 6605,
+        );
         let claude_target = crate::spawn_orchestration::pane_node_id("claude-660");
-        register_native_ack(&mut app, sender, &claude_target, &oversize, 6606);
+        register_native_ack(
+            &mut app,
+            sender,
+            &claude_target,
+            &oversize,
+            /*seq*/ 6606,
+        );
         while app_event_rx.try_recv().is_ok() {}
 
         Box::pin(app.handle_event(

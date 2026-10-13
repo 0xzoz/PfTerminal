@@ -831,7 +831,12 @@ fn issue_652_a_folder_named_twice_adds_no_worktrees_carve_out() {
     std::fs::create_dir_all(&cwd).unwrap();
     let home = real.join("home");
     std::fs::create_dir_all(home.join("worktrees")).unwrap();
-    let denials = ReadDenials::collect(&home, None, None, &[abs(&cwd)]);
+    let denials = ReadDenials::collect(
+        &home,
+        /*user_home*/ None,
+        /*claude_config_dir*/ None,
+        &[abs(&cwd)],
+    );
     let policy = denials
         .apply(&profile)
         .unwrap()
