@@ -1578,6 +1578,10 @@ async fn run_ratatui_app(
     color_eyre::install()?;
 
     tooltips::announcement::prewarm(initial_config.http_client_factory());
+    // PF-84-S06 (#595): the session's final config keeps the warning that a
+    // local daemon was not reused, whatever reloads it below (resume, fork,
+    // onboarding).
+    let daemon_not_reused = default_login_launch::daemon_not_reused_warning(&initial_config);
 
     install_panic_hook();
     tui::configure_panic_diagnostics(initial_config.log_dir.clone());
@@ -2073,9 +2077,6 @@ async fn run_ratatui_app(
         &session_selection,
         resume_picker::SessionSelection::Resume(_) | resume_picker::SessionSelection::Fork(_)
     ) || picker_cancelled_without_selection;
-    // PF-84-S06 (#595): the session's own config keeps the warning that a
-    // local daemon was not reused, also when it is reloaded below.
-    let daemon_not_reused = default_login_launch::daemon_not_reused_warning(&config);
     let mut config = match &session_selection {
         resume_picker::SessionSelection::Resume(_) | resume_picker::SessionSelection::Fork(_) => {
             load_config_or_exit_with_fallback_cwd(
