@@ -93,7 +93,7 @@ async fn session(level: SecurityLevel, rules: &str, calls: usize) -> anyhow::Res
                 .enable(Feature::UnifiedExec)
                 .expect("enable unified exec");
         })
-        .build_with_auto_env(&server)
+        .build(&server)
         .await?;
     std::mem::forget(server);
     Ok(test)

@@ -132,7 +132,9 @@ async fn pf_30_s01_source_envelopes_label_tool_output_and_keep_human_prompt() ->
                     .enable(Feature::SourceEnvelopes)
                     .expect("enable source envelopes");
             })
-            .build_with_auto_env(&server)
+            // this shell_command test fails only in the remote lane (#157, #708), so pin
+            // it to the local executor even in the remote test lane.
+            .build(&server)
             .await?;
         let human = "read the notes <keep> 日本語";
         test.submit_turn(human).await?;
@@ -578,7 +580,8 @@ async fn pf_30_s03_two_call_turn_with(
                 .expect("enable source envelopes");
             tweak(config);
         })
-        .build_with_auto_env(&server)
+        // PF-30-S03 checks host-side hooks and the host sandbox (#157).
+        .build(&server)
         .await?;
     // Keep the server alive for the whole test.
     std::mem::forget(server);

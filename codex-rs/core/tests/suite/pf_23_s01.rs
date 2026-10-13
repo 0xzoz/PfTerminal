@@ -174,7 +174,9 @@ async fn start_turn_after(
                 .expect("enable source envelopes");
             tweak(config);
         })
-        .build_with_auto_env(&server)
+        // These tests check the host sandbox's protections (#157): pin them to
+        // the local executor, also in the remote test lane.
+        .build(&server)
         .await?;
     // Keep the server alive for the whole test.
     std::mem::forget(server);

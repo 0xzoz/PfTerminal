@@ -86,7 +86,7 @@ async fn run_calls(
                 .enable(Feature::UnifiedExec)
                 .expect("enable unified exec");
         })
-        .build_with_auto_env(&server)
+        .build(&server)
         .await?;
     let root = test.cwd_path().canonicalize()?;
     std::fs::create_dir_all(root.join(".agents"))?;

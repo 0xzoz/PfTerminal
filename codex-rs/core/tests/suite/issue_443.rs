@@ -101,7 +101,7 @@ async fn vault_commands_after(
                     .expect("enable unified exec");
             }
         })
-        .build_with_auto_env(&server)
+        .build(&server)
         .await?;
     if confirm {
         let home = test.codex_home_path();

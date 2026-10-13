@@ -178,7 +178,7 @@ async fn issue_507_kill_switch_stops_the_running_command_and_its_turn() -> anyho
     let server = start_mock_server().await;
     let captured = mount_sse_sequence(&server, vec![sse(shell_call("call-1", &command))]).await;
     let test = builder(AskForApproval::Never, /*unified*/ false)
-        .build_with_auto_env(&server)
+        .build(&server)
         .await?;
     submit(&test, "run the slow command").await?;
     wait_for_event(&test.codex, |event| {
@@ -247,7 +247,7 @@ async fn issue_507_kill_switch_from_another_process_stops_the_running_command() 
     let server = start_mock_server().await;
     let captured = mount_sse_sequence(&server, vec![sse(shell_call("call-1", &command))]).await;
     let test = builder(AskForApproval::Never, /*unified*/ false)
-        .build_with_auto_env(&server)
+        .build(&server)
         .await?;
     let home = test.codex_home_path().to_path_buf();
     submit(&test, "run the slow command").await?;
@@ -352,7 +352,7 @@ async fn issue_507_a_command_waiting_for_approval_never_runs() -> anyhow::Result
     let server = start_mock_server().await;
     let captured = mount_sse_sequence(&server, vec![sse(shell_call("call-1", &command))]).await;
     let test = builder(AskForApproval::UnlessTrusted, /*unified*/ false)
-        .build_with_auto_env(&server)
+        .build(&server)
         .await?;
     submit(&test, "write the marker").await?;
     let approval = match wait_for_event(&test.codex, |event| {
@@ -406,7 +406,7 @@ async fn issue_507_kill_switch_ends_background_terminals() -> anyhow::Result<()>
     )
     .await;
     let test = builder(AskForApproval::Never, /*unified*/ true)
-        .build_with_auto_env(&server)
+        .build(&server)
         .await?;
     submit(&test, "start it in the background").await?;
     wait_for_event(&test.codex, |event| {
@@ -450,7 +450,7 @@ async fn issue_507_control_background_command_runs_without_the_kill_switch() -> 
     )
     .await;
     let test = builder(AskForApproval::Never, /*unified*/ true)
-        .build_with_auto_env(&server)
+        .build(&server)
         .await?;
     submit(&test, "start it in the background").await?;
     wait_for_event(&test.codex, |event| {
@@ -481,7 +481,7 @@ async fn issue_507_revoke_all_leaves_the_running_command_alone() -> anyhow::Resu
     )
     .await;
     let test = builder(AskForApproval::Never, /*unified*/ false)
-        .build_with_auto_env(&server)
+        .build(&server)
         .await?;
     submit(&test, "run the slow command").await?;
     wait_for_event(&test.codex, |event| {

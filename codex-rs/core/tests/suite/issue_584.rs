@@ -102,7 +102,7 @@ async fn start(
                 config.features.enable(feature).expect("enable feature");
             }
         })
-        .build_with_auto_env(&server)
+        .build(&server)
         .await?;
     std::mem::forget(server);
     test.codex
