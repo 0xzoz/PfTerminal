@@ -162,6 +162,16 @@ const CORBANU_DATABASES: &str = "*.sqlite*";
 /// The database init lock (#549), next to the databases.
 const DB_INIT_LOCK: &str = "pfterminal_db_init.lock";
 
+/// #611: what Corbanu keeps in its database folder besides the databases:
+/// the init lock, the GPU controller's lock, pending accounting records
+/// (`codex_state::PENDING_DIR`) and databases set aside by recovery.
+const DATABASE_FOLDER_ENTRIES: &[&str] = &[
+    DB_INIT_LOCK,
+    "gpu-controller.lock",
+    "accounting-pending",
+    "db-backups",
+];
+
 /// Other Corbanu home folders in the user's home: denied whole.
 const OTHER_CORBANU_HOMES: &[&str] = &[".corbanu", ".codex", ".pfterminal"];
 
@@ -367,6 +377,17 @@ impl ReadDenials {
                 create_missing_read_later_folders(codex_home);
             }
         }
+        // #611 (Linux): a separate database folder's missing entries, made
+        // as Corbanu would where the command could make them, so bubblewrap
+        // puts no placeholder file where Corbanu expects a folder or a lock.
+        if cfg!(target_os = "linux")
+            && let Some(folder) = separate_database_folder(codex_home, sqlite_home)
+            && profile
+                .file_system_sandbox_policy()
+                .can_write_path_with_cwd(folder.as_path(), turn_cwd.as_path())
+        {
+            create_missing_database_folder_entries(folder.as_path());
+        }
         // #583: the read-only home keeps `worktrees` writable only as a real
         // folder, so it is made (empty, as Corbanu would) where the command
         // could have made it before.
@@ -397,25 +418,31 @@ impl ReadDenials {
     }
 
     /// #611: a database folder set apart from the Corbanu home (`sqlite_home`
-    /// or `CODEX_SQLITE_HOME`) gets the home's database rules: each existing
-    /// database file is denied (reads and writes), the database pattern
-    /// denies reading those created later, and the init lock (#586) is
-    /// denied also before it exists (a command holding it would stall every
-    /// new launch on these databases). A command a person approved under
-    /// Moderate (#540) drops them with the other stores.
+    /// or `CODEX_SQLITE_HOME`) is denied like the home's stores: whole, as
+    /// Corbanu creates it before any command runs (the databases, the init
+    /// lock, `gpu-controller.lock`, pending accounting records and database
+    /// backups). Where it holds the command's own folder or the Corbanu home
+    /// (whose runtime entries stay readable), what Corbanu keeps there is
+    /// denied one by one instead: each existing database, the database
+    /// pattern (reads of those created later) and [`DATABASE_FOLDER_ENTRIES`]
+    /// also before they exist (the init lock, #586). A command a person
+    /// approved under Moderate (#540) drops them with the other stores.
     fn protect_database_folder(
         &mut self,
         codex_home: &Path,
         sqlite_home: &Path,
         keep: &[AbsolutePathBuf],
     ) {
-        let Ok(folder) = AbsolutePathBuf::from_absolute_path(sqlite_home) else {
+        let Some(folder) = separate_database_folder(codex_home, sqlite_home) else {
             return;
         };
-        let same_folder = sqlite_home == codex_home
-            || std::fs::canonicalize(sqlite_home)
-                .is_ok_and(|real| std::fs::canonicalize(codex_home).is_ok_and(|home| home == real));
-        if same_folder {
+        let real_folder = std::fs::canonicalize(folder.as_path()).ok();
+        let holds_home = codex_home.starts_with(folder.as_path())
+            || real_folder.as_ref().is_some_and(|real| {
+                std::fs::canonicalize(codex_home).is_ok_and(|home| home.starts_with(real))
+            });
+        if folder.as_path().is_dir() && !holds_home && !Self::holds_kept(&folder, keep) {
+            self.push_existing(folder, keep);
             return;
         }
         if let Ok(entries) = std::fs::read_dir(folder.as_path()) {
@@ -425,7 +452,9 @@ impl ReadDenials {
                 }
             }
         }
-        self.push_fixed(folder.join(DB_INIT_LOCK), keep);
+        for name in DATABASE_FOLDER_ENTRIES {
+            self.push_fixed(folder.join(name), keep);
+        }
         let databases = folder
             .join(CORBANU_DATABASES)
             .to_string_lossy()
@@ -879,6 +908,34 @@ pub(crate) fn create_missing_runtime_folders(codex_home: &Path) {
             let _ = std::fs::create_dir(codex_home.join(entry));
         }
     }
+}
+
+/// #611: the database folder, when it is not the Corbanu home (by any
+/// spelling).
+fn separate_database_folder(codex_home: &Path, sqlite_home: &Path) -> Option<AbsolutePathBuf> {
+    let folder = AbsolutePathBuf::from_absolute_path(sqlite_home).ok()?;
+    let same_folder = sqlite_home == codex_home
+        || std::fs::canonicalize(sqlite_home)
+            .is_ok_and(|real| std::fs::canonicalize(codex_home).is_ok_and(|home| home == real));
+    (!same_folder).then_some(folder)
+}
+
+/// #611 (Linux): creates a separate database folder's missing folders and
+/// GPU controller lock, empty and private, as Corbanu would. The init lock
+/// keeps #608's placeholder handling.
+fn create_missing_database_folder_entries(folder: &Path) {
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    for name in ["accounting-pending", "db-backups"] {
+        // Fails harmlessly where it exists (also as a link).
+        let _ = builder.create(folder.join(name));
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let _ = options.open(folder.join("gpu-controller.lock"));
 }
 
 /// #603 (Linux): creates the missing folders Corbanu reads later, empty and

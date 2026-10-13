@@ -680,61 +680,77 @@ fn issue_586_db_init_lock_denied_before_it_exists() {
     }
 }
 
-/// Issue #611: a database folder set apart from the Corbanu home gets the
-/// home's database rules: its databases (reads also of one created later,
-/// writes of existing ones) and its init lock (also before it exists) are
-/// denied. Other files in it are not.
-/// The home's own rules are unchanged when the folder is the home.
+/// Issue #611: a database folder set apart from the Corbanu home is denied
+/// whole (all Corbanu keeps there). Where it holds the command's folder, the
+/// databases (reads also of one created later, writes of existing ones),
+/// the init lock, the GPU controller's lock, pending accounting records and
+/// backups are denied one by one, also before they exist; other files stay.
+/// Nothing is added when the folder is the home (by another spelling).
 #[test]
 fn issue_611_a_separate_database_folder_is_denied_like_the_home() {
     let fx = fixture();
     let databases = fx.user_home.join("db");
-    std::fs::create_dir_all(&databases).unwrap();
+    std::fs::create_dir_all(databases.join("accounting-pending")).unwrap();
     std::fs::write(databases.join("state_5.sqlite"), "x").unwrap();
-    let cwd = abs(&fx.user_home.join("project"));
     let profile = PermissionProfile::Disabled;
-    let denials = ReadDenials::for_turn(
-        &fx.codex_home,
-        &databases,
-        &cwd,
-        std::slice::from_ref(&cwd),
-        &profile,
-    );
-    let policy = denials
-        .apply(&profile)
-        .unwrap()
-        .file_system_sandbox_policy();
-    let matcher = denials.matcher().unwrap();
+    let denied = |cwd: &AbsolutePathBuf, name: &str| {
+        let denials = ReadDenials::for_turn(
+            &fx.codex_home,
+            &databases,
+            cwd,
+            std::slice::from_ref(cwd),
+            &profile,
+        );
+        let policy = denials
+            .apply(&profile)
+            .unwrap()
+            .file_system_sandbox_policy();
+        let path = databases.join(name);
+        let read = denials.matcher().unwrap().is_read_denied(&path);
+        let write = !policy.can_write_path_with_cwd(&path, cwd.as_path());
+        (read, write)
+    };
+    // Elsewhere: the whole folder.
+    let project = abs(&fx.user_home.join("project"));
     for name in [
         "state_5.sqlite",
-        "logs_2.sqlite-wal",
-        "later.sqlite",
+        "later.sqlite-wal",
         "pfterminal_db_init.lock",
+        "gpu-controller.lock",
+        "accounting-pending/x.json",
+        "db-backups/state_5.sqlite",
+        "notes.txt",
     ] {
-        let path = databases.join(name);
-        assert!(matcher.is_read_denied(&path), "{name}");
-        // Existing databases and the lock: not writable either.
-        if ["state_5.sqlite", "pfterminal_db_init.lock"].contains(&name) {
-            assert!(
-                !policy.can_write_path_with_cwd(&path, cwd.as_path()),
-                "{name}"
-            );
-        }
+        assert_eq!(denied(&project, name), (true, true), "{name}");
     }
-    assert!(!matcher.is_read_denied(&databases.join("notes.txt")));
+    // Working inside it: what Corbanu keeps there, one by one.
+    let inside = abs(&databases.join("work"));
+    std::fs::create_dir_all(inside.as_path()).unwrap();
+    for (name, expected) in [
+        ("state_5.sqlite", (true, true)),
+        ("pfterminal_db_init.lock", (true, true)),
+        ("gpu-controller.lock", (true, true)),
+        ("accounting-pending/x.json", (true, true)),
+        ("db-backups/x", (true, true)),
+        ("later.sqlite", (true, false)),
+        ("notes.txt", (false, false)),
+        ("work/file", (false, false)),
+    ] {
+        assert_eq!(denied(&inside, name), expected, "{name}");
+    }
     // The database folder is the home (by another spelling): nothing added.
     let same = ReadDenials::for_turn(
         &fx.codex_home,
         &fx.codex_home.join("."),
-        &cwd,
-        std::slice::from_ref(&cwd),
+        &project,
+        std::slice::from_ref(&project),
         &profile,
     );
     let home = ReadDenials::for_turn(
         &fx.codex_home,
         &fx.codex_home,
-        &cwd,
-        std::slice::from_ref(&cwd),
+        &project,
+        std::slice::from_ref(&project),
         &profile,
     );
     assert_eq!(same, home);

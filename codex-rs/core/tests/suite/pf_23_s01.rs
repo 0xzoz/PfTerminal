@@ -2395,8 +2395,9 @@ async fn issue_586_missing_db_init_lock_cannot_be_created_or_held() -> anyhow::R
 
 /// Issue #611: with the databases in their own folder (`sqlite_home`), a
 /// protected command with full access cannot read or write a database there,
-/// nor create and hold the missing init lock, with the paths built at run
-/// time. Permissive is unchanged.
+/// create and hold the missing init lock, hold the GPU controller's lock or
+/// plant a pending accounting record, with the paths built at run time.
+/// Permissive is unchanged.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn issue_611_a_separate_database_folder_is_protected() -> anyhow::Result<()> {
@@ -2420,7 +2421,11 @@ async fn issue_611_a_separate_database_folder_is_protected() -> anyhow::Result<(
              cat \"$d/canary.$s\"; echo; printf x >> \"$d/canary.$s\"; \
              perl -e 'use Fcntl qw(:flock); open(my $f, \">>\", $ARGV[0]) or die \"open: $!\\n\"; \
              flock($f, LOCK_EX | LOCK_NB) or die \"lock: $!\\n\"' \
-             \"$d/pfterminal_db_$(printf init).lock\" && echo held-611; echo ran-611"
+             \"$d/pfterminal_db_$(printf init).lock\" && echo init-held-611; \
+             perl -e 'use Fcntl qw(:flock); open(my $f, \"<\", $ARGV[0]) or die \"open: $!\\n\"; \
+             flock($f, LOCK_EX | LOCK_NB) or die \"lock: $!\\n\"' \
+             \"$d/gpu-controller.$(printf lock)\" && echo gpu-held-611; \
+             printf '{{}}' > \"$d/accounting-$(printf pending)/planted.json\"; echo ran-611"
         );
         let sqlite_home = AbsolutePathBuf::from_absolute_path(&folder)?;
         let (canary, missing_lock) = (folder.join("canary.sqlite"), lock.clone());
@@ -2441,6 +2446,9 @@ async fn issue_611_a_separate_database_folder_is_protected() -> anyhow::Result<(
             },
             move |_| {
                 std::fs::write(&canary, CANARY).expect("canary database");
+                let folder = canary.parent().expect("database folder");
+                std::fs::write(folder.join("gpu-controller.lock"), "").expect("gpu lock");
+                std::fs::create_dir_all(folder.join("accounting-pending")).expect("pending");
                 // Start-up created it; the command meets it missing.
                 let _ = std::fs::remove_file(&missing_lock);
             },
@@ -2452,9 +2460,11 @@ async fn issue_611_a_separate_database_folder_is_protected() -> anyhow::Result<(
         let achieved = [
             output.contains(CANARY),
             std::fs::read_to_string(folder.join("canary.sqlite")).unwrap_or_default() != CANARY,
-            output.contains("held-611") || lock.exists(),
+            output.contains("init-held-611") || lock.exists(),
+            output.contains("gpu-held-611"),
+            folder.join("accounting-pending/planted.json").exists(),
         ];
-        if !output.contains("ran-611") || achieved != [open; 3] {
+        if !output.contains("ran-611") || achieved != [open; 5] {
             wrong.push(format!("{level:?}: {achieved:?}: {output}"));
         }
         drop(test);
