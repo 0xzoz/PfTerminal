@@ -320,6 +320,10 @@ impl ClaudeApprovalView {
 }
 
 impl BottomPaneView for ClaudeApprovalView {
+    fn answers_request(&self) -> bool {
+        true
+    }
+
     fn handle_key_event(&mut self, key: KeyEvent) {
         self.handle_key_at(key, Instant::now());
     }

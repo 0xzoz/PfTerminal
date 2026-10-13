@@ -1433,6 +1433,10 @@ fn idle_plain_chord(key_event: KeyEvent, idle: bool) -> bool {
 }
 
 impl BottomPaneView for RequestUserInputOverlay {
+    fn answers_request(&self) -> bool {
+        true
+    }
+
     fn prefer_esc_to_handle_key_event(&self) -> bool {
         true
     }

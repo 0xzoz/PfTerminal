@@ -575,6 +575,30 @@ impl BottomPane {
         self.request_redraw();
     }
 
+    /// #624: shows a view that answers a request (see
+    /// [`BottomPaneView::answers_request`]). Over views the person opened (a
+    /// picker, a menu) it goes underneath them, above any other request
+    /// views, so their keys keep reaching the view they see; it shows when
+    /// those views close, revealed (#523: the next Enter alone can't answer
+    /// it).
+    fn push_request_view(&mut self, view: Box<dyn BottomPaneView>) {
+        let insert_at = self
+            .view_stack
+            .iter()
+            .rposition(|view| view.answers_request())
+            .map_or(0, |index| index + 1);
+        if insert_at == self.view_stack.len() {
+            self.push_view(view);
+            return;
+        }
+        // Record the current depth first: closing the views above then
+        // counts as revealing this one.
+        self.sync_top_view();
+        self.view_stack.insert(insert_at, view);
+        self.last_top_depth = self.view_stack.len();
+        self.request_redraw();
+    }
+
     fn pop_active_view_with_completion(&mut self, completion: Option<ViewCompletion>) {
         if self.view_stack.pop().is_some() {
             match completion {
@@ -1386,7 +1410,7 @@ impl BottomPane {
             let typed_at = self
                 .last_composer_key_at
                 .max(self.last_composer_activity_at);
-            self.push_view(Box::new(ClaudeApprovalView::new(request, typed_at)));
+            self.push_request_view(Box::new(ClaudeApprovalView::new(request, typed_at)));
         }
         self.request_redraw();
     }
@@ -1543,8 +1567,10 @@ impl BottomPane {
     }
 
     pub(crate) fn terminal_title_requires_action(&self) -> bool {
-        self.active_view()
-            .is_some_and(bottom_pane_view::BottomPaneView::terminal_title_requires_action)
+        // #624: a request waiting under a view the person opened still needs them.
+        self.view_stack
+            .iter()
+            .any(|view| view.terminal_title_requires_action())
     }
 
     pub(crate) fn has_active_view(&self) -> bool {
@@ -1619,17 +1645,21 @@ impl BottomPane {
 
     /// Called when the agent requests user approval.
     pub fn push_approval_request(&mut self, request: ApprovalRequest, features: &Features) {
-        let request = if let Some(view) = self.view_stack.last_mut() {
+        // #624: a request view may sit under views the person opened; the
+        // newest one that queues this kind of request takes it.
+        let mut request = request;
+        for view in self.view_stack.iter_mut().rev() {
             match view.try_consume_approval_request(request) {
-                Some(request) => request,
+                Some(unconsumed) => request = unconsumed,
                 None => {
                     self.request_redraw();
                     return;
                 }
             }
-        } else {
-            request
-        };
+            if view.answers_request() {
+                break;
+            }
+        }
 
         let now = Instant::now();
         if !self.delayed_approval_requests.is_empty()
@@ -1657,23 +1687,27 @@ impl BottomPane {
                 FreshChoice::None => {}
             }
             self.pause_status_timer_for_modal();
-            self.push_view(Box::new(modal));
+            self.push_request_view(Box::new(modal));
         }
     }
 
     /// Called when the agent requests user input.
     pub fn push_user_input_request(&mut self, request: ToolRequestUserInputParams) {
-        let request = if let Some(view) = self.view_stack.last_mut() {
+        // #624: a request view may sit under views the person opened; the
+        // newest one that queues this kind of request takes it.
+        let mut request = request;
+        for view in self.view_stack.iter_mut().rev() {
             match view.try_consume_user_input_request(request) {
-                Some(request) => request,
+                Some(unconsumed) => request = unconsumed,
                 None => {
                     self.request_redraw();
                     return;
                 }
             }
-        } else {
-            request
-        };
+            if view.answers_request() {
+                break;
+            }
+        }
 
         let mut modal = RequestUserInputOverlay::new_with_keymap(
             request,
@@ -1695,24 +1729,28 @@ impl BottomPane {
             /*enabled*/ false,
             Some("Answer the questions to continue.".to_string()),
         );
-        self.push_view(Box::new(modal));
+        self.push_request_view(Box::new(modal));
     }
 
     pub(crate) fn push_mcp_server_elicitation_request(
         &mut self,
         request: McpServerElicitationFormRequest,
     ) {
-        let request = if let Some(view) = self.view_stack.last_mut() {
+        // #624: a request view may sit under views the person opened; the
+        // newest one that queues this kind of request takes it.
+        let mut request = request;
+        for view in self.view_stack.iter_mut().rev() {
             match view.try_consume_mcp_server_elicitation_request(request) {
-                Some(request) => request,
+                Some(unconsumed) => request = unconsumed,
                 None => {
                     self.request_redraw();
                     return;
                 }
             }
-        } else {
-            request
-        };
+            if view.answers_request() {
+                break;
+            }
+        }
 
         if let Some(tool_suggestion) = request.tool_suggestion()
             && let Some(install_url) = tool_suggestion.install_url.clone()
@@ -1766,7 +1804,7 @@ impl BottomPane {
                 /*enabled*/ false,
                 Some("Respond to the tool suggestion to continue.".to_string()),
             );
-            self.push_view(Box::new(view));
+            self.push_request_view(Box::new(view));
             return;
         }
 
@@ -1791,7 +1829,7 @@ impl BottomPane {
             /*enabled*/ false,
             Some("Respond to the MCP server request to continue.".to_string()),
         );
-        self.push_view(Box::new(modal));
+        self.push_request_view(Box::new(modal));
     }
 
     pub(crate) fn dismiss_app_server_request(
@@ -2426,6 +2464,16 @@ mod tests {
                 pane.handle_key_event(KeyEvent::new(key, KeyModifiers::NONE));
             }
             assert!(!elicitation_resolved(&mut rx), "over_view={over_view}");
+            if over_view {
+                // #624: it waited under the picker; closing the picker
+                // reveals it, and the same keys still don't answer it.
+                pane.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+                assert_eq!(pane.view_stack.len(), 1);
+                for key in [KeyCode::Enter, KeyCode::Char('1'), KeyCode::Enter] {
+                    pane.handle_key_event(KeyEvent::new(key, KeyModifiers::NONE));
+                }
+                assert!(!elicitation_resolved(&mut rx));
+            }
 
             for key in [KeyCode::Down, KeyCode::Up, KeyCode::Enter] {
                 pane.handle_key_event(KeyEvent::new(key, KeyModifiers::NONE));
@@ -2489,9 +2537,10 @@ mod tests {
         }
     }
 
-    /// #523: the main approval prompt opened over another view takes neither
-    /// the Enter nor the number key and Enter meant for that view; the arrow
-    /// keys then Enter answer it.
+    /// #523, #624: the main approval prompt that arrives over another view
+    /// waits under it, so neither the Enter nor the number key and Enter
+    /// meant for that view reach it; once the view closes, it is revealed and
+    /// the arrow keys then Enter answer it.
     #[test]
     fn approval_opened_over_a_view_needs_a_deliberate_choice() {
         let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
@@ -2507,8 +2556,109 @@ mod tests {
         );
         assert!(!approval_answered(&mut rx));
 
+        press_keys(&mut pane, &[KeyCode::Esc]);
+        assert_eq!(pane.view_stack.len(), 1);
+        press_keys(
+            &mut pane,
+            &[KeyCode::Enter, KeyCode::Char('1'), KeyCode::Enter],
+        );
+        assert!(!approval_answered(&mut rx));
+
         press_keys(&mut pane, &[KeyCode::Down, KeyCode::Up, KeyCode::Enter]);
         assert!(approval_answered(&mut rx));
+    }
+
+    /// The `/panes` picker of #624: two panes and a "new pane" entry; each
+    /// choice sends an `OpenPanePicker` marker so the test sees which ran.
+    fn panes_picker() -> SelectionViewParams {
+        let item = |name: &str| SelectionItem {
+            name: name.to_string(),
+            actions: vec![Box::new(|tx: &AppEventSender| {
+                tx.send(AppEvent::OpenPanePicker)
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        };
+        SelectionViewParams {
+            title: Some("Panes".to_string()),
+            items: vec![
+                item("Corbanu Terminal - Main"),
+                item("Corbanu Terminal - B"),
+                item("+ Corbanu Terminal Pane"),
+            ],
+            ..Default::default()
+        }
+    }
+
+    /// #624: an approval that arrives while the person has the `/panes`
+    /// picker open goes under the picker. The picker stays on screen and its
+    /// keys (Down Down Enter, as in the Aggressive re-run) reach only the
+    /// picker; the approval stays pending and shows, unanswered, once the
+    /// picker closes, where it still needs a deliberate choice.
+    #[test]
+    fn approval_arriving_under_an_open_picker_leaves_its_keys_to_the_picker() {
+        let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
+        let features = Features::with_defaults();
+        let mut pane = test_pane(AppEventSender::new(tx_raw));
+        pane.show_selection_view(panes_picker());
+        pane.push_approval_request(exec_request(), &features);
+
+        assert_eq!(pane.view_stack.len(), 2);
+        assert!(
+            !pane.view_stack[1].answers_request(),
+            "the picker stays on top"
+        );
+        assert!(pane.terminal_title_requires_action());
+        let area = Rect::new(0, 0, 60, pane.desired_height(/*width*/ 60));
+        assert_snapshot!(
+            "approval_waits_under_open_panes_picker",
+            render_snapshot(&pane, area)
+        );
+
+        press_keys(&mut pane, &[KeyCode::Down, KeyCode::Down, KeyCode::Enter]);
+        let events: Vec<AppEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AppEvent::OpenPanePicker)),
+            "the picker took the keys"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AppEvent::SubmitThreadOp { .. })),
+            "no key reached the approval"
+        );
+
+        pane.pre_draw_tick();
+        assert_eq!(pane.view_stack.len(), 1);
+        assert!(pane.view_stack[0].answers_request(), "the approval shows");
+        let area = Rect::new(0, 0, 60, pane.desired_height(/*width*/ 60));
+        assert_snapshot!(
+            "approval_shows_after_panes_picker_closes",
+            render_snapshot(&pane, area)
+        );
+
+        press_keys(&mut pane, &[KeyCode::Enter]);
+        assert!(!approval_answered(&mut rx), "revealed: Enter alone");
+        press_keys(&mut pane, &[KeyCode::Down, KeyCode::Up, KeyCode::Enter]);
+        assert!(approval_answered(&mut rx));
+    }
+
+    /// #624: a second approval while the first waits under the picker joins
+    /// the first one's queue instead of opening another prompt.
+    #[test]
+    fn approvals_waiting_under_a_picker_share_one_prompt() {
+        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let features = Features::with_defaults();
+        let mut pane = test_pane(AppEventSender::new(tx_raw));
+        pane.show_selection_view(panes_picker());
+        pane.push_approval_request(exec_request(), &features);
+        pane.push_approval_request(exec_request(), &features);
+
+        assert_eq!(pane.view_stack.len(), 2);
+        assert!(pane.view_stack[0].answers_request());
+        assert!(!pane.view_stack[1].answers_request());
     }
 
     /// #523: the main approval prompt revealed when the view above it closes
@@ -2618,6 +2768,14 @@ mod tests {
         let mut pane = test_pane(AppEventSender::new(tx_raw));
         pane.show_selection_view(picker());
         pane.push_user_input_request(user_input_request());
+        press_keys(
+            &mut pane,
+            &[KeyCode::Enter, KeyCode::Char('1'), KeyCode::Enter],
+        );
+        assert!(!question_answered(&mut rx));
+        // #624: the question waited under the picker until it closed.
+        press_keys(&mut pane, &[KeyCode::Esc]);
+        assert_eq!(pane.view_stack.len(), 1);
         press_keys(
             &mut pane,
             &[KeyCode::Enter, KeyCode::Char('1'), KeyCode::Enter],

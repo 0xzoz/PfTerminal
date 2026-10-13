@@ -63,6 +63,13 @@ pub(crate) trait BottomPaneView: Renderable {
     /// Clear any pending child-flow cleanup marker after a child view is cancelled.
     fn clear_dismiss_after_child_accept(&mut self) {}
 
+    /// #624: whether this view answers a request from an agent or a server
+    /// (an approval, a question, an MCP form). Such a view never opens over a
+    /// view the person opened, so keys meant for that view can't answer it.
+    fn answers_request(&self) -> bool {
+        false
+    }
+
     /// Stable identifier for views that need external refreshes while open.
     fn view_id(&self) -> Option<&'static str> {
         None

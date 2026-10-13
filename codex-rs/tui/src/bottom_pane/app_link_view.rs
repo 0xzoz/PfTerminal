@@ -850,6 +850,10 @@ impl AppLinkView {
 }
 
 impl BottomPaneView for AppLinkView {
+    fn answers_request(&self) -> bool {
+        self.elicitation_target.is_some()
+    }
+
     fn handle_key_event(&mut self, key_event: KeyEvent) {
         if key_event.kind == KeyEventKind::Release {
             return;

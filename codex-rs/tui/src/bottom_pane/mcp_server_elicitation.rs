@@ -1721,6 +1721,10 @@ impl Renderable for McpServerElicitationOverlay {
 }
 
 impl BottomPaneView for McpServerElicitationOverlay {
+    fn answers_request(&self) -> bool {
+        true
+    }
+
     fn prefer_esc_to_handle_key_event(&self) -> bool {
         true
     }
