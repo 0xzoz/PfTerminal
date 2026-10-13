@@ -295,6 +295,44 @@ async fn approval_keys_include_move_destination() {
     assert_eq!(keys.len(), 2);
 }
 
+/// #713: a patch whose paths aren't native to this host skips path matching,
+/// but a restricted turn must still ask for it instead of auto-approving it.
+#[tokio::test]
+async fn foreign_patch_paths_are_not_auto_approved_under_a_restricted_turn() {
+    use crate::apply_patch::apply_patch;
+    use crate::tools::sandboxing::ExecApprovalRequirement;
+    use codex_protocol::models::PermissionProfile;
+    use codex_protocol::protocol::AskForApproval;
+
+    let (_session, mut turn) = make_session_and_context().await;
+    turn.approval_policy = crate::config::Constrained::allow_any(AskForApproval::OnRequest);
+    turn.permission_profile = PermissionProfile::workspace_write();
+    let foreign = if cfg!(windows) {
+        "file:///tmp/remote/new.txt"
+    } else {
+        "file:///C:/remote/new.txt"
+    };
+    let path = PathUri::parse(foreign).expect("foreign path URI");
+    assert!(path.to_abs_path().is_err(), "{foreign} must not be native");
+    let action = ApplyPatchAction::new_add_for_test(&path, "content".to_string());
+
+    let (_, _, policy) = patch_permissions_without_path_matching(&turn, &action);
+    let InternalApplyPatchInvocation::DelegateToRuntime(apply) =
+        apply_patch(&turn, &policy, action).await
+    else {
+        panic!("expected the patch to go to the runtime");
+    };
+    assert!(!apply.auto_approved);
+    assert!(
+        matches!(
+            apply.exec_approval_requirement,
+            ExecApprovalRequirement::NeedsApproval { .. }
+        ),
+        "{:?}",
+        apply.exec_approval_requirement
+    );
+}
+
 #[tokio::test]
 async fn shell_intercept_uses_consecutive_grammar_failures_and_rejects_after_fallback() {
     let (session, turn) = make_session_and_context().await;
