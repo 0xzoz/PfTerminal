@@ -88,6 +88,57 @@ async fn current_and_unready_providers_are_never_replacement_candidates() {
     );
 }
 
+/// #665: Z.AI replaces the current provider over the connection that can
+/// sign in: here `zai-anthropic` with the default key, because `zai` runs on
+/// an account that is not enrolled.
+#[tokio::test]
+async fn a_replacement_uses_a_connection_with_its_own_credential() {
+    let home = tempdir().unwrap();
+    let mut config = crate::legacy_core::config::ConfigBuilder::default()
+        .codex_home(home.path().to_path_buf())
+        .build()
+        .await
+        .unwrap();
+    config.model_providers =
+        codex_model_provider_info::built_in_model_providers(/*openai_base_url*/ None);
+    let status_host = |config: &crate::legacy_core::config::Config| {
+        ProviderStatusHost::from_config_with_account_registry(
+            config,
+            crate::provider_status_host::ProviderAccountMetadata::default(),
+            |_, _| false,
+        )
+        .with_environment(|env_key| {
+            if env_key == "ZAI_API_KEY" {
+                codex_provider_auth::EnvironmentCredentialMetadata::Present
+            } else {
+                codex_provider_auth::EnvironmentCredentialMetadata::Missing
+            }
+        })
+    };
+    let replacement = |status_host: &ProviderStatusHost| {
+        let entry = status_host.catalog().get("zai").expect("zai entry").clone();
+        replacement_candidates_for(
+            status_host,
+            &[status(&entry, ProviderEligibilityState::Active)],
+            /*current_model*/ None,
+        )
+        .into_iter()
+        .map(|candidate| candidate.runtime_provider_id.as_str().to_string())
+        .collect::<Vec<_>>()
+    };
+    assert_eq!(replacement(&status_host(&config)), ["zai"]);
+
+    config
+        .model_providers
+        .get_mut("zai")
+        .expect("built-in zai provider")
+        .account = Some(codex_model_provider_info::NamedProviderAccount {
+        provider_id: "zai".into(),
+        name: "work".into(),
+    });
+    assert_eq!(replacement(&status_host(&config)), ["zai-anthropic"]);
+}
+
 fn status(
     entry: &codex_provider_auth::ProviderCatalogEntry,
     eligibility: ProviderEligibilityState,

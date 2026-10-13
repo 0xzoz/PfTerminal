@@ -418,7 +418,8 @@ async fn enrolled_named_account_configures_its_provider_without_a_default_key() 
                     && account.name == "main"
                     && kind == ProviderAccountKind::ApiKey
             },
-        );
+        )
+        .with_environment(|_| EnvironmentCredentialMetadata::Missing);
         assert_eq!(
             host.resolve_provider("zai").unwrap().configuration,
             expected,

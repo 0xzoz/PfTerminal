@@ -388,10 +388,11 @@ impl ProviderStatusHost {
         statuses
     }
 
-    /// #665: connections whose own credential is missing although another
-    /// connection of their entry has one (`zai` on an enrolled named
-    /// account, `zai-anthropic` on the default account with no default Z.AI
-    /// key). They cannot authenticate; their entry is configured by the other.
+    /// #665: connections, of an entry whose connections run on different
+    /// accounts, whose own credential is missing (`zai-anthropic` on the
+    /// default account with no default Z.AI key while `zai` runs on an
+    /// enrolled named account). They cannot authenticate, even when their
+    /// entry is set up by another connection.
     pub(crate) fn connections_without_credential(&self) -> std::collections::BTreeSet<String> {
         self.connection_credentials
             .values()
