@@ -894,7 +894,7 @@ fn openai_api_key_rates_match_the_published_sheet() -> anyhow::Result<()> {
             "openai",
             scope,
             utc("2026-11-21T23:59:59.999Z"),
-            None
+            /*tier*/ None
         )?
         .is_empty()
     );
@@ -904,13 +904,14 @@ fn openai_api_key_rates_match_the_published_sheet() -> anyhow::Result<()> {
             "openai",
             scope,
             utc("2026-11-22T00:00:00Z"),
-            None
+            /*tier*/ None
         )?
         .is_empty()
     );
     // A stated cache write or tier extends the price identity; changing either
     // changes it, so a record states exactly which sheet priced it.
-    let luna = responses_original("gpt-5.6-luna", "openai", scope, read_on, None)?.remove(0);
+    let luna =
+        responses_original("gpt-5.6-luna", "openai", scope, read_on, /*tier*/ None)?.remove(0);
     let v1 = (
         "openai-responses-api-key-bundled-v1",
         "openai",
@@ -941,8 +942,8 @@ fn openai_api_key_rates_match_the_published_sheet() -> anyhow::Result<()> {
 fn openai_plan_equivalent_states_cache_write_and_long_context() -> anyhow::Result<()> {
     let scope = Uuid::new_v4();
     let at = utc("2026-10-09T19:00:00Z");
-    let plan = plan_original("gpt-5.6-luna", "openai", scope, at, None)?.remove(0);
-    let billed = responses_original("gpt-5.6-luna", "openai", scope, at, None)?.remove(0);
+    let plan = plan_original("gpt-5.6-luna", "openai", scope, at, /*tier*/ None)?.remove(0);
+    let billed = responses_original("gpt-5.6-luna", "openai", scope, at, /*tier*/ None)?.remove(0);
     assert_eq!(plan.basis, Basis::PlanEquivalent);
     assert_eq!(plan.plan_burn_millis, Some(200));
     assert_eq!(plan.rates, billed.rates);

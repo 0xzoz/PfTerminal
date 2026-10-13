@@ -18,7 +18,7 @@ fn pf_27_s05_base_url_binds_origin_and_path_prefix() {
         binding_for_base_url("https://api.openai.com/v1", ProviderApiKeyHeader::Bearer),
         Some(binding(
             "api.openai.com",
-            443,
+            /*port*/ 443,
             "/v1",
             ModelAuthHeader::Bearer
         ))
@@ -30,7 +30,7 @@ fn pf_27_s05_base_url_binds_origin_and_path_prefix() {
         ),
         Some(binding(
             "api.z.ai",
-            8443,
+            /*port*/ 8443,
             "/api/coding/paas/v4",
             ModelAuthHeader::Bearer
         ))
@@ -39,7 +39,7 @@ fn pf_27_s05_base_url_binds_origin_and_path_prefix() {
         binding_for_base_url("https://api.anthropic.com", ProviderApiKeyHeader::XApiKey),
         Some(binding(
             "api.anthropic.com",
-            443,
+            /*port*/ 443,
             "/",
             ModelAuthHeader::XApiKey
         ))
@@ -285,14 +285,26 @@ fn sec_391_default_matrix_level_os_and_explicit_setting() {
         }
     }
     // Spot checks of the rows that matter most.
-    assert_eq!(level_broker_setting(Aggressive, true, None), Some(true));
     assert_eq!(
-        level_broker_setting(Aggressive, true, Some(false)),
+        level_broker_setting(Aggressive, /*supported*/ true, /*explicit*/ None),
+        Some(true)
+    );
+    assert_eq!(
+        level_broker_setting(Aggressive, /*supported*/ true, Some(false)),
         Some(false)
     );
-    assert_eq!(level_broker_setting(Aggressive, false, None), None);
-    assert_eq!(level_broker_setting(Moderate, true, None), None);
-    assert_eq!(level_broker_setting(Permissive, true, None), None);
+    assert_eq!(
+        level_broker_setting(Aggressive, /*supported*/ false, /*explicit*/ None),
+        None
+    );
+    assert_eq!(
+        level_broker_setting(Moderate, /*supported*/ true, /*explicit*/ None),
+        None
+    );
+    assert_eq!(
+        level_broker_setting(Permissive, /*supported*/ true, /*explicit*/ None),
+        None
+    );
     assert!(resolve(Aggressive, true, Some(true), Some(false)));
     assert!(!resolve(Aggressive, true, Some(false), Some(true)));
     // macOS and Linux (PF-27-S05) and Windows (PF-27-S09) run the broker.

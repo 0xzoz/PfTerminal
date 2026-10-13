@@ -19,7 +19,7 @@ fn named_accounts_are_keyed_by_their_credential() {
     let key = |provider: &ModelProviderInfo| provider_request_key_identity(provider, || "unused");
     // The default account is keyed by its environment key (salted per home,
     // #482); a named account by what it holds, never by that key.
-    assert!(match key(&zai_on(None)) {
+    assert!(match key(&zai_on(/*account*/ None)) {
         ProviderKeyIdentity::EnvSecret { env_key, .. } => env_key == "ZAI_API_KEY",
         ProviderKeyIdentity::Label(label) => label == "stored:ZAI_API_KEY",
         ProviderKeyIdentity::NamedAccount(_) => false,

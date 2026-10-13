@@ -205,13 +205,13 @@ fn security_revocation_cannot_release_a_kill_switch_that_is_off() {
 fn security_revocation_kill_switch_without_a_session_is_saved() {
     let _serial = serial();
     let home = TempDir::new().unwrap();
-    let report = revoke(&home, None, HumanRevocation::KillSwitchOn).unwrap();
+    let report = revoke(&home, /*thread*/ None, HumanRevocation::KillSwitchOn).unwrap();
     assert!(report.kill_switch_active && !report.live);
     assert_eq!(
         stored_kill_switch(&home),
         Some((SecurityLevel::Permissive, true))
     );
-    revoke(&home, None, HumanRevocation::KillSwitchOff).unwrap();
+    revoke(&home, /*thread*/ None, HumanRevocation::KillSwitchOff).unwrap();
     assert_eq!(
         stored_kill_switch(&home),
         Some((SecurityLevel::Permissive, false))
@@ -303,14 +303,14 @@ fn security_revocation_release_reaches_the_other_sessions() {
 fn security_revocation_release_is_for_the_switch_reviewed() {
     let _serial = serial();
     let home = TempDir::new().unwrap();
-    revoke(&home, None, HumanRevocation::KillSwitchOn).unwrap();
-    let reviewed = basis(&home, None);
-    revoke(&home, None, HumanRevocation::KillSwitchOff).unwrap();
-    revoke(&home, None, HumanRevocation::KillSwitchOn).unwrap();
+    revoke(&home, /*thread*/ None, HumanRevocation::KillSwitchOn).unwrap();
+    let reviewed = basis(&home, /*thread*/ None);
+    revoke(&home, /*thread*/ None, HumanRevocation::KillSwitchOff).unwrap();
+    revoke(&home, /*thread*/ None, HumanRevocation::KillSwitchOn).unwrap();
     let result = commit_human_revocation(
         home.path(),
         SecurityLevel::Permissive,
-        None,
+        /*thread*/ None,
         &reviewed,
         HumanRevocation::KillSwitchOff,
         now(),
@@ -333,7 +333,7 @@ fn security_revocation_unsaved_without_a_session_is_an_error() {
     let _serial = serial();
     let home = TempDir::new().unwrap();
     std::fs::create_dir(home.path().join("security_state.lock")).unwrap();
-    let result = revoke(&home, None, HumanRevocation::KillSwitchOn);
+    let result = revoke(&home, /*thread*/ None, HumanRevocation::KillSwitchOn);
     assert!(
         matches!(result, Err(LevelChangeError::NotSaved(_))),
         "{result:?}"
@@ -381,7 +381,7 @@ fn security_revocation_unsaved_but_taken_by_another_session_is_reported() {
     let home = TempDir::new().unwrap();
     let (_view, other) = live_tree(&home, SecurityLevel::Aggressive);
     std::fs::create_dir(home.path().join("security_state.lock")).unwrap();
-    let report = revoke(&home, None, HumanRevocation::KillSwitchOn).unwrap();
+    let report = revoke(&home, /*thread*/ None, HumanRevocation::KillSwitchOn).unwrap();
     assert!(
         !report.live && report.other_sessions && report.not_saved.is_some(),
         "{report:?}"

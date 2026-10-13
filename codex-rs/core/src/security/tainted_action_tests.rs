@@ -624,7 +624,7 @@ fn issue_239_human_approval_lifts_rules_only_under_bound_moderate() {
     );
     assert!(moderate.moderate_bound());
     assert!(moderate.human_approval_lifts_rules(Some(0)));
-    assert!(!moderate.human_approval_lifts_rules(None));
+    assert!(!moderate.human_approval_lifts_rules(/*approved_at*/ None));
     // New untrusted content arrived while the human decided.
     let tainted = PostTaintState {
         taint_generation: 1,

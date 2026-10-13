@@ -305,7 +305,7 @@ fn pf_30_s01_labelled_context_round_trips_through_each_real_provider_adapter() {
         ],
         ..Default::default()
     };
-    let base = test_model_client(SessionSource::Cli).with_source_envelopes(true);
+    let base = test_model_client(SessionSource::Cli).with_source_envelopes(/*enabled*/ true);
     base.register_message_origin(std::slice::from_ref(&human), MessageOrigin::Human);
     base.register_message_origin(std::slice::from_ref(&call), MessageOrigin::Model);
     base.register_native_tool_origin("call-1", codex_protocol::provenance::SourceKind::Tool);
@@ -392,7 +392,7 @@ fn pf_30_s01_labelled_context_round_trips_through_each_real_provider_adapter() {
 
 #[test]
 fn pf_30_s01_labelled_restore_reinjection_waits_while_permissive() {
-    let client = test_model_client(SessionSource::Cli).with_source_envelopes(true);
+    let client = test_model_client(SessionSource::Cli).with_source_envelopes(/*enabled*/ true);
     client.note_restored_history(&[], std::iter::empty());
     // Permissive history is unchanged: the request stays pending.
     assert!(!client.take_host_context_reinjection());
@@ -3250,7 +3250,11 @@ fn namespaced_history_replays_under_offered_flat_names() {
             description: String::new(),
             strict: false,
             defer_loading: None,
-            parameters: codex_tools::JsonSchema::object(Default::default(), None, None),
+            parameters: codex_tools::JsonSchema::object(
+                Default::default(),
+                /*required*/ None,
+                /*additional_properties*/ None,
+            ),
             output_schema: None,
         })
     };

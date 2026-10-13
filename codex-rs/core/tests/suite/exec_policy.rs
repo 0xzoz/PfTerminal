@@ -502,7 +502,7 @@ async fn unified_exec_forbidden_command_reads_as_the_rule_justification() -> Res
         "run a forbidden command",
         AskForApproval::OnRequest,
         PermissionProfile::read_only(),
-        None,
+        /*collaboration_mode*/ None,
     )
     .await?;
     wait_for_event(&test.codex, |event| {

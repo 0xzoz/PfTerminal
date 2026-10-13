@@ -396,12 +396,12 @@ fn pf_28_s01_forwarded_sub_session_stream_is_gated_twice_without_leaking() {
     let (first, second) = text.split_at(12);
     for piece in [first, second] {
         forward(
-            gate_event_with(&gate, child, reasoning_delta(child, 0, piece)),
+            gate_event_with(&gate, child, reasoning_delta(child, /*index*/ 0, piece)),
             &mut delivered,
         );
     }
     forward(
-        gate_event_with(&gate, child, reasoning_delta(child, 1, "next")),
+        gate_event_with(&gate, child, reasoning_delta(child, /*index*/ 1, "next")),
         &mut delivered,
     );
     let aborted = |turn: &str| {
