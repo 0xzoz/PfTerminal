@@ -62,6 +62,7 @@ use codex_model_provider_info::VERCEL_GLM_5_3_FLASH_MODEL;
 use codex_model_provider_info::VERCEL_GLM_5_3_MODEL;
 use codex_model_provider_info::VERCEL_KIMI_K3_MODEL;
 use codex_model_provider_info::VERCEL_PROVIDER_ID;
+use codex_model_provider_info::ZAI_ANTHROPIC_PROVIDER_ID;
 use codex_model_provider_info::ZAI_DEFAULT_MODEL;
 use codex_model_provider_info::ZAI_PROVIDER_ID;
 #[cfg(test)]
@@ -562,6 +563,7 @@ impl ChatWidget {
             corbanu_presets.extend(fable_presets);
             presets.extend(corbanu_presets);
         }
+        let mut presets = self.with_model_route_rows(presets);
         presets.retain(|preset| self.model_catalog.preset_is_selectable(preset));
 
         // Runtime and public API catalog entries may describe the same route.
@@ -714,7 +716,7 @@ impl ChatWidget {
         }
     }
 
-    fn model_display_label_for_preset(preset: &ModelPreset) -> String {
+    pub(super) fn model_display_label_for_preset(preset: &ModelPreset) -> String {
         let display_name = preset.display_name.trim();
         if display_name.is_empty() {
             preset.model.clone()
@@ -752,7 +754,7 @@ impl ChatWidget {
                 "pfterminal-plan"
             }
             Some(KIMI_CODE_PROVIDER_ID) => "kimi-code",
-            Some(ZAI_PROVIDER_ID) => "zai",
+            Some(ZAI_PROVIDER_ID | ZAI_ANTHROPIC_PROVIDER_ID) => "zai",
             Some(DEEPSEEK_PROVIDER_ID) => "deepseek",
             Some(CLAUDE_PLAN_PROVIDER_ID) => "claude-plan",
             Some(ANTHROPIC_PROVIDER_ID) => "anthropic",
@@ -1102,7 +1104,10 @@ impl ChatWidget {
             .then(|| default_effort.clone());
 
         let model_slug = preset.model.to_string();
-        let is_current_model = self.current_model() == preset.model.as_str();
+        // #653: another connection of the session's model is not the current choice.
+        let is_current_model = self.current_model() == preset.model.as_str()
+            && (codex_model_provider_info::model_routes(&preset.model).is_empty()
+                || provider.as_deref() == Some(self.config.model_provider_id.as_str()));
         let highlight_choice = match &purpose {
             ModelSelectionPurpose::SpawnAgent { .. } => spawn_default_effort,
             ModelSelectionPurpose::CodexPane { .. } => default_choice.clone(),

@@ -4664,7 +4664,13 @@ impl App {
                                     .unwrap_or_else(|| provider_id.to_string())
                             }
                         });
-                        let mut message = if let Some(provider_label) = provider_label {
+                        // #653: a model served over several connections names the one chosen.
+                        let route = provider.as_deref().and_then(|provider_id| {
+                            codex_model_provider_info::model_route(&model, provider_id)
+                        });
+                        let mut message = if let Some(route) = route {
+                            format!("Model changed to {}", route.model_label(&model_label))
+                        } else if let Some(provider_label) = provider_label {
                             format!("Model changed to {model_label} via {provider_label}")
                         } else {
                             format!("Model changed to {model_label}")
