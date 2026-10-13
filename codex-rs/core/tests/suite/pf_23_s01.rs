@@ -2445,6 +2445,98 @@ async fn issue_611_a_separate_database_folder_is_protected() -> anyhow::Result<(
     Ok(())
 }
 
+/// #650: a protected command with full access, working in a linked git
+/// worktree, cannot rewrite another worktree's folder in the shared
+/// repository folder (its `commondir`, `config.worktree` or `gitdir`, which
+/// would point the person's later git runs there at a planted config), nor
+/// move that folder aside, with the paths built at run time. Its own
+/// worktree's files stay writable. Permissive is unchanged.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_650_other_worktrees_git_folders_stay_read_only() -> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let mut wrong = Vec::new();
+    for (level, open) in [
+        (SecurityLevel::Moderate, false),
+        (SecurityLevel::Aggressive, false),
+        (SecurityLevel::Permissive, true),
+    ] {
+        let base = TempDir::new()?;
+        let x = base.path().canonicalize()?;
+        let common = x.join("main/.git");
+        std::fs::create_dir_all(common.join("hooks"))?;
+        std::fs::write(common.join("config"), "[core]\n")?;
+        for name in ["wt", "other"] {
+            let admin = common.join("worktrees").join(name);
+            std::fs::create_dir_all(&admin)?;
+            std::fs::write(admin.join("HEAD"), "ref\n")?;
+            std::fs::write(admin.join("commondir"), "../..\n")?;
+            std::fs::write(
+                admin.join("gitdir"),
+                format!("{}/.git\n", x.join(name).display()),
+            )?;
+            std::fs::create_dir_all(x.join(name))?;
+            std::fs::write(
+                x.join(name).join(".git"),
+                format!("gitdir: {}\n", admin.display()),
+            )?;
+        }
+        let other = common.join("worktrees/other");
+        let path = x.to_string_lossy().into_owned();
+        // Split inside the folder's own name: neither part names it.
+        let (head, tail) = path.split_at(path.len() - 2);
+        let command = format!(
+            "x=\"$(printf '{head}%s' {tail})\"; o=\"$x/main/.g$(printf it)/worktrees/other\"; \
+             printf /planted > \"$o/common$(printf dir)\"; \
+             printf '[core]\\n' > \"$o/config.$(printf worktree)\"; \
+             printf /planted > \"$o/git$(printf dir)\"; \
+             mv \"$o\" \"$x/moved650\"; echo x > \"$x/wt/file650\"; echo ran-650"
+        );
+        let cwd = AbsolutePathBuf::from_absolute_path(x.join("wt"))?;
+        let (test, captured) = start_turn_in(
+            None,
+            level,
+            AskForApproval::Never,
+            vec![
+                call("call-650", "shell_command", json!({ "command": command })),
+                done_step(),
+            ],
+            move |config| {
+                config.cwd = cwd.clone();
+                config
+                    .permissions
+                    .set_permission_profile(PermissionProfile::Disabled)
+                    .expect("full access");
+            },
+        )
+        .await?;
+        assert!(next_exec_approval(&test).await.is_none());
+        let requests = captured.requests();
+        let output = output_text(&requests[requests.len() - 1], "call-650");
+        // Where the folder is now (Permissive moves it).
+        let now = if other.exists() {
+            other.clone()
+        } else {
+            x.join("moved650")
+        };
+        let read = |name: &str| std::fs::read_to_string(now.join(name)).unwrap_or_default();
+        let achieved = [
+            read("commondir") != "../..\n",
+            !read("config.worktree").is_empty(),
+            !read("gitdir").starts_with(&x.to_string_lossy().into_owned()),
+            x.join("moved650").exists(),
+        ];
+        if !output.contains("ran-650") || achieved != [open; 4] || !x.join("wt/file650").exists() {
+            wrong.push(format!("{level:?}: {achieved:?}: {output}"));
+        }
+        drop(test);
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
 /// #605: with a `:minimal`-read profile the macOS platform defaults keep
 /// `/tmp` writable for temporary files. A protected command working in a git
 /// worktree below `/tmp` still cannot write the repository's hooks or the
