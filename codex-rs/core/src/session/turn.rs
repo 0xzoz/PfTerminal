@@ -1645,6 +1645,7 @@ pub(crate) fn build_prompt(
             &turn_context.session_source,
         ),
         producer: Some(turn_context.output_producer()),
+        flat_tool_names: router.flat_tool_names().clone(),
     }
 }
 
@@ -2038,7 +2039,76 @@ pub(crate) async fn built_tools(
         step_store,
         tool_suggest_candidates.as_ref(),
     ));
+    notify_omitted_tools(sess, turn_context, tool_router.omitted_tools()).await;
     (all_mcp_tools, tool_router)
+}
+
+/// Most left-out tools named in the #688 notice; the rest are counted.
+const OMITTED_TOOLS_NAMED: usize = 10;
+
+/// #688: tells the person, once per tool per session, which tools a wire
+/// without namespaces could not carry because of its tool-count limit. Review,
+/// compaction and internal sub-sessions stay quiet: their tools are the
+/// parent's, which the parent's own turns report.
+async fn notify_omitted_tools(sess: &Session, turn_context: &TurnContext, omitted: &[ToolName]) {
+    use codex_protocol::protocol::SessionSource;
+    use codex_protocol::protocol::SubAgentSource;
+    if omitted.is_empty()
+        || matches!(
+            turn_context.session_source,
+            SessionSource::Internal(_)
+                | SessionSource::SubAgent(
+                    SubAgentSource::Review
+                        | SubAgentSource::Compact
+                        | SubAgentSource::MemoryConsolidation
+                        | SubAgentSource::Other(_)
+                )
+        )
+    {
+        return;
+    }
+    let newly_omitted = sess.state.lock().await.unreported_omitted_tools(omitted);
+    if newly_omitted.is_empty() {
+        return;
+    }
+    let names: Vec<String> = newly_omitted
+        .iter()
+        .map(codex_tools::code_mode_name_for_tool_name)
+        .collect();
+    warn!(
+        omitted = names.len(),
+        first_omitted = %names[0],
+        "too many tools for a provider without namespace tools; omitting the rest"
+    );
+    sess.send_event(
+        turn_context,
+        EventMsg::Warning(WarningEvent {
+            message: omitted_tools_notice(&names),
+        }),
+    )
+    .await;
+    // Only once shown: an interrupted turn reports them again next time.
+    sess.state
+        .lock()
+        .await
+        .mark_omitted_tools_reported(newly_omitted);
+}
+
+fn omitted_tools_notice(names: &[String]) -> String {
+    let limit = crate::tools::spec_plan::MAX_TOOLS_WITHOUT_NAMESPACES;
+    let mut listed = names
+        .iter()
+        .take(OMITTED_TOOLS_NAMED)
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if names.len() > OMITTED_TOOLS_NAMED {
+        listed.push_str(&format!(" and {} more", names.len() - OMITTED_TOOLS_NAMED));
+    }
+    let count = names.len();
+    format!(
+        "Corbanu sends at most {limit} tools per request to providers without tool namespaces, so these are not offered to the model ({count}): {listed}. Turn off MCP servers or tools you don't need, or use a provider with tool namespaces (such as OpenAI), to offer them."
+    )
 }
 
 #[derive(Debug)]
