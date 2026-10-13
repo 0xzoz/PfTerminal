@@ -2362,17 +2362,20 @@ async fn v1_multi_agent_tools_reach_every_provider_without_namespace_tools() {
             "send_input_v1",
             "wait_agent_v1",
             "close_agent_v1",
+            "resume_agent_v1",
         ]);
         plan.assert_visible_lacks(&[
             MULTI_AGENT_V1_NAMESPACE,
             "spawn_agent",
             "multi_agent_v1__spawn_agent",
+            "multi_agent_v1__resume_agent",
         ]);
     }
 }
 
 /// Built-in grouped tools are kept before MCP tools when the tool-count limit
-/// leaves room for only some of them.
+/// leaves room for only some of them, even when their names sort after the
+/// MCP tools'.
 #[tokio::test]
 async fn flattened_builtin_tools_keep_their_place_before_mcp_tools() {
     let tool_runtimes = (0..200)
@@ -2386,23 +2389,51 @@ async fn flattened_builtin_tools_keep_their_place_before_mcp_tools() {
         })
         .collect();
     let router = planned_router(
-        |turn| {
-            use_zai_provider(turn);
-            set_feature(turn, Feature::SleepTool, /*enabled*/ true);
-        },
+        use_zai_provider,
         ToolPlanInputs {
             tool_runtimes,
+            extension_tool_executors: vec![Arc::new(TestNamespaceExtensionTool {
+                namespace: "zz_extension",
+                tool_name: "lookup",
+            })],
             ..ToolPlanInputs::default()
         },
     )
     .await;
     let specs = router.model_visible_specs();
     assert_eq!(specs.len(), 128);
-    assert!(specs.iter().any(|spec| spec.name() == "clock__sleep"));
+    assert!(
+        specs
+            .iter()
+            .any(|spec| spec.name() == "zz_extension__lookup")
+    );
     assert!(
         specs
             .iter()
             .any(|spec| spec.name() == "mcp__bulk__tool_000")
+    );
+}
+
+/// Memory reads stay off wires without namespaces until sending stored
+/// memories to those providers is decided (#547).
+#[tokio::test]
+async fn memory_tools_are_not_offered_without_namespace_tools() {
+    let router = planned_router(
+        use_generic_chat_provider,
+        ToolPlanInputs {
+            extension_tool_executors: vec![Arc::new(TestNamespaceExtensionTool {
+                namespace: "memories",
+                tool_name: "read",
+            })],
+            ..ToolPlanInputs::default()
+        },
+    )
+    .await;
+    assert!(
+        !router
+            .model_visible_specs()
+            .iter()
+            .any(|spec| spec.name().starts_with("memories")),
     );
 }
 

@@ -452,7 +452,7 @@ impl ModelProvider for ConfiguredModelProvider {
             }
         } else if self.info.wire_api == WireApi::Chat {
             // Chat Completions has no namespace container either. Core offers
-            // MCP tools under flat names and drops other namespaced tools.
+            // namespaced tools under flat names (#515, #547).
             ProviderCapabilities {
                 namespace_tools: false,
                 image_generation: false,

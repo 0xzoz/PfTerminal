@@ -105,6 +105,7 @@ use codex_tools::default_namespace_description;
 use codex_tools::request_user_input_available_modes;
 use codex_tools::shell_command_backend_for_features;
 use codex_tools::shell_type_for_model_and_features;
+use codex_utils_string::take_bytes_at_char_boundary;
 use futures::future::BoxFuture;
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
@@ -116,6 +117,10 @@ use tracing::warn;
 /// smallest documented limit among them (OpenAI Chat Completions rejects more
 /// than 128 tools).
 const MAX_TOOLS_WITHOUT_NAMESPACES: usize = 128;
+/// The share of a namespace's description each of its flat tools repeats.
+const MAX_FLAT_NAMESPACE_DESCRIPTION_BYTES: usize = 300;
+/// `ext/memories` tool namespace.
+const MEMORY_TOOLS_NAMESPACE: &str = "memories";
 const MULTI_AGENT_V2_NAMESPACE_DESCRIPTION: &str = "Tools for spawning and managing sub-agents.";
 const IMAGE_GEN_NAMESPACE: &str = "image_gen";
 const IMAGEGEN_TOOL_NAME: &str = "imagegen";
@@ -321,7 +326,6 @@ fn build_model_visible_specs(
     hosted_specs: Vec<ToolSpec>,
 ) -> (Vec<ToolSpec>, FlatToolNames) {
     let namespace_tools = namespace_tools_enabled(turn_context);
-    let v1_aliases = v1_plain_function_subagents_enabled(turn_context);
     let mut specs = Vec::new();
     // Without namespace support, namespaced tools are offered under flat names
     // instead of being dropped with their namespace: MCP tools (#515, #227)
@@ -343,8 +347,14 @@ fn build_model_visible_specs(
             );
             match spec {
                 ToolSpec::Namespace(namespace) if !namespace_tools => {
-                    // V1 sub-agent tools already have plain aliases here.
-                    if v1_aliases && namespace.name == MULTI_AGENT_V1_NAMESPACE {
+                    // V1 sub-agent tools have plain aliases here (`spawn_agent_v1`, ...).
+                    if namespace.name == MULTI_AGENT_V1_NAMESPACE {
+                        continue;
+                    }
+                    // Memory reads would send stored memories to providers that
+                    // never saw them; that disclosure is a product decision, so
+                    // they stay off these wires for now (#547).
+                    if namespace.name == MEMORY_TOOLS_NAMESPACE {
                         continue;
                     }
                     let Some(tool) = flat_namespace_function(namespace, &tool_name) else {
@@ -413,13 +423,18 @@ fn build_model_visible_specs(
 }
 
 /// The function a namespaced runtime offers, for a wire without namespaces.
-/// The namespace's description (an MCP server's, bounded when the spec was
-/// built) is carried into the tool's own, since the namespace is not sent.
+/// The namespace is not sent, so its description (an MCP server's, say) is
+/// carried into the tool's own, bounded per tool because every tool of the
+/// namespace repeats it.
 fn flat_namespace_function(
     namespace: ResponsesApiNamespace,
     tool_name: &ToolName,
 ) -> Option<ResponsesApiTool> {
-    let namespace_description = namespace.description.trim().to_string();
+    let namespace_description = take_bytes_at_char_boundary(
+        namespace.description.trim(),
+        MAX_FLAT_NAMESPACE_DESCRIPTION_BYTES,
+    )
+    .to_string();
     let mut tools = namespace
         .tools
         .into_iter()
@@ -1173,6 +1188,10 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
                 registry.register_trusted(multi_agent_v1_plain_function_handler(
                     CloseAgentHandler,
                     "close_agent_v1",
+                ));
+                registry.register_trusted(multi_agent_v1_plain_function_handler(
+                    ResumeAgentHandler,
+                    "resume_agent_v1",
                 ));
             }
         }
