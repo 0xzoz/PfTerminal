@@ -98,6 +98,8 @@ pub mod legacy_core {
     pub use codex_core::protect_external_agent_launch;
     // #436: "restart now" cannot bring back provider keys the broker holds.
     pub use codex_core::broker_removed_environment_keys;
+    // #625: a key the broker holds still configures its provider.
+    pub use codex_core::broker_holds_environment_key;
 
     pub mod config {
         pub use codex_core::config::*;

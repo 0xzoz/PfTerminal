@@ -177,6 +177,8 @@ fn sec_391_broker_that_cannot_start_fails_closed_and_scrubs_keys() {
     assert_eq!(std::env::var_os(&name), None);
     // #436: "restart now" learns the key is gone (names only).
     assert!(removed_environment_keys().contains(&name));
+    // #625: a broker that did not start holds nothing.
+    assert!(!holds_environment_key(&name));
     assert!(broker.unavailable_reason().is_some());
     for source in [provider_key(), held_value()] {
         let error = refusal(&broker, "https://api.z.ai/api/paas/v4", source);
@@ -613,4 +615,14 @@ async fn sec_391_managed_requirement_wins_and_is_named() {
             (true, BrokerModelAuthOrigin::Policy)
         );
     }
+}
+
+/// #625: a key the broker holds is reported as held, by name only.
+#[test]
+fn sec_625_held_environment_keys_are_reported_by_name() {
+    let name = format!("SEC625_HELD_KEY_{}", std::process::id());
+    assert!(!holds_environment_key(&name));
+    note_held_env_keys(std::slice::from_ref(&name));
+    assert!(holds_environment_key(&name));
+    assert!(!holds_environment_key(&format!("{name}_OTHER")));
 }

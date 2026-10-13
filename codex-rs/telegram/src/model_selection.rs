@@ -257,7 +257,9 @@ fn provider_credential_present(config: &Config, env_key: &str) -> bool {
     let from_env = std::env::var(env_key)
         .ok()
         .is_some_and(|value| !value.trim().is_empty());
-    if from_env {
+    // #625: under broker_model_auth the credential broker took the key out
+    // of the environment; it still sends this provider's requests with it.
+    if from_env || codex_core::broker_holds_environment_key(env_key) {
         return true;
     }
 
