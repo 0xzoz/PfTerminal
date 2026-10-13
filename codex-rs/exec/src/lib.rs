@@ -1116,7 +1116,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
         let mut error_seen = false;
         let mut interrupt_channel_open = true;
         let primary_thread_id_for_requests = primary_thread_id.to_string();
-        let mut panic_stall = panic_watch::PanicStallWatch::new(
+        let panic_stall = panic_watch::PanicStallWatch::new(
             &panic_watch::PROCESS_PANICS,
             panic_watch::PANIC_STALL_TIMEOUT,
         );
@@ -1166,7 +1166,6 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                 }
                 maybe_event = client.next_event() => maybe_event,
             };
-            panic_stall.progress();
 
             let Some(server_event) = server_event else {
                 break;

@@ -10446,7 +10446,14 @@ async fn a_panicking_task_fails_its_turn_instead_of_leaving_it_running() {
         format!("Fatal error: {}", crate::tasks::TURN_PANICKED_MESSAGE)
     );
     let _ = recv_terminal_event(&rx, TerminalEventKind::TurnComplete).await;
-    assert!(sess.active_turn.lock().await.is_none());
+    // The turn is cleared just after TurnComplete is sent.
+    timeout(Duration::from_secs(2), async {
+        while sess.active_turn.lock().await.is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the finished turn is cleared");
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

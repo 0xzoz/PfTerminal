@@ -88,8 +88,8 @@ impl AbsolutePathBuf {
     /// When the working directory cannot be resolved (it was removed, or the
     /// OS revoked access to the volume holding it, #616), this returns the
     /// working directory most recently resolved through this function, and
-    /// before any such resolution the filesystem root (the temp directory on
-    /// Windows). Use it only where a usable directory is required and a panic
+    /// before any such resolution the filesystem root (the system drive's
+    /// root on Windows). Use it only where a usable directory is required and a panic
     /// or an error would be worse than a stable fallback.
     pub fn current_dir_or_last_known() -> Self {
         static LAST_KNOWN: Mutex<Option<AbsolutePathBuf>> = Mutex::new(None);
@@ -112,9 +112,20 @@ impl AbsolutePathBuf {
         }
     }
 
+    /// The filesystem root; on Windows the system drive's root (`C:\` when
+    /// `SystemDrive` is unset or not a drive).
     fn unresolvable_cwd_fallback() -> Self {
         let root = if cfg!(windows) {
-            std::env::temp_dir()
+            std::env::var("SystemDrive")
+                .ok()
+                .filter(|drive| {
+                    let drive = drive.as_bytes();
+                    drive.len() == 2 && drive[0].is_ascii_alphabetic() && drive[1] == b':'
+                })
+                .map_or_else(
+                    || PathBuf::from(r"C:\"),
+                    |drive| PathBuf::from(format!(r"{drive}\")),
+                )
         } else {
             PathBuf::from("/")
         };
