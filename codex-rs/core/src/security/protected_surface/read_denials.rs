@@ -649,6 +649,12 @@ impl ReadDenials {
         self.never_lifted_paths().chain(&self.read_only)
     }
 
+    /// #584: the read-only paths an Aggressive grant lifts (start-up files,
+    /// git hooks and config): every read-only path but those no grant lifts.
+    pub(crate) fn liftable_read_only_paths(&self) -> impl Iterator<Item = &AbsolutePathBuf> {
+        self.read_only.iter()
+    }
+
     /// Issue #513: the Corbanu home's runtime entries (`tmp` holds the
     /// sandbox launchers), read-only wherever the rules apply.
     pub(crate) fn runtime_read_only_paths(&self) -> impl Iterator<Item = &AbsolutePathBuf> {
