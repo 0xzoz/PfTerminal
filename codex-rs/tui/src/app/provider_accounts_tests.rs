@@ -71,7 +71,8 @@ async fn one_session_selection_covers_one_provider() {
 
     // Back to the default account, then another provider is free.
     assert_eq!(
-        app.select_session_provider_account("zai", None).await,
+        app.select_session_provider_account("zai", /*name*/ None)
+            .await,
         Ok(Some("zai:work".to_string()))
     );
     assert_eq!(session_account(&app, "zai"), None);
@@ -114,7 +115,7 @@ async fn a_default_set_by_a_higher_layer_is_reported() {
         toml::Value::String("work".to_string()),
     ));
     let error = app
-        .persist_default_provider_account("zai", None)
+        .persist_default_provider_account("zai", /*name*/ None)
         .await
         .expect_err("outranked");
     assert!(error.contains("another config layer"), "{error}");
@@ -298,7 +299,7 @@ fn only_a_sign_in_account_change_is_a_switch() {
         "Connectors, usage and the model list now use openai account `work`; model list refreshed."
     );
     assert_eq!(
-        account_switch_message(None),
+        account_switch_message(/*account*/ None),
         "Connectors, usage and the model list now use the default account; model list refreshed."
     );
 }

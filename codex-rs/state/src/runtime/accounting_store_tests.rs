@@ -956,7 +956,7 @@ async fn accounting_deleted_attempts_count_only_what_retention_cannot_explain() 
             scan_rows: 1,
         };
         assert_eq!(
-            scope::deleted_attempts(&mut conn, 150, ahead, &mut work).await,
+            scope::deleted_attempts(&mut conn, /*day*/ 150, ahead, &mut work).await,
             DeletedAttempts::Unread
         );
     }
@@ -1507,7 +1507,7 @@ async fn accounting_inspect_range_states_day_page_retention_floor() -> anyhow::R
     a.dispatched_at_ms = time.try_into()?;
     store.admit(a.thread_id, &a, &[snapshot()], time).await?;
     store
-        .observe(a.thread_id, &a, &[row(/*id*/ 1)], time)
+        .observe(a.thread_id, &a, &[row(/*revision*/ 1)], time)
         .await?;
     let floor = inspection(inspected(&runtime, /*day*/ 400, time).await?)
         .coverage

@@ -62,6 +62,7 @@ use codex_model_provider_info::VERCEL_GLM_5_3_FLASH_MODEL;
 use codex_model_provider_info::VERCEL_GLM_5_3_MODEL;
 use codex_model_provider_info::VERCEL_KIMI_K3_MODEL;
 use codex_model_provider_info::VERCEL_PROVIDER_ID;
+use codex_model_provider_info::ZAI_ANTHROPIC_PROVIDER_ID;
 use codex_model_provider_info::ZAI_DEFAULT_MODEL;
 use codex_model_provider_info::ZAI_PROVIDER_ID;
 #[cfg(test)]
@@ -562,6 +563,7 @@ impl ChatWidget {
             corbanu_presets.extend(fable_presets);
             presets.extend(corbanu_presets);
         }
+        let mut presets = self.with_model_route_rows(presets);
         presets.retain(|preset| self.model_catalog.preset_is_selectable(preset));
 
         // Runtime and public API catalog entries may describe the same route.
@@ -583,10 +585,19 @@ impl ChatWidget {
             return;
         }
 
+        // #653: a default model's other connections stay next to it.
+        let default_route_models = presets
+            .iter()
+            .filter(|preset| {
+                preset.is_default
+                    && !codex_model_provider_info::model_routes(&preset.model).is_empty()
+            })
+            .map(|preset| preset.model.clone())
+            .collect::<HashSet<_>>();
         let mut provider_items = MODEL_PICKER_PROVIDER_GROUPS
             .into_iter()
             .map(|group| (group, Vec::new()))
-            .collect::<Vec<(ModelPickerProviderGroup, Vec<SelectionItem>)>>();
+            .collect::<Vec<(ModelPickerProviderGroup, Vec<(bool, SelectionItem)>)>>();
         for preset in presets.into_iter() {
             let provider = preset
                 .provider_id
@@ -601,11 +612,16 @@ impl ChatWidget {
             else {
                 continue;
             };
-            items.push(self.model_picker_item(preset, purpose.clone()));
+            let leads = preset.is_default || default_route_models.contains(&preset.model);
+            items.push((leads, self.model_picker_item(preset, purpose.clone())));
         }
-        for (_, items) in &mut provider_items {
-            items.sort_by_key(|item| !item.is_default);
-        }
+        let mut provider_items = provider_items
+            .into_iter()
+            .map(|(group, mut items)| {
+                items.sort_by_key(|(leads, _)| !leads);
+                (group, items.into_iter().map(|(_, item)| item).collect())
+            })
+            .collect::<Vec<(ModelPickerProviderGroup, Vec<SelectionItem>)>>();
         provider_items.retain(|(_, items)| !items.is_empty());
 
         let (items, tabs, initial_tab_id, footer_hint) = if provider_items.len() > 1 {
@@ -714,7 +730,7 @@ impl ChatWidget {
         }
     }
 
-    fn model_display_label_for_preset(preset: &ModelPreset) -> String {
+    pub(super) fn model_display_label_for_preset(preset: &ModelPreset) -> String {
         let display_name = preset.display_name.trim();
         if display_name.is_empty() {
             preset.model.clone()
@@ -752,7 +768,7 @@ impl ChatWidget {
                 "pfterminal-plan"
             }
             Some(KIMI_CODE_PROVIDER_ID) => "kimi-code",
-            Some(ZAI_PROVIDER_ID) => "zai",
+            Some(ZAI_PROVIDER_ID | ZAI_ANTHROPIC_PROVIDER_ID) => "zai",
             Some(DEEPSEEK_PROVIDER_ID) => "deepseek",
             Some(CLAUDE_PLAN_PROVIDER_ID) => "claude-plan",
             Some(ANTHROPIC_PROVIDER_ID) => "anthropic",
@@ -1102,11 +1118,16 @@ impl ChatWidget {
             .then(|| default_effort.clone());
 
         let model_slug = preset.model.to_string();
-        let is_current_model = self.current_model() == preset.model.as_str();
+        let is_session_model = self.current_model() == preset.model.as_str();
+        // #653: another connection of the session's model keeps its effort
+        // highlighted but is not the current choice.
+        let is_current_model = is_session_model
+            && (codex_model_provider_info::model_routes(&preset.model).is_empty()
+                || provider.as_deref() == Some(self.config.model_provider_id.as_str()));
         let highlight_choice = match &purpose {
             ModelSelectionPurpose::SpawnAgent { .. } => spawn_default_effort,
             ModelSelectionPurpose::CodexPane { .. } => default_choice.clone(),
-            ModelSelectionPurpose::Session if is_current_model => {
+            ModelSelectionPurpose::Session if is_session_model => {
                 if in_plan_mode {
                     self.config
                         .plan_mode_reasoning_effort
@@ -1123,7 +1144,20 @@ impl ChatWidget {
         let selection_choice = highlight_choice.clone().or_else(|| default_choice.clone());
         let initial_selected_idx = choices
             .iter()
-            .position(|choice| Some(choice) == selection_choice.as_ref());
+            .position(|choice| Some(choice) == selection_choice.as_ref())
+            .or_else(|| {
+                // #653: another connection of the session's model keeps an
+                // advanced effort (the session's, or the model default it runs
+                // on) preselected under "More reasoning…", which follows the
+                // standard choices.
+                (is_session_model
+                    && !is_current_model
+                    && !advanced_choices.is_empty()
+                    && Self::is_advanced_reasoning_effort(
+                        highlight_choice.as_ref().unwrap_or(&default_effort),
+                    ))
+                .then_some(choices.len())
+            });
         let mut items: Vec<SelectionItem> = Vec::new();
         for choice in choices.iter() {
             let effort = choice.clone();
@@ -1325,6 +1359,9 @@ impl ChatWidget {
         let highlight_choice = is_current_model
             .then(|| self.effective_reasoning_effort())
             .flatten();
+        // #653: another connection of the session's model is not the current choice.
+        let is_current_route = codex_model_provider_info::model_routes(&model_slug).is_empty()
+            || provider.as_deref() == Some(self.config.model_provider_id.as_str());
         let mut items = Vec::new();
         for effort in choices {
             let description = match &effort {
@@ -1379,7 +1416,9 @@ impl ChatWidget {
             items.push(SelectionItem {
                 name: Self::reasoning_effort_label(&effort),
                 description: Some(description.to_string()),
-                is_current: is_current_model && Some(&effort) == highlight_choice.as_ref(),
+                is_current: is_current_model
+                    && is_current_route
+                    && Some(&effort) == highlight_choice.as_ref(),
                 actions,
                 dismiss_on_select: true,
                 ..Default::default()

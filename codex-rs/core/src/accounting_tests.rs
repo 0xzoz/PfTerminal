@@ -472,6 +472,10 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> anyhow::Result<Self> {
+        Self::with_endpoint(ENDPOINT).await
+    }
+
+    async fn with_endpoint(endpoint: &str) -> anyhow::Result<Self> {
         let home = tempfile::tempdir()?;
         let db = StateRuntime::init(
             SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(home.path().to_path_buf())?),
@@ -492,7 +496,7 @@ impl Fixture {
             "turn".into(),
             &AccountingMode::DirectAnthropic {
                 scope: Uuid::new_v4(),
-                approved_endpoint: ENDPOINT.into(),
+                approved_endpoint: endpoint.into(),
             },
         )
         .await?;
@@ -834,6 +838,66 @@ async fn accounting_admission_failure_and_route_mismatch_serve_the_request_unrec
         );
         assert!(fixture.sampling.is_closed());
     }
+    Ok(())
+}
+
+/// #654: under Aggressive the credential broker serves model requests, and
+/// each reaches the transport rewritten to the broker's plain-HTTP URL. Every
+/// such request is recorded against the approved HTTPS route, as it is when
+/// the request goes out directly.
+#[tokio::test]
+async fn issue_654_brokered_requests_are_all_recorded() -> anyhow::Result<()> {
+    const PROVIDER: &str = "https://api.z.ai/api/anthropic/v1";
+    let fixture = Fixture::with_endpoint(PROVIDER).await?;
+    let sends = Arc::new(AtomicUsize::new(0));
+    let requests = 3;
+    for _ in 0..requests {
+        let brokered = crate::model_broker_auth::rewritten_for_broker_in_tests(Request {
+            url: format!("{PROVIDER}/messages"),
+            ..request()
+        });
+        assert!(brokered.url.starts_with("http://api.z.ai:443/"));
+        AccountingTransport::new(
+            Probe {
+                sends: sends.clone(),
+                fail_first: false,
+            },
+            Some(ResponseEvidence::new(fixture.sampling.clone())),
+            "glm-5.3-flash".into(),
+        )
+        .stream(brokered)
+        .await?;
+    }
+    assert_eq!(
+        (
+            sends.load(Ordering::SeqCst),
+            fixture.attempts().await?.len()
+        ),
+        (requests, requests),
+        "every request the broker served is recorded"
+    );
+    assert!(!fixture.sampling.is_closed());
+
+    // A brokered request to another route is still not attributed to this one.
+    let other = Fixture::with_endpoint(PROVIDER).await?;
+    let transport = AccountingTransport::new(
+        Probe {
+            sends: sends.clone(),
+            fail_first: false,
+        },
+        Some(ResponseEvidence::new(other.sampling.clone())),
+        "glm-5.3-flash".into(),
+    );
+    transport
+        .stream(crate::model_broker_auth::rewritten_for_broker_in_tests(
+            Request {
+                url: "https://api.z.ai:8443/api/anthropic/v1/messages".into(),
+                ..request()
+            },
+        ))
+        .await?;
+    assert_eq!(other.attempts().await?.len(), 0);
+    assert!(other.sampling.is_closed());
     Ok(())
 }
 

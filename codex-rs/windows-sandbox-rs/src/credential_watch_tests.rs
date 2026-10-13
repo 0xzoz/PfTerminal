@@ -291,18 +291,26 @@ fn lost_changes_rescan_by_identity_and_failures_stop() {
     )]
     .into_iter()
     .collect();
-    assert_eq!(must_stop(Change::Lost, &known, &names, None), None);
+    assert_eq!(
+        must_stop(Change::Lost, &known, &names, /*max_depth*/ None),
+        None
+    );
     std::fs::write(work.join("save.tmp"), "API_KEY=new").unwrap();
     std::fs::rename(work.join("save.tmp"), work.join(".env")).unwrap();
     assert!(
-        must_stop(Change::Lost, &known, &names, None)
+        must_stop(Change::Lost, &known, &names, /*max_depth*/ None)
             .expect("stopped")
             .ends_with(".env")
     );
     assert!(
-        must_stop(Change::Failed("boom".to_string()), &known, &names, None)
-            .expect("stopped")
-            .contains("the watch failed")
+        must_stop(
+            Change::Failed("boom".to_string()),
+            &known,
+            &names,
+            /*max_depth*/ None
+        )
+        .expect("stopped")
+        .contains("the watch failed")
     );
 }
 
@@ -311,7 +319,11 @@ fn lost_changes_rescan_by_identity_and_failures_stop() {
 fn stopped_output_reports_the_stop() {
     let mut stderr = b"partial".to_vec();
     assert_eq!(
-        stopped_output(Some("C:/w/.env".to_string()), 0, &mut stderr),
+        stopped_output(
+            Some("C:/w/.env".to_string()),
+            /*exit_code*/ 0,
+            &mut stderr
+        ),
         1
     );
     let text = String::from_utf8(stderr).unwrap();
@@ -321,9 +333,15 @@ fn stopped_output_reports_the_stop() {
     );
     assert!(text.contains("(C:/w/.env) appeared while it ran"), "{text}");
     let mut untouched = b"out".to_vec();
-    assert_eq!(stopped_output(None, 0, &mut untouched), 0);
+    assert_eq!(
+        stopped_output(/*found*/ None, /*exit_code*/ 0, &mut untouched),
+        0
+    );
     assert_eq!(untouched, b"out");
-    assert_eq!(stopped_output(Some("x".to_string()), 7, &mut Vec::new()), 7);
+    assert_eq!(
+        stopped_output(Some("x".to_string()), /*exit_code*/ 7, &mut Vec::new()),
+        7
+    );
 }
 
 /// On Windows paths match in any letter case: a denied file named with
@@ -358,9 +376,13 @@ fn notify_records_are_parsed_and_malformed_ones_are_lost() {
         }
         bytes
     }
-    let first = record(0, 1, "app\\.env");
-    let mut both = record(u32::try_from(first.len()).unwrap(), 1, "app\\.env");
-    both.extend(record(0, 5, ".envrc"));
+    let first = record(/*next*/ 0, /*action*/ 1, "app\\.env");
+    let mut both = record(
+        u32::try_from(first.len()).unwrap(),
+        /*action*/ 1,
+        "app\\.env",
+    );
+    both.extend(record(/*next*/ 0, /*action*/ 5, ".envrc"));
     assert_eq!(
         parse_notify_entries(&both),
         Some(vec![
@@ -370,7 +392,7 @@ fn notify_records_are_parsed_and_malformed_ones_are_lost() {
     );
     assert_eq!(parse_notify_entries(&first[..first.len() - 4]), None);
     assert_eq!(parse_notify_entries(&first[..6]), None);
-    let past_end = record(4096, 1, ".env");
+    let past_end = record(/*next*/ 4096, /*action*/ 1, ".env");
     assert_eq!(parse_notify_entries(&past_end), None);
 }
 
@@ -385,7 +407,7 @@ fn a_file_at_a_denied_path_that_was_missing_is_new() {
         [(key(&work.join(".env")), None)].into_iter().collect();
     std::fs::write(work.join(".env"), "API_KEY=dummy").unwrap();
     assert!(
-        must_stop(Change::Lost, &known, &names, None)
+        must_stop(Change::Lost, &known, &names, /*max_depth*/ None)
             .expect("stopped")
             .ends_with(".env")
     );

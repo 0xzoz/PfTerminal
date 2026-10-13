@@ -6924,7 +6924,7 @@ async fn tui_aggressive_spawn_account_switch_asks_the_human() {
         ("Allow once", (Ok(()), vec![Some("zai:work".to_string())], true)),
     ] {
         let home = tempfile::tempdir().expect("home");
-        let permissions = tui_aggressive_permissions(home.path(), true, true).await;
+        let permissions = tui_aggressive_permissions(home.path(), /*profile*/ true, /*marker*/ true).await;
         let outcome = spawn_with_account_answering(
             /*named_accounts*/ true,
             |config, turn| {

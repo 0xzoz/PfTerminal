@@ -272,7 +272,7 @@ command = "docs-mcp"
     );
     let flags = layer(
         "launch flags",
-        None,
+        /*path*/ None,
         r#"permissions.p.filesystem."/x/secrets" = "deny""#,
     );
     let mut sources = fixture.sources();
@@ -643,7 +643,7 @@ fn pf_29_s01_credential_store_modes_are_not_secrets() {
     let system_path = fixture.root.path().join("etc/codex/config.toml");
     let flags = layer(
         "launch flags",
-        None,
+        /*path*/ None,
         r#"cli_auth_credentials_store = "file""#,
     );
     let system = layer(
@@ -674,7 +674,7 @@ model_auto_compact_token_limit_scope = "body_after_prefix"
         &format!(r#"shell_environment_policy.set.DEPLOY_TOKEN = "{FAKE_CORE_VALUE}""#),
     ] {
         let mut sources = fixture.sources();
-        sources.config_layers = vec![layer("launch flags", None, flag)];
+        sources.config_layers = vec![layer("launch flags", /*path*/ None, flag)];
         assert!(!fixture.run(&sources).is_clean(), "{flag}");
     }
 }

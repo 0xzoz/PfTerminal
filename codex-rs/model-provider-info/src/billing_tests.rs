@@ -76,7 +76,10 @@ fn basis_does_not_follow_the_auth_type() {
     );
     // An environment API key does not make Kimi Code pay per use (the Blocker).
     let kimi = &providers[KIMI_CODE_PROVIDER_ID];
-    assert_eq!(BillingCredential::of(kimi, None), BillingCredential::ApiKey);
+    assert_eq!(
+        BillingCredential::of(kimi, /*auth_mode*/ None),
+        BillingCredential::ApiKey
+    );
     assert_eq!(
         declared(KIMI_CODE_PROVIDER_ID, kimi, Some(AuthMode::ApiKey)),
         BillingDeclaration::BuiltIn(Subscription)
@@ -121,7 +124,7 @@ fn basis_does_not_follow_the_auth_type() {
             declared_billing(
                 AMAZON_BEDROCK_PROVIDER_ID,
                 provider,
-                BillingCredential::of(provider, None),
+                BillingCredential::of(provider, /*auth_mode*/ None),
                 "https://bedrock-mantle.us-east-1.api.aws/openai/v1",
                 /*at_built_in_route*/ false,
             ),
@@ -185,7 +188,7 @@ fn custom_providers_follow_their_route() {
         declared_billing(
             "custom",
             &custom,
-            BillingCredential::of(&custom, None),
+            BillingCredential::of(&custom, /*auth_mode*/ None),
             endpoint,
             /*at_built_in_route*/ false,
         )

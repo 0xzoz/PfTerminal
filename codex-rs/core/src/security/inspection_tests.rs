@@ -74,11 +74,26 @@ fn pf_41_s01_live_tree_reports_levels_children_and_generation() {
     let facts = observe(home.path(), SecurityLevel::Permissive, Some(root), NOW);
 
     let mut children = vec![
-        agent(same, 1, SecurityLevel::Moderate, false),
-        agent(stricter, 1, SecurityLevel::Aggressive, true),
+        agent(
+            same,
+            /*depth*/ 1,
+            SecurityLevel::Moderate,
+            /*stricter*/ false,
+        ),
+        agent(
+            stricter,
+            /*depth*/ 1,
+            SecurityLevel::Aggressive,
+            /*stricter*/ true,
+        ),
     ];
     children.sort_by_key(|agent| agent.thread.to_string());
-    let mut agents = vec![agent(root, 0, SecurityLevel::Moderate, false)];
+    let mut agents = vec![agent(
+        root,
+        /*depth*/ 0,
+        SecurityLevel::Moderate,
+        /*stricter*/ false,
+    )];
     agents.extend(children);
     assert_eq!(
         facts.policy,

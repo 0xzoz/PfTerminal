@@ -219,7 +219,7 @@ pub(crate) mod test_support {
         let broker = Arc::new(RecordingBroker::default());
         super::set_test_model_key_broker(Some(broker.clone()));
         let result = test(&broker);
-        super::set_test_model_key_broker(None);
+        super::set_test_model_key_broker(/*broker*/ None);
         result
     }
 }

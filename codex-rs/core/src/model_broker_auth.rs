@@ -1009,6 +1009,52 @@ impl codex_http_client::ModelBrokerSender for PipeSender {
     }
 }
 
+/// #654: the HTTPS URL the broker requests for a frame-bearing `request`
+/// (the inverse of [`BrokerRewrite::for_url`]), or `None` when `request` is
+/// not brokered or its URL is not one [`broker_request`] produces.
+///
+/// The HTTP transport sends a frame-bearing request only to the broker, which
+/// performs it against the HTTPS origin and path the frame signs, so this is
+/// the route the provider serves. Developer accounting compares it, not the
+/// rewritten plain-HTTP URL, with the turn's approved route.
+pub(crate) fn brokered_target_url(request: &Request) -> Option<String> {
+    if !request
+        .headers
+        .contains_key(codex_http_client::MODEL_BROKER_FRAME_HEADER)
+    {
+        return None;
+    }
+    let mut url = url::Url::parse(&request.url).ok()?;
+    if url.scheme() != "http"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    match url.host()? {
+        url::Host::Domain(_) | url::Host::Ipv4(_) => {}
+        url::Host::Ipv6(_) => return None,
+    }
+    let port = url.port_or_known_default()?;
+    url.set_scheme("https").ok()?;
+    url.set_port(Some(port)).ok()?;
+    Some(url.to_string())
+}
+
+/// `request` as [`broker_request`] hands it to the transport, with a
+/// placeholder frame: for tests of what sees brokered requests afterwards.
+#[cfg(test)]
+pub(crate) fn rewritten_for_broker_in_tests(mut request: Request) -> Request {
+    let rewrite = BrokerRewrite::for_url(&request.url).expect("brokerable test URL");
+    request.headers.insert(
+        codex_http_client::MODEL_BROKER_FRAME_HEADER,
+        http::HeaderValue::from_static("test-frame"),
+    );
+    request.url = rewrite.broker_url;
+    request
+}
+
 /// PF-27-S09: the `Host` value and origin-form target of a brokered request
 /// URL (`http://host:port/path?query`, as [`broker_request`] rewrote it).
 /// `None` for anything else, including a URL with user info, which the pipe

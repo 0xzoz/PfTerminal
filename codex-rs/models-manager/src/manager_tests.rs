@@ -3070,7 +3070,11 @@ fn glm_5_3_flash_routes_use_standard_base_with_work_pattern() {
 #[tokio::test]
 async fn load_cached_list_needs_a_usable_cache() {
     let codex_home = tempdir().expect("temp dir");
-    let endpoint = TestModelsEndpoint::new(vec![vec![remote_model("cached-model", "Cached", 1)]]);
+    let endpoint = TestModelsEndpoint::new(vec![vec![remote_model(
+        "cached-model",
+        "Cached",
+        /*priority*/ 1,
+    )]]);
     let manager = openai_manager_for_tests(codex_home.path().to_path_buf(), endpoint.clone());
     assert!(!manager.load_cached_list().await, "no cache yet");
 

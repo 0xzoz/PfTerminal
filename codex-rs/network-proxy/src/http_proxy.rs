@@ -1290,13 +1290,15 @@ mod tests {
         // Flag off: today's behaviour (local binding plus a literal allowlist entry).
         for authority in ["93.184.216.34:8443", "127.0.0.1:443"] {
             let host = authority.split(':').next().unwrap();
-            let response = pf_33_s01_connect(pf_33_s01_policy(host, false), authority).await;
+            let response =
+                pf_33_s01_connect(pf_33_s01_policy(host, /*guard*/ false), authority).await;
             assert_eq!(response.status(), StatusCode::OK, "{authority}");
         }
         // Flag on: HTTPS port only, and local binding is not a private grant.
         for authority in ["93.184.216.34:8443", "127.0.0.1:443"] {
             let host = authority.split(':').next().unwrap();
-            let response = pf_33_s01_connect(pf_33_s01_policy(host, true), authority).await;
+            let response =
+                pf_33_s01_connect(pf_33_s01_policy(host, /*guard*/ true), authority).await;
             assert!(
                 pf_33_s01_blocked_by_destination_policy(&response),
                 "{authority}"
@@ -1304,7 +1306,7 @@ mod tests {
         }
         // An allowed tunnel is always intercepted under the guard; without MITM
         // state it fails closed instead of passing through unchecked.
-        let state = pf_33_s01_policy("93.184.216.34", true);
+        let state = pf_33_s01_policy("93.184.216.34", /*guard*/ true);
         let response = pf_33_s01_connect(state.clone(), "93.184.216.34:443").await;
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         assert_eq!(
@@ -1312,7 +1314,7 @@ mod tests {
             "blocked-by-mitm-required"
         );
         let response = pf_33_s01_connect(
-            pf_33_s01_policy("93.184.216.34", false),
+            pf_33_s01_policy("93.184.216.34", /*guard*/ false),
             "93.184.216.34:443",
         )
         .await;
@@ -1321,7 +1323,7 @@ mod tests {
 
     #[tokio::test]
     async fn pf_33_s01_plain_http_is_refused_under_the_guard() {
-        let state = pf_33_s01_policy("93.184.216.34", true);
+        let state = pf_33_s01_policy("93.184.216.34", /*guard*/ true);
         let mut req = Request::builder()
             .method(Method::GET)
             .uri("http://93.184.216.34/")

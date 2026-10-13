@@ -658,7 +658,7 @@ mod tests {
         let mut client_session = fixture.session.services.model_client().new_session();
         let metadata = fixture.metadata();
         let prompt = Prompt {
-            input: vec![message("user", "compact this", None)],
+            input: vec![message("user", "compact this", /*phase*/ None)],
             ..Default::default()
         };
         let mut attempt = async || match run_remote_compaction_request_v2(

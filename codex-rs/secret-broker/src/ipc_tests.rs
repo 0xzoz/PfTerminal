@@ -323,16 +323,39 @@ fn pf_33_s02_provider_frame_carries_authenticated_pins() {
 fn sec_390_pipe_peer_proof_binds_key_challenge_and_both_processes() {
     let mac = BrokerChannelMac::from_secret(KEY);
     let challenge = [3_u8; PIPE_CHALLENGE_BYTES];
-    let proof = mac.pipe_peer_proof(&challenge, 10, 20);
+    let proof = mac.pipe_peer_proof(&challenge, /*client_pid*/ 10, /*server_pid*/ 20);
     assert_eq!(proof.len(), PIPE_PROOF_BYTES);
-    assert!(mac.verify_pipe_peer_proof(&challenge, 10, 20, &proof));
+    assert!(mac.verify_pipe_peer_proof(
+        &challenge, /*client_pid*/ 10, /*server_pid*/ 20, &proof
+    ));
 
     let other_key = BrokerChannelMac::from_secret([8; 32]);
-    assert!(!other_key.verify_pipe_peer_proof(&challenge, 10, 20, &proof));
-    assert!(!mac.verify_pipe_peer_proof(&[4; PIPE_CHALLENGE_BYTES], 10, 20, &proof));
+    assert!(!other_key.verify_pipe_peer_proof(
+        &challenge, /*client_pid*/ 10, /*server_pid*/ 20, &proof
+    ));
+    assert!(!mac.verify_pipe_peer_proof(
+        &[4; PIPE_CHALLENGE_BYTES],
+        /*client_pid*/ 10,
+        /*server_pid*/ 20,
+        &proof
+    ));
     // A relaying process is the broker's client, so the ids differ.
-    assert!(!mac.verify_pipe_peer_proof(&challenge, 11, 20, &proof));
-    assert!(!mac.verify_pipe_peer_proof(&challenge, 10, 21, &proof));
-    assert!(!mac.verify_pipe_peer_proof(&challenge, 10, 20, &proof[..31]));
-    assert!(!mac.verify_pipe_peer_proof(&challenge, 10, 20, &[]));
+    assert!(!mac.verify_pipe_peer_proof(
+        &challenge, /*client_pid*/ 11, /*server_pid*/ 20, &proof
+    ));
+    assert!(!mac.verify_pipe_peer_proof(
+        &challenge, /*client_pid*/ 10, /*server_pid*/ 21, &proof
+    ));
+    assert!(!mac.verify_pipe_peer_proof(
+        &challenge,
+        /*client_pid*/ 10,
+        /*server_pid*/ 20,
+        &proof[..31]
+    ));
+    assert!(!mac.verify_pipe_peer_proof(
+        &challenge,
+        /*client_pid*/ 10,
+        /*server_pid*/ 20,
+        &[]
+    ));
 }

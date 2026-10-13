@@ -2170,7 +2170,8 @@ async fn stored_openai_login_takes_precedence_over_openai_api_key_env() {
     )
     .expect("seed api key");
 
-    let manager = manager_with_openai_api_key_env(codex_home.path(), true).await;
+    let manager =
+        manager_with_openai_api_key_env(codex_home.path(), /*enable_codex_api_key_env*/ true).await;
     let auth = manager.auth_cached().expect("stored auth should load");
 
     assert_eq!(auth.api_key(), Some("sk-stored"));
@@ -2187,7 +2188,8 @@ async fn codex_api_key_env_takes_precedence_over_openai_api_key_env() {
     let _codex_api_key_guard = EnvVarGuard::set(CODEX_API_KEY_ENV_VAR, "sk-codex-env");
     let _openai_api_key_guard = EnvVarGuard::set(OPENAI_API_KEY_ENV_VAR, "sk-openai-env");
 
-    let manager = manager_with_openai_api_key_env(codex_home.path(), true).await;
+    let manager =
+        manager_with_openai_api_key_env(codex_home.path(), /*enable_codex_api_key_env*/ true).await;
     let auth = manager.auth_cached().expect("CODEX_API_KEY should load");
 
     assert_eq!(auth.api_key(), Some("sk-codex-env"));
@@ -2264,7 +2266,11 @@ async fn shared_from_config_reads_openai_api_key_env_unless_chatgpt_login_is_req
         AuthCredentialsStoreMode::File,
         AuthCredentialsStoreMode::Ephemeral,
     ] {
-        let manager = AuthManager::shared_from_config(&config(None, mode), false).await;
+        let manager = AuthManager::shared_from_config(
+            &config(None, mode),
+            /*enable_codex_api_key_env*/ false,
+        )
+        .await;
         assert!(manager.openai_api_key_env_enabled());
         assert_eq!(
             manager
@@ -2279,7 +2285,7 @@ async fn shared_from_config_reads_openai_api_key_env_unless_chatgpt_login_is_req
             Some(ForcedLoginMethod::Chatgpt),
             AuthCredentialsStoreMode::File,
         ),
-        true,
+        /*enable_codex_api_key_env*/ true,
     )
     .await;
     assert!(!forced.openai_api_key_env_enabled());
@@ -2288,7 +2294,7 @@ async fn shared_from_config_reads_openai_api_key_env_unless_chatgpt_login_is_req
     // Plain constructors (cloud tasks, cloud config) don't read it.
     let plain = AuthManager::new(
         codex_home.path().to_path_buf(),
-        false,
+        /*enable_codex_api_key_env*/ false,
         AuthCredentialsStoreMode::File,
         /*forced_chatgpt_workspace_id*/ None,
         /*chatgpt_base_url*/ None,

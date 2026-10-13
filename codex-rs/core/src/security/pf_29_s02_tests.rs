@@ -253,7 +253,13 @@ fn pf_29_s02_every_interruption_recovers_to_the_same_result_and_locks_until_then
         assert!(!locked.is_clean());
         // A second migration cannot start over the unfinished one.
         assert_eq!(
-            run(&machine.corbanu(), &machine.plan(), &vault, None).err(),
+            run(
+                &machine.corbanu(),
+                &machine.plan(),
+                &vault,
+                /*fail_at*/ None
+            )
+            .err(),
             Some(MigrationError::InProgress)
         );
 
@@ -320,9 +326,14 @@ fn pf_29_s02_store_failure_changes_no_file_and_recovers_later() {
     let before = machine.read(&machine.zshrc());
     let vault = FakeVault::default();
     vault.fail_puts.set(true);
-    let err = run(&machine.corbanu(), &machine.plan(), &vault, None)
-        .err()
-        .unwrap_or_else(|| panic!("store failure ignored"));
+    let err = run(
+        &machine.corbanu(),
+        &machine.plan(),
+        &vault,
+        /*fail_at*/ None,
+    )
+    .err()
+    .unwrap_or_else(|| panic!("store failure ignored"));
     assert!(err.to_string().contains("vault is locked"), "{err}");
     assert_eq!(machine.read(&machine.zshrc()), before);
 
@@ -356,7 +367,7 @@ fn pf_29_s02_fish_and_linked_profiles() {
     );
 
     let vault = FakeVault::default();
-    run(&machine.corbanu(), &plan, &vault, None).unwrap_or_else(|err| panic!("{err}"));
+    run(&machine.corbanu(), &plan, &vault, /*fail_at*/ None).unwrap_or_else(|err| panic!("{err}"));
     assert_eq!(
         machine.read(&fish),
         "set -gx ANTHROPIC_API_KEY (corbanu vault auth-helper migrated/anthropic_api_key)\n"
@@ -401,7 +412,7 @@ fn pf_29_s02_only_plain_single_assignments_are_rewritten() {
     assert_eq!(plan.unsupported.len(), 7, "{:?}", plan.unsupported);
 
     let vault = FakeVault::default();
-    run(&machine.corbanu(), &plan, &vault, None).unwrap_or_else(|err| panic!("{err}"));
+    run(&machine.corbanu(), &plan, &vault, /*fail_at*/ None).unwrap_or_else(|err| panic!("{err}"));
     assert_eq!(
         vault
             .values
