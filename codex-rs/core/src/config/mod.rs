@@ -109,8 +109,11 @@ use codex_model_provider_info::corrected_catalog_provider;
 use codex_model_provider_info::create_oss_provider_with_base_url;
 use codex_model_provider_info::default_model_context_window_for_provider;
 use codex_model_provider_info::default_model_max_output_tokens_for_provider;
+use codex_model_provider_info::is_retired_model;
 use codex_model_provider_info::merge_configured_model_providers;
 use codex_model_provider_info::resolve_model_for_provider;
+use codex_model_provider_info::retired_model_notice;
+use codex_model_provider_info::retired_model_replacement;
 use codex_models_manager::ModelsManagerConfig;
 use codex_protocol::config_types::AltScreenMode;
 use codex_protocol::config_types::AutoCompactTokenLimitScope;
@@ -4350,6 +4353,11 @@ impl Config {
             .clone();
 
         let requested_model_for_pair_validation = model.clone().or_else(|| cfg.model.clone());
+        let retired_pin = requested_model_for_pair_validation
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| is_retired_model(model))
+            .map(str::to_string);
         let incompatible_explicit_provider = model_provider_was_explicit
             .then_some(requested_model_for_pair_validation.as_deref())
             .flatten()
@@ -4446,6 +4454,25 @@ impl Config {
                 }
                 None => (model_provider_id, model_provider, model, false),
             };
+        // A retired pin (config, override, resumed thread or connector state)
+        // would fail every turn: its catalogue row is gone. Move it on and say so,
+        // whichever step above already replaced it.
+        let model = model.map(|model| {
+            retired_model_replacement(&model, &model_provider_id).map_or(model, str::to_string)
+        });
+        // Only when the retirement is what changed it, not another fallback
+        // (an incompatible provider, a provider's own default model).
+        if let (Some(retired), Some(current)) = (retired_pin.as_deref(), model.as_deref())
+            && retired_model_replacement(retired, &model_provider_id) == Some(current)
+        {
+            tracing::warn!(
+                retired,
+                current,
+                provider = %model_provider_id,
+                "replaced a retired model pin"
+            );
+            startup_warnings.push(retired_model_notice(retired, current));
+        }
         let mut shell_environment_policy: ShellEnvironmentPolicy =
             cfg.shell_environment_policy.into();
         let mut allow_login_shell = cfg.allow_login_shell.unwrap_or(true);
@@ -5580,6 +5607,10 @@ mod tests;
 #[cfg(test)]
 #[path = "catalogue_effort_tests.rs"]
 mod catalogue_effort_tests;
+
+#[cfg(test)]
+#[path = "retired_model_tests.rs"]
+mod retired_model_tests;
 
 #[cfg(test)]
 #[path = "config_loader_tests.rs"]

@@ -2587,10 +2587,17 @@ impl ModelClient {
             tool_choice,
             stream: true,
             max_tokens: model_info.max_output_tokens.ok_or_else(|| {
-                CodexErr::InvalidRequest(format!(
-                    "model `{}` has no catalogued maximum output token limit",
-                    model_info.slug
-                ))
+                CodexErr::InvalidRequest(if model_info.used_fallback_model_metadata {
+                    format!(
+                        "model `{}` is not in this provider's model catalog, so its maximum output length is unknown; choose another model with /model or change `model` in config.toml",
+                        model_info.slug
+                    )
+                } else {
+                    format!(
+                        "model `{}` has no catalogued maximum output token limit",
+                        model_info.slug
+                    )
+                })
             })?,
             thinking,
             output_config,

@@ -1973,3 +1973,43 @@ fn claude_plan_provider_with_unresolvable_cwd_child() {
         Some(auth.cwd)
     );
 }
+
+/// #81: Opus 4.8 left the bundled catalogues, so a pin on it (plan or bare
+/// slug) resolves to the provider's current default instead of being kept and
+/// failing every request. Providers with their own catalogues keep it.
+#[test]
+fn retired_opus_4_8_resolves_to_the_provider_default() {
+    for model in [
+        CLAUDE_PLAN_LEGACY_OPUS_4_8_MODEL,
+        ANTHROPIC_LEGACY_OPUS_4_8_MODEL,
+    ] {
+        assert!(is_retired_model(model));
+        assert_eq!(
+            resolve_model_for_provider(Some(model.to_string()), CLAUDE_PLAN_PROVIDER_ID).as_deref(),
+            Some(CLAUDE_PLAN_MODEL),
+            "{model}"
+        );
+        assert_eq!(
+            resolve_model_for_provider(Some(model.to_string()), ANTHROPIC_PROVIDER_ID).as_deref(),
+            Some(ANTHROPIC_DEFAULT_MODEL),
+            "{model}"
+        );
+        assert_eq!(
+            retired_model_replacement(model, OPENROUTER_PROVIDER_ID),
+            None,
+            "{model}"
+        );
+    }
+    for current in [
+        CLAUDE_PLAN_MODEL,
+        CLAUDE_OPUS_5_5_PLAN_MODEL,
+        CLAUDE_FABLE_5_PLAN_MODEL,
+    ] {
+        assert!(!is_retired_model(current));
+        assert_eq!(
+            resolve_model_for_provider(Some(current.to_string()), CLAUDE_PLAN_PROVIDER_ID)
+                .as_deref(),
+            Some(current)
+        );
+    }
+}
