@@ -3391,6 +3391,12 @@ impl Session {
         let Some(refusal) = refusal else {
             return response;
         };
+        // #622: listed under the inspector's recent denials too.
+        crate::security::inspection::record_refusal(
+            self.thread_id(),
+            "a permission grant naming a protected path",
+            "those paths were left out of the grant",
+        );
         match turn_context {
             Some(turn_context) => {
                 crate::security::protected_reads::notify(self, turn_context, refusal).await;

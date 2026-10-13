@@ -97,6 +97,7 @@ async fn run_exec_like(args: RunExecLikeArgs) -> Result<FunctionToolOutput, Func
     .await
     {
         crate::security::protected_reads::notify(&session, &turn, refusal.clone()).await;
+        crate::security::protected_reads::record_permission_refusal(&session);
         return Err(FunctionCallError::RespondToModel(refusal));
     }
     let exec_permission_approvals_enabled =

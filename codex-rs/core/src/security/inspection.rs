@@ -304,6 +304,23 @@ pub(crate) fn record_declined_approval(
     record(Some(thread), what, outcome);
 }
 
+/// #622: the Aggressive sandbox denied `what` (a protected read, a listing
+/// of the Corbanu home, a start-up file outside the current folder) to a
+/// command, and the denial was explained where it failed.
+pub(crate) fn record_sandbox_denial(thread: ThreadId, what: &'static str) {
+    record(
+        Some(thread),
+        what,
+        "denied by the sandbox; never granted under Aggressive",
+    );
+}
+
+/// #622: a request was refused, or cut down, before it ran, because of what
+/// the security level never allows (fixed text only).
+pub(crate) fn record_refusal(thread: ThreadId, what: &'static str, outcome: &'static str) {
+    record(Some(thread), what, outcome);
+}
+
 /// #437: held while an approval request waits. Esc on the prompt interrupts
 /// the turn, which drops the waiting request before any answer arrives; the
 /// request did not run and is recorded as declined.

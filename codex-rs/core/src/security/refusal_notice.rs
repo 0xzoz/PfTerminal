@@ -96,6 +96,22 @@ impl Blocked {
         }
     }
 
+    /// #622: what the inspector's recent denials say was refused.
+    pub(crate) fn inspected(self) -> &'static str {
+        match self {
+            Self::Files => "a write outside the current folder or a protected read",
+            Self::Network => "network access",
+        }
+    }
+
+    /// #622: the outcome the inspector shows for it.
+    pub(crate) fn inspected_outcome(self) -> &'static str {
+        match self {
+            Self::Files => "blocked by the Aggressive sandbox",
+            Self::Network => "looks blocked by the Aggressive sandbox",
+        }
+    }
+
     /// Added to the command's output for the model.
     pub(crate) fn model_note(self) -> String {
         format!(
