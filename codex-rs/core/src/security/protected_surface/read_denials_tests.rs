@@ -904,6 +904,22 @@ fn issue_651_glob_syntax_and_backups_of_the_database_folder() {
     }
 }
 
+/// Issue #651: a pattern below a folder reached through a link whose real
+/// location holds glob syntax is copied with that location escaped.
+#[test]
+fn issue_651_real_location_of_a_pattern_is_escaped() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let real = base.join("db[1]{2");
+    std::fs::create_dir_all(&real).unwrap();
+    std::os::unix::fs::symlink(&real, base.join("link")).unwrap();
+    let pattern = format!("{}/*.sqlite*", base.join("link").display());
+    assert_eq!(
+        real_pattern(&pattern),
+        Some(format!("{}/db[[]1][{{]2/*.sqlite*", base.display()))
+    );
+}
+
 /// Issue #562: on Linux the missing runtime folders are created, empty,
 /// only where the profile could write the Corbanu home, so bubblewrap never
 /// needs a placeholder file where Corbanu expects a folder. `AGENTS.md` is

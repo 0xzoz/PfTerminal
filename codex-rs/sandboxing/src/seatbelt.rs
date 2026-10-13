@@ -897,6 +897,17 @@ fn credential_name_in_any_case(regex: &str) -> String {
     format!(r"{head}\.[eE][nN][vV]{rc}{rest}")
 }
 
+/// #651: `text` as a glob matching only itself: each metacharacter in a
+/// one-character class (a lone `]` is literal already).
+fn escape_glob_literal(text: &str) -> String {
+    text.chars()
+        .map(|ch| match ch {
+            '*' | '?' | '[' | '{' | '}' => format!("[{ch}]"),
+            other => other.to_string(),
+        })
+        .collect()
+}
+
 fn canonicalize_glob_static_prefix_for_sandbox(pattern: &str) -> Option<String> {
     let first_glob_index = pattern
         .char_indices()
@@ -917,7 +928,9 @@ fn canonicalize_glob_static_prefix_for_sandbox(pattern: &str) -> Option<String> 
     }
 
     let root = normalize_path_for_sandbox(Path::new(&pattern[..prefix_end]))?;
-    let root = root.to_string_lossy();
+    // #651: the resolved folder escaped, should it hold glob syntax (a
+    // database folder reached through a link to `db[1]`).
+    let root = escape_glob_literal(&root.to_string_lossy());
     let suffix = &pattern[prefix_end..];
     let normalized_pattern = format!("{root}{suffix}");
     (normalized_pattern != pattern).then_some(normalized_pattern)

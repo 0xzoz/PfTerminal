@@ -89,33 +89,29 @@ fn pf_29_s01_isolation_only_after_a_preflight_and_lands_in_the_profile() {
         "store folders exist from launch"
     );
 
-    // #651: a home with glob syntax is escaped: its database glob and its
-    // stores match only themselves.
+    // #651: a home with glob syntax: its database glob is escaped (it
+    // matches the databases there only), its stores stay as written (a deny
+    // key with glob syntax is a pattern, which launch then refuses, failing
+    // closed).
     let odd = root.path().join("corbanu[1]");
     std::fs::create_dir_all(&odd).unwrap();
     std::fs::write(receipt_path(&odd), "garbage").unwrap();
     std::fs::write(odd.join("state_5.sqlite"), "db").unwrap();
     let odd_paths = isolation_paths(&odd, Some(&home), /*cwd*/ None);
-    let escaped = root.path().join("corbanu[[]1]");
-    for path in [escaped.join("*.sqlite*"), escaped.join("sessions")] {
-        assert!(
-            odd_paths.contains(&path),
-            "{}: {odd_paths:?}",
-            path.display()
-        );
-    }
+    assert!(
+        odd_paths.contains(&root.path().join("corbanu[[]1]").join("*.sqlite*")),
+        "{odd_paths:?}"
+    );
+    assert!(odd_paths.contains(&odd.join("sessions")));
     assert!(!odd_paths.contains(&odd.join("state_5.sqlite")));
-    assert!(!odd_paths.contains(&odd.join("sessions")));
+    assert!(!odd_paths.contains(&odd.join("*.sqlite*")));
 
-    // #651: a database folder set apart in the user config: its databases
-    // and what Corbanu keeps there (when present).
+    // #651: a database folder set apart in the user config, relative to the
+    // config file's folder as Core resolves it: its databases and what
+    // Corbanu keeps there (when present).
     let databases = root.path().join("db");
     std::fs::create_dir_all(databases.join("accounting-pending")).unwrap();
-    std::fs::write(
-        corbanu.join("config.toml"),
-        format!("sqlite_home = {:?}\n", databases.display().to_string()),
-    )
-    .unwrap();
+    std::fs::write(corbanu.join("config.toml"), "sqlite_home = \"../db\"\n").unwrap();
     let with_folder = isolation_paths(&corbanu, Some(&home), /*cwd*/ None);
     assert!(
         with_folder.contains(&databases.join("*.sqlite*")),
@@ -124,6 +120,31 @@ fn pf_29_s01_isolation_only_after_a_preflight_and_lands_in_the_profile() {
     assert!(with_folder.contains(&databases.join("accounting-pending")));
     assert!(!with_folder.contains(&databases.join("gpu-controller.lock")));
     std::fs::remove_file(corbanu.join("config.toml")).unwrap();
+    // On the command line, against the working folder.
+    let given = override_database_isolation(
+        &corbanu,
+        &[(
+            "sqlite_home".to_string(),
+            toml::Value::String("db".to_string()),
+        )],
+        Some(root.path()),
+    );
+    assert!(given.contains(&databases.join("*.sqlite*")), "{given:?}");
+    // `~` is expanded as Core expands it.
+    if let Some(user_home) = dirs::home_dir() {
+        assert_eq!(resolve_folder("~/db", root.path()), user_home.join("db"));
+    }
+    assert_eq!(
+        override_database_isolation(
+            &corbanu,
+            &[(
+                "sqlite_home".to_string(),
+                toml::Value::String(".".to_string())
+            )],
+            Some(&corbanu),
+        ),
+        Vec::<PathBuf>::new()
+    );
 
     let mut overrides = aggressive::base_overrides(&corbanu, &corbanu);
     aggressive::deny_reads(&mut overrides, &paths);

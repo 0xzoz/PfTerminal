@@ -1366,7 +1366,8 @@ fn real_pattern(pattern: &str) -> Option<String> {
     let split = pattern[..wildcard].rfind('/')?;
     let folder = AbsolutePathBuf::from_absolute_path(Path::new(&pattern[..split.max(1)])).ok()?;
     let real = real_location(&folder).filter(|real| *real != folder)?;
-    let real = real.as_path().to_string_lossy();
+    // #651: escaped, should the real location hold glob syntax.
+    let real = crate::security::preflight::glob_escape_path(real.as_path());
     Some(format!(
         "{}{}",
         real.trim_end_matches('/'),

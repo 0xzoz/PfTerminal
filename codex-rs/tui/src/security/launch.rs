@@ -106,6 +106,15 @@ impl LaunchPlan {
                 crate::legacy_core::protected_preflight::home_dir().as_deref(),
                 cwd.as_deref(),
             );
+            // #651: also a database folder given with `-c sqlite_home=…`.
+            if !plan.isolated.is_empty() {
+                let given = preflight::override_database_isolation(
+                    codex_home,
+                    cli_kv_overrides,
+                    cwd.as_deref(),
+                );
+                plan.isolated.extend(given);
+            }
             aggressive::deny_reads(cli_kv_overrides, &plan.isolated);
         }
         Ok(plan)

@@ -31,8 +31,6 @@ use crate::legacy_core::protected_preflight::Preflight;
 use crate::legacy_core::protected_preflight::ReadinessFlags;
 use crate::legacy_core::protected_preflight::database_glob;
 use crate::legacy_core::protected_preflight::file_sources;
-use crate::legacy_core::protected_preflight::glob_escape_path;
-use crate::legacy_core::protected_preflight::has_glob_chars;
 use crate::legacy_core::protected_preflight::is_database_file;
 
 pub(crate) const RECEIPT_FILE: &str = "security_preflight.toml";
@@ -186,23 +184,10 @@ pub(crate) fn isolation_paths(
     let found = Preflight::run(&sources, ReadinessFlags::default())
         .inventory
         .isolation_paths();
-    // #651: a database folder set apart from the home, as far as it is known
-    // before config loads; `verify_database_folder` checks the loaded one.
-    let folder = database_folder(codex_home, cwd, &sources);
-    let folder_entries = folder
-        .iter()
-        .flat_map(|folder| {
-            DATABASE_FOLDER_ENTRIES
-                .iter()
-                .map(|entry| folder.join(entry))
-        })
-        // Bubblewrap would put a placeholder at a missing one.
-        .filter(|path| std::fs::symlink_metadata(path).is_ok());
-    // One glob covers every database, including files created later.
-    let globs =
-        std::iter::once(database_glob(codex_home)).chain(folder.as_deref().map(database_glob));
-    // #651: a path holding glob syntax would be read as a pattern; escaped,
-    // it matches only itself (the database globs are escaped already).
+    // #651: every database folder set apart from the home that config may
+    // name, as far as it is known before config loads;
+    // `verify_database_folder` checks the loaded one.
+    let folders = database_folder_candidates(codex_home, cwd, &sources);
     let mut paths = CORBANU_HOME_STORES
         .iter()
         .map(|name| codex_home.join(name))
@@ -211,79 +196,114 @@ pub(crate) fn isolation_paths(
                 .into_iter()
                 .filter(|path| !is_database_file(codex_home, path)),
         )
-        .chain(folder_entries)
-        .map(|path| {
-            if has_glob_chars(&path) {
-                PathBuf::from(glob_escape_path(&path))
-            } else {
-                path
-            }
-        })
-        .chain(globs)
+        .chain(
+            folders
+                .iter()
+                .flat_map(|folder| database_folder_isolation(folder)),
+        )
+        // One glob covers every database, including files created later.
+        .chain(std::iter::once(database_glob(codex_home)))
         .collect::<Vec<_>>();
     paths.sort();
     paths.dedup();
     paths
 }
 
-/// #651: the database folder (`sqlite_home` in the project or user config,
-/// else `CODEX_SQLITE_HOME`) when it is not the Corbanu home. Only absolute
-/// paths are read here; the loaded config is checked at launch.
-fn database_folder(
+/// #651: what a database folder set apart from the home holds that agent
+/// commands may not read: its databases (one glob, the folder escaped) and
+/// what Corbanu keeps there besides them, when present (bubblewrap would
+/// put a placeholder at a missing one).
+pub(crate) fn database_folder_isolation(folder: &Path) -> Vec<PathBuf> {
+    DATABASE_FOLDER_ENTRIES
+        .iter()
+        .map(|entry| folder.join(entry))
+        .filter(|path| std::fs::symlink_metadata(path).is_ok())
+        .chain(std::iter::once(database_glob(folder)))
+        .collect()
+}
+
+/// #651: the database folders config may name, resolved as Core resolves
+/// them (`~` expanded; a relative path against the config file's folder, or
+/// the working folder for `CODEX_SQLITE_HOME`): `sqlite_home` in the user
+/// and project config and the variable, each one not the Corbanu home.
+fn database_folder_candidates(
     codex_home: &Path,
     cwd: Option<&Path>,
     sources: &InventorySources,
-) -> Option<PathBuf> {
-    let configured = sources
-        .config_layers
-        .iter()
-        .rev()
-        .find_map(|layer| layer.toml.get("sqlite_home")?.as_str().map(PathBuf::from));
-    let folder = match configured {
-        Some(folder) => folder,
-        None => {
-            let env = std::env::var_os(codex_state::SQLITE_HOME_ENV)?;
-            let env = PathBuf::from(env);
-            match cwd {
-                Some(cwd) if env.is_relative() && !env.as_os_str().is_empty() => cwd.join(env),
-                _ => env,
-            }
-        }
-    };
-    separate_database_folder(codex_home, &folder)
+) -> Vec<PathBuf> {
+    let configured = sources.config_layers.iter().filter_map(|layer| {
+        let value = layer.toml.get("sqlite_home")?.as_str()?;
+        let base = layer
+            .path
+            .as_deref()
+            .and_then(Path::parent)
+            .unwrap_or(codex_home);
+        Some(resolve_folder(value, base))
+    });
+    let env = std::env::var(codex_state::SQLITE_HOME_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .and_then(|value| {
+            let base = cwd
+                .map(Path::to_path_buf)
+                .or_else(|| std::env::current_dir().ok())?;
+            Some(resolve_folder(value.trim(), &base))
+        });
+    let mut folders: Vec<PathBuf> = configured
+        .chain(env)
+        .filter_map(|folder| separate_database_folder(codex_home, &folder))
+        .collect();
+    folders.sort();
+    folders.dedup();
+    folders
 }
 
-/// `folder` when it is absolute and not the Corbanu home (by any spelling).
+/// #651: [`database_folder_isolation`] for a `sqlite_home` given on the
+/// command line (`-c`), resolved against the working folder.
+pub(crate) fn override_database_isolation(
+    codex_home: &Path,
+    overrides: &[(String, toml::Value)],
+    cwd: Option<&Path>,
+) -> Vec<PathBuf> {
+    let Some(base) = cwd
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok())
+    else {
+        return Vec::new();
+    };
+    overrides
+        .iter()
+        .filter(|(key, _)| key == "sqlite_home")
+        .filter_map(|(_, value)| value.as_str())
+        .filter_map(|value| separate_database_folder(codex_home, &resolve_folder(value, &base)))
+        .flat_map(|folder| database_folder_isolation(&folder))
+        .collect()
+}
+
+/// `value` as Core resolves a configured folder: `~` expanded, relative
+/// against `base`.
+pub(crate) fn resolve_folder(value: &str, base: &Path) -> PathBuf {
+    codex_utils_absolute_path::AbsolutePathBuf::resolve_path_against_base(value, base)
+        .into_path_buf()
+}
+
+/// `folder` when it is not the Corbanu home (by any spelling).
 fn separate_database_folder(codex_home: &Path, folder: &Path) -> Option<PathBuf> {
     let same = folder == codex_home
         || std::fs::canonicalize(folder)
             .is_ok_and(|real| std::fs::canonicalize(codex_home).is_ok_and(|home| home == real));
-    (folder.is_absolute() && !same).then(|| folder.to_path_buf())
+    (!same).then(|| folder.to_path_buf())
 }
 
-/// #651: under Aggressive, the loaded config's database folder, when set
-/// apart from the home, must be denied like the home's databases: its
-/// database glob in the profile, and what Corbanu keeps there unreadable.
+/// #651: under Aggressive with a preflight, the loaded config's database
+/// folder, when set apart from the home, must be denied like the home's
+/// databases: its database glob in the profile, and what Corbanu keeps
+/// there unreadable.
 pub(crate) fn verify_database_folder(config: &Config) -> Vec<String> {
-    let Some(folder) = separate_database_folder(config.codex_home.as_path(), config.sqlite.home())
-    else {
-        return Vec::new();
-    };
-    let mut paths = vec![database_glob(&folder)];
-    paths.extend(
-        DATABASE_FOLDER_ENTRIES
-            .iter()
-            .map(|entry| folder.join(entry))
-            .filter(|path| std::fs::symlink_metadata(path).is_ok())
-            .map(|path| {
-                if has_glob_chars(&path) {
-                    PathBuf::from(glob_escape_path(&path))
-                } else {
-                    path
-                }
-            }),
-    );
-    verify_isolation(config, &paths)
+    match separate_database_folder(config.codex_home.as_path(), config.sqlite.home()) {
+        Some(folder) => verify_isolation(config, &database_folder_isolation(&folder)),
+        None => Vec::new(),
+    }
 }
 
 /// Every isolated path must be unreadable to agent commands.
@@ -291,11 +311,14 @@ pub(crate) fn verify_isolation(config: &Config, paths: &[PathBuf]) -> Vec<String
     let policy = config.permissions.file_system_sandbox_policy();
     let cwd = config.cwd.as_path();
     let codex_home = config.codex_home.as_path();
-    // The path check does not evaluate globs; the database glob must be in
-    // the policy for the files it covers to count as denied.
+    // The path check does not evaluate globs; a database glob must be in the
+    // policy for the files it covers to count as denied (#651: also the
+    // loaded config's separate database folder's).
     let globs = policy.get_unreadable_globs_with_cwd(cwd);
     let glob = database_glob(codex_home).to_string_lossy().into_owned();
     let databases_denied = globs.contains(&glob);
+    let folder_glob = separate_database_folder(codex_home, config.sqlite.home())
+        .map(|folder| database_glob(&folder).to_string_lossy().into_owned());
     // macOS: the Seatbelt clauses agent commands run under, built by the
     // sandbox's own code, so the check cannot drift from it (#488).
     #[cfg(target_os = "macos")]
@@ -310,8 +333,9 @@ pub(crate) fn verify_isolation(config: &Config, paths: &[PathBuf]) -> Vec<String
         .iter()
         .filter(|path| {
             let pattern = path.as_os_str().to_string_lossy();
-            // #651: a database glob, or a path escaped as a pattern.
-            let covered = if pattern == glob || has_glob_chars(path) {
+            let covered = if pattern == glob {
+                databases_denied
+            } else if folder_glob.as_deref() == Some(pattern.as_ref()) {
                 globs.iter().any(|denied| *denied == pattern)
             } else {
                 (databases_denied && is_database_file(codex_home, path)) || !readable(path)

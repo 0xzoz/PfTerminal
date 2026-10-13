@@ -3202,3 +3202,37 @@ fn minimal_reads_keep_tmp_writes_unchanged_without_denials() {
         &["git=0", "gitdir=0", "ws=0", "scratch=0", "slash_tmp=0"],
     );
 }
+
+/// #651: a database glob below a folder reached through a link whose real
+/// location holds glob syntax (`link -> db[1]`) still denies the databases
+/// there: the resolved folder is escaped, not read as a character class.
+#[test]
+fn glob_below_a_link_to_a_folder_with_glob_syntax_is_escaped() {
+    let dir = TempDir::new().expect("tempdir");
+    let base = dir.path().canonicalize().expect("canonical");
+    let real = base.join("db[1]");
+    fs::create_dir_all(&real).expect("real");
+    fs::write(real.join("x.sqlite"), "secret-651\n").expect("db");
+    fs::write(real.join("notes.txt"), "notes-651\n").expect("notes");
+    let link = base.join("link");
+    std::os::unix::fs::symlink(&real, &link).expect("link");
+    let policy = FileSystemSandboxPolicy::restricted(vec![
+        root_read_entry(),
+        FileSystemSandboxEntry {
+            path: FileSystemPath::GlobPattern {
+                pattern: format!("{}/*.sqlite*", link.display()),
+            },
+            access: FileSystemAccessMode::Deny,
+            missing_path_behavior: None,
+        },
+    ]);
+    let script = format!(
+        "cat '{real}/x.sqlite'; echo db=$?; cat '{link}/x.sqlite'; echo link=$?; \
+         cat '{real}/notes.txt'; echo notes=$?",
+        real = real.display(),
+        link = link.display(),
+    );
+    let stdout = run_in_seatbelt(&policy, &base, &script);
+    assert_lines(&stdout, &["db=1", "link=1", "notes=0"]);
+    assert!(!stdout.contains("secret-651"), "{stdout}");
+}

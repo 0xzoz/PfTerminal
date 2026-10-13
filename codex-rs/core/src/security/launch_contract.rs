@@ -294,7 +294,6 @@ pub fn protect_external_agent_launch(
         .map_err(|err| err.to_string())
 }
 
-/// True once the secretless launch contract is armed in this process.
 /// #651: the armed contract also protects the database folder `sqlite_home`
 /// when it is set apart from `CODEX_HOME`. Called once a config is loaded.
 pub(crate) fn protect_database_folder(sqlite_home: &Path) {
@@ -303,6 +302,7 @@ pub(crate) fn protect_database_folder(sqlite_home: &Path) {
     }
 }
 
+/// True once the secretless launch contract is armed in this process.
 pub fn external_agent_contract_armed() -> bool {
     active().is_some()
 }
@@ -630,9 +630,9 @@ impl LaunchContract {
             .clone()
     }
 
-    /// Every path agent commands may not read: [`Self::protected_read_paths`]
-    /// and what Corbanu keeps in each separate database folder besides the
-    /// databases (#651).
+    /// Every path agent commands may not read: [`Self::protected_read_paths`],
+    /// what Corbanu keeps in each separate database folder besides the
+    /// databases, and the backups beside each folder (#651).
     fn protected_paths(&self) -> Vec<AbsolutePathBuf> {
         let mut paths = self.protected_read_paths.clone();
         for folder in self.database_folders() {
@@ -641,6 +641,18 @@ impl LaunchContract {
                     .iter()
                     .map(|entry| folder.join(entry)),
             );
+        }
+        // Databases recovery set aside beside each folder (the home's too).
+        for folder in std::iter::once(self.codex_home.clone()).chain(self.database_folders()) {
+            if let Some(name) = folder.as_path().file_name() {
+                let mut backups = name.to_os_string();
+                backups.push(".db-backups");
+                if let Ok(backups) =
+                    AbsolutePathBuf::from_absolute_path(folder.as_path().with_file_name(backups))
+                {
+                    paths.push(backups);
+                }
+            }
         }
         paths
     }
