@@ -72,11 +72,11 @@ pub(crate) fn listing_explanation(path: &str) -> String {
 /// and a grant lifts the start-up file protections only there.
 pub(crate) fn startup_explanation(path: &str) -> String {
     format!(
-        "Security level Aggressive blocks writing `{}`: it is a start-up file outside the \
-         current folder, and agent commands can write only inside the current folder, even \
-         when you approve them; this cannot be granted, not even once (Grant once lifts the \
-         start-up file and git write protections only inside the current folder). To allow it, a person can \
-         switch to Permissive in /security (it applies after a restart).",
+        "Security level Aggressive blocks writing `{}`: it is, or leads to, a start-up file \
+         outside the current folder, and agent commands can write only inside the current \
+         folder, even when you approve them; this cannot be granted, not even once (Grant once \
+         lifts the start-up file and git write protections only inside the current folder). To \
+         allow it, a person can switch to Permissive in /security (it applies after a restart).",
         shown_path(path)
     )
 }
@@ -190,7 +190,9 @@ impl ReadPolicyInputs {
         }
         // The profile as the orchestrator runs it: project roots are the
         // workspace roots (or the current folder), also by their real
-        // locations, as the sandbox resolves them.
+        // locations, as the sandbox resolves them. Write permissions granted
+        // for the turn or requested by the command are left out: Aggressive
+        // turns permission requests off and refuses additional writes (#245).
         let mut roots = if self.workspace_roots.is_empty() {
             vec![self.turn_cwd.clone()]
         } else {
@@ -695,116 +697,77 @@ fn written_word(
     })
 }
 
-/// Shells whose arguments are scripts.
+/// Shells whose `-c` argument is a script.
 const SHELLS: [&str; 6] = ["sh", "bash", "zsh", "dash", "ksh", "fish"];
 
 /// Programs whose path arguments (after the first, for `sed`'s script) are
-/// written, and those whose last argument is.
+/// written, and those whose last argument is (`mv` also removes the others).
 const WRITES_EVERY_ARGUMENT: [&str; 5] = ["tee", "touch", "truncate", "rm", "chmod"];
 const WRITES_LAST_ARGUMENT: [&str; 5] = ["cp", "mv", "ln", "install", "rsync"];
 
-/// #620: the words a shell command writes to, as spelled: redirection
-/// targets (`>`, `>>`, `2>`, `&>`, attached or not), every path argument of
-/// `tee`, `touch`, `truncate`, `rm` and `chmod`, the destination of `cp`,
-/// `mv`, `ln`, `install` and `rsync`, the files of `sed -i`, and `dd of=`.
-/// Text-based and incomplete; it only decides whether a grant offer is
-/// withheld as useless, never what runs.
+/// Shell scripts inside scripts (`bash -c '…'`) looked into.
+const MAX_SCRIPT_DEPTH: usize = 4;
+
+/// #620: the words a command writes to, as spelled: in a shell script,
+/// redirection targets (`>`, `>>`, `2>`, `&>`, `>&file`, `<>`, attached or
+/// not), and for each simple command every path argument of `tee`,
+/// `touch`, `truncate`, `rm` and `chmod`, the destination of `cp`, `mv`,
+/// `ln`, `install` and `rsync` (and what `mv` moves away), the files of
+/// `sed -i`, and `dd of=`; a shell's `-c` script is looked into. Text-based
+/// and incomplete (newlines and `;` or `|` attached to a word do not
+/// separate commands); it only decides whether a grant offer is withheld as
+/// useless, never what runs.
 fn write_targets(command: &[String]) -> Vec<String> {
-    // A shell's arguments are scripts, each split into words; any other
-    // command is one simple command already split.
-    let program = command
-        .first()
-        .map(|program| program.rsplit('/').next().unwrap_or(program));
-    let scripts: Vec<Vec<String>> = if program.is_some_and(|program| SHELLS.contains(&program)) {
-        command
-            .iter()
-            .map(|argument| {
-                shlex::split(argument)
-                    .unwrap_or_else(|| argument.split_whitespace().map(str::to_string).collect())
-            })
-            .collect()
-    } else {
-        vec![command.to_vec()]
-    };
-    let mut targets = Vec::new();
-    for words in scripts {
-        let mut segment: Vec<String> = Vec::new();
-        let mut redirect_next = false;
-        let mut input_next = false;
-        for word in words {
-            let ends_segment =
-                word.ends_with(';') || matches!(word.as_str(), "&&" | "||" | "|" | "&");
-            let trimmed = word.trim_end_matches(';');
-            if redirect_next {
-                redirect_next = false;
-                targets.push(trimmed.trim_end_matches(['&', '|', ')']).to_string());
-            } else if input_next {
-                // `< file` is read, not written.
-                input_next = false;
-            } else if trimmed.starts_with('<') {
-                // `<file`, `<<EOF`; a lone `<` takes the next word.
-                input_next = trimmed == "<" && !ends_segment;
-            } else if let Some(index) = trimmed.find('>').filter(|_| !trimmed.contains(">&")) {
-                // `>`, `>>`, `2>`, `&>`, `>|`, alone or attached to its target
-                // or to the word before (`x>>~/.zshrc`); `2>&1` writes nothing.
-                let before =
-                    trimmed[..index].trim_end_matches(|c: char| c.is_ascii_digit() || c == '&');
-                if !before.is_empty() {
-                    segment.push(before.to_string());
-                }
-                let target = trimmed[index..].trim_start_matches(['>', '|']);
-                if target.is_empty() {
-                    redirect_next = !ends_segment;
-                } else {
-                    targets.push(target.to_string());
-                }
-            } else if !trimmed.is_empty() && !matches!(trimmed, "&&" | "||" | "|" | "&") {
-                segment.push(trimmed.to_string());
-            }
-            if ends_segment {
-                targets.extend(segment_targets(&std::mem::take(&mut segment)));
-            }
-        }
-        targets.extend(segment_targets(&segment));
-    }
-    targets
+    simple_command_targets(command, MAX_SCRIPT_DEPTH)
 }
 
-/// The words one simple command writes to, by its program (see
-/// [`write_targets`]).
-fn segment_targets(segment: &[String]) -> Vec<String> {
-    // Skip `VAR=value` prefixes and `sudo`/`command`/`env`.
-    let mut words = segment
+/// The words one simple command (already split into words) writes to.
+fn simple_command_targets(words: &[String], depth: usize) -> Vec<String> {
+    // Skip `VAR=value` prefixes and `sudo`/`command`/`env`/`exec`/`nohup`.
+    let words: Vec<&str> = words
         .iter()
+        .map(String::as_str)
         .skip_while(|word| {
             (word.contains('=') && !word.starts_with('-'))
-                || matches!(word.as_str(), "sudo" | "command" | "env" | "exec" | "nohup")
+                || matches!(*word, "sudo" | "command" | "env" | "exec" | "nohup")
         })
-        .map(String::as_str);
-    let Some(program) = words.next() else {
+        .collect();
+    let Some((program, arguments)) = words.split_first() else {
         return Vec::new();
     };
     let program = program.rsplit('/').next().unwrap_or(program);
-    let words: Vec<&str> = words.collect();
-    let paths = || words.iter().filter(|word| !word.starts_with('-'));
-    let to_owned = |words: Vec<&&str>| {
-        words
-            .into_iter()
-            .map(std::string::ToString::to_string)
-            .collect()
-    };
-    if WRITES_EVERY_ARGUMENT.contains(&program) {
-        to_owned(paths().collect())
-    } else if WRITES_LAST_ARGUMENT.contains(&program) && paths().count() >= 2 {
+    if SHELLS.contains(&program) {
+        // Every argument after a `-c` option is the script (and its `$0`,
+        // `$1`…, which parse as plain words).
+        return arguments
+            .iter()
+            .skip_while(|argument| {
+                !(argument.starts_with('-')
+                    && !argument.starts_with("--")
+                    && argument.contains('c'))
+            })
+            .skip(1)
+            .take(1)
+            .flat_map(|script| script_targets(script, depth))
+            .collect();
+    }
+    let paths: Vec<&&str> = arguments
+        .iter()
+        .filter(|word| !word.starts_with('-'))
+        .collect();
+    let owned = |paths: &[&&str]| paths.iter().map(std::string::ToString::to_string).collect();
+    if WRITES_EVERY_ARGUMENT.contains(&program) || (program == "mv" && paths.len() >= 2) {
+        owned(&paths)
+    } else if WRITES_LAST_ARGUMENT.contains(&program) && paths.len() >= 2 {
         // With one path, `ln -s x` and `install x` write in the current
         // folder, not to it.
-        to_owned(paths().next_back().into_iter().collect())
-    } else if program == "sed" && words.iter().any(|word| word.starts_with("-i")) {
+        owned(&paths[paths.len() - 1..])
+    } else if program == "sed" && arguments.iter().any(|word| word.starts_with("-i")) {
         // Every path after the script (or all of them with `-e`).
-        let skip = usize::from(!words.contains(&"-e"));
-        to_owned(paths().skip(skip).collect())
+        let skip = usize::from(!arguments.contains(&"-e")).min(paths.len());
+        owned(&paths[skip..])
     } else if program == "dd" {
-        words
+        arguments
             .iter()
             .filter_map(|word| word.strip_prefix("of="))
             .map(str::to_string)
@@ -812,6 +775,67 @@ fn segment_targets(segment: &[String]) -> Vec<String> {
     } else {
         Vec::new()
     }
+}
+
+/// The words a shell script writes to: its redirection targets, and those
+/// of each simple command in it (see [`write_targets`]).
+fn script_targets(script: &str, depth: usize) -> Vec<String> {
+    let Some(depth) = depth.checked_sub(1) else {
+        return Vec::new();
+    };
+    let words = shlex::split(script)
+        .unwrap_or_else(|| script.split_whitespace().map(str::to_string).collect());
+    let mut targets = Vec::new();
+    let mut segment: Vec<String> = Vec::new();
+    let mut redirect_next = false;
+    let mut input_next = false;
+    for word in words {
+        let ends_segment = word.ends_with(';') || matches!(word.as_str(), "&&" | "||" | "|" | "&");
+        let trimmed = word.trim_end_matches(';');
+        if redirect_next {
+            redirect_next = false;
+            targets.push(trimmed.trim_end_matches(['&', '|', ')']).to_string());
+        } else if input_next {
+            // `< file` is read, not written.
+            input_next = false;
+        } else if let Some(target) = trimmed.strip_prefix("<>") {
+            // Opened for reading and writing.
+            if target.is_empty() {
+                redirect_next = !ends_segment;
+            } else {
+                targets.push(target.to_string());
+            }
+        } else if trimmed.starts_with('<') {
+            // `<file`, `<<EOF`; a lone `<` takes the next word.
+            input_next = trimmed == "<" && !ends_segment;
+        } else if let Some(index) = trimmed.find('>') {
+            // `>`, `>>`, `2>`, `&>`, `>|`, `>&file`, alone or attached to its
+            // target or to the word before (`x>>~/.zshrc`); `2>&1` and `>&-`
+            // write no file.
+            let before =
+                trimmed[..index].trim_end_matches(|c: char| c.is_ascii_digit() || c == '&');
+            if !before.is_empty() {
+                segment.push(before.to_string());
+            }
+            let target = trimmed[index..].trim_start_matches(['>', '|']);
+            let target = target.strip_prefix('&').unwrap_or(target).trim();
+            let duplicates = target.starts_with(|c: char| c.is_ascii_digit() || c == '-')
+                && trimmed[index..].contains(">&");
+            match (duplicates, target.is_empty()) {
+                // A file descriptor, not a file.
+                (true, _) => {}
+                (false, true) => redirect_next = !ends_segment,
+                (false, false) => targets.push(target.to_string()),
+            }
+        } else if !trimmed.is_empty() && !matches!(trimmed, "&&" | "||" | "|" | "&") {
+            segment.push(trimmed.to_string());
+        }
+        if ends_segment {
+            targets.extend(simple_command_targets(&std::mem::take(&mut segment), depth));
+        }
+    }
+    targets.extend(simple_command_targets(&segment, depth));
+    targets
 }
 
 /// Characters that end a path inside code.

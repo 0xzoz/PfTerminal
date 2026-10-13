@@ -359,6 +359,7 @@ fn issue_621_finds_the_denied_path_inside_interpreter_code() {
 }
 
 /// An Aggressive session (with the source labels it turns on).
+#[cfg(unix)]
 fn aggressive(session: &Session) {
     let client = (*session.services.model_client())
         .clone()
@@ -369,6 +370,7 @@ fn aggressive(session: &Session) {
 
 /// The recent denials the inspector shows for `session` (not the
 /// process-wide ones other tests in this process may have recorded).
+#[cfg(unix)]
 fn recent_denials(session: &Session, turn: &TurnContext) -> Vec<(&'static str, &'static str)> {
     crate::security::inspection::observe(
         turn.config.codex_home.as_path(),
@@ -605,6 +607,30 @@ fn issue_620_write_targets() {
             targets(script)
         );
     }
+    assert_eq!(
+        targets("cmd >&out <>rw; mv ~/.zshrc x"),
+        vec!["out", "rw", "~/.zshrc", "x"]
+    );
+    assert_eq!(
+        write_targets(&[
+            "env".to_string(),
+            "bash".to_string(),
+            "-c".to_string(),
+            "echo x >> ~/.zshrc".to_string(),
+        ]),
+        vec!["~/.zshrc"]
+    );
+    assert_eq!(targets("bash -c 'tee -a ~/.zshrc < in'"), vec!["~/.zshrc"]);
+    // Not through a shell, `>` in an argument is text.
+    assert_eq!(
+        write_targets(&[
+            "git".to_string(),
+            "commit".to_string(),
+            "-m".to_string(),
+            "x >~/.zshrc".to_string(),
+        ]),
+        Vec::<String>::new()
+    );
     // Not through a shell: one simple command.
     assert_eq!(
         write_targets(&["tee".to_string(), "-a".to_string(), "/u/.zshrc".to_string()]),
