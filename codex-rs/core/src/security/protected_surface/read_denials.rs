@@ -613,7 +613,7 @@ impl ReadDenials {
     }
 
     /// #594/#598: the Corbanu home's spellings that may not be moved.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn unmovable_paths(&self) -> impl Iterator<Item = &AbsolutePathBuf> {
         self.unmovable.iter()
     }
