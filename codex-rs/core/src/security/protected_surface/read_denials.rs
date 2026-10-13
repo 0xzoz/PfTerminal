@@ -1041,8 +1041,11 @@ fn separate_database_folder(codex_home: &Path, sqlite_home: &Path) -> Option<Abs
 
 /// #611 (Linux): creates a separate database folder's missing folders and
 /// GPU controller lock, empty and private, as Corbanu would. The init lock
-/// keeps #608's placeholder handling. #651: the folder itself (and the
-/// folders above it) too, where it is missing, as state start-up would.
+/// keeps #608's placeholder handling. #651: the folder itself too, where it
+/// is missing (private; the folders above it as state start-up makes them),
+/// unless the nearest existing folder above it is reached through a link: a
+/// command could have planted one there, and the folder would then be made
+/// wherever it points. It is denied either way.
 pub(crate) fn create_missing_database_folder(folder: &Path) {
     #[cfg(unix)]
     let builder = {
@@ -1052,12 +1055,11 @@ pub(crate) fn create_missing_database_folder(folder: &Path) {
     };
     #[cfg(not(unix))]
     let builder = std::fs::DirBuilder::new();
-    if std::fs::symlink_metadata(folder).is_err() {
-        let mut builder = std::fs::DirBuilder::new();
-        builder.recursive(true);
-        #[cfg(unix)]
-        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-        // Fails harmlessly where it cannot be made; it is denied either way.
+    if std::fs::symlink_metadata(folder).is_err() && !reached_through_link(folder) {
+        // Fail harmlessly where they cannot be made.
+        if let Some(parent) = folder.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
         let _ = builder.create(folder);
     }
     for name in ["accounting-pending", "db-backups"] {
@@ -1069,6 +1071,15 @@ pub(crate) fn create_missing_database_folder(folder: &Path) {
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     let _ = options.open(folder.join("gpu-controller.lock"));
+}
+
+/// #651: whether the nearest existing folder above `path` is not its real
+/// location (a link on the way). Unknown counts as reached through a link.
+fn reached_through_link(path: &Path) -> bool {
+    let Some(existing) = path.ancestors().skip(1).find(|ancestor| ancestor.exists()) else {
+        return true;
+    };
+    !std::fs::canonicalize(existing).is_ok_and(|real| real == existing)
 }
 
 /// #603 (Linux): creates the missing folders Corbanu reads later, empty and

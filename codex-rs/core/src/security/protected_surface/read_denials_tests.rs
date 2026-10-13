@@ -1349,6 +1349,22 @@ fn issue_651_a_missing_database_folder_is_denied_whole() {
     );
     assert!(!fx.user_home.join("other").exists());
     assert!(denials.fixed.contains(&abs(&elsewhere)), "{denials:?}");
+
+    // Nor where a folder above it is reached through a link (one a command
+    // may have planted): it would be made wherever the link points.
+    let target = fx.user_home.join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    std::os::unix::fs::symlink(&target, fx.user_home.join("linked")).unwrap();
+    let linked = fx.user_home.join("linked/sub/db");
+    let denials = ReadDenials::for_turn(
+        &fx.codex_home,
+        &linked,
+        &project,
+        std::slice::from_ref(&project),
+        &profile,
+    );
+    assert!(!target.join("sub").exists());
+    assert!(denials.fixed.contains(&abs(&linked)), "{denials:?}");
 }
 
 /// Issue #562: on Linux the missing runtime folders are created, empty,
