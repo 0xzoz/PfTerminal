@@ -516,7 +516,7 @@ fn accounting_inspect_range_bucket_reaching_today_stays_partial_when_unverified(
             },
             Some(0),
             /*read_at*/ 2 * DAY,
-            vec![bucket(0, 7 * DAY, Some(effective), days)],
+            vec![bucket(/*start_ms*/ 0, 7 * DAY, Some(effective), days)],
         )
     };
     let detail = InspectionDay::DetailUnavailable {
@@ -572,7 +572,7 @@ fn accounting_inspect_range_hour_in_progress_total_sums_whole_and_current() {
         /*read_at*/ HOUR + HOUR / 2,
         vec![
             bucket(
-                0,
+                /*start_ms*/ 0,
                 HOUR,
                 Some((0, HOUR)),
                 vec![ready_at(checkpoint, HOUR + HOUR / 2)],
@@ -613,7 +613,7 @@ fn accounting_inspect_range_future_buckets_have_not_started() {
             .map(|_| InspectionDay::CheckpointLag)
             .collect::<Vec<_>>()
     };
-    let mut current = vec![ready_at(1_000, 2 * DAY)];
+    let mut current = vec![ready_at(/*checkpoint*/ 1_000, 2 * DAY)];
     current.extend((1..7).map(|_| InspectionDay::CheckpointLag));
     let pages = range_pages(
         InspectionRange {
@@ -624,9 +624,9 @@ fn accounting_inspect_range_future_buckets_have_not_started() {
         Some(0),
         /*read_at*/ 2 * DAY,
         vec![
-            bucket(0, 7 * DAY, Some((0, 1_001)), current),
-            bucket(7 * DAY, 14 * DAY, None, lag()),
-            bucket(14 * DAY, 21 * DAY, None, lag()),
+            bucket(/*start_ms*/ 0, 7 * DAY, Some((0, 1_001)), current),
+            bucket(7 * DAY, 14 * DAY, /*effective*/ None, lag()),
+            bucket(14 * DAY, 21 * DAY, /*effective*/ None, lag()),
         ],
     );
     let range = &pages[0].text;
@@ -692,7 +692,7 @@ fn accounting_inspect_range_expired_bucket_beside_in_progress_is_not_stale() {
         /*aggregate_day_floor*/ None,
         /*read_at*/ 102 * DAY,
         vec![
-            bucket(0, DAY, Some((0, DAY)), vec![expired]),
+            bucket(/*start_ms*/ 0, DAY, Some((0, DAY)), vec![expired]),
             bucket(
                 100 * DAY,
                 107 * DAY,
@@ -813,7 +813,7 @@ fn accounting_inspect_range_retention_matches_day_pages() {
         "{:#?}",
         pages[0].text
     );
-    assert!(retention(400 * 86_400_000, floor, None).contains(phrase));
+    assert!(retention(400 * 86_400_000, floor, /*oldest_recorded_day*/ None).contains(phrase));
     assert!(
         !pages[0]
             .text
@@ -1470,7 +1470,12 @@ fn accounting_inspect_basis_only_request_shows_no_price_metadata() {
         ),
     ] {
         let mut q = quote();
-        q.snapshot = Some(native_snapshot(none.clone(), basis, source, None));
+        q.snapshot = Some(native_snapshot(
+            none.clone(),
+            basis,
+            source,
+            /*plan_burn_millis*/ None,
+        ));
         let text = attempt_text(&q).join("\n");
         assert!(text.contains(&format!("Billing basis: {shown}")), "{text}");
         assert!(
@@ -1495,9 +1500,24 @@ fn accounting_inspect_priced_or_plan_rate_request_keeps_price_metadata() {
     let none = serde_json::json!({"noncached":null,"read":null,"write":null,"output":null});
     let one_rate = serde_json::json!({"noncached":"1","read":null,"write":null,"output":null});
     for snapshot in [
-        native_snapshot(none, "PlanEquivalent", None, Some(1000)),
-        native_snapshot(one_rate.clone(), "Billed", None, None),
-        native_snapshot(one_rate, "PlanEquivalent", None, None),
+        native_snapshot(
+            none,
+            "PlanEquivalent",
+            /*basis_source*/ None,
+            Some(1000),
+        ),
+        native_snapshot(
+            one_rate.clone(),
+            "Billed",
+            /*basis_source*/ None,
+            /*plan_burn_millis*/ None,
+        ),
+        native_snapshot(
+            one_rate,
+            "PlanEquivalent",
+            /*basis_source*/ None,
+            /*plan_burn_millis*/ None,
+        ),
     ] {
         let mut q = quote();
         // A request copies the plan rate from its record.

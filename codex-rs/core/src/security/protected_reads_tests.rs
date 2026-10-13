@@ -29,7 +29,7 @@ fn issue_442_finds_the_denied_path_the_command_names() {
             Some(user_home),
             codex_home,
             denied,
-            None,
+            /*denial_lines*/ None,
         )
     };
     assert_eq!(word("cat .env"), Some(".env".to_string()));
@@ -237,7 +237,7 @@ async fn issue_442_denied_protected_read_is_explained_under_aggressive() {
     let client = (*session.services.model_client())
         .clone()
         .with_ingress_level(SecurityLevel::Aggressive)
-        .with_source_envelopes(true);
+        .with_source_envelopes(/*enabled*/ true);
     session.services.replace_model_client(client);
     let explanation = explain(1, denial)
         .await
@@ -286,7 +286,7 @@ async fn issue_554_find_above_the_home_is_explained_under_aggressive() {
     let client = (*session.services.model_client())
         .clone()
         .with_ingress_level(SecurityLevel::Aggressive)
-        .with_source_envelopes(true);
+        .with_source_envelopes(/*enabled*/ true);
     session.services.replace_model_client(client);
     let explanation = explain(&denial).await.expect("explained under Aggressive");
     assert_eq!(
@@ -321,7 +321,7 @@ fn issue_621_finds_the_denied_path_inside_interpreter_code() {
             Some(user_home),
             codex_home,
             denied,
-            None,
+            /*denial_lines*/ None,
         )
     };
     for (script, expected) in [
@@ -364,7 +364,7 @@ fn aggressive(session: &Session) {
     let client = (*session.services.model_client())
         .clone()
         .with_ingress_level(SecurityLevel::Aggressive)
-        .with_source_envelopes(true);
+        .with_source_envelopes(/*enabled*/ true);
     session.services.replace_model_client(client);
 }
 
@@ -678,7 +678,13 @@ fn issue_584_only_never_writable_words() {
             std::slice::from_ref(&cwd),
             &profile,
         );
-        only_never_writable_word(&shell(script), &work, None, codex_home, &denials)
+        only_never_writable_word(
+            &shell(script),
+            &work,
+            /*user_home*/ None,
+            codex_home,
+            &denials,
+        )
     };
     for (script, expected) in [
         ("printf x > .codex/config.toml", Some(".codex/config.toml")),
@@ -717,7 +723,13 @@ fn issue_584_only_never_writable_words() {
                 &profile,
             );
             let word = |script: &str| {
-                only_never_writable_word(&shell(script), &worktree, None, codex_home, &denials)
+                only_never_writable_word(
+                    &shell(script),
+                    &worktree,
+                    /*user_home*/ None,
+                    codex_home,
+                    &denials,
+                )
             };
             assert_eq!(
                 word("printf x > .codex/a").as_deref(),

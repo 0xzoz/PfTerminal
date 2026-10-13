@@ -23,7 +23,7 @@ fn key(view: &mut RevocationView, code: KeyCode) {
 
 fn text(view: &RevocationView) -> String {
     let mut lines: Vec<String> = view
-        .lines(90)
+        .lines(/*width*/ 90)
         .iter()
         .map(|line| {
             line.spans
@@ -38,14 +38,14 @@ fn text(view: &RevocationView) -> String {
 }
 
 fn kill_switch_saved(home: &TempDir) -> bool {
-    LevelBasis::read(home.path(), SecurityLevel::Permissive, None).kill_switch_active
+    LevelBasis::read(home.path(), SecurityLevel::Permissive, /*thread*/ None).kill_switch_active
 }
 
 /// The kill switch row opens a review; Esc changes nothing.
 #[test]
 fn pf_25_s02_kill_switch_review_and_esc_change_nothing() {
     let home = TempDir::new().unwrap();
-    let mut view = view(&home, None);
+    let mut view = view(&home, /*app_event_tx*/ None);
     assert_snapshot!("pf_25_s02_list", text(&view));
     key(&mut view, KeyCode::Down);
     key(&mut view, KeyCode::Enter);
@@ -63,7 +63,7 @@ fn pf_25_s02_kill_switch_review_and_esc_change_nothing() {
 #[test]
 fn pf_25_s02_kill_switch_on_then_off() {
     let home = TempDir::new().unwrap();
-    let mut view = view(&home, None);
+    let mut view = view(&home, /*app_event_tx*/ None);
     key(&mut view, KeyCode::Down);
     key(&mut view, KeyCode::Enter);
     key(&mut view, KeyCode::Enter);
@@ -94,7 +94,7 @@ fn pf_25_s02_kill_switch_on_then_off() {
 #[test]
 fn pf_25_s02_revoke_all_is_reviewed_and_saved() {
     let home = TempDir::new().unwrap();
-    let mut view = view(&home, None);
+    let mut view = view(&home, /*app_event_tx*/ None);
     key(&mut view, KeyCode::Enter);
     assert!(text(&view).contains("Revoke all active authority?"));
     key(&mut view, KeyCode::Enter);
@@ -111,7 +111,7 @@ fn pf_25_s02_revoke_all_is_reviewed_and_saved() {
 #[test]
 fn pf_25_s02_changed_state_is_refused() {
     let home = TempDir::new().unwrap();
-    let mut view = view(&home, None);
+    let mut view = view(&home, /*app_event_tx*/ None);
     key(&mut view, KeyCode::Enter);
     let mut other = super::super::revocation_view::RevocationView::new(
         RevocationTarget {
@@ -120,7 +120,7 @@ fn pf_25_s02_changed_state_is_refused() {
             thread: None,
         },
         crate::keymap::RuntimeKeymap::defaults().list,
-        None,
+        /*app_event_tx*/ None,
     );
     key(&mut other, KeyCode::Down);
     key(&mut other, KeyCode::Enter);
@@ -211,7 +211,7 @@ fn view_with(
             thread: None,
         },
         crate::keymap::RuntimeKeymap::defaults().list,
-        None,
+        /*app_event_tx*/ None,
         Box::new(move || grants.borrow().clone()),
     )
 }
@@ -278,7 +278,7 @@ fn pf_25_s02_selection_follows_the_grant() {
 #[test]
 fn pf_25_s02_commit_runs_off_the_ui_thread() {
     let home = TempDir::new().unwrap();
-    let mut view = view(&home, None);
+    let mut view = view(&home, /*app_event_tx*/ None);
     view.commit_inline = false;
     key(&mut view, KeyCode::Down);
     key(&mut view, KeyCode::Enter);

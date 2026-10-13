@@ -983,7 +983,7 @@ async fn accounting_policy_late_refusals_are_reported_once() -> Result<()> {
     refuse().await?;
     assert!(notices.refused_since(Some(&ledger)));
     assert!(!notices.refused_since(Some(&ledger)));
-    assert!(!notices.refused_since(None));
+    assert!(!notices.refused_since(/*ledger*/ None));
     Ok(())
 }
 

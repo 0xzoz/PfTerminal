@@ -4646,10 +4646,26 @@ mod tests {
         let secret = claude.join("secret.json");
         std::fs::write(&secret, "secret").expect("secret");
         let policy = FileSystemSandboxPolicy::restricted(vec![
-            path_entry(&home, FileSystemAccessMode::Write, false),
-            path_entry(&claude, FileSystemAccessMode::Read, true),
-            path_entry(&credentials, FileSystemAccessMode::Deny, true),
-            path_entry(&secret, FileSystemAccessMode::Deny, true),
+            path_entry(
+                &home,
+                FileSystemAccessMode::Write,
+                /*skip_missing*/ false,
+            ),
+            path_entry(
+                &claude,
+                FileSystemAccessMode::Read,
+                /*skip_missing*/ true,
+            ),
+            path_entry(
+                &credentials,
+                FileSystemAccessMode::Deny,
+                /*skip_missing*/ true,
+            ),
+            path_entry(
+                &secret,
+                FileSystemAccessMode::Deny,
+                /*skip_missing*/ true,
+            ),
         ]);
 
         let args = create_filesystem_args(&policy, &home, NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
@@ -4704,9 +4720,21 @@ mod tests {
         std::fs::create_dir_all(&home).expect("create home");
         let config = home.join(".config");
         let policy = FileSystemSandboxPolicy::restricted(vec![
-            path_entry(&home, FileSystemAccessMode::Write, false),
-            path_entry(&config.join("gh"), FileSystemAccessMode::Deny, true),
-            path_entry(&config.join("gcloud"), FileSystemAccessMode::Deny, true),
+            path_entry(
+                &home,
+                FileSystemAccessMode::Write,
+                /*skip_missing*/ false,
+            ),
+            path_entry(
+                &config.join("gh"),
+                FileSystemAccessMode::Deny,
+                /*skip_missing*/ true,
+            ),
+            path_entry(
+                &config.join("gcloud"),
+                FileSystemAccessMode::Deny,
+                /*skip_missing*/ true,
+            ),
         ]);
 
         let args = create_filesystem_args(&policy, &home, NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
@@ -4742,9 +4770,21 @@ mod tests {
         std::fs::create_dir_all(&work).expect("create work");
         let secret = work.join("secret");
         let policy = FileSystemSandboxPolicy::restricted(vec![
-            path_entry(&home, FileSystemAccessMode::Write, false),
-            path_entry(&work, FileSystemAccessMode::Write, false),
-            path_entry(&secret, FileSystemAccessMode::Deny, true),
+            path_entry(
+                &home,
+                FileSystemAccessMode::Write,
+                /*skip_missing*/ false,
+            ),
+            path_entry(
+                &work,
+                FileSystemAccessMode::Write,
+                /*skip_missing*/ false,
+            ),
+            path_entry(
+                &secret,
+                FileSystemAccessMode::Deny,
+                /*skip_missing*/ true,
+            ),
         ]);
 
         let args = create_filesystem_args(&policy, &home, NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
@@ -4777,9 +4817,21 @@ mod tests {
         std::fs::create_dir_all(&claude).expect("create .claude");
         let hooks = claude.join("missing/hooks");
         let policy = FileSystemSandboxPolicy::restricted(vec![
-            path_entry(&home, FileSystemAccessMode::Write, false),
-            path_entry(&claude, FileSystemAccessMode::Read, true),
-            path_entry(&hooks, FileSystemAccessMode::Read, true),
+            path_entry(
+                &home,
+                FileSystemAccessMode::Write,
+                /*skip_missing*/ false,
+            ),
+            path_entry(
+                &claude,
+                FileSystemAccessMode::Read,
+                /*skip_missing*/ true,
+            ),
+            path_entry(
+                &hooks,
+                FileSystemAccessMode::Read,
+                /*skip_missing*/ true,
+            ),
         ]);
 
         let args = create_filesystem_args(&policy, &home, NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
@@ -4995,9 +5047,13 @@ mod tests {
                 .position(|candidate| candidate.iter().zip(window).all(|(a, b)| a == b))
         };
 
-        let args = create_filesystem_args(&entries(false), &workspace, None)
-            .expect("filesystem args")
-            .args;
+        let args = create_filesystem_args(
+            &entries(false),
+            &workspace,
+            /*glob_scan_max_depth*/ None,
+        )
+        .expect("filesystem args")
+        .args;
         let read_only = find(&args, &["--ro-bind", &home_str, &home_str]).expect("ro bind");
         let tmpfs = find(&args, &["--perms", "111", "--tmpfs", &home_str]).expect("tmpfs");
         assert!(read_only < tmpfs, "{args:?}");
@@ -5015,9 +5071,13 @@ mod tests {
             "{args:?}"
         );
 
-        let args = create_filesystem_args(&entries(true), &workspace, None)
-            .expect("filesystem args")
-            .args;
+        let args = create_filesystem_args(
+            &entries(true),
+            &workspace,
+            /*glob_scan_max_depth*/ None,
+        )
+        .expect("filesystem args")
+        .args;
         assert!(
             find(&args, &["--perms", "555", "--tmpfs", &home_str]).is_none(),
             "{args:?}"
@@ -5063,7 +5123,7 @@ mod tests {
                 &AbsolutePathBuf::from_absolute_path(link.join("home")).expect("absolute"),
             ),
         ]);
-        let args = create_filesystem_args(&policy, &base, None)
+        let args = create_filesystem_args(&policy, &base, /*glob_scan_max_depth*/ None)
             .expect("filesystem args")
             .args;
         let logical = path_to_string(&link.join("home"));

@@ -29,7 +29,7 @@ fn request_for(input: serde_json::Value) -> (ClaudeApprovalRequest, oneshot::Rec
 fn view_for(input: serde_json::Value) -> (ClaudeApprovalView, oneshot::Receiver<bool>, Instant) {
     let (request, rx) = request_for(input);
     let view = ClaudeApprovalView::new(request, /*typed_at*/ None);
-    render(&view, 80);
+    render(&view, /*width*/ 80);
     let shown_at = view.shown_at.get().expect("drawn");
     (view, rx, shown_at)
 }
@@ -116,7 +116,7 @@ fn continued_typing_never_allows() {
     let (request, _rx) = request_for(json!({ "command": "touch x" }));
     let typed_at = Instant::now() + INPUT_GUARD * 2;
     let mut view = ClaudeApprovalView::new(request, Some(typed_at));
-    render(&view, 80);
+    render(&view, /*width*/ 80);
     view.handle_key_at(key(KeyCode::Right), typed_at + INPUT_GUARD / 2);
     assert_eq!(view.choice, Choice::Deny);
 }
@@ -165,7 +165,7 @@ fn requests_queue_and_each_starts_on_deny_with_a_fresh_guard() {
     let (mut view, mut first_rx, shown_at) = view_for(json!({ "command": "touch first" }));
     let (second, mut second_rx) = request_for(json!({ "command": "touch second" }));
     assert!(view.try_consume_claude_approval(second).is_none());
-    assert!(render(&view, 80).contains("1 more requests waiting"));
+    assert!(render(&view, /*width*/ 80).contains("1 more requests waiting"));
 
     let later = shown_at + INPUT_GUARD;
     view.handle_key_at(key(KeyCode::Right), later);
@@ -176,7 +176,7 @@ fn requests_queue_and_each_starts_on_deny_with_a_fresh_guard() {
     view.handle_key_at(key(KeyCode::Enter), later);
     assert!(second_rx.try_recv().is_err());
     assert_eq!(view.choice, Choice::Deny);
-    let screen = render(&view, 80);
+    let screen = render(&view, /*width*/ 80);
     assert!(screen.contains("touch second"), "{screen}");
     let shown_again = view.shown_at.get().expect("drawn");
     // Past its own guard and the quiet time the first answer started.
@@ -207,7 +207,7 @@ fn settled_requests_leave_the_queue() {
     drop(rx);
     // The front request stopped waiting: the next one shows, afresh.
     assert!(!view.remove_settled_requests());
-    assert!(render(&view, 80).contains("touch second"));
+    assert!(render(&view, /*width*/ 80).contains("touch second"));
     let shown_again = view.shown_at.get().expect("drawn");
     assert!(shown_again >= shown_at);
     assert!(second_rx.try_recv().is_err());
@@ -229,7 +229,7 @@ fn long_commands_are_fully_visible_and_allow_needs_the_end_seen() {
         "command": format!("ls\n{long_line}"),
         "run_in_background": true,
     }));
-    let screen = render(&view, 60);
+    let screen = render(&view, /*width*/ 60);
     let joined: String = screen.split_whitespace().collect();
     assert!(joined.contains("ls⏎"), "{screen}");
     assert!(joined.contains("rm-rf~/important"), "{screen}");
@@ -241,7 +241,7 @@ fn long_commands_are_fully_visible_and_allow_needs_the_end_seen() {
         .join("\n");
     let (mut view, mut rx, shown_at) = view_for(json!({ "command": lines }));
     let later = shown_at + INPUT_GUARD;
-    let screen = render(&view, 60);
+    let screen = render(&view, /*width*/ 60);
     assert!(
         screen.contains("step 0") && !screen.contains("step 39"),
         "{screen}"
@@ -251,7 +251,7 @@ fn long_commands_are_fully_visible_and_allow_needs_the_end_seen() {
     view.handle_key_at(key(KeyCode::Right), later);
     assert_eq!(view.choice, Choice::Deny);
     view.handle_key_at(key(KeyCode::End), later);
-    let screen = render(&view, 60);
+    let screen = render(&view, /*width*/ 60);
     assert!(
         screen.contains("step 39") && !screen.contains("step 0⏎"),
         "{screen}"
@@ -266,7 +266,7 @@ fn a_popup_with_no_room_for_details_cannot_allow() {
     let (request, mut rx) = request_for(json!({ "command": "touch x" }));
     let mut view = ClaudeApprovalView::new(request, /*typed_at*/ None);
     // Only the header and options fit.
-    render_in(&view, 80, 9);
+    render_in(&view, /*width*/ 80, /*height*/ 9);
     assert!(!view.seen_end.get());
     let later = view.shown_at.get().expect("drawn") + INPUT_GUARD;
     view.handle_key_at(key(KeyCode::Right), later);
@@ -278,12 +278,12 @@ fn a_popup_with_no_room_for_details_cannot_allow() {
 fn a_request_too_long_to_show_can_only_be_denied() {
     let command = "x".repeat(crate::claude_panes::approval::DETAIL_MAX_CHARS + 10);
     let (mut view, mut rx, shown_at) = view_for(json!({ "command": command }));
-    let screen = render(&view, 80);
+    let screen = render(&view, /*width*/ 80);
     assert!(screen.contains("more characters are not shown"), "{screen}");
     assert!(!screen.contains("Allow once"), "{screen}");
     let later = shown_at + INPUT_GUARD;
     view.handle_key_at(key(KeyCode::End), later);
-    render(&view, 80);
+    render(&view, /*width*/ 80);
     view.handle_key_at(key(KeyCode::Right), later);
     view.handle_key_at(key(KeyCode::Enter), later);
     assert_eq!(rx.try_recv(), Ok(false));
@@ -298,5 +298,5 @@ fn popup_snapshot() {
     }));
     // The guard is over: the hint shows how to answer.
     view.shown_at.set(Some(Instant::now() - INPUT_GUARD));
-    assert_snapshot!(render(&view, 72));
+    assert_snapshot!(render(&view, /*width*/ 72));
 }

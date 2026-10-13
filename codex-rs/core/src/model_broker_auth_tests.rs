@@ -18,7 +18,7 @@ fn pf_27_s05_base_url_binds_origin_and_path_prefix() {
         binding_for_base_url("https://api.openai.com/v1", ProviderApiKeyHeader::Bearer),
         Some(binding(
             "api.openai.com",
-            443,
+            /*port*/ 443,
             "/v1",
             ModelAuthHeader::Bearer
         ))
@@ -30,7 +30,7 @@ fn pf_27_s05_base_url_binds_origin_and_path_prefix() {
         ),
         Some(binding(
             "api.z.ai",
-            8443,
+            /*port*/ 8443,
             "/api/coding/paas/v4",
             ModelAuthHeader::Bearer
         ))
@@ -39,7 +39,7 @@ fn pf_27_s05_base_url_binds_origin_and_path_prefix() {
         binding_for_base_url("https://api.anthropic.com", ProviderApiKeyHeader::XApiKey),
         Some(binding(
             "api.anthropic.com",
-            443,
+            /*port*/ 443,
             "/",
             ModelAuthHeader::XApiKey
         ))
@@ -86,6 +86,35 @@ fn pf_27_s05_requests_are_rewritten_to_plain_http_for_the_broker() {
     ] {
         assert_eq!(BrokerRewrite::for_url(url), None, "{url}");
     }
+}
+
+#[test]
+fn issue_654_brokered_target_url_inverts_the_broker_rewrite() {
+    let request = |url: &str| codex_http_client::Request::new(http::Method::POST, url.to_string());
+    for url in [
+        "https://api.z.ai/api/paas/v4/chat/completions",
+        "https://api.openai.com/v1/responses?stream=true",
+        "https://api.z.ai:8443/v4/chat/completions",
+        "https://203.0.113.7/v1/messages",
+        "https://api.example:80/v1/messages",
+    ] {
+        let brokered = rewritten_for_broker_in_tests(request(url));
+        assert_ne!(brokered.url, url);
+        assert_eq!(
+            brokered_target_url(&brokered).as_deref(),
+            Some(url),
+            "{url}"
+        );
+    }
+    // Only a frame-bearing plain-HTTP URL is the broker's.
+    let unframed = request("http://api.z.ai:443/api/paas/v4/chat/completions");
+    assert_eq!(brokered_target_url(&unframed), None);
+    let mut framed_https = rewritten_for_broker_in_tests(request("https://api.z.ai/v4"));
+    framed_https.url = "https://api.z.ai/v4".to_string();
+    assert_eq!(brokered_target_url(&framed_https), None);
+    let mut framed_user = rewritten_for_broker_in_tests(request("https://api.z.ai/v4"));
+    framed_user.url = "http://user@api.z.ai:443/v4".to_string();
+    assert_eq!(brokered_target_url(&framed_user), None);
 }
 
 fn brokered_request(base_url: &str, source: BrokeredKeySource) -> BrokeredAuthRequest {
@@ -285,14 +314,26 @@ fn sec_391_default_matrix_level_os_and_explicit_setting() {
         }
     }
     // Spot checks of the rows that matter most.
-    assert_eq!(level_broker_setting(Aggressive, true, None), Some(true));
     assert_eq!(
-        level_broker_setting(Aggressive, true, Some(false)),
+        level_broker_setting(Aggressive, /*supported*/ true, /*explicit*/ None),
+        Some(true)
+    );
+    assert_eq!(
+        level_broker_setting(Aggressive, /*supported*/ true, Some(false)),
         Some(false)
     );
-    assert_eq!(level_broker_setting(Aggressive, false, None), None);
-    assert_eq!(level_broker_setting(Moderate, true, None), None);
-    assert_eq!(level_broker_setting(Permissive, true, None), None);
+    assert_eq!(
+        level_broker_setting(Aggressive, /*supported*/ false, /*explicit*/ None),
+        None
+    );
+    assert_eq!(
+        level_broker_setting(Moderate, /*supported*/ true, /*explicit*/ None),
+        None
+    );
+    assert_eq!(
+        level_broker_setting(Permissive, /*supported*/ true, /*explicit*/ None),
+        None
+    );
     assert!(resolve(Aggressive, true, Some(true), Some(false)));
     assert!(!resolve(Aggressive, true, Some(false), Some(true)));
     // macOS and Linux (PF-27-S05) and Windows (PF-27-S09) run the broker.

@@ -4240,6 +4240,8 @@ impl Config {
                     .map(|path| path.to_path_buf())
             })
             .unwrap_or_else(|| codex_home.to_path_buf());
+        // #651: an armed launch contract protects a separate database folder.
+        crate::security::launch_contract::protect_database_folder(&sqlite_home);
 
         let mut built_in_model_providers = built_in_model_providers(openai_base_url);
         if let Some(command) = codex_self_exe

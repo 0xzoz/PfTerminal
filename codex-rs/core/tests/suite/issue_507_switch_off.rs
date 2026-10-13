@@ -142,7 +142,12 @@ async fn issue_507_switch_off_does_not_start_a_turn_for_waiting_agent_messages()
     let test = builder().build_with_auto_env(&server).await?;
 
     switch(&test, HumanRevocation::KillSwitchOn)?;
-    mail(&test.codex, "worker finished: pf507-pane-mail", true).await?;
+    mail(
+        &test.codex,
+        "worker finished: pf507-pane-mail",
+        /*trigger_turn*/ true,
+    )
+    .await?;
     assert_no_turn_starts(&test.codex, "switch on").await;
     switch(&test, HumanRevocation::KillSwitchOff)?;
     assert_no_turn_starts(&test.codex, "switch turned off").await;
@@ -233,7 +238,12 @@ async fn issue_507_switch_off_does_not_wake_a_durable_sleep() -> anyhow::Result<
         .await?;
 
     switch(&test, HumanRevocation::KillSwitchOn)?;
-    mail(&test.codex, "worker update: pf507-sleep-mail", false).await?;
+    mail(
+        &test.codex,
+        "worker update: pf507-sleep-mail",
+        /*trigger_turn*/ false,
+    )
+    .await?;
     assert_no_turn_starts(&test.codex, "switch on").await;
     switch(&test, HumanRevocation::KillSwitchOff)?;
     assert_no_turn_starts(&test.codex, "switch turned off").await;

@@ -11,7 +11,7 @@ fn request(home: &Path, target: ChosenLevel, raise_core: bool) -> TransitionRequ
         nested: NestedAgents::Refuse,
         configured: SecurityLevel::Permissive,
         thread: None,
-        reviewed: LevelBasis::read(home, SecurityLevel::Permissive, None),
+        reviewed: LevelBasis::read(home, SecurityLevel::Permissive, /*thread*/ None),
         passed_preflight: raise_core.then(|| {
             Preflight::run(
                 &file_sources(home, /*home*/ None, /*cwd*/ None),
@@ -38,7 +38,12 @@ fn state(home: &Path) -> (level::StoredLevel, StoredSecurityState, bool) {
 #[test]
 fn security_confirm_aggressive_saves_the_level_and_raises_core() {
     let home = tempfile::tempdir().unwrap();
-    let outcome = run(request(home.path(), ChosenLevel::Aggressive, true)).unwrap();
+    let outcome = run(request(
+        home.path(),
+        ChosenLevel::Aggressive,
+        /*raise_core*/ true,
+    ))
+    .unwrap();
     assert_eq!(
         outcome.core.map(|report| report.next_start),
         Some(SecurityLevel::Aggressive)
@@ -58,7 +63,12 @@ fn security_confirm_aggressive_saves_the_level_and_raises_core() {
 #[test]
 fn security_confirm_aggressive_without_preflight_leaves_core_alone() {
     let home = tempfile::tempdir().unwrap();
-    let outcome = run(request(home.path(), ChosenLevel::Aggressive, false)).unwrap();
+    let outcome = run(request(
+        home.path(),
+        ChosenLevel::Aggressive,
+        /*raise_core*/ false,
+    ))
+    .unwrap();
     assert_eq!(outcome.core, None);
     assert_eq!(
         state(home.path()),
@@ -73,8 +83,18 @@ fn security_confirm_aggressive_without_preflight_leaves_core_alone() {
 #[test]
 fn security_confirm_downgrade_saves_both_records() {
     let home = tempfile::tempdir().unwrap();
-    run(request(home.path(), ChosenLevel::Aggressive, true)).unwrap();
-    let outcome = run(request(home.path(), ChosenLevel::Permissive, false)).unwrap();
+    run(request(
+        home.path(),
+        ChosenLevel::Aggressive,
+        /*raise_core*/ true,
+    ))
+    .unwrap();
+    let outcome = run(request(
+        home.path(),
+        ChosenLevel::Permissive,
+        /*raise_core*/ false,
+    ))
+    .unwrap();
     assert_eq!(
         outcome.core.map(|report| report.next_start),
         Some(SecurityLevel::Permissive)
@@ -94,12 +114,22 @@ fn security_confirm_downgrade_saves_both_records() {
 #[test]
 fn security_confirm_write_failure_changes_nothing() {
     let home = tempfile::tempdir().unwrap();
-    run(request(home.path(), ChosenLevel::Aggressive, true)).unwrap();
+    run(request(
+        home.path(),
+        ChosenLevel::Aggressive,
+        /*raise_core*/ true,
+    ))
+    .unwrap();
     let before = std::fs::read(level::state_path(home.path())).unwrap();
     // The state file's lock cannot be created when it is a folder.
     std::fs::remove_file(home.path().join("security_state.lock")).unwrap();
     std::fs::create_dir(home.path().join("security_state.lock")).unwrap();
-    let failure = run(request(home.path(), ChosenLevel::Permissive, false)).unwrap_err();
+    let failure = run(request(
+        home.path(),
+        ChosenLevel::Permissive,
+        /*raise_core*/ false,
+    ))
+    .unwrap_err();
     assert!(failure.message.starts_with("Not saved:"), "{failure:?}");
     assert!(failure.message.ends_with("Nothing changed"), "{failure:?}");
     assert_eq!(
@@ -119,12 +149,25 @@ fn security_confirm_write_failure_changes_nothing() {
 #[test]
 fn security_confirm_state_changed_since_review_asks_to_review_again() {
     let home = tempfile::tempdir().unwrap();
-    let stale = request(home.path(), ChosenLevel::Permissive, false);
+    let stale = request(
+        home.path(),
+        ChosenLevel::Permissive,
+        /*raise_core*/ false,
+    );
     // Another session confirms Aggressive while the review is open.
-    run(request(home.path(), ChosenLevel::Aggressive, true)).unwrap();
+    run(request(
+        home.path(),
+        ChosenLevel::Aggressive,
+        /*raise_core*/ true,
+    ))
+    .unwrap();
     let failure = run(TransitionRequest {
         reviewed: stale.reviewed,
-        ..request(home.path(), ChosenLevel::Permissive, false)
+        ..request(
+            home.path(),
+            ChosenLevel::Permissive,
+            /*raise_core*/ false,
+        )
     })
     .unwrap_err();
     assert!(failure.review_again, "{failure:?}");
@@ -141,7 +184,14 @@ fn security_confirm_state_changed_since_review_asks_to_review_again() {
 #[test]
 fn security_confirm_runs_off_the_calling_thread() {
     let home = tempfile::tempdir().unwrap();
-    let mut pending = start(request(home.path(), ChosenLevel::Aggressive, true), false);
+    let mut pending = start(
+        request(
+            home.path(),
+            ChosenLevel::Aggressive,
+            /*raise_core*/ true,
+        ),
+        /*inline*/ false,
+    );
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let result = loop {
         if let Some(result) = pending.poll() {

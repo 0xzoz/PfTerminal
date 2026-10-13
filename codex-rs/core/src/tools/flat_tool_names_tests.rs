@@ -9,7 +9,11 @@ fn tool(name: &str) -> ResponsesApiTool {
         description: format!("{name} description"),
         strict: false,
         defer_loading: Some(true),
-        parameters: JsonSchema::object(BTreeMap::new(), None, None),
+        parameters: JsonSchema::object(
+            BTreeMap::new(),
+            /*required*/ None,
+            /*additional_properties*/ None,
+        ),
         output_schema: None,
     }
 }

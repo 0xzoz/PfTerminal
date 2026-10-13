@@ -1534,7 +1534,7 @@ mod tests {
         let auth = provider.auth().await.expect("placeholder auth");
         let api_auth = provider.api_auth().await.expect("brokered auth");
         let account = provider.account_state().expect("account state");
-        crate::model_key_broker::set_test_model_key_broker(None);
+        crate::model_key_broker::set_test_model_key_broker(/*broker*/ None);
 
         assert_eq!(auth.api_key(), Some(crate::BROKERED_KEY_PLACEHOLDER));
         assert!(api_auth.to_auth_headers().is_empty());

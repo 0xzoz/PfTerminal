@@ -1202,7 +1202,7 @@ async fn pf_33_s02_unpinned_broker_resolves_and_pins_keep_the_private_peer_check
     let broker = pinned_broker(&upstream, options());
     let dummy = virtualized_dummy_for(&broker, PINNED_NAME);
     let response = pinned_route(&broker, upstream.port, &dummy)
-        .forward(pinned_request(&dummy, None))
+        .forward(pinned_request(&dummy, /*pin*/ None))
         .await
         .expect("broker response");
     assert_eq!(denial(&response), Some("upstream_failed"));
@@ -1477,7 +1477,7 @@ mod pf_27_s05 {
         let bound = binding(upstream.port, "/v1", ModelAuthHeader::Bearer);
 
         let credential = broker
-            .register_stored(bound.clone(), "ZAI_API_KEY", &[], None)
+            .register_stored(bound.clone(), "ZAI_API_KEY", &[], /*account*/ None)
             .expect("register")
             .expect("stored key");
         let response = signed(&credential, upstream.port, "/v1/responses").await;
@@ -1489,26 +1489,26 @@ mod pf_27_s05 {
         // Nothing stored, an unreadable store, a malformed id.
         assert!(
             broker
-                .register_stored(bound.clone(), "MISSING_API_KEY", &[], None)
+                .register_stored(bound.clone(), "MISSING_API_KEY", &[], /*account*/ None)
                 .expect("register")
                 .is_none()
         );
         assert_eq!(
             broker
-                .register_stored(bound.clone(), "BROKEN_API_KEY", &[], None)
+                .register_stored(bound.clone(), "BROKEN_API_KEY", &[], /*account*/ None)
                 .err(),
             Some(ModelCredentialBrokerError::StoreUnavailable)
         );
         assert_eq!(
             broker
-                .register_stored(bound.clone(), "../ZAI_API_KEY", &[], None)
+                .register_stored(bound.clone(), "../ZAI_API_KEY", &[], /*account*/ None)
                 .err(),
             Some(ModelCredentialBrokerError::Rejected)
         );
         // A broker started without a store home reads no stored keys.
         assert!(
             model_broker(&upstream)
-                .register_stored(bound, "ZAI_API_KEY", &[], None)
+                .register_stored(bound, "ZAI_API_KEY", &[], /*account*/ None)
                 .expect("register")
                 .is_none()
         );
@@ -1577,7 +1577,7 @@ mod pf_27_s05 {
                 binding(upstream.port, "/v1", ModelAuthHeader::Bearer),
                 "PF27_S05_NEVER_SET_KEY",
                 &taken,
-                None,
+                /*account*/ None,
             )
             .expect("register")
             .expect("stashed key");
@@ -1739,7 +1739,7 @@ mod pf_27_s05 {
                     binding(port, "/v1", ModelAuthHeader::Bearer),
                     MEMORY_KEY_ENV,
                     &taken,
-                    None,
+                    /*account*/ None,
                 )
                 .expect("register")
                 .expect("stashed key");

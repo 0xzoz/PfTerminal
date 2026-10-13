@@ -1315,7 +1315,7 @@ mod pf_27_s02_tests {
             prepare_runtime_dir(Some(&configured)),
             Some(configured.clone())
         );
-        assert_eq!(prepare_runtime_dir(None), None);
+        assert_eq!(prepare_runtime_dir(/*configured*/ None), None);
 
         let long = PathBuf::from("/").join("x".repeat(120)).join("run");
         let fallback = user_runtime_dir().and_then(|dir| create_runtime_dir(&dir));

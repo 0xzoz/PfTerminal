@@ -488,7 +488,14 @@ fn a_refusal_replays_to_zero_usage() {
         Dialect::NativeAnthropic,
         Dialect::UnknownCompatible,
     ] {
-        let usage = replay(dialect, &[observation(1, r#"{"refused_status":403}"#)]).unwrap();
+        let usage = replay(
+            dialect,
+            &[observation(
+                /*revision*/ 1,
+                r#"{"refused_status":403}"#,
+            )],
+        )
+        .unwrap();
         assert_eq!(
             usage,
             Usage {
@@ -505,13 +512,25 @@ fn a_refusal_replays_to_zero_usage() {
         );
     }
     for invalid in [
-        vec![observation(1, r#"{"refused_status":429}"#)],
-        vec![observation(1, r#"{"refused_status":400}"#)],
-        vec![observation(1, r#"{"refused_status":200}"#)],
-        vec![observation(1, r#"{"refused_status":401,"output":0}"#)],
+        vec![observation(
+            /*revision*/ 1,
+            r#"{"refused_status":429}"#,
+        )],
+        vec![observation(
+            /*revision*/ 1,
+            r#"{"refused_status":400}"#,
+        )],
+        vec![observation(
+            /*revision*/ 1,
+            r#"{"refused_status":200}"#,
+        )],
+        vec![observation(
+            /*revision*/ 1,
+            r#"{"refused_status":401,"output":0}"#,
+        )],
         vec![
-            observation(1, r#"{"input":1}"#),
-            observation(2, r#"{"refused_status":401}"#),
+            observation(/*revision*/ 1, r#"{"input":1}"#),
+            observation(/*revision*/ 2, r#"{"refused_status":401}"#),
         ],
     ] {
         assert!(replay(Dialect::Inclusive, &invalid).is_err(), "{invalid:?}");

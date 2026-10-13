@@ -91,6 +91,9 @@ impl WriteStdinHandler {
         };
 
         let args: WriteStdinArgs = parse_arguments_for_tool("write_stdin", &arguments)?;
+        if !args.chars.is_empty() && !is_interrupt(&args.chars) {
+            typed_link_check(&session, &turn, &args).await?;
+        }
         // PF-23-S01: writes to one process, interrupts included, are judged
         // and sent one at a time.
         let post_taint = session.services.model_client().post_taint_state();
@@ -128,6 +131,52 @@ impl WriteStdinHandler {
 
         Ok(boxed_tool_output(response))
     }
+}
+
+/// #623: under Aggressive, typing a command (or code) into a running process
+/// that creates a link to the project's `.codex` or `.agents` is refused like
+/// the command itself. One write at a time: a command typed across several
+/// writes is not put together here.
+async fn typed_link_check(
+    session: &Session,
+    turn: &TurnContext,
+    args: &WriteStdinArgs,
+) -> Result<(), FunctionCallError> {
+    use crate::security::protected_links;
+    if !protected_links::applies(session) {
+        return Ok(());
+    }
+    // A shell's command line, or code typed into an interpreter.
+    let typed = [
+        vec!["sh".to_string(), "-c".to_string(), args.chars.clone()],
+        vec!["python3".to_string(), "-c".to_string(), args.chars.clone()],
+    ];
+    if !typed
+        .iter()
+        .any(|command| protected_links::may_link_command(command))
+    {
+        return Ok(());
+    }
+    let process_id = args.session_id.to_string();
+    let Some(cwd) = session
+        .services
+        .unified_exec_manager
+        .list_processes()
+        .await
+        .into_iter()
+        .find(|process| process.process_id == process_id)
+        .and_then(|process| process.cwd.to_abs_path().ok())
+    else {
+        // No such running process: the write fails on its own.
+        return Ok(());
+    };
+    for command in &typed {
+        if let Some(refusal) = protected_links::refusal(session, turn, command, cwd.as_path()).await
+        {
+            return Err(FunctionCallError::RespondToModel(refusal));
+        }
+    }
+    Ok(())
 }
 
 /// PF-23-S01: typing into a running process after untrusted content is

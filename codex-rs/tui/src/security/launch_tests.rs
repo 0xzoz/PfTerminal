@@ -234,3 +234,61 @@ async fn shown_aggressive_states_gate_spawn_account_switches_in_core() {
         );
     }
 }
+
+/// #651: every database folder config may name is denied at launch, and
+/// verification counts each one's database glob as denied, also one that is
+/// not the folder Core loads (the user config's, overridden with `-c`).
+#[tokio::test]
+async fn issue_651_every_candidate_database_folder_counts_as_denied() {
+    let home = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    level::save(home.path(), ChosenLevel::Aggressive, NestedAgents::Refuse).unwrap();
+    std::fs::write(home.path().join(preflight::RECEIPT_FILE), "garbage").unwrap();
+    let configured = root.path().join("configured");
+    let given = root.path().join("given");
+    std::fs::create_dir_all(&configured).unwrap();
+    std::fs::create_dir_all(&given).unwrap();
+    std::fs::write(
+        home.path().join("config.toml"),
+        format!("sqlite_home = {:?}\n", configured.display().to_string()),
+    )
+    .unwrap();
+    let mut cli = vec![(
+        "sqlite_home".to_string(),
+        toml::Value::String(given.display().to_string()),
+    )];
+    let mut plan = LaunchPlan::prepare(home.path(), &mut cli).unwrap();
+    for folder in [&configured, &given] {
+        assert!(
+            plan.isolated.contains(&folder.join("*.sqlite*")),
+            "{:?}",
+            plan.isolated
+        );
+    }
+    plan.extend_env_overrides(&ShellEnvironmentPolicyToml::default(), &mut cli);
+    cli.push(broker_off());
+    let mut overrides = ConfigOverrides {
+        cwd: Some(cwd.path().to_path_buf()),
+        ..Default::default()
+    };
+    plan.apply_launch_overrides(&mut overrides);
+    let config = crate::legacy_core::config::ConfigBuilder::default()
+        .codex_home(home.path().to_path_buf())
+        .cli_overrides(cli)
+        .harness_overrides(overrides)
+        .loader_overrides(codex_config::LoaderOverrides::without_managed_config_for_tests())
+        .build()
+        .await
+        .unwrap();
+    assert_eq!(config.sqlite.home(), given.as_path());
+    let databases = preflight::verify_isolation(&config, &plan.isolated)
+        .into_iter()
+        .filter(|line| line.contains(".sqlite"))
+        .collect::<Vec<_>>();
+    assert_eq!(databases, Vec::<String>::new());
+    assert_eq!(
+        preflight::verify_database_folder(&config),
+        Vec::<String>::new()
+    );
+}

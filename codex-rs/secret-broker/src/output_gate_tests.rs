@@ -52,19 +52,19 @@ fn pf_28_s01_exact_value_and_encodings_are_removed_whole() {
     let mut encodings = vec![
         CANARY.to_string(),
         json[1..json.len() - 1].to_string(),
-        percent_encode(CANARY.as_bytes(), true, false)
+        percent_encode(CANARY.as_bytes(), /*upper*/ true, /*form*/ false)
             .into_iter()
             .map(char::from)
             .collect(),
-        percent_encode(CANARY.as_bytes(), false, false)
+        percent_encode(CANARY.as_bytes(), /*upper*/ false, /*form*/ false)
             .into_iter()
             .map(char::from)
             .collect(),
-        hex(CANARY.as_bytes(), false)
+        hex(CANARY.as_bytes(), /*upper*/ false)
             .into_iter()
             .map(char::from)
             .collect(),
-        hex(CANARY.as_bytes(), true)
+        hex(CANARY.as_bytes(), /*upper*/ true)
             .into_iter()
             .map(char::from)
             .collect(),
@@ -248,7 +248,7 @@ fn pf_28_s01_chunk_boundaries_never_split_a_value() {
             whole,
             "cut {cut}"
         );
-        assert_no_fragment(&out, CANARY, 6);
+        assert_no_fragment(&out, CANARY, /*min*/ 6);
     }
     let one_byte_chunks: Vec<&[u8]> = bytes.chunks(1).collect();
     let out = stream(&gate, &one_byte_chunks);
@@ -259,13 +259,23 @@ fn pf_28_s01_chunk_boundaries_never_split_a_value() {
 fn pf_28_s01_stream_holds_back_at_most_the_longest_value() {
     let gate = gate_with(CANARY);
     let mut scrubber = StreamScrubber::new();
-    let out = scrubber.push(&gate, OutputSink::ToolResult, &b"z ".repeat(2048), true);
+    let out = scrubber.push(
+        &gate,
+        OutputSink::ToolResult,
+        &b"z ".repeat(2048),
+        /*utf8*/ true,
+    );
     assert!(scrubber.pending() <= gate.snapshot().max_len + BASE64_SLACK + 2);
     assert_eq!(out.len() + scrubber.pending(), 4096);
     // PF-28-S02 changed the bound for one unbroken encoded run: it is held up
     // to MAX_BLOCK_CARRY so a nested encoding is decoded whole.
     let mut scrubber = StreamScrubber::new();
-    let out = scrubber.push(&gate, OutputSink::ToolResult, &[b'z'; 4096], true);
+    let out = scrubber.push(
+        &gate,
+        OutputSink::ToolResult,
+        &[b'z'; 4096],
+        /*utf8*/ true,
+    );
     assert!(scrubber.pending() <= MAX_BLOCK_CARRY);
     assert_eq!(out.len() + scrubber.pending(), 4096);
 }
@@ -279,7 +289,7 @@ fn pf_28_s01_stream_holds_back_only_a_possible_value_start() {
         &gate,
         OutputSink::ToolResult,
         b"ordinary output, no value here ",
-        true,
+        /*utf8*/ true,
     );
     assert_eq!(out, b"ordinary output, no value here ");
     assert_eq!(scrubber.pending(), 0);
@@ -287,7 +297,7 @@ fn pf_28_s01_stream_holds_back_only_a_possible_value_start() {
     let start = &CANARY.as_bytes()[..5];
     let mut chunk = b"next ".to_vec();
     chunk.extend_from_slice(start);
-    let out = scrubber.push(&gate, OutputSink::ToolResult, &chunk, true);
+    let out = scrubber.push(&gate, OutputSink::ToolResult, &chunk, /*utf8*/ true);
     assert_eq!(out, b"next");
     assert_eq!(scrubber.pending(), start.len() + 1);
 }
@@ -321,9 +331,19 @@ fn pf_28_s01_multibyte_text_is_cut_on_char_boundaries() {
     let bytes = input.as_bytes();
     for cut in 0..=bytes.len() {
         let mut scrubber = StreamScrubber::new();
-        let first = scrubber.push(&gate, OutputSink::ModelResponse, &bytes[..cut], true);
+        let first = scrubber.push(
+            &gate,
+            OutputSink::ModelResponse,
+            &bytes[..cut],
+            /*utf8*/ true,
+        );
         assert!(String::from_utf8(first.clone()).is_ok(), "cut {cut}");
-        let second = scrubber.push(&gate, OutputSink::ModelResponse, &bytes[cut..], true);
+        let second = scrubber.push(
+            &gate,
+            OutputSink::ModelResponse,
+            &bytes[cut..],
+            /*utf8*/ true,
+        );
         let rest = scrubber.finish(&gate, OutputSink::ModelResponse);
         let out = [first, second, rest].concat();
         assert_eq!(
@@ -481,7 +501,12 @@ fn pf_28_s01_disarmed_gate_passes_through_and_keeps_registrations() {
     assert_eq!(gate.scrub(OutputSink::ToolResult, CANARY), None);
     let mut scrubber = StreamScrubber::new();
     assert_eq!(
-        scrubber.push(&gate, OutputSink::ToolResult, CANARY.as_bytes(), true),
+        scrubber.push(
+            &gate,
+            OutputSink::ToolResult,
+            CANARY.as_bytes(),
+            /*utf8*/ true
+        ),
         CANARY.as_bytes()
     );
     gate.arm().expect("arm");
@@ -513,8 +538,18 @@ fn pf_28_s01_short_value_is_not_redacted_inside_a_longer_word_at_a_cut() {
     gate.register("short", SecretClass::Operational, "abc")
         .expect("register");
     let mut scrubber = StreamScrubber::new();
-    let mut out = scrubber.push(&gate, OutputSink::ToolResult, b"abcdzzq", true);
-    out.extend(scrubber.push(&gate, OutputSink::ToolResult, b"x end abc.", true));
+    let mut out = scrubber.push(
+        &gate,
+        OutputSink::ToolResult,
+        b"abcdzzq",
+        /*utf8*/ true,
+    );
+    out.extend(scrubber.push(
+        &gate,
+        OutputSink::ToolResult,
+        b"x end abc.",
+        /*utf8*/ true,
+    ));
     out.extend(scrubber.finish(&gate, OutputSink::ToolResult));
     assert_eq!(
         String::from_utf8(out).expect("utf8"),

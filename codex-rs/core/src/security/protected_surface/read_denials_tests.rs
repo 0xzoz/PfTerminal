@@ -48,7 +48,12 @@ fn workspace(cwd: &Path) -> PermissionProfile {
 fn pf_23_s01_corbanu_home_is_denied_by_default_and_runtime_entries_stay() {
     let fx = fixture();
     let cwd = fx.user_home.join("project");
-    let denials = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)]);
+    let denials = ReadDenials::collect(
+        &fx.codex_home,
+        Some(&fx.user_home),
+        /*claude_config_dir*/ None,
+        &[abs(&cwd)],
+    );
     let profile = denials.apply(&workspace(&cwd)).unwrap();
     let policy = profile.file_system_sandbox_policy();
     let readable = |path: &Path| policy.can_read_path_with_cwd(path, &cwd);
@@ -92,7 +97,12 @@ fn pf_23_s01_corbanu_home_is_denied_by_default_and_runtime_entries_stay() {
 fn pf_23_s01_full_access_gets_a_sandbox_that_only_denies_reads() {
     let fx = fixture();
     let cwd = fx.user_home.join("project");
-    let denials = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)]);
+    let denials = ReadDenials::collect(
+        &fx.codex_home,
+        Some(&fx.user_home),
+        /*claude_config_dir*/ None,
+        &[abs(&cwd)],
+    );
     let profile = denials.apply(&PermissionProfile::Disabled).unwrap();
     let policy = profile.file_system_sandbox_policy();
     assert_eq!(policy.kind, FileSystemSandboxKind::Restricted);
@@ -116,12 +126,22 @@ fn pf_23_s01_a_denial_holding_the_workspace_is_skipped() {
     let fx = fixture();
     // Working inside `~/.ssh` (or a home entry) must not deny the workspace.
     let cwd = fx.user_home.join(".ssh");
-    let denials = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)]);
+    let denials = ReadDenials::collect(
+        &fx.codex_home,
+        Some(&fx.user_home),
+        /*claude_config_dir*/ None,
+        &[abs(&cwd)],
+    );
     assert!(denials.skipped.contains(&abs(&cwd)));
     assert!(denials.paths().all(|path| !cwd.starts_with(path.as_path())));
     // The working folder inside the Corbanu home skips only its own entry.
     let cwd = fx.codex_home.join("notes.txt");
-    let denials = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)]);
+    let denials = ReadDenials::collect(
+        &fx.codex_home,
+        Some(&fx.user_home),
+        /*claude_config_dir*/ None,
+        &[abs(&cwd)],
+    );
     assert_eq!(denials.skipped, vec![abs(&cwd)]);
     assert!(
         denials
@@ -158,7 +178,7 @@ async fn pf_23_s01_file_tools_get_the_denials_after_taint() {
     let client = (*session.services.model_client())
         .clone()
         .with_ingress_level(codex_security_policy::SecurityLevel::Moderate)
-        .with_source_envelopes(true);
+        .with_source_envelopes(/*enabled*/ true);
     session.services.replace_model_client(client);
     let environment = turn
         .environments
@@ -174,7 +194,8 @@ async fn pf_23_s01_file_tools_get_the_denials_after_taint() {
             .file_system_sandbox_policy()
             .can_read_path_with_cwd(auth.as_path(), cwd.as_path())
     };
-    let context = || turn.file_system_sandbox_context(None, &environment);
+    let context =
+        || turn.file_system_sandbox_context(/*additional_permissions*/ None, &environment);
     // Issue #239: under Moderate the denials apply before taint too.
     let before = protect_file_tool_context(&session, &turn, context());
     assert!(readable(context()));
@@ -198,7 +219,7 @@ async fn pf_23_s01_upload_reads_follow_the_denials_after_taint() {
     let client = (*session.services.model_client())
         .clone()
         .with_ingress_level(codex_security_policy::SecurityLevel::Moderate)
-        .with_source_envelopes(true);
+        .with_source_envelopes(/*enabled*/ true);
     session.services.replace_model_client(client);
     #[allow(deprecated)]
     let cwd = turn.cwd.clone();
@@ -247,7 +268,12 @@ fn issue_562_missing_runtime_entries_stay_read_only() {
     ] {
         assert!(!fx.codex_home.join(missing).exists(), "{missing}");
     }
-    let denials = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)]);
+    let denials = ReadDenials::collect(
+        &fx.codex_home,
+        Some(&fx.user_home),
+        /*claude_config_dir*/ None,
+        &[abs(&cwd)],
+    );
     let policy = denials
         .apply(&PermissionProfile::Disabled)
         .unwrap()
@@ -292,8 +318,12 @@ fn issue_583_the_corbanu_home_takes_no_new_entries() {
         (worktree.clone(), PermissionProfile::Disabled),
         (worktree.clone(), workspace(&worktree)),
     ] {
-        let mut denials =
-            ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)]);
+        let mut denials = ReadDenials::collect(
+            &fx.codex_home,
+            Some(&fx.user_home),
+            /*claude_config_dir*/ None,
+            &[abs(&cwd)],
+        );
         // An Aggressive grant lifts the other write rules, not this one.
         denials.lift_write_rules();
         let policy = denials
@@ -339,7 +369,12 @@ fn issue_583_the_corbanu_home_takes_no_new_entries() {
         ]),
         NetworkSandboxPolicy::Restricted,
     );
-    let denials = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&project)]);
+    let denials = ReadDenials::collect(
+        &fx.codex_home,
+        Some(&fx.user_home),
+        /*claude_config_dir*/ None,
+        &[abs(&project)],
+    );
     let policy = denials
         .apply(&project_only)
         .unwrap()
@@ -355,7 +390,12 @@ fn issue_583_the_corbanu_home_takes_no_new_entries() {
         (fx.codex_home.clone(), false),
         (other, false),
     ] {
-        let denials = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)]);
+        let denials = ReadDenials::collect(
+            &fx.codex_home,
+            Some(&fx.user_home),
+            /*claude_config_dir*/ None,
+            &[abs(&cwd)],
+        );
         let denials = if runtime_only {
             denials.runtime_only()
         } else {
@@ -408,7 +448,12 @@ fn issue_603_names_corbanu_reads_later_are_protected_in_the_home() {
     for (cwd, root, profile) in cases {
         let mut keep = vec![abs(&cwd)];
         keep.extend(root.as_deref().map(abs));
-        let mut denials = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &keep);
+        let mut denials = ReadDenials::collect(
+            &fx.codex_home,
+            Some(&fx.user_home),
+            /*claude_config_dir*/ None,
+            &keep,
+        );
         denials.lift_write_rules();
         let policy = denials
             .apply(&profile)
@@ -424,11 +469,16 @@ fn issue_603_names_corbanu_reads_later_are_protected_in_the_home() {
         assert!(writable(&cwd.join("file")), "{cwd:?}");
         // A person's approval under Moderate lifts it, as it lifts the
         // read-only home (#540).
-        let policy = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &keep)
-            .runtime_only()
-            .apply(&profile)
-            .unwrap()
-            .file_system_sandbox_policy();
+        let policy = ReadDenials::collect(
+            &fx.codex_home,
+            Some(&fx.user_home),
+            /*claude_config_dir*/ None,
+            &keep,
+        )
+        .runtime_only()
+        .apply(&profile)
+        .unwrap()
+        .file_system_sandbox_policy();
         assert!(
             policy.can_write_path_with_cwd(&fx.codex_home.join("rules/x.rules"), &cwd),
             "{cwd:?}"
@@ -437,10 +487,15 @@ fn issue_603_names_corbanu_reads_later_are_protected_in_the_home() {
     // A command working in a name it would protect keeps its folder.
     let rules = fx.codex_home.join("rules");
     std::fs::create_dir_all(&rules).unwrap();
-    let policy = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&rules)])
-        .apply(&PermissionProfile::Disabled)
-        .unwrap()
-        .file_system_sandbox_policy();
+    let policy = ReadDenials::collect(
+        &fx.codex_home,
+        Some(&fx.user_home),
+        /*claude_config_dir*/ None,
+        &[abs(&rules)],
+    )
+    .apply(&PermissionProfile::Disabled)
+    .unwrap()
+    .file_system_sandbox_policy();
     assert!(policy.can_write_path_with_cwd(&rules.join("x.rules"), &rules));
     assert!(!policy.can_write_path_with_cwd(&fx.codex_home.join("hooks.json"), &rules));
 }
@@ -510,10 +565,15 @@ fn issue_603_a_kept_link_does_not_skip_a_credential_denial() {
     std::os::unix::fs::symlink(&ssh, &build).unwrap();
     for cwd in [project.clone(), build.clone()] {
         let keep = [abs(&project), abs(&build)];
-        let policy = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &keep)
-            .apply(&PermissionProfile::Disabled)
-            .unwrap()
-            .file_system_sandbox_policy();
+        let policy = ReadDenials::collect(
+            &fx.codex_home,
+            Some(&fx.user_home),
+            /*claude_config_dir*/ None,
+            &keep,
+        )
+        .apply(&PermissionProfile::Disabled)
+        .unwrap()
+        .file_system_sandbox_policy();
         let key = ssh.join("id_ed25519");
         assert!(!policy.can_read_path_with_cwd(&key, &cwd), "{cwd:?}");
         assert!(!policy.can_write_path_with_cwd(&key, &cwd), "{cwd:?}");
@@ -533,10 +593,15 @@ fn issue_603_a_worktrees_link_keeps_the_names_protected() {
         }
         std::os::unix::fs::symlink(target, &worktrees).unwrap();
         let cwd = fx.codex_home.clone();
-        let policy = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)])
-            .apply(&PermissionProfile::Disabled)
-            .unwrap()
-            .file_system_sandbox_policy();
+        let policy = ReadDenials::collect(
+            &fx.codex_home,
+            Some(&fx.user_home),
+            /*claude_config_dir*/ None,
+            &[abs(&cwd)],
+        )
+        .apply(&PermissionProfile::Disabled)
+        .unwrap()
+        .file_system_sandbox_policy();
         for name in ["rules/x.rules", "hooks.json", "agents/x"] {
             assert!(
                 !policy.can_write_path_with_cwd(&fx.codex_home.join(name), &cwd),
@@ -556,8 +621,12 @@ fn issue_583_a_worktrees_link_opens_nothing() {
         std::fs::remove_dir_all(fx.codex_home.join("worktrees")).unwrap();
         std::os::unix::fs::symlink(target, fx.codex_home.join("worktrees")).unwrap();
         let cwd = fx.user_home.join("project");
-        let mut denials =
-            ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)]);
+        let mut denials = ReadDenials::collect(
+            &fx.codex_home,
+            Some(&fx.user_home),
+            /*claude_config_dir*/ None,
+            &[abs(&cwd)],
+        );
         denials.lift_write_rules();
         assert_eq!(denials.home_writable_paths().count(), 0, "{target}");
         let policy = denials
@@ -626,7 +695,12 @@ fn issue_583_a_linked_home_outside_the_workspace_gets_no_carve_out() {
         ]),
         NetworkSandboxPolicy::Restricted,
     );
-    let denials = ReadDenials::collect(&codex_home, Some(&user_home), None, &[abs(&cwd)]);
+    let denials = ReadDenials::collect(
+        &codex_home,
+        Some(&user_home),
+        /*claude_config_dir*/ None,
+        &[abs(&cwd)],
+    );
     let policy = denials
         .apply(&home_only)
         .unwrap()
@@ -688,7 +762,12 @@ fn issue_619_a_home_below_a_tmp_spelled_root_is_protected() {
     let home = real.join("dot/home");
     std::fs::create_dir_all(home.join("worktrees")).unwrap();
     let profile = workspace(&logical);
-    let denials = ReadDenials::collect(&home, None, None, &[abs(&cwd)]);
+    let denials = ReadDenials::collect(
+        &home,
+        /*user_home*/ None,
+        /*claude_config_dir*/ None,
+        &[abs(&cwd)],
+    );
     let policy = denials
         .apply(&profile)
         .unwrap()
@@ -704,7 +783,12 @@ fn issue_619_a_home_below_a_tmp_spelled_root_is_protected() {
     // A home that is the root's `.codex`: the root's metadata.
     let home = real.join(".codex");
     std::fs::create_dir_all(home.join("worktrees")).unwrap();
-    let denials = ReadDenials::collect(&home, None, None, &[abs(&cwd)]);
+    let denials = ReadDenials::collect(
+        &home,
+        /*user_home*/ None,
+        /*claude_config_dir*/ None,
+        &[abs(&cwd)],
+    );
     let policy = denials
         .apply(&profile)
         .unwrap()
@@ -876,6 +960,96 @@ fn issue_611_a_separate_database_folder_is_denied_like_the_home() {
     assert_eq!(same, home);
 }
 
+/// Issue #651: a database folder (or Corbanu home) whose path holds glob
+/// syntax is escaped in the database glob, so a database created later is
+/// still covered and nothing else is; databases recovery set aside beside
+/// the folder (`<folder>.db-backups`) are denied when present; and a command
+/// working in the home cannot create `accounting-pending` or `db-backups`.
+#[test]
+fn issue_651_glob_syntax_and_backups_of_the_database_folder() {
+    let fx = fixture();
+    let profile = PermissionProfile::Disabled;
+    let databases = fx.user_home.join("db[1]{2*?");
+    let inside = abs(&databases.join("work"));
+    std::fs::create_dir_all(inside.as_path()).unwrap();
+    let backups = fx.user_home.join("db[1]{2*?.db-backups/sqlite-1-0");
+    std::fs::create_dir_all(&backups).unwrap();
+    let denials = ReadDenials::for_turn(
+        &fx.codex_home,
+        &databases,
+        &inside,
+        std::slice::from_ref(&inside),
+        &profile,
+    );
+    let matcher = denials.matcher().expect("a valid matcher");
+    for denied in [
+        databases.join("later.sqlite"),
+        databases.join("later.sqlite-wal"),
+        backups.join("state_5.sqlite"),
+    ] {
+        assert!(matcher.is_read_denied(&denied), "{}", denied.display());
+    }
+    for readable in [
+        databases.join("notes.txt"),
+        inside.join("file").to_path_buf(),
+        fx.user_home.join("db1/later.sqlite"),
+    ] {
+        assert!(!matcher.is_read_denied(&readable), "{}", readable.display());
+    }
+
+    // A Corbanu home whose path holds glob syntax.
+    let home = fx.user_home.join("h[o]me");
+    std::fs::create_dir_all(&home).unwrap();
+    let project = abs(&fx.user_home.join("project"));
+    let denials = ReadDenials::for_turn(
+        &home,
+        &home,
+        &project,
+        std::slice::from_ref(&project),
+        &profile,
+    );
+    let matcher = denials.matcher().expect("a valid matcher");
+    assert!(matcher.is_read_denied(&home.join("later.sqlite")));
+    assert!(!matcher.is_read_denied(&fx.user_home.join("home/later.sqlite")));
+
+    // Working in the home: neither may be created.
+    let in_home = abs(&fx.codex_home);
+    let denials = ReadDenials::for_turn(
+        &fx.codex_home,
+        &fx.codex_home,
+        &in_home,
+        std::slice::from_ref(&in_home),
+        &profile,
+    );
+    let policy = denials
+        .apply(&profile)
+        .unwrap()
+        .file_system_sandbox_policy();
+    for name in ["accounting-pending/x.json", "db-backups/x"] {
+        let path = fx.codex_home.join(name);
+        assert!(
+            !policy.can_write_path_with_cwd(&path, in_home.as_path()),
+            "{name}"
+        );
+    }
+}
+
+/// Issue #651: a pattern below a folder reached through a link whose real
+/// location holds glob syntax is copied with that location escaped.
+#[test]
+fn issue_651_real_location_of_a_pattern_is_escaped() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let real = base.join("db[1]{2");
+    std::fs::create_dir_all(&real).unwrap();
+    std::os::unix::fs::symlink(&real, base.join("link")).unwrap();
+    let pattern = format!("{}/*.sqlite*", base.join("link").display());
+    assert_eq!(
+        real_pattern(&pattern),
+        Some(format!("{}/db[[]1][{{]2/*.sqlite*", base.display()))
+    );
+}
+
 /// Issue #562: on Linux the missing runtime folders are created, empty,
 /// only where the profile could write the Corbanu home, so bubblewrap never
 /// needs a placeholder file where Corbanu expects a folder. `AGENTS.md` is
@@ -922,7 +1096,12 @@ fn pf_23_s02_persistence_files_become_read_only() {
     std::fs::create_dir_all(cwd.join(".git/hooks")).unwrap();
     // An existing start-up file; the ones below do not exist.
     std::fs::write(fx.user_home.join(".bashrc"), "x").unwrap();
-    let denials = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)]);
+    let denials = ReadDenials::collect(
+        &fx.codex_home,
+        Some(&fx.user_home),
+        /*claude_config_dir*/ None,
+        &[abs(&cwd)],
+    );
     let policy = denials
         .apply(&PermissionProfile::Disabled)
         .unwrap()
@@ -988,7 +1167,12 @@ fn pf_23_s02_rules_never_widen_and_keep_existing_denials() {
         ]),
         NetworkSandboxPolicy::Restricted,
     );
-    let denials = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)]);
+    let denials = ReadDenials::collect(
+        &fx.codex_home,
+        Some(&fx.user_home),
+        /*claude_config_dir*/ None,
+        &[abs(&cwd)],
+    );
     let policy = denials.apply(&base).unwrap().file_system_sandbox_policy();
     for unreadable in [fx.user_home.join(".zshrc"), fx.codex_home.join("skills")] {
         assert!(!policy.can_read_path_with_cwd(&unreadable, &cwd));
@@ -1027,9 +1211,10 @@ async fn pf_23_s02_protected_levels_apply_the_rules_from_the_start() {
         let client = (*session.services.model_client())
             .clone()
             .with_ingress_level(level)
-            .with_source_envelopes(true);
+            .with_source_envelopes(/*enabled*/ true);
         session.services.replace_model_client(client);
-        let context = turn.file_system_sandbox_context(None, &environment);
+        let context =
+            turn.file_system_sandbox_context(/*additional_permissions*/ None, &environment);
         let protected_context = protect_file_tool_context(&session, &turn, context.clone());
         assert_eq!(readable(protected_context), !protected, "{level:?}");
         assert_eq!(
@@ -1060,7 +1245,12 @@ fn pf_23_s02_worktree_hooks_and_symlinked_dotfiles_are_protected() {
     std::fs::write(dotfiles.join("zshrc"), "x").unwrap();
     std::os::unix::fs::symlink(dotfiles.join("zshrc"), fx.user_home.join(".zshrc")).unwrap();
 
-    let denials = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)]);
+    let denials = ReadDenials::collect(
+        &fx.codex_home,
+        Some(&fx.user_home),
+        /*claude_config_dir*/ None,
+        &[abs(&cwd)],
+    );
     let read_only: Vec<_> = denials.read_only_paths().cloned().collect();
     let mut protected_paths = vec![
         cwd.join(".git"),
@@ -1112,7 +1302,12 @@ fn pf_23_s02_enclosing_repo_and_dangling_links_are_protected() {
         fx.user_home.join(".zshrc"),
     )
     .unwrap();
-    let denials = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)]);
+    let denials = ReadDenials::collect(
+        &fx.codex_home,
+        Some(&fx.user_home),
+        /*claude_config_dir*/ None,
+        &[abs(&cwd)],
+    );
     let read_only: Vec<_> = denials.read_only_paths().cloned().collect();
     let mut protected_paths = vec![repo.join(".git/hooks"), repo.join(".git/config")];
     if cfg!(target_os = "macos") {
@@ -1151,7 +1346,12 @@ fn pf_23_s02_submodules_and_hooks_path_are_protected() {
     .unwrap();
     std::fs::create_dir_all(cwd.join(".husky")).unwrap();
 
-    let denials = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)]);
+    let denials = ReadDenials::collect(
+        &fx.codex_home,
+        Some(&fx.user_home),
+        /*claude_config_dir*/ None,
+        &[abs(&cwd)],
+    );
     let policy = denials
         .apply(&PermissionProfile::Disabled)
         .unwrap()
@@ -1198,7 +1398,7 @@ async fn issue_239_read_denials_apply_under_protected_level_before_taint() {
     let client = (*session.services.model_client())
         .clone()
         .with_ingress_policy(SecurityLevel::Moderate, control.effective_security_policy())
-        .with_source_envelopes(true);
+        .with_source_envelopes(/*enabled*/ true);
     session.services.replace_model_client(client);
 
     let environment = turn
@@ -1215,7 +1415,8 @@ async fn issue_239_read_denials_apply_under_protected_level_before_taint() {
             .file_system_sandbox_policy()
             .can_read_path_with_cwd(auth.as_path(), cwd.as_path())
     };
-    let context = || turn.file_system_sandbox_context(None, &environment);
+    let context =
+        || turn.file_system_sandbox_context(/*additional_permissions*/ None, &environment);
 
     // No taint has occurred yet, but the level is Moderate: denials apply.
     assert_eq!(
@@ -1254,7 +1455,12 @@ fn issue_442_a_grant_keeps_every_read_denial() {
     let fx = fixture();
     let cwd = fx.user_home.join("project");
     std::fs::create_dir_all(cwd.join(".git/hooks")).unwrap();
-    let mut denials = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)]);
+    let mut denials = ReadDenials::collect(
+        &fx.codex_home,
+        Some(&fx.user_home),
+        /*claude_config_dir*/ None,
+        &[abs(&cwd)],
+    );
     denials.lift_write_rules();
     let policy = denials
         .apply(&PermissionProfile::Disabled)
@@ -1372,7 +1578,12 @@ fn issue_506_home_listing_denial_is_added_only_when_asked() {
             .file_system_sandbox_policy()
             .get_unlistable_directories()
     };
-    let mut denials = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)]);
+    let mut denials = ReadDenials::collect(
+        &fx.codex_home,
+        Some(&fx.user_home),
+        /*claude_config_dir*/ None,
+        &[abs(&cwd)],
+    );
     assert!(unlistable(&denials).is_empty());
     denials.deny_home_listing();
     assert_eq!(unlistable(&denials), vec![home.clone()]);
@@ -1389,7 +1600,12 @@ fn issue_506_home_listing_denial_is_added_only_when_asked() {
     assert!(full.can_write_path_with_cwd(&cwd.join("file.txt"), &cwd));
     assert_eq!(full.get_unlistable_directories(), vec![home.clone()]);
 
-    let mut in_home = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[home]);
+    let mut in_home = ReadDenials::collect(
+        &fx.codex_home,
+        Some(&fx.user_home),
+        /*claude_config_dir*/ None,
+        &[home],
+    );
     in_home.deny_home_listing();
     assert_eq!(in_home.unlistable_home(), None);
 }
@@ -1407,14 +1623,15 @@ async fn issue_506_file_tools_cannot_list_the_home_under_aggressive() {
         let client = (*session.services.model_client())
             .clone()
             .with_ingress_level(level)
-            .with_source_envelopes(true);
+            .with_source_envelopes(/*enabled*/ true);
         session.services.replace_model_client(client);
         let environment = turn
             .environments
             .primary()
             .expect("a primary environment")
             .clone();
-        let context = turn.file_system_sandbox_context(None, &environment);
+        let context =
+            turn.file_system_sandbox_context(/*additional_permissions*/ None, &environment);
         let protected = protect_file_tool_context(&session, &turn, context);
         let profile = PermissionProfile::try_from(protected.permissions).unwrap();
         let unlistable = profile
@@ -1443,7 +1660,12 @@ fn issue_540_runtime_entries_stay_read_only_when_the_rules_are_lifted() {
     let cwd = fx.user_home.join("project");
     std::fs::write(fx.user_home.join(".bashrc"), "x").unwrap();
     for profile in [workspace(&fx.user_home), PermissionProfile::Disabled] {
-        let all = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)]);
+        let all = ReadDenials::collect(
+            &fx.codex_home,
+            Some(&fx.user_home),
+            /*claude_config_dir*/ None,
+            &[abs(&cwd)],
+        );
         assert!(all.read_only_paths().count() > all.runtime_read_only_paths().count());
         let denials = all.runtime_only();
         assert_eq!(denials.paths().count(), 0);
@@ -1479,10 +1701,15 @@ fn issue_540_runtime_entries_stay_read_only_when_the_rules_are_lifted() {
         );
     }
     // Full access keeps its network.
-    let lifted = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)])
-        .runtime_only()
-        .apply(&PermissionProfile::Disabled)
-        .unwrap();
+    let lifted = ReadDenials::collect(
+        &fx.codex_home,
+        Some(&fx.user_home),
+        /*claude_config_dir*/ None,
+        &[abs(&cwd)],
+    )
+    .runtime_only()
+    .apply(&PermissionProfile::Disabled)
+    .unwrap();
     assert_eq!(
         lifted.network_sandbox_policy(),
         NetworkSandboxPolicy::Enabled
@@ -1530,7 +1757,12 @@ fn linked_home_with_agents_link_to_key() -> LinkedHome {
 fn issue_518_read_only_entries_never_reopen_a_denial_through_a_linked_home() {
     let fx = linked_home_with_agents_link_to_key();
     let cwd = fx.cwd.as_path();
-    let denials = ReadDenials::collect(&fx.codex_home, Some(&fx.linked_home), None, &[abs(cwd)]);
+    let denials = ReadDenials::collect(
+        &fx.codex_home,
+        Some(&fx.linked_home),
+        /*claude_config_dir*/ None,
+        &[abs(cwd)],
+    );
     for profile in [PermissionProfile::Disabled, workspace(cwd)] {
         let policy = denials
             .apply(&profile)
@@ -1589,7 +1821,12 @@ fn issue_518_a_dangling_link_to_a_denied_folder_stays_denied() {
     let cwd = fx.cwd.as_path();
     std::fs::remove_file(cwd.join(".agents")).unwrap();
     std::os::unix::fs::symlink("../.ssh/id_new", cwd.join(".agents")).unwrap();
-    let denials = ReadDenials::collect(&fx.codex_home, Some(&fx.linked_home), None, &[abs(cwd)]);
+    let denials = ReadDenials::collect(
+        &fx.codex_home,
+        Some(&fx.linked_home),
+        /*claude_config_dir*/ None,
+        &[abs(cwd)],
+    );
     let policy = denials
         .apply(&PermissionProfile::Disabled)
         .unwrap()
@@ -1611,7 +1848,12 @@ fn issue_518_a_home_alias_link_keeps_runtime_entries_readable() {
     let alias = fx.user_home.join(".codex");
     std::os::unix::fs::symlink(&fx.codex_home, &alias).unwrap();
     let cwd = fx.user_home.join("project");
-    let denials = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)]);
+    let denials = ReadDenials::collect(
+        &fx.codex_home,
+        Some(&fx.user_home),
+        /*claude_config_dir*/ None,
+        &[abs(&cwd)],
+    );
     assert!(!denials.paths().any(|path| path.as_path() == alias));
     let policy = denials
         .apply(&PermissionProfile::Disabled)
@@ -1636,7 +1878,12 @@ fn issue_518_sandboxed_commands_cannot_read_the_key_through_a_linked_home() {
 
     let fx = linked_home_with_agents_link_to_key();
     let cwd = fx.cwd.as_path();
-    let denials = ReadDenials::collect(&fx.codex_home, Some(&fx.linked_home), None, &[abs(cwd)]);
+    let denials = ReadDenials::collect(
+        &fx.codex_home,
+        Some(&fx.linked_home),
+        /*claude_config_dir*/ None,
+        &[abs(cwd)],
+    );
     let policy = denials
         .apply(&PermissionProfile::Disabled)
         .unwrap()
@@ -1690,7 +1937,12 @@ fn issue_518_dangling_links_resolve_through_the_folders_they_name() {
         };
         std::os::unix::fs::symlink(&next, cwd.join(format!("chain{hop}"))).unwrap();
     }
-    let denials = ReadDenials::collect(&fx.codex_home, Some(&fx.linked_home), None, &[abs(cwd)]);
+    let denials = ReadDenials::collect(
+        &fx.codex_home,
+        Some(&fx.linked_home),
+        /*claude_config_dir*/ None,
+        &[abs(cwd)],
+    );
     let policy = denials
         .apply(&PermissionProfile::Disabled)
         .unwrap()
@@ -1715,7 +1967,12 @@ fn issue_518_a_home_name_above_the_active_home_stays_denied() {
     let active = user_home.join(".corbanu");
     let cwd = user_home.join("project");
     std::fs::create_dir_all(&cwd).unwrap();
-    let denials = ReadDenials::collect(&active, Some(&user_home), None, &[abs(&cwd)]);
+    let denials = ReadDenials::collect(
+        &active,
+        Some(&user_home),
+        /*claude_config_dir*/ None,
+        &[abs(&cwd)],
+    );
     let policy = denials
         .apply(&workspace(&cwd))
         .unwrap()
@@ -1731,7 +1988,12 @@ fn issue_442_a_grant_keeps_codex_and_agents_read_only() {
     let cwd = fx.user_home.join("project");
     std::fs::create_dir_all(cwd.join(".git/hooks")).unwrap();
     std::fs::create_dir_all(cwd.join(".codex")).unwrap();
-    let mut denials = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)]);
+    let mut denials = ReadDenials::collect(
+        &fx.codex_home,
+        Some(&fx.user_home),
+        /*claude_config_dir*/ None,
+        &[abs(&cwd)],
+    );
     denials.lift_write_rules();
     let policy = denials
         .apply(&PermissionProfile::Disabled)
@@ -1781,7 +2043,12 @@ fn issue_442_a_grant_lifts_only_the_described_kinds() {
             std::fs::write(&path, "").unwrap();
         }
     }
-    let denials = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)]);
+    let denials = ReadDenials::collect(
+        &fx.codex_home,
+        Some(&fx.user_home),
+        /*claude_config_dir*/ None,
+        &[abs(&cwd)],
+    );
     let never: Vec<_> = denials.never_lifted_paths().cloned().collect();
     let lifted: Vec<_> = denials
         .read_only_paths()
@@ -1830,8 +2097,12 @@ fn issue_594_598_the_home_is_unmovable_in_each_spelling() {
     std::os::unix::fs::symlink(&real, &fx.codex_home).unwrap();
     let elsewhere = fx.user_home.join("project");
     let cwd = abs(&elsewhere);
-    let mut denials =
-        ReadDenials::collect(&real, Some(&fx.user_home), None, std::slice::from_ref(&cwd));
+    let mut denials = ReadDenials::collect(
+        &real,
+        Some(&fx.user_home),
+        /*claude_config_dir*/ None,
+        std::slice::from_ref(&cwd),
+    );
     denials.add_home_spellings(
         &abs(&real),
         [elsewhere, fx.user_home.join("missing"), "relative".into()],

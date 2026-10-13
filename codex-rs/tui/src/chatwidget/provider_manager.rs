@@ -941,7 +941,12 @@ mod tests {
             provider_manager_rows(&catalog, &statuses, /*accounts*/ None).len(),
             2
         );
-        chat.open_provider_manager(&catalog, &statuses, None, Some(&accounts));
+        chat.open_provider_manager(
+            &catalog,
+            &statuses,
+            /*focused_provider*/ None,
+            Some(&accounts),
+        );
         let rendered =
             crate::chatwidget::tests::helpers::render_bottom_popup(&chat, /*width*/ 100);
         insta::assert_snapshot!("provider_manager_named_accounts", rendered);

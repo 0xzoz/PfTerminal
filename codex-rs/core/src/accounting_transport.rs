@@ -339,13 +339,18 @@ impl<T: HttpTransport> AccountingTransport<T> {
             evidence.exclude();
             return None;
         }
+        // #654: a request the credential broker serves (Aggressive turns it
+        // on) carries the broker's plain-HTTP URL; it is admitted against the
+        // HTTPS route the broker requests.
+        let brokered = crate::model_broker_auth::brokered_target_url(request);
+        let url = brokered.as_deref().unwrap_or(&request.url);
         let admission =
             if evidence.sampling.dialect == codex_state::accounting::Dialect::NativeAnthropic {
-                evidence.sampling.admit(&self.model, &request.url).await
+                evidence.sampling.admit(&self.model, url).await
             } else {
                 evidence
                     .sampling
-                    .admit_with_tier(&self.model, &request.url, self.tier.as_deref())
+                    .admit_with_tier(&self.model, url, self.tier.as_deref())
                     .await
             };
         match admission {

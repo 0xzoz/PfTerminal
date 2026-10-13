@@ -2694,7 +2694,9 @@ impl Session {
     }
 
     /// Adds an execpolicy amendment to both the in-memory and on-disk policies so future
-    /// commands can use the newly approved prefix.
+    /// commands can use the newly approved prefix. #626: one approved while
+    /// Aggressive is active is recorded as such, so it applies under
+    /// Aggressive too (the others are suspended there).
     pub(crate) async fn persist_execpolicy_amendment(
         &self,
         amendment: &ExecPolicyAmendment,
@@ -2709,7 +2711,18 @@ impl Session {
 
         self.services
             .exec_policy
-            .append_amendment_and_update(&codex_home, amendment)
+            .append_amendment_and_update(
+                &codex_home,
+                amendment,
+                // Aggressive in force now (an unreadable live level counts
+                // as Aggressive, as it is enforced): the person approved it
+                // under Aggressive.
+                if self.services.model_client().live_level_is_aggressive() {
+                    crate::exec_policy::ApprovedUnder::Aggressive
+                } else {
+                    crate::exec_policy::ApprovedUnder::LessStrict
+                },
+            )
             .await
     }
 

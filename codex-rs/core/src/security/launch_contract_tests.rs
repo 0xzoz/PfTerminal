@@ -456,3 +456,44 @@ fn pf_27_s06_protected_codex_home_dirs_are_protected_entries() {
         assert!(super::PROTECTED_CODEX_HOME_ENTRIES.contains(dir), "{dir}");
     }
 }
+
+/// #651: the contract also denies the home's database init lock and, once a
+/// config names a database folder set apart from the home, that folder's
+/// databases (its path escaped as a glob) and what Corbanu keeps there. A
+/// folder that is the home adds nothing.
+#[test]
+fn issue_651_a_separate_database_folder_is_protected() {
+    let fixture = fixture();
+    let cwd = fixture.workspace.as_path();
+    let databases_dir = tempfile::tempdir().expect("databases");
+    let databases = AbsolutePathBuf::from_absolute_path(databases_dir.path().join("db[1]{2"))
+        .expect("absolute");
+    std::fs::create_dir_all(databases.as_path()).expect("database folder");
+    fixture
+        .contract
+        .note_database_folder(fixture.codex_home.as_path());
+    assert_eq!(fixture.contract.database_folders(), Vec::new());
+    fixture.contract.note_database_folder(databases.as_path());
+    let protected = fixture
+        .contract
+        .protect_permissions(&workspace_profile(&fixture.workspace), cwd)
+        .expect("protectable");
+    let file_system = protected.file_system_sandbox_policy();
+    let globs = file_system.get_unreadable_globs_with_cwd(cwd);
+    let escaped = format!("{}/db[[]1][{{]2/*.sqlite*", databases_dir.path().display());
+    assert!(globs.contains(&escaped), "{globs:?}");
+    for path in [
+        fixture.codex_home.join("pfterminal_db_init.lock"),
+        databases.join("pfterminal_db_init.lock"),
+        databases.join("gpu-controller.lock"),
+        databases.join("accounting-pending"),
+        databases.join("db-backups"),
+    ] {
+        assert!(
+            !file_system.can_read_path_with_cwd(path.as_path(), cwd),
+            "{}",
+            path.display()
+        );
+    }
+    assert_eq!(fixture.contract.verify_permissions(&protected, cwd), Ok(()));
+}

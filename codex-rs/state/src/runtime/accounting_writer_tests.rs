@@ -119,7 +119,9 @@ async fn records_are_written_in_order_and_their_files_removed() -> anyhow::Resul
         WriteOutcome::Written
     );
     assert_eq!(
-        runtime.record_accounting(observe(owner, &first, 1)).await?,
+        runtime
+            .record_accounting(observe(owner, &first, /*revision*/ 1))
+            .await?,
         WriteOutcome::Written
     );
     assert_eq!(recorded(&runtime, &first).await?, (1, 1));
@@ -161,7 +163,9 @@ async fn a_busy_state_db_puts_records_off_without_waiting_and_loses_none() -> an
     // While the writer is retrying, later records are put off at once.
     let started = Instant::now();
     assert_eq!(
-        runtime.record_accounting(observe(owner, &first, 1)).await?,
+        runtime
+            .record_accounting(observe(owner, &first, /*revision*/ 1))
+            .await?,
         WriteOutcome::Deferred
     );
     assert!(started.elapsed() < Duration::from_millis(250));
@@ -205,9 +209,9 @@ async fn records_an_exited_process_left_are_written_once() -> anyhow::Result<()>
     let running = Uuid::new_v4().to_string();
     let (a, b, c) = (attempt(owner), attempt(owner), attempt(owner));
     save(&crashed, 0, admit(owner, &a))?;
-    save(&crashed, 1, observe(owner, &a, 1))?;
+    save(&crashed, 1, observe(owner, &a, /*revision*/ 1))?;
     // Already written once before the crash: applying it again changes nothing.
-    save(&crashed, 2, observe(owner, &a, 1))?;
+    save(&crashed, 2, observe(owner, &a, /*revision*/ 1))?;
     std::fs::write(dir.join(format!("{exited}.lock")), b"")?;
     save(&exited, 0, admit(owner, &b))?;
     let held = std::fs::OpenOptions::new()
@@ -321,7 +325,7 @@ async fn adopted_usage_waits_for_its_admission() -> anyhow::Result<()> {
     let saved = Saved {
         version: 1,
         queued_at_ms: chrono::Utc::now().timestamp_millis(),
-        write: observe(owner, &first, 1),
+        write: observe(owner, &first, /*revision*/ 1),
     };
     std::fs::write(
         dir.join(format!("{exited}-{:020}.json", 1)),
@@ -640,7 +644,9 @@ async fn ten_sessions_on_one_home_wait_briefly_and_lose_no_record() -> anyhow::R
                         runtime.note_state_db_contended();
                     }
                 }
-                runtime.record_accounting(observe(owner, &next, 1)).await?;
+                runtime
+                    .record_accounting(observe(owner, &next, /*revision*/ 1))
+                    .await?;
                 waits.push(started.elapsed());
                 attempts.push(next);
                 // The model answering.
