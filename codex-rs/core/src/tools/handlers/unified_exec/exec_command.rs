@@ -271,6 +271,7 @@ impl ExecCommandHandler {
         .await
         {
             crate::security::protected_reads::notify(&session, &turn, refusal.clone()).await;
+            crate::security::protected_reads::record_permission_refusal(&session);
             manager.release_process_id(process_id).await;
             return Err(FunctionCallError::RespondToModel(refusal));
         }
@@ -467,6 +468,12 @@ impl ExecCommandHandler {
 
 /// #439: tells the person in the transcript why the command failed.
 async fn notify_blocked(context: &UnifiedExecContext, blocked: refusal_notice::Blocked) {
+    // #622: listed under the inspector's recent denials too.
+    crate::security::inspection::record_refusal(
+        context.session.thread_id(),
+        blocked.inspected(),
+        blocked.inspected_outcome(),
+    );
     context
         .session
         .send_event(
