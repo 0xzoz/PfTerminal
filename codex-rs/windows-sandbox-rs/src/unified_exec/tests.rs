@@ -958,9 +958,7 @@ fn run_legacy_delete_fixture(
                 low_can_write_git_dir: low_integrity_can_open_for_write(&protected_git_dir),
                 low_can_write_codex_file: low_integrity_can_open_for_write(&codex_file),
                 low_can_write_workspace_file: low_integrity_can_open_for_write(&nested_existing),
-                low_can_write_junction_target: low_integrity_can_open_for_write(
-                    &junction_target_file,
-                ),
+                low_can_write_junction_target: low_integrity_can_open_for_write(&junction_target),
             },
             format!("stdout={stdout:?}\n{}", sandbox_log(codex_home.path())),
         )

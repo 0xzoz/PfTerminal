@@ -340,7 +340,8 @@ pub(crate) fn apply_legacy_session_acl_rules(
             // planted: the host must not relabel a folder it picked.
             if p.exists()
                 && !crate::workspace_acl::is_reparse_point(p)
-                && strictly_inside_a_root(&canonicalize_path(p), &canonical_allow)
+                && dunce::canonicalize(p)
+                    .is_ok_and(|canonical| strictly_inside_a_root(&canonical, &canonical_allow))
             {
                 label_protected_path_medium(p).with_context(|| {
                     format!(
