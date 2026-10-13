@@ -583,6 +583,7 @@ impl LaunchContract {
             .into_iter()
             .map(|path| {
                 let path_entry = FileSystemPath::Path { path: path.clone() };
+                let path = &path;
                 // PF-27-S06: the Windows sandbox drops every skip-if-missing
                 // entry, so a path that exists is denied outright there. So
                 // is a protected CODEX_HOME directory that does not exist yet

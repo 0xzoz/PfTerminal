@@ -186,33 +186,32 @@ pub(crate) fn isolation_paths(
     let found = Preflight::run(&sources, ReadinessFlags::default())
         .inventory
         .isolation_paths();
-    let mut exact = CORBANU_HOME_STORES
-        .iter()
-        .map(|name| codex_home.join(name))
-        .collect::<Vec<_>>();
-    // One glob covers every database, including files created later.
-    exact.extend(
-        found
-            .into_iter()
-            .filter(|path| !is_database_file(codex_home, path)),
-    );
-    let mut globs = vec![database_glob(codex_home)];
     // #651: a database folder set apart from the home, as far as it is known
     // before config loads; `verify_database_folder` checks the loaded one.
-    if let Some(folder) = database_folder(codex_home, cwd, &sources) {
-        globs.push(database_glob(&folder));
-        exact.extend(
+    let folder = database_folder(codex_home, cwd, &sources);
+    let folder_entries = folder
+        .iter()
+        .flat_map(|folder| {
             DATABASE_FOLDER_ENTRIES
                 .iter()
                 .map(|entry| folder.join(entry))
-                // Bubblewrap would put a placeholder at a missing one.
-                .filter(|path| std::fs::symlink_metadata(path).is_ok()),
-        );
-    }
+        })
+        // Bubblewrap would put a placeholder at a missing one.
+        .filter(|path| std::fs::symlink_metadata(path).is_ok());
+    // One glob covers every database, including files created later.
+    let globs =
+        std::iter::once(database_glob(codex_home)).chain(folder.as_deref().map(database_glob));
     // #651: a path holding glob syntax would be read as a pattern; escaped,
     // it matches only itself (the database globs are escaped already).
-    let mut paths = exact
-        .into_iter()
+    let mut paths = CORBANU_HOME_STORES
+        .iter()
+        .map(|name| codex_home.join(name))
+        .chain(
+            found
+                .into_iter()
+                .filter(|path| !is_database_file(codex_home, path)),
+        )
+        .chain(folder_entries)
         .map(|path| {
             if has_glob_chars(&path) {
                 PathBuf::from(glob_escape_path(&path))
