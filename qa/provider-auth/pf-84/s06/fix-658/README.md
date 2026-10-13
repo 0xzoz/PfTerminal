@@ -31,9 +31,9 @@ token it carried. `auth.json` was byte-identical before and after in every run.
    2 get            /backend-api/codex/connectors/directory/list               tuiwork
    1 get            /backend-api/codex/plugins/featured                        tuiwork
    7 post-unhandled /backend-api/codex/ps/mcp                                  none
-  50 get            /backend-api/codex/ps/plugins/installed                    tuiwork
-   7 get            /backend-api/codex/ps/plugins/list                         tuiwork
-   9 get            /backend-api/codex/ps/plugins/suggested                    tuiwork
+  43 get            /backend-api/codex/ps/plugins/installed                    tuiwork
+   6 get            /backend-api/codex/ps/plugins/list                         tuiwork
+   8 get            /backend-api/codex/ps/plugins/suggested                    tuiwork
    2 get            /backend-api/codex/wham/rate-limit-reset-credits           tuiwork
    1 get            /backend-api/codex/wham/settings/user                      tuiwork
    2 get            /backend-api/codex/wham/usage                              tuiwork
@@ -64,9 +64,9 @@ token it carried. `auth.json` was byte-identical before and after in every run.
    2 get            /backend-api/codex/connectors/directory/list               tuiwork
    1 get            /backend-api/codex/plugins/featured                        none
    7 post-unhandled /backend-api/codex/ps/mcp                                  none
-  30 get            /backend-api/codex/ps/plugins/installed                    tuiwork
-   4 get            /backend-api/codex/ps/plugins/list                         tuiwork
-   5 get            /backend-api/codex/ps/plugins/suggested                    tuiwork
+  37 get            /backend-api/codex/ps/plugins/installed                    tuiwork
+   5 get            /backend-api/codex/ps/plugins/list                         tuiwork
+   6 get            /backend-api/codex/ps/plugins/suggested                    tuiwork
    2 get            /backend-api/codex/wham/rate-limit-reset-credits           tuiwork
    1 get            /backend-api/codex/wham/settings/user                      tuiwork
    2 get            /backend-api/codex/wham/usage                              tuiwork
@@ -85,9 +85,9 @@ token it carried. `auth.json` was byte-identical before and after in every run.
    2 get            /backend-api/codex/connectors/directory/list               tuidefault
    1 get            /backend-api/codex/plugins/featured                        tuidefault
    7 post-unhandled /backend-api/codex/ps/mcp                                  none
-  50 get            /backend-api/codex/ps/plugins/installed                    tuidefault
-   7 get            /backend-api/codex/ps/plugins/list                         tuidefault
-   9 get            /backend-api/codex/ps/plugins/suggested                    tuidefault
+  43 get            /backend-api/codex/ps/plugins/installed                    tuidefault
+   6 get            /backend-api/codex/ps/plugins/list                         tuidefault
+   8 get            /backend-api/codex/ps/plugins/suggested                    tuidefault
    2 get            /backend-api/codex/wham/rate-limit-reset-credits           tuidefault
    1 get            /backend-api/codex/wham/settings/user                      tuidefault
    2 get            /backend-api/codex/wham/usage                              tuidefault

@@ -180,9 +180,12 @@ fingerprint.
   OpenAI sign-in, use the default login; sessions on different OpenAI accounts
   (for example a pane on `work` and one on the default login) send none of
   them and say why. A conversation you left (it stays loaded for a while)
-  does not count. A `resume` or `fork`, and an app server or daemon with
-  named accounts on, send none until a conversation starts, because its
-  account is known only then.
+  does not count while no turn runs in it. A `resume` or `fork`, and an app
+  server or daemon with named accounts on, send none until a conversation
+  starts, because its account is known only then. Known limit: a TUI that
+  reuses a running local daemon in which another client already has a
+  conversation open follows that conversation's account until its own
+  conversation starts.
 - `forced_login_method` and `forced_chatgpt_workspace_id` apply to named
   accounts too: a sign-in of the other kind or another workspace is refused.
   A session on a named account checks them against that account only and

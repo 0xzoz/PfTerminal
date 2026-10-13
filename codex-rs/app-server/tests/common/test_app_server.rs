@@ -1645,6 +1645,23 @@ impl TestAppServer {
             .with_context(|| format!("failed to deserialize response for request {request_id}"))
     }
 
+    /// The response or the error for `request_id`, whichever arrives.
+    pub async fn read_stream_until_result(
+        &mut self,
+        request_id: RequestId,
+    ) -> anyhow::Result<Result<JSONRPCResponse, JSONRPCError>> {
+        let message = self
+            .read_stream_until_message(|message| {
+                Self::message_request_id(message) == Some(&request_id)
+            })
+            .await?;
+        match message {
+            JSONRPCMessage::Response(response) => Ok(Ok(response)),
+            JSONRPCMessage::Error(error) => Ok(Err(error)),
+            message => anyhow::bail!("expected a response or an error, got {message:?}"),
+        }
+    }
+
     pub async fn read_stream_until_error_message(
         &mut self,
         request_id: RequestId,

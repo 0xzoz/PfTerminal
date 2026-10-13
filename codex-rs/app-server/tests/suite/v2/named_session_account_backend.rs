@@ -312,8 +312,22 @@ async fn a_thread_the_user_left_does_not_count() -> Result<()> {
     )
     .await??;
     // The registration follows the subscription asynchronously.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    read_rate_limits(&mut app).await?;
+    let mut served = false;
+    for _ in 0..50 {
+        let request = app.send_get_account_rate_limits_request().await?;
+        if timeout(
+            DEFAULT_TIMEOUT,
+            app.read_stream_until_result(RequestId::Integer(request)),
+        )
+        .await??
+        .is_ok()
+        {
+            served = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(served, "rate limits were never served on work");
     assert_eq!(
         tokens_for(&server, "/api/codex/usage").await,
         vec![WORK_TOKEN.to_string()]

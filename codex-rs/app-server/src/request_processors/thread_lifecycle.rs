@@ -121,6 +121,12 @@ impl UnloadingState {
     }
 }
 
+/// #658: whether a thread counts for the process's own backend requests: a
+/// client is attached to it, or a turn is running.
+fn counts_as_attached(has_subscribers: bool, status: &ThreadStatus) -> bool {
+    has_subscribers || matches!(status, ThreadStatus::Active { .. })
+}
+
 pub(super) enum ThreadShutdownResult {
     Complete,
     SubmitFailed,
@@ -229,25 +235,6 @@ pub(super) async fn ensure_listener_task_running(
             "thread {conversation_id} is closing; retry after the thread is closed"
         )));
     };
-    // #658: a thread nobody is attached to does not count toward the account
-    // of the process's own backend requests (it stays loaded for a while).
-    // Holds the thread weakly, so it never keeps a session alive.
-    {
-        let mut has_subscribers_rx = unloading_state.has_subscribers_rx.clone();
-        let thread = Arc::downgrade(&conversation);
-        tokio::spawn(async move {
-            loop {
-                let attached = *has_subscribers_rx.borrow_and_update();
-                match thread.upgrade() {
-                    Some(thread) => thread.set_client_attached(attached),
-                    None => return,
-                }
-                if has_subscribers_rx.changed().await.is_err() {
-                    return;
-                }
-            }
-        });
-    }
     let config = conversation.config().await;
     let environments = conversation.environment_selections().await;
     let watch_registration = listener_task_context
@@ -282,6 +269,34 @@ pub(super) async fn ensure_listener_task_running(
             .register_listener_command_tx(conversation_id, listener_command_tx);
         (listener_command_rx, listener_generation)
     };
+    // #658: a user thread counts toward the account of the process's own
+    // backend requests while a client is attached or a turn runs, the rule
+    // unloading uses; one the user left (kept loaded for a while) does not.
+    // Holds the thread weakly, so it never keeps a session alive.
+    {
+        let mut has_subscribers_rx = unloading_state.has_subscribers_rx.clone();
+        let mut thread_status_rx = unloading_state.thread_status_rx.clone();
+        let thread = Arc::downgrade(&conversation);
+        tokio::spawn(async move {
+            loop {
+                let attached = counts_as_attached(
+                    *has_subscribers_rx.borrow_and_update(),
+                    &thread_status_rx.borrow_and_update(),
+                );
+                match thread.upgrade() {
+                    Some(thread) => thread.set_client_attached(attached),
+                    None => return,
+                }
+                let changed = tokio::select! {
+                    changed = has_subscribers_rx.changed() => changed,
+                    changed = thread_status_rx.changed() => changed,
+                };
+                if changed.is_err() {
+                    return;
+                }
+            }
+        });
+    }
     let ListenerTaskContext {
         outgoing,
         thread_manager,
@@ -889,4 +904,25 @@ pub(super) fn set_thread_status_and_interrupt_stale_turns(
         }
     }
     thread.status = status;
+}
+
+#[cfg(test)]
+mod attach_tests {
+    use super::*;
+
+    #[test]
+    fn issue_658_a_running_turn_keeps_a_left_thread_counted() {
+        let active = ThreadStatus::Active {
+            active_flags: Vec::new(),
+        };
+        assert!(counts_as_attached(
+            /*has_subscribers*/ true,
+            &ThreadStatus::Idle
+        ));
+        assert!(counts_as_attached(/*has_subscribers*/ false, &active));
+        assert!(!counts_as_attached(
+            /*has_subscribers*/ false,
+            &ThreadStatus::Idle
+        ));
+    }
 }
