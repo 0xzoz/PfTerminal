@@ -1320,6 +1320,7 @@ fn issue_660_operator_pane_task_sent_while_on_and_handled_after_off_is_not_sent(
         fixture.app.active_thread_id = Some(fixture.root);
         super::issue_507_switch(&fixture.app, HumanRevocation::KillSwitchOn);
         let sent_while_kill_switch_on = fixture.app.kill_switch_on_now();
+        assert!(sent_while_kill_switch_on);
         super::issue_507_switch(&fixture.app, HumanRevocation::KillSwitchOff);
         fixture
             .app

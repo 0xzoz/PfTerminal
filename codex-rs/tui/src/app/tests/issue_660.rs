@@ -55,6 +55,7 @@ async fn issue_660_not_sent_report_to_a_native_sender_starts_no_turn() -> Result
 
     issue_507_switch(&app, HumanRevocation::KillSwitchOn);
     let sent_while_kill_switch_on = app.kill_switch_on_now();
+    assert!(sent_while_kill_switch_on);
     issue_507_switch(&app, HumanRevocation::KillSwitchOff);
     Box::pin(app.handle_event(
         &mut tui,
@@ -101,6 +102,7 @@ async fn issue_660_held_claude_task_failure_starts_no_sender_turn() {
 
     issue_507_switch(&app, HumanRevocation::KillSwitchOn);
     let sent_while_kill_switch_on = app.kill_switch_on_now();
+    assert!(sent_while_kill_switch_on);
     issue_507_switch(&app, HumanRevocation::KillSwitchOff);
     app.submit_claude_pane_task_queued(
         "claude-missing".to_string(),
@@ -131,6 +133,7 @@ async fn issue_660_failures_of_tasks_sent_while_on_start_no_sender_turn() -> Res
     );
     issue_507_switch(&app, HumanRevocation::KillSwitchOn);
     let sent_while_kill_switch_on = app.kill_switch_on_now();
+    assert!(sent_while_kill_switch_on);
     issue_507_switch(&app, HumanRevocation::KillSwitchOff);
     let oversize = "x".repeat(crate::dispatch_queue::MAX_DISPATCH_TASK_BYTES + 1);
 
