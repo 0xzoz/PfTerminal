@@ -1,5 +1,6 @@
 mod history;
 mod normalize;
+pub(crate) mod provider_items;
 pub(crate) mod updates;
 
 pub(crate) use history::ContextManager;

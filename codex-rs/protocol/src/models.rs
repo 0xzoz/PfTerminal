@@ -30,6 +30,7 @@ use crate::mcp::CallToolResult;
 
 mod context_fragment_sources;
 mod executed_tool_calls;
+mod producer;
 
 pub use executed_tool_calls::ExecutedToolCall;
 pub use executed_tool_calls::ExecutedToolCallArguments;
@@ -781,8 +782,9 @@ pub enum MessagePhase {
 ///
 /// Responses API strongly types this payload. Do not modify it without first getting API
 /// approval and making the corresponding Responses API change.
-// Exception: local-only `context_fragment_sources`, removed by request serialization before any
-// provider call. Kept as a plain comment so generated app-server schemas do not change.
+// Exception: local-only `context_fragment_sources` and `producer`, removed by request
+// serialization before any provider call. Kept as a plain comment so generated app-server
+// schemas do not change.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, JsonSchema, TS)]
 pub struct InternalChatMessageMetadataPassthrough {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -803,6 +805,14 @@ pub struct InternalChatMessageMetadataPassthrough {
     #[schemars(skip)]
     #[ts(skip)]
     pub context_fragment_sources: Option<Vec<Option<String>>>,
+    /// Local provenance of a model output item: the provider (and named account) whose response
+    /// produced it (#578). Request building uses it to keep another provider's item IDs, reasoning
+    /// and encrypted state out of requests that could only send them as references. It is not part
+    /// of the Responses API payload: request serialization removes it before any provider call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    #[ts(skip)]
+    pub producer: Option<String>,
 }
 
 /// PF-owned correlation metadata kept separate from provider-owned passthrough

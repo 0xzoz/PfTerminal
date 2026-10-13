@@ -268,6 +268,241 @@ fn issue_562_missing_runtime_entries_stay_read_only() {
     assert!(!readable(&override_md));
 }
 
+/// #583: a protected command cannot create a missing Corbanu-home entry
+/// that Corbanu reads later (exec-policy `rules/`, or any other name): the
+/// home itself is read-only wherever the profile could write it, and no
+/// grant lifts it. `worktrees` stays writable, also when the command works
+/// in one, without becoming a root of its own there (whose default rules
+/// would make a git worktree's git folder read-only). The profile is never
+/// widened.
+#[test]
+fn issue_583_the_corbanu_home_takes_no_new_entries() {
+    let fx = fixture();
+    let project = fx.user_home.join("project");
+    let worktree = fx.codex_home.join("worktrees/w");
+    let created = [
+        fx.codex_home.join("rules"),
+        fx.codex_home.join("rules/x.rules"),
+        fx.codex_home.join("hooks.json"),
+        fx.codex_home.join("new.txt"),
+    ];
+    for (cwd, profile) in [
+        (project.clone(), PermissionProfile::Disabled),
+        (project.clone(), workspace(&fx.user_home)),
+        (worktree.clone(), PermissionProfile::Disabled),
+        (worktree.clone(), workspace(&worktree)),
+    ] {
+        let mut denials =
+            ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)]);
+        // An Aggressive grant lifts the other write rules, not this one.
+        denials.lift_write_rules();
+        let policy = denials
+            .apply(&profile)
+            .unwrap()
+            .file_system_sandbox_policy();
+        let writable = |path: &Path| policy.can_write_path_with_cwd(path, &cwd);
+        for path in &created {
+            assert!(!writable(path), "{}: {cwd:?} {profile:?}", path.display());
+        }
+        assert!(!writable(&fx.codex_home), "{cwd:?} {profile:?}");
+        assert!(writable(&worktree.join("file")), "{cwd:?} {profile:?}");
+        assert!(writable(&cwd.join("file")), "{cwd:?} {profile:?}");
+        assert!(
+            policy.can_read_path_with_cwd(&fx.codex_home.join("skills/s"), &cwd),
+            "{cwd:?} {profile:?}"
+        );
+        if profile == PermissionProfile::Disabled {
+            let roots: Vec<AbsolutePathBuf> = policy
+                .get_writable_roots_with_cwd(&cwd)
+                .into_iter()
+                .map(|root| root.root)
+                .collect();
+            assert!(!roots.contains(&abs(&worktree)), "{roots:?}");
+        }
+    }
+    // The profile is never widened: one that writes only the project keeps
+    // the home's folders read-only.
+    let project_only = PermissionProfile::from_runtime_permissions(
+        &FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry::new(
+                FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                FileSystemAccessMode::Read,
+            ),
+            FileSystemSandboxEntry::new(
+                FileSystemPath::Path {
+                    path: abs(&project),
+                },
+                FileSystemAccessMode::Write,
+            ),
+        ]),
+        NetworkSandboxPolicy::Restricted,
+    );
+    let denials = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&project)]);
+    let policy = denials
+        .apply(&project_only)
+        .unwrap()
+        .file_system_sandbox_policy();
+    assert!(!policy.can_write_path_with_cwd(&worktree.join("file"), &project));
+    // Left as before: a person's approval of one command (#540), a command
+    // working in the home itself, or in a folder of it outside `worktrees`.
+    let other = fx.codex_home.join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    for (cwd, runtime_only) in [
+        (project, true),
+        (fx.codex_home.clone(), false),
+        (other, false),
+    ] {
+        let denials = ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)]);
+        let denials = if runtime_only {
+            denials.runtime_only()
+        } else {
+            denials
+        };
+        let policy = denials
+            .apply(&PermissionProfile::Disabled)
+            .unwrap()
+            .file_system_sandbox_policy();
+        assert!(
+            policy.can_write_path_with_cwd(&fx.codex_home.join("new.txt"), &cwd),
+            "{cwd:?}"
+        );
+    }
+}
+
+/// #583 review: a `worktrees` link (to a runtime entry, or to the home
+/// itself) opens nothing: only a real `worktrees` folder stays writable.
+/// Where the profile could write the home, a missing `worktrees` is made.
+#[test]
+fn issue_583_a_worktrees_link_opens_nothing() {
+    for target in ["tmp", "."] {
+        let fx = fixture();
+        std::fs::remove_dir_all(fx.codex_home.join("worktrees")).unwrap();
+        std::os::unix::fs::symlink(target, fx.codex_home.join("worktrees")).unwrap();
+        let cwd = fx.user_home.join("project");
+        let mut denials =
+            ReadDenials::collect(&fx.codex_home, Some(&fx.user_home), None, &[abs(&cwd)]);
+        denials.lift_write_rules();
+        assert_eq!(denials.home_writable_paths().count(), 0, "{target}");
+        let policy = denials
+            .apply(&PermissionProfile::Disabled)
+            .unwrap()
+            .file_system_sandbox_policy();
+        for path in ["tmp/x", "rules/x.rules", "worktrees/x"] {
+            assert!(
+                !policy.can_write_path_with_cwd(&fx.codex_home.join(path), &cwd),
+                "{target}: {path}"
+            );
+        }
+    }
+    let fx = fixture();
+    std::fs::remove_dir_all(fx.codex_home.join("worktrees")).unwrap();
+    let cwd = abs(&fx.user_home.join("project"));
+    ReadDenials::for_turn(
+        &fx.codex_home,
+        &cwd,
+        std::slice::from_ref(&cwd),
+        &PermissionProfile::read_only(),
+    );
+    assert!(!fx.codex_home.join("worktrees").exists());
+    ReadDenials::for_turn(
+        &fx.codex_home,
+        &cwd,
+        std::slice::from_ref(&cwd),
+        &PermissionProfile::Disabled,
+    );
+    assert!(fx.codex_home.join("worktrees").is_dir());
+}
+
+/// #583 review: a Corbanu home reached through a link inside the workspace
+/// (`~/.corbanu -> /elsewhere/home`) gets no `worktrees` carve-out where the
+/// profile never covered the real folder: Seatbelt would resolve the link
+/// spelling and make the real `worktrees` writable.
+#[test]
+fn issue_583_a_linked_home_outside_the_workspace_gets_no_carve_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let user_home = base.join("user");
+    let real_home = base.join("outside/home");
+    std::fs::create_dir_all(real_home.join("worktrees/w")).unwrap();
+    std::fs::create_dir_all(user_home.join("project")).unwrap();
+    std::os::unix::fs::symlink(&real_home, user_home.join(".corbanu")).unwrap();
+    let codex_home = user_home.join(".corbanu");
+    let cwd = user_home.join("project");
+    // A workspace of the user's home only (no temporary-folder roots, which
+    // would hold the real home here).
+    let home_only = PermissionProfile::from_runtime_permissions(
+        &FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry::new(
+                FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                FileSystemAccessMode::Read,
+            ),
+            FileSystemSandboxEntry::new(
+                FileSystemPath::Path {
+                    path: abs(&user_home),
+                },
+                FileSystemAccessMode::Write,
+            ),
+        ]),
+        NetworkSandboxPolicy::Restricted,
+    );
+    let denials = ReadDenials::collect(&codex_home, Some(&user_home), None, &[abs(&cwd)]);
+    let policy = denials
+        .apply(&home_only)
+        .unwrap()
+        .file_system_sandbox_policy();
+    let worktree_writes: Vec<&FileSystemSandboxEntry> = policy
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.access == FileSystemAccessMode::Write
+                && matches!(&entry.path, FileSystemPath::Path { path } if path.as_path().ends_with("worktrees"))
+        })
+        .collect();
+    assert_eq!(worktree_writes, Vec::<&FileSystemSandboxEntry>::new());
+}
+
+/// Issue #586: the database init lock is denied before it exists, so a
+/// protected command can neither create it nor hold it, also where #583
+/// leaves the Corbanu home writable (a command working in the home or in a
+/// folder of it outside `worktrees`).
+#[test]
+fn issue_586_db_init_lock_denied_before_it_exists() {
+    let fx = fixture();
+    let lock = fx.codex_home.join("pfterminal_db_init.lock");
+    assert!(!lock.exists());
+    std::fs::create_dir_all(fx.codex_home.join("other")).unwrap();
+    for cwd in [
+        fx.user_home.join("project"),
+        fx.codex_home.clone(),
+        fx.codex_home.join("other"),
+    ] {
+        let denials = ReadDenials::collect(
+            &fx.codex_home,
+            Some(&fx.user_home),
+            /*claude_config_dir*/ None,
+            &[abs(&cwd)],
+        );
+        let policy = denials
+            .apply(&PermissionProfile::Disabled)
+            .unwrap()
+            .file_system_sandbox_policy();
+        assert!(
+            !policy.can_write_path_with_cwd(&lock, &cwd),
+            "{}",
+            cwd.display()
+        );
+        assert!(
+            !policy.can_read_path_with_cwd(&lock, &cwd),
+            "{}",
+            cwd.display()
+        );
+    }
+}
+
 /// Issue #562: on Linux the missing runtime folders are created, empty,
 /// only where the profile could write the Corbanu home, so bubblewrap never
 /// needs a placeholder file where Corbanu expects a folder. `AGENTS.md` is
@@ -1205,4 +1440,43 @@ fn issue_442_a_grant_lifts_only_the_described_kinds() {
             "{kind} not lifted: {lifted:?}"
         );
     }
+}
+
+/// #594/#598: the Corbanu home may not be moved in any spelling (as given,
+/// its real location, and a home name or home variable linking to it), also
+/// for a command a person approved (#540); a name for another folder is not
+/// recorded.
+#[test]
+fn issue_594_598_the_home_is_unmovable_in_each_spelling() {
+    let fx = fixture();
+    let real = fx.user_home.join("dotfiles/corbanu");
+    std::fs::create_dir_all(fx.user_home.join("dotfiles")).unwrap();
+    std::fs::rename(&fx.codex_home, &real).unwrap();
+    std::os::unix::fs::symlink(&real, &fx.codex_home).unwrap();
+    let elsewhere = fx.user_home.join("project");
+    let cwd = abs(&elsewhere);
+    let mut denials =
+        ReadDenials::collect(&real, Some(&fx.user_home), None, std::slice::from_ref(&cwd));
+    denials.add_home_spellings(
+        &abs(&real),
+        [elsewhere, fx.user_home.join("missing"), "relative".into()],
+    );
+    let expected = vec![abs(&real), abs(&fx.codex_home)];
+    assert_eq!(
+        denials.unmovable_paths().cloned().collect::<Vec<_>>(),
+        expected
+    );
+    let approved = denials.runtime_only();
+    assert_eq!(
+        approved.unmovable_paths().cloned().collect::<Vec<_>>(),
+        expected
+    );
+    let lifted = approved
+        .apply(&PermissionProfile::Disabled)
+        .expect("not an external sandbox");
+    let mut unmovable = lifted.file_system_sandbox_policy().get_unmovable_paths();
+    unmovable.sort();
+    let mut sorted = expected;
+    sorted.sort();
+    assert_eq!(unmovable, sorted);
 }

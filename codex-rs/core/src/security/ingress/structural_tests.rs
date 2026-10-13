@@ -459,3 +459,47 @@ fn pf_30_s01_labelled_cache_tracks_current_history() {
     assert_eq!(ingress.labelled.current.len(), 10);
     assert!(ingress.labelled.previous.is_empty());
 }
+
+/// #578: labelling looks another provider's model items up by their recorded
+/// bytes (producer included), and request building removes their IDs after.
+/// An unrecorded one, labelled as data, keeps its producer for that step and
+/// does not show it to the model.
+#[test]
+fn another_providers_items_stay_recognisable_after_labelling() {
+    use crate::context_manager::provider_items::strip_foreign_references;
+    let mut ingress = NativeIngress::default();
+    ingress.set_labelled_mode(true);
+    let mut call = ResponseItem::FunctionCall {
+        id: Some(codex_protocol::ResponseItemId::from_server(
+            "fc_call_1".into(),
+        )),
+        name: "shell".into(),
+        namespace: None,
+        arguments: "{}".into(),
+        encrypted_function_args: None,
+        call_id: "call_1".into(),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    call.set_producer("zai");
+    ingress.register_messages(std::slice::from_ref(&call), MessageOrigin::Model);
+    let mut unrecorded = message("assistant", "an answer nobody recorded");
+    unrecorded.set_id(Some(codex_protocol::ResponseItemId::from_server(
+        "msg_zai_1".into(),
+    )));
+    unrecorded.set_producer("zai");
+    let mut unrecorded_call = call.clone();
+    if let ResponseItem::FunctionCall { call_id, .. } = &mut unrecorded_call {
+        *call_id = "call_2".into();
+    }
+
+    let mut projected =
+        ingress.project_labelled(&[call.clone(), unrecorded.clone(), unrecorded_call]);
+    assert!(matches!(projected[0], ResponseItem::FunctionCall { .. }));
+    assert_eq!(projected[1].producer(), Some("zai"));
+    assert!(!texts(&projected[2]).concat().contains("\"producer\""));
+    strip_foreign_references(&mut projected, "openai");
+    assert!(
+        projected.iter().all(|item| item.id().is_none()),
+        "{projected:?}"
+    );
+}

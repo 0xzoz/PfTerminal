@@ -524,9 +524,9 @@ impl TurnContext {
     ) -> Self {
         let mut config = (*self.config).clone();
         config.model = Some(model.clone());
-        let model_info = models_manager
-            .get_model_info(model.as_str(), &config.to_models_manager_config())
-            .await;
+        let model_info =
+            crate::model_info_for_provider::model_info_for_config(models_manager, &model, &config)
+                .await;
         let supported_reasoning_levels = model_info
             .supported_reasoning_levels
             .iter()
@@ -668,6 +668,16 @@ impl TurnContext {
         let file_system_sandbox_policy = self.file_system_sandbox_policy();
         (file_system_sandbox_policy != legacy_file_system_sandbox_policy)
             .then_some(file_system_sandbox_policy)
+    }
+
+    /// #578: the provider (and named account) recorded as the producer of
+    /// this turn's model output items: `<provider id>`, or
+    /// `<provider id>:<account>` for a named account.
+    pub(crate) fn output_producer(&self) -> String {
+        crate::context_manager::provider_items::producer_key(
+            &self.config.model_provider_id,
+            self.provider.info().account.as_ref(),
+        )
     }
 
     pub(crate) fn to_turn_context_item(&self) -> TurnContextItem {
@@ -1108,14 +1118,13 @@ impl Session {
             .and_then(|turn_environment| turn_environment.cwd().to_abs_path().ok())
             .unwrap_or_else(|| session_configuration.cwd().clone());
         let per_turn_config = Self::build_per_turn_config(&session_configuration, cwd.clone());
-        let model_info = self
-            .services
-            .models_manager
-            .get_model_info(
-                session_configuration.collaboration_mode.model(),
-                &per_turn_config.to_models_manager_config(),
-            )
-            .await;
+        // PF-84 (#572): Bedrock's own metadata after a switch to Bedrock.
+        let model_info = crate::model_info_for_provider::model_info_for_config(
+            &self.services.models_manager,
+            session_configuration.collaboration_mode.model(),
+            &per_turn_config,
+        )
+        .await;
         self.services
             .thread_extension_data
             .insert(model_info.clone());

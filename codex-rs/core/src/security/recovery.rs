@@ -16,7 +16,8 @@
 //! anchor of the authoritative store (PF-20); agent commands cannot read or
 //! write the file once the protected-path rules apply, but under Permissive
 //! before untrusted content they can. A transition in one process reaches
-//! another process on the same home at its next session start.
+//! another process on the same home at its next session start; the kill
+//! switch, on or off, reaches it while it runs (#507, within about a second).
 
 use std::fs::OpenOptions;
 use std::io;

@@ -25,6 +25,7 @@ use crate::bwrap::BwrapOptions;
 use crate::bwrap::create_bwrap_command_args;
 use crate::landlock::apply_permission_profile_to_current_thread;
 use crate::launcher::exec_bwrap;
+use crate::launcher::preferred_bwrap_inherited_fd;
 use crate::launcher::preferred_bwrap_supports_argv0;
 use crate::proxy_routing::activate_proxy_routes_in_netns;
 use crate::proxy_routing::prepare_host_proxy_route_spec;
@@ -137,11 +138,26 @@ pub struct LandlockCommand {
     #[arg(long = "proxy-route-spec", hide = true)]
     pub proxy_route_spec: Option<String>,
 
+    /// Internal (#536): the writable roots' real locations as the caller
+    /// pinned them; each root is bound there, and the command is refused
+    /// when a root no longer leads there.
+    #[arg(
+        long = "pinned-writable-roots",
+        hide = true,
+        value_parser = parse_pinned_writable_roots
+    )]
+    pub pinned_writable_roots: Option<PinnedWritableRoots>,
+
     /// When set, skip mounting a fresh `/proc` even though PID isolation is
     /// still enabled. This is primarily intended for restrictive container
     /// environments that deny `--proc /proc`.
     #[arg(long = "no-proc", default_value_t = false)]
     pub no_proc: bool,
+
+    /// Internal (#581): a descriptor the inner stage closes before running
+    /// the command (the verified bundled bubblewrap that `aa-exec` ran).
+    #[arg(long = "close-inherited-fd", hide = true)]
+    pub close_inherited_fd: Option<i32>,
 
     /// Full command args to run under the Linux sandbox helper.
     #[arg(trailing_var_arg = true)]
@@ -164,7 +180,9 @@ pub fn run_main() -> ! {
         apply_seccomp_then_exec,
         allow_network_for_proxy,
         proxy_route_spec,
+        pinned_writable_roots,
         no_proc,
+        close_inherited_fd,
         command,
     } = LandlockCommand::parse();
 
@@ -187,6 +205,13 @@ pub fn run_main() -> ! {
     // Inner stage: apply seccomp/no_new_privs after bubblewrap has already
     // established the filesystem view.
     if apply_seccomp_then_exec {
+        // #581: first, so nothing started here (proxy bridges) inherits it.
+        if let Some(fd) = close_inherited_fd.filter(|fd| *fd > libc::STDERR_FILENO) {
+            // SAFETY: closes a descriptor this process does not use.
+            unsafe {
+                libc::close(fd);
+            }
+        }
         if allow_network_for_proxy {
             let spec = proxy_route_spec
                 .as_deref()
@@ -221,6 +246,12 @@ pub fn run_main() -> ! {
         exec_or_panic(command);
     }
 
+    if let Some(PinnedWritableRoots(pinned)) = pinned_writable_roots {
+        // #536: bubblewrap and legacy Landlock grant each writable root on
+        // the folder opened and checked at its pinned location.
+        crate::pinned::set(pinned);
+    }
+
     if !use_legacy_landlock {
         // Outer stage: bubblewrap first, then re-enter this binary in the
         // sandboxed environment to apply seccomp. This path never falls back
@@ -242,6 +273,7 @@ pub fn run_main() -> ! {
             permission_profile: &permission_profile,
             allow_network_for_proxy,
             proxy_route_spec,
+            close_inherited_fd: preferred_bwrap_inherited_fd(),
             command,
         });
         run_bwrap_with_proc_fallback(
@@ -286,6 +318,16 @@ impl fmt::Display for ResolvePermissionProfileError {
             Self::MissingConfiguration => write!(f, "missing permission profile configuration"),
         }
     }
+}
+
+/// The `--pinned-writable-roots` value (#536).
+#[derive(Debug, Clone)]
+pub struct PinnedWritableRoots(pub Vec<codex_protocol::permissions::PinnedWritableRoot>);
+
+fn parse_pinned_writable_roots(value: &str) -> std::result::Result<PinnedWritableRoots, String> {
+    serde_json::from_str(value)
+        .map(PinnedWritableRoots)
+        .map_err(|err| format!("invalid pinned writable roots: {err}"))
 }
 
 fn parse_permission_profile(value: &str) -> std::result::Result<PermissionProfile, String> {
@@ -356,6 +398,10 @@ fn run_bwrap_with_proc_fallback(
     let options = BwrapOptions {
         mount_proc,
         network_mode,
+        pins: crate::pinned::get().map(|roots| crate::bwrap::WritableRootPins {
+            roots,
+            bind_fd: crate::launcher::bind_fd_available(),
+        }),
         ..Default::default()
     };
     // #442: watch before the existing credential files are found and hidden,
@@ -1761,6 +1807,7 @@ struct InnerSeccompCommandArgs<'a> {
     permission_profile: &'a PermissionProfile,
     allow_network_for_proxy: bool,
     proxy_route_spec: Option<String>,
+    close_inherited_fd: Option<i32>,
     command: Vec<String>,
 }
 
@@ -1772,6 +1819,7 @@ fn build_inner_seccomp_command(args: InnerSeccompCommandArgs<'_>) -> Vec<String>
         permission_profile,
         allow_network_for_proxy,
         proxy_route_spec,
+        close_inherited_fd,
         command,
     } = args;
     let current_exe = match std::env::current_exe() {
@@ -1803,6 +1851,10 @@ fn build_inner_seccomp_command(args: InnerSeccompCommandArgs<'_>) -> Vec<String>
             .unwrap_or_else(|| panic!("managed proxy mode requires a proxy route spec"));
         inner.push("--proxy-route-spec".to_string());
         inner.push(proxy_route_spec);
+    }
+    if let Some(fd) = close_inherited_fd {
+        inner.push("--close-inherited-fd".to_string());
+        inner.push(fd.to_string());
     }
     inner.push("--".to_string());
     inner.extend(command);

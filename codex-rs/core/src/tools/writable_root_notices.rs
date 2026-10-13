@@ -47,6 +47,7 @@ pub(crate) fn excluded_writable_link_warning(exclusion: &WritableLinkIntoReadOnl
     )
 }
 
-#[cfg(test)]
+// Its one test needs symlinks (unix).
+#[cfg(all(test, unix))]
 #[path = "writable_root_notices_tests.rs"]
 mod tests;

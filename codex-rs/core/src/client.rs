@@ -23,6 +23,7 @@
 //! WebSocket prewarm is treated as the first websocket connection attempt for a turn. If it
 //! fails, normal stream retry/fallback logic handles recovery on the same turn.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -278,6 +279,10 @@ struct ModelClientState {
     /// Set once a provider rejects a tool continuation that ends in tool output after an
     /// assistant message. The session then restores the legacy synthetic `Continue.` turn.
     legacy_synthetic_continuation: AtomicBool,
+    /// #578: item IDs a Responses host reported it could not find (`store:
+    /// false` keeps nothing to look up). Later requests of this client send
+    /// none of them as a reference.
+    unresolvable_item_ids: StdMutex<HashSet<String>>,
 }
 
 /// Resolved API client setup for a single request attempt.
@@ -828,6 +833,7 @@ impl ModelClient {
                 http_server_state_rejected: AtomicBool::new(false),
                 vercel_vendor_pin_rejected: AtomicBool::new(false),
                 legacy_synthetic_continuation: AtomicBool::new(false),
+                unresolvable_item_ids: StdMutex::new(HashSet::new()),
             }),
             agent_identity_policy,
             prompt_cache_key_override: None,
@@ -1387,6 +1393,7 @@ impl ModelClient {
                 http_server_state_rejected: AtomicBool::new(false),
                 vercel_vendor_pin_rejected: AtomicBool::new(false),
                 legacy_synthetic_continuation: AtomicBool::new(false),
+                unresolvable_item_ids: StdMutex::new(HashSet::new()),
             }),
             agent_identity_policy: self.agent_identity_policy,
             prompt_cache_key_override: self.prompt_cache_key_override.clone(),
@@ -2170,6 +2177,11 @@ impl ModelClient {
         responses_metadata: &CodexResponsesMetadata,
     ) -> Result<ResponsesApiRequest> {
         let mut input = self.source_admitted_input(prompt, model_info.use_responses_lite)?;
+        // #578: after labelling, which looks items up by their recorded bytes.
+        if let Some(producer) = prompt.producer.as_deref() {
+            crate::context_manager::provider_items::strip_foreign_references(&mut input, producer);
+        }
+        self.drop_unresolvable_item_references(&mut input);
         let is_openai = self.state.provider.info().is_openai();
         if !is_openai {
             retain_latest_contextual_developer_fragments(&mut input);
@@ -2630,6 +2642,42 @@ impl ModelClient {
         }
 
         ChatCachePolicy::default()
+    }
+
+    /// #578: records the item a Responses host reported missing (`Item with
+    /// id '…' not found`). Returns the ID when it is new, so the caller can
+    /// retry once without it; `None` for any other error or an ID already
+    /// dropped (the retry did not help).
+    pub(crate) fn note_unresolvable_item_reference(&self, err: &CodexErr) -> Option<String> {
+        if self.state.provider.info().wire_api != WireApi::Responses {
+            return None;
+        }
+        let id = unresolvable_item_id(&err.to_string())?;
+        let mut ids = self.state.unresolvable_item_ids.lock().ok()?;
+        ids.insert(id.clone()).then_some(id)
+    }
+
+    /// Leaves the items in [`ModelClientState::unresolvable_item_ids`] out of
+    /// a Responses request as references: reasoning is dropped (without the
+    /// stored item it carries nothing the host can read), other items are
+    /// sent inline without their ID.
+    fn drop_unresolvable_item_references(&self, input: &mut Vec<ResponseItem>) {
+        let Ok(ids) = self.state.unresolvable_item_ids.lock() else {
+            return;
+        };
+        if ids.is_empty() {
+            return;
+        }
+        input.retain_mut(|item| {
+            if !item.id().is_some_and(|id| ids.contains(id.as_str())) {
+                return true;
+            }
+            if matches!(item, ResponseItem::Reasoning { .. }) {
+                return false;
+            }
+            item.set_id(/*new_id*/ None);
+            true
+        });
     }
 
     fn prepare_response_items_for_request(&self, input: &mut [ResponseItem]) {
@@ -4730,6 +4778,11 @@ impl ModelClientSession {
         }
     }
 
+    /// See [`ModelClient::note_unresolvable_item_reference`].
+    pub(crate) fn note_unresolvable_item_reference(&self, err: &CodexErr) -> Option<String> {
+        self.client.note_unresolvable_item_reference(err)
+    }
+
     /// Permanently disables WebSockets for this Codex session and resets WebSocket state.
     ///
     /// This is used after exhausting the provider retry budget, to force subsequent requests onto
@@ -5397,7 +5450,7 @@ fn append_anthropic_message_for_response_item(
                 "assistant",
                 json!({
                     "type": "tool_use",
-                    "id": call_id,
+                    "id": anthropic_tool_use_id(&call_id),
                     "name": name,
                     "input": input,
                 }),
@@ -5421,7 +5474,7 @@ fn append_anthropic_message_for_response_item(
                 "user",
                 json!({
                     "type": "tool_result",
-                    "tool_use_id": call_id,
+                    "tool_use_id": anthropic_tool_use_id(&call_id),
                     "content": anthropic_tool_result_content(&output),
                 }),
             );
@@ -5450,6 +5503,38 @@ fn append_anthropic_message_for_response_item(
         | ResponseItem::ContextCompaction { .. }
         | ResponseItem::Other => {}
     }
+}
+
+/// Anthropic accepts only `tool_use` IDs matching `^[a-zA-Z0-9_-]+$`. Another
+/// provider's call IDs (a Chat host's `functions.shell:0`) are mapped onto
+/// that alphabet, the same way for a call and its result (#578), with a hash
+/// of the original so two IDs that differ only in other characters stay
+/// distinct. Valid IDs, Anthropic's own included, are unchanged.
+fn anthropic_tool_use_id(call_id: &str) -> Cow<'_, str> {
+    let valid = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
+    if call_id.chars().all(valid) {
+        return Cow::Borrowed(call_id);
+    }
+    let mapped: String = call_id
+        .chars()
+        .map(|c| if valid(c) { c } else { '_' })
+        .collect();
+    // FNV-1a: stable across builds, so a replayed history maps the same way.
+    let hash = call_id
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+    Cow::Owned(format!("{mapped}_{hash:016x}"))
+}
+
+/// The item ID in a Responses `Item with id '<id>' not found` error (#578).
+fn unresolvable_item_id(message: &str) -> Option<String> {
+    const PREFIX: &str = "Item with id '";
+    let start = message.find(PREFIX)? + PREFIX.len();
+    let (id, rest) = message[start..].split_once('\'')?;
+    (rest.starts_with(" not found") && !id.is_empty() && !id.contains(char::is_whitespace))
+        .then(|| id.to_string())
 }
 
 fn push_anthropic_message(messages: &mut Vec<Value>, role: &str, block: Value) {

@@ -39,6 +39,13 @@ use crate::mentions::collect_explicit_app_ids;
 use crate::mentions::collect_explicit_plugin_mentions;
 use crate::mentions::collect_tool_mentions_from_messages;
 use crate::plugins::build_plugin_injections;
+use crate::provider_throttle::format_provider_request_block;
+use crate::provider_throttle::notify_state_db_fallback;
+use crate::provider_throttle::provider_request_key;
+use crate::provider_throttle::provider_request_result_from_error;
+use crate::provider_throttle::provider_request_result_kind;
+use crate::provider_throttle::record_unleased_provider_request_result;
+use crate::provider_throttle::turn_auth;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_retry::ResponsesStreamRequest;
@@ -127,14 +134,11 @@ use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TurnDiffEvent;
 use codex_protocol::protocol::WarningEvent;
 use codex_protocol::user_input::UserInput;
-use codex_state::ProviderRequestBlock;
-use codex_state::ProviderRequestBlockReason;
 use codex_state::ProviderRequestKey;
 use codex_state::ProviderRequestLease;
 use codex_state::ProviderRequestLeaseDecision;
 use codex_state::ProviderRequestPreflight;
 use codex_state::ProviderRequestResult;
-use codex_state::StateDbFallback;
 use codex_tools::DiscoverableTool;
 use codex_tools::ToolName;
 use codex_tools::filter_request_plugin_install_discoverable_tools_for_client;
@@ -147,8 +151,6 @@ use codex_utils_stream_parser::strip_citations;
 use futures::prelude::*;
 use futures::stream::FuturesOrdered;
 use regex_lite::Regex;
-use sha2::Digest;
-use sha2::Sha256;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::Instrument;
@@ -429,13 +431,10 @@ pub(crate) async fn run_turn(
                 .await?;
 
             // Construct the input that we will send to the model.
-            let mut sampling_request_input: Vec<ResponseItem> = async {
-                sess.clone_history()
-                    .await
-                    .for_prompt(&turn_context.model_info.input_modalities)
-            }
-            .instrument(trace_span!("run_turn.prepare_sampling_request_input"))
-            .await;
+            let mut sampling_request_input: Vec<ResponseItem> =
+                async { sess.clone_history().await.for_turn_prompt(&turn_context) }
+                    .instrument(trace_span!("run_turn.prepare_sampling_request_input"))
+                    .await;
             if std::mem::take(&mut pending_completion_continuation) {
                 sampling_request_input
                     .push(ContextualUserFragment::into(TurnCompletionContinuation));
@@ -1645,6 +1644,7 @@ pub(crate) fn build_prompt(
         output_schema_strict: !crate::guardian::is_guardian_reviewer_source(
             &turn_context.session_source,
         ),
+        producer: Some(turn_context.output_producer()),
     }
 }
 
@@ -1689,6 +1689,33 @@ pub(crate) async fn notify_openai_api_key_env_fallback(sess: &Session, turn_cont
         )
         .await;
     }
+}
+
+/// #578: retries of one request without an item the provider reported
+/// missing.
+const MAX_UNRESOLVABLE_ITEM_RETRIES: usize = 8;
+
+/// #578: whether to send a failed request again without an item a stateless
+/// Responses host reported missing (`Item with id '…' not found`). Each ID is
+/// retried once, at most [`MAX_UNRESOLVABLE_ITEM_RETRIES`] per request; the
+/// client leaves the ID out of its later requests.
+pub(crate) fn retry_without_unresolvable_item(
+    client_session: &ModelClientSession,
+    err: &CodexErr,
+    retries: &mut usize,
+) -> bool {
+    if *retries >= MAX_UNRESOLVABLE_ITEM_RETRIES {
+        return false;
+    }
+    let Some(item_id) = client_session.note_unresolvable_item_reference(err) else {
+        return false;
+    };
+    *retries += 1;
+    warn!(
+        item_id,
+        "the provider could not find an item this request referenced; retrying without it"
+    );
+    true
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1751,6 +1778,7 @@ async fn run_sampling_request(
     let max_retries = turn_context.provider.info().stream_max_retries();
     let mut retries = 0;
     let mut same_request_idle_failures = 0;
+    let mut unresolvable_item_retries = 0;
     let mut initial_input = Some(input);
     let mut original_input = None;
     let mut executed_tool_calls_by_output = HashMap::new();
@@ -1758,9 +1786,7 @@ async fn run_sampling_request(
         let prompt_input = if let Some(input) = initial_input.take() {
             input
         } else {
-            sess.clone_history()
-                .await
-                .for_prompt(&turn_context.model_info.input_modalities)
+            sess.clone_history().await.for_turn_prompt(&turn_context)
         };
         let mut prompt_input = prompt_input;
         if let Some(executed_tool_calls) = sess.services.executed_tool_calls.as_ref()
@@ -1822,6 +1848,24 @@ async fn run_sampling_request(
 
         if original_input.is_none() {
             original_input = Some(prompt.input);
+        }
+
+        // #578: a stateless Responses host could not find an item this
+        // request referenced. Retry without it (each ID once) rather than
+        // failing this and every later turn.
+        if retry_without_unresolvable_item(client_session, &err, &mut unresolvable_item_retries) {
+            turn_context.turn_timing_state.record_sampling_retry();
+            sess.send_event(
+                &turn_context,
+                EventMsg::Warning(WarningEvent {
+                    message: "The provider could not find an earlier item this request referred \
+                              to (for example after a provider switch); it was left out and the \
+                              request was sent again."
+                        .to_string(),
+                }),
+            )
+            .await;
+            continue;
         }
 
         if !err.is_retryable() {
@@ -2617,10 +2661,18 @@ async fn acquire_provider_request_lease(
         return Ok(ProviderRequestThrottle::default());
     };
 
-    let Ok(key) = provider_request_key(turn_context, &state_db)
-        .boxed()
-        .or_cancel(cancellation_token)
-        .await
+    let (codex_home, auth_mode) = turn_auth(sess, turn_context);
+    let Ok(key) = provider_request_key(
+        &state_db,
+        &codex_home,
+        turn_context.config.model_provider_id.as_str(),
+        turn_context.provider.info(),
+        turn_context.model_info.slug.as_str(),
+        || auth_mode,
+    )
+    .boxed()
+    .or_cancel(cancellation_token)
+    .await
     else {
         return Err(CodexErr::TurnAborted);
     };
@@ -2992,66 +3044,6 @@ async fn record_provider_request_result_for_lease(
     recorded.decision
 }
 
-/// #476: a request sent without a lease (any human-driven session, and a
-/// sub-agent's small or well-cached one) still records how it ended, so a 429
-/// holds every later request on the key back for the cooldown. A failure
-/// without an HTTP status (an interrupt, a network error) says nothing about
-/// the key and is not recorded.
-async fn record_unleased_provider_request_result(
-    sess: &Session,
-    key: &ProviderRequestKey,
-    result: ProviderRequestResult,
-) {
-    if matches!(result, ProviderRequestResult::Failed { status: None, .. }) {
-        return;
-    }
-    let Some(state_db) = sess.state_db() else {
-        return;
-    };
-    let result_kind = provider_request_result_kind(&result);
-    let recorded = state_db
-        .record_provider_request_throttle_outcome(key, result, now_unix_timestamp_ms())
-        .boxed()
-        .await;
-    trace!(
-        provider = %key.provider_id,
-        model = %key.model,
-        key_fingerprint = %key.key_fingerprint,
-        result = result_kind,
-        state_db_fallback = ?recorded.state_db_fallback,
-        "recorded unleased provider request result"
-    );
-}
-
-/// Say once per session that the shared state DB could not be written, so the
-/// provider-request throttle went on from this process's own state (#351).
-async fn notify_state_db_fallback(
-    sess: &Session,
-    turn_context: &TurnContext,
-    fallback: Option<StateDbFallback>,
-) {
-    let Some(fallback) = fallback else {
-        return;
-    };
-    if sess
-        .services
-        .state_db_fallback_noticed
-        .swap(true, std::sync::atomic::Ordering::Relaxed)
-    {
-        return;
-    }
-    let cause = match fallback {
-        StateDbFallback::Busy => "is busy (another session or process is writing to it)",
-        StateDbFallback::ReadOnly => "is read-only",
-        StateDbFallback::Unavailable => "can't be written",
-    };
-    let message = format!(
-        "The shared state database {cause}. Requests continue, and the provider request limits this Corbanu process knows about still apply; limits shared with other Corbanu processes resume once the database can be written."
-    );
-    sess.send_event(turn_context, EventMsg::Warning(WarningEvent { message }))
-        .await;
-}
-
 /// How the throttle let a request go: under a lease, or without one.
 #[derive(Default)]
 struct ProviderRequestThrottle {
@@ -3106,10 +3098,13 @@ impl ProviderRequestLeaseGuard {
         cancellation_token: &CancellationToken,
     ) {
         if let Some(key) = self.unleased_key.take() {
-            record_unleased_provider_request_result(sess, &key, result)
-                .or_cancel(cancellation_token)
-                .await
-                .ok();
+            if let Some(state_db) = self.state_db.as_ref() {
+                record_unleased_provider_request_result(state_db, &key, result)
+                    .boxed()
+                    .or_cancel(cancellation_token)
+                    .await
+                    .ok();
+            }
             return;
         }
         let Some(lease) = self.lease.clone() else {
@@ -3172,13 +3167,6 @@ impl Drop for ProviderRequestLeaseGuard {
     }
 }
 
-fn provider_request_result_kind(result: &ProviderRequestResult) -> &'static str {
-    match result {
-        ProviderRequestResult::Success { .. } => "success",
-        ProviderRequestResult::Failed { .. } => "failed",
-    }
-}
-
 fn provider_request_result_from_outcome(
     outcome: &CodexResult<SamplingRequestResult>,
 ) -> ProviderRequestResult {
@@ -3194,197 +3182,9 @@ fn provider_request_result_from_outcome(
     }
 }
 
-fn provider_request_result_from_error(err: &CodexErr) -> ProviderRequestResult {
-    ProviderRequestResult::Failed {
-        status: err.http_status_code_value(),
-        request_id: provider_request_error_request_id(err),
-        retry_after_ms: provider_request_error_retry_after_ms(err),
-    }
-}
-
-fn provider_request_error_request_id(err: &CodexErr) -> Option<String> {
-    match err.details() {
-        CodexErrorDetails::RetryLimit(err) => err.request_id.clone(),
-        CodexErrorDetails::UnexpectedStatus(err) => err.request_id.clone(),
-        CodexErrorDetails::ResponseStreamFailed(err) => err.request_id.clone(),
-        _ => None,
-    }
-}
-
-fn provider_request_error_retry_after_ms(err: &CodexErr) -> Option<i64> {
-    match err.details() {
-        CodexErrorDetails::RetryLimit(err) => err.retry_after_ms,
-        _ => None,
-    }
-}
-
-async fn provider_request_key(
-    turn_context: &TurnContext,
-    state_db: &StateDbHandle,
-) -> ProviderRequestKey {
-    let key_fingerprint = match provider_request_key_identity(turn_context.provider.info(), || {
-        turn_context
-            .auth_manager
-            .as_ref()
-            .and_then(|auth_manager| auth_manager.auth_mode())
-    }) {
-        ProviderKeyIdentity::Label(label) => label,
-        ProviderKeyIdentity::EnvSecret { env_key, secret } => {
-            match state_db.provider_request_key_salt().await {
-                Ok(salt) => {
-                    let salted = salted_env_key_fingerprint(&salt, &env_key, &secret);
-                    state_db
-                        .adopt_legacy_provider_request_key(
-                            &legacy_env_key_fingerprint(&env_key, &secret),
-                            &salted,
-                            now_unix_timestamp_ms(),
-                        )
-                        .await;
-                    salted
-                }
-                Err(error) => {
-                    warn!(error = %format!("{error:#}"), "provider request key salt unavailable");
-                    format!("env-salted:{env_key}:unavailable")
-                }
-            }
-        }
-    };
-    ProviderRequestKey {
-        provider_id: turn_context.config.model_provider_id.clone(),
-        model: turn_context.model_info.slug.clone(),
-        key_fingerprint,
-    }
-}
-
-/// The credential identity a provider's throttle state is kept under.
-#[derive(PartialEq, Eq)]
-enum ProviderKeyIdentity {
-    /// A label that holds no credential material.
-    Label(String),
-    /// An API key from the environment, fingerprinted with the home's salt.
-    EnvSecret {
-        env_key: String,
-        secret: zeroize::Zeroizing<String>,
-    },
-}
-
-/// Never shows the key.
-impl std::fmt::Debug for ProviderKeyIdentity {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Label(label) => f.debug_tuple("Label").field(label).finish(),
-            Self::EnvSecret { env_key, .. } => f
-                .debug_struct("EnvSecret")
-                .field("env_key", env_key)
-                .finish_non_exhaustive(),
-        }
-    }
-}
-
-fn provider_request_key_identity<A: std::fmt::Debug>(
-    provider: &codex_model_provider_info::ModelProviderInfo,
-    auth_mode: impl FnOnce() -> A,
-) -> ProviderKeyIdentity {
-    // PF-84: each named account has throttle state of its own, so one
-    // account's 429 or lease never blocks another. A named account never uses
-    // the provider's environment key, so that key is not part of its identity.
-    let label = if let Some(account) = provider.account.as_ref() {
-        format!("account:{}", account.name)
-    } else if let Some(env_key) = provider.env_key.as_deref() {
-        match std::env::var(env_key)
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-        {
-            Some(secret) => {
-                return ProviderKeyIdentity::EnvSecret {
-                    env_key: env_key.to_string(),
-                    secret: zeroize::Zeroizing::new(secret),
-                };
-            }
-            // Do not hit the vault on the hot path just to fingerprint throttle state.
-            // The actual request path still resolves the stored key and will fail
-            // normally if it is missing or invalid.
-            None => format!("stored:{env_key}"),
-        }
-    } else if provider.experimental_bearer_token.is_some() {
-        "config:bearer-token".to_string()
-    } else if provider.auth.is_some() {
-        "config:auth-command".to_string()
-    } else if provider.aws.is_some() {
-        "config:aws".to_string()
-    } else {
-        format!("auth-mode:{:?}", auth_mode())
-    };
-    ProviderKeyIdentity::Label(label)
-}
-
-/// #482: an environment key's throttle identity, salted per home so the same
-/// key gives a different value on every machine.
-fn salted_env_key_fingerprint(salt: &[u8], env_key: &str, secret: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(b"corbanu-provider-request-key-v1\0");
-    hasher.update(salt);
-    hasher.update(b"\0");
-    hasher.update(env_key.as_bytes());
-    hasher.update(b"\0");
-    hasher.update(secret.as_bytes());
-    format!("env-salted:{env_key}:{}", hex_prefix(&hasher.finalize()))
-}
-
-/// The unsalted identity older builds kept the key's throttle row under; it
-/// is only computed to move that row to the salted key.
-fn legacy_env_key_fingerprint(env_key: &str, secret: &str) -> String {
-    format!(
-        "env:{env_key}:{}",
-        hex_prefix(&Sha256::digest(secret.as_bytes()))
-    )
-}
-
-fn hex_prefix(digest: &[u8]) -> String {
-    digest
-        .iter()
-        .take(8)
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
 fn rough_prompt_token_estimate(prompt: &Prompt) -> i64 {
     let input_bytes = serde_json::to_vec(&prompt.input).map_or(0, |bytes| bytes.len());
     i64::try_from(input_bytes / 4).unwrap_or(i64::MAX)
-}
-
-fn format_provider_request_block(key: &ProviderRequestKey, block: &ProviderRequestBlock) -> String {
-    let reason = match block.reason {
-        ProviderRequestBlockReason::Cooldown => "cooldown",
-        ProviderRequestBlockReason::Lease => "active request lease",
-    };
-    let wait_seconds = (block.remaining_ms.max(0) + 999) / 1000;
-    let status = block
-        .last_status
-        .map(|status| status.to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-    let request_id = block
-        .last_request_id
-        .as_deref()
-        .map(|id| format!(", request id: {id}"))
-        .unwrap_or_default();
-    let provider_cache = if block.last_provider_input_tokens > 0 {
-        format!(
-            " Last provider usage: input={} cached_input={}.",
-            block.last_provider_input_tokens, block.last_provider_cached_input_tokens
-        )
-    } else {
-        String::new()
-    };
-    format!(
-        "provider request blocked by local {reason} for {}/{} ({}) for about {wait_seconds}s. Last status: {status}{request_id}. Last preflight: input={} cached_input={} request_bytes={}.{provider_cache} Wait, compact, switch provider/model, or start a fresh thread before retrying.",
-        key.provider_id,
-        key.model,
-        key.key_fingerprint,
-        block.last_input_tokens,
-        block.last_cached_input_tokens,
-        block.last_request_bytes
-    )
 }
 
 fn assign_missing_streamed_response_item_id(
@@ -3565,6 +3365,8 @@ async fn try_run_sampling_request(
             ResponseEvent::Created => {}
             ResponseEvent::OutputItemDone(mut item) => {
                 assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
+                // #578: later requests to another provider adapt this item.
+                item.set_producer(&turn_context.output_producer());
                 let completed_item_id = item.id().map(|item_id| item_id.as_str().to_string());
                 if let Some((_, mut consumer)) = active_tool_argument_diff_consumer.take()
                     && let Ok(Some(event)) = consumer.finish()

@@ -2444,3 +2444,23 @@ fn text_only_items_unchanged() {
 
     assert_eq!(estimated, raw_len);
 }
+
+/// #578: every snapshot of a session's history shares the flag that keeps the
+/// dropped-compaction-summary log to once per session.
+#[test]
+fn history_snapshots_share_the_foreign_compaction_log_flag() {
+    use std::sync::atomic::Ordering;
+    let history = ContextManager::new();
+    let snapshot = history.clone();
+    assert!(
+        !snapshot
+            .foreign_compaction_warned
+            .swap(true, Ordering::Relaxed)
+    );
+    assert!(history.foreign_compaction_warned.load(Ordering::Relaxed));
+    assert!(
+        !ContextManager::new()
+            .foreign_compaction_warned
+            .load(Ordering::Relaxed)
+    );
+}
