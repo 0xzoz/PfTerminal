@@ -2393,6 +2393,83 @@ async fn issue_586_missing_db_init_lock_cannot_be_created_or_held() -> anyhow::R
     Ok(())
 }
 
+/// Issue #611: with the databases in their own folder (`sqlite_home`), a
+/// protected command with full access cannot read a database there, create
+/// a new one, or create and hold the missing init lock, with the paths built
+/// at run time. Permissive is unchanged. On Linux a database pattern denies
+/// the matching files that exist when the command starts (as in the Corbanu
+/// home), so creating a new name is not checked there.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_611_a_separate_database_folder_is_protected() -> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let mut wrong = Vec::new();
+    for (level, open) in [
+        (SecurityLevel::Moderate, false),
+        (SecurityLevel::Aggressive, false),
+        (SecurityLevel::Permissive, true),
+    ] {
+        let databases = TempDir::new()?;
+        let folder = databases.path().canonicalize()?;
+        let lock = folder.join("pfterminal_db_init.lock");
+        let path = folder.to_string_lossy().into_owned();
+        // Split inside the folder's own name: neither part names it.
+        let (head, tail) = path.split_at(path.len() - 2);
+        let command = format!(
+            "d=\"$(printf '{head}%s' {tail})\"; s=\"sql$(printf ite)\"; \
+             cat \"$d/canary.$s\"; echo; printf x > \"$d/new.$s\"; \
+             perl -e 'use Fcntl qw(:flock); open(my $f, \">>\", $ARGV[0]) or die \"open: $!\\n\"; \
+             flock($f, LOCK_EX | LOCK_NB) or die \"lock: $!\\n\"' \
+             \"$d/pfterminal_db_$(printf init).lock\" && echo held-611; echo ran-611"
+        );
+        let sqlite_home = AbsolutePathBuf::from_absolute_path(&folder)?;
+        let (canary, missing_lock) = (folder.join("canary.sqlite"), lock.clone());
+        let (test, captured) = start_turn_after(
+            None,
+            level,
+            AskForApproval::Never,
+            vec![
+                call("call-db", "shell_command", json!({ "command": command })),
+                done_step(),
+            ],
+            move |config| {
+                config.sqlite = codex_state::SqliteConfig::from_sqlite_home(sqlite_home.clone());
+                config
+                    .permissions
+                    .set_permission_profile(PermissionProfile::Disabled)
+                    .expect("full access");
+            },
+            move |_| {
+                std::fs::write(&canary, CANARY).expect("canary database");
+                // Start-up created it; the command meets it missing.
+                let _ = std::fs::remove_file(&missing_lock);
+            },
+        )
+        .await?;
+        assert!(next_exec_approval(&test).await.is_none());
+        let requests = captured.requests();
+        let output = output_text(&requests[requests.len() - 1], "call-db");
+        let achieved = [
+            output.contains(CANARY),
+            if cfg!(target_os = "linux") {
+                open
+            } else {
+                folder.join("new.sqlite").exists()
+            },
+            output.contains("held-611") || lock.exists(),
+        ];
+        if !output.contains("ran-611") || achieved != [open; 3] {
+            wrong.push(format!("{level:?}: {achieved:?}: {output}"));
+        }
+        drop(test);
+        drop(databases);
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
 /// PF-23-S03: a level confirmed earlier and stored in `security_state.json`
 /// is enforced after a restart even when the configured level is lower.
 #[cfg(target_os = "macos")]

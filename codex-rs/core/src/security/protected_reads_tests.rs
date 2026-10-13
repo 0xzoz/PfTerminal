@@ -551,6 +551,7 @@ fn issue_620_start_up_files_through_links() {
         let folder = AbsolutePathBuf::from_absolute_path(folder.canonicalize().unwrap()).unwrap();
         ReadPolicyInputs {
             codex_home: home.join(".corbanu"),
+            sqlite_home: home.join(".corbanu"),
             turn_cwd: folder.clone(),
             workspace_roots: vec![folder],
             // Aggressive's sandbox: the current folder only.

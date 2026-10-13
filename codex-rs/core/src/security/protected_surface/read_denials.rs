@@ -61,7 +61,7 @@ const CORBANU_STORES: &[&str] = &[
     "security_state.lock",
     // #586: the database init lock (#549); a command holding it would
     // stall every new launch on this home.
-    "pfterminal_db_init.lock",
+    DB_INIT_LOCK,
     // #562: read as instructions ahead of AGENTS.md; a command may not
     // create it either.
     "AGENTS.override.md",
@@ -158,6 +158,9 @@ const DEFAULT_AGENTS_MD: &str = "AGENTS.md";
 
 /// State and log databases, created after launch.
 const CORBANU_DATABASES: &str = "*.sqlite*";
+
+/// The database init lock (#549), next to the databases.
+const DB_INIT_LOCK: &str = "pfterminal_db_init.lock";
 
 /// Other Corbanu home folders in the user's home: denied whole.
 const OTHER_CORBANU_HOMES: &[&str] = &[".corbanu", ".codex", ".pfterminal"];
@@ -332,9 +335,11 @@ impl ReadDenials {
 
     /// The denials for this host's user: what stays readable is the turn's
     /// working folder, its workspace roots and the profile's writable roots
-    /// resolved against that folder.
+    /// resolved against that folder. `sqlite_home` is the database folder
+    /// (`SqliteConfig::home`), the Corbanu home unless set apart (#611).
     pub(crate) fn for_turn(
         codex_home: &Path,
+        sqlite_home: &Path,
         turn_cwd: &AbsolutePathBuf,
         workspace_roots: &[AbsolutePathBuf],
         profile: &PermissionProfile,
@@ -376,6 +381,7 @@ impl ReadDenials {
                 .map(Path::new),
             &keep,
         );
+        denials.protect_database_folder(codex_home, sqlite_home, &keep);
         // #594: the home variable's own spelling (a link the home was found
         // through; the home itself is its real location).
         if let Ok(codex_home) = AbsolutePathBuf::from_absolute_path(codex_home) {
@@ -388,6 +394,37 @@ impl ReadDenials {
             );
         }
         denials
+    }
+
+    /// #611: a database folder set apart from the Corbanu home (`sqlite_home`
+    /// or `CODEX_SQLITE_HOME`) gets the home's database rules: its databases
+    /// are denied, also those created later, and so is the init lock (#586),
+    /// also before it exists (a command holding it would stall every new
+    /// launch on these databases). A command a person approved under
+    /// Moderate (#540) drops them with the other stores.
+    fn protect_database_folder(
+        &mut self,
+        codex_home: &Path,
+        sqlite_home: &Path,
+        keep: &[AbsolutePathBuf],
+    ) {
+        let Ok(folder) = AbsolutePathBuf::from_absolute_path(sqlite_home) else {
+            return;
+        };
+        let same_folder = sqlite_home == codex_home
+            || std::fs::canonicalize(sqlite_home)
+                .is_ok_and(|real| std::fs::canonicalize(codex_home).is_ok_and(|home| home == real));
+        if same_folder {
+            return;
+        }
+        self.push_fixed(folder.join(DB_INIT_LOCK), keep);
+        let databases = folder
+            .join(CORBANU_DATABASES)
+            .to_string_lossy()
+            .into_owned();
+        if !self.globs.contains(&databases) {
+            self.globs.push(databases);
+        }
     }
 
     /// #583: the Corbanu home itself is read-only, so a protected command
@@ -985,6 +1022,7 @@ pub(crate) fn protect_file_tool_context(
     // to this call never make a denied folder readable.
     let mut denials = ReadDenials::for_turn(
         turn.config.codex_home.as_path(),
+        turn.config.sqlite.home(),
         &turn_cwd,
         &workspace_roots,
         turn.config.permissions.permission_profile(),
@@ -1027,6 +1065,7 @@ pub(crate) fn post_taint_read_policy(
     let profile = turn.config.permissions.permission_profile();
     let denials = ReadDenials::for_turn(
         turn.config.codex_home.as_path(),
+        turn.config.sqlite.home(),
         &turn_cwd,
         &workspace_roots,
         profile,

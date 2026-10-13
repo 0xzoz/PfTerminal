@@ -3380,10 +3380,11 @@ impl Session {
         let Some(level) = crate::security::protected_additional::protected_level(self) else {
             return response;
         };
-        let (codex_home, configs) = self.grant_check_configs(Some(cwd)).await;
+        let (codex_home, sqlite_home, configs) = self.grant_check_configs(Some(cwd)).await;
         let (kept, refusal) = crate::security::protected_additional::strip_grant_off_thread(
             level,
             codex_home,
+            sqlite_home,
             configs,
             response.permissions.clone().into(),
         )
@@ -3471,15 +3472,20 @@ impl Session {
         let Some(level) = crate::security::protected_additional::protected_level(self) else {
             return Some(granted);
         };
-        let (codex_home, configs) = self.grant_check_configs(/*cwd*/ None).await;
+        let (codex_home, sqlite_home, configs) = self.grant_check_configs(/*cwd*/ None).await;
         crate::security::protected_additional::strip_grant_off_thread(
-            level, codex_home, configs, granted,
+            level,
+            codex_home,
+            sqlite_home,
+            configs,
+            granted,
         )
         .await
         .0
     }
 
-    /// Issue #524: the Corbanu home, and what a grant is checked against:
+    /// Issue #524: the Corbanu home and its database folder (#611), and what
+    /// a grant is checked against:
     /// `cwd` (or the session's original folder) with the original profile,
     /// and the session's current folder and profile, which may have changed
     /// since, each with the current workspace roots.
@@ -3487,6 +3493,7 @@ impl Session {
         &self,
         cwd: Option<&AbsolutePathBuf>,
     ) -> (
+        std::path::PathBuf,
         std::path::PathBuf,
         Vec<crate::security::protected_additional::GrantCheckConfig>,
     ) {
@@ -3508,7 +3515,11 @@ impl Session {
         if !configs.contains(&now) {
             configs.push(now);
         }
-        (config.codex_home.to_path_buf(), configs)
+        (
+            config.codex_home.to_path_buf(),
+            config.sqlite.home().to_path_buf(),
+            configs,
+        )
     }
 
     #[expect(
