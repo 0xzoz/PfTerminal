@@ -406,15 +406,17 @@ fn register_synthetic_mount_targets_owns_a_placeholder_that_vanished_before_regi
 }
 
 /// #607: another live run's empty placeholder folder (`.codex`, which it
-/// holds read-only in its writable root) that this run's policy denies is
-/// masked and held (registered as found), so its maker's cleanup leaves it
-/// while this run masks it; the last run out removes it. Before, only a
-/// placeholder file was held, and the maker removed the folder (and the
-/// mask with it) from under this run.
+/// holds read-only in its own writable root) that this run's policy denies
+/// outside its writable roots is masked and held (registered as found), so
+/// its maker's cleanup leaves it while this run masks it; the last run out
+/// removes it. Before, only a placeholder file was held, and the maker
+/// removed the folder (and the mask with it) from under this run.
 #[test]
 fn a_live_placeholder_folder_is_held_while_it_is_masked() {
     let temp_dir = tempfile::TempDir::new().expect("tempdir");
     let root = temp_dir.path().canonicalize().expect("canonical");
+    let project = root.join("project");
+    std::fs::create_dir(&project).expect("project");
     let placeholder = root.join(".codex");
     // Another run, still running, registered and made it.
     let mut maker = std::process::Command::new("sleep")
@@ -444,14 +446,14 @@ fn a_live_placeholder_folder_is_held_while_it_is_masked() {
             access: FileSystemAccessMode::Read,
             missing_path_behavior: None,
         },
-        entry(&root, FileSystemAccessMode::Write),
+        entry(&project, FileSystemAccessMode::Write),
         entry(&placeholder, FileSystemAccessMode::Deny),
     ]);
     let args = create_bwrap_command_args(
         vec!["/bin/true".to_string()],
         &policy,
-        &root,
-        &root,
+        &project,
+        &project,
         BwrapOptions::default(),
     )
     .expect("bwrap args");

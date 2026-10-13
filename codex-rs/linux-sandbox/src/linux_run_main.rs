@@ -1028,9 +1028,8 @@ fn register_synthetic_mount_targets(
                 };
                 // #607: its location now, before the command runs, where it
                 // is removed (without following a link).
-                let target = target.with_real_path(
-                    crate::placeholder_registry::real_placeholder_path(target.path()),
-                );
+                let real_path = crate::placeholder_registry::real_placeholder_path(target.path());
+                let target = target.with_real_path(real_path);
                 // #607: a placeholder another run made (still there) keeps
                 // its record, whose time is when it was made.
                 if !target.preserves_pre_existing_path()
