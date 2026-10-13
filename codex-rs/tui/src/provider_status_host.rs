@@ -539,9 +539,25 @@ fn corbanu_metadata_with_environment(
 }
 
 fn environment_metadata(env_key: &str) -> EnvironmentCredentialMetadata {
-    match std::env::var(env_key) {
+    environment_metadata_from(
+        std::env::var(env_key),
+        crate::legacy_core::broker_holds_environment_key(env_key),
+    )
+}
+
+/// #625: a key the credential broker took out of this process's environment
+/// (Aggressive's `broker_model_auth`) is still the provider's key: the broker
+/// sends its model requests with it.
+fn environment_metadata_from(
+    value: Result<String, std::env::VarError>,
+    held_by_broker: bool,
+) -> EnvironmentCredentialMetadata {
+    match value {
         Ok(value) if value.trim().is_empty() => EnvironmentCredentialMetadata::Invalid,
         Ok(_) => EnvironmentCredentialMetadata::Present,
+        Err(std::env::VarError::NotPresent) if held_by_broker => {
+            EnvironmentCredentialMetadata::Present
+        }
         Err(std::env::VarError::NotPresent) => EnvironmentCredentialMetadata::Missing,
         Err(std::env::VarError::NotUnicode(_)) => EnvironmentCredentialMetadata::Invalid,
     }

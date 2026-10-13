@@ -319,6 +319,29 @@ fn environment_precedence_skips_managed_reads_until_environment_is_missing() {
     );
 }
 
+/// #625: under Aggressive the credential broker takes the provider key out of
+/// the environment; the provider stays configured (it serves the session).
+#[test]
+fn a_key_held_by_the_credential_broker_still_configures_its_provider() {
+    let missing = || Err(std::env::VarError::NotPresent);
+    assert_eq!(
+        environment_metadata_from(missing(), /*held_by_broker*/ true),
+        EnvironmentCredentialMetadata::Present
+    );
+    assert_eq!(
+        environment_metadata_from(missing(), /*held_by_broker*/ false),
+        EnvironmentCredentialMetadata::Missing
+    );
+    assert_eq!(
+        environment_metadata_from(Ok(" ".to_string()), /*held_by_broker*/ true),
+        EnvironmentCredentialMetadata::Invalid
+    );
+    assert_eq!(
+        environment_metadata_from(Ok("key".to_string()), /*held_by_broker*/ false),
+        EnvironmentCredentialMetadata::Present
+    );
+}
+
 async fn config(path: &std::path::Path, id: &str, provider: ModelProviderInfo) -> Config {
     let mut config = crate::legacy_core::config::ConfigBuilder::default()
         .codex_home(path.to_path_buf())

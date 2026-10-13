@@ -176,6 +176,33 @@ pub fn removed_environment_keys() -> Vec<String> {
         .clone()
 }
 
+/// #625: provider-key variables a running broker holds for this process.
+/// They are gone from the environment, but the provider is still configured.
+static HELD_ENV_KEYS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+#[cfg_attr(not(any(unix, windows)), allow(dead_code))]
+fn note_held_env_keys(names: &[String]) {
+    let mut held = HELD_ENV_KEYS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for name in names {
+        if !held.contains(name) {
+            held.push(name.clone());
+        }
+    }
+}
+
+/// #625: whether this process handed provider-key variable `name` to the
+/// credential broker, which holds it for model requests. Status checks treat
+/// such a variable as set: reading the environment no longer finds it.
+pub fn holds_environment_key(name: &str) -> bool {
+    HELD_ENV_KEYS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .any(|held| held == name)
+}
+
 #[derive(Clone, Debug)]
 #[cfg_attr(
     not(any(unix, windows)),
@@ -477,10 +504,13 @@ impl CoreModelKeyBroker {
             }
         };
         match broker.take_env_keys(&settings.env_names) {
-            Ok(taken) if !taken.is_empty() => tracing::info!(
-                "provider keys handed to the credential broker and removed from the environment: {}",
-                taken.join(", ")
-            ),
+            Ok(taken) if !taken.is_empty() => {
+                note_held_env_keys(&taken);
+                tracing::info!(
+                    "provider keys handed to the credential broker and removed from the environment: {}",
+                    taken.join(", ")
+                );
+            }
             Ok(_) => {}
             Err(error) => {
                 // The keys are gone from the environment either way; a

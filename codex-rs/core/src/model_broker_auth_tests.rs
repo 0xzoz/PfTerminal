@@ -177,6 +177,8 @@ fn sec_391_broker_that_cannot_start_fails_closed_and_scrubs_keys() {
     assert_eq!(std::env::var_os(&name), None);
     // #436: "restart now" learns the key is gone (names only).
     assert!(removed_environment_keys().contains(&name));
+    // #625: a broker that did not start holds nothing.
+    assert!(!holds_environment_key(&name));
     assert!(broker.unavailable_reason().is_some());
     for source in [provider_key(), held_value()] {
         let error = refusal(&broker, "https://api.z.ai/api/paas/v4", source);
