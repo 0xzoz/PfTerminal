@@ -19,8 +19,13 @@ in the PR.
 
 ## Evidence
 
-- Regression tests (fail before, pass after): `core/tests/suite/issue_620_622.rs` (real Seatbelt; Linux bwrap
+- Regression tests (fail before, pass after): `core/tests/suite/issue_620_622.rs` (real Seatbelt on macOS, bubblewrap
   on glitch), `security::protected_reads::tests::issue_620_*`, `issue_621_*`.
-- tmux (GLM 5.3 Flash, debug build, disposable home and HOME): `after-620.txt`, `after-621.txt`,
-  `after-622.txt` (approval prompts without Grant once; the inspector row).
-- Videos: specs `qa/demos/specs/issue62{0,1,2}-*.toml`, links in the PR.
+- tmux (GLM 5.3 Flash, debug build of 30cb180947, disposable home and HOME): `after-620.txt`, `after-621.txt`
+  (approval prompts without Grant once), `after-622.txt` (the inspector row).
+- Videos: [#620](https://github.com/CorbanuCore/CorbanuTerminal/releases/download/demos/issue-620-issue620-zshrc-no-grant-30cb18094768-2026-10-12.mp4),
+  [#621](https://github.com/CorbanuCore/CorbanuTerminal/releases/download/demos/issue-621-issue621-python-listing-never-granted-30cb18094768-2026-10-12.mp4),
+  [#622](https://github.com/CorbanuCore/CorbanuTerminal/releases/download/demos/issue-622-issue622-inspector-lists-denials-30cb18094768-2026-10-12.mp4).
+- Limits: the write-target parsing is text-based (quotes inside a script are not kept, `/usr/bin/env` or `sudo -u`
+  prefixes and newline-separated commands are not looked into); a miss offers Grant once as before, a false match only
+  withholds it. Listing denials are not enforced on Windows, so nothing is said there.

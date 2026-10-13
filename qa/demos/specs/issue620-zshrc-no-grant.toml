@@ -77,7 +77,7 @@ wait = "Security level Aggressive blocks writing"
 timeout = 60
 compress = 2
 [[steps]]
-wait = "(?m)^• (?!Ran|Running|Working|Explor)"
+wait = "(?s)Security level Aggressive block.*─{10}.*\\n• "
 timeout = 120
 compress = 2
 [[steps]]

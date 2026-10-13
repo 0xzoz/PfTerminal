@@ -714,9 +714,10 @@ const MAX_SCRIPT_DEPTH: usize = 4;
 /// `touch`, `truncate`, `rm` and `chmod`, the destination of `cp`, `mv`,
 /// `ln`, `install` and `rsync` (and what `mv` moves away), the files of
 /// `sed -i`, and `dd of=`; a shell's `-c` script is looked into. Text-based
-/// and incomplete (newlines and `;` or `|` attached to a word do not
-/// separate commands); it only decides whether a grant offer is withheld as
-/// useless, never what runs.
+/// and incomplete (newlines, `;` inside a word and `|` attached to a word
+/// do not separate commands, and quotes inside a script are not kept); it
+/// only decides whether a grant offer is withheld as useless, never what
+/// runs.
 fn write_targets(command: &[String]) -> Vec<String> {
     simple_command_targets(command, MAX_SCRIPT_DEPTH)
 }
