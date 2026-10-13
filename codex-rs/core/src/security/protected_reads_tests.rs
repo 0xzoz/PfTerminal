@@ -387,7 +387,9 @@ fn recent_denials(session: &Session, turn: &TurnContext) -> Vec<(&'static str, &
 /// interpreter makes is explained where it failed, also when the command
 /// built the path at run time (the denial line names it), and it is listed
 /// under the inspector's recent denials. The approval prompt for the listing
-/// offers no grant (`protected_note_in_command`).
+/// offers no grant (`protected_note_in_command`; Windows does not enforce
+/// the listing denial, so it says nothing there).
+#[cfg(unix)]
 #[tokio::test]
 async fn issue_621_622_interpreter_denials_are_explained_and_listed() {
     let (session, turn) = crate::session::tests::make_session_and_context().await;
@@ -460,6 +462,7 @@ async fn issue_621_622_interpreter_denials_are_explained_and_listed() {
 /// with Grant once, so the approval prompt offers no grant and says why;
 /// a denied write is explained the same way where it failed. A write in the
 /// current folder, and Permissive sessions, are left alone.
+#[cfg(unix)]
 #[tokio::test]
 async fn issue_620_startup_file_outside_the_folder_is_never_granted() {
     let (session, turn) = crate::session::tests::make_session_and_context().await;
@@ -513,14 +516,7 @@ async fn issue_620_startup_file_outside_the_folder_is_never_granted() {
     ] {
         assert_eq!(note(&shell(script)).await, None, "{script}");
     }
-    // A link in the current folder to a start-up file counts where it points.
-    let link_dir = tempfile::tempdir().unwrap();
-    let link = link_dir.path().join("rc-link");
-    std::os::unix::fs::symlink(user_home.join(".zshrc"), &link).unwrap();
-    assert_eq!(
-        note(&shell(&format!("echo x >> '{}'", link.display()))).await,
-        Some(startup_explanation(&link.display().to_string()))
-    );
+
     assert_eq!(
         denial_explanation(&session, &turn, &append, cwd.as_path(), Some(1), &denied).await,
         Some(startup_explanation("~/.zshrc"))
@@ -531,5 +527,87 @@ async fn issue_620_startup_file_outside_the_folder_is_never_granted() {
             "writing a start-up file outside the current folder",
             "denied by the sandbox; never granted under Aggressive"
         )]
+    );
+}
+
+/// #620: a start-up file reached through links counts by every name on the
+/// way (`./rc -> ~/.zshrc -> ~/dotfiles/zshrc`, as dotfile managers link
+/// it), and is writable where any of those names is (a workspace that is
+/// the home folder keeps Grant once).
+#[cfg(unix)]
+#[test]
+fn issue_620_start_up_files_through_links() {
+    use codex_protocol::permissions::NetworkSandboxPolicy;
+    let user_home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let home = user_home.path();
+    std::fs::create_dir(home.join("dotfiles")).unwrap();
+    std::fs::write(home.join("dotfiles/zshrc"), "").unwrap();
+    std::os::unix::fs::symlink(home.join("dotfiles/zshrc"), home.join(".zshrc")).unwrap();
+    std::os::unix::fs::symlink(home.join(".zshrc"), work.path().join("rc")).unwrap();
+    let inputs = |folder: &Path| {
+        let folder = AbsolutePathBuf::from_absolute_path(folder.canonicalize().unwrap()).unwrap();
+        ReadPolicyInputs {
+            codex_home: home.join(".corbanu"),
+            turn_cwd: folder.clone(),
+            workspace_roots: vec![folder],
+            // Aggressive's sandbox: the current folder only.
+            profile: PermissionProfile::workspace_write_with(
+                &[],
+                NetworkSandboxPolicy::Restricted,
+                /*exclude_tmpdir_env_var*/ true,
+                /*exclude_slash_tmp*/ true,
+            ),
+            user_home: Some(home.to_path_buf()),
+        }
+    };
+    let in_work = inputs(work.path());
+    assert!(in_work.unwritable_startup_file(&work.path().join("rc")));
+    assert!(in_work.unwritable_startup_file(&home.join(".zshrc")));
+    assert!(in_work.unwritable_startup_file(&home.join(".bash_profile")));
+    assert!(!in_work.unwritable_startup_file(&work.path().join("notes.txt")));
+    assert!(!in_work.unwritable_startup_file(&home.join("notes.txt")));
+    let in_home = inputs(home);
+    assert!(!in_home.unwritable_startup_file(&home.join(".zshrc")));
+    assert!(!in_home.unwritable_startup_file(&home.join(".bash_profile")));
+}
+
+/// #620: the words a command writes to, and not the ones it only reads or
+/// runs.
+#[test]
+fn issue_620_write_targets() {
+    let targets = |script: &str| write_targets(&shell(script));
+    assert_eq!(targets("echo x >> ~/.zshrc"), vec!["~/.zshrc"]);
+    assert_eq!(targets("printf x>>~/.zshrc 2>&1"), vec!["~/.zshrc"]);
+    assert_eq!(
+        targets("cmd &> log; tee -a a b < in"),
+        vec!["log", "a", "b"]
+    );
+    assert_eq!(targets("cp -r src ~/.config/fish"), vec!["~/.config/fish"]);
+    assert_eq!(targets("sed -i 's/a/b/' f g"), vec!["f", "g"]);
+    assert_eq!(targets("dd if=x of=y"), vec!["y"]);
+    assert_eq!(targets("FOO=1 sudo touch t"), vec!["t"]);
+    for script in [
+        "cat ~/.zshrc",
+        "tee out < ~/.bashrc",
+        "cd .git/hooks && ln -s ~/.local/bin/pre-commit",
+        "~/.local/bin/tool --flag",
+        "git commit -m 'document ~/.zshrc'",
+        "echo hi 2>&1",
+    ] {
+        assert!(
+            targets(script)
+                .iter()
+                .all(|target| !target.contains(".zshrc")
+                    && !target.contains(".bashrc")
+                    && !target.contains("pre-commit")),
+            "{script}: {:?}",
+            targets(script)
+        );
+    }
+    // Not through a shell: one simple command.
+    assert_eq!(
+        write_targets(&["tee".to_string(), "-a".to_string(), "/u/.zshrc".to_string()]),
+        vec!["/u/.zshrc"]
     );
 }

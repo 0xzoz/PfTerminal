@@ -163,8 +163,9 @@ impl ReadPolicyInputs {
     }
 
     /// #620: whether `path` is one of the user's start-up files (`~/.zshrc`,
-    /// login items; [`USER_PERSISTENCE`]), as spelled or where a link to it
-    /// points, that the sandbox the command runs in cannot write at all:
+    /// login items; [`USER_PERSISTENCE`]), as spelled, through any link on
+    /// the way or where it finally points, that the sandbox the command runs
+    /// in cannot write where a write lands (the link's final target):
     /// outside its writable folders, so no grant could let it be written.
     fn unwritable_startup_file(&self, path: &Path) -> bool {
         let (Some(user_home), Ok(path)) = (
@@ -173,7 +174,8 @@ impl ReadPolicyInputs {
         ) else {
             return false;
         };
-        let real = ReadDenials::real_location(&path);
+        let mut spellings = link_chain(&path);
+        spellings.extend(ReadDenials::real_location(&path));
         let mut homes = vec![user_home.to_path_buf()];
         homes.extend(std::fs::canonicalize(user_home).ok());
         let is_startup = |path: &AbsolutePathBuf| {
@@ -183,17 +185,25 @@ impl ReadPolicyInputs {
                     .any(|entry| path.as_path().starts_with(home.join(entry)))
             })
         };
-        if !is_startup(&path) && !real.as_ref().is_some_and(is_startup) {
+        if !spellings.iter().any(is_startup) {
             return false;
         }
         // The profile as the orchestrator runs it: project roots are the
-        // workspace roots (or the current folder).
-        let roots = if self.workspace_roots.is_empty() {
+        // workspace roots (or the current folder), also by their real
+        // locations, as the sandbox resolves them.
+        let mut roots = if self.workspace_roots.is_empty() {
             vec![self.turn_cwd.clone()]
         } else {
             self.workspace_roots.clone()
         };
-        let target = real.unwrap_or(path);
+        let real_roots: Vec<AbsolutePathBuf> = roots
+            .iter()
+            .filter_map(|root| std::fs::canonicalize(root.as_path()).ok())
+            .filter_map(|root| AbsolutePathBuf::from_absolute_path(root).ok())
+            .collect();
+        roots.extend(real_roots);
+        // A write through a link lands where it finally points.
+        let target = ReadDenials::real_location(&path).unwrap_or(path);
         !self
             .profile
             .clone()
@@ -202,6 +212,26 @@ impl ReadPolicyInputs {
             .can_write_path_with_cwd(target.as_path(), self.turn_cwd.as_path())
     }
 }
+
+/// Links followed from a file: `path` and each name it is a link to, as far
+/// as [`MAX_LINK_HOPS`] (a link in a folder above a name is not followed).
+fn link_chain(path: &AbsolutePathBuf) -> Vec<AbsolutePathBuf> {
+    let mut chain = vec![path.clone()];
+    while chain.len() <= MAX_LINK_HOPS {
+        let last = chain[chain.len() - 1].clone();
+        let Some(parent) = last.as_path().parent() else {
+            break;
+        };
+        let Ok(target) = std::fs::read_link(last.as_path()) else {
+            break;
+        };
+        chain.push(AbsolutePathBuf::resolve_path_against_base(target, parent));
+    }
+    chain
+}
+
+/// Links [`link_chain`] follows.
+const MAX_LINK_HOPS: usize = 8;
 
 async fn off_thread<T: Send + 'static>(
     work: impl FnOnce() -> Option<T> + Send + 'static,
@@ -665,6 +695,9 @@ fn written_word(
     })
 }
 
+/// Shells whose arguments are scripts.
+const SHELLS: [&str; 6] = ["sh", "bash", "zsh", "dash", "ksh", "fish"];
+
 /// Programs whose path arguments (after the first, for `sed`'s script) are
 /// written, and those whose last argument is.
 const WRITES_EVERY_ARGUMENT: [&str; 5] = ["tee", "touch", "truncate", "rm", "chmod"];
@@ -677,24 +710,43 @@ const WRITES_LAST_ARGUMENT: [&str; 5] = ["cp", "mv", "ln", "install", "rsync"];
 /// Text-based and incomplete; it only decides whether a grant offer is
 /// withheld as useless, never what runs.
 fn write_targets(command: &[String]) -> Vec<String> {
+    // A shell's arguments are scripts, each split into words; any other
+    // command is one simple command already split.
+    let program = command
+        .first()
+        .map(|program| program.rsplit('/').next().unwrap_or(program));
+    let scripts: Vec<Vec<String>> = if program.is_some_and(|program| SHELLS.contains(&program)) {
+        command
+            .iter()
+            .map(|argument| {
+                shlex::split(argument)
+                    .unwrap_or_else(|| argument.split_whitespace().map(str::to_string).collect())
+            })
+            .collect()
+    } else {
+        vec![command.to_vec()]
+    };
     let mut targets = Vec::new();
-    for argument in command {
-        let words = shlex::split(argument)
-            .unwrap_or_else(|| argument.split_whitespace().map(str::to_string).collect());
+    for words in scripts {
         let mut segment: Vec<String> = Vec::new();
         let mut redirect_next = false;
+        let mut input_next = false;
         for word in words {
-            if redirect_next {
-                redirect_next = false;
-                targets.push(word.trim_end_matches([';', '&', '|', ')']).to_string());
-                continue;
-            }
             let ends_segment =
                 word.ends_with(';') || matches!(word.as_str(), "&&" | "||" | "|" | "&");
             let trimmed = word.trim_end_matches(';');
-            // `>`, `>>`, `2>`, `&>`, `>|`, alone or attached to its target
-            // or to the word before (`x>>~/.zshrc`); `2>&1` writes nothing.
-            if let Some(index) = trimmed.find('>').filter(|_| !trimmed.contains(">&")) {
+            if redirect_next {
+                redirect_next = false;
+                targets.push(trimmed.trim_end_matches(['&', '|', ')']).to_string());
+            } else if input_next {
+                // `< file` is read, not written.
+                input_next = false;
+            } else if trimmed.starts_with('<') {
+                // `<file`, `<<EOF`; a lone `<` takes the next word.
+                input_next = trimmed == "<" && !ends_segment;
+            } else if let Some(index) = trimmed.find('>').filter(|_| !trimmed.contains(">&")) {
+                // `>`, `>>`, `2>`, `&>`, `>|`, alone or attached to its target
+                // or to the word before (`x>>~/.zshrc`); `2>&1` writes nothing.
                 let before =
                     trimmed[..index].trim_end_matches(|c: char| c.is_ascii_digit() || c == '&');
                 if !before.is_empty() {
@@ -743,7 +795,9 @@ fn segment_targets(segment: &[String]) -> Vec<String> {
     };
     if WRITES_EVERY_ARGUMENT.contains(&program) {
         to_owned(paths().collect())
-    } else if WRITES_LAST_ARGUMENT.contains(&program) {
+    } else if WRITES_LAST_ARGUMENT.contains(&program) && paths().count() >= 2 {
+        // With one path, `ln -s x` and `install x` write in the current
+        // folder, not to it.
         to_owned(paths().next_back().into_iter().collect())
     } else if program == "sed" && words.iter().any(|word| word.starts_with("-i")) {
         // Every path after the script (or all of them with `-e`).
