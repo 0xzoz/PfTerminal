@@ -541,9 +541,7 @@ impl ReadDenials {
             // #603: `worktrees` itself in a spelling of the home (a link
             // swapped in before `real_folder` was checked, and a folder put
             // back after it, would otherwise name the link's target).
-            let names_worktrees = homes
-                .iter()
-                .any(|home| folder == home.join(HOME_WRITABLE));
+            let names_worktrees = homes.iter().any(|home| folder == home.join(HOME_WRITABLE));
             if real_folder
                 && names_worktrees
                 && inside_home(&folder)

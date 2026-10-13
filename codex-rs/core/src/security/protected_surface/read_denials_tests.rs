@@ -754,10 +754,8 @@ fn issue_603_a_worktrees_link_swapped_in_refuses_the_command_in_the_real_sandbox
     let fx = fixture();
     let (policy, cwd) = worktrees_carve_out_policy(&fx);
     swap_worktrees_for_a_link(&fx, ".");
-    let profile = PermissionProfile::from_runtime_permissions(
-        &policy,
-        NetworkSandboxPolicy::Restricted,
-    );
+    let profile =
+        PermissionProfile::from_runtime_permissions(&policy, NetworkSandboxPolicy::Restricted);
     let cwd_uri = PathUri::from_abs_path(&abs(&cwd));
     let script = format!(
         "printf x > '{}'; echo wrote=$?",
