@@ -13638,7 +13638,7 @@ fn turn_start_capacity_classifier_rejects_message_only_match() {
 }
 
 #[test]
-fn session_start_error_surfaces_archived_guidance_without_rollout_path() {
+fn session_start_failure_surfaces_archived_guidance_without_rollout_path() {
     let thread_id =
         ThreadId::from_string("019e72f4-e09a-70f2-b2c2-a153a57b8cc0").expect("thread id");
     let target_session = SessionTarget {
@@ -13692,13 +13692,23 @@ fn session_start_failure_turns_a_server_refusal_into_a_plain_message() {
     let refusal = "failed to load configuration: the thread's recorded account zai:work: named accounts need the `named_accounts` feature (`--enable named_accounts`); resume with `--account zai:default` to use the default credentials instead";
 
     for action in ["resume", "fork"] {
-        let err = color_eyre::eyre::eyre!(
-            "thread/{action} failed during TUI bootstrap: thread/{action} failed: {refusal} (code -32600)"
-        );
-        assert_fatal_exit(
-            session_start_failure(action, &target_session, err),
-            &format!("Could not {action} session {thread_id}: {refusal}"),
-        );
+        for suffix in ["", r#", data: {"reason":"cloudRequirements"}"#] {
+            let odd = "a message mentioning (code 7) itself";
+            let err = color_eyre::eyre::eyre!(
+                "thread/{action} failed during TUI bootstrap: thread/{action} failed: {odd} (code -32600){suffix}"
+            );
+            assert_fatal_exit(
+                session_start_failure(action, &target_session, err),
+                &format!("Could not {action} session {thread_id}: {odd}"),
+            );
+            let err = color_eyre::eyre::eyre!(
+                "thread/{action} failed during TUI bootstrap: thread/{action} failed: {refusal} (code -32600){suffix}"
+            );
+            assert_fatal_exit(
+                session_start_failure(action, &target_session, err),
+                &format!("Could not {action} session {thread_id}: {refusal}"),
+            );
+        }
     }
 }
 

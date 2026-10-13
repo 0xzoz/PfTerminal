@@ -1032,6 +1032,25 @@ fn active_turn_steer_race(error: &TypedRequestError) -> Option<ActiveTurnSteerRa
 /// A resume/fork the app server refused (archived thread, account rules, ...)
 /// ends the launch with a plain `ERROR:` line like other launch refusals (#656).
 /// Anything else (transport failure, bad response) stays an error report.
+/// [`session_start_failure`], and for a refusal the app server is shut down
+/// as on the other early exits.
+async fn end_session_start(
+    app_server: AppServerSession,
+    action: &str,
+    target_session: &SessionTarget,
+    err: color_eyre::eyre::Report,
+) -> Result<AppExitInfo> {
+    let result = session_start_failure(action, target_session, err);
+    if result.is_ok() {
+        app_server
+            .shutdown()
+            .await
+            .inspect_err(|err| tracing::warn!("app-server shutdown failed: {err}"))
+            .ok();
+    }
+    result
+}
+
 fn session_start_failure(
     action: &str,
     target_session: &SessionTarget,
@@ -1059,9 +1078,16 @@ fn session_start_refusal(action: &str, err: &color_eyre::eyre::Report) -> Option
     let err = err.to_string();
     let server_prefix = format!("thread/{action} failed: ");
     let message = &err[err.find(&server_prefix)? + server_prefix.len()..];
-    let (message, code) = message.rsplit_once(" (code ")?;
-    code.strip_suffix(')')?.parse::<i64>().ok()?;
-    let message = message.trim();
+    // `{message} (code {code})`, then `, data: {data}` when the error has data;
+    // either part may itself contain ` (code `.
+    let (end, _) = message.match_indices(" (code ").find(|(start, marker)| {
+        message[start + marker.len()..]
+            .split_once(')')
+            .is_some_and(|(code, rest)| {
+                code.parse::<i64>().is_ok() && (rest.is_empty() || rest.starts_with(", data: "))
+            })
+    })?;
+    let message = message[..end].trim();
     (!message.is_empty()).then(|| message.to_string())
 }
 
@@ -1418,7 +1444,9 @@ impl App {
                     .await
                 {
                     Ok(resumed) => resumed,
-                    Err(err) => return session_start_failure("resume", &target_session, err),
+                    Err(err) => {
+                        return end_session_start(app_server, "resume", &target_session, err).await;
+                    }
                 };
                 apply_persisted_resume_runtime(
                     &mut config,
@@ -1482,7 +1510,9 @@ impl App {
                     .await
                 {
                     Ok(forked) => forked,
-                    Err(err) => return session_start_failure("fork", &target_session, err),
+                    Err(err) => {
+                        return end_session_start(app_server, "fork", &target_session, err).await;
+                    }
                 };
                 let init = crate::chatwidget::ChatWidgetInit {
                     config: config.clone(),
