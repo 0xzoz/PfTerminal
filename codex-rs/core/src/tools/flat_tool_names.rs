@@ -1,10 +1,11 @@
 //! Flat, provider-valid names for namespaced tools on wires without namespaces.
 //!
 //! Chat Completions and Anthropic Messages accept only top-level function tools,
-//! while MCP tools are registered under a namespace (`mcp__server` + `tool`). On
-//! those wires each MCP tool is offered under one flat name, and a call to that
-//! name is mapped back to the namespaced [`ToolName`] before dispatch, so the
-//! same handler, approvals and security gates run as on the Responses wire.
+//! while MCP tools (`mcp__server` + `tool`) and other grouped tools (`clock` +
+//! `sleep`, ...) are registered under a namespace. On those wires each such tool
+//! is offered under one flat name, and a call to that name is mapped back to the
+//! namespaced [`ToolName`] before dispatch, so the same handler, approvals and
+//! security gates run as on the Responses wire.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
