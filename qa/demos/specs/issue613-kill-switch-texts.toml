@@ -120,3 +120,7 @@ wait = "Kill switch: on"
 wait = "is refused\\)"
 [[steps]]
 pause = 4.0
+[[steps]]
+key = "Escape"
+[[steps]]
+pause = 0.5
