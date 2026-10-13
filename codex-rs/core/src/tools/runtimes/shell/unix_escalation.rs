@@ -627,6 +627,18 @@ impl CoreShellActionProvider {
         tracing::debug!(
             "Determining escalation action for command {program:?} with args {argv:?} in {workdir:?}"
         );
+        // #623: under Aggressive, no program a script starts may create a
+        // link to the project's `.codex` or `.agents` (or Corbanu's files).
+        if let Some(refusal) = crate::security::protected_links::refusal(
+            &self.session,
+            &self.turn,
+            &join_program_and_argv(program, argv),
+            workdir.as_path(),
+        )
+        .await
+        {
+            return Ok(EscalationDecision::deny(Some(refusal)));
+        }
 
         let evaluation = {
             let policy = self.policy.read().await;
