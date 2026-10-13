@@ -69,9 +69,12 @@ struct ModelRouteFamily {
     serves: fn(&str) -> bool,
 }
 
-/// Only connections checked live end to end are listed. Other providers have
-/// Anthropic-style siblings (Baseten, OpenRouter, Vercel) that are still marked
-/// experimental; add a family here once one is checked.
+/// Only provider pairs checked live end to end are listed (Z.AI: GLM 5.3 Flash
+/// on both, #653). A family covers every model its providers already accept
+/// (`resolve_model_for_provider` keeps any `glm-*` on both Z.AI connections),
+/// not only the checked one. Baseten, OpenRouter and Vercel also have
+/// Anthropic-style siblings, still marked experimental; add a family here once
+/// one is checked.
 const MODEL_ROUTE_FAMILIES: [ModelRouteFamily; 1] = [ModelRouteFamily {
     routes: [
         ModelRoute {

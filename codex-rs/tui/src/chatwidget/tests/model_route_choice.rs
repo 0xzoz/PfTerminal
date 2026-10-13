@@ -287,3 +287,41 @@ async fn switch_to_claude_style_keeping_max(session_effort: Option<ReasoningEffo
         "{events:?}"
     );
 }
+
+/// A default model's connections stay together when the tab lifts it first,
+/// and every connection row has its own id.
+#[tokio::test]
+async fn a_default_models_connections_stay_together_with_distinct_ids() {
+    let (mut chat, _rx, _op_rx) = zai_session(ZAI_ANTHROPIC_PROVIDER_ID).await;
+    crate::model_catalog::ModelCatalog::sync_runtime_models(
+        &chat.model_catalog,
+        [ZAI_ANTHROPIC_PROVIDER_ID],
+        Some(FLASH),
+        ZAI_ANTHROPIC_PROVIDER_ID,
+    );
+    let mut presets = chat.model_catalog.try_list_models().expect("catalog");
+    for preset in &mut presets {
+        preset.is_default = preset.model == "glm-5.2";
+    }
+
+    let rows = chat.with_model_route_rows(presets.clone());
+    let zai_ids = rows
+        .iter()
+        .filter(|row| row.model.starts_with("glm-"))
+        .map(|row| row.id.clone())
+        .collect::<Vec<_>>();
+    let unique = zai_ids.iter().collect::<std::collections::HashSet<_>>();
+    assert_eq!(unique.len(), zai_ids.len(), "{zai_ids:?}");
+
+    chat.open_all_models_popup(presets);
+    let popup = render_bottom_popup_with_height(&chat, /*width*/ 110, /*height*/ 36);
+    let position = |label: &str| {
+        popup
+            .find(label)
+            .unwrap_or_else(|| panic!("{label}: {popup}"))
+    };
+    let openai = position("GLM 5.2 · Z.AI (OpenAI-style)");
+    let claude = position("GLM 5.2 · Z.AI (Claude-style)");
+    let flash = position(OPENAI_STYLE);
+    assert!(openai < claude && claude < flash, "{popup}");
+}

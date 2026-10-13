@@ -585,10 +585,19 @@ impl ChatWidget {
             return;
         }
 
+        // #653: a default model's other connections stay next to it.
+        let default_route_models = presets
+            .iter()
+            .filter(|preset| {
+                preset.is_default
+                    && !codex_model_provider_info::model_routes(&preset.model).is_empty()
+            })
+            .map(|preset| preset.model.clone())
+            .collect::<HashSet<_>>();
         let mut provider_items = MODEL_PICKER_PROVIDER_GROUPS
             .into_iter()
             .map(|group| (group, Vec::new()))
-            .collect::<Vec<(ModelPickerProviderGroup, Vec<SelectionItem>)>>();
+            .collect::<Vec<(ModelPickerProviderGroup, Vec<(bool, SelectionItem)>)>>();
         for preset in presets.into_iter() {
             let provider = preset
                 .provider_id
@@ -603,11 +612,16 @@ impl ChatWidget {
             else {
                 continue;
             };
-            items.push(self.model_picker_item(preset, purpose.clone()));
+            let leads = preset.is_default || default_route_models.contains(&preset.model);
+            items.push((leads, self.model_picker_item(preset, purpose.clone())));
         }
-        for (_, items) in &mut provider_items {
-            items.sort_by_key(|item| !item.is_default);
-        }
+        let mut provider_items = provider_items
+            .into_iter()
+            .map(|(group, mut items)| {
+                items.sort_by_key(|(leads, _)| !leads);
+                (group, items.into_iter().map(|(_, item)| item).collect())
+            })
+            .collect::<Vec<(ModelPickerProviderGroup, Vec<SelectionItem>)>>();
         provider_items.retain(|(_, items)| !items.is_empty());
 
         let (items, tabs, initial_tab_id, footer_hint) = if provider_items.len() > 1 {

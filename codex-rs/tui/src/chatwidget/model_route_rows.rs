@@ -48,8 +48,14 @@ impl ChatWidget {
             let show_accounts = self.route_accounts_differ(&routes);
             for (index, route) in routes.into_iter().enumerate() {
                 let mut row = preset.clone();
+                // Unique per connection, even when the first row was a runtime
+                // entry carrying another connection's id.
+                row.id = if index == 0 && preset.provider_id.is_none() {
+                    preset.id.clone()
+                } else {
+                    format!("{}:{}", route.provider_id, preset.model)
+                };
                 if index > 0 {
-                    row.id = format!("{}:{}", route.provider_id, preset.model);
                     row.is_default = false;
                     if let Some(note) = route.note {
                         row.description = note.to_string();
