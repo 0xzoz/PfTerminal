@@ -1328,7 +1328,7 @@ fn issue_651_a_missing_database_folder_is_denied_whole() {
     for path in ["notes.txt", "later.sqlite", "sub/x"]
         .map(|name| databases.join(name))
         .into_iter()
-        .chain([databases.clone()])
+        .chain([databases])
     {
         assert!(matcher.is_read_denied(&path), "{}", path.display());
         assert!(
