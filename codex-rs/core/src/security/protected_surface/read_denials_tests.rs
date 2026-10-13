@@ -457,10 +457,17 @@ fn issue_603_read_later_folders_are_created_only_for_a_command_in_the_home() {
         (project, PermissionProfile::Disabled),
         (home.clone(), PermissionProfile::read_only()),
     ] {
-        ReadDenials::for_turn(&fx.codex_home, &cwd, std::slice::from_ref(&cwd), &profile);
+        ReadDenials::for_turn(
+            &fx.codex_home,
+            &fx.codex_home,
+            &cwd,
+            std::slice::from_ref(&cwd),
+            &profile,
+        );
         assert!(!fx.codex_home.join("rules").exists(), "{cwd:?}");
     }
     ReadDenials::for_turn(
+        &fx.codex_home,
         &fx.codex_home,
         &home,
         std::slice::from_ref(&home),
@@ -569,12 +576,14 @@ fn issue_583_a_worktrees_link_opens_nothing() {
     let cwd = abs(&fx.user_home.join("project"));
     ReadDenials::for_turn(
         &fx.codex_home,
+        &fx.codex_home,
         &cwd,
         std::slice::from_ref(&cwd),
         &PermissionProfile::read_only(),
     );
     assert!(!fx.codex_home.join("worktrees").exists());
     ReadDenials::for_turn(
+        &fx.codex_home,
         &fx.codex_home,
         &cwd,
         std::slice::from_ref(&cwd),
@@ -745,6 +754,82 @@ fn issue_586_db_init_lock_denied_before_it_exists() {
     }
 }
 
+/// Issue #611: a database folder set apart from the Corbanu home is denied
+/// whole (all Corbanu keeps there). Where it holds the command's folder, the
+/// databases (reads also of one created later, writes of existing ones),
+/// the init lock, the GPU controller's lock, pending accounting records and
+/// backups are denied one by one, also before they exist; other files stay.
+/// Nothing is added when the folder is the home (by another spelling).
+#[test]
+fn issue_611_a_separate_database_folder_is_denied_like_the_home() {
+    let fx = fixture();
+    let databases = fx.user_home.join("db");
+    std::fs::create_dir_all(databases.join("accounting-pending")).unwrap();
+    std::fs::write(databases.join("state_5.sqlite"), "x").unwrap();
+    let profile = PermissionProfile::Disabled;
+    let denied = |cwd: &AbsolutePathBuf, name: &str| {
+        let denials = ReadDenials::for_turn(
+            &fx.codex_home,
+            &databases,
+            cwd,
+            std::slice::from_ref(cwd),
+            &profile,
+        );
+        let policy = denials
+            .apply(&profile)
+            .unwrap()
+            .file_system_sandbox_policy();
+        let path = databases.join(name);
+        let read = denials.matcher().unwrap().is_read_denied(&path);
+        let write = !policy.can_write_path_with_cwd(&path, cwd.as_path());
+        (read, write)
+    };
+    // Elsewhere: the whole folder.
+    let project = abs(&fx.user_home.join("project"));
+    for name in [
+        "state_5.sqlite",
+        "later.sqlite-wal",
+        "pfterminal_db_init.lock",
+        "gpu-controller.lock",
+        "accounting-pending/x.json",
+        "db-backups/state_5.sqlite",
+        "notes.txt",
+    ] {
+        assert_eq!(denied(&project, name), (true, true), "{name}");
+    }
+    // Working inside it: what Corbanu keeps there, one by one.
+    let inside = abs(&databases.join("work"));
+    std::fs::create_dir_all(inside.as_path()).unwrap();
+    for (name, expected) in [
+        ("state_5.sqlite", (true, true)),
+        ("pfterminal_db_init.lock", (true, true)),
+        ("gpu-controller.lock", (true, true)),
+        ("accounting-pending/x.json", (true, true)),
+        ("db-backups/x", (true, true)),
+        ("later.sqlite", (true, false)),
+        ("notes.txt", (false, false)),
+        ("work/file", (false, false)),
+    ] {
+        assert_eq!(denied(&inside, name), expected, "{name}");
+    }
+    // The database folder is the home (by another spelling): nothing added.
+    let same = ReadDenials::for_turn(
+        &fx.codex_home,
+        &fx.codex_home.join("."),
+        &project,
+        std::slice::from_ref(&project),
+        &profile,
+    );
+    let home = ReadDenials::for_turn(
+        &fx.codex_home,
+        &fx.codex_home,
+        &project,
+        std::slice::from_ref(&project),
+        &profile,
+    );
+    assert_eq!(same, home);
+}
+
 /// Issue #562: on Linux the missing runtime folders are created, empty,
 /// only where the profile could write the Corbanu home, so bubblewrap never
 /// needs a placeholder file where Corbanu expects a folder. `AGENTS.md` is
@@ -756,6 +841,7 @@ fn issue_562_missing_runtime_folders_are_created_only_where_writable() {
     let folders = ["plugins", "packages", ".tmp"];
     ReadDenials::for_turn(
         &fx.codex_home,
+        &fx.codex_home,
         &cwd,
         std::slice::from_ref(&cwd),
         &PermissionProfile::read_only(),
@@ -764,6 +850,7 @@ fn issue_562_missing_runtime_folders_are_created_only_where_writable() {
         assert!(!fx.codex_home.join(folder).exists(), "{folder}");
     }
     ReadDenials::for_turn(
+        &fx.codex_home,
         &fx.codex_home,
         &cwd,
         std::slice::from_ref(&cwd),

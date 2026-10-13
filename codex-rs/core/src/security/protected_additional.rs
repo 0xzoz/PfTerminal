@@ -369,6 +369,7 @@ pub(crate) fn protected_level(session: &crate::session::session::Session) -> Opt
 pub(crate) fn strip_grant(
     level: SecurityLevel,
     codex_home: &Path,
+    sqlite_home: &Path,
     configs: &[GrantCheckConfig],
     grant: AdditionalPermissionProfile,
 ) -> (Option<AdditionalPermissionProfile>, Option<String>) {
@@ -387,7 +388,8 @@ pub(crate) fn strip_grant(
         let profile = profile
             .clone()
             .materialize_project_roots_with_workspace_roots(workspace_roots);
-        let denials = ReadDenials::for_turn(codex_home, cwd, workspace_roots, &profile);
+        let denials =
+            ReadDenials::for_turn(codex_home, sqlite_home, cwd, workspace_roots, &profile);
         let protected = denials
             .apply(&profile)
             .map(|protected| protected.file_system_sandbox_policy());
@@ -429,18 +431,21 @@ pub(crate) struct GrantCheckConfig {
 pub(crate) async fn strip_grant_off_thread(
     level: SecurityLevel,
     codex_home: std::path::PathBuf,
+    sqlite_home: std::path::PathBuf,
     configs: Vec<GrantCheckConfig>,
     grant: AdditionalPermissionProfile,
 ) -> (Option<AdditionalPermissionProfile>, Option<String>) {
-    tokio::task::spawn_blocking(move || strip_grant(level, &codex_home, &configs, grant))
-        .await
-        .unwrap_or_else(|_| {
-            tracing::warn!(
-                target: "codex_core::security::tainted_action",
-                "the permission grant could not be checked; dropped"
-            );
-            (None, Some(unchecked_refusal(level)))
-        })
+    tokio::task::spawn_blocking(move || {
+        strip_grant(level, &codex_home, &sqlite_home, &configs, grant)
+    })
+    .await
+    .unwrap_or_else(|_| {
+        tracing::warn!(
+            target: "codex_core::security::tainted_action",
+            "the permission grant could not be checked; dropped"
+        );
+        (None, Some(unchecked_refusal(level)))
+    })
 }
 
 /// Issue #524: the refusal when the protected-path check itself failed.

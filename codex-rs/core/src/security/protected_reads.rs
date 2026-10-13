@@ -99,6 +99,8 @@ const MAX_SHOWN_PATH_CHARS: usize = 200;
 /// thread; building it reads folders, so that happens off it.
 struct ReadPolicyInputs {
     codex_home: PathBuf,
+    /// The database folder (#611).
+    sqlite_home: PathBuf,
     turn_cwd: AbsolutePathBuf,
     workspace_roots: Vec<AbsolutePathBuf>,
     profile: PermissionProfile,
@@ -140,6 +142,7 @@ impl ReadPolicyInputs {
             .unwrap_or_default();
         Some(Self {
             codex_home: turn.config.codex_home.to_path_buf(),
+            sqlite_home: turn.config.sqlite.home().to_path_buf(),
             turn_cwd,
             workspace_roots,
             profile: turn.config.permissions.permission_profile().clone(),
@@ -152,6 +155,7 @@ impl ReadPolicyInputs {
     fn matcher(&self, cwd: &Path) -> Option<ReadDenyMatcher> {
         let mut denials = ReadDenials::for_turn(
             &self.codex_home,
+            &self.sqlite_home,
             &self.turn_cwd,
             &self.workspace_roots,
             &self.profile,
@@ -567,6 +571,7 @@ pub(crate) async fn additional_permission_refusal(
     off_thread(move || {
         let denials = ReadDenials::for_turn(
             &inputs.codex_home,
+            &inputs.sqlite_home,
             &inputs.turn_cwd,
             &inputs.workspace_roots,
             &inputs.profile,
