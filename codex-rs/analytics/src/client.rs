@@ -60,10 +60,9 @@ const ANALYTICS_EVENTS_FLUSH_TIMEOUT: Duration = Duration::from_secs(25);
 const ANALYTICS_EVENT_DEDUPE_MAX_KEYS: usize = 4096;
 
 pub(crate) enum AnalyticsEventsQueueMessage {
-    Fact(Box<AnalyticsFact>),
-    /// #658: the sign-in the next facts were recorded under (resolved when
-    /// they were recorded, not when they are sent; `None`: none may be used).
-    SignIn(Option<Arc<AuthManager>>),
+    /// A fact and (#658) the sign-in it was recorded under, resolved when it
+    /// was recorded rather than when it is sent; `None`: none may be used.
+    Fact(Box<AnalyticsFact>, Option<Arc<AuthManager>>),
     Flush(oneshot::Sender<()>),
 }
 
@@ -139,17 +138,11 @@ fn analytics_capture_file_from_env() -> Option<PathBuf> {
 impl AnalyticsEventsQueue {
     fn new(auth_manager: Arc<AuthManager>, destination: AnalyticsEventsDestination) -> Self {
         let (sender, mut receiver) = mpsc::channel(ANALYTICS_EVENTS_QUEUE_SIZE);
-        let queue_auth_manager = Arc::clone(&auth_manager);
         tokio::spawn(async move {
             let mut reducer = AnalyticsReducer::default();
-            let mut recorded_sign_in = None;
             while let Some(input) = receiver.recv().await {
-                let input = match input {
-                    AnalyticsEventsQueueMessage::Fact(input) => *input,
-                    AnalyticsEventsQueueMessage::SignIn(sign_in) => {
-                        recorded_sign_in = Some(sign_in);
-                        continue;
-                    }
+                let (input, sign_in) = match input {
+                    AnalyticsEventsQueueMessage::Fact(input, sign_in) => (*input, sign_in),
                     AnalyticsEventsQueueMessage::Flush(done_tx) => {
                         let _ = done_tx.send(());
                         continue;
@@ -157,9 +150,6 @@ impl AnalyticsEventsQueue {
                 };
                 let mut events = Vec::new();
                 reducer.ingest(input, &mut events).await;
-                let sign_in = recorded_sign_in
-                    .clone()
-                    .unwrap_or_else(|| queue_auth_manager.for_session());
                 send_track_events_as(sign_in, &destination, events).await;
             }
         });
@@ -172,14 +162,13 @@ impl AnalyticsEventsQueue {
     }
 
     fn try_send(&self, input: AnalyticsFact) {
-        if let Some(auth_manager) = &self.auth_manager {
-            let _ = self.sender.try_send(AnalyticsEventsQueueMessage::SignIn(
-                auth_manager.for_session(),
-            ));
-        }
+        let sign_in = self
+            .auth_manager
+            .as_ref()
+            .and_then(AuthManager::for_session);
         if self
             .sender
-            .try_send(AnalyticsEventsQueueMessage::Fact(Box::new(input)))
+            .try_send(AnalyticsEventsQueueMessage::Fact(Box::new(input), sign_in))
             .is_err()
         {
             //TODO: add a metric for this

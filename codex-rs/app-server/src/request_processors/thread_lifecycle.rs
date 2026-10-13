@@ -284,24 +284,27 @@ pub(super) async fn ensure_listener_task_running(
         let mut thread_status_rx = unloading_state.thread_status_rx.clone();
         let thread = Arc::downgrade(&conversation);
         tokio::spawn(async move {
+            // When the thread stopped counting; the grace runs from then.
+            let mut not_counting_since: Option<Instant> = None;
             loop {
                 let attached = counts_as_attached(
                     *has_subscribers_rx.borrow_and_update(),
                     &thread_status_rx.borrow_and_update(),
                 );
-                let changed = if attached {
-                    None
+                if attached {
+                    not_counting_since = None;
                 } else {
-                    tokio::select! {
-                        () = tokio::time::sleep(DETACH_GRACE) => None,
+                    let since = *not_counting_since.get_or_insert_with(Instant::now);
+                    let changed = tokio::select! {
+                        () = tokio::time::sleep_until((since + DETACH_GRACE).into()) => None,
                         changed = has_subscribers_rx.changed() => Some(changed),
                         changed = thread_status_rx.changed() => Some(changed),
+                    };
+                    match changed {
+                        Some(Ok(())) => continue,
+                        Some(Err(_)) => return,
+                        None => {}
                     }
-                };
-                match changed {
-                    Some(Ok(())) => continue,
-                    Some(Err(_)) => return,
-                    None => {}
                 }
                 match thread.upgrade() {
                     Some(thread) => thread.set_client_attached(attached),

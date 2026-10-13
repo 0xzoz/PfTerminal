@@ -9,8 +9,8 @@ use crate::AppServerTarget;
 
 /// PF-84-S06: what a launch does with the default OpenAI login.
 pub(crate) struct DefaultLoginAtLaunch {
-    /// The app server the launch uses: a reused local daemon is replaced by
-    /// the embedded one when the daemon would use a ruled-out default login.
+    /// The app server the launch uses: a local daemon is replaced by the
+    /// embedded one when the launch leaves the default login in place (#658).
     pub(crate) app_server_target: AppServerTarget,
     /// The default login was left in place; the caller records it with
     /// `codex_login::leave_default_login_unenforced` before any auth manager
@@ -84,9 +84,9 @@ pub(crate) fn daemon_not_reused_warning(config: &Config) -> Option<String> {
 
 /// PF-84-S06 (#595): whether a connected local daemon leaves a ruled-out
 /// default login in place and refuses to use it, under the same login
-/// restrictions as this launch. Checked again on the session's own
-/// connection, since the daemon may have been restarted since the launch
-/// decided to reuse it.
+/// restrictions as this launch. A launch that leaves the login in place no
+/// longer targets a local daemon (#658); this stays as a guard for any
+/// connection made with that setting.
 pub(crate) fn daemon_matches_default_login_policy(
     client: &RemoteAppServerClient,
     config: &Config,
