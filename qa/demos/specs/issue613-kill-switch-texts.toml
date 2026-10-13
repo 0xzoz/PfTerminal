@@ -1,7 +1,7 @@
 # Issue #613 (#602 review): the kill switch texts name the panes whose tasks don't wait.
 id = "issue613-kill-switch-texts"
 feature = "#613: kill switch texts say which tasks don't wait"
-expected = "The kill-switch-on review and the stop message say that messages and tasks from other agents wait, that a Claude pane keeps only the newest task, and that a task for a pane opened in /panes is refused instead."
+expected = "The kill-switch-on review, the stop message and the /security picker say that tasks from other agents wait, that a Claude pane keeps only the newest task, and that a task for a Corbanu pane opened in /panes is refused; /orchestrate resume is refused while the switch is on."
 model = "glm-5.3-flash"
 provider = "zai"
 config = """
@@ -99,5 +99,24 @@ wait = "Turn stopped by the security kill switch"
 timeout = 30
 [[steps]]
 wait = "newest task"
+[[steps]]
+pause = 4.0
+[[steps]]
+type = "/orchestrate resume whip-1"
+[[steps]]
+key = "Enter"
+[[steps]]
+wait = "Not resumed: the security kill switch is on"
+timeout = 30
+[[steps]]
+pause = 3.0
+[[steps]]
+type = "/security"
+[[steps]]
+key = "Enter"
+[[steps]]
+wait = "Kill switch: on"
+[[steps]]
+wait = "is refused\\)"
 [[steps]]
 pause = 4.0

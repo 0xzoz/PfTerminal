@@ -901,7 +901,7 @@ impl App {
         else {
             return Err("Expected an assignment attach command.".to_string());
         };
-        self.attach_whip(
+        let attached = self.attach_whip(
             target,
             whip_name,
             mode,
@@ -910,7 +910,13 @@ impl App {
             cooldown_s,
             holder,
             CommandOrigin::User,
-        )
+        );
+        // #613: as for `/orchestrate attach`, paused at once while the kill
+        // switch is on.
+        if attached.is_ok() {
+            self.pause_whips_for_kill_switch();
+        }
+        attached
     }
 
     pub(crate) fn open_orchestrate_status_view(&mut self) {
@@ -2418,15 +2424,21 @@ impl App {
         }
         // #613: while the kill switch is on nothing is resumed or started
         // (it could fire right after switch-off), and a whip attached now is
-        // paused at once, like those armed when the switch went on.
-        if let OrchestrateCommand::Resume(id_or_target) | OrchestrateCommand::Start(id_or_target) =
-            &command
+        // paused at once, like those armed when the switch went on. The saved
+        // state decides (not the state this process last learned): a switch-off
+        // elsewhere allows it at once, and a switch-on is already saved.
+        let refused = match &command {
+            OrchestrateCommand::Resume(id) => Some(("resumed", "resume", id)),
+            OrchestrateCommand::Start(id) => Some(("started", "start", id)),
+            _ => None,
+        };
+        if let Some((done, verb, id_or_target)) = refused
             && crate::legacy_core::security_revocation::kill_switch_on(
                 self.config.codex_home.as_ref(),
             )
         {
             self.chat_widget.add_error_message(format!(
-                "Not resumed: the security kill switch is on. Turn it off in /security, then run /orchestrate resume {id_or_target}."
+                "Not {done}: the security kill switch is on. Turn it off in /security, then run /orchestrate {verb} {id_or_target}."
             ));
             return;
         }
