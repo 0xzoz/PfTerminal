@@ -67,6 +67,12 @@ impl ToolExecutor<ToolInvocation> for GetContextRemainingHandler {
         create_get_context_remaining_tool()
     }
 
+    // It only reads state, and may wait for the calling response's usage; it
+    // must not hold back other tools while it waits (#564).
+    fn supports_parallel_tool_calls(&self) -> bool {
+        true
+    }
+
     fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
         Box::pin(async move {
             if !matches!(invocation.payload, ToolPayload::Function { .. }) {

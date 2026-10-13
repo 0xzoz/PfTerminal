@@ -3935,6 +3935,9 @@ async fn try_run_sampling_request(
         }
     };
     drop(sampling_timing_guard);
+    // No more usage arrives for this response. Tools still running (and waiting
+    // for it) must not wait for the drain below, which waits for them.
+    drop(response_usage);
 
     flush_assistant_text_segments_all(
         &sess,

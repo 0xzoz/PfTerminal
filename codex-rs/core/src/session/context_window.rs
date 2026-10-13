@@ -16,21 +16,23 @@ pub(crate) struct ContextWindowTokenStatus {
     pub(crate) token_limit_reached: bool,
 }
 
-/// #564: marks a sampling response as streaming until its usage is recorded
-/// (`response.completed`) or the stream ends without it.
+/// #564: counts a sampling response as streaming until its usage is recorded
+/// (`response.completed`) or its stream ends without it.
 pub(crate) struct PendingResponseUsage<'a> {
-    pending: &'a tokio::sync::watch::Sender<bool>,
+    pending: &'a tokio::sync::watch::Sender<usize>,
 }
 
 impl Drop for PendingResponseUsage<'_> {
     fn drop(&mut self) {
-        self.pending.send_replace(false);
+        self.pending
+            .send_modify(|pending| *pending = pending.saturating_sub(1));
     }
 }
 
 impl Session {
     pub(crate) fn begin_response_usage(&self) -> PendingResponseUsage<'_> {
-        self.response_usage_pending.send_replace(true);
+        self.response_usage_pending
+            .send_modify(|pending| *pending += 1);
         PendingResponseUsage {
             pending: &self.response_usage_pending,
         }
@@ -43,7 +45,7 @@ impl Session {
     pub(crate) async fn wait_for_response_usage(&self) {
         let mut pending = self.response_usage_pending.subscribe();
         // The sender lives as long as the session.
-        let _ = pending.wait_for(|pending| !*pending).await;
+        let _ = pending.wait_for(|pending| *pending == 0).await;
     }
 }
 

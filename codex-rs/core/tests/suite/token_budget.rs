@@ -1010,6 +1010,67 @@ async fn get_context_remaining_counts_the_calling_responses_usage() -> Result<()
     Ok(())
 }
 
+/// #564: when a response's stream ends without `response.completed`, a
+/// `get_context_remaining` call waiting for its usage is released, so the
+/// turn retries instead of hanging.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_context_remaining_does_not_wait_for_a_response_that_never_completes() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let call_id = "remaining-call";
+    let (server, _) = start_streaming_sse_server(vec![
+        // Ends without `response.completed`.
+        vec![StreamingSseChunk {
+            gate: None,
+            body: sse(vec![
+                ev_response_created("resp-1"),
+                ev_function_call(call_id, "get_context_remaining", "{}"),
+            ]),
+        }],
+        vec![StreamingSseChunk {
+            gate: None,
+            body: sse(vec![
+                ev_response_created("resp-2"),
+                ev_assistant_message("msg-2", "done"),
+                ev_completed("resp-2"),
+            ]),
+        }],
+    ])
+    .await;
+    let mut builder = test_codex().with_config(|config| {
+        config.model_context_window = Some(10_000);
+        config.model_provider.request_max_retries = Some(0);
+        config.model_provider.stream_max_retries = Some(1);
+        config.model_provider.stream_idle_timeout_ms = Some(2_000);
+        config
+            .features
+            .enable(Feature::TokenBudget)
+            .expect("test config should allow token budget");
+    });
+    let test = builder.build_with_streaming_server(&server).await?;
+
+    test.codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "check remaining context".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: ThreadSettingsOverrides::default(),
+        })
+        .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    assert_eq!(server.requests().await.len(), 2, "the response is retried");
+    server.shutdown().await;
+
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn get_context_remaining_uses_body_after_prefix_window() -> Result<()> {
     skip_if_no_network!(Ok(()));
