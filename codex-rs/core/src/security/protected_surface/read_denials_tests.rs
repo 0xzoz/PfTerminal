@@ -1280,6 +1280,77 @@ fn issue_651_real_location_of_a_pattern_is_escaped() {
     );
 }
 
+/// Issue #651 item 7: a separate database folder missing at launch (state
+/// start-up failed) is denied whole, as when it exists, so a command can
+/// neither create it nor put anything in it. On Linux it is first made,
+/// private, with what Corbanu keeps there (bubblewrap would otherwise hold
+/// its path with a placeholder file on the host); elsewhere it stays missing
+/// and is denied before it exists. Not made where the command could not
+/// make it.
+#[test]
+fn issue_651_a_missing_database_folder_is_denied_whole() {
+    let fx = fixture();
+    let profile = PermissionProfile::Disabled;
+    let databases = fx.user_home.join("data/db");
+    let project = abs(&fx.user_home.join("project"));
+    let denials = ReadDenials::for_turn(
+        &fx.codex_home,
+        &databases,
+        &project,
+        std::slice::from_ref(&project),
+        &profile,
+    );
+    let folder = abs(&databases);
+    let linux = cfg!(target_os = "linux");
+    assert_eq!(databases.is_dir(), linux);
+    if linux {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&databases).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+        assert!(databases.join("accounting-pending").is_dir());
+        assert!(databases.join("gpu-controller.lock").is_file());
+        assert!(denials.existing.contains(&folder), "{denials:?}");
+    } else {
+        assert!(denials.fixed.contains(&folder), "{denials:?}");
+    }
+    // Whole: nothing is denied one by one in it.
+    assert!(
+        !denials
+            .paths()
+            .any(|path| path.as_path().starts_with(&databases) && *path != folder),
+        "{denials:?}"
+    );
+    let policy = denials
+        .apply(&profile)
+        .unwrap()
+        .file_system_sandbox_policy();
+    let matcher = denials.matcher().unwrap();
+    for path in ["notes.txt", "later.sqlite", "sub/x"]
+        .map(|name| databases.join(name))
+        .into_iter()
+        .chain([databases.clone()])
+    {
+        assert!(matcher.is_read_denied(&path), "{}", path.display());
+        assert!(
+            !policy.can_write_path_with_cwd(&path, project.as_path()),
+            "{}",
+            path.display()
+        );
+    }
+
+    // Where the command could not make it, it is not made.
+    let elsewhere = fx.user_home.join("other/db");
+    let denials = ReadDenials::for_turn(
+        &fx.codex_home,
+        &elsewhere,
+        &project,
+        std::slice::from_ref(&project),
+        &PermissionProfile::read_only(),
+    );
+    assert!(!fx.user_home.join("other").exists());
+    assert!(denials.fixed.contains(&abs(&elsewhere)), "{denials:?}");
+}
+
 /// Issue #562: on Linux the missing runtime folders are created, empty,
 /// only where the profile could write the Corbanu home, so bubblewrap never
 /// needs a placeholder file where Corbanu expects a folder. `AGENTS.md` is

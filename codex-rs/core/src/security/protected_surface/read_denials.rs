@@ -378,13 +378,16 @@ impl ReadDenials {
         // #611 (Linux): a separate database folder's missing entries, made
         // as Corbanu would where the command could make them, so bubblewrap
         // puts no placeholder file where Corbanu expects a folder or a lock.
+        // #651: the folder itself too, should it be missing (state start-up
+        // failed): it is then denied whole, as when it exists, instead of
+        // bubblewrap holding its path with a placeholder file on the host.
         if cfg!(target_os = "linux")
             && let Some(folder) = separate_database_folder(codex_home, sqlite_home)
             && profile
                 .file_system_sandbox_policy()
                 .can_write_path_with_cwd(folder.as_path(), turn_cwd.as_path())
         {
-            create_missing_database_folder_entries(folder.as_path());
+            create_missing_database_folder(folder.as_path());
         }
         // #583: the read-only home keeps `worktrees` writable only as a real
         // folder, so it is made (empty, as Corbanu would) where the command
@@ -426,6 +429,11 @@ impl ReadDenials {
     /// pattern (reads of those created later) and [`DATABASE_FOLDER_ENTRIES`]
     /// also before they exist (the init lock, #586). A command a person
     /// approved under Moderate (#540) drops them with the other stores.
+    ///
+    /// #651: a folder missing at launch is denied whole too, before it
+    /// exists, so a command cannot create it and fill it. On Linux `for_turn`
+    /// first makes it where the command could (bubblewrap would otherwise
+    /// hold the missing path with a placeholder file on the host).
     fn protect_database_folder(
         &mut self,
         codex_home: &Path,
@@ -440,8 +448,14 @@ impl ReadDenials {
             || real_folder.as_ref().is_some_and(|real| {
                 std::fs::canonicalize(codex_home).is_ok_and(|home| home.starts_with(real))
             });
-        if folder.as_path().is_dir() && !holds_home && !Self::holds_kept(&folder, keep) {
-            self.push_existing(folder, keep);
+        let missing = std::fs::symlink_metadata(folder.as_path()).is_err();
+        if (missing || folder.as_path().is_dir()) && !holds_home && !Self::holds_kept(&folder, keep)
+        {
+            if missing {
+                self.push_fixed(folder, keep);
+            } else {
+                self.push_existing(folder, keep);
+            }
             return;
         }
         if let Ok(entries) = std::fs::read_dir(folder.as_path()) {
@@ -1027,8 +1041,9 @@ fn separate_database_folder(codex_home: &Path, sqlite_home: &Path) -> Option<Abs
 
 /// #611 (Linux): creates a separate database folder's missing folders and
 /// GPU controller lock, empty and private, as Corbanu would. The init lock
-/// keeps #608's placeholder handling.
-fn create_missing_database_folder_entries(folder: &Path) {
+/// keeps #608's placeholder handling. #651: the folder itself (and the
+/// folders above it) too, where it is missing, as state start-up would.
+pub(crate) fn create_missing_database_folder(folder: &Path) {
     #[cfg(unix)]
     let builder = {
         let mut builder = std::fs::DirBuilder::new();
@@ -1037,6 +1052,14 @@ fn create_missing_database_folder_entries(folder: &Path) {
     };
     #[cfg(not(unix))]
     let builder = std::fs::DirBuilder::new();
+    if std::fs::symlink_metadata(folder).is_err() {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        // Fails harmlessly where it cannot be made; it is denied either way.
+        let _ = builder.create(folder);
+    }
     for name in ["accounting-pending", "db-backups"] {
         // Fails harmlessly where it exists (also as a link).
         let _ = builder.create(folder.join(name));
