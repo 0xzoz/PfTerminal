@@ -454,9 +454,9 @@ struct FileSystemSemanticSignature {
     unmovable_paths: Vec<AbsolutePathBuf>,
 }
 
-/// #652: the writable roots of a policy reached through a nested link
-/// (`~/ws -> /Volumes/x/ws`), each as written, normalized and at its real
-/// location, where Seatbelt and bubblewrap grant it.
+/// #652: the writable roots of a policy, each as written, normalized and at
+/// its real location, where Seatbelt and bubblewrap grant it (a root reached
+/// through a nested link, `~/ws -> /Volumes/x/ws`, at its target).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WritableRootLinks {
     roots: Vec<(AbsolutePathBuf, AbsolutePathBuf, PathBuf)>,
@@ -468,7 +468,8 @@ impl WritableRootLinks {
     }
 
     /// `path` spelled through each root that holds its real location while
-    /// `path` is not below the root as written or normalized. The sandboxes
+    /// `path` is not below the root as written or normalized (a root reached
+    /// through a nested link, or `path` reached through one). The sandboxes
     /// grant such a root at its real location, so `path` is writable
     /// through it, and a read-only entry for `path` must be spelled through
     /// the root for them to honor it.
@@ -1245,9 +1246,10 @@ impl FileSystemSandboxPolicy {
         normalized.can_write_path_with_cwd(normalize_effective_absolute_path(path).as_path(), cwd)
     }
 
-    /// #652: the writable roots reached through a nested link
-    /// (`~/ws -> /Volumes/x/ws`), with their real locations, where the
-    /// sandboxes grant them. Usually none; computed once for many paths.
+    /// #652: the writable roots with their normalized spellings and real
+    /// locations, where the sandboxes grant them (a root reached through a
+    /// nested link, `~/ws -> /Volumes/x/ws`, at its target), computed once
+    /// for many paths.
     pub fn writable_root_links_with_cwd(&self, cwd: &Path) -> WritableRootLinks {
         #[cfg(unix)]
         {
@@ -1257,10 +1259,10 @@ impl FileSystemSandboxPolicy {
             let roots = self
                 .get_writable_roots_with_cwd(cwd)
                 .into_iter()
-                .filter_map(|root| {
+                .map(|root| {
                     let real = real_location(root.root.as_path());
                     let normalized = normalize_effective_absolute_path(root.root.clone());
-                    (real != normalized.as_path()).then_some((root.root, normalized, real))
+                    (root.root, normalized, real)
                 })
                 .collect();
             WritableRootLinks { roots }
