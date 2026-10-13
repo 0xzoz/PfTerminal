@@ -527,8 +527,11 @@ impl LaunchContract {
         }
         // A writable root above CODEX_HOME (for example `$TMPDIR`) becomes
         // read-only there; this only narrows access. A workspace inside
-        // CODEX_HOME stays writable and is refused below.
-        if file_system.can_write_path_with_cwd(self.codex_home.as_path(), cwd) {
+        // CODEX_HOME stays writable and is refused below. #619: also a root
+        // spelled by an alias of its location (`/tmp` for `/private/tmp`).
+        if file_system.can_write_path_with_cwd(self.codex_home.as_path(), cwd)
+            || file_system.can_write_effective_path_with_cwd(self.codex_home.as_path(), cwd)
+        {
             file_system.entries.push(FileSystemSandboxEntry::new(
                 FileSystemPath::Path {
                     path: self.codex_home.clone(),
@@ -640,6 +643,9 @@ impl LaunchContract {
         if writable_inside_home
             || file_system.can_write_path_with_cwd(self.codex_home.as_path(), cwd)
             || file_system.can_write_path_with_cwd(&self.codex_home.join("config.toml"), cwd)
+            || file_system.can_write_effective_path_with_cwd(self.codex_home.as_path(), cwd)
+            || file_system
+                .can_write_effective_path_with_cwd(&self.codex_home.join("config.toml"), cwd)
         {
             return Err(LaunchDenied::PolicyStoreWritable);
         }
