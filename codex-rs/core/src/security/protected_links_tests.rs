@@ -246,25 +246,20 @@ fn issue_623_finds_links_behind_operators_continuations_and_more_tools() {
     assert!(!link_targets(&argv(&["python3", "-c", &quiet])).overflow);
 }
 
+/// Review r3: a long first string must not hide a link call (the bound
+/// refuses even when nothing was collected).
 #[test]
-fn issue_623_names_agent_settings_in_any_case_or_glob() {
-    for target in [
-        ".agents",
-        "sub/.agents",
-        "y/.agents/notes.md",
-        ".AGENTS",
-        ".Codex",
-        ".agen*",
-        ".a?ents",
-        ".[a]gents",
-        ".[!x]odex",
-        "..\\.agents",
-    ] {
-        assert!(names_agent_settings(target), "{target}");
-    }
-    for target in [".agents-old", "agents", "*", ".a", "notes.md", ".[!a]gents"] {
-        assert!(!names_agent_settings(target), "{target}");
-    }
+fn issue_623_overflow_without_candidates_still_counts() {
+    let code = format!(
+        "x='{}'; import os; os.symlink('.agents', 'ag')",
+        "a".repeat(5000)
+    );
+    let command = argv(&["python3", "-c", &code]);
+    let found = link_targets(&command);
+    assert!(found.overflow, "{found:?}");
+    assert!(may_link_command(&command));
+    assert!(!may_link_command(&shell("cat .agents/notes.md")));
+    assert!(!may_link_command(&shell("ls -la")));
 }
 
 #[test]
@@ -341,10 +336,16 @@ fn project() -> Project {
 }
 
 #[cfg(unix)]
+/// What [`refusal`] would name for `command`, without a session.
 fn refused(project: &Project, command: &[String], cwd: &Path) -> Option<String> {
-    project
-        .inputs
-        .protected_target(&link_targets(command).candidates, cwd)
+    if !may_link_command(command) {
+        return None;
+    }
+    project.inputs.settings_named(command, cwd).or_else(|| {
+        project
+            .inputs
+            .protected_target(&link_targets(command).candidates, cwd)
+    })
 }
 
 #[cfg(unix)]
@@ -359,16 +360,16 @@ fn issue_623_refuses_relative_and_absolute_links_into_agent_settings() {
     );
     assert_eq!(
         refused(&project, &shell(&absolute), root),
-        Some(format!("{}/.codex", root.display()))
+        Some(".codex".to_string())
     );
     // Relative to the link's folder, and from a folder below the project.
     assert_eq!(
         refused(&project, &shell("ln -s ../.agents sub/ag"), root),
-        Some("../.agents".to_string())
+        Some(".agents".to_string())
     );
     assert_eq!(
         refused(&project, &shell("ln -s ../.agents ag"), &root.join("sub")),
-        Some("../.agents".to_string())
+        Some(".agents".to_string())
     );
     assert_eq!(
         refused(
@@ -380,16 +381,16 @@ fn issue_623_refuses_relative_and_absolute_links_into_agent_settings() {
     );
     assert_eq!(
         refused(&project, &shell("cd sub && ln -s ../.agents x"), root),
-        Some("../.agents".to_string())
+        Some(".agents".to_string())
     );
     // `$PWD` is the shell's folder.
     assert_eq!(
         refused(&project, &shell("ln -s \"$PWD/.agents\" ag"), root),
-        Some("$PWD/.agents".to_string())
+        Some(".agents".to_string())
     );
     assert_eq!(
         refused(&project, &shell("ln -s \"$(pwd)/.codex\" ag"), root),
-        Some("$(pwd)/.codex".to_string())
+        Some(".codex".to_string())
     );
     // From `sub`, `evil/../.agents` reads as `sub/.agents`, but `evil`
     // links to `inner`, so the system reads the project's `.agents`.
@@ -401,23 +402,62 @@ fn issue_623_refuses_relative_and_absolute_links_into_agent_settings() {
             &shell("ln -s evil/../.agents x"),
             &root.join("sub")
         ),
-        Some("evil/../.agents".to_string())
+        Some(".agents".to_string())
     );
     // Two steps: a link whose text names `.agents` anywhere is refused.
     assert_eq!(
         refused(&project, &shell("ln -s y/.agents x"), root),
-        Some("y/.agents".to_string())
+        Some(".agents".to_string())
     );
     assert_eq!(
         refused(&project, &shell("ln -s .agen* ag"), root),
         Some(".agen*".to_string())
     );
+    // Review r3: substitutions, variables, `eval`, pipes into a shell and
+    // braces name `.agents` too, and are refused.
+    for script in [
+        "echo $(ln -s .agents ag)",
+        "true \"$(ln -s .agents ag)\"",
+        "ls `ln -s .agents ag`",
+        "cat <(ln -s .agents ag)",
+        "eval 'ln -s .agents ag'",
+        "echo 'ln -s .agents ag' | sh",
+        "sh <<< 'ln -s .agents ag'",
+        "ln -s \"$(realpath .agents)\" ag",
+        "ln -s \"${X:-.agents}\" ag",
+        "A=.agents; ln -s \"$A\" ag",
+        "mkdir d; ln -s ../.agent{s,} d",
+    ] {
+        assert!(
+            project
+                .inputs
+                .settings_named(&shell(script), root)
+                .is_some(),
+            "{script}"
+        );
+    }
+    // A project kept below a folder named `.codex` is not one.
+    let inside = format!("ln -s {}/notes.txt n", root.display());
+    assert_eq!(project.inputs.settings_named(&shell(&inside), root), None);
     // Folders a script changes to are expanded like targets.
     let home = format!(
         "cd {} && ln -s rules r",
         project.inputs.codex_home.display()
     );
     assert!(refused(&project, &shell(&home), root).is_some());
+    // A target that leads there through an existing link (the text names
+    // no protected folder): resolved as the system reads it.
+    std::os::unix::fs::symlink(root.join(".agents"), root.join("al")).expect("al");
+    assert_eq!(
+        refused(&project, &shell("ln -s al x"), root),
+        Some("al".to_string())
+    );
+    std::fs::create_dir_all(root.join("inner2")).expect("inner2");
+    std::os::unix::fs::symlink(root.join("inner2"), root.join("sub/up")).expect("up");
+    assert_eq!(
+        refused(&project, &shell("ln -s up/../al x"), &root.join("sub")),
+        Some("up/../al".to_string())
+    );
     // A link to the Corbanu home is refused too.
     let home = format!("ln -s {} h", project.inputs.codex_home.display());
     assert!(refused(&project, &shell(&home), root).is_some());

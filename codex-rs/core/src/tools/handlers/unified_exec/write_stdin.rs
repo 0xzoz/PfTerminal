@@ -143,14 +143,17 @@ async fn typed_link_check(
     args: &WriteStdinArgs,
 ) -> Result<(), FunctionCallError> {
     use crate::security::protected_links;
+    if !protected_links::applies(session) {
+        return Ok(());
+    }
     // A shell's command line, or code typed into an interpreter.
     let typed = [
         vec!["sh".to_string(), "-c".to_string(), args.chars.clone()],
         vec!["python3".to_string(), "-c".to_string(), args.chars.clone()],
     ];
-    if typed
+    if !typed
         .iter()
-        .all(|command| protected_links::link_targets(command).candidates.is_empty())
+        .any(|command| protected_links::may_link_command(command))
     {
         return Ok(());
     }

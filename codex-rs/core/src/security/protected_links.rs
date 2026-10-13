@@ -14,17 +14,22 @@
 //! own arguments (so a script file's `ln` is seen there too).
 //!
 //! Keys typed into a running shell (`write_stdin`) are read the same way, one
-//! write at a time. Any target whose text names a `.codex` or `.agents`
-//! folder (also through a glob such as `.agen*`), anywhere, is refused too,
-//! so a link cannot be made in two steps (`ln -s y/.agents x`, then `ln -s .
-//! y`).
+//! write at a time. A command that may create a link (an `ln`, `gln` or
+//! `mklink` word anywhere, a link call in code, a PowerShell link item) and
+//! names a `.codex` or `.agents` folder anywhere in its text, outside the
+//! paths of its own folder and the workspace roots, is refused too: through
+//! a variable, `$(…)`, backticks, `eval` or a pipe into a shell, by a glob
+//! (`.agen*`), a brace (`.agent{s,}`) or another letter case. So a link
+//! cannot be made in two steps (`ln -s y/.agents x`, then `ln -s . y`).
 //!
 //! Out of reach: a target built at run time (`ln -s "$(cat f)" x`); a link
 //! made by a script file without zsh-fork, or typed across several writes;
 //! links copied, moved or unpacked (`cp -a`, `mv`, `rsync -l`, `tar`, `git
 //! checkout`); tools not listed (`awk system()`, `Rscript`, PowerShell
-//! `-EncodedCommand`); remote environments. Text that only looks like a
-//! command (a heredoc's documentation, `find -name ln`) may be refused.
+//! `-EncodedCommand`); remote environments. Over-refusal is accepted: text
+//! that only looks like a link command (a heredoc's documentation, `find
+//! -name ln`, `grep "ln -s" .agents`), and, in code that calls a link
+//! function, every quoted string is taken as a target.
 //! Writes through such a link stay refused by the sandbox; a hard link to a
 //! protected file is refused by the sandbox itself.
 
@@ -39,22 +44,26 @@ use super::protected_surface::ReadDenials;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 
+#[path = "protected_links_names.rs"]
+mod names;
 #[path = "protected_links_parse.rs"]
 mod parse;
+
+use names::settings_name_in;
 
 use parse::Candidate;
 #[cfg(test)]
 use parse::calls_link;
-pub(crate) use parse::link_targets;
+use parse::link_targets;
 
 /// What a person is told when such a command is refused.
 pub(crate) fn explanation(target: &str) -> String {
     format!(
-        "Security level Aggressive refused this command before it ran: it creates a link to \
-         `{}`, and the project's .codex and .agents folders (agent settings) and Corbanu's own \
-         files are always read-only under Aggressive, so no link to them is created either \
-         (nothing was created). This cannot be granted, not even once. To allow it, a person can \
-         switch to Permissive in /security (it applies after a restart).",
+        "Security level Aggressive refused this command before it ran: it creates a link, and \
+         `{}` is or may lead to the project's .codex or .agents folders (agent settings) or \
+         Corbanu's own files, which are always read-only under Aggressive, so no link to them is \
+         created either (nothing was created). This cannot be granted, not even once. To allow \
+         it, a person can switch to Permissive in /security (it applies after a restart).",
         shown_path(target)
     )
 }
@@ -70,23 +79,37 @@ pub(crate) async fn refusal(
 ) -> Option<String> {
     let inputs = Inputs::capture(session, turn)?;
     let found = link_targets(command);
-    let first = found.candidates.first()?.target.clone();
-    let found = if found.overflow {
-        // Too many paths to look at: refused, naming the first.
-        first
-    } else {
-        let (candidates, cwd) = (found.candidates, cwd.to_path_buf());
-        match tokio::time::timeout(
-            LOOKUP_TIMEOUT,
-            tokio::task::spawn_blocking(move || inputs.protected_target(&candidates, &cwd)),
-        )
-        .await
-        {
-            Ok(Ok(found)) => found?,
-            // The lookups did not finish: refused (nothing is created),
-            // naming the first link target.
-            Ok(Err(_)) | Err(_) => first,
-        }
+    if !may_link(&found, command) {
+        return None;
+    }
+    let first = found
+        .candidates
+        .first()
+        .map(|candidate| candidate.target.clone())
+        .unwrap_or_else(|| "a path it names".to_string());
+    let (command, cwd, fallback) = (command.to_vec(), cwd.to_path_buf(), first.clone());
+    let looked = tokio::time::timeout(
+        LOOKUP_TIMEOUT,
+        tokio::task::spawn_blocking(move || {
+            // It makes a link and names `.codex` or `.agents` anywhere
+            // (through a variable, `$(…)`, `eval` or a pipe into a shell
+            // too).
+            if let Some(named) = inputs.settings_named(&command, &cwd) {
+                return Some(named);
+            }
+            // Too many paths to look at: refused, naming the first.
+            if found.overflow {
+                return Some(fallback);
+            }
+            inputs.protected_target(&found.candidates, &cwd)
+        }),
+    )
+    .await;
+    let found = match looked {
+        Ok(Ok(found)) => found?,
+        // The lookups did not finish: refused (nothing is created), naming
+        // the first link target.
+        Ok(Err(_)) | Err(_) => first,
     };
     let refusal = explanation(&found);
     super::protected_reads::notify(session, turn, refusal.clone()).await;
@@ -96,6 +119,25 @@ pub(crate) async fn refusal(
         "refused before it ran; never granted under Aggressive",
     );
     Some(refusal)
+}
+
+/// Whether `command` may create a link (see [`refusal`]); cheap, no lookups.
+pub(crate) fn may_link_command(command: &[String]) -> bool {
+    may_link(&link_targets(command), command)
+}
+
+fn may_link(found: &parse::Found, command: &[String]) -> bool {
+    !found.candidates.is_empty() || found.overflow || parse::makes_links(command)
+}
+
+/// Whether the #623 check applies to this session (Aggressive), before any
+/// text is read.
+pub(crate) fn applies(session: &Session) -> bool {
+    session
+        .services
+        .model_client()
+        .post_taint_state()
+        .is_some_and(|state| state.level == codex_security_policy::SecurityLevel::Aggressive)
 }
 
 /// How long the path lookups may take before the command is refused anyway.
@@ -161,14 +203,42 @@ impl Inputs {
         kept.extend(real);
         let writable: Vec<&AbsolutePathBuf> = denials.home_writable_paths().collect();
         candidates.iter().find_map(|candidate| {
-            (names_agent_settings(&candidate.target)
-                || self
-                    .bases(candidate, cwd)
-                    .iter()
-                    .flat_map(|base| self.resolve(&candidate.target, base))
-                    .any(|path| lands_in(&path, &kept, &writable)))
-            .then(|| candidate.target.clone())
+            self.bases(candidate, cwd)
+                .iter()
+                .flat_map(|base| self.resolve(&candidate.target, base))
+                .any(|path| lands_in(&path, &kept, &writable))
+                .then(|| candidate.target.clone())
         })
+    }
+
+    /// The agent settings name `command` spells anywhere, with the command's
+    /// folder, the turn's and the workspace roots (each by its real location
+    /// too) left out: a project kept below a folder named `.codex` is not
+    /// one.
+    fn settings_named(&self, command: &[String], cwd: &Path) -> Option<String> {
+        let mut text = command.join(" ");
+        let mut roots: Vec<PathBuf> = std::iter::once(cwd.to_path_buf())
+            .chain(std::iter::once(self.turn_cwd.to_path_buf()))
+            .chain(
+                self.workspace_roots
+                    .iter()
+                    .map(AbsolutePathBuf::to_path_buf),
+            )
+            .collect();
+        let real: Vec<PathBuf> = roots
+            .iter()
+            .filter_map(|root| std::fs::canonicalize(root).ok())
+            .collect();
+        roots.extend(real);
+        // Longest first, so a root inside another is removed whole.
+        roots.sort_by_key(|root| std::cmp::Reverse(root.as_os_str().len()));
+        for root in roots {
+            let root = root.to_string_lossy();
+            if root.len() > 1 {
+                text = text.replace(root.as_ref(), ".");
+            }
+        }
+        settings_name_in(&text)
     }
 
     /// The folders a candidate's relative target may be read from: the
@@ -234,65 +304,6 @@ impl Inputs {
         (!expanded.is_empty() && !expanded.contains('$') && !expanded.starts_with('~'))
             .then_some(expanded)
     }
-}
-
-/// The agent settings folder names (any letter case: macOS and Windows
-/// disks ignore it).
-const AGENT_SETTINGS: [&str; 2] = [".codex", ".agents"];
-
-/// Whether `target`, as written, names a `.codex` or `.agents` folder (or
-/// one a glob in it could match) anywhere on its way.
-fn names_agent_settings(target: &str) -> bool {
-    target.split(['/', '\\']).any(|name| {
-        AGENT_SETTINGS.iter().any(|settings| {
-            name.eq_ignore_ascii_case(settings)
-                || (name.contains(['*', '?', '[']) && glob_matches(name, settings))
-        })
-    })
-}
-
-/// Whether the shell glob `pattern` (`*`, `?`, `[…]`) matches `name`, any
-/// letter case. As in a shell, a leading `.` must be written.
-fn glob_matches(pattern: &str, name: &str) -> bool {
-    fn matches(pattern: &[char], name: &[char]) -> bool {
-        match pattern.split_first() {
-            None => name.is_empty(),
-            Some(('*', rest)) => (0..=name.len()).any(|skip| matches(rest, &name[skip..])),
-            Some(('?', rest)) => !name.is_empty() && matches(rest, &name[1..]),
-            Some(('[', rest)) => {
-                let Some(close) = rest.iter().skip(1).position(|c| *c == ']').map(|i| i + 1) else {
-                    return name.first() == Some(&'[') && matches(rest, &name[1..]);
-                };
-                let (set, after) = (&rest[..close], &rest[close + 1..]);
-                let (negated, set) = match set.split_first() {
-                    Some(('!' | '^', set)) => (true, set),
-                    _ => (false, set),
-                };
-                let Some(first) = name.first() else {
-                    return false;
-                };
-                let mut found = false;
-                let mut index = 0;
-                while index < set.len() {
-                    if index + 2 < set.len() && set[index + 1] == '-' {
-                        found |= (set[index]..=set[index + 2]).contains(first);
-                        index += 3;
-                    } else {
-                        found |= set[index] == *first;
-                        index += 1;
-                    }
-                }
-                found != negated && matches(after, &name[1..])
-            }
-            Some((c, rest)) => name.first() == Some(c) && matches(rest, &name[1..]),
-        }
-    }
-    let pattern: Vec<char> = pattern.to_ascii_lowercase().chars().collect();
-    let name: Vec<char> = name.to_ascii_lowercase().chars().collect();
-    if name.first() == Some(&'.') && pattern.first() != Some(&'.') {
-        return false;
-    }
-    matches(&pattern, &name)
 }
 
 /// `path` from `base`, each existing name followed to where it links before

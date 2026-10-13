@@ -34,7 +34,7 @@ use serde_json::json;
 use tempfile::TempDir;
 
 const REFUSED: &str =
-    "Security level Aggressive refused this command before it ran: it creates a link to";
+    "Security level Aggressive refused this command before it ran: it creates a link";
 
 /// What one command did.
 struct Run {

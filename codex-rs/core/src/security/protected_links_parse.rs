@@ -109,6 +109,43 @@ pub(crate) fn link_targets(command: &[String]) -> Found {
     }
 }
 
+/// Whether `command`'s text, read loosely, may create a link: a word `ln`,
+/// `gln` or `mklink` anywhere (also inside `$(…)`, quotes, `eval` or a pipe
+/// into a shell), a link call in code, or a PowerShell link item type. With
+/// a `.codex`/`.agents` name anywhere in it the command is refused (see
+/// `protected_links`), so a variable or substitution refuses more, not less.
+pub(crate) fn makes_links(command: &[String]) -> bool {
+    let text = command.join(" ");
+    let lower = text.to_ascii_lowercase();
+    calls_link(&text)
+        || ["symboliclink", "hardlink", "junction"]
+            .iter()
+            .any(|kind| lower.contains(kind))
+        || text
+            .split(|c: char| {
+                c.is_whitespace()
+                    || matches!(
+                        c,
+                        '/' | '\\'
+                            | '$'
+                            | '('
+                            | ')'
+                            | '{'
+                            | '}'
+                            | '"'
+                            | '\''
+                            | '`'
+                            | ';'
+                            | '&'
+                            | '|'
+                            | '<'
+                            | '>'
+                            | '='
+                    )
+            })
+            .any(|word| matches!(program_name(word).as_str(), "ln" | "gln" | "mklink"))
+}
+
 /// What [`link_targets`] found.
 #[derive(Debug, Default)]
 pub(crate) struct Found {

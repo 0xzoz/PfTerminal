@@ -1,0 +1,205 @@
+//! #623: the agent settings folder names (`.codex`, `.agents`) as a command
+//! may spell them: any letter case (macOS and Windows disks ignore it), a
+//! glob (`.agen*`) or brace (`.agent{s,}`) that could make one.
+
+/// The agent settings folder names.
+const AGENT_SETTINGS: [&str; 2] = [".codex", ".agents"];
+/// Spellings of one word looked at (brace alternatives).
+const MAX_VARIANTS: usize = 64;
+/// Characters that end a name in command text: whitespace, path separators
+/// and shell syntax (`$(…)`, quotes, `=`, `:`, `,`, redirections).
+const NAME_DELIMITERS: [char; 22] = [
+    '/', '\\', '$', '(', ')', '{', '}', '"', '\'', '`', ',', ':', ';', '=', '<', '>', '|', '&',
+    ' ', '\t', '\n', '\r',
+];
+
+/// Whether `name` is an agent settings folder name, or a glob that could
+/// match one.
+fn is_settings_name(name: &str) -> bool {
+    // `${X:-.agents}`: the default after `-`.
+    let name = name.trim_start_matches('-');
+    AGENT_SETTINGS.iter().any(|settings| {
+        name.eq_ignore_ascii_case(settings)
+            || (name.contains(['*', '?', '[']) && glob_matches(name, settings))
+    })
+}
+
+/// The first agent settings name in `text` (a command's words), read with
+/// every shell delimiter splitting names (`"$(realpath .agents)"`,
+/// `A=.agents`, `$'.agents'`) and brace alternatives expanded.
+pub(super) fn settings_name_in(text: &str) -> Option<String> {
+    text.split_whitespace()
+        .flat_map(brace_variants)
+        .flat_map(|variant| {
+            variant
+                .split(NAME_DELIMITERS)
+                .filter(|name| is_settings_name(name))
+                .map(|name| name.trim_start_matches('-').to_string())
+                .collect::<Vec<_>>()
+        })
+        .next()
+}
+
+/// `word` with its `{a,b}` groups expanded (the shell's brace expansion),
+/// bounded; a word without one is itself.
+fn brace_variants(word: &str) -> Vec<String> {
+    let mut variants = vec![word.to_string()];
+    let mut done = Vec::new();
+    while let Some(variant) = variants.pop() {
+        let group = variant.find('{').and_then(|open| {
+            variant[open..]
+                .find('}')
+                .map(|close| (open, open + close))
+                .filter(|(open, close)| variant[*open..*close].contains(','))
+        });
+        match group {
+            Some((open, close)) if done.len() + variants.len() < MAX_VARIANTS => {
+                for alternative in variant[open + 1..close].split(',') {
+                    variants.push(format!(
+                        "{}{alternative}{}",
+                        &variant[..open],
+                        &variant[close + 1..]
+                    ));
+                }
+            }
+            _ => done.push(variant),
+        }
+    }
+    done
+}
+
+/// Whether the shell glob `pattern` (`*`, `?`, `[…]`, `[!…]`) matches
+/// `name`, any letter case; as in a shell, a leading `.` must be written.
+/// Linear in the pattern's length (a table over the short name).
+pub(super) fn glob_matches(pattern: &str, name: &str) -> bool {
+    enum Token {
+        Star,
+        Any,
+        Set { negated: bool, chars: Vec<char> },
+        Char(char),
+    }
+    let pattern: Vec<char> = pattern.to_ascii_lowercase().chars().collect();
+    let name: Vec<char> = name.to_ascii_lowercase().chars().collect();
+    if name.first() == Some(&'.') && pattern.first() != Some(&'.') {
+        return false;
+    }
+    let mut tokens = Vec::new();
+    let mut index = 0;
+    while index < pattern.len() {
+        match pattern[index] {
+            '*' => {
+                if !matches!(tokens.last(), Some(Token::Star)) {
+                    tokens.push(Token::Star);
+                }
+                index += 1;
+            }
+            '?' => {
+                tokens.push(Token::Any);
+                index += 1;
+            }
+            '[' => match pattern[index + 1..]
+                .iter()
+                .skip(1)
+                .position(|c| *c == ']')
+                .map(|close| index + 2 + close)
+            {
+                Some(close) => {
+                    let mut set = &pattern[index + 1..close];
+                    let negated = matches!(set.first(), Some('!' | '^'));
+                    if negated {
+                        set = &set[1..];
+                    }
+                    let mut chars = Vec::new();
+                    let mut at = 0;
+                    while at < set.len() {
+                        if at + 2 < set.len() && set[at + 1] == '-' {
+                            chars.extend(set[at]..=set[at + 2]);
+                            at += 3;
+                        } else {
+                            chars.push(set[at]);
+                            at += 1;
+                        }
+                    }
+                    tokens.push(Token::Set { negated, chars });
+                    index = close + 1;
+                }
+                None => {
+                    tokens.push(Token::Char('['));
+                    index += 1;
+                }
+            },
+            c => {
+                tokens.push(Token::Char(c));
+                index += 1;
+            }
+        }
+    }
+    // `row[j]`: the tokens so far match the first `j` characters of `name`.
+    let mut row = vec![false; name.len() + 1];
+    row[0] = true;
+    for token in &tokens {
+        let mut next = vec![false; name.len() + 1];
+        for j in 0..=name.len() {
+            next[j] = match token {
+                Token::Star => row[j] || (j > 0 && next[j - 1]),
+                _ if j == 0 => false,
+                Token::Any => row[j - 1],
+                Token::Set { negated, chars } => {
+                    row[j - 1] && (chars.contains(&name[j - 1]) != *negated)
+                }
+                Token::Char(c) => row[j - 1] && name[j - 1] == *c,
+            };
+        }
+        row = next;
+    }
+    row[name.len()]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn issue_623_globs_braces_and_shell_syntax_name_agent_settings() {
+        for target in [
+            ".agents",
+            "sub/.agents",
+            ".AGENTS",
+            ".agen*",
+            ".a?ents",
+            ".[a]gents",
+            ".[!x]odex",
+            ".[a-c]odex",
+            "..\\.agents",
+            "../.agent{s,}",
+            ".{agents,x}",
+        ] {
+            assert!(settings_name_in(target).is_some(), "{target}");
+        }
+        for target in [".agents-old", "agents", "*", ".a", ".[!a]gents", "{a,b}"] {
+            assert_eq!(settings_name_in(target), None, "{target}");
+        }
+        for text in [
+            "ln -s \"$(realpath .agents)\" ag",
+            "ln -s \"${X:-.agents}\" ag",
+            "ln -s $.agents ag",
+            "A=.agents; ln -s \"$A\" ag",
+            "echo $(ln -s .agents ag)",
+        ] {
+            assert_eq!(settings_name_in(text).as_deref(), Some(".agents"), "{text}");
+        }
+        assert_eq!(settings_name_in("ln -s src/notes.py n"), None);
+        assert_eq!(settings_name_in("ln -s .agents-old x"), None);
+    }
+
+    #[test]
+    fn issue_623_glob_matching_is_linear() {
+        let stars = format!(".{}", "*".repeat(100_000));
+        let started = std::time::Instant::now();
+        assert!(glob_matches(&stars, ".agents"));
+        let many = format!(".{}x", "*a".repeat(50_000));
+        assert!(!glob_matches(&many, ".agents"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+}

@@ -11,19 +11,33 @@ decisions (Travis, 2026-10-13) are on the issues.
 ## Why #623 is a pre-run check
 
 No OS sandbox can refuse a symbolic link by where it points: Seatbelt filters only by the link's name or type, and
-Landlock and seccomp cannot read the target. The check is in core, so it is the same on macOS, Linux and Windows. It
-reads `ln`/`gln` (`-s` or hard), `cp -s`/`-l`, `mklink`, PowerShell `New-Item … SymbolicLink|Junction|HardLink` and
-`CreateSymbolicLink`, behind shell keywords, operators, wrappers (`sudo`, `env`, `timeout`, `find -exec`, …), in `sh -c`
-scripts, heredocs and interpreter code (`os.symlink`, `symlink_to`, `fs.symlinkSync`, `FileUtils.ln_s`, `os.system('ln
-…')`). It also covers each program a zsh-fork script starts, and text typed into a running shell or interpreter
-(`write_stdin`), one write at a time. A target is refused when its text names a `.codex` or `.agents` folder anywhere
-(also by glob or in another letter case), or when it resolves into one, as written or as the system reads it through
-links. Too many paths, or lookups past 2 s, refuse.
+Landlock and seccomp cannot read the target. The check is in core, so it is the same on macOS, Linux and Windows.
 
-Out of reach (writes through such a link stay denied by the sandbox): targets built at run time, a script file's links
-without zsh-fork, a command typed across several writes, links copied, moved or unpacked (`cp -a`, `mv`, `rsync -l`,
-`tar`, `git checkout`), tools not listed (`awk system()`, `Rscript`, PowerShell `-EncodedCommand`), remote
-environments. Text that only looks like a link command (a heredoc's documentation) may be refused.
+- **Parsed links.** It reads `ln`/`gln` (`-s` or hard), `cp -s`/`-l`, `mklink`, PowerShell `New-Item …
+  SymbolicLink|Junction|HardLink` and `CreateSymbolicLink`. It also finds them behind shell keywords, operators and
+  wrappers (`sudo`, `env`, `timeout`, `find -exec`, …), in `sh -c` scripts and heredocs, and in interpreter code
+  (`os.symlink`, `symlink_to`, `fs.symlinkSync`, `FileUtils.ln_s`, `os.system('ln …')`).
+- **Where it applies.** The check runs on each agent command, on each program a zsh-fork script starts, and on text
+  typed into a running shell or interpreter (`write_stdin`), one write at a time.
+- **When a parsed link is refused.** When its target resolves into a protected path, either as written or as the
+  system reads it through links.
+- **Backstop.** Any command that may create a link (an `ln`/`gln`/`mklink` word anywhere, a link call in code, a
+  PowerShell link item) and names `.codex` or `.agents` anywhere in its text is refused. The paths of its own folder
+  and the workspace roots are left out of that check, so a project kept below a folder named `.codex` is not caught by
+  it. The backstop catches names hidden in variables, `$(…)`, backticks, `eval`, pipes into a shell, globs, braces and
+  other letter cases.
+- **Bounds.** Too many paths to check, or lookups that take longer than 2 s, also refuse.
+
+Out of reach (writes through such a link stay denied by the sandbox):
+- targets built at run time without a protected name in the text;
+- a script file's links without zsh-fork;
+- a command typed across several writes;
+- links copied, moved or unpacked (`cp -a`, `mv`, `rsync -l`, `tar`, `git checkout`);
+- tools not listed (`awk system()`, `Rscript`, PowerShell `-EncodedCommand`);
+- remote environments.
+
+Over-refusal is accepted: text that only looks like a link command (`grep "ln -s" .agents`, a heredoc's
+documentation) is refused. So is a link call in code that also names a protected path in some other string.
 
 ## Evidence
 
