@@ -304,11 +304,11 @@ async fn issue_584_a_command_writing_only_agent_settings_is_offered_no_grant() -
     assert!(output.contains("Exit code: 1"), "{output}");
     assert!(!cwd.join(".codex/issue584.toml").as_path().exists());
     assert!(!cwd.join(".agents/issue584.md").as_path().exists());
-    // The denial names the write that failed last (the command's status).
+    // The denial names the first write it reports (both were denied).
     assert!(
         warnings
             .iter()
-            .any(|warning| warning.contains(NEVER) && warning.contains("issue584")),
+            .any(|warning| warning.contains(NEVER) && warning.contains("`.agents/issue584.md`")),
         "the denial is explained: {warnings:?} / {output}"
     );
     Ok(())

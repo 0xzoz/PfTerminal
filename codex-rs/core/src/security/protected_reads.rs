@@ -240,9 +240,12 @@ impl ReadPolicyInputs {
 
 /// #584: whether a write to `path` lands, as spelled, through a link on the
 /// way or where it finally points, in one of `kept` (or one's real
-/// location). Not where any spelling of it, its real location included, is
-/// in a folder of `writable` (`worktrees` in the Corbanu home, #583, which
-/// may be listed by its real location only).
+/// location), and not in a folder of `writable` inside that kept path
+/// (`worktrees` in the Corbanu home, #583), as the sandbox's most specific
+/// entry wins: a kept path inside the writable folder (a worktree's own
+/// `.codex`) still counts. A writable folder is also matched through the
+/// kept path's spelling (the home reached through a link, whose `worktrees`
+/// is known by its real location only).
 fn lands_in<'a>(
     path: &Path,
     kept: impl Iterator<Item = &'a AbsolutePathBuf>,
@@ -261,17 +264,33 @@ fn lands_in<'a>(
         paths.into_iter().chain(real).collect::<Vec<_>>()
     };
     let writable = with_real(writable.iter().map(|folder| (*folder).clone()).collect());
-    if spellings.iter().any(|spelling| {
-        writable
-            .iter()
-            .any(|folder| spelling.as_path().starts_with(folder.as_path()))
-    }) {
-        return false;
-    }
     let kept = with_real(kept.cloned().collect());
-    spellings.iter().any(|spelling| {
-        kept.iter()
-            .any(|kept| spelling.as_path().starts_with(kept.as_path()))
+    kept.iter().any(|kept| {
+        let real_kept = ReadDenials::real_location(kept).unwrap_or_else(|| kept.clone());
+        // The writable folders inside this kept path, also spelled the way
+        // it is.
+        let inside: Vec<PathBuf> = writable
+            .iter()
+            .flat_map(|folder| {
+                let as_spelled = folder
+                    .as_path()
+                    .strip_prefix(real_kept.as_path())
+                    .ok()
+                    .map(|rest| kept.as_path().join(rest));
+                folder
+                    .as_path()
+                    .starts_with(kept.as_path())
+                    .then(|| folder.to_path_buf())
+                    .into_iter()
+                    .chain(as_spelled)
+            })
+            .collect();
+        spellings.iter().any(|spelling| {
+            spelling.as_path().starts_with(kept.as_path())
+                && !inside
+                    .iter()
+                    .any(|folder| spelling.as_path().starts_with(folder))
+        })
     })
 }
 

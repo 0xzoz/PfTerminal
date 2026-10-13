@@ -694,6 +694,31 @@ fn issue_584_only_never_writable_words() {
     ] {
         assert_eq!(word(&home, script).as_deref(), expected, "{script}");
     }
+    // A session working in a Corbanu worktree (#583): the worktree's own
+    // `.codex` stays never writable (the most specific entry wins), its
+    // other files are writable; also when the home is reached through a link.
+    for spelled in [&home, &linked_home] {
+        let worktree = spelled.join("worktrees/x");
+        std::fs::create_dir_all(worktree.join(".codex")).unwrap();
+        let cwd = AbsolutePathBuf::from_absolute_path(&worktree).unwrap();
+        for codex_home in [&home, &linked_home] {
+            let denials =
+                ReadDenials::for_turn(codex_home, &cwd, std::slice::from_ref(&cwd), &profile);
+            let word = |script: &str| {
+                only_never_writable_word(&shell(script), &worktree, None, codex_home, &denials)
+            };
+            assert_eq!(
+                word("printf x > .codex/a").as_deref(),
+                Some(".codex/a"),
+                "{spelled:?} {codex_home:?}"
+            );
+            assert_eq!(
+                word("printf x > notes.md"),
+                None,
+                "{spelled:?} {codex_home:?}"
+            );
+        }
+    }
     // The Corbanu home itself, also spelled through a link, but not its
     // writable `worktrees` folder (#583), whichever spelling is used.
     for codex_home in [&home, &linked_home] {
