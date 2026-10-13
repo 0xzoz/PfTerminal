@@ -2368,10 +2368,7 @@ fn metadata_names_are_protected_in_any_case() {
             ws = workspace.display(),
         );
         let stdout = run_in_seatbelt(&policy, &workspace, &script);
-        assert_lines(
-            &stdout,
-            &["git=1", "codex=1", "agents=1", "gitx=0", "ws=0"],
-        );
+        assert_lines(&stdout, &["git=1", "codex=1", "agents=1", "gitx=0", "ws=0"]);
     }
 }
 
