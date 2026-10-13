@@ -509,14 +509,9 @@ async fn load_read_only_account(
             notice: Some("Top up with USDC to create the first API key.".to_string()),
         });
     };
-    let account_response = gateway
-        .client
-        .get(format!("{}/v1/account", gateway.origin))
-        .bearer_auth(api_key.as_str())
-        .send()
-        .await
-        .map_err(|error| error.to_string())?;
-    if account_response.status() == reqwest::StatusCode::UNAUTHORIZED {
+    let account_response =
+        super::wallet_http::account_get(&gateway, "/v1/account", &api_key).await?;
+    if account_response.status == reqwest::StatusCode::UNAUTHORIZED {
         return Ok(CorbanuApiView {
             account: None,
             models,
@@ -527,15 +522,14 @@ async fn load_read_only_account(
             ),
         });
     }
-    if !account_response.status().is_success() {
+    if !account_response.status.is_success() {
         return Err(format!(
             "Corbanu API account returned HTTP {}",
-            account_response.status()
+            account_response.status
         ));
     }
     let account = account_response
         .json::<KeyAccountResponse>()
-        .await
         .map_err(|error| format!("Corbanu API account response was malformed: {error}"))?;
     let daemon = WalletDaemonClient::new(home)
         .status()

@@ -9,6 +9,12 @@ use serde_json::Value;
 use serde_json::json;
 use uuid::Uuid;
 
+/// #641: shown where Campaign Tracker needs the Corbanu API key and only the
+/// credential broker holds it.
+const TRACKER_KEY_HELD_BY_BROKER: &str = "Campaign Tracker can't use the Corbanu API key from \
+the environment: under security level Aggressive the credential broker holds it, and Campaign \
+Tracker sends the key itself. Store the key with /providers (Corbanu API) to use it; activity \
+remains encrypted locally meanwhile.";
 const VIEW: &str = "campaign-tracker";
 #[cfg(test)]
 #[path = "campaign_tracker_tests.rs"]
@@ -93,6 +99,16 @@ impl ChatWidget {
         .flatten()
         .unwrap_or_default()
     }
+    /// #641: no key Campaign Tracker can send: the Corbanu API key from the
+    /// environment is held by the credential broker (Aggressive's
+    /// `broker_model_auth`), which attaches it to requests as a header, and
+    /// Campaign Tracker sends it in the request body; no key is stored.
+    fn tracker_key_held_by_broker(&self, key: &str) -> bool {
+        key.is_empty()
+            && codex_model_provider_info::CORBANU_API_KEY_ENV_VARS
+                .iter()
+                .any(|name| crate::legacy_core::broker_holds_environment_key(name))
+    }
     pub(crate) fn open_campaign_tracker(&mut self, path: String, mut body: Option<Value>) {
         if self.tracker_local_workflow(&path, body.as_ref()) {
             return;
@@ -113,7 +129,12 @@ impl ChatWidget {
         if enrollment == Some(true)
             && let Some(body) = &mut body
         {
-            body["apiKey"] = json!(self.tracker_api_key());
+            let key = self.tracker_api_key();
+            if self.tracker_key_held_by_broker(&key) {
+                self.add_error_message(TRACKER_KEY_HELD_BY_BROKER.to_string());
+                return;
+            }
+            body["apiKey"] = json!(key);
         }
         self.tracker_selection(SelectionViewParams {
             view_id: Some(VIEW),
@@ -517,9 +538,11 @@ impl ChatWidget {
         }
         let key = self.tracker_api_key();
         if key.is_empty() {
-            let _ = store.failure(
-                "Corbanu subscription credential unavailable; activity remains encrypted locally.",
-            );
+            let _ = store.failure(if self.tracker_key_held_by_broker(&key) {
+                TRACKER_KEY_HELD_BY_BROKER
+            } else {
+                "Corbanu subscription credential unavailable; activity remains encrypted locally."
+            });
             return;
         }
         self.campaign_tracker_syncing = true;
