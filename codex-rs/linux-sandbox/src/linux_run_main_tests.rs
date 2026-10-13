@@ -405,6 +405,81 @@ fn register_synthetic_mount_targets_owns_a_placeholder_that_vanished_before_regi
     assert!(!placeholder.exists());
 }
 
+/// #607: another live run's empty placeholder folder (`.codex`, which it
+/// holds read-only in its writable root) that this run's policy denies is
+/// masked and held (registered as found), so its maker's cleanup leaves it
+/// while this run masks it; the last run out removes it. Before, only a
+/// placeholder file was held, and the maker removed the folder (and the
+/// mask with it) from under this run.
+#[test]
+fn a_live_placeholder_folder_is_held_while_it_is_masked() {
+    let temp_dir = tempfile::TempDir::new().expect("tempdir");
+    let root = temp_dir.path().canonicalize().expect("canonical");
+    let placeholder = root.join(".codex");
+    // Another run, still running, registered and made it.
+    let mut maker = std::process::Command::new("sleep")
+        .arg("60")
+        .spawn()
+        .expect("spawn the maker");
+    let marker_dir = synthetic_mount_marker_dir(&placeholder);
+    std::fs::create_dir_all(&marker_dir).expect("marker dir");
+    let made = crate::bwrap::SyntheticMountTarget::missing_empty_directory(&placeholder);
+    let maker_marker = marker_dir.join(maker.id().to_string());
+    std::fs::write(&maker_marker, SYNTHETIC_MOUNT_MARKER_SYNTHETIC).expect("maker marker");
+    write_synthetic_mount_target_record(&marker_dir, &made);
+    std::fs::create_dir(&placeholder).expect("placeholder folder");
+
+    let entry = |path: &Path, access| FileSystemSandboxEntry {
+        path: FileSystemPath::Path {
+            path: AbsolutePathBuf::from_absolute_path(path).expect("absolute"),
+        },
+        access,
+        missing_path_behavior: None,
+    };
+    let policy = FileSystemSandboxPolicy::restricted(vec![
+        FileSystemSandboxEntry {
+            path: FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            },
+            access: FileSystemAccessMode::Read,
+            missing_path_behavior: None,
+        },
+        entry(&root, FileSystemAccessMode::Write),
+        entry(&placeholder, FileSystemAccessMode::Deny),
+    ]);
+    let args = create_bwrap_command_args(
+        vec!["/bin/true".to_string()],
+        &policy,
+        &root,
+        &root,
+        BwrapOptions::default(),
+    )
+    .expect("bwrap args");
+    let held: Vec<&crate::bwrap::SyntheticMountTarget> = args
+        .synthetic_mount_targets
+        .iter()
+        .filter(|target| target.path() == placeholder)
+        .collect();
+    assert_eq!(held.len(), 1, "{:?}", args.synthetic_mount_targets);
+    assert!(held[0].preserves_pre_existing_path());
+    let registrations = register_synthetic_mount_targets(&args.synthetic_mount_targets);
+
+    // The maker ends and cleans up: the folder stays while this run masks it.
+    cleanup_synthetic_mount_targets(&[SyntheticMountTargetRegistration {
+        target: made,
+        marker_file: maker_marker,
+        marker_dir: marker_dir.clone(),
+    }]);
+    maker.kill().expect("kill the maker");
+    maker.wait().expect("reap the maker");
+    assert!(placeholder.is_dir(), "the maker removed a held placeholder");
+
+    // This run is the last one out.
+    cleanup_synthetic_mount_targets(&registrations);
+    assert!(!placeholder.exists());
+    assert!(!marker_dir.exists());
+}
+
 /// A pid no live process has: a child that has been reaped.
 fn ended_pid() -> u32 {
     let mut child = std::process::Command::new("true").spawn().expect("spawn");
@@ -462,6 +537,83 @@ fn stale_placeholders_of_ended_runs_are_removed() {
     assert!(!marker_dir.exists());
     assert_eq!(std::fs::read(&changed).expect("changed"), b"real contents");
     assert!(!changed_marker_dir.exists());
+}
+
+/// #607: a sweep leaves a placeholder whose run is in another PID namespace
+/// (a container sharing `TMPDIR`), where `kill(pid, 0)` cannot see it, and
+/// the person's own empty file made where a stale placeholder was removed
+/// (it changed long after the record). One of an ended run in this
+/// namespace still goes.
+#[test]
+fn stale_placeholder_sweep_leaves_other_namespaces_and_later_files() {
+    let temp_dir = tempfile::TempDir::new().expect("tempdir");
+
+    let other_namespace = temp_dir.path().join("other-namespace");
+    std::fs::write(&other_namespace, "").expect("placeholder");
+    let maker = ended_pid();
+    let marker_dir = plant_stale_placeholder(&other_namespace, &[(maker, SYNTHETIC_MOUNT_MARKER_SYNTHETIC)]);
+    std::fs::write(
+        crate::placeholder_registry::pid_namespace_file(&marker_dir.join(maker.to_string())),
+        "1",
+    )
+    .expect("another namespace");
+
+    let persons = temp_dir.path().join("persons");
+    std::fs::write(&persons, "").expect("the person's own empty file");
+    let persons_marker_dir = plant_stale_placeholder(&persons, &[]);
+    std::fs::File::options()
+        .write(true)
+        .open(persons_marker_dir.join(SYNTHETIC_MOUNT_TARGET_RECORD))
+        .expect("record")
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+        .expect("an hour-old record");
+
+    let stale = temp_dir.path().join("stale");
+    std::fs::write(&stale, "").expect("placeholder");
+    let stale_marker_dir = plant_stale_placeholder(&stale, &[]);
+
+    remove_stale_synthetic_mount_targets();
+
+    assert!(other_namespace.exists());
+    assert!(marker_dir.exists());
+    assert!(persons.exists());
+    assert!(!persons_marker_dir.exists());
+    assert!(!stale.exists());
+    assert!(!stale_marker_dir.exists());
+
+    for entry in std::fs::read_dir(&marker_dir).expect("markers") {
+        std::fs::remove_file(entry.expect("entry").path()).expect("remove");
+    }
+    std::fs::remove_dir(&marker_dir).expect("marker dir");
+}
+
+/// #607: a run's cleanup removes its placeholder where it was registered,
+/// without following a link: a folder above it swapped for a link (by the
+/// command, in its writable root) cannot redirect the removal to an empty
+/// file elsewhere.
+#[test]
+fn cleanup_does_not_follow_a_link_swapped_in_above_the_placeholder() {
+    let temp_dir = tempfile::TempDir::new().expect("tempdir");
+    let base = temp_dir.path().canonicalize().expect("canonical");
+    let folder = base.join("folder");
+    let elsewhere = base.join("elsewhere");
+    std::fs::create_dir_all(&folder).expect("folder");
+    std::fs::create_dir_all(&elsewhere).expect("elsewhere");
+    let placeholder = folder.join(".aws");
+    let registrations =
+        register_synthetic_mount_targets(&[crate::bwrap::SyntheticMountTarget::missing(
+            &placeholder,
+        )]);
+    // bubblewrap's mount target, then the command's swap.
+    std::fs::write(&placeholder, "").expect("placeholder");
+    std::fs::rename(&folder, base.join("moved")).expect("move the folder");
+    std::os::unix::fs::symlink(&elsewhere, &folder).expect("a link in its place");
+    std::fs::write(elsewhere.join(".aws"), "").expect("an empty file elsewhere");
+
+    cleanup_synthetic_mount_targets(&registrations);
+
+    assert!(elsewhere.join(".aws").exists(), "removed through the link");
+    assert!(!registrations[0].marker_dir.exists());
 }
 
 /// #582: a recorded placeholder a live run still uses (its maker, or a run
