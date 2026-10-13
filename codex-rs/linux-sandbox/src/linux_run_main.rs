@@ -57,6 +57,8 @@ struct SyntheticMountTargetRegistration {
     target: crate::bwrap::SyntheticMountTarget,
     marker_file: PathBuf,
     marker_dir: PathBuf,
+    /// #607: whether this run wrote the record (it makes the placeholder).
+    wrote_record: bool,
 }
 
 #[derive(Debug)]
@@ -1035,7 +1037,8 @@ fn register_synthetic_mount_targets(
                 let made_by_another_run = fs::symlink_metadata(target.path()).is_ok()
                     && read_synthetic_mount_target_record(&marker_dir)
                         .is_some_and(|made| made.path() == target.path());
-                if !target.preserves_pre_existing_path() && !made_by_another_run {
+                let wrote_record = !target.preserves_pre_existing_path() && !made_by_another_run;
+                if wrote_record {
                     write_synthetic_mount_target_record(&marker_dir, &target);
                 }
                 let marker_file = marker_dir.join(std::process::id().to_string());
@@ -1053,6 +1056,7 @@ fn register_synthetic_mount_targets(
                     target,
                     marker_file,
                     marker_dir,
+                    wrote_record,
                 }
             })
             .collect()
@@ -1183,10 +1187,23 @@ fn cleanup_synthetic_mount_targets(targets: &[SyntheticMountTargetRegistration])
             // removing) goes as its record says, also when this run only
             // held it as an existing path.
             // #607: one another run made is removed only as the placeholder
-            // made for its record (that run may have been killed long ago).
+            // made for its record (that run may have been killed long ago);
+            // this run's own as before. A record without its location (an
+            // older run's) is removed at this run's, resolved when it
+            // registered.
             match read_synthetic_mount_target_record(&target.marker_dir) {
                 Some(made) if target.target.pre_existing_path_is_unchanged() => {
-                    let recorded_at = synthetic_mount_target_record_time(&target.marker_dir);
+                    let made = if made.real_path().is_none() && made.path() == target.target.path()
+                    {
+                        made.with_real_path(target.target.real_path().map(Path::to_path_buf))
+                    } else {
+                        made
+                    };
+                    let recorded_at = if target.wrote_record {
+                        None
+                    } else {
+                        synthetic_mount_target_record_time(&target.marker_dir)
+                    };
                     remove_synthetic_mount_target(&made, recorded_at);
                 }
                 _ => remove_synthetic_mount_target(&target.target, /*recorded_at*/ None),
@@ -1541,6 +1558,14 @@ fn remove_stale_synthetic_mount_targets() {
             continue;
         }
         let recorded_at = synthetic_mount_target_record_time(&marker_dir);
+        // A record without its location (an older run's): resolved now, as
+        // before.
+        let target = if target.real_path().is_none() {
+            let real_path = crate::placeholder_registry::real_placeholder_path(target.path());
+            target.with_real_path(real_path)
+        } else {
+            target
+        };
         // #607: reached without following a link above it, and only the
         // placeholder made for this record (not the person's own empty file
         // or folder made there later); anything else is no longer one.

@@ -471,6 +471,7 @@ fn a_live_placeholder_folder_is_held_while_it_is_masked() {
         target: made,
         marker_file: maker_marker,
         marker_dir: marker_dir.clone(),
+        wrote_record: true,
     }]);
     maker.kill().expect("kill the maker");
     maker.wait().expect("reap the maker");
@@ -592,6 +593,51 @@ fn stale_placeholder_sweep_leaves_other_namespaces_and_later_files() {
     std::fs::remove_dir(&marker_dir).expect("marker dir");
 }
 
+/// #607 review: a run removes its own placeholder whatever the record's time
+/// says (a file server's clock, a run stopped in between); and a sweep
+/// removes an older run's placeholder recorded without its location under a
+/// folder reached through a link, resolved then, as before.
+#[test]
+fn own_placeholders_and_older_records_are_still_removed() {
+    let temp_dir = tempfile::TempDir::new().expect("tempdir");
+    let base = temp_dir.path().canonicalize().expect("canonical");
+    let own = base.join("own");
+    let registrations =
+        register_synthetic_mount_targets(&[crate::bwrap::SyntheticMountTarget::missing(&own)]);
+    std::fs::write(&own, "").expect("placeholder");
+    std::fs::File::options()
+        .write(true)
+        .open(registrations[0].marker_dir.join(SYNTHETIC_MOUNT_TARGET_RECORD))
+        .expect("record")
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+        .expect("an hour-old record");
+    cleanup_synthetic_mount_targets(&registrations);
+    assert!(!own.exists());
+
+    let dotfiles = base.join("dotfiles");
+    std::fs::create_dir_all(&dotfiles).expect("dotfiles");
+    std::os::unix::fs::symlink(&dotfiles, base.join("config")).expect("linked folder");
+    let older = base.join("config").join("gh");
+    std::fs::write(&older, "").expect("placeholder");
+    let marker_dir = synthetic_mount_marker_dir(&older);
+    std::fs::create_dir_all(&marker_dir).expect("marker dir");
+    std::fs::write(
+        marker_dir.join(ended_pid().to_string()),
+        SYNTHETIC_MOUNT_MARKER_SYNTHETIC,
+    )
+    .expect("the maker's marker");
+    let record = marker_dir.join(SYNTHETIC_MOUNT_TARGET_RECORD);
+    let mut contents = b"file\n".to_vec();
+    contents.extend_from_slice(older.as_os_str().as_bytes());
+    std::fs::write(&record, contents).expect("an older run's record");
+    std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o600)).expect("0600");
+
+    remove_stale_synthetic_mount_targets();
+
+    assert!(!dotfiles.join("gh").exists());
+    assert!(!marker_dir.exists());
+}
+
 /// #607: a run's cleanup removes its placeholder where it was registered,
 /// without following a link: a folder above it swapped for a link (by the
 /// command, in its writable root) cannot redirect the removal to an empty
@@ -700,6 +746,7 @@ fn a_live_placeholder_is_held_from_the_moment_it_is_found() {
         target: made,
         marker_file: maker_marker,
         marker_dir: marker_dir.clone(),
+        wrote_record: true,
     }]);
     maker.kill().expect("kill the maker");
     maker.wait().expect("reap the maker");

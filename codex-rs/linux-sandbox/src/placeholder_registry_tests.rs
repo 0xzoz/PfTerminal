@@ -78,16 +78,17 @@ fn a_placeholder_is_one_made_for_its_record() {
         recorded_at + Duration::from_secs(1),
         recorded_at
     ));
+    // A file server's clock may run behind.
     assert!(made_for_record(
-        recorded_at - Duration::from_millis(500),
+        recorded_at - Duration::from_secs(3600),
+        recorded_at
+    ));
+    assert!(made_for_record(
+        recorded_at + Duration::from_secs(300),
         recorded_at
     ));
     assert!(!made_for_record(
         recorded_at + Duration::from_secs(3600),
-        recorded_at
-    ));
-    assert!(!made_for_record(
-        recorded_at - Duration::from_secs(3600),
         recorded_at
     ));
 }

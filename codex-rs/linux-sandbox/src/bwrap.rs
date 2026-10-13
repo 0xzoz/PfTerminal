@@ -2044,16 +2044,15 @@ fn append_unreadable_root_args(
     // registered, so its maker's cleanup (or a sweep after that run was
     // killed) cannot remove it, and the mask with it, from under this run.
     if let Some(metadata) = live_placeholder_directory(unreadable_root) {
-        if has_synthetic_mount_target(bwrap_args, unreadable_root) {
-            return Ok(());
-        }
         append_existing_unreadable_path_args(bwrap_args, unreadable_root, allowed_write_paths)?;
-        bwrap_args
-            .synthetic_mount_targets
-            .push(SyntheticMountTarget::existing_empty_directory(
-                unreadable_root,
-                &metadata,
-            ));
+        if !has_synthetic_mount_target(bwrap_args, unreadable_root) {
+            bwrap_args
+                .synthetic_mount_targets
+                .push(SyntheticMountTarget::existing_empty_directory(
+                    unreadable_root,
+                    &metadata,
+                ));
+        }
         return Ok(());
     }
 

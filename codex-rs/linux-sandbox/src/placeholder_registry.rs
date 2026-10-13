@@ -4,8 +4,9 @@
 //!   pid `kill(pid, 0)` cannot see, is taken as running;
 //! - a placeholder is removed without following a link in the folders above
 //!   it, at the location they had when it was registered;
-//! - a recorded placeholder whose status changed well after its record was
-//!   written (the person removed it and made their own) is not removed.
+//! - a placeholder another run recorded whose status changed well after the
+//!   record was written (the person removed it and made their own) is not
+//!   removed.
 
 use std::ffi::CString;
 use std::fs;
@@ -23,10 +24,9 @@ use std::time::Duration;
 use std::time::SystemTime;
 
 /// How long after its record a placeholder may still be made: bubblewrap
-/// makes it right after the run registers it.
-const PLACEHOLDER_MADE_WITHIN: Duration = Duration::from_secs(120);
-/// Clock granularity between the record's and the placeholder's times.
-const CLOCK_SLACK: Duration = Duration::from_secs(2);
+/// makes it right after the run registers it. Generous, for a host folder
+/// whose file server's clock runs ahead, or a run stopped in between.
+const PLACEHOLDER_MADE_WITHIN: Duration = Duration::from_secs(15 * 60);
 
 /// The extension of the file beside a run's marker naming its PID namespace.
 const PID_NAMESPACE_EXTENSION: &str = "pidns";
@@ -209,13 +209,16 @@ fn open_folder(folder: libc::c_int, name: &Path) -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
-/// Whether a placeholder whose status last changed at `changed_at` is the
-/// one made for a record written at `recorded_at`: bubblewrap makes it just
-/// after. One changed long after (the person removed the placeholder and
-/// made their own empty file or folder there) is not.
+/// Whether a placeholder whose status last changed at `changed_at` may be
+/// the one made for a record written at `recorded_at`: bubblewrap makes it
+/// just after. One changed long after (the person removed the placeholder
+/// and made their own empty file or folder there) is not. (No lower bound:
+/// a file's status changes when it is made or moved there, and a file
+/// server's clock may run behind.)
 pub(crate) fn made_for_record(changed_at: SystemTime, recorded_at: SystemTime) -> bool {
-    let earliest = recorded_at.checked_sub(CLOCK_SLACK).unwrap_or(recorded_at);
-    changed_at >= earliest && changed_at <= recorded_at + PLACEHOLDER_MADE_WITHIN
+    recorded_at
+        .checked_add(PLACEHOLDER_MADE_WITHIN)
+        .is_none_or(|latest| changed_at <= latest)
 }
 
 #[cfg(test)]
