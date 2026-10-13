@@ -9,7 +9,8 @@ expected = "The session on account work answers as work; the mock backend's log 
 model = "gpt-5.4"
 provider = "openai"
 args = ["--account", "work"]
-setup = """(nohup python3 {run}/../../../../provider-auth/pf-84/s06/scripts/mock_openai.py --port 38467 --log {logs}/mock-openai.jsonl > /dev/null 2>&1 &)
+setup = """nohup python3 {run}/../../../../provider-auth/pf-84/s06/scripts/mock_openai.py --port 38467 --log {logs}/mock-openai.jsonl > /dev/null 2>&1 &
+echo $! > {logs}/mock.pid
 sleep 1
 curl -s -X POST -H 'content-type: application/json' -d '{"user":"default","ttl":3600}' http://127.0.0.1:38467/_next_user > /dev/null
 {bin} login --device-auth --experimental_issuer http://127.0.0.1:38467 2>&1 | tail -1
@@ -54,3 +55,5 @@ wait = "backend requests on the default login: 0"
 timeout = 30
 [[steps]]
 pause = 5.0
+[[steps]]
+run = "kill $(cat {logs}/mock.pid)"

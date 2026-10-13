@@ -829,4 +829,5 @@ fn issue_658_facts_carry_the_sign_in_they_were_recorded_under() {
     drop(work);
     assert_eq!(record(3), Some(None));
     drop(default);
+    let _ = std::fs::remove_dir_all(base.codex_home());
 }
