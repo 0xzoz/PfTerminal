@@ -138,7 +138,9 @@ mod macos {
         let mut error: *mut c_char = std::ptr::null_mut();
         // SAFETY: `profile` is a valid NUL-terminated string; `error` receives
         // an allocation we free below.
-        let result = unsafe { sandbox_init(profile.as_ptr(), 0, &mut error) };
+        let result = unsafe {
+            sandbox_init(profile.as_ptr(), /*flags*/ 0, &mut error)
+        };
         if !error.is_null() {
             // SAFETY: `error` was allocated by sandbox_init.
             unsafe { sandbox_free_error(error) };

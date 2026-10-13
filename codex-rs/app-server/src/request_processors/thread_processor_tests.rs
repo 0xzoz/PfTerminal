@@ -996,7 +996,10 @@ mod thread_processor_behavior_tests {
                 recorded_provider_account(&history, Some("kimi")),
                 // The newest turn recorded no account (named accounts were off).
                 recorded_provider_account(
-                    &[turn_context("zai", Some("fake")), turn_context("zai", None)],
+                    &[
+                        turn_context("zai", Some("fake")),
+                        turn_context("zai", /*provider_account*/ None)
+                    ],
                     Some("zai"),
                 ),
             ],

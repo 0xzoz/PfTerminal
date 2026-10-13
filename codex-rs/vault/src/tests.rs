@@ -631,9 +631,9 @@ fn pf_28_s01_revealed_values_are_registered_with_the_output_gate() {
         .update(
             "pf28-basic",
             Some("pf28user:pf28-rotated-password-3".to_string()),
-            None,
-            None,
-            None,
+            /*provider*/ None,
+            /*notes*/ None,
+            /*revocation_notes*/ None,
         )
         .expect("update");
     assert_eq!(

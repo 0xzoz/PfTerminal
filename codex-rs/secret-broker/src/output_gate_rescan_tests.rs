@@ -64,11 +64,11 @@ fn pf_28_s02_wrapped_base64_and_hex_blocks_are_found() {
     let base64 = STANDARD.encode(&file);
     let hex: String = file.bytes().map(|byte| format!("{byte:02x}")).collect();
     for (block, encoded) in [
-        (wrap(&base64, 76, "\n"), &base64),
-        (wrap(&base64, 64, "\r\n"), &base64),
-        (wrap(&base64, 76, "\n    "), &base64),
-        (wrap(&base64, 76, "\\n"), &base64),
-        (wrap(&hex, 60, "\n"), &hex),
+        (wrap(&base64, /*width*/ 76, "\n"), &base64),
+        (wrap(&base64, /*width*/ 64, "\r\n"), &base64),
+        (wrap(&base64, /*width*/ 76, "\n    "), &base64),
+        (wrap(&base64, /*width*/ 76, "\\n"), &base64),
+        (wrap(&hex, /*width*/ 60, "\n"), &hex),
     ] {
         let input = format!("$ cat creds | encode\n{block}\n$ ");
         let output = scrub(&gate, &input).expect("wrapped value found");
@@ -137,7 +137,7 @@ fn pf_28_s02_rescans_leave_ordinary_text_alone() {
         json,
         "We are able to see above it, and about the ability to abandon it.".to_string(),
         "CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR is read by tests".to_string(),
-        format!("data:{}\n{}\n", wrap(&other, 20, "\n"), other),
+        format!("data:{}\n{}\n", wrap(&other, /*width*/ 20, "\n"), other),
         "0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
         "use std::collections::HashMap;\nfn main() {}\n".to_string(),
     ] {

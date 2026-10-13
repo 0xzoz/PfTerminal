@@ -534,20 +534,32 @@ mod tests {
         let connector = TargetCheckedTcpConnector::new(guarded_state());
 
         assert_refused(
-            Service::serve(&connector, pinned_request("example.com", 443, None)).await,
+            Service::serve(
+                &connector,
+                pinned_request("example.com", /*port*/ 443, /*pin*/ None),
+            )
+            .await,
             "no checked answers",
         );
         let public: IpAddr = "93.184.216.34".parse().expect("ip");
         for (host, port) in [("other.example", 443), ("example.com", 8443)] {
             let pin = PinnedPeers::new(host, port, [public]);
             assert_refused(
-                Service::serve(&connector, pinned_request("example.com", 443, Some(pin))).await,
+                Service::serve(
+                    &connector,
+                    pinned_request("example.com", /*port*/ 443, Some(pin)),
+                )
+                .await,
                 "authority changed",
             );
         }
-        let empty = PinnedPeers::new("example.com", 443, []);
+        let empty = PinnedPeers::new("example.com", /*port*/ 443, []);
         assert_refused(
-            Service::serve(&connector, pinned_request("example.com", 443, Some(empty))).await,
+            Service::serve(
+                &connector,
+                pinned_request("example.com", /*port*/ 443, Some(empty)),
+            )
+            .await,
             "no checked answers",
         );
     }
@@ -558,8 +570,8 @@ mod tests {
         let public: IpAddr = "93.184.216.34".parse().expect("ip");
         let mut request = pinned_request(
             "example.com",
-            443,
-            Some(PinnedPeers::new("example.com", 443, [public])),
+            /*port*/ 443,
+            Some(PinnedPeers::new("example.com", /*port*/ 443, [public])),
         );
         request
             .extensions_mut()
@@ -614,7 +626,11 @@ mod tests {
 
         // A pin only narrows a dial, so it binds without the guard too: the
         // isolated broker has no guard and dials the answers Core checked.
-        let stale = PinnedPeers::new("other.example", 1, ["93.184.216.34".parse().expect("ip")]);
+        let stale = PinnedPeers::new(
+            "other.example",
+            /*port*/ 1,
+            ["93.184.216.34".parse().expect("ip")],
+        );
         let mut request = rama_tcp::client::Request::new(HostWithPort::from(target));
         request.extensions_mut().insert(stale);
         assert_refused(
@@ -639,13 +655,13 @@ mod tests {
 
     #[test]
     fn pf_33_s02_pin_host_comparison_is_canonical() {
-        let pin = PinnedPeers::new("Example.COM.", 443, []);
+        let pin = PinnedPeers::new("Example.COM.", /*port*/ 443, []);
         assert!(pin.covers(&HostWithPort::new(
             Host::Name("example.com".parse().expect("name")),
             443
         )));
         // The guard pins the A-label form; clients send the same form.
-        let idn = PinnedPeers::new("xn--bcher-kva.example", 443, []);
+        let idn = PinnedPeers::new("xn--bcher-kva.example", /*port*/ 443, []);
         assert!(idn.covers(&HostWithPort::new(
             Host::Name("XN--BCHER-KVA.example".parse().expect("name")),
             443
@@ -654,7 +670,11 @@ mod tests {
             Host::Name("bcher.example".parse().expect("name")),
             443
         )));
-        let v6 = PinnedPeers::new("[2606:2800:220:1:248:1893:25c8:1946]", 443, []);
+        let v6 = PinnedPeers::new(
+            "[2606:2800:220:1:248:1893:25c8:1946]",
+            /*port*/ 443,
+            [],
+        );
         assert!(v6.covers(&HostWithPort::new(
             Host::Address("2606:2800:220:1:248:1893:25c8:1946".parse().expect("ip")),
             443

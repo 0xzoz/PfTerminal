@@ -1628,7 +1628,7 @@ async fn ledger_written_before_plan_basis_validates_and_reads() -> anyhow::Resul
     assert_eq!(formats(runtime.clone()).await?, vec![1]);
     // A new usage report on the old incomplete attempt mixes a legacy price
     // record and legacy estimates with a current-form estimate.
-    let mut b = attempt(2, T0 + 3_000)?;
+    let mut b = attempt(/*id*/ 2, T0 + 3_000)?;
     b.thread_id = owner;
     b.turn = "pre-5bae-fixture".into();
     b.provider = "anthropic".into();
@@ -1654,7 +1654,7 @@ async fn ledger_written_before_plan_basis_validates_and_reads() -> anyhow::Resul
         .await?;
     assert_eq!(formats(runtime.clone()).await?, vec![1]);
     // A record format 1 cannot express upgrades the ledger as it is written.
-    let mut local = attempt(10, read_at)?;
+    let mut local = attempt(/*id*/ 10, read_at)?;
     local.thread_id = owner;
     let mut basis_only = snapshot()?;
     basis_only.id = Uuid::from_u128(2000);
@@ -1688,7 +1688,7 @@ async fn ledger_written_before_plan_basis_validates_and_reads() -> anyhow::Resul
     assert_eq!(totals, Current::Ready(after.totals));
     // A long-context price tier needs format 3: the format-2 ledger is upgraded
     // as the record is written, and the record reads back with its tier.
-    let mut tiered = attempt(11, later)?;
+    let mut tiered = attempt(/*id*/ 11, later)?;
     tiered.thread_id = owner;
     let mut price = snapshot()?;
     price.id = Uuid::from_u128(2001);
@@ -1727,7 +1727,7 @@ async fn ledger_written_before_plan_basis_validates_and_reads() -> anyhow::Resul
             .await?;
     conn.close().await?;
     let named_at = later + 1_000;
-    let mut named = attempt(12, named_at)?;
+    let mut named = attempt(/*id*/ 12, named_at)?;
     named.thread_id = owner;
     named.account = Some(AttemptAccount {
         name: "work".into(),
@@ -1768,7 +1768,7 @@ async fn ledger_written_before_plan_basis_validates_and_reads() -> anyhow::Resul
 #[test]
 fn attempt_account_is_validated() -> anyhow::Result<()> {
     let with = |name: &str, fingerprint: Option<&str>| -> anyhow::Result<bool> {
-        let mut attempt = attempt(1, 1_789_473_600_000)?;
+        let mut attempt = attempt(/*id*/ 1, /*time*/ 1_789_473_600_000)?;
         attempt.account = Some(AttemptAccount {
             name: name.into(),
             fingerprint: fingerprint.map(str::to_string),
@@ -1794,14 +1794,24 @@ async fn a_refused_attempt_is_an_exact_zero_through_format_5() -> anyhow::Result
     let path = home();
     let runtime = open(&path).await?;
     let price = snapshot()?;
-    let ok = attempt(1, 0)?;
+    let ok = attempt(/*id*/ 1, /*time*/ 0)?;
     native(&runtime, ok.thread_id).await?;
-    let store = AccountingStore::open(&runtime, 0).await?;
+    let store = AccountingStore::open(&runtime, /*as_of*/ 0).await?;
     store
-        .admit(ok.thread_id, &ok, std::slice::from_ref(&price), 0)
+        .admit(
+            ok.thread_id,
+            &ok,
+            std::slice::from_ref(&price),
+            /*as_of*/ 0,
+        )
         .await?;
     store
-        .observe(ok.thread_id, &ok, &[observation(&ok, 1, 10)?], 0)
+        .observe(
+            ok.thread_id,
+            &ok,
+            &[observation(&ok, /*revision*/ 1, /*input*/ 10)?],
+            /*as_of*/ 0,
+        )
         .await?;
     let formats = |runtime: Arc<StateRuntime>| async move {
         let mut conn = connection(&runtime).await?;
@@ -1819,9 +1829,14 @@ async fn a_refused_attempt_is_an_exact_zero_through_format_5() -> anyhow::Result
     let (before, earlier) = formats(runtime.clone()).await?;
     assert_eq!(before, vec![1]);
 
-    let refused = attempt(2, 1)?;
+    let refused = attempt(/*id*/ 2, /*time*/ 1)?;
     store
-        .admit(refused.thread_id, &refused, std::slice::from_ref(&price), 1)
+        .admit(
+            refused.thread_id,
+            &refused,
+            std::slice::from_ref(&price),
+            /*as_of*/ 1,
+        )
         .await?;
     let refusal = Observation {
         revision: 1.try_into()?,
@@ -1837,7 +1852,7 @@ async fn a_refused_attempt_is_an_exact_zero_through_format_5() -> anyhow::Result
             refused.thread_id,
             &refused,
             std::slice::from_ref(&refusal),
-            1,
+            /*as_of*/ 1,
         )
         .await?;
     assert_eq!(quote.usage.refused_status, Some(401));
@@ -1847,20 +1862,33 @@ async fn a_refused_attempt_is_an_exact_zero_through_format_5() -> anyhow::Result
     assert_eq!(after, vec![1, 2, 3, 4, 5]);
     assert!(observations.iter().any(|payload| payload == &earlier[0]));
 
-    let view = ready(AccountingStore::inspect_day(&runtime, ok.thread_id, 0, 2).await?);
+    let view = ready(
+        AccountingStore::inspect_day(
+            &runtime,
+            ok.thread_id,
+            /*utc_day*/ 0,
+            /*read_at_ms*/ 2,
+        )
+        .await?,
+    );
     assert_eq!(view.totals.attempts, 2);
     // Only the first attempt, which reported input alone, is incomplete.
     assert_eq!(view.totals.per_use_unknown(), 1);
     // A refusal states nothing else, and nothing follows it.
     let mut bad = refusal.clone();
     bad.patch.input = Presence::Number(1.try_into()?);
-    let other = attempt(3, 2)?;
+    let other = attempt(/*id*/ 3, /*time*/ 2)?;
     store
-        .admit(other.thread_id, &other, std::slice::from_ref(&price), 2)
+        .admit(
+            other.thread_id,
+            &other,
+            std::slice::from_ref(&price),
+            /*as_of*/ 2,
+        )
         .await?;
     assert!(
         store
-            .observe(other.thread_id, &other, &[bad], 2)
+            .observe(other.thread_id, &other, &[bad], /*as_of*/ 2)
             .await
             .is_err()
     );
@@ -1869,8 +1897,10 @@ async fn a_refused_attempt_is_an_exact_zero_through_format_5() -> anyhow::Result
             .observe(
                 refused.thread_id,
                 &refused,
-                &[observation(&refused, 2, 5)?],
-                2
+                &[observation(
+                    &refused, /*revision*/ 2, /*input*/ 5
+                )?],
+                /*as_of*/ 2
             )
             .await
             .is_err()
@@ -1885,11 +1915,11 @@ async fn a_refused_attempt_is_an_exact_zero_through_format_5() -> anyhow::Result
 async fn newer_ledger_format_is_refused_by_name() -> anyhow::Result<()> {
     let path = home();
     let runtime = open(&path).await?;
-    let a = attempt(1, 0)?;
+    let a = attempt(/*id*/ 1, /*time*/ 0)?;
     native(&runtime, a.thread_id).await?;
-    AccountingStore::open(&runtime, 0)
+    AccountingStore::open(&runtime, /*as_of*/ 0)
         .await?
-        .admit(a.thread_id, &a, &[], 0)
+        .admit(a.thread_id, &a, &[], /*as_of*/ 0)
         .await?;
     let mut conn = connection(&runtime).await?;
     sqlx::query(
@@ -1899,10 +1929,15 @@ async fn newer_ledger_format_is_refused_by_name() -> anyhow::Result<()> {
     .execute(&mut conn)
     .await?;
     let before = inspection_tables(&mut conn).await?;
-    let read = AccountingStore::inspect_day(&runtime, a.thread_id, 0, 1)
-        .await
-        .expect_err("newer format read");
-    let write = AccountingStore::open(&runtime, 1)
+    let read = AccountingStore::inspect_day(
+        &runtime,
+        a.thread_id,
+        /*utc_day*/ 0,
+        /*read_at_ms*/ 1,
+    )
+    .await
+    .expect_err("newer format read");
+    let write = AccountingStore::open(&runtime, /*as_of*/ 1)
         .await
         .err()
         .context("newer format write")?;
