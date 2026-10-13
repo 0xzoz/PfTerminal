@@ -5,4 +5,4 @@ Videos are assets on the [`demos` prerelease](https://github.com/CorbanuCore/Cor
 
 | Date | Demo | Feature | Commit | Model | Length | Video |
 | --- | --- | --- | --- | --- | --- | --- |
-| 2026-10-13 | `issue688-tool-limit-notice-once` | #688: tools over the 128-tool limit are reported once | `161846c5e203` | glm-5.3-flash | 22s | [mp4](https://github.com/CorbanuCore/CorbanuTerminal/releases/download/demos/issue-688-issue688-tool-limit-notice-once-161846c5e203-2026-10-13.mp4) · [cast](https://github.com/CorbanuCore/CorbanuTerminal/releases/download/demos/issue-688-issue688-tool-limit-notice-once-161846c5e203-2026-10-13.cast) |
+| 2026-10-13 | `issue688-tool-limit-notice-once` | #688: tools over the 128-tool limit are reported once | `547e4386fd62` | glm-5.3-flash | 22s | [mp4](https://github.com/CorbanuCore/CorbanuTerminal/releases/download/demos/issue-688-issue688-tool-limit-notice-once-547e4386fd62-2026-10-13.mp4) · [cast](https://github.com/CorbanuCore/CorbanuTerminal/releases/download/demos/issue-688-issue688-tool-limit-notice-once-547e4386fd62-2026-10-13.cast) |
