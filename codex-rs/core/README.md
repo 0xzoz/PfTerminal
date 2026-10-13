@@ -97,9 +97,19 @@ deletes inside it keep working. Side effects:
 
 - The labels are persistent. A folder that was a writable root keeps its Low
   label, so a later session can delete (not write) there even when the folder
-  is not one of its writable roots, and other Low-integrity programs of the
-  user can write there. `icacls <dir> /setintegritylevel (OI)(CI)M` restores
-  Medium.
+  is not one of its writable roots. In particular, a `ReadOnly` session in a
+  workspace (or with a `%TEMP%`) that an earlier `WorkspaceWrite` session used
+  can still delete files there, apart from protected paths. Other
+  Low-integrity programs of the user can write in labelled folders too.
+  `icacls <dir> /setintegritylevel (OI)(CI)M` restores Medium. Running the
+  sandbox's own tests on Windows labels the checkout they use as a workspace.
+- Labelling needs permission to change the folder's owner settings
+  (`WRITE_OWNER`); without it the command does not start and the error says
+  why. The first label propagates through the whole folder tree, which can be
+  slow for large trees.
+- Protected paths inside writable roots (and other read-only carve-outs) get
+  an explicit Medium label, so they don't inherit the Low label and other
+  Low-integrity programs can't write them.
 - Commands can no longer write outside writable roots to objects that grant
   Everyone or the logon SID write access, or open other programs' named pipes
   and other IPC endpoints for writing, unless those are labelled Low.

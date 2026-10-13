@@ -16,6 +16,7 @@ use crate::env::inherit_path_env;
 use crate::env::normalize_null_device_env;
 use crate::identity::SandboxCreds;
 use crate::identity::require_logon_sandbox_creds;
+use crate::integrity::label_protected_path_medium;
 use crate::integrity::label_writable_root_low;
 use crate::integrity::set_token_low_integrity;
 use crate::logging::log_start;
@@ -289,14 +290,15 @@ pub(crate) fn apply_legacy_session_acl_rules(
         compute_allow_paths_for_permissions(permissions, current_dir, env_map);
     unsafe {
         // #158: the sandbox runs at Low integrity; its writable roots carry a
-        // Low label so writes inside them keep working.
+        // Low label so writes inside them keep working. Without the label
+        // every write there would fail, so say why instead.
         for p in &allow {
-            if let Err(err) = label_writable_root_low(p) {
-                crate::logging::debug_log(
-                    &format!("label writable root Low failed for {}: {err}", p.display()),
-                    Some(&codex_home.join(".sandbox")),
-                );
-            }
+            label_writable_root_low(p).with_context(|| {
+                format!(
+                    "the Windows sandbox could not label writable root {} for Low-integrity commands; it needs permission to change the folder's owner settings (WRITE_OWNER)",
+                    p.display()
+                )
+            })?;
         }
         for path in additional_deny_write_paths {
             // Explicit carveouts must exist before the command starts so the
@@ -320,6 +322,19 @@ pub(crate) fn apply_legacy_session_acl_rules(
             }
         }
         for p in &deny {
+            // #158: keep the writable root's Low label off protected paths, so
+            // other Low-integrity programs can't write them either.
+            if p.exists()
+                && let Err(err) = label_protected_path_medium(p)
+            {
+                crate::logging::debug_log(
+                    &format!(
+                        "label protected path Medium failed for {}: {err}",
+                        p.display()
+                    ),
+                    Some(&codex_home.join(".sandbox")),
+                );
+            }
             for root_sid in deny_root_capabilities_for_path(p, acl_sids.write_root_sids) {
                 let _ = add_deny_write_ace(p, root_sid.sid.as_ptr());
             }

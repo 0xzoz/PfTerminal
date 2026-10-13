@@ -227,8 +227,12 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "P1 hardening regressions failed in a normal session" }
             foreach ($t in $env:LEGACY_158_TESTS.Split(' ')) {
               Assert-Tests $sandbox "unified_exec::tests::$t" 1
-              & $medium -Program $sandbox -Arguments @('--exact', "unified_exec::tests::$t", '--nocapture', '--test-threads=1')
-              if ($LASTEXITCODE -ne 0) { throw "#158 $t failed in a normal session" }
+              $out = & $medium -Program $sandbox -Arguments @('--exact', "unified_exec::tests::$t", '--nocapture', '--test-threads=1')
+              $code = $LASTEXITCODE
+              $out
+              if ($code -ne 0) { throw "#158 $t failed in a normal session" }
+              # An ignored test passes with nothing run.
+              if (-not ($out -match 'test result: ok\. 1 passed')) { throw "#158 $t did not run in a normal session" }
             }
             Assert-Tests $sandbox 'credential_watch' 18
             & $medium -Program $sandbox -Arguments @('credential_watch', '--nocapture', '--test-threads=1')

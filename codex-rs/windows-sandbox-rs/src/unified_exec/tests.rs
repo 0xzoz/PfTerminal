@@ -1000,6 +1000,7 @@ fn legacy_read_only_cannot_delete_anything() {
     let (outcome, diagnostics) = run_legacy_delete_fixture(PermissionProfile::read_only());
     assert_eq!(
         (
+            outcome.exit_code,
             outcome.workspace_file_exists,
             outcome.temp_file_exists,
             outcome.tmp_file_exists,
@@ -1010,6 +1011,7 @@ fn legacy_read_only_cannot_delete_anything() {
             outcome.outside_dir_exists,
         ),
         (
+            0,
             true,
             true,
             true,

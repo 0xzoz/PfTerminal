@@ -55,6 +55,7 @@ use windows_sys::Win32::System::SystemServices::SYSTEM_MANDATORY_LABEL_ACE_TYPE;
 use windows_sys::Win32::System::SystemServices::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP;
 
 const LOW_INTEGRITY_SID: &str = "S-1-16-4096";
+const MEDIUM_INTEGRITY_SID: &str = "S-1-16-8192";
 const LOW_INTEGRITY_RID: u32 = 0x1000;
 
 /// Lowers `h_token` to Low integrity.
@@ -85,15 +86,15 @@ pub(crate) unsafe fn set_token_low_integrity(h_token: HANDLE) -> Result<()> {
     Ok(())
 }
 
-/// An ACL holding one Low no-write-up label ACE with `flags`.
-struct LowLabelAcl {
+/// An ACL holding one no-write-up label ACE for `level` with `flags`.
+struct LabelAcl {
     buffer: Vec<u64>,
-    _low: LocalSid,
+    _level: LocalSid,
 }
 
-impl LowLabelAcl {
-    unsafe fn new(flags: u32) -> Result<Self> {
-        let low = LocalSid::from_string(LOW_INTEGRITY_SID)?;
+impl LabelAcl {
+    unsafe fn new(level: &str, flags: u32) -> Result<Self> {
+        let low = LocalSid::from_string(level)?;
         // ACL header + SYSTEM_MANDATORY_LABEL_ACE (header, mask, SID).
         let size = std::mem::size_of::<ACL>()
             + std::mem::size_of::<ACE_HEADER>()
@@ -114,7 +115,10 @@ impl LowLabelAcl {
         {
             return Err(anyhow!("AddMandatoryAce failed: {}", GetLastError()));
         }
-        Ok(Self { buffer, _low: low })
+        Ok(Self {
+            buffer,
+            _level: low,
+        })
     }
 
     fn as_ptr(&mut self) -> *mut ACL {
@@ -137,7 +141,27 @@ pub(crate) unsafe fn label_writable_root_low(path: &Path) -> Result<bool> {
     if has_low_label(path, flags)? {
         return Ok(false);
     }
-    let mut acl = LowLabelAcl::new(flags)?;
+    set_file_label(path, LOW_INTEGRITY_SID, flags)?;
+    Ok(true)
+}
+
+/// Gives a protected path inside a writable root (and everything below it)
+/// an explicit Medium label, so it does not inherit the root's Low label: no
+/// other Low-integrity program may write `.git`, `.codex` or `.agents` there.
+///
+/// # Safety
+/// Calls Win32 security APIs on `path`.
+pub(crate) unsafe fn label_protected_path_medium(path: &Path) -> Result<()> {
+    let flags = if path.is_dir() {
+        OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
+    } else {
+        0
+    };
+    set_file_label(path, MEDIUM_INTEGRITY_SID, flags)
+}
+
+unsafe fn set_file_label(path: &Path, level: &str, flags: u32) -> Result<()> {
+    let mut acl = LabelAcl::new(level, flags)?;
     // Inheritable label ACEs propagate to existing children.
     let code = SetNamedSecurityInfoW(
         to_wide(path).as_ptr(),
@@ -154,7 +178,7 @@ pub(crate) unsafe fn label_writable_root_low(path: &Path) -> Result<bool> {
             path.display()
         ));
     }
-    Ok(true)
+    Ok(())
 }
 
 unsafe fn has_low_label(path: &Path, flags: u32) -> Result<bool> {
@@ -225,7 +249,7 @@ unsafe fn sacl_has_low_label(p_sacl: *mut ACL, flags: u32) -> bool {
 /// # Safety
 /// `handle` must be a desktop handle opened with `WRITE_OWNER`.
 pub(crate) unsafe fn label_window_object_low(handle: HANDLE) -> Result<()> {
-    let mut acl = LowLabelAcl::new(/*flags*/ 0)?;
+    let mut acl = LabelAcl::new(LOW_INTEGRITY_SID, /*flags*/ 0)?;
     let code = SetSecurityInfo(
         handle,
         SE_WINDOW_OBJECT,
