@@ -9,6 +9,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use codex_extension_api::ExtensionData;
+use futures::FutureExt;
 use futures::future::BoxFuture;
 use tokio::select;
 use tokio::sync::Notify;
@@ -58,6 +59,7 @@ use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::WarningEvent;
 
 use codex_features::Feature;
+use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ContentItem;
@@ -72,6 +74,11 @@ const GRACEFULL_INTERRUPTION_TIMEOUT_MS: u64 = 100;
 const TASK_COMPACT_METRIC: &str = "codex.task.compact";
 
 pub(crate) type SessionTaskResult = CodexResult<Option<String>>;
+
+/// The turn error reported when a task panicked (#616). The panic itself is
+/// logged by the process panic hook; its payload is not repeated here.
+pub(crate) const TURN_PANICKED_MESSAGE: &str =
+    "this turn stopped because of an internal error (a panic); the details are in the log";
 
 pub(crate) enum MailboxParentProvenance {
     Ignore,
@@ -458,22 +465,33 @@ impl Session {
                 // (before this process started, or by another process) are
                 // protected before this task produces output.
                 let session_for_refresh = session_ctx.clone_session();
-                tokio::select! {
-                    () = crate::security::disclosure_gate::refresh_vault_values_for_task(
-                        &session_for_refresh,
-                        ctx.as_ref(),
-                    ) => {}
-                    () = task_cancellation_token.cancelled() => {}
-                }
-                let task_result = task_for_run
-                    .run(
-                        Arc::clone(&session_ctx),
-                        ctx,
-                        task_input,
-                        task_cancellation_token.child_token(),
-                    )
-                    .instrument(trace_span!("session_task.run"))
-                    .await;
+                let run_session_ctx = Arc::clone(&session_ctx);
+                let run_cancellation_token = task_cancellation_token.clone();
+                let run = async move {
+                    tokio::select! {
+                        () = crate::security::disclosure_gate::refresh_vault_values_for_task(
+                            &session_for_refresh,
+                            ctx.as_ref(),
+                        ) => {}
+                        () = run_cancellation_token.cancelled() => {}
+                    }
+                    task_for_run
+                        .run(
+                            run_session_ctx,
+                            ctx,
+                            task_input,
+                            run_cancellation_token.child_token(),
+                        )
+                        .instrument(trace_span!("session_task.run"))
+                        .await
+                };
+                // #616: a panic inside the task must still finish the turn
+                // (with an error), or every client waiting for its end (exec,
+                // the TUI) waits forever.
+                let task_result = std::panic::AssertUnwindSafe(run)
+                    .catch_unwind()
+                    .await
+                    .unwrap_or_else(|_| Err(CodexErr::Fatal(TURN_PANICKED_MESSAGE.to_string())));
                 let sess = session_ctx.clone_session();
                 if let Err(err) = sess.flush_rollout().await {
                     warn!("failed to flush rollout before completing turn: {err}");

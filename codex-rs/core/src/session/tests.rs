@@ -247,6 +247,7 @@ impl StepContext {
 }
 
 mod guardian_tests;
+mod panicking_task_tests;
 
 struct InstructionsTestCase {
     slug: &'static str,

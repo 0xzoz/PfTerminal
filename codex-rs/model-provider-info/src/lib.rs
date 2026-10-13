@@ -77,9 +77,13 @@ fn claude_provider_auth_cwd() -> AbsolutePathBuf {
     // its credentials-file identity cannot drift from the profile selected by
     // the TUI. The command remains a bare installed executable resolved via
     // PATH, never a project-relative program.
-    AbsolutePathBuf::current_dir().unwrap_or_else(|err| {
-        panic!("current directory must resolve to determine Claude provider auth cwd: {err}")
-    })
+    //
+    // #616: this runs whenever the provider table is built, including on
+    // request and accounting paths. If the directory can't be resolved there
+    // (e.g. macOS revoked access to the volume holding it), keep the last
+    // resolved one instead of panicking a runtime worker; a helper that can't
+    // run from it fails its request with an error instead.
+    AbsolutePathBuf::current_dir_or_last_known()
 }
 
 const OPENAI_PROVIDER_NAME: &str = "OpenAI";
