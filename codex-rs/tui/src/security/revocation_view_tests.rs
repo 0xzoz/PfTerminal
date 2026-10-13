@@ -336,7 +336,8 @@ fn pf_25_s02_only_this_view_revokes() {
                 .any(|name| text.contains(name))
         })
         .filter_map(|path| path.strip_prefix(workspace).ok())
-        .map(|path| path.display().to_string())
+        // Forward slashes on every platform, so the names below match on Windows.
+        .map(|path| path.display().to_string().replace('\\', "/"))
         .filter(|path| {
             !path.ends_with("_tests.rs")
                 && path != "tui/src/claude_panes/tests.rs"
