@@ -35,6 +35,7 @@ pub(crate) use gate::check_dispatch;
 #[cfg(test)]
 pub(crate) use gate::question_id;
 pub(crate) use read_denials::ReadDenials;
+pub(crate) use read_denials::create_missing_database_folder;
 pub(crate) use read_denials::post_taint_read_policy;
 pub(crate) use read_denials::protect_file_tool_context;
 pub(crate) use read_denials::readable_under;

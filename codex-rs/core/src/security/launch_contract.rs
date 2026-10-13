@@ -556,6 +556,17 @@ impl LaunchContract {
                 ));
             }
         }
+        // #651 (Linux): a database folder (and what Corbanu keeps in it)
+        // missing where the command could make it is made as Corbanu would,
+        // so bubblewrap holds no missing path there with a placeholder file
+        // on the host; its entries are then denied as when it exists.
+        if cfg!(target_os = "linux") {
+            for folder in self.database_folders() {
+                if file_system.can_write_path_with_cwd(folder.as_path(), cwd) {
+                    super::protected_surface::create_missing_database_folder(folder.as_path());
+                }
+            }
+        }
         for entry in self.protected_entries() {
             if !file_system.entries.contains(&entry) {
                 file_system.entries.push(entry);
@@ -647,12 +658,17 @@ impl LaunchContract {
             );
         }
         // Databases recovery set aside beside each folder (the home's too).
+        // On Linux only when present: bubblewrap would hold a missing one
+        // with a placeholder file beside the folder (in the user's home for
+        // the default home, #348), as `ReadDenials` does.
         for folder in std::iter::once(self.codex_home.clone()).chain(self.database_folders()) {
             if let Some(name) = folder.as_path().file_name() {
                 let mut backups = name.to_os_string();
                 backups.push(".db-backups");
                 if let Ok(backups) =
                     AbsolutePathBuf::from_absolute_path(folder.as_path().with_file_name(backups))
+                    && (!cfg!(target_os = "linux")
+                        || std::fs::symlink_metadata(backups.as_path()).is_ok())
                 {
                     paths.push(backups);
                 }

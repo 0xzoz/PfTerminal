@@ -2633,6 +2633,77 @@ async fn issue_651_a_database_folder_with_glob_syntax_is_protected() -> anyhow::
     Ok(())
 }
 
+/// Issue #651 item 7: with a separate database folder missing when the
+/// command runs (state start-up failed), a protected command with full
+/// access cannot create it and put a file or a pending accounting record in
+/// it, and finds no placeholder file at its path (bubblewrap's, which sat on
+/// the host while the command ran); with the paths built at run time.
+/// Permissive is unchanged.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_651_a_missing_database_folder_is_protected() -> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let mut wrong = Vec::new();
+    for (level, open) in [
+        (SecurityLevel::Moderate, false),
+        (SecurityLevel::Aggressive, false),
+        (SecurityLevel::Permissive, true),
+    ] {
+        let base = TempDir::new()?;
+        let folder = base.path().canonicalize()?.join("databases");
+        let path = folder.to_string_lossy().into_owned();
+        // Split inside the folder's own name: neither part names it.
+        let (head, tail) = path.split_at(path.len() - 2);
+        let command = format!(
+            "d=\"$(printf '{head}%s' {tail})\"; [ -f \"$d\" ] && echo placeholder-651; \
+             mkdir -p \"$d/accounting-$(printf pending)\"; printf x > \"$d/planted\"; \
+             printf '{{}}' > \"$d/accounting-$(printf pending)/planted.json\"; echo ran-651"
+        );
+        let sqlite_home = AbsolutePathBuf::from_absolute_path(&folder)?;
+        let missing = folder.clone();
+        let (test, captured) = start_turn_after(
+            /*home*/ None,
+            level,
+            AskForApproval::Never,
+            vec![
+                call("call-651m", "shell_command", json!({ "command": command })),
+                done_step(),
+            ],
+            move |config| {
+                config.sqlite = codex_state::SqliteConfig::from_sqlite_home(sqlite_home.clone());
+                config
+                    .permissions
+                    .set_permission_profile(PermissionProfile::Disabled)
+                    .expect("full access");
+            },
+            move |_| {
+                // Start-up created it; the command meets it missing.
+                std::fs::remove_dir_all(&missing).expect("database folder");
+            },
+        )
+        .await?;
+        assert!(next_exec_approval(&test).await.is_none());
+        let requests = captured.requests();
+        let output = output_text(&requests[requests.len() - 1], "call-651m");
+        let achieved = [
+            folder.join("planted").exists(),
+            folder.join("accounting-pending/planted.json").exists(),
+        ];
+        if !output.contains("ran-651")
+            || output.contains("placeholder-651")
+            || achieved != [open; 2]
+        {
+            wrong.push(format!("{level:?}: {achieved:?}: {output}"));
+        }
+        drop(test);
+        drop(base);
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
 /// #652: with a writable root reached through a nested link
 /// (`<base>/link -> <base>/real`) and the Corbanu home at its real location
 /// below it, a protected command still cannot create a name in the home
