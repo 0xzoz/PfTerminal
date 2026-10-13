@@ -307,6 +307,9 @@ async fn foreign_patch_paths_are_not_auto_approved_under_a_restricted_turn() {
     let (_session, mut turn) = make_session_and_context().await;
     turn.approval_policy = crate::config::Constrained::allow_any(AskForApproval::OnRequest);
     turn.permission_profile = PermissionProfile::workspace_write();
+    // Make the platform sandbox available on every OS (Windows tests default
+    // to no sandbox, where the old fallback would ask anyway).
+    turn.windows_sandbox_level = codex_protocol::config_types::WindowsSandboxLevel::RestrictedToken;
     let foreign = if cfg!(windows) {
         "file:///tmp/remote/new.txt"
     } else {
