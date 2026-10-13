@@ -38,6 +38,7 @@ use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
 #[cfg(unix)]
 use core_test_support::skip_if_sandbox;
+use core_test_support::skip_if_wine_exec;
 use core_test_support::stdio_server_bin;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
@@ -241,6 +242,17 @@ fn output_text(request: &ResponsesRequest, call_id: &str) -> String {
         .unwrap_or_default()
 }
 
+/// #615: what the interactive shell printed when it started, for failures
+/// where typing into it found no session (the shell had already exited).
+#[cfg(unix)]
+fn shell_start_output(captured: &ResponseMock) -> String {
+    captured
+        .requests()
+        .iter()
+        .find_map(|request| request.function_call_output_text("call-open"))
+        .unwrap_or_else(|| "<no call-open output was sent>".to_string())
+}
+
 /// An MCP call whose arguments reach a credential needs the human after
 /// untrusted content, even where the server's tools run unasked and the tool
 /// calls itself read-only; with approvals off it is refused, and ordinary or
@@ -249,6 +261,10 @@ fn output_text(request: &ResponsesRequest, call_id: &str) -> String {
 async fn pf_23_s01_protected_mcp_call_after_untrusted_content_needs_the_human() -> anyhow::Result<()>
 {
     skip_if_no_network!(Ok(()));
+    skip_if_wine_exec!(
+        Ok(()),
+        "this security test runs host shell commands; Wine-exec routes them to a Windows executor with a non-native cwd"
+    );
     let protected = "~/.ssh/id_ed25519";
     let mcp_turn = |level, approval, message: &str| {
         start_turn(
@@ -343,9 +359,12 @@ async fn pf_23_s01_typing_a_protected_command_into_a_running_shell_needs_the_hum
     };
 
     let (test, captured) = stdin_turn(AskForApproval::OnRequest, "corbanu vault list\n").await?;
-    let question = next_question(&test)
-        .await
-        .expect("typing the vault command asks");
+    let Some(question) = next_question(&test).await else {
+        panic!(
+            "typing the vault command asks; the shell started with: {}",
+            shell_start_output(&captured)
+        );
+    };
     let text = &question.questions[0].question;
     assert!(text.contains("corbanu vault list"), "{text}");
     assert!(
@@ -414,6 +433,10 @@ async fn pf_23_s01_typing_a_protected_command_into_a_running_shell_needs_the_hum
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pf_23_s01_code_mode_cell_results_taint_its_later_calls() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
+    skip_if_wine_exec!(
+        Ok(()),
+        "this security test runs host shell commands; Wine-exec routes them to a Windows executor with a non-native cwd"
+    );
     // #553: code mode runs in the `codex-code-mode-host` process. Without
     // it the session falls back to direct tools and the cell never runs, so
     // this test would check nothing; say so instead of failing on the
@@ -3024,7 +3047,11 @@ async fn pf_23_s02_typing_into_a_shell_started_before_untrusted_content_is_confi
         assert!(next_question(&test).await.is_none(), "{approval:?}");
         let requests = captured.requests();
         let typed = output_text(&requests[2], "call-stdin");
-        assert!(typed.contains("typed-one"), "{typed}");
+        assert!(
+            typed.contains("typed-one"),
+            "{typed}\nthe shell started with: {}",
+            shell_start_output(&captured)
+        );
         assert!(!typed.contains(CANARY), "{approval:?}: {typed}");
         assert!(output_text(&requests[3], "call-again").contains("typed-two"));
     }

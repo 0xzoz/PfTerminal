@@ -56,6 +56,10 @@ exclude_slash_tmp = true
 /// legacy sandbox has no denied reads, so approved commands can leave it,
 /// and its "off" network and vault rows say so.
 #[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "workspace-write falls back to read-only on Windows without the Windows sandbox (#691)"
+)]
 async fn workspace_write_rows_name_the_escape_route() {
     let home = tempfile::tempdir().unwrap();
     let cwd = tempfile::tempdir().unwrap();

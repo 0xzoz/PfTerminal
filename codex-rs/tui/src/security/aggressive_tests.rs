@@ -607,6 +607,10 @@ async fn role_that_relaxes_strict_rules_fails_verification() {
 
 /// The launch check loads the whole exec policy the way a session does.
 #[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixture: the host_executable path /opt/elsewhere/corbanu is not absolute on Windows (#691)"
+)]
 async fn exec_policy_must_load_and_forbid_vault_commands() {
     let home = tempfile::tempdir().unwrap();
     let cwd = tempfile::tempdir().unwrap();

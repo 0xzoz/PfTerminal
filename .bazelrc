@@ -32,6 +32,14 @@ common:macos --test_env=PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr
 common:windows --test_env=SYSTEMROOT
 common:windows --test_env=COMSPEC
 common:windows --test_env=WINDIR
+# Windows-only tests read the profile folder (e.g. the protected-launch tests
+# under core/src/security); strict action env drops it otherwise.
+common:windows --test_env=USERPROFILE
+# Match `just test` (scripts/isolated_rust_tests.py): debug test binaries never
+# call the native keyring and use the profile-local fallback instead. Without it
+# a test that seeds a secret in-process (native keyring on Windows) and a child
+# started with this variable disagree about where the key lives (#631, #636).
+common --test_env=CORBANU_TEST_NO_NATIVE_KEYRING=1
 # Rust's libtest harness runs test bodies on std-spawned threads. The default
 # 2 MiB stack can be too small for large async test futures on Windows CI; see
 # https://github.com/openai/codex/pull/19067 for the motivating failure.

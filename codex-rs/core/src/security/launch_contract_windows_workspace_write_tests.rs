@@ -131,6 +131,12 @@ fn pf_27_s06_d2_tool_launch_carries_contract_denies_to_windows_sandbox() {
 
 #[tokio::test]
 async fn pf_27_s06_d2_vault_unreadable_through_tool_launch_under_workspace_write() {
+    // Bazel gives unit tests no codex-windows-sandbox-setup helper, so this
+    // runs under cargo on a Windows box (the Windows gates), not in nightly
+    // Bazel (#691).
+    if option_env!("BAZEL_PACKAGE").is_some() {
+        return;
+    }
     // Inside the user profile, like the default `~/.codex`.
     let profile_dir = std::env::var_os("USERPROFILE").expect("USERPROFILE");
     let codex_home_dir = tempfile::Builder::new()

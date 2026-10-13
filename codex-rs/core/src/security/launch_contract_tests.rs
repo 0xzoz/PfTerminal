@@ -303,14 +303,15 @@ fn pf_27_s02_environment_keeps_dummies_but_never_raw_values() {
         .contract
         .check_command(&["/bin/sh".to_string(), "-c".to_string()], &mut env)
         .expect("allowed");
-    assert_eq!(
-        env,
-        HashMap::from([
-            ("GITHUB_TOKEN".to_string(), dummy),
-            ("PATH".to_string(), "/usr/bin".to_string()),
-            ("ZDOTDIR".to_string(), PROTECTED_ZDOTDIR.to_string()),
-        ])
-    );
+    let mut expected = HashMap::from([
+        ("GITHUB_TOKEN".to_string(), dummy),
+        ("PATH".to_string(), "/usr/bin".to_string()),
+    ]);
+    // zsh's start-up folder is pinned on Unix only (`check_command`).
+    if cfg!(unix) {
+        expected.insert("ZDOTDIR".to_string(), PROTECTED_ZDOTDIR.to_string());
+    }
+    assert_eq!(env, expected);
 }
 
 #[test]
