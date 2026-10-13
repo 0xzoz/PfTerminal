@@ -3297,6 +3297,9 @@ async fn try_run_sampling_request(
             return Err(err);
         }
     };
+    // Tools called from this response that read the context usage wait until
+    // `response.completed` records it (#564).
+    let mut response_usage = Some(sess.begin_response_usage());
     let mut in_flight: FuturesOrdered<AbortOnDropHandle<CodexResult<ResponseInputItem>>> =
         FuturesOrdered::new();
     let mut needs_follow_up = false;
@@ -3713,6 +3716,7 @@ async fn try_run_sampling_request(
                 let budget_result = sess
                     .record_token_usage_info(&turn_context, token_usage.as_ref())
                     .await;
+                response_usage.take();
                 should_emit_token_count = true;
                 should_emit_turn_diff = true;
                 if let Err(err) = budget_result {

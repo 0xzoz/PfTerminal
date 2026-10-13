@@ -16,6 +16,37 @@ pub(crate) struct ContextWindowTokenStatus {
     pub(crate) token_limit_reached: bool,
 }
 
+/// #564: marks a sampling response as streaming until its usage is recorded
+/// (`response.completed`) or the stream ends without it.
+pub(crate) struct PendingResponseUsage<'a> {
+    pending: &'a tokio::sync::watch::Sender<bool>,
+}
+
+impl Drop for PendingResponseUsage<'_> {
+    fn drop(&mut self) {
+        self.pending.send_replace(false);
+    }
+}
+
+impl Session {
+    pub(crate) fn begin_response_usage(&self) -> PendingResponseUsage<'_> {
+        self.response_usage_pending.send_replace(true);
+        PendingResponseUsage {
+            pending: &self.response_usage_pending,
+        }
+    }
+
+    /// Waits until no response is streaming without its usage recorded, so a
+    /// tool called from a response (`get_context_remaining`) counts that
+    /// response's tokens. Tool calls start as soon as their item arrives,
+    /// usually before `response.completed` carries the usage.
+    pub(crate) async fn wait_for_response_usage(&self) {
+        let mut pending = self.response_usage_pending.subscribe();
+        // The sender lives as long as the session.
+        let _ = pending.wait_for(|pending| !*pending).await;
+    }
+}
+
 fn tokens_remaining(limit: Option<i64>, used: i64) -> Option<i64> {
     limit.map(|limit| limit.saturating_sub(used).max(0))
 }

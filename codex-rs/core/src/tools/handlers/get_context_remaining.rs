@@ -75,6 +75,8 @@ impl ToolExecutor<ToolInvocation> for GetContextRemainingHandler {
                 ));
             }
 
+            // Count the tokens of the response that made this call (#564).
+            invocation.session.wait_for_response_usage().await;
             let token_status = crate::session::context_window::context_window_token_status(
                 invocation.session.as_ref(),
                 invocation.turn.as_ref(),

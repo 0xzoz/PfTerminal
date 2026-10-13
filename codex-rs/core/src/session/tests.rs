@@ -6348,6 +6348,7 @@ pub(crate) async fn make_session_and_context_for_config(config: Config) -> (Sess
         git_enrichment_policy: GitEnrichmentPolicy::Fresh,
         fork_persistence: ForkPersistence::Copied,
         next_internal_sub_id: AtomicU64::new(0),
+        response_usage_pending: tokio::sync::watch::Sender::new(false),
     };
 
     session.mark_mcp_runtime_dirty();
@@ -8594,6 +8595,7 @@ where
         git_enrichment_policy: GitEnrichmentPolicy::Fresh,
         fork_persistence: ForkPersistence::Copied,
         next_internal_sub_id: AtomicU64::new(0),
+        response_usage_pending: tokio::sync::watch::Sender::new(false),
     });
 
     if start_submission_loop {
