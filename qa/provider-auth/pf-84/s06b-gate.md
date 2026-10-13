@@ -114,8 +114,10 @@ API key in `auth.json`; a decoy `OPENAI_API_KEY` is set throughout. Captures: [s
   after a mid-session switch to a default-account OpenAI provider.~~ Fixed in the PF-84 follow-up (below): they
   follow every mid-session switch, named to default, default to named and between named accounts.
 - ~~The model list is fetched with the account the process started on.~~ Fixed in the same follow-up: it follows the
-  account the user's session uses. Still open: `/status` rate limits before the first reply come from the default
-  login, and the app server's `/apps` directory listing (`app/list`) always uses the default login.
+  account the user's session uses. ~~Still open: `/status` rate limits before the first reply come from the default
+  login, and the app server's `/apps` directory listing (`app/list`) always uses the default login.~~ Fixed by #658:
+  the app server's own ChatGPT backend requests (also plugin listings, settings and analytics) use the session's
+  account.
 - The registry keeps each named manager's first base settings (`forced_login_method`, workspace, route) until it is
   dropped; a config reload does not update a live manager (the session-start check does run again).
 - `for_named_account` reads the vault while holding the registry lock; the `/status` card reads the vault on the UI
@@ -146,7 +148,7 @@ API key in `auth.json`; a decoy `OPENAI_API_KEY` is set throughout. Captures: [s
   again and say *Connectors, usage and the model list now use …*.
 - **Limits.** The process has one list: with several user sessions on different accounts (an app-server client with
   many threads) the last one to start or switch decides it. A process started on a provider without OpenAI sign-in
-  (e.g. `zai`) keeps that provider's list. Analytics events keep the manager the session started with. A turn running
+  (e.g. `zai`) keeps that provider's list. Analytics events follow the session's account (#658). A turn running
   across a switch is priced under its own provider's account but recorded under the session's current provider id
   (`accounting_binding`, unchanged). The switch reads a named account's ChatGPT or API-key sign-in from the vault under
   the session state lock (other kinds load on first use); accounting resolves the request's account per request, which

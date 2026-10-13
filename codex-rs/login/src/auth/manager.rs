@@ -2569,6 +2569,11 @@ pub struct AuthManager {
     hide_restricted_default_login: bool,
     /// Why the default login is hidden right now, if it is.
     hidden_default_login_reason: RwLock<Option<String>>,
+    /// PF-84-S06 (#658), on the default login's manager: the named sign-in
+    /// account the process's user session runs on, if any. Process-level
+    /// ChatGPT backend requests (plugin listings, settings, usage, analytics)
+    /// use [`AuthManager::for_session`], so they go out on that account.
+    session_account: RwLock<Option<NamedChatgptAccount>>,
 }
 
 #[derive(Debug)]
@@ -2749,6 +2754,7 @@ impl AuthManager {
             base_manager: None,
             hide_restricted_default_login: false,
             hidden_default_login_reason: RwLock::new(None),
+            session_account: RwLock::new(None),
             auth_route_config,
         }
     }
@@ -2782,6 +2788,7 @@ impl AuthManager {
             base_manager: None,
             hide_restricted_default_login: false,
             hidden_default_login_reason: RwLock::new(None),
+            session_account: RwLock::new(None),
             auth_route_config: crate::test_support::transport_default_auth_route_config(),
         })
     }
@@ -2814,6 +2821,7 @@ impl AuthManager {
             base_manager: None,
             hide_restricted_default_login: false,
             hidden_default_login_reason: RwLock::new(None),
+            session_account: RwLock::new(None),
             auth_route_config: crate::test_support::transport_default_auth_route_config(),
         })
     }
@@ -2854,6 +2862,7 @@ impl AuthManager {
             base_manager: None,
             hide_restricted_default_login: false,
             hidden_default_login_reason: RwLock::new(None),
+            session_account: RwLock::new(None),
             auth_route_config: crate::test_support::transport_default_auth_route_config(),
         })
     }
@@ -2905,6 +2914,7 @@ impl AuthManager {
             base_manager: None,
             hide_restricted_default_login: false,
             hidden_default_login_reason: RwLock::new(None),
+            session_account: RwLock::new(None),
             // External bearer auth refreshes by running the provider's command and never makes
             // auth-owned HTTP requests, so this route is intentionally inert.
             auth_route_config: AuthRouteConfig::from_http_client_factory(HttpClientFactory::new(

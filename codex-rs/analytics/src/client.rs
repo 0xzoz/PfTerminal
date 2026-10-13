@@ -615,7 +615,7 @@ impl AnalyticsEventsClient {
 }
 
 async fn send_track_events(
-    auth_manager: &AuthManager,
+    auth_manager: &Arc<AuthManager>,
     destination: &AnalyticsEventsDestination,
     mut events: Vec<TrackEventRequest>,
 ) {
@@ -623,7 +623,8 @@ async fn send_track_events(
         return;
     }
 
-    let Some(auth) = auth_manager.auth().await else {
+    // #658: on the sign-in the process's user session runs on.
+    let Some(auth) = auth_manager.for_session().auth().await else {
         return;
     };
     if auth.is_api_key_auth() {

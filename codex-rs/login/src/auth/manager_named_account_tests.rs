@@ -70,3 +70,41 @@ async fn an_unreadable_sign_in_is_still_removed() {
             .is_empty()
     );
 }
+
+/// #658: the process's backend requests follow the session's account: its
+/// named account's sign-in, never the default login, and nothing (not the
+/// default) when that account has no usable sign-in.
+#[tokio::test]
+async fn the_session_manager_follows_the_session_account_and_never_falls_back() {
+    let home = tempfile::tempdir().expect("home");
+    login_named_account_with_api_key(home.path(), &account("work"), "sk-canary-work")
+        .expect("sign-in");
+    let base = AuthManager::from_auth_for_testing_with_home(
+        CodexAuth::from_api_key("sk-canary-default"),
+        home.path().to_path_buf(),
+    );
+    let key = |manager: Arc<AuthManager>| async move {
+        manager
+            .auth()
+            .await
+            .and_then(|auth| auth.api_key().map(str::to_string))
+    };
+    assert_eq!(
+        key(base.for_session()).await.as_deref(),
+        Some("sk-canary-default")
+    );
+
+    let work = base.for_named_account(account("work"));
+    assert!(work.follow_session_account(Some(account("work"))));
+    assert!(!base.follow_session_account(Some(account("work"))));
+    for manager in [base.for_session(), work.for_session()] {
+        assert_eq!(manager.named_account(), Some(&account("work")));
+        assert_eq!(key(manager).await.as_deref(), Some("sk-canary-work"));
+    }
+
+    assert!(base.follow_session_account(Some(account("ghost"))));
+    assert_eq!(key(base.for_session()).await, None);
+
+    assert!(base.follow_session_account(/*account*/ None));
+    assert!(Arc::ptr_eq(&base.for_session(), &base));
+}

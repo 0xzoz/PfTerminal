@@ -166,14 +166,18 @@ fingerprint.
 - A refreshed token is saved back to that account only. One process shares
   one sign-in and refresh lock per account; other processes pick a refresh
   up from the vault.
-- A session on a named account uses it for what needs the sign-in: model
-  requests, refresh, connectors, plugin installs, usage, the model list and
-  the `/status` account line. A mid-session switch to another provider moves
-  all of them to that provider's account (or the default login). The process
-  has one model list: the last session started or switched decides its
-  account, and a process started on a provider without OpenAI sign-in keeps
-  that provider's list. The rate limits `/status` shows before the first
-  reply, and the `/apps` directory, come from the default login.
+- A session on a named account uses it for everything that needs the
+  sign-in: model requests, refresh, connectors, plugin installs and listings,
+  usage and rate limits (also before the first reply), the `/apps` directory,
+  ChatGPT settings, analytics, the model list and the `/status` account line.
+  The default login is never sent. A request the account cannot serve (for
+  example, a plugin listing on an API-key account, or any request on an
+  account without a usable sign-in) goes out without it or not at all, never
+  on the default login. A mid-session switch to another provider moves all of
+  them to that provider's account (or the default login). The process has one
+  such account, like its one model list: the last session started or switched
+  decides it, and a process started on a provider without OpenAI sign-in keeps
+  the default login for them.
 - `forced_login_method` and `forced_chatgpt_workspace_id` apply to named
   accounts too: a sign-in of the other kind or another workspace is refused.
   A session on a named account checks them against that account only and

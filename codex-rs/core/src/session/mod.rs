@@ -634,9 +634,12 @@ impl Session {
         };
 
         let mut config = Arc::new(config);
-        // PF-84: a user's session lists models with its own account's sign-in.
+        // PF-84: a user's session lists models with its own account's sign-in,
+        // and the process's own ChatGPT backend requests (plugin listings,
+        // settings, usage, analytics) use that sign-in too (#658).
         if !session_source.is_non_root_agent() {
             let account = codex_model_provider::named_sign_in_account(&config.model_provider);
+            auth_manager.follow_session_account(account.clone());
             models_manager.follow_sign_in_account(account.as_ref());
         }
         let refresh_strategy = if session_source.is_non_root_agent() {
@@ -1840,6 +1843,10 @@ impl Session {
             )
         };
         let account = codex_model_provider::named_sign_in_account(&provider);
+        // #658: the process's own ChatGPT backend requests follow the switch.
+        self.services
+            .auth_manager()
+            .follow_session_account(account.clone());
         if !self
             .services
             .models_manager

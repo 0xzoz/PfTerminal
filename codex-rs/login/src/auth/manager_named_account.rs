@@ -79,6 +79,47 @@ impl AuthManager {
             .unwrap_or_else(|| Arc::clone(self))
     }
 
+    /// PF-84-S06 (#658): records the named sign-in account the process's
+    /// user session runs on (`None`: the default login), so that
+    /// [`AuthManager::for_session`] serves it. A session calls this when it
+    /// starts and when it switches accounts; with several user sessions in a
+    /// process (an app-server client with many threads) the last one to
+    /// start or switch decides, as for the process's model list. Returns
+    /// whether it changed.
+    pub fn follow_session_account(self: &Arc<Self>, account: Option<NamedChatgptAccount>) -> bool {
+        let base = self.default_account_manager();
+        let mut current = base
+            .session_account
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *current == account {
+            return false;
+        }
+        *current = account;
+        true
+    }
+
+    /// PF-84-S06 (#658): the manager of the sign-in the process's user
+    /// session runs on: its named account's ([`AuthManager::follow_session_account`])
+    /// or the default login's. Requests the process makes for the session
+    /// outside a thread (plugin listings, settings, usage, analytics) use
+    /// this, so a session on a named account never sends the default login.
+    /// A named account without a usable sign-in yields no auth: such a
+    /// request goes out without credentials or not at all, never with the
+    /// default login.
+    pub fn for_session(self: &Arc<Self>) -> Arc<AuthManager> {
+        let base = self.default_account_manager();
+        let account = base
+            .session_account
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        match account {
+            Some(account) => base.for_named_account(account),
+            None => base,
+        }
+    }
+
     /// The named account this manager serves, if any.
     pub fn named_account(&self) -> Option<&NamedChatgptAccount> {
         self.named_account.as_ref()
@@ -139,6 +180,7 @@ impl AuthManager {
             base_manager: Some(base),
             hide_restricted_default_login: false,
             hidden_default_login_reason: RwLock::new(None),
+            session_account: RwLock::new(None),
         }
     }
 

@@ -770,6 +770,7 @@ pub async fn run_main_with_transport_options(
 
     let auth_manager =
         AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false).await;
+    follow_configured_session_account(&auth_manager, &config);
 
     let remote_control_enabled = remote_control_policy == RemoteControlPolicy::Allowed
         && remote_control_explicitly_requested
@@ -1367,6 +1368,16 @@ fn loader_overrides_with_test_user_config_file(
     let _ = test_user_config_file;
 
     Ok(loader_overrides)
+}
+
+/// PF-84-S06 (#658): until a thread starts, the server's own ChatGPT backend
+/// requests (plugin listings, settings, usage, analytics) use the account the
+/// configuration starts the session on, never the default login when that is
+/// a named sign-in account.
+pub(crate) fn follow_configured_session_account(auth_manager: &Arc<AuthManager>, config: &Config) {
+    auth_manager.follow_session_account(codex_model_provider::named_sign_in_account(
+        &config.model_provider,
+    ));
 }
 
 fn analytics_rpc_transport(transport: &AppServerTransport) -> AppServerRpcTransport {

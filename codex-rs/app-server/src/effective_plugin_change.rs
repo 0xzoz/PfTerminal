@@ -53,7 +53,7 @@ pub(crate) fn effective_plugins_changed_callback(
                     async move {
                         if let Err(err) = trust_materialized_plugin_hooks(
                             change.materialized_remote_plugins,
-                            &trust_auth_manager,
+                            &trust_auth_manager.for_session(),
                             &trust_thread_manager,
                             &trust_config_manager,
                             &trust_config_processor,

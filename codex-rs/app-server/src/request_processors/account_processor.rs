@@ -1142,7 +1142,8 @@ impl AccountRequestProcessor {
     async fn get_account_rate_limits_response(
         &self,
     ) -> Result<GetAccountRateLimitsResponse, JSONRPCErrorError> {
-        let Some(auth) = self.auth_manager.auth().await else {
+        // #658: the account the session runs on, never another one.
+        let Some(auth) = self.auth_manager.for_session().auth().await else {
             return Err(invalid_request(
                 "codex account authentication required to read rate limits",
             ));
@@ -1215,7 +1216,8 @@ impl AccountRequestProcessor {
     async fn get_account_token_usage_response(
         &self,
     ) -> Result<GetAccountTokenUsageResponse, JSONRPCErrorError> {
-        let Some(auth) = self.auth_manager.auth().await else {
+        // #658: the account the session runs on, never another one.
+        let Some(auth) = self.auth_manager.for_session().auth().await else {
             return Err(invalid_request(
                 "codex account authentication required to read token usage",
             ));
@@ -1245,7 +1247,8 @@ impl AccountRequestProcessor {
     async fn get_workspace_messages_response(
         &self,
     ) -> Result<GetWorkspaceMessagesResponse, JSONRPCErrorError> {
-        let Some(auth) = self.auth_manager.auth().await else {
+        // #658: the account the session runs on, never another one.
+        let Some(auth) = self.auth_manager.for_session().auth().await else {
             return Err(invalid_request(
                 "codex account authentication required to read workspace messages",
             ));
@@ -1336,7 +1339,8 @@ impl AccountRequestProcessor {
         &self,
         params: SendAddCreditsNudgeEmailParams,
     ) -> Result<AddCreditsNudgeEmailStatus, JSONRPCErrorError> {
-        let Some(auth) = self.auth_manager.auth().await else {
+        // #658: the account the session runs on, never another one.
+        let Some(auth) = self.auth_manager.for_session().auth().await else {
             return Err(invalid_request(
                 "codex account authentication required to notify workspace owner",
             ));

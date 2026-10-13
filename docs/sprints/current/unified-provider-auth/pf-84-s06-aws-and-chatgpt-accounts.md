@@ -66,7 +66,7 @@ Paths are under `codex-rs/`, at `ee530a0e26`.
 ## Remaining
 
 - [ ] Code-blind functional design frozen before test-result disclosure (independent acceptance).
-- [ ] Before the flag is removed: early `/status` rate limits and the `/apps` directory still come from the default login.
+- [x] Before the flag is removed: early `/status` rate limits, the `/apps` directory, plugin listings, ChatGPT settings and analytics use the session's account, never the default login (#658).
 
 ## Verification
 

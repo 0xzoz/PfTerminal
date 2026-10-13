@@ -90,7 +90,7 @@ impl FeedbackRequestProcessor {
             upload_tags.insert("effort".to_string(), format!("{reasoning_effort:?}"));
         }
 
-        let auth = self.auth_manager.auth_cached();
+        let auth = self.auth_manager.for_session().auth_cached();
         if let Some(chatgpt_user_id) = auth
             .as_ref()
             .and_then(codex_login::CodexAuth::get_chatgpt_user_id)

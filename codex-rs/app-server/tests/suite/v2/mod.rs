@@ -46,6 +46,7 @@ mod memory_reset;
 mod model_list;
 mod model_provider_capabilities_read;
 mod multi_agent_v2_developer_instructions;
+mod named_session_account_backend;
 mod output_schema;
 mod permission_profile_list;
 mod plan_item;
