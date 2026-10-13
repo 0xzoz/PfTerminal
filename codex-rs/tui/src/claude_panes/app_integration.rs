@@ -822,7 +822,7 @@ impl App {
                         .unwrap_or_else(|| role.label().to_string()),
                     crate::dispatch_queue::SavedNativeSpawnRuntime {
                         model: profile_config.provider_model.to_string(),
-                        provider: format!("external-claude:{profile:?}").to_ascii_lowercase(),
+                        provider: profile.crew_runtime_provider_id(),
                         reasoning_effort: None,
                     },
                 ) {
