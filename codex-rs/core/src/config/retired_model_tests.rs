@@ -7,6 +7,7 @@ use codex_config::config_toml::ConfigToml;
 use codex_model_provider_info::ANTHROPIC_DEFAULT_MODEL;
 use codex_model_provider_info::ANTHROPIC_LEGACY_OPUS_4_8_MODEL;
 use codex_model_provider_info::ANTHROPIC_PROVIDER_ID;
+use codex_model_provider_info::CLAUDE_FABLE_5_MODEL;
 use codex_model_provider_info::CLAUDE_PLAN_LEGACY_OPUS_4_8_MODEL;
 use codex_model_provider_info::CLAUDE_PLAN_MODEL;
 use codex_model_provider_info::CLAUDE_PLAN_PROVIDER_ID;
@@ -35,10 +36,20 @@ fn assert_notice(config: &Config, retired: &str, replacement: &str) {
 async fn config_pin_on_retired_opus_4_8_plan_moves_to_the_plan_default() -> std::io::Result<()> {
     // With and without an explicit provider: both shapes are what an upgrade
     // from 0.1.20 left in `config.toml`.
-    for config_toml in [
-        format!("model = {CLAUDE_PLAN_LEGACY_OPUS_4_8_MODEL:?}\n"),
-        format!(
-            "model_provider = {CLAUDE_PLAN_PROVIDER_ID:?}\nmodel = {CLAUDE_PLAN_LEGACY_OPUS_4_8_MODEL:?}\n"
+    for (config_toml, retired) in [
+        (
+            format!("model = {CLAUDE_PLAN_LEGACY_OPUS_4_8_MODEL:?}\n"),
+            CLAUDE_PLAN_LEGACY_OPUS_4_8_MODEL,
+        ),
+        (
+            format!("model = {ANTHROPIC_LEGACY_OPUS_4_8_MODEL:?}\n"),
+            ANTHROPIC_LEGACY_OPUS_4_8_MODEL,
+        ),
+        (
+            format!(
+                "model_provider = {CLAUDE_PLAN_PROVIDER_ID:?}\nmodel = {CLAUDE_PLAN_LEGACY_OPUS_4_8_MODEL:?}\n"
+            ),
+            CLAUDE_PLAN_LEGACY_OPUS_4_8_MODEL,
         ),
     ] {
         let config = load(&config_toml, ConfigOverrides::default()).await?;
@@ -51,11 +62,7 @@ async fn config_pin_on_retired_opus_4_8_plan_moves_to_the_plan_default() -> std:
             Some(CLAUDE_PLAN_MODEL),
             "{config_toml}"
         );
-        assert_notice(
-            &config,
-            CLAUDE_PLAN_LEGACY_OPUS_4_8_MODEL,
-            CLAUDE_PLAN_MODEL,
-        );
+        assert_notice(&config, retired, CLAUDE_PLAN_MODEL);
     }
     Ok(())
 }
@@ -152,10 +159,8 @@ async fn other_providers_keep_their_handling_without_a_retirement_notice() -> st
         ConfigOverrides::default(),
     )
     .await?;
-    assert_ne!(
-        config.model.as_deref(),
-        Some(ANTHROPIC_LEGACY_OPUS_4_8_MODEL)
-    );
+    // That provider's own default, as before.
+    assert_eq!(config.model.as_deref(), Some(CLAUDE_FABLE_5_MODEL));
     no_notice(&config);
     Ok(())
 }
