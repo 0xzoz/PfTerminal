@@ -3300,9 +3300,9 @@ mod tests {
 
     /// #536: with pinned roots, each writable root is bound with `--bind-fd`
     /// from the folder opened at its pinned location (never `--bind` by
-    /// path), `/dev/null` stays the first preserved file for the
-    /// `--ro-bind-data` masks, a root swapped for a link is refused, and so
-    /// is a bubblewrap without `--bind-fd`.
+    /// path), each `--ro-bind-data` mask reads its own `/dev/null`
+    /// descriptor, a root swapped for a link is refused, and so is a
+    /// bubblewrap without `--bind-fd`.
     #[test]
     fn pinned_writable_roots_are_bound_from_checked_folders() {
         let temp_dir = TempDir::new().expect("temp dir");
