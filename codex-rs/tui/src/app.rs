@@ -1029,17 +1029,40 @@ fn active_turn_steer_race(error: &TypedRequestError) -> Option<ActiveTurnSteerRa
     Some(ActiveTurnSteerRace::ExpectedTurnMismatch { actual_turn_id })
 }
 
-fn session_start_error(
+/// A resume/fork the app server refused (archived thread, account rules, ...)
+/// ends the launch with a plain `ERROR:` line like other launch refusals (#656).
+/// Anything else (transport failure, bad response) stays an error report.
+fn session_start_failure(
     action: &str,
     target_session: &SessionTarget,
     err: color_eyre::eyre::Report,
-) -> color_eyre::eyre::Report {
+) -> Result<AppExitInfo> {
     if let Some(message) = archived_session_guidance(&err) {
-        return color_eyre::eyre::eyre!("{message}");
+        return Ok(AppExitInfo::fatal(message));
+    }
+    if let Some(message) = session_start_refusal(action, &err) {
+        let thread_id = target_session.thread_id;
+        return Ok(AppExitInfo::fatal(format!(
+            "Could not {action} session {thread_id}: {message}"
+        )));
     }
 
     let target_label = target_session.display_label();
-    color_eyre::eyre::eyre!("Failed to {action} session from {target_label}: {err}")
+    Err(color_eyre::eyre::eyre!(
+        "Failed to {action} session from {target_label}: {err}"
+    ))
+}
+
+/// The server's own message when `thread/{action}` was answered with a
+/// JSON-RPC error, without the bootstrap context and error code.
+fn session_start_refusal(action: &str, err: &color_eyre::eyre::Report) -> Option<String> {
+    let err = err.to_string();
+    let server_prefix = format!("thread/{action} failed: ");
+    let message = &err[err.find(&server_prefix)? + server_prefix.len()..];
+    let (message, code) = message.rsplit_once(" (code ")?;
+    code.strip_suffix(')')?.parse::<i64>().ok()?;
+    let message = message.trim();
+    (!message.is_empty()).then(|| message.to_string())
 }
 
 fn archived_session_guidance(err: &color_eyre::eyre::Report) -> Option<String> {
@@ -1385,7 +1408,7 @@ impl App {
                         &config,
                         &harness_overrides,
                     );
-                let resumed = app_server
+                let resumed = match app_server
                     .resume_thread(
                         config.clone(),
                         target_session.thread_id,
@@ -1393,7 +1416,10 @@ impl App {
                         permission_settings,
                     )
                     .await
-                    .map_err(|err| session_start_error("resume", &target_session, err))?;
+                {
+                    Ok(resumed) => resumed,
+                    Err(err) => return session_start_failure("resume", &target_session, err),
+                };
                 apply_persisted_resume_runtime(
                     &mut config,
                     Some(&resumed.session.model),
@@ -1451,10 +1477,13 @@ impl App {
                     /*inc*/ 1,
                     &[("source", "cli_subcommand")],
                 );
-                let forked = app_server
+                let forked = match app_server
                     .fork_thread(config.clone(), target_session.thread_id)
                     .await
-                    .map_err(|err| session_start_error("fork", &target_session, err))?;
+                {
+                    Ok(forked) => forked,
+                    Err(err) => return session_start_failure("fork", &target_session, err),
+                };
                 let init = crate::chatwidget::ChatWidgetInit {
                     config: config.clone(),
                     frame_requester: tui.frame_requester(),
