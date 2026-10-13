@@ -15,7 +15,9 @@ worker's parent, or a fork's source conversation, runs on),
 `[provider_accounts] <provider> = "<name>"`, `default`.
 
 A fork (`/fork`, editing an earlier prompt, `/side`, `corbanu fork`) runs on
-the account its source conversation runs on, and `/status` names it.
+the account its source conversation runs on, and `/status` names it. A fork
+cut at an earlier turn also uses the conversation's current account, not the
+one that turn ran on, as a resume does.
 
 - `--account <name>` selects an account of the provider you launch with. On
   `resume`, write `<provider>:<name>` if the thread runs on another provider.
