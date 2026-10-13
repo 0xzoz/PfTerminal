@@ -264,7 +264,12 @@ async fn a_request_without_an_id_ends_the_turn() {
 async fn a_second_result_is_an_error() {
     let dir = tempfile::tempdir().expect("tempdir");
     let script = format!("{}sleep 30", emit(&[RESULT, RESULT]));
-    let output = run(plan_for(&dir, script), CancellationToken::new(), None).await;
+    let output = run(
+        plan_for(&dir, script),
+        CancellationToken::new(),
+        /*tx*/ None,
+    )
+    .await;
     assert_eq!(
         output.status,
         ClaudePaneTurnStatus::ProviderError,
@@ -298,7 +303,7 @@ async fn interrupting_a_turn_closes_its_open_popups() {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     assert_eq!(person.asked().len(), 1);
-    assert!(!person.responder(0).is_settled());
+    assert!(!person.responder(/*index*/ 0).is_settled());
     cancel.cancel();
     let output = turn.await.expect("turn task");
     assert_eq!(
@@ -312,7 +317,7 @@ async fn interrupting_a_turn_closes_its_open_popups() {
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    assert!(person.responder(0).is_settled());
+    assert!(person.responder(/*index*/ 0).is_settled());
     assert_eq!(*person.settled.lock().unwrap(), 1);
 }
 
@@ -338,8 +343,8 @@ async fn claude_code_can_withdraw_a_request() {
     let answer_second = tokio::spawn(async move {
         loop {
             let asked = answering.asked.lock().unwrap().len();
-            if asked == 2 && answering.responder(0).is_settled() {
-                answering.responder(1).respond(/*allow*/ false);
+            if asked == 2 && answering.responder(/*index*/ 0).is_settled() {
+                answering.responder(/*index*/ 1).respond(/*allow*/ false);
                 return;
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
@@ -369,7 +374,7 @@ async fn claude_exiting_before_reading_the_prompt_ends_the_turn() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut plan = plan_for(&dir, "exit 3".to_string());
     plan.stdin_prompt = Some("p".repeat(1 << 20));
-    let output = run(plan, CancellationToken::new(), None).await;
+    let output = run(plan, CancellationToken::new(), /*tx*/ None).await;
     assert_ne!(output.status, ClaudePaneTurnStatus::Success, "{output:?}");
 }
 
@@ -389,7 +394,7 @@ async fn prompts_larger_than_a_pipe_buffer_arrive_whole() {
     let mut plan = plan_for(&dir, script);
     let prompt = "q".repeat(300 * 1024);
     plan.stdin_prompt = Some(prompt.clone());
-    let output = run(plan, CancellationToken::new(), None).await;
+    let output = run(plan, CancellationToken::new(), /*tx*/ None).await;
     assert_eq!(output.status, ClaudePaneTurnStatus::Success, "{output:?}");
     assert_eq!(
         read_json(&dir, "prompt.json")["message"]["content"],

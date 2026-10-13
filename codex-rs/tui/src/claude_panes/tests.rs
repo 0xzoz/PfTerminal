@@ -4799,7 +4799,11 @@ fn kill_switch_refuses_claude_pane_turns() {
         )
         .expect("create pane");
     let switch = |choice| {
-        let basis = LevelBasis::read(codex_home.path(), SecurityLevel::Permissive, None);
+        let basis = LevelBasis::read(
+            codex_home.path(),
+            SecurityLevel::Permissive,
+            /*thread*/ None,
+        );
         commit_human_revocation(
             codex_home.path(),
             SecurityLevel::Permissive,

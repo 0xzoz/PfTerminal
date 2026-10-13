@@ -93,23 +93,23 @@ fn list_review_and_saved_screens() {
         /*preflight_input*/ None,
         RuntimeKeymap::defaults().list,
     );
-    insta::assert_snapshot!("security_level_picker_list", render(&picker, 80));
+    insta::assert_snapshot!("security_level_picker_list", render(&picker, /*width*/ 80));
     picker.handle_key_event(key(KeyCode::Down));
     picker.handle_key_event(key(KeyCode::Enter));
     insta::assert_snapshot!(
         "security_level_picker_moderate_unavailable",
-        render(&picker, 80)
+        render(&picker, /*width*/ 80)
     );
     picker.handle_key_event(key(KeyCode::Down));
     picker.handle_key_event(key(KeyCode::Enter));
     insta::assert_snapshot!(
         "security_level_picker_review_aggressive",
-        render(&picker, 80)
+        render(&picker, /*width*/ 80)
     );
     picker.handle_key_event(key(KeyCode::Enter));
     insta::assert_snapshot!(
         "security_level_picker_saved_aggressive",
-        render(&picker, 80)
+        render(&picker, /*width*/ 80)
     );
     assert_eq!(
         level::load(home.path()),
@@ -164,12 +164,12 @@ fn return_to_permissive_while_aggressive_is_active() {
     picker.handle_key_event(key(KeyCode::Enter));
     insta::assert_snapshot!(
         "security_level_picker_review_permissive",
-        render(&picker, 80)
+        render(&picker, /*width*/ 80)
     );
     picker.handle_key_event(key(KeyCode::Enter));
     insta::assert_snapshot!(
         "security_level_picker_saved_permissive_pending",
-        render(&picker, 80)
+        render(&picker, /*width*/ 80)
     );
     // The session is still Aggressive, so its vault rule file stays until the
     // restart that activates Permissive (#203).
@@ -196,7 +196,8 @@ fn unreadable_state_is_reported_and_aggressive_selected() {
         /*preflight_input*/ None,
         RuntimeKeymap::defaults().list,
     );
-    let rendered = render(&picker, 400).replace(&home.path().display().to_string(), "<home>");
+    let rendered =
+        render(&picker, /*width*/ 400).replace(&home.path().display().to_string(), "<home>");
     insta::assert_snapshot!("security_level_picker_unreadable", rendered);
 }
 
@@ -234,7 +235,7 @@ fn tall_review_scrolls_to_its_last_line() {
     );
     picker.handle_key_event(key(KeyCode::Up));
     picker.handle_key_event(key(KeyCode::Enter));
-    let line_count = picker.lines(80).len();
+    let line_count = picker.lines(/*width*/ 80).len();
     let body_height = 12;
     let max = (line_count - usize::from(body_height)) as u16;
     assert_eq!(picker.scroll_for(line_count, body_height), 0);
@@ -242,7 +243,7 @@ fn tall_review_scrolls_to_its_last_line() {
         picker.handle_key_event(key(KeyCode::Down));
     }
     assert_eq!(picker.scroll_for(line_count, body_height), max);
-    let mut visible = picker.lines(80).split_off(usize::from(max));
+    let mut visible = picker.lines(/*width*/ 80).split_off(usize::from(max));
     visible.push(Line::from(picker.footer()));
     let area = Rect::new(0, 0, 80, visible.len() as u16);
     let mut buffer = Buffer::empty(area);
@@ -290,7 +291,7 @@ fn nested_agents_switch_from_the_aggressive_review() {
 
     picker.handle_key_event(key(KeyCode::Enter));
     picker.handle_key_event(key(KeyCode::Char('n')));
-    let review = render(&picker, 80);
+    let review = render(&picker, /*width*/ 80);
     assert!(
         review.contains("Nested agents: pass.") && review.contains("n refuse/pass"),
         "{review}"
@@ -298,7 +299,7 @@ fn nested_agents_switch_from_the_aggressive_review() {
     picker.handle_key_event(key(KeyCode::Enter));
     insta::assert_snapshot!(
         "security_level_picker_saved_nested_pass",
-        render(&picker, 80)
+        render(&picker, /*width*/ 80)
     );
     assert_eq!(
         level::load_state(home.path()),
@@ -370,7 +371,7 @@ mod pf_29_s01 {
     }
 
     fn text(picker: &SecurityLevelPicker) -> String {
-        render(picker, 400)
+        render(picker, /*width*/ 400)
     }
 
     #[test]
@@ -583,7 +584,7 @@ mod pf_29_s02 {
     }
 
     fn text(picker: &SecurityLevelPicker) -> String {
-        render(picker, 400)
+        render(picker, /*width*/ 400)
     }
 
     #[test]
@@ -747,7 +748,7 @@ mod pf_24_s02 {
         }
 
         fn text(&self, picker: &SecurityLevelPicker) -> String {
-            render(picker, 400).replace(&self.root.path().display().to_string(), "<root>")
+            render(picker, /*width*/ 400).replace(&self.root.path().display().to_string(), "<root>")
         }
 
         fn stored(&self) -> (StoredLevel, StoredSecurityState) {
@@ -781,7 +782,7 @@ mod pf_24_s02 {
         picker.handle_key_event(key(KeyCode::Enter));
         insta::assert_snapshot!(
             "security_confirm_saved_aggressive_core",
-            render(&picker, 80)
+            render(&picker, /*width*/ 80)
         );
         assert_eq!(
             machine.stored(),
@@ -805,7 +806,10 @@ mod pf_24_s02 {
         let (mut picker, _rx) = machine.picker(ChosenLevel::Aggressive);
         picker.handle_key_event(key(KeyCode::Down));
         picker.handle_key_event(key(KeyCode::Enter));
-        insta::assert_snapshot!("security_confirm_review_downgrade", render(&picker, 80));
+        insta::assert_snapshot!(
+            "security_confirm_review_downgrade",
+            render(&picker, /*width*/ 80)
+        );
         // Esc restores the prior state: nothing was written.
         picker.handle_key_event(key(KeyCode::Esc));
         assert_eq!(
@@ -1014,24 +1018,24 @@ fn pf_25_s02_kill_switch_status_and_g_key() {
         use crate::legacy_core::security_level_change::SecurityLevel;
         use crate::legacy_core::security_revocation::HumanRevocation;
         use crate::legacy_core::security_revocation::commit_human_revocation;
-        let basis = LevelBasis::read(home.path(), SecurityLevel::Permissive, None);
+        let basis = LevelBasis::read(home.path(), SecurityLevel::Permissive, /*thread*/ None);
         commit_human_revocation(
             home.path(),
             SecurityLevel::Permissive,
-            None,
+            /*thread*/ None,
             &basis,
             HumanRevocation::KillSwitchOn,
-            1_000,
+            /*now_unix_seconds*/ 1_000,
         )
         .unwrap();
     }
     let mut picker = SecurityLevelPicker::new(
         &context(home.path(), ChosenLevel::Permissive),
         current(),
-        None,
+        /*preflight_input*/ None,
         RuntimeKeymap::defaults().list,
     );
-    let text = render(&picker, 120);
+    let text = render(&picker, /*width*/ 120);
     assert!(text.contains("Kill switch: on"), "{text}");
     assert!(text.contains("g grants and kill switch"), "{text}");
     picker.handle_key_event(key(KeyCode::Char('k')));

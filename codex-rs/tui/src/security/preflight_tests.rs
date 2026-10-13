@@ -148,7 +148,7 @@ fn pf_29_s01_resume_refused_for_conversations_before_activation() {
         assert!(refusal_for(&context(Some(boundary)), &fresh).is_some());
     }
     // Flag off (no boundary) or Permissive: today's behaviour.
-    assert_eq!(refusal_for(&context(None), &fresh), None);
+    assert_eq!(refusal_for(&context(/*boundary*/ None), &fresh), None);
     let mut permissive = context(Some(Boundary::Unverified("x".to_string())));
     permissive.active = ChosenLevel::Permissive;
     assert_eq!(refusal_for(&permissive, &fresh), None);

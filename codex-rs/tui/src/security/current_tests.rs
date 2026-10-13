@@ -70,8 +70,8 @@ async fn workspace_write_rows_name_the_escape_route() {
     let open = build(
         home.path(),
         cwd.path(),
-        &workspace_write(extra.path(), true),
-        false,
+        &workspace_write(extra.path(), /*network*/ true),
+        /*aggressive_level*/ false,
     )
     .await;
     let [sandbox, approvals, network, vault, _, _] = current_values(&open);
@@ -90,8 +90,8 @@ async fn workspace_write_rows_name_the_escape_route() {
     let closed = build(
         home.path(),
         cwd.path(),
-        &workspace_write(extra.path(), false),
-        false,
+        &workspace_write(extra.path(), /*network*/ false),
+        /*aggressive_level*/ false,
     )
     .await;
     let [_, _, network, _, _, _] = current_values(&closed);
@@ -110,8 +110,8 @@ async fn aggressive_rows_claim_only_what_is_enforced() {
     let config = build(
         home.path(),
         cwd.path(),
-        &workspace_write(extra.path(), true),
-        true,
+        &workspace_write(extra.path(), /*network*/ true),
+        /*aggressive_level*/ true,
     )
     .await;
     // #391: the stored level the launch path reads turns the model key
@@ -137,7 +137,7 @@ async fn aggressive_rows_claim_only_what_is_enforced() {
 async fn model_keys_row_reports_the_broker_setting() {
     let home = tempfile::tempdir().unwrap();
     let cwd = tempfile::tempdir().unwrap();
-    let mut config = build(home.path(), cwd.path(), "", false).await;
+    let mut config = build(home.path(), cwd.path(), "", /*aggressive_level*/ false).await;
     assert_eq!(
         current_values(&config)[4],
         "Corbanu reads provider keys itself (broker_model_auth off)"
@@ -165,8 +165,8 @@ async fn issue_440_vault_row_says_the_environment_is_allowlisted_under_secretles
     let mut config = build(
         home.path(),
         cwd.path(),
-        &workspace_write(extra.path(), true),
-        true,
+        &workspace_write(extra.path(), /*network*/ true),
+        /*aggressive_level*/ true,
     )
     .await;
     // Enabled after loading, so this test process is not armed.
@@ -296,8 +296,15 @@ request_permissions_tool = {request_tools}
 "#
         )
     };
-    let [_, _, network, vault, _, _] =
-        current_values(&build(home.path(), cwd.path(), &user_config(true), false).await);
+    let [_, _, network, vault, _, _] = current_values(
+        &build(
+            home.path(),
+            cwd.path(),
+            &user_config(true),
+            /*aggressive_level*/ false,
+        )
+        .await,
+    );
     assert_eq!(
         [network, vault.split("; ").next().unwrap().to_string()],
         [
@@ -305,8 +312,15 @@ request_permissions_tool = {request_tools}
             "the vault store and sign-in file are unreadable (unless an approved permission request grants access) to agent commands".to_string(),
         ]
     );
-    let [sandbox, _, network, _, _, _] =
-        current_values(&build(home.path(), cwd.path(), &user_config(false), false).await);
+    let [sandbox, _, network, _, _, _] = current_values(
+        &build(
+            home.path(),
+            cwd.path(),
+            &user_config(false),
+            /*aggressive_level*/ false,
+        )
+        .await,
+    );
     assert_eq!(
         [sandbox, network],
         [
@@ -331,8 +345,8 @@ async fn sec_437_thread_settings_keep_the_aggressive_rows() {
     let mut config = build(
         home.path(),
         cwd.path(),
-        &workspace_write(extra.path(), true),
-        true,
+        &workspace_write(extra.path(), /*network*/ true),
+        /*aggressive_level*/ true,
     )
     .await;
     let before = current_values(&config);
@@ -405,7 +419,7 @@ async fn sec_437_thread_settings_keep_the_aggressive_rows() {
     assert_eq!(
         crate::app::thread_settings::permission_profile_for_thread_settings(
             &profile,
-            None,
+            /*materialized*/ None,
             active.as_ref(),
             &changed,
         ),

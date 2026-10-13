@@ -40,7 +40,7 @@ fn render(picker: &SecurityLevelPicker, width: u16) -> String {
 
 /// One line per paragraph, so phrases never break across lines.
 fn text(picker: &SecurityLevelPicker) -> String {
-    render(picker, 1000)
+    render(picker, /*width*/ 1000)
 }
 
 /// A Permissive session with the activation preflight on. With `live`, its
@@ -155,7 +155,10 @@ fn issue_443_screen_07_names_what_applies_now_and_at_restart() {
         saved.contains("commands already running keep the permissions they started with"),
         "{saved}"
     );
-    insta::assert_snapshot!("issue_443_saved_aggressive_live", render(&picker, 80));
+    insta::assert_snapshot!(
+        "issue_443_saved_aggressive_live",
+        render(&picker, /*width*/ 80)
+    );
 
     // Esc, then /security again: the list says the same.
     picker.screen = Screen::List { note: None };

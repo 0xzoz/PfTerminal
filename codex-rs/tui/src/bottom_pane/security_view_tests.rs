@@ -136,14 +136,14 @@ fn pf_25_s02_grants_view_opens_and_returns() {
         use crate::legacy_core::security_level_change::SecurityLevel;
         use crate::legacy_core::security_revocation::HumanRevocation;
         use crate::legacy_core::security_revocation::commit_human_revocation;
-        let basis = LevelBasis::read(home.path(), SecurityLevel::Permissive, None);
+        let basis = LevelBasis::read(home.path(), SecurityLevel::Permissive, /*thread*/ None);
         commit_human_revocation(
             home.path(),
             SecurityLevel::Permissive,
-            None,
+            /*thread*/ None,
             &basis,
             HumanRevocation::KillSwitchOn,
-            1_000,
+            /*now_unix_seconds*/ 1_000,
         )
         .unwrap();
     }
@@ -163,7 +163,7 @@ fn pf_25_s02_grants_view_opens_and_returns() {
         picker: Some(SecurityLevelPicker::new(
             &context,
             current(),
-            None,
+            /*preflight_input*/ None,
             RuntimeKeymap::defaults().list,
         )),
         revocations: None,
@@ -171,13 +171,13 @@ fn pf_25_s02_grants_view_opens_and_returns() {
         inspector: None,
     };
     view.handle_key_event(key(KeyCode::Char('g')));
-    let text = snapshot(&view, 90);
+    let text = snapshot(&view, /*width*/ 90);
     assert!(text.contains("Grants and kill switch"), "{text}");
     assert!(text.contains("Kill switch: on"), "{text}");
     view.handle_key_event(key(KeyCode::Esc));
     assert!(view.revocations.is_none());
     assert!(!view.is_complete());
-    assert!(snapshot(&view, 90).contains("Security level"));
+    assert!(snapshot(&view, /*width*/ 90).contains("Security level"));
 }
 
 /// PF-41-S01: an open inspector keeps redrawing, so its observation age and

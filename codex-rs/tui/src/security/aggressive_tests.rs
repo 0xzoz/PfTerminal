@@ -861,7 +861,10 @@ async fn issue_442_launch_check_requires_credential_names() {
     let home = tempfile::tempdir().unwrap();
     let config = load(home.path(), cwd.path(), "").await;
     let origin = config.codex_home.to_path_buf();
-    assert_eq!(verify(&config, true, &origin), Vec::<String>::new());
+    assert_eq!(
+        verify(&config, /*rules_present*/ true, &origin),
+        Vec::<String>::new()
+    );
     let globs = config
         .permissions
         .file_system_sandbox_policy()
@@ -874,7 +877,7 @@ async fn issue_442_launch_check_requires_credential_names() {
     without_credential_names(&mut cli);
     let config = load_with(home.path(), cwd.path(), "", cli).await;
     assert_eq!(
-        verify(&config, true, &origin),
+        verify(&config, /*rules_present*/ true, &origin),
         vec![
             "Sandbox: credential files created later (.env, .env.* (except .env.example, .env.sample and .env.template) and .envrc) would be readable to agent commands"
                 .to_string()
@@ -933,7 +936,11 @@ async fn issue_442_credential_files_created_later_stay_unreadable_under_seatbelt
     deny_reads(&mut cli, &[cwd.join(".env")]);
     let config = load_with(home.path(), &cwd, "", cli).await;
     assert_eq!(
-        verify(&config, true, &config.codex_home.to_path_buf()),
+        verify(
+            &config,
+            /*rules_present*/ true,
+            &config.codex_home.to_path_buf()
+        ),
         Vec::<String>::new()
     );
 
@@ -1024,11 +1031,14 @@ async fn issue_442_launch_check_names_unsafe_credential_files() {
     let home = tempfile::tempdir().unwrap();
     let config = load(home.path(), &work, "").await;
     let origin = config.codex_home.to_path_buf();
-    assert_eq!(verify(&config, true, &origin), Vec::<String>::new());
+    assert_eq!(
+        verify(&config, /*rules_present*/ true, &origin),
+        Vec::<String>::new()
+    );
 
     std::os::unix::fs::symlink("../notes.txt", work.join("app/.envrc")).unwrap();
     std::fs::hard_link(work.join("notes.txt"), work.join(".env.hard")).unwrap();
-    let mut failures = verify(&config, true, &origin);
+    let mut failures = verify(&config, /*rules_present*/ true, &origin);
     failures.sort();
     assert_eq!(failures.len(), 2, "{failures:?}");
     assert!(
@@ -1075,7 +1085,10 @@ async fn issue_442_credential_templates_are_exempt() {
     let home = tempfile::tempdir().unwrap();
     let config = load(home.path(), &work, "").await;
     let origin = config.codex_home.to_path_buf();
-    assert_eq!(verify(&config, true, &origin), Vec::<String>::new());
+    assert_eq!(
+        verify(&config, /*rules_present*/ true, &origin),
+        Vec::<String>::new()
+    );
     let matcher = codex_protocol::permissions::ReadDenyMatcher::new(
         &config.permissions.file_system_sandbox_policy(),
         &work,
