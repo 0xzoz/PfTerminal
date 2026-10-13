@@ -64,6 +64,9 @@ pub(crate) struct Session {
     pub(super) git_enrichment_policy: GitEnrichmentPolicy,
     pub(super) fork_persistence: ForkPersistence,
     pub(super) next_internal_sub_id: AtomicU64,
+    /// #564: sampling responses streaming whose usage is not recorded yet
+    /// (see `begin_response_usage`).
+    pub(super) response_usage_pending: watch::Sender<usize>,
 }
 
 #[derive(Clone)]
@@ -1305,6 +1308,7 @@ impl Session {
                 git_enrichment_policy,
                 fork_persistence,
                 next_internal_sub_id: AtomicU64::new(0),
+                response_usage_pending: watch::Sender::new(0),
             });
             if let Some(network_policy_decider_session) = network_policy_decider_session {
                 let mut guard = network_policy_decider_session.write().await;

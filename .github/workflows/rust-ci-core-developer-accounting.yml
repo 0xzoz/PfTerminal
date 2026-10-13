@@ -94,7 +94,6 @@ jobs:
       - name: Disk space after the helper builds
         run: df -h . "${CARGO_TARGET_DIR}"
 
-      # Skipped until #564 is fixed: it fails only with developer-accounting.
       - name: "cargo nextest codex-core --features developer-accounting"
         run: |
           set -euo pipefail
@@ -103,8 +102,7 @@ jobs:
             "CARGO_BIN_EXE_codex-linux-sandbox=${sandbox_helper}" \
             "CARGO_BIN_EXE_codex_linux_sandbox=${sandbox_helper}" \
             cargo nextest run --locked --no-fail-fast \
-              -p codex-core --features developer-accounting \
-              -E 'not test(token_budget_auto_compact_fallback_uses_buffer_until_new_context)'
+              -p codex-core --features developer-accounting
 
       - name: Upload the nextest report
         if: failure()
