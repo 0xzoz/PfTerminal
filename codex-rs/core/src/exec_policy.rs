@@ -483,6 +483,7 @@ impl ExecPolicyManager {
                                     );
                                     aggressive::suspended_note(&aggressive::suspended_prefixes(
                                         &full,
+                                        &self.aggressive_approved.load(),
                                     ))
                                 })
                                 .flatten(),

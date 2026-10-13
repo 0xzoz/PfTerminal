@@ -1,5 +1,7 @@
 use super::*;
+#[cfg(unix)]
 use codex_protocol::models::PermissionProfile;
+#[cfg(unix)]
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use pretty_assertions::assert_eq;
 
@@ -126,6 +128,44 @@ fn issue_623_finds_links_made_by_interpreters() {
     );
 }
 
+#[test]
+fn issue_623_only_calls_that_create_a_link_count() {
+    for code in [
+        "os.symlink('a', 'b')",
+        "fs.symlinkSync('a', 'b')",
+        "Path('b').symlink_to('a')",
+        "os.link('a', 'b')",
+        "symlink \"a\", \"b\"",
+        "File.link('a', 'b')",
+    ] {
+        assert!(calls_link(code), "{code}");
+    }
+    for code in [
+        "os.unlink('a')",
+        "os.readlink('a')",
+        "Path('a').is_symlink()",
+        "os.path.islink('a')",
+        "print('symlinks')",
+    ] {
+        assert!(!calls_link(code), "{code}");
+    }
+    assert_eq!(
+        targets(&shell("python3 -c \"import os; os.unlink('.agents/x')\"")),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn issue_623_reads_relative_targets_from_folders_the_script_changes_to() {
+    let found = link_targets(&shell("cd sub && ln -s ../.agents x"));
+    assert_eq!(found.len(), 1);
+    assert!(
+        found[0].link_folders.contains(&"sub".to_string()),
+        "{found:?}"
+    );
+}
+
+#[cfg(unix)]
 struct Project {
     _home: tempfile::TempDir,
     _root: tempfile::TempDir,
@@ -133,6 +173,7 @@ struct Project {
     inputs: Inputs,
 }
 
+#[cfg(unix)]
 fn project() -> Project {
     let home = tempfile::TempDir::new().expect("home");
     let root_dir = tempfile::TempDir::new().expect("project");
@@ -160,10 +201,12 @@ fn project() -> Project {
     }
 }
 
+#[cfg(unix)]
 fn refused(project: &Project, command: &[String], cwd: &Path) -> Option<String> {
     project.inputs.protected_target(&link_targets(command), cwd)
 }
 
+#[cfg(unix)]
 #[test]
 fn issue_623_refuses_relative_and_absolute_links_into_agent_settings() {
     let project = project();
@@ -194,11 +237,16 @@ fn issue_623_refuses_relative_and_absolute_links_into_agent_settings() {
         ),
         Some(".agents".to_string())
     );
+    assert_eq!(
+        refused(&project, &shell("cd sub && ln -s ../.agents x"), root),
+        Some("../.agents".to_string())
+    );
     // A link to the Corbanu home is refused too.
     let home = format!("ln -s {} h", project.inputs.codex_home.display());
     assert!(refused(&project, &shell(&home), root).is_some());
 }
 
+#[cfg(unix)]
 #[test]
 fn issue_623_other_links_are_not_refused() {
     let project = project();

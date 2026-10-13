@@ -110,9 +110,10 @@ pub(crate) fn suspend_unapproved(policy: &Policy, approved: &[Vec<String>]) -> P
     )
 }
 
-/// The remembered approvals in `full` (the policy without suspension) that
-/// would have approved the command unasked, as the prompt names them.
-pub(crate) fn suspended_prefixes(full: &Evaluation) -> Vec<Vec<String>> {
+/// The suspended remembered approvals in `full` (the evaluation without
+/// suspension) when they would have approved the command unasked, as the
+/// prompt names them; those in `approved` applied and are not named.
+pub(crate) fn suspended_prefixes(full: &Evaluation, approved: &[Vec<String>]) -> Vec<Vec<String>> {
     if full.decision != Decision::Allow {
         return Vec::new();
     }
@@ -123,8 +124,13 @@ pub(crate) fn suspended_prefixes(full: &Evaluation) -> Vec<Vec<String>> {
             RuleMatch::PrefixRuleMatch {
                 matched_prefix,
                 decision: Decision::Allow,
+                justification,
                 ..
-            } => Some(matched_prefix.clone()),
+            } if !(justification.as_deref() == Some(APPROVED_UNDER_AGGRESSIVE)
+                && approved.contains(matched_prefix)) =>
+            {
+                Some(matched_prefix.clone())
+            }
             _ => None,
         })
         .collect();

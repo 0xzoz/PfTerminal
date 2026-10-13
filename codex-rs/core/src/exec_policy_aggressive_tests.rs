@@ -293,6 +293,51 @@ async fn issue_626_project_rules_cannot_claim_aggressive_approval() {
     ));
 }
 
+/// #626: the prompt names only the suspended approvals, not one that a
+/// person saved under Aggressive and that applied to another part.
+#[tokio::test]
+async fn issue_626_note_names_only_suspended_rules() {
+    let home = TempDir::new().expect("home");
+    let project = TempDir::new().expect("project");
+    write_rules(
+        home.path(),
+        &[
+            r#"prefix_rule(pattern=["touch", "x"], decision="allow")"#.to_string(),
+            marked_rule("mkdir y"),
+        ],
+    );
+    let manager = ExecPolicyManager::load(
+        &stack(home.path(), project.path()),
+        /*strict_rules*/ false,
+    )
+    .await
+    .expect("load");
+    let command = vec![
+        "bash".to_string(),
+        "-lc".to_string(),
+        "touch x && mkdir y".to_string(),
+    ];
+    let asked = manager
+        .create_exec_approval_requirement(
+            ExecApprovalRequest {
+                command: &command,
+                approval_policy: AskForApproval::UnlessTrusted,
+                permission_profile: PermissionProfile::read_only(),
+                windows_sandbox_level: WindowsSandboxLevel::Disabled,
+                sandbox_permissions: SandboxPermissions::UseDefault,
+                prefix_rule: None,
+            },
+            /*live_aggressive*/ true,
+        )
+        .await;
+    let reason = reason(&asked);
+    assert!(
+        reason.contains("start with `touch x`) was not applied"),
+        "{reason}"
+    );
+    assert!(!reason.contains("mkdir"), "{reason}");
+}
+
 #[test]
 fn manager_without_rules_suspends_nothing_outside_aggressive() {
     let mut parser = PolicyParser::new();

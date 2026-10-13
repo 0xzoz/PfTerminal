@@ -34,9 +34,23 @@ use crate::session::turn_context::TurnContext;
 /// Shells whose `-c` argument is a script.
 const SHELLS: [&str; 6] = ["sh", "bash", "zsh", "dash", "ksh", "fish"];
 /// Interpreters whose `-c`/`-e` argument (or heredoc) is code.
-const INTERPRETERS: [&str; 6] = ["python", "python3", "node", "perl", "ruby", "deno"];
-/// Words in code that create a link.
-const LINK_CALLS: [&str; 4] = ["symlink", "link(", "link_to", "linkSync"];
+const INTERPRETERS: [&str; 10] = [
+    "python", "python3", "pypy3", "py", "node", "bun", "deno", "perl", "ruby", "php",
+];
+/// Calls in code that create a link (`os.symlink(`, `fs.symlinkSync(`,
+/// `Path.symlink_to(`, `os.link(`, perl's `symlink "a", "b"`…), matched where
+/// no letter, digit or `_` comes before them, so `unlink(`, `readlink(` and
+/// `is_symlink(` are not calls that create one.
+const LINK_CALLS: [&str; 8] = [
+    "symlink(",
+    "symlink ",
+    "symlinkSync(",
+    "symlink_to(",
+    "hardlink_to(",
+    "link_to(",
+    "link(",
+    "linkSync(",
+];
 /// Scripts inside scripts looked into.
 const MAX_DEPTH: usize = 4;
 /// Paths looked at in one command.
@@ -227,12 +241,32 @@ impl Candidate {
     }
 }
 
-/// The paths `command` creates links to (see the module docs), bounded.
+/// The paths `command` creates links to (see the module docs), bounded. A
+/// relative target is read from the command's folder, the link's folder and
+/// every folder a script changes to (`cd sub && ln -s ../.agents x`): more
+/// folders than the one it is relative to, so a link may be refused that
+/// would not point into a protected path, never the reverse.
 pub(crate) fn link_targets(command: &[String]) -> Vec<Candidate> {
-    let mut found = Vec::new();
-    simple_command(command, MAX_DEPTH, &mut found);
+    let mut scan = Scan::default();
+    simple_command(command, MAX_DEPTH, &mut scan);
+    let Scan { mut found, folders } = scan;
     found.truncate(MAX_CANDIDATES);
+    for candidate in &mut found {
+        for folder in &folders {
+            if !candidate.link_folders.contains(folder) {
+                candidate.link_folders.push(folder.clone());
+            }
+        }
+    }
     found
+}
+
+/// What [`link_targets`] collects.
+#[derive(Default)]
+struct Scan {
+    found: Vec<Candidate>,
+    /// Folders a script changes to.
+    folders: Vec<String>,
 }
 
 fn program_name(word: &str) -> String {
@@ -254,7 +288,7 @@ fn program_name(word: &str) -> String {
 }
 
 /// One simple command (already split into words).
-fn simple_command(words: &[String], depth: usize, found: &mut Vec<Candidate>) {
+fn simple_command(words: &[String], depth: usize, found: &mut Scan) {
     let words: Vec<&str> = words
         .iter()
         .map(String::as_str)
@@ -314,6 +348,13 @@ fn simple_command(words: &[String], depth: usize, found: &mut Vec<Candidate>) {
         return;
     }
     match name {
+        "cd" | "pushd" => {
+            if let Some(folder) = arguments.iter().find(|word| !word.starts_with('-'))
+                && found.folders.len() < MAX_CANDIDATES
+            {
+                found.folders.push((*folder).to_string());
+            }
+        }
         "ln" => ln(arguments, found),
         "cp" if arguments.iter().any(|word| {
             matches!(*word, "--symbolic-link" | "--link")
@@ -353,7 +394,7 @@ fn simple_command(words: &[String], depth: usize, found: &mut Vec<Candidate>) {
 }
 
 /// `ln [options] target… [link | folder]`, `ln -t folder target…`.
-fn ln(arguments: &[&str], found: &mut Vec<Candidate>) {
+fn ln(arguments: &[&str], found: &mut Scan) {
     let mut folder = None;
     let mut iter = arguments.iter();
     while let Some(word) = iter.next() {
@@ -377,7 +418,7 @@ fn ln(arguments: &[&str], found: &mut Vec<Candidate>) {
 
 /// PowerShell `New-Item -ItemType SymbolicLink|Junction|HardLink -Path link
 /// -Target target` (or `-Value`).
-fn new_item(arguments: &[&str], found: &mut Vec<Candidate>) {
+fn new_item(arguments: &[&str], found: &mut Scan) {
     let value_of = |names: &[&str]| {
         arguments
             .iter()
@@ -426,27 +467,27 @@ fn parent_of(path: &str) -> String {
         .unwrap_or_default()
 }
 
-fn push(found: &mut Vec<Candidate>, target: &str, link_folders: Vec<String>) {
+fn push(found: &mut Scan, target: &str, link_folders: Vec<String>) {
     let target = target.trim_matches(['\'', '"']).to_string();
     let candidate = Candidate {
         target,
         link_folders,
     };
-    if !candidate.target.is_empty() && !found.contains(&candidate) {
-        found.push(candidate);
+    if !candidate.target.is_empty() && !found.found.contains(&candidate) {
+        found.found.push(candidate);
     }
 }
 
 /// A shell script: each simple command in it, and, when it runs an
 /// interpreter on several lines (a heredoc) that call a link function, every
 /// string it quotes.
-fn shell_script(script: &str, depth: usize, found: &mut Vec<Candidate>) {
+fn shell_script(script: &str, depth: usize, found: &mut Scan) {
     let Some(depth) = depth.checked_sub(1) else {
         return;
     };
     let mut segment: Vec<String> = Vec::new();
     let mut runs_interpreter = false;
-    let mut finish = |segment: &mut Vec<String>, found: &mut Vec<Candidate>| {
+    let mut finish = |segment: &mut Vec<String>, found: &mut Scan| {
         if segment
             .first()
             .is_some_and(|program| INTERPRETERS.contains(&program_name(program).as_str()))
@@ -485,8 +526,8 @@ fn shell_script(script: &str, depth: usize, found: &mut Vec<Candidate>) {
 
 /// Code an interpreter runs: when it calls a link function, every quoted
 /// string in it is a candidate target.
-fn code(code: &str, found: &mut Vec<Candidate>) {
-    if !LINK_CALLS.iter().any(|call| code.contains(call)) {
+fn code(code: &str, found: &mut Scan) {
+    if !calls_link(code) {
         return;
     }
     for quote in ['\'', '"', '`'] {
@@ -496,6 +537,18 @@ fn code(code: &str, found: &mut Vec<Candidate>) {
             }
         }
     }
+}
+
+/// Whether `code` calls one of [`LINK_CALLS`].
+fn calls_link(code: &str) -> bool {
+    LINK_CALLS.iter().any(|call| {
+        code.match_indices(call).any(|(index, _)| {
+            !code[..index]
+                .chars()
+                .next_back()
+                .is_some_and(|before| before.is_alphanumeric() || before == '_')
+        })
+    })
 }
 
 #[cfg(test)]
