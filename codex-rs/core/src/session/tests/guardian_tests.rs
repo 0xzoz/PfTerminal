@@ -326,7 +326,8 @@ async fn guardian_allows_shell_command_additional_permissions_requests_past_poli
     );
     let session = Arc::new(session);
     let turn_context = Arc::new(turn_context_raw);
-    let expiration_ms: u64 = if cfg!(windows) { 2_500 } else { 1_000 };
+    // `echo hi` can take seconds to start on a loaded Windows runner (#636).
+    let expiration_ms: u64 = if cfg!(windows) { 10_000 } else { 1_000 };
 
     let handler = crate::tools::handlers::ShellCommandHandler::from(
         codex_tools::ShellCommandBackendConfig::Classic,
@@ -455,7 +456,7 @@ async fn strict_auto_review_turn_grant_forces_guardian_for_shell_command_policy_
                     "command": "echo hi",
                     "login": false,
                     "workdir": workdir,
-                    "timeout_ms": 1_000_u64,
+                    "timeout_ms": if cfg!(windows) { 10_000_u64 } else { 1_000_u64 },
                 })
                 .to_string(),
             },
@@ -642,7 +643,7 @@ async fn shell_command_allows_sticky_turn_permissions_without_inline_request_per
                 arguments: serde_json::json!({
                     "command": "echo hi",
                     "login": false,
-                    "timeout_ms": 1_000_u64,
+                    "timeout_ms": if cfg!(windows) { 10_000_u64 } else { 1_000_u64 },
                     "workdir": workdir,
                 })
                 .to_string(),

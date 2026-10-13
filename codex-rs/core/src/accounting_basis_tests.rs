@@ -420,6 +420,10 @@ async fn image_generation_rates_apply_only_to_openai_api_key_rates() -> anyhow::
 /// same account, and records them on every attempt; the default account
 /// records none. The ledger moves to format 4 only once a named attempt lands.
 #[tokio::test(flavor = "current_thread")]
+#[cfg_attr(
+    windows,
+    ignore = "Windows: the vault fingerprint read fails with os error 33 (#694)"
+)]
 async fn admission_records_the_named_account() -> anyhow::Result<()> {
     const CANARY: &str = "canary-pf84-s05-work-key";
     let home = tempfile::tempdir()?;

@@ -128,10 +128,6 @@ fn launch_flags_cannot_weaken_aggressive() {
 /// A permissive user config plus the overlay loads as every mapping row;
 /// without the overlay the same config fails verification.
 #[tokio::test]
-#[cfg_attr(
-    windows,
-    ignore = "Aggressive cannot be fully applied on a Windows test machine without the Windows sandbox (#691)"
-)]
 async fn overlay_on_permissive_user_config_verifies_every_row() {
     let home = tempfile::tempdir().unwrap();
     let cwd = tempfile::tempdir().unwrap();
@@ -210,10 +206,6 @@ set = { MY_API_KEY = "abc" }
 
 /// A workspace that contains the Corbanu home still cannot rewrite the level.
 #[tokio::test]
-#[cfg_attr(
-    windows,
-    ignore = "Aggressive cannot be fully applied on a Windows test machine without the Windows sandbox (#691)"
-)]
 async fn codex_home_inside_the_workspace_stays_read_only() {
     let cwd = tempfile::tempdir().unwrap();
     let home = cwd.path().join(".corbanu");
@@ -392,10 +384,6 @@ async fn isolation_check_matches_seatbelt_through_a_nested_link() {
 /// A workspace that is the account home cannot delete the Aggressive-homes
 /// registry's entries, and a profile that would let it fails verification.
 #[tokio::test]
-#[cfg_attr(
-    windows,
-    ignore = "Aggressive cannot be fully applied on a Windows test machine without the Windows sandbox (#691)"
-)]
 async fn registry_inside_the_workspace_stays_read_only() {
     let account = tempfile::tempdir().unwrap();
     let cwd = account.path();
@@ -466,10 +454,6 @@ async fn registry_inside_the_workspace_stays_read_only() {
 /// A registry the workspace contains must exist (Linux would put a
 /// placeholder there), and a path the profile cannot express is reported.
 #[tokio::test]
-#[cfg_attr(
-    windows,
-    ignore = "Aggressive cannot be fully applied on a Windows test machine without the Windows sandbox (#691)"
-)]
 async fn missing_or_unexpressible_registry_fails_verification() {
     let account = tempfile::tempdir().unwrap();
     let cwd = account.path();
@@ -564,10 +548,6 @@ async fn another_layer_defining_the_profile_fails_verification() {
 
 /// A custom role that would hand children different values is refused.
 #[tokio::test]
-#[cfg_attr(
-    windows,
-    ignore = "Aggressive cannot be fully applied on a Windows test machine without the Windows sandbox (#691)"
-)]
 async fn role_that_changes_child_values_fails_verification() {
     let home = tempfile::tempdir().unwrap();
     let cwd = tempfile::tempdir().unwrap();
@@ -600,10 +580,6 @@ async fn role_that_changes_child_values_fails_verification() {
 
 /// A role cannot hand children lenient rule parsing.
 #[tokio::test]
-#[cfg_attr(
-    windows,
-    ignore = "Aggressive cannot be fully applied on a Windows test machine without the Windows sandbox (#691)"
-)]
 async fn role_that_relaxes_strict_rules_fails_verification() {
     let home = tempfile::tempdir().unwrap();
     let cwd = tempfile::tempdir().unwrap();
@@ -737,10 +713,6 @@ async fn issue_441_nested_agent_launches_are_forbidden_before_approval_when_set_
 /// New threads must fail rather than drop the vault rule when a `.rules` file
 /// breaks after launch; a user `strict_rules = false` cannot turn that off.
 #[tokio::test]
-#[cfg_attr(
-    windows,
-    ignore = "Aggressive cannot be fully applied on a Windows test machine without the Windows sandbox (#691)"
-)]
 async fn strict_rules_is_forced_and_verified() {
     let home = tempfile::tempdir().unwrap();
     let cwd = tempfile::tempdir().unwrap();
@@ -825,10 +797,6 @@ async fn project_rules_count_only_when_the_project_is_trusted() {
 /// than the origin: every row holds, and its commands can read neither vault
 /// store, write outside the folder or reach the network.
 #[tokio::test]
-#[cfg_attr(
-    windows,
-    ignore = "Aggressive cannot be fully applied on a Windows test machine without the Windows sandbox (#691)"
-)]
 async fn nested_child_on_another_home_protects_both_homes() {
     let origin = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
@@ -892,10 +860,6 @@ fn without_credential_names(cli: &mut [(String, toml::Value)]) {
 /// #442 (Travis, 2026-10-11): the launch check fails when credential files
 /// created later would not be denied by name.
 #[tokio::test]
-#[cfg_attr(
-    windows,
-    ignore = "Aggressive cannot be fully applied on a Windows test machine without the Windows sandbox (#691)"
-)]
 async fn issue_442_launch_check_requires_credential_names() {
     let cwd = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
