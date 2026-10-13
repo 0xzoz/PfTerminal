@@ -12,9 +12,9 @@ use uuid::Uuid;
 /// #641: shown where Campaign Tracker needs the Corbanu API key and only the
 /// credential broker holds it.
 const TRACKER_KEY_HELD_BY_BROKER: &str = "Campaign Tracker can't use the Corbanu API key from \
-the environment: under security level Aggressive the credential broker holds it, and Campaign \
-Tracker sends the key itself. Store the key with /providers (Corbanu API) to use it; activity \
-remains encrypted locally meanwhile.";
+the environment: the credential broker holds it (broker_model_auth, on under security level \
+Aggressive), and Campaign Tracker sends the key itself. Store the key with /providers (Corbanu \
+API) to use it; activity remains encrypted locally meanwhile.";
 const VIEW: &str = "campaign-tracker";
 #[cfg(test)]
 #[path = "campaign_tracker_tests.rs"]

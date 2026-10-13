@@ -1,4 +1,5 @@
 use super::*;
+use pretty_assertions::assert_eq;
 
 #[test]
 fn remote_gateway_requires_https() {
@@ -29,18 +30,30 @@ fn a_corbanu_key_held_by_the_broker_is_used_for_account_calls() {
     );
     assert!(matches!(held, Ok(Some(CorbanuAccountKey::HeldByBroker))));
 
-    let environment = account_key_from(Some("env-key".to_string()), true, no_stored_key);
+    let environment = account_key_from(
+        Some("env-key".to_string()),
+        /*held_by_broker*/ true,
+        no_stored_key,
+    );
     assert!(matches!(
         environment,
         Ok(Some(CorbanuAccountKey::Value(key))) if key.as_str() == "env-key"
     ));
-    let stored = account_key_from(None, false, || Ok(Some("stored-key".to_string())));
+    let stored = account_key_from(
+        /*environment*/ None,
+        /*held_by_broker*/ false,
+        || Ok(Some("stored-key".to_string())),
+    );
     assert!(matches!(
         stored,
         Ok(Some(CorbanuAccountKey::Value(key))) if key.as_str() == "stored-key"
     ));
     assert!(matches!(
-        account_key_from(None, false, no_stored_key),
+        account_key_from(
+            /*environment*/ None,
+            /*held_by_broker*/ false,
+            no_stored_key
+        ),
         Ok(None)
     ));
 }

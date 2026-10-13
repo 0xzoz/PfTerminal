@@ -124,7 +124,11 @@ async fn brokered_get(
     url: String,
 ) -> Result<AccountResponse, String> {
     use codex_http_client::HttpTransport as _;
-    let auth = codex_model_provider::brokered_auth(brokered_account_auth(&gateway.origin))
+    // Registering the credential is a blocking call to the broker.
+    let binding = brokered_account_auth(&gateway.origin);
+    let auth = tokio::task::spawn_blocking(move || codex_model_provider::brokered_auth(binding))
+        .await
+        .map_err(|error| error.to_string())?
         .map_err(|error| error.to_string())?;
     let mut request = codex_http_client::Request::new(reqwest::Method::GET, url);
     request.timeout = Some(REQUEST_TIMEOUT);
