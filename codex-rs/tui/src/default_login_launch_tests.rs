@@ -246,6 +246,16 @@ async fn named_session_starts_its_own_server_when_the_daemon_is_gone() {
     assert!(settled.left_in_place);
     assert_eq!(settled.app_server_target, AppServerTarget::Embedded);
     assert!(settled.daemon_not_reused.is_some());
+    // A reloaded session config (resume, fork) carries the warning over.
+    let mut config = launch.config.clone();
+    assert_eq!(daemon_not_reused_warning(&config), None);
+    config
+        .startup_warnings
+        .extend(settled.daemon_not_reused.clone());
+    assert_eq!(
+        daemon_not_reused_warning(&config),
+        settled.daemon_not_reused
+    );
 }
 
 /// Unchanged: a default session, or any launch with named accounts off,

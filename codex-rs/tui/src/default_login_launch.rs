@@ -76,6 +76,16 @@ pub(crate) async fn settle_default_login_at_launch(
     })
 }
 
+/// PF-84-S06 (#595): the warning [`settle_default_login_at_launch`] added
+/// to `config`, if any, so a reloaded config can carry it.
+pub(crate) fn daemon_not_reused_warning(config: &Config) -> Option<String> {
+    config
+        .startup_warnings
+        .iter()
+        .find(|warning| warning.as_str() == DAEMON_NOT_REUSED)
+        .cloned()
+}
+
 /// PF-84-S06 (#595): whether a connected local daemon leaves a ruled-out
 /// default login in place and refuses to use it, under the same login
 /// restrictions as this launch. Checked again on the session's own

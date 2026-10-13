@@ -539,9 +539,10 @@ async fn start_app_server(
                 && !default_login_launch::daemon_matches_default_login_policy(remote, &config)
             {
                 return Err(color_eyre::eyre::eyre!(
-                    "The local app-server daemon changed since this session started and could \
-                     use the default OpenAI login your login settings rule out. Start corbanu \
-                     again."
+                    "The running local app-server daemon does not confirm that it leaves alone \
+                     the default OpenAI login this session's login settings rule out (it may \
+                     have been restarted, or the session's settings differ). Restart the daemon \
+                     or start corbanu again."
                 ));
             }
             Ok(client)
@@ -2072,6 +2073,9 @@ async fn run_ratatui_app(
         &session_selection,
         resume_picker::SessionSelection::Resume(_) | resume_picker::SessionSelection::Fork(_)
     ) || picker_cancelled_without_selection;
+    // PF-84-S06 (#595): the session's own config keeps the warning that a
+    // local daemon was not reused, also when it is reloaded below.
+    let daemon_not_reused = default_login_launch::daemon_not_reused_warning(&config);
     let mut config = match &session_selection {
         resume_picker::SessionSelection::Resume(_) | resume_picker::SessionSelection::Fork(_) => {
             load_config_or_exit_with_fallback_cwd(
@@ -2098,6 +2102,11 @@ async fn run_ratatui_app(
     };
     if reloads_provider_config {
         startup_provider_resolution = None;
+    }
+    if let Some(warning) = daemon_not_reused
+        && !config.startup_warnings.contains(&warning)
+    {
+        config.startup_warnings.push(warning);
     }
     if let Some(message) = chosen_thread_account_error(
         &config,
