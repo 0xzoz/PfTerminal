@@ -2704,6 +2704,112 @@ async fn issue_651_a_missing_database_folder_is_protected() -> anyhow::Result<()
     Ok(())
 }
 
+/// Issue #651 item 6 (Travis, 2026-10-13): a separate database folder that is
+/// a well-known shared folder (here the temporary folder, `TMPDIR`) is not
+/// denied whole: a protected command with full access can still read and
+/// write ordinary files there, and still cannot read or write a database,
+/// create and hold the missing init lock, hold the GPU controller's lock or
+/// plant a pending accounting record or a backup, with the paths built at run
+/// time. Permissive is unchanged.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_651_a_shared_database_folder_is_denied_entry_by_entry() -> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let mut wrong = Vec::new();
+    let original_tmpdir = std::env::var_os("TMPDIR");
+    for (level, open) in [
+        (SecurityLevel::Moderate, false),
+        (SecurityLevel::Aggressive, false),
+        (SecurityLevel::Permissive, true),
+    ] {
+        let base = TempDir::new()?;
+        let folder = base.path().canonicalize()?.join("shared");
+        std::fs::create_dir_all(&folder)?;
+        let lock = folder.join("pfterminal_db_init.lock");
+        let path = folder.to_string_lossy().into_owned();
+        // Split inside the folder's own name: neither part names it.
+        let (head, tail) = path.split_at(path.len() - 2);
+        let command = format!(
+            "d=\"$(printf '{head}%s' {tail})\"; s=\"sql$(printf ite)\"; \
+             cat \"$d/notes-651.txt\"; echo; printf x > \"$d/scratch-651\" && echo wrote-651; \
+             cat \"$d/canary.$s\"; echo; printf x >> \"$d/canary.$s\"; \
+             perl -e 'use Fcntl qw(:flock); open(my $f, \">>\", $ARGV[0]) or die \"open: $!\\n\"; \
+             flock($f, LOCK_EX | LOCK_NB) or die \"lock: $!\\n\"' \
+             \"$d/pfterminal_db_$(printf init).lock\" && echo init-held-651; \
+             perl -e 'use Fcntl qw(:flock); open(my $f, \"<\", $ARGV[0]) or die \"open: $!\\n\"; \
+             flock($f, LOCK_EX | LOCK_NB) or die \"lock: $!\\n\"' \
+             \"$d/gpu-controller.$(printf lock)\" && echo gpu-held-651; \
+             printf '{{}}' > \"$d/accounting-$(printf pending)/planted.json\"; \
+             printf x > \"$d/db-$(printf backups)/planted\"; echo ran-651"
+        );
+        let sqlite_home = AbsolutePathBuf::from_absolute_path(&folder)?;
+        let (shared, missing_lock) = (folder.clone(), lock.clone());
+        let (test, captured) = start_turn_after(
+            /*home*/ None,
+            level,
+            AskForApproval::Never,
+            vec![
+                call("call-651s", "shell_command", json!({ "command": command })),
+                done_step(),
+            ],
+            move |config| {
+                config.sqlite = codex_state::SqliteConfig::from_sqlite_home(sqlite_home.clone());
+                config
+                    .permissions
+                    .set_permission_profile(PermissionProfile::Disabled)
+                    .expect("full access");
+            },
+            move |_| {
+                std::fs::write(shared.join("notes-651.txt"), "ordinary-651").expect("notes");
+                std::fs::write(shared.join("canary.sqlite"), CANARY).expect("canary database");
+                std::fs::write(shared.join("gpu-controller.lock"), "").expect("gpu lock");
+                std::fs::create_dir_all(shared.join("accounting-pending")).expect("pending");
+                std::fs::create_dir_all(shared.join("db-backups")).expect("backups");
+                // Start-up created it; the command meets it missing.
+                let _ = std::fs::remove_file(&missing_lock);
+                // The database folder is the temporary folder from here on
+                // (set after the session's own folders were made).
+                // SAFETY: nextest runs each test in its own process.
+                unsafe { std::env::set_var("TMPDIR", &shared) };
+            },
+        )
+        .await?;
+        let approval = next_exec_approval(&test).await;
+        // SAFETY: as above.
+        unsafe {
+            match &original_tmpdir {
+                Some(value) => std::env::set_var("TMPDIR", value),
+                None => std::env::remove_var("TMPDIR"),
+            }
+        }
+        assert!(approval.is_none());
+        let requests = captured.requests();
+        let output = output_text(&requests[requests.len() - 1], "call-651s");
+        let ordinary = output.contains("ordinary-651")
+            && output.contains("wrote-651")
+            && folder.join("scratch-651").exists();
+        let achieved = [
+            output.contains(CANARY),
+            std::fs::read_to_string(folder.join("canary.sqlite")).unwrap_or_default() != CANARY,
+            output.contains("init-held-651") || lock.exists(),
+            output.contains("gpu-held-651"),
+            folder.join("accounting-pending/planted.json").exists(),
+            folder.join("db-backups/planted").exists(),
+        ];
+        if !output.contains("ran-651") || !ordinary || achieved != [open; 6] {
+            wrong.push(format!(
+                "{level:?}: ordinary={ordinary} {achieved:?}: {output}"
+            ));
+        }
+        drop(test);
+        drop(base);
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
 /// #652: with a writable root reached through a nested link
 /// (`<base>/link -> <base>/real`) and the Corbanu home at its real location
 /// below it, a protected command still cannot create a name in the home
