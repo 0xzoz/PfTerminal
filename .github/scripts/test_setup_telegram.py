@@ -34,6 +34,8 @@ class SetupTelegramHomeTest(unittest.TestCase):
             ],
             cwd=REPO_ROOT,
             env=env,
+            # Never the caller's terminal: the script prompts when stdin is one.
+            stdin=subprocess.DEVNULL,
             check=False,
             capture_output=True,
             text=True,
