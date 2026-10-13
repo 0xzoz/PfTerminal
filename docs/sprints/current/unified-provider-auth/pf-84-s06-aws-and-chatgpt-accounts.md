@@ -62,11 +62,11 @@ Paths are under `codex-rs/`, at `ee530a0e26`.
   login untouched, rows with email hint/plan/fingerprint and the same-user warning. Gate:
   [s06b-gate.md](../../../../qa/provider-auth/pf-84/s06b-gate.md) (live ChatGPT pending: no disposable account).
 - [x] Mid-session switch: connectors, plugin installs, accounting and the model list follow the active account ([gate](../../../../qa/provider-auth/pf-84/s06b-gate.md#follow-up-mid-session-account-switch-fixpf84-switch-follow)).
+- [x] Early `/status` rate limits, the `/apps` directory, plugin listings, ChatGPT settings and analytics use the session's account, never the default login (#658).
 
 ## Remaining
 
 - [ ] Code-blind functional design frozen before test-result disclosure (independent acceptance).
-- [x] Before the flag is removed: early `/status` rate limits, the `/apps` directory, plugin listings, ChatGPT settings and analytics use the session's account, never the default login (#658).
 
 ## Verification
 

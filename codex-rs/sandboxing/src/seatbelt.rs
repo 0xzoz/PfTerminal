@@ -27,13 +27,17 @@ const MACOS_SEATBELT_NETWORK_POLICY: &str = include_str!("seatbelt_network_polic
 const MACOS_RESTRICTED_READ_ONLY_PLATFORM_DEFAULTS: &str =
     include_str!("restricted_read_only_platform_defaults.sbpl");
 
-/// The platform defaults' scratch folders, writable for tools' temporary
-/// files (`:minimal` reads).
+/// The platform defaults' scratch folders, readable and writable for tools'
+/// temporary files (`:minimal` reads).
 const PLATFORM_TMP_FOLDERS: [&str; 4] = ["/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp"];
 
-/// Their writes as the platform defaults always granted them, kept for a
-/// policy without denied paths (Permissive's shape).
-const PLATFORM_TMP_WRITES: &str = r#"(allow file-write* (subpath "/tmp"))
+/// Their reads and writes as the platform defaults always granted them, kept
+/// for a policy without denied paths (Permissive's shape).
+const PLATFORM_TMP_ACCESS: &str = r#"(allow file-read* (subpath "/tmp"))
+(allow file-read* (subpath "/private/tmp"))
+(allow file-read* (subpath "/var/tmp"))
+(allow file-read* (subpath "/private/var/tmp"))
+(allow file-write* (subpath "/tmp"))
 (allow file-write* (subpath "/private/tmp"))
 (allow file-write* (subpath "/var/tmp"))
 (allow file-write* (subpath "/private/var/tmp"))"#;
@@ -727,13 +731,19 @@ fn build_seatbelt_rename_guard_policy(
     (policy.join("\n"), params)
 }
 
-/// #605: the platform defaults' scratch-folder writes once the policy denies
-/// reads: each folder stays writable except the `protected` paths it holds
-/// (in every spelling), so a workspace below `/tmp` keeps its `.git`,
-/// `.codex` and `.agents` (and every other read-only path) read-only, as its
-/// own writable root does. Emitted with the write clauses, ahead of the
-/// rename guard, which then holds there too.
-fn platform_tmp_write_policy(protected: &[AbsolutePathBuf]) -> (String, Vec<(String, PathBuf)>) {
+/// #605/#649: the platform defaults' scratch-folder `action` (reads or
+/// writes) once the policy denies reads: each folder stays usable except the
+/// `protected` paths it holds (in every spelling). For writes, a workspace
+/// below `/tmp` keeps its `.git`, `.codex` and `.agents` (and every other
+/// read-only path) read-only, as its own writable root does; for reads, a
+/// denied path below `/tmp` stays unreadable, as below a readable root.
+/// Emitted with the policy's own clauses, ahead of the deny sections (glob
+/// denials, unlistable folders, rename guard), which then hold there too.
+fn platform_tmp_policy(
+    action: &str,
+    param_prefix: &str,
+    protected: &[AbsolutePathBuf],
+) -> (String, Vec<(String, PathBuf)>) {
     let mut clauses: Vec<SeatbeltClause> = Vec::new();
     for folder in PLATFORM_TMP_FOLDERS {
         let Ok(root) = AbsolutePathBuf::from_absolute_path(folder) else {
@@ -754,7 +764,7 @@ fn platform_tmp_write_policy(protected: &[AbsolutePathBuf]) -> (String, Vec<(Str
             clauses.push(clause);
         }
     }
-    build_seatbelt_clause_policy("file-write*", "PLATFORM_TMP", clauses)
+    build_seatbelt_clause_policy(action, param_prefix, clauses)
 }
 
 /// Issue #506: deny listing each directory (reading its entries), in every
@@ -1169,11 +1179,18 @@ pub fn create_seatbelt_command_args(
     }
     let (rename_guard_policy, rename_guard_params) =
         build_seatbelt_rename_guard_policy(rename_guarded);
-    // #605: with `:minimal` reads, the scratch folders' writes; once the
-    // policy denies reads, without the paths protected elsewhere.
+    // #605/#649: with `:minimal` reads, the scratch folders' reads and
+    // writes; once the policy denies reads, without the paths protected
+    // elsewhere (writes) or denied (reads).
     let include_platform_defaults = file_system_sandbox_policy.include_platform_defaults();
     let platform_tmp_unchanged = unreadable_roots.is_empty();
-    let (platform_tmp_policy, platform_tmp_params) =
+    let (platform_tmp_read_policy, platform_tmp_read_params) =
+        if !include_platform_defaults || platform_tmp_unchanged {
+            (String::new(), Vec::new())
+        } else {
+            platform_tmp_policy("file-read*", "PLATFORM_TMP_READ", &unreadable_roots)
+        };
+    let (platform_tmp_write_policy, platform_tmp_write_params) =
         if !include_platform_defaults || platform_tmp_unchanged {
             (String::new(), Vec::new())
         } else {
@@ -1185,7 +1202,7 @@ pub fn create_seatbelt_command_args(
                 .chain(unreadable_roots.iter().cloned())
                 .chain(file_system_sandbox_policy.get_unmovable_paths())
                 .collect();
-            platform_tmp_write_policy(&protected)
+            platform_tmp_policy("file-write*", "PLATFORM_TMP", &protected)
         };
     let (file_write_policy, file_write_dir_params) =
         if file_system_sandbox_policy.has_full_disk_write_access() {
@@ -1296,8 +1313,9 @@ pub fn create_seatbelt_command_args(
     let mut policy_sections = vec![
         MACOS_SEATBELT_BASE_POLICY.to_string(),
         file_read_policy,
+        platform_tmp_read_policy,
         file_write_policy,
-        platform_tmp_policy,
+        platform_tmp_write_policy,
         deny_read_policy,
         unlistable_policy,
         rename_guard_policy,
@@ -1305,10 +1323,10 @@ pub fn create_seatbelt_command_args(
     ];
     if include_platform_defaults {
         policy_sections.push(MACOS_RESTRICTED_READ_ONLY_PLATFORM_DEFAULTS.to_string());
-        // Only allows: placed here as before (#605 emits them above when the
-        // policy denies reads).
+        // Only allows: placed here as before (#605/#649 emit them above when
+        // the policy denies reads).
         if platform_tmp_unchanged {
-            policy_sections.push(PLATFORM_TMP_WRITES.to_string());
+            policy_sections.push(PLATFORM_TMP_ACCESS.to_string());
         }
     }
 
@@ -1316,8 +1334,9 @@ pub fn create_seatbelt_command_args(
 
     let dir_params = [
         file_read_dir_params,
+        platform_tmp_read_params,
         file_write_dir_params,
-        platform_tmp_params,
+        platform_tmp_write_params,
         rename_guard_params,
         unlistable_params,
         unix_socket_dir_params(&proxy),
