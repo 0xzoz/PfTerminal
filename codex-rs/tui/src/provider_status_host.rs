@@ -130,6 +130,92 @@ pub(crate) struct ProviderStatusHost {
     /// account, and whether the vault holds that account. Such an entry's
     /// status comes from the account, never from the default credential.
     named_accounts: Arc<BTreeMap<String, bool>>,
+    /// #665: for API-key entries served by several connections where one runs
+    /// on a named account, each connection's own credential (by entry id,
+    /// then runtime provider id). Each connection authenticates with its own.
+    connection_credentials: Arc<BTreeMap<String, BTreeMap<String, ConnectionCredential>>>,
+    /// Reads an API-key environment variable (tests replace it).
+    environment: fn(&str) -> EnvironmentCredentialMetadata,
+}
+
+/// The credential one connection (runtime provider) authenticates with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ConnectionCredential {
+    /// A named account and whether the vault holds it.
+    NamedAccount { enrolled: bool },
+    /// The provider's default key (environment, broker or stored).
+    DefaultKey { env_key: String },
+}
+
+/// The vault account kinds a named account of `provider` can be enrolled as.
+fn named_account_kinds(
+    provider: &codex_model_provider_info::ModelProviderInfo,
+) -> &'static [ProviderAccountKind] {
+    if provider.is_claude_plan() {
+        &[
+            ProviderAccountKind::ClaudeOauthToken,
+            ProviderAccountKind::ClaudeConfigDir,
+        ]
+    } else if provider.auth.is_some() {
+        &[ProviderAccountKind::Command]
+    } else if codex_model_provider::named_sign_in_account(provider).is_some() {
+        // PF-84-S06: an OpenAI ChatGPT or API-key sign-in.
+        &[ProviderAccountKind::ChatgptAuth]
+    } else {
+        &[ProviderAccountKind::ApiKey]
+    }
+}
+
+/// #665: for an API-key entry served by several connections (`zai` and
+/// `zai-anthropic` share `ZAI_API_KEY`) where at least one runs on a named
+/// account, the credential each connection really uses.
+fn connection_credentials(
+    catalog: &ProviderCatalog,
+    config: &Config,
+    holds: impl Fn(&NamedProviderAccount, ProviderAccountKind) -> bool,
+) -> BTreeMap<String, BTreeMap<String, ConnectionCredential>> {
+    let mut by_entry = BTreeMap::new();
+    for entry in catalog.entries() {
+        let Some(ProviderSetupCapability::ApiKey {
+            storage: ApiKeyStorage::EnvironmentVariable { env_key },
+        }) = entry.setup_capabilities.iter().next()
+        else {
+            continue;
+        };
+        let connections = entry
+            .runtime_provider_ids
+            .iter()
+            .filter_map(|id| {
+                config
+                    .model_providers
+                    .get(id.as_str())
+                    .map(|provider| (id.as_str(), provider))
+            })
+            .collect::<Vec<_>>();
+        if connections.len() < 2
+            || connections
+                .iter()
+                .all(|(_, provider)| provider.account.is_none())
+        {
+            continue;
+        }
+        let mut credentials = BTreeMap::new();
+        for (id, provider) in connections {
+            let credential = match &provider.account {
+                Some(account) => ConnectionCredential::NamedAccount {
+                    enrolled: named_account_kinds(provider)
+                        .iter()
+                        .any(|kind| holds(account, *kind)),
+                },
+                None => ConnectionCredential::DefaultKey {
+                    env_key: env_key.clone(),
+                },
+            };
+            credentials.insert(id.to_string(), credential);
+        }
+        by_entry.insert(entry.id.as_str().to_string(), credentials);
+    }
+    by_entry
 }
 
 /// PF-84: for each catalog entry whose runtime provider selects a named
@@ -150,20 +236,9 @@ fn named_account_enrollment(
         let Some((provider, account)) = selected else {
             continue;
         };
-        let kinds: &[ProviderAccountKind] = if provider.is_claude_plan() {
-            &[
-                ProviderAccountKind::ClaudeOauthToken,
-                ProviderAccountKind::ClaudeConfigDir,
-            ]
-        } else if provider.auth.is_some() {
-            &[ProviderAccountKind::Command]
-        } else if codex_model_provider::named_sign_in_account(provider).is_some() {
-            // PF-84-S06: an OpenAI ChatGPT or API-key sign-in.
-            &[ProviderAccountKind::ChatgptAuth]
-        } else {
-            &[ProviderAccountKind::ApiKey]
-        };
-        let enrolled = kinds.iter().any(|kind| holds(account, *kind));
+        let enrolled = named_account_kinds(provider)
+            .iter()
+            .any(|kind| holds(account, *kind));
         enrollment.insert(entry.id.as_str().to_string(), enrolled);
     }
     enrollment
@@ -178,15 +253,18 @@ impl ProviderStatusHost {
         })
     }
 
-    fn from_config_with_account_registry(
+    pub(crate) fn from_config_with_account_registry(
         config: &Config,
         account: ProviderAccountMetadata,
         holds: impl Fn(&NamedProviderAccount, ProviderAccountKind) -> bool,
     ) -> Self {
         let catalog = ProviderCatalog::from_runtime_providers(&config.model_providers);
-        let named_accounts = Arc::new(named_account_enrollment(&catalog, config, holds));
+        let named_accounts = Arc::new(named_account_enrollment(&catalog, config, &holds));
+        let connection_credentials = Arc::new(connection_credentials(&catalog, config, &holds));
         Self {
             named_accounts,
+            connection_credentials,
+            environment: environment_metadata,
             catalog,
             codex_home: config.codex_home.to_path_buf(),
             current: Arc::new(RwLock::new(CurrentProviderSelection::runtime_id(
@@ -196,6 +274,15 @@ impl ProviderStatusHost {
             authorizations: ProviderRuntimeAuthorizations::default(),
             health: Arc::default(),
         }
+    }
+    /// Tests: read API-key environment variables through `environment`.
+    #[cfg(test)]
+    pub(crate) fn with_environment(
+        mut self,
+        environment: fn(&str) -> EnvironmentCredentialMetadata,
+    ) -> Self {
+        self.environment = environment;
+        self
     }
     pub(crate) fn set_runtime_authorizations(&mut self, value: ProviderRuntimeAuthorizations) {
         self.authorizations = value;
@@ -267,7 +354,7 @@ impl ProviderStatusHost {
             match entry.setup_capabilities.iter().next() {
                 Some(ProviderSetupCapability::ApiKey {
                     storage: ApiKeyStorage::EnvironmentVariable { env_key },
-                }) if environment_metadata(env_key) == EnvironmentCredentialMetadata::Missing => {
+                }) if (self.environment)(env_key) == EnvironmentCredentialMetadata::Missing => {
                     Some(env_key.as_str())
                 }
                 _ => None,
@@ -299,6 +386,37 @@ impl ProviderStatusHost {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .apply(&mut statuses);
         statuses
+    }
+
+    /// #665: connections, of an entry whose connections run on different
+    /// accounts, whose own credential is missing (`zai-anthropic` on the
+    /// default account with no default Z.AI key while `zai` runs on an
+    /// enrolled named account). They cannot authenticate, even when their
+    /// entry is set up by another connection.
+    pub(crate) fn connections_without_credential(&self) -> std::collections::BTreeSet<String> {
+        self.connection_credentials
+            .values()
+            .flatten()
+            .filter(|(_, credential)| {
+                !self.connection_has_credential(credential, /*managed*/ None)
+            })
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    fn connection_has_credential(
+        &self,
+        credential: &ConnectionCredential,
+        managed: Option<&ManagedSnapshot>,
+    ) -> bool {
+        match credential {
+            ConnectionCredential::NamedAccount { enrolled } => *enrolled,
+            ConnectionCredential::DefaultKey { env_key } => {
+                let metadata = self.environment_api_key_metadata(env_key, managed);
+                metadata.environment == EnvironmentCredentialMetadata::Present
+                    || matches!(metadata.managed, ManagedApiKeyMetadata::Stored { .. })
+            }
+        }
     }
 
     pub(crate) fn begin_credential_attempt(&self, scope: String, runtime_provider: &str) {
@@ -395,6 +513,36 @@ impl ProviderStatusHost {
         managed: Option<&ManagedSnapshot>,
     ) -> ProviderMetadata {
         let first = entry.setup_capabilities.iter().next();
+        // #665: connections on different accounts. The entry is set up when
+        // any connection has its own credential; the others are refused one
+        // by one (`connections_without_credential`).
+        if let Some(connections) = self.connection_credentials.get(entry.id.as_str())
+            && let Some(ProviderSetupCapability::ApiKey {
+                storage: ApiKeyStorage::EnvironmentVariable { env_key },
+            }) = first
+        {
+            let named_enrolled = connections.values().any(|credential| {
+                *credential == ConnectionCredential::NamedAccount { enrolled: true }
+            });
+            let default_key = connections.values().any(|credential| {
+                matches!(credential, ConnectionCredential::DefaultKey { .. })
+                    && self.connection_has_credential(credential, managed)
+            });
+            return ProviderMetadata::ApiKey(if default_key && !named_enrolled {
+                self.environment_api_key_metadata(env_key, managed)
+            } else {
+                ApiKeyCredentialMetadata {
+                    environment: EnvironmentCredentialMetadata::Missing,
+                    managed: if named_enrolled {
+                        ManagedApiKeyMetadata::Stored {
+                            source: codex_login::ProviderApiKeyStorageSource::EncryptedVault,
+                        }
+                    } else {
+                        ManagedApiKeyMetadata::Missing
+                    },
+                }
+            });
+        }
         let named = self.named_accounts.get(entry.id.as_str()).copied();
         match first {
             // PF-84 (#571): OpenAI on a named sign-in account (selected for
@@ -467,7 +615,7 @@ impl ProviderStatusHost {
         env_key: &str,
         snapshot: Option<&ManagedSnapshot>,
     ) -> ApiKeyCredentialMetadata {
-        let environment = environment_metadata(env_key);
+        let environment = (self.environment)(env_key);
         prioritized_api_key_metadata(environment, || match snapshot {
             Some(Ok(snapshot)) => snapshot
                 .get(env_key)

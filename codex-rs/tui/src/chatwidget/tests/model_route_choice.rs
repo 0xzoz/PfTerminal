@@ -28,6 +28,13 @@ fn open_all_models(chat: &mut ChatWidget) -> String {
     render_bottom_popup_with_height(chat, /*width*/ 110, /*height*/ 36)
 }
 
+/// Opens the picker the way `/model` does, filtering the catalog first.
+fn open_model_command(chat: &mut ChatWidget) -> String {
+    let presets = chat.model_catalog.try_list_models().expect("catalog");
+    chat.open_model_popup_with_presets(presets);
+    render_bottom_popup_with_height(chat, /*width*/ 110, /*height*/ 36)
+}
+
 /// Selects the row named `label` in the open tab and returns the preset the
 /// picker sends to the effort step.
 fn select_row(
@@ -210,6 +217,107 @@ async fn only_available_connections_are_offered() {
         "{unconfigured}"
     );
     assert!(!unconfigured.contains("-style"), "{unconfigured}");
+}
+
+/// #665: with the connections on different accounts, each is listed only when
+/// its own credential is there: the named account's enrollment, or the
+/// default Z.AI key for a connection without an account.
+#[tokio::test]
+async fn connections_on_different_accounts_are_offered_only_with_their_own_credential() {
+    for (named, named_row, default_row) in [
+        (ZAI_PROVIDER_ID, OPENAI_STYLE, CLAUDE_STYLE),
+        (ZAI_ANTHROPIC_PROVIDER_ID, CLAUDE_STYLE, OPENAI_STYLE),
+    ] {
+        // Enrolled named account, no default key: only its connection.
+        let (mut chat, _rx, _op_rx, home) = mixed_account_session(named, /*enrolled*/ true).await;
+        let popup = open_all_models(&mut chat);
+        assert!(popup.contains(named_row), "{named}: {popup}");
+        assert!(!popup.contains(default_row), "{named}: {popup}");
+
+        // With a default Z.AI key stored, the other connection can sign in too.
+        chat.handle_key_event(KeyEvent::from(KeyCode::Esc));
+        store_default_zai_key(&chat, home.path());
+        chat.model_catalog.refresh_provider_policy();
+        let popup = open_all_models(&mut chat);
+        assert!(
+            popup.contains(named_row) && popup.contains(default_row),
+            "{named}: {popup}"
+        );
+
+        // A default key and an unenrolled named account: only the default
+        // account's connection, for every GLM model `/model` lists.
+        let (mut chat, _rx, _op_rx, home) = mixed_account_session(named, /*enrolled*/ false).await;
+        store_default_zai_key(&chat, home.path());
+        chat.model_catalog.refresh_provider_policy();
+        let popup = open_model_command(&mut chat);
+        assert!(popup.contains(default_row), "{named}: {popup}");
+        assert!(!popup.contains(named_row), "{named}: {popup}");
+        let other_model_row = default_row.replace("GLM 5.3 Flash", "GLM 5.3");
+        assert!(popup.contains(&other_model_row), "{named}: {popup}");
+    }
+}
+
+/// A Z.AI session whose connection `named` runs on account `work` (enrolled
+/// or not) and the other on the default account, with no Z.AI key in the
+/// environment. Returns the chat and the home holding its credentials.
+async fn mixed_account_session(
+    named: &str,
+    enrolled: bool,
+) -> (
+    ChatWidget,
+    tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+    tokio::sync::mpsc::UnboundedReceiver<Op>,
+    tempfile::TempDir,
+) {
+    use crate::provider_status_host::ProviderAccountMetadata;
+    use crate::provider_status_host::ProviderStatusHost;
+    use codex_provider_auth::ProviderRuntimeAuthorizations;
+
+    let (mut chat, rx, op_rx) = zai_session(named).await;
+    let home = tempfile::tempdir().unwrap();
+    let mut config = crate::legacy_core::config::ConfigBuilder::default()
+        .codex_home(home.path().to_path_buf())
+        .build()
+        .await
+        .unwrap();
+    config.cli_auth_credentials_store_mode = codex_login::AuthCredentialsStoreMode::File;
+    config.model_provider_id = named.to_string();
+    let account = codex_model_provider_info::NamedProviderAccount {
+        provider_id: named.to_string(),
+        name: "work".to_string(),
+    };
+    for providers in [
+        &mut config.model_providers,
+        &mut chat.config.model_providers,
+    ] {
+        providers.get_mut(named).expect(named).account = Some(account.clone());
+    }
+    let host = ProviderStatusHost::from_config_with_account_registry(
+        &config,
+        ProviderAccountMetadata::default(),
+        move |held, kind| {
+            enrolled && held == &account && kind == codex_login::ProviderAccountKind::ApiKey
+        },
+    )
+    .with_environment(|_| codex_provider_auth::EnvironmentCredentialMetadata::Missing);
+    chat.model_catalog.set_provider_policy(
+        super::super::provider_model_policy::ProviderModelPolicy::new(
+            host,
+            ProviderRuntimeAuthorizations::default(),
+        ),
+    );
+    (chat, rx, op_rx, home)
+}
+
+fn store_default_zai_key(chat: &ChatWidget, home: &std::path::Path) {
+    codex_login::login_with_provider_api_key(
+        home,
+        "ZAI_API_KEY",
+        "synthetic-route-choice-key",
+        codex_login::AuthCredentialsStoreMode::File,
+        chat.config.auth_keyring_backend_kind(),
+    )
+    .unwrap();
 }
 
 /// PF-84 accounts are per provider: connections on different accounts say so.

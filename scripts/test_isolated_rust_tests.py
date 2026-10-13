@@ -27,6 +27,7 @@ class IsolatedRustTests(unittest.TestCase):
                 "CLAUDE_CODE_OAUTH_TOKEN": "synthetic-token",
                 "ANTHROPIC_API_KEY": "synthetic-key",
                 "OPENAI_API_KEY": "synthetic-key",
+                "ZAI_API_KEY": "synthetic-key",
                 "CORBANU_TEST_NO_NATIVE_KEYRING": "0",
                 "CARGO_TARGET_DIR": str(Path(root) / "build-cache"),
             }
@@ -52,6 +53,7 @@ class IsolatedRustTests(unittest.TestCase):
                 "CLAUDE_CODE_OAUTH_TOKEN",
                 "ANTHROPIC_API_KEY",
                 "OPENAI_API_KEY",
+                "ZAI_API_KEY",
             ):
                 self.assertNotIn(name, child)
             self.assertEqual(child["CARGO_TARGET_DIR"], parent["CARGO_TARGET_DIR"])
