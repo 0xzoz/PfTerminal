@@ -657,7 +657,7 @@ impl CoreShellActionProvider {
             return Ok(EscalationDecision::deny(Some(refusal)));
         }
 
-        let policy_context = InterceptedExecPolicyContext {
+        let policy_context = || InterceptedExecPolicyContext {
             approval_policy: self.approval_policy,
             permission_profile: self.permission_profile.clone(),
             windows_sandbox_level: self.turn.windows_sandbox_level,
@@ -667,7 +667,7 @@ impl CoreShellActionProvider {
         let evaluation = {
             let policy = self.policy.read().await;
             let mut evaluation =
-                evaluate_intercepted_exec_policy(&policy, program, argv, policy_context.clone());
+                evaluate_intercepted_exec_policy(&policy, program, argv, policy_context());
             if self.strict_rules {
                 crate::exec_policy::apply_strict_forbidden_matches(
                     &mut evaluation,
@@ -685,7 +685,7 @@ impl CoreShellActionProvider {
                     .services
                     .exec_policy
                     .aggressive_suspended_note(|policy| {
-                        evaluate_intercepted_exec_policy(policy, program, argv, policy_context)
+                        evaluate_intercepted_exec_policy(policy, program, argv, policy_context())
                     })
             })
             .flatten();
