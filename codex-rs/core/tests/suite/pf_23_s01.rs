@@ -142,6 +142,18 @@ async fn start_turn_in(
     steps: Vec<Step>,
     tweak: impl Fn(&mut Config) + Send + Sync + 'static,
 ) -> anyhow::Result<(TestCodex, ResponseMock)> {
+    start_turn_after(home, level, approval, steps, tweak, |_| {}).await
+}
+
+/// [`start_turn_in`], running `before_turn` once the session has started.
+async fn start_turn_after(
+    home: Option<Arc<TempDir>>,
+    level: SecurityLevel,
+    approval: AskForApproval,
+    steps: Vec<Step>,
+    tweak: impl Fn(&mut Config) + Send + Sync + 'static,
+    before_turn: impl FnOnce(&TestCodex),
+) -> anyhow::Result<(TestCodex, ResponseMock)> {
     let server = start_mock_server().await;
     let captured = mount_sse_sequence(&server, steps.into_iter().map(sse).collect()).await;
     let mut builder = test_codex();
@@ -166,6 +178,7 @@ async fn start_turn_in(
     if test.config.mcp_servers.get().contains_key("rmcp") {
         wait_for_mcp_server(&test.codex, "rmcp").await?;
     }
+    before_turn(&test);
     test.codex
         .submit(Op::UserInput {
             items: vec![UserInput::Text {
@@ -1881,6 +1894,98 @@ async fn issue_583_git_still_commits_in_a_corbanu_home_worktree() -> anyhow::Res
     assert!(output.contains("committed-583"), "{output}");
     assert!(output.contains("ran-583"), "{output}");
     assert!(!root.join("new-entry").exists(), "{output}");
+    Ok(())
+}
+
+/// Issue #586: a protected command cannot create, and so cannot hold, the
+/// database init lock (#549) where it is missing, by its name or (on a
+/// case-insensitive macOS volume, the same file) in another case, even with
+/// full access and the path built at run time. Holding it would make every
+/// new launch on the home wait out the lock before opening the databases
+/// unlocked. Where the lock exists, a hard link to it cannot be made and
+/// held either. The same holds for a command working in the Corbanu home
+/// itself, which #583 leaves writable: the lock is a store. Permissive is
+/// unchanged.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_586_missing_db_init_lock_cannot_be_created_or_held() -> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let mut wrong = Vec::new();
+    for (missing, in_home) in [(true, false), (true, true), (false, false)] {
+        for (level, held) in [
+            (SecurityLevel::Moderate, false),
+            (SecurityLevel::Aggressive, false),
+            (SecurityLevel::Permissive, true),
+        ] {
+            let home = Arc::new(TempDir::new()?);
+            let root = home.path().canonicalize()?;
+            let lock = root.join("pfterminal_db_init.lock");
+            let path = root.to_string_lossy().into_owned();
+            // Split inside the home folder's own name: neither part names it.
+            let (head, tail) = path.split_at(path.len() - 2);
+            let attempts = if missing {
+                "hold \"$h/$n\" lower; hold \"$h/PFTERMINAL_DB_$(printf INIT).LOCK\" upper"
+            } else {
+                "ln \"$h/$n\" ./link586 && hold ./link586 link"
+            };
+            let command = format!(
+                "h=\"$(printf '{head}%s' {tail})\"; n=\"pfterminal_db_$(printf init).lock\"; \
+                 hold() {{ perl -e 'use Fcntl qw(:flock); \
+                 open(my $f, \">>\", $ARGV[0]) or die \"open: $!\\n\"; \
+                 flock($f, LOCK_EX | LOCK_NB) or die \"lock: $!\\n\"' \"$1\" && echo \"held-$2\"; }}; \
+                 {attempts}; echo ran-586"
+            );
+            let (test, captured) = start_turn_after(
+                Some(home.clone()),
+                level,
+                AskForApproval::Never,
+                vec![
+                    call("call-lock", "shell_command", json!({ "command": command })),
+                    done_step(),
+                ],
+                move |config| {
+                    if in_home {
+                        config.cwd = config.codex_home.clone();
+                    }
+                    config
+                        .permissions
+                        .set_permission_profile(PermissionProfile::Disabled)
+                        .expect("full access");
+                },
+                // The session created it here at start-up (so this home holds
+                // the databases); the first command meets it missing.
+                |_| {
+                    if missing {
+                        std::fs::remove_file(&lock).expect("the session created the lock");
+                    } else {
+                        assert!(lock.is_file(), "the session created the lock");
+                    }
+                },
+            )
+            .await?;
+            assert!(next_exec_approval(&test).await.is_none());
+            let requests = captured.requests();
+            let output = output_text(&requests[requests.len() - 1], "call-lock");
+            let ok = if missing {
+                // `exists()` is the check for the upper-case probe too: on a
+                // case-insensitive volume (default macOS) it is this file. On
+                // a case-sensitive one it is another, harmless file.
+                output.contains("held-lower") == held && lock.exists() == held
+            } else {
+                output.contains("held-link") == held
+                    && test.config.cwd.join("link586").exists() == held
+            };
+            if !output.contains("ran-586") || !ok {
+                wrong.push(format!(
+                    "{level:?} missing={missing} in_home={in_home}: exists={}: {output}",
+                    lock.exists()
+                ));
+            }
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
     Ok(())
 }
 
