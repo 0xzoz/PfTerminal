@@ -38,6 +38,7 @@ use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
 #[cfg(unix)]
 use core_test_support::skip_if_sandbox;
+use core_test_support::stdio_server_bin;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
@@ -97,16 +98,13 @@ fn insert_rmcp_server(config: &mut Config) -> anyhow::Result<()> {
         McpServerConfig {
             auth: Default::default(),
             transport: McpServerTransportConfig::Stdio {
-                command: super::rmcp_client::remote_aware_stdio_server_bin()?,
+                command: stdio_server_bin()?,
                 args: Vec::new(),
                 env: None,
                 env_vars: Vec::new(),
-                // Remote stdio MCP servers must be given an explicit cwd.
-                cwd: core_test_support::is_remote_test_environment().then(|| {
-                    codex_utils_path_uri::LegacyAppPathString::from_path(config.cwd.as_path())
-                }),
+                cwd: None,
             },
-            environment_id: super::rmcp_client::remote_aware_environment_id(),
+            environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
             enabled: true,
             required: false,
             supports_parallel_tool_calls: false,
@@ -175,7 +173,9 @@ async fn start_turn_after(
                 .expect("enable source envelopes");
             tweak(config);
         })
-        .build_with_auto_env(&server)
+        // These tests check the host sandbox's protections (#157): pin them to
+        // the local executor, also in the remote test lane.
+        .build(&server)
         .await?;
     // Keep the server alive for the whole test.
     std::mem::forget(server);
@@ -314,10 +314,6 @@ async fn pf_23_s01_protected_mcp_call_after_untrusted_content_needs_the_human() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pf_23_s01_typing_a_protected_command_into_a_running_shell_needs_the_human()
 -> anyhow::Result<()> {
-    core_test_support::skip_if_remote!(
-        Ok(()),
-        "split write_stdin into a remote interactive shell does not reproduce the local output (#157 follow-up)"
-    );
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
     let stdin_turn = |approval, chars: &str| {
@@ -2502,7 +2498,7 @@ async fn issue_650_other_worktrees_git_folders_stay_read_only() -> anyhow::Resul
         );
         let cwd = AbsolutePathBuf::from_absolute_path(x.join("wt"))?;
         let (test, captured) = start_turn_in(
-            None,
+            /*home*/ None,
             level,
             AskForApproval::Never,
             vec![
@@ -2572,7 +2568,7 @@ async fn issue_651_a_database_folder_with_glob_syntax_is_protected() -> anyhow::
         let cwd = AbsolutePathBuf::from_absolute_path(&work)?;
         let canary = folder.join("canary.sqlite");
         let (test, captured) = start_turn_after(
-            None,
+            /*home*/ None,
             level,
             AskForApproval::Never,
             vec![
@@ -2981,10 +2977,6 @@ async fn pf_23_s02_sandbox_makes_persistence_files_read_only_under_full_access()
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pf_23_s02_typing_into_a_shell_started_before_untrusted_content_is_confined()
 -> anyhow::Result<()> {
-    core_test_support::skip_if_remote!(
-        Ok(()),
-        "writes its canary fixture on the host, but the shell runs in the remote container"
-    );
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
     // The shell proves it is confined: it cannot read a Corbanu home store

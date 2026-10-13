@@ -21,6 +21,7 @@ use codex_app_server_protocol::UserInput as V2UserInput;
 use codex_core::test_support::all_model_presets;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use core_test_support::responses;
+use core_test_support::skip_if_remote;
 use core_test_support::skip_if_wine_exec;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
@@ -182,6 +183,10 @@ async fn pending_permission_probe(mcp: &mut TestAppServer, call_id: &str) -> Res
 
 #[tokio::test]
 async fn thread_settings_f05_pending_decline_is_not_approval_or_replay() -> Result<()> {
+    skip_if_remote!(
+        Ok(()),
+        "the permission probes and their fixtures are on the host (#157)"
+    );
     skip_if_wine_exec!(
         Ok(()),
         "shell-command approval routing requires a host-native cwd under Wine-exec"
@@ -191,6 +196,10 @@ async fn thread_settings_f05_pending_decline_is_not_approval_or_replay() -> Resu
 
 #[tokio::test]
 async fn thread_settings_f05_pending_accept_runs_once_and_next_turn_is_full() -> Result<()> {
+    skip_if_remote!(
+        Ok(()),
+        "the permission probes and their fixtures are on the host (#157)"
+    );
     skip_if_wine_exec!(
         Ok(()),
         "shell-command approval routing requires a host-native cwd under Wine-exec"
@@ -276,6 +285,10 @@ async fn wait_permission_barrier(fixture: &std::path::Path) -> Result<()> {
 
 #[tokio::test]
 async fn thread_settings_f06_f09_inflight_restricted_to_full_keeps_old_boundary() -> Result<()> {
+    skip_if_remote!(
+        Ok(()),
+        "the permission probes and their fixtures are on the host (#157)"
+    );
     skip_if_wine_exec!(
         Ok(()),
         "shell-command approval routing requires a host-native cwd under Wine-exec"
@@ -285,6 +298,10 @@ async fn thread_settings_f06_f09_inflight_restricted_to_full_keeps_old_boundary(
 
 #[tokio::test]
 async fn thread_settings_f06_f09_inflight_full_to_restricted_keeps_old_boundary() -> Result<()> {
+    skip_if_remote!(
+        Ok(()),
+        "the permission probes and their fixtures are on the host (#157)"
+    );
     skip_if_wine_exec!(
         Ok(()),
         "shell-command approval routing requires a host-native cwd under Wine-exec"
@@ -350,6 +367,10 @@ async fn inflight_permission_case(
 
 #[tokio::test]
 async fn thread_settings_f07_rapid_conflicts_end_full() -> Result<()> {
+    skip_if_remote!(
+        Ok(()),
+        "the permission probes and their fixtures are on the host (#157)"
+    );
     skip_if_wine_exec!(
         Ok(()),
         "shell-command approval routing requires a host-native cwd under Wine-exec"
@@ -454,6 +475,10 @@ async fn thread_settings_f10_restart_effective_restricted_reports_probe_authorit
 
 #[tokio::test]
 async fn thread_settings_f10_restart_effective_full_reports_probe_authority() -> Result<()> {
+    skip_if_remote!(
+        Ok(()),
+        "the permission probes and their fixtures are on the host (#157)"
+    );
     skip_if_wine_exec!(
         Ok(()),
         "shell-command approval routing requires a host-native cwd under Wine-exec"
@@ -953,6 +978,10 @@ async fn thread_settings_authorization_boundary_returns_input_and_discriminator(
 
 #[tokio::test]
 async fn thread_settings_confirmation_next_turn_tightening_and_loosening() -> Result<()> {
+    skip_if_remote!(
+        Ok(()),
+        "the permission probes and their fixtures are on the host (#157)"
+    );
     skip_if_wine_exec!(
         Ok(()),
         "shell-command approval routing requires a host-native cwd under Wine-exec"
@@ -993,6 +1022,10 @@ async fn thread_settings_confirmation_next_turn_tightening_and_loosening() -> Re
 
 #[tokio::test]
 async fn thread_settings_confirmation_preserves_pending_approval() -> Result<()> {
+    skip_if_remote!(
+        Ok(()),
+        "the permission probes and their fixtures are on the host (#157)"
+    );
     skip_if_wine_exec!(
         Ok(()),
         "shell-command approval routing requires a host-native cwd under Wine-exec"
@@ -1135,6 +1168,10 @@ async fn preserve_running_authority_after_confirmation(
 
 #[tokio::test]
 async fn thread_settings_confirmation_loosening_preserves_running_work_authority() -> Result<()> {
+    skip_if_remote!(
+        Ok(()),
+        "the permission probes and their fixtures are on the host (#157)"
+    );
     skip_if_wine_exec!(
         Ok(()),
         "shell-command approval routing requires a host-native cwd under Wine-exec"
@@ -1145,6 +1182,10 @@ async fn thread_settings_confirmation_loosening_preserves_running_work_authority
 
 #[tokio::test]
 async fn thread_settings_confirmation_tightening_preserves_granted_approval() -> Result<()> {
+    skip_if_remote!(
+        Ok(()),
+        "the permission probes and their fixtures are on the host (#157)"
+    );
     skip_if_wine_exec!(
         Ok(()),
         "shell-command approval routing requires a host-native cwd under Wine-exec"
@@ -1157,6 +1198,10 @@ async fn thread_settings_confirmation_tightening_preserves_granted_approval() ->
 
 #[tokio::test]
 async fn thread_settings_confirmation_leaves_mcp_status_responses_unaffected() -> Result<()> {
+    skip_if_remote!(
+        Ok(()),
+        "the permission probes and their fixtures are on the host (#157)"
+    );
     skip_if_wine_exec!(
         Ok(()),
         "the stdio MCP fixture does not start under Wine-exec"
