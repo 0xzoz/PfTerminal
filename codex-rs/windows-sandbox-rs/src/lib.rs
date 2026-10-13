@@ -75,6 +75,8 @@ mod identity;
 #[cfg(target_os = "windows")]
 mod integrity;
 #[cfg(target_os = "windows")]
+mod integrity_leases;
+#[cfg(target_os = "windows")]
 mod logging;
 #[cfg(target_os = "windows")]
 mod logon_launch;
@@ -238,6 +240,8 @@ pub use hide_users::hide_newly_created_users;
 pub use identity::require_logon_sandbox_creds;
 #[cfg(target_os = "windows")]
 pub use identity::sandbox_setup_is_complete;
+#[cfg(target_os = "windows")]
+pub use integrity_leases::repair_stale_integrity_labels;
 #[cfg(target_os = "windows")]
 pub use ipc_framed::ErrorPayload;
 #[cfg(target_os = "windows")]
@@ -619,7 +623,8 @@ mod windows_impl {
             capability_roots,
         )?;
         allow_null_device_for_workspace_write(uses_write_capabilities);
-        apply_legacy_session_acl_rules(
+        // Held until the command has exited (#158).
+        let _integrity_lease = match apply_legacy_session_acl_rules(
             &permissions,
             codex_home,
             &current_dir,
@@ -631,7 +636,16 @@ mod windows_impl {
                 readonly_sid_str: security.readonly_sid_str.as_deref(),
                 write_root_sids: &security.write_root_sids,
             },
-        )?;
+            /*session*/ true,
+        ) {
+            Ok(lease) => lease,
+            Err(err) => {
+                unsafe {
+                    CloseHandle(security.h_token);
+                }
+                return Err(err);
+            }
+        };
         let (stdin_pair, stdout_pair, stderr_pair) = unsafe { setup_stdio_pipes()? };
         let ((in_r, in_w), (out_r, out_w), (err_r, err_w)) = (stdin_pair, stdout_pair, stderr_pair);
         let spawn_res = unsafe {
@@ -803,6 +817,13 @@ mod windows_impl {
         }
 
         ensure_codex_home_exists(codex_home)?;
+        // #158: put back the labels a crashed session left behind.
+        if let Err(err) = super::integrity_leases::repair_stale_integrity_labels() {
+            log_note(
+                &format!("integrity labels: could not repair stale labels: {err:#}"),
+                Some(codex_home.join(".sandbox").as_path()),
+            );
+        }
         let current_dir = cwd.to_path_buf();
         let capability_roots =
             legacy_session_capability_roots(&permissions, &current_dir, env_map, codex_home);
@@ -819,6 +840,7 @@ mod windows_impl {
                 readonly_sid_str: None,
                 write_root_sids: &write_root_sids,
             },
+            /*session*/ false,
         )?;
 
         Ok(())

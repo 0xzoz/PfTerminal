@@ -707,10 +707,19 @@ struct LegacyDeleteOutcome {
     nested_existing_contents: Option<String>,
     outside_dir_exists: bool,
     /// What any other Low-integrity program of the user may write after the
-    /// session: protected paths stay Medium, the workspace is Low (#158).
+    /// session: nothing of the workspace, since its label is put back when
+    /// the session ends (#158), including what the session made there.
     low_can_write_git_dir: bool,
     low_can_write_codex_file: bool,
     low_can_write_workspace_file: bool,
+    low_can_write_made_file: bool,
+    /// The session made `made\new.txt` (workspace-write only).
+    made_file_exists: bool,
+    /// A file outside the roots, reached through a junction in the
+    /// workspace: labelling the root does not follow the junction.
+    linked_file_exists: bool,
+    /// The workspace's own label is back and no longer recorded.
+    workspace_label_restored: bool,
     /// A Low-labelled folder outside the roots that a planted `.agents`
     /// junction points at keeps its label: the host relabels only inside
     /// writable roots.
@@ -858,6 +867,22 @@ fn run_legacy_delete_fixture(
         let outside_dir = outside_root.join("outside-dir");
         fs::create_dir(&outside_dir).expect("create outside directory");
         let outside_move_target = workspace.join("moved-in.txt");
+        let made_dir = workspace.join("made");
+        let made_file = made_dir.join("new.txt");
+        let linked_dir = outside_root.join("linked");
+        fs::create_dir(&linked_dir).expect("create linked directory");
+        fs::write(linked_dir.join("linked.txt"), "linked").expect("seed linked file");
+        let output = std::process::Command::new(system32_exe("cmd.exe"))
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(workspace.join("link-out"))
+            .arg(&linked_dir)
+            .output()
+            .expect("run mklink");
+        assert!(output.status.success(), "mklink /J link-out failed");
+        let linked_delete = workspace.join("link-out").join("linked.txt");
+        // SAFETY: reads the label of a folder this test made.
+        let workspace_label_before =
+            unsafe { crate::integrity::read_explicit_labels(&workspace) }.expect("read label");
         fs::write(&workspace_file, "workspace").expect("seed workspace file");
         fs::write(&temp_file, "temp").expect("seed TEMP file");
         fs::write(&tmp_file, "tmp").expect("seed TMP file");
@@ -876,6 +901,9 @@ fn run_legacy_delete_fixture(
                 "rmdir \"%OUTSIDE_DIR%\"\r\n",
                 "rmdir \"%PROTECTED_GIT_DIR%\"\r\n",
                 ">\"%NESTED_EXISTING%\" echo after\r\n",
+                "del /f /q \"%LINKED_DELETE%\"\r\n",
+                "mkdir \"%MADE_DIR%\"\r\n",
+                ">\"%MADE_FILE%\" echo made\r\n",
                 "exit /b 0\r\n",
             ),
         )
@@ -916,6 +944,18 @@ fn run_legacy_delete_fixture(
                 "OUTSIDE_MOVE_TARGET".to_string(),
                 outside_move_target.to_string_lossy().into_owned(),
             ),
+            (
+                "LINKED_DELETE".to_string(),
+                linked_delete.to_string_lossy().into_owned(),
+            ),
+            (
+                "MADE_DIR".to_string(),
+                made_dir.to_string_lossy().into_owned(),
+            ),
+            (
+                "MADE_FILE".to_string(),
+                made_file.to_string_lossy().into_owned(),
+            ),
         ]);
 
         let spawned = spawn_windows_sandbox_session_legacy(
@@ -943,6 +983,11 @@ fn run_legacy_delete_fixture(
             collect_stdout_and_exit(spawned, codex_home.path(), Duration::from_secs(/*secs*/ 10))
                 .await;
         let stdout = String::from_utf8_lossy(&stdout);
+        let canonical_workspace = dunce::canonicalize(&workspace).expect("canonical workspace");
+        // SAFETY: reads the label of a folder this test made.
+        let workspace_label_after =
+            unsafe { crate::integrity::read_explicit_labels(&workspace) }.expect("read label");
+        let recorded = crate::integrity_leases::recorded_roots().expect("read the label records");
 
         (
             LegacyDeleteOutcome {
@@ -958,6 +1003,12 @@ fn run_legacy_delete_fixture(
                 low_can_write_git_dir: low_integrity_can_open_for_write(&protected_git_dir),
                 low_can_write_codex_file: low_integrity_can_open_for_write(&codex_file),
                 low_can_write_workspace_file: low_integrity_can_open_for_write(&nested_existing),
+                low_can_write_made_file: made_file.exists()
+                    && low_integrity_can_open_for_write(&made_file),
+                made_file_exists: made_file.exists(),
+                linked_file_exists: linked_dir.join("linked.txt").exists(),
+                workspace_label_restored: workspace_label_after == workspace_label_before
+                    && !recorded.contains(&canonical_workspace),
                 low_can_write_junction_target: low_integrity_can_open_for_write(&junction_target),
             },
             format!("stdout={stdout:?}\n{}", sandbox_log(codex_home.path())),
@@ -1110,7 +1161,11 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
             outside_dir_exists: true,
             low_can_write_git_dir: false,
             low_can_write_codex_file: false,
-            low_can_write_workspace_file: true,
+            low_can_write_workspace_file: false,
+            low_can_write_made_file: false,
+            made_file_exists: true,
+            linked_file_exists: true,
+            workspace_label_restored: true,
             low_can_write_junction_target: true,
         },
         "{diagnostics}"
@@ -1133,6 +1188,9 @@ fn legacy_read_only_cannot_delete_anything() {
             outcome.protected_git_dir_exists,
             outcome.nested_existing_contents.as_deref(),
             outcome.outside_dir_exists,
+            outcome.made_file_exists,
+            outcome.linked_file_exists,
+            outcome.workspace_label_restored,
         ),
         (
             0,
@@ -1143,9 +1201,265 @@ fn legacy_read_only_cannot_delete_anything() {
             false,
             true,
             Some("before"),
-            true
+            true,
+            false,
+            true,
+            true,
         ),
         "{diagnostics}"
+    );
+}
+
+/// Runs `script` (cmd lines) in a legacy session on `workspace`, with
+/// `TEMP`/`TMP` set to `temp`; returns its exit code.
+fn run_legacy_script(
+    permission_profile: &PermissionProfile,
+    workspace: &Path,
+    temp: &Path,
+    script: &str,
+) -> i32 {
+    let runtime = current_thread_runtime();
+    runtime.block_on(async move {
+        let codex_home = sandbox_home("legacy-script");
+        let script_path = temp.join("legacy-script.cmd");
+        fs::write(&script_path, format!("@echo off\r\n{script}exit /b 0\r\n"))
+            .expect("write script");
+        let env_map = HashMap::from([
+            ("TEMP".to_string(), temp.to_string_lossy().into_owned()),
+            ("TMP".to_string(), temp.to_string_lossy().into_owned()),
+        ]);
+        let spawned = spawn_windows_sandbox_session_legacy(
+            permission_profile,
+            workspace_roots_for(workspace).as_slice(),
+            codex_home.path(),
+            vec![
+                "C:\\Windows\\System32\\cmd.exe".to_string(),
+                "/d".to_string(),
+                "/c".to_string(),
+                script_path.display().to_string(),
+            ],
+            workspace,
+            env_map,
+            /*timeout_ms*/ Some(5_000),
+            &[],
+            &[],
+            /*tty*/ false,
+            /*stdin_open*/ false,
+            /*use_private_desktop*/ true,
+        )
+        .await
+        .expect("spawn legacy session");
+        let (_stdout, exit_code) =
+            collect_stdout_and_exit(spawned, codex_home.path(), Duration::from_secs(/*secs*/ 10))
+                .await;
+        exit_code
+    })
+}
+
+/// #158 option (b): the labels a workspace-write session needed are put
+/// back when it ends, so a read-only session started after it on the same
+/// workspace and `TEMP` deletes nothing, including what the first session
+/// made there. With the labels left in place it could.
+#[test]
+fn legacy_read_only_after_workspace_write_cannot_delete() {
+    let _guard = legacy_process_test_guard();
+    let test_root = user_owned_test_root();
+    let workspace = test_root.path().join("workspace");
+    let temp = test_root.path().join("temp");
+    for directory in [&workspace, &temp] {
+        fs::create_dir_all(directory).expect("create test directory");
+    }
+    let workspace_file = workspace.join("existing.txt");
+    let temp_file = temp.join("existing.txt");
+    fs::write(&workspace_file, "before").expect("seed workspace file");
+    fs::write(&temp_file, "before").expect("seed TEMP file");
+    let made_dir = workspace.join("made");
+    let made_file = made_dir.join("new.txt");
+    let temp_made = temp.join("made-in-temp.txt");
+
+    let write_exit = run_legacy_script(
+        &PermissionProfile::workspace_write(),
+        &workspace,
+        &temp,
+        &format!(
+            "mkdir \"{made}\"\r\n>\"{made_file}\" echo made\r\n>\"{temp_made}\" echo made\r\n>\"{existing}\" echo after\r\n",
+            made = made_dir.display(),
+            made_file = made_file.display(),
+            temp_made = temp_made.display(),
+            existing = workspace_file.display(),
+        ),
+    );
+    let after_write = (
+        write_exit,
+        made_file.exists(),
+        temp_made.exists(),
+        fs::read_to_string(&workspace_file)
+            .ok()
+            .map(|contents| contents.trim().to_string()),
+    );
+    assert_eq!(
+        after_write,
+        (0, true, true, Some("after".to_string())),
+        "the workspace-write session could not write its roots"
+    );
+
+    let read_exit = run_legacy_script(
+        &PermissionProfile::read_only(),
+        &workspace,
+        &temp,
+        &format!(
+            "del /f /q \"{existing}\"\r\ndel /f /q \"{made_file}\"\r\ndel /f /q \"{temp_made}\"\r\ndel /f /q \"{temp_file}\"\r\nmove /y \"{temp_file}\" \"{moved}\"\r\n",
+            existing = workspace_file.display(),
+            made_file = made_file.display(),
+            temp_made = temp_made.display(),
+            temp_file = temp_file.display(),
+            moved = workspace.join("moved.txt").display(),
+        ),
+    );
+    assert_eq!(
+        (
+            read_exit,
+            workspace_file.exists(),
+            made_file.exists(),
+            temp_made.exists(),
+            temp_file.exists(),
+            workspace.join("moved.txt").exists(),
+            low_integrity_can_open_for_write(&workspace_file),
+            low_integrity_can_open_for_write(&made_file),
+            low_integrity_can_open_for_write(&temp_file),
+        ),
+        (0, true, true, true, true, false, false, false, false),
+    );
+}
+
+const CRASH_ROOTS_ENV: &str = "CODEX_158_CRASH_ROOTS";
+const CRASH_CHILD_TEST: &str = "unified_exec::tests::legacy_integrity_crash_child_entry";
+const CRASH_CHILD_READY: &str = "integrity-crash-child: leased";
+
+/// The child of [`legacy_crashed_session_labels_are_repaired`]: takes a lease
+/// on the roots it is given and waits to be killed. Does nothing otherwise.
+#[test]
+fn legacy_integrity_crash_child_entry() {
+    let Some(roots) = std::env::var_os(CRASH_ROOTS_ENV) else {
+        return;
+    };
+    let roots: Vec<PathBuf> = std::env::split_paths(&roots)
+        .map(|root| dunce::canonicalize(root).expect("canonical root"))
+        .collect();
+    let lease = crate::integrity_leases::acquire(&roots, /*log_dir*/ None).expect("lease");
+    // Own line: libtest prints the test name without a newline first.
+    println!("\n{CRASH_CHILD_READY}");
+    use std::io::Write as _;
+    std::io::stdout().flush().expect("flush");
+    std::thread::sleep(Duration::from_secs(/*secs*/ 300));
+    drop(lease);
+}
+
+/// #158 option (b): a session killed while it holds a lease leaves its roots
+/// labelled Low; the startup repair puts each root's own label back (none,
+/// or an explicit one), and leaves a live session's roots alone.
+#[test]
+fn legacy_crashed_session_labels_are_repaired() {
+    use std::io::BufRead as _;
+    let _guard = legacy_process_test_guard();
+    let test_root = user_owned_test_root();
+    let crashed = test_root.path().join("crashed");
+    let kept = test_root.path().join("kept");
+    let live = test_root.path().join("live");
+    for directory in [&crashed, &kept, &live] {
+        fs::create_dir_all(directory).expect("create test directory");
+        fs::write(directory.join("file.txt"), "before").expect("seed file");
+    }
+    // `kept` has its own explicit label, which must come back as it was.
+    let output = std::process::Command::new(system32_exe("icacls.exe"))
+        .arg(&kept)
+        .args(["/setintegritylevel", "(OI)(CI)M"])
+        .output()
+        .expect("run icacls");
+    assert!(output.status.success(), "icacls failed");
+    // SAFETY: reads labels of folders this test made.
+    let labels = |path: &Path| unsafe { crate::integrity::read_explicit_labels(path) }.unwrap();
+    let crashed_before = labels(&crashed);
+    let kept_before = labels(&kept);
+    assert_eq!((crashed_before.len(), kept_before.len()), (0, 1));
+    let canonical = |path: &Path| dunce::canonicalize(path).expect("canonical");
+
+    let mut child = std::process::Command::new(std::env::current_exe().expect("test exe"))
+        .args([
+            "--exact",
+            CRASH_CHILD_TEST,
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(
+            CRASH_ROOTS_ENV,
+            std::env::join_paths([&crashed, &kept]).expect("join roots"),
+        )
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("start the crash child");
+    let stdout = child.stdout.take().expect("child stdout");
+    let mut ready = false;
+    for line in std::io::BufReader::new(stdout).lines() {
+        let line = line.expect("read child stdout");
+        if line.trim() == CRASH_CHILD_READY {
+            ready = true;
+            break;
+        }
+    }
+    let leased = (
+        ready,
+        low_integrity_can_open_for_write(&crashed.join("file.txt")),
+        low_integrity_can_open_for_write(&kept.join("file.txt")),
+    );
+    child.kill().expect("kill the crash child");
+    child.wait().expect("wait for the crash child");
+    assert_eq!(
+        leased,
+        (true, true, true),
+        "the child did not label its roots"
+    );
+
+    // Killed: nothing was put back.
+    let recorded = crate::integrity_leases::recorded_roots().expect("records");
+    assert_eq!(
+        (
+            low_integrity_can_open_for_write(&crashed.join("file.txt")),
+            recorded.contains(&canonical(&crashed)),
+            recorded.contains(&canonical(&kept)),
+        ),
+        (true, true, true),
+        "a killed session should leave its labels: {recorded:?}"
+    );
+
+    let live_lease =
+        crate::integrity_leases::acquire(&[canonical(&live)], /*log_dir*/ None).expect("lease");
+    let repaired = crate::repair_stale_integrity_labels().expect("repair");
+    let recorded = crate::integrity_leases::recorded_roots().expect("records");
+    assert_eq!(
+        (
+            repaired >= 2,
+            low_integrity_can_open_for_write(&crashed.join("file.txt")),
+            low_integrity_can_open_for_write(&kept.join("file.txt")),
+            labels(&crashed) == crashed_before,
+            labels(&kept) == kept_before,
+            recorded.contains(&canonical(&crashed)),
+            recorded.contains(&canonical(&kept)),
+            low_integrity_can_open_for_write(&live.join("file.txt")),
+            recorded.contains(&canonical(&live)),
+        ),
+        (true, false, false, true, true, false, false, true, true),
+        "repaired {repaired}: {recorded:?}"
+    );
+
+    drop(live_lease);
+    let recorded = crate::integrity_leases::recorded_roots().expect("records");
+    assert_eq!(
+        (
+            low_integrity_can_open_for_write(&live.join("file.txt")),
+            recorded.contains(&canonical(&live)),
+        ),
+        (false, false)
     );
 }
 

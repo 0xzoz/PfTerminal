@@ -9,9 +9,12 @@
 //! carry an inheritable Low label so writes inside them keep working.
 
 use crate::token::LocalSid;
+use crate::winutil::string_from_sid_bytes;
 use crate::winutil::to_wide;
 use anyhow::Result;
 use anyhow::anyhow;
+use serde::Deserialize;
+use serde::Serialize;
 use std::ffi::c_void;
 use std::path::Path;
 use windows_sys::Win32::Foundation::ERROR_SUCCESS;
@@ -53,6 +56,7 @@ use windows_sys::Win32::System::StationsAndDesktops::CloseDesktop;
 use windows_sys::Win32::System::StationsAndDesktops::OpenDesktopW;
 use windows_sys::Win32::System::SystemServices::SE_GROUP_INTEGRITY;
 use windows_sys::Win32::System::SystemServices::SYSTEM_MANDATORY_LABEL_ACE_TYPE;
+use windows_sys::Win32::System::SystemServices::SYSTEM_MANDATORY_LABEL_NO_READ_UP;
 use windows_sys::Win32::System::SystemServices::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP;
 
 const LOW_INTEGRITY_SID: &str = "S-1-16-4096";
@@ -87,38 +91,68 @@ pub(crate) unsafe fn set_token_low_integrity(h_token: HANDLE) -> Result<()> {
     Ok(())
 }
 
-/// An ACL holding one no-write-up label ACE for `level` with `flags`.
+/// One explicit (not inherited) mandatory label entry, as recorded to put a
+/// folder's own label back (#158).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct LabelAce {
+    /// Inheritance flags, without `INHERITED_ACE`.
+    pub(crate) flags: u8,
+    /// Mandatory policy (no-write-up, no-read-up, no-execute-up).
+    pub(crate) mask: u32,
+    /// The integrity level SID, such as `S-1-16-4096`.
+    pub(crate) sid: String,
+}
+
+/// An ACL holding the given mandatory label ACEs (possibly none).
 struct LabelAcl {
     buffer: Vec<u64>,
-    _level: LocalSid,
+    _levels: Vec<LocalSid>,
 }
 
 impl LabelAcl {
     unsafe fn new(level: &str, flags: u32) -> Result<Self> {
-        let low = LocalSid::from_string(level)?;
-        // ACL header + SYSTEM_MANDATORY_LABEL_ACE (header, mask, SID).
+        Self::with_aces(&[LabelAce {
+            flags: flags as u8,
+            mask: SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+            sid: level.to_string(),
+        }])
+    }
+
+    unsafe fn with_aces(aces: &[LabelAce]) -> Result<Self> {
+        let levels = aces
+            .iter()
+            .map(|ace| LocalSid::from_string(&ace.sid))
+            .collect::<Result<Vec<_>>>()?;
+        // ACL header + per SYSTEM_MANDATORY_LABEL_ACE (header, mask, SID).
         let size = std::mem::size_of::<ACL>()
-            + std::mem::size_of::<ACE_HEADER>()
-            + std::mem::size_of::<u32>()
-            + GetLengthSid(low.as_ptr()) as usize;
+            + levels
+                .iter()
+                .map(|level| {
+                    std::mem::size_of::<ACE_HEADER>()
+                        + std::mem::size_of::<u32>()
+                        + GetLengthSid(level.as_ptr()) as usize
+                })
+                .sum::<usize>();
         let mut buffer = vec![0u64; size.div_ceil(8)];
         let acl = buffer.as_mut_ptr() as *mut ACL;
         if InitializeAcl(acl, (buffer.len() * 8) as u32, ACL_REVISION) == 0 {
             return Err(anyhow!("InitializeAcl failed: {}", GetLastError()));
         }
-        if AddMandatoryAce(
-            acl,
-            ACL_REVISION,
-            flags,
-            SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
-            low.as_ptr(),
-        ) == 0
-        {
-            return Err(anyhow!("AddMandatoryAce failed: {}", GetLastError()));
+        for (ace, level) in aces.iter().zip(&levels) {
+            if AddMandatoryAce(
+                acl,
+                ACL_REVISION,
+                u32::from(ace.flags) & !INHERITED_ACE,
+                ace.mask,
+                level.as_ptr(),
+            ) == 0
+            {
+                return Err(anyhow!("AddMandatoryAce failed: {}", GetLastError()));
+            }
         }
         Ok(Self {
             buffer,
-            _level: low,
+            _levels: levels,
         })
     }
 
@@ -127,9 +161,11 @@ impl LabelAcl {
     }
 }
 
-/// Gives `path` (and, for a directory, everything below it) a Low
+/// Gives `path` (and, for a directory, everything below it) an explicit Low
 /// no-write-up label, so a Low-integrity sandbox can write there. Returns
-/// false when the label is already in place.
+/// false when the label is already in place. Explicit even below a Low
+/// parent: a root nested in another session's root keeps its label when
+/// that root's label is put back.
 ///
 /// # Safety
 /// Calls Win32 security APIs on `path`.
@@ -139,11 +175,149 @@ pub(crate) unsafe fn label_writable_root_low(path: &Path) -> Result<bool> {
     } else {
         0
     };
-    if has_label(path, LOW_INTEGRITY_SID, flags, /*explicit_only*/ false)? {
+    if has_label(path, LOW_INTEGRITY_SID, flags, /*explicit_only*/ true)? {
         return Ok(false);
     }
     set_file_label(path, LOW_INTEGRITY_SID, flags)?;
     Ok(true)
+}
+
+/// Gives a folder of the host's own (the label registry) an explicit Medium
+/// no-write-up and no-read-up label for it and everything below it: no
+/// Low-integrity program, the sandbox included, may write, read or hold
+/// open anything there.
+///
+/// # Safety
+/// Calls Win32 security APIs on `path`.
+pub(crate) unsafe fn label_private_dir_medium(path: &Path) -> Result<()> {
+    let ace = LabelAce {
+        flags: (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE) as u8,
+        mask: SYSTEM_MANDATORY_LABEL_NO_WRITE_UP | SYSTEM_MANDATORY_LABEL_NO_READ_UP,
+        sid: MEDIUM_INTEGRITY_SID.to_string(),
+    };
+    if read_explicit_labels(path)? == [ace.clone()] {
+        return Ok(());
+    }
+    set_explicit_labels(path, &[ace])
+}
+
+/// The explicit (not inherited) label entries of `path`, in order.
+///
+/// # Safety
+/// Calls Win32 security APIs on `path`.
+pub(crate) unsafe fn read_explicit_labels(path: &Path) -> Result<Vec<LabelAce>> {
+    let mut out = Vec::new();
+    with_label_sacl(path, |p_sacl| {
+        for_each_label_ace(p_sacl, |ace_flags, mask, sid| {
+            if ace_flags & INHERITED_ACE == 0 {
+                let len = GetLengthSid(sid) as usize;
+                let bytes = std::slice::from_raw_parts(sid as *const u8, len);
+                let sid = string_from_sid_bytes(bytes).map_err(|err| anyhow!(err))?;
+                out.push(LabelAce {
+                    flags: ace_flags as u8,
+                    mask,
+                    sid,
+                });
+            }
+            Ok(true)
+        })
+    })?;
+    Ok(out)
+}
+
+/// Replaces the explicit label entries of `path` with `labels` (none
+/// removes them). Inheritable entries propagate to existing children, and
+/// children get the inherited entries of `path` back.
+///
+/// # Safety
+/// Calls Win32 security APIs on `path`.
+pub(crate) unsafe fn set_explicit_labels(path: &Path, labels: &[LabelAce]) -> Result<()> {
+    let mut acl = LabelAcl::with_aces(labels)?;
+    apply_label_acl(path, &mut acl)
+}
+
+/// Whether the label Windows applies to `path` is at Low integrity or below.
+///
+/// # Safety
+/// Calls Win32 security APIs on `path`.
+pub(crate) unsafe fn effective_label_is_low(path: &Path) -> Result<bool> {
+    let mut low = false;
+    with_label_sacl(path, |p_sacl| {
+        for_each_label_ace(p_sacl, |ace_flags, _mask, sid| {
+            if ace_flags & INHERIT_ONLY_ACE != 0 {
+                return Ok(true);
+            }
+            let count = *GetSidSubAuthorityCount(sid);
+            low = count > 0 && *GetSidSubAuthority(sid, u32::from(count) - 1) <= LOW_INTEGRITY_RID;
+            Ok(false)
+        })
+    })?;
+    Ok(low)
+}
+
+/// Calls `f` with the label SACL of `path` (null when it has none).
+unsafe fn with_label_sacl(path: &Path, f: impl FnOnce(*mut ACL) -> Result<()>) -> Result<()> {
+    let mut p_sd: *mut c_void = std::ptr::null_mut();
+    let mut p_sacl: *mut ACL = std::ptr::null_mut();
+    let code = GetNamedSecurityInfoW(
+        to_wide(path).as_ptr(),
+        SE_FILE_OBJECT,
+        LABEL_SECURITY_INFORMATION,
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        &mut p_sacl,
+        &mut p_sd,
+    );
+    if code != ERROR_SUCCESS {
+        return Err(anyhow!(
+            "GetNamedSecurityInfoW(label) failed for {}: {code}",
+            path.display()
+        ));
+    }
+    let result = f(p_sacl);
+    if !p_sd.is_null() {
+        LocalFree(p_sd as HLOCAL);
+    }
+    result
+}
+
+/// Calls `f(flags, mask, sid)` for each mandatory label ACE in `p_sacl`
+/// (which may be null) until it returns false.
+unsafe fn for_each_label_ace(
+    p_sacl: *mut ACL,
+    mut f: impl FnMut(u32, u32, *mut c_void) -> Result<bool>,
+) -> Result<()> {
+    if p_sacl.is_null() {
+        return Ok(());
+    }
+    let mut info: ACL_SIZE_INFORMATION = std::mem::zeroed();
+    if GetAclInformation(
+        p_sacl,
+        &mut info as *mut ACL_SIZE_INFORMATION as *mut c_void,
+        std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
+        AclSizeInformation,
+    ) == 0
+    {
+        return Err(anyhow!("GetAclInformation failed: {}", GetLastError()));
+    }
+    for i in 0..info.AceCount {
+        let mut p_ace: *mut c_void = std::ptr::null_mut();
+        if GetAce(p_sacl, i, &mut p_ace) == 0 {
+            continue;
+        }
+        let hdr = &*(p_ace as *const ACE_HEADER);
+        if u32::from(hdr.AceType) != SYSTEM_MANDATORY_LABEL_ACE_TYPE {
+            continue;
+        }
+        let mask = *((p_ace as usize + std::mem::size_of::<ACE_HEADER>()) as *const u32);
+        let sid = (p_ace as usize + std::mem::size_of::<ACE_HEADER>() + std::mem::size_of::<u32>())
+            as *mut c_void;
+        if !f(u32::from(hdr.AceFlags), mask, sid)? {
+            break;
+        }
+    }
+    Ok(())
 }
 
 /// Gives a protected path inside a writable root (and everything below it)
@@ -172,6 +346,10 @@ pub(crate) unsafe fn label_protected_path_medium(path: &Path) -> Result<()> {
 
 unsafe fn set_file_label(path: &Path, level: &str, flags: u32) -> Result<()> {
     let mut acl = LabelAcl::new(level, flags)?;
+    apply_label_acl(path, &mut acl)
+}
+
+unsafe fn apply_label_acl(path: &Path, acl: &mut LabelAcl) -> Result<()> {
     // Inheritable label ACEs propagate to existing children.
     let code = SetNamedSecurityInfoW(
         to_wide(path).as_ptr(),

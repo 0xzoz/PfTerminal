@@ -92,23 +92,38 @@ or move a file it has no `DELETE` right on when the parent directory grants
 most of the user profile, in both `ReadOnly` and `WorkspaceWrite` modes.
 Commands therefore run at Low integrity: a Low-integrity process cannot delete,
 move or write an object labelled Medium (the default for unlabelled objects).
-Each writable root gets an inheritable Low no-write-up label, so writes and
-deletes inside it keep working. Side effects:
+Each writable root gets an inheritable Low no-write-up label while a session
+uses it, so writes and deletes inside it keep working (option (b), security
+sign-off by Travis on 2026-10-13):
 
-- The labels are persistent. A folder that was a writable root keeps its Low
-  label, so a later session can delete (not write) there even when the folder
-  is not one of its writable roots. In particular, a `ReadOnly` session in a
-  workspace (or with a `%TEMP%`) that an earlier `WorkspaceWrite` session used
-  can still delete files there, apart from protected paths. Other
-  Low-integrity programs of the user can write in labelled folders too.
-  `icacls <dir> /setintegritylevel (OI)(CI)M` restores Medium. Running the
-  sandbox's own tests on Windows labels the checkout they use as a workspace.
+- Every legacy command takes a lease on its writable roots. The first lease on
+  a root records the root's own label and labels it Low; when the last lease
+  ends (after the command has exited), the recorded label is put back and
+  propagates to the folder's children again. So once no session runs, a
+  `ReadOnly` session, the PF-27-S08 credential broker or another Low-integrity
+  program cannot delete in a workspace or `%TEMP%` an earlier `WorkspaceWrite`
+  session used.
+- The records are per Windows user, in
+  `%LOCALAPPDATA%\CorbanuTerminalSandbox\integrity-labels` (labelled Medium,
+  no write-up and no read-up). Each live session holds a session file open; a
+  session that was killed leaves a file that can be deleted, and every lease,
+  the end of every lease and the start of the TUI and app server put back the
+  labels only such sessions held. A writable root that holds the records
+  protects them like `.git`.
+- While a command runs, its roots are Low: other Low-integrity programs of the
+  user (the credential broker included) can delete, and programs that are not
+  write-restricted can write, there. Processes a command leaves running lose
+  write access to its roots when it exits.
+- Labelling and putting the label back each walk the whole folder tree, once
+  per command when no other session holds the root, which can be slow for
+  large trees (or a large `%TEMP%`). Objects a command itself labels Low (with
+  `icacls`, say) keep that label. Roots shared with another Windows account's
+  sessions are not tracked across accounts.
 - Labelling needs permission to change the folder's owner settings
   (`WRITE_OWNER`) and a file system that holds integrity labels; without them
-  the command does not start and the error says why. The first label
-  propagates through the whole folder tree, which can be slow for large trees.
-  If propagation stops partway, the root still counts as labelled and the
-  unlabelled files below it stay unwritable.
+  the command does not start and the error says why. If propagation stops
+  partway, files below it may stay unwritable (or, when the label is put back,
+  Low).
 - Protected paths inside writable roots (and other read-only carve-outs) get
   an explicit Medium label, once, so they don't inherit the Low label and
   other Low-integrity programs can't write them. If that label can't be set,
