@@ -98,8 +98,9 @@ sign-off by Travis on 2026-10-13):
 
 - Every legacy command takes a lease on its writable roots. The first lease on
   a root records the root's own label and labels it Low; when the last lease
-  ends (after the command has exited), the recorded label is put back and
-  propagates to the folder's children again. So once no session runs, a
+  ends (once the command and what it left running have exited), the recorded
+  label is put back and propagates to the folder's children again. So once no
+  session runs, a
   `ReadOnly` session, the PF-27-S08 credential broker or another Low-integrity
   program cannot delete in a workspace or `%TEMP%` an earlier `WorkspaceWrite`
   session used.
@@ -112,18 +113,19 @@ sign-off by Travis on 2026-10-13):
   protects them like `.git`.
 - While a command runs, its roots are Low: other Low-integrity programs of the
   user (the credential broker included) can delete, and programs that are not
-  write-restricted can write, there. Processes a command leaves running lose
-  write access to its roots when it exits.
+  write-restricted can write, there.
 - Labelling and putting the label back each walk the whole folder tree, once
   per command when no other session holds the root, which can be slow for
   large trees (or a large `%TEMP%`). Objects a command itself labels Low (with
   `icacls`, say) keep that label. Roots shared with another Windows account's
   sessions are not tracked across accounts.
 - Labelling needs permission to change the folder's owner settings
-  (`WRITE_OWNER`) and a file system that holds integrity labels; without them
-  the command does not start and the error says why. If propagation stops
-  partway, files below it may stay unwritable (or, when the label is put back,
-  Low).
+  (`WRITE_OWNER`) and a file system that holds integrity labels. A root
+  without them is left as it is: commands can't write there, and the sandbox
+  log says why. If propagation stops partway, files below the root may stay
+  unwritable (or, when the label is put back, Low).
+- Processes a command leaves running (a server, say) keep the lease until the
+  last of them exits, or until Core exits.
 - Protected paths inside writable roots (and other read-only carve-outs) get
   an explicit Medium label, once, so they don't inherit the Low label and
   other Low-integrity programs can't write them. If that label can't be set,

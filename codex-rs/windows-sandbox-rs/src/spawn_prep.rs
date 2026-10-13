@@ -16,6 +16,7 @@ use crate::env::inherit_path_env;
 use crate::env::normalize_null_device_env;
 use crate::identity::SandboxCreds;
 use crate::identity::require_logon_sandbox_creds;
+use crate::integrity::effective_label_is_low;
 use crate::integrity::label_protected_path_medium;
 use crate::integrity::set_token_low_integrity;
 use crate::integrity_leases::IntegrityLease;
@@ -363,12 +364,18 @@ pub(crate) fn apply_legacy_session_acl_rules(
                 && dunce::canonicalize(p)
                     .is_ok_and(|canonical| strictly_inside_a_root(&canonical, &canonical_allow))
             {
-                label_protected_path_medium(p).with_context(|| {
-                    format!(
-                        "the Windows sandbox could not keep protected path {} at Medium integrity",
-                        p.display()
-                    )
-                })?;
+                // A path that isn't Low anyway (its root could not be
+                // labelled) needs no label of its own.
+                if let Err(err) = label_protected_path_medium(p)
+                    && !matches!(effective_label_is_low(p), Ok(false))
+                {
+                    return Err(err).with_context(|| {
+                        format!(
+                            "the Windows sandbox could not keep protected path {} at Medium integrity",
+                            p.display()
+                        )
+                    });
+                }
             }
             for root_sid in deny_root_capabilities_for_path(p, acl_sids.write_root_sids) {
                 let _ = add_deny_write_ace(p, root_sid.sid.as_ptr());

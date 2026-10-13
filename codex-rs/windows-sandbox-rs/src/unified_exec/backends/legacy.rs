@@ -450,8 +450,11 @@ pub(crate) async fn spawn_windows_sandbox_session_legacy(
                 CloseHandle(token_handle);
             }
         }
-        // Labels are put back before the exit is reported.
-        drop(integrity_lease);
+        // Labels are put back before the exit is reported, unless processes
+        // the command left running still use them.
+        if let Some(lease) = integrity_lease {
+            lease.release_after_job(Arc::clone(&job_for_wait));
+        }
         finalize_exit(
             exit_tx,
             wait_handle,

@@ -1432,8 +1432,6 @@ fn legacy_crashed_session_labels_are_repaired() {
         "a killed session should leave its labels: {recorded:?}"
     );
 
-    let live_lease =
-        crate::integrity_leases::acquire(&[canonical(&live)], /*log_dir*/ None).expect("lease");
     let repaired = crate::repair_stale_integrity_labels().expect("repair");
     let recorded = crate::integrity_leases::recorded_roots().expect("records");
     assert_eq!(
@@ -1445,11 +1443,23 @@ fn legacy_crashed_session_labels_are_repaired() {
             labels(&kept) == kept_before,
             recorded.contains(&canonical(&crashed)),
             recorded.contains(&canonical(&kept)),
+        ),
+        (true, false, false, true, true, false, false),
+        "repaired {repaired}: {recorded:?}"
+    );
+
+    // A live session's roots are left alone.
+    let live_lease =
+        crate::integrity_leases::acquire(&[canonical(&live)], /*log_dir*/ None).expect("lease");
+    crate::repair_stale_integrity_labels().expect("repair");
+    let recorded = crate::integrity_leases::recorded_roots().expect("records");
+    assert_eq!(
+        (
             low_integrity_can_open_for_write(&live.join("file.txt")),
             recorded.contains(&canonical(&live)),
         ),
-        (true, false, false, true, true, false, false, true, true),
-        "repaired {repaired}: {recorded:?}"
+        (true, true),
+        "{recorded:?}"
     );
 
     drop(live_lease);

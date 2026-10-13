@@ -21,6 +21,9 @@
 //!   crash): its roots no longer count;
 //! - `registry.lock`, held exclusively while the registry changes.
 //!
+//! A lease ends when the command's last process exits, so processes it
+//! leaves running (a server, say) keep writing until they exit too.
+//!
 //! Every acquire, every release and the startup sweep
 //! ([`repair_stale_integrity_labels`]) put back the label of each recorded
 //! root that no live session holds.
@@ -34,6 +37,7 @@ use crate::integrity::set_explicit_labels;
 use crate::logging::log_note;
 use anyhow::Context;
 use anyhow::Result;
+use codex_utils_pty::JobObject;
 use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
@@ -48,6 +52,7 @@ use std::os::windows::fs::MetadataExt as _;
 use std::os::windows::fs::OpenOptionsExt as _;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -135,26 +140,60 @@ fn acquire_locked(lease: &mut IntegrityLease, wanted: &BTreeSet<PathBuf>) -> Res
     let mut labels = load_labels(&lease.registry)?;
     sweep(&lease.registry, &mut labels, lease.log_dir.as_deref())?;
     for root in wanted {
-        if !labels.roots.contains_key(root) {
-            // SAFETY: reads the label of an existing canonical root.
-            let original = unsafe { read_explicit_labels(root) }
-                .with_context(|| format!("read the integrity label of {}", root.display()))?;
-            labels.roots.insert(root.clone(), original);
-            // Recorded before it changes, so a crash cannot lose it.
-            save_labels(&lease.registry, &labels)?;
+        // A root that can't be labelled stays as it is: commands can't write
+        // there, which is safe, and the others still work.
+        if let Err(err) = lease_root(&lease.registry, &mut labels, root) {
+            log_note(
+                &format!(
+                    "integrity labels: writable root {} can't be labelled Low, so sandboxed commands can't write there (labelling needs permission to change the folder's owner settings, WRITE_OWNER, and a file system that holds integrity labels): {err:#}",
+                    root.display()
+                ),
+                lease.log_dir.as_deref(),
+            );
         }
-        // SAFETY: labels an existing canonical root.
-        unsafe { label_writable_root_low(root) }.with_context(|| {
-            format!(
-                "the Windows sandbox could not label writable root {} for Low-integrity commands; it probably needs permission to change the folder's owner settings (WRITE_OWNER), or the file system can't hold integrity labels",
-                root.display()
-            )
-        })?;
+    }
+    Ok(())
+}
+
+fn lease_root(registry: &Path, labels: &mut Labels, root: &Path) -> Result<()> {
+    let new = !labels.roots.contains_key(root);
+    if new {
+        // SAFETY: reads the label of an existing canonical root.
+        let original = unsafe { read_explicit_labels(root) }
+            .with_context(|| format!("read the integrity label of {}", root.display()))?;
+        labels.roots.insert(root.to_path_buf(), original);
+        // Recorded before it changes, so a crash cannot lose it.
+        save_labels(registry, labels)?;
+    }
+    // SAFETY: labels an existing canonical root.
+    if let Err(err) = unsafe { label_writable_root_low(root) } {
+        // Unchanged: nothing to put back later.
+        // SAFETY: as above.
+        if new && unsafe { read_explicit_labels(root) }.is_ok_and(|now| labels.roots[root] == now) {
+            labels.roots.remove(root);
+            save_labels(registry, labels)?;
+        }
+        return Err(err);
     }
     Ok(())
 }
 
 impl IntegrityLease {
+    /// Ends the lease once no process of the command's `job` runs: right
+    /// away when none does, so a caller that reports the exit afterwards
+    /// finds the labels back; otherwise, on a thread of its own, when the
+    /// last process the command left running exits.
+    pub(crate) fn release_after_job(self, job: Arc<JobObject>) {
+        if wait_for_empty_job(&job, Duration::from_secs(/*secs*/ 2)) {
+            drop(self);
+            return;
+        }
+        std::thread::spawn(move || {
+            while !wait_for_empty_job(&job, Duration::from_secs(/*secs*/ 1)) {}
+            drop(self);
+        });
+    }
+
     fn release(&mut self) -> Result<()> {
         let Some((file, path)) = self.session.take() else {
             return Ok(());
@@ -182,6 +221,37 @@ impl Drop for IntegrityLease {
                 self.log_dir.as_deref(),
             );
         }
+    }
+}
+
+/// Whether `job` has no process left within `timeout` (or can't be asked).
+fn wait_for_empty_job(job: &JobObject, timeout: Duration) -> bool {
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::System::JobObjects::JOBOBJECT_BASIC_ACCOUNTING_INFORMATION;
+    use windows_sys::Win32::System::JobObjects::JobObjectBasicAccountingInformation;
+    use windows_sys::Win32::System::JobObjects::QueryInformationJobObject;
+    let deadline = Instant::now() + timeout;
+    loop {
+        // SAFETY: a zeroed plain-data struct the call fills in.
+        let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: `job` holds a valid job handle; the buffer and its size match.
+        let ok = unsafe {
+            QueryInformationJobObject(
+                job.as_raw_handle() as HANDLE,
+                JobObjectBasicAccountingInformation,
+                &mut info as *mut JOBOBJECT_BASIC_ACCOUNTING_INFORMATION as *mut std::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 || info.ActiveProcesses == 0 {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 

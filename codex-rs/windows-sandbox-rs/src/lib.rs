@@ -624,7 +624,7 @@ mod windows_impl {
         )?;
         allow_null_device_for_workspace_write(uses_write_capabilities);
         // Held until the command has exited (#158).
-        let _integrity_lease = match apply_legacy_session_acl_rules(
+        let integrity_lease = match apply_legacy_session_acl_rules(
             &permissions,
             codex_home,
             &current_dir,
@@ -764,6 +764,10 @@ mod windows_impl {
                 &format!("capture failed to preserve descendants after root exit: {err}"),
                 logs_base_dir,
             );
+        }
+
+        if let Some(lease) = integrity_lease {
+            lease.release_after_job(Arc::clone(&job));
         }
 
         unsafe {
