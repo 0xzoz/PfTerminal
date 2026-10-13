@@ -57,7 +57,6 @@ use codex_exec_server::ExecServerRuntimePaths;
 use codex_login::AuthRouteConfig;
 use codex_login::default_client::originator;
 use codex_login::default_client::set_default_client_residency_requirement;
-use codex_login::enforce_login_restrictions;
 use codex_protocol::ThreadId;
 use codex_protocol::auth::AuthMode;
 use codex_protocol::config_types::AltScreenMode;
@@ -120,6 +119,7 @@ mod crew_presets;
 mod crew_state;
 mod custom_spawn_crew;
 pub(crate) mod custom_terminal;
+mod default_login_launch;
 mod pets;
 pub use custom_terminal::Terminal;
 mod auto_review_denials;
@@ -1369,6 +1369,29 @@ pub async fn run_main(
             codex_rollout::sqlite_telemetry_recorder(metrics.clone(), otel_originator.as_str());
         let _ = codex_state::install_process_db_telemetry(telemetry);
     }
+    let launches_resume_or_fork =
+        is_resume_launch(&cli) || cli.fork_picker || cli.fork_last || cli.fork_session_id.is_some();
+    #[allow(clippy::print_stderr)]
+    let default_login_launch::DefaultLoginAtLaunch {
+        app_server_target,
+        left_in_place,
+    } = match default_login_launch::settle_default_login_at_launch(
+        &config,
+        launches_resume_or_fork,
+        app_server_target,
+    )
+    .await
+    {
+        Ok(settled) => settled,
+        Err(err) => {
+            eprintln!("{err}");
+            std::process::exit(1);
+        }
+    };
+    if left_in_place {
+        codex_login::leave_default_login_unenforced();
+    }
+
     let state_db = init_state_db_for_app_server_target(&config, &app_server_target).await?;
     let config_toml_log_dir_configured = config
         .config_layer_stack
@@ -1391,32 +1414,6 @@ pub async fn run_main(
         #[allow(clippy::print_stderr)]
         {
             eprintln!("Error adding directories: {warning}");
-            std::process::exit(1);
-        }
-    }
-
-    // PF-84-S06 (#570): a session on a named sign-in account checks the
-    // restrictions against that account at thread start and never reads or
-    // logs out the default login. A resumed or forked thread's account is
-    // known only later, so those launches leave the default login in place
-    // too. Only with the embedded app server: this process's managers then
-    // never use a ruled-out default login, and a thread on it is refused at
-    // thread start with the reason. A reused local daemon is another process,
-    // so the TUI enforces at startup for it as before; a remote server
-    // decides for itself.
-    let leaves_default_login = matches!(app_server_target, AppServerTarget::Embedded)
-        && (config.runs_on_named_sign_in_account()
-            || (config.named_accounts_enabled()
-                && (is_resume_launch(&cli)
-                    || cli.fork_picker
-                    || cli.fork_last
-                    || cli.fork_session_id.is_some())));
-    if leaves_default_login {
-        codex_login::leave_default_login_unenforced();
-    } else if !app_server_target.uses_remote_workspace() {
-        #[allow(clippy::print_stderr)]
-        if let Err(err) = enforce_login_restrictions(&config.default_login_restrictions()).await {
-            eprintln!("{err}");
             std::process::exit(1);
         }
     }
