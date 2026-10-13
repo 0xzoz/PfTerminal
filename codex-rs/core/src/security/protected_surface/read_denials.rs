@@ -19,6 +19,8 @@
 //! a workspace-write sandbox cannot read credential files from `$HOME` before
 //! any taint. Permissive and flag-off sessions are unchanged.
 
+use crate::security::preflight::DATABASE_FOLDER_ENTRIES;
+use crate::security::preflight::DB_INIT_LOCK;
 use crate::security::tainted_action::USER_PERSISTENCE;
 use crate::security::tainted_action::WORKSPACE_AGENT_SETTINGS;
 use crate::security::tainted_action::WORKSPACE_PERSISTENCE;
@@ -118,6 +120,10 @@ const CORBANU_READ_LATER_FOLDERS: &[&str] = &[
     "gpu-transport",
     "mcp-oauth-locks",
     "thread-writer-locks",
+    // #651: in the database folder, the home by default (pending accounting
+    // records are imported later; recovery sets databases aside there).
+    "accounting-pending",
+    "db-backups",
 ];
 
 /// #603: the Corbanu home files Corbanu reads at session start or later
@@ -155,22 +161,6 @@ const CORBANU_READ_LATER_LOCKS: &[&str] = &[
 
 /// The one runtime entry that is a file (#562).
 const DEFAULT_AGENTS_MD: &str = "AGENTS.md";
-
-/// State and log databases, created after launch.
-const CORBANU_DATABASES: &str = "*.sqlite*";
-
-/// The database init lock (#549), next to the databases.
-const DB_INIT_LOCK: &str = "pfterminal_db_init.lock";
-
-/// #611: what Corbanu keeps in its database folder besides the databases:
-/// the init lock, the GPU controller's lock, pending accounting records
-/// (`codex_state::PENDING_DIR`) and databases set aside by recovery.
-const DATABASE_FOLDER_ENTRIES: &[&str] = &[
-    DB_INIT_LOCK,
-    "gpu-controller.lock",
-    "accounting-pending",
-    "db-backups",
-];
 
 /// Other Corbanu home folders in the user's home: denied whole.
 const OTHER_CORBANU_HOMES: &[&str] = &[".corbanu", ".codex", ".pfterminal"];
@@ -305,9 +295,9 @@ impl ReadDenials {
         for store in CORBANU_STORES {
             denials.push_fixed(codex_home.join(store), keep);
         }
+        // #651: the home escaped, should its path hold glob syntax.
         denials.globs.push(
-            codex_home
-                .join(CORBANU_DATABASES)
+            crate::security::preflight::database_glob(codex_home.as_path())
                 .to_string_lossy()
                 .into_owned(),
         );
@@ -407,6 +397,7 @@ impl ReadDenials {
             &keep,
         );
         denials.protect_database_folder(codex_home, sqlite_home, &keep);
+        denials.protect_database_backups(sqlite_home, &keep);
         // #594: the home variable's own spelling (a link the home was found
         // through; the home itself is its real location).
         if let Ok(codex_home) = AbsolutePathBuf::from_absolute_path(codex_home) {
@@ -459,12 +450,30 @@ impl ReadDenials {
         for name in DATABASE_FOLDER_ENTRIES {
             self.push_fixed(folder.join(name), keep);
         }
-        let databases = folder
-            .join(CORBANU_DATABASES)
+        let databases = crate::security::preflight::database_glob(folder.as_path())
             .to_string_lossy()
             .into_owned();
         if !self.globs.contains(&databases) {
             self.globs.push(databases);
+        }
+    }
+
+    /// #651: databases recovery set aside beside the database folder (the
+    /// Corbanu home by default) when something else stood in its place
+    /// (`<folder>.db-backups`, `codex_state` recovery): denied when present.
+    /// Not before it exists: on Linux bubblewrap would put a placeholder
+    /// beside the folder (in the user's home for the default home, #348).
+    fn protect_database_backups(&mut self, sqlite_home: &Path, keep: &[AbsolutePathBuf]) {
+        let Some(name) = sqlite_home.file_name() else {
+            return;
+        };
+        let mut backups = name.to_os_string();
+        backups.push(".db-backups");
+        if let Ok(backups) =
+            AbsolutePathBuf::from_absolute_path(sqlite_home.with_file_name(backups))
+            && std::fs::symlink_metadata(backups.as_path()).is_ok()
+        {
+            self.push_existing(backups, keep);
         }
     }
 

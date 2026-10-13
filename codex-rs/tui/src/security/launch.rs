@@ -161,7 +161,11 @@ impl LaunchPlan {
         let mut boundary = None;
         if self.aggressive() {
             verify_aggressive(&self.codex_home, &self.codex_home, config).await?;
-            let unisolated = preflight::verify_isolation(config, &self.isolated);
+            let mut unisolated = preflight::verify_isolation(config, &self.isolated);
+            // #651: with a preflight, also a database folder set apart.
+            if !self.isolated.is_empty() {
+                unisolated.extend(preflight::verify_database_folder(config));
+            }
             if !unisolated.is_empty() {
                 return Err(format!(
                     "Security level Aggressive could not be fully applied:\n  {}\nChoose Permissive by editing {}.",

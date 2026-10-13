@@ -2445,6 +2445,75 @@ async fn issue_611_a_separate_database_folder_is_protected() -> anyhow::Result<(
     Ok(())
 }
 
+/// Issue #651: a protected command working inside a separate database
+/// folder whose path holds glob syntax runs (bubblewrap's glob scan accepts
+/// the escaped pattern) and still cannot read a database there, write the
+/// backups folder, or (macOS, whose sandbox matches the pattern itself) read
+/// a database created during the command. Permissive is unchanged.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_651_a_database_folder_with_glob_syntax_is_protected() -> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let mut wrong = Vec::new();
+    for (level, open) in [
+        (SecurityLevel::Moderate, false),
+        (SecurityLevel::Aggressive, false),
+        (SecurityLevel::Permissive, true),
+    ] {
+        let base = TempDir::new()?;
+        let folder = base.path().canonicalize()?.join("db[1]{2");
+        let work = folder.join("work");
+        std::fs::create_dir_all(&work)?;
+        let command = "cat ../canary.sqlite; echo; printf later-651 > ../new.sqlite; \
+                       cat ../new.sqlite; echo; printf x > ../db-backups/planted; echo ran-651";
+        let sqlite_home = AbsolutePathBuf::from_absolute_path(&folder)?;
+        let cwd = AbsolutePathBuf::from_absolute_path(&work)?;
+        let canary = folder.join("canary.sqlite");
+        let (test, captured) = start_turn_after(
+            None,
+            level,
+            AskForApproval::Never,
+            vec![
+                call("call-651", "shell_command", json!({ "command": command })),
+                done_step(),
+            ],
+            move |config| {
+                config.cwd = cwd.clone();
+                config.sqlite = codex_state::SqliteConfig::from_sqlite_home(sqlite_home.clone());
+                config
+                    .permissions
+                    .set_permission_profile(PermissionProfile::Disabled)
+                    .expect("full access");
+            },
+            move |_| {
+                std::fs::write(&canary, CANARY).expect("canary database");
+                let folder = canary.parent().expect("database folder");
+                std::fs::create_dir_all(folder.join("db-backups")).expect("backups");
+            },
+        )
+        .await?;
+        assert!(next_exec_approval(&test).await.is_none());
+        let requests = captured.requests();
+        let output = output_text(&requests[requests.len() - 1], "call-651");
+        let mut achieved = vec![
+            output.contains(CANARY),
+            folder.join("db-backups/planted").exists(),
+        ];
+        if cfg!(target_os = "macos") {
+            achieved.push(output.contains("later-651"));
+        }
+        if !output.contains("ran-651") || achieved.iter().any(|got| *got != open) {
+            wrong.push(format!("{level:?}: {achieved:?}: {output}"));
+        }
+        drop(test);
+        drop(base);
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
 /// #605: with a `:minimal`-read profile the macOS platform defaults keep
 /// `/tmp` writable for temporary files. A protected command working in a git
 /// worktree below `/tmp` still cannot write the repository's hooks or the

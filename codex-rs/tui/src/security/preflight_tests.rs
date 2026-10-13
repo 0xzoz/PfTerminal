@@ -89,16 +89,41 @@ fn pf_29_s01_isolation_only_after_a_preflight_and_lands_in_the_profile() {
         "store folders exist from launch"
     );
 
-    // A home with glob syntax cannot prefix a pattern: exact paths instead.
+    // #651: a home with glob syntax is escaped: its database glob and its
+    // stores match only themselves.
     let odd = root.path().join("corbanu[1]");
     std::fs::create_dir_all(&odd).unwrap();
     std::fs::write(receipt_path(&odd), "garbage").unwrap();
     std::fs::write(odd.join("state_5.sqlite"), "db").unwrap();
     let odd_paths = isolation_paths(&odd, Some(&home), /*cwd*/ None);
-    assert!(!odd_paths.iter().any(|path| path.ends_with("*.sqlite*")));
-    for name in ["state_5.sqlite", "state_5.sqlite-wal", "state_5.sqlite-shm"] {
-        assert!(odd_paths.contains(&odd.join(name)), "{name}");
+    let escaped = root.path().join("corbanu[[]1]");
+    for path in [escaped.join("*.sqlite*"), escaped.join("sessions")] {
+        assert!(
+            odd_paths.contains(&path),
+            "{}: {odd_paths:?}",
+            path.display()
+        );
     }
+    assert!(!odd_paths.contains(&odd.join("state_5.sqlite")));
+    assert!(!odd_paths.contains(&odd.join("sessions")));
+
+    // #651: a database folder set apart in the user config: its databases
+    // and what Corbanu keeps there (when present).
+    let databases = root.path().join("db");
+    std::fs::create_dir_all(databases.join("accounting-pending")).unwrap();
+    std::fs::write(
+        corbanu.join("config.toml"),
+        format!("sqlite_home = {:?}\n", databases.display().to_string()),
+    )
+    .unwrap();
+    let with_folder = isolation_paths(&corbanu, Some(&home), /*cwd*/ None);
+    assert!(
+        with_folder.contains(&databases.join("*.sqlite*")),
+        "{with_folder:?}"
+    );
+    assert!(with_folder.contains(&databases.join("accounting-pending")));
+    assert!(!with_folder.contains(&databases.join("gpu-controller.lock")));
+    std::fs::remove_file(corbanu.join("config.toml")).unwrap();
 
     let mut overrides = aggressive::base_overrides(&corbanu, &corbanu);
     aggressive::deny_reads(&mut overrides, &paths);
