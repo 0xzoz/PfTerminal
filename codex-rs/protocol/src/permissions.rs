@@ -302,6 +302,7 @@ struct FileSystemSemanticSignature {
     unreadable_roots: Vec<AbsolutePathBuf>,
     unreadable_globs: Vec<String>,
     unlistable_directories: Vec<AbsolutePathBuf>,
+    unmovable_paths: Vec<AbsolutePathBuf>,
 }
 
 /// Runtime matcher for read-deny entries in a filesystem sandbox policy.
@@ -514,6 +515,50 @@ impl FileSystemSandboxEntry {
     }
 }
 
+/// Special-path token of an entry that stops agent commands moving one path
+/// aside (issues #594, #598): the path and every folder above it may not be
+/// renamed or removed where the sandbox would otherwise let the command do
+/// so; a link at the path keeps pointing where it does (Seatbelt). What is
+/// in those folders keeps the access the rest of the policy gives it. The
+/// path is the entry's absolute `subpath`. Carried as
+/// [`FileSystemSpecialPath::Unknown`], like [`DIRECTORY_LISTING_SPECIAL_PATH`].
+pub const NO_MOVE_SPECIAL_PATH: &str = ":no_move";
+
+impl FileSystemSandboxEntry {
+    /// An entry that stops agent commands moving `path` or a folder above it.
+    pub fn deny_moving(path: &AbsolutePathBuf) -> Self {
+        Self::new(
+            FileSystemPath::Special {
+                value: FileSystemSpecialPath::unknown(
+                    NO_MOVE_SPECIAL_PATH,
+                    Some(path.to_string_lossy().into_owned()),
+                ),
+            },
+            FileSystemAccessMode::Deny,
+        )
+    }
+
+    /// The path this entry stops agent commands moving, if it is a
+    /// [`Self::deny_moving`] entry.
+    pub fn unmovable_path(&self) -> Option<AbsolutePathBuf> {
+        if self.access != FileSystemAccessMode::Deny {
+            return None;
+        }
+        match &self.path {
+            FileSystemPath::Special {
+                value:
+                    FileSystemSpecialPath::Unknown {
+                        path,
+                        subpath: Some(subpath),
+                    },
+            } if path == NO_MOVE_SPECIAL_PATH => {
+                AbsolutePathBuf::from_absolute_path(Path::new(subpath)).ok()
+            }
+            _ => None,
+        }
+    }
+}
+
 fn read_only_file_system_entries() -> Vec<FileSystemSandboxEntry> {
     vec![FileSystemSandboxEntry::new(
         FileSystemPath::Special {
@@ -592,7 +637,10 @@ impl FileSystemSandboxPolicy {
     pub fn has_denied_read_restrictions(&self) -> bool {
         matches!(self.kind, FileSystemSandboxKind::Restricted)
             && self.entries.iter().any(|entry| {
+                // #598: a no-move entry denies no read; a run a person
+                // approves outside the sandbox may drop it.
                 entry.access == FileSystemAccessMode::Deny
+                    && entry.unmovable_path().is_none()
                     && !matches!(
                         &entry.path,
                         FileSystemPath::Special {
@@ -1368,6 +1416,22 @@ impl FileSystemSandboxPolicy {
         )
     }
 
+    /// Paths agent commands may not move aside (issues #594, #598), from
+    /// [`FileSystemSandboxEntry::deny_moving`] entries, as written. Only a
+    /// restricted policy carries them.
+    pub fn get_unmovable_paths(&self) -> Vec<AbsolutePathBuf> {
+        if !matches!(self.kind, FileSystemSandboxKind::Restricted) {
+            return Vec::new();
+        }
+        dedup_absolute_paths(
+            self.entries
+                .iter()
+                .filter_map(FileSystemSandboxEntry::unmovable_path)
+                .collect(),
+            /*normalize_effective_paths*/ false,
+        )
+    }
+
     pub fn to_legacy_sandbox_policy(
         &self,
         network_policy: NetworkSandboxPolicy,
@@ -1508,6 +1572,7 @@ impl FileSystemSandboxPolicy {
             unreadable_roots: sorted_absolute_paths(self.get_unreadable_roots_with_cwd(cwd)),
             unreadable_globs: self.get_unreadable_globs_with_cwd(cwd),
             unlistable_directories: sorted_absolute_paths(self.get_unlistable_directories()),
+            unmovable_paths: sorted_absolute_paths(self.get_unmovable_paths()),
         }
     }
 }
@@ -4065,6 +4130,52 @@ mod tests {
         assert!(
             FileSystemSandboxPolicy::unrestricted()
                 .get_unlistable_directories()
+                .is_empty()
+        );
+    }
+
+    /// #594/#598: a no-move entry is its own kind of entry: it changes no
+    /// read or write access, keeps the path as written (a link spelling
+    /// too), and needs the sandbox that enforces it.
+    #[cfg(unix)]
+    #[test]
+    fn issue_598_no_move_entry_changes_no_access() {
+        let temp = TempDir::new().expect("tempdir");
+        let base = temp.path().canonicalize().expect("canonical");
+        let home = AbsolutePathBuf::from_absolute_path(base.join("home")).expect("home");
+        std::fs::create_dir_all(home.as_path()).expect("home");
+        let link = base.join("link");
+        std::os::unix::fs::symlink(home.as_path(), &link).expect("link");
+        let link = AbsolutePathBuf::from_absolute_path(link).expect("link");
+        let entry = FileSystemSandboxEntry::deny_moving(&link);
+        assert_eq!(entry.unmovable_path(), Some(link.clone()));
+        assert_eq!(entry.unlistable_directory(), None);
+        let mut read = entry.clone();
+        read.access = FileSystemAccessMode::Read;
+        assert_eq!(read.unmovable_path(), None);
+
+        let full = FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry::new(
+            FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            },
+            FileSystemAccessMode::Write,
+        )]);
+        let mut policy = full.clone();
+        policy.entries.push(entry.clone());
+        policy.entries.push(entry);
+        let cwd = base.as_path();
+        assert_eq!(policy.get_unmovable_paths(), vec![link]);
+        assert!(full.get_unmovable_paths().is_empty());
+        assert!(policy.has_full_disk_write_access());
+        assert!(policy.get_unreadable_roots_with_cwd(cwd).is_empty());
+        assert!(!policy.has_denied_read_restrictions());
+        assert!(policy.can_write_path_with_cwd(home.as_path(), cwd));
+        assert!(policy.can_read_path_with_cwd(home.as_path(), cwd));
+        assert!(policy.needs_direct_runtime_enforcement(NetworkSandboxPolicy::Restricted, cwd));
+        assert!(!policy.is_semantically_equivalent_to(&full, cwd));
+        assert!(
+            FileSystemSandboxPolicy::unrestricted()
+                .get_unmovable_paths()
                 .is_empty()
         );
     }

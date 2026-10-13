@@ -1380,3 +1380,42 @@ fn issue_442_a_grant_keeps_codex_and_agents_read_only() {
         );
     }
 }
+
+/// #594/#598: the Corbanu home may not be moved in any spelling (as given,
+/// its real location, and a home name or home variable linking to it), also
+/// for a command a person approved (#540); a name for another folder is not
+/// recorded.
+#[test]
+fn issue_594_598_the_home_is_unmovable_in_each_spelling() {
+    let fx = fixture();
+    let real = fx.user_home.join("dotfiles/corbanu");
+    std::fs::create_dir_all(fx.user_home.join("dotfiles")).unwrap();
+    std::fs::rename(&fx.codex_home, &real).unwrap();
+    std::os::unix::fs::symlink(&real, &fx.codex_home).unwrap();
+    let elsewhere = fx.user_home.join("project");
+    let cwd = abs(&elsewhere);
+    let mut denials =
+        ReadDenials::collect(&real, Some(&fx.user_home), None, std::slice::from_ref(&cwd));
+    denials.add_home_spellings(
+        &abs(&real),
+        [elsewhere, fx.user_home.join("missing"), "relative".into()],
+    );
+    let expected = vec![abs(&real), abs(&fx.codex_home)];
+    assert_eq!(
+        denials.unmovable_paths().cloned().collect::<Vec<_>>(),
+        expected
+    );
+    let approved = denials.runtime_only();
+    assert_eq!(
+        approved.unmovable_paths().cloned().collect::<Vec<_>>(),
+        expected
+    );
+    let lifted = approved
+        .apply(&PermissionProfile::Disabled)
+        .expect("not an external sandbox");
+    let mut unmovable = lifted.file_system_sandbox_policy().get_unmovable_paths();
+    unmovable.sort();
+    let mut sorted = expected;
+    sorted.sort();
+    assert_eq!(unmovable, sorted);
+}

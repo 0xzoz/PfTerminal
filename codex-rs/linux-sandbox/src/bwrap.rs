@@ -269,13 +269,15 @@ pub(crate) fn create_bwrap_command_args(
     let unreadable_globs =
         file_system_sandbox_policy.get_unreadable_globs_with_cwd(sandbox_policy_cwd);
     // Full disk write normally skips bwrap, but unreadable glob patterns still
-    // need concrete bwrap masks for the matches expanded below, and an
-    // unlistable directory (#506) its own mount.
+    // need concrete bwrap masks for the matches expanded below, an
+    // unlistable directory (#506) its own mount, and a path that may not be
+    // moved (#598) its pins.
     if file_system_sandbox_policy.has_full_disk_write_access()
         && unreadable_globs.is_empty()
         && file_system_sandbox_policy
             .get_unlistable_directories()
             .is_empty()
+        && file_system_sandbox_policy.get_unmovable_paths().is_empty()
     {
         return if options.network_mode == BwrapNetworkMode::FullAccess {
             Ok(BwrapArgs {
@@ -449,7 +451,8 @@ fn create_filesystem_args_with_pins(
         && (!unreadable_globs.is_empty()
             || !file_system_sandbox_policy
                 .get_unlistable_directories()
-                .is_empty())
+                .is_empty()
+            || !file_system_sandbox_policy.get_unmovable_paths().is_empty())
     {
         writable_roots.push(WritableRoot {
             root: AbsolutePathBuf::from_absolute_path("/")?,
@@ -723,6 +726,9 @@ fn create_filesystem_args_with_pins(
     // #587: once the policy denies reads (as Seatbelt's rename guard), the
     // folders above each protected path inside a writable root are pinned.
     let pin_protected_folders = !unreadable_roots.is_empty();
+    // #594/#598: and, whatever else the policy holds, each path it says may
+    // not be moved and the folders above it.
+    let unmovable = unmovable_pin_targets(file_system_sandbox_policy);
     // `:root = write` (full access with denials), not a project at `/`.
     let full_write_root = file_system_sandbox_policy.entries.iter().any(|entry| {
         entry.access == FileSystemAccessMode::Write
@@ -926,7 +932,7 @@ fn create_filesystem_args_with_pins(
                 (*unlistable, read_only)
             })
             .collect();
-        if pin_protected_folders {
+        if pin_protected_folders || !unmovable.is_empty() {
             let protected: Vec<&Path> = read_only_subpaths
                 .iter()
                 .chain(&nested_unreadable_roots)
@@ -941,6 +947,8 @@ fn create_filesystem_args_with_pins(
                 &mut bwrap_args,
                 mount_root,
                 &protected,
+                pin_protected_folders,
+                &unmovable,
                 &allowed_write_paths,
             );
         }
@@ -1067,17 +1075,35 @@ fn create_filesystem_args_with_pins(
 /// folder, so what is in it is unchanged; a folder gone by then (another
 /// run's placeholder) is skipped (`--bind-try`). Folders at or below a
 /// protected path (masked or read-only already), writable roots (bound
-/// already), links and folders in a parent the user neither owns nor can
-/// write (they cannot be renamed, such as `/home`) are left out.
+/// already), links, folders at or below `/dev` (a bind would put the host's
+/// back over the minimal one, #493) and folders in a parent the user
+/// neither owns nor can write (they cannot be renamed, such as `/home`) are
+/// left out.
+///
+/// `above_protected`: whether the folders above `protected` are pinned
+/// (#587, once the policy denies reads); they are always left out. #594/#598:
+/// the folders above each [`UnmovableTarget`] are pinned in any case, and
+/// the target itself when it is a folder.
 fn append_protected_folder_pins(
     bwrap_args: &mut BwrapArgs,
     mount_root: &Path,
     protected: &[&Path],
+    above_protected: bool,
+    unmovable: &[UnmovableTarget],
     allowed_write_paths: &[PathBuf],
 ) {
     let mut folders = BTreeSet::new();
-    for path in protected {
-        for folder in path.ancestors().skip(1) {
+    let sources = protected
+        .iter()
+        .filter(|_| above_protected)
+        .map(|path| (*path, /*itself*/ false))
+        .chain(
+            unmovable
+                .iter()
+                .map(|target| (target.path.as_path(), target.pin_itself)),
+        );
+    for (path, itself) in sources {
+        for folder in path.ancestors().skip(usize::from(!itself)) {
             if folder == mount_root || !folder.starts_with(mount_root) {
                 break;
             }
@@ -1088,6 +1114,7 @@ fn append_protected_folder_pins(
         .into_iter()
         .filter(|folder| {
             !protected.iter().any(|path| folder.starts_with(path))
+                && !folder.starts_with("/dev")
                 && !allowed_write_paths.iter().any(|root| root == folder)
                 && fs::symlink_metadata(folder).is_ok_and(|metadata| metadata.is_dir())
                 && folder.parent().is_some_and(user_may_change)
@@ -1099,6 +1126,52 @@ fn append_protected_folder_pins(
         bwrap_args.args.push(path_to_string(folder));
         bwrap_args.args.push(path_to_string(folder));
     }
+}
+
+/// #594/#598: a location the sandbox keeps in place for a path the policy
+/// says may not be moved ([`FileSystemSandboxPolicy::get_unmovable_paths`]).
+#[derive(Debug, PartialEq, Eq)]
+struct UnmovableTarget {
+    /// Real location: of the path, or of a link on its way (the link's own
+    /// folder resolved).
+    path: PathBuf,
+    /// Whether the location itself is pinned (a folder), or only the folders
+    /// above it (a link: a mount cannot sit on a link, so a command that can
+    /// write the folder holding it can still replace it; Seatbelt keeps it).
+    pin_itself: bool,
+}
+
+/// #594/#598: the real location of each unmovable path, and of each link on
+/// its way (a Corbanu home reached through `~/.corbanu -> ~/dotfiles/x` keeps
+/// `~/dotfiles/x`, `~/dotfiles` and the folders above `~/.corbanu`).
+fn unmovable_pin_targets(policy: &FileSystemSandboxPolicy) -> Vec<UnmovableTarget> {
+    let mut targets: Vec<UnmovableTarget> = Vec::new();
+    let mut push = |path: PathBuf, pin_itself: bool| {
+        if !targets
+            .iter()
+            .any(|target| target.path == path && target.pin_itself == pin_itself)
+        {
+            targets.push(UnmovableTarget { path, pin_itself });
+        }
+    };
+    for path in policy.get_unmovable_paths() {
+        let path = path.as_path();
+        if let Ok(real) = fs::canonicalize(path) {
+            push(real, /*pin_itself*/ true);
+        }
+        let mut spelled = PathBuf::new();
+        for component in path.components() {
+            spelled.push(component);
+            if fs::symlink_metadata(&spelled)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+                && let (Some(parent), Some(name)) = (spelled.parent(), spelled.file_name())
+                && let Ok(parent) = fs::canonicalize(parent)
+            {
+                push(parent.join(name), /*pin_itself*/ false);
+            }
+        }
+    }
+    targets
 }
 
 /// Whether the user could rename an entry of `folder`: it can write it, or
@@ -4358,30 +4431,29 @@ mod tests {
         // A folder the user owns but cannot write right now could be made
         // writable first: its entries are pinned too.
         let outer = base.join("outer");
-        std::fs::set_permissions(
-            &outer,
-            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o555),
-        )
-        .expect("chmod");
-        let args = create_filesystem_args(&policy, &base, NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
-            .expect("bwrap fs args")
-            .args;
-        std::fs::set_permissions(
-            &outer,
-            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
-        )
-        .expect("chmod");
-        let binds: Vec<&str> = args
-            .windows(3)
-            .filter(|window| window[0] == "--bind-try" && window[1] == window[2])
-            .map(|window| window[1].as_str())
-            .collect();
+        let args = {
+            let _read_only = ModeGuard::set(&outer, 0o555);
+            create_filesystem_args(&policy, &base, NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
+                .expect("bwrap fs args")
+                .args
+        };
+        let binds = pinned_folders(&args);
         let path = |path: &Path| path_to_string(path);
         for folder in [&base, &base.join("outer"), &home] {
             assert!(
                 binds.contains(&path(folder).as_str()),
                 "{folder:?}: {args:?}"
             );
+        }
+        // A folder whose parent the user neither owns nor can write (the
+        // temporary folder's top-level folder, in `/`) cannot be renamed.
+        let top = base
+            .ancestors()
+            .find(|folder| folder.parent() == Some(Path::new("/")))
+            .expect("top-level folder");
+        // SAFETY: `geteuid` has no preconditions.
+        if unsafe { libc::geteuid() } != 0 {
+            assert!(!binds.contains(&path(top).as_str()), "{top:?}: {args:?}");
         }
         for folder in [home.join("skills"), home.join("skills/inner")] {
             assert!(
@@ -4398,6 +4470,108 @@ mod tests {
 
         let workspace = FileSystemSandboxPolicy::restricted(vec![writable, read_only]);
         let args = create_filesystem_args(&workspace, &base, NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
+            .expect("bwrap fs args")
+            .args;
+        assert!(!args.iter().any(|arg| arg == "--bind-try"), "{args:?}");
+    }
+
+    /// Restores a folder's mode when dropped, also when the test fails.
+    struct ModeGuard<'a>(&'a Path);
+
+    impl<'a> ModeGuard<'a> {
+        fn set(path: &'a Path, mode: u32) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("chmod");
+            Self(path)
+        }
+    }
+
+    impl Drop for ModeGuard<'_> {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    /// The folders a run binds onto themselves (`--bind-try d d`).
+    fn pinned_folders(args: &[String]) -> Vec<&str> {
+        args.windows(3)
+            .filter(|window| window[0] == "--bind-try" && window[1] == window[2])
+            .map(|window| window[1].as_str())
+            .collect()
+    }
+
+    /// #594/#598: a path the policy says may not be moved (the Corbanu home
+    /// of a command a person approved: no denials, only its read-only
+    /// runtime entries) is pinned at its real location, before the read-only
+    /// mounts inside it, and so is every folder above it and above a link
+    /// on its way. The link itself cannot be pinned. Without the entry
+    /// (Permissive) nothing is pinned.
+    #[test]
+    fn unmovable_paths_pin_the_real_folder_and_the_folders_above_a_link() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let base = temp_dir.path().canonicalize().expect("canonical");
+        let home = base.join("dot/home");
+        std::fs::create_dir_all(home.join("skills")).expect("home");
+        std::fs::create_dir_all(base.join("links")).expect("links");
+        let link = base.join("links/home");
+        std::os::unix::fs::symlink(&home, &link).expect("link");
+        let writable = FileSystemSandboxEntry::new(
+            FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            },
+            FileSystemAccessMode::Write,
+        );
+        let read_only = path_entry(
+            &home.join("skills"),
+            FileSystemAccessMode::Read,
+            /*skip_missing*/ true,
+        );
+        let absolute = |path: &Path| AbsolutePathBuf::from_absolute_path(path).expect("absolute");
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            writable.clone(),
+            read_only.clone(),
+            FileSystemSandboxEntry::deny_moving(&absolute(&link)),
+        ]);
+        assert_eq!(
+            unmovable_pin_targets(&policy),
+            vec![
+                UnmovableTarget {
+                    path: home.clone(),
+                    pin_itself: true,
+                },
+                UnmovableTarget {
+                    path: link.clone(),
+                    pin_itself: false,
+                },
+            ]
+        );
+        let args = create_filesystem_args(&policy, &base, NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
+            .expect("bwrap fs args")
+            .args;
+        let binds = pinned_folders(&args);
+        let path = |path: &Path| path_to_string(path);
+        for folder in [&base, &base.join("dot"), &home, &base.join("links")] {
+            assert!(
+                binds.contains(&path(folder).as_str()),
+                "{folder:?}: {args:?}"
+            );
+        }
+        for folder in [&link, &home.join("skills")] {
+            assert!(
+                !binds.contains(&path(folder).as_str()),
+                "{folder:?}: {args:?}"
+            );
+        }
+        let position = |flag: &str, target: &Path| {
+            args.windows(2)
+                .position(|window| window[0] == flag && window[1] == path(target))
+                .expect("mount")
+        };
+        assert!(position("--bind-try", &home) < position("--ro-bind", &home.join("skills")));
+
+        let permissive = FileSystemSandboxPolicy::restricted(vec![writable, read_only]);
+        let args = create_filesystem_args(&permissive, &base, NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
             .expect("bwrap fs args")
             .args;
         assert!(!args.iter().any(|arg| arg == "--bind-try"), "{args:?}");
