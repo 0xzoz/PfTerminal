@@ -74,6 +74,27 @@ impl ChatWidget {
         rows
     }
 
+    /// #665: whether another connection of a model served by several can be
+    /// used when the preset's own cannot (`zai` on an account that is not
+    /// enrolled, `zai-anthropic` on the default key). The picker then still
+    /// offers the model, as that connection's row.
+    pub(super) fn another_route_is_selectable(&self, preset: &ModelPreset) -> bool {
+        let provider = preset
+            .provider_id
+            .clone()
+            .or_else(|| Self::model_provider_for_selection(&preset.model));
+        provider
+            .as_deref()
+            .and_then(|provider| model_route(&preset.model, provider))
+            .is_some()
+            && model_routes(&preset.model).iter().any(|route| {
+                self.config.model_providers.contains_key(route.provider_id)
+                    && self
+                        .model_catalog
+                        .provider_is_selectable(route.provider_id, &preset.model)
+            })
+    }
+
     /// PF-84 accounts are per provider, so two connections of one model can
     /// run on different accounts; the rows then name them.
     fn route_accounts_differ(&self, routes: &[ModelRoute]) -> bool {

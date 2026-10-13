@@ -28,6 +28,13 @@ fn open_all_models(chat: &mut ChatWidget) -> String {
     render_bottom_popup_with_height(chat, /*width*/ 110, /*height*/ 36)
 }
 
+/// Opens the picker the way `/model` does, filtering the catalog first.
+fn open_model_command(chat: &mut ChatWidget) -> String {
+    let presets = chat.model_catalog.try_list_models().expect("catalog");
+    chat.open_model_popup_with_presets(presets);
+    render_bottom_popup_with_height(chat, /*width*/ 110, /*height*/ 36)
+}
+
 /// Selects the row named `label` in the open tab and returns the preset the
 /// picker sends to the effort step.
 fn select_row(
@@ -238,13 +245,15 @@ async fn connections_on_different_accounts_are_offered_only_with_their_own_crede
         );
 
         // A default key and an unenrolled named account: only the default
-        // account's connection.
+        // account's connection, for every GLM model `/model` lists.
         let (mut chat, _rx, _op_rx, home) = mixed_account_session(named, /*enrolled*/ false).await;
         store_default_zai_key(&chat, home.path());
         chat.model_catalog.refresh_provider_policy();
-        let popup = open_all_models(&mut chat);
+        let popup = open_model_command(&mut chat);
         assert!(popup.contains(default_row), "{named}: {popup}");
         assert!(!popup.contains(named_row), "{named}: {popup}");
+        let other_model_row = default_row.replace("GLM 5.3 Flash", "GLM 5.3");
+        assert!(popup.contains(&other_model_row), "{named}: {popup}");
     }
 }
 
