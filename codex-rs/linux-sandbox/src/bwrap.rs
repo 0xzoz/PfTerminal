@@ -157,6 +157,11 @@ pub(crate) struct SyntheticMountTarget {
     // If an empty metadata path was already present, remember its inode so
     // cleanup does not delete a real pre-existing file or directory.
     pre_existing_path: Option<FileIdentity>,
+    /// #607: where it is, with the folder above it resolved when the run
+    /// registered it (before the command ran). It is removed there, without
+    /// following a link, so a folder the command swaps for a link cannot
+    /// redirect the removal.
+    real_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -182,6 +187,7 @@ impl SyntheticMountTarget {
             path: path.to_path_buf(),
             kind: SyntheticMountTargetKind::EmptyFile,
             pre_existing_path: None,
+            real_path: None,
         }
     }
 
@@ -190,6 +196,7 @@ impl SyntheticMountTarget {
             path: path.to_path_buf(),
             kind: SyntheticMountTargetKind::EmptyDirectory,
             pre_existing_path: None,
+            real_path: None,
         }
     }
 
@@ -198,15 +205,33 @@ impl SyntheticMountTarget {
             path: path.to_path_buf(),
             kind: SyntheticMountTargetKind::EmptyFile,
             pre_existing_path: Some(FileIdentity::from_metadata(metadata)),
+            real_path: None,
         }
     }
 
-    fn existing_empty_directory(path: &Path, metadata: &Metadata) -> Self {
+    pub(crate) fn existing_empty_directory(path: &Path, metadata: &Metadata) -> Self {
         Self {
             path: path.to_path_buf(),
             kind: SyntheticMountTargetKind::EmptyDirectory,
             pre_existing_path: Some(FileIdentity::from_metadata(metadata)),
+            real_path: None,
         }
+    }
+
+    /// #607: the same target, at `real_path` (see [`Self::removal_path`]).
+    pub(crate) fn with_real_path(mut self, real_path: Option<PathBuf>) -> Self {
+        self.real_path = real_path;
+        self
+    }
+
+    /// #607: where it is removed: its location when it was registered, or
+    /// its path when that could not be resolved.
+    pub(crate) fn removal_path(&self) -> &Path {
+        self.real_path.as_deref().unwrap_or(&self.path)
+    }
+
+    pub(crate) fn real_path(&self) -> Option<&Path> {
+        self.real_path.as_deref()
     }
 
     pub(crate) fn preserves_pre_existing_path(&self) -> bool {
@@ -233,22 +258,32 @@ impl SyntheticMountTarget {
         self.kind
     }
 
-    pub(crate) fn should_remove_after_bwrap(&self, metadata: &Metadata) -> bool {
+    /// Whether what is at the path after bubblewrap ran is still this
+    /// placeholder: an empty file, or a folder (`empty_file`, `dir`), and not
+    /// the pre-existing path found when the arguments were built (`identity`
+    /// is its `(dev, ino)`).
+    pub(crate) fn should_remove(&self, empty_file: bool, dir: bool, identity: (u64, u64)) -> bool {
         match self.kind {
             SyntheticMountTargetKind::EmptyFile => {
-                if !metadata.file_type().is_file() || metadata.len() != 0 {
+                if !empty_file {
                     return false;
                 }
             }
             SyntheticMountTargetKind::EmptyDirectory => {
-                if !metadata.file_type().is_dir() {
+                if !dir {
                     return false;
                 }
             }
         }
 
         match self.pre_existing_path {
-            Some(pre_existing_path) => pre_existing_path != FileIdentity::from_metadata(metadata),
+            Some(pre_existing_path) => {
+                pre_existing_path
+                    != FileIdentity {
+                        dev: identity.0,
+                        ino: identity.1,
+                    }
+            }
             None => true,
         }
     }
@@ -2004,6 +2039,19 @@ fn append_unreadable_root_args(
         bwrap_args.args.push("000".to_string());
         return append_existing_empty_file_bind_data_args(bwrap_args, unreadable_root, &metadata);
     }
+    // #607: the same for another live run's placeholder folder (a protected
+    // metadata name it holds read-only): masked as a denied folder and
+    // registered, so its maker's cleanup (or a sweep after that run was
+    // killed) cannot remove it, and the mask with it, from under this run.
+    if let Some(metadata) = live_placeholder_directory(unreadable_root) {
+        append_existing_unreadable_path_args(bwrap_args, unreadable_root, allowed_write_paths)?;
+        if !has_synthetic_mount_target(bwrap_args, unreadable_root) {
+            bwrap_args.synthetic_mount_targets.push(
+                SyntheticMountTarget::existing_empty_directory(unreadable_root, &metadata),
+            );
+        }
+        return Ok(());
+    }
 
     append_existing_unreadable_path_args(bwrap_args, unreadable_root, allowed_write_paths)
 }
@@ -2054,6 +2102,15 @@ fn has_read_only_bind(bwrap_args: &BwrapArgs, path: &Path) -> bool {
 fn live_placeholder_file(path: &Path) -> Option<Metadata> {
     let metadata = empty_file_metadata(path)?;
     crate::linux_run_main::is_live_placeholder(path).then_some(metadata)
+}
+
+/// #607: `path` when it is an empty folder another live run registered as
+/// its placeholder.
+fn live_placeholder_directory(path: &Path) -> Option<Metadata> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    (metadata.file_type().is_dir() && directory_is_empty(path))
+        .then_some(metadata)
+        .filter(|_| crate::linux_run_main::is_live_placeholder(path))
 }
 
 fn empty_file_metadata(path: &Path) -> Option<Metadata> {
@@ -3008,7 +3065,11 @@ mod tests {
         );
         let metadata = std::fs::symlink_metadata(&dot_git).expect("stat .git");
         assert!(
-            !args.synthetic_mount_targets[0].should_remove_after_bwrap(&metadata),
+            !args.synthetic_mount_targets[0].should_remove(
+                metadata.file_type().is_file() && metadata.len() == 0,
+                metadata.file_type().is_dir(),
+                (metadata.dev(), metadata.ino()),
+            ),
             "pre-existing empty preserved files must not be cleaned up as synthetic targets",
         );
     }
