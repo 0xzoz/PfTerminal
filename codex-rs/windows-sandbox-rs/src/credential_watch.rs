@@ -743,6 +743,9 @@ mod backend {
         }
     }
 
+    // The read was issued before the move here: the system writes into its
+    // `OVERLAPPED` and buffer, so it must stay boxed (unmoved).
+    #[allow(clippy::boxed_local)]
     fn run(mut read: Box<Read>, stop: HANDLE, root: &Path, tx: &Sender<Change>) {
         loop {
             let handles = [read.event, stop];

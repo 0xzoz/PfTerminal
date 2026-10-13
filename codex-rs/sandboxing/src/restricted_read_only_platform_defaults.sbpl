@@ -90,11 +90,12 @@
 (allow file-read* file-test-existence file-write-data file-ioctl
   (literal "/dev/dtracehelper"))
 
-; Scratch space so tools can create temp files.
-(allow file-read* file-test-existence file-write* (subpath "/tmp"))
-(allow file-read* file-write* (subpath "/private/tmp"))
-(allow file-read* file-write* (subpath "/var/tmp"))
-(allow file-read* file-write* (subpath "/private/var/tmp"))
+; Scratch space so tools can create temp files. Writes there are granted by
+; the generated profile (seatbelt.rs, `platform_tmp_write_policy`).
+(allow file-read* file-test-existence (subpath "/tmp"))
+(allow file-read* (subpath "/private/tmp"))
+(allow file-read* (subpath "/var/tmp"))
+(allow file-read* (subpath "/private/var/tmp"))
 
 ; Allow reading standard config directories.
 (allow file-read* (subpath "/etc"))

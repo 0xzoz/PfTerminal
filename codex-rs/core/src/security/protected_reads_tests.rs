@@ -551,6 +551,7 @@ fn issue_620_start_up_files_through_links() {
         let folder = AbsolutePathBuf::from_absolute_path(folder.canonicalize().unwrap()).unwrap();
         ReadPolicyInputs {
             codex_home: home.join(".corbanu"),
+            sqlite_home: home.join(".corbanu"),
             turn_cwd: folder.clone(),
             workspace_roots: vec![folder],
             // Aggressive's sandbox: the current folder only.
@@ -636,4 +637,112 @@ fn issue_620_write_targets() {
         write_targets(&["tee".to_string(), "-a".to_string(), "/u/.zshrc".to_string()]),
         vec!["/u/.zshrc"]
     );
+}
+
+/// #584: the word a command writes that no grant lifts (the project's
+/// `.codex` and `.agents`, the Corbanu home), when it writes no path a grant
+/// lifts: through `..`, a link as the last part, and a Corbanu home reached
+/// through a link, whose `worktrees` folder stays writable.
+#[cfg(unix)]
+#[test]
+fn issue_584_only_never_writable_words() {
+    use codex_protocol::permissions::NetworkSandboxPolicy;
+    let base = tempfile::tempdir().unwrap();
+    let base = base.path().canonicalize().unwrap();
+    let work = base.join("work");
+    let home = base.join("corbanu-home");
+    for folder in [
+        work.join(".codex"),
+        work.join(".agents"),
+        work.join(".git/hooks"),
+        work.join("sub"),
+        home.join("worktrees/x"),
+    ] {
+        std::fs::create_dir_all(&folder).unwrap();
+    }
+    std::os::unix::fs::symlink(work.join(".codex/config.toml"), work.join("settings")).unwrap();
+    let linked_home = base.join("linked-home");
+    std::os::unix::fs::symlink(&home, &linked_home).unwrap();
+    let cwd = AbsolutePathBuf::from_absolute_path(&work).unwrap();
+    let profile = PermissionProfile::workspace_write_with(
+        &[],
+        NetworkSandboxPolicy::Restricted,
+        /*exclude_tmpdir_env_var*/ true,
+        /*exclude_slash_tmp*/ true,
+    );
+    let word = |codex_home: &Path, script: &str| {
+        let denials = ReadDenials::for_turn(
+            codex_home,
+            codex_home,
+            &cwd,
+            std::slice::from_ref(&cwd),
+            &profile,
+        );
+        only_never_writable_word(&shell(script), &work, None, codex_home, &denials)
+    };
+    for (script, expected) in [
+        ("printf x > .codex/config.toml", Some(".codex/config.toml")),
+        (
+            "printf x >> sub/../.agents/notes.md",
+            Some("sub/../.agents/notes.md"),
+        ),
+        ("printf x > settings", Some("settings")),
+        (
+            "cp notes.txt .agents/notes.md && tee .codex/a",
+            Some(".agents/notes.md"),
+        ),
+        // A git hook beside it: Grant once still lifts that one.
+        (
+            "printf x > .git/hooks/pre-commit; printf x > .codex/a",
+            None,
+        ),
+        ("printf x > notes.txt", None),
+        ("cat .codex/config.toml", None),
+    ] {
+        assert_eq!(word(&home, script).as_deref(), expected, "{script}");
+    }
+    // A session working in a Corbanu worktree (#583): the worktree's own
+    // `.codex` stays never writable (the most specific entry wins), its
+    // other files are writable; also when the home is reached through a link.
+    for spelled in [&home, &linked_home] {
+        let worktree = spelled.join("worktrees/x");
+        std::fs::create_dir_all(worktree.join(".codex")).unwrap();
+        let cwd = AbsolutePathBuf::from_absolute_path(&worktree).unwrap();
+        for codex_home in [&home, &linked_home] {
+            let denials = ReadDenials::for_turn(
+                codex_home,
+                codex_home,
+                &cwd,
+                std::slice::from_ref(&cwd),
+                &profile,
+            );
+            let word = |script: &str| {
+                only_never_writable_word(&shell(script), &worktree, None, codex_home, &denials)
+            };
+            assert_eq!(
+                word("printf x > .codex/a").as_deref(),
+                Some(".codex/a"),
+                "{spelled:?} {codex_home:?}"
+            );
+            assert_eq!(
+                word("printf x > notes.md"),
+                None,
+                "{spelled:?} {codex_home:?}"
+            );
+        }
+    }
+    // The Corbanu home itself, also spelled through a link, but not its
+    // writable `worktrees` folder (#583), whichever spelling is used.
+    for codex_home in [&home, &linked_home] {
+        let into_home = format!("printf x > {}/notes.md", linked_home.display());
+        assert!(word(codex_home, &into_home).is_some(), "{codex_home:?}");
+        for spelled in [&home, &linked_home] {
+            let into_worktrees = format!("printf x > {}/worktrees/x/notes.md", spelled.display());
+            assert_eq!(
+                word(codex_home, &into_worktrees),
+                None,
+                "{codex_home:?} {into_worktrees}"
+            );
+        }
+    }
 }

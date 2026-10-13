@@ -594,6 +594,7 @@ fn issue_524_grants_are_checked_with_every_workspace_root() {
     let (kept, refusal) = strip_grant(
         SecurityLevel::Aggressive,
         &f.codex_home,
+        &f.codex_home,
         &configs,
         grant.clone(),
     );
@@ -602,6 +603,7 @@ fn issue_524_grants_are_checked_with_every_workspace_root() {
     assert!(refusal.contains("blocked writing to"), "{refusal}");
     let (kept, refusal) = strip_grant(
         SecurityLevel::Moderate,
+        &f.codex_home,
         &f.codex_home,
         &configs,
         grant.clone(),
@@ -617,6 +619,7 @@ fn issue_524_grants_are_checked_with_every_workspace_root() {
     assert_eq!(
         strip_grant(
             SecurityLevel::Permissive,
+            &f.codex_home,
             &f.codex_home,
             &configs,
             grant.clone()

@@ -239,6 +239,7 @@ impl ToolOrchestrator {
             let turn_cwd = turn_ctx.cwd.clone();
             let cwds = resolution_folders(tool, req, &turn_cwd, &materialized_workspace_roots);
             let codex_home = tool_ctx.turn.config.codex_home.to_path_buf();
+            let sqlite_home = tool_ctx.turn.config.sqlite.home().to_path_buf();
             let (roots, profile, additional) = (
                 materialized_workspace_roots.clone(),
                 permissions.clone(),
@@ -254,6 +255,7 @@ impl ToolOrchestrator {
             let checked = tokio::task::spawn_blocking(move || {
                 let denials = crate::security::protected_surface::ReadDenials::for_turn(
                     &codex_home,
+                    &sqlite_home,
                     &turn_cwd,
                     &roots,
                     &profile,
@@ -1212,6 +1214,7 @@ fn post_taint_read_denials(
         // outside any sandbox has none to hold them).
         let denials = ReadDenials::for_turn(
             tool_ctx.turn.config.codex_home.as_path(),
+            tool_ctx.turn.config.sqlite.home(),
             &cwd,
             workspace_roots,
             materialized,
@@ -1276,6 +1279,7 @@ fn post_taint_read_denials(
     }
     let mut denials = ReadDenials::for_turn(
         tool_ctx.turn.config.codex_home.as_path(),
+        tool_ctx.turn.config.sqlite.home(),
         &cwd,
         workspace_roots,
         materialized,

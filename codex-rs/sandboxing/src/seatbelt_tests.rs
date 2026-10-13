@@ -3103,3 +3103,102 @@ fn seatbelt_grants_writable_roots_at_their_pinned_location() {
     assert!(stdout.contains("wrote=1"), "{stdout}");
     assert!(!outside.join("file").exists());
 }
+
+/// #605: a `:minimal`-read profile with a workspace (a git worktree) below
+/// `/tmp`. The platform defaults keep `/tmp` writable for temporary files.
+/// `protected`: whether the profile also denies a path (Moderate's and
+/// Aggressive's shape), when they no longer reach the workspace's
+/// protected paths. Returns the script's output.
+fn minimal_profile_in_tmp(protected: bool) -> (TempDir, String) {
+    let base = tempfile::tempdir_in("/tmp").expect("tempdir in /tmp");
+    // As a person spells it: through the `/tmp` link.
+    let x = base.path().to_path_buf();
+    let main_git = x.join("main/.git");
+    let gitdir = main_git.join("worktrees/wt");
+    fs::create_dir_all(&gitdir).expect("gitdir");
+    fs::create_dir_all(main_git.join("hooks")).expect("hooks");
+    fs::write(gitdir.join("HEAD"), "ref\n").expect("HEAD");
+    let workspace = x.join("wt");
+    fs::create_dir_all(&workspace).expect("wt");
+    fs::write(
+        workspace.join(".git"),
+        format!("gitdir: {}\n", gitdir.display()),
+    )
+    .expect(".git file");
+    let mut entries = vec![
+        FileSystemSandboxEntry {
+            path: FileSystemPath::Special {
+                value: FileSystemSpecialPath::Minimal,
+            },
+            access: FileSystemAccessMode::Read,
+            missing_path_behavior: None,
+        },
+        path_entry(&workspace, FileSystemAccessMode::Write),
+    ];
+    if protected {
+        entries.push(path_entry(&x.join("denied"), FileSystemAccessMode::Deny));
+        // A read-only path outside every writable root (the repository's
+        // hooks, as Moderate records them).
+        entries.push(path_entry(
+            &main_git.join("hooks"),
+            FileSystemAccessMode::Read,
+        ));
+    }
+    let script = format!(
+        "echo x > '{ws}/.git'; echo git=$?; echo x >> '{gitdir}/HEAD'; echo gitdir=$?; \
+         echo x > '{main}/hooks/pre-commit'; echo hooks=$?; mkdir '{ws}/.codex'; echo codex=$?; \
+         mkdir '{ws}/.agents'; echo agents=$?; mv '{gitdir}' '{x}/moved'; echo moved=$?; \
+         echo x > '{ws}/file'; echo ws=$?; echo x > '{x}/scratch'; echo scratch=$?; \
+         echo x > /tmp/.codex-605-$$; echo slash_tmp=$?; rm -f /tmp/.codex-605-$$",
+        ws = workspace.display(),
+        gitdir = gitdir.display(),
+        main = main_git.display(),
+        x = x.display(),
+    );
+    let stdout = run_in_seatbelt(
+        &FileSystemSandboxPolicy::restricted(entries),
+        &workspace,
+        &script,
+    );
+    (base, stdout)
+}
+
+/// #605: once the policy denies reads, `/tmp` stays writable for temporary
+/// files but no longer reaches a workspace's `.git` (also the worktree's git
+/// folder), `.codex`, `.agents` or another read-only path there, which stay
+/// read-only as with `:root` reads.
+#[test]
+fn minimal_reads_keep_protected_paths_in_tmp_read_only() {
+    let (base, stdout) = minimal_profile_in_tmp(/*protected*/ true);
+    assert_lines(
+        &stdout,
+        &[
+            "git=1",
+            "gitdir=1",
+            "hooks=1",
+            "codex=1",
+            "agents=1",
+            "moved=1",
+            "ws=0",
+            "scratch=0",
+            "slash_tmp=0",
+        ],
+    );
+    let x = base.path();
+    assert_eq!(
+        fs::read_to_string(x.join("main/.git/worktrees/wt/HEAD")).expect("HEAD"),
+        "ref\n"
+    );
+    assert!(!x.join("wt/.codex").exists() && !x.join("main/.git/hooks/pre-commit").exists());
+}
+
+/// #605: a policy without denied paths (Permissive's shape) keeps the
+/// platform defaults' `/tmp` writes as they were.
+#[test]
+fn minimal_reads_keep_tmp_writes_unchanged_without_denials() {
+    let (_base, stdout) = minimal_profile_in_tmp(/*protected*/ false);
+    assert_lines(
+        &stdout,
+        &["git=0", "gitdir=0", "ws=0", "scratch=0", "slash_tmp=0"],
+    );
+}

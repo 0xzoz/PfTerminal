@@ -2992,10 +2992,6 @@ impl Session {
         rx_approve.await.unwrap_or(ReviewDecision::Abort)
     }
 
-    #[expect(
-        clippy::await_holding_invalid_type,
-        reason = "active turn checks and turn state updates must remain atomic"
-    )]
     pub(crate) async fn request_permissions_for_environment(
         self: &Arc<Self>,
         turn_context: &Arc<TurnContext>,
@@ -3004,22 +3000,53 @@ impl Session {
         environment: TurnEnvironmentSelection,
         cancellation_token: CancellationToken,
     ) -> Option<RequestPermissionsResponse> {
+        self.request_permissions_explained(
+            turn_context,
+            call_id,
+            args,
+            environment,
+            cancellation_token,
+        )
+        .await
+        .unwrap_or_else(|_refusal| {
+            Some(RequestPermissionsResponse {
+                permissions: RequestPermissionProfile::default(),
+                scope: PermissionGrantScope::Turn,
+                strict_auto_review: false,
+            })
+        })
+    }
+
+    /// [`Self::request_permissions_for_environment`], or `Err` with why when
+    /// the request was refused before anyone was asked (#584).
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "active turn checks and turn state updates must remain atomic"
+    )]
+    pub(crate) async fn request_permissions_explained(
+        self: &Arc<Self>,
+        turn_context: &Arc<TurnContext>,
+        call_id: String,
+        args: RequestPermissionsArgs,
+        environment: TurnEnvironmentSelection,
+        cancellation_token: CancellationToken,
+    ) -> Result<Option<RequestPermissionsResponse>, String> {
         match turn_context.as_ref().approval_policy.value() {
             AskForApproval::Never => {
-                return Some(RequestPermissionsResponse {
+                return Ok(Some(RequestPermissionsResponse {
                     permissions: RequestPermissionProfile::default(),
                     scope: PermissionGrantScope::Turn,
                     strict_auto_review: false,
-                });
+                }));
             }
             AskForApproval::Granular(granular_config)
                 if !granular_config.allows_request_permissions() =>
             {
-                return Some(RequestPermissionsResponse {
+                return Ok(Some(RequestPermissionsResponse {
                     permissions: RequestPermissionProfile::default(),
                     scope: PermissionGrantScope::Turn,
                     strict_auto_review: false,
-                });
+                }));
             }
             AskForApproval::OnRequest
             | AskForApproval::UnlessTrusted
@@ -3033,11 +3060,20 @@ impl Session {
                 cwd = %environment.cwd,
                 "request_permissions requires a cwd native to the Codex host"
             );
-            return Some(RequestPermissionsResponse {
+            return Ok(Some(RequestPermissionsResponse {
                 permissions: RequestPermissionProfile::default(),
                 scope: PermissionGrantScope::Turn,
                 strict_auto_review: false,
-            });
+            }));
+        };
+        let requested_permissions = tokio::select! {
+            biased;
+            _ = cancellation_token.cancelled() => return Ok(None),
+            kept = self.grantable_request(
+                turn_context.as_ref(),
+                requested_permissions,
+                &native_environment_cwd,
+            ) => kept?,
         };
 
         if crate::guardian::routes_approval_to_guardian(turn_context.as_ref()) {
@@ -3069,7 +3105,7 @@ impl Session {
             );
             let decision = tokio::select! {
                 biased;
-                _ = cancellation_token.cancelled() => return None,
+                _ = cancellation_token.cancelled() => return Ok(None),
                 decision = review_rx => decision.unwrap_or_else(|_| {
                     ReviewDecision::denied("automatic approval review could not complete")
                 }),
@@ -3127,7 +3163,7 @@ impl Session {
                 originating_turn_state.as_ref(),
             )
             .await;
-            return Some(response);
+            return Ok(Some(response));
         }
 
         let _elicitation = self.services.elicitations.register();
@@ -3163,7 +3199,7 @@ impl Session {
             cwd: Some(native_environment_cwd),
         });
         self.send_event(turn_context.as_ref(), event).await;
-        tokio::select! {
+        Ok(tokio::select! {
             biased;
             _ = cancellation_token.cancelled() => {
                 let mut active = self.active_turn.lock().await;
@@ -3174,7 +3210,7 @@ impl Session {
                 None
             }
             response = rx_response => response.ok(),
-        }
+        })
     }
 
     pub(crate) async fn request_permissions_for_cwd(
@@ -3375,6 +3411,51 @@ impl Session {
         }
     }
 
+    /// #584: under Aggressive no answer grants a protected path or a
+    /// read-only one (`ReadOnlyScope::for_grant`; #520: the project's
+    /// `.codex` and `.agents` included), so those entries are left out before
+    /// anyone is asked, and the person is told why. `Err` with why when
+    /// nothing would be left to grant: then nobody is asked.
+    async fn grantable_request(
+        &self,
+        turn_context: &TurnContext,
+        requested: RequestPermissionProfile,
+        cwd: &AbsolutePathBuf,
+    ) -> Result<RequestPermissionProfile, String> {
+        if requested.is_empty() {
+            return Ok(requested);
+        }
+        let Some(level @ codex_security_policy::SecurityLevel::Aggressive) =
+            crate::security::protected_additional::protected_level(self)
+        else {
+            return Ok(requested);
+        };
+        let (codex_home, sqlite_home, configs) = self.grant_check_configs(Some(cwd)).await;
+        let (kept, refusal) = crate::security::protected_additional::strip_grant_off_thread(
+            level,
+            codex_home,
+            sqlite_home,
+            configs,
+            requested.clone().into(),
+        )
+        .await;
+        let Some(refusal) = refusal else {
+            return Ok(requested);
+        };
+        let unchecked = refusal == crate::security::protected_additional::unchecked_refusal(level);
+        crate::security::inspection::record_refusal(
+            self.thread_id(),
+            "a permission request naming a protected path",
+            match kept {
+                Some(_) => "those paths were left out before anyone was asked",
+                None if unchecked => "refused before anyone was asked; it could not be checked",
+                None => "refused before anyone was asked; never granted under Aggressive",
+            },
+        );
+        crate::security::protected_reads::notify(self, turn_context, refusal.clone()).await;
+        kept.map(Into::into).ok_or(refusal)
+    }
+
     /// Issue #245: once the protected-path rules apply, a permission grant
     /// never names a protected path. Such entries are dropped from the answer
     /// the model gets and from what is recorded, and the person is told why.
@@ -3390,10 +3471,11 @@ impl Session {
         let Some(level) = crate::security::protected_additional::protected_level(self) else {
             return response;
         };
-        let (codex_home, configs) = self.grant_check_configs(Some(cwd)).await;
+        let (codex_home, sqlite_home, configs) = self.grant_check_configs(Some(cwd)).await;
         let (kept, refusal) = crate::security::protected_additional::strip_grant_off_thread(
             level,
             codex_home,
+            sqlite_home,
             configs,
             response.permissions.clone().into(),
         )
@@ -3481,15 +3563,20 @@ impl Session {
         let Some(level) = crate::security::protected_additional::protected_level(self) else {
             return Some(granted);
         };
-        let (codex_home, configs) = self.grant_check_configs(/*cwd*/ None).await;
+        let (codex_home, sqlite_home, configs) = self.grant_check_configs(/*cwd*/ None).await;
         crate::security::protected_additional::strip_grant_off_thread(
-            level, codex_home, configs, granted,
+            level,
+            codex_home,
+            sqlite_home,
+            configs,
+            granted,
         )
         .await
         .0
     }
 
-    /// Issue #524: the Corbanu home, and what a grant is checked against:
+    /// Issue #524: the Corbanu home and its database folder (#611), and what
+    /// a grant is checked against:
     /// `cwd` (or the session's original folder) with the original profile,
     /// and the session's current folder and profile, which may have changed
     /// since, each with the current workspace roots.
@@ -3497,6 +3584,7 @@ impl Session {
         &self,
         cwd: Option<&AbsolutePathBuf>,
     ) -> (
+        std::path::PathBuf,
         std::path::PathBuf,
         Vec<crate::security::protected_additional::GrantCheckConfig>,
     ) {
@@ -3518,7 +3606,11 @@ impl Session {
         if !configs.contains(&now) {
             configs.push(now);
         }
-        (config.codex_home.to_path_buf(), configs)
+        (
+            config.codex_home.to_path_buf(),
+            config.sqlite.home().to_path_buf(),
+            configs,
+        )
     }
 
     #[expect(

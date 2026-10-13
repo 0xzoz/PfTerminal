@@ -27,6 +27,17 @@ const MACOS_SEATBELT_NETWORK_POLICY: &str = include_str!("seatbelt_network_polic
 const MACOS_RESTRICTED_READ_ONLY_PLATFORM_DEFAULTS: &str =
     include_str!("restricted_read_only_platform_defaults.sbpl");
 
+/// The platform defaults' scratch folders, writable for tools' temporary
+/// files (`:minimal` reads).
+const PLATFORM_TMP_FOLDERS: [&str; 4] = ["/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp"];
+
+/// Their writes as the platform defaults always granted them, kept for a
+/// policy without denied paths (Permissive's shape).
+const PLATFORM_TMP_WRITES: &str = r#"(allow file-write* (subpath "/tmp"))
+(allow file-write* (subpath "/private/tmp"))
+(allow file-write* (subpath "/var/tmp"))
+(allow file-write* (subpath "/private/var/tmp"))"#;
+
 /// When working with `sandbox-exec`, only consider `sandbox-exec` in `/usr/bin`
 /// to defend against an attacker trying to inject a malicious version on the
 /// PATH. If /usr/bin/sandbox-exec has been tampered with, then the attacker
@@ -716,6 +727,36 @@ fn build_seatbelt_rename_guard_policy(
     (policy.join("\n"), params)
 }
 
+/// #605: the platform defaults' scratch-folder writes once the policy denies
+/// reads: each folder stays writable except the `protected` paths it holds
+/// (in every spelling), so a workspace below `/tmp` keeps its `.git`,
+/// `.codex` and `.agents` (and every other read-only path) read-only, as its
+/// own writable root does. Emitted with the write clauses, ahead of the
+/// rename guard, which then holds there too.
+fn platform_tmp_write_policy(protected: &[AbsolutePathBuf]) -> (String, Vec<(String, PathBuf)>) {
+    let mut clauses: Vec<SeatbeltClause> = Vec::new();
+    for folder in PLATFORM_TMP_FOLDERS {
+        let Ok(root) = AbsolutePathBuf::from_absolute_path(folder) else {
+            continue;
+        };
+        let clause = SeatbeltClause::new(SeatbeltAccessRoot {
+            excluded_subpaths: protected
+                .iter()
+                .filter(|path| reached_through_root(path, &root))
+                .cloned()
+                .collect(),
+            protected_metadata_names: Vec::new(),
+            pinned: false,
+            root,
+        });
+        // `/tmp` and `/private/tmp` are one folder once normalized.
+        if !clauses.iter().any(|existing| existing.root == clause.root) {
+            clauses.push(clause);
+        }
+    }
+    build_seatbelt_clause_policy("file-write*", "PLATFORM_TMP", clauses)
+}
+
 /// Issue #506: deny listing each directory (reading its entries), in every
 /// spelling Seatbelt may see. `file-read-data` on the directory itself only:
 /// its metadata and every path below it keep the access the rest of the
@@ -1128,6 +1169,24 @@ pub fn create_seatbelt_command_args(
     }
     let (rename_guard_policy, rename_guard_params) =
         build_seatbelt_rename_guard_policy(rename_guarded);
+    // #605: with `:minimal` reads, the scratch folders' writes; once the
+    // policy denies reads, without the paths protected elsewhere.
+    let include_platform_defaults = file_system_sandbox_policy.include_platform_defaults();
+    let platform_tmp_unchanged = unreadable_roots.is_empty();
+    let (platform_tmp_policy, platform_tmp_params) =
+        if !include_platform_defaults || platform_tmp_unchanged {
+            (String::new(), Vec::new())
+        } else {
+            let protected: Vec<AbsolutePathBuf> = protected_by_root
+                .iter()
+                .flatten()
+                .cloned()
+                .chain(file_system_sandbox_policy.get_read_only_paths_with_cwd(sandbox_policy_cwd))
+                .chain(unreadable_roots.iter().cloned())
+                .chain(file_system_sandbox_policy.get_unmovable_paths())
+                .collect();
+            platform_tmp_write_policy(&protected)
+        };
     let (file_write_policy, file_write_dir_params) =
         if file_system_sandbox_policy.has_full_disk_write_access() {
             if unreadable_roots.is_empty() {
@@ -1230,7 +1289,6 @@ pub fn create_seatbelt_command_args(
     let network_policy =
         dynamic_network_policy_for_network(network_sandbox_policy, enforce_managed_network, &proxy);
 
-    let include_platform_defaults = file_system_sandbox_policy.include_platform_defaults();
     let deny_read_policy =
         build_seatbelt_unreadable_glob_policy(file_system_sandbox_policy, sandbox_policy_cwd);
     let (unlistable_policy, unlistable_params) =
@@ -1239,6 +1297,7 @@ pub fn create_seatbelt_command_args(
         MACOS_SEATBELT_BASE_POLICY.to_string(),
         file_read_policy,
         file_write_policy,
+        platform_tmp_policy,
         deny_read_policy,
         unlistable_policy,
         rename_guard_policy,
@@ -1246,6 +1305,11 @@ pub fn create_seatbelt_command_args(
     ];
     if include_platform_defaults {
         policy_sections.push(MACOS_RESTRICTED_READ_ONLY_PLATFORM_DEFAULTS.to_string());
+        // Only allows: placed here as before (#605 emits them above when the
+        // policy denies reads).
+        if platform_tmp_unchanged {
+            policy_sections.push(PLATFORM_TMP_WRITES.to_string());
+        }
     }
 
     let full_policy = policy_sections.join("\n");
@@ -1253,6 +1317,7 @@ pub fn create_seatbelt_command_args(
     let dir_params = [
         file_read_dir_params,
         file_write_dir_params,
+        platform_tmp_params,
         rename_guard_params,
         unlistable_params,
         unix_socket_dir_params(&proxy),

@@ -166,7 +166,7 @@ mod windows_impl {
                 flag.load(Ordering::SeqCst)
                     || cancellation
                         .as_ref()
-                        .is_some_and(|token| token.is_cancelled())
+                        .is_some_and(crate::WindowsSandboxCancellationToken::is_cancelled)
             }))
         } else {
             cancellation

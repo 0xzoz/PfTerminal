@@ -9,6 +9,9 @@
 //! - #620: the same for a start-up file outside the current folder that a
 //!   command writes (`>> ~/.zshrc`): Aggressive's sandbox never writes
 //!   there, so no grant could let the command write it;
+//! - #584: the same for a command that writes only paths no grant lifts
+//!   under Aggressive (#520: the project's `.codex` and `.agents`; the
+//!   Corbanu home);
 //! - #622: such a denial is listed under the inspector's recent denials.
 //!
 //! Explanation only: it never changes what runs or what is denied (it only
@@ -82,6 +85,20 @@ pub(crate) fn startup_explanation(path: &str) -> String {
     )
 }
 
+/// #584: the explanation for a write to a path no grant lifts under
+/// Aggressive (#520: the project's `.codex` and `.agents`; the Corbanu home
+/// outside `worktrees`).
+pub(crate) fn never_writable_explanation(path: &str) -> String {
+    format!(
+        "Security level Aggressive blocks writing `{}`: agent commands can never write the \
+         project's .codex and .agents folders (agent settings) or the Corbanu home (outside its \
+         worktrees folder), even when you approve them, and this cannot be granted, not even \
+         once. To allow it, a person can switch to Permissive in /security (it applies after a \
+         restart).",
+        shown_path(path)
+    )
+}
+
 /// `path` as an explanation shows it: it is the command's own spelling, so
 /// escaped and bounded.
 pub(crate) fn shown_path(path: &str) -> String {
@@ -99,6 +116,8 @@ const MAX_SHOWN_PATH_CHARS: usize = 200;
 /// thread; building it reads folders, so that happens off it.
 struct ReadPolicyInputs {
     codex_home: PathBuf,
+    /// The database folder (#611).
+    sqlite_home: PathBuf,
     turn_cwd: AbsolutePathBuf,
     workspace_roots: Vec<AbsolutePathBuf>,
     profile: PermissionProfile,
@@ -140,6 +159,7 @@ impl ReadPolicyInputs {
             .unwrap_or_default();
         Some(Self {
             codex_home: turn.config.codex_home.to_path_buf(),
+            sqlite_home: turn.config.sqlite.home().to_path_buf(),
             turn_cwd,
             workspace_roots,
             profile: turn.config.permissions.permission_profile().clone(),
@@ -150,17 +170,23 @@ impl ReadPolicyInputs {
     /// The deny-read matcher of the session's read policy; `None` for a
     /// profile that cannot take the rules (an external sandbox).
     fn matcher(&self, cwd: &Path) -> Option<ReadDenyMatcher> {
-        let mut denials = ReadDenials::for_turn(
-            &self.codex_home,
-            &self.turn_cwd,
-            &self.workspace_roots,
-            &self.profile,
-        );
+        let mut denials = self.denials();
         // Captured only under Aggressive (see `capture`).
         denials.deny_home_listing();
         let policy = denials.apply(&self.profile)?.file_system_sandbox_policy();
         // A malformed pattern denies every path; explain nothing then.
         ReadDenyMatcher::try_new(&policy, cwd).ok().flatten()
+    }
+
+    /// The session's protected paths, as the read policy is built from them.
+    fn denials(&self) -> ReadDenials {
+        ReadDenials::for_turn(
+            &self.codex_home,
+            &self.sqlite_home,
+            &self.turn_cwd,
+            &self.workspace_roots,
+            &self.profile,
+        )
     }
 
     /// #620: whether `path` is one of the user's start-up files (`~/.zshrc`,
@@ -214,6 +240,88 @@ impl ReadPolicyInputs {
             .file_system_sandbox_policy()
             .can_write_path_with_cwd(target.as_path(), self.turn_cwd.as_path())
     }
+}
+
+/// #584: whether a write to `path` lands, as spelled, through a link on the
+/// way or where it finally points, in one of `kept` (or one's real
+/// location), and not in a folder of `writable` inside that kept path
+/// (`worktrees` in the Corbanu home, #583), as the sandbox's most specific
+/// entry wins: a kept path inside the writable folder (a worktree's own
+/// `.codex`) still counts. A writable folder is also matched through the
+/// kept path's spelling (the home reached through a link, whose `worktrees`
+/// is known by its real location only).
+fn lands_in<'a>(
+    path: &Path,
+    kept: impl Iterator<Item = &'a AbsolutePathBuf>,
+    writable: &[&AbsolutePathBuf],
+) -> bool {
+    let Ok(path) = AbsolutePathBuf::from_absolute_path(path) else {
+        return false;
+    };
+    let mut spellings = link_chain(&path);
+    spellings.extend(ReadDenials::real_location(&path));
+    let with_real = |paths: Vec<AbsolutePathBuf>| {
+        let real: Vec<AbsolutePathBuf> = paths
+            .iter()
+            .filter_map(ReadDenials::real_location)
+            .collect();
+        paths.into_iter().chain(real).collect::<Vec<_>>()
+    };
+    let writable = with_real(writable.iter().map(|folder| (*folder).clone()).collect());
+    let kept = with_real(kept.cloned().collect());
+    kept.iter().any(|kept| {
+        let real_kept = ReadDenials::real_location(kept).unwrap_or_else(|| kept.clone());
+        // The writable folders inside this kept path, also spelled the way
+        // it is.
+        let inside: Vec<PathBuf> = writable
+            .iter()
+            .flat_map(|folder| {
+                let as_spelled = folder
+                    .as_path()
+                    .strip_prefix(real_kept.as_path())
+                    .ok()
+                    .map(|rest| kept.as_path().join(rest));
+                folder
+                    .as_path()
+                    .starts_with(kept.as_path())
+                    .then(|| folder.to_path_buf())
+                    .into_iter()
+                    .chain(as_spelled)
+            })
+            .collect();
+        spellings.iter().any(|spelling| {
+            spelling.as_path().starts_with(kept.as_path())
+                && !inside
+                    .iter()
+                    .any(|folder| spelling.as_path().starts_with(folder))
+        })
+    })
+}
+
+/// #584: the first word `command` writes to (see [`write_targets`]) that
+/// lands in a path no grant lifts under Aggressive, when it writes no
+/// read-only path a grant could lift (a git hook beside it: then Grant once
+/// still applies to that, and is offered).
+fn only_never_writable_word(
+    command: &[String],
+    cwd: &Path,
+    user_home: Option<&Path>,
+    codex_home: &Path,
+    denials: &ReadDenials,
+) -> Option<String> {
+    let writable: Vec<&AbsolutePathBuf> = denials.home_writable_paths().collect();
+    let mut found = None;
+    for word in write_targets(command) {
+        let Some(path) = resolve(&word, cwd, user_home, codex_home) else {
+            continue;
+        };
+        if lands_in(&path, denials.never_lifted_paths(), &writable) {
+            found.get_or_insert(word);
+        } else if lands_in(&path, denials.liftable_read_only_paths(), &[]) {
+            return None;
+        }
+    }
+    found
 }
 
 /// Links followed from a file: `path` and each name it is a link to, as far
@@ -340,6 +448,20 @@ pub(crate) async fn denial_explanation(
                 )
                 .map(ProtectedNote::Startup)
             })
+            // #584: a path no grant lifts.
+            .or_else(|| {
+                let denials = inputs.denials();
+                let writable: Vec<&AbsolutePathBuf> = denials.home_writable_paths().collect();
+                written_word(
+                    &command,
+                    &cwd,
+                    inputs.user_home.as_deref(),
+                    &inputs.codex_home,
+                    &|path| lands_in(path, denials.never_lifted_paths(), &writable),
+                    Some(&denial_lines),
+                )
+                .map(ProtectedNote::NeverWritable)
+            })
             // #621: a protected path the denial line reports that no word
             // of the command names (built at run time). Bounded: only the
             // first lines are looked at.
@@ -456,7 +578,9 @@ pub(crate) async fn protected_path_in_command(
 ) -> Option<String> {
     match protected_note_in_command(session, turn, command, cwd).await? {
         ProtectedNote::Read(path) => Some(path),
-        ProtectedNote::Listing(_) | ProtectedNote::Startup(_) => None,
+        ProtectedNote::Listing(_) | ProtectedNote::Startup(_) | ProtectedNote::NeverWritable(_) => {
+            None
+        }
     }
 }
 
@@ -469,6 +593,9 @@ pub(crate) enum ProtectedNote {
     /// A start-up file outside the current folder, which Aggressive's
     /// sandbox never writes (#620).
     Startup(String),
+    /// A path no grant lifts that it writes (#584: the project's `.codex`
+    /// and `.agents`, #520; the Corbanu home).
+    NeverWritable(String),
 }
 
 impl ProtectedNote {
@@ -478,6 +605,7 @@ impl ProtectedNote {
             Self::Read(path) => explanation(path),
             Self::Listing(path) => listing_explanation(path),
             Self::Startup(path) => startup_explanation(path),
+            Self::NeverWritable(path) => never_writable_explanation(path),
         }
     }
 
@@ -488,13 +616,18 @@ impl ProtectedNote {
             Self::Read(_) => "reading a protected file",
             Self::Listing(_) => "listing the Corbanu home",
             Self::Startup(_) => "writing a start-up file outside the current folder",
+            Self::NeverWritable(_) => {
+                "writing the project's .codex or .agents, or the Corbanu home"
+            }
         }
     }
 }
 
 /// The protected path `command` names (#442), or else the folder it lists
 /// that may not be listed (#506), or else a start-up file outside the
-/// current folder it names (#620): no grant could apply to any of them.
+/// current folder it names (#620), or else, when it writes no path a grant
+/// lifts, a path no grant lifts that it writes (#584: the project's `.codex`
+/// and `.agents`, the Corbanu home): no grant could apply to any of them.
 pub(crate) async fn protected_note_in_command(
     session: &Session,
     turn: &TurnContext,
@@ -539,6 +672,22 @@ pub(crate) async fn protected_note_in_command(
                 )
                 .map(ProtectedNote::Startup)
             })
+            // Windows drops the read-only entry of a missing path, so a
+            // missing `.codex` may well be written there (#554 likewise).
+            .or_else(|| {
+                (!cfg!(windows))
+                    .then(|| {
+                        only_never_writable_word(
+                            &command,
+                            &cwd,
+                            inputs.user_home.as_deref(),
+                            &inputs.codex_home,
+                            &inputs.denials(),
+                        )
+                    })
+                    .flatten()
+                    .map(ProtectedNote::NeverWritable)
+            })
     })
     .await
 }
@@ -567,6 +716,7 @@ pub(crate) async fn additional_permission_refusal(
     off_thread(move || {
         let denials = ReadDenials::for_turn(
             &inputs.codex_home,
+            &inputs.sqlite_home,
             &inputs.turn_cwd,
             &inputs.workspace_roots,
             &inputs.profile,

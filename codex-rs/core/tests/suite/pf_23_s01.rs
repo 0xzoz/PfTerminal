@@ -1850,27 +1850,6 @@ impl LinkedHome {
         }
     }
 
-    /// #619 (macOS, pre-existing): with a workspace-write profile a home
-    /// below a temporary-folder root reached through an alias (`/tmp`, or
-    /// `$TMPDIR` in `/var/folders`, both in `/private`) keeps its runtime
-    /// entries writable, so `AGENTS.md` can be planted in place (moving and
-    /// replacing are still refused).
-    fn with_known_exception(
-        &self,
-        mut expected: Vec<&'static str>,
-        level: SecurityLevel,
-        full_access: bool,
-    ) -> Vec<&'static str> {
-        if cfg!(target_os = "macos")
-            && level != SecurityLevel::Permissive
-            && !full_access
-            && self.root.starts_with("/private")
-        {
-            expected.push("planted");
-        }
-        expected
-    }
-
     /// What the command achieved.
     fn changed(&self) -> Vec<&'static str> {
         let mut changed = Vec::new();
@@ -1950,11 +1929,7 @@ async fn issue_594_a_linked_corbanu_home_cannot_be_replaced() -> anyhow::Result<
         let output = output_text(&requests[requests.len() - 1], "call-replace");
         drop(test);
         let changed = home.changed();
-        let expected = home.with_known_exception(
-            LinkedHome::expected(level, through_link, /*approved*/ false),
-            level,
-            full_access,
-        );
+        let expected = LinkedHome::expected(level, through_link, /*approved*/ false);
         if !LinkedHome::ran(level, through_link, /*approved*/ false, &output) || changed != expected
         {
             wrong.push(format!(
@@ -2019,11 +1994,7 @@ async fn issue_598_an_approved_command_cannot_move_the_corbanu_home() -> anyhow:
         let output = output_text(&requests[requests.len() - 1], "call-replace");
         drop(test);
         let changed = home.changed();
-        let expected = home.with_known_exception(
-            LinkedHome::expected(level, through_link, /*approved*/ true),
-            level,
-            full_access,
-        );
+        let expected = LinkedHome::expected(level, through_link, /*approved*/ true);
         // Under Moderate a person was asked and the rules were lifted (the
         // credential file was readable).
         let lifted = level == SecurityLevel::Permissive || asked == 1 && output.contains(CANARY);
@@ -2388,6 +2359,183 @@ async fn issue_586_missing_db_init_lock_cannot_be_created_or_held() -> anyhow::R
                 ));
             }
         }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
+/// Issue #611: with the databases in their own folder (`sqlite_home`), a
+/// protected command with full access cannot read or write a database there,
+/// create and hold the missing init lock, hold the GPU controller's lock or
+/// plant a pending accounting record, with the paths built at run time.
+/// Permissive is unchanged.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_611_a_separate_database_folder_is_protected() -> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let mut wrong = Vec::new();
+    for (level, open) in [
+        (SecurityLevel::Moderate, false),
+        (SecurityLevel::Aggressive, false),
+        (SecurityLevel::Permissive, true),
+    ] {
+        let databases = TempDir::new()?;
+        let folder = databases.path().canonicalize()?;
+        let lock = folder.join("pfterminal_db_init.lock");
+        let path = folder.to_string_lossy().into_owned();
+        // Split inside the folder's own name: neither part names it.
+        let (head, tail) = path.split_at(path.len() - 2);
+        let command = format!(
+            "d=\"$(printf '{head}%s' {tail})\"; s=\"sql$(printf ite)\"; \
+             cat \"$d/canary.$s\"; echo; printf x >> \"$d/canary.$s\"; \
+             perl -e 'use Fcntl qw(:flock); open(my $f, \">>\", $ARGV[0]) or die \"open: $!\\n\"; \
+             flock($f, LOCK_EX | LOCK_NB) or die \"lock: $!\\n\"' \
+             \"$d/pfterminal_db_$(printf init).lock\" && echo init-held-611; \
+             perl -e 'use Fcntl qw(:flock); open(my $f, \"<\", $ARGV[0]) or die \"open: $!\\n\"; \
+             flock($f, LOCK_EX | LOCK_NB) or die \"lock: $!\\n\"' \
+             \"$d/gpu-controller.$(printf lock)\" && echo gpu-held-611; \
+             printf '{{}}' > \"$d/accounting-$(printf pending)/planted.json\"; echo ran-611"
+        );
+        let sqlite_home = AbsolutePathBuf::from_absolute_path(&folder)?;
+        let (canary, missing_lock) = (folder.join("canary.sqlite"), lock.clone());
+        let (test, captured) = start_turn_after(
+            None,
+            level,
+            AskForApproval::Never,
+            vec![
+                call("call-db", "shell_command", json!({ "command": command })),
+                done_step(),
+            ],
+            move |config| {
+                config.sqlite = codex_state::SqliteConfig::from_sqlite_home(sqlite_home.clone());
+                config
+                    .permissions
+                    .set_permission_profile(PermissionProfile::Disabled)
+                    .expect("full access");
+            },
+            move |_| {
+                std::fs::write(&canary, CANARY).expect("canary database");
+                let folder = canary.parent().expect("database folder");
+                std::fs::write(folder.join("gpu-controller.lock"), "").expect("gpu lock");
+                std::fs::create_dir_all(folder.join("accounting-pending")).expect("pending");
+                // Start-up created it; the command meets it missing.
+                let _ = std::fs::remove_file(&missing_lock);
+            },
+        )
+        .await?;
+        assert!(next_exec_approval(&test).await.is_none());
+        let requests = captured.requests();
+        let output = output_text(&requests[requests.len() - 1], "call-db");
+        let achieved = [
+            output.contains(CANARY),
+            std::fs::read_to_string(folder.join("canary.sqlite")).unwrap_or_default() != CANARY,
+            output.contains("init-held-611") || lock.exists(),
+            output.contains("gpu-held-611"),
+            folder.join("accounting-pending/planted.json").exists(),
+        ];
+        if !output.contains("ran-611") || achieved != [open; 5] {
+            wrong.push(format!("{level:?}: {achieved:?}: {output}"));
+        }
+        drop(test);
+        drop(databases);
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
+/// #605: with a `:minimal`-read profile the macOS platform defaults keep
+/// `/tmp` writable for temporary files. A protected command working in a git
+/// worktree below `/tmp` still cannot write the repository's hooks or the
+/// worktree's git folder, nor create the workspace's `.codex`, as with
+/// `:root` reads; a scratch file in `/tmp` is still written. Permissive is
+/// unchanged.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_605_minimal_reads_keep_git_below_tmp_read_only() -> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
+    use codex_protocol::permissions::FileSystemAccessMode;
+    use codex_protocol::permissions::FileSystemPath;
+    use codex_protocol::permissions::FileSystemSandboxEntry;
+    use codex_protocol::permissions::FileSystemSandboxPolicy;
+    use codex_protocol::permissions::FileSystemSpecialPath;
+    use codex_protocol::permissions::NetworkSandboxPolicy;
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let mut wrong = Vec::new();
+    for (level, open) in [
+        (SecurityLevel::Moderate, false),
+        (SecurityLevel::Permissive, true),
+    ] {
+        // As a person spells it: through the `/tmp` link.
+        let base = tempfile::tempdir_in("/tmp")?;
+        let x = base.path().to_path_buf();
+        let gitdir = x.join("main/.git/worktrees/wt");
+        std::fs::create_dir_all(&gitdir)?;
+        std::fs::create_dir_all(x.join("main/.git/hooks"))?;
+        std::fs::write(x.join("main/.git/config"), "[core]\n")?;
+        std::fs::write(gitdir.join("HEAD"), "ref\n")?;
+        std::fs::write(gitdir.join("commondir"), "../..\n")?;
+        let workspace = x.join("wt");
+        std::fs::create_dir_all(&workspace)?;
+        std::fs::write(
+            workspace.join(".git"),
+            format!("gitdir: {}\n", gitdir.display()),
+        )?;
+        let path = x.to_string_lossy().into_owned();
+        // Split inside the folder's own name: neither part names it.
+        let (head, tail) = path.split_at(path.len() - 2);
+        let command = format!(
+            "x=\"$(printf '{head}%s' {tail})\"; g=\".g$(printf it)\"; \
+             echo x > \"$x/main/$g/hooks/pre-commit\"; echo x >> \"$x/main/$g/worktrees/wt/HEAD\"; \
+             mkdir \"$x/wt/.co$(printf dex)\"; echo x > \"$x/scratch\"; echo ran-605"
+        );
+        let cwd = AbsolutePathBuf::from_absolute_path(&workspace)?;
+        let (test, captured) = start_turn_in(
+            None,
+            level,
+            AskForApproval::Never,
+            vec![
+                call("call-605", "shell_command", json!({ "command": command })),
+                done_step(),
+            ],
+            move |config| {
+                config.cwd = cwd.clone();
+                let file_system = FileSystemSandboxPolicy::restricted(vec![
+                    FileSystemSandboxEntry::new(
+                        FileSystemPath::Special {
+                            value: FileSystemSpecialPath::Minimal,
+                        },
+                        FileSystemAccessMode::Read,
+                    ),
+                    FileSystemSandboxEntry::new(
+                        FileSystemPath::Path { path: cwd.clone() },
+                        FileSystemAccessMode::Write,
+                    ),
+                ]);
+                config
+                    .permissions
+                    .set_permission_profile(PermissionProfile::from_runtime_permissions(
+                        &file_system,
+                        NetworkSandboxPolicy::Restricted,
+                    ))
+                    .expect(":minimal profile");
+            },
+        )
+        .await?;
+        assert!(next_exec_approval(&test).await.is_none());
+        let requests = captured.requests();
+        let output = output_text(&requests[requests.len() - 1], "call-605");
+        let achieved = [
+            x.join("main/.git/hooks/pre-commit").exists(),
+            std::fs::read_to_string(gitdir.join("HEAD"))? != "ref\n",
+            workspace.join(".codex").exists(),
+        ];
+        if !output.contains("ran-605") || achieved != [open; 3] || !x.join("scratch").exists() {
+            wrong.push(format!("{level:?}: {achieved:?}: {output}"));
+        }
+        drop(test);
     }
     assert_eq!(wrong, Vec::<String>::new());
     Ok(())
