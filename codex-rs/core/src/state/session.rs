@@ -50,6 +50,8 @@ pub(crate) struct SessionState {
     /// PF-84: provider-reported usage per (provider, named account), kept only
     /// while named accounts are on. Names only, never credential material.
     account_token_usage: Vec<AccountTokenUsage>,
+    /// #688: tools already reported as left out by the tool-count limit.
+    omitted_tools_reported: HashSet<codex_protocol::ToolName>,
 }
 
 impl SessionState {
@@ -84,6 +86,7 @@ impl SessionState {
             next_turn_is_first: true,
             openai_api_key_env_fallback_in_use: false,
             account_token_usage: Vec::new(),
+            omitted_tools_reported: HashSet::new(),
         }
     }
 
@@ -93,6 +96,19 @@ impl SessionState {
         let newly_in_use = in_use && !self.openai_api_key_env_fallback_in_use;
         self.openai_api_key_env_fallback_in_use = in_use;
         newly_in_use
+    }
+
+    /// #688: the tools in `omitted` not reported yet this session, which are
+    /// now recorded as reported. Each left-out tool is reported once.
+    pub(crate) fn note_omitted_tools(
+        &mut self,
+        omitted: &[codex_protocol::ToolName],
+    ) -> Vec<codex_protocol::ToolName> {
+        omitted
+            .iter()
+            .filter(|tool| self.omitted_tools_reported.insert((*tool).clone()))
+            .cloned()
+            .collect()
     }
 
     // History helpers

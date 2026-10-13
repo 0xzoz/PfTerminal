@@ -2337,7 +2337,7 @@ impl ModelClient {
         if !self.state.provider.info().is_openai() {
             retain_latest_contextual_developer_fragments(&mut input);
         }
-        flatten_namespaced_history(&mut input, &prompt.tools);
+        flatten_namespaced_history(&mut input, &prompt.tools, &prompt.flat_tool_names);
         let mut skipped_tool_call_ids = HashSet::new();
         append_chat_messages_for_response_items(
             input,
@@ -2524,7 +2524,7 @@ impl ModelClient {
         if !self.state.provider.info().is_openai() {
             retain_latest_contextual_developer_fragments(&mut input);
         }
-        flatten_namespaced_history(&mut input, &prompt.tools);
+        flatten_namespaced_history(&mut input, &prompt.tools, &prompt.flat_tool_names);
         let mut messages = Vec::new();
         let mut skipped_tool_call_ids = HashSet::new();
         for item in input {
@@ -4925,7 +4925,18 @@ fn chat_replay_function_arguments(arguments: String) -> String {
 /// call recorded on the Responses wire (before a provider switch or in forked
 /// history) replays under the flat name this request offers for it, such as an
 /// MCP tool's `mcp__server__tool`; otherwise under its bare name, as before.
-fn flatten_namespaced_history(input: &mut [ResponseItem], tools: &[ToolSpec]) {
+///
+/// `flat_tool_names` is the request's own mapping. With it, a call replays
+/// only under the name offered for that exact tool: a tool whose preferred flat
+/// name a plain tool already takes is offered under a hashed name, and its
+/// earlier calls must not appear as calls of the plain tool (#688). Without a
+/// mapping (requests built without a tool router) the preferred name is used
+/// when offered.
+fn flatten_namespaced_history(
+    input: &mut [ResponseItem],
+    tools: &[ToolSpec],
+    flat_tool_names: &crate::tools::flat_tool_names::FlatToolNames,
+) {
     let offered: HashSet<&str> = tools
         .iter()
         .filter(|tool| matches!(tool, ToolSpec::Function(_) | ToolSpec::Freeform(_)))
@@ -4944,10 +4955,13 @@ fn flatten_namespaced_history(input: &mut [ResponseItem], tools: &[ToolSpec]) {
         let Some(namespace) = namespace.take() else {
             continue;
         };
-        let flat = crate::tools::flat_tool_names::flat_tool_name_for(
-            &codex_tools::ToolName::namespaced(namespace, name.clone()),
-        );
-        if offered.contains(flat.as_str()) {
+        let tool_name = codex_tools::ToolName::namespaced(namespace, name.clone());
+        let flat = if flat_tool_names.is_empty() {
+            Some(crate::tools::flat_tool_names::flat_tool_name_for(&tool_name))
+        } else {
+            flat_tool_names.flat_name_for(&tool_name).map(str::to_string)
+        };
+        if let Some(flat) = flat.filter(|flat| offered.contains(flat.as_str())) {
             *name = flat;
         }
     }

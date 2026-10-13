@@ -3276,7 +3276,7 @@ fn namespaced_history_replays_under_offered_flat_names() {
         call(&long_namespace, "tool"),
     ];
 
-    super::flatten_namespaced_history(&mut input, &tools);
+    super::flatten_namespaced_history(&mut input, &tools, &Default::default());
 
     let names: Vec<_> = input
         .iter()
@@ -3295,6 +3295,56 @@ fn namespaced_history_replays_under_offered_flat_names() {
             (long_flat, None),
         ]
     );
+}
+
+/// #688: a plain tool already takes an MCP tool's preferred flat name, so the
+/// MCP tool is offered under a hashed name. Its earlier calls replay under
+/// that hashed name, never as calls of the plain tool.
+#[test]
+fn namespaced_history_never_replays_under_a_plain_tool_with_the_same_name() {
+    let function = |name: &str| codex_tools::ResponsesApiTool {
+        name: name.to_string(),
+        description: String::new(),
+        strict: false,
+        defer_loading: None,
+        parameters: codex_tools::JsonSchema::object(
+            Default::default(),
+            /*required*/ None,
+            /*additional_properties*/ None,
+        ),
+        output_schema: None,
+    };
+    let mcp_tool = codex_tools::ToolName::namespaced("mcp__orders", "lookup");
+    let reserved = std::collections::HashSet::from(["mcp__orders__lookup".to_string()]);
+    let (flattened, flat_tool_names) = crate::tools::flat_tool_names::flatten_namespaced_tools(
+        vec![(mcp_tool.clone(), function("lookup"))],
+        &reserved,
+    );
+    let hashed = flattened[0].name.clone();
+    assert_ne!(hashed, "mcp__orders__lookup");
+    let tools = vec![
+        codex_tools::ToolSpec::Function(function("mcp__orders__lookup")),
+        codex_tools::ToolSpec::Function(flattened[0].clone()),
+    ];
+    let mut input = vec![ResponseItem::FunctionCall {
+        id: None,
+        name: "lookup".to_string(),
+        namespace: Some("mcp__orders".to_string()),
+        arguments: "{}".to_string(),
+        call_id: "call-lookup".to_string(),
+        encrypted_function_args: None,
+        internal_chat_message_metadata_passthrough: None,
+    }];
+
+    super::flatten_namespaced_history(&mut input, &tools, &flat_tool_names);
+
+    let ResponseItem::FunctionCall {
+        name, namespace, ..
+    } = &input[0]
+    else {
+        panic!("unexpected item {:?}", input[0]);
+    };
+    assert_eq!((name.as_str(), namespace), (hashed.as_str(), &None));
 }
 
 #[test]

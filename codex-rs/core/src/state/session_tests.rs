@@ -48,6 +48,27 @@ async fn openai_api_key_env_fallback_notice_fires_on_each_switch_to_it() {
     assert!(state.note_openai_api_key_env_fallback(/*in_use*/ true));
 }
 
+/// #688: each tool left out by the tool-count limit is reported once per
+/// session, not on every request.
+#[tokio::test]
+async fn omitted_tools_are_reported_once_per_session() {
+    let session_configuration = make_session_configuration_for_tests().await;
+    let mut state = SessionState::new(session_configuration);
+    let tool = |name: &str| codex_protocol::ToolName::namespaced("mcp__bulk", name);
+
+    assert_eq!(
+        state.note_omitted_tools(&[tool("a"), tool("b")]),
+        vec![tool("a"), tool("b")]
+    );
+    assert_eq!(state.note_omitted_tools(&[tool("a"), tool("b")]), Vec::new());
+    // A tool newly left out later (another MCP server connected) is reported.
+    assert_eq!(
+        state.note_omitted_tools(&[tool("a"), tool("b"), tool("c")]),
+        vec![tool("c")]
+    );
+    assert_eq!(state.note_omitted_tools(&[]), Vec::new());
+}
+
 #[tokio::test]
 async fn set_rate_limits_defaults_limit_id_to_codex_when_missing() {
     let session_configuration = make_session_configuration_for_tests().await;

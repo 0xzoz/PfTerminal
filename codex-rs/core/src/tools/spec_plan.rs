@@ -116,7 +116,7 @@ use tracing::warn;
 /// Most function tools one request may carry on wires without namespaces: the
 /// smallest documented limit among them (OpenAI Chat Completions rejects more
 /// than 128 tools).
-const MAX_TOOLS_WITHOUT_NAMESPACES: usize = 128;
+pub(crate) const MAX_TOOLS_WITHOUT_NAMESPACES: usize = 128;
 /// The share of a namespace's description each of its flat tools repeats.
 const MAX_FLAT_NAMESPACE_DESCRIPTION_BYTES: usize = 300;
 /// `ext/memories` tool namespace.
@@ -291,9 +291,14 @@ pub(crate) fn finalize_tool_router(
 
     let code_mode_tool_names = register_code_mode_executors(turn_context, &mut registry);
 
-    let (model_visible_specs, flat_tool_names) =
-        build_model_visible_specs(turn_context, &registry, &code_mode_tool_names, hosted_specs);
-    ToolRouter::from_parts(registry, model_visible_specs).with_flat_tool_names(flat_tool_names)
+    let ModelVisibleSpecs {
+        specs,
+        flat_tool_names,
+        omitted_tools,
+    } = build_model_visible_specs(turn_context, &registry, &code_mode_tool_names, hosted_specs);
+    ToolRouter::from_parts(registry, specs)
+        .with_flat_tool_names(flat_tool_names)
+        .with_omitted_tools(omitted_tools)
 }
 
 fn apply_direct_model_only_namespace_overrides(
@@ -318,13 +323,22 @@ fn apply_direct_model_only_namespace_overrides(
     }
 }
 
+/// What one request offers the model.
+struct ModelVisibleSpecs {
+    specs: Vec<ToolSpec>,
+    flat_tool_names: FlatToolNames,
+    /// Tools left out by the tool-count limit (#688: reported to the person
+    /// once per session by the turn, not logged on every request).
+    omitted_tools: Vec<ToolName>,
+}
+
 #[instrument(level = "trace", skip_all)]
 fn build_model_visible_specs(
     turn_context: &TurnContext,
     registry: &ToolRegistry,
     code_mode_tool_names: &BTreeMap<String, ToolName>,
     hosted_specs: Vec<ToolSpec>,
-) -> (Vec<ToolSpec>, FlatToolNames) {
+) -> ModelVisibleSpecs {
     let namespace_tools = namespace_tools_enabled(turn_context);
     let mut specs = Vec::new();
     // Without namespace support, namespaced tools are offered under flat names
@@ -383,27 +397,29 @@ fn build_model_visible_specs(
         .filter(|spec| namespace_tools || !matches!(spec, ToolSpec::Namespace(_)))
         .collect();
     if flattened_builtin_tools.is_empty() && flattened_mcp_tools.is_empty() {
-        return (specs, FlatToolNames::default());
+        return ModelVisibleSpecs {
+            specs,
+            flat_tool_names: FlatToolNames::default(),
+            omitted_tools: Vec::new(),
+        };
     }
     let mut budget = MAX_TOOLS_WITHOUT_NAMESPACES.saturating_sub(specs.len());
     let mut flattened = Vec::new();
-    for (mut tools, kind) in [
-        (flattened_builtin_tools, "built-in"),
-        (flattened_mcp_tools, "MCP"),
-    ] {
+    let mut omitted_tools = Vec::new();
+    for mut tools in [flattened_builtin_tools, flattened_mcp_tools] {
         if tools.len() > budget {
             tools.sort_by(|(left, _), (right, _)| left.cmp(right));
-            let omitted = tools.split_off(budget);
-            warn!(
-                offered = budget,
-                omitted = omitted.len(),
-                first_omitted = %omitted[0].0,
-                "too many {kind} tools for a provider without namespace tools; omitting the rest"
+            omitted_tools.extend(
+                tools
+                    .split_off(budget)
+                    .into_iter()
+                    .map(|(tool_name, _)| tool_name),
             );
         }
         budget -= tools.len();
         flattened.extend(tools);
     }
+    omitted_tools.sort();
     // A flat name must not shadow any visible tool or any registered plain tool,
     // because the router resolves registered plain names first.
     let reserved = specs
@@ -419,7 +435,11 @@ fn build_model_visible_specs(
         .collect();
     let (tools, flat_tool_names) = flatten_namespaced_tools(flattened, &reserved);
     specs.extend(tools.into_iter().map(ToolSpec::Function));
-    (specs, flat_tool_names)
+    ModelVisibleSpecs {
+        specs,
+        flat_tool_names,
+        omitted_tools,
+    }
 }
 
 /// The function a namespaced runtime offers, for a wire without namespaces.

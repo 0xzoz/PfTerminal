@@ -39,6 +39,14 @@ impl FlatToolNames {
         self.by_flat_name.get(flat_name)
     }
 
+    /// The flat name this request offers for a namespaced tool, if any.
+    pub(crate) fn flat_name_for(&self, tool_name: &ToolName) -> Option<&str> {
+        self.by_flat_name
+            .iter()
+            .find(|(_, offered)| *offered == tool_name)
+            .map(|(flat, _)| flat.as_str())
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.by_flat_name.is_empty()
     }

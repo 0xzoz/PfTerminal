@@ -2226,6 +2226,23 @@ async fn flattened_mcp_tools_stay_within_the_tool_count_limit() {
             .iter()
             .any(|spec| spec.name() == "mcp__bulk__tool_199")
     );
+    // #688: the left-out tools are reported (by the turn, once per session).
+    let omitted = router.omitted_tools();
+    assert_eq!(omitted.len(), 200 - 128);
+    assert_eq!(
+        omitted.first(),
+        Some(&ToolName::namespaced("mcp__bulk", "tool_128"))
+    );
+    assert_eq!(
+        omitted.last(),
+        Some(&ToolName::namespaced("mcp__bulk", "tool_199"))
+    );
+}
+
+#[tokio::test]
+async fn nothing_is_reported_omitted_within_the_tool_count_limit() {
+    let router = mcp_router(use_zai_provider).await;
+    assert_eq!(router.omitted_tools(), &[] as &[ToolName]);
 }
 
 #[tokio::test]
