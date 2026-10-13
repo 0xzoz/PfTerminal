@@ -312,13 +312,11 @@ pub(crate) fn verify_isolation(config: &Config, paths: &[PathBuf]) -> Vec<String
     let cwd = config.cwd.as_path();
     let codex_home = config.codex_home.as_path();
     // The path check does not evaluate globs; a database glob must be in the
-    // policy for the files it covers to count as denied (#651: also the
-    // loaded config's separate database folder's).
+    // policy for the files it covers to count as denied (#651: also each
+    // candidate database folder's, as launch denied them).
     let globs = policy.get_unreadable_globs_with_cwd(cwd);
     let glob = database_glob(codex_home).to_string_lossy().into_owned();
     let databases_denied = globs.contains(&glob);
-    let folder_glob = separate_database_folder(codex_home, config.sqlite.home())
-        .map(|folder| database_glob(&folder).to_string_lossy().into_owned());
     // macOS: the Seatbelt clauses agent commands run under, built by the
     // sandbox's own code, so the check cannot drift from it (#488).
     #[cfg(target_os = "macos")]
@@ -333,9 +331,10 @@ pub(crate) fn verify_isolation(config: &Config, paths: &[PathBuf]) -> Vec<String
         .iter()
         .filter(|path| {
             let pattern = path.as_os_str().to_string_lossy();
-            let covered = if pattern == glob {
-                databases_denied
-            } else if folder_glob.as_deref() == Some(pattern.as_ref()) {
+            // Only a database glob counts as a pattern: an exact path with
+            // glob syntax is read as one by config, which covers no
+            // contents, so it stays uncovered (launch refuses).
+            let covered = if path.file_name() == Some(std::ffi::OsStr::new("*.sqlite*")) {
                 globs.iter().any(|denied| *denied == pattern)
             } else {
                 (databases_denied && is_database_file(codex_home, path)) || !readable(path)
