@@ -2526,7 +2526,9 @@ async fn issue_650_other_worktrees_git_folders_stay_read_only() -> anyhow::Resul
             read("commondir") != "../..\n",
             !read("config.worktree").is_empty(),
             !read("gitdir").starts_with(&x.to_string_lossy().into_owned()),
-            x.join("moved650").exists(),
+            // Moved aside (`mv` copies what a pinned folder keeps from
+            // being renamed, and fails to remove the protected entries).
+            !other.exists(),
         ];
         if !output.contains("ran-650") || achieved != [open; 4] || !x.join("wt/file650").exists() {
             wrong.push(format!("{level:?}: {achieved:?}: {output}"));
