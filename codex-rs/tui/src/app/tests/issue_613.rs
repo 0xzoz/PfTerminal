@@ -128,9 +128,10 @@ async fn issue_613_the_sender_of_a_task_for_a_missing_pane_is_told() {
     );
 }
 
-/// #613: a whip a person resumes while the switch is on is paused again at
-/// once, so it cannot fire after the switch is turned off unless someone
-/// resumes it then.
+/// #613: a whip a person resumes while the switch is on is not resumed (they
+/// are told to resume it after turning the switch off), so it cannot fire
+/// after the switch is turned off unless someone resumes it then; one
+/// attached while on is paused at once.
 #[tokio::test]
 async fn issue_613_a_whip_resumed_while_on_stays_paused() {
     let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
@@ -156,7 +157,15 @@ async fn issue_613_a_whip_resumed_while_on_stays_paused() {
     assert_eq!(
         app.orchestrate_whips.get("whip-1").map(|whip| whip.state),
         Some(crate::orchestrate::WhipState::Paused),
-        "resumed while on: paused again at once"
+        "not resumed while on"
+    );
+    app.handle_orchestrate_command(format!(
+        "attach {pane_id} keep-going --mode auto --holder none --max 3"
+    ));
+    assert_eq!(
+        app.orchestrate_whips.get("whip-2").map(|whip| whip.state),
+        Some(crate::orchestrate::WhipState::Paused),
+        "attached while on: paused at once"
     );
     issue_507_switch(&app, HumanRevocation::KillSwitchOff);
     app.sweep_orchestrate_whips();
@@ -178,7 +187,7 @@ async fn issue_613_a_task_sent_while_on_and_handled_after_off_waits() {
     let sent_while_on = app.kill_switch_on_now();
     assert!(sent_while_on);
     issue_507_switch(&app, HumanRevocation::KillSwitchOff);
-    app.submit_claude_pane_task_sent(
+    app.submit_claude_pane_task_queued(
         orc_pane_id.clone(),
         "pf613 queued".to_string(),
         sent_while_on,
@@ -196,4 +205,40 @@ async fn issue_613_a_task_sent_while_on_and_handled_after_off_waits() {
     app.submit_claude_pane_task(orc_pane_id, "pf613 after".to_string());
     assert_eq!(app.claude_panes.prepared_prompts.len(), 1);
     assert!(app.kill_switch_held_claude_tasks.is_empty());
+}
+
+/// #613: through the event handler, a task sent while the switch was on for
+/// a Claude pane that is still busy stopping waits instead of being refused
+/// as busy, also when handled after switch-off.
+#[tokio::test]
+async fn issue_613_the_handler_holds_a_task_sent_while_on_for_a_busy_pane() -> Result<()> {
+    let (mut app, _app_event_rx, _troll_pane_id, orc_pane_id) =
+        make_child_report_auto_claude_pane_app().await;
+    let config = app.chat_widget.config_ref().clone();
+    let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(&config)).await?;
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    let codex_home = app.config.codex_home.to_path_buf();
+    let _busy = app
+        .claude_panes
+        .prepare_turn(&orc_pane_id, "busy".to_string(), &codex_home)
+        .expect("a running turn");
+    issue_507_switch(&app, HumanRevocation::KillSwitchOn);
+    let sent_while_kill_switch_on = app.kill_switch_on_now();
+    issue_507_switch(&app, HumanRevocation::KillSwitchOff);
+    let event = AppEvent::SubmitSpawnClaudePaneTask {
+        pane_id: orc_pane_id.clone(),
+        task: "pf613 busy".to_string(),
+        sent_while_kill_switch_on,
+    };
+    Box::pin(app.handle_event(&mut tui, &mut app_server, event)).await?;
+    assert_eq!(
+        app.kill_switch_held_claude_tasks,
+        vec![(orc_pane_id.clone(), "pf613 busy".to_string())]
+    );
+    assert_eq!(
+        app.claude_panes.prepared_prompts.len(),
+        1,
+        "only the busy turn"
+    );
+    Ok(())
 }

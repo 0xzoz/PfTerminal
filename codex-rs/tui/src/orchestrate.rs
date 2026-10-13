@@ -2416,18 +2416,23 @@ impl App {
             self.chat_widget.add_error_message(err);
             return;
         }
-        // #613: a whip or assignment a person attaches, resumes or starts
-        // while the kill switch is on is paused at once, like those armed when
-        // it went on, so it cannot fire once the switch is off without someone
-        // resuming it then.
-        let arms = matches!(
-            command,
-            OrchestrateCommand::Attach { .. }
-                | OrchestrateCommand::Resume(_)
-                | OrchestrateCommand::Start(_)
-        );
+        // #613: while the kill switch is on nothing is resumed or started
+        // (it could fire right after switch-off), and a whip attached now is
+        // paused at once, like those armed when the switch went on.
+        if let OrchestrateCommand::Resume(id_or_target) | OrchestrateCommand::Start(id_or_target) =
+            &command
+            && crate::legacy_core::security_revocation::kill_switch_on(
+                self.config.codex_home.as_ref(),
+            )
+        {
+            self.chat_widget.add_error_message(format!(
+                "Not resumed: the security kill switch is on. Turn it off in /security, then run /orchestrate resume {id_or_target}."
+            ));
+            return;
+        }
+        let attaches = matches!(command, OrchestrateCommand::Attach { .. });
         self.dispatch_orchestrate_command(command, origin);
-        if arms {
+        if attaches {
             self.pause_whips_for_kill_switch();
         }
     }

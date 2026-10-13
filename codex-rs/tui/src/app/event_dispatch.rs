@@ -5727,7 +5727,7 @@ impl App {
                     ));
                     return Ok(AppRunControl::Continue);
                 }
-                self.submit_claude_pane_task_sent(pane_id, task, sent_while_kill_switch_on);
+                self.submit_claude_pane_task_queued(pane_id, task, sent_while_kill_switch_on);
             }
             AppEvent::OpenSpawnStatus => {
                 self.open_spawn_status();

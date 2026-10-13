@@ -1053,7 +1053,9 @@ impl App {
     }
 
     /// #613: whether the kill switch is on, as saved or as this process
-    /// last learned (a change elsewhere reaches it about a second later).
+    /// last learned. After a switch-off in another process this stays true
+    /// until that change is handled here (about a second): tasks are held,
+    /// never sent, in that window. A switch-off here is handled in order.
     pub(crate) fn kill_switch_on_now(&self) -> bool {
         self.kill_switch_known_on
             || crate::legacy_core::security_revocation::kill_switch_on(
@@ -1063,14 +1065,16 @@ impl App {
 
     #[cfg(test)]
     pub(crate) fn submit_claude_pane_task(&mut self, pane_id: String, task: String) {
-        self.submit_claude_pane_task_sent(pane_id, task, /*sent_while_kill_switch_on*/ false);
+        self.submit_claude_pane_task_queued(
+            pane_id, task, /*sent_while_kill_switch_on*/ false,
+        );
     }
 
     /// `sent_while_kill_switch_on` (#613): another agent sent the task while
     /// the switch was on; it waits for the pane's next turn even when the
     /// switch was turned off before it got here (nothing restarts after
     /// switch-off, #507).
-    pub(crate) fn submit_claude_pane_task_sent(
+    pub(crate) fn submit_claude_pane_task_queued(
         &mut self,
         pane_id: String,
         task: String,
