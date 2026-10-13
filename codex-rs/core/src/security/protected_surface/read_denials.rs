@@ -610,7 +610,7 @@ impl ReadDenials {
         };
         keep.iter()
             .filter_map(|kept| kept_real_location(kept.as_path()))
-            .any(|kept| kept.starts_with(&real))
+            .any(|kept| kept_within(&kept, &real))
     }
 
     fn push_existing(&mut self, path: AbsolutePathBuf, keep: &[AbsolutePathBuf]) {
@@ -1151,6 +1151,20 @@ fn kept_real_location(kept: &Path) -> Option<PathBuf> {
     // As `canonicalize` did: only a folder that exists.
     std::fs::symlink_metadata(&real).ok()?;
     Some(real)
+}
+
+/// Whether kept folder `kept` (resolved by [`kept_real_location`]) is
+/// `real` or inside it; on macOS in any case, as `canonicalize` reported
+/// the stored case before (a working folder typed in another case).
+fn kept_within(kept: &Path, real: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        codex_protocol::permissions::location_within(kept, real)
+    }
+    #[cfg(not(unix))]
+    {
+        kept.starts_with(real)
+    }
 }
 
 /// `path` with its nearest existing folder resolved, or `None` when that

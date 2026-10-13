@@ -730,6 +730,72 @@ fn issue_603_a_worktrees_link_swapped_in_after_the_check_is_refused() {
     }
 }
 
+/// #603 review: a grant below `worktrees` (an additional-permission write at
+/// `worktrees/w`) where the profile cannot write `worktrees` itself (no
+/// carve-out in the policy) is refused too once `worktrees` leads elsewhere;
+/// before, it was first seen, and granted, at the link's target.
+#[test]
+fn issue_603_a_grant_below_a_swapped_worktrees_is_refused() {
+    let fx = fixture();
+    let cwd = fx.user_home.join("project");
+    let denials = ReadDenials::collect(
+        &fx.codex_home,
+        Some(&fx.user_home),
+        /*claude_config_dir*/ None,
+        &[abs(&cwd)],
+    );
+    let mut policy = denials
+        .apply(&workspace(&cwd))
+        .unwrap()
+        .file_system_sandbox_policy();
+    let grant = fx.codex_home.join("worktrees/w");
+    policy.entries.push(FileSystemSandboxEntry::new(
+        FileSystemPath::Path { path: abs(&grant) },
+        FileSystemAccessMode::Write,
+    ));
+    swap_worktrees_for_a_link(&fx, ".");
+    let refused = codex_sandboxing::writable_root_ledger::check_writable_roots(&policy, &cwd);
+    assert!(
+        matches!(
+            &refused,
+            Err(codex_sandboxing::writable_root_ledger::WritableRootRefusal::Changed { root, .. })
+                if root == &fx.codex_home.join("worktrees")
+        ),
+        "{refused:?}"
+    );
+}
+
+/// #603 review: a `worktrees` left as it was, or replaced by another real
+/// folder (removed and made again), runs as before.
+#[test]
+fn issue_603_a_real_worktrees_is_never_refused() {
+    let fx = fixture();
+    let (policy, cwd) = worktrees_carve_out_policy(&fx);
+    assert!(codex_sandboxing::writable_root_ledger::check_writable_roots(&policy, &cwd).is_ok());
+    let worktrees = fx.codex_home.join("worktrees");
+    std::fs::rename(&worktrees, fx.codex_home.join("worktrees.old")).unwrap();
+    std::fs::create_dir_all(worktrees.join("w")).unwrap();
+    assert!(codex_sandboxing::writable_root_ledger::check_writable_roots(&policy, &cwd).is_ok());
+    let (policy, cwd) = worktrees_carve_out_policy(&fx);
+    assert!(codex_sandboxing::writable_root_ledger::check_writable_roots(&policy, &cwd).is_ok());
+}
+
+/// #603 review: a kept folder typed in another case than stored (macOS
+/// ignores case) still keeps a denial that holds it from applying, as when
+/// `canonicalize` gave the stored case.
+#[cfg(target_os = "macos")]
+#[test]
+fn issue_603_a_kept_folder_in_another_case_is_kept() {
+    let fx = fixture();
+    let typed = fx.user_home.join(".CORBANU").join("worktrees").join("w");
+    if !typed.exists() {
+        // A volume that does not ignore case.
+        return;
+    }
+    let denied = abs(&fx.codex_home.join("worktrees"));
+    assert!(ReadDenials::holds_kept(&denied, &[abs(&typed)]));
+}
+
 /// #603 (launch race) with the real sandbox (`sandbox-exec`, bubblewrap): a
 /// command whose `worktrees` was swapped for a link to the home after the
 /// rules were built is refused, and creates no `hooks.json` in the home.

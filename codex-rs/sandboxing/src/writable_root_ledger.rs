@@ -52,6 +52,18 @@ fn ledger() -> MutexGuard<'static, HashMap<PathBuf, PathBuf>> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// #603: folders checked to be real at a location ([`record_checked_root`]).
+/// A writable root below one, such as a grant at `worktrees/<name>`, is
+/// refused while the folder leads elsewhere through a link.
+static CHECKED: LazyLock<Mutex<HashMap<PathBuf, PathBuf>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn checked() -> MutexGuard<'static, HashMap<PathBuf, PathBuf>> {
+    CHECKED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Why a command was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WritableRootRefusal {
@@ -133,16 +145,15 @@ pub fn record_writable_roots(policy: &FileSystemSandboxPolicy, cwd: &Path) {
     }
 }
 
-/// #603: records `real` as the location of the writable root spelled `root`,
-/// when this process has not seen `root` yet. For a root the caller has just
-/// checked to be a real folder at `real` (the Corbanu home's `worktrees`
-/// carve-out): a link swapped in before the sandbox is set up is then a
-/// change ([`check_writable_roots`] refuses the command), not the root's
-/// first sight.
+/// #603: records `real` as the location of the folder spelled `root`, which
+/// the caller has just checked to be a real folder there (the Corbanu home's
+/// `worktrees` carve-out). A link swapped in before the sandbox is set up is
+/// then a change ([`check_writable_roots`] refuses the command), not the
+/// root's first sight; so is one in place of the folder above a writable
+/// root below it (a grant at `worktrees/<name>`).
 pub fn record_checked_root(root: &Path, real: &Path) {
-    ledger()
-        .entry(root.to_path_buf())
-        .or_insert_with(|| real.to_path_buf());
+    ledger().insert(root.to_path_buf(), real.to_path_buf());
+    checked().insert(root.to_path_buf(), real.to_path_buf());
 }
 
 /// Checks every writable root of `policy` before a sandboxed command (a root
@@ -157,9 +168,25 @@ pub fn check_writable_roots(
         .iter()
         .map(|root| real_path(root.root.as_path()))
         .collect();
+    let checked = checked().clone();
     let mut ledger = ledger();
     let mut pinned = Vec::with_capacity(roots.len());
     for (index, root) in roots.iter().enumerate() {
+        // #603: a root below a checked folder that now leads elsewhere.
+        for (folder, was) in &checked {
+            if root.root.as_path() == folder.as_path() || !root.root.as_path().starts_with(folder) {
+                continue;
+            }
+            let now = real_path(folder);
+            if now != *was && !links_on(folder).is_empty() {
+                return Err(WritableRootRefusal::Changed {
+                    root: folder.clone(),
+                    link: link_to_name(&roots, folder, was),
+                    was: was.clone(),
+                    now,
+                });
+            }
+        }
         let now = &reals[index];
         let was = ledger
             .entry(root.root.to_path_buf())
