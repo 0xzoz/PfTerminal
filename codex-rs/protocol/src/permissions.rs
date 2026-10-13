@@ -1619,9 +1619,6 @@ impl FileSystemSandboxPolicy {
         )
     }
 
-    /// Paths agent commands may not move aside (issues #594, #598), from
-    /// [`FileSystemSandboxEntry::deny_moving`] entries, as written. Only a
-    /// restricted policy carries them.
     /// The explicit read-only paths resolved against `cwd`: entries that
     /// neither write nor deny reads, and that no more specific entry makes
     /// writable. Unlike [`WritableRoot::read_only_subpaths`] these are not
@@ -1646,6 +1643,9 @@ impl FileSystemSandboxPolicy {
         )
     }
 
+    /// Paths agent commands may not move aside (issues #594, #598), from
+    /// [`FileSystemSandboxEntry::deny_moving`] entries, as written. Only a
+    /// restricted policy carries them.
     pub fn get_unmovable_paths(&self) -> Vec<AbsolutePathBuf> {
         if !matches!(self.kind, FileSystemSandboxKind::Restricted) {
             return Vec::new();
