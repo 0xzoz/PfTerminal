@@ -57,7 +57,6 @@ use codex_exec_server::ExecServerRuntimePaths;
 use codex_login::AuthRouteConfig;
 use codex_login::default_client::originator;
 use codex_login::default_client::set_default_client_residency_requirement;
-use codex_login::enforce_login_restrictions;
 use codex_protocol::ThreadId;
 use codex_protocol::auth::AuthMode;
 use codex_protocol::config_types::AltScreenMode;
@@ -120,6 +119,7 @@ mod crew_presets;
 mod crew_state;
 mod custom_spawn_crew;
 pub(crate) mod custom_terminal;
+mod default_login_launch;
 mod pets;
 pub use custom_terminal::Terminal;
 mod auto_review_denials;
@@ -529,9 +529,25 @@ async fn start_app_server(
         )
         .await
         .map(AppServerClient::InProcess),
-        AppServerTarget::LocalDaemon { endpoint } | AppServerTarget::Remote { endpoint } => {
-            connect_remote_app_server(endpoint.clone()).await
+        AppServerTarget::LocalDaemon { endpoint } => {
+            let client = connect_remote_app_server(endpoint.clone()).await?;
+            // PF-84-S06 (#595): this session left a ruled-out default login
+            // in place because the daemon refuses to use it; a daemon
+            // restarted since without that must not serve the session.
+            if codex_login::default_login_left_unenforced()
+                && let AppServerClient::Remote(remote) = &client
+                && !default_login_launch::daemon_matches_default_login_policy(remote, &config)
+            {
+                return Err(color_eyre::eyre::eyre!(
+                    "The running local app-server daemon does not confirm that it leaves alone \
+                     the default OpenAI login this session's login settings rule out (it may \
+                     have been restarted, or the session's settings differ). Restart the daemon \
+                     or start corbanu again."
+                ));
+            }
+            Ok(client)
         }
+        AppServerTarget::Remote { endpoint } => connect_remote_app_server(endpoint.clone()).await,
     }
 }
 
@@ -1369,6 +1385,31 @@ pub async fn run_main(
             codex_rollout::sqlite_telemetry_recorder(metrics.clone(), otel_originator.as_str());
         let _ = codex_state::install_process_db_telemetry(telemetry);
     }
+    let launches_resume_or_fork =
+        is_resume_launch(&cli) || cli.fork_picker || cli.fork_last || cli.fork_session_id.is_some();
+    #[allow(clippy::print_stderr)]
+    let default_login_launch::DefaultLoginAtLaunch {
+        app_server_target,
+        left_in_place,
+        daemon_not_reused,
+    } = match default_login_launch::settle_default_login_at_launch(
+        &config,
+        launches_resume_or_fork,
+        app_server_target,
+    )
+    .await
+    {
+        Ok(settled) => settled,
+        Err(err) => {
+            eprintln!("{err}");
+            std::process::exit(1);
+        }
+    };
+    if left_in_place {
+        codex_login::leave_default_login_unenforced();
+    }
+    config.startup_warnings.extend(daemon_not_reused);
+
     let state_db = init_state_db_for_app_server_target(&config, &app_server_target).await?;
     let config_toml_log_dir_configured = config
         .config_layer_stack
@@ -1391,32 +1432,6 @@ pub async fn run_main(
         #[allow(clippy::print_stderr)]
         {
             eprintln!("Error adding directories: {warning}");
-            std::process::exit(1);
-        }
-    }
-
-    // PF-84-S06 (#570): a session on a named sign-in account checks the
-    // restrictions against that account at thread start and never reads or
-    // logs out the default login. A resumed or forked thread's account is
-    // known only later, so those launches leave the default login in place
-    // too. Only with the embedded app server: this process's managers then
-    // never use a ruled-out default login, and a thread on it is refused at
-    // thread start with the reason. A reused local daemon is another process,
-    // so the TUI enforces at startup for it as before; a remote server
-    // decides for itself.
-    let leaves_default_login = matches!(app_server_target, AppServerTarget::Embedded)
-        && (config.runs_on_named_sign_in_account()
-            || (config.named_accounts_enabled()
-                && (is_resume_launch(&cli)
-                    || cli.fork_picker
-                    || cli.fork_last
-                    || cli.fork_session_id.is_some())));
-    if leaves_default_login {
-        codex_login::leave_default_login_unenforced();
-    } else if !app_server_target.uses_remote_workspace() {
-        #[allow(clippy::print_stderr)]
-        if let Err(err) = enforce_login_restrictions(&config.default_login_restrictions()).await {
-            eprintln!("{err}");
             std::process::exit(1);
         }
     }
@@ -1563,6 +1578,10 @@ async fn run_ratatui_app(
     color_eyre::install()?;
 
     tooltips::announcement::prewarm(initial_config.http_client_factory());
+    // PF-84-S06 (#595): the session's final config keeps the warning that a
+    // local daemon was not reused, whatever reloads it below (resume, fork,
+    // onboarding).
+    let daemon_not_reused = default_login_launch::daemon_not_reused_warning(&initial_config);
 
     install_panic_hook();
     tui::configure_panic_diagnostics(initial_config.log_dir.clone());
@@ -2084,6 +2103,11 @@ async fn run_ratatui_app(
     };
     if reloads_provider_config {
         startup_provider_resolution = None;
+    }
+    if let Some(warning) = daemon_not_reused
+        && !config.startup_warnings.contains(&warning)
+    {
+        config.startup_warnings.push(warning);
     }
     if let Some(message) = chosen_thread_account_error(
         &config,
