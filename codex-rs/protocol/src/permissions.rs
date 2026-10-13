@@ -1088,6 +1088,51 @@ impl FileSystemSandboxPolicy {
             .is_some_and(|entry| entry.access.can_read())
     }
 
+    /// Like [`Self::can_write_path_with_cwd`], with the policy's paths and
+    /// `path` normalized alike, as [`Self::can_read_effective_path_with_cwd`]
+    /// does: Seatbelt normalizes a writable root spelled `/tmp` to
+    /// `/private/tmp`, so `/private/tmp/x` is writable through it (#619).
+    /// Everything else, protected metadata names included, is decided as
+    /// [`Self::can_write_path_with_cwd`] decides it for the normalized
+    /// policy.
+    pub fn can_write_effective_path_with_cwd(&self, path: &Path, cwd: &Path) -> bool {
+        match self.kind {
+            FileSystemSandboxKind::Unrestricted | FileSystemSandboxKind::ExternalSandbox => {
+                return true;
+            }
+            FileSystemSandboxKind::Restricted => {}
+        }
+        let Some(path) = resolve_candidate_path(path, cwd) else {
+            return false;
+        };
+        // Each entry naming a folder, by its normalized path; the others
+        // (the filesystem root, patterns) as they are.
+        let cwd_absolute = AbsolutePathBuf::from_absolute_path(cwd).ok();
+        let normalized = Self {
+            kind: self.kind,
+            glob_scan_max_depth: self.glob_scan_max_depth,
+            entries: self
+                .entries
+                .iter()
+                .map(|entry| match &entry.path {
+                    FileSystemPath::Special {
+                        value: FileSystemSpecialPath::Root,
+                    } => entry.clone(),
+                    path => match resolve_entry_path(path, cwd_absolute.as_ref()) {
+                        Some(path) => FileSystemSandboxEntry {
+                            path: FileSystemPath::Path {
+                                path: normalize_effective_absolute_path(path),
+                            },
+                            ..entry.clone()
+                        },
+                        None => entry.clone(),
+                    },
+                })
+                .collect(),
+        };
+        normalized.can_write_path_with_cwd(normalize_effective_absolute_path(path).as_path(), cwd)
+    }
+
     pub fn can_write_path_with_cwd(&self, path: &Path, cwd: &Path) -> bool {
         if !self.resolve_access_with_cwd(path, cwd).can_write() {
             return false;
@@ -3391,6 +3436,57 @@ mod tests {
         assert!(policy.can_read_path_with_cwd(&logical.join(".env"), &logical));
     }
 
+    /// #619: a writable root spelled `/tmp` holds `/private/tmp/x` for the
+    /// sandbox; the effective check says so, the literal one does not. A
+    /// more specific read-only entry in either spelling still wins.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn can_write_effective_path_matches_through_top_level_aliases() {
+        let root = tempfile::tempdir_in("/tmp").expect("tempdir in /tmp");
+        let logical = root.path().to_path_buf();
+        let physical = logical.canonicalize().expect("canonical");
+        assert!(physical.starts_with("/private/tmp"), "{physical:?}");
+        let entry = |path: &Path, access| FileSystemSandboxEntry {
+            path: FileSystemPath::Path {
+                path: AbsolutePathBuf::from_absolute_path(path).expect("absolute"),
+            },
+            access,
+            missing_path_behavior: None,
+        };
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                access: FileSystemAccessMode::Read,
+                missing_path_behavior: None,
+            },
+            entry(&logical, FileSystemAccessMode::Write),
+        ]);
+        let target = physical.join("home/AGENTS.md");
+        assert!(!policy.can_write_path_with_cwd(&target, &physical));
+        assert!(policy.can_write_effective_path_with_cwd(&target, &physical));
+        assert!(policy.can_write_effective_path_with_cwd(&logical.join("x"), &physical));
+        for read_only in [physical.join("home"), logical.join("home")] {
+            let mut narrowed = policy.clone();
+            narrowed
+                .entries
+                .push(entry(&read_only, FileSystemAccessMode::Read));
+            assert!(
+                !narrowed.can_write_effective_path_with_cwd(&target, &physical),
+                "{read_only:?}"
+            );
+        }
+        assert!(!policy.can_write_effective_path_with_cwd(Path::new("/etc/x"), &physical));
+        // The root's protected metadata stays protected in either spelling.
+        for path in [physical.join(".codex/x"), logical.join(".git/x")] {
+            assert!(
+                !policy.can_write_effective_path_with_cwd(&path, &physical),
+                "{path:?}"
+            );
+        }
+    }
+
     /// Seatbelt matches a denial to a readable root by its normalized
     /// spelling, which keeps nested links: a rule reached only through one
     /// is not counted, so the check stays on the safe side.
@@ -4254,7 +4350,7 @@ mod tests {
 
         let temp_dir = TempDir::new().expect("tempdir");
         // The real location, so a link's target matches the globs too.
-        let temp = fs::canonicalize(temp_dir.path()).expect("real");
+        let temp = std::fs::canonicalize(temp_dir.path()).expect("real");
         let root = temp.to_string_lossy().into_owned();
         let policy = FileSystemSandboxPolicy::restricted(
             credential_file_globs(&root)
@@ -4300,8 +4396,19 @@ mod tests {
             credential_rule_roots(&[format!("{root}/**/.env.*")]),
             Vec::<PathBuf>::new()
         );
+        // A template name that is a link to a credential file stays denied.
+        #[cfg(unix)]
+        {
+            fs::write(temp.as_path().join(".env"), "SECRET=1").expect("env");
+            std::os::unix::fs::symlink(".env", temp.as_path().join(".env.sample")).expect("link");
+            assert!(is_read_denied(
+                &temp.as_path().join(".env.sample"),
+                &policy,
+                temp.as_path()
+            ));
+        }
         // A user's own deny glob still covers a template name.
-        let mut entries = policy.entries.clone();
+        let mut entries = policy.entries;
         entries.push(FileSystemSandboxEntry::new(
             FileSystemPath::GlobPattern {
                 pattern: format!("{root}/**/*.example"),
@@ -4314,17 +4421,6 @@ mod tests {
             &own,
             temp.as_path()
         ));
-        // A template name that is a link to a credential file stays denied.
-        #[cfg(unix)]
-        {
-            fs::write(temp.as_path().join(".env"), "SECRET=1").expect("env");
-            std::os::unix::fs::symlink(".env", temp.as_path().join(".env.sample")).expect("link");
-            assert!(is_read_denied(
-                &temp.as_path().join(".env.sample"),
-                &policy,
-                temp.as_path()
-            ));
-        }
     }
 
     /// #442 (Travis, 2026-10-12): the credential rule as a profile writes it

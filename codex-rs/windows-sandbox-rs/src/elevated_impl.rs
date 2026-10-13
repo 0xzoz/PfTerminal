@@ -137,6 +137,41 @@ mod windows_impl {
 
         let logs_base_dir: Option<&Path> = Some(sandbox_base.as_path());
         log_start(&command, logs_base_dir);
+        // #442 (Travis, 2026-10-12): a credential file that appears while the
+        // command runs stops it, as on Linux. The watch starts before the
+        // sandbox (and the deny ACEs) are set up for this command.
+        let credential_stop = Arc::new(AtomicBool::new(false));
+        let credential_watch = {
+            let flag = Arc::clone(&credential_stop);
+            let (file_system, _) = permission_profile.to_runtime_permissions();
+            let known: Vec<std::path::PathBuf> = deny_read_override
+                .paths()
+                .into_iter()
+                .map(AbsolutePathBuf::into_path_buf)
+                .collect();
+            crate::credential_watch::CredentialWatch::start(
+                &file_system,
+                cwd,
+                &known,
+                Box::new(move || flag.store(true, Ordering::SeqCst)),
+            )
+            .map_err(|refusal| {
+                log_failure(&command, &refusal, logs_base_dir);
+                anyhow::Error::msg(refusal)
+            })?
+        };
+        let cancellation = if credential_watch.is_some() {
+            let flag = Arc::clone(&credential_stop);
+            Some(crate::WindowsSandboxCancellationToken::new(move || {
+                flag.load(Ordering::SeqCst)
+                    || cancellation
+                        .as_ref()
+                        .is_some_and(crate::WindowsSandboxCancellationToken::is_cancelled)
+            }))
+        } else {
+            cancellation
+        };
+
         let sandbox_creds = require_logon_sandbox_creds(
             &permissions,
             cwd,
@@ -262,6 +297,13 @@ mod windows_impl {
             }
             drop(pipe_write);
             let (exit_code, timed_out) = result?;
+            let exit_code = crate::credential_watch::stopped_output(
+                credential_watch
+                    .as_ref()
+                    .and_then(crate::credential_watch::CredentialWatch::finish),
+                exit_code,
+                &mut stderr,
+            );
 
             if exit_code == 0 {
                 log_success(&command, logs_base_dir);

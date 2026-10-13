@@ -146,6 +146,19 @@ pub fn install_model_key_broker(broker: Arc<dyn ModelKeyBroker>) -> bool {
     MODEL_KEY_BROKER.set(broker).is_ok()
 }
 
+/// #641: auth for a request outside the model client that uses a provider
+/// credential (the Corbanu account calls of the wallet): signed for the
+/// installed broker, which attaches the credential, as for model requests.
+/// An error when no broker is installed; nothing falls back to sending the
+/// credential directly.
+pub fn brokered_auth(
+    request: BrokeredAuthRequest,
+) -> codex_protocol::error::Result<SharedAuthProvider> {
+    model_key_broker()
+        .ok_or_else(|| codex_protocol::error::CodexErr::Fatal(BROKER_NOT_RUNNING.to_string()))?
+        .auth(request)
+}
+
 /// Whether provider credentials in this process are brokered.
 pub fn model_key_broker_installed() -> bool {
     model_key_broker().is_some()

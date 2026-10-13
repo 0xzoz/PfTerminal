@@ -551,6 +551,7 @@ fn issue_620_start_up_files_through_links() {
         let folder = AbsolutePathBuf::from_absolute_path(folder.canonicalize().unwrap()).unwrap();
         ReadPolicyInputs {
             codex_home: home.join(".corbanu"),
+            sqlite_home: home.join(".corbanu"),
             turn_cwd: folder.clone(),
             workspace_roots: vec![folder],
             // Aggressive's sandbox: the current folder only.
@@ -670,7 +671,13 @@ fn issue_584_only_never_writable_words() {
         /*exclude_slash_tmp*/ true,
     );
     let word = |codex_home: &Path, script: &str| {
-        let denials = ReadDenials::for_turn(codex_home, &cwd, std::slice::from_ref(&cwd), &profile);
+        let denials = ReadDenials::for_turn(
+            codex_home,
+            codex_home,
+            &cwd,
+            std::slice::from_ref(&cwd),
+            &profile,
+        );
         only_never_writable_word(&shell(script), &work, None, codex_home, &denials)
     };
     for (script, expected) in [
@@ -702,8 +709,13 @@ fn issue_584_only_never_writable_words() {
         std::fs::create_dir_all(worktree.join(".codex")).unwrap();
         let cwd = AbsolutePathBuf::from_absolute_path(&worktree).unwrap();
         for codex_home in [&home, &linked_home] {
-            let denials =
-                ReadDenials::for_turn(codex_home, &cwd, std::slice::from_ref(&cwd), &profile);
+            let denials = ReadDenials::for_turn(
+                codex_home,
+                codex_home,
+                &cwd,
+                std::slice::from_ref(&cwd),
+                &profile,
+            );
             let word = |script: &str| {
                 only_never_writable_word(&shell(script), &worktree, None, codex_home, &denials)
             };

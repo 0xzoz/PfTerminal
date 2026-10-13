@@ -440,7 +440,7 @@ fn pf_41_s01_children_grants_taint_and_denials_are_correlated() {
             "main session: one command may write hooks and start-up files; expires in 4m; used 1 of 2"
                 .to_string(),
             // #442: what a grant never lifts.
-            "Protected reads: never granted under Aggressive, not even once: credential files (.env, .env.* and .envrc files, also ones created later, on Windows from the next command on; not .env.example, .env.sample or .env.template; SSH, cloud and CLI tokens) and Corbanu's sign-in, vault, config and history stay unreadable to agent commands; switch to Permissive in /security to allow them. On Linux a command is stopped when such a file appears while it runs; a process already waiting for that file can read it in the moment before the stop"
+            "Protected reads: never granted under Aggressive, not even once: credential files (.env, .env.* and .envrc files, also ones created later; not .env.example, .env.sample or .env.template; SSH, cloud and CLI tokens) and Corbanu's sign-in, vault, config and history stay unreadable to agent commands; switch to Permissive in /security to allow them. On Linux and Windows a command is stopped when such a file appears while it runs; a process already waiting for that file can read it in the moment before the stop"
                 .to_string(),
             // #442 (Travis, 2026-10-12): what Grant once lifts, and what not.
             format!("Grant once: {}", crate::security::aggressive::GRANT_ONCE_LIFTS),
