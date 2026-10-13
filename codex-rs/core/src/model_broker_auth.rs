@@ -178,6 +178,8 @@ pub fn removed_environment_keys() -> Vec<String> {
 
 /// #625: provider-key variables a running broker holds for this process.
 /// They are gone from the environment, but the provider is still configured.
+/// Never cleared: if the broker later stops, the key is still configured and
+/// its requests fail with the broker's own error, which says what to do.
 static HELD_ENV_KEYS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 #[cfg_attr(not(any(unix, windows)), allow(dead_code))]
@@ -469,6 +471,13 @@ impl CoreModelKeyBroker {
     fn start(settings: BrokerSettings) -> Self {
         use codex_network_proxy::model_auth::ModelCredentialBroker;
         use codex_network_proxy::model_auth::ModelCredentialBrokerOptions;
+        // #625: only a usable (non-blank) value configures its provider.
+        let usable_env_keys: Vec<String> = settings
+            .env_names
+            .iter()
+            .filter(|name| std::env::var(name.as_str()).is_ok_and(|value| !value.trim().is_empty()))
+            .cloned()
+            .collect();
         // Every set variable below leaves this process's environment, whatever
         // happens next.
         note_removed_env_keys(
@@ -505,7 +514,12 @@ impl CoreModelKeyBroker {
         };
         match broker.take_env_keys(&settings.env_names) {
             Ok(taken) if !taken.is_empty() => {
-                note_held_env_keys(&taken);
+                let held: Vec<String> = taken
+                    .iter()
+                    .filter(|name| usable_env_keys.contains(name))
+                    .cloned()
+                    .collect();
+                note_held_env_keys(&held);
                 tracing::info!(
                     "provider keys handed to the credential broker and removed from the environment: {}",
                     taken.join(", ")

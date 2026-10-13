@@ -616,3 +616,13 @@ async fn sec_391_managed_requirement_wins_and_is_named() {
         );
     }
 }
+
+/// #625: a key the broker holds is reported as held, by name only.
+#[test]
+fn sec_625_held_environment_keys_are_reported_by_name() {
+    let name = format!("SEC625_HELD_KEY_{}", std::process::id());
+    assert!(!holds_environment_key(&name));
+    note_held_env_keys(std::slice::from_ref(&name));
+    assert!(holds_environment_key(&name));
+    assert!(!holds_environment_key(&format!("{name}_OTHER")));
+}
