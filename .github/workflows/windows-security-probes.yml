@@ -82,6 +82,14 @@ concurrency:
   # Keep runs on main as evidence; only superseded PR runs are cancelled.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+env:
+  # #158: the legacy (unelevated) sandbox keeps deletes inside writable roots.
+  LEGACY_158_TESTS: >-
+    legacy_workspace_write_delete_is_limited_to_writable_roots
+    legacy_read_only_cannot_delete_anything
+    legacy_workspace_write_can_delete_inside_writable_roots
+    legacy_workspace_write_cannot_delete_or_replace_protected_git_dir
+
 jobs:
   probes:
     name: pf_27_s06 probes (windows-2022)
@@ -125,6 +133,18 @@ jobs:
           export CARGO_BIN_EXE_codex_windows_sandbox_setup="$(cygpath -w "${bin_dir}/codex-windows-sandbox-setup.exe")"
           export CARGO_BIN_EXE_codex_command_runner="$(cygpath -w "${bin_dir}/codex-command-runner.exe")"
           cargo test --locked --manifest-path codex-rs/Cargo.toml -p codex-windows-sandbox --lib sec_win_ -- --nocapture --test-threads=1
+      - name: Legacy sandbox delete boundary (#158)
+        if: ${{ !cancelled() }}
+        shell: bash
+        # One process per test: a failing legacy test poisons the lock the
+        # others share.
+        run: |
+          set -euo pipefail
+          for t in $LEGACY_158_TESTS; do
+            cargo test --locked --manifest-path codex-rs/Cargo.toml -p codex-windows-sandbox --lib -- --exact "unified_exec::tests::$t" --nocapture --test-threads=1 2>&1 | tee legacy-158.log
+            grep -q "test result: ok. 1 passed" legacy-158.log
+          done
+          rm legacy-158.log
       - name: P1 Windows hardening regressions (#320)
         if: ${{ !cancelled() }}
         shell: bash
@@ -205,6 +225,11 @@ jobs:
             Assert-Tests $sandbox 'sec_win_' 31
             & $medium -Program $sandbox -Arguments @('sec_win_', '--nocapture', '--test-threads=1')
             if ($LASTEXITCODE -ne 0) { throw "P1 hardening regressions failed in a normal session" }
+            foreach ($t in $env:LEGACY_158_TESTS.Split(' ')) {
+              Assert-Tests $sandbox "unified_exec::tests::$t" 1
+              & $medium -Program $sandbox -Arguments @('--exact', "unified_exec::tests::$t", '--nocapture', '--test-threads=1')
+              if ($LASTEXITCODE -ne 0) { throw "#158 $t failed in a normal session" }
+            }
             Assert-Tests $sandbox 'credential_watch' 18
             & $medium -Program $sandbox -Arguments @('credential_watch', '--nocapture', '--test-threads=1')
             if ($LASTEXITCODE -ne 0) { throw "#442 credential watch failed in a normal session" }

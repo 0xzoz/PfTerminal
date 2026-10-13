@@ -126,6 +126,19 @@ fn user_owned_test_root() -> TempDir {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    // An explicit Medium label: a legacy session that had the checkout as a
+    // writable root labelled it Low, which children would inherit (#158).
+    let output = std::process::Command::new(system32_exe("icacls.exe"))
+        .arg(root.path())
+        .args(["/setintegritylevel", "(OI)(CI)M"])
+        .output()
+        .expect("run icacls /setintegritylevel");
+    assert!(
+        output.status.success(),
+        "icacls /setintegritylevel failed: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     root
 }
 

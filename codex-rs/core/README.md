@@ -84,19 +84,28 @@ supports a narrow split-filesystem subset: full-read split policies whose
 writable roots still match the legacy `WorkspaceWrite` root set, but add extra
 read-only carveouts under those writable roots.
 
-Known limitation (#158): the unelevated backend does not confine deletes
-outside its writable roots. Its write-restricted token checks the writable-root
-capability SIDs for write accesses, including `DELETE`, but Windows does not
-treat `FILE_DELETE_CHILD` as a write. NTFS lets a caller delete or move a file
-it has no `DELETE` right on when the parent directory grants
-`FILE_DELETE_CHILD`. A sandboxed command can therefore delete any file or
-directory whose parent grants that right to the user's non-administrator
-identity (Administrators is deny-only in the sandbox token), which in practice
-covers most of the user profile. This applies in both `ReadOnly` and
-`WorkspaceWrite` modes. In `WorkspaceWrite` the command can also move such
-files into a writable root. Creating or writing files outside writable roots
-is still blocked. Note that a `ReadOnly` session can therefore delete the
-workspace, including `.git`.
+Deletes in the unelevated backend (#158): its write-restricted token checks
+the writable-root capability SIDs for write accesses, including `DELETE`, but
+Windows does not treat `FILE_DELETE_CHILD` as a write. NTFS lets a caller delete
+or move a file it has no `DELETE` right on when the parent directory grants
+`FILE_DELETE_CHILD`, so on its own the token let a sandboxed command delete
+most of the user profile, in both `ReadOnly` and `WorkspaceWrite` modes.
+Commands therefore run at Low integrity: a Low-integrity process cannot delete,
+move or write an object labelled Medium (the default for unlabelled objects).
+Each writable root gets an inheritable Low no-write-up label, so writes and
+deletes inside it keep working. Side effects:
+
+- The labels are persistent. A folder that was a writable root keeps its Low
+  label, so a later session can delete (not write) there even when the folder
+  is not one of its writable roots, and other Low-integrity programs of the
+  user can write there. `icacls <dir> /setintegritylevel (OI)(CI)M` restores
+  Medium.
+- Commands can no longer write outside writable roots to objects that grant
+  Everyone or the logon SID write access, or open other programs' named pipes
+  and other IPC endpoints for writing, unless those are labelled Low.
+- The desktop commands start on is labelled Low: the per-command private
+  desktop, or Core's own desktop when Core runs off the interactive window
+  station with `sandbox_private_desktop = false`.
 
 Protected paths that already exist inside writable roots when a session
 starts, such as `.git`, `.codex`, and `.agents`, also get an Everyone deny of
