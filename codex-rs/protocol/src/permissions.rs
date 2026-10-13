@@ -454,6 +454,60 @@ struct FileSystemSemanticSignature {
     unmovable_paths: Vec<AbsolutePathBuf>,
 }
 
+/// #652: the writable roots of a policy reached through a nested link
+/// (`~/ws -> /Volumes/x/ws`), each as written, normalized and at its real
+/// location, where Seatbelt and bubblewrap grant it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WritableRootLinks {
+    roots: Vec<(AbsolutePathBuf, AbsolutePathBuf, PathBuf)>,
+}
+
+impl WritableRootLinks {
+    pub fn is_empty(&self) -> bool {
+        self.roots.is_empty()
+    }
+
+    /// `path` spelled through each root that holds its real location while
+    /// `path` is not below the root as written or normalized. The sandboxes
+    /// grant such a root at its real location, so `path` is writable
+    /// through it, and a read-only entry for `path` must be spelled through
+    /// the root for them to honor it.
+    pub fn spellings(&self, path: &Path, cwd: &Path) -> Vec<AbsolutePathBuf> {
+        #[cfg(unix)]
+        {
+            if self.roots.is_empty() {
+                return Vec::new();
+            }
+            let Some(path) = resolve_candidate_path(path, cwd) else {
+                return Vec::new();
+            };
+            let real = real_location(path.as_path());
+            let normalized = normalize_effective_absolute_path(path.clone());
+            let mut spellings: Vec<AbsolutePathBuf> = Vec::new();
+            for (root, root_normalized, root_real) in &self.roots {
+                if path.as_path().starts_with(root.as_path())
+                    || normalized.as_path().starts_with(root_normalized.as_path())
+                {
+                    continue;
+                }
+                let Ok(suffix) = real.strip_prefix(root_real) else {
+                    continue;
+                };
+                let spelled = root.join(suffix);
+                if !spellings.contains(&spelled) {
+                    spellings.push(spelled);
+                }
+            }
+            spellings
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (path, cwd);
+            Vec::new()
+        }
+    }
+}
+
 /// Runtime matcher for read-deny entries in a filesystem sandbox policy.
 pub struct ReadDenyMatcher {
     denied_candidates: Vec<Vec<PathBuf>>,
@@ -1101,10 +1155,27 @@ impl FileSystemSandboxPolicy {
     /// [`Self::can_grant_write_effective_path_with_cwd`].
     pub fn can_write_effective_path_with_cwd(&self, path: &Path, cwd: &Path) -> bool {
         self.can_write_normalized(path, cwd, /*read_only_wins*/ false)
-            || self
-                .writable_root_spellings_with_cwd(path, cwd)
-                .iter()
-                .any(|spelled| self.can_write_path_with_cwd(spelled.as_path(), cwd))
+            || self.can_write_through_links(path, cwd, &self.writable_root_links_with_cwd(cwd))
+    }
+
+    /// [`Self::can_write_effective_path_with_cwd`] with the roots reached
+    /// through a nested link computed once
+    /// ([`Self::writable_root_links_with_cwd`]), for many paths.
+    pub fn can_write_effective_path_with_links(
+        &self,
+        path: &Path,
+        cwd: &Path,
+        links: &WritableRootLinks,
+    ) -> bool {
+        self.can_write_normalized(path, cwd, /*read_only_wins*/ false)
+            || self.can_write_through_links(path, cwd, links)
+    }
+
+    fn can_write_through_links(&self, path: &Path, cwd: &Path, links: &WritableRootLinks) -> bool {
+        links
+            .spellings(path, cwd)
+            .iter()
+            .any(|spelled| self.can_write_path_with_cwd(spelled.as_path(), cwd))
     }
 
     /// #652: [`Self::can_write_effective_path_with_cwd`] for adding a write
@@ -1174,52 +1245,41 @@ impl FileSystemSandboxPolicy {
         normalized.can_write_path_with_cwd(normalize_effective_absolute_path(path).as_path(), cwd)
     }
 
+    /// #652: the writable roots reached through a nested link
+    /// (`~/ws -> /Volumes/x/ws`), with their real locations, where the
+    /// sandboxes grant them. Usually none; computed once for many paths.
+    pub fn writable_root_links_with_cwd(&self, cwd: &Path) -> WritableRootLinks {
+        #[cfg(unix)]
+        {
+            if !matches!(self.kind, FileSystemSandboxKind::Restricted) {
+                return WritableRootLinks::default();
+            }
+            let roots = self
+                .get_writable_roots_with_cwd(cwd)
+                .into_iter()
+                .filter_map(|root| {
+                    let real = real_location(root.root.as_path());
+                    let normalized = normalize_effective_absolute_path(root.root.clone());
+                    (real != normalized.as_path()).then_some((root.root, normalized, real))
+                })
+                .collect();
+            WritableRootLinks { roots }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = cwd;
+            WritableRootLinks::default()
+        }
+    }
+
     /// #652: `path` spelled through each writable root reached through a
-    /// nested link (`~/ws -> /Volumes/x/ws`): a root whose real location
-    /// holds `path`'s real location, while `path` is not below the root as
-    /// written or normalized. The sandboxes grant such a root at its real
-    /// location, so `path` is writable through it, and a read-only entry
-    /// for `path` must be spelled through the root for them to honor it.
+    /// nested link ([`Self::writable_root_links_with_cwd`]).
     pub fn writable_root_spellings_with_cwd(
         &self,
         path: &Path,
         cwd: &Path,
     ) -> Vec<AbsolutePathBuf> {
-        #[cfg(unix)]
-        {
-            if !matches!(self.kind, FileSystemSandboxKind::Restricted) {
-                return Vec::new();
-            }
-            let Some(path) = resolve_candidate_path(path, cwd) else {
-                return Vec::new();
-            };
-            let real = real_location(path.as_path());
-            let normalized = normalize_effective_absolute_path(path.clone());
-            let mut spellings: Vec<AbsolutePathBuf> = Vec::new();
-            for root in self.get_writable_roots_with_cwd(cwd) {
-                let root = root.root;
-                if path.as_path().starts_with(root.as_path())
-                    || normalized
-                        .as_path()
-                        .starts_with(normalize_effective_absolute_path(root.clone()).as_path())
-                {
-                    continue;
-                }
-                let Ok(suffix) = real.strip_prefix(real_location(root.as_path())) else {
-                    continue;
-                };
-                let spelled = root.join(suffix);
-                if !spellings.contains(&spelled) {
-                    spellings.push(spelled);
-                }
-            }
-            spellings
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = (path, cwd);
-            Vec::new()
-        }
+        self.writable_root_links_with_cwd(cwd).spellings(path, cwd)
     }
 
     pub fn can_write_path_with_cwd(&self, path: &Path, cwd: &Path) -> bool {
