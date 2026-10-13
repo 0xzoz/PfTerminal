@@ -39,6 +39,7 @@ use windows_sys::Win32::Security::GetSidSubAuthority;
 use windows_sys::Win32::Security::GetSidSubAuthorityCount;
 use windows_sys::Win32::Security::GetTokenInformation;
 use windows_sys::Win32::Security::INHERIT_ONLY_ACE;
+use windows_sys::Win32::Security::INHERITED_ACE;
 use windows_sys::Win32::Security::InitializeAcl;
 use windows_sys::Win32::Security::LABEL_SECURITY_INFORMATION;
 use windows_sys::Win32::Security::OBJECT_INHERIT_ACE;
@@ -138,7 +139,7 @@ pub(crate) unsafe fn label_writable_root_low(path: &Path) -> Result<bool> {
     } else {
         0
     };
-    if has_low_label(path, flags)? {
+    if has_label(path, LOW_INTEGRITY_SID, flags, /*explicit_only*/ false)? {
         return Ok(false);
     }
     set_file_label(path, LOW_INTEGRITY_SID, flags)?;
@@ -157,6 +158,15 @@ pub(crate) unsafe fn label_protected_path_medium(path: &Path) -> Result<()> {
     } else {
         0
     };
+    // Labelling walks the whole tree; do it once.
+    if has_label(
+        path,
+        MEDIUM_INTEGRITY_SID,
+        flags,
+        /*explicit_only*/ true,
+    )? {
+        return Ok(());
+    }
     set_file_label(path, MEDIUM_INTEGRITY_SID, flags)
 }
 
@@ -181,7 +191,7 @@ unsafe fn set_file_label(path: &Path, level: &str, flags: u32) -> Result<()> {
     Ok(())
 }
 
-unsafe fn has_low_label(path: &Path, flags: u32) -> Result<bool> {
+unsafe fn has_label(path: &Path, level: &str, flags: u32, explicit_only: bool) -> Result<bool> {
     let mut p_sd: *mut c_void = std::ptr::null_mut();
     let mut p_sacl: *mut ACL = std::ptr::null_mut();
     let code = GetNamedSecurityInfoW(
@@ -200,15 +210,15 @@ unsafe fn has_low_label(path: &Path, flags: u32) -> Result<bool> {
             path.display()
         ));
     }
-    let found = !p_sacl.is_null() && sacl_has_low_label(p_sacl, flags);
+    let found = !p_sacl.is_null() && sacl_has_label(p_sacl, level, flags, explicit_only);
     if !p_sd.is_null() {
         LocalFree(p_sd as HLOCAL);
     }
     Ok(found)
 }
 
-unsafe fn sacl_has_low_label(p_sacl: *mut ACL, flags: u32) -> bool {
-    let Ok(low) = LocalSid::from_string(LOW_INTEGRITY_SID) else {
+unsafe fn sacl_has_label(p_sacl: *mut ACL, level: &str, flags: u32, explicit_only: bool) -> bool {
+    let Ok(low) = LocalSid::from_string(level) else {
         return false;
     };
     let mut info: ACL_SIZE_INFORMATION = std::mem::zeroed();
@@ -231,6 +241,7 @@ unsafe fn sacl_has_low_label(p_sacl: *mut ACL, flags: u32) -> bool {
         if u32::from(hdr.AceType) != SYSTEM_MANDATORY_LABEL_ACE_TYPE
             || ace_flags & INHERIT_ONLY_ACE != 0
             || ace_flags & flags != flags
+            || (explicit_only && ace_flags & INHERITED_ACE != 0)
         {
             continue;
         }

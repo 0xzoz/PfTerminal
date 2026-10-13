@@ -706,6 +706,86 @@ struct LegacyDeleteOutcome {
     protected_git_dir_exists: bool,
     nested_existing_contents: Option<String>,
     outside_dir_exists: bool,
+    /// What any other Low-integrity program of the user may write after the
+    /// session: protected paths stay Medium, the workspace is Low (#158).
+    low_can_write_git_dir: bool,
+    low_can_write_codex_file: bool,
+    low_can_write_workspace_file: bool,
+}
+
+/// Whether a plain Low-integrity copy of this process's token (not the
+/// sandbox token) can open `path` for writing.
+fn low_integrity_can_open_for_write(path: &Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Security::DuplicateTokenEx;
+    use windows_sys::Win32::Security::RevertToSelf;
+    use windows_sys::Win32::Security::SecurityImpersonation;
+    use windows_sys::Win32::Security::TOKEN_ALL_ACCESS;
+    use windows_sys::Win32::Security::TOKEN_DUPLICATE;
+    use windows_sys::Win32::Security::TOKEN_QUERY;
+    use windows_sys::Win32::Security::TokenImpersonation;
+    use windows_sys::Win32::Storage::FileSystem::CreateFileW;
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_DELETE;
+    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE;
+    use windows_sys::Win32::Storage::FileSystem::FILE_WRITE_DATA;
+    use windows_sys::Win32::Storage::FileSystem::OPEN_EXISTING;
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    use windows_sys::Win32::System::Threading::OpenProcessToken;
+    use windows_sys::Win32::System::Threading::SetThreadToken;
+
+    // SAFETY: token handles are opened and closed here; the impersonation is
+    // reverted before returning.
+    unsafe {
+        let mut process_token: HANDLE = 0;
+        assert_ne!(
+            OpenProcessToken(
+                GetCurrentProcess(),
+                TOKEN_DUPLICATE | TOKEN_QUERY,
+                &mut process_token
+            ),
+            0,
+            "open the process token"
+        );
+        let mut low: HANDLE = 0;
+        let duplicated = DuplicateTokenEx(
+            process_token,
+            TOKEN_ALL_ACCESS,
+            std::ptr::null(),
+            SecurityImpersonation,
+            TokenImpersonation,
+            &mut low,
+        );
+        CloseHandle(process_token);
+        assert_ne!(duplicated, 0, "duplicate the process token");
+        crate::integrity::set_token_low_integrity(low).expect("lower the token");
+        assert_ne!(SetThreadToken(std::ptr::null(), low), 0, "impersonate");
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let handle = CreateFileW(
+            wide.as_ptr(),
+            FILE_WRITE_DATA,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            0,
+        );
+        RevertToSelf();
+        CloseHandle(low);
+        if handle == INVALID_HANDLE_VALUE {
+            return false;
+        }
+        CloseHandle(handle);
+        true
+    }
 }
 
 /// Runs the legacy delete fixture and returns its outcome plus diagnostics.
@@ -729,6 +809,9 @@ fn run_legacy_delete_fixture(
         }
         let protected_git_dir = workspace.join(".git");
         fs::create_dir(&protected_git_dir).expect("create protected .git directory");
+        let codex_file = workspace.join(".codex").join("config.toml");
+        fs::create_dir(workspace.join(".codex")).expect("create protected .codex directory");
+        fs::write(&codex_file, "# before").expect("seed protected .codex file");
 
         let workspace_file = workspace.join("workspace-delete.txt");
         let temp_file = temp_root.join("temp-delete.txt");
@@ -839,6 +922,9 @@ fn run_legacy_delete_fixture(
                 protected_git_dir_exists: protected_git_dir.is_dir(),
                 nested_existing_contents: fs::read_to_string(&nested_existing).ok(),
                 outside_dir_exists: outside_dir.is_dir(),
+                low_can_write_git_dir: low_integrity_can_open_for_write(&protected_git_dir),
+                low_can_write_codex_file: low_integrity_can_open_for_write(&codex_file),
+                low_can_write_workspace_file: low_integrity_can_open_for_write(&nested_existing),
             },
             format!("stdout={stdout:?}\n{}", sandbox_log(codex_home.path())),
         )
@@ -988,6 +1074,9 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
             protected_git_dir_exists: true,
             nested_existing_contents: Some("after\r\n".to_string()),
             outside_dir_exists: true,
+            low_can_write_git_dir: false,
+            low_can_write_codex_file: false,
+            low_can_write_workspace_file: true,
         },
         "{diagnostics}"
     );

@@ -104,12 +104,13 @@ deletes inside it keep working. Side effects:
   `icacls <dir> /setintegritylevel (OI)(CI)M` restores Medium. Running the
   sandbox's own tests on Windows labels the checkout they use as a workspace.
 - Labelling needs permission to change the folder's owner settings
-  (`WRITE_OWNER`); without it the command does not start and the error says
-  why. The first label propagates through the whole folder tree, which can be
+  (`WRITE_OWNER`) and a file system that holds integrity labels; without them
+  the command does not start and the error says why. The first label propagates through the whole folder tree, which can be
   slow for large trees.
 - Protected paths inside writable roots (and other read-only carve-outs) get
-  an explicit Medium label, so they don't inherit the Low label and other
-  Low-integrity programs can't write them.
+  an explicit Medium label, once, so they don't inherit the Low label and
+  other Low-integrity programs can't write them. If that label can't be set,
+  the command does not start.
 - Commands can no longer write outside writable roots to objects that grant
   Everyone or the logon SID write access, or open other programs' named pipes
   and other IPC endpoints for writing, unless those are labelled Low.

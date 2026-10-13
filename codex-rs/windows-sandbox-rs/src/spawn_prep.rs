@@ -295,7 +295,7 @@ pub(crate) fn apply_legacy_session_acl_rules(
         for p in &allow {
             label_writable_root_low(p).with_context(|| {
                 format!(
-                    "the Windows sandbox could not label writable root {} for Low-integrity commands; it needs permission to change the folder's owner settings (WRITE_OWNER)",
+                    "the Windows sandbox could not label writable root {} for Low-integrity commands; it probably needs permission to change the folder's owner settings (WRITE_OWNER), or the file system can't hold integrity labels",
                     p.display()
                 )
             })?;
@@ -324,16 +324,13 @@ pub(crate) fn apply_legacy_session_acl_rules(
         for p in &deny {
             // #158: keep the writable root's Low label off protected paths, so
             // other Low-integrity programs can't write them either.
-            if p.exists()
-                && let Err(err) = label_protected_path_medium(p)
-            {
-                crate::logging::debug_log(
-                    &format!(
-                        "label protected path Medium failed for {}: {err}",
+            if p.exists() {
+                label_protected_path_medium(p).with_context(|| {
+                    format!(
+                        "the Windows sandbox could not keep protected path {} at Medium integrity",
                         p.display()
-                    ),
-                    Some(&codex_home.join(".sandbox")),
-                );
+                    )
+                })?;
             }
             for root_sid in deny_root_capabilities_for_path(p, acl_sids.write_root_sids) {
                 let _ = add_deny_write_ace(p, root_sid.sid.as_ptr());
