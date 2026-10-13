@@ -3811,7 +3811,7 @@ impl Config {
             // replay a login-shell snapshot that re-exports profile secrets.
             crate::security::launch_contract::arm(&codex_home);
             if features.enabled(Feature::ShellSnapshot)
-                && features.disable(Feature::ShellSnapshot).is_err()
+                && !features.turn_off_unless_required(Feature::ShellSnapshot)
             {
                 startup_warnings.push(
                     "secretless_agent_launch: shell_snapshot is required by policy; agent commands cannot read the snapshot files"
@@ -3838,7 +3838,7 @@ impl Config {
             // snapshots persist the environment, so they are off too; if
             // policy pins them on, fail closed before arming.
             if features.enabled(Feature::ShellSnapshot)
-                && features.disable(Feature::ShellSnapshot).is_err()
+                && !features.turn_off_unless_required(Feature::ShellSnapshot)
             {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,

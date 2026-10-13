@@ -128,6 +128,17 @@ impl ManagedFeatures {
     pub fn disable(&mut self, feature: Feature) -> ConstraintResult<()> {
         self.set_enabled(feature, /*enabled*/ false)
     }
+
+    /// Turns `feature` off unless a managed requirement keeps it on, and
+    /// returns whether it is off afterwards. `disable` alone cannot tell:
+    /// pins are reapplied before validation, so it succeeds and leaves a
+    /// pinned feature on (#412).
+    pub fn turn_off_unless_required(&mut self, feature: Feature) -> bool {
+        if self.pinned(feature) == Some(true) {
+            return false;
+        }
+        self.disable(feature).is_ok() && !self.enabled(feature)
+    }
 }
 
 /// Only available for tests to ensure `ManagedFeatures` is constructed with
