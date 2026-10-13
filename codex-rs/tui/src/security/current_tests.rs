@@ -58,7 +58,7 @@ exclude_slash_tmp = true
 #[tokio::test]
 #[cfg_attr(
     windows,
-    ignore = "Aggressive cannot be fully applied on a Windows test machine without the Windows sandbox (#691)"
+    ignore = "workspace-write falls back to read-only on Windows without the Windows sandbox (#691)"
 )]
 async fn workspace_write_rows_name_the_escape_route() {
     let home = tempfile::tempdir().unwrap();

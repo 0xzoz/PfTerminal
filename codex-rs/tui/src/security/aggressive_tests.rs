@@ -633,7 +633,7 @@ async fn role_that_relaxes_strict_rules_fails_verification() {
 #[tokio::test]
 #[cfg_attr(
     windows,
-    ignore = "Aggressive cannot be fully applied on a Windows test machine without the Windows sandbox (#691)"
+    ignore = "Unix fixture: the host_executable path /opt/elsewhere/corbanu is not absolute on Windows (#691)"
 )]
 async fn exec_policy_must_load_and_forbid_vault_commands() {
     let home = tempfile::tempdir().unwrap();

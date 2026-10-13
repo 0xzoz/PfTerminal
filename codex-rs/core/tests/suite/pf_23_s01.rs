@@ -244,6 +244,7 @@ fn output_text(request: &ResponsesRequest, call_id: &str) -> String {
 
 /// #615: what the interactive shell printed when it started, for failures
 /// where typing into it found no session (the shell had already exited).
+#[cfg(unix)]
 fn shell_start_output(captured: &ResponseMock) -> String {
     captured
         .requests()
