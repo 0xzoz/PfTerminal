@@ -217,8 +217,10 @@ unsafe fn has_label(path: &Path, level: &str, flags: u32, explicit_only: bool) -
     Ok(found)
 }
 
+/// Whether the label Windows applies (the first label entry that is not
+/// inherit-only) is a no-write-up label for `level` with `flags`.
 unsafe fn sacl_has_label(p_sacl: *mut ACL, level: &str, flags: u32, explicit_only: bool) -> bool {
-    let Ok(low) = LocalSid::from_string(level) else {
+    let Ok(wanted) = LocalSid::from_string(level) else {
         return false;
     };
     let mut info: ACL_SIZE_INFORMATION = std::mem::zeroed();
@@ -240,17 +242,17 @@ unsafe fn sacl_has_label(p_sacl: *mut ACL, level: &str, flags: u32, explicit_onl
         let ace_flags = u32::from(hdr.AceFlags);
         if u32::from(hdr.AceType) != SYSTEM_MANDATORY_LABEL_ACE_TYPE
             || ace_flags & INHERIT_ONLY_ACE != 0
-            || ace_flags & flags != flags
-            || (explicit_only && ace_flags & INHERITED_ACE != 0)
         {
             continue;
         }
+        // The first effective label decides.
         let mask = *((p_ace as usize + std::mem::size_of::<ACE_HEADER>()) as *const u32);
         let sid = (p_ace as usize + std::mem::size_of::<ACE_HEADER>() + std::mem::size_of::<u32>())
             as *mut c_void;
-        if mask & SYSTEM_MANDATORY_LABEL_NO_WRITE_UP != 0 && EqualSid(sid, low.as_ptr()) != 0 {
-            return true;
-        }
+        return ace_flags & flags == flags
+            && !(explicit_only && ace_flags & INHERITED_ACE != 0)
+            && mask & SYSTEM_MANDATORY_LABEL_NO_WRITE_UP != 0
+            && EqualSid(sid, wanted.as_ptr()) != 0;
     }
     false
 }

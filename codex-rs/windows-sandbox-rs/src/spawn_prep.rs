@@ -259,6 +259,15 @@ fn deny_root_capabilities_for_path<'a>(
     }
 }
 
+/// Whether `path` lies below one of `roots` and holds none of them (a planted
+/// `gitdir: .` must not relabel the workspace itself). All paths canonical.
+fn strictly_inside_a_root(path: &Path, roots: &[PathBuf]) -> bool {
+    roots
+        .iter()
+        .any(|root| path != root.as_path() && path.starts_with(root))
+        && !roots.iter().any(|root| root.starts_with(path))
+}
+
 pub(crate) fn allow_null_device_for_workspace_write(is_workspace_write: bool) {
     if !is_workspace_write {
         return;
@@ -321,10 +330,18 @@ pub(crate) fn apply_legacy_session_acl_rules(
                 let _ = ensure_allow_write_aces(p, &[root_sid.sid.as_ptr()]);
             }
         }
+        let canonical_allow: Vec<PathBuf> =
+            allow.iter().map(|root| canonicalize_path(root)).collect();
         for p in &deny {
             // #158: keep the writable root's Low label off protected paths, so
             // other Low-integrity programs can't write them either.
-            if p.exists() {
+            // Only where a Low label can be inherited (canonically inside a
+            // writable root), and never through a link the sandbox may have
+            // planted: the host must not relabel a folder it picked.
+            if p.exists()
+                && !crate::workspace_acl::is_reparse_point(p)
+                && strictly_inside_a_root(&canonicalize_path(p), &canonical_allow)
+            {
                 label_protected_path_medium(p).with_context(|| {
                     format!(
                         "the Windows sandbox could not keep protected path {} at Medium integrity",

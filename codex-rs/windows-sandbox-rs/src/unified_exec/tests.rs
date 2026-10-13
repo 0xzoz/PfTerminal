@@ -711,6 +711,10 @@ struct LegacyDeleteOutcome {
     low_can_write_git_dir: bool,
     low_can_write_codex_file: bool,
     low_can_write_workspace_file: bool,
+    /// A Low-labelled folder outside the roots that a planted `.agents`
+    /// junction points at keeps its label: the host relabels only inside
+    /// writable roots.
+    low_can_write_junction_target: bool,
 }
 
 /// Whether a plain Low-integrity copy of this process's token (not the
@@ -812,6 +816,35 @@ fn run_legacy_delete_fixture(
         let codex_file = workspace.join(".codex").join("config.toml");
         fs::create_dir(workspace.join(".codex")).expect("create protected .codex directory");
         fs::write(&codex_file, "# before").expect("seed protected .codex file");
+        let junction_target = test_root.path().join("elsewhere-low");
+        fs::create_dir(&junction_target).expect("create junction target");
+        let junction_target_file = junction_target.join("file.txt");
+        fs::write(&junction_target_file, "low").expect("seed junction target file");
+        for args in [
+            vec![
+                junction_target.display().to_string(),
+                "/setintegritylevel".to_string(),
+                "(OI)(CI)L".to_string(),
+            ],
+            vec![
+                junction_target_file.display().to_string(),
+                "/setintegritylevel".to_string(),
+                "L".to_string(),
+            ],
+        ] {
+            let output = std::process::Command::new(system32_exe("icacls.exe"))
+                .args(&args)
+                .output()
+                .expect("run icacls");
+            assert!(output.status.success(), "icacls {args:?} failed");
+        }
+        let output = std::process::Command::new(system32_exe("cmd.exe"))
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(workspace.join(".agents"))
+            .arg(&junction_target)
+            .output()
+            .expect("run mklink");
+        assert!(output.status.success(), "mklink /J failed");
 
         let workspace_file = workspace.join("workspace-delete.txt");
         let temp_file = temp_root.join("temp-delete.txt");
@@ -925,6 +958,9 @@ fn run_legacy_delete_fixture(
                 low_can_write_git_dir: low_integrity_can_open_for_write(&protected_git_dir),
                 low_can_write_codex_file: low_integrity_can_open_for_write(&codex_file),
                 low_can_write_workspace_file: low_integrity_can_open_for_write(&nested_existing),
+                low_can_write_junction_target: low_integrity_can_open_for_write(
+                    &junction_target_file,
+                ),
             },
             format!("stdout={stdout:?}\n{}", sandbox_log(codex_home.path())),
         )
@@ -1077,6 +1113,7 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
             low_can_write_git_dir: false,
             low_can_write_codex_file: false,
             low_can_write_workspace_file: true,
+            low_can_write_junction_target: true,
         },
         "{diagnostics}"
     );

@@ -105,12 +105,16 @@ deletes inside it keep working. Side effects:
   sandbox's own tests on Windows labels the checkout they use as a workspace.
 - Labelling needs permission to change the folder's owner settings
   (`WRITE_OWNER`) and a file system that holds integrity labels; without them
-  the command does not start and the error says why. The first label propagates through the whole folder tree, which can be
-  slow for large trees.
+  the command does not start and the error says why. The first label
+  propagates through the whole folder tree, which can be slow for large trees.
+  If propagation stops partway, the root still counts as labelled and the
+  unlabelled files below it stay unwritable.
 - Protected paths inside writable roots (and other read-only carve-outs) get
   an explicit Medium label, once, so they don't inherit the Low label and
   other Low-integrity programs can't write them. If that label can't be set,
-  the command does not start.
+  the command does not start. Paths that are links, or that resolve outside
+  the writable roots (a `.git` file's `gitdir:` target, for example), are left
+  alone.
 - Commands can no longer write outside writable roots to objects that grant
   Everyone or the logon SID write access, or open other programs' named pipes
   and other IPC endpoints for writing, unless those are labelled Low.
