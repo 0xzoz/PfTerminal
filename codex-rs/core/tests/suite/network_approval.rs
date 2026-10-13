@@ -1139,9 +1139,13 @@ async fn guardian_receives_exact_trigger_for_single_network_request() -> Result<
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_guardian_network_decisions_are_scoped_to_each_request_and_environment() -> Result<()>
 {
+    // Needs a remote environment, but can't pass against one yet (#708, #722):
+    // the remote executor's proxy rejects the MITM that this fixture's
+    // "limited" mode needs, and it asks the host only for Guardian-reviewed
+    // decisions, so the user is never asked about a remote network request.
     core_test_support::skip_if_remote!(
         Ok(()),
-        "network requests from inside the remote container do not reach the host-side network approval proxy (#708)"
+        "a remote executor's proxy can't run limited mode or ask the user (#708)"
     );
     skip_if_target_windows!(Ok(()), "uses the POSIX/Python network fixture");
     skip_if_host_windows!(Ok(()));
@@ -1361,9 +1365,13 @@ async fn remote_guardian_network_decisions_are_scoped_to_each_request_and_enviro
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn approved_network_host_for_one_environment_still_prompts_in_another() -> Result<()> {
+    // Needs a remote environment, but can't pass against one yet (#708, #722):
+    // the remote executor's proxy rejects the MITM that this fixture's
+    // "limited" mode needs, and it asks the host only for Guardian-reviewed
+    // decisions, so the user is never asked about a remote network request.
     core_test_support::skip_if_remote!(
         Ok(()),
-        "network requests from inside the remote container do not reach the host-side network approval proxy (#708)"
+        "a remote executor's proxy can't run limited mode or ask the user (#708)"
     );
     skip_if_target_windows!(Ok(()), "uses the POSIX/Python network fixture");
     skip_if_host_windows!(Ok(()));

@@ -251,6 +251,29 @@ fn remote_exec_server_url() -> Result<String> {
     Ok(listen_url.to_string())
 }
 
+/// `NO_PROXY` for a test that points the process at a test HTTP proxy: `base`
+/// plus the remote exec-server host in the remote lane. The websocket dialer
+/// matches `NO_PROXY` by host name only, not by CIDR range, so a private range
+/// in `base` doesn't keep the exec-server connection out of the proxy.
+pub fn no_proxy_with_remote_exec_server(base: &str) -> String {
+    let host = std::env::var(REMOTE_EXEC_SERVER_URL_ENV_VAR)
+        .ok()
+        .and_then(|url| {
+            let authority = url.trim().split_once("://")?.1.split('/').next()?;
+            let host = match authority.strip_prefix('[') {
+                Some(rest) => rest.split(']').next()?,
+                None => authority
+                    .rsplit_once(':')
+                    .map_or(authority, |(host, _port)| host),
+            };
+            (!host.is_empty()).then(|| host.to_string())
+        });
+    match host {
+        Some(host) => format!("{base},{host}"),
+        None => base.to_string(),
+    }
+}
+
 fn remote_test_instance_id() -> String {
     let instance = REMOTE_TEST_INSTANCE_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("{}-{instance}", std::process::id())

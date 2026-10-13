@@ -947,8 +947,10 @@ allow_local_binding = true
                 .set_permission_profile(permission_profile_for_config)
                 .expect("set permission profile");
         });
-    // The host-side network proxy can't see requests from the remote
-    // container (#708), so these run on the local executor.
+    // Local executor only (#708, #722): this "limited"-mode proxy needs MITM, which a
+    // remote executor's proxy refuses, and in "full" mode a denial made by the
+    // remote proxy doesn't end the command as failed (the host's denial monitor
+    // only sees its own proxy).
     let test = builder.build(server).await?;
     assert!(
         test.config.permissions.network.is_some(),
@@ -2923,8 +2925,7 @@ async fn unified_exec_formats_large_output_summary() -> Result<()> {
             .enable(Feature::UnifiedExec)
             .expect("test config should allow feature update");
     });
-    // Pinned to the local executor: fails only in the remote lane (#157, #708).
-    let test = builder.build(&server).await?;
+    let test = builder.build_with_auto_env(&server).await?;
 
     let output_line = "token token \n";
     let output_repetitions = 100_000;

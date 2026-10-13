@@ -101,6 +101,8 @@ async fn vault_commands_after(
                     .expect("enable unified exec");
             }
         })
+        // Host-sandbox security test: local executor on purpose, also in the
+        // remote lane (#708).
         .build(&server)
         .await?;
     if confirm {

@@ -44,6 +44,8 @@ use serde_json::json;
 /// How long a stopped command would have needed to leave its mark.
 const COMMAND_SECONDS: u64 = 3;
 
+/// The kill-switch tests check host processes and the host sandbox: their
+/// sessions use the local executor on purpose, also in the remote lane (#708).
 fn builder(approval: AskForApproval, unified: bool) -> TestCodexBuilder {
     test_codex()
         .with_model("test-gpt-5.1-codex")

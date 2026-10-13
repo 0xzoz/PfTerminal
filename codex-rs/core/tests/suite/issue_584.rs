@@ -102,6 +102,8 @@ async fn start(
                 config.features.enable(feature).expect("enable feature");
             }
         })
+        // Host-sandbox security test: local executor on purpose, also in the
+        // remote lane (#708).
         .build(&server)
         .await?;
     std::mem::forget(server);

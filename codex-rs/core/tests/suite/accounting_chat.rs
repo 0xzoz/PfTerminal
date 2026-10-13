@@ -528,8 +528,8 @@ async fn accounting_chat_native_finish_reason_and_tool_parity() -> anyhow::Resul
                     .disable(codex_features::Feature::CodeModeOnly)
                     .unwrap();
             })
-            // this shell_command test fails only in the remote lane (#157, #708), so pin
-            // it to the local executor even in the remote test lane.
+            // Local executor only: `shell_command` runs commands on the Codex
+            // host, never in a remote environment (#708, #721).
             .build(&server)
             .await?;
         submit(&test).await?;
@@ -594,8 +594,8 @@ async fn accounting_chat_native_sampling_auxiliary_scope() -> anyhow::Result<()>
                 .disable(codex_features::Feature::RemoteCompactionV2)
                 .unwrap();
         })
-        // this shell_command test fails only in the remote lane (#157, #708), so pin
-        // it to the local executor even in the remote test lane.
+        // Local executor only: `shell_command` runs commands on the Codex
+        // host, never in a remote environment (#708, #721).
         .build(&server)
         .await?;
     submit(&test).await?;

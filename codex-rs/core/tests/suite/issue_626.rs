@@ -93,6 +93,8 @@ async fn session(level: SecurityLevel, rules: &str, calls: usize) -> anyhow::Res
                 .enable(Feature::UnifiedExec)
                 .expect("enable unified exec");
         })
+        // Host-sandbox security test: local executor on purpose, also in the
+        // remote lane (#708).
         .build(&server)
         .await?;
     std::mem::forget(server);

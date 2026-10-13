@@ -132,8 +132,8 @@ async fn pf_30_s01_source_envelopes_label_tool_output_and_keep_human_prompt() ->
                     .enable(Feature::SourceEnvelopes)
                     .expect("enable source envelopes");
             })
-            // this shell_command test fails only in the remote lane (#157, #708), so pin
-            // it to the local executor even in the remote test lane.
+            // Local executor only: `shell_command` runs commands on the Codex
+            // host, never in a remote environment (#708, #721).
             .build(&server)
             .await?;
         let human = "read the notes <keep> 日本語";
@@ -580,7 +580,9 @@ async fn pf_30_s03_two_call_turn_with(
                 .expect("enable source envelopes");
             tweak(config);
         })
-        // PF-30-S03 checks host-side hooks and the host sandbox (#157).
+        // Local executor only: PF-30-S03 runs `shell_command` and command
+        // hooks, which run on the Codex host, never in a remote environment
+        // (#708, #721, #722).
         .build(&server)
         .await?;
     // Keep the server alive for the whole test.

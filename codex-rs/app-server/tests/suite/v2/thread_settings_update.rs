@@ -144,8 +144,9 @@ fn assert_permission_effects(path: &std::path::Path, count: usize) -> Result<()>
     Ok(())
 }
 
-/// Every test here checks authorization against probes and fixtures on the
-/// host, so its app-server uses the local executor (#157).
+/// Every test here runs `shell_command` probes that write markers on the host,
+/// and `shell_command` never runs in a remote environment (#708, #721), so its
+/// app-server uses the local executor.
 async fn native_permission_fixture(
     workspace: &std::path::Path,
     script: Vec<String>,
