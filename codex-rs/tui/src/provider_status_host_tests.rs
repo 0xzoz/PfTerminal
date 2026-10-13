@@ -524,7 +524,8 @@ async fn openai_on_a_named_sign_in_account_is_configured_without_a_default_login
 
 /// #665: `zai` and `zai-anthropic` share one catalog entry, but PF-84 accounts
 /// are per connection. With one on a named account, each connection is judged
-/// on its own credential; without any account none is singled out.
+/// on its own credential and the entry is set up when any connection has one;
+/// without any account nothing changes.
 #[tokio::test]
 async fn each_connection_on_a_mixed_account_entry_needs_its_own_credential() {
     use std::collections::BTreeSet;
@@ -537,7 +538,7 @@ async fn each_connection_on_a_mixed_account_entry_needs_its_own_credential() {
         .unwrap();
     config.cli_auth_credentials_store_mode = codex_login::AuthCredentialsStoreMode::File;
     config.model_provider_id = "zai".into();
-    let missing = |config: &Config, enrolled: bool| {
+    let host = |config: &Config, enrolled: bool| {
         ProviderStatusHost::from_config_with_account_registry(
             config,
             ProviderAccountMetadata::default(),
@@ -548,11 +549,28 @@ async fn each_connection_on_a_mixed_account_entry_needs_its_own_credential() {
                     && kind == ProviderAccountKind::ApiKey
             },
         )
-        .connections_without_credential()
+        .with_environment(|_| EnvironmentCredentialMetadata::Missing)
     };
-    let set = |ids: &[&str]| ids.iter().map(ToString::to_string).collect::<BTreeSet<_>>();
+    let check = |config: &Config, enrolled: bool, missing: &[&str], entry| {
+        let host = host(config, enrolled);
+        assert_eq!(
+            host.connections_without_credential(),
+            missing
+                .iter()
+                .map(ToString::to_string)
+                .collect::<BTreeSet<_>>(),
+            "enrolled = {enrolled}"
+        );
+        assert_eq!(
+            host.resolve_provider("zai").unwrap().configuration,
+            entry,
+            "enrolled = {enrolled}"
+        );
+    };
+    use ProviderConfigurationState::Configured;
+    use ProviderConfigurationState::NotConfigured;
 
-    assert_eq!(missing(&config, /*enrolled*/ false), set(&[]));
+    check(&config, /*enrolled*/ false, &[], NotConfigured);
     config
         .model_providers
         .get_mut("zai")
@@ -561,10 +579,17 @@ async fn each_connection_on_a_mixed_account_entry_needs_its_own_credential() {
         provider_id: "zai".into(),
         name: "work".into(),
     });
-    assert_eq!(missing(&config, /*enrolled*/ true), set(&["zai-anthropic"]));
-    assert_eq!(
-        missing(&config, /*enrolled*/ false),
-        set(&["zai", "zai-anthropic"])
+    check(
+        &config,
+        /*enrolled*/ true,
+        &["zai-anthropic"],
+        Configured,
+    );
+    check(
+        &config,
+        /*enrolled*/ false,
+        &["zai", "zai-anthropic"],
+        NotConfigured,
     );
 
     codex_login::login_with_provider_api_key(
@@ -575,6 +600,63 @@ async fn each_connection_on_a_mixed_account_entry_needs_its_own_credential() {
         config.auth_keyring_backend_kind(),
     )
     .unwrap();
-    assert_eq!(missing(&config, /*enrolled*/ true), set(&[]));
-    assert_eq!(missing(&config, /*enrolled*/ false), set(&["zai"]));
+    check(&config, /*enrolled*/ true, &[], Configured);
+    // The default key alone sets the entry up for `zai-anthropic`.
+    check(&config, /*enrolled*/ false, &["zai"], Configured);
+}
+
+/// #665: a key in the environment (or held by the credential broker, which
+/// reports it as present) is the default key of a connection without an account.
+#[tokio::test]
+async fn an_environment_default_key_serves_the_connection_without_an_account() {
+    let home = tempdir().unwrap();
+    let mut config = crate::legacy_core::config::ConfigBuilder::default()
+        .codex_home(home.path().to_path_buf())
+        .build()
+        .await
+        .unwrap();
+    config.model_provider_id = "zai-anthropic".into();
+    config
+        .model_providers
+        .get_mut("zai")
+        .expect("built-in zai provider")
+        .account = Some(NamedProviderAccount {
+        provider_id: "zai".into(),
+        name: "work".into(),
+    });
+    let host = ProviderStatusHost::from_config_with_account_registry(
+        &config,
+        ProviderAccountMetadata::default(),
+        |_, _| false,
+    )
+    .with_environment(|env_key| {
+        if env_key == "ZAI_API_KEY" {
+            EnvironmentCredentialMetadata::Present
+        } else {
+            EnvironmentCredentialMetadata::Missing
+        }
+    });
+    assert_eq!(
+        host.connections_without_credential(),
+        std::collections::BTreeSet::from(["zai".to_string()])
+    );
+    assert_eq!(
+        host.resolve_provider("zai").unwrap().configuration,
+        ProviderConfigurationState::Configured
+    );
+    let policy = crate::chatwidget::provider_model_policy::ProviderModelPolicy::new(
+        host,
+        ProviderRuntimeAuthorizations::default(),
+    );
+    assert!(policy.provider_is_selectable("zai-anthropic", "glm-5.3-flash"));
+    assert!(!policy.provider_is_selectable("zai", "glm-5.3-flash"));
+    // A session on the connection that cannot sign in is asked to recover.
+    assert!(matches!(
+        policy.current("zai", "glm-5.3-flash"),
+        codex_provider_auth::CurrentSelectionDecision::RequireExplicitRecovery { .. }
+    ));
+    assert!(matches!(
+        policy.current("zai-anthropic", "glm-5.3-flash"),
+        codex_provider_auth::CurrentSelectionDecision::Preserve(_)
+    ));
 }

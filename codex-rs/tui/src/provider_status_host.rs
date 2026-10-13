@@ -130,10 +130,12 @@ pub(crate) struct ProviderStatusHost {
     /// account, and whether the vault holds that account. Such an entry's
     /// status comes from the account, never from the default credential.
     named_accounts: Arc<BTreeMap<String, bool>>,
-    /// #665: each connection's own credential, for API-key entries where a
-    /// connection runs on a named account. The entry's status is judged on
-    /// one account, but each connection authenticates with its own.
-    connection_credentials: Arc<BTreeMap<String, ConnectionCredential>>,
+    /// #665: for API-key entries served by several connections where one runs
+    /// on a named account, each connection's own credential (by entry id,
+    /// then runtime provider id). Each connection authenticates with its own.
+    connection_credentials: Arc<BTreeMap<String, BTreeMap<String, ConnectionCredential>>>,
+    /// Reads an API-key environment variable (tests replace it).
+    environment: fn(&str) -> EnvironmentCredentialMetadata,
 }
 
 /// The credential one connection (runtime provider) authenticates with.
@@ -171,8 +173,8 @@ fn connection_credentials(
     catalog: &ProviderCatalog,
     config: &Config,
     holds: impl Fn(&NamedProviderAccount, ProviderAccountKind) -> bool,
-) -> BTreeMap<String, ConnectionCredential> {
-    let mut credentials = BTreeMap::new();
+) -> BTreeMap<String, BTreeMap<String, ConnectionCredential>> {
+    let mut by_entry = BTreeMap::new();
     for entry in catalog.entries() {
         let Some(ProviderSetupCapability::ApiKey {
             storage: ApiKeyStorage::EnvironmentVariable { env_key },
@@ -197,6 +199,7 @@ fn connection_credentials(
         {
             continue;
         }
+        let mut credentials = BTreeMap::new();
         for (id, provider) in connections {
             let credential = match &provider.account {
                 Some(account) => ConnectionCredential::NamedAccount {
@@ -210,8 +213,9 @@ fn connection_credentials(
             };
             credentials.insert(id.to_string(), credential);
         }
+        by_entry.insert(entry.id.as_str().to_string(), credentials);
     }
-    credentials
+    by_entry
 }
 
 /// PF-84: for each catalog entry whose runtime provider selects a named
@@ -260,6 +264,7 @@ impl ProviderStatusHost {
         Self {
             named_accounts,
             connection_credentials,
+            environment: environment_metadata,
             catalog,
             codex_home: config.codex_home.to_path_buf(),
             current: Arc::new(RwLock::new(CurrentProviderSelection::runtime_id(
@@ -269,6 +274,15 @@ impl ProviderStatusHost {
             authorizations: ProviderRuntimeAuthorizations::default(),
             health: Arc::default(),
         }
+    }
+    /// Tests: read API-key environment variables through `environment`.
+    #[cfg(test)]
+    pub(crate) fn with_environment(
+        mut self,
+        environment: fn(&str) -> EnvironmentCredentialMetadata,
+    ) -> Self {
+        self.environment = environment;
+        self
     }
     pub(crate) fn set_runtime_authorizations(&mut self, value: ProviderRuntimeAuthorizations) {
         self.authorizations = value;
@@ -340,7 +354,7 @@ impl ProviderStatusHost {
             match entry.setup_capabilities.iter().next() {
                 Some(ProviderSetupCapability::ApiKey {
                     storage: ApiKeyStorage::EnvironmentVariable { env_key },
-                }) if environment_metadata(env_key) == EnvironmentCredentialMetadata::Missing => {
+                }) if (self.environment)(env_key) == EnvironmentCredentialMetadata::Missing => {
                     Some(env_key.as_str())
                 }
                 _ => None,
@@ -374,24 +388,34 @@ impl ProviderStatusHost {
         statuses
     }
 
-    /// #665: connections whose own credential is missing although their
-    /// catalog entry is judged configured by another connection's account
-    /// (`zai` on an enrolled named account, `zai-anthropic` on the default
-    /// account with no default Z.AI key). They cannot authenticate.
+    /// #665: connections whose own credential is missing although another
+    /// connection of their entry has one (`zai` on an enrolled named
+    /// account, `zai-anthropic` on the default account with no default Z.AI
+    /// key). They cannot authenticate; their entry is configured by the other.
     pub(crate) fn connections_without_credential(&self) -> std::collections::BTreeSet<String> {
         self.connection_credentials
-            .iter()
-            .filter(|(_, credential)| match credential {
-                ConnectionCredential::NamedAccount { enrolled } => !enrolled,
-                ConnectionCredential::DefaultKey { env_key } => {
-                    let metadata =
-                        self.environment_api_key_metadata(env_key, /*snapshot*/ None);
-                    metadata.environment != EnvironmentCredentialMetadata::Present
-                        && !matches!(metadata.managed, ManagedApiKeyMetadata::Stored { .. })
-                }
+            .values()
+            .flatten()
+            .filter(|(_, credential)| {
+                !self.connection_has_credential(credential, /*managed*/ None)
             })
             .map(|(id, _)| id.clone())
             .collect()
+    }
+
+    fn connection_has_credential(
+        &self,
+        credential: &ConnectionCredential,
+        managed: Option<&ManagedSnapshot>,
+    ) -> bool {
+        match credential {
+            ConnectionCredential::NamedAccount { enrolled } => *enrolled,
+            ConnectionCredential::DefaultKey { env_key } => {
+                let metadata = self.environment_api_key_metadata(env_key, managed);
+                metadata.environment == EnvironmentCredentialMetadata::Present
+                    || matches!(metadata.managed, ManagedApiKeyMetadata::Stored { .. })
+            }
+        }
     }
 
     pub(crate) fn begin_credential_attempt(&self, scope: String, runtime_provider: &str) {
@@ -488,6 +512,36 @@ impl ProviderStatusHost {
         managed: Option<&ManagedSnapshot>,
     ) -> ProviderMetadata {
         let first = entry.setup_capabilities.iter().next();
+        // #665: connections on different accounts. The entry is set up when
+        // any connection has its own credential; the others are refused one
+        // by one (`connections_without_credential`).
+        if let Some(connections) = self.connection_credentials.get(entry.id.as_str())
+            && let Some(ProviderSetupCapability::ApiKey {
+                storage: ApiKeyStorage::EnvironmentVariable { env_key },
+            }) = first
+        {
+            let named_enrolled = connections.values().any(|credential| {
+                *credential == ConnectionCredential::NamedAccount { enrolled: true }
+            });
+            let default_key = connections.values().any(|credential| {
+                matches!(credential, ConnectionCredential::DefaultKey { .. })
+                    && self.connection_has_credential(credential, managed)
+            });
+            return ProviderMetadata::ApiKey(if default_key && !named_enrolled {
+                self.environment_api_key_metadata(env_key, managed)
+            } else {
+                ApiKeyCredentialMetadata {
+                    environment: EnvironmentCredentialMetadata::Missing,
+                    managed: if named_enrolled {
+                        ManagedApiKeyMetadata::Stored {
+                            source: codex_login::ProviderApiKeyStorageSource::EncryptedVault,
+                        }
+                    } else {
+                        ManagedApiKeyMetadata::Missing
+                    },
+                }
+            });
+        }
         let named = self.named_accounts.get(entry.id.as_str()).copied();
         match first {
             // PF-84 (#571): OpenAI on a named sign-in account (selected for
@@ -560,7 +614,7 @@ impl ProviderStatusHost {
         env_key: &str,
         snapshot: Option<&ManagedSnapshot>,
     ) -> ApiKeyCredentialMetadata {
-        let environment = environment_metadata(env_key);
+        let environment = (self.environment)(env_key);
         prioritized_api_key_metadata(environment, || match snapshot {
             Some(Ok(snapshot)) => snapshot
                 .get(env_key)

@@ -34,7 +34,8 @@ pub(crate) struct ProviderModelPolicy {
     statuses: ProviderStatusCatalog,
     authorizations: ProviderRuntimeAuthorizations,
     /// #665: connections that cannot authenticate although their provider
-    /// entry is ready (see `ProviderStatusHost::connections_without_credential`).
+    /// entry is ready (see `ProviderStatusHost::connections_without_credential`):
+    /// not offered, and a session on one is asked to recover.
     without_credential: BTreeSet<String>,
 }
 
@@ -108,13 +109,24 @@ impl ProviderModelPolicy {
         runtime_provider_id: &str,
         model: &str,
     ) -> CurrentSelectionDecision {
-        ProviderRuntimeSelectionPolicy::current(
+        match ProviderRuntimeSelectionPolicy::current(
             self.host.catalog(),
             &self.statuses,
             &self.authorizations,
             runtime_provider_id,
             model,
-        )
+        ) {
+            CurrentSelectionDecision::Preserve(_)
+                if self.without_credential.contains(runtime_provider_id) =>
+            {
+                CurrentSelectionDecision::RequireExplicitRecovery {
+                    requested_runtime_provider_id: runtime_provider_id.to_string(),
+                    requested_model: model.to_string(),
+                    reason: ProviderUseBlocker::NotConfigured,
+                }
+            }
+            decision => decision,
+        }
     }
 
     pub(crate) fn preset_is_selectable(&self, preset: &ModelPreset) -> bool {
