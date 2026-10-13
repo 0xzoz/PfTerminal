@@ -19,7 +19,15 @@ pub(crate) struct DefaultLoginAtLaunch {
     /// `codex_login::leave_default_login_unenforced` before any auth manager
     /// is built.
     pub(crate) left_in_place: bool,
+    /// Why a running local daemon was not reused, for the startup warnings
+    /// (logging is not set up yet at this point of the launch).
+    pub(crate) daemon_not_reused: Option<String>,
 }
+
+const DAEMON_NOT_REUSED: &str = "This session did not reuse the running local app-server \
+     daemon, because the daemon could not confirm that it leaves alone the default OpenAI \
+     login your login settings rule out; it started its own app server instead. Restart the \
+     daemon to reuse it.";
 
 /// PF-84-S06 (#570, #595): a session on a named sign-in account checks the
 /// restrictions against that account at thread start and never reads or
@@ -47,29 +55,46 @@ pub(crate) async fn settle_default_login_at_launch(
         return Ok(DefaultLoginAtLaunch {
             app_server_target,
             left_in_place: false,
+            daemon_not_reused: None,
         });
     }
-    let app_server_target = match app_server_target {
+    let (app_server_target, daemon_not_reused) = match app_server_target {
         AppServerTarget::LocalDaemon { endpoint }
             if !daemon_leaves_ruled_out_default_login(&endpoint, config).await =>
         {
-            tracing::info!(
-                "not reusing the local app-server daemon: it would use a default login this \
-                 session's login restrictions rule out; starting an embedded app server"
-            );
-            AppServerTarget::Embedded
+            (
+                AppServerTarget::Embedded,
+                Some(DAEMON_NOT_REUSED.to_string()),
+            )
         }
-        target => target,
+        target => (target, None),
     };
     Ok(DefaultLoginAtLaunch {
         app_server_target,
         left_in_place: true,
+        daemon_not_reused,
     })
 }
 
-/// PF-84-S06 (#595): whether the local daemon at `endpoint` leaves a
-/// ruled-out default login in place and refuses to use it, under the same
-/// login restrictions as this launch.
+/// PF-84-S06 (#595): whether a connected local daemon leaves a ruled-out
+/// default login in place and refuses to use it, under the same login
+/// restrictions as this launch. Checked again on the session's own
+/// connection, since the daemon may have been restarted since the launch
+/// decided to reuse it.
+pub(crate) fn daemon_matches_default_login_policy(
+    client: &RemoteAppServerClient,
+    config: &Config,
+) -> bool {
+    client.ruled_out_default_login().is_some_and(|policy| {
+        policy.forced_login_method == config.configured_forced_login_method
+            && policy.forced_chatgpt_workspace_id == config.forced_chatgpt_workspace_id
+    })
+}
+
+/// PF-84-S06 (#595): asks the local daemon at `endpoint` (see
+/// [`daemon_matches_default_login_policy`]). The probe initializes like the
+/// session's own connection does right after (same client name), so it
+/// changes nothing on the daemon beyond one more connection.
 async fn daemon_leaves_ruled_out_default_login(
     endpoint: &RemoteAppServerEndpoint,
     config: &Config,
@@ -86,18 +111,10 @@ async fn daemon_leaves_ruled_out_default_login(
     .await
     {
         Ok(client) => client,
-        Err(err) => {
-            tracing::debug!(%err, "could not ask the local app-server daemon about the default login");
-            return false;
-        }
+        Err(_) => return false,
     };
-    let leaves = client.ruled_out_default_login().is_some_and(|policy| {
-        policy.forced_login_method == config.configured_forced_login_method
-            && policy.forced_chatgpt_workspace_id == config.forced_chatgpt_workspace_id
-    });
-    if let Err(err) = client.shutdown().await {
-        tracing::debug!(%err, "closing the local app-server daemon probe");
-    }
+    let leaves = daemon_matches_default_login_policy(&client, config);
+    let _ = client.shutdown().await;
     leaves
 }
 

@@ -191,8 +191,18 @@ async fn reused_local_daemon_leaves_a_ruled_out_default_login_and_refuses_it() -
         .arg(format!("unix://{}", socket_path.display()))
         .arg(DISABLE_PLUGIN_STARTUP_TASKS_ARG)
         .current_dir(codex_home.path())
+        // The same isolation `TestAppServer` applies: every profile alias
+        // pinned to the fixture, no native keyring, no host managed config.
         .env("CODEX_HOME", codex_home.path())
+        .env("CORBANU_HOME", codex_home.path())
+        .env("PFTERMINAL_HOME", codex_home.path())
+        .env("CORBANU_TEST_NO_NATIVE_KEYRING", "1")
+        .env(
+            "CODEX_APP_SERVER_MANAGED_CONFIG_PATH",
+            codex_home.path().join("managed_config.toml"),
+        )
         .env_remove("OPENAI_API_KEY")
+        .env_remove("CODEX_API_KEY")
         .env("RUST_LOG", "warn")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())

@@ -170,6 +170,7 @@ async fn named_session_reusing_a_daemon_leaves_the_default_login_in_place() {
 
     assert!(settled.left_in_place);
     assert_eq!(settled.app_server_target, daemon_target);
+    assert_eq!(settled.daemon_not_reused, None);
     daemon.abort();
 }
 
@@ -190,6 +191,7 @@ async fn resume_reusing_a_daemon_leaves_the_default_login_in_place() {
 
     assert!(settled.left_in_place);
     assert_eq!(settled.app_server_target, daemon_target);
+    assert_eq!(settled.daemon_not_reused, None);
     daemon.abort();
 }
 
@@ -216,6 +218,7 @@ async fn named_session_starts_its_own_server_when_the_daemon_would_use_the_login
 
         assert!(settled.left_in_place, "{policy:?}");
         assert_eq!(settled.app_server_target, AppServerTarget::Embedded);
+        assert!(settled.daemon_not_reused.is_some(), "{policy:?}");
         daemon.abort();
     }
 }
@@ -242,6 +245,7 @@ async fn named_session_starts_its_own_server_when_the_daemon_is_gone() {
 
     assert!(settled.left_in_place);
     assert_eq!(settled.app_server_target, AppServerTarget::Embedded);
+    assert!(settled.daemon_not_reused.is_some());
 }
 
 /// Unchanged: a default session, or any launch with named accounts off,

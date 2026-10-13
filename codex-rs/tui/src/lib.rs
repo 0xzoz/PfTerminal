@@ -529,9 +529,24 @@ async fn start_app_server(
         )
         .await
         .map(AppServerClient::InProcess),
-        AppServerTarget::LocalDaemon { endpoint } | AppServerTarget::Remote { endpoint } => {
-            connect_remote_app_server(endpoint.clone()).await
+        AppServerTarget::LocalDaemon { endpoint } => {
+            let client = connect_remote_app_server(endpoint.clone()).await?;
+            // PF-84-S06 (#595): this session left a ruled-out default login
+            // in place because the daemon refuses to use it; a daemon
+            // restarted since without that must not serve the session.
+            if codex_login::default_login_left_unenforced()
+                && let AppServerClient::Remote(remote) = &client
+                && !default_login_launch::daemon_matches_default_login_policy(remote, &config)
+            {
+                return Err(color_eyre::eyre::eyre!(
+                    "The local app-server daemon changed since this session started and could \
+                     use the default OpenAI login your login settings rule out. Start corbanu \
+                     again."
+                ));
+            }
+            Ok(client)
         }
+        AppServerTarget::Remote { endpoint } => connect_remote_app_server(endpoint.clone()).await,
     }
 }
 
@@ -1375,6 +1390,7 @@ pub async fn run_main(
     let default_login_launch::DefaultLoginAtLaunch {
         app_server_target,
         left_in_place,
+        daemon_not_reused,
     } = match default_login_launch::settle_default_login_at_launch(
         &config,
         launches_resume_or_fork,
@@ -1391,6 +1407,7 @@ pub async fn run_main(
     if left_in_place {
         codex_login::leave_default_login_unenforced();
     }
+    config.startup_warnings.extend(daemon_not_reused);
 
     let state_db = init_state_db_for_app_server_target(&config, &app_server_target).await?;
     let config_toml_log_dir_configured = config
