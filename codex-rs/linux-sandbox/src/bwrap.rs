@@ -782,11 +782,6 @@ fn create_filesystem_args_with_pins(
                 let real =
                     crate::pinned::expected_location(pins.roots, &checked, &writable_root.root);
                 let file = crate::pinned::open_at(&[root, mount_root], &real)?;
-                // `--ro-bind-data` masks read the first preserved file as
-                // `/dev/null`; keep it first.
-                if bwrap_args.preserved_files.is_empty() {
-                    bwrap_args.preserved_files.push(File::open("/dev/null")?);
-                }
                 bwrap_args.args.push("--bind-fd".to_string());
                 bwrap_args.args.push(file.as_raw_fd().to_string());
                 bwrap_args.args.push(path_to_string(mount_root));
@@ -1803,13 +1798,15 @@ fn append_read_only_subpath_args(
 }
 
 fn append_empty_file_bind_data_args(bwrap_args: &mut BwrapArgs, path: &Path) -> Result<()> {
-    if bwrap_args.preserved_files.is_empty() {
-        bwrap_args.preserved_files.push(File::open("/dev/null")?);
-    }
-    let null_fd = bwrap_args.preserved_files[0].as_raw_fd().to_string();
+    // bubblewrap reads a `--ro-bind-data` descriptor to its end and then
+    // closes it, so every mask needs its own. A shared one left the second
+    // mask reading a closed descriptor ("Can't write data to file ...: Bad
+    // file descriptor") unless bubblewrap happened to reuse its number (#636).
+    let null = File::open("/dev/null")?;
     bwrap_args.args.push("--ro-bind-data".to_string());
-    bwrap_args.args.push(null_fd);
+    bwrap_args.args.push(null.as_raw_fd().to_string());
     bwrap_args.args.push(path_to_string(path));
+    bwrap_args.preserved_files.push(null);
     Ok(())
 }
 
@@ -3303,9 +3300,9 @@ mod tests {
 
     /// #536: with pinned roots, each writable root is bound with `--bind-fd`
     /// from the folder opened at its pinned location (never `--bind` by
-    /// path), `/dev/null` stays the first preserved file for the
-    /// `--ro-bind-data` masks, a root swapped for a link is refused, and so
-    /// is a bubblewrap without `--bind-fd`.
+    /// path), each `--ro-bind-data` mask reads its own `/dev/null`
+    /// descriptor, a root swapped for a link is refused, and so is a
+    /// bubblewrap without `--bind-fd`.
     #[test]
     fn pinned_writable_roots_are_bound_from_checked_folders() {
         let temp_dir = TempDir::new().expect("temp dir");
@@ -3364,17 +3361,21 @@ mod tests {
         let fd_target =
             |fd: &str| std::fs::read_link(format!("/proc/self/fd/{fd}")).expect("preserved fd");
         assert_eq!(fd_target(&bind[1]), workspace);
+        // The masks read `/dev/null`, each through its own descriptor.
+        let masks = args
+            .args
+            .windows(3)
+            .filter(|window| window[0] == "--ro-bind-data")
+            .map(|window| window[1].clone())
+            .collect::<Vec<_>>();
+        assert!(!masks.is_empty(), "{:?}", args.args);
+        for fd in &masks {
+            assert_eq!(fd_target(fd), PathBuf::from("/dev/null"));
+        }
         assert_eq!(
-            fd_target(&args.preserved_files[0].as_raw_fd().to_string()),
-            PathBuf::from("/dev/null")
-        );
-        assert!(
-            args.args
-                .windows(3)
-                .any(|window| window[0] == "--ro-bind-data"
-                    && window[1] == args.preserved_files[0].as_raw_fd().to_string()),
-            "{:?}",
-            args.args
+            masks.iter().collect::<std::collections::HashSet<_>>().len(),
+            masks.len(),
+            "{masks:?}"
         );
 
         assert!(
@@ -4316,6 +4317,63 @@ mod tests {
                 && window[2] == "--ro-bind-data"
                 && window[4] == blocked_file_str
         }));
+    }
+
+    /// #636: bubblewrap closes a `--ro-bind-data` descriptor once it has read
+    /// it, so two masked files must not share one.
+    #[test]
+    fn every_masked_file_gets_its_own_null_descriptor() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let mut entries = vec![FileSystemSandboxEntry {
+            path: FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            },
+            access: FileSystemAccessMode::Read,
+            missing_path_behavior: None,
+        }];
+        let mut blocked = Vec::new();
+        for name in ["first.txt", "second.txt", "third.txt"] {
+            let path = temp_dir.path().join(name);
+            std::fs::write(&path, "secret").expect("create blocked file");
+            entries.push(FileSystemSandboxEntry {
+                path: FileSystemPath::Path {
+                    path: AbsolutePathBuf::from_absolute_path(&path).expect("absolute"),
+                },
+                access: FileSystemAccessMode::Deny,
+                missing_path_behavior: None,
+            });
+            blocked.push(path_to_string(&path));
+        }
+        let policy = FileSystemSandboxPolicy::restricted(entries);
+
+        let args =
+            create_filesystem_args(&policy, temp_dir.path(), NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
+                .expect("filesystem args");
+
+        let masks = args
+            .args
+            .windows(3)
+            .filter(|window| window[0] == "--ro-bind-data")
+            .map(|window| (window[2].clone(), window[1].clone()))
+            .collect::<Vec<_>>();
+        let mut masked = masks
+            .iter()
+            .map(|(path, _)| path.clone())
+            .collect::<Vec<_>>();
+        masked.sort();
+        assert_eq!(masked, blocked);
+        let fds = masks
+            .iter()
+            .map(|(_, fd)| fd.clone())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(fds.len(), blocked.len(), "{masks:?}");
+        for fd in fds {
+            assert_eq!(
+                std::fs::read_link(format!("/proc/self/fd/{fd}")).expect("preserved fd"),
+                PathBuf::from("/dev/null")
+            );
+        }
+        assert_eq!(args.preserved_files.len(), blocked.len());
     }
 
     #[test]
