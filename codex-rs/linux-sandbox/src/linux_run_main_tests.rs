@@ -551,7 +551,10 @@ fn stale_placeholder_sweep_leaves_other_namespaces_and_later_files() {
     let other_namespace = temp_dir.path().join("other-namespace");
     std::fs::write(&other_namespace, "").expect("placeholder");
     let maker = ended_pid();
-    let marker_dir = plant_stale_placeholder(&other_namespace, &[(maker, SYNTHETIC_MOUNT_MARKER_SYNTHETIC)]);
+    let marker_dir = plant_stale_placeholder(
+        &other_namespace,
+        &[(maker, SYNTHETIC_MOUNT_MARKER_SYNTHETIC)],
+    );
     std::fs::write(
         crate::placeholder_registry::pid_namespace_file(&marker_dir.join(maker.to_string())),
         "1",

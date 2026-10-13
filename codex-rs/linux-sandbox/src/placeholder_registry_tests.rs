@@ -13,7 +13,10 @@ fn a_marker_names_its_pid_namespace() {
             .ok(),
         own_pid_namespace()
     );
-    assert!(marker_run_is_active(&marker, std::process::id() as libc::pid_t));
+    assert!(marker_run_is_active(
+        &marker,
+        std::process::id() as libc::pid_t
+    ));
     remove_marker(&marker).expect("remove");
     assert!(!marker.exists() && !pid_namespace_file(&marker).exists());
 }
@@ -60,7 +63,11 @@ fn removal_does_not_follow_a_link_above_the_placeholder() {
             .expect("find")
             .is_none()
     );
-    assert!(find_without_links(&base.join("missing")).expect("find").is_none());
+    assert!(
+        find_without_links(&base.join("missing"))
+            .expect("find")
+            .is_none()
+    );
 }
 
 #[test]

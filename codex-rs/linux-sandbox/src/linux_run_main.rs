@@ -1028,10 +1028,9 @@ fn register_synthetic_mount_targets(
                 };
                 // #607: its location now, before the command runs, where it
                 // is removed (without following a link).
-                let target = target
-                    .with_real_path(crate::placeholder_registry::real_placeholder_path(
-                        target.path(),
-                    ));
+                let target = target.with_real_path(
+                    crate::placeholder_registry::real_placeholder_path(target.path()),
+                );
                 // #607: a placeholder another run made (still there) keeps
                 // its record, whose time is when it was made.
                 if !target.preserves_pre_existing_path()
@@ -1079,11 +1078,11 @@ fn register_protected_create_targets(
                 let marker_file = marker_dir.join(std::process::id().to_string());
                 crate::placeholder_registry::write_marker(&marker_file, PROTECTED_CREATE_MARKER)
                     .unwrap_or_else(|err| {
-                    panic!(
-                        "failed to register protected create target {}: {err}",
-                        target.path().display()
-                    )
-                });
+                        panic!(
+                            "failed to register protected create target {}: {err}",
+                            target.path().display()
+                        )
+                    });
                 ProtectedCreateTargetRegistration {
                     target: target.clone(),
                     marker_file,
@@ -1547,18 +1546,17 @@ fn remove_stale_synthetic_mount_targets() {
         // #607: reached without following a link above it, and only the
         // placeholder made for this record (not the person's own empty file
         // or folder made there later); anything else is no longer one.
-        let removed = match crate::placeholder_registry::find_without_links(target.removal_path())
-        {
+        let removed = match crate::placeholder_registry::find_without_links(target.removal_path()) {
             Err(_) => false,
             Ok(None) => true,
             Ok(Some(found))
-                if !target.should_remove(found.is_empty_file(), found.is_dir(), found.identity())
-                    || recorded_at.is_some_and(|recorded_at| {
-                        !crate::placeholder_registry::made_for_record(
-                            found.changed_at(),
-                            recorded_at,
-                        )
-                    }) =>
+                if !target.should_remove(
+                    found.is_empty_file(),
+                    found.is_dir(),
+                    found.identity(),
+                ) || recorded_at.is_some_and(|recorded_at| {
+                    !crate::placeholder_registry::made_for_record(found.changed_at(), recorded_at)
+                }) =>
             {
                 true
             }
@@ -1692,8 +1690,11 @@ pub(crate) fn is_live_placeholder(path: &Path) -> bool {
             // file at ...: Read-only file system`). Registration rewrites
             // this marker; a run that ends first leaves it to the sweep.
             let marker_file = marker_dir.join(std::process::id().to_string());
-            crate::placeholder_registry::write_marker(&marker_file, SYNTHETIC_MOUNT_MARKER_EXISTING)
-                .unwrap_or_else(|err| {
+            crate::placeholder_registry::write_marker(
+                &marker_file,
+                SYNTHETIC_MOUNT_MARKER_EXISTING,
+            )
+            .unwrap_or_else(|err| {
                 panic!(
                     "failed to hold synthetic bubblewrap mount target {}: {err}",
                     path.display()
