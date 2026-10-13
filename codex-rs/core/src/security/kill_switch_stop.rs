@@ -35,7 +35,7 @@ use crate::function_tool::FunctionCallError;
 use crate::session::session::Session;
 
 /// Shown in a session whose work the kill switch stopped.
-pub const KILL_SWITCH_STOPPED: &str = "Stopped: the security kill switch was turned on, so Corbanu ended this reply and the commands it was running, and sends nothing to the model until the switch is turned off. Turning it off restarts nothing: messages and tasks from other agents wait for the next turn someone starts. To turn it off, open /security, press g, choose \"Turn the kill switch off\" and confirm.";
+pub const KILL_SWITCH_STOPPED: &str = "Stopped: the security kill switch was turned on, so Corbanu ended this reply and the commands it was running, and sends nothing to the model until the switch is turned off. Turning it off restarts nothing: messages and tasks from other agents wait for the next turn someone starts (a Claude pane keeps only the newest task; a task for a Corbanu pane you opened yourself in /panes is refused instead). To turn it off, open /security, press g, choose \"Turn the kill switch off\" and confirm.";
 
 /// What the model is told for a tool call that was not run.
 const KILL_SWITCH_TOOL_REFUSAL: &str = "Not run: the security kill switch is on, so Corbanu runs no tool calls until a person turns it off in /security.";

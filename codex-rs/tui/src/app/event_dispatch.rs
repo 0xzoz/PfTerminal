@@ -5683,7 +5683,11 @@ impl App {
                     ));
                 }
             }
-            AppEvent::SubmitSpawnClaudePaneTask { pane_id, task } => {
+            AppEvent::SubmitSpawnClaudePaneTask {
+                pane_id,
+                task,
+                sent_while_kill_switch_on,
+            } => {
                 if self.spawn_legacy_read_only {
                     self.chat_widget.add_error_message(
                         "This restored legacy /spawn hierarchy is read-only. Existing Claude panes \
@@ -5706,12 +5710,9 @@ impl App {
                     return Ok(AppRunControl::Continue);
                 }
                 // #507: with the kill switch on the task waits, also for a
-                // pane still stopping.
-                if self.claude_panes.claude_pane_is_running(&pane_id)
-                    && !crate::legacy_core::security_revocation::kill_switch_on(
-                        self.config.codex_home.as_ref(),
-                    )
-                {
+                // pane still stopping (#613: or when it was sent while on).
+                let hold = sent_while_kill_switch_on || self.kill_switch_on_now();
+                if self.claude_panes.claude_pane_is_running(&pane_id) && !hold {
                     let acks = self.take_spawn_dispatch_acks_for_task(&target, &task);
                     self.release_spawn_dispatch_origins(&acks);
                     self.record_spawn_dispatch_acks(
@@ -5726,7 +5727,7 @@ impl App {
                     ));
                     return Ok(AppRunControl::Continue);
                 }
-                self.submit_claude_pane_task(pane_id, task);
+                self.submit_claude_pane_task_sent(pane_id, task, sent_while_kill_switch_on);
             }
             AppEvent::OpenSpawnStatus => {
                 self.open_spawn_status();

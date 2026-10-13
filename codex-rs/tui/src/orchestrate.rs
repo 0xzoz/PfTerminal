@@ -2416,6 +2416,27 @@ impl App {
             self.chat_widget.add_error_message(err);
             return;
         }
+        // #613: a whip or assignment a person attaches, resumes or starts
+        // while the kill switch is on is paused at once, like those armed when
+        // it went on, so it cannot fire once the switch is off without someone
+        // resuming it then.
+        let arms = matches!(
+            command,
+            OrchestrateCommand::Attach { .. }
+                | OrchestrateCommand::Resume(_)
+                | OrchestrateCommand::Start(_)
+        );
+        self.dispatch_orchestrate_command(command, origin);
+        if arms {
+            self.pause_whips_for_kill_switch();
+        }
+    }
+
+    fn dispatch_orchestrate_command(
+        &mut self,
+        command: OrchestrateCommand,
+        origin: CommandOrigin<'_>,
+    ) {
         match command {
             OrchestrateCommand::Status => self.chat_widget.add_info_message(
                 format_whip_status(&self.orchestrate_whips, self.orchestrate_now()),
@@ -2814,8 +2835,12 @@ impl App {
         match destination {
             FireDestination::Native(thread_id) => self.send_native_task_event(thread_id, task),
             FireDestination::ClaudePane(pane_id) => {
-                self.app_event_tx
-                    .send(AppEvent::SubmitSpawnClaudePaneTask { pane_id, task });
+                let sent_while_kill_switch_on = self.kill_switch_on_now();
+                self.app_event_tx.send(AppEvent::SubmitSpawnClaudePaneTask {
+                    pane_id,
+                    task,
+                    sent_while_kill_switch_on,
+                });
             }
         }
         self.chat_widget.add_info_message(
@@ -3048,9 +3073,11 @@ impl App {
                 self.send_native_task_event(thread_id, plan.task);
             }
             FireDestination::ClaudePane(pane_id) => {
+                let sent_while_kill_switch_on = self.kill_switch_on_now();
                 self.app_event_tx.send(AppEvent::SubmitSpawnClaudePaneTask {
                     pane_id,
                     task: plan.task,
+                    sent_while_kill_switch_on,
                 });
             }
         }
@@ -3234,9 +3261,14 @@ impl App {
                 Ok(FireDestination::Native(thread_id)) => {
                     self.send_native_task_event(thread_id, task)
                 }
-                Ok(FireDestination::ClaudePane(pane_id)) => self
-                    .app_event_tx
-                    .send(AppEvent::SubmitSpawnClaudePaneTask { pane_id, task }),
+                Ok(FireDestination::ClaudePane(pane_id)) => {
+                    let sent_while_kill_switch_on = self.kill_switch_on_now();
+                    self.app_event_tx.send(AppEvent::SubmitSpawnClaudePaneTask {
+                        pane_id,
+                        task,
+                        sent_while_kill_switch_on,
+                    });
+                }
                 Err(err) => {
                     pause_ids.push(id.clone());
                     self.chat_widget.add_error_message(format!(
