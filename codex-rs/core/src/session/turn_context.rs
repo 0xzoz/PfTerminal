@@ -1100,7 +1100,6 @@ impl Session {
         .await
     }
 
-    #[instrument(name = "turn_context.build", level = "trace", skip_all)]
     /// #505: a person confirmed Aggressive in `/security` in this process
     /// (its live policy is Aggressive) while the session's own configured
     /// level is lower, so the restart that loads the Aggressive rules has not
@@ -1146,6 +1145,7 @@ impl Session {
         configuration.approvals_reviewer = codex_protocol::config_types::ApprovalsReviewer::User;
     }
 
+    #[instrument(name = "turn_context.build", level = "trace", skip_all)]
     async fn new_turn_context_from_configuration(
         &self,
         sub_id: String,
