@@ -258,6 +258,10 @@ pub enum ProviderAccountSignIn {
     ApiKey,
 }
 
+/// A named account's sign-in with what its metadata records it holds
+/// (`None`: not recorded).
+pub type RecordedSignIn = (Zeroizing<String>, Option<ProviderAccountSignIn>);
+
 /// Reads [`ProviderAccountSignIn`] leniently: a value this build does not
 /// know reads as not recorded instead of failing the whole vault index.
 pub(crate) fn lenient_sign_in<'de, D>(
@@ -351,7 +355,7 @@ impl Vault {
         &self,
         provider_id: &str,
         name: &ProviderAccountName,
-    ) -> Result<Option<(Zeroizing<String>, Option<ProviderAccountSignIn>)>, VaultError> {
+    ) -> Result<Option<RecordedSignIn>, VaultError> {
         let kind = ProviderAccountKind::ChatgptAuth;
         let label = account_label(provider_id, name, kind)?;
         self.with_storage_lock(|| {

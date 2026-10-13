@@ -92,6 +92,7 @@ pub use provider_accounts::ProviderAccountKind;
 pub use provider_accounts::ProviderAccountMeta;
 pub use provider_accounts::ProviderAccountName;
 pub use provider_accounts::ProviderAccountSignIn;
+pub use provider_accounts::RecordedSignIn;
 pub use provider_accounts::is_provider_managed_account_label;
 pub use provider_accounts::parse_provider_account_label;
 pub use provider_accounts::parse_provider_account_selection;
