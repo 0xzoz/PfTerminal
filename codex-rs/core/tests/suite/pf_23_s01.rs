@@ -2541,6 +2541,90 @@ async fn issue_605_minimal_reads_keep_git_below_tmp_read_only() -> anyhow::Resul
     Ok(())
 }
 
+/// #649: with a `:minimal`-read profile the macOS platform defaults keep
+/// `/tmp` readable for temporary files. A protected command working below
+/// `/tmp` still cannot read the Corbanu home's files when the home is below
+/// `/tmp` too, with the path built at run time; a scratch file in `/tmp` is
+/// still read. Permissive is unchanged.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_649_minimal_reads_keep_denied_paths_below_tmp_unreadable() -> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
+    use codex_protocol::permissions::FileSystemAccessMode;
+    use codex_protocol::permissions::FileSystemPath;
+    use codex_protocol::permissions::FileSystemSandboxEntry;
+    use codex_protocol::permissions::FileSystemSandboxPolicy;
+    use codex_protocol::permissions::FileSystemSpecialPath;
+    use codex_protocol::permissions::NetworkSandboxPolicy;
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let mut wrong = Vec::new();
+    for (level, open) in [
+        (SecurityLevel::Moderate, false),
+        (SecurityLevel::Permissive, true),
+    ] {
+        // Both as a person spells them: through the `/tmp` link.
+        let home = Arc::new(tempfile::tempdir_in("/tmp")?);
+        std::fs::write(home.path().join("pf23-notes.txt"), CANARY)?;
+        let base = tempfile::tempdir_in("/tmp")?;
+        let workspace = base.path().join("ws");
+        std::fs::create_dir_all(&workspace)?;
+        std::fs::write(base.path().join("scratch"), "scratch-649")?;
+        let path = home.path().to_string_lossy().into_owned();
+        // Split inside the home folder's own name: neither part names it.
+        let (head, tail) = path.split_at(path.len() - 2);
+        let command = format!(
+            "cat \"$(printf '{head}%s/pf23-notes.txt' {tail})\"; echo; cat '{}'; echo; echo ran-649",
+            base.path().join("scratch").display()
+        );
+        let cwd = AbsolutePathBuf::from_absolute_path(&workspace)?;
+        let (test, captured) = start_turn_in(
+            Some(home.clone()),
+            level,
+            AskForApproval::Never,
+            vec![
+                call("call-649", "shell_command", json!({ "command": command })),
+                done_step(),
+            ],
+            move |config| {
+                config.cwd = cwd.clone();
+                let file_system = FileSystemSandboxPolicy::restricted(vec![
+                    FileSystemSandboxEntry::new(
+                        FileSystemPath::Special {
+                            value: FileSystemSpecialPath::Minimal,
+                        },
+                        FileSystemAccessMode::Read,
+                    ),
+                    FileSystemSandboxEntry::new(
+                        FileSystemPath::Path { path: cwd.clone() },
+                        FileSystemAccessMode::Write,
+                    ),
+                ]);
+                config
+                    .permissions
+                    .set_permission_profile(PermissionProfile::from_runtime_permissions(
+                        &file_system,
+                        NetworkSandboxPolicy::Restricted,
+                    ))
+                    .expect(":minimal profile");
+            },
+        )
+        .await?;
+        assert!(next_exec_approval(&test).await.is_none());
+        let requests = captured.requests();
+        let output = output_text(&requests[requests.len() - 1], "call-649");
+        if !output.contains("ran-649")
+            || output.contains(CANARY) != open
+            || !output.contains("scratch-649")
+        {
+            wrong.push(format!("{level:?}: {output}"));
+        }
+        drop(test);
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
 /// PF-23-S03: a level confirmed earlier and stored in `security_state.json`
 /// is enforced after a restart even when the configured level is lower.
 #[cfg(target_os = "macos")]
