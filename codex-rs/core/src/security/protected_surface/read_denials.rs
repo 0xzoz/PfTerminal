@@ -339,9 +339,13 @@ impl ReadDenials {
         workspace_roots: &[AbsolutePathBuf],
         profile: &PermissionProfile,
     ) -> Self {
-        let can_write_home = profile
-            .file_system_sandbox_policy()
-            .can_write_path_with_cwd(codex_home, turn_cwd.as_path());
+        // #619: also through a root spelled by an alias of the home's
+        // location (`/tmp` for `/private/tmp`), as the sandboxes match it.
+        let can_write_home = can_write(
+            &profile.file_system_sandbox_policy(),
+            codex_home,
+            turn_cwd.as_path(),
+        );
         let mut keep = vec![turn_cwd.clone()];
         keep.extend(workspace_roots.iter().cloned());
         keep.extend(
@@ -783,7 +787,7 @@ impl ReadDenials {
         let home_writable: Vec<FileSystemSandboxEntry> = self
             .home_writable
             .iter()
-            .filter(|path| file_system.can_write_path_with_cwd(path.as_path(), cwd))
+            .filter(|path| can_write(&file_system, path.as_path(), cwd))
             .map(|path| {
                 FileSystemSandboxEntry::skip_missing_path(
                     FileSystemPath::Path { path: path.clone() },
@@ -793,7 +797,7 @@ impl ReadDenials {
             .collect();
         let read_only: Vec<FileSystemSandboxEntry> = self
             .read_only_paths()
-            .filter(|path| file_system.can_write_path_with_cwd(path.as_path(), cwd))
+            .filter(|path| can_write(&file_system, path.as_path(), cwd))
             .map(|path| {
                 // #518: a `Read` entry more specific than a denial would
                 // reopen it. A read-only path that is denied in any spelling
@@ -817,6 +821,14 @@ impl ReadDenials {
             network,
         ))
     }
+}
+
+/// Whether `policy` lets a command write `path`, as written or through a
+/// writable root spelled by an alias of its location (#619: Seatbelt matches
+/// a root spelled `/tmp` or `/var/...` at `/private/...`, where the Corbanu
+/// home and these paths are recorded).
+fn can_write(policy: &FileSystemSandboxPolicy, path: &Path, cwd: &Path) -> bool {
+    policy.can_write_path_with_cwd(path, cwd) || policy.can_write_effective_path_with_cwd(path, cwd)
 }
 
 /// #562 (Linux): creates the Corbanu home's missing runtime folders, empty,
