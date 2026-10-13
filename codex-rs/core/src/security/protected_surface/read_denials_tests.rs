@@ -914,6 +914,96 @@ fn issue_611_a_separate_database_folder_is_denied_like_the_home() {
     assert_eq!(same, home);
 }
 
+/// Issue #651: a database folder (or Corbanu home) whose path holds glob
+/// syntax is escaped in the database glob, so a database created later is
+/// still covered and nothing else is; databases recovery set aside beside
+/// the folder (`<folder>.db-backups`) are denied when present; and a command
+/// working in the home cannot create `accounting-pending` or `db-backups`.
+#[test]
+fn issue_651_glob_syntax_and_backups_of_the_database_folder() {
+    let fx = fixture();
+    let profile = PermissionProfile::Disabled;
+    let databases = fx.user_home.join("db[1]{2*?");
+    let inside = abs(&databases.join("work"));
+    std::fs::create_dir_all(inside.as_path()).unwrap();
+    let backups = fx.user_home.join("db[1]{2*?.db-backups/sqlite-1-0");
+    std::fs::create_dir_all(&backups).unwrap();
+    let denials = ReadDenials::for_turn(
+        &fx.codex_home,
+        &databases,
+        &inside,
+        std::slice::from_ref(&inside),
+        &profile,
+    );
+    let matcher = denials.matcher().expect("a valid matcher");
+    for denied in [
+        databases.join("later.sqlite"),
+        databases.join("later.sqlite-wal"),
+        backups.join("state_5.sqlite"),
+    ] {
+        assert!(matcher.is_read_denied(&denied), "{}", denied.display());
+    }
+    for readable in [
+        databases.join("notes.txt"),
+        inside.join("file").to_path_buf(),
+        fx.user_home.join("db1/later.sqlite"),
+    ] {
+        assert!(!matcher.is_read_denied(&readable), "{}", readable.display());
+    }
+
+    // A Corbanu home whose path holds glob syntax.
+    let home = fx.user_home.join("h[o]me");
+    std::fs::create_dir_all(&home).unwrap();
+    let project = abs(&fx.user_home.join("project"));
+    let denials = ReadDenials::for_turn(
+        &home,
+        &home,
+        &project,
+        std::slice::from_ref(&project),
+        &profile,
+    );
+    let matcher = denials.matcher().expect("a valid matcher");
+    assert!(matcher.is_read_denied(&home.join("later.sqlite")));
+    assert!(!matcher.is_read_denied(&fx.user_home.join("home/later.sqlite")));
+
+    // Working in the home: neither may be created.
+    let in_home = abs(&fx.codex_home);
+    let denials = ReadDenials::for_turn(
+        &fx.codex_home,
+        &fx.codex_home,
+        &in_home,
+        std::slice::from_ref(&in_home),
+        &profile,
+    );
+    let policy = denials
+        .apply(&profile)
+        .unwrap()
+        .file_system_sandbox_policy();
+    for name in ["accounting-pending/x.json", "db-backups/x"] {
+        let path = fx.codex_home.join(name);
+        assert!(
+            !policy.can_write_path_with_cwd(&path, in_home.as_path()),
+            "{name}"
+        );
+    }
+}
+
+/// Issue #651: a pattern below a folder reached through a link whose real
+/// location holds glob syntax is copied with that location escaped.
+#[test]
+fn issue_651_real_location_of_a_pattern_is_escaped() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let real = base.join("db[1]{2");
+    std::fs::create_dir_all(&real).unwrap();
+    std::os::unix::fs::symlink(&real, base.join("link")).unwrap();
+    let pattern = format!("{}/*.sqlite*", base.join("link").display());
+    assert_eq!(
+        real_pattern(&pattern),
+        Some(format!("{}/db[[]1][{{]2/*.sqlite*", base.display()))
+    );
+}
+
 /// Issue #562: on Linux the missing runtime folders are created, empty,
 /// only where the profile could write the Corbanu home, so bubblewrap never
 /// needs a placeholder file where Corbanu expects a folder. `AGENTS.md` is
