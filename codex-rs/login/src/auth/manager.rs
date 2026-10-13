@@ -3720,6 +3720,11 @@ impl AuthManager {
 #[path = "manager_named_account.rs"]
 mod named_account;
 
+#[path = "manager_session_account.rs"]
+mod session_account;
+pub use session_account::SessionSignIn;
+pub use session_account::SessionSignInRegistration;
+
 #[cfg(test)]
 #[path = "auth_tests.rs"]
 mod tests;

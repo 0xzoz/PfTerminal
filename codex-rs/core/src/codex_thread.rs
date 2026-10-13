@@ -803,6 +803,17 @@ impl CodexThread {
         self.session.thread_config_snapshot().await
     }
 
+    /// PF-84-S06 (#658): whether a client is attached to this thread. A user
+    /// thread nobody is attached to (one the user left, kept loaded for a
+    /// while) does not count toward the account the process's own backend
+    /// requests use.
+    pub fn set_client_attached(&self, attached: bool) {
+        self.session
+            .services
+            .active_auth
+            .set_user_attached(attached);
+    }
+
     /// Returns the files that supplied the thread's loaded model instructions.
     pub async fn instruction_sources(&self) -> Vec<PathUri> {
         self.session.instruction_sources().await

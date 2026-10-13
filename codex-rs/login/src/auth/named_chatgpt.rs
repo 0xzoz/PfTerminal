@@ -20,7 +20,7 @@ use super::storage::AuthDotJson;
 use super::storage::AuthStorageBackend;
 
 /// A named sign-in account of an OpenAI-auth provider.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NamedChatgptAccount {
     pub provider_id: String,
     pub name: String,

@@ -166,14 +166,23 @@ fingerprint.
 - A refreshed token is saved back to that account only. One process shares
   one sign-in and refresh lock per account; other processes pick a refresh
   up from the vault.
-- A session on a named account uses it for what needs the sign-in: model
-  requests, refresh, connectors, plugin installs, usage, the model list and
-  the `/status` account line. A mid-session switch to another provider moves
-  all of them to that provider's account (or the default login). The process
-  has one model list: the last session started or switched decides its
-  account, and a process started on a provider without OpenAI sign-in keeps
-  that provider's list. The rate limits `/status` shows before the first
-  reply, and the `/apps` directory, come from the default login.
+- A session on a named account uses it for everything that needs the
+  sign-in: model requests, refresh, connectors, plugin installs and listings,
+  usage and rate limits (also before the first reply), the `/apps` directory,
+  ChatGPT settings, analytics, the model list and the `/status` account line.
+  The default login is never sent. A request the account cannot serve (for
+  example, a plugin listing on an API-key account, or any request on an
+  account without a usable sign-in) goes out without it or not at all, never
+  on the default login. A mid-session switch to another provider moves all of
+  them to that provider's account (or the default login). Requests the process
+  makes outside a conversation follow its open sessions: sessions on one named
+  account use it; sessions only on the default login, or on providers without
+  OpenAI sign-in, use the default login; sessions on different OpenAI accounts
+  (for example a pane on `work` and one on the default login) send none of
+  them and say why. A conversation you left (it stays loaded for a while)
+  does not count while no turn runs in it. A `resume` or `fork`, and an app
+  server or daemon with named accounts on, send none until a conversation
+  starts, because its account is known only then.
 - `forced_login_method` and `forced_chatgpt_workspace_id` apply to named
   accounts too: a sign-in of the other kind or another workspace is refused.
   A session on a named account checks them against that account only and
@@ -184,11 +193,10 @@ fingerprint.
   is refused with the reason instead of logging the login out. With
   `named_accounts` on, an app server (`corbanu app-server`, or the local
   daemon a TUI reuses) does the same for every client: it never logs out a
-  default login these settings rule out and refuses to use it. A TUI reuses
-  a running local daemon for such a launch only when the daemon reports this
-  under the same settings (an older daemon, or one started with
-  `named_accounts` off or other settings, is not reused: the TUI starts its
-  own app server). A default session still logs a ruled-out default login
+  default login these settings rule out and refuses to use it. Such a TUI
+  launch never reuses a running local daemon, which may already serve
+  another session on another account: it starts its own app server and
+  says so. A default session still logs a ruled-out default login
   out at startup, daemon or not. While a forced login rules the default
   out, `corbanu fork` of a named thread without `--account` shows the
   default sign-in screen; pass `--account <name>` to fork it on its

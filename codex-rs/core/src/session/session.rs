@@ -1207,7 +1207,11 @@ impl Session {
                 user_shell: Arc::new(default_shell),
                 show_raw_agent_reasoning: config.show_raw_agent_reasoning,
                 exec_policy,
-                active_auth: crate::state::ActiveAuthManager::new(Arc::clone(&auth_manager)),
+                active_auth: crate::state::ActiveAuthManager::new(Arc::clone(&auth_manager))
+                    .for_user_session(
+                        !session_configuration.session_source.is_non_root_agent(),
+                        &session_configuration.provider,
+                    ),
                 openai_file_upload_client_pool: RouteAwareClientPool::new_without_request_logging(
                     config.http_client_factory(),
                     ClientRouteClass::Api,
