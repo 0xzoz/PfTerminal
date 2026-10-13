@@ -91,6 +91,20 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
 
+      # Without a remote cache the gnu job's outputs (Wine-exec and V8 included)
+      # filled the runner's disk on nightly-ci (2026-10-12 and -13: "No space
+      # left on device" in hundreds of tests, #636). Drop preinstalled SDKs
+      # this job never uses.
+      - name: Free runner disk space (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          df -h /
+          for dir in /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost; do
+            if [[ -d "$dir" ]]; then sudo rm -r -- "$dir"; fi
+          done
+          df -h /
+
       - name: bazel test //...
         env:
           BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}

@@ -239,6 +239,14 @@ async fn user_shell_cmd_env_values_never_reach_trace_logs() -> anyhow::Result<()
 /// request URL are still logged, with the values redacted.
 #[tokio::test]
 async fn provider_credentials_and_tool_env_never_reach_trace_logs() -> anyhow::Result<()> {
+    // These check that the trace sinks record named events, which depends
+    // on process-wide tracing state (callsite interest). Bazel runs every test
+    // of a shard in one process, where other tests leave those callsites
+    // disabled; nextest (postmerge-ci) gives each test its own process, and
+    // runs them there (#636, as for aws-auth's log-sink tests).
+    if option_env!("BAZEL_PACKAGE").is_some() {
+        return Ok(());
+    }
     const PROVIDER_KEY: &str = "fake-provider-key-trace-0001-7d41c9e2";
     const HEADER_VALUE: &str = "fake-provider-header-0002-41aa90c3";
     const QUERY_VALUE: &str = "fake-provider-query-0003-0e5d77b1";
@@ -452,6 +460,14 @@ async fn websocket_api_key_never_reaches_trace_logs() -> anyhow::Result<()> {
 /// hyper and h2 under the same `RUST_LOG`.
 #[tokio::test]
 async fn http_api_key_never_reaches_trace_logs() -> anyhow::Result<()> {
+    // These check that the trace sinks record named events, which depends
+    // on process-wide tracing state (callsite interest). Bazel runs every test
+    // of a shard in one process, where other tests leave those callsites
+    // disabled; nextest (postmerge-ci) gives each test its own process, and
+    // runs them there (#636, as for aws-auth's log-sink tests).
+    if option_env!("BAZEL_PACKAGE").is_some() {
+        return Ok(());
+    }
     const API_KEY: &str = "fake-http-api-key-380-0002-0d93a7e4";
 
     let (sinks, guard) = TraceSinks::install().await?;

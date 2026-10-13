@@ -570,6 +570,7 @@ generatedImage(result);
 /// the app server. `cargo test -p codex-app-server` builds only this package's
 /// binaries; `just test`, CI and Bazel also build the host. Without it the
 /// cell cannot start and its output is a spawn error, not the image (#371).
+#[cfg(not(windows))]
 fn require_code_mode_host() {
     assert!(
         codex_utils_cargo_bin::cargo_bin("codex-code-mode-host").is_ok(),

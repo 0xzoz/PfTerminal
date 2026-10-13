@@ -2390,8 +2390,12 @@ async fn issue_442_templates_stay_usable_and_never_reach_the_env() {
 /// test; a run from a nextest archive on another machine (CI's test shards)
 /// has to create it.
 fn outside_temp_root() -> PathBuf {
-    let root = option_env!("CARGO_TARGET_TMPDIR")
+    // Under Bazel the compile-time scratch path is read-only in the test
+    // sandbox; its per-test `TEST_TMPDIR` is outside `/tmp` and `TMPDIR` too.
+    let root = std::env::var_os("TEST_TMPDIR")
+        .filter(|_| option_env!("BAZEL_PACKAGE").is_some())
         .map(PathBuf::from)
+        .or_else(|| option_env!("CARGO_TARGET_TMPDIR").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
     std::fs::create_dir_all(&root).unwrap();
     root
