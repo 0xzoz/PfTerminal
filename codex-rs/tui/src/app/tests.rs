@@ -339,6 +339,7 @@ async fn accounting_inspect_app_off_and_old_usage_routes() -> anyhow::Result<()>
 #[path = "tests/advanced_reasoning_tests.rs"]
 mod advanced_reasoning_tests;
 mod dispatch_integration;
+mod issue_613;
 mod model_catalog;
 mod plugin_catalog;
 mod rate_limits;

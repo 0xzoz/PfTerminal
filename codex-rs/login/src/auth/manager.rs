@@ -1687,7 +1687,11 @@ pub fn leave_default_login_unenforced() {
     DEFAULT_LOGIN_LEFT_UNENFORCED.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
-fn default_login_left_unenforced() -> bool {
+/// PF-84-S06 (#595): whether this process left the default login in place
+/// (see [`leave_default_login_unenforced`]). An app server reports it at
+/// initialize, so a client reusing it knows a ruled-out default login is
+/// neither logged out nor used there.
+pub fn default_login_left_unenforced() -> bool {
     DEFAULT_LOGIN_LEFT_UNENFORCED.load(std::sync::atomic::Ordering::SeqCst)
 }
 

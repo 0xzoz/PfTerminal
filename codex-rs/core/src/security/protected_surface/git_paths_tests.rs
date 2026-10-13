@@ -167,3 +167,53 @@ fn pf_23_s02_unreadable_repository_fails_closed() {
         }
     }
 }
+
+/// #650: a worktree's repository paths include what git reads from every
+/// linked worktree's folder in the common one, also the other worktrees';
+/// past the limit, or when the folder cannot be read, `worktrees` whole.
+#[test]
+fn issue_650_other_worktrees_folders_are_protected() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = abs(&dir.path().canonicalize().unwrap());
+    let common = base.join("main/.git");
+    for name in ["w", "other"] {
+        let admin = common.join("worktrees").join(name);
+        std::fs::create_dir_all(admin.as_path()).unwrap();
+        std::fs::write(admin.join("commondir").as_path(), "../..\n").unwrap();
+        std::fs::write(admin.join("gitdir").as_path(), "x\n").unwrap();
+    }
+    let repo = base.join("repo");
+    std::fs::create_dir_all(repo.as_path()).unwrap();
+    std::fs::write(
+        repo.join(".git").as_path(),
+        format!("gitdir: {}\n", common.join("worktrees/w").display()),
+    )
+    .unwrap();
+    let paths = git_persistence_paths(&repo, None);
+    for protected in [
+        "worktrees/other/commondir",
+        "worktrees/other/config.worktree",
+        "worktrees/other/gitdir",
+        "worktrees/w/commondir",
+    ] {
+        assert!(
+            paths.contains(&common.join(protected)),
+            "{protected}: {paths:?}"
+        );
+    }
+    // The main worktree finds them the same way.
+    std::fs::create_dir_all(base.join("main/src").as_path()).unwrap();
+    let paths = git_persistence_paths(&base.join("main/src"), None);
+    assert!(
+        paths.contains(&common.join("worktrees/other/commondir")),
+        "{paths:?}"
+    );
+
+    for n in 0..=MAX_MODULE_DIRS {
+        std::fs::create_dir_all(common.join(format!("worktrees/f{n}")).as_path()).unwrap();
+    }
+    assert_eq!(
+        worktree_admin_paths(&common),
+        vec![common.join("worktrees")]
+    );
+}

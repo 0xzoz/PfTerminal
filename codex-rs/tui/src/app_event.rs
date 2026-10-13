@@ -490,6 +490,10 @@ pub(crate) enum AppEvent {
     SubmitSpawnClaudePaneTask {
         pane_id: String,
         task: String,
+        /// #613: another agent sent it while the security kill switch was
+        /// on: it waits for the pane's next turn even when it is handled
+        /// after the switch was turned off.
+        sent_while_kill_switch_on: bool,
     },
     /// Show the current orchestration tree.
     OpenSpawnStatus,

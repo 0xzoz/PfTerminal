@@ -378,6 +378,7 @@ use self::plugins::PluginsCacheState;
 mod plan_implementation;
 use self::plan_implementation::PLAN_IMPLEMENTATION_TITLE;
 mod model_popups;
+mod model_route_rows;
 mod provider_health;
 pub(crate) mod provider_model_policy;
 mod provider_recovery;

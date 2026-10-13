@@ -3203,6 +3203,118 @@ fn minimal_reads_keep_tmp_writes_unchanged_without_denials() {
     );
 }
 
+/// #649: a `:minimal`-read profile with a workspace below `/tmp`, a denied
+/// file in it and one outside it (both below `/tmp`), a `.env` there (a
+/// denied glob) and a folder that may not be listed. `denied`: whether the
+/// profile denies those paths (Moderate's and Aggressive's shape). Returns
+/// the script's output.
+fn minimal_reads_in_tmp(denied: bool) -> (TempDir, String) {
+    let base = tempfile::tempdir_in("/tmp").expect("tempdir in /tmp");
+    let x = base.path().to_path_buf();
+    let workspace = x.join("ws");
+    let unlistable = x.join("home");
+    fs::create_dir_all(&workspace).expect("ws");
+    fs::create_dir_all(&unlistable).expect("home");
+    fs::write(workspace.join("secret.key"), "ws-secret-649\n").expect("ws secret");
+    fs::write(workspace.join(".env"), "env-secret-649\n").expect(".env");
+    fs::write(workspace.join("file"), "ws-file-649\n").expect("ws file");
+    fs::write(x.join("secret.key"), "outside-secret-649\n").expect("secret");
+    fs::write(x.join("scratch"), "scratch-649\n").expect("scratch");
+    fs::write(unlistable.join("listing-canary-649"), "x\n").expect("canary");
+    let mut entries = vec![
+        FileSystemSandboxEntry {
+            path: FileSystemPath::Special {
+                value: FileSystemSpecialPath::Minimal,
+            },
+            access: FileSystemAccessMode::Read,
+            missing_path_behavior: None,
+        },
+        path_entry(&workspace, FileSystemAccessMode::Write),
+    ];
+    if denied {
+        entries.push(path_entry(
+            &workspace.join("secret.key"),
+            FileSystemAccessMode::Deny,
+        ));
+        entries.push(path_entry(
+            &x.join("secret.key"),
+            FileSystemAccessMode::Deny,
+        ));
+        entries.push(FileSystemSandboxEntry {
+            path: FileSystemPath::GlobPattern {
+                pattern: format!("{}/**/.env", x.display()),
+            },
+            access: FileSystemAccessMode::Deny,
+            missing_path_behavior: None,
+        });
+        entries.push(FileSystemSandboxEntry::deny_directory_listing(
+            &AbsolutePathBuf::from_absolute_path(&unlistable).expect("absolute"),
+        ));
+    }
+    let script = format!(
+        "cat '{ws}/secret.key'; echo ws_secret=$?; cat '{x}/secret.key'; echo secret=$?; \
+         cat '{ws}/.env'; echo env=$?; ls '{home}'; echo ls=$?; \
+         cat '{ws}/file'; echo ws=$?; cat '{x}/scratch'; echo scratch=$?",
+        ws = workspace.display(),
+        x = x.display(),
+        home = unlistable.display(),
+    );
+    let stdout = run_in_seatbelt(
+        &FileSystemSandboxPolicy::restricted(entries),
+        &workspace,
+        &script,
+    );
+    (base, stdout)
+}
+
+/// #649: once the policy denies reads, `/tmp` stays readable for temporary
+/// files but no longer reaches a denied path, a denied glob or a folder that
+/// may not be listed there: they stay unreadable as with `:root` reads.
+#[test]
+fn minimal_reads_keep_denied_paths_in_tmp_unreadable() {
+    let (_base, stdout) = minimal_reads_in_tmp(/*denied*/ true);
+    assert_lines(
+        &stdout,
+        &[
+            "ws_secret=1",
+            "secret=1",
+            "env=1",
+            "ls=1",
+            "ws-file-649",
+            "ws=0",
+            "scratch-649",
+            "scratch=0",
+        ],
+    );
+    for leaked in [
+        "ws-secret-649",
+        "outside-secret-649",
+        "env-secret-649",
+        "listing-canary-649",
+    ] {
+        assert!(!stdout.contains(leaked), "{leaked} leaked: {stdout}");
+    }
+}
+
+/// #649: a policy without denied paths (Permissive's shape) keeps the
+/// platform defaults' `/tmp` reads as they were.
+#[test]
+fn minimal_reads_keep_tmp_reads_unchanged_without_denials() {
+    let (_base, stdout) = minimal_reads_in_tmp(/*denied*/ false);
+    assert_lines(
+        &stdout,
+        &[
+            "ws_secret=0",
+            "secret=0",
+            "env=0",
+            "ls=0",
+            "ws=0",
+            "scratch=0",
+            "listing-canary-649",
+        ],
+    );
+}
+
 /// #651: a database glob below a folder reached through a link whose real
 /// location holds glob syntax (`link -> db[1]`) still denies the databases
 /// there: the resolved folder is escaped, not read as a character class.

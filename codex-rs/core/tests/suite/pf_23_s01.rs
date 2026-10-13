@@ -2445,6 +2445,100 @@ async fn issue_611_a_separate_database_folder_is_protected() -> anyhow::Result<(
     Ok(())
 }
 
+/// #650: a protected command with full access, working in a linked git
+/// worktree, cannot rewrite another worktree's folder in the shared
+/// repository folder (its `commondir`, `config.worktree` or `gitdir`, which
+/// would point the person's later git runs there at a planted config), nor
+/// move that folder aside, with the paths built at run time. Its own
+/// worktree's files stay writable. Permissive is unchanged.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_650_other_worktrees_git_folders_stay_read_only() -> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let mut wrong = Vec::new();
+    for (level, open) in [
+        (SecurityLevel::Moderate, false),
+        (SecurityLevel::Aggressive, false),
+        (SecurityLevel::Permissive, true),
+    ] {
+        let base = TempDir::new()?;
+        let x = base.path().canonicalize()?;
+        let common = x.join("main/.git");
+        std::fs::create_dir_all(common.join("hooks"))?;
+        std::fs::write(common.join("config"), "[core]\n")?;
+        for name in ["wt", "other"] {
+            let admin = common.join("worktrees").join(name);
+            std::fs::create_dir_all(&admin)?;
+            std::fs::write(admin.join("HEAD"), "ref\n")?;
+            std::fs::write(admin.join("commondir"), "../..\n")?;
+            std::fs::write(
+                admin.join("gitdir"),
+                format!("{}/.git\n", x.join(name).display()),
+            )?;
+            std::fs::create_dir_all(x.join(name))?;
+            std::fs::write(
+                x.join(name).join(".git"),
+                format!("gitdir: {}\n", admin.display()),
+            )?;
+        }
+        let other = common.join("worktrees/other");
+        let path = x.to_string_lossy().into_owned();
+        // Split inside the folder's own name: neither part names it.
+        let (head, tail) = path.split_at(path.len() - 2);
+        let command = format!(
+            "x=\"$(printf '{head}%s' {tail})\"; o=\"$x/main/.g$(printf it)/worktrees/other\"; \
+             printf /planted > \"$o/common$(printf dir)\"; \
+             printf '[core]\\n' > \"$o/config.$(printf worktree)\"; \
+             printf /planted > \"$o/git$(printf dir)\"; \
+             mv \"$o\" \"$x/moved650\"; echo x > \"$x/wt/file650\"; echo ran-650"
+        );
+        let cwd = AbsolutePathBuf::from_absolute_path(x.join("wt"))?;
+        let (test, captured) = start_turn_in(
+            None,
+            level,
+            AskForApproval::Never,
+            vec![
+                call("call-650", "shell_command", json!({ "command": command })),
+                done_step(),
+            ],
+            move |config| {
+                config.cwd = cwd.clone();
+                config
+                    .permissions
+                    .set_permission_profile(PermissionProfile::Disabled)
+                    .expect("full access");
+            },
+        )
+        .await?;
+        assert!(next_exec_approval(&test).await.is_none());
+        let requests = captured.requests();
+        let output = output_text(&requests[requests.len() - 1], "call-650");
+        // Where the folder is now (Permissive moves it).
+        let now = if other.exists() {
+            other.clone()
+        } else {
+            x.join("moved650")
+        };
+        let read = |name: &str| std::fs::read_to_string(now.join(name)).unwrap_or_default();
+        let achieved = [
+            read("commondir") != "../..\n",
+            !read("config.worktree").is_empty(),
+            !read("gitdir").starts_with(&x.to_string_lossy().into_owned()),
+            // Moved aside (`mv` copies what a pinned folder keeps from
+            // being renamed, and fails to remove the protected entries).
+            !other.exists(),
+        ];
+        if !output.contains("ran-650") || achieved != [open; 4] || !x.join("wt/file650").exists() {
+            wrong.push(format!("{level:?}: {achieved:?}: {output}"));
+        }
+        drop(test);
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
 /// Issue #651: a protected command working inside a separate database
 /// folder whose path holds glob syntax runs (bubblewrap's glob scan accepts
 /// the escaped pattern) and still cannot read a database there, write the
@@ -2603,6 +2697,90 @@ async fn issue_605_minimal_reads_keep_git_below_tmp_read_only() -> anyhow::Resul
         ];
         if !output.contains("ran-605") || achieved != [open; 3] || !x.join("scratch").exists() {
             wrong.push(format!("{level:?}: {achieved:?}: {output}"));
+        }
+        drop(test);
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
+/// #649: with a `:minimal`-read profile the macOS platform defaults keep
+/// `/tmp` readable for temporary files. A protected command working below
+/// `/tmp` still cannot read the Corbanu home's files when the home is below
+/// `/tmp` too, with the path built at run time; a scratch file in `/tmp` is
+/// still read. Permissive is unchanged.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_649_minimal_reads_keep_denied_paths_below_tmp_unreadable() -> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
+    use codex_protocol::permissions::FileSystemAccessMode;
+    use codex_protocol::permissions::FileSystemPath;
+    use codex_protocol::permissions::FileSystemSandboxEntry;
+    use codex_protocol::permissions::FileSystemSandboxPolicy;
+    use codex_protocol::permissions::FileSystemSpecialPath;
+    use codex_protocol::permissions::NetworkSandboxPolicy;
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let mut wrong = Vec::new();
+    for (level, open) in [
+        (SecurityLevel::Moderate, false),
+        (SecurityLevel::Permissive, true),
+    ] {
+        // Both as a person spells them: through the `/tmp` link.
+        let home = Arc::new(tempfile::tempdir_in("/tmp")?);
+        std::fs::write(home.path().join("pf23-notes.txt"), CANARY)?;
+        let base = tempfile::tempdir_in("/tmp")?;
+        let workspace = base.path().join("ws");
+        std::fs::create_dir_all(&workspace)?;
+        std::fs::write(base.path().join("scratch"), "scratch-649")?;
+        let path = home.path().to_string_lossy().into_owned();
+        // Split inside the home folder's own name: neither part names it.
+        let (head, tail) = path.split_at(path.len() - 2);
+        let command = format!(
+            "cat \"$(printf '{head}%s/pf23-notes.txt' {tail})\"; echo; cat '{}'; echo; echo ran-649",
+            base.path().join("scratch").display()
+        );
+        let cwd = AbsolutePathBuf::from_absolute_path(&workspace)?;
+        let (test, captured) = start_turn_in(
+            Some(home.clone()),
+            level,
+            AskForApproval::Never,
+            vec![
+                call("call-649", "shell_command", json!({ "command": command })),
+                done_step(),
+            ],
+            move |config| {
+                config.cwd = cwd.clone();
+                let file_system = FileSystemSandboxPolicy::restricted(vec![
+                    FileSystemSandboxEntry::new(
+                        FileSystemPath::Special {
+                            value: FileSystemSpecialPath::Minimal,
+                        },
+                        FileSystemAccessMode::Read,
+                    ),
+                    FileSystemSandboxEntry::new(
+                        FileSystemPath::Path { path: cwd.clone() },
+                        FileSystemAccessMode::Write,
+                    ),
+                ]);
+                config
+                    .permissions
+                    .set_permission_profile(PermissionProfile::from_runtime_permissions(
+                        &file_system,
+                        NetworkSandboxPolicy::Restricted,
+                    ))
+                    .expect(":minimal profile");
+            },
+        )
+        .await?;
+        assert!(next_exec_approval(&test).await.is_none());
+        let requests = captured.requests();
+        let output = output_text(&requests[requests.len() - 1], "call-649");
+        if !output.contains("ran-649")
+            || output.contains(CANARY) != open
+            || !output.contains("scratch-649")
+        {
+            wrong.push(format!("{level:?}: {output}"));
         }
         drop(test);
     }

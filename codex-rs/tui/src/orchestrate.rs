@@ -901,7 +901,7 @@ impl App {
         else {
             return Err("Expected an assignment attach command.".to_string());
         };
-        self.attach_whip(
+        let attached = self.attach_whip(
             target,
             whip_name,
             mode,
@@ -910,7 +910,13 @@ impl App {
             cooldown_s,
             holder,
             CommandOrigin::User,
-        )
+        );
+        // #613: as for `/orchestrate attach`, paused at once while the kill
+        // switch is on.
+        if attached.is_ok() {
+            self.pause_whips_for_kill_switch();
+        }
+        attached
     }
 
     pub(crate) fn open_orchestrate_status_view(&mut self) {
@@ -2416,6 +2422,38 @@ impl App {
             self.chat_widget.add_error_message(err);
             return;
         }
+        // #613: while the kill switch is on nothing is resumed or started
+        // (it could fire right after switch-off), and a whip attached now is
+        // paused at once, like those armed when the switch went on. The saved
+        // state decides (not the state this process last learned): a switch-off
+        // elsewhere allows it at once, and a switch-on is already saved.
+        let refused = match &command {
+            OrchestrateCommand::Resume(id) => Some(("resumed", "resume", id)),
+            OrchestrateCommand::Start(id) => Some(("started", "start", id)),
+            _ => None,
+        };
+        if let Some((done, verb, id_or_target)) = refused
+            && crate::legacy_core::security_revocation::kill_switch_on(
+                self.config.codex_home.as_ref(),
+            )
+        {
+            self.chat_widget.add_error_message(format!(
+                "Not {done}: the security kill switch is on. Turn it off in /security, then run /orchestrate {verb} {id_or_target}."
+            ));
+            return;
+        }
+        let attaches = matches!(command, OrchestrateCommand::Attach { .. });
+        self.dispatch_orchestrate_command(command, origin);
+        if attaches {
+            self.pause_whips_for_kill_switch();
+        }
+    }
+
+    fn dispatch_orchestrate_command(
+        &mut self,
+        command: OrchestrateCommand,
+        origin: CommandOrigin<'_>,
+    ) {
         match command {
             OrchestrateCommand::Status => self.chat_widget.add_info_message(
                 format_whip_status(&self.orchestrate_whips, self.orchestrate_now()),
@@ -2814,8 +2852,12 @@ impl App {
         match destination {
             FireDestination::Native(thread_id) => self.send_native_task_event(thread_id, task),
             FireDestination::ClaudePane(pane_id) => {
-                self.app_event_tx
-                    .send(AppEvent::SubmitSpawnClaudePaneTask { pane_id, task });
+                let sent_while_kill_switch_on = self.kill_switch_on_now();
+                self.app_event_tx.send(AppEvent::SubmitSpawnClaudePaneTask {
+                    pane_id,
+                    task,
+                    sent_while_kill_switch_on,
+                });
             }
         }
         self.chat_widget.add_info_message(
@@ -3048,9 +3090,11 @@ impl App {
                 self.send_native_task_event(thread_id, plan.task);
             }
             FireDestination::ClaudePane(pane_id) => {
+                let sent_while_kill_switch_on = self.kill_switch_on_now();
                 self.app_event_tx.send(AppEvent::SubmitSpawnClaudePaneTask {
                     pane_id,
                     task: plan.task,
+                    sent_while_kill_switch_on,
                 });
             }
         }
@@ -3234,9 +3278,14 @@ impl App {
                 Ok(FireDestination::Native(thread_id)) => {
                     self.send_native_task_event(thread_id, task)
                 }
-                Ok(FireDestination::ClaudePane(pane_id)) => self
-                    .app_event_tx
-                    .send(AppEvent::SubmitSpawnClaudePaneTask { pane_id, task }),
+                Ok(FireDestination::ClaudePane(pane_id)) => {
+                    let sent_while_kill_switch_on = self.kill_switch_on_now();
+                    self.app_event_tx.send(AppEvent::SubmitSpawnClaudePaneTask {
+                        pane_id,
+                        task,
+                        sent_while_kill_switch_on,
+                    });
+                }
                 Err(err) => {
                     pause_ids.push(id.clone());
                     self.chat_widget.add_error_message(format!(

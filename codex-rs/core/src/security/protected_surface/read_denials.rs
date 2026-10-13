@@ -736,6 +736,12 @@ impl ReadDenials {
         self.never_lifted_paths().chain(&self.read_only)
     }
 
+    /// #584: the read-only paths an Aggressive grant lifts (start-up files,
+    /// git hooks and config): every read-only path but those no grant lifts.
+    pub(crate) fn liftable_read_only_paths(&self) -> impl Iterator<Item = &AbsolutePathBuf> {
+        self.read_only.iter()
+    }
+
     /// Issue #513: the Corbanu home's runtime entries (`tmp` holds the
     /// sandbox launchers), read-only wherever the rules apply.
     pub(crate) fn runtime_read_only_paths(&self) -> impl Iterator<Item = &AbsolutePathBuf> {
@@ -968,9 +974,14 @@ fn separate_database_folder(codex_home: &Path, sqlite_home: &Path) -> Option<Abs
 /// GPU controller lock, empty and private, as Corbanu would. The init lock
 /// keeps #608's placeholder handling.
 fn create_missing_database_folder_entries(folder: &Path) {
-    let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    let builder = {
+        let mut builder = std::fs::DirBuilder::new();
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        builder
+    };
+    #[cfg(not(unix))]
+    let builder = std::fs::DirBuilder::new();
     for name in ["accounting-pending", "db-backups"] {
         // Fails harmlessly where it exists (also as a link).
         let _ = builder.create(folder.join(name));
