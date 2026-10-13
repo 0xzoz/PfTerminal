@@ -2608,6 +2608,97 @@ async fn issue_651_a_database_folder_with_glob_syntax_is_protected() -> anyhow::
     Ok(())
 }
 
+/// #652: with a writable root reached through a nested link
+/// (`<base>/link -> <base>/real`) and the Corbanu home at its real location
+/// below it, a protected command still cannot create a name in the home
+/// (`hooks.json`, which would run commands in later sessions) or write a
+/// runtime folder (`skills/`), with the paths built at run time; the root
+/// stays writable. Permissive is unchanged.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_652_home_below_a_root_reached_through_a_nested_link_stays_protected()
+-> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
+    use codex_protocol::permissions::FileSystemAccessMode;
+    use codex_protocol::permissions::FileSystemPath;
+    use codex_protocol::permissions::FileSystemSandboxEntry;
+    use codex_protocol::permissions::FileSystemSandboxPolicy;
+    use codex_protocol::permissions::FileSystemSpecialPath;
+    use codex_protocol::permissions::NetworkSandboxPolicy;
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let mut wrong = Vec::new();
+    for (level, open) in [
+        (SecurityLevel::Moderate, false),
+        (SecurityLevel::Permissive, true),
+    ] {
+        let base = TempDir::new()?;
+        let base_path = base.path().canonicalize()?;
+        let real = base_path.join("real");
+        std::fs::create_dir_all(real.join("ws"))?;
+        let link = base_path.join("link");
+        std::os::unix::fs::symlink(&real, &link)?;
+        let home = Arc::new(TempDir::new_in(&real)?);
+        let home_real = home.path().canonicalize()?;
+        std::fs::create_dir_all(home_real.join("skills"))?;
+        let path = home_real.to_string_lossy().into_owned();
+        // Split inside the home folder's own name: neither part names it.
+        let (head, tail) = path.split_at(path.len() - 2);
+        let command = format!(
+            "h=\"$(printf '{head}%s' {tail})\"; printf x > \"$h/hoo$(printf ks).json\"; \
+             printf x > \"$h/sk$(printf ills)/planted\"; printf x > ./file652; echo ran-652"
+        );
+        let cwd = AbsolutePathBuf::from_absolute_path(link.join("ws"))?;
+        let root = AbsolutePathBuf::from_absolute_path(&link)?;
+        let (test, captured) = start_turn_in(
+            Some(home.clone()),
+            level,
+            AskForApproval::Never,
+            vec![
+                call("call-652", "shell_command", json!({ "command": command })),
+                done_step(),
+            ],
+            move |config| {
+                config.cwd = cwd.clone();
+                let file_system = FileSystemSandboxPolicy::restricted(vec![
+                    FileSystemSandboxEntry::new(
+                        FileSystemPath::Special {
+                            value: FileSystemSpecialPath::Root,
+                        },
+                        FileSystemAccessMode::Read,
+                    ),
+                    FileSystemSandboxEntry::new(
+                        FileSystemPath::Path { path: root.clone() },
+                        FileSystemAccessMode::Write,
+                    ),
+                ]);
+                config
+                    .permissions
+                    .set_permission_profile(PermissionProfile::from_runtime_permissions(
+                        &file_system,
+                        NetworkSandboxPolicy::Restricted,
+                    ))
+                    .expect("nested-link root profile");
+            },
+        )
+        .await?;
+        assert!(next_exec_approval(&test).await.is_none());
+        let requests = captured.requests();
+        let output = output_text(&requests[requests.len() - 1], "call-652");
+        let achieved = [
+            std::fs::read_to_string(home_real.join("hooks.json")).unwrap_or_default() == "x",
+            home_real.join("skills/planted").exists(),
+        ];
+        if !output.contains("ran-652") || achieved != [open; 2] || !real.join("ws/file652").exists()
+        {
+            wrong.push(format!("{level:?}: {achieved:?}: {output}"));
+        }
+        drop(test);
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
 /// #605: with a `:minimal`-read profile the macOS platform defaults keep
 /// `/tmp` writable for temporary files. A protected command working in a git
 /// worktree below `/tmp` still cannot write the repository's hooks or the

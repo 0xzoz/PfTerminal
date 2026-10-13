@@ -542,15 +542,19 @@ impl LaunchContract {
         // read-only there; this only narrows access. A workspace inside
         // CODEX_HOME stays writable and is refused below. #619: also a root
         // spelled by an alias of its location (`/tmp` for `/private/tmp`).
+        // #652: also through a root reached through a nested link, spelled
+        // through that root too, which is how the sandboxes honor it.
         if file_system.can_write_path_with_cwd(self.codex_home.as_path(), cwd)
             || file_system.can_write_effective_path_with_cwd(self.codex_home.as_path(), cwd)
         {
-            file_system.entries.push(FileSystemSandboxEntry::new(
-                FileSystemPath::Path {
-                    path: self.codex_home.clone(),
-                },
-                FileSystemAccessMode::Read,
-            ));
+            let spellings =
+                file_system.writable_root_spellings_with_cwd(self.codex_home.as_path(), cwd);
+            for path in std::iter::once(self.codex_home.clone()).chain(spellings) {
+                file_system.entries.push(FileSystemSandboxEntry::new(
+                    FileSystemPath::Path { path },
+                    FileSystemAccessMode::Read,
+                ));
+            }
         }
         for entry in self.protected_entries() {
             if !file_system.entries.contains(&entry) {

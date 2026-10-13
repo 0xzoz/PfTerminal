@@ -32,6 +32,7 @@ use codex_protocol::permissions::FileSystemSandboxKind;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::FileSystemSpecialPath;
 use codex_protocol::permissions::ReadDenyMatcher;
+use codex_protocol::permissions::WritableRootLinks;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use std::path::Path;
 use std::path::PathBuf;
@@ -871,12 +872,20 @@ impl ReadDenials {
             .as_ref()
             .map_or_else(|| Path::new("/"), AbsolutePathBuf::as_path);
         let readable = Readability::new(&file_system, cwd);
+        // #652: the profile's writable roots reached through a nested link,
+        // computed once for every path below.
+        let links = file_system.writable_root_links_with_cwd(cwd);
         // #583: what stays writable inside the read-only Corbanu home, where
         // the profile could write it (more specific than the home's entry).
         let home_writable: Vec<FileSystemSandboxEntry> = self
             .home_writable
             .iter()
-            .filter(|path| can_write(&file_system, path.as_path(), cwd))
+            // #652: under every reading of the profile (a folder it names
+            // in two spellings with different access stays read-only).
+            .filter(|path| {
+                can_write_with(&file_system, path.as_path(), cwd, &links)
+                    && file_system.can_grant_write_effective_path_with_cwd(path.as_path(), cwd)
+            })
             .map(|path| {
                 FileSystemSandboxEntry::skip_missing_path(
                     FileSystemPath::Path { path: path.clone() },
@@ -886,8 +895,8 @@ impl ReadDenials {
             .collect();
         let read_only: Vec<FileSystemSandboxEntry> = self
             .read_only_paths()
-            .filter(|path| may_write(&file_system, path.as_path(), cwd))
-            .map(|path| {
+            .filter(|path| may_write(&file_system, path.as_path(), cwd, &links))
+            .flat_map(|path| {
                 // #518: a `Read` entry more specific than a denial would
                 // reopen it. A read-only path that is denied in any spelling
                 // (its real location under a denial spelled through a linked
@@ -897,10 +906,18 @@ impl ReadDenials {
                 } else {
                     FileSystemAccessMode::Deny
                 };
-                FileSystemSandboxEntry::skip_missing_path(
-                    FileSystemPath::Path { path: path.clone() },
-                    access,
-                )
+                // #652: also spelled through each writable root reached
+                // through a nested link, the spelling the sandboxes honor
+                // there.
+                std::iter::once(path.clone())
+                    .chain(links.spellings(path.as_path(), cwd))
+                    .map(move |path| {
+                        FileSystemSandboxEntry::skip_missing_path(
+                            FileSystemPath::Path { path },
+                            access,
+                        )
+                    })
+                    .collect::<Vec<_>>()
             })
             .collect();
         file_system.entries.extend(read_only);
@@ -915,16 +932,33 @@ impl ReadDenials {
 /// Whether `policy` lets a command write `path`, as written or through a
 /// writable root spelled by an alias of its location (#619: Seatbelt matches
 /// a root spelled `/tmp` or `/var/...` at `/private/...`, where the Corbanu
-/// home and these paths are recorded).
+/// home and these paths are recorded) or reached through a nested link
+/// (#652).
 fn can_write(policy: &FileSystemSandboxPolicy, path: &Path, cwd: &Path) -> bool {
-    policy.can_write_path_with_cwd(path, cwd) || policy.can_write_effective_path_with_cwd(path, cwd)
+    can_write_with(policy, path, cwd, &policy.writable_root_links_with_cwd(cwd))
+}
+
+/// [`can_write`] with the roots reached through a nested link computed once.
+fn can_write_with(
+    policy: &FileSystemSandboxPolicy,
+    path: &Path,
+    cwd: &Path,
+    links: &WritableRootLinks,
+) -> bool {
+    policy.can_write_path_with_cwd(path, cwd)
+        || policy.can_write_effective_path_with_links(path, cwd, links)
 }
 
 /// [`can_write`], or (#605) through the macOS platform defaults' scratch
 /// folders, which `:minimal` reads make writable outside the policy's own
 /// roots: where a path becomes read-only. Never used to grant a write.
-fn may_write(policy: &FileSystemSandboxPolicy, path: &Path, cwd: &Path) -> bool {
-    can_write(policy, path, cwd) || platform_tmp_writable(policy, path)
+fn may_write(
+    policy: &FileSystemSandboxPolicy,
+    path: &Path,
+    cwd: &Path,
+    links: &WritableRootLinks,
+) -> bool {
+    can_write_with(policy, path, cwd, links) || platform_tmp_writable(policy, path)
 }
 
 /// #605: whether `path` is in a scratch folder the macOS platform defaults
