@@ -245,6 +245,7 @@ mod guardian;
 pub(crate) mod helpers;
 mod history_replay;
 mod mcp_startup;
+mod model_route_choice;
 mod permissions;
 mod plan_mode;
 #[path = "tests/plugin_catalog_tests.rs"]

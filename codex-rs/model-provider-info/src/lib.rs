@@ -31,6 +31,7 @@ use std::num::NonZeroU64;
 use std::time::Duration;
 
 mod billing;
+mod model_routes;
 mod provider_debug;
 
 pub use billing::BillingBasis;
@@ -40,6 +41,11 @@ pub use billing::built_in_basis;
 pub use billing::declared_billing;
 pub use billing::not_declared_next_step;
 pub use billing::route_basis;
+pub use model_routes::ModelRoute;
+pub use model_routes::ModelRouteStyle;
+pub use model_routes::default_model_route;
+pub use model_routes::model_route;
+pub use model_routes::model_routes;
 
 const DEFAULT_ANTHROPIC_REQUEST_BODY_MAX_BYTES: usize = 30_000_000;
 const DEFAULT_ANTHROPIC_RETRY_BODY_MAX_BYTES: usize = 15_000_000;
