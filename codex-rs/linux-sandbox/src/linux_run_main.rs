@@ -1185,12 +1185,14 @@ fn cleanup_synthetic_mount_targets(targets: &[SyntheticMountTargetRegistration])
             // #582: a placeholder another run made (and was killed before
             // removing) goes as its record says, also when this run only
             // held it as an existing path.
-            let recorded_at = synthetic_mount_target_record_time(&target.marker_dir);
+            // #607: one another run made is removed only as the placeholder
+            // made for its record (that run may have been killed long ago).
             match read_synthetic_mount_target_record(&target.marker_dir) {
                 Some(made) if target.target.pre_existing_path_is_unchanged() => {
+                    let recorded_at = synthetic_mount_target_record_time(&target.marker_dir);
                     remove_synthetic_mount_target(&made, recorded_at);
                 }
-                _ => remove_synthetic_mount_target(&target.target, recorded_at),
+                _ => remove_synthetic_mount_target(&target.target, /*recorded_at*/ None),
             }
             remove_synthetic_mount_target_record(&target.marker_dir);
             match fs::remove_dir(&target.marker_dir) {
@@ -1331,10 +1333,9 @@ fn make_directory_tree_writable(path: &Path) -> std::io::Result<()> {
 
 /// Removes `target` where it was registered, without following a link in
 /// the folders above it (#607): an empty file, or an empty folder, that it
-/// still is. A placeholder this or another run made (no pre-existing path)
-/// is only removed when it was made for its record (written at
-/// `recorded_at`, when there is one): not the person's own empty file made
-/// there later.
+/// still is. With `recorded_at` (the time of the record of a placeholder
+/// another run made), only when it was made for that record: not the
+/// person's own empty file made there later.
 fn remove_synthetic_mount_target(
     target: &crate::bwrap::SyntheticMountTarget,
     recorded_at: Option<std::time::SystemTime>,
