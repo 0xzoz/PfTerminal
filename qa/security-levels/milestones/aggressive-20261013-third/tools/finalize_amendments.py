@@ -6,7 +6,7 @@ d = json.loads((run3 / "design3/amendments3-v3.json").read_text())
 rows = []
 for r in d["amendments"]:
     if r["case"] == "AGG-32":
-        r = dict(r); r["decisions"] = [f"owner answer (b) = Option {b} (go file qual-aggr3.go, SHA-256 {go_sha})"]; r.pop("pending", None)
+        r = dict(r); r["decisions"] = [f"#447 (2026-10-13T17:10:35Z, point 2): owner answer (b) = Option {b} (go file qual-aggr3.go, SHA-256 {go_sha})"]; r.pop("pending", None)
         if b == "B":
             r["new"] = {"expected": [r["new"]["expected"][0].split(": ", 1)[1]]}
         else:
@@ -17,7 +17,7 @@ for r in d["amendments"]:
         raise SystemExit("answer (a) = A needs a new candidate with #662 and a reviewed amendment: stop and re-plan")
     rows.append(r)
 d["amendments"] = rows
-d["about"] = f"Third-run amendment table, final. Owner answers: (a) Option {a}, (b) Option {b} (go file SHA-256 {go_sha}). Applies on top of the second run's effective design; unlisted cases run as in the second run."
+d["about"] = f"Third-run amendment table, final. Owner answers: (a) Option {a} (#505 2026-10-13T17:10:33Z, #447 17:10:35Z point 1: the restart-only list stays; no amendment for AGG-02/04/37), (b) Option {b} (#447 17:10:35Z point 2) (go file SHA-256 {go_sha}). Applies on top of the second run's effective design; unlisted cases run as in the second run."
 d.pop("pending", None)
 (run3 / "design3/amendments3-final.json").write_text(json.dumps(d, indent=1))
 L = ["# Third-run amendments (final)", "", d["about"], "", "| Case | Old expectation (in force for the second run) | Decision | New expectation |", "| --- | --- | --- | --- |"]
