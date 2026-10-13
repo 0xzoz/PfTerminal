@@ -212,6 +212,72 @@ async fn only_available_connections_are_offered() {
     assert!(!unconfigured.contains("-style"), "{unconfigured}");
 }
 
+/// #665: with the connections on different accounts, each is listed only when
+/// its own credential is there: the named account's enrollment, or the
+/// default Z.AI key for a connection without an account.
+#[tokio::test]
+async fn connections_on_different_accounts_are_offered_only_with_their_own_credential() {
+    use crate::provider_status_host::ProviderAccountMetadata;
+    use crate::provider_status_host::ProviderStatusHost;
+    use codex_provider_auth::ProviderRuntimeAuthorizations;
+
+    for (named, offered, hidden) in [
+        (ZAI_PROVIDER_ID, OPENAI_STYLE, CLAUDE_STYLE),
+        (ZAI_ANTHROPIC_PROVIDER_ID, CLAUDE_STYLE, OPENAI_STYLE),
+    ] {
+        let (mut chat, _rx, _op_rx) = zai_session(named).await;
+        let home = tempfile::tempdir().unwrap();
+        let mut config = crate::legacy_core::config::ConfigBuilder::default()
+            .codex_home(home.path().to_path_buf())
+            .build()
+            .await
+            .unwrap();
+        config.cli_auth_credentials_store_mode = codex_login::AuthCredentialsStoreMode::File;
+        config.model_provider_id = named.to_string();
+        let account = codex_model_provider_info::NamedProviderAccount {
+            provider_id: named.to_string(),
+            name: "work".to_string(),
+        };
+        for providers in [
+            &mut config.model_providers,
+            &mut chat.config.model_providers,
+        ] {
+            providers.get_mut(named).expect(named).account = Some(account.clone());
+        }
+        let host = ProviderStatusHost::from_config_with_account_registry(
+            &config,
+            ProviderAccountMetadata::default(),
+            |held, kind| held == &account && kind == codex_login::ProviderAccountKind::ApiKey,
+        );
+        chat.model_catalog.set_provider_policy(
+            super::super::provider_model_policy::ProviderModelPolicy::new(
+                host.clone(),
+                ProviderRuntimeAuthorizations::default(),
+            ),
+        );
+        let popup = open_all_models(&mut chat);
+        assert!(popup.contains(offered), "{named}: {popup}");
+        assert!(!popup.contains(hidden), "{named}: {popup}");
+
+        // With a default Z.AI key stored, the other connection can sign in too.
+        chat.handle_key_event(KeyEvent::from(KeyCode::Esc));
+        codex_login::login_with_provider_api_key(
+            home.path(),
+            "ZAI_API_KEY",
+            "synthetic-route-choice-key",
+            config.cli_auth_credentials_store_mode,
+            config.auth_keyring_backend_kind(),
+        )
+        .unwrap();
+        chat.model_catalog.refresh_provider_policy();
+        let popup = open_all_models(&mut chat);
+        assert!(
+            popup.contains(offered) && popup.contains(hidden),
+            "{named}: {popup}"
+        );
+    }
+}
+
 /// PF-84 accounts are per provider: connections on different accounts say so.
 #[tokio::test]
 async fn connections_on_different_named_accounts_name_them() {

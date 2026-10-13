@@ -521,3 +521,60 @@ async fn openai_on_a_named_sign_in_account_is_configured_without_a_default_login
         );
     }
 }
+
+/// #665: `zai` and `zai-anthropic` share one catalog entry, but PF-84 accounts
+/// are per connection. With one on a named account, each connection is judged
+/// on its own credential; without any account none is singled out.
+#[tokio::test]
+async fn each_connection_on_a_mixed_account_entry_needs_its_own_credential() {
+    use std::collections::BTreeSet;
+
+    let home = tempdir().unwrap();
+    let mut config = crate::legacy_core::config::ConfigBuilder::default()
+        .codex_home(home.path().to_path_buf())
+        .build()
+        .await
+        .unwrap();
+    config.cli_auth_credentials_store_mode = codex_login::AuthCredentialsStoreMode::File;
+    config.model_provider_id = "zai".into();
+    let missing = |config: &Config, enrolled: bool| {
+        ProviderStatusHost::from_config_with_account_registry(
+            config,
+            ProviderAccountMetadata::default(),
+            |account, kind| {
+                enrolled
+                    && account.provider_id == "zai"
+                    && account.name == "work"
+                    && kind == ProviderAccountKind::ApiKey
+            },
+        )
+        .connections_without_credential()
+    };
+    let set = |ids: &[&str]| ids.iter().map(ToString::to_string).collect::<BTreeSet<_>>();
+
+    assert_eq!(missing(&config, /*enrolled*/ false), set(&[]));
+    config
+        .model_providers
+        .get_mut("zai")
+        .expect("built-in zai provider")
+        .account = Some(NamedProviderAccount {
+        provider_id: "zai".into(),
+        name: "work".into(),
+    });
+    assert_eq!(missing(&config, /*enrolled*/ true), set(&["zai-anthropic"]));
+    assert_eq!(
+        missing(&config, /*enrolled*/ false),
+        set(&["zai", "zai-anthropic"])
+    );
+
+    codex_login::login_with_provider_api_key(
+        home.path(),
+        "ZAI_API_KEY",
+        "synthetic-default-key",
+        config.cli_auth_credentials_store_mode,
+        config.auth_keyring_backend_kind(),
+    )
+    .unwrap();
+    assert_eq!(missing(&config, /*enrolled*/ true), set(&[]));
+    assert_eq!(missing(&config, /*enrolled*/ false), set(&["zai"]));
+}

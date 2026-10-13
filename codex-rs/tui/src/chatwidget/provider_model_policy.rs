@@ -1,8 +1,11 @@
+use std::collections::BTreeSet;
+
 use codex_protocol::openai_models::ModelPreset;
 use codex_provider_auth::CurrentSelectionDecision;
 use codex_provider_auth::ProviderRuntimeAuthorizations;
 use codex_provider_auth::ProviderRuntimeSelectionPolicy;
 use codex_provider_auth::ProviderStatusCatalog;
+use codex_provider_auth::ProviderUseBlocker;
 use codex_provider_auth::ProviderUseContext;
 use codex_provider_auth::ProviderUseDecision;
 
@@ -30,6 +33,9 @@ pub(crate) struct ProviderModelPolicy {
     host: ProviderStatusHost,
     statuses: ProviderStatusCatalog,
     authorizations: ProviderRuntimeAuthorizations,
+    /// #665: connections that cannot authenticate although their provider
+    /// entry is ready (see `ProviderStatusHost::connections_without_credential`).
+    without_credential: BTreeSet<String>,
 }
 
 impl ProviderModelPolicy {
@@ -38,10 +44,12 @@ impl ProviderModelPolicy {
         authorizations: ProviderRuntimeAuthorizations,
     ) -> Self {
         let statuses = host.resolve();
+        let without_credential = host.connections_without_credential();
         Self {
             host,
             statuses,
             authorizations,
+            without_credential,
         }
     }
 
@@ -51,6 +59,7 @@ impl ProviderModelPolicy {
 
     pub(crate) fn refresh(&mut self) {
         self.statuses = self.host.resolve();
+        self.without_credential = self.host.connections_without_credential();
     }
 
     pub(crate) fn update_statuses(
@@ -72,14 +81,26 @@ impl ProviderModelPolicy {
         model: &str,
         context: ProviderUseContext,
     ) -> ProviderUseDecision {
-        ProviderRuntimeSelectionPolicy::assess(
+        let decision = ProviderRuntimeSelectionPolicy::assess(
             self.host.catalog(),
             &self.statuses,
             &self.authorizations,
             runtime_provider_id,
             model,
             context,
-        )
+        );
+        match decision {
+            ProviderUseDecision::Ready(_)
+            | ProviderUseDecision::RequiresRuntimeAuthorization(_)
+                if self.without_credential.contains(runtime_provider_id) =>
+            {
+                ProviderUseDecision::Blocked {
+                    requested_runtime_provider_id: runtime_provider_id.to_string(),
+                    reason: ProviderUseBlocker::NotConfigured,
+                }
+            }
+            decision => decision,
+        }
     }
 
     pub(crate) fn current(
