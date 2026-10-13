@@ -69,7 +69,9 @@ impl VaultAccountAuthStorage {
 }
 
 /// #609: what a sign-in holds, for its vault metadata (never the value).
-/// `None` for anything but ChatGPT tokens or an OpenAI API key.
+/// ChatGPT tokens count first, as in [`sign_in_restriction`]. `None` for a
+/// sign-in with neither: status then shows it as a ChatGPT sign-in, as
+/// before, and its manager still checks it at use.
 pub(super) fn sign_in_kind(auth: &AuthDotJson) -> Option<ProviderAccountSignIn> {
     if auth.tokens.is_some() {
         Some(ProviderAccountSignIn::Chatgpt)
@@ -140,7 +142,7 @@ impl AuthStorageBackend for VaultAccountAuthStorage {
         })?;
         // #609: a sign-in saved before its kind was recorded gets it on its
         // next use (the index only; nothing is written once it is there).
-        if sign_in_kind(&auth).is_some_and(|kind| recorded != Some(kind)) {
+        if recorded.is_none() {
             self.record_sign_in_kind(&auth);
         }
         Ok(Some(auth))

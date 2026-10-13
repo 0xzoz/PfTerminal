@@ -258,6 +258,18 @@ pub enum ProviderAccountSignIn {
     ApiKey,
 }
 
+/// Reads [`ProviderAccountSignIn`] leniently: a value this build does not
+/// know reads as not recorded instead of failing the whole vault index.
+pub(crate) fn lenient_sign_in<'de, D>(
+    deserializer: D,
+) -> Result<Option<ProviderAccountSignIn>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = <Option<serde_json::Value> as serde::Deserialize>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| serde_json::from_value(value).ok()))
+}
+
 /// Metadata for one named account: no secret material.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderAccountMeta {
@@ -441,8 +453,9 @@ impl Vault {
 
     /// PF-84 (#609): records what a named account's `chatgpt_auth` sign-in
     /// holds, for one saved before it was recorded. Writes only the vault
-    /// index, and only when the account holds a sign-in whose metadata says
-    /// otherwise. Returns whether it wrote.
+    /// index, and only when the account holds a sign-in with nothing
+    /// recorded: a save records its own kind, which a reader that raced it
+    /// must not overwrite. Returns whether it wrote.
     pub fn record_provider_account_sign_in(
         &self,
         provider_id: &str,
@@ -460,7 +473,7 @@ impl Vault {
             else {
                 return Ok(false);
             };
-            if meta.sign_in == Some(sign_in) {
+            if meta.sign_in.is_some() {
                 return Ok(false);
             }
             meta.sign_in = Some(sign_in);

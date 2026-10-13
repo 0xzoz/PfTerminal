@@ -591,7 +591,18 @@ fn what_a_sign_in_holds_is_index_metadata_only() {
             .record_provider_account_sign_in("openai", &work, ProviderAccountSignIn::ApiKey)
             .expect("same")
     );
-    assert_eq!(snapshot(dir.path()), before, "an unchanged record wrote");
+    // Only a missing record is filled: a save records its own kind, which a
+    // reader racing it must not overwrite.
+    assert!(
+        !vault
+            .record_provider_account_sign_in("openai", &work, ProviderAccountSignIn::Chatgpt)
+            .expect("other")
+    );
+    assert_eq!(
+        snapshot(dir.path()),
+        before,
+        "an existing record was overwritten"
+    );
     let (value, recorded) = vault
         .read_provider_account_sign_in("openai", &work)
         .expect("read")
@@ -639,4 +650,28 @@ fn what_a_sign_in_holds_is_index_metadata_only() {
     );
     let metadata = serde_json::to_string(&vault.list().expect("list")).expect("json");
     assert!(!metadata.contains("canary"), "{metadata}");
+}
+
+/// #609: a value a later build records reads as not recorded instead of
+/// making the vault index unreadable.
+#[test]
+fn an_unknown_sign_in_reads_as_not_recorded() {
+    let meta: crate::VaultCredentialMeta = serde_json::from_value(serde_json::json!({
+        "label": "provider/openai/accounts/work/chatgpt_auth",
+        "type": "bearer-token",
+        "created_at": 1,
+        "updated_at": 1,
+        "sign_in": "personal_access_token",
+    }))
+    .expect("readable");
+    assert_eq!(meta.sign_in, None);
+    let meta: crate::VaultCredentialMeta = serde_json::from_value(serde_json::json!({
+        "label": "provider/openai/accounts/work/chatgpt_auth",
+        "type": "bearer-token",
+        "created_at": 1,
+        "updated_at": 1,
+        "sign_in": "api_key",
+    }))
+    .expect("readable");
+    assert_eq!(meta.sign_in, Some(ProviderAccountSignIn::ApiKey));
 }

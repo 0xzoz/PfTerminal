@@ -266,7 +266,13 @@ pub struct VaultCredentialMeta {
     /// PF-84 (#609): for a named OpenAI sign-in account, whether it holds a
     /// ChatGPT sign-in or an OpenAI API key (never the value). Recorded when
     /// the sign-in is saved, or on its next use for one saved before.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// A value this build does not know (from a later one) reads as not
+    /// recorded, so it never makes the index unreadable.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "provider_accounts::lenient_sign_in"
+    )]
     pub sign_in: Option<ProviderAccountSignIn>,
 }
 

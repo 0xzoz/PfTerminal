@@ -317,3 +317,22 @@ fn chatgpt_sign_in_rows_show_the_email_hint_and_plan_only() {
         "{detail}"
     );
 }
+
+/// #609: an OpenAI API key added in `/providers` records that it is one, so
+/// status tells it from a ChatGPT sign-in without reading it.
+#[test]
+fn an_openai_api_key_added_here_records_what_it_holds() {
+    let home = tempfile::tempdir().expect("home");
+    save_account(
+        home.path().to_path_buf(),
+        "openai",
+        &name("work"),
+        AddAccountMethod::OpenaiApiKey,
+        AccountValue::new("sk-canary-609-add".to_string()),
+    )
+    .expect("save");
+    assert_eq!(
+        codex_login::provider_account_sign_in(home.path(), "openai", "work").expect("read"),
+        Some(codex_vault::ProviderAccountSignIn::ApiKey)
+    );
+}

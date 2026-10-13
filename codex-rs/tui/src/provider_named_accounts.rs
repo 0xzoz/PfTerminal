@@ -438,9 +438,13 @@ pub(crate) fn save_account(
         }
         _ => cleaned,
     };
+    // #609: an OpenAI API-key sign-in records what it holds, so status can
+    // tell it from a ChatGPT sign-in without reading it.
+    let sign_in = (method == AddAccountMethod::OpenaiApiKey)
+        .then_some(codex_vault::ProviderAccountSignIn::ApiKey);
     // Adding never replaces an existing account's credential.
     Vault::new(codex_home)
-        .create_provider_account(provider_id, name, method.kind(), &cleaned)
+        .create_provider_account_with_sign_in(provider_id, name, method.kind(), &cleaned, sign_in)
         .map_err(|error| format!("Could not save {provider_id} account `{name}`: {error}"))?;
     Ok(format!("Saved {provider_id} account `{name}`."))
 }
