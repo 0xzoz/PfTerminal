@@ -513,6 +513,52 @@ fn stale_placeholder_sweep_leaves_placeholders_in_use() {
     std::fs::remove_dir(&other_marker_dir).expect("other marker dir");
 }
 
+/// #673: a run that finds another live run's placeholder holds it at once.
+/// Its maker's cleanup, between this run's argument build and its
+/// registration, used to remove it; bubblewrap then had to make a new one,
+/// which fails where this run's sandbox is read-only.
+#[test]
+fn a_live_placeholder_is_held_from_the_moment_it_is_found() {
+    let temp_dir = tempfile::TempDir::new().expect("tempdir");
+    let placeholder = temp_dir.path().join(".aws");
+    std::fs::write(&placeholder, "").expect("placeholder");
+    // Another run made it and is still running.
+    let mut maker = std::process::Command::new("sleep")
+        .arg("60")
+        .spawn()
+        .expect("spawn the maker");
+    let marker_dir = synthetic_mount_marker_dir(&placeholder);
+    std::fs::create_dir_all(&marker_dir).expect("marker dir");
+    let made = crate::bwrap::SyntheticMountTarget::missing(&placeholder);
+    let maker_marker = marker_dir.join(maker.id().to_string());
+    std::fs::write(&maker_marker, SYNTHETIC_MOUNT_MARKER_SYNTHETIC).expect("maker marker");
+    write_synthetic_mount_target_record(&marker_dir, &made);
+
+    // This run builds its arguments and finds it.
+    assert!(is_live_placeholder(&placeholder));
+    let metadata = std::fs::symlink_metadata(&placeholder).expect("stat");
+
+    // The maker ends and cleans up before this run registers.
+    cleanup_synthetic_mount_targets(&[SyntheticMountTargetRegistration {
+        target: made,
+        marker_file: maker_marker,
+        marker_dir: marker_dir.clone(),
+    }]);
+    maker.kill().expect("kill the maker");
+    maker.wait().expect("reap the maker");
+    assert!(placeholder.exists(), "the maker removed a held placeholder");
+
+    // This run registers it as the existing path it found, and as the last
+    // run out removes it.
+    let registrations = register_synthetic_mount_targets(&[
+        crate::bwrap::SyntheticMountTarget::existing_empty_file(&placeholder, &metadata),
+    ]);
+    assert!(registrations[0].target.preserves_pre_existing_path());
+    cleanup_synthetic_mount_targets(&registrations);
+    assert!(!placeholder.exists());
+    assert!(!marker_dir.exists());
+}
+
 #[test]
 fn cleanup_synthetic_mount_targets_preserves_real_pre_existing_empty_file() {
     let temp_dir = tempfile::TempDir::new().expect("tempdir");

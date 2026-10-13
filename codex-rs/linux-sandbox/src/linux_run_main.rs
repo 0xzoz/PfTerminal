@@ -1620,12 +1620,28 @@ pub(crate) fn is_live_placeholder(path: &Path) -> bool {
         return false;
     }
     with_synthetic_mount_registry_lock(|| {
-        synthetic_mount_marker_dir_has_active_synthetic_owner(&marker_dir)
+        let live = synthetic_mount_marker_dir_has_active_synthetic_owner(&marker_dir)
             // #582: one whose maker was killed before removing it: held as
             // a placeholder too, so a sweep leaves it while this run uses it,
             // and the last run out removes it.
             || read_synthetic_mount_target_record(&marker_dir)
-                .is_some_and(|made| made.path() == path)
+                .is_some_and(|made| made.path() == path);
+        if live {
+            // #673: hold it now, under the same lock as the check. This run
+            // only registers just before bubblewrap starts; until then its
+            // maker's cleanup could remove it, and bubblewrap cannot make a
+            // new one where this run's sandbox is read-only (`Can't create
+            // file at ...: Read-only file system`). Registration rewrites
+            // this marker; a run that ends first leaves it to the sweep.
+            let marker_file = marker_dir.join(std::process::id().to_string());
+            fs::write(&marker_file, SYNTHETIC_MOUNT_MARKER_EXISTING).unwrap_or_else(|err| {
+                panic!(
+                    "failed to hold synthetic bubblewrap mount target {}: {err}",
+                    path.display()
+                )
+            });
+        }
+        live
     })
 }
 
