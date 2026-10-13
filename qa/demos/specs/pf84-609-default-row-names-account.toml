@@ -5,7 +5,7 @@
 #     --bin qa/demos/wrappers/pf84-609-default-row-names-account.sh --sprint ISSUE-609 --publish
 id = "pf84-609-default-row-names-account"
 feature = "PF-84 #609: the default row names the account its status is about"
-expected = "A session on the named Z.AI account work answers on it; /providers shows the Z.AI default row as configured with '(status of this session's account `work`)', and the work row as this session."
+expected = "A session on the named Z.AI account work answers on it; /providers shows the Z.AI default row as configured with '(status of account `work`)', and the work row as this session."
 model = "glm-5.3-flash"
 provider = "zai"
 cols = 130
@@ -36,6 +36,6 @@ type = "/providers"
 [[steps]]
 key = "Enter"
 [[steps]]
-wait = "status of this session's account `work`"
+wait = "status of account `work`"
 [[steps]]
 pause = 4.0
