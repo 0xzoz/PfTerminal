@@ -133,6 +133,18 @@ pub fn record_writable_roots(policy: &FileSystemSandboxPolicy, cwd: &Path) {
     }
 }
 
+/// #603: records `real` as the location of the writable root spelled `root`,
+/// when this process has not seen `root` yet. For a root the caller has just
+/// checked to be a real folder at `real` (the Corbanu home's `worktrees`
+/// carve-out): a link swapped in before the sandbox is set up is then a
+/// change ([`check_writable_roots`] refuses the command), not the root's
+/// first sight.
+pub fn record_checked_root(root: &Path, real: &Path) {
+    ledger()
+        .entry(root.to_path_buf())
+        .or_insert_with(|| real.to_path_buf());
+}
+
 /// Checks every writable root of `policy` before a sandboxed command (a root
 /// seen for the first time is recorded now) and returns them with the real
 /// locations the sandbox must grant.

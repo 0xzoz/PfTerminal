@@ -208,6 +208,9 @@ pub(crate) struct ReadDenials {
     /// #583: `worktrees` inside the read-only Corbanu home (each spelling),
     /// which stays writable where the profile can write it.
     home_writable: Vec<AbsolutePathBuf>,
+    /// #603: the real location `worktrees` had when it was checked to be a
+    /// real folder in the home ([`Self::protect_home`]).
+    home_writable_real: Option<AbsolutePathBuf>,
     /// Where the profile's relative entries resolve (the turn's folder).
     cwd: Option<AbsolutePathBuf>,
     /// The Corbanu home, unless it is a folder the command keeps.
@@ -499,9 +502,9 @@ impl ReadDenials {
         if cfg!(windows) {
             return;
         }
-        if real_location(codex_home).is_none() {
+        let Some(real_home) = real_location(codex_home) else {
             return;
-        }
+        };
         let homes = spellings(codex_home);
         let worktrees = spellings(&codex_home.join(HOME_WRITABLE));
         let inside_home = |folder: &AbsolutePathBuf| {
@@ -535,12 +538,20 @@ impl ReadDenials {
                 .runtime_read_only
                 .iter()
                 .any(|runtime| runtime.as_path().starts_with(folder.as_path()));
+            // #603: `worktrees` itself in a spelling of the home (a link
+            // swapped in before `real_folder` was checked, and a folder put
+            // back after it, would otherwise name the link's target).
+            let names_worktrees = homes
+                .iter()
+                .any(|home| folder == home.join(HOME_WRITABLE));
             if real_folder
+                && names_worktrees
                 && inside_home(&folder)
                 && !holds_runtime
                 && !self.home_writable.contains(&folder)
             {
                 self.home_writable.push(folder);
+                self.home_writable_real = Some(real_home.join(HOME_WRITABLE));
             }
         }
     }
@@ -600,10 +611,8 @@ impl ReadDenials {
             return false;
         };
         keep.iter()
-            .filter(|kept| !has_nested_link(kept.as_path()))
-            .any(|kept| {
-                std::fs::canonicalize(kept.as_path()).is_ok_and(|kept| kept.starts_with(&real))
-            })
+            .filter_map(|kept| kept_real_location(kept.as_path()))
+            .any(|kept| kept.starts_with(&real))
     }
 
     fn push_existing(&mut self, path: AbsolutePathBuf, keep: &[AbsolutePathBuf]) {
@@ -807,6 +816,20 @@ impl ReadDenials {
     pub(crate) fn apply(&self, profile: &PermissionProfile) -> Option<PermissionProfile> {
         if matches!(profile, PermissionProfile::External { .. }) {
             return None;
+        }
+        // #603: `worktrees` is writable only as the real folder checked in
+        // `protect_home`. Its location is recorded for the sandboxes, which
+        // grant writes where a root was first seen (#536): a link swapped in
+        // before the command's sandbox is set up (by a command a person
+        // approved, or another session) then refuses the command instead of
+        // opening the link's target (Linux: bound with `--bind-fd` there).
+        if let Some(real) = &self.home_writable_real {
+            for path in &self.home_writable {
+                codex_sandboxing::writable_root_ledger::record_checked_root(
+                    path.as_path(),
+                    real.as_path(),
+                );
+            }
         }
         let (mut file_system, network) = profile.to_runtime_permissions();
         let entries: Vec<FileSystemSandboxEntry> = self
@@ -1107,6 +1130,29 @@ fn has_nested_link(path: &Path) -> bool {
             std::fs::symlink_metadata(ancestor)
                 .is_ok_and(|metadata| metadata.file_type().is_symlink())
         })
+}
+
+/// #603: where a kept folder really is, resolved only through its top-level
+/// folder (an alias such as `/tmp` on macOS): `None` for one that is or sits
+/// below a link. No link below the top-level folder is followed, so one
+/// swapped in after [`has_nested_link`] looked (review round 4) cannot
+/// redirect the folder to what it points to (`build -> ~/.ssh`).
+fn kept_real_location(kept: &Path) -> Option<PathBuf> {
+    if has_nested_link(kept) {
+        return None;
+    }
+    let mut components = kept.components();
+    let mut real = PathBuf::from(components.next()?.as_os_str());
+    if let Some(top) = components.next() {
+        real = std::fs::canonicalize(real.join(top)).ok()?;
+        let rest = components.as_path();
+        if !rest.as_os_str().is_empty() {
+            real.push(rest);
+        }
+    }
+    // As `canonicalize` did: only a folder that exists.
+    std::fs::symlink_metadata(&real).ok()?;
+    Some(real)
 }
 
 /// `path` with its nearest existing folder resolved, or `None` when that

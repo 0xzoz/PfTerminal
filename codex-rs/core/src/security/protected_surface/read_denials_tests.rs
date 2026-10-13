@@ -661,6 +661,156 @@ fn issue_583_a_worktrees_link_opens_nothing() {
     assert!(fx.codex_home.join("worktrees").is_dir());
 }
 
+/// #603: the profile of a protected command with full access (the
+/// read-only Corbanu home, with the `worktrees` carve-out) and a grant below
+/// `worktrees` (an additional-permission write at `worktrees/w`).
+fn worktrees_carve_out_policy(fx: &Fixture) -> (FileSystemSandboxPolicy, std::path::PathBuf) {
+    let cwd = fx.user_home.join("project");
+    let denials = ReadDenials::collect(
+        &fx.codex_home,
+        Some(&fx.user_home),
+        /*claude_config_dir*/ None,
+        &[abs(&cwd)],
+    );
+    let worktrees = abs(&fx.codex_home.join("worktrees"));
+    assert_eq!(
+        denials.home_writable_paths().collect::<Vec<_>>(),
+        vec![&worktrees]
+    );
+    let mut policy = denials
+        .apply(&PermissionProfile::Disabled)
+        .unwrap()
+        .file_system_sandbox_policy();
+    policy.entries.push(FileSystemSandboxEntry::new(
+        FileSystemPath::Path {
+            path: abs(&fx.codex_home.join("worktrees/w")),
+        },
+        FileSystemAccessMode::Write,
+    ));
+    assert!(policy.can_write_path_with_cwd(&fx.codex_home.join("worktrees/w/x"), &cwd));
+    assert!(!policy.can_write_path_with_cwd(&fx.codex_home.join("hooks.json"), &cwd));
+    (policy, cwd)
+}
+
+/// Replaces the home's `worktrees` with a link to `target`, as a command a
+/// person approved under Moderate, or another session, could.
+fn swap_worktrees_for_a_link(fx: &Fixture, target: &str) {
+    let worktrees = fx.codex_home.join("worktrees");
+    std::fs::rename(&worktrees, fx.codex_home.join("worktrees.old")).unwrap();
+    std::os::unix::fs::symlink(target, &worktrees).unwrap();
+}
+
+/// #603 (launch race): `worktrees` is checked to be a real folder when the
+/// rules are built; a link swapped in before the sandbox is set up used to
+/// be the root's first sight, so the sandboxes granted writes where it led
+/// (the home itself, or its runtime `tmp`). Now the command is refused, as
+/// is a grant below `worktrees` the swap would move. (A link into a
+/// read-only entry such as `tmp` is no writable root at all, #535.)
+#[test]
+fn issue_603_a_worktrees_link_swapped_in_after_the_check_is_refused() {
+    for target in [".", "tmp"] {
+        let fx = fixture();
+        let (policy, cwd) = worktrees_carve_out_policy(&fx);
+        swap_worktrees_for_a_link(&fx, target);
+        let worktrees = fx.codex_home.join("worktrees");
+        match codex_sandboxing::writable_root_ledger::check_writable_roots(&policy, &cwd) {
+            Err(codex_sandboxing::writable_root_ledger::WritableRootRefusal::Changed {
+                root,
+                ..
+            }) => assert_eq!(root, worktrees, "{target}"),
+            Err(refusal) => panic!("{target}: {refusal}"),
+            Ok(pinned) => {
+                let granted: Vec<_> = pinned
+                    .iter()
+                    .filter(|pinned| pinned.root.as_path().starts_with(&worktrees))
+                    .collect();
+                assert!(granted.is_empty(), "{target}: {granted:?}");
+            }
+        }
+    }
+}
+
+/// #603 (launch race) with the real sandbox (`sandbox-exec`, bubblewrap): a
+/// `worktrees` link to the home swapped in after the rules were built opens
+/// nothing; before, the command created `hooks.json` in the home through it.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn issue_603_a_worktrees_link_swapped_in_opens_nothing_in_the_real_sandbox() {
+    use codex_sandboxing::SandboxCommand;
+    use codex_sandboxing::SandboxManager;
+    use codex_sandboxing::SandboxTransformRequest;
+    use codex_sandboxing::SandboxType;
+    use codex_utils_path_uri::PathUri;
+
+    #[cfg(target_os = "linux")]
+    let Ok(linux_sandbox_exe) = codex_utils_cargo_bin::cargo_bin("codex-linux-sandbox") else {
+        eprintln!("codex-linux-sandbox is not built; skipping");
+        return;
+    };
+    #[cfg(not(target_os = "linux"))]
+    let linux_sandbox_exe = std::path::PathBuf::new();
+    let fx = fixture();
+    let (policy, cwd) = worktrees_carve_out_policy(&fx);
+    swap_worktrees_for_a_link(&fx, ".");
+    let profile = PermissionProfile::from_runtime_permissions(
+        &policy,
+        NetworkSandboxPolicy::Restricted,
+    );
+    let cwd_uri = PathUri::from_abs_path(&abs(&cwd));
+    let script = format!(
+        "printf x > '{}'; echo wrote=$?",
+        fx.codex_home.join("worktrees/hooks.json").display()
+    );
+    let transformed = SandboxManager::new().transform(SandboxTransformRequest {
+        command: SandboxCommand {
+            program: "/bin/sh".into(),
+            args: vec!["-c".to_string(), script],
+            cwd: cwd_uri.clone(),
+            env: std::collections::HashMap::new(),
+            managed_network: None,
+            additional_permissions: None,
+        },
+        permissions: &profile,
+        sandbox: if cfg!(target_os = "macos") {
+            SandboxType::MacosSeatbelt
+        } else {
+            SandboxType::LinuxSeccomp
+        },
+        enforce_managed_network: false,
+        environment_id: None,
+        network: None,
+        sandbox_policy_cwd: &cwd_uri,
+        codex_linux_sandbox_exe: Some(&linux_sandbox_exe),
+        use_legacy_landlock: false,
+        windows_sandbox_level: codex_protocol::config_types::WindowsSandboxLevel::Disabled,
+        windows_sandbox_private_desktop: false,
+    });
+    let output = match transformed {
+        Err(codex_sandboxing::SandboxTransformError::WritableRootRefused(refused)) => {
+            format!("refused: {refused}")
+        }
+        Err(err) => panic!("{err}"),
+        Ok(request) => {
+            let mut command = std::process::Command::new(&request.command[0]);
+            command.args(&request.command[1..]).current_dir(&cwd);
+            if let Some(arg0) = &request.arg0 {
+                std::os::unix::process::CommandExt::arg0(&mut command, arg0);
+            }
+            let output = command.output().unwrap();
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        }
+    };
+    assert!(
+        !fx.codex_home.join("hooks.json").exists(),
+        "created through the link: {output}"
+    );
+    assert!(output.starts_with("refused: "), "{output}");
+}
+
 /// #583 review: a Corbanu home reached through a link inside the workspace
 /// (`~/.corbanu -> /elsewhere/home`) gets no `worktrees` carve-out where the
 /// profile never covered the real folder: Seatbelt would resolve the link
