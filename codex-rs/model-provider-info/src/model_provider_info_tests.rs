@@ -1917,3 +1917,59 @@ fn named_account_rejections_name_the_recovery_for_their_kind() {
         ]
     );
 }
+
+/// #616: building the provider table (which happens on request and
+/// accounting paths, on Tokio workers) must not panic when the working
+/// directory can't be resolved. Runs in a child process because it removes
+/// the process working directory.
+#[cfg(unix)]
+#[test]
+fn claude_plan_provider_builds_when_current_dir_is_unresolvable() {
+    let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "tests::claude_plan_provider_with_unresolvable_cwd_child",
+            "--ignored",
+            "--exact",
+            "--nocapture",
+        ])
+        .env("CODEX_616_UNRESOLVABLE_CWD_CHILD", "1")
+        .output()
+        .expect("run child test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "child failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(stdout.contains("1 passed"), "child did not run:\n{stdout}");
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "run by claude_plan_provider_builds_when_current_dir_is_unresolvable"]
+fn claude_plan_provider_with_unresolvable_cwd_child() {
+    if std::env::var_os("CODEX_616_UNRESOLVABLE_CWD_CHILD").is_none() {
+        return;
+    }
+    let temp_dir = tempdir().expect("temp dir");
+    let removed_cwd = temp_dir.path().join("removed");
+    std::fs::create_dir(&removed_cwd).expect("create cwd");
+    std::env::set_current_dir(&removed_cwd).expect("enter cwd");
+    std::fs::remove_dir(&removed_cwd).expect("remove cwd");
+    std::env::current_dir().expect_err("current dir should be unresolvable");
+
+    // Both the single provider and the whole table (as config reloads,
+    // accounting and request paths build it) complete without a panic.
+    let provider = ModelProviderInfo::create_claude_plan_provider();
+    let providers = built_in_model_providers(/*openai_base_url*/ None);
+
+    let auth = provider.auth.expect("Claude Plan runs its auth helper");
+    assert!(auth.cwd.as_path().is_absolute());
+    assert_eq!(
+        providers[CLAUDE_PLAN_PROVIDER_ID]
+            .auth
+            .as_ref()
+            .map(|auth| auth.cwd.clone()),
+        Some(auth.cwd)
+    );
+}

@@ -9,6 +9,7 @@ mod event_processor;
 mod event_processor_with_human_output;
 pub(crate) mod event_processor_with_jsonl_output;
 pub(crate) mod exec_events;
+mod panic_watch;
 
 pub use cli::Cli;
 pub use cli::Command;
@@ -281,6 +282,7 @@ pub async fn run_main_enforced(
 ) -> anyhow::Result<()> {
     let run_main_started_at = std::time::Instant::now();
     trace_exec_timing("run_main_start", run_main_started_at);
+    panic_watch::install_panic_hook();
 
     if let Err(err) = set_default_originator("codex_exec".to_string()) {
         tracing::warn!(?err, "Failed to set codex exec originator override {err:?}");
@@ -784,6 +786,8 @@ async fn load_bootstrap_config_or_exit(
 /// seconds on a large ledger in a debug build). Records waiting on another
 /// process are left for the next writer at once.
 const ACCOUNTING_EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+/// How long exec waits for a stalled turn to accept an interrupt (#616).
+const PANIC_STALL_INTERRUPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     let exec_session_started_at = std::time::Instant::now();
@@ -1112,8 +1116,32 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
         let mut error_seen = false;
         let mut interrupt_channel_open = true;
         let primary_thread_id_for_requests = primary_thread_id.to_string();
+        let mut panic_stall = panic_watch::PanicStallWatch::new(
+            &panic_watch::PROCESS_PANICS,
+            panic_watch::PANIC_STALL_TIMEOUT,
+        );
         loop {
             let server_event = tokio::select! {
+                () = panic_stall.stalled() => {
+                    // #616: never wait forever on a turn a panic left behind.
+                    eprintln!("error: {}", panic_watch::PANIC_STALL_MESSAGE);
+                    let interrupt = send_request_with_response::<TurnInterruptResponse>(
+                        &client,
+                        ClientRequest::TurnInterrupt {
+                            request_id: request_ids.next(),
+                            params: TurnInterruptParams {
+                                thread_id: primary_thread_id_for_requests.clone(),
+                                turn_id: task_id.clone(),
+                            },
+                        },
+                        "turn/interrupt",
+                    );
+                    if tokio::time::timeout(PANIC_STALL_INTERRUPT_TIMEOUT, interrupt).await.is_err() {
+                        warn!("turn/interrupt did not answer after a panic stall");
+                    }
+                    error_seen = true;
+                    break;
+                }
                 maybe_interrupt = interrupt_rx.recv(), if interrupt_channel_open => {
                     if maybe_interrupt.is_none() {
                         interrupt_channel_open = false;
@@ -1138,6 +1166,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                 }
                 maybe_event = client.next_event() => maybe_event,
             };
+            panic_stall.progress();
 
             let Some(server_event) = server_event else {
                 break;
