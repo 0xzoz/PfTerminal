@@ -3317,7 +3317,7 @@ fn namespaced_history_never_replays_under_a_plain_tool_with_the_same_name() {
     let mcp_tool = codex_tools::ToolName::namespaced("mcp__orders", "lookup");
     let reserved = std::collections::HashSet::from(["mcp__orders__lookup".to_string()]);
     let (flattened, flat_tool_names) = crate::tools::flat_tool_names::flatten_namespaced_tools(
-        vec![(mcp_tool.clone(), function("lookup"))],
+        vec![(mcp_tool, function("lookup"))],
         &reserved,
     );
     let hashed = flattened[0].name.clone();
