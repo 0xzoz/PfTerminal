@@ -174,6 +174,11 @@ impl PrivateDesktop {
                 let _ = CloseDesktop(handle);
                 return Err(err);
             }
+            // #158: legacy sessions run at Low integrity.
+            if let Err(err) = crate::integrity::label_window_object_low(handle) {
+                let _ = CloseDesktop(handle);
+                return Err(err);
+            }
         }
 
         Ok(Self { handle, name })

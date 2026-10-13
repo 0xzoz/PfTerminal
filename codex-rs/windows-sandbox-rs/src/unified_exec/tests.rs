@@ -689,11 +689,16 @@ struct LegacyDeleteOutcome {
     temp_file_exists: bool,
     tmp_file_exists: bool,
     outside_file_contents: Option<String>,
+    outside_move_target_exists: bool,
     protected_git_dir_exists: bool,
+    nested_existing_contents: Option<String>,
+    outside_dir_exists: bool,
 }
 
 /// Runs the legacy delete fixture and returns its outcome plus diagnostics.
-fn run_legacy_delete_fixture() -> (LegacyDeleteOutcome, String) {
+fn run_legacy_delete_fixture(
+    permission_profile: PermissionProfile,
+) -> (LegacyDeleteOutcome, String) {
     let _guard = legacy_process_test_guard();
     let runtime = current_thread_runtime();
     runtime.block_on(async move {
@@ -716,6 +721,14 @@ fn run_legacy_delete_fixture() -> (LegacyDeleteOutcome, String) {
         let temp_file = temp_root.join("temp-delete.txt");
         let tmp_file = tmp_root.join("tmp-delete.txt");
         let outside_file = outside_root.join("outside-delete.txt");
+        // A file that predates the session, below a subdirectory: Low-integrity
+        // writes there need the inherited label (#158).
+        let nested_existing = workspace.join("sub").join("existing.txt");
+        fs::create_dir(workspace.join("sub")).expect("create workspace subdirectory");
+        fs::write(&nested_existing, "before").expect("seed nested workspace file");
+        let outside_dir = outside_root.join("outside-dir");
+        fs::create_dir(&outside_dir).expect("create outside directory");
+        let outside_move_target = workspace.join("moved-in.txt");
         fs::write(&workspace_file, "workspace").expect("seed workspace file");
         fs::write(&temp_file, "temp").expect("seed TEMP file");
         fs::write(&tmp_file, "tmp").expect("seed TMP file");
@@ -729,8 +742,11 @@ fn run_legacy_delete_fixture() -> (LegacyDeleteOutcome, String) {
                 "del /f /q \"%WORKSPACE_DELETE%\"\r\n",
                 "del /f /q \"%TEMP_DELETE%\"\r\n",
                 "del /f /q \"%TMP_DELETE%\"\r\n",
+                "move /y \"%OUTSIDE_DELETE%\" \"%OUTSIDE_MOVE_TARGET%\"\r\n",
                 "del /f /q \"%OUTSIDE_DELETE%\"\r\n",
+                "rmdir \"%OUTSIDE_DIR%\"\r\n",
                 "rmdir \"%PROTECTED_GIT_DIR%\"\r\n",
+                ">\"%NESTED_EXISTING%\" echo after\r\n",
                 "exit /b 0\r\n",
             ),
         )
@@ -759,9 +775,20 @@ fn run_legacy_delete_fixture() -> (LegacyDeleteOutcome, String) {
                 "PROTECTED_GIT_DIR".to_string(),
                 protected_git_dir.to_string_lossy().into_owned(),
             ),
+            (
+                "NESTED_EXISTING".to_string(),
+                nested_existing.to_string_lossy().into_owned(),
+            ),
+            (
+                "OUTSIDE_DIR".to_string(),
+                outside_dir.to_string_lossy().into_owned(),
+            ),
+            (
+                "OUTSIDE_MOVE_TARGET".to_string(),
+                outside_move_target.to_string_lossy().into_owned(),
+            ),
         ]);
 
-        let permission_profile = PermissionProfile::workspace_write();
         let spawned = spawn_windows_sandbox_session_legacy(
             &permission_profile,
             workspace_roots_for(workspace.as_path()).as_slice(),
@@ -795,7 +822,10 @@ fn run_legacy_delete_fixture() -> (LegacyDeleteOutcome, String) {
                 temp_file_exists: temp_file.exists(),
                 tmp_file_exists: tmp_file.exists(),
                 outside_file_contents: fs::read_to_string(&outside_file).ok(),
+                outside_move_target_exists: outside_move_target.exists(),
                 protected_git_dir_exists: protected_git_dir.is_dir(),
+                nested_existing_contents: fs::read_to_string(&nested_existing).ok(),
+                outside_dir_exists: outside_dir.is_dir(),
             },
             format!("stdout={stdout:?}\n{}", sandbox_log(codex_home.path())),
         )
@@ -804,15 +834,16 @@ fn run_legacy_delete_fixture() -> (LegacyDeleteOutcome, String) {
 
 #[test]
 fn legacy_workspace_write_can_delete_inside_writable_roots() {
-    let (outcome, diagnostics) = run_legacy_delete_fixture();
+    let (outcome, diagnostics) = run_legacy_delete_fixture(PermissionProfile::workspace_write());
     assert_eq!(
         (
             outcome.exit_code,
             outcome.workspace_file_exists,
             outcome.temp_file_exists,
             outcome.tmp_file_exists,
+            outcome.nested_existing_contents.as_deref().map(str::trim),
         ),
-        (0, false, false, false),
+        (0, false, false, false, Some("after")),
         "{diagnostics}"
     );
 }
@@ -926,10 +957,12 @@ fn legacy_workspace_write_cannot_delete_or_replace_protected_git_dir() {
     });
 }
 
+/// #158: WRITE_RESTRICTED tokens do not restrict FILE_DELETE_CHILD, so the
+/// parent's ACL let the sandbox delete or move anything the user could; the
+/// Low-integrity token keeps deletes and moves inside the writable roots.
 #[test]
-#[ignore = "known escape, #158: WRITE_RESTRICTED tokens do not restrict FILE_DELETE_CHILD outside writable roots"]
 fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
-    let (outcome, diagnostics) = run_legacy_delete_fixture();
+    let (outcome, diagnostics) = run_legacy_delete_fixture(PermissionProfile::workspace_write());
     assert_eq!(
         outcome,
         LegacyDeleteOutcome {
@@ -938,8 +971,41 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
             temp_file_exists: false,
             tmp_file_exists: false,
             outside_file_contents: Some("outside".to_string()),
+            outside_move_target_exists: false,
             protected_git_dir_exists: true,
+            nested_existing_contents: Some("after\r\n".to_string()),
+            outside_dir_exists: true,
         },
+        "{diagnostics}"
+    );
+}
+
+/// #158: a read-only legacy session deleted the workspace, `.git` and files
+/// outside it through their parents; at Low integrity it deletes nothing.
+#[test]
+fn legacy_read_only_cannot_delete_anything() {
+    let (outcome, diagnostics) = run_legacy_delete_fixture(PermissionProfile::read_only());
+    assert_eq!(
+        (
+            outcome.workspace_file_exists,
+            outcome.temp_file_exists,
+            outcome.tmp_file_exists,
+            outcome.outside_file_contents.as_deref(),
+            outcome.outside_move_target_exists,
+            outcome.protected_git_dir_exists,
+            outcome.nested_existing_contents.as_deref(),
+            outcome.outside_dir_exists,
+        ),
+        (
+            true,
+            true,
+            true,
+            Some("outside"),
+            false,
+            true,
+            Some("before"),
+            true
+        ),
         "{diagnostics}"
     );
 }

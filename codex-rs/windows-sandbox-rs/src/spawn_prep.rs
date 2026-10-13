@@ -16,6 +16,8 @@ use crate::env::inherit_path_env;
 use crate::env::normalize_null_device_env;
 use crate::identity::SandboxCreds;
 use crate::identity::require_logon_sandbox_creds;
+use crate::integrity::label_writable_root_low;
+use crate::integrity::set_token_low_integrity;
 use crate::logging::log_start;
 use crate::path_normalization::canonicalize_path;
 use crate::resolved_permissions::ResolvedWindowsSandboxPermissions;
@@ -173,6 +175,14 @@ pub(crate) fn prepare_legacy_session_security(
             (h_token, Some(psid), Some(caps.readonly), Vec::new())
         }
     };
+    // #158: Low integrity closes the parent FILE_DELETE_CHILD route that the
+    // write-restricted token leaves open outside the writable roots.
+    if let Err(err) = unsafe { set_token_low_integrity(h_token) } {
+        unsafe {
+            CloseHandle(h_token);
+        }
+        return Err(err);
+    }
 
     Ok(LegacySessionSecurity {
         h_token,
@@ -278,6 +288,16 @@ pub(crate) fn apply_legacy_session_acl_rules(
     let AllowDenyPaths { allow, mut deny } =
         compute_allow_paths_for_permissions(permissions, current_dir, env_map);
     unsafe {
+        // #158: the sandbox runs at Low integrity; its writable roots carry a
+        // Low label so writes inside them keep working.
+        for p in &allow {
+            if let Err(err) = label_writable_root_low(p) {
+                crate::logging::debug_log(
+                    &format!("label writable root Low failed for {}: {err}", p.display()),
+                    Some(&codex_home.join(".sandbox")),
+                );
+            }
+        }
         for path in additional_deny_write_paths {
             // Explicit carveouts must exist before the command starts so the
             // sandbox cannot create them under a writable parent first.
