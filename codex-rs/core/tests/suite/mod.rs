@@ -93,6 +93,7 @@ mod issue_445;
 mod issue_506;
 mod issue_507;
 mod issue_507_switch_off;
+mod issue_584;
 mod issue_620_622;
 mod items;
 mod json_result;

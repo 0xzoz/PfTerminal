@@ -456,6 +456,18 @@ impl Default for AppServerRuntimeOptions {
     }
 }
 
+/// PF-84-S06 (#595): with named accounts on, this server (standalone or a
+/// local daemon a TUI reuses) never logs out a default OpenAI login its login
+/// restrictions rule out and never uses it: its default-login managers treat
+/// such a login as absent and a thread on it is refused with the reason, as
+/// in a TUI or exec process whose session runs on a named account. Call
+/// before any auth manager is built.
+fn leave_ruled_out_default_login_in_place(config: &Config) {
+    if config.named_accounts_enabled() {
+        codex_login::leave_default_login_unenforced();
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run_main_with_transport_options(
     arg0_paths: Arg0DispatchPaths,
@@ -506,6 +518,7 @@ pub async fn run_main_with_transport_options(
         .await
     {
         Ok(config) => {
+            leave_ruled_out_default_login_in_place(&config);
             let discovered_thread_config_loader = configured_thread_config_loader(&config);
             config_manager
                 .replace_thread_config_loader(Arc::clone(&discovered_thread_config_loader));
@@ -545,6 +558,7 @@ pub async fn run_main_with_transport_options(
             })?
         }
     };
+    leave_ruled_out_default_login_in_place(&config);
     let code_mode_session_provider: Option<Arc<dyn CodeModeSessionProvider>> =
         match &runtime_options.code_mode_host_transport {
             CodeModeHostTransport::Local => None,
