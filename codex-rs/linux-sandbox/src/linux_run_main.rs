@@ -1691,7 +1691,8 @@ pub(crate) fn is_live_placeholder(path: &Path) -> bool {
             // file at ...: Read-only file system`). Registration rewrites
             // this marker; a run that ends first leaves it to the sweep.
             let marker_file = marker_dir.join(std::process::id().to_string());
-            fs::write(&marker_file, SYNTHETIC_MOUNT_MARKER_EXISTING).unwrap_or_else(|err| {
+            crate::placeholder_registry::write_marker(&marker_file, SYNTHETIC_MOUNT_MARKER_EXISTING)
+                .unwrap_or_else(|err| {
                 panic!(
                     "failed to hold synthetic bubblewrap mount target {}: {err}",
                     path.display()
