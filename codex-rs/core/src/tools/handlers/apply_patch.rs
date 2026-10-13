@@ -254,6 +254,8 @@ fn write_permissions_for_paths(
     file_system_sandbox_policy: &codex_protocol::permissions::FileSystemSandboxPolicy,
     cwd: &AbsolutePathBuf,
 ) -> Option<AdditionalPermissionProfile> {
+    // #606: as the sandboxes, nothing through a writable link they leave out.
+    let excluded = file_system_sandbox_policy.writable_links_into_read_only_paths(cwd.as_path());
     let write_paths = file_paths
         .iter()
         .map(|path| {
@@ -262,7 +264,11 @@ fn write_permissions_for_paths(
                 .into_path_buf()
         })
         .filter(|path| {
-            !file_system_sandbox_policy.can_write_path_with_cwd(path.as_path(), cwd.as_path())
+            !file_system_sandbox_policy.can_write_path_outside_excluded_links(
+                path.as_path(),
+                cwd.as_path(),
+                &excluded,
+            )
         })
         .collect::<BTreeSet<_>>()
         .into_iter()
