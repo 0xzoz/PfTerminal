@@ -312,7 +312,9 @@ fn within(path: &Path, prefix: &Path) -> bool {
     path.starts_with(prefix)
 }
 
-// The tests exercise links and real paths, which are unix-only here.
-#[cfg(all(test, unix))]
+// The tests exercise links and real paths, which are unix-only here. A
+// separate `cfg(test)` keeps clippy treating the module as test code.
+#[cfg(test)]
+#[cfg(unix)]
 #[path = "writable_root_ledger_tests.rs"]
 mod tests;
