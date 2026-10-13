@@ -200,8 +200,6 @@ wait = "Security level"
 [[steps]]
 key = "Escape"
 [[steps]]
-wait = "Nothing restarted"
-[[steps]]
 pause = 2.0
 [[steps]]
 run = "sleep 20; ls -a {workspace}; test ! -e {workspace}/codex-task.txt"

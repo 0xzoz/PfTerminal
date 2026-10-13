@@ -5402,6 +5402,9 @@ impl App {
                 // switch is turned off. #660: also when another agent sent it
                 // while the switch was on and it is handled only after
                 // switch-off; it asks for no turn.
+                // `trigger_turn` is part of a mailbox message's identity. The ID
+                // comes from the dispatch origin, admitted once, so the same ID
+                // is not sent again on the other side of a switch change.
                 let hold = sent_while_kill_switch_on || self.kill_switch_on_now();
                 let params = ThreadAgentMessageParams {
                     source_thread_id: source_thread_id.to_string(),
@@ -5460,6 +5463,9 @@ impl App {
                             .await
                         {
                             Ok(materialized_thread_id) => {
+                                // The switch may have gone on (in another
+                                // process) while the agent was materialized.
+                                let hold = hold || self.kill_switch_on_now();
                                 let materialized_source_thread_id = self
                                     .spawn_node_backing_thread_id(&source_node_id)
                                     .or(self.primary_thread_id)
@@ -5606,18 +5612,20 @@ impl App {
                 // starts it once the switch is off. #660: also when another
                 // agent sent it while the switch was on and it is handled only
                 // after switch-off.
-                if sent_while_kill_switch_on || self.kill_switch_on_now() {
+                let kill_switch_on = self.kill_switch_on_now();
+                if sent_while_kill_switch_on || kill_switch_on {
                     let label = self.thread_label(thread_id);
-                    let detail = if self.kill_switch_on_now() {
+                    let detail = if kill_switch_on {
                         format!(
                             "Not sent to {label}: the security kill switch is on, and a task for a pane you opened is not kept (as a typed message is not). Send it again after turning the switch off."
                         )
                     } else {
                         format!(
-                            "Not sent to {label}: it was sent while the security kill switch was on, and a task for a pane you opened is not kept (as a typed message is not). Turning the switch off starts nothing: send it again."
+                            "Not sent to {label}: it was sent while the security kill switch was on, and a task for a pane you opened is not kept (as a typed message is not). It was not started when the switch was turned off; send it again."
                         )
                     };
-                    self.record_spawn_dispatch_failed_for_task(&target_node_id, &task, &detail);
+                    // #660: the sender is told; no turn starts for it there.
+                    self.record_kill_switch_dispatch_failed_for_task(&target_node_id, &task, &detail);
                     self.chat_widget.add_error_message(detail);
                     return Ok(AppRunControl::Continue);
                 }

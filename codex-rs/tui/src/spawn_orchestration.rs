@@ -1867,6 +1867,7 @@ impl App {
         );
     }
 
+    #[cfg(test)]
     pub(crate) fn record_spawn_parent_report(&mut self, parent_node_id: String, report: String) {
         self.record_spawn_parent_report_with_notify(
             parent_node_id,
@@ -1876,7 +1877,7 @@ impl App {
         );
     }
 
-    fn record_spawn_parent_report_with_notify(
+    pub(crate) fn record_spawn_parent_report_with_notify(
         &mut self,
         parent_node_id: String,
         report: String,
@@ -1915,11 +1916,10 @@ impl App {
     ) {
         // #507: no turn is started for a report while the kill switch is on
         // either (it would only wait, and could push a real waiting task out
-        // of a Claude pane); the parent has it with its next turn.
-        let start_turns = start_turns
-            && !crate::legacy_core::security_revocation::kill_switch_on(
-                self.config.codex_home.as_ref(),
-            );
+        // of a Claude pane); the parent has it with its next turn. #660: as
+        // this process last learned it too (a switch-off elsewhere is not
+        // handled here yet).
+        let start_turns = start_turns && !self.kill_switch_on_now();
         let summary = "Child report delivered.".to_string();
         let hint = Some(report.to_string());
         // `codex-main` is the native primary Codex thread, not a Claude pane. Route it through the
@@ -2091,17 +2091,58 @@ impl App {
         task: &str,
         detail: impl AsRef<str>,
     ) {
-        let detail = detail.as_ref();
+        self.record_spawn_dispatch_failed_for_task_with_turns(
+            target_node_id,
+            task,
+            detail.as_ref(),
+            /*start_turns*/ true,
+        );
+    }
+
+    /// #660: as `record_spawn_dispatch_failed_for_task`, for a task held or
+    /// refused because of the kill switch: the senders are told, but no turn
+    /// starts for it in them, also when it is handled just after switch-off
+    /// (nothing restarts after switch-off, #507).
+    pub(crate) fn record_kill_switch_dispatch_failed_for_task(
+        &mut self,
+        target_node_id: &str,
+        task: &str,
+        detail: impl AsRef<str>,
+    ) {
+        self.record_spawn_dispatch_failed_for_task_with_turns(
+            target_node_id,
+            task,
+            detail.as_ref(),
+            /*start_turns*/ false,
+        );
+    }
+
+    fn record_spawn_dispatch_failed_for_task_with_turns(
+        &mut self,
+        target_node_id: &str,
+        task: &str,
+        detail: &str,
+        start_turns: bool,
+    ) {
         let acks = self.take_spawn_dispatch_acks_for_task(target_node_id, task);
         self.release_spawn_dispatch_origins(&acks);
         for ack in &acks {
-            self.note_assignment_dispatch_failure(
+            self.note_assignment_dispatch_failure_with_turns(
                 &ack.source_node_id,
                 detail,
                 /*will_retry*/ false,
+                start_turns,
             );
         }
-        self.record_spawn_dispatch_acks(&acks, "failed", detail, /*notify*/ true);
+        for ack in &acks {
+            self.record_spawn_dispatch_ack(
+                ack,
+                "failed",
+                detail,
+                /*notify*/ true,
+                start_turns,
+            );
+        }
     }
 
     pub(crate) fn release_spawn_dispatch_origins(&mut self, acks: &[SpawnDispatchAck]) {
@@ -2121,7 +2162,7 @@ impl App {
     ) {
         let detail = detail.as_ref();
         for ack in acks {
-            self.record_spawn_dispatch_ack(ack, status, detail, notify);
+            self.record_spawn_dispatch_ack(ack, status, detail, notify, /*start_turns*/ true);
         }
     }
 
@@ -2131,6 +2172,7 @@ impl App {
         status: &str,
         detail: &str,
         notify: bool,
+        start_turns: bool,
     ) {
         let report = format!(
             "dispatch_ack; #{}; target={}; status={}; detail={}",
@@ -2143,7 +2185,7 @@ impl App {
             ack.source_node_id.clone(),
             report,
             notify,
-            /*start_turns*/ true,
+            start_turns,
         );
     }
 
