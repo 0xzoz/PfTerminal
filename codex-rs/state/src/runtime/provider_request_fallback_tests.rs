@@ -310,14 +310,14 @@ async fn one_accounts_cooldown_never_blocks_another() -> anyhow::Result<()> {
         .record_provider_request_throttle_result(&fake, rate_limited(), /*now_ms*/ 2_000)
         .await;
     let blocked = runtime
-        .check_provider_request_throttle(&account("fake"), &preflight(), 3_000)
+        .check_provider_request_throttle(&account("fake"), &preflight(), /*now_ms*/ 3_000)
         .await;
     assert_eq!(
         blocked.decision.map(|block| block.reason),
         Some(ProviderRequestBlockReason::Cooldown)
     );
     let work = runtime
-        .check_provider_request_throttle(&account("work"), &preflight(), 3_000)
+        .check_provider_request_throttle(&account("work"), &preflight(), /*now_ms*/ 3_000)
         .await;
     assert_eq!(work.decision, None);
     acquired(lease(account("work"), "work-worker", 3_001).await);
@@ -356,7 +356,11 @@ async fn an_unleased_429_starts_a_cooldown_every_process_sees() -> anyhow::Resul
     };
     assert_eq!(check(&runtime, account("b"), 1_000).await.decision, None);
     let recorded = runtime
-        .record_provider_request_throttle_outcome(&account("b"), rate_limited(), 2_000)
+        .record_provider_request_throttle_outcome(
+            &account("b"),
+            rate_limited(),
+            /*now_ms*/ 2_000,
+        )
         .await;
     assert_eq!(recorded.state_db_fallback, None);
 
@@ -390,12 +394,16 @@ async fn an_unleased_429_starts_a_cooldown_every_process_sees() -> anyhow::Resul
                 input_tokens: Some(10),
                 cached_input_tokens: Some(0),
             },
-            400_000,
+            /*now_ms*/ 400_000,
         )
         .await;
     assert_eq!(check(&runtime, account("a"), 400_001).await.decision, None);
     other_process
-        .record_provider_request_throttle_outcome(&account("a"), no_retry_after, 500_000)
+        .record_provider_request_throttle_outcome(
+            &account("a"),
+            no_retry_after,
+            /*now_ms*/ 500_000,
+        )
         .await;
     assert_eq!(
         check_reason(&check(&runtime, account("a"), 500_001).await),
@@ -416,7 +424,7 @@ async fn an_unleased_result_never_ends_a_cooldown_or_lease() -> anyhow::Result<(
     let runtime = StateRuntime::init_for_testing(home.clone(), "zai".into()).await?;
     let other_process = StateRuntime::init_for_testing(home.clone(), "zai".into()).await?;
     runtime
-        .record_provider_request_throttle_outcome(&key(), rate_limited(), 1_000)
+        .record_provider_request_throttle_outcome(&key(), rate_limited(), /*now_ms*/ 1_000)
         .await;
     for result in [
         ProviderRequestResult::Success {
@@ -435,12 +443,12 @@ async fn an_unleased_result_never_ends_a_cooldown_or_lease() -> anyhow::Result<(
         },
     ] {
         other_process
-            .record_provider_request_throttle_outcome(&key(), result, 2_000)
+            .record_provider_request_throttle_outcome(&key(), result, /*now_ms*/ 2_000)
             .await;
         assert_eq!(
             check_reason(
                 &runtime
-                    .check_provider_request_throttle(&key(), &preflight(), 3_000)
+                    .check_provider_request_throttle(&key(), &preflight(), /*now_ms*/ 3_000)
                     .await
             ),
             Some((ProviderRequestBlockReason::Cooldown, 61_000, Some(429)))
@@ -455,15 +463,15 @@ async fn an_unleased_result_never_ends_a_cooldown_or_lease() -> anyhow::Result<(
                 input_tokens: None,
                 cached_input_tokens: None,
             },
-            71_000,
+            /*now_ms*/ 71_000,
         )
         .await;
     assert_eq!(
-        blocked_reason(&acquire(&other_process, "worker-b", 72_000).await),
+        blocked_reason(&acquire(&other_process, "worker-b", /*now_ms*/ 72_000).await),
         Some(ProviderRequestBlockReason::Lease)
     );
     runtime
-        .release_provider_request_throttle_lease(&lease, 73_000)
+        .release_provider_request_throttle_lease(&lease, /*now_ms*/ 73_000)
         .await?;
 
     other_process.close().await;
@@ -480,11 +488,11 @@ async fn an_unleased_429_holds_this_process_back_while_the_db_is_busy() -> anyho
     let runtime = StateRuntime::init_for_testing(home.clone(), "zai".into()).await?;
     let held = hold_write_lock(&runtime.sqlite().state_db_path()).await?;
     let recorded = runtime
-        .record_provider_request_throttle_outcome(&key(), rate_limited(), 1_000)
+        .record_provider_request_throttle_outcome(&key(), rate_limited(), /*now_ms*/ 1_000)
         .await;
     assert_eq!(recorded.state_db_fallback, Some(StateDbFallback::Busy));
     let check = runtime
-        .check_provider_request_throttle(&key(), &preflight(), 2_000)
+        .check_provider_request_throttle(&key(), &preflight(), /*now_ms*/ 2_000)
         .await;
     assert_eq!(
         check_reason(&check),
@@ -532,11 +540,17 @@ async fn a_legacy_row_moves_to_its_salted_key() -> anyhow::Result<()> {
     };
     let lease = acquired(
         runtime
-            .acquire_provider_request_throttle_lease(&legacy, &preflight(), "old", 600_000, 1_000)
+            .acquire_provider_request_throttle_lease(
+                &legacy,
+                &preflight(),
+                "old",
+                /*lease_ttl_ms*/ 600_000,
+                /*now_ms*/ 1_000,
+            )
             .await,
     );
     runtime
-        .record_provider_request_throttle_result(&lease, rate_limited(), 2_000)
+        .record_provider_request_throttle_result(&lease, rate_limited(), /*now_ms*/ 2_000)
         .await;
 
     // A fresh process (no memory of the legacy cooldown) adopts the row.
@@ -551,7 +565,7 @@ async fn a_legacy_row_moves_to_its_salted_key() -> anyhow::Result<()> {
     assert_eq!(
         check_reason(
             &process
-                .check_provider_request_throttle(&salted, &preflight(), 3_000)
+                .check_provider_request_throttle(&salted, &preflight(), /*now_ms*/ 3_000)
                 .await
         ),
         Some((ProviderRequestBlockReason::Cooldown, 62_000, Some(429)))
@@ -587,19 +601,19 @@ async fn a_burst_of_429s_does_not_escalate_the_cooldown() -> anyhow::Result<()> 
     assert_eq!(
         check_reason(
             &runtime
-                .check_provider_request_throttle(&key(), &preflight(), 2_000)
+                .check_provider_request_throttle(&key(), &preflight(), /*now_ms*/ 2_000)
                 .await
         ),
         Some((ProviderRequestBlockReason::Cooldown, 31_200, Some(429)))
     );
     // The next 429 after the cooldown escalates once.
     runtime
-        .record_provider_request_throttle_outcome(&key(), no_retry_after, 40_000)
+        .record_provider_request_throttle_outcome(&key(), no_retry_after, /*now_ms*/ 40_000)
         .await;
     assert_eq!(
         check_reason(
             &runtime
-                .check_provider_request_throttle(&key(), &preflight(), 40_001)
+                .check_provider_request_throttle(&key(), &preflight(), /*now_ms*/ 40_001)
                 .await
         ),
         Some((ProviderRequestBlockReason::Cooldown, 100_000, Some(429)))
@@ -618,7 +632,7 @@ async fn a_leased_success_never_ends_an_unleased_cooldown() -> anyhow::Result<()
     let other_process = StateRuntime::init_for_testing(home.clone(), "zai".into()).await?;
     let lease = acquired(acquire(&runtime, "worker-a", /*now_ms*/ 1_000).await);
     other_process
-        .record_provider_request_throttle_outcome(&key(), rate_limited(), 2_000)
+        .record_provider_request_throttle_outcome(&key(), rate_limited(), /*now_ms*/ 2_000)
         .await;
     let recorded = runtime
         .record_provider_request_throttle_result(
@@ -627,7 +641,7 @@ async fn a_leased_success_never_ends_an_unleased_cooldown() -> anyhow::Result<()
                 input_tokens: Some(1),
                 cached_input_tokens: None,
             },
-            3_000,
+            /*now_ms*/ 3_000,
         )
         .await;
     assert_eq!(recorded.decision, true);
@@ -635,7 +649,7 @@ async fn a_leased_success_never_ends_an_unleased_cooldown() -> anyhow::Result<()
         assert_eq!(
             check_reason(
                 &process
-                    .check_provider_request_throttle(&key(), &preflight(), 4_000)
+                    .check_provider_request_throttle(&key(), &preflight(), /*now_ms*/ 4_000)
                     .await
             ),
             Some((ProviderRequestBlockReason::Cooldown, 62_000, Some(429)))
@@ -643,7 +657,7 @@ async fn a_leased_success_never_ends_an_unleased_cooldown() -> anyhow::Result<()
     }
     // The lease itself ended.
     assert_eq!(
-        blocked_reason(&acquire(&other_process, "worker-b", 70_000).await),
+        blocked_reason(&acquire(&other_process, "worker-b", /*now_ms*/ 70_000).await),
         None
     );
     other_process.close().await;
@@ -728,7 +742,7 @@ async fn adoption_waits_out_a_busy_db_once() -> anyhow::Result<()> {
     let started = Instant::now();
     adopt().await;
     let check = runtime
-        .check_provider_request_throttle(&key(), &preflight(), 2_000)
+        .check_provider_request_throttle(&key(), &preflight(), /*now_ms*/ 2_000)
         .await;
     assert_eq!(check.state_db_fallback, Some(StateDbFallback::Busy));
     assert!(

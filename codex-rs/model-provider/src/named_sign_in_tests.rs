@@ -39,7 +39,7 @@ async fn named_and_default_openai_providers_never_mix_sign_ins() {
 
     let named = create_model_provider(openai(Some("work")), Some(base.clone()));
     let swapped = base.for_named_account(work);
-    let default_on_swapped = create_model_provider(openai(None), Some(swapped));
+    let default_on_swapped = create_model_provider(openai(/*account*/ None), Some(swapped));
     let missing = create_model_provider(openai(Some("missing")), Some(base));
     assert_eq!(
         (

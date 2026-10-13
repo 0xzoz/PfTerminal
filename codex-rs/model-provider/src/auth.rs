@@ -903,7 +903,7 @@ mod tests {
         let mut bearer =
             create_oss_provider_with_base_url("https://llm.example/v1", WireApi::Responses);
         bearer.experimental_bearer_token = Some("bearer-pf27s05".to_string());
-        assert_brokered_matches_direct(None, &bearer, ProviderApiKeyHeader::Bearer);
+        assert_brokered_matches_direct(/*auth*/ None, &bearer, ProviderApiKeyHeader::Bearer);
     }
 
     use crate::model_key_broker::test_support::with_recording_broker;
@@ -950,7 +950,9 @@ mod tests {
                 assert_eq!(request.header, ProviderApiKeyHeader::Bearer);
                 assert_eq!(
                     request.base_url,
-                    zai.to_api_provider(None).expect("provider").base_url
+                    zai.to_api_provider(/*auth_mode*/ None)
+                        .expect("provider")
+                        .base_url
                 );
                 let crate::model_key_broker::BrokeredKeySource::ProviderKey {
                     provider_key_id,
@@ -1059,12 +1061,12 @@ mod tests {
     /// Before the process's broker runs, brokered credentials are not sent.
     #[test]
     fn pf_27_s05_required_broker_not_running_fails_closed() {
-        crate::model_key_broker::set_test_broker_required(true);
+        crate::model_key_broker::set_test_broker_required(/*required*/ true);
         let mut provider =
             create_oss_provider_with_base_url("https://llm.example/v1", WireApi::Responses);
         provider.experimental_bearer_token = Some("bearer-pf27s05".to_string());
         let result = resolve_provider_auth(/*auth*/ None, &provider);
-        crate::model_key_broker::set_test_broker_required(false);
+        crate::model_key_broker::set_test_broker_required(/*required*/ false);
         let Err(error) = result else {
             panic!("a credential must not be attached before the broker runs");
         };

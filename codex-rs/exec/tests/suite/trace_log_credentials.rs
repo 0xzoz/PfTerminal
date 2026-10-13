@@ -74,7 +74,12 @@ async fn websocket_turn_keeps_the_key_out_of_trace_logs() {
     // A startup prewarm, if any, then the turn.
     let server = start_websocket_server(vec![vec![turn.clone(), turn]]).await;
     let test = test_codex_exec();
-    let output = run_exec(&test, &format!("{}/v1", server.uri()), KEY, true);
+    let output = run_exec(
+        &test,
+        &format!("{}/v1", server.uri()),
+        KEY,
+        /*websockets*/ true,
+    );
 
     assert_eq!(
         server
@@ -114,7 +119,12 @@ async fn http_turn_keeps_the_key_out_of_trace_logs() {
     )
     .await;
     let test = test_codex_exec();
-    let output = run_exec(&test, &format!("{}/v1", server.uri()), KEY, false);
+    let output = run_exec(
+        &test,
+        &format!("{}/v1", server.uri()),
+        KEY,
+        /*websockets*/ false,
+    );
 
     assert_eq!(
         response.single_request().header("authorization"),

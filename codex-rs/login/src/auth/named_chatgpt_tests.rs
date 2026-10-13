@@ -181,21 +181,43 @@ fn login_restrictions_refuse_the_other_kind_and_other_workspaces() {
     let api_key = api_key_login("sk-canary");
     assert_eq!(
         [
-            sign_in_restriction(&work, &chatgpt, None, None),
+            sign_in_restriction(
+                &work, &chatgpt, /*forced_login_method*/ None, /*forced_workspace*/ None
+            ),
             sign_in_restriction(
                 &work,
                 &chatgpt,
                 Some(ForcedLoginMethod::Chatgpt),
                 Some(&["ws-1".to_string()])
             ),
-            sign_in_restriction(&work, &api_key, Some(ForcedLoginMethod::Api), None),
+            sign_in_restriction(
+                &work,
+                &api_key,
+                Some(ForcedLoginMethod::Api),
+                /*forced_workspace*/ None
+            ),
         ],
         [None, None, None]
     );
     for refused in [
-        sign_in_restriction(&work, &api_key, Some(ForcedLoginMethod::Chatgpt), None),
-        sign_in_restriction(&work, &chatgpt, Some(ForcedLoginMethod::Api), None),
-        sign_in_restriction(&work, &chatgpt, None, Some(&["ws-other".to_string()])),
+        sign_in_restriction(
+            &work,
+            &api_key,
+            Some(ForcedLoginMethod::Chatgpt),
+            /*forced_workspace*/ None,
+        ),
+        sign_in_restriction(
+            &work,
+            &chatgpt,
+            Some(ForcedLoginMethod::Api),
+            /*forced_workspace*/ None,
+        ),
+        sign_in_restriction(
+            &work,
+            &chatgpt,
+            /*forced_login_method*/ None,
+            Some(&["ws-other".to_string()]),
+        ),
     ] {
         let reason = refused.expect("refused");
         assert!(
