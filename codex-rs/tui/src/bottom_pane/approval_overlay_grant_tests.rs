@@ -149,15 +149,15 @@ fn pf_25_s01_grant_option_only_when_core_offers_one() {
 /// read-only.
 #[test]
 fn issue_442_grant_once_says_what_it_lifts() {
-    let (mut view, _rx) = overlay(Some(offer()), true);
-    let option = render(&view, 160);
+    let (mut view, _rx) = overlay(Some(offer()), /*security_levels*/ true);
+    let option = render(&view, /*width*/ 160);
     assert!(
         option.contains("Grant once: also let it write hooks and start-up files"),
         "{option}"
     );
     key(&mut view, KeyCode::Char('g'));
     key(&mut view, KeyCode::Enter);
-    let review = render(&view, 400)
+    let review = render(&view, /*width*/ 400)
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
@@ -182,14 +182,17 @@ fn issue_442_grant_once_says_what_it_lifts() {
 /// nothing is answered yet.
 #[test]
 fn pf_25_s01_grant_review_shows_exact_scope() {
-    let (mut view, mut rx) = overlay(Some(offer()), true);
-    assert_snapshot!("pf_25_s01_grant_option", render(&view, 100));
+    let (mut view, mut rx) = overlay(Some(offer()), /*security_levels*/ true);
+    assert_snapshot!("pf_25_s01_grant_option", render(&view, /*width*/ 100));
     key(&mut view, KeyCode::Char('g'));
     key(&mut view, KeyCode::Enter);
     assert!(view.grant_review.is_some());
-    assert_snapshot!("pf_25_s01_grant_review", render(&view, 100));
+    assert_snapshot!("pf_25_s01_grant_review", render(&view, /*width*/ 100));
     key(&mut view, KeyCode::Char('u'));
-    assert_snapshot!("pf_25_s01_grant_review_until_expiry", render(&view, 100));
+    assert_snapshot!(
+        "pf_25_s01_grant_review_until_expiry",
+        render(&view, /*width*/ 100)
+    );
     assert_eq!(exec_decisions(&mut rx), Vec::new());
     assert!(!view.is_complete());
 }
@@ -197,7 +200,7 @@ fn pf_25_s01_grant_review_shows_exact_scope() {
 /// Esc in the review goes back to the approval: nothing granted or answered.
 #[test]
 fn pf_25_s01_esc_returns_to_the_approval() {
-    let (mut view, mut rx) = overlay(Some(offer()), true);
+    let (mut view, mut rx) = overlay(Some(offer()), /*security_levels*/ true);
     assert!(!view.prefer_esc_to_handle_key_event());
     key(&mut view, KeyCode::Char('g'));
     key(&mut view, KeyCode::Enter);
@@ -220,22 +223,22 @@ fn pf_25_s01_esc_returns_to_the_approval() {
 /// review shows why and stays open; the command is not approved.
 #[test]
 fn pf_25_s01_unknown_offer_is_refused_visibly() {
-    let (mut view, mut rx) = overlay(Some(offer()), true);
+    let (mut view, mut rx) = overlay(Some(offer()), /*security_levels*/ true);
     key(&mut view, KeyCode::Char('g'));
     key(&mut view, KeyCode::Enter);
-    render(&view, 100);
+    render(&view, /*width*/ 100);
     key(&mut view, KeyCode::Down);
     key(&mut view, KeyCode::Enter);
     assert!(view.grant_review.is_some());
     assert!(!view.is_complete());
     assert_eq!(exec_decisions(&mut rx), Vec::new());
-    assert_snapshot!("pf_25_s01_grant_refused", render(&view, 100));
+    assert_snapshot!("pf_25_s01_grant_refused", render(&view, /*width*/ 100));
 }
 
 /// Typed text and other keys in the review do nothing.
 #[test]
 fn pf_25_s01_review_ignores_other_keys() {
-    let (mut view, mut rx) = overlay(Some(offer()), true);
+    let (mut view, mut rx) = overlay(Some(offer()), /*security_levels*/ true);
     key(&mut view, KeyCode::Char('g'));
     key(&mut view, KeyCode::Enter);
     for code in [KeyCode::Char('y'), KeyCode::Char('n'), KeyCode::Char('g')] {
@@ -281,7 +284,7 @@ fn pf_25_s01_pane_esc_in_review_keeps_the_request() {
 /// second Enter goes back, and the approval then needs a fresh choice.
 #[test]
 fn pf_25_s01_double_enter_grants_nothing() {
-    let (mut view, mut rx) = overlay(Some(offer()), true);
+    let (mut view, mut rx) = overlay(Some(offer()), /*security_levels*/ true);
     key(&mut view, KeyCode::Char('g'));
     for _ in 0..4 {
         key(&mut view, KeyCode::Enter);
@@ -314,7 +317,7 @@ fn pf_25_s01_grant_records_the_choice_and_approves() {
         if toggle {
             key(&mut view, KeyCode::Char('u'));
         }
-        render(&view, 100);
+        render(&view, /*width*/ 100);
         key(&mut view, KeyCode::Down);
         key(&mut view, KeyCode::Enter);
         assert_eq!(offer.confirmed_uses(), Some(uses));
@@ -325,7 +328,7 @@ fn pf_25_s01_grant_records_the_choice_and_approves() {
             match event {
                 AppEvent::InsertHistoryCell(cell) => {
                     granted |= cell
-                        .display_lines(200)
+                        .display_lines(/*width*/ 200)
                         .iter()
                         .any(|line| line.to_string().contains("You granted"));
                 }
@@ -344,7 +347,7 @@ fn pf_25_s01_grant_records_the_choice_and_approves() {
 /// A review cut off by a short pane cannot grant.
 #[test]
 fn pf_25_s01_clipped_review_cannot_grant() {
-    let (mut view, mut rx) = overlay(Some(offer()), true);
+    let (mut view, mut rx) = overlay(Some(offer()), /*security_levels*/ true);
     key(&mut view, KeyCode::Char('g'));
     key(&mut view, KeyCode::Enter);
     let mut buf = Buffer::empty(Rect::new(0, 0, 100, 8));
@@ -353,14 +356,14 @@ fn pf_25_s01_clipped_review_cannot_grant() {
     key(&mut view, KeyCode::Enter);
     assert!(view.grant_review.is_some());
     assert_eq!(exec_decisions(&mut rx), Vec::new());
-    assert!(render(&view, 100).contains("does not fit on screen"));
+    assert!(render(&view, /*width*/ 100).contains("does not fit on screen"));
 }
 
 /// The request answered elsewhere while the review is open closes it;
 /// Ctrl+C in the review cancels the request.
 #[test]
 fn pf_25_s01_review_follows_the_request() {
-    let (mut view, mut rx) = overlay(Some(offer()), true);
+    let (mut view, mut rx) = overlay(Some(offer()), /*security_levels*/ true);
     key(&mut view, KeyCode::Char('g'));
     key(&mut view, KeyCode::Enter);
     assert!(
@@ -371,7 +374,7 @@ fn pf_25_s01_review_follows_the_request() {
     assert!(view.is_complete());
     assert_eq!(exec_decisions(&mut rx), Vec::new());
 
-    let (mut view, mut rx) = overlay(Some(offer()), true);
+    let (mut view, mut rx) = overlay(Some(offer()), /*security_levels*/ true);
     key(&mut view, KeyCode::Char('g'));
     key(&mut view, KeyCode::Enter);
     assert_eq!(view.on_ctrl_c(), CancellationEvent::Handled);
@@ -387,7 +390,7 @@ fn pf_25_s01_review_follows_the_request() {
 fn pf_25_s01_no_option_for_another_command_or_without_accept() {
     let mut other = offer();
     other.command = vec!["cat".to_string(), "../home/other.txt".to_string()];
-    let (view, _rx) = overlay(Some(other), true);
+    let (view, _rx) = overlay(Some(other), /*security_levels*/ true);
     assert!(
         !view
             .options
@@ -399,7 +402,11 @@ fn pf_25_s01_no_option_for_another_command_or_without_accept() {
         unreachable!()
     };
     no_accept.available_decisions = vec![CommandExecutionApprovalDecision::Cancel];
-    let (view, _rx) = overlay_for(ApprovalRequest::Exec(no_accept), Some(offer()), true);
+    let (view, _rx) = overlay_for(
+        ApprovalRequest::Exec(no_accept),
+        Some(offer()),
+        /*security_levels*/ true,
+    );
     assert!(
         !view
             .options
@@ -430,10 +437,10 @@ fn pf_25_s01_same_command_accepts_the_joined_form() {
 fn pf_25_s01_review_escapes_model_text() {
     let mut offered = offer();
     offered.cwd = "/work\nFolder      /safe\u{202e}".to_string();
-    let (mut view, _rx) = overlay(Some(offered), true);
+    let (mut view, _rx) = overlay(Some(offered), /*security_levels*/ true);
     key(&mut view, KeyCode::Char('g'));
     key(&mut view, KeyCode::Enter);
-    let rendered = render(&view, 100);
+    let rendered = render(&view, /*width*/ 100);
     assert!(rendered.contains("/work\\nFolder"), "{rendered}");
     assert!(rendered.contains("\\u{202e}"), "{rendered}");
     assert!(
@@ -449,7 +456,7 @@ fn pf_25_s01_review_escapes_model_text() {
 /// view above grants nothing and answers nothing.
 #[test]
 fn issue_523_a_revealed_review_grants_nothing() {
-    let (mut view, mut rx) = overlay(Some(offer()), true);
+    let (mut view, mut rx) = overlay(Some(offer()), /*security_levels*/ true);
     key(&mut view, KeyCode::Char('g'));
     key(&mut view, KeyCode::Enter);
     assert!(view.grant_review.is_some());

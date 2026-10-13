@@ -72,9 +72,21 @@ async fn issue_613_the_same_task_sent_again_while_it_waits_is_delivered_once() {
         make_child_report_auto_claude_pane_app().await;
     let source = crate::spawn_orchestration::pane_node_id(&troll_pane_id);
     issue_507_switch(&app, HumanRevocation::KillSwitchOn);
-    register_ack(&mut app, &source, &orc_pane_id, "pf613 task", 6131);
+    register_ack(
+        &mut app,
+        &source,
+        &orc_pane_id,
+        "pf613 task",
+        /*seq*/ 6131,
+    );
     app.submit_claude_pane_task(orc_pane_id.clone(), "pf613 task".to_string());
-    register_ack(&mut app, &source, &orc_pane_id, "pf613 task", 6132);
+    register_ack(
+        &mut app,
+        &source,
+        &orc_pane_id,
+        "pf613 task",
+        /*seq*/ 6132,
+    );
     app.submit_claude_pane_task(orc_pane_id.clone(), "pf613 task".to_string());
     assert_eq!(
         app.kill_switch_held_claude_tasks,
@@ -116,7 +128,13 @@ async fn issue_613_the_sender_of_a_task_for_a_missing_pane_is_told() {
         make_child_report_auto_claude_pane_app().await;
     let source = crate::spawn_orchestration::pane_node_id(&troll_pane_id);
     issue_507_switch(&app, HumanRevocation::KillSwitchOn);
-    register_ack(&mut app, &source, "claude-missing", "pf613 task", 6133);
+    register_ack(
+        &mut app,
+        &source,
+        "claude-missing",
+        "pf613 task",
+        /*seq*/ 6133,
+    );
     app.submit_claude_pane_task("claude-missing".to_string(), "pf613 task".to_string());
     assert!(app.kill_switch_held_claude_tasks.is_empty());
     let reports = reports_to(&app, &source);

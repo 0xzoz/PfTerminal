@@ -5389,18 +5389,21 @@ mod tests {
     fn slash_command_argument_hint_shows_until_an_argument_is_typed() {
         // `/cost` exists only in developer-accounting builds.
         let shown = cfg!(feature = "developer-accounting");
-        assert_eq!(shows_argument_hint("/cost ", 100, |_| {}), shown);
-        assert_eq!(shows_argument_hint("/cost   ", 100, |_| {}), shown);
+        assert_eq!(shows_argument_hint("/cost ", /*width*/ 100, |_| {}), shown);
+        assert_eq!(
+            shows_argument_hint("/cost   ", /*width*/ 100, |_| {}),
+            shown
+        );
         // Not before the space, once an argument is typed, for a command
         // without a hint, where it would not fit whole, or where `/cost`
         // cannot be submitted.
         for text in ["/cost", "/cost 2", "/cost 2026-10-09 ", "/diff ", "/cost\t"] {
-            assert!(!shows_argument_hint(text, 100, |_| {}), "{text}");
+            assert!(!shows_argument_hint(text, /*width*/ 100, |_| {}), "{text}");
         }
-        assert!(!shows_argument_hint("/cost ", 40, |_| {}));
+        assert!(!shows_argument_hint("/cost ", /*width*/ 40, |_| {}));
         assert!(!shows_argument_hint(
             "/cost ",
-            100,
+            /*width*/ 100,
             ChatComposer::set_parent_owned_thread
         ));
     }

@@ -7115,7 +7115,7 @@ fn issue_507_switch(app: &App, choice: crate::legacy_core::security_revocation::
     use crate::legacy_core::security_level_change::SecurityLevel;
     use crate::legacy_core::security_revocation::commit_human_revocation;
     let codex_home = app.config.codex_home.to_path_buf();
-    let basis = LevelBasis::read(&codex_home, SecurityLevel::Permissive, None);
+    let basis = LevelBasis::read(&codex_home, SecurityLevel::Permissive, /*thread*/ None);
     commit_human_revocation(
         &codex_home,
         SecurityLevel::Permissive,

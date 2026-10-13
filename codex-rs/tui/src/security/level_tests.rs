@@ -214,7 +214,7 @@ fn contained_panes_lift_the_refusal_only_when_containment_is_ready() {
         );
     }
     let _feature = feature(true);
-    let _armed = test_settings::set_contract_armed(true);
+    let _armed = test_settings::set_contract_armed(/*armed*/ true);
     let has_sandbox =
         codex_sandboxing::get_platform_sandbox(/*windows_sandbox_enabled*/ false).is_some();
     assert_eq!(external_agent_block_reason().is_none(), has_sandbox);
