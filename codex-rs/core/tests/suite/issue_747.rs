@@ -285,9 +285,18 @@ async fn issue_747_moderate_never_runs_a_command_outside_the_sandbox() -> anyhow
         (SecurityLevel::Permissive, Route::EscalatedExec, 1, true),
         (SecurityLevel::Moderate, Route::Patch, 1, true),
         (SecurityLevel::Permissive, Route::Patch, 1, true),
+        // Review r1 finding 1: Core's Aggressive without its launch profile
+        // (confirmed before the restart, or only `[security] level`; an
+        // unreadable policy counts as Aggressive) keeps every command in the
+        // sandbox already: its protected-path rules apply from the start and
+        // no approval lifts them, so their denied reads keep the run in it.
+        (SecurityLevel::Aggressive, Route::Escalated, 1, false),
+        (SecurityLevel::Aggressive, Route::EscalatedExec, 1, false),
+        (SecurityLevel::Aggressive, Route::Rule, 0, false),
     ] {
         let run = run(level, route).await?;
         let moderate = level == SecurityLevel::Moderate;
+        // The prompt note and the model instruction are Moderate's only.
         // Only a request to leave the sandbox gets the note on its prompt.
         let noted = moderate && matches!(route, Route::Escalated | Route::EscalatedExec);
         if run.asked != asks
