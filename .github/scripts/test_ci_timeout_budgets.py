@@ -73,7 +73,8 @@ class PrLinuxClippyTest(unittest.TestCase):
             r"      runner: windows-2022\n"
             r"      target: x86_64-pc-windows-msvc\n"
             r"      profile: dev\n"
-            r"      timeout_minutes: 60$",
+            r"      timeout_minutes: 60\n"
+            r"      save_caches: false$",
         )
 
     def test_pr_windows_clippy_is_required(self) -> None:

@@ -21,8 +21,9 @@ red status noise without testing the code.
   the same `cargo clippy --tests -D warnings` for the Windows msvc dev target
   (#717), so `cfg(unix)`-gated imports, helpers and `mut`s that are unused on
   Windows fail the PR instead of breaking postmerge. Same triggers, required
-  status and shared job as the Linux leg; it reuses the caches postmerge
-  `rust-ci-full` saves for this leg (warm runs ~15 minutes, 60-minute timeout).
+  status and shared job as the Linux leg. It restores the caches postmerge
+  `rust-ci-full` saves for this leg but saves none itself, so PR churn doesn't
+  evict main's (about 12 minutes warm, 15 cold; 60-minute timeout).
 - Rust nextest on Linux x64.
 - SDK checks on hosted Linux x64.
 - V8 canary coverage on hosted Linux x64 only.
