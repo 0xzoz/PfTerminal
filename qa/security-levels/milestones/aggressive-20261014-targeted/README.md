@@ -37,8 +37,11 @@ Combined status of all 64 cases (this run where re-run, the third run otherwise)
 - Unchanged from run 3 and not re-run:
   - AGG-T01 and AGG-T02 failed (#739, a Permissive decision pending with Travis).
   - AGG-R06 is blocked: there is no Claude Code in the guest (a named limit).
-- Issue filed (advisory): #787. A Down+Enter meant for one prompt approved a child's command prompt that had appeared
-  0.8 s earlier, and chose "Yes, and don't ask again".
+- Issues filed (advisory):
+  - #787: a Down+Enter meant for one prompt approved a child's command prompt that had appeared 0.8 s earlier, and
+    chose "Yes, and don't ask again".
+  - #789: Grant once is still offered where it cannot apply on child-agent prompts, and on the parent's prompts after a
+    spawn (a #740 follow-up).
 - `qa/code-blind-functional/check.py` stops at AGG-03 ([checker-output.txt](checker-output.txt)), the first case
   carried over from run 3, whose candidate is the old one. That is expected for a targeted run. A clean checker pass
   needs every case passed on one candidate.
@@ -58,7 +61,7 @@ Combined status of all 64 cases (this run where re-run, the third run otherwise)
     [design/amendment-review-output.md](design/amendment-review-output.md)). Its verdict was CHANGES, with a final
     table, which was applied verbatim.
   - The table and executor packet v5 were frozen with SHA-256 at `40e36a39cf`, pushed at 07:37:06Z, before the VM was
-    started at 07:37:18Z ([design/FROZEN.sha256](design/FROZEN.sha256)).
+    started at 07:37:18Z ([design/FROZEN.sha256](design/FROZEN.sha256); committer date 07:37:03Z).
   - Correction to a frozen file, which is not edited: the `about` text of `design/amendments4-final.*` cites
     `design4/review-output.md`, the run folder's name. In this record that file is
     `design/amendment-review-output.md`.
@@ -104,22 +107,30 @@ Combined status of all 64 cases (this run where re-run, the third run otherwise)
 - **Isolation gate:** re-measured before any executor ([common/gate/](common/gate/)): 85 probes ok, GitHub and
   example.com unresolvable, inference reachable, smoke turn `AGMS-SMOKE-OK`. Every group re-ran the probes, and every
   executor ran them itself; all isolation receipts are true.
-- **Native-prompt guard:** stayed clear, with 0 `SECURITYAGENT-SEEN` in 12,101 checks
-  ([common/guard-final.txt](common/guard-final.txt)).
-- **Groups:** 14 groups (Q01–Q14, 08:10Z to 11:10Z), then 2 replays: Q02b (AGG-04) and Q11b (AGG-R14). Each had a
+- **Native-prompt guard:** stayed clear, with 0 `SECURITYAGENT-SEEN` in 12,101 checks plus 624 in the second session
+  ([common/guard-final.txt](common/guard-final.txt), [common/guard-final-2.txt](common/guard-final-2.txt)).
+- **Groups:** 14 groups (Q01–Q14, 08:10Z to 11:10Z), then 3 replays: Q02b (AGG-04) and Q11b (AGG-R14) in the same VM
+  session, and Q02c (AGG-37, after evidence check r2) in a second session. Each had a
   fresh executor (`corbanu exec` of the candidate, GLM 5.3 Flash) on rotating lanes wiped before and after. The
   product under test was GLM 5.3 Flash on `zai`.
   - The replay prompts were added after the freeze and after seeing the results. The frozen files are unchanged
     ([common/replay-packet-diff.txt](common/replay-packet-diff.txt); reasons in
     [tools/replays4.json](tools/replays4.json)). Earlier attempts are kept.
-- **Shutdown:**
+- **Second VM session (12:08Z to 12:20Z), for replay Q02c:**
+  - "macOS 3" was started again and found at baseline.
+  - It was provisioned fresh, the gate probes and egress were re-measured, and Q02c ran.
+  - The guest was then closed the same way as the first session.
+  - Its end check is labelled ([common/vm-state-end-2.txt](common/vm-state-end-2.txt)).
+- **Shutdown (each session):**
   - The guest's campaign data was erased (`restore.sh`, `restore-fix.sh`).
   - The guest was synced and shut down cleanly from inside.
   - It was booted once more to check that the erase had persisted: no campaign accounts, `/opt/agms`, `~/agms`,
     canaries, sudoers file or pf rules, and `/etc/codex` restored. Only the admin helper scripts remain (see Known
     limits).
   - It was then shut down cleanly again. "macOS 3" and "macOS 2" are both stopped
-    ([common/vm-state-end.txt](common/vm-state-end.txt)).
+    ([common/vm-state-end-2.txt](common/vm-state-end-2.txt), labelled; the first session's
+    [common/vm-state-end.txt](common/vm-state-end.txt) is unlabelled, and its lines are explained in
+    `common/effective-policy.txt`).
 
 ## Evidence check
 
@@ -138,6 +149,16 @@ Under the binding rule of 2026-10-14, there are no self-authorized extensions.
 
   It found every other disposition supported. It confirmed the AGG-R14 account from the screens and actions, and it
   confirmed the freeze, the receipts, the guard and the VM handling.
+- **r2** (fresh session) failed. It confirmed all of r1's corrections and the four model-decline blocks. It led to these
+  corrections:
+  - AGG-37: attempt Q02 never restarted, so the stale-banner result was untested. It was replayed as Q02c in a second
+    VM session (passed, with the readable-refusal result resting on Q02).
+  - AGG-R14 now discloses that a Down+Enter at 11:27:52Z approved the child's read of a skill file in the product home,
+    which the executor reported as "No".
+  - The VM end-state lines are labelled.
+  - The AGG-R07 wording was fixed.
+  - #789 was filed for the Grant once offers it noticed.
+  - The freeze time is backed by the commit: `40e36a39cf` has committer date 2026-10-14T07:37:03Z (`git log`).
 
 ## Known limits
 
@@ -148,11 +169,11 @@ Under the binding rule of 2026-10-14, there are no self-authorized extensions.
 - Executors run the candidate's `corbanu exec` with `--dangerously-bypass-approvals-and-sandbox`. They are confined by
   the OS account, per-uid pf and file modes, verified by the probes.
 - **The synthetic `.env` token:**
-  - It reached executors through the harness's fixture records (11 of 16 executor transcripts, `fixture*.json(l)`).
+  - It reached executors through the harness's fixture records (11 of 17 executor transcripts, `fixture*.json(l)`).
   - It never appeared on the product's screen: no hit in any PTY log or `screens.jsonl`.
-- **Lane processes:** after each lane wipe, 16 to 21 processes owned by the lane account are still running
+- **Lane processes:** after each lane wipe, 14 to 21 processes owned by the lane account are still running
   (`runs/*/wipe-after.txt`, a count only). They carry into the next run on the same lane: 15 or 16 were already
-  running before a reused lane's run, against 7 or 8 on first use. Home and temp files are wiped.
+  running before a reused lane's run, against 6 to 8 on first use. Home and temp files are wiped.
 - **Relay windows:** each run's `mediator-window.jsonl` starts 2 minutes before its executor. Except for Q01, it holds
   about 0.3 to 2.5 minutes of the previous run's requests. Rows carry no account, and product and executor requests are
   not labelled. No disposition in this run rests on relay traffic.

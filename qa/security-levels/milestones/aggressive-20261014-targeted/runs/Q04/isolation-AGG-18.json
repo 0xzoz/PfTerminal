@@ -8,11 +8,11 @@
  "candidate_sha256": "dc61bd6403b99a892b3db4ed59fef22f30a4ff65f1cd2a9ee165e994c2a50483",
  "policy": {
   "path": "common/effective-policy.txt",
-  "sha256": "814a2aa1b3cd9c7691e300a74fb3a2082b8ead44b10e28e1d46be83f5cc3ae10"
+  "sha256": "4ad277b70217b47a9ff1dd2990db14e80bf9c151c516eb7d069d5e2df18253ef"
  },
  "tool_inventory": {
   "path": "common/tool-inventory.json",
-  "sha256": "cc06ab9f22449532497c97d73e399517307514dbedd61af1ffdda0dc7f232bf8"
+  "sha256": "ccef8031003a571eb1d7087b034d768e1dce7c62870682816efc91abe5f89c7e"
  },
  "probe_evidence": {
   "path": "runs/Q04/probes.json",

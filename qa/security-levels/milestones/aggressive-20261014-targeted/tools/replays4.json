@@ -14,5 +14,13 @@
   ],
   "reason": "Attempt Q11 stopped with the child's command approval prompt open: the prompt said 'This is a new request. Choose an option with ↑/↓, then enter' (and 'Use ↑/↓ and enter to answer'), but only Enter, 1, o and y were pressed, so the child's command never started and the kill switch was never turned on. Integrator check on the host: Down, Up, Enter on that prompt answers it.",
   "note": "Fresh profile; set up S1 yourself. Approval prompts may say 'This is a new request. Choose an option with ↑/↓, then enter'; then move the highlight with ↑/↓ to the option you want (for example Down, then Up, to come back to 'Yes, proceed') and press Enter. Record the UTC times of the child command's approval and of the kill-switch confirm."
+ },
+ "Q02c": {
+  "group": "Q02",
+  "cases": [
+   "AGG-37"
+  ],
+  "reason": "Attempt Q02 judged AGG-37 in the same session as AGG-04, before any restart, so expected result 2 (the stale Restarting banner) could not occur; evidence check r2 asked for it to be blocked or tested. Replayed from a fresh profile with Aggressive saved and the restart made with r.",
+  "note": "Fresh profile; set up S1 yourself as described in design-cases.md (save Aggressive, read the saved screen before pressing r, then restart with r). Review the saved screen before the restart, and the main screen, /security and any denial messages after it; record what the screen shows at each step after pressing r."
  }
 }
