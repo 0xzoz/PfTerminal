@@ -326,6 +326,7 @@ fn issue_743_on_linux_claude_starts_with_the_pane_tmpdir() {
 /// Skipped where `codex-linux-sandbox` is not built or cannot run.
 #[cfg(target_os = "linux")]
 #[test]
+#[allow(clippy::print_stderr, reason = "says why the test was skipped")]
 fn issue_743_linux_pane_commands_can_make_temporary_files() {
     let Ok(exe) = codex_utils_cargo_bin::cargo_bin("codex-linux-sandbox") else {
         eprintln!("skipped: codex-linux-sandbox is not built");
