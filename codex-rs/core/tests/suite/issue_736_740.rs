@@ -5,7 +5,8 @@
 //!   keychain (never the login keychain) finds its item outside the
 //!   sandbox, but under Aggressive the approved command cannot reach the
 //!   keychain service. The prompt and the result say so; no grant is
-//!   offered.
+//!   offered. #758: the same when an organization's requirements enforce a
+//!   managed network proxy.
 //! - #737: `git config --global` writes `~/.gitconfig`, a start-up file
 //!   outside the current folder: no grant, with the #620 explanation.
 //! - #740: a write outside the current folder, or to the project's `.git`,
@@ -27,6 +28,7 @@ use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::user_input::UserInput;
 use codex_security_policy::SecurityLevel;
+use core_test_support::managed_network_requirements_loader;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call;
@@ -62,6 +64,17 @@ struct Run {
 /// `.git/hooks` folder, approves it once (y, no grant) and reports what
 /// happened. Agent commands get `shell_env` set.
 async fn run(command: &str, shell_env: &[(&str, &Path)]) -> anyhow::Result<Run> {
+    run_with(command, shell_env, /*managed_network*/ false).await
+}
+
+/// [`run`], with `managed_network`: an organization's requirements enforce
+/// a managed network proxy (#758), so the sandbox takes its restricted
+/// network rules.
+async fn run_with(
+    command: &str,
+    shell_env: &[(&str, &Path)],
+    managed_network: bool,
+) -> anyhow::Result<Run> {
     let shell_env: Vec<(String, String)> = shell_env
         .iter()
         .map(|(name, path)| (name.to_string(), path.display().to_string()))
@@ -87,7 +100,11 @@ async fn run(command: &str, shell_env: &[(&str, &Path)]) -> anyhow::Result<Run> 
         ],
     )
     .await;
-    let test = test_codex()
+    let mut builder = test_codex();
+    if managed_network {
+        builder = builder.with_cloud_config_bundle(managed_network_requirements_loader());
+    }
+    let test = builder
         .with_home(Arc::new(TempDir::new()?))
         .with_model("test-gpt-5.1-codex")
         .with_workspace_setup(|cwd, _fs| async move {
@@ -134,6 +151,11 @@ async fn run(command: &str, shell_env: &[(&str, &Path)]) -> anyhow::Result<Run> 
         .build(&server)
         .await?;
     std::mem::forget(server);
+    assert_eq!(
+        test.config.permissions.network.is_some(),
+        managed_network,
+        "managed network proxy"
+    );
     let thread = test.session_configured.thread_id;
     test.codex
         .submit(Op::UserInput {
@@ -269,6 +291,22 @@ impl Drop for Keychain {
 async fn issue_736_keychain_is_out_of_reach_and_explained() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
+    keychain_is_out_of_reach_and_explained(/*managed_network*/ false).await
+}
+
+/// #758: also when an organization's requirements enforce a managed network
+/// proxy, whose restricted network rules allow `com.apple.SecurityServer`:
+/// Aggressive denies the keychain services after them (Travis, 2026-10-14).
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_758_keychain_is_out_of_reach_with_a_managed_network_proxy() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    keychain_is_out_of_reach_and_explained(/*managed_network*/ true).await
+}
+
+#[cfg(target_os = "macos")]
+async fn keychain_is_out_of_reach_and_explained(managed_network: bool) -> anyhow::Result<()> {
     const SERVICE: &str = "corbanu-probe-736";
     const SECRET: &str = "keychain-canary-736";
     let keychain = Keychain::create(SERVICE, SECRET)?;
@@ -291,9 +329,10 @@ async fn issue_736_keychain_is_out_of_reach_and_explained() -> anyhow::Result<()
     );
 
     let folder = keychain.folder.path();
-    let run = run(
+    let run = run_with(
         &keychain.find_command(SERVICE),
         &[("HOME", folder), ("CFFIXED_USER_HOME", folder)],
+        managed_network,
     )
     .await?;
     // The boundary: the approved command does not get the item.

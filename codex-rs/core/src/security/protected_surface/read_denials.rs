@@ -217,6 +217,9 @@ pub(crate) struct ReadDenials {
     home: Option<AbsolutePathBuf>,
     /// #506: whether listing [`Self::home`] is denied too (Aggressive).
     home_listing_denied: bool,
+    /// #758: whether agent commands are kept away from the macOS keychain
+    /// services (Aggressive), whatever the network rules allow.
+    keychain_services_denied: bool,
     /// #594/#598: each spelling of the Corbanu home (as given, its real
     /// location, and a link naming it): it and the folders above it may not
     /// be moved aside, not even by a command a person approved (#540).
@@ -780,6 +783,13 @@ impl ReadDenials {
         self.home_listing_denied = true;
     }
 
+    /// #758: under Aggressive, agent commands may not reach the macOS
+    /// keychain services either, not even through a managed network proxy
+    /// or an allowed Unix socket (Travis, 2026-10-14). No grant lifts it.
+    pub(crate) fn deny_keychain_services(&mut self) {
+        self.keychain_services_denied = true;
+    }
+
     /// The folder whose listing is denied, if any.
     pub(crate) fn unlistable_home(&self) -> Option<&AbsolutePathBuf> {
         self.home.as_ref().filter(|_| self.home_listing_denied)
@@ -907,6 +917,10 @@ impl ReadDenials {
                 self.unmovable
                     .iter()
                     .map(FileSystemSandboxEntry::deny_moving),
+            )
+            .chain(
+                self.keychain_services_denied
+                    .then(FileSystemSandboxEntry::deny_keychain_services),
             )
             .collect();
         if entries.is_empty()

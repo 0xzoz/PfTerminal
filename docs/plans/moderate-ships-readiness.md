@@ -21,15 +21,14 @@ sprint implemented D1–D6. The table below is what is now done; the rest of thi
 | --- | --- | --- |
 | #750: choosing Moderate | Done. `/security` offers Moderate. Its review lists what it adds and what is not available (D1: PF-31, PF-32, PF-34, PF-35/36, PF-37, PF-38/39, PF-40). Confirming saves the level file and Core's record, and `r` restarts. Moving to Permissive or Aggressive says what changes and when. Esc changes nothing. Moderate isn't saved without `source_envelopes`, because Core refuses every model request under a protected level without it. | PR on `mod/750-moderate-picker`; videos in `qa/demos/index/issue-750.md`; tmux check in `qa/security-levels/moderate-picker-20261014/` |
 | D4: when Moderate applies | Core's level, and with it the approval rules, the sandbox rule and the protected-file rules, is raised when you confirm. The credential broker and the TUI's active level apply at the next start. Core can't raise only the approval rules, so this is stricter than a literal "everything else at the next start". | same |
-| #747 (D3) | Done. Under Moderate no command leaves the sandbox: approved escalations, the retry without the sandbox and allow rules all stay in it, and D6's remembered rules still skip the prompt. The prompt and the model's instructions say so. Aggressive confirmed before a restart, or set only in config, already keeps commands in the sandbox (pinned by tests). | #764 |
+| #747 (D3) | Done. Under Moderate no command leaves the sandbox: approved escalations, the retry without the sandbox and allow rules all stay in it, and D6's remembered rules still skip the prompt. The prompt and the model's instructions say so. Aggressive confirmed before a restart, or set only in config, already keeps commands in the sandbox (pinned by tests). | #764 (merged) |
 | #749: inspector | Done. "Active this run: Moderate" now appears beside "Moderate in force". The vault store shows as unreadable (but not under an external sandbox), no row says commands can run outside the sandbox, and the Nested agents row describes Moderate. The broker counts under Moderate, and the unbuilt controls are listed as not available. | PR on `mod/750-moderate-picker` |
-| D2: broker | Done. `broker_model_auth` is on by default under Moderate. The person's own setting wins, and a project layer can't turn it off. | #764 |
+| D2: broker | Done. `broker_model_auth` is on by default under Moderate. The person's own setting wins, and a project layer can't turn it off. | #764 (merged) |
 | D5: child agents | Partly done. In-process agents (`/spawn`, agent tools) inherit Moderate. A nested `corbanu exec` started by an agent command isn't refused. With this home it stops at start (it can't read Corbanu's config inside the sandbox); with another home it isn't held to Moderate. Decision needed: #766. | #766 |
-| #748: refusal wording | Separate worker (PR #760). | #760 |
+| #748: refusal wording | Done by a separate worker: Moderate refusals name the level and the way forward. | #760 (merged) |
 | User docs | `docs/security-moderate.md`, plus the Moderate parts of `docs/security-aggressive.md` and `docs/config.md`. | both PRs |
 
-Still open before the code-blind run: #766 (D5), #760 (#748), the Aggressive sign-off items, and the model-decline
-rule.
+Still open before the code-blind run: #766 (D5), the Aggressive sign-off items, and the model-decline rule.
 
 ## 1. What Moderate promises, and what main does
 

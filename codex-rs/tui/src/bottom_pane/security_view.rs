@@ -86,6 +86,15 @@ impl SecurityView {
         self
     }
 
+    /// #691: why Aggressive cannot be chosen yet (Windows without its
+    /// sandbox set up).
+    pub(crate) fn with_windows_sandbox_blocker(mut self, blocker: Option<String>) -> Self {
+        if let Some(picker) = self.picker.as_mut() {
+            picker.set_windows_sandbox_blocker(blocker);
+        }
+        self
+    }
+
     /// PF-24-S02: Core's configured levels, and where "restart now" goes.
     pub(crate) fn with_confirmation(
         mut self,

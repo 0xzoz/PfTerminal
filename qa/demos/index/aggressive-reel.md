@@ -5,6 +5,8 @@ One narrated video of the Aggressive security level as it stands after the fixes
 gets, edited from the issue demo videos indexed in this folder (`issue-6*.md`, `ISSUE-*.md`, `AGG-*.md`). It is an
 asset on the [`demos` prerelease](https://github.com/CorbanuCore/CorbanuTerminal/releases/tag/demos).
 
+- Watch online: <https://corbanu-aggressive-reel.cloudflare-share.workers.dev/> (published 2026-10-14; subtitles are burned in, and the page also
+  offers them as an English text track). Direct MP4: <https://corbanu-aggressive-reel.cloudflare-share.workers.dev/video.mp4>, the release asset losslessly remuxed for fast start, chapters kept.
 - Video: [aggressive-reel-2026-10-13.mp4](https://github.com/CorbanuCore/CorbanuTerminal/releases/download/demos/aggressive-reel-2026-10-13.mp4) (9:58, 1920x1080, 30 fps, H.264/AAC, chapters
   embedded) · subtitles: [aggressive-reel-2026-10-13.srt](https://github.com/CorbanuCore/CorbanuTerminal/releases/download/demos/aggressive-reel-2026-10-13.srt)
 - Security levels are behind the default-off `security_levels` flag.

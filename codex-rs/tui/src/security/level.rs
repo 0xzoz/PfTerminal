@@ -130,6 +130,15 @@ pub(crate) fn external_agent_block_reason() -> Option<String> {
     external_agent_block_reason_in(context.active, load(&context.codex_home).enforced())
 }
 
+/// #758: whether this process enforces Aggressive.
+pub(crate) fn aggressive_active() -> bool {
+    #[cfg(test)]
+    if let Some((active, _)) = test_levels::LEVELS.get() {
+        return active == ChosenLevel::Aggressive;
+    }
+    context().is_some_and(|context| context.active == ChosenLevel::Aggressive)
+}
+
 /// For entry points that may have no launch context (`corbanu
 /// claude-pane-smoke`): `codex_home`'s saved level, and the active level when
 /// there is one.

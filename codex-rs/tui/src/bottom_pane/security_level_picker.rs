@@ -135,6 +135,9 @@ pub(crate) struct SecurityLevelPicker {
     pub(super) open_revocations: bool,
     /// #750: the feature flags the Moderate rows depend on.
     pub(super) moderate: crate::security::moderate::Facts,
+    /// #691: why Aggressive cannot be chosen on this Windows machine yet
+    /// (its sandbox is not set up); `None` elsewhere.
+    pub(super) windows_sandbox_blocker: Option<String>,
 }
 
 /// Core's `[security]` levels from the session's config layers, and the
@@ -193,12 +196,18 @@ impl SecurityLevelPicker {
             restart_blocked: crate::security::restart::restart_blocker(),
             open_revocations: false,
             moderate: crate::security::moderate::Facts::default(),
+            windows_sandbox_blocker: None,
         }
     }
 
     /// #750: the flags the Moderate review describes.
     pub(crate) fn set_moderate_facts(&mut self, facts: crate::security::moderate::Facts) {
         self.moderate = facts;
+    }
+
+    /// #691: Aggressive is not offered until the Windows sandbox is set up.
+    pub(crate) fn set_windows_sandbox_blocker(&mut self, blocker: Option<String>) {
+        self.windows_sandbox_blocker = blocker;
     }
 
     /// PF-25-S02: whether the grants and kill switch view is offered: Core
@@ -779,6 +788,11 @@ impl SecurityLevelPicker {
                     note: Some("Moderate is already saved. Nothing changed.".to_string()),
                 }
             }
+            // #691: also a saved Aggressive's review (its nested-agent
+            // setting, an unfinished commit) waits for the sandbox.
+            ChosenLevel::Aggressive if self.windows_sandbox_blocker.is_some() => Screen::List {
+                note: self.windows_sandbox_blocker.clone(),
+            },
             target => Screen::Review(target),
         }
     }
@@ -872,10 +886,20 @@ impl SecurityLevelPicker {
                 lines.push(Line::default());
                 for (index, row) in ROWS.iter().enumerate() {
                     let marker = if index == self.selected { ">" } else { " " };
-                    let suffix = if row.chosen() == self.active {
-                        "  (active)"
-                    } else {
-                        ""
+                    let suffix = match row.chosen() {
+                        // #691: also when Aggressive is active (its review
+                        // stays closed until the sandbox is set up).
+                        ChosenLevel::Aggressive
+                            if self.windows_sandbox_blocker.is_some()
+                                && self.active == ChosenLevel::Aggressive =>
+                        {
+                            "  (active), needs the Windows sandbox set up"
+                        }
+                        ChosenLevel::Aggressive if self.windows_sandbox_blocker.is_some() => {
+                            "  needs the Windows sandbox set up"
+                        }
+                        level if level == self.active => "  (active)",
+                        _ => "",
                     };
                     let text = format!("{marker} {}{suffix}", row.name());
                     lines.push(if index == self.selected {
