@@ -8920,19 +8920,20 @@
   }
  ],
  "evidence_check": {
-  "agent": "01a13831-7438-72d2-b70d-2c0b821fcb4c",
+  "agent": "01a1383e-5e8b-7913-99f5-15191dab76f3",
   "verdict": "fail",
   "artifact": {
    "path": "review/evidence-check.md",
-   "sha256": "ce0d9cb04fa1cbf44ec802aefbedd8ee1ce6eca0b216189346c47cfbba0aa270"
+   "sha256": "cd751704c5b939c31e6de0880d9004fff957c9aad60f6d09139c6004493c53f9"
   }
  },
  "review_budget": {
-  "used": 5,
+  "used": 6,
   "limit": 5,
+  "extension": 1,
   "ledger": {
    "path": "review-ledger.md",
-   "sha256": "da1574bca5d856038296b98f794e4dbe867fac1a87dbc76f8684fd607b994794"
+   "sha256": "c70a98548e4b7b5add45e99a8369c3e565db92e004b80b0243f78a233fea5720"
   }
  }
 }

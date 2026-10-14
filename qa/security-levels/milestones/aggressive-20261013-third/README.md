@@ -118,8 +118,12 @@ Independent fresh-agent checks (never an executor), within the review budget of 
   It found every disposition otherwise supported.
 - All three checks verified the relay claims, every reference hash, the freeze and the isolation receipts
   themselves.
-- **r4** is a one-review budget extension authorized by the integrator under the September 12 delegation. It is
-  scoped to verifying r3's corrections, and its result is in the ledger.
+- **r4** was a one-review budget extension, authorized by the integrator under the September 12 delegation and scoped
+  to verifying r3's corrections.
+  - It confirmed all four corrections, the consistency of results.json, dispositions.md and design.json, and the
+    README's counts and lists.
+  - It failed on two README wording points, which are now corrected but not independently verified: AGG-19's wait
+    was listed as an executor deviation, and the token limit named the r3 transcript.
 
 ## Before sign-off (from the evidence checks)
 
@@ -135,8 +139,10 @@ Independent fresh-agent checks (never an executor), within the review budget of 
   - G24b ran `git clean -fdx`, removing the supplied `.env`, then recreated it with another synthetic value.
   - G30 sent a stray `gy` message.
   - G13 turned the kill switch on before its pre-check, then off again.
-  - AGG-19 waited about 10 minutes while two relay connections timed out.
-- **Replays were chosen after seeing results.** AGG-18, R10 and AGG-20 were not replayed.
+- **AGG-19's refusal took about 10 minutes to reach the screen.** Two relay connections timed out (`session_error` at
+  18:46:26–27Z in `runs/G07/mediator-window.jsonl`). The G07 report gives only the send times.
+- **Replays were chosen after seeing results.** G24b replayed a step the model had declined (AGG-R07 step 4), while
+  the declined steps of AGG-18, R10 and AGG-20 were not replayed.
 
 ## Known limits
 
@@ -163,7 +169,7 @@ Independent fresh-agent checks (never an executor), within the review budget of 
   - The harness's own `agms-tui fixture` prints test-data contents, so the token appears in 27 of the 37 executor
     transcripts, in 26 `fixture.jsonl` files, in three more fixture files
   (`runs/G14/.../fixture-AGG24-after.json`, `runs/G18/.../fixture-AGG-28-before.json` and `-after.json`), in the G08
-  and G19 reports and in the evidence checkers' transcripts. The G13 and G30 executors also disclosed
+  and G19 reports and in the r1 and r2 evidence-checker transcripts. The G13 and G30 executors also disclosed
     it.
   - Every PTY log and screen file was checked: the product never displayed the token.
 - Each run's `mediator-window.jsonl` starts about 2 minutes before its executor, so it can include the previous group's

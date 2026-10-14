@@ -102,6 +102,6 @@ if check.exists():
     results["evidence_check"] = {"agent": meta["agent"], "verdict": meta["verdict"], "artifact": ref(check)}
 ledger = root / "review-ledger.md"
 budget = json.loads((root / "tools/review-budget.json").read_text())
-results["review_budget"] = {"used": budget["used"], "limit": 5, "ledger": ref(ledger)}
+results["review_budget"] = {"used": budget["used"], "limit": 5, "extension": budget.get("extension", 0), "ledger": ref(ledger)}
 (root / "results.json").write_text(json.dumps(results, indent=1, ensure_ascii=False) + "\n")
 print(sha(root / "results.json"), len(cases))
