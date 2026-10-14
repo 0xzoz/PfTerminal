@@ -22,10 +22,10 @@ pub(crate) fn profile_summary(level: SecurityLevel) -> &'static str {
             "No additional security controls. Existing approvals, sandbox, vault, wallet, tool, network and agent policies remain unchanged."
         }
         SecurityLevel::Moderate => {
-            "Planned: isolate credentials, treat external content as untrusted, protect sensitive data, preview protected actions, and support audit and revocation. Not available yet."
+            "Protection around untrusted content and secrets while normal work continues: commands stay in the sandbox, credential and Corbanu files are protected, and protected actions after untrusted content need a person's fresh approval. Chosen in /security with the security_levels feature."
         }
         SecurityLevel::Aggressive => {
-            "Planned: all Moderate controls, plus deny sensitive access by default, narrow expiring grants, and exact human approval for every sign or broadcast. Not available yet."
+            "Sensitive access denied by default: writes only in the current folder, approval for every command, no network, and no vault access for agents. Chosen in /security with the security_levels feature."
         }
     }
 }

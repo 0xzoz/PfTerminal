@@ -18,7 +18,8 @@ fn absent_state_is_permissive_and_touches_nothing() {
 fn unknown_or_corrupt_state_fails_visibly_and_enforces_aggressive() {
     let home = tempfile::tempdir().unwrap();
     for contents in [
-        "version = 1\nlevel = \"moderate\"\n",
+        "version = 1\nlevel = \"relaxed\"\n",
+        "version = 1\nlevel = \"Moderate\"\n",
         "version = 1\nlevel = \"Permissive\"\n",
         "version = 2\nlevel = \"permissive\"\n",
         "version = 1\nlevel = \"permissive\"\nextra = true\n",

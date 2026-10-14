@@ -1,5 +1,6 @@
-//! Flagged `/security` picker (PF-24-S03). A human chooses Permissive or
-//! Aggressive; the differences are shown first and only the accept key saves.
+//! Flagged `/security` picker (PF-24-S03). A human chooses Permissive,
+//! Moderate (#750) or Aggressive; the differences are shown first and only
+//! the accept key saves.
 //! A saved level takes effect at the next start, where it is verified before
 //! being shown as active.
 //!
@@ -64,11 +65,11 @@ enum Row {
 const ROWS: [Row; 3] = [Row::Permissive, Row::Moderate, Row::Aggressive];
 
 impl Row {
-    fn chosen(self) -> Option<ChosenLevel> {
+    fn chosen(self) -> ChosenLevel {
         match self {
-            Self::Permissive => Some(ChosenLevel::Permissive),
-            Self::Moderate => None,
-            Self::Aggressive => Some(ChosenLevel::Aggressive),
+            Self::Permissive => ChosenLevel::Permissive,
+            Self::Moderate => ChosenLevel::Moderate,
+            Self::Aggressive => ChosenLevel::Aggressive,
         }
     }
 
@@ -132,6 +133,8 @@ pub(crate) struct SecurityLevelPicker {
     pub(super) restart_blocked: Option<String>,
     /// PF-25-S02: `g` asked for the grants and kill switch view.
     pub(super) open_revocations: bool,
+    /// #750: the feature flags the Moderate rows depend on.
+    pub(super) moderate: crate::security::moderate::Facts,
 }
 
 /// Core's `[security]` levels from the session's config layers, and the
@@ -157,6 +160,7 @@ impl SecurityLevelPicker {
         let (stored, nested) = level::load_state(&context.codex_home);
         let selected = match stored.enforced() {
             ChosenLevel::Permissive => 0,
+            ChosenLevel::Moderate => 1,
             ChosenLevel::Aggressive => 2,
         };
         Self {
@@ -188,7 +192,13 @@ impl SecurityLevelPicker {
             app_event_tx: None,
             restart_blocked: crate::security::restart::restart_blocker(),
             open_revocations: false,
+            moderate: crate::security::moderate::Facts::default(),
         }
+    }
+
+    /// #750: the flags the Moderate review describes.
+    pub(crate) fn set_moderate_facts(&mut self, facts: crate::security::moderate::Facts) {
+        self.moderate = facts;
     }
 
     /// PF-25-S02: whether the grants and kill switch view is offered: Core
@@ -336,6 +346,7 @@ impl SecurityLevelPicker {
                     && self.stored == StoredLevel::Chosen(target)
                     && self.nested_choice == self.nested
                     && !self.core_behind()
+                    && !self.moderate_core_behind(target)
                 {
                     self.screen = Screen::List {
                         note: Some(format!(
@@ -345,6 +356,12 @@ impl SecurityLevelPicker {
                     };
                 } else if accept {
                     if !self.preflight_allows_save(target) {
+                        return;
+                    }
+                    if target == ChosenLevel::Moderate
+                        && let Some(blocker) = crate::security::moderate::blocker(&self.moderate)
+                    {
+                        self.preflight_note = Some(format!("Not saved: {blocker}"));
                         return;
                     }
                     self.confirm(target);
@@ -549,7 +566,7 @@ impl SecurityLevelPicker {
             reviewed: self.basis.clone(),
             passed_preflight: match target {
                 ChosenLevel::Aggressive => self.preflight.clone(),
-                ChosenLevel::Permissive => None,
+                ChosenLevel::Permissive | ChosenLevel::Moderate => None,
             },
             raise_core,
         };
@@ -581,7 +598,15 @@ impl SecurityLevelPicker {
     }
 
     fn last_target(&self) -> Option<ChosenLevel> {
-        ROWS[self.selected].chosen()
+        Some(ROWS[self.selected].chosen())
+    }
+
+    /// #750: Core's record still needs a saved Moderate confirmed (the
+    /// level file was saved without it, or a step did not finish).
+    fn moderate_core_behind(&self, target: ChosenLevel) -> bool {
+        target == ChosenLevel::Moderate
+            && self.stored == StoredLevel::Chosen(ChosenLevel::Moderate)
+            && confirm::core_commit_needed(&self.basis, ChosenLevel::Moderate, /*raise*/ true)
     }
 
     /// A restart activates what was saved, or ends this session's
@@ -705,22 +730,27 @@ impl SecurityLevelPicker {
 
     fn choose(&self, row: Row) -> Screen {
         match row.chosen() {
-            None => Screen::List {
-                note: Some("Moderate is not available yet.".to_string()),
-            },
             // A saved Aggressive opens its review again so the nested-agent
             // setting can be changed.
-            Some(ChosenLevel::Permissive)
+            ChosenLevel::Permissive
                 if self.stored == StoredLevel::Chosen(ChosenLevel::Permissive) =>
             {
                 Screen::List {
                     note: Some("Permissive is already saved. Nothing changed.".to_string()),
                 }
             }
-            Some(ChosenLevel::Permissive) if self.stored == StoredLevel::Absent => Screen::List {
+            ChosenLevel::Permissive if self.stored == StoredLevel::Absent => Screen::List {
                 note: Some("Permissive is already in effect. Nothing changed.".to_string()),
             },
-            Some(target) => Screen::Review(target),
+            ChosenLevel::Moderate
+                if self.stored == StoredLevel::Chosen(ChosenLevel::Moderate)
+                    && !self.moderate_core_behind(ChosenLevel::Moderate) =>
+            {
+                Screen::List {
+                    note: Some("Moderate is already saved. Nothing changed.".to_string()),
+                }
+            }
+            target => Screen::Review(target),
         }
     }
 
@@ -757,6 +787,16 @@ impl SecurityLevelPicker {
                             "Saved: Aggressive. Core's protections ({protections}) apply in this session now; the sandbox, approval, network, environment, model-key and child-agent rows take effect when you restart Corbanu Terminal."
                         )
                     },
+                );
+            }
+            StoredLevel::Absent | StoredLevel::Chosen(_)
+                if saved == ChosenLevel::Moderate
+                    && saved != self.active
+                    && self.core_moderate_now() =>
+            {
+                // D4: Core's rules now, the credential broker at restart.
+                lines.push(
+                    "Saved: Moderate. Core's Moderate rules apply in this session now; model keys through the credential broker start when you restart Corbanu Terminal.".to_string(),
                 );
             }
             StoredLevel::Absent | StoredLevel::Chosen(_) if saved != self.active => lines.push(
@@ -803,16 +843,16 @@ impl SecurityLevelPicker {
                 lines.push(Line::default());
                 for (index, row) in ROWS.iter().enumerate() {
                     let marker = if index == self.selected { ">" } else { " " };
-                    let suffix = match row.chosen() {
-                        None => "  not available yet",
-                        Some(level) if level == self.active => "  (active)",
-                        Some(_) => "",
+                    let suffix = if row.chosen() == self.active {
+                        "  (active)"
+                    } else {
+                        ""
                     };
                     let text = format!("{marker} {}{suffix}", row.name());
-                    lines.push(match (index == self.selected, row.chosen()) {
-                        (_, None) => text.dim().into(),
-                        (true, Some(_)) => text.cyan().bold().into(),
-                        (false, Some(_)) => text.into(),
+                    lines.push(if index == self.selected {
+                        text.cyan().bold().into()
+                    } else {
+                        text.into()
                     });
                 }
                 lines.push(Line::default());
@@ -821,7 +861,7 @@ impl SecurityLevelPicker {
                         "Today's behaviour. Your approval, sandbox, network, vault and agent settings apply exactly as configured."
                     }
                     Row::Moderate => {
-                        "Protection around untrusted content and secrets while normal work continues. Not available yet."
+                        "Protection around untrusted content and secrets while normal work continues: agent commands stay in your sandbox, credential and Corbanu files are protected, and protected actions after untrusted content need your fresh approval. Your own approval, sandbox and network settings stay."
                     }
                     Row::Aggressive => {
                         "Sensitive access denied by default, built from existing sandbox, approval, network and exec-policy controls."
@@ -895,8 +935,29 @@ impl SecurityLevelPicker {
                     lines.extend(wrap(&line));
                 }
             }
+            Screen::Review(ChosenLevel::Moderate) => {
+                lines.extend(self.moderate_review_lines(width));
+            }
             Screen::Review(ChosenLevel::Permissive) => {
                 lines.push("Return to Permissive?".bold().into());
+                if self.active == ChosenLevel::Moderate {
+                    lines.push("Protections removed at the next start:".bold().red().into());
+                    lines.extend(
+                        wrap("Your own settings from config apply instead of each of these.")
+                            .into_iter()
+                            .map(Stylize::dim),
+                    );
+                    let hanging = if width < 20 { "" } else { "    " };
+                    for (control, value) in crate::security::moderate::REMOVED {
+                        lines.extend(word_wrap_lines(
+                            [Line::from(vec![
+                                format!("• {control}:").bold(),
+                                format!(" {value}").into(),
+                            ])],
+                            RtOptions::new(width).subsequent_indent(hanging.into()),
+                        ));
+                    }
+                }
                 if self.active == ChosenLevel::Aggressive {
                     lines.push("Protections removed at the next start:".bold().red().into());
                     lines.extend(
@@ -935,10 +996,20 @@ impl SecurityLevelPicker {
                     lines.extend(wrap(&line));
                 }
                 lines.extend(wrap(
-                    "Your own approval, sandbox, network, web search and environment settings from config apply again exactly as saved. The Aggressive vault rule file is removed at the next start.",
+                    if self.active == ChosenLevel::Aggressive
+                        || self.stored.enforced() == ChosenLevel::Aggressive
+                    {
+                        "Your own approval, sandbox, network, web search and environment settings from config apply again exactly as saved. The Aggressive vault rule file is removed at the next start."
+                    } else {
+                        "Your own approval, sandbox, network, web search and environment settings from config apply exactly as saved."
+                    },
                 ));
                 lines.extend(wrap(if self.active == ChosenLevel::Aggressive {
                     "Takes effect when you restart Corbanu Terminal; this session stays Aggressive until then, and its pending approvals end with it."
+                } else if self.active == ChosenLevel::Moderate
+                    || (self.basis.live && self.basis.in_force == SecurityLevel::Moderate)
+                {
+                    "Takes effect when you restart Corbanu Terminal; Core's Moderate rules stay on in this session until then."
                 } else if self.core_aggressive_now()
                     && self
                         .core
@@ -949,7 +1020,14 @@ impl SecurityLevelPicker {
                 } else if self.core_aggressive_now() {
                     "Core's Aggressive protections stay on in this session until you restart; saving cancels the Aggressive level saved for the next start."
                 } else {
-                    "This session is already Permissive; saving cancels the Aggressive level saved for the next start."
+                    match self.stored.enforced() {
+                        ChosenLevel::Moderate => {
+                            "This session is already Permissive; saving cancels the Moderate level saved for the next start."
+                        }
+                        ChosenLevel::Permissive | ChosenLevel::Aggressive => {
+                            "This session is already Permissive; saving cancels the Aggressive level saved for the next start."
+                        }
+                    }
                 }));
                 if let Some(note) = &self.preflight_note {
                     lines.extend(wrap(note).into_iter().map(Stylize::cyan));
@@ -967,7 +1045,9 @@ impl SecurityLevelPicker {
                     ChosenLevel::Aggressive => {
                         format!("Saved: Aggressive (nested agents: {})", self.nested.name())
                     }
-                    ChosenLevel::Permissive => format!("Saved: {}", level.name()),
+                    ChosenLevel::Permissive | ChosenLevel::Moderate => {
+                        format!("Saved: {}", level.name())
+                    }
                 };
                 lines.push(saved.bold().into());
                 if level == self.active {
@@ -994,6 +1074,15 @@ impl SecurityLevelPicker {
                     lines.extend(wrap(&at_restart(
                         approvals.is_some_and(|approvals| approvals.held > 0),
                     )));
+                } else if level == ChosenLevel::Moderate && self.core_moderate_now() {
+                    // D4: Core's rules now, the credential broker at restart.
+                    lines.extend(wrap(&format!(
+                        "Active now in this session: {}.",
+                        crate::security::moderate::EFFECTS
+                    )));
+                    lines.extend(wrap(
+                        "Starts when you restart: model keys held by the credential broker (unless your own config turns broker_model_auth off), and Moderate shown as the active level. Commands already running keep the permissions they started with until they end.",
+                    ));
                 } else {
                     lines.extend(wrap(&format!(
                         "Restart Corbanu Terminal to activate {}. Until then this session stays {}.",
@@ -1138,11 +1227,13 @@ impl SecurityLevelPicker {
                 } else {
                     String::new()
                 };
-                if target == ChosenLevel::Aggressive
+                if (target == ChosenLevel::Aggressive
                     && self
                         .preflight
                         .as_ref()
-                        .is_some_and(|preflight| !preflight.is_clean())
+                        .is_some_and(|preflight| !preflight.is_clean()))
+                    || (target == ChosenLevel::Moderate
+                        && crate::security::moderate::blocker(&self.moderate).is_some())
                 {
                     format!("{scroll}{migrate}esc back, nothing changes")
                 } else {
@@ -1233,6 +1324,116 @@ impl SecurityLevelPicker {
     /// now, so its protections (vault refusal, protected paths) hold.
     fn core_aggressive_now(&self) -> bool {
         self.basis.live && self.basis.in_force == SecurityLevel::Aggressive
+    }
+
+    /// #750 (D4): Core's level is exactly Moderate in this session's live
+    /// policy now, so Moderate's Core rules hold.
+    fn core_moderate_now(&self) -> bool {
+        self.basis.live && self.basis.in_force == SecurityLevel::Moderate
+    }
+
+    /// #750: the review shown before Moderate is saved.
+    fn moderate_review_lines(&self, width: usize) -> Vec<Line<'static>> {
+        let wrap = |text: &str| -> Vec<Line<'static>> {
+            textwrap::wrap(text, width)
+                .into_iter()
+                .map(|line| Line::from(line.into_owned()))
+                .collect()
+        };
+        let (indent, hanging) = if width < 20 { ("", "") } else { ("  ", "    ") };
+        let mut lines: Vec<Line<'static>> = vec!["Switch to Moderate?".bold().into()];
+        if let Some(blocker) = crate::security::moderate::blocker(&self.moderate) {
+            lines.extend(wrap(blocker).into_iter().map(Stylize::red));
+        }
+        lines.extend(wrap(
+            "Moderate keeps your own approval, sandbox and network settings and adds these, in Corbanu Terminal sessions and their child agents:",
+        ));
+        for (control, value) in crate::security::moderate::rows(&self.moderate) {
+            lines.extend(word_wrap_lines(
+                [Line::from(vec![format!("• {control}").bold()])],
+                RtOptions::new(width).subsequent_indent(hanging.into()),
+            ));
+            lines.extend(word_wrap_lines(
+                [Line::from(format!("Moderate: {value}"))],
+                RtOptions::new(width)
+                    .initial_indent(indent.into())
+                    .subsequent_indent(hanging.into()),
+            ));
+        }
+        lines.push("Not available in this build:".bold().into());
+        lines.extend(wrap(
+            &crate::security::inspector::NOT_AVAILABLE
+                .iter()
+                .map(|(label, sprint)| format!("{label} ({sprint})"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        ));
+        if self.active == ChosenLevel::Aggressive {
+            lines.push(
+                "Aggressive protections removed at the next start:"
+                    .bold()
+                    .red()
+                    .into(),
+            );
+            for (control, value) in crate::security::moderate::REMOVED_FROM_AGGRESSIVE {
+                lines.extend(word_wrap_lines(
+                    [Line::from(vec![
+                        format!("• {control}:").bold(),
+                        format!(" {value}").into(),
+                    ])],
+                    RtOptions::new(width).subsequent_indent(hanging.into()),
+                ));
+            }
+        }
+        lines.extend(wrap(crate::security::moderate::UNCHANGED));
+        if let Some(note) = &self.preflight_note {
+            lines.extend(wrap(note).into_iter().map(Stylize::cyan));
+        }
+        for line in self.core_lines_for_moderate() {
+            lines.extend(wrap(&line));
+        }
+        lines
+    }
+
+    /// #750 (D4): when Moderate applies, and what confirming does to Core's
+    /// level.
+    fn core_lines_for_moderate(&self) -> Vec<String> {
+        let effects = crate::security::moderate::EFFECTS;
+        let mut lines = vec![if self.active == ChosenLevel::Aggressive
+            || self.basis.in_force == SecurityLevel::Aggressive
+        {
+            format!(
+                "This session stays {} until you restart Corbanu Terminal; Moderate applies from the next start (you can restart right after saving). Grants and \"for session\" approvals in this session end as soon as you confirm.",
+                name(self.basis.in_force.max(confirm::core_level(self.active)))
+            )
+        } else if self.basis.live && self.basis.in_force == SecurityLevel::Moderate {
+            "Core's level is already Moderate in this session; confirming saves Moderate for every start. Model keys through the credential broker start when you restart Corbanu Terminal.".to_string()
+        } else if self.basis.live {
+            format!(
+                "Core's level becomes Moderate as soon as you confirm, in this session and the others of this Corbanu Terminal: {effects}; grants and \"for session\" approvals end. Model keys through the credential broker start when you restart Corbanu Terminal (you can restart right after saving); commands already running keep the permissions they started with."
+            )
+        } else {
+            format!(
+                "Core's level becomes Moderate from the next start (this session's policy does not run in this process yet): {effects}."
+            )
+        }];
+        lines.push(
+            if self.basis.next_start > SecurityLevel::Moderate
+                && crate::legacy_core::security_level_change::downgrade_rewrites_user_config(
+                    &self.codex_home,
+                    SecurityLevel::Moderate,
+                )
+            {
+                "Your config.toml sets a stricter [security] level; confirming rewrites it to \"moderate\"."
+            } else {
+                "Your config.toml is not modified."
+            }
+            .to_string(),
+        );
+        if let Some(line) = self.outside_user_config_floor(ChosenLevel::Moderate) {
+            lines.push(line);
+        }
+        lines
     }
 
     /// What Core's Aggressive level enforces now: protected paths need the
@@ -1418,3 +1619,7 @@ mod tests;
 #[cfg(test)]
 #[path = "security_level_picker_issue_443_tests.rs"]
 mod issue_443_tests;
+
+#[cfg(test)]
+#[path = "security_level_picker_issue_750_tests.rs"]
+mod issue_750_tests;

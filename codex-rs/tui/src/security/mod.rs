@@ -10,6 +10,7 @@ pub(crate) mod inspector;
 pub(crate) mod launch;
 pub(crate) mod level;
 pub(crate) mod migration;
+pub(crate) mod moderate;
 pub(crate) mod nested;
 pub(crate) mod preflight;
 pub mod restart;

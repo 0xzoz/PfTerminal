@@ -127,6 +127,7 @@ fn saved_level(codex_home: &std::path::Path) -> SecurityLevel {
 fn stored_security_level(codex_home: &std::path::Path) -> SecurityLevel {
     match codex_security_level::level::load(codex_home).enforced() {
         codex_security_level::level::ChosenLevel::Permissive => SecurityLevel::Permissive,
+        codex_security_level::level::ChosenLevel::Moderate => SecurityLevel::Moderate,
         codex_security_level::level::ChosenLevel::Aggressive => SecurityLevel::Aggressive,
     }
 }

@@ -99,6 +99,14 @@ impl SecurityView {
         self
     }
 
+    /// #750: the feature flags the Moderate review describes.
+    pub(crate) fn with_moderate_facts(mut self, facts: crate::security::moderate::Facts) -> Self {
+        if let Some(picker) = self.picker.as_mut() {
+            picker.set_moderate_facts(facts);
+        }
+        self
+    }
+
     fn lines(&self, width: u16) -> Vec<Line<'static>> {
         let mut lines = vec!["Security profiles — read only".bold().into()];
         let paragraphs = [

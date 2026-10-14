@@ -49,7 +49,7 @@ impl LaunchPlan {
         let stored = level::load(codex_home);
         // A Permissive launch must not remove the rule file (or the registry
         // entry) another process on this home still enforces Aggressive with.
-        let shared_with_aggressive = stored.enforced() == ChosenLevel::Permissive
+        let shared_with_aggressive = stored.enforced() != ChosenLevel::Aggressive
             && stored != StoredLevel::Absent
             && level::aggressive_running(codex_home);
         if stored.enforced() == ChosenLevel::Aggressive {
@@ -132,12 +132,52 @@ impl LaunchPlan {
         self.stored.enforced() == ChosenLevel::Aggressive
     }
 
-    /// A remote app server does not load these overrides; refuse rather than
-    /// show Aggressive over a server that does not enforce it.
+    /// #750: what this process enforces. Moderate is Core's level (D1: no
+    /// launch-time overrides), so it is active only where the loaded config
+    /// enforces it: saved in `/security` with Core's record, or set as
+    /// `[security] level` (#749: the inspector and picker no longer say
+    /// Permissive next to Moderate in force). Records the Moderate warnings.
+    pub(super) fn active_level(&self, config: &mut Config) -> ChosenLevel {
+        use crate::legacy_core::security_level_change::SecurityLevel;
+        let core = config.security_level;
+        match self.stored.enforced() {
+            ChosenLevel::Aggressive => return ChosenLevel::Aggressive,
+            ChosenLevel::Moderate if core < SecurityLevel::Moderate => {
+                config.startup_warnings.push(
+                    "Security level Moderate was saved, but Core's level was not confirmed with it, so Moderate's protections are not on. Choose Moderate again in /security.".to_string(),
+                );
+                return ChosenLevel::Permissive;
+            }
+            ChosenLevel::Moderate => {}
+            ChosenLevel::Permissive if core == SecurityLevel::Moderate => {}
+            ChosenLevel::Permissive => return ChosenLevel::Permissive,
+        }
+        // D2: the credential broker is on by default where it runs; only an
+        // explicit setting keeps it off.
+        if cfg!(any(target_os = "macos", target_os = "linux", windows))
+            && !config.features.enabled(Feature::BrokerModelAuth)
+        {
+            config.startup_warnings.push(
+                "Security level Moderate: broker_model_auth is off (set in your configuration or by policy), so Corbanu reads provider keys itself instead of the credential broker.".to_string(),
+            );
+        }
+        if !config.features.enabled(Feature::SourceEnvelopes) {
+            config.startup_warnings.push(
+                "Security level Moderate needs the source_envelopes feature: without it Corbanu refuses every model request. Turn it on, or choose Permissive in /security.".to_string(),
+            );
+        }
+        ChosenLevel::Moderate
+    }
+
+    /// A remote app server does not load these overrides (nor, for
+    /// Moderate, this home's Core record); refuse rather than show a level
+    /// over a server that does not enforce it.
     pub(crate) fn check_target(&self, uses_remote_app_server: bool) -> Result<(), String> {
-        if self.aggressive() && uses_remote_app_server {
+        let stored = self.stored.enforced();
+        if stored != ChosenLevel::Permissive && uses_remote_app_server {
             return Err(format!(
-                "Security level Aggressive cannot be enforced on a remote app server. Start locally, or choose Permissive in /security first ({}).",
+                "Security level {} cannot be enforced on a remote app server. Start locally, or choose Permissive in /security first ({}).",
+                stored.name(),
                 level::state_path(&self.codex_home).display()
             ));
         }
@@ -241,6 +281,7 @@ impl LaunchPlan {
                 ));
             }
         }
+        let active = self.active_level(config);
         if self.shared_with_aggressive {
             config.startup_warnings.push(
                 "Another Corbanu Terminal using this Corbanu home still enforces Aggressive; its vault rule file stays until it exits.".to_string(),
@@ -260,7 +301,7 @@ impl LaunchPlan {
                     self.stored,
                     StoredLevel::Absent | StoredLevel::Chosen(ChosenLevel::Permissive)
                 ),
-            active: self.stored.enforced(),
+            active,
             preflight_enabled,
             boundary,
         });

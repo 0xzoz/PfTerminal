@@ -8,6 +8,7 @@ use pretty_assertions::assert_eq;
 use super::*;
 use crate::legacy_core::config::ConfigBuilder;
 use crate::legacy_core::config::ConfigOverrides;
+use crate::legacy_core::security_level_change::SecurityLevel;
 use crate::security::aggressive;
 
 async fn build(home: &Path, cwd: &Path, user_config: &str, aggressive_level: bool) -> Config {
@@ -78,7 +79,8 @@ async fn workspace_write_rows_name_the_escape_route() {
         /*aggressive_level*/ false,
     )
     .await;
-    let [sandbox, approvals, network, vault, _, _] = current_values(&open);
+    let [sandbox, approvals, network, vault, _, _] =
+        current_values(&open, SecurityLevel::Permissive);
     assert_eq!(
         [sandbox, approvals, network, vault],
         [
@@ -98,7 +100,7 @@ async fn workspace_write_rows_name_the_escape_route() {
         /*aggressive_level*/ false,
     )
     .await;
-    let [_, _, network, _, _, _] = current_values(&closed);
+    let [_, _, network, _, _, _] = current_values(&closed, SecurityLevel::Permissive);
     assert_eq!(
         network,
         "off inside the sandbox, on for commands that run outside it; web search live"
@@ -120,7 +122,8 @@ async fn aggressive_rows_claim_only_what_is_enforced() {
     .await;
     // #391: the stored level the launch path reads turns the model key
     // broker on; these overrides alone do not (see the next test).
-    let [sandbox, approvals, network, vault, _, children] = current_values(&config);
+    let [sandbox, approvals, network, vault, _, children] =
+        current_values(&config, SecurityLevel::Permissive);
     assert_eq!(
         [sandbox, approvals, network, vault, children],
         [
@@ -143,7 +146,7 @@ async fn model_keys_row_reports_the_broker_setting() {
     let cwd = tempfile::tempdir().unwrap();
     let mut config = build(home.path(), cwd.path(), "", /*aggressive_level*/ false).await;
     assert_eq!(
-        current_values(&config)[4],
+        current_values(&config, SecurityLevel::Permissive)[4],
         "Corbanu reads provider keys itself (broker_model_auth off)"
     );
     // Enabled after loading, so this test process is not marked brokered.
@@ -152,7 +155,7 @@ async fn model_keys_row_reports_the_broker_setting() {
         .enable(Feature::BrokerModelAuth)
         .expect("enable the broker");
     assert_eq!(
-        current_values(&config)[4],
+        current_values(&config, SecurityLevel::Permissive)[4],
         "held by the isolated credential broker (broker_model_auth on)"
     );
 }
@@ -178,7 +181,7 @@ async fn issue_440_vault_row_says_the_environment_is_allowlisted_under_secretles
         .features
         .enable(Feature::SecretlessAgentLaunch)
         .expect("enable the secretless launch");
-    let vault = &current_values(&config)[3];
+    let vault = &current_values(&config, SecurityLevel::Permissive)[3];
     assert!(
         vault.contains("only allowlisted environment variables reach agent commands"),
         "{vault}"
@@ -308,6 +311,7 @@ request_permissions_tool = {request_tools}
             /*aggressive_level*/ false,
         )
         .await,
+        SecurityLevel::Permissive,
     );
     assert_eq!(
         [network, vault.split("; ").next().unwrap().to_string()],
@@ -324,6 +328,7 @@ request_permissions_tool = {request_tools}
             /*aggressive_level*/ false,
         )
         .await,
+        SecurityLevel::Permissive,
     );
     assert_eq!(
         [sandbox, network],
@@ -353,7 +358,7 @@ async fn sec_437_thread_settings_keep_the_aggressive_rows() {
         /*aggressive_level*/ true,
     )
     .await;
-    let before = current_values(&config);
+    let before = current_values(&config, SecurityLevel::Permissive);
     let profile = config.permissions.permission_profile().clone();
     let active = config.permissions.active_permission_profile();
     let cwd_abs = config.cwd.clone();
@@ -396,7 +401,7 @@ async fn sec_437_thread_settings_keep_the_aggressive_rows() {
             PermissionProfileSnapshot::from_session_snapshot(lossy, active.clone()),
         )
         .unwrap();
-    let rows = current_values(&weakened);
+    let rows = current_values(&weakened, SecurityLevel::Permissive);
     assert!(
         rows[0].contains("approved or allow-listed commands can run outside the sandbox"),
         "{rows:?}"
@@ -415,7 +420,7 @@ async fn sec_437_thread_settings_keep_the_aggressive_rows() {
             PermissionProfileSnapshot::from_session_snapshot(kept, active.clone()),
         )
         .unwrap();
-    assert_eq!(current_values(&config), before);
+    assert_eq!(current_values(&config, SecurityLevel::Permissive), before);
 
     // A real change (a different sandbox) is still applied.
     let mut changed = settings;
@@ -429,4 +434,51 @@ async fn sec_437_thread_settings_keep_the_aggressive_rows() {
         ),
         codex_protocol::models::PermissionProfile::Disabled
     );
+}
+
+/// #747/#749: under Moderate no command leaves the sandbox, so the rows
+/// never say approved commands can run outside it, and with the
+/// untrusted-content labels the vault store and sign-in file are unreadable.
+#[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "workspace-write falls back to read-only on Windows without the Windows sandbox (#691)"
+)]
+async fn issue_749_moderate_rows_keep_commands_in_the_sandbox() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let extra = tempfile::tempdir().unwrap();
+    let config = build(
+        home.path(),
+        cwd.path(),
+        &format!(
+            "{}\n[features]\nsource_envelopes = true\n",
+            workspace_write(extra.path(), /*network*/ false)
+        ),
+        /*aggressive_level*/ false,
+    )
+    .await;
+    let [
+        permissive_sandbox,
+        _,
+        permissive_network,
+        permissive_vault,
+        _,
+        _,
+    ] = current_values(&config, SecurityLevel::Permissive);
+    assert!(permissive_sandbox.contains("can run outside the sandbox"));
+    let [sandbox, _, network, vault, _, _] = current_values(&config, SecurityLevel::Moderate);
+    assert!(!sandbox.contains("outside the sandbox"), "{sandbox}");
+    assert!(
+        sandbox
+            .contains("under Moderate approved and allow-listed commands stay inside the sandbox"),
+        "{sandbox}"
+    );
+    assert_eq!(network, "off for agent commands; web search live");
+    assert_ne!(network, permissive_network);
+    assert!(
+        vault.starts_with("the vault store and sign-in file are unreadable (Moderate; your fresh approval of one command lifts this for that command) to agent commands"),
+        "{vault}"
+    );
+    assert!(permissive_vault.contains("readable to agent commands"));
 }

@@ -34,10 +34,14 @@ pub const VAULT_PROGRAMS: [&str; 5] = [
     "pfterminal-debug",
 ];
 
-/// A level a human can choose in this build. Moderate is not offered yet.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A level a human can choose in this build. Ordered from least to most
+/// protected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ChosenLevel {
     Permissive,
+    /// #750: Core's Moderate level, chosen in `/security`; it adds no
+    /// launch-time overrides (D1, Travis 2026-10-14).
+    Moderate,
     Aggressive,
 }
 
@@ -45,6 +49,7 @@ impl ChosenLevel {
     pub fn name(self) -> &'static str {
         match self {
             Self::Permissive => "Permissive",
+            Self::Moderate => "Moderate",
             Self::Aggressive => "Aggressive",
         }
     }
@@ -52,6 +57,7 @@ impl ChosenLevel {
     pub fn key(self) -> &'static str {
         match self {
             Self::Permissive => "permissive",
+            Self::Moderate => "moderate",
             Self::Aggressive => "aggressive",
         }
     }
@@ -101,6 +107,7 @@ impl StoredLevel {
     pub fn enforced(&self) -> ChosenLevel {
         match self {
             Self::Absent | Self::Chosen(ChosenLevel::Permissive) => ChosenLevel::Permissive,
+            Self::Chosen(ChosenLevel::Moderate) => ChosenLevel::Moderate,
             Self::Chosen(ChosenLevel::Aggressive) | Self::Invalid(_) => ChosenLevel::Aggressive,
         }
     }
@@ -208,9 +215,10 @@ fn reconcile(codex_home: &Path, stored: StoredLevel) -> StoredLevel {
         ConfirmedLevel::Level(_) => StoredLevel::Invalid(format!(
             "{} says {} but the confirmed level in {} is Aggressive; it may have been changed outside /security",
             state_path(codex_home).display(),
-            match stored {
+            match &stored {
                 StoredLevel::Absent => "nothing",
-                StoredLevel::Chosen(_) | StoredLevel::Invalid(_) => "Permissive",
+                StoredLevel::Chosen(level) => level.name(),
+                StoredLevel::Invalid(_) => "Permissive",
             },
             confirmed_state_path(codex_home).display()
         )),
@@ -271,6 +279,7 @@ fn load_file(codex_home: &Path) -> Result<(ChosenLevel, NestedAgents), StoredLev
     }
     let level = match file.level.as_str() {
         "permissive" => ChosenLevel::Permissive,
+        "moderate" => ChosenLevel::Moderate,
         "aggressive" => ChosenLevel::Aggressive,
         other => return Err(invalid(format!("unknown level `{other}`"))),
     };
@@ -302,7 +311,7 @@ pub fn save(codex_home: &Path, level: ChosenLevel, nested: NestedAgents) -> io::
     // record still says Aggressive until it is committed next.
     match load_file(codex_home) {
         Ok((saved, saved_nested))
-            if saved == level && (saved_nested == nested || level == ChosenLevel::Permissive) =>
+            if saved == level && (saved_nested == nested || level != ChosenLevel::Aggressive) =>
         {
             Ok(())
         }
@@ -312,8 +321,8 @@ pub fn save(codex_home: &Path, level: ChosenLevel, nested: NestedAgents) -> io::
     }
 }
 
-/// Aggressive needs the vault rule present; Permissive needs it absent so the
-/// user's own exec policy applies exactly as before.
+/// Aggressive needs the vault rule present; Permissive and Moderate need it
+/// absent so the user's own exec policy applies exactly as before.
 pub fn sync_rules(codex_home: &Path, level: ChosenLevel) -> io::Result<()> {
     let path = rules_path(codex_home);
     match level {
@@ -324,7 +333,7 @@ pub fn sync_rules(codex_home: &Path, level: ChosenLevel) -> io::Result<()> {
             }
             Ok(())
         }
-        ChosenLevel::Permissive => match std::fs::remove_file(&path) {
+        ChosenLevel::Permissive | ChosenLevel::Moderate => match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(err) => Err(err),

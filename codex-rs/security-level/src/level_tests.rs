@@ -109,3 +109,40 @@ fn security_confirm_aggressive_lock_is_seen_by_another_launch() {
     drop(second);
     assert!(!aggressive_running(home.path()));
 }
+
+/// #750: Moderate is a level a person can save. It writes no rule file
+/// (and removes Aggressive's), keeps no nested-launch setting, and a file
+/// weaker than an Aggressive record still reads as changed outside
+/// `/security`.
+#[test]
+fn issue_750_moderate_is_saved_and_read_back() {
+    let home = TempDir::new().unwrap();
+    save(home.path(), ChosenLevel::Aggressive, NestedAgents::Pass).unwrap();
+    assert!(rules_path(home.path()).exists());
+    save(home.path(), ChosenLevel::Moderate, NestedAgents::Pass).unwrap();
+    assert_eq!(
+        load_state(home.path()),
+        (
+            StoredLevel::Chosen(ChosenLevel::Moderate),
+            NestedAgents::Refuse
+        )
+    );
+    assert_eq!(
+        std::fs::read_to_string(state_path(home.path())).unwrap(),
+        "version = 1\nlevel = \"moderate\"\n"
+    );
+    assert_eq!(load(home.path()).enforced(), ChosenLevel::Moderate);
+    sync_rules(home.path(), ChosenLevel::Moderate).unwrap();
+    assert!(!rules_path(home.path()).exists());
+    confirm(home.path(), "moderate");
+    assert_eq!(
+        load(home.path()),
+        StoredLevel::Chosen(ChosenLevel::Moderate)
+    );
+    confirm(home.path(), "aggressive");
+    let stored = load(home.path());
+    assert!(invalid(&stored), "{stored:?}");
+    assert_eq!(stored.enforced(), ChosenLevel::Aggressive);
+    assert!(ChosenLevel::Permissive < ChosenLevel::Moderate);
+    assert!(ChosenLevel::Moderate < ChosenLevel::Aggressive);
+}

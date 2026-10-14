@@ -10,7 +10,9 @@
 //! Values come from the chat widget's config: approvals, sandbox, reviewer and
 //! workspace roots follow `/permissions` and the session; web search, the
 //! environment policy, shell settings and roles are this process's launch
-//! settings.
+//! settings. Core's level in force now adds what Core enforces on top
+//! (#749): under Moderate no command leaves the sandbox (#747) and, with the
+//! untrusted-content labels, the vault store and sign-in file are denied.
 
 use std::path::Path;
 
@@ -52,13 +54,37 @@ const SAFE_ROLE_KEYS: [&str; 9] = [
     "personality",
 ];
 
-pub(crate) fn current_values(config: &Config) -> CurrentValues {
+/// Core's level for the session now: its config, or the live policy (also
+/// right after `/security` confirmed a level).
+pub(crate) fn level_now(
+    config: &Config,
+    thread: Option<codex_protocol::ThreadId>,
+) -> crate::legacy_core::security_level_change::SecurityLevel {
+    use crate::legacy_core::security_level_change::LevelBasis;
+    use crate::legacy_core::security_level_change::configured_level;
+    LevelBasis::read(&config.codex_home, configured_level(config), thread)
+        .in_force
+        .max(config.security_level)
+}
+
+/// `level` is Core's level in force now ([`level_now`]).
+pub(crate) fn current_values(
+    config: &Config,
+    level: crate::legacy_core::security_level_change::SecurityLevel,
+) -> CurrentValues {
     let cwd = config.cwd.as_path();
     let file_system = config.permissions.file_system_sandbox_policy();
     let restricted = matches!(file_system.kind, FileSystemSandboxKind::Restricted);
+    // #747 (D3): under Moderate no command leaves the sandbox.
+    let moderate = level == crate::legacy_core::security_level_change::SecurityLevel::Moderate;
     // Without denied reads, escalated, allow-listed and retried commands run
     // outside the sandbox (`unsandboxed_execution_allowed` in core).
-    let escapes = restricted && !file_system.has_denied_read_restrictions();
+    let escapes = restricted && !file_system.has_denied_read_restrictions() && !moderate;
+    // #749: Moderate's rules deny the vault store and sign-in file to every
+    // agent command (PF-23, #239), with the untrusted-content labels.
+    let moderate_denies_store = moderate && config.features.enabled(Feature::SourceEnvelopes);
+    let secretless = config.features.enabled(Feature::SecretlessAgentLaunch)
+        || codex_protocol::secretless_launch::is_armed();
 
     let mut sandbox = match file_system.kind {
         FileSystemSandboxKind::Unrestricted => {
@@ -103,6 +129,10 @@ pub(crate) fn current_values(config: &Config) -> CurrentValues {
     }
     if escapes {
         sandbox.push_str("; approved or allow-listed commands can run outside the sandbox");
+    } else if moderate && restricted {
+        sandbox.push_str(
+            "; under Moderate approved and allow-listed commands stay inside the sandbox",
+        );
     }
     let request_tools = config.features.enabled(Feature::RequestPermissionsTool)
         || config.features.enabled(Feature::ExecPermissionApprovals);
@@ -138,18 +168,19 @@ pub(crate) fn current_values(config: &Config) -> CurrentValues {
     let network = format!("{network}; web search {}", config.web_search_mode.value());
 
     let secrets = config.codex_home.join("secrets");
-    let store_readable = escapes
-        || !restricted
-        || [
-            secrets.as_path(),
-            config.codex_home.join("auth.json").as_path(),
-        ]
-        .iter()
-        .any(|path| file_system.can_read_path_with_cwd(path, cwd))
-        || file_system
-            .get_readable_roots_with_cwd(cwd)
+    let store_readable = !moderate_denies_store
+        && (escapes
+            || !restricted
+            || [
+                secrets.as_path(),
+                config.codex_home.join("auth.json").as_path(),
+            ]
             .iter()
-            .any(|root| root.as_path().starts_with(secrets.as_path()));
+            .any(|path| file_system.can_read_path_with_cwd(path, cwd))
+            || file_system
+                .get_readable_roots_with_cwd(cwd)
+                .iter()
+                .any(|root| root.as_path().starts_with(secrets.as_path())));
     let kept = kept_secret_kinds(
         &config.permissions.shell_environment_policy,
         std::env::vars(),
@@ -158,6 +189,10 @@ pub(crate) fn current_values(config: &Config) -> CurrentValues {
         "the vault store and sign-in file are {} to agent commands; {}; {}",
         if store_readable {
             "readable"
+        } else if moderate_denies_store && secretless {
+            "unreadable (Moderate and secretless_agent_launch, also when you approve a command)"
+        } else if moderate_denies_store {
+            "unreadable (Moderate; your fresh approval of one command lifts this for that command)"
         } else if widenable {
             "unreadable (unless an approved permission request grants access)"
         } else {
@@ -166,9 +201,7 @@ pub(crate) fn current_values(config: &Config) -> CurrentValues {
         // #440: the secretless launch keeps only allowlisted names and names
         // set explicitly, not every name that is not secret-like (and not
         // secret-like names the policy would otherwise pass through).
-        if config.features.enabled(Feature::SecretlessAgentLaunch)
-            || codex_protocol::secretless_launch::is_armed()
-        {
+        if secretless {
             "only allowlisted environment variables reach agent commands (for example PATH, HOME, locale, terminal, proxy and tool locations; secretless_agent_launch); set others explicitly in shell_environment_policy.set".to_string()
         } else if kept.is_empty() {
             "secret-like environment variables are removed".to_string()

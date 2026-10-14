@@ -292,3 +292,78 @@ async fn issue_651_every_candidate_database_folder_counts_as_denied() {
         Vec::<String>::new()
     );
 }
+
+/// #750/#749: Moderate is Core's level. It is active only where the loaded
+/// config enforces it (saved with Core's record, or `[security] level`), adds
+/// no launch overrides and keeps no rule file; a saved Moderate without
+/// Core's record is reported and not shown as active. A remote app server is
+/// refused, as for Aggressive.
+#[tokio::test]
+async fn issue_750_moderate_is_active_only_where_core_enforces_it() {
+    async fn active(
+        home: &std::path::Path,
+        cli: Vec<(String, toml::Value)>,
+    ) -> (ChosenLevel, Vec<String>) {
+        let mut prepared = Vec::new();
+        let plan = LaunchPlan::prepare(home, &mut prepared).unwrap();
+        assert_eq!(prepared, Vec::new());
+        let mut cli = cli;
+        cli.push(broker_off());
+        let mut config = crate::legacy_core::config::ConfigBuilder::default()
+            .codex_home(home.to_path_buf())
+            .cli_overrides(cli)
+            .loader_overrides(codex_config::LoaderOverrides::without_managed_config_for_tests())
+            .build()
+            .await
+            .unwrap();
+        let before = config.startup_warnings.len();
+        let level = plan.active_level(&mut config);
+        (level, config.startup_warnings[before..].to_vec())
+    }
+    let home = tempfile::tempdir().unwrap();
+    level::save(home.path(), ChosenLevel::Aggressive, NestedAgents::Refuse).unwrap();
+    level::save(home.path(), ChosenLevel::Moderate, NestedAgents::Refuse).unwrap();
+    let (level, warnings) = active(home.path(), Vec::new()).await;
+    assert_eq!(level, ChosenLevel::Permissive);
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("Core's level was not confirmed")),
+        "{warnings:?}"
+    );
+    // Aggressive's rule file is removed at the Moderate launch.
+    assert!(!level::rules_path(home.path()).exists());
+    let plan = LaunchPlan::prepare(home.path(), &mut Vec::new()).unwrap();
+    assert_eq!(plan.origin_registry_update(), Some(false));
+    assert!(plan.check_target(/*uses_remote_app_server*/ true).is_err());
+
+    std::fs::write(
+        home.path().join("security_state.json"),
+        r#"{"version":1,"level":"moderate","revocations":{"schema_version":1,"generation":0,"kill_switch_active":false}}"#,
+    )
+    .unwrap();
+    let (level, warnings) = active(home.path(), Vec::new()).await;
+    assert_eq!(level, ChosenLevel::Moderate);
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("broker_model_auth is off")),
+        "{warnings:?}"
+    );
+
+    // `[security] level = "moderate"` in config, nothing saved (#749).
+    let config_only = tempfile::tempdir().unwrap();
+    let (level, _) = active(
+        config_only.path(),
+        vec![(
+            "security".to_string(),
+            toml::toml! { version = 1
+            level = "moderate" }
+            .into(),
+        )],
+    )
+    .await;
+    assert_eq!(level, ChosenLevel::Moderate);
+    let (level, _) = active(config_only.path(), Vec::new()).await;
+    assert_eq!(level, ChosenLevel::Permissive);
+}

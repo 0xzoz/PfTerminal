@@ -379,7 +379,12 @@ impl ChatWidget {
                 self.bottom_pane.show_view(Box::new(
                     crate::bottom_pane::security_view::SecurityView::new(
                         Some(self.config.security_level),
-                        || crate::security::current::current_values(&self.config),
+                        || {
+                            crate::security::current::current_values(
+                                &self.config,
+                                crate::security::current::level_now(&self.config, core.thread),
+                            )
+                        },
                         || {
                             self.config
                                 .features
@@ -393,6 +398,9 @@ impl ChatWidget {
                         self.bottom_pane.list_keymap(),
                     )
                     .with_confirmation(core, self.app_event_tx.clone())
+                    .with_moderate_facts(crate::security::moderate::Facts::from_config(
+                        &self.config,
+                    ))
                     .with_inspector(|| {
                         crate::security::inspector::InspectorInput::from_config(
                             &self.config,

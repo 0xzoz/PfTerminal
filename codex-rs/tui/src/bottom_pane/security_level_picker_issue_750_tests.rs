@@ -1,0 +1,326 @@
+//! #750: Moderate can be chosen in `/security`, with a review of what it
+//! adds and what is not available (D1), a confirmation that saves it with
+//! Core's record (Core's rules now, the credential broker at the next start:
+//! D4), "restart now", and the moves back to Permissive and to and from
+//! Aggressive. Esc changes nothing.
+
+use crossterm::event::KeyModifiers;
+use pretty_assertions::assert_eq;
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::widgets::Paragraph;
+use ratatui::widgets::Widget;
+
+use super::*;
+use crate::keymap::RuntimeKeymap;
+use crate::security::moderate::Facts;
+
+fn key(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::NONE)
+}
+
+fn render(picker: &SecurityLevelPicker, width: u16) -> String {
+    let mut lines = picker.lines(width);
+    lines.push(Line::from(picker.footer()));
+    let area = Rect::new(0, 0, width, lines.len() as u16);
+    let mut buffer = Buffer::empty(area);
+    Paragraph::new(lines).render(area, &mut buffer);
+    (0..area.height)
+        .map(|y| {
+            (0..area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// One line per paragraph, so phrases never break across lines.
+fn text(picker: &SecurityLevelPicker) -> String {
+    render(picker, /*width*/ 1000)
+}
+
+const ALL_ON: Facts = Facts {
+    untrusted_content: true,
+    secretless_launch: true,
+    output_gate: true,
+};
+
+fn open_picker(home: &std::path::Path, active: ChosenLevel, facts: Facts) -> SecurityLevelPicker {
+    let context = LevelContext {
+        codex_home: home.to_path_buf(),
+        picker_enabled: true,
+        active,
+        preflight_enabled: false,
+        boundary: None,
+    };
+    let current = [
+        "commands can write to the current folder; permission-request tools are off",
+        "on-request (reviewer: you)",
+        "off for agent commands; web search cached",
+        "the vault store and sign-in file are readable to agent commands",
+        "held by the isolated credential broker (broker_model_auth on)",
+        "spawned agents get this session's values",
+    ]
+    .map(str::to_string);
+    let mut picker = SecurityLevelPicker::new(
+        &context,
+        current,
+        /*preflight_input*/ None,
+        RuntimeKeymap::defaults().list,
+    );
+    picker.set_moderate_facts(facts);
+    picker
+}
+
+fn choose_moderate(picker: &mut SecurityLevelPicker) {
+    while ROWS[picker.selected] != Row::Moderate {
+        picker.handle_key_event(key(KeyCode::Down));
+    }
+    picker.handle_key_event(key(KeyCode::Enter));
+}
+
+fn confirmed(home: &std::path::Path) -> level::ConfirmedLevel {
+    level::load_confirmed(home)
+}
+
+#[test]
+fn issue_750_moderate_is_offered_reviewed_and_esc_changes_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let mut picker = open_picker(home.path(), ChosenLevel::Permissive, ALL_ON);
+    let list = text(&picker);
+    assert!(!list.contains("not available yet"), "{list}");
+    choose_moderate(&mut picker);
+    assert_eq!(picker.screen, Screen::Review(ChosenLevel::Moderate));
+    insta::assert_snapshot!(
+        "security_level_picker_review_moderate",
+        render(&picker, /*width*/ 80)
+    );
+    let review = text(&picker);
+    for expected in [
+        "Switch to Moderate?",
+        "even when you approve a request to run outside it",
+        "Not available in this build:",
+        "Financial preview and approvals (PF-38, PF-39)",
+        "Isolated retrieval (PF-31)",
+        "Untrusted-content detectors (PF-35, PF-36)",
+        "Agent Sweep (PF-40)",
+        "Your config.toml is not modified.",
+        "confirm and save",
+    ] {
+        assert!(review.contains(expected), "{expected}: {review}");
+    }
+    assert!(!review.contains("can run outside the sandbox"), "{review}");
+    picker.handle_key_event(key(KeyCode::Esc));
+    assert_eq!(
+        picker.screen,
+        Screen::List {
+            note: Some("Cancelled. Nothing changed.".to_string())
+        }
+    );
+    assert_eq!(level::load(home.path()), StoredLevel::Absent);
+    assert_eq!(confirmed(home.path()), level::ConfirmedLevel::Absent);
+}
+
+#[test]
+fn issue_750_confirming_moderate_saves_it_with_cores_record_and_offers_restart() {
+    let home = tempfile::tempdir().unwrap();
+    let mut picker = open_picker(home.path(), ChosenLevel::Permissive, ALL_ON);
+    choose_moderate(&mut picker);
+    picker.handle_key_event(key(KeyCode::Enter));
+    assert_eq!(
+        level::load(home.path()),
+        StoredLevel::Chosen(ChosenLevel::Moderate)
+    );
+    assert_eq!(
+        confirmed(home.path()),
+        level::ConfirmedLevel::Level("moderate".to_string())
+    );
+    insta::assert_snapshot!(
+        "security_level_picker_saved_moderate",
+        render(&picker, /*width*/ 80)
+    );
+    let saved = text(&picker);
+    assert!(saved.contains("Saved: Moderate"), "{saved}");
+    assert!(
+        saved.contains("Restart Corbanu Terminal to activate Moderate."),
+        "{saved}"
+    );
+    assert!(
+        picker.footer().contains("r restart now"),
+        "{}",
+        picker.footer()
+    );
+    // Choosing it again changes nothing.
+    picker.handle_key_event(key(KeyCode::Esc));
+    let mut again = open_picker(home.path(), ChosenLevel::Permissive, ALL_ON);
+    choose_moderate(&mut again);
+    assert_eq!(
+        again.screen,
+        Screen::List {
+            note: Some("Moderate is already saved. Nothing changed.".to_string())
+        }
+    );
+}
+
+/// D4: when the session's policy runs in this process, Core's rules apply as
+/// soon as the person confirms, and the credential broker at the restart.
+#[test]
+fn issue_750_a_live_session_takes_cores_rules_now_and_the_broker_at_restart() {
+    let home = tempfile::tempdir().unwrap();
+    let mut picker = open_picker(home.path(), ChosenLevel::Permissive, ALL_ON);
+    choose_moderate(&mut picker);
+    picker.basis.live = true;
+    let review = text(&picker);
+    assert!(
+        review.contains("Core's level becomes Moderate as soon as you confirm"),
+        "{review}"
+    );
+    assert!(
+        review.contains("Model keys through the credential broker start when you restart"),
+        "{review}"
+    );
+    // What the live tree reports after the commit.
+    picker.screen = Screen::Saved(Ok(TransitionOutcome {
+        level: ChosenLevel::Moderate,
+        core: None,
+    }));
+    picker.stored = StoredLevel::Chosen(ChosenLevel::Moderate);
+    picker.basis.in_force = SecurityLevel::Moderate;
+    picker.basis.next_start = SecurityLevel::Moderate;
+    let saved = text(&picker);
+    assert!(
+        saved.contains("Active now in this session: agent commands stay in the sandbox"),
+        "{saved}"
+    );
+    assert!(
+        saved.contains("Starts when you restart: model keys held by the credential broker"),
+        "{saved}"
+    );
+    picker.screen = Screen::List { note: None };
+    let list = text(&picker);
+    assert!(
+        list.contains("Saved: Moderate. Core's Moderate rules apply in this session now"),
+        "{list}"
+    );
+}
+
+/// Core refuses every model request under Moderate without the
+/// untrusted-content labels, so Moderate is not saved without them.
+#[test]
+fn issue_750_moderate_is_not_saved_without_the_untrusted_content_labels() {
+    let home = tempfile::tempdir().unwrap();
+    let mut picker = open_picker(home.path(), ChosenLevel::Permissive, Facts::default());
+    choose_moderate(&mut picker);
+    let review = text(&picker);
+    assert!(
+        review
+            .contains("Moderate needs the untrusted-content labels (the source_envelopes feature)"),
+        "{review}"
+    );
+    assert!(
+        review.contains(
+            "agent commands get your environment as configured (secretless_agent_launch off)"
+        ),
+        "{review}"
+    );
+    assert!(
+        !picker.footer().contains("confirm and save"),
+        "{}",
+        picker.footer()
+    );
+    picker.handle_key_event(key(KeyCode::Enter));
+    assert_eq!(picker.screen, Screen::Review(ChosenLevel::Moderate));
+    assert!(text(&picker).contains("Not saved: Moderate needs"));
+    assert_eq!(level::load(home.path()), StoredLevel::Absent);
+    assert_eq!(confirmed(home.path()), level::ConfirmedLevel::Absent);
+}
+
+#[test]
+fn issue_750_return_to_permissive_from_moderate() {
+    let home = tempfile::tempdir().unwrap();
+    level::save(home.path(), ChosenLevel::Moderate, NestedAgents::Refuse).unwrap();
+    let mut picker = open_picker(home.path(), ChosenLevel::Moderate, ALL_ON);
+    assert_eq!(ROWS[picker.selected], Row::Moderate);
+    assert!(text(&picker).contains("> Moderate  (active)"));
+    picker.handle_key_event(key(KeyCode::Up));
+    picker.handle_key_event(key(KeyCode::Enter));
+    assert_eq!(picker.screen, Screen::Review(ChosenLevel::Permissive));
+    insta::assert_snapshot!(
+        "security_level_picker_review_permissive_from_moderate",
+        render(&picker, /*width*/ 80)
+    );
+    let review = text(&picker);
+    assert!(
+        review.contains("Protections removed at the next start:"),
+        "{review}"
+    );
+    assert!(
+        review.contains("Takes effect when you restart Corbanu Terminal; Core's Moderate rules stay on in this session until then."),
+        "{review}"
+    );
+    assert!(!review.contains("vault rule file"), "{review}");
+    picker.handle_key_event(key(KeyCode::Enter));
+    assert_eq!(
+        level::load(home.path()),
+        StoredLevel::Chosen(ChosenLevel::Permissive)
+    );
+    let saved = text(&picker);
+    assert!(saved.contains("Saved: Permissive"), "{saved}");
+    assert!(
+        saved.contains("Restart Corbanu Terminal to activate Permissive. Until then this session stays Moderate."),
+        "{saved}"
+    );
+}
+
+#[test]
+fn issue_750_moderate_to_aggressive_and_back() {
+    let home = tempfile::tempdir().unwrap();
+    level::save(home.path(), ChosenLevel::Moderate, NestedAgents::Refuse).unwrap();
+    let mut picker = open_picker(home.path(), ChosenLevel::Moderate, ALL_ON);
+    picker.handle_key_event(key(KeyCode::Down));
+    picker.handle_key_event(key(KeyCode::Enter));
+    assert_eq!(picker.screen, Screen::Review(ChosenLevel::Aggressive));
+    picker.handle_key_event(key(KeyCode::Enter));
+    assert_eq!(saved_level(&picker), Some(ChosenLevel::Aggressive));
+    assert_eq!(
+        level::load(home.path()),
+        StoredLevel::Chosen(ChosenLevel::Aggressive)
+    );
+
+    // From an active Aggressive back to Moderate: what goes at the restart.
+    let mut picker = open_picker(home.path(), ChosenLevel::Aggressive, ALL_ON);
+    choose_moderate(&mut picker);
+    assert_eq!(picker.screen, Screen::Review(ChosenLevel::Moderate));
+    let review = text(&picker);
+    assert!(
+        review.contains("Aggressive protections removed at the next start:"),
+        "{review}"
+    );
+    assert!(
+        review.contains("This session stays Aggressive until you restart Corbanu Terminal"),
+        "{review}"
+    );
+    picker.handle_key_event(key(KeyCode::Enter));
+    assert_eq!(saved_level(&picker), Some(ChosenLevel::Moderate));
+    assert_eq!(
+        level::load(home.path()),
+        StoredLevel::Chosen(ChosenLevel::Moderate)
+    );
+    // Aggressive's rule file stays until the next launch.
+    assert!(level::rules_path(home.path()).exists());
+    let saved = text(&picker);
+    assert!(
+        saved.contains("Restart Corbanu Terminal to activate Moderate. Until then this session stays Aggressive."),
+        "{saved}"
+    );
+}
+
+fn saved_level(picker: &SecurityLevelPicker) -> Option<ChosenLevel> {
+    match &picker.screen {
+        Screen::Saved(Ok(outcome)) => Some(outcome.level),
+        _ => None,
+    }
+}
