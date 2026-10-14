@@ -4797,14 +4797,30 @@ async fn wait_for_cached_remote_catalog_plugin_ids(
     Ok(())
 }
 
+/// The catalog cache files in `cache_dir`. The cache is written atomically
+/// through a temporary file in the same folder, which can be empty when read;
+/// only the finished `.json` files count.
+fn cached_remote_catalog_files(cache_dir: &std::path::Path) -> Result<Vec<std::path::PathBuf>> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(cache_dir)? {
+        let path = entry?.path();
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "json")
+        {
+            files.push(path);
+        }
+    }
+    Ok(files)
+}
+
 fn cached_remote_catalog_plugin_ids(codex_home: &std::path::Path) -> Result<Vec<String>> {
     let cache_dir = codex_home.join("cache/remote_plugin_catalog");
     if !cache_dir.exists() {
         return Ok(Vec::new());
     }
     let mut plugin_ids = Vec::new();
-    for entry in std::fs::read_dir(cache_dir)? {
-        let path = entry?.path();
+    for path in cached_remote_catalog_files(&cache_dir)? {
         let cached_catalog: serde_json::Value = serde_json::from_slice(&std::fs::read(path)?)?;
         let Some(plugins) = cached_catalog["plugins"].as_array() else {
             continue;
@@ -4825,8 +4841,7 @@ fn rewrite_cached_remote_catalog_fetched_at(
     fetched_at: chrono::DateTime<Utc>,
 ) -> Result<()> {
     let cache_dir = codex_home.join("cache/remote_plugin_catalog");
-    for entry in std::fs::read_dir(cache_dir)? {
-        let path = entry?.path();
+    for path in cached_remote_catalog_files(&cache_dir)? {
         let mut cached_catalog: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
         cached_catalog["fetched_at"] = serde_json::json!(fetched_at);
         std::fs::write(path, serde_json::to_vec_pretty(&cached_catalog)?)?;
