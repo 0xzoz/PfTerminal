@@ -227,24 +227,12 @@ fn explain(
 }
 
 /// The person's own permissions for the command: the profile without
-/// Moderate's rules, its project roots the workspace roots (or the current
-/// folder), also by their real locations, as the sandbox resolves them.
+/// Moderate's rules, with the project roots as the sandbox resolves them.
 fn own_profile(inputs: &ReadPolicyInputs) -> PermissionProfile {
-    let mut roots = if inputs.workspace_roots.is_empty() {
-        vec![inputs.turn_cwd.clone()]
-    } else {
-        inputs.workspace_roots.clone()
-    };
-    let real_roots: Vec<AbsolutePathBuf> = roots
-        .iter()
-        .filter_map(|root| std::fs::canonicalize(root.as_path()).ok())
-        .filter_map(|root| AbsolutePathBuf::from_absolute_path(root).ok())
-        .collect();
-    roots.extend(real_roots);
     inputs
         .profile
         .clone()
-        .materialize_project_roots_with_workspace_roots(&roots)
+        .materialize_project_roots_with_workspace_roots(&inputs.roots())
 }
 
 #[cfg(test)]

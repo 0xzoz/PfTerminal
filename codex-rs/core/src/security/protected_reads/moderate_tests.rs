@@ -56,6 +56,7 @@ impl Fixture {
             workspace_roots: Vec::new(),
             profile,
             user_home: dirs::home_dir(),
+            keychain_closed: false,
         }
     }
 
