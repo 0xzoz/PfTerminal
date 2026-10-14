@@ -6,7 +6,7 @@ Security level
 Active in this session: Permissive
 
   Permissive  (active)
-  Moderate  not available yet
+  Moderate
 > Aggressive  needs the Windows sandbox set up
 
 Sensitive access denied by default, built from existing sandbox, approval,
