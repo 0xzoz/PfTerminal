@@ -1,7 +1,7 @@
 name: rust-ci lint/build
 
 # Cargo clippy (`--tests -D warnings`) for one runner/target/profile. Shared by
-# rust-ci.yml (PR: Linux gnu dev only) and rust-ci-full.yml (postmerge: gnu,
+# rust-ci.yml (PR: Linux gnu dev and Windows msvc dev) and rust-ci-full.yml (postmerge: gnu,
 # musl, musl release and Windows msvc dev), so both run the same job definition
 # and share the cargo-home and sccache caches.
 on:

@@ -117,6 +117,7 @@ jobs:
 
           # Windows clippy: cfg(unix)/cfg(target_os = "linux") gating mistakes
           # (dead code, unused imports) only show up when linting for Windows.
+          # Blocking PR CI (rust-ci.yml) also runs this leg (#717).
           - runner: windows-2022
             target: x86_64-pc-windows-msvc
             profile: dev

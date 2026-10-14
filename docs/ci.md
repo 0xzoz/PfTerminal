@@ -17,6 +17,12 @@ red status noise without testing the code.
   20-minute timeout. The job is `rust-ci-lint-build.yml`, shared with
   postmerge `rust-ci-full`, which also runs the musl dev and musl release legs.
   The full Linux test suite stays postmerge only.
+- Windows clippy (`rust-ci / Lint/Build — windows-2022 - x86_64-pc-windows-msvc`):
+  the same `cargo clippy --tests -D warnings` for the Windows msvc dev target
+  (#717), so `cfg(unix)`-gated imports, helpers and `mut`s that are unused on
+  Windows fail the PR instead of breaking postmerge. Same triggers, required
+  status and shared job as the Linux leg; it reuses the caches postmerge
+  `rust-ci-full` saves for this leg (warm runs ~15 minutes, 60-minute timeout).
 - Rust nextest on Linux x64.
 - SDK checks on hosted Linux x64.
 - V8 canary coverage on hosted Linux x64 only.
