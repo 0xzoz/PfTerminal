@@ -698,3 +698,27 @@ fn sec_625_held_environment_keys_are_reported_by_name() {
     assert!(holds_environment_key(&name));
     assert!(!holds_environment_key(&format!("{name}_OTHER")));
 }
+
+/// #750 (D2): a Moderate level chosen in `/security` decides the default at
+/// the next start, as Aggressive does.
+#[test]
+fn issue_750_saved_moderate_decides_the_broker_default() {
+    let home = tempfile::tempdir().expect("home");
+    std::fs::write(
+        home.path().join("security_level.toml"),
+        "version = 1\nlevel = \"moderate\"\n",
+    )
+    .expect("stored level");
+    assert_eq!(
+        level_for_defaults(home.path(), SecurityLevel::Permissive),
+        SecurityLevel::Moderate
+    );
+    assert_eq!(
+        level_broker_setting(
+            level_for_defaults(home.path(), SecurityLevel::Permissive),
+            /*supported*/ true,
+            /*explicit*/ None
+        ),
+        Some(true)
+    );
+}
