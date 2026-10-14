@@ -519,8 +519,8 @@ async fn issue_620_startup_file_outside_the_folder_is_never_granted() {
         Some(startup_explanation("~/.zshrc"))
     );
     // Only where the command writes it: reading one, running a program from
-    // `~/.local/bin` or naming one in a message keeps the grant (it may lift
-    // a git write in the current folder).
+    // `~/.local/bin` or naming one in a message is not a start-up file write
+    // (#740 may still withhold the grant for another reason).
     for script in [
         "echo '# x' >> notes.txt",
         "cat ~/.gitconfig >> .git/config",
@@ -528,7 +528,13 @@ async fn issue_620_startup_file_outside_the_folder_is_never_granted() {
         "~/.local/bin/pre-commit install",
         "git commit -m 'document ~/.zshrc > notes'",
     ] {
-        assert_eq!(note(&shell(script)).await, None, "{script}");
+        let explained = note(&shell(script)).await;
+        assert!(
+            explained
+                .as_deref()
+                .is_none_or(|note| !note.contains("start-up file outside")),
+            "{script}: {explained:?}"
+        );
     }
 
     assert_eq!(
