@@ -1029,11 +1029,11 @@ fn register_synthetic_mount_targets(
                         marker_dir.display()
                     )
                 });
-                // #562: another live run made it, or (checked under this
-                // lock, separately from the check when the arguments were
-                // built) it has gone since: then the mount target bubblewrap
-                // makes is this run's own placeholder, and its marker must
-                // say so for later runs.
+                // #562: another live run made it, or it has gone since the
+                // arguments were built (where this run could not take the
+                // registry lock for them, #673, or the person removed it):
+                // then the mount target bubblewrap makes is this run's own
+                // placeholder, and its marker must say so for later runs.
                 let target = if target.preserves_pre_existing_path()
                     && (synthetic_mount_marker_dir_has_active_synthetic_owner(&marker_dir)
                         || !target.pre_existing_path_is_unchanged())
@@ -1535,11 +1535,12 @@ fn owned_by_this_user(path: &Path, file: bool) -> bool {
 /// `~/Library` for `~/Library/Keychains`) failed every protected run until
 /// #579 held it in place.
 ///
-/// A run that meets a recorded placeholder holds it (registers itself,
-/// [`is_live_placeholder`]), so one with any live marker is left alone, as
-/// is a marker folder of another kind (a protected-create target). This
-/// never fails a run: without a usable registry it does nothing, and what
-/// cannot be removed keeps its record for a later run.
+/// A run that meets a recorded placeholder registers itself for it (under
+/// the [`RegistryLock`] it took before finding it, #673), so one with any
+/// live marker is left alone, as is a marker folder of another kind (a
+/// protected-create target). This never fails a run: without a usable
+/// registry it does nothing, and what cannot be removed keeps its record for
+/// a later run.
 fn remove_stale_synthetic_mount_targets() {
     // A run without placeholders must not fail here.
     let Some(registry_root) = unchecked_synthetic_mount_registry_root() else {
@@ -1561,7 +1562,11 @@ fn remove_stale_synthetic_mount_targets() {
         return;
     }
     // A registry this run cannot lock (read-only in a nested sandbox) is
-    // left as it is.
+    // left as it is. (#673: never while this thread holds the lock, which a
+    // second descriptor would wait for forever.)
+    if REGISTRY_LOCK_HELD.get() {
+        return;
+    }
     let Ok(lock_file) = File::open(registry_root.join("lock")) else {
         return;
     };
@@ -1673,9 +1678,10 @@ thread_local! {
 
 /// #673: the placeholder registry's lock, held by a run from just before it
 /// looks at the paths it mounts until it has registered the placeholders it
-/// found or makes ([`register_mount_targets`]). Every removal of a placeholder
-/// (its makers' and holders' cleanup, the sweep) takes this lock, so none is
-/// removed between this run finding it and registering it.
+/// found or makes ([`register_mount_targets`]). The registry's runs remove a
+/// placeholder only under this lock (its makers' and holders' cleanup, the
+/// sweep), so none is removed between this run finding it and registering
+/// it.
 ///
 /// Before, the arguments were built without it and each check locked on its
 /// own: a placeholder found (`~/.aws`, or `~/.claude` above a missing
@@ -1693,17 +1699,23 @@ pub(crate) struct RegistryLock {
 
 impl RegistryLock {
     /// `None` where the registry cannot be made or locked (read-only, as in
-    /// a nested sandbox), or when this thread holds it already; each step
-    /// then locks on its own, as before.
+    /// a nested sandbox, or another user's), or when this thread holds it
+    /// already; each step then locks on its own, as before.
     pub(crate) fn acquire() -> Option<Self> {
         if REGISTRY_LOCK_HELD.get() {
             return None;
         }
-        let registry_root = unchecked_synthetic_mount_registry_root()?;
-        if registry_root.is_symlink() {
+        // Without the panicking checks of `synthetic_mount_registry_root`
+        // (a run with nothing to register must not fail here), then the
+        // same folder the markers are in.
+        if unchecked_synthetic_mount_registry_root()?.is_symlink() {
             return None;
         }
+        let registry_root = synthetic_mount_registry_root();
         let file = open_synthetic_mount_registry_lock(&registry_root).ok()?;
+        if !owned_by_this_user(&registry_root, /*file*/ false) {
+            return None;
+        }
         // SAFETY: locks a descriptor this function owns.
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } < 0 {
             return None;
