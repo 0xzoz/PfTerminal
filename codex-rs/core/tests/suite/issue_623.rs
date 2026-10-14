@@ -86,6 +86,8 @@ async fn run_calls(
                 .enable(Feature::UnifiedExec)
                 .expect("enable unified exec");
         })
+        // Host-sandbox security test: local executor on purpose, also in the
+        // remote lane (#708).
         .build(&server)
         .await?;
     let root = test.cwd_path().canonicalize()?;

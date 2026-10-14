@@ -18,7 +18,6 @@ use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
 use core_test_support::skip_if_target_windows;
-use core_test_support::test_codex::local_selections;
 use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
 use std::sync::Arc;
@@ -57,8 +56,7 @@ async fn user_turn_includes_skill_instructions() -> Result<()> {
     let mut builder = test_codex().with_workspace_setup(move |cwd, fs| async move {
         write_repo_skill(cwd, fs, "demo", "demo skill", skill_body).await
     });
-    // Pinned to the local executor: fails only in the remote lane (#157, #708).
-    let test = builder.build(&server).await?;
+    let test = builder.build_with_auto_env(&server).await?;
 
     let skill_path = test
         .config
@@ -97,7 +95,8 @@ async fn user_turn_includes_skill_instructions() -> Result<()> {
             responsesapi_client_metadata: None,
             additional_context: Default::default(),
             thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
-                environments: Some(local_selections(test.config.cwd.clone())),
+                // The test's default environment: remote in the remote lane.
+                environments: None,
                 approval_policy: Some(AskForApproval::Never),
                 sandbox_policy: Some(sandbox_policy),
                 permission_profile,
