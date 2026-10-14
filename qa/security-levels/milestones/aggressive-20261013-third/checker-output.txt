@@ -2,4 +2,4 @@ $ python3 qa/code-blind-functional/check.py qa/security-levels/milestones/aggres
 BLOCKED: unresolved AGG-01: failed
 exit=1
 
-Expected while any case is failed or blocked: the checker stops at the first unresolved case (6 failed, 5 blocked). It is structural traceability only; the independent evidence check is recorded in review/ and results.json.
+Expected while any case is failed or blocked: the checker stops at the first unresolved case (6 failed, 7 blocked). It is structural traceability only; the independent evidence check is recorded in review/ and results.json.

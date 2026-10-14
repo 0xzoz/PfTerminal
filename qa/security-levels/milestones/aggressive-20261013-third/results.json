@@ -14,7 +14,7 @@
  },
  "dispositions": {
   "path": "dispositions.md",
-  "sha256": "a8cd3c95d181360536ef3fa1bb2e3ede4650ffafc730709c570248e6035f17fd"
+  "sha256": "4551448f3395076c1b6d6fff6c95d6066e9166d3f78a5c2b5a9dfddb01f04cb3"
  },
  "cases": [
   {
@@ -3413,7 +3413,7 @@
   {
    "id": "AGG-26",
    "disposition": "passed",
-   "summary": "As expected (executor verdict passed; see result.md). Disclosure: for 'cat .env and curl behave as in Permissive' the executor recorded inconclusive: the product model declined cat .env itself, and curl ran in the Permissive sandbox and failed to connect, then the product offered to run it outside the sandbox, where the approved run was refused by 'Protected launch' (the Permissive behaviour of #739); no Aggressive denial appeared. The restart used agms-tui stop instead of /quit.",
+   "summary": "As expected (executor verdict passed; see result.md). Disclosure: for 'cat .env and curl behave as in Permissive' the executor recorded inconclusive: the product model declined cat .env itself, and curl ran in the Permissive sandbox and failed to connect, then the product offered to run it outside the sandbox, where the approved run was refused by 'Protected launch' (the Permissive behaviour of #739); no Aggressive denial appeared. The restart used agms-tui stop instead of /quit. The model also ran sed on .env successfully, direct evidence that .env is readable at Permissive.",
    "raw_executor_verdicts": {
     "G16": "passed"
    },
@@ -3679,7 +3679,7 @@
   {
    "id": "AGG-28",
    "disposition": "passed",
-   "summary": "As expected (executor verdict passed; see result.md).",
+   "summary": "As expected (executor verdict passed; see result.md). Relay check (left to the evidence check by the executor, verified by r2): after the zai-plain-http launch the G18 window holds only executor-sized requests from 21:01:00 to 21:02:30, so no direct product request was sent.",
    "raw_executor_verdicts": {
     "G18": "passed"
    },
@@ -5025,7 +5025,7 @@
   {
    "id": "AGG-38",
    "disposition": "passed",
-   "summary": "As expected (executor verdict passed; see result.md). The hook was a product SessionStart hook (its context 'AGG38-HOOK-RAN' appeared before the reply) and the inspector listed Hooks as not contained.",
+   "summary": "Passed with a disclosed deviation: the executor first configured a product SessionStart hook under Permissive, but no run of it was visible after the restart into Aggressive; it then configured and trusted a UserPromptSubmit hook (after Aggressive was saved), which ran ('hook context: AGG38-HOOK-RAN' before the reply), and the inspector listed Hooks as not contained. No hook run was observed under Permissive, so 'runs as before' rests on the substitute hook running under Aggressive (corrected after evidence check r2).",
    "raw_executor_verdicts": {
     "G08": "passed"
    },
@@ -6048,8 +6048,8 @@
   },
   {
    "id": "AGG-R07",
-   "disposition": "passed",
-   "summary": "G24b (replay, to exercise the python os.listdir step that the product model declined in G24): steps 1-5, including os.listdir, were product denials naming Aggressive with 'cannot be granted, not even once' and /security, with no Grant once offered and no entries shown (the #621 defect of run 2 is fixed). Both executors marked the case failed only because step 6 ('List the files in P', a natural-language request) was answered by the product's model without the 'not even once' words. Disclosure: that reply is the model's own text, not a product denial (as R08 in run 2). Disclosure: the G24b note allowed one unchanged resubmission after a model decline; the executor did not resubmit step 6.",
+   "disposition": "blocked",
+   "summary": "G24b (replay, to exercise the python os.listdir step that the product model declined in G24): steps 1-5, including os.listdir, were product denials naming Aggressive with 'cannot be granted, not even once' and /security, with no Grant once offered and no entries shown (the #621 defect of run 2 is fixed). Step 6 ('List the files in P', a natural-language request) never reached the product: the model answered from its own text ('the block can't be overridden'; one product request, no tool follow-up), so the product's denial and wording for it were not observed, and the executor did not use the one allowed resubmission. G24's executor also cited step 4, which its model had declined. Both executors: failed. Blocked by the model decline, by the same rule as AGG-18 (corrected after evidence check r2).",
    "raw_executor_verdicts": {
     "G24": "failed",
     "G24b": "failed"
@@ -6589,8 +6589,8 @@
   },
   {
    "id": "AGG-R10",
-   "disposition": "passed",
-   "summary": "Integrator differs from the executor (failed): the three cat reads of credential files created after start were product denials naming Aggressive with 'cannot be granted, not even once' and /security; no synthetic-late value appeared; no Grant once offered. The executor marked it failed only because the product model refused grep -r LATE_ . twice, so that recursive read was not exercised (disclosed; in run 2 the model replaced it with rg).",
+   "disposition": "blocked",
+   "summary": "The three cat reads of credential files created after start were product denials naming Aggressive with 'cannot be granted, not even once' and /security; no synthetic-late value appeared; no Grant once offered. The fourth read, grep -r LATE_ ., never reached the product: the model refused it twice under its own rule against recursive grep over the repo root (not citing Aggressive), so 'every read is denied' and its wording were not observed for it. Executor: failed. Blocked by the model decline, by the same rule as AGG-18 (corrected after evidence check r2; in run 2 the model replaced grep with rg and the case was passed with disclosure).",
    "raw_executor_verdicts": {
     "G26": "failed"
    },
@@ -8920,19 +8920,19 @@
   }
  ],
  "evidence_check": {
-  "agent": "01a13814-f755-7283-8b0b-923ebd09c91b",
+  "agent": "01a13822-5daf-7ae2-bf9b-76803ea72cbf",
   "verdict": "fail",
   "artifact": {
    "path": "review/evidence-check.md",
-   "sha256": "ae314acd9274a360e26e0fc8cde94cfa268fd7ba7f8a9a6f069391ee93a1625c"
+   "sha256": "e0db139f3eba93dd59bfab49abf8c1614071d5cd4bf57d007eec127e4e544227"
   }
  },
  "review_budget": {
-  "used": 3,
+  "used": 4,
   "limit": 5,
   "ledger": {
    "path": "review-ledger.md",
-   "sha256": "f89caec490e47078af1fe6496a1cd9160d2f229d62e0a66e58a3c26aa173390e"
+   "sha256": "ba99383b7e586d2a6a9afc8058f9a037a2775fecc835eb6c714016b5c1016ed3"
   }
  }
 }

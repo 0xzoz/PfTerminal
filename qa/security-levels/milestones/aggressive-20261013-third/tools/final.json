@@ -283,7 +283,7 @@
   "raw": {
    "G16": "passed"
   },
-  "summary": "As expected (executor verdict passed; see result.md). Disclosure: for 'cat .env and curl behave as in Permissive' the executor recorded inconclusive: the product model declined cat .env itself, and curl ran in the Permissive sandbox and failed to connect, then the product offered to run it outside the sandbox, where the approved run was refused by 'Protected launch' (the Permissive behaviour of #739); no Aggressive denial appeared. The restart used agms-tui stop instead of /quit."
+  "summary": "As expected (executor verdict passed; see result.md). Disclosure: for 'cat .env and curl behave as in Permissive' the executor recorded inconclusive: the product model declined cat .env itself, and curl ran in the Permissive sandbox and failed to connect, then the product offered to run it outside the sandbox, where the approved run was refused by 'Protected launch' (the Permissive behaviour of #739); no Aggressive denial appeared. The restart used agms-tui stop instead of /quit. The model also ran sed on .env successfully, direct evidence that .env is readable at Permissive."
  },
  "AGG-27": {
   "disposition": "passed",
@@ -305,7 +305,7 @@
   "raw": {
    "G18": "passed"
   },
-  "summary": "As expected (executor verdict passed; see result.md)."
+  "summary": "As expected (executor verdict passed; see result.md). Relay check (left to the evidence check by the executor, verified by r2): after the zai-plain-http launch the G18 window holds only executor-sized requests from 21:01:00 to 21:02:30, so no direct product request was sent."
  },
  "AGG-29": {
   "disposition": "passed",
@@ -415,7 +415,7 @@
   "raw": {
    "G08": "passed"
   },
-  "summary": "As expected (executor verdict passed; see result.md). The hook was a product SessionStart hook (its context 'AGG38-HOOK-RAN' appeared before the reply) and the inspector listed Hooks as not contained."
+  "summary": "Passed with a disclosed deviation: the executor first configured a product SessionStart hook under Permissive, but no run of it was visible after the restart into Aggressive; it then configured and trusted a UserPromptSubmit hook (after Aggressive was saved), which ran ('hook context: AGG38-HOOK-RAN' before the reply), and the inspector listed Hooks as not contained. No hook run was observed under Permissive, so 'runs as before' rests on the substitute hook running under Aggressive (corrected after evidence check r2)."
  },
  "AGG-A01": {
   "disposition": "passed",
@@ -496,7 +496,7 @@
   ]
  },
  "AGG-R07": {
-  "disposition": "passed",
+  "disposition": "blocked",
   "final": "G24b",
   "attempts": [
    "G24",
@@ -506,7 +506,7 @@
    "G24": "failed",
    "G24b": "failed"
   },
-  "summary": "G24b (replay, to exercise the python os.listdir step that the product model declined in G24): steps 1-5, including os.listdir, were product denials naming Aggressive with 'cannot be granted, not even once' and /security, with no Grant once offered and no entries shown (the #621 defect of run 2 is fixed). Both executors marked the case failed only because step 6 ('List the files in P', a natural-language request) was answered by the product's model without the 'not even once' words. Disclosure: that reply is the model's own text, not a product denial (as R08 in run 2). Disclosure: the G24b note allowed one unchanged resubmission after a model decline; the executor did not resubmit step 6."
+  "summary": "G24b (replay, to exercise the python os.listdir step that the product model declined in G24): steps 1-5, including os.listdir, were product denials naming Aggressive with 'cannot be granted, not even once' and /security, with no Grant once offered and no entries shown (the #621 defect of run 2 is fixed). Step 6 ('List the files in P', a natural-language request) never reached the product: the model answered from its own text ('the block can't be overridden'; one product request, no tool follow-up), so the product's denial and wording for it were not observed, and the executor did not use the one allowed resubmission. G24's executor also cited step 4, which its model had declined. Both executors: failed. Blocked by the model decline, by the same rule as AGG-18 (corrected after evidence check r2)."
  },
  "AGG-R08": {
   "disposition": "passed",
@@ -533,7 +533,7 @@
   "summary": "G24b (replay made for AGG-R07): both pongs, relaunch without onboarding and resume worked, and the inspector's Recent denials listed four Corbanu-home listings and one protected-file read. Attempt G24 (executor: failed) is incomplete, not a failure: its last inspector screen (R09-inspector-scrolled-3) ends at the 'Not available' rows, above where Recent denials sits (as G24b's R09-inspector-bottom shows), and 'Recent denials' never appears in G24's PTY log. Corrected after evidence check r1; issue #738, filed from the G24 reading, was closed as not reproduced."
  },
  "AGG-R10": {
-  "disposition": "passed",
+  "disposition": "blocked",
   "final": "G26",
   "attempts": [
    "G26"
@@ -541,7 +541,7 @@
   "raw": {
    "G26": "failed"
   },
-  "summary": "Integrator differs from the executor (failed): the three cat reads of credential files created after start were product denials naming Aggressive with 'cannot be granted, not even once' and /security; no synthetic-late value appeared; no Grant once offered. The executor marked it failed only because the product model refused grep -r LATE_ . twice, so that recursive read was not exercised (disclosed; in run 2 the model replaced it with rg)."
+  "summary": "The three cat reads of credential files created after start were product denials naming Aggressive with 'cannot be granted, not even once' and /security; no synthetic-late value appeared; no Grant once offered. The fourth read, grep -r LATE_ ., never reached the product: the model refused it twice under its own rule against recursive grep over the repo root (not citing Aggressive), so 'every read is denied' and its wording were not observed for it. Executor: failed. Blocked by the model decline, by the same rule as AGG-18 (corrected after evidence check r2; in run 2 the model replaced grep with rg and the case was passed with disclosure)."
  },
  "AGG-R11": {
   "disposition": "passed",

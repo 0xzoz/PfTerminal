@@ -6,42 +6,46 @@ and the owner decisions of 2026-10-13 were made. **Not passed: the milestone nee
 
 ## Result
 
-64 cases: **53 passed, 6 failed, 5 blocked** ([dispositions.md](dispositions.md), [results.json](results.json)).
+64 cases: **51 passed, 6 failed, 7 blocked** ([dispositions.md](dispositions.md), [results.json](results.json)).
 
 - Failed:
   - AGG-10: `security find-generic-password` was offered for approval, then ran with no Aggressive denial (#736).
   - AGG-T03: `git config --global` (~/.gitconfig) was offered Grant once and lacked the #620 explanation (#737).
-  - AGG-T01, AGG-T02: under Permissive with the security features on, the approved outside write was refused by
+  - AGG-T01 and AGG-T02: under Permissive with the security features on, the approved outside write was refused by
     "Protected launch", so the file never changed (#739). The #626 behaviour itself held: the remembered approval was
-    suspended under Aggressive with the note, and applied again at Permissive.
-  - AGG-01, AGG-25: they fail against frozen expectations that a later decision or fix made stale, with no owner
-    decision amending them (as in run 2). AGG-01 is now only the Vault row's wording, from decision #440. AGG-25's E1
-    flag no longer blocks the preflight (#438).
-- Blocked:
-  - AGG-18: the grant itself worked; the `cat .env` step was declined by the product's model.
-  - AGG-20: the child's model declined to start a full-access role.
-  - AGG-R03: the prompt appeared before pane A could be left; the case says to record it blocked.
-  - AGG-R06: no Claude Code in the guest.
+    suspended under Aggressive with the note and applied again at Permissive.
+  - AGG-01 and AGG-25 fail against frozen expectations that a later decision or fix made stale, with no owner decision
+    amending them (as in run 2):
+    - AGG-01 now differs only in the Vault row's wording, from decision #440;
+    - AGG-25's E1 flag no longer blocks the preflight (#438).
+- Blocked because the product's model declined a step, so the product's own denial was never shown:
+  - AGG-18: the grant worked; the `cat .env` step was declined.
+  - AGG-R07: steps 1-5 were product denials with the right wording, but step 6 was declined.
+  - AGG-R10: three reads were denied correctly, but the model refused `grep -r`.
+  - AGG-20: the child's model declined to start a role.
+- Blocked for other reasons:
+  - AGG-R03: the prompt appeared before pane A could be left.
+  - AGG-R06: there is no Claude Code in the guest.
   - AGG-R14: the stop could not be credited to the kill switch.
 - Compared with run 2, these now pass:
-  - AGG-33 (Grant once expiry on the in-folder hooks file `.husky/pre-commit`);
-  - AGG-24, AGG-38 and AGG-R07 (#621);
-  - AGG-27 (#664/#625) and AGG-32 (owner answer (b));
+  - AGG-33: Grant once expiry on the in-folder hooks file `.husky/pre-commit`.
+  - AGG-24, AGG-38 and AGG-R09.
+  - AGG-27 (#664/#625) and AGG-32 (owner answer (b)).
   - AGG-R13 (#623) and AGG-R17 (#620).
 - Other changes from run 2:
-  - AGG-18 moved from failed to blocked. Its Grant once part now works.
-  - AGG-10 moved from passed to failed. In run 2 the product's model declined its third step; this time it ran.
-  - AGG-R09 stays passed after a replay; its first attempt never scrolled to Recent denials.
+  - AGG-18 and AGG-R07 moved from failed to blocked. Their earlier defects (#620, #621) are fixed, and the remaining
+    step was declined by the model.
+  - AGG-R10 moved from passed to blocked, under the stricter rule above.
+  - AGG-10 moved from passed to failed: in run 2 the model declined its third step, and this time the step ran.
   - Every other run-2 disposition is unchanged.
 - Advisory finding: Grant once is offered where it cannot apply (#740).
-- Some passes rest partly on the product's model declining a step rather than on the protection itself. Each is
-  disclosed in its summary: AGG-14, AGG-21, AGG-24 (setup steps), AGG-26 (step 4), AGG-30, AGG-R07 (step 6), AGG-R08
-  (step 3) and AGG-R10 (grep).
-- The integrator changed these executor verdicts, with reasons in the summaries:
-  - to passed: AGG-06, AGG-30, AGG-R07, AGG-R10, AGG-R16, and AGG-R09 (its first attempt was incomplete);
-  - to blocked: AGG-18, AGG-20, AGG-R14.
-- `qa/code-blind-functional/check.py` stops at the first unresolved case, as expected with failures and blocks
-  ([checker-output.txt](checker-output.txt)).
+- Some passes rest partly on the product's model declining a step whose expected wording the model's text still met.
+  Each is disclosed in its summary: AGG-14, AGG-21, AGG-24 (setup steps), AGG-26 (step 4), AGG-30 and AGG-R08 (step 3).
+- Executor verdicts the integrator changed, with the reasons in the summaries:
+  - to passed: AGG-06, AGG-30, AGG-R16, and AGG-R09 (its first attempt was incomplete);
+  - to blocked: AGG-18, AGG-20, AGG-R07, AGG-R10, AGG-R14.
+- `qa/code-blind-functional/check.py` stops at the first unresolved case, as expected while there are failures and
+  blocks ([checker-output.txt](checker-output.txt)).
 
 ## Candidate
 
@@ -94,12 +98,17 @@ the hooks file is protected without a grant.
 
 Independent fresh-agent checks (never an executor), within the review budget of 5 ([review-ledger.md](review-ledger.md),
 [review/](review/)):
-- **r1** failed and led to these corrections:
+- **r1** failed. It led to these corrections:
   - AGG-R09 moved from failed to passed, and #738 was closed;
   - AGG-18 moved from passed to blocked;
-  - the AGG-14, AGG-24, AGG-R14, AGG-R07, AGG-26, AGG-R04 and AGG-10 summaries were corrected;
+  - the AGG-14, 24, R14, R07, 26, R04 and 10 summaries were corrected;
   - the README lists and limits were completed.
-- r1 also verified the relay claims, every reference hash, the freeze and the isolation receipts.
+- **r2** failed. It led to these corrections:
+  - AGG-R07 and AGG-R10 moved to blocked, by the same rule as AGG-18;
+  - the AGG-38 deviation is now disclosed;
+  - AGG-28's relay result is recorded;
+  - the README run-2 comparison and the token and window limits were corrected.
+- Both checks verified the relay claims, every reference hash, the freeze and the isolation receipts themselves.
 
 ## Known limits
 
@@ -122,8 +131,19 @@ Independent fresh-agent checks (never an executor), within the review budget of 
   context grows past the product's.
 - After the lane wipe, 7 to 22 processes owned by the lane account are still running (`runs/*/wipe-*.txt`, a count only),
   and the record does not identify them. Home files and temp files are wiped.
-- The G13 executor printed the fixture's synthetic `.env` token into its own tool output, so it went to the executor's
-  model. It disclosed this. The value is synthetic and the product never showed it.
+- The fixture's synthetic `.env` token reached the executors, never the product.
+  - The harness's own `agms-tui fixture` prints test-data contents, so the token appears in 27 of the 37 executor
+    transcripts, in 26 `fixture.jsonl` files and in the G08 and G19 reports. The G13 and G30 executors also disclosed
+    it.
+  - Every PTY log and screen file was checked: the product never displayed the token.
+- Each run's `mediator-window.jsonl` starts about 2 minutes before its executor, so it can include the previous group's
+  last requests. For example, G22's first three rows belong to G21's executor.
+- Some attempts include in-attempt retries that are disclosed only in the executors' reports: G06 discarded its first
+  AGG-09 try; G28d discarded an invalid preliminary AGG-R17 setup; G31 re-sent steps (d) and (h); G28 resubmitted the
+  second AGG-R17 command.
+- Correction to frozen files, which are not edited: `design/designer-session.md` and `design/packet/new-screens/README.txt`
+  give the packet-screen capture window as 14:38–14:53Z. The capture files are dated 14:39:56Z–14:48:22Z, before the
+  designer started at 14:49:18Z.
 - Product logs (`collected/product-logs/*.log`) are kept out of git by the repository's `*.log` rule, as in run 2.
 - Each run's test project is under `runs/<label>/collected/fixture/workspace/`. Its git directory is stored as
   `dot-git/`, and its synthetic `.env` is ignored by the project's own `.gitignore`. Raw PTY logs and SQLite files are
