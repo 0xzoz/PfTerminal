@@ -281,7 +281,12 @@ fn issue_743_on_linux_claude_starts_with_the_pane_tmpdir() {
     let tmp = Path::new("/state/pane-a/tmp");
     let args = ["-p".to_string(), "--verbose".to_string()];
     assert_eq!(
-        pane_command(SandboxType::LinuxSeccomp, tmp, "/usr/local/bin/claude", &args),
+        pane_command(
+            SandboxType::LinuxSeccomp,
+            tmp,
+            "/usr/local/bin/claude",
+            &args
+        ),
         (
             "/usr/bin/env".to_string(),
             vec![
@@ -293,7 +298,12 @@ fn issue_743_on_linux_claude_starts_with_the_pane_tmpdir() {
         )
     );
     assert_eq!(
-        pane_command(SandboxType::MacosSeatbelt, tmp, "/usr/local/bin/claude", &args),
+        pane_command(
+            SandboxType::MacosSeatbelt,
+            tmp,
+            "/usr/local/bin/claude",
+            &args
+        ),
         ("/usr/local/bin/claude".to_string(), args.to_vec())
     );
     // The sandbox's own environment keeps the session's `TMPDIR`.
@@ -333,7 +343,10 @@ fn issue_743_linux_pane_commands_can_make_temporary_files() {
     std::fs::create_dir_all(containment.tmp_dir()).unwrap();
     let env = HashMap::from([
         ("PATH".to_string(), "/usr/bin:/bin".to_string()),
-        ("HOME".to_string(), cwd.path().to_string_lossy().into_owned()),
+        (
+            "HOME".to_string(),
+            cwd.path().to_string_lossy().into_owned(),
+        ),
         ("TMPDIR".to_string(), "/tmp".to_string()),
         // The bridge, as a pane's plan sets it.
         (
