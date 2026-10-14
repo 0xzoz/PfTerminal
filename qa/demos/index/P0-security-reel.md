@@ -2,6 +2,8 @@
 
 One narrated video of the P0 security-levels work, edited from the sprint gate videos indexed in this folder.
 It is an asset on the [`demos` prerelease](https://github.com/CorbanuCore/CorbanuTerminal/releases/tag/demos).
+Follow-up: [aggressive-reel.md](aggressive-reel.md) shows the Aggressive level after the 2026-10-13 fixes and the third
+milestone run.
 
 - Video: [p0-security-levels-reel-2026-10-08.mp4](https://github.com/CorbanuCore/CorbanuTerminal/releases/download/demos/p0-security-levels-reel-2026-10-08.mp4) (11:51, 1920x1080, 30 fps, H.264/AAC) ·
   subtitles: [p0-security-levels-reel-2026-10-08.srt](https://github.com/CorbanuCore/CorbanuTerminal/releases/download/demos/p0-security-levels-reel-2026-10-08.srt)

@@ -720,16 +720,80 @@ fn stale_placeholder_sweep_leaves_placeholders_in_use() {
     std::fs::remove_dir(&other_marker_dir).expect("other marker dir");
 }
 
-/// #673: a run that finds another live run's placeholder holds it at once.
-/// Its maker's cleanup, between this run's argument build and its
-/// registration, used to remove it; bubblewrap then had to make a new one,
-/// which fails where this run's sandbox is read-only.
+/// Whether another thread could take the registry lock now.
+fn registry_lock_is_free() -> bool {
+    std::thread::spawn(|| {
+        let lock = std::fs::File::open(synthetic_mount_registry_root().join("lock")).expect("lock");
+        // SAFETY: tries to lock a descriptor this closure owns.
+        unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
+    })
+    .join()
+    .expect("try the lock")
+}
+
+/// #673: a run holds the registry lock from before it looks at the paths it
+/// mounts until it has registered them, so no other run's cleanup can
+/// remove a placeholder in between.
 #[test]
-fn a_live_placeholder_is_held_from_the_moment_it_is_found() {
+fn the_registry_stays_locked_from_building_the_arguments_to_registering() {
     let temp_dir = tempfile::TempDir::new().expect("tempdir");
-    let placeholder = temp_dir.path().join(".aws");
-    std::fs::write(&placeholder, "").expect("placeholder");
-    // Another run made it and is still running.
+    let project = temp_dir.path().canonicalize().expect("canonical");
+    let policy = FileSystemSandboxPolicy::restricted(vec![
+        FileSystemSandboxEntry {
+            path: FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            },
+            access: FileSystemAccessMode::Read,
+            missing_path_behavior: None,
+        },
+        FileSystemSandboxEntry {
+            path: FileSystemPath::Path {
+                path: AbsolutePathBuf::from_absolute_path(&project).expect("absolute"),
+            },
+            access: FileSystemAccessMode::Write,
+            missing_path_behavior: None,
+        },
+    ]);
+    let args = create_bwrap_command_args(
+        vec!["/bin/true".to_string()],
+        &policy,
+        &project,
+        &project,
+        BwrapOptions::default(),
+    )
+    .expect("bwrap args");
+    assert!(
+        !registry_lock_is_free(),
+        "the arguments were built unlocked"
+    );
+
+    let (synthetic, protected) = register_mount_targets(
+        &args.synthetic_mount_targets,
+        &args.protected_create_targets,
+        args.registry_lock,
+    );
+    // (Other tests may hold it now.)
+    assert!(!REGISTRY_LOCK_HELD.get(), "registering kept the lock");
+    cleanup_synthetic_mount_targets(&synthetic);
+    cleanup_protected_create_targets(&protected);
+}
+
+/// #673: another live run's placeholder (`~/.aws`, denied outside this
+/// run's writable roots) found while this run builds its arguments stays
+/// until this run has registered it, also when its maker ends and cleans up
+/// in between: the cleanup waits for the registry lock, then leaves the
+/// placeholder to this run, the last one out. Before, it could be removed
+/// between this run finding it and checking it was a placeholder; this run
+/// then masked it unregistered, and bubblewrap failed the command (`Can't
+/// create file at ~/.aws: Read-only file system`).
+#[test]
+fn a_placeholder_found_while_building_stays_until_it_is_registered() {
+    let temp_dir = tempfile::TempDir::new().expect("tempdir");
+    let root = temp_dir.path().canonicalize().expect("canonical");
+    let project = root.join("project");
+    std::fs::create_dir(&project).expect("project");
+    let placeholder = root.join(".aws");
+    // Another run, still running, registered and made it.
     let mut maker = std::process::Command::new("sleep")
         .arg("60")
         .spawn()
@@ -740,28 +804,75 @@ fn a_live_placeholder_is_held_from_the_moment_it_is_found() {
     let maker_marker = marker_dir.join(maker.id().to_string());
     std::fs::write(&maker_marker, SYNTHETIC_MOUNT_MARKER_SYNTHETIC).expect("maker marker");
     write_synthetic_mount_target_record(&marker_dir, &made);
+    std::fs::write(&placeholder, "").expect("placeholder");
 
-    // This run builds its arguments and finds it.
-    assert!(is_live_placeholder(&placeholder));
-    let metadata = std::fs::symlink_metadata(&placeholder).expect("stat");
+    let entry = |path: &Path, access| FileSystemSandboxEntry {
+        path: FileSystemPath::Path {
+            path: AbsolutePathBuf::from_absolute_path(path).expect("absolute"),
+        },
+        access,
+        missing_path_behavior: None,
+    };
+    let policy = FileSystemSandboxPolicy::restricted(vec![
+        FileSystemSandboxEntry {
+            path: FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            },
+            access: FileSystemAccessMode::Read,
+            missing_path_behavior: None,
+        },
+        entry(&project, FileSystemAccessMode::Write),
+        entry(&placeholder, FileSystemAccessMode::Deny),
+    ]);
+    let args = create_bwrap_command_args(
+        vec!["/bin/true".to_string()],
+        &policy,
+        &project,
+        &project,
+        BwrapOptions::default(),
+    )
+    .expect("bwrap args");
+    let found: Vec<&crate::bwrap::SyntheticMountTarget> = args
+        .synthetic_mount_targets
+        .iter()
+        .filter(|target| target.path() == placeholder)
+        .collect();
+    assert_eq!(found.len(), 1, "{:?}", args.synthetic_mount_targets);
+    assert!(found[0].preserves_pre_existing_path());
 
-    // The maker ends and cleans up before this run registers.
-    cleanup_synthetic_mount_targets(&[SyntheticMountTargetRegistration {
-        target: made,
-        marker_file: maker_marker,
-        marker_dir: marker_dir.clone(),
-        wrote_record: true,
-    }]);
+    // The maker ends and cleans up while this run has not registered yet.
     maker.kill().expect("kill the maker");
     maker.wait().expect("reap the maker");
-    assert!(placeholder.exists(), "the maker removed a held placeholder");
+    let maker_cleanup = std::thread::spawn({
+        let marker_dir = marker_dir.clone();
+        move || {
+            cleanup_synthetic_mount_targets(&[SyntheticMountTargetRegistration {
+                target: made,
+                marker_file: maker_marker,
+                marker_dir,
+                wrote_record: true,
+            }]);
+        }
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        placeholder.exists(),
+        "the maker removed a placeholder this run found"
+    );
+    assert!(!maker_cleanup.is_finished(), "the cleanup did not wait");
 
-    // This run registers it as the existing path it found, and as the last
-    // run out removes it.
-    let registrations = register_synthetic_mount_targets(&[
-        crate::bwrap::SyntheticMountTarget::existing_empty_file(&placeholder, &metadata),
-    ]);
-    assert!(registrations[0].target.preserves_pre_existing_path());
+    let (registrations, _) = register_mount_targets(
+        &args.synthetic_mount_targets,
+        &args.protected_create_targets,
+        args.registry_lock,
+    );
+    maker_cleanup.join().expect("the maker's cleanup");
+    assert!(
+        placeholder.exists(),
+        "the maker removed a placeholder this run registered"
+    );
+
+    // This run is the last one out.
     cleanup_synthetic_mount_targets(&registrations);
     assert!(!placeholder.exists());
     assert!(!marker_dir.exists());
