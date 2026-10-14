@@ -14,7 +14,7 @@ contains both exact subscription burn and API-key prices; the live spawn tool
 resolves the active side from authentication. Unverified rows in this document
 remain disabled until their billing and capability metadata is verified.
 
-## OpenAI API-key prices (read 2026-10-09, #361)
+## OpenAI API-key prices (read 2026-10-09, #361; 2026-10-14, #368)
 
 Source: https://developers.openai.com/api/docs/pricing (Standard table) and
 https://developers.openai.com/api/docs/models/<slug>, read 2026-10-09. USD per
@@ -31,6 +31,7 @@ Batch are not priced: those attempts show "no price", never the Standard rate.
 | slug          |    in | cached | cache writes |   out | LC  |
 | ------------- | ----: | -----: | -----------: | ----: | :-: |
 | gpt-6-astra   | 10.00 |   1.00 |        12.50 | 50.00 | yes |
+| gpt-6.1-sol   |  2.00 |   0.10 |         2.50 | 10.00 | yes |
 | gpt-6-sol     |  2.00 |   0.20 |         2.50 | 10.00 | yes |
 | gpt-6-luna    |  0.10 |   0.01 |        0.125 |  0.50 | yes |
 | gpt-5.6-sol   |  4.00 |   0.40 |         5.00 | 20.00 | yes |
@@ -43,9 +44,18 @@ Batch are not priced: those attempts show "no price", never the Standard rate.
 | gpt-5.2       |  1.75 |  0.175 |            - | 14.00 | no  |
 
 GPT-5.6 Sol's rates are a promotion OpenAI offers "at least through November
-21, 2026" (regular: 5.00 / 0.50 / 30.00); the catalogue states no Sol API price
-after 2026-11-21T23:59:59.999Z until the page is read again (the earliest
-reading of "through November 21").
+21, 2026". The model page calls them a 20% input and 33% output reduction
+(GPT-5.5 is 5.00 / 30.00) but states no Sol price after the promotion, so the
+catalogue states no
+Sol API price after 2026-11-21T23:59:59.999Z until the page is read again (the
+earliest reading of "through November 21"). Re-read 2026-10-14 (#368):
+unchanged. GPT-6.1 Sol was added from the same page and
+developers.openai.com/api/docs/models/gpt-6.1-sol, read 2026-10-14; it is
+manual selection only, like GPT-6 Astra and Luna.
+`python3 scripts/check_price_calendars.py` warns 30 days before a stated price
+end, and fails 30 days before DeepSeek's off-peak holiday list runs out (the
+list covers through 31 December of its last year; dates come from the State
+Council's yearly holiday notice, which DeepSeek's page refers to).
 
 Billing class:
 

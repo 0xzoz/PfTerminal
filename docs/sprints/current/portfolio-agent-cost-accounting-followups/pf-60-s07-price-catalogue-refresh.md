@@ -14,7 +14,7 @@ branch: "UNALLOCATED"
 base_commit: "UNALLOCATED"
 depends_on: "PF-60-S04"
 created: 2026-10-10
-updated: 2026-10-10
+updated: 2026-10-14
 ---
 
 # PF-60-S07 — Price catalogue refresh (#368)
@@ -48,6 +48,11 @@ updated: 2026-10-10
 ## Done
 
 - [x] Draft sprint created 2026-10-10 from Travis's decision; linked to one plan feature.
+- [x] AC3: `gpt-6.1-sol` has a row at OpenAI's published rates, cache writes included.
+- [x] 2026-10-14 data upkeep (#368, readings in `qa/portfolio/agent-cost-accounting/issue-368/`):
+      AC4 re-read (unchanged, no post-promotion price published; boundary test); AC5 no 2027 State Council notice yet,
+      so `scripts/check_price_calendars.py` (nightly) fails from 2026-12-01 until the dates are added; AC2 read but not
+      priceable as data (custom routes are not priced per token, BigModel bills CNY, slugs clash with Z.AI, K3 TTL writes).
 
 ## Remaining
 
@@ -57,7 +62,6 @@ updated: 2026-10-10
 - [ ] AC2 Moonshot/Kimi Open Platform (`api.moonshot.ai/v1`) and BigModel (`open.bigmodel.cn/api/paas/v4`): rows from
       the official pricing pages, with K3 cache writes by TTL; a request on each recomputes exactly (or the route stays
       "no price" with the reason recorded if no key is available).
-- [ ] AC3: `gpt-6.1-sol` has a row at OpenAI's published rates, cache writes included.
 - [ ] AC4: the GPT-5.6 Sol price is re-read before 2026-11-21; a test pins the promotion end so work after it uses the
       new published price or shows "no price" with a reason, never the promotional price.
 - [ ] AC5: DeepSeek's holiday and off-peak calendar after 2026-10-07 matches DeepSeek's page.

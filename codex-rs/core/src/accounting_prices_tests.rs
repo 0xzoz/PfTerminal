@@ -44,7 +44,7 @@ fn accounting_chat_prices_exact_source_and_unknown() -> anyhow::Result<()> {
     assert_ne!(first.id, second.id);
     assert_eq!(first.source_reference, second.source_reference);
     for model in [
-        "gpt-6.1-sol",
+        "gpt-6.1-astra",
         "remote-only",
         "Gpt-5.6-sol",
         "openai/gpt-5.6-sol",
@@ -172,7 +172,7 @@ fn accounting_responses_prices_exact_and_unknown() {
         Uuid::new_v5(&Uuid::NAMESPACE_OID, &source)
     );
     for model in [
-        "gpt-6.1-sol",
+        "gpt-6.1-astra",
         "remote-only",
         "Gpt-5.6-sol",
         "openai/gpt-5.6-sol",
@@ -814,8 +814,8 @@ fn utc(text: &str) -> i64 {
 }
 
 /// #361: every OpenAI API-key row states the Standard rates OpenAI publishes,
-/// read 2026-10-09 from developers.openai.com/api/docs/pricing and each
-/// model's page: input, cached input, cache writes ("-" or unlisted means the
+/// read 2026-10-09 (GPT-6.1 Sol: 2026-10-14, #368) from
+/// developers.openai.com/api/docs/pricing and each model's page: input, cached input, cache writes ("-" or unlisted means the
 /// sheet states none) and output in milli-USD per million tokens, and, where
 /// the page says prompts above 272K input tokens cost 2x input (cache rates
 /// included) and 1.5x output for the full request, that tier.
@@ -825,8 +825,9 @@ fn openai_api_key_rates_match_the_published_sheet() -> anyhow::Result<()> {
     let read_on = utc("2026-10-09T19:00:00Z");
     // (model, input, cached input, cache writes, output, long-context tier)
     type Row = (&'static str, u32, u32, Option<u32>, u32, bool);
-    let sheet: [Row; 11] = [
+    let sheet: [Row; 12] = [
         ("gpt-6-astra", 10_000, 1_000, Some(12_500), 50_000, true),
+        ("gpt-6.1-sol", 2_000, 100, Some(2_500), 10_000, true),
         ("gpt-6-sol", 2_000, 200, Some(2_500), 10_000, true),
         ("gpt-6-luna", 100, 10, Some(125), 500, true),
         ("gpt-5.6-sol", 4_000, 400, Some(5_000), 20_000, true),
@@ -933,6 +934,61 @@ fn openai_api_key_rates_match_the_published_sheet() -> anyhow::Result<()> {
         luna.source_reference,
         Uuid::new_v5(&Uuid::NAMESPACE_OID, &reference)
     );
+    Ok(())
+}
+
+/// #368: GPT-5.6 Sol's API price is a promotion OpenAI states "at least
+/// through November 21, 2026" (re-read 2026-10-14: unchanged, and no
+/// post-promotion price is published). The last millisecond of that day is
+/// priced at the promotional rate; from the next millisecond an API-key turn
+/// has no price and a ChatGPT-login turn keeps its plan burn with no API
+/// equivalent, so nothing is priced at a rate OpenAI may no longer charge.
+#[test]
+fn gpt_5_6_sol_promotion_ends_at_its_stated_boundary() -> anyhow::Result<()> {
+    let scope = Uuid::new_v4();
+    let last = utc("2026-11-21T23:59:59.999Z");
+    let after = last + 1;
+    let catalog = codex_models_manager::bundled_models_response()?;
+    let billing = billing_for(&catalog.models, "gpt-5.6-sol", "openai").expect("bundled row");
+    assert_eq!(
+        billing.api_key_rates_at(last),
+        Some((4_000, 20_000, Some(400)))
+    );
+    assert_eq!(billing.api_key_rates_at(after), None);
+
+    let promotional = Rates {
+        noncached: Some(rate(4_000)?),
+        read: Some(rate(400)?),
+        write: Some(rate(5_000)?),
+        output: Some(rate(20_000)?),
+    };
+    for price in [
+        responses_original("gpt-5.6-sol", "openai", scope, last, /*tier*/ None)?,
+        chat_original("gpt-5.6-sol", "openai", scope, last)?,
+    ] {
+        let [price] = price.as_slice() else {
+            panic!("one price at the last promotional millisecond");
+        };
+        assert_eq!(price.rates, promotional);
+    }
+    assert!(responses_original("gpt-5.6-sol", "openai", scope, after, /*tier*/ None)?.is_empty());
+    assert!(chat_original("gpt-5.6-sol", "openai", scope, after)?.is_empty());
+
+    let [plan] = plan_original("gpt-5.6-sol", "openai", scope, after, /*tier*/ None)?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("one plan record"))?;
+    assert_eq!(plan.basis, Basis::PlanEquivalent);
+    assert_eq!(plan.plan_burn_millis, Some(1_000));
+    assert_eq!(
+        plan.rates,
+        Rates {
+            noncached: None,
+            read: None,
+            write: None,
+            output: None,
+        }
+    );
+    assert_eq!(plan.long_context, None);
     Ok(())
 }
 
