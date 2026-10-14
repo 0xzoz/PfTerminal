@@ -323,8 +323,10 @@ fn issue_743_linux_pane_commands_can_make_temporary_files() {
     };
     let cwd = tempfile::tempdir().unwrap();
     let state = tempfile::tempdir().unwrap();
+    // Keyed like `state_dir`: its siblings (other panes) are denied.
+    let state_dir = state.path().canonicalize().unwrap().join("home-key/pane-a");
     let containment = ClaudeContainment {
-        state_dir: state.path().canonicalize().unwrap(),
+        state_dir,
         panes_dir: cwd.path().join("panes"),
         linux_sandbox_exe: Some(exe),
     };
