@@ -9,7 +9,7 @@ file in `active/` as an active plan (limit 3, all taken).
 **Verdict: not ready.** Moderate can't be chosen in `/security` today. A person reaches it only through a config
 setting that PF-23-S01's readiness note calls a test setting. Its core protections are on main and tested, but four product
 defects (#747–#750) and seven owner decisions (D1–D7 below) stand between it and a code-blind run. Estimated
-elapsed time from Travis's decisions to a first sign-off request: about 3.5–4.5 working days for one cycle, about
+elapsed time from Travis's decisions to a first sign-off request: about 3.4–4.4 working days for one cycle, about
 4.5–6.5 with the one re-run the Aggressive history suggests (section 3.5).
 
 ## 1. What Moderate promises, and what main does
@@ -24,7 +24,7 @@ elapsed time from Travis's decisions to a first sign-off request: about 3.5–4.
 | [P0 history](history/p0-security-levels-2026-10-06.md): the 2026-08-28 reconciled planning decisions and the [profile and failure contract](history/p0-security-levels-2026-10-06.md#profile-and-failure-contract) | Planning decisions: "Every level above Permissive requires the broker." Profile contract: Moderate composes existing denials with new policy; broker-only credentials; scoped derived financial values; isolated fetch and screened search; pause ingestion when the local classifier is down. |
 | Travis, 2026-10-06 decision 2 (`sec-common.md`) | "Moderate is added as its protections land." |
 | Travis, 2026-10-11, #245 | Keep the Moderate refusal: an additional-permission read of a protected credential or vault path is refused before the prompt, even with a person's approval. |
-| Travis, 2026-10-11, #513 (with what #558 implemented) | Under Moderate only a person's fresh approval lifts write protection on shell/git start-up files and git hooks for that one command; Guardian, hooks, the approval cache and session/turn grants never do. Runtime entries are never writable. #558 applied the same rule to git config and the project's `.codex` and `.agents`, as the handoff's section 9 records. |
+| Travis, 2026-10-11, #513 (with what #558 implemented) | Under Moderate only a person's fresh approval lifts write protection on shell/git start-up files and git hooks for that one command; Guardian, hooks, the approval cache and session/turn grants never do. Runtime entries are never writable. #558 applied the same rule to the project's `.codex` and `.agents` (the handoff's section 9 lists them too) and to git config (from #558 only). |
 | Travis, 2026-10-12, #513 | A command a person approves to run outside the sandbox may write the runtime files (documented exception). |
 | Travis, 2026-10-12, #603 (15) and (16) | (15) A one-command approval under Moderate keeps lifting the read-only Corbanu home. (16) Corbanu-home names are protected before they exist, also when the command works in the home. |
 | Travis, 2026-10-13 (24-item decisions list in the coordinator's `todo.md`, outside the repository, entry "23:55") | 20: keep worktrees reached through a link read-only (#603); 22: #651 documented, entry by entry for shared folders; 23: accept #650's side effect (sandboxed `git worktree remove/prune` fails under Moderate and Aggressive). |
@@ -37,10 +37,10 @@ The P1 plan says the milestone "covers PF-28-S02, PF-23 and the Moderate picker 
 | Area | State on main | Evidence |
 | --- | --- | --- |
 | Choosing Moderate | **Not possible.** The picker lists Moderate as "not available yet"; there is no review, preflight, confirmation, restart or downgrade path for it. The picker's Moderate summary ends "Not available yet." | `c1-picker.txt`; [PF-24-S03](../sprints/archive/p0-security-levels/pf-24-s03-flagged-security-picker.md) excluded Moderate; #750 |
-| Reaching Moderate at all | Only `[security] version = 1, level = "moderate"` in config. [PF-23-S01's readiness note](../../qa/security-levels/sprints/PF-23-S01/activation-readiness.md) calls it "a test setting, not a product level". | `c1-*` |
+| Reaching Moderate at all | Only `[security] version = 1, level = "moderate"` in config. [PF-23-S01's readiness note](../../qa/security-levels/sprints/PF-23-S01/activation-readiness.md) calls it (in the older key spelling `security_level = "moderate"`) "a test setting, not a product level". | `c1-*` |
 | Untrusted content and taint (PF-30-S01..S03, PF-23-S01) | Merged behind `source_envelopes`. After tool, MCP, web, agent or memory content, protected commands (vault, credentials, policy, disclosure, value transfer, unseen code), MCP calls that change or send data and unclassified tools need a fresh person's answer, and typing into a running process is judged as one command since the untrusted content; cached or automatic approvals don't count. | PF-23-S01 record; tmux `c3-prompt`, `c4-prompt` ("… after untrusted content entered the session … a cached or automatic approval does not count") |
 | Read protection | The Corbanu home's stores and `$HOME` credential files are unreadable to agent commands under Moderate, from the start of the session (#239, fixed by #244), and the secretless launch contract denies the vault store, sign-in files and config. Under Moderate a person's fresh approval lifts the PF-23 read denials for that run, but not the launch contract's. | `c3-result`, `c6`; PF-13-S07 saved-level route matrix v5: 0 leaks under saved Moderate on macOS and Linux, though in the Linux Moderate run the model declined the `$HOME/.ssh` probe, so the sandbox wasn't exercised there |
-| Read refusal and write protection | #245 (additional-permission reads of protected paths refused, #526), #513 (#537, #558), #540 and #603 decision 16 (#627, #697) implemented as decided; decisions 15 and 20 kept today's behaviour; runtime entries never writable. | Issue comments: tests, plus GLM 5.3 Flash tmux videos for #245 and #513 |
+| Read refusal and write protection | #245 (additional-permission reads of protected paths refused, #526), #513 (#537, #558), #540 and #603 decision 16 (#627, with its leftovers in #697) implemented as decided; decisions 15 and 20 kept today's behaviour; runtime entries never writable. | Issue comments: tests, plus GLM 5.3 Flash tmux videos for #245 and #513 |
 | Secretless launch, output gate, reflected scrubbing, destination policy | Merged behind their flags (`secretless_agent_launch`, `secret_output_gate`, `url_destination_policy`); PF-28-S02 archived with open items in P1. | P1 carried-forward table |
 | Model keys through the broker | Off by default under Moderate (#391). Inspector: "Corbanu reads provider keys itself (broker_model_auth off)". | `c1-inspector` |
 | Downgrade, restart, inheritance (PF-23-S03) | Core handles Moderate (`next start Moderate`, children inherit); no TUI path to confirm it. | `c1-inspector` Live policy row |
@@ -106,8 +106,8 @@ packets told the designer it was "not available", and AGG-35 only checked that c
 | AGG-27, A01 (routes) | Both Z.AI routes under Moderate, with the broker off or on (D2). |
 | AGG-30, AGG-33 replay, AGG-T01, T02, #626 (remembered approvals) | Whether Permissive "don't ask again" rules apply under Moderate before untrusted content (D6). |
 | AGG-R13, #623 (links into `.codex`/`.agents`) | The link refusal is Aggressive-only; under Moderate a fresh approval may lift `.codex`/`.agents` writes (#513). |
-| AGG-T01, T02, #739 | #747. |
-| (AGG-21 only, as level tampering) | Moderate's own core: hostile instructions in a file, tool output or MCP result, followed by a request for a protected action. Only AGG-21 put hostile instructions in a file, and only to change the level; no case used tool or MCP output, or followed hostile content with a credential or vault action. |
+| AGG-T01, T02, #739 (they cover both #626 and #739) | #747. |
+| (AGG-21 only, as level tampering) | Moderate's own core: hostile instructions in a file, tool output or MCP result, followed by a request for a protected action. Only AGG-21 put hostile instructions in a file, and only to loosen the level and network; no case used tool or MCP output, or followed hostile content with a credential or vault action. |
 
 ## 3. Proposed milestone plan
 
@@ -182,7 +182,7 @@ rather than letting them fail (AGG-01, AGG-25); record the product model's refus
 
 | Step | Estimate | Basis |
 | --- | --- | --- |
-| Picker sprint (#750) with #747–#749 | 1.5–2.5 days, one worker | Judgement: the comparable TUI security sprints PF-24-S02 and PF-25-S01 each took about a day (lanes opened 2026-10-06, both completed 2026-10-07), plus three bounded fixes |
+| Picker sprint (#750) with #747–#749 | 1.5–2.5 days, one worker | Judgement: PF-24-S02 and PF-25-S01 each went from launch to merge within 2026-10-07 (about 6 and 3 hours; the coordinator's `todo.md` and `git log`). The range allows for the larger scope (review screen, preflight, downgrade, switching), #747–#749 and review rounds |
 | Docs page, candidate build and package | 0.5 day | Run 3 candidate build |
 | Packet, fresh design, owner questions, freeze | 0.5 day | Run 3: about 2 hours 35 minutes from packet capture (14:39Z) to the VM start (17:14Z), including the wait for the owner's answers |
 | VM execution | 8–10 hours | Run 3: 64 cases in 32 groups plus 5 replays took 8.3 hours (17:18Z–01:37Z). A first Moderate design will be a similar size, and untrusted-content cases need extra steps. |
@@ -195,7 +195,7 @@ Z.AI cost stays on GLM 5.3 Flash.
 
 ## 4. Sources
 
-Product spec (**P0 `/security` levels**, **Required trust boundaries**); the closed
+Product spec (**P0 `/security` levels**, **Release rule**, **Required trust boundaries**); the closed
 [P0 plan](completed/main-2026-10-08-p0-security-levels.md) and its
 [history](history/p0-security-levels-2026-10-06.md); the [P1 plan](active/p1-security-hardening.md); sprint records
 PF-23-S01..S03, PF-24-S02/S03, PF-25-S01/S02 in [the archive](../sprints/archive/p0-security-levels/); the three
