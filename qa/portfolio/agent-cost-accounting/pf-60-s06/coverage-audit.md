@@ -31,3 +31,8 @@ that thread; this sprint does not change them.
 
 The sequence above is pinned by `codex-rs/core/tests/suite/accounting_side_forks.rs` and
 `codex-rs/core/src/session/tests/guardian_tests.rs` (`accounting_owner_of_*`).
+
+**Side effect of the `/side` marker.** The thread source `side` also travels where the thread source already went:
+the turn-metadata request header sent to the provider and the analytics events. A `/side` turn used to report
+`user` there and now reports `side`. Nothing branches on the value; ephemeral threads are never saved, so thread
+lists and resume are unaffected.

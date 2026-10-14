@@ -350,25 +350,116 @@ async fn accounting_sub_agent_spawned_from_side_is_recorded_under_the_conversati
     .await;
     let side = fork(&test, side_source()).await?;
     turn(&side.thread, SIDE_PROMPT, Default::default()).await?;
-    let records = wait_until(&db, |seen| {
+    wait_until(&db, |seen| {
         let kinds = kinds(seen);
         kinds.iter().any(|kind| kind == "side:agent:")
             && kinds.iter().filter(|kind| *kind == "side:").count() >= 2
     })
     .await?;
+    // Nothing else arrives later: each request is recorded once.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let records = attempts(&db).await?;
     let parent = test.session_configured.thread_id;
     assert!(
         records.iter().all(|attempt| attempt.thread_id == parent),
         "{records:#?}"
     );
-    let kinds = kinds(&records);
-    assert_eq!(kinds[0], "", "{records:#?}");
-    assert!(
-        kinds[1..]
-            .iter()
-            .all(|kind| kind == "side:" || kind == "side:agent:"),
+    let mut kinds = kinds(&records);
+    kinds.sort();
+    assert_eq!(
+        kinds,
+        vec!["", "side:", "side:", "side:agent:"],
         "{records:#?}"
     );
+    // The conversation's day counts all four requests' tokens, each once.
+    wait_observations(&db, /*count*/ 4).await?;
+    let total = totals(&db, &records[0]).await?;
+    assert_eq!(total.measured[0].known, 400);
+    test.thread_manager
+        .shutdown_all_threads_bounded(std::time::Duration::from_secs(3))
+        .await;
+    Ok(())
+}
+
+/// AC5: work for an `exec --ephemeral` conversation stays uncollected. A
+/// sub-agent it spawns looks the conversation up, finds it excluded and is
+/// excluded too (`parent_not_persisted`); nothing reaches the ledger.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn accounting_sub_agent_of_an_ephemeral_run_stays_uncollected() -> anyhow::Result<()> {
+    use responses::ev_assistant_message;
+    use responses::ev_function_call_with_namespace;
+    use responses::ev_response_created;
+    use responses::sse;
+    core_test_support::skip_if_no_network!(Ok(()));
+
+    const ROOT_PROMPT: &str = "ephemeral run that spawns a helper";
+    const CHILD_PROMPT: &str = "helper task from the ephemeral run";
+    const SPAWN_CALL_ID: &str = "ephemeral-spawn-call";
+    let server = MockServer::start().await;
+    let endpoint = format!("{}/v1", server.uri());
+    let test = builder(endpoint.clone(), enabled(&endpoint))
+        .with_config(|config| config.ephemeral = true)
+        .build_with_auto_env(&server)
+        .await?;
+    responses::mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            body_contains(request, ROOT_PROMPT) && !body_contains(request, SPAWN_CALL_ID)
+        },
+        sse(vec![
+            ev_response_created("resp-root-spawn"),
+            ev_function_call_with_namespace(
+                SPAWN_CALL_ID,
+                "collaboration",
+                "spawn_agent",
+                &json!({ "message": CHILD_PROMPT, "task_name": "helper", "fork_turns": "none" })
+                    .to_string(),
+            ),
+            completed("resp-root-spawn"),
+        ]),
+    )
+    .await;
+    let child = responses::mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            body_contains(request, CHILD_PROMPT) && !body_contains(request, SPAWN_CALL_ID)
+        },
+        sse(vec![
+            ev_response_created("resp-child"),
+            ev_assistant_message("msg-child", "helper done"),
+            completed("resp-child"),
+        ]),
+    )
+    .await;
+    responses::mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| body_contains(request, SPAWN_CALL_ID),
+        sse(vec![
+            ev_response_created("resp-root-after"),
+            ev_assistant_message("msg-root-after", "root done"),
+            completed("resp-root-after"),
+        ]),
+    )
+    .await;
+    test.submit_turn(ROOT_PROMPT).await?;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    while child.requests().is_empty() {
+        anyhow::ensure!(
+            tokio::time::Instant::now() < deadline,
+            "the helper never sent its request"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let db = codex_state::StateRuntime::init(test.config.sqlite.clone(), "openai".into()).await?;
+    // The ledger table only exists once something was collected in this home.
+    match attempts(&db).await {
+        Ok(seen) => assert_eq!(seen.len(), 0, "{seen:#?}"),
+        Err(error) => assert!(
+            error.to_string().contains("no such table"),
+            "unexpected ledger error: {error}"
+        ),
+    }
     test.thread_manager
         .shutdown_all_threads_bounded(std::time::Duration::from_secs(3))
         .await;
