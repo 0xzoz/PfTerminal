@@ -496,3 +496,123 @@ async fn issue_749_moderate_rows_keep_commands_in_the_sandbox() {
         "{vault}"
     );
 }
+
+/// #792 (AGG-04): before the restart that follows confirming Aggressive in
+/// `/security`, the session keeps its own sandbox (no denied reads of its
+/// own) while Core's Aggressive is in force. With the untrusted-content
+/// labels Core's rules deny the vault store and sign-in file to every agent
+/// command and keep every run in the sandbox (#747's Aggressive cases), so
+/// the rows no longer say the store is readable or that approved commands
+/// leave the sandbox; `corbanu vault …` commands are refused (#443).
+#[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "workspace-write falls back to read-only on Windows without the Windows sandbox (#691)"
+)]
+async fn issue_792_aggressive_before_restart_rows_say_what_core_enforces() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let permissive = |labels: bool| {
+        format!(
+            r#"approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+web_search = "cached"
+
+[sandbox_workspace_write]
+network_access = false
+exclude_tmpdir_env_var = true
+exclude_slash_tmp = true
+
+[features]
+source_envelopes = {labels}
+"#
+        )
+    };
+    let rows = |values: CurrentValues| {
+        let [sandbox, _, network, vault, _, _] = values;
+        let vault = vault.split("; ").next().unwrap().to_string();
+        format!("Sandbox: {sandbox}\nNetwork: {network}\nVault: {vault}")
+    };
+    let config = build(
+        home.path(),
+        cwd.path(),
+        &permissive(true),
+        /*aggressive_level*/ false,
+    )
+    .await;
+    let before_restart = rows(current_values(&config, SecurityLevel::Aggressive));
+    insta::assert_snapshot!("issue_792_aggressive_before_restart_rows", before_restart);
+    assert!(!before_restart.contains("are readable"), "{before_restart}");
+    assert!(!before_restart.contains("run outside"), "{before_restart}");
+    // Permissive in force: unchanged.
+    let permissive_rows = rows(current_values(&config, SecurityLevel::Permissive));
+    assert!(
+        permissive_rows.contains("the vault store and sign-in file are readable to agent commands"),
+        "{permissive_rows}"
+    );
+    assert!(
+        permissive_rows.contains("approved or allow-listed commands can run outside the sandbox"),
+        "{permissive_rows}"
+    );
+    assert!(
+        !permissive_rows.contains("corbanu vault"),
+        "{permissive_rows}"
+    );
+
+    // Without the labels Core's rules do not apply: only the vault
+    // commands are refused.
+    let unlabelled = build(
+        home.path(),
+        cwd.path(),
+        &permissive(false),
+        /*aggressive_level*/ false,
+    )
+    .await;
+    let unlabelled = rows(current_values(&unlabelled, SecurityLevel::Aggressive));
+    assert!(
+        unlabelled.contains(
+            "Vault: the vault store and sign-in file are readable to agent commands, and direct `corbanu vault …` commands are refused"
+        ),
+        "{unlabelled}"
+    );
+    assert!(
+        unlabelled.contains("approved or allow-listed commands can run outside the sandbox"),
+        "{unlabelled}"
+    );
+
+    // After the restart the session's own Aggressive profile denies them
+    // too; the row names the level and the refused vault commands.
+    let extra = tempfile::tempdir().unwrap();
+    let restarted = build(
+        home.path(),
+        cwd.path(),
+        &format!(
+            "{}\n[features]\nsource_envelopes = true\n",
+            workspace_write(extra.path(), /*network*/ false)
+        ),
+        /*aggressive_level*/ true,
+    )
+    .await;
+    let [sandbox, _, _, vault, _, _] = current_values(&restarted, SecurityLevel::Aggressive);
+    assert!(!sandbox.contains("outside the sandbox"), "{sandbox}");
+    assert!(
+        vault.starts_with(
+            "the vault store and sign-in file are unreadable (Aggressive, also when you approve a command) to agent commands, and direct `corbanu vault …` commands are refused; "
+        ),
+        "{vault}"
+    );
+
+    // An external sandbox takes none of Core's rules.
+    let mut external = config;
+    external
+        .permissions
+        .set_permission_profile(codex_protocol::models::PermissionProfile::External {
+            network: codex_protocol::permissions::NetworkSandboxPolicy::Restricted,
+        })
+        .unwrap();
+    let vault = &current_values(&external, SecurityLevel::Aggressive)[3];
+    assert!(
+        vault.starts_with("the vault store and sign-in file are readable to agent commands"),
+        "{vault}"
+    );
+}

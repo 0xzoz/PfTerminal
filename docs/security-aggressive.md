@@ -163,8 +163,15 @@ create files there too.
 ## Commands run outside the sandbox
 
 Under Moderate no agent command runs outside the sandbox, even when you
-approve it; Aggressive, once it applies after a restart, keeps every command in
-its sandbox too. Under Moderate a command can still ask to run outside it
+approve it; Aggressive keeps every command in its sandbox too, once it applies
+after a restart. Before the restart, from when you confirm Aggressive in
+`/security`, the same holds when the untrusted-content labels are on and the
+session uses a sandbox Corbanu applies (not an external one): Core's
+protected-path rules then deny the vault store and sign-in file to every
+command and keep each run in its sandbox. The inspector's "This session" rows
+say which applies.
+
+Under Moderate a command can still ask to run outside it
 (an escalation request): the prompt says it stays in the sandbox, and
 approving it only lifts Moderate's protection of credential and Corbanu files
 for that one command. A write outside your writable folders, or network your
