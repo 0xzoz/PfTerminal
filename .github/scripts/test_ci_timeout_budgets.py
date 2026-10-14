@@ -178,6 +178,27 @@ class PrArgumentCommentLintTest(unittest.TestCase):
             rust_ci,
         )
 
+    def test_lint_restores_mains_cargo_home_cache(self) -> None:
+        # The path list is part of the cache version: it must match the save.
+        def cargo_home_restore(text: str) -> tuple[str, str]:
+            match = re.search(
+                r"(?ms)^      - name: Restore cargo home cache\n.*?path: \|\n(.*?)^          key: ([^\n]+)",
+                text,
+            )
+            self.assertIsNotNone(match)
+            return match.group(1), match.group(2)
+
+        lint_build = (REPO_ROOT / ".github" / "workflows" / "rust-ci-lint-build.yml").read_text()
+        paths, key = cargo_home_restore(self.job("argument_comment_lint_changed"))
+        main_paths, main_key = cargo_home_restore(lint_build)
+        self.assertEqual(paths, main_paths)
+        self.assertEqual(
+            key,
+            main_key.replace("${{ inputs.runner }}", "ubuntu-24.04")
+            .replace("${{ inputs.target }}", "x86_64-unknown-linux-gnu")
+            .replace("${{ inputs.profile }}", "dev"),
+        )
+
     def test_lint_only_restores_caches(self) -> None:
         job = self.job("argument_comment_lint_changed")
         self.assertIn("actions/cache/restore@", job)

@@ -291,14 +291,30 @@ jobs:
             --component rust-src \
             --no-self-update
           rustup default nightly-2025-09-18
+      - name: Compute lockfile hash
+        id: lockhash
+        working-directory: codex-rs
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "hash=$(sha256sum Cargo.lock | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "toolchain_hash=$(sha256sum rust-toolchain.toml | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      # Main's Linux clippy cache (rust-ci-lint-build.yml). The key and the
+      # path list must match it exactly: the path list is part of the cache
+      # version, so a shorter list never matches.
       - name: Restore cargo home cache
         uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: |
+            ~/.cargo/bin/
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-          key: cargo-home-ubuntu-24.04-x86_64-unknown-linux-gnu-dev-${{ hashFiles('codex-rs/Cargo.lock') }}-${{ hashFiles('codex-rs/rust-toolchain.toml') }}
+            ${{ github.workspace }}/.cargo-home/bin/
+            ${{ github.workspace }}/.cargo-home/registry/index/
+            ${{ github.workspace }}/.cargo-home/registry/cache/
+            ${{ github.workspace }}/.cargo-home/git/db/
+          key: cargo-home-ubuntu-24.04-x86_64-unknown-linux-gnu-dev-${{ steps.lockhash.outputs.hash }}-${{ steps.lockhash.outputs.toolchain_hash }}
           restore-keys: |
             cargo-home-ubuntu-24.04-x86_64-unknown-linux-gnu-dev-
       - name: Restore cargo-dylint tooling
