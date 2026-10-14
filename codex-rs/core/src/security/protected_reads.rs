@@ -18,8 +18,9 @@
 //!   project's `.git`), or that, as far as its text shows, writes nothing a
 //!   grant lifts at all;
 //! - #736: the same for a macOS keychain command (`security
-//!   find-generic-password`): the keychain service is out of reach of
-//!   Aggressive's sandbox, so it runs but cannot read or change items;
+//!   find-generic-password`): the keychain services are out of reach of
+//!   Aggressive's sandbox (#758: denied after its network rules too), so it
+//!   runs but cannot read or change items;
 //! - #622: such a denial is listed under the inspector's recent denials.
 //!
 //! Explanation only: it never changes what runs or what is denied (it only
@@ -185,9 +186,9 @@ struct ReadPolicyInputs {
     workspace_roots: Vec<AbsolutePathBuf>,
     profile: PermissionProfile,
     user_home: Option<PathBuf>,
-    /// #736: agent commands cannot reach the macOS keychain service: macOS,
-    /// with network off and no network proxy (Seatbelt allows the service
-    /// only with its network rules).
+    /// #736, #758: agent commands cannot reach the macOS keychain services:
+    /// on macOS, Aggressive's sandbox denies them after every other rule,
+    /// also with a managed network proxy or an allowed Unix socket.
     keychain_closed: bool,
 }
 
@@ -224,20 +225,18 @@ impl ReadPolicyInputs {
                     .collect()
             })
             .unwrap_or_default();
+        let profile = turn.config.permissions.permission_profile().clone();
         Some(Self {
             codex_home: turn.config.codex_home.to_path_buf(),
             sqlite_home: turn.config.sqlite.home().to_path_buf(),
             turn_cwd,
             workspace_roots,
-            profile: turn.config.permissions.permission_profile().clone(),
-            user_home: dirs::home_dir(),
+            // #758: the denial is a rule of Corbanu's sandbox, which an
+            // external sandbox does not take.
             keychain_closed: cfg!(target_os = "macos")
-                && turn.network.is_none()
-                && !turn
-                    .config
-                    .permissions
-                    .network_sandbox_policy()
-                    .is_enabled(),
+                && !matches!(profile, PermissionProfile::External { .. }),
+            profile,
+            user_home: dirs::home_dir(),
         })
     }
 
