@@ -264,7 +264,21 @@ impl PtyCodex {
 impl Drop for PtyCodex {
     fn drop(&mut self) {
         let _ = self.child.kill();
-        let _ = self.child.wait();
+        // On macOS a session leader exits only once its terminal's output has
+        // drained, so keep reading the PTY until the child is gone. Give up
+        // after a while rather than hang the test run.
+        let deadline = Instant::now() + Duration::from_secs(/*secs*/ 10);
+        while Instant::now() < deadline {
+            if !matches!(self.child.try_wait(), Ok(None)) {
+                return;
+            }
+            if self
+                .read_output(Duration::from_millis(/*millis*/ 20))
+                .is_err()
+            {
+                std::thread::sleep(Duration::from_millis(/*millis*/ 20));
+            }
+        }
     }
 }
 
