@@ -697,9 +697,10 @@ impl CoreShellActionProvider {
         // Issue #540: where the protected-path rules apply, an intercepted
         // exec leaves the sandbox only within a request a person approved to
         // run outside it, never through an allow rule (as in the
-        // orchestrator). #747: under Moderate, never.
+        // orchestrator). #747: under Moderate, never; #739: nor under
+        // Permissive with protected launch armed, which refuses such a run.
         let moderate_keeps_sandbox =
-            crate::security::protected_additional::moderate_keeps_sandbox(&self.session);
+            crate::security::protected_additional::keeps_sandbox_always(&self.session);
         let unsandboxed_allowed =
             unsandboxed_execution_allowed(&self.permission_profile.file_system_sandbox_policy())
                 && !moderate_keeps_sandbox

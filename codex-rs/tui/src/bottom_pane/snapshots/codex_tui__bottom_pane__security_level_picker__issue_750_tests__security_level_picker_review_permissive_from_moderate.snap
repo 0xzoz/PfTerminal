@@ -5,8 +5,6 @@ expression: "render(&picker, 80)"
 Return to Permissive?
 Protections removed at the next start:
 Your own settings from config apply instead of each of these.
-• Sandbox: a command you approve to run outside the sandbox, a retry without it
-    and a remembered rule that skips it run outside it again
 • Protected files: credential files in your home folder and Corbanu's sign-in,
     vault, config, history and state are no longer denied to agent commands, and
     files that run code later are no longer read-only; your own sandbox settings
@@ -17,6 +15,9 @@ Your own settings from config apply instead of each of these.
     turns broker_model_auth on
 Your own approval, sandbox, network, web search and environment settings from
 config apply exactly as saved.
+Protected launch (secretless_agent_launch) stays on: agent commands never run
+outside the sandbox, even when you approve, so no approval to run outside it
+is offered.
 Takes effect when you restart Corbanu Terminal; Core's Moderate rules stay on in
 this session until then.
 enter confirm and save · esc back, nothing changes

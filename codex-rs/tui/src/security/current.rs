@@ -91,19 +91,24 @@ pub(crate) fn current_values(
     // takes the rules, and an external one keeps its own.
     let aggressive_rules =
         aggressive && restricted && config.features.enabled(Feature::SourceEnvelopes);
+    let secretless = config.features.enabled(Feature::SecretlessAgentLaunch)
+        || codex_protocol::secretless_launch::is_armed();
     // Without denied reads, escalated, allow-listed and retried commands run
     // outside the sandbox (`unsandboxed_execution_allowed` in core); the
-    // denied reads of Aggressive's rules keep them in it.
-    let escapes =
-        restricted && !file_system.has_denied_read_restrictions() && !moderate && !aggressive_rules;
+    // denied reads of Aggressive's rules keep them in it. #739: protected
+    // launch (secretless_agent_launch) refuses every run outside it, so none
+    // is offered.
+    let escapes = restricted
+        && !file_system.has_denied_read_restrictions()
+        && !moderate
+        && !aggressive_rules
+        && !secretless;
     // #749: Moderate's rules deny the vault store and sign-in file to every
     // agent command (PF-23, #239), with the untrusted-content labels.
     // An external sandbox takes none of Core's rules (it keeps its own).
     let moderate_denies_store = moderate
         && config.features.enabled(Feature::SourceEnvelopes)
         && !matches!(file_system.kind, FileSystemSandboxKind::ExternalSandbox);
-    let secretless = config.features.enabled(Feature::SecretlessAgentLaunch)
-        || codex_protocol::secretless_launch::is_armed();
 
     let mut sandbox = match file_system.kind {
         FileSystemSandboxKind::Unrestricted => {
@@ -157,6 +162,11 @@ pub(crate) fn current_values(
         sandbox.push_str(
             "; under Aggressive approved and allow-listed commands stay inside the sandbox",
         );
+    } else if secretless && restricted && !file_system.has_denied_read_restrictions() {
+        // #739: protected launch does it.
+        sandbox.push_str(
+            "; with protected launch (secretless_agent_launch) no command runs outside the sandbox, so none is offered",
+        );
     }
     let request_tools = config.features.enabled(Feature::RequestPermissionsTool)
         || config.features.enabled(Feature::ExecPermissionApprovals);
@@ -192,8 +202,11 @@ pub(crate) fn current_values(
     let network = format!("{network}; web search {}", config.web_search_mode.value());
 
     let secrets = config.codex_home.join("secrets");
+    // #739: the launch contract denies them to every agent command and
+    // refuses a launch that could read them.
     let store_readable = !moderate_denies_store
         && !aggressive_rules
+        && !secretless
         && (escapes
             || !restricted
             || [
@@ -220,6 +233,8 @@ pub(crate) fn current_values(
             "unreadable (Moderate and secretless_agent_launch, also when you approve a command)"
         } else if moderate_denies_store {
             "unreadable (Moderate; your fresh approval of one command lifts this for that command)"
+        } else if secretless {
+            "unreadable (secretless_agent_launch, also when you approve a command)"
         } else if widenable {
             "unreadable (unless an approved permission request grants access)"
         } else {

@@ -218,6 +218,21 @@ the levels protect and their limits are on
 [Moderate security level](security-moderate.md) and
 [Aggressive security level: protected files](security-aggressive.md).
 
+### Protected launch (`secretless_agent_launch`)
+
+With `secretless_agent_launch` on, every agent command runs inside the OS
+sandbox, with only allowlisted environment variables, and can't read
+Corbanu's vault, sign-in files or config. Nothing runs outside the sandbox at
+any level, Permissive included, so Corbanu doesn't offer it (#739):
+
+- A command that asks to run outside the sandbox isn't run, and you aren't
+  asked. Corbanu says it isn't possible here.
+- After a sandbox denial, "retry without sandbox?" isn't offered.
+- A command you allowed earlier with "don't ask again" still skips the
+  prompt, but runs inside the sandbox, and Corbanu says so.
+
+Without the feature, Permissive works as configured.
+
 ### Kill switch
 
 `/security` → `g` → "Turn the kill switch on" stops the work running in every

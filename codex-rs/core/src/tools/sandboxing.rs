@@ -359,15 +359,16 @@ pub(crate) fn sandbox_permissions_preserving_denied_reads(
 }
 
 /// [`sandbox_permissions_preserving_denied_reads`] for a run in `session`:
-/// under security level Moderate a request to run outside the sandbox runs
-/// inside it too (#747, decision D3).
+/// under security level Moderate (#747, decision D3), and under Permissive
+/// with protected launch armed (#739), a request to run outside the sandbox
+/// runs inside it too.
 pub(crate) fn sandbox_permissions_for_session(
     sandbox_permissions: SandboxPermissions,
     file_system_sandbox_policy: &FileSystemSandboxPolicy,
     session: &crate::session::session::Session,
 ) -> SandboxPermissions {
     if sandbox_permissions.requires_escalated_permissions()
-        && crate::security::protected_additional::moderate_keeps_sandbox(session)
+        && crate::security::protected_additional::keeps_sandbox_always(session)
     {
         SandboxPermissions::UseDefault
     } else {

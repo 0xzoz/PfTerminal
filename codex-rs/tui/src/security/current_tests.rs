@@ -204,6 +204,59 @@ async fn issue_440_vault_row_says_the_environment_is_allowlisted_under_secretles
     );
 }
 
+/// #739 (option B): with protected launch on (secretless_agent_launch),
+/// whose launch contract refuses every run outside the sandbox and every
+/// read of the vault store and sign-in file, the Permissive rows no longer
+/// claim that approved or allow-listed commands can run outside it, nor what
+/// would follow from that.
+#[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "workspace-write falls back to read-only on Windows without the Windows sandbox (#691)"
+)]
+async fn issue_739_rows_under_protected_launch_claim_no_run_outside_the_sandbox() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let extra = tempfile::tempdir().unwrap();
+    let mut config = build(
+        home.path(),
+        cwd.path(),
+        &workspace_write(extra.path(), /*network*/ false),
+        /*aggressive_level*/ false,
+    )
+    .await;
+    let [sandbox, _, network, vault, _, _] = current_values(&config, SecurityLevel::Permissive);
+    assert!(
+        sandbox.contains("approved or allow-listed commands can run outside the sandbox"),
+        "{sandbox}"
+    );
+    assert!(network.starts_with("off inside the sandbox, on for commands that run outside it"));
+    assert!(vault.starts_with("the vault store and sign-in file are readable"));
+    // Enabled after loading, so this test process is not armed.
+    config
+        .features
+        .enable(Feature::SecretlessAgentLaunch)
+        .expect("enable the secretless launch");
+    let [sandbox, _, network, vault, _, _] = current_values(&config, SecurityLevel::Permissive);
+    assert!(
+        !sandbox.contains("can run outside the sandbox"),
+        "{sandbox}"
+    );
+    assert!(
+        sandbox.contains(
+            "with protected launch (secretless_agent_launch) no command runs outside the sandbox, so none is offered"
+        ),
+        "{sandbox}"
+    );
+    assert_eq!(network, "off for agent commands; web search live");
+    assert!(
+        vault.starts_with(
+            "the vault store and sign-in file are unreadable (secretless_agent_launch, also when you approve a command) to agent commands"
+        ),
+        "{vault}"
+    );
+}
+
 /// Names the user lists explicitly are reported, not just the fixed probes.
 #[test]
 fn secret_kinds_include_named_variables_from_the_environment() {

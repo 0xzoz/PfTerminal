@@ -190,6 +190,26 @@ impl ToolOrchestrator {
         {
             return Err(ToolError::Rejected(refusal));
         }
+        // #739 (option B, security sign-off): under Permissive with protected
+        // launch armed, a request to run outside the sandbox is refused before
+        // anyone is asked, since the launch contract would refuse the run. A
+        // forbidden request keeps its own refusal; where denied reads already
+        // keep the run in the sandbox, nothing is refused.
+        let permissive_launch =
+            crate::security::protected_additional::permissive_launch_keeps_sandbox(
+                &tool_ctx.session,
+            );
+        if permissive_launch
+            && !matches!(requirement, ExecApprovalRequirement::Forbidden { .. })
+            && unsandboxed_execution_allowed(&file_system_sandbox_policy)
+            && tool
+                .sandbox_permissions(req)
+                .requires_escalated_permissions()
+        {
+            return Err(ToolError::Rejected(
+                crate::security::protected_additional::PROTECTED_LAUNCH_NO_ESCALATION.to_string(),
+            ));
+        }
         // Registered just before the user (not an automatic reviewer) is
         // asked. A cached approval or a permission hook may still answer
         // without them; then no review is shown and nothing is confirmed.
@@ -611,27 +631,47 @@ impl ToolOrchestrator {
         // rules' read denials already keep such runs sandboxed.)
         // #747 (D3): under Moderate nothing leaves the sandbox at all (read
         // again: a level confirmed while the person was asked counts).
-        let moderate_keeps_sandbox = moderate_keeps_sandbox
+        // #739: nor under Permissive with protected launch armed, whose launch
+        // contract refuses every run outside the sandbox.
+        let permissive_launch = permissive_launch
+            || crate::security::protected_additional::permissive_launch_keeps_sandbox(
+                &tool_ctx.session,
+            );
+        let always_sandboxed = permissive_launch
+            || moderate_keeps_sandbox
             || crate::security::protected_additional::moderate_keeps_sandbox(&tool_ctx.session);
-        let keeps_sandbox = moderate_keeps_sandbox
+        let keeps_sandbox = always_sandboxed
             || (crate::security::protected_additional::protected_level(&tool_ctx.session)
                 .is_some()
                 && !tool
                     .sandbox_permissions(req)
                     .requires_escalated_permissions());
         let policy_allows_no_sandbox =
-            !moderate_keeps_sandbox && unsandboxed_execution_allowed(&file_system_sandbox_policy);
+            !always_sandboxed && unsandboxed_execution_allowed(&file_system_sandbox_policy);
 
         // 2) First attempt under the selected sandbox.
+        let unkept_override = sandbox_override_for_first_attempt(
+            tool.sandbox_permissions(req),
+            &requirement,
+            &file_system_sandbox_policy,
+        );
         let sandbox_override = if keeps_sandbox {
             SandboxOverride::NoOverride
         } else {
-            sandbox_override_for_first_attempt(
-                tool.sandbox_permissions(req),
-                &requirement,
-                &file_system_sandbox_policy,
-            )
+            unkept_override
         };
+        // #739: a remembered rule that would skip the sandbox is not applied
+        // silently under protected launch: the run stays in it, and the
+        // person is told why.
+        if permissive_launch
+            && matches!(unkept_override, SandboxOverride::BypassSandboxFirstAttempt)
+        {
+            warn(
+                tool_ctx,
+                crate::security::protected_additional::PROTECTED_LAUNCH_RULE_STAYS_SANDBOXED,
+            )
+            .await;
+        }
         let managed_network_active = turn_ctx.network.is_some();
         let sandbox_preference = tool.sandbox_preference();
         let sandbox_requested = match sandbox_override {
@@ -814,6 +854,17 @@ impl ToolOrchestrator {
                     }
                 }
                 if !unsandboxed_allowed && network_approval_context.is_none() {
+                    // #739: where only protected launch keeps this run in the
+                    // sandbox, say why no retry outside it is offered.
+                    if permissive_launch
+                        && unsandboxed_execution_allowed(&file_system_sandbox_policy)
+                    {
+                        warn(
+                            tool_ctx,
+                            crate::security::protected_additional::PROTECTED_LAUNCH_NO_RETRY,
+                        )
+                        .await;
+                    }
                     otel.sandbox_outcome(
                         &otel_tn,
                         otel_ci,
@@ -1071,6 +1122,19 @@ where
         "post-taint protected action needs fresh human approval"
     );
     Some(crate::security::tainted_action::PostTaintAction { kind, state })
+}
+
+/// #739: tells the person `message` (a warning in the transcript).
+async fn warn(tool_ctx: &ToolCtx, message: &str) {
+    tool_ctx
+        .session
+        .send_event(
+            &tool_ctx.turn,
+            codex_protocol::protocol::EventMsg::Warning(codex_protocol::protocol::WarningEvent {
+                message: message.to_string(),
+            }),
+        )
+        .await;
 }
 
 /// #747 (D3): under Moderate, what a person is told before approving a

@@ -910,6 +910,11 @@ impl SecurityLevelPicker {
                 }
                 lines.push(Line::default());
                 let summary = match ROWS[self.selected] {
+                    // #739: protected launch refuses every run outside the
+                    // sandbox, also under Permissive.
+                    Row::Permissive if self.moderate.secretless_launch => {
+                        PERMISSIVE_UNDER_PROTECTED_LAUNCH
+                    }
                     Row::Permissive => {
                         "Today's behaviour. Your approval, sandbox, network, vault and agent settings apply exactly as configured."
                     }
@@ -1001,7 +1006,15 @@ impl SecurityLevelPicker {
                             .map(Stylize::dim),
                     );
                     let hanging = if width < 20 { "" } else { "    " };
-                    for (control, value) in crate::security::moderate::REMOVED {
+                    // #739: protected launch keeps every command in the
+                    // sandbox under Permissive too, so that is not removed.
+                    for (control, value) in
+                        crate::security::moderate::REMOVED
+                            .into_iter()
+                            .filter(|(control, _)| {
+                                !(self.moderate.secretless_launch && *control == "Sandbox")
+                            })
+                    {
                         lines.extend(word_wrap_lines(
                             [Line::from(vec![
                                 format!("• {control}:").bold(),
@@ -1057,6 +1070,9 @@ impl SecurityLevelPicker {
                         "Your own approval, sandbox, network, web search and environment settings from config apply exactly as saved."
                     },
                 ));
+                if self.moderate.secretless_launch {
+                    lines.extend(wrap(PROTECTED_LAUNCH_KEEPS_SANDBOX));
+                }
                 lines.extend(wrap(if self.active == ChosenLevel::Aggressive {
                     "Takes effect when you restart Corbanu Terminal; this session stays Aggressive until then, and its pending approvals end with it."
                 } else if self.active == ChosenLevel::Moderate
@@ -1627,6 +1643,12 @@ impl SecurityLevelPicker {
         })
     }
 }
+
+/// #739 (option B): the Permissive summary while protected launch is on.
+const PERMISSIVE_UNDER_PROTECTED_LAUNCH: &str = "Your approval, sandbox, network, vault and agent settings apply as configured, except that protected launch (secretless_agent_launch) is on: agent commands never run outside the sandbox, even when you approve, so that is not offered.";
+
+/// #739: on the Permissive review while protected launch is on.
+const PROTECTED_LAUNCH_KEEPS_SANDBOX: &str = "Protected launch (secretless_agent_launch) stays on: agent commands never run outside the sandbox, even when you approve, so no approval to run outside it is offered.";
 
 fn name(level: SecurityLevel) -> &'static str {
     crate::security::view::profile_name(level)

@@ -373,6 +373,38 @@ pub(crate) fn moderate_keeps_sandbox(session: &crate::session::session::Session)
 /// run outside the sandbox under Moderate.
 pub(crate) const MODERATE_STAYS_SANDBOXED: &str = "Under security level Moderate it still runs inside the sandbox, even if you approve: writes outside your writable folders and network your sandbox blocks still fail.";
 
+/// #739 (Travis, 2026-10-14, option B, security sign-off): under security
+/// level Permissive with protected launch armed (`secretless_agent_launch`),
+/// whose launch contract refuses every command outside the OS sandbox, no
+/// approval to run outside it is offered. A request to run outside it
+/// (`require_escalated`) is refused before anyone is asked, "retry without
+/// sandbox?" is not offered, and a remembered exec-policy rule that would
+/// skip the sandbox runs the command inside it, with a note. Permissive
+/// without protected launch is unchanged; Moderate and Aggressive keep their
+/// own handling (#747).
+pub(crate) fn permissive_launch_keeps_sandbox(session: &crate::session::session::Session) -> bool {
+    crate::security::launch_contract::active().is_some()
+        && session.services.model_client().live_level() == SecurityLevel::Permissive
+}
+
+/// Whether no command leaves the sandbox in `session` now: Moderate (#747)
+/// or Permissive under protected launch (#739).
+pub(crate) fn keeps_sandbox_always(session: &crate::session::session::Session) -> bool {
+    moderate_keeps_sandbox(session) || permissive_launch_keeps_sandbox(session)
+}
+
+/// #739: what the model and the person get instead of an approval prompt for
+/// a request to run outside the sandbox under protected launch.
+pub(crate) const PROTECTED_LAUNCH_NO_ESCALATION: &str = "Not run: this command asked to run outside the OS sandbox, and that isn't possible here. Protected launch (secretless_agent_launch) keeps every agent command inside the sandbox, also at security level Permissive and even with an approval, so no approval was asked for. Inside the sandbox it cannot write outside your writable folders or use network the sandbox blocks.";
+
+/// #739: shown to the person when a remembered approval would have run a
+/// command outside the sandbox under protected launch.
+pub(crate) const PROTECTED_LAUNCH_RULE_STAYS_SANDBOXED: &str = "A remembered approval (\"don't ask again\") would run this command outside the OS sandbox, which isn't possible here: protected launch (secretless_agent_launch) keeps every agent command inside it, also at security level Permissive. It runs inside the sandbox instead, so writes outside your writable folders and network the sandbox blocks fail.";
+
+/// #739: shown to the person when the sandbox blocked a command and a retry
+/// without it would have been offered (or run) under Permissive.
+pub(crate) const PROTECTED_LAUNCH_NO_RETRY: &str = "The sandbox blocked this command. Running it outside the sandbox isn't possible here: protected launch (secretless_agent_launch) keeps every agent command inside it, also at security level Permissive, so \"retry without sandbox?\" is not offered.";
+
 /// Issues #245 and #513: a permission grant (`request_permissions`)
 /// without the entries that would open a protected path or reopen a
 /// read-only one under `level`'s rules, and the refusal to show when any
