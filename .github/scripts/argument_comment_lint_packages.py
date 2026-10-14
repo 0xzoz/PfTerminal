@@ -19,6 +19,8 @@ WORKSPACE = "codex-rs"
 CANARY_PACKAGE = "codex-utils-string"
 # Editing any of these lints the canary so the PR proves the job still works.
 LINT_JOB_PATHS = (
+    ".github/actions/setup-ci/",
+    ".github/actions/setup-rusty-v8/",
     ".github/scripts/argument_comment_lint_packages.py",
     ".github/workflows/rust-ci.yml",
     "tools/argument-comment-lint/",
@@ -61,7 +63,15 @@ def lint_packages(files: list[str], packages: dict[str, str]) -> list[str]:
 def changed_files(base: str, head: str) -> list[str]:
     output = subprocess.run(
         # Three dots: only what the PR changed since it left `base`.
-        ["git", "diff", "--name-only", "--no-renames", f"{base}...{head}"],
+        [
+            "git",
+            "-c",
+            "core.quotePath=off",
+            "diff",
+            "--name-only",
+            "--no-renames",
+            f"{base}...{head}",
+        ],
         capture_output=True,
         check=True,
         cwd=ROOT,

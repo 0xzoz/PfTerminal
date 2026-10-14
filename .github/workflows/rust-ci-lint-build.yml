@@ -22,8 +22,8 @@ on:
       save_caches:
         description: >-
           Save the cargo-home and sccache caches. Saves happen only on main
-          whatever this says (PRs restore main's caches, #636); blocking-ci's
-          legs turn it off so main's push run doesn't duplicate the caches
+          regardless (PRs restore main's caches, #636); blocking-ci's legs
+          turn it off so main's push run doesn't duplicate the caches
           postmerge rust-ci-full saves under the same keys. Only the
           local-disk sccache fallback honours it; the sccache GitHub backend,
           if ever enabled, writes the cache itself.
@@ -163,6 +163,8 @@ jobs:
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.14.0
+          # setup-zig can't restore without saving, so only main caches (#636).
+          use-cache: ${{ github.ref == 'refs/heads/main' }}
 
       - if: ${{ inputs.target == 'x86_64-unknown-linux-musl' || inputs.target == 'aarch64-unknown-linux-musl'}}
         name: Install musl build tools

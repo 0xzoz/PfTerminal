@@ -42,10 +42,12 @@ red status noise without testing the code.
 
 The repository's Actions cache is limited to 10 GB and GitHub evicts the least
 recently used entries beyond that. Only `main` saves caches (#636): every save
-step is guarded by `github.ref == 'refs/heads/main'` (and Swatinem `save-if`,
-setup-uv `save-cache`, setup-bazel `cache-save`). Pull requests, and workflows
-dispatched on other branches, restore the caches `main` saved and save none,
-so PR churn can't evict them. Where blocking-ci and postmerge run the same
+step is guarded by `github.ref == 'refs/heads/main'`, as are Swatinem
+`save-if`, setup-uv `save-cache` and setup-bazel `cache-save`. Pull requests,
+and workflows dispatched on other branches, restore the caches `main` saved and
+save none, so PR churn can't evict them. setup-node and setup-zig can't restore
+without saving, so their caches are on only for `main` (both are used only by
+postmerge or nightly jobs). Where blocking-ci and postmerge run the same
 clippy leg on `main`, only postmerge `rust-ci-full` saves it.
 `.github/scripts/test_ci_timeout_budgets.py` enforces this. Check usage with
 `gh api repos/CorbanuCore/CorbanuTerminal/actions/cache/usage`.

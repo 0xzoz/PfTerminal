@@ -172,6 +172,8 @@ class PrArgumentCommentLintTest(unittest.TestCase):
             "[[ '${{ needs.argument_comment_lint_changed.result }}' == 'success' ]]",
             rust_ci,
         )
+        # The package list is an output of `changed`, so it must have run.
+        self.assertIn("[[ '${{ needs.changed.result }}' == 'success' ]]", rust_ci)
         self.assertIn(
             "NEEDS_CHANGED_OUTPUTS_ARGUMENT_COMMENT_LINT_PACKAGES: "
             "${{ needs.changed.outputs.argument_comment_lint_packages }}",
@@ -248,17 +250,31 @@ class CacheSavePolicyTest(unittest.TestCase):
                 self.assertNotRegex(path.read_text(), r"uses: actions/cache@")
 
     def test_third_party_caches_save_only_on_main(self) -> None:
-        workflows = REPO_ROOT / ".github"
-        for relative, setting in (
-            ("workflows/orchestrate-tui-matrix.yml", "save-if"),
-            ("workflows/repo-checks.yml", "save-cache"),
-            ("actions/setup-bazel-ci/action.yml", "cache-save"),
-        ):
-            with self.subTest(file=relative):
-                self.assertRegex(
-                    (workflows / relative).read_text(),
-                    rf"(?m)^\s+{setting}: \$\{{\{{ {re.escape(self.MAIN)} \}}\}}$",
-                )
+        # Actions with their own cache: each use must be guarded (save-if,
+        # save-cache, cache-save, use-cache, setup-* `cache:`) or disable it.
+        caching_actions = re.compile(
+            r"uses: (Swatinem/rust-cache|astral-sh/setup-uv|bazel-contrib/setup-bazel|mlugg/setup-zig)@"
+        )
+        setup_with_cache = re.compile(r"uses: actions/setup-(node|python|go|java)@")
+        checked = 0
+        for path in self.ci_files():
+            lines = path.read_text().splitlines()
+            for index, line in enumerate(lines):
+                step = None
+                if caching_actions.search(line):
+                    step = self.step_containing(lines, index)
+                elif setup_with_cache.search(line):
+                    step = self.step_containing(lines, index)
+                    if not re.search(r"(?m)^\s+cache:", step):
+                        continue
+                if step is None:
+                    continue
+                checked += 1
+                with self.subTest(file=path.name, line=index + 1):
+                    self.assertTrue(
+                        self.MAIN in step or "use-cache: false" in step, step
+                    )
+        self.assertGreaterEqual(checked, 6)
 
 
 class NightlyHeavyJobsTest(unittest.TestCase):
