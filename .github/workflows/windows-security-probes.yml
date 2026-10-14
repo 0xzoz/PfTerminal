@@ -92,6 +92,7 @@ env:
     legacy_workspace_write_cannot_delete_or_replace_protected_git_dir
     legacy_read_only_after_workspace_write_cannot_delete
     legacy_crashed_session_labels_are_repaired
+    legacy_label_registry_is_closed_to_low_integrity
 
 jobs:
   probes:
@@ -152,7 +153,8 @@ jobs:
         if: ${{ !cancelled() }}
         shell: bash
         # The legacy sessions above labelled TEMP Low while they ran; once they
-        # ended, the broker must again be unable to delete there.
+        # ended, the broker must again be unable to delete there. No repair
+        # runs first: it would hide a release that failed to put labels back.
         run: cargo test --locked --manifest-path codex-rs/Cargo.toml -p codex-process-hardening --lib pf_27_s08 -- --nocapture --test-threads=1
       - name: P1 Windows hardening regressions (#320)
         if: ${{ !cancelled() }}

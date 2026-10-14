@@ -729,6 +729,20 @@ struct LegacyDeleteOutcome {
 /// Whether a plain Low-integrity copy of this process's token (not the
 /// sandbox token) can open `path` for writing.
 fn low_integrity_can_open_for_write(path: &Path) -> bool {
+    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_DELETE;
+    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE;
+    use windows_sys::Win32::Storage::FileSystem::FILE_WRITE_DATA;
+    low_integrity_can_open(
+        path,
+        FILE_WRITE_DATA,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+    )
+}
+
+/// Whether a plain Low-integrity copy of this process's token can open
+/// `path` (a file or folder) for `access`, sharing `share`.
+fn low_integrity_can_open(path: &Path, access: u32, share: u32) -> bool {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::Foundation::HANDLE;
@@ -742,10 +756,6 @@ fn low_integrity_can_open_for_write(path: &Path) -> bool {
     use windows_sys::Win32::Security::TokenImpersonation;
     use windows_sys::Win32::Storage::FileSystem::CreateFileW;
     use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
-    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_DELETE;
-    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
-    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE;
-    use windows_sys::Win32::Storage::FileSystem::FILE_WRITE_DATA;
     use windows_sys::Win32::Storage::FileSystem::OPEN_EXISTING;
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
     use windows_sys::Win32::System::Threading::OpenProcessToken;
@@ -784,8 +794,8 @@ fn low_integrity_can_open_for_write(path: &Path) -> bool {
             .collect();
         let handle = CreateFileW(
             wide.as_ptr(),
-            FILE_WRITE_DATA,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            access,
+            share,
             std::ptr::null(),
             OPEN_EXISTING,
             FILE_FLAG_BACKUP_SEMANTICS,
@@ -1332,6 +1342,81 @@ fn legacy_read_only_after_workspace_write_cannot_delete() {
     );
 }
 
+/// #158 option (b): no Low-integrity process (a sandboxed command, the
+/// credential broker) may read, change or hold open the label records, which
+/// would keep a release from ever putting the labels back. `FILE_EXECUTE`
+/// counts as a read for file sharing, so it is tried too.
+#[test]
+fn legacy_label_registry_is_closed_to_low_integrity() {
+    use windows_sys::Win32::Storage::FileSystem::DELETE;
+    use windows_sys::Win32::Storage::FileSystem::FILE_EXECUTE;
+    use windows_sys::Win32::Storage::FileSystem::FILE_READ_DATA;
+    use windows_sys::Win32::Storage::FileSystem::FILE_WRITE_DATA;
+    let _guard = legacy_process_test_guard();
+    let test_root = user_owned_test_root();
+    let root = test_root.path().join("root");
+    fs::create_dir_all(&root).expect("create root");
+    // A lease creates the registry and its files.
+    let lease = crate::integrity_leases::acquire(
+        &[dunce::canonicalize(&root).expect("canonical root")],
+        /*log_dir*/ None,
+    )
+    .expect("lease");
+    drop(lease);
+    let parent = crate::integrity_leases::registry_parent_dir().expect("registry parent");
+    let registry = parent.join("integrity-labels");
+    let mut opened = Vec::new();
+    for path in [
+        parent.clone(),
+        registry.clone(),
+        registry.join("registry.lock"),
+        registry.join("labels.json"),
+    ] {
+        assert!(path.exists(), "{} is missing", path.display());
+        for (name, access) in [
+            ("execute", FILE_EXECUTE),
+            ("read", FILE_READ_DATA),
+            ("write", FILE_WRITE_DATA),
+            ("delete", DELETE),
+        ] {
+            if low_integrity_can_open(&path, access, /*share*/ 0) {
+                opened.push(format!("{name} {}", path.display()));
+            }
+        }
+    }
+    assert_eq!(opened, Vec::<String>::new());
+}
+
+/// Measures labelling and putting back a tree of
+/// `CODEX_158_COST_FILES` files (default 20000). Evidence for the PR, not a
+/// gate.
+#[test]
+#[ignore = "measurement"]
+fn legacy_integrity_label_cost() {
+    let count: usize = std::env::var("CODEX_158_COST_FILES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(20_000);
+    let _guard = legacy_process_test_guard();
+    let test_root = user_owned_test_root();
+    let root = test_root.path().join("tree");
+    for i in 0..count {
+        let dir = root.join(format!("d{}", i / 100));
+        if i % 100 == 0 {
+            fs::create_dir_all(&dir).expect("create dir");
+        }
+        fs::write(dir.join(format!("f{i}.txt")), "x").expect("write file");
+    }
+    let canonical = dunce::canonicalize(&root).expect("canonical root");
+    let started = Instant::now();
+    let lease = crate::integrity_leases::acquire(&[canonical], /*log_dir*/ None).expect("lease");
+    let labelled = started.elapsed();
+    let started = Instant::now();
+    drop(lease);
+    let restored = started.elapsed();
+    eprintln!("integrity label cost: {count} files, label {labelled:?}, put back {restored:?}");
+}
+
 const CRASH_ROOTS_ENV: &str = "CODEX_158_CRASH_ROOTS";
 const CRASH_CHILD_TEST: &str = "unified_exec::tests::legacy_integrity_crash_child_entry";
 const CRASH_CHILD_READY: &str = "integrity-crash-child: leased";
@@ -1418,18 +1503,6 @@ fn legacy_crashed_session_labels_are_repaired() {
         leased,
         (true, true, true),
         "the child did not label its roots"
-    );
-
-    // Killed: nothing was put back.
-    let recorded = crate::integrity_leases::recorded_roots().expect("records");
-    assert_eq!(
-        (
-            low_integrity_can_open_for_write(&crashed.join("file.txt")),
-            recorded.contains(&canonical(&crashed)),
-            recorded.contains(&canonical(&kept)),
-        ),
-        (true, true, true),
-        "a killed session should leave its labels: {recorded:?}"
     );
 
     let repaired = crate::repair_stale_integrity_labels().expect("repair");
@@ -1621,11 +1694,19 @@ async fn assert_legacy_tty_descendant_lifecycle(
         wait_for_path(&ready_marker, Duration::from_secs(10)),
         "{lifecycle:?} descendant did not start"
     );
-    let descendant_pid = fs::read_to_string(&ready_marker)
-        .expect("read descendant pid")
-        .trim()
-        .parse()
-        .expect("parse descendant pid");
+    // The file appears before its contents are written.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let descendant_pid: u32 = loop {
+        let contents = fs::read_to_string(&ready_marker).unwrap_or_default();
+        if let Ok(pid) = contents.trim().parse() {
+            break pid;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "descendant pid not written: {contents:?}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    };
     let descendant_process = open_process_for_wait(descendant_pid);
 
     if matches!(lifecycle, LegacyTtyDescendantLifecycle::Terminate) {

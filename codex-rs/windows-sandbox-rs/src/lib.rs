@@ -741,6 +741,7 @@ mod windows_impl {
                 GetExitCodeProcess(pi.hProcess, &mut exit_code_u32);
             }
         }
+        let mut descendants_preserved = false;
         if timed_out || cancelled {
             if let Err(job_err) = job.terminate() {
                 log_note(
@@ -764,10 +765,12 @@ mod windows_impl {
                 &format!("capture failed to preserve descendants after root exit: {err}"),
                 logs_base_dir,
             );
+        } else {
+            descendants_preserved = true;
         }
 
         if let Some(lease) = integrity_lease {
-            lease.release_after_job(Arc::clone(&job));
+            lease.release_after_job(Arc::clone(&job), descendants_preserved);
         }
 
         unsafe {

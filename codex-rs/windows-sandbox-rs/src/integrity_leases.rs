@@ -181,10 +181,13 @@ fn lease_root(registry: &Path, labels: &mut Labels, root: &Path) -> Result<()> {
 impl IntegrityLease {
     /// Ends the lease once no process of the command's `job` runs: right
     /// away when none does, so a caller that reports the exit afterwards
-    /// finds the labels back; otherwise, on a thread of its own, when the
-    /// last process the command left running exits.
-    pub(crate) fn release_after_job(self, job: Arc<JobObject>) {
-        if wait_for_empty_job(&job, Duration::from_secs(/*secs*/ 2)) {
+    /// finds the labels back; otherwise, when `descendants_preserved` (the
+    /// command exited and left processes running on purpose), on a thread of
+    /// its own when the last of them exits. Without it (the job was
+    /// terminated, or still kills its processes when its handle closes), the
+    /// lease ends after a short wait and holds no reference to the job.
+    pub(crate) fn release_after_job(self, job: Arc<JobObject>, descendants_preserved: bool) {
+        if wait_for_empty_job(&job, Duration::from_secs(/*secs*/ 2)) || !descendants_preserved {
             drop(self);
             return;
         }
@@ -441,7 +444,7 @@ fn load_labels(registry: &Path) -> Result<Labels> {
     match std::fs::read(&path) {
         Ok(bytes) => serde_json::from_slice(&bytes).with_context(|| {
             format!(
-                "{} is damaged, so the Windows sandbox doesn't know which folders' integrity labels to put back",
+                "{} is damaged, so the Windows sandbox doesn't know which folders' integrity labels to put back; remove it, and give each writable root you used a Medium label again (icacls <folder> /setintegritylevel (OI)(CI)M)",
                 path.display()
             )
         }),
@@ -453,8 +456,13 @@ fn load_labels(registry: &Path) -> Result<Labels> {
 fn save_labels(registry: &Path, labels: &Labels) -> Result<()> {
     let path = registry.join(LABELS_FILE);
     let tmp = registry.join(format!("{LABELS_FILE}.tmp"));
-    std::fs::write(&tmp, serde_json::to_vec_pretty(labels)?)
+    // Flushed before it replaces the old records, so a power loss cannot
+    // leave damaged records behind.
+    let mut file = File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+    file.write_all(&serde_json::to_vec_pretty(labels)?)
+        .and_then(|()| file.sync_all())
         .with_context(|| format!("write {}", tmp.display()))?;
+    drop(file);
     std::fs::rename(&tmp, &path).with_context(|| format!("replace {}", path.display()))
 }
 

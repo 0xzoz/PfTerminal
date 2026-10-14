@@ -56,6 +56,7 @@ use windows_sys::Win32::System::StationsAndDesktops::CloseDesktop;
 use windows_sys::Win32::System::StationsAndDesktops::OpenDesktopW;
 use windows_sys::Win32::System::SystemServices::SE_GROUP_INTEGRITY;
 use windows_sys::Win32::System::SystemServices::SYSTEM_MANDATORY_LABEL_ACE_TYPE;
+use windows_sys::Win32::System::SystemServices::SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP;
 use windows_sys::Win32::System::SystemServices::SYSTEM_MANDATORY_LABEL_NO_READ_UP;
 use windows_sys::Win32::System::SystemServices::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP;
 
@@ -183,16 +184,19 @@ pub(crate) unsafe fn label_writable_root_low(path: &Path) -> Result<bool> {
 }
 
 /// Gives a folder of the host's own (the label registry) an explicit Medium
-/// no-write-up and no-read-up label for it and everything below it: no
-/// Low-integrity program, the sandbox included, may write, read or hold
-/// open anything there.
+/// no-write-up, no-read-up and no-execute-up label for it and everything
+/// below it: no Low-integrity program, the sandbox included, may write, read
+/// or hold open anything there (`FILE_EXECUTE`, which file sharing counts as
+/// a read, included).
 ///
 /// # Safety
 /// Calls Win32 security APIs on `path`.
 pub(crate) unsafe fn label_private_dir_medium(path: &Path) -> Result<()> {
     let ace = LabelAce {
         flags: (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE) as u8,
-        mask: SYSTEM_MANDATORY_LABEL_NO_WRITE_UP | SYSTEM_MANDATORY_LABEL_NO_READ_UP,
+        mask: SYSTEM_MANDATORY_LABEL_NO_WRITE_UP
+            | SYSTEM_MANDATORY_LABEL_NO_READ_UP
+            | SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP,
         sid: MEDIUM_INTEGRITY_SID.to_string(),
     };
     if read_explicit_labels(path)? == [ace.clone()] {
