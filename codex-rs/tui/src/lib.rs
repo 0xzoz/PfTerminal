@@ -1526,6 +1526,11 @@ pub async fn run_main(
             if let Err(err) = codex_state::scrub_sandbox_logs_once(&sandbox_dir) {
                 tracing::warn!("failed to scrub old secrets from the sandbox logs: {err}");
             }
+            // #158: put back integrity labels a crashed sandbox session left.
+            #[cfg(target_os = "windows")]
+            if let Err(err) = codex_windows_sandbox::repair_stale_integrity_labels() {
+                tracing::warn!("failed to repair stale sandbox integrity labels: {err:#}");
+            }
         }
     });
 

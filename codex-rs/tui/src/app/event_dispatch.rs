@@ -4340,7 +4340,7 @@ impl App {
                                 &[],
                             );
                             tracing::warn!(
-                                error = %err,
+                                error = %format!("{err:#}"),
                                 "failed to preflight non-admin Windows sandbox setup"
                             );
                         }
