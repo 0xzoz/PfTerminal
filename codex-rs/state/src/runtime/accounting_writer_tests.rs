@@ -588,11 +588,15 @@ async fn an_adopted_retry_waits_for_its_predecessor() -> anyhow::Result<()> {
 /// for seconds partway through (as a long maintenance or a backup does). What
 /// a request waits on in the shared state DB - the throttle check, its
 /// admission, a thread-metadata write and its usage - never adds up to more
-/// than about a second, nothing fails, and every record ends up in the ledger.
+/// than about a second (a few on loaded Windows runners, still well short of
+/// the hold), nothing fails, and every record ends up in the ledger.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ten_sessions_on_one_home_wait_briefly_and_lose_no_record() -> anyhow::Result<()> {
     const SESSIONS: usize = 10;
     const REQUESTS: usize = 12;
+    // Longer on Windows, so its looser bounds below stay well short of a
+    // request that waited out the whole hold.
+    const HOLD: Duration = Duration::from_secs(if cfg!(windows) { 6 } else { 3 });
     let path = home();
     let setup = StateRuntime::init_for_testing(path.to_path_buf(), "synthetic".into()).await?;
     let owners: Vec<ThreadId> = (0..SESSIONS).map(|_| ThreadId::new()).collect();
@@ -604,7 +608,7 @@ async fn ten_sessions_on_one_home_wait_briefly_and_lose_no_record() -> anyhow::R
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(800)).await;
             let mut lock = hold_write_lock(&setup).await?;
-            tokio::time::sleep(Duration::from_secs(3)).await;
+            tokio::time::sleep(HOLD).await;
             sqlx::query("ROLLBACK").execute(&mut *lock).await?;
             anyhow::Ok(())
         })
@@ -680,7 +684,8 @@ async fn ten_sessions_on_one_home_wait_briefly_and_lose_no_record() -> anyhow::R
     assert!(p99 < bound, "p99 {p99:?}, max {max:?}");
     // With 120 waits, p99 is the second-largest, so a max bound under the
     // p99 bound would override it: Windows keeps its 3 s here too (the 2.5 s
-    // bound failed nightly-ci at max 2.50 s and 2.87 s, #691).
+    // bound failed nightly-ci at max 2.50 s and 2.87 s, #691), half its 6 s
+    // hold.
     let max_bound = Duration::from_millis(if cfg!(windows) { 3_000 } else { 2_500 });
     assert!(max < max_bound, "p99 {p99:?}, max {max:?}");
     assert_eq!(attempts.len(), SESSIONS * REQUESTS);
