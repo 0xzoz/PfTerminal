@@ -282,7 +282,8 @@ evidence check beyond the budget of 5 under the 2026-09-12 delegation (Travis to
 approval while the prompt claimed the keychain stays protected), AGG-T01/T02 (#739: under Permissive with the security features on, an
 approved write outside the project is refused by “Protected launch”), AGG-T03 (#737: <code>git config --global</code> offered Grant once, no
 #620 explanation). Advisory #740 (Grant once offered where it can never apply).</li>
-<li>Blocked: AGG-18, AGG-R07, AGG-R10 (the product's model declined a step), AGG-20, AGG-R03, AGG-R06 (no Claude Code in the guest), AGG-R14.</li>
+<li>Blocked: AGG-18, AGG-R07, AGG-R10 (the product's model declined a step); AGG-R06 (no Claude Code in the guest); AGG-20, AGG-R03,
+AGG-R14 (blocked in run 2 as well).</li>
 <li>Newly passing: AGG-24, AGG-27, AGG-32, AGG-33 (first pass), AGG-38, AGG-R09 (#738 closed as not reproduced), AGG-R13, AGG-R17;
 AGG-27 passed with <code>/model</code> offering both connections, so #653 was closed.</li>
 <li>Six decisions queued for Travis (section 11): sign-off (worker recommends hold until #736 is assessed and #737 fixed, then re-run only the
@@ -290,7 +291,10 @@ affected cases), amend AGG-01/25, the model-decline rule, #739 under Permissive,
 </ul></li>
 <li><b>Fix round running — worker <code>agg-fix4</code></b> (since 04:10Z): #736 (assess with a disposable keychain; fix the boundary or make the
 prompt truthful), #737 (#620 treatment for global config writers), #740. PR #752 open
-(“Aggressive: explain keychain commands (#736); no Grant once where it cannot apply (#737, #740)”). #739 waits for Travis (changes Permissive).</li>
+(“Aggressive: explain keychain commands (#736); no Grant once where it cannot apply (#737, #740)”). Its description (06:00Z) reports for #736
+that <b>the boundary holds</b> (real <code>sandbox-exec</code>, disposable keychain: under Aggressive's network-off sandbox the keychain service
+can't be reached, so AGG-10's command ran but read nothing) and fixes the wording instead — confirm from agg-fix4's result.
+#739 waits for Travis (changes Permissive).</li>
 <li><b>Reel:</b> Aggressive reel (9:58, 11 chapters incl. the three-run comparison) at
 <code>https://github.com/CorbanuCore/CorbanuTerminal/releases/download/demos/aggressive-reel-2026-10-13.mp4</code>, index
 <code>qa/demos/index/aggressive-reel.md</code> (#746). Not on Cloudflare until Travis reviews it (5 review notes in <code>$W/reel-agg.result.md</code>).</li>
@@ -330,8 +334,8 @@ Travis's sign-off.</li>
 <p>#538 fixed the “database is locked” errors (wave 1). Wave 2: #616 exec panic/hang fixed (#638; a crashing turn now ends with an error,
 plus a 5-minute safety net Travis kept); #586 init-lock protection merged (#608); separate database folder protected (#645, #672);
 #651 closed: item 7 (missing folder at launch, #714) and item 6 (shared folder such as <code>/tmp</code>, <code>TMPDIR</code> or home denied entry
-by entry on macOS, #729; still whole-folder on Linux/Windows — section 11). Linux sandbox placeholder race fixed (#690 shared
-<code>/dev/null</code> fd, #693, then #742 for the remaining window; #673/#615 closed). New: #732 (unbounded database pattern scan), #743
+by entry on macOS, #729; still whole-folder on Linux/Windows — section 11). Linux sandbox: shared <code>/dev/null</code> fd bug fixed (#690);
+placeholder race fixed by #693, then #742 for the remaining window (#673/#615 closed). New: #732 (unbounded database pattern scan), #743
 (Claude panes use a different <code>TMPDIR</code>, so their placeholder registry is separate — decision), #744 (#623 link check's 2 s timeout
 refuses commands under load), #745 (orphaned empty placeholder folder).</p>
 <h3>8.4 PF-60 developer accounting</h3>
@@ -467,11 +471,12 @@ argument-comment lint on test code and the native Windows Bazel tests (decision 
 <p><small>49 open issues, snapshot from <code>gh issue list</code> at 05:40Z.</small></p>
 <h2>11. Open questions for Travis</h2>
 <p>Every “Decision(s) queued” item in <code>todo.md</code> (wave 2) that Travis has not answered yet, with the worker's recommendation.
-Everything queued before his ~22:14Z 24-item answer was answered (section 9); all items below were queued after it. Details and options are
+Everything queued before his ~22:14Z 24-item answer was answered (section 9); all items below were queued after it. (ci-health's #693
+follow-ups question is moot: #742 removed those follow-ups.) Details and options are
 in the named result file.</p>
 <table>
 <tr><th>#</th><th>Question</th><th>Recommendation</th><th>Source</th></tr>
-<tr><td>1</td><td><b>Aggressive milestone sign-off</b> after the third run (51/6/7 of 64, not passed): accept with named limits, or hold.</td><td>Hold until #736 is assessed (security-boundary question) and #737 is fixed (agg-fix4 is on both), then re-run only the affected cases — not a full fourth run.</td><td>qual-aggr3</td></tr>
+<tr><td>1</td><td><b>Aggressive milestone sign-off</b> after the third run (51/6/7 of 64, not passed): accept with named limits, or hold.</td><td>Hold until #736 is assessed (security-boundary question) and #737 is fixed (agg-fix4 is on both; PR #752 already reports the #736 boundary holds), then re-run only the affected cases — not a full fourth run.</td><td>qual-aggr3</td></tr>
 <tr><td>2</td><td>Amend AGG-01 (Vault row wording per your #440 decision) and AGG-25 (trigger no longer blocks after #438) to today's behaviour?</td><td>Yes, amend.</td><td>qual-aggr3</td></tr>
 <tr><td>3</td><td>Model-decline rule: a case passes when the product's model declines a step but its text still meets the expected wording, and is blocked when it doesn't.</td><td>Accept the rule.</td><td>qual-aggr3</td></tr>
 <tr><td>4</td><td>#739: under Permissive with the security features on, an approved write outside the project is refused by “Protected launch” although the prompt offered it. Either run it as without the features, or stop offering it. Both change Permissive (sign-off). Moderate has the same gap (#747).</td><td>Stop offering what will be refused.</td><td>qual-aggr3</td></tr>
