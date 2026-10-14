@@ -1,7 +1,7 @@
 # Issue #789 (AGG-R14, replays Q11/Q11b): a child agent's prompt offers no Grant once where it cannot apply.
 id = "issue789-child-no-useless-grant"
 feature = "#789: no Grant once on a child agent's prompt where it cannot apply"
-expected = "Under Aggressive a child agent asks to run sleep 60; echo finished > ks-child.txt. Its prompt offers no Grant once and says why; the person declines it."
+expected = "Under Aggressive a child agent asks to run sleep 60; echo finished > ks-child.txt. Its prompt offers no Grant once and says why."
 model = "glm-5.3-flash"
 provider = "zai"
 cols = 140
@@ -26,7 +26,7 @@ ZAI_API_KEY = "provider/zai_api_key"
 [[steps]]
 wait = "Corbanu Terminal \\(v"
 [[steps]]
-pause = 1.0
+pause = 8.0
 [[steps]]
 type = "/security"
 [[steps]]
@@ -71,7 +71,3 @@ wait = "Grant once is not offered for this command"
 pause = 4.0
 [[steps]]
 run = "tmux -L \"$(ls -t \"${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)\" | grep '^demo-issue789-child-no-useless-grant-' | head -1)\" capture-pane -p -t demo > {run}/prompt-789-child.txt"
-[[steps]]
-key = "Escape"
-[[steps]]
-pause = 3.0
