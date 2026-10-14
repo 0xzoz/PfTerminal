@@ -66,8 +66,12 @@ request, record its words verbatim; you may resubmit the same case wording uncha
 (out / "navigation.md").write_text(navigation)
 (out / "executor-prompt.md").write_text(executor_prompt)
 (out / "prompts").mkdir(exist_ok=True)
-for group, ids in GROUPS.items():
-    note = NOTES.get(group, "")
+REPLAYS = json.loads((run4 / "tools/replays4.json").read_text()) if (run4 / "tools/replays4.json").exists() else {}
+ASSIGN = [(g, ids, NOTES.get(g, "")) for g, ids in GROUPS.items()] + \
+         [(label, r["cases"], (NOTES.get(r["group"], "") + " " if NOTES.get(r["group"]) else "") +
+           "Replay assignment (fresh executor; earlier attempts are kept separately): " + r["note"])
+          for label, r in REPLAYS.items()]
+for group, ids, note in ASSIGN:
     note = f"\n- Note for this group: {note}" if note else ""
     prompt = f"""{executor_prompt}
 {navigation}
