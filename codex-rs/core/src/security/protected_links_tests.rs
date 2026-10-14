@@ -479,3 +479,35 @@ fn issue_623_other_links_are_not_refused() {
         assert_eq!(refused(&project, &shell(script), root), None, "{script}");
     }
 }
+
+/// #744: on a loaded machine the lookups took over 2 s and an ordinary
+/// command was refused; a lookup that takes 3 s now finishes and decides.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_744_a_slow_lookup_is_waited_for() {
+    let found = looked_up(LOOKUP_TIMEOUT, "'{\"hooks\":{}}'".to_string(), || {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        None
+    })
+    .await;
+    assert_eq!(found, None);
+}
+
+/// #744: lookups that do not finish in time, or fail, still refuse the
+/// command, naming the first link target.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_744_lookups_that_do_not_finish_still_refuse() {
+    let timeout = std::time::Duration::from_millis(50);
+    let slow = looked_up(timeout, ".agents".to_string(), || {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        None
+    })
+    .await;
+    assert_eq!(slow, Some(".agents".to_string()));
+    let failed = looked_up(timeout, ".codex".to_string(), || panic!("lookup failed")).await;
+    assert_eq!(failed, Some(".codex".to_string()));
+    let named = looked_up(LOOKUP_TIMEOUT, ".codex".to_string(), || {
+        Some("x/.agents".to_string())
+    })
+    .await;
+    assert_eq!(named, Some("x/.agents".to_string()));
+}
