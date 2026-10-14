@@ -87,6 +87,37 @@ unreadable; Corbanu's own files and the project's `.git` folder (its hooks and c
 included), `.codex` and `.agents` stay read-only; other folders and the
 network stay closed.
 
+**When it is not offered.** The approval prompt leaves Grant once out, and
+says why, when it could not help: nothing the command writes is something
+Grant once lifts, and the command:
+
+- writes outside the current folder, including your own config files
+  (`~/.gitconfig` from `git config --global`, `~/.npmrc` from `npm config set`,
+  your pip config from `pip config set`, `gh config set`);
+- writes the project's `.git`, `.codex` or `.agents`, or Corbanu's files;
+- reads a protected file, or uses the macOS keychain (below);
+- or shows every file it writes in its text (a plain read, a new link in the
+  current folder).
+
+Corbanu decides this from the command's text. When it can't tell what a
+program writes (a script, `npm install`), Grant once is still offered, unless
+the command also writes a start-up file outside the current folder, the
+project's `.codex` or `.agents`, or Corbanu's files. The same reasons are
+given where such a command fails.
+
+## The macOS keychain
+
+On macOS the sandbox doesn't let agent commands reach the keychain service.
+If you approve `security find-generic-password` or another keychain command,
+it runs but can't read, add or change any keychain item: it reports the item
+as not found, or an error, and Corbanu says that Aggressive caused it. No
+grant lifts this, and `~/Library/Keychains` is unreadable too. To allow it,
+switch to Permissive.
+
+This holds while agent commands have no network. If your organization's
+requirements route them through a network proxy, the sandbox opens the
+keychain service with the network rules; Corbanu then makes no such claim.
+
 ## A separate database folder
 
 Under Moderate and Aggressive, agent commands can't use Corbanu's database folder

@@ -5,6 +5,8 @@ in [PF-84-S02.md](PF-84-S02.md) … [PF-84-S06.md](PF-84-S06.md) and the follow-
 [ISSUE-555.md](ISSUE-555.md), [issue-653.md](issue-653.md)). It is an asset on the
 [`demos` prerelease](https://github.com/CorbanuCore/CorbanuTerminal/releases/tag/demos).
 
+- Watch online: <https://corbanu-named-accounts-reel.cloudflare-share.workers.dev/> (published 2026-10-14; subtitles are burned in, and the page also
+  offers them as an English text track). Direct MP4: <https://corbanu-named-accounts-reel.cloudflare-share.workers.dev/video.mp4>, the same file as the release asset.
 - Video: [named-accounts-reel-2026-10-13.mp4](https://github.com/CorbanuCore/CorbanuTerminal/releases/download/demos/named-accounts-reel-2026-10-13.mp4) (8:12, 1920x1080, 30 fps, H.264/AAC, chapters
   embedded) · subtitles: [named-accounts-reel-2026-10-13.srt](https://github.com/CorbanuCore/CorbanuTerminal/releases/download/demos/named-accounts-reel-2026-10-13.srt)
 - Everything shown is behind the default-off `named_accounts` flag. The owner accepted S01–S06 as limited testing:

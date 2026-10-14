@@ -1328,7 +1328,7 @@ fn issue_660_switch_off_names_a_codex_pane_whose_task_waits() -> Result<()> {
             });
         fixture
             .route_until(std::time::Duration::from_secs(20), |app| {
-                transcript_since(app, 0).contains("waits: the security kill switch is on")
+                transcript_since(app, /*from*/ 0).contains("waits: the security kill switch is on")
             })
             .await?;
         assert!(responses.requests().is_empty(), "no turn started");

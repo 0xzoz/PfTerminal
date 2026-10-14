@@ -341,6 +341,7 @@ async fn effective_patch_permissions(
 }
 
 fn patch_permissions_without_path_matching(
+    turn: &TurnContext,
     action: &ApplyPatchAction,
 ) -> (
     Vec<PathUri>,
@@ -348,7 +349,8 @@ fn patch_permissions_without_path_matching(
     codex_protocol::permissions::FileSystemSandboxPolicy,
 ) {
     // TODO(anp): Make permission matching operate on PathUri. Until then, foreign paths skip
-    // permission matching; a managed turn still fails closed at the platform sandbox boundary.
+    // permission matching. They are still assessed against the turn's own policy, never an
+    // unrestricted one, so a restricted turn asks (or rejects) instead of auto-approving (#713).
     (
         file_paths_for_action(action),
         crate::tools::handlers::EffectiveAdditionalPermissions {
@@ -356,7 +358,7 @@ fn patch_permissions_without_path_matching(
             additional_permissions: None,
             permissions_preapproved: false,
         },
-        codex_protocol::permissions::FileSystemSandboxPolicy::unrestricted(),
+        turn.file_system_sandbox_policy(),
     )
 }
 
@@ -465,7 +467,9 @@ impl ApplyPatchHandler {
                         turn_environment.cwd(),
                     )
                     .await
-                    .unwrap_or_else(|_| patch_permissions_without_path_matching(&changes));
+                    .unwrap_or_else(|_| {
+                        patch_permissions_without_path_matching(turn.as_ref(), &changes)
+                    });
                 match apply_patch::apply_patch(turn.as_ref(), &file_system_sandbox_policy, changes)
                     .await
                 {
@@ -671,7 +675,9 @@ pub(crate) async fn intercept_apply_patch(
                     cwd,
                 )
                 .await
-                .unwrap_or_else(|_| patch_permissions_without_path_matching(&changes));
+                .unwrap_or_else(|_| {
+                    patch_permissions_without_path_matching(turn.as_ref(), &changes)
+                });
             match apply_patch::apply_patch(turn.as_ref(), &file_system_sandbox_policy, changes)
                 .await
             {

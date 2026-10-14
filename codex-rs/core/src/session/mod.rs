@@ -211,6 +211,7 @@ use codex_protocol::exec_output::StreamOutput;
 
 mod code_mode_warning;
 mod config_lock;
+mod confirmed_aggressive;
 pub(crate) mod context_window;
 mod extension_metrics;
 mod handlers;
@@ -737,6 +738,7 @@ impl Session {
             compact_prompt: config.compact_prompt.clone(),
             approval_policy: config.permissions.approval_policy.clone(),
             approvals_reviewer: config.approvals_reviewer,
+            aggressive_approvals: false,
             permission_profile_state: session_permission_profile_state_from_config(&config)?,
             windows_sandbox_level: WindowsSandboxLevel::from_config(&config),
             environments: TurnEnvironmentSelections::new(

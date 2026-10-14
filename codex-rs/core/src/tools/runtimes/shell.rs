@@ -268,6 +268,15 @@ impl ToolRuntime<ShellRequest, ExecToolCallOutput> for ShellRuntime {
         attempt: &SandboxAttempt<'_>,
         ctx: &ToolCtx,
     ) -> Result<ExecToolCallOutput, ToolError> {
+        // This runtime only spawns processes on the Codex host. For a remote
+        // environment that would run the command on the wrong machine, outside
+        // the remote executor, so refuse instead.
+        if req.turn_environment.environment.is_remote() {
+            return Err(ToolError::Rejected(format!(
+                "{} runs commands on the Codex host only, so it can't run in the remote environment `{}`",
+                ctx.tool_name.name, req.turn_environment.environment_id
+            )));
+        }
         let session_shell = ctx.session.user_shell();
         let shell = req
             .turn_environment

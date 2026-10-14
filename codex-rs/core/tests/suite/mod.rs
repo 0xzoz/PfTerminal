@@ -91,6 +91,7 @@ mod hooks_mcp;
 mod image_rollout;
 mod issue_443;
 mod issue_445;
+mod issue_505;
 mod issue_506;
 mod issue_507;
 mod issue_507_switch_off;
@@ -98,6 +99,7 @@ mod issue_584;
 mod issue_620_622;
 mod issue_623;
 mod issue_626;
+mod issue_736_740;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod issue_748;
 mod items;

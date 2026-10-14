@@ -4,7 +4,9 @@ use std::time::Duration;
 use std::time::Instant;
 
 use super::DB_INIT_LOCK_FILENAME;
+use super::SHM_RESET_RETRIES;
 use super::database_has_content;
+use super::retry_shm_reset_race;
 
 #[tokio::test]
 async fn connecting_to_an_existing_database_does_not_wait_for_its_writer() -> anyhow::Result<()> {
@@ -304,4 +306,86 @@ async fn a_link_at_the_lock_path_is_not_repaired() -> anyhow::Result<()> {
     );
     assert_eq!(std::fs::metadata(&target)?.len(), 0);
     Ok(())
+}
+
+/// A database error with a given extended result code.
+#[derive(Debug)]
+struct CodedError(&'static str);
+
+impl std::fmt::Display for CodedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "(code: {}) test error", self.0)
+    }
+}
+
+impl std::error::Error for CodedError {}
+
+impl sqlx::error::DatabaseError for CodedError {
+    fn message(&self) -> &str {
+        "test error"
+    }
+
+    fn code(&self) -> Option<std::borrow::Cow<'_, str>> {
+        Some(self.0.into())
+    }
+
+    fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+        self
+    }
+
+    fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+        self
+    }
+
+    fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+        self
+    }
+
+    fn kind(&self) -> sqlx::error::ErrorKind {
+        sqlx::error::ErrorKind::Other
+    }
+}
+
+/// Opens with `retry_shm_reset_race`, failing the first `failures` attempts
+/// with `code`; returns the result and how many attempts were made.
+async fn open_failing(code: &'static str, failures: u32) -> (Result<(), sqlx::Error>, u32) {
+    let attempts = std::cell::Cell::new(0);
+    let result = retry_shm_reset_race(std::path::Path::new("test.sqlite"), || {
+        attempts.set(attempts.get() + 1);
+        let attempt = attempts.get();
+        async move {
+            if attempt <= failures {
+                Err(sqlx::Error::Database(Box::new(CodedError(code))))
+            } else {
+                Ok(())
+            }
+        }
+    })
+    .await;
+    (result, attempts.get())
+}
+
+/// #691: on Windows a launch that resets a WAL database's `-shm` file while
+/// an exiting process still maps it gets SQLITE_IOERR_TRUNCATE (1546); the
+/// open is retried, and only that error is.
+#[tokio::test]
+async fn an_open_retries_only_the_shm_reset_race() {
+    let (result, attempts) = open_failing("1546", /*failures*/ 2).await;
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(attempts, 3);
+
+    // Any other error (here SQLITE_IOERR_SHMOPEN) is returned at once.
+    let (result, attempts) = open_failing("4618", /*failures*/ 1).await;
+    assert!(result.is_err());
+    assert_eq!(attempts, 1);
+
+    // A truncation that keeps failing is reported after the retries.
+    let (result, attempts) = open_failing("1546", u32::MAX).await;
+    let code = result
+        .expect_err("still failing")
+        .as_database_error()
+        .and_then(sqlx::error::DatabaseError::code)
+        .map(std::borrow::Cow::into_owned);
+    assert_eq!(code.as_deref(), Some("1546"));
+    assert_eq!(attempts, SHM_RESET_RETRIES + 1);
 }
