@@ -105,8 +105,10 @@ many programs:
 If the database folder is one of these, only Corbanu's own entries are hidden, so
 other commands can still use the folder:
 
-- the databases, and any database created later;
-- each database's journal and `-wal`/`-shm` files, which commands can't create either;
+- the databases, and any `*.sqlite*` file created later there (so other programs'
+  databases at the top of that folder are unreadable to commands too);
+- Corbanu's own database names with their journal and `-wal`/`-shm` files, which
+  commands can't create either, in any letter case;
 - the database init lock (`pfterminal_db_init.lock`) and the GPU lock
   (`gpu-controller.lock`);
 - the `accounting-pending` and `db-backups` folders.
@@ -114,9 +116,9 @@ other commands can still use the folder:
 These stay protected even before they exist. A folder inside a shared one, such as
 `/tmp/corbanu-db`, is still hidden whole.
 
-**On Linux, a shared folder is still hidden whole.** The Linux sandbox can't stop a
-command from creating a file under a database's name, so hiding entries one by one
-would be weaker there. Commands that need the folder fail under Moderate and
+**On Linux and Windows, a shared folder is still hidden whole.** Their sandboxes
+can't stop a command from creating a file under a database's name, so hiding entries
+one by one would be weaker there. Commands that need the folder fail under Moderate and
 Aggressive.
 
 Don't keep the databases in `/tmp` or `/var/tmp`: other people on the machine can

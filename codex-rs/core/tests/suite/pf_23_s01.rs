@@ -2770,7 +2770,13 @@ async fn shared_database_folder_scenario() -> anyhow::Result<()> {
              printf '{{}}' > \"$d/accounting-$(printf pending)/planted.json\"; \
              printf x > \"$d/db-$(printf backups)/planted\"; \
              printf x > \"$d/pfterminal_state_5.$s-$(printf journal)\"; \
-             ln -s /dev/null \"$d/logs_2.$s-$(printf wal)\"; echo ran-651"
+             ln -s /dev/null \"$d/logs_2.$s-$(printf wal)\"; \
+             S=\"SQL$(printf ITE)\"; printf x > \"$d/PFTERMINAL_STATE_5.$S-$(printf JOURNAL)\"; \
+             ln -s /dev/null \"$d/LOGS_2.$S-$(printf WAL)\"; \
+             printf '{{}}' > \"$d/ACCOUNTING-$(printf PENDING)/upper.json\"; \
+             perl -e 'use Fcntl qw(:flock); open(my $f, \">>\", $ARGV[0]) or die \"open: $!\\n\"; \
+             flock($f, LOCK_EX | LOCK_NB) or die \"lock: $!\\n\"' \
+             \"$d/PFTERMINAL_DB_$(printf INIT).LOCK\" && echo init-upper-held-651; echo ran-651"
         );
         let sqlite_home = AbsolutePathBuf::from_absolute_path(&folder)?;
         let (shared, missing_lock) = (folder.clone(), lock.clone());
@@ -2828,11 +2834,18 @@ async fn shared_database_folder_scenario() -> anyhow::Result<()> {
             folder.join("pfterminal_state_5.sqlite-journal").exists(),
             std::fs::symlink_metadata(folder.join("logs_2.sqlite-wal"))
                 .is_ok_and(|metadata| metadata.file_type().is_symlink()),
+            // The same names in other letters (one file on macOS's usual
+            // case-insensitive volumes, which Corbanu then opens).
+            folder.join("PFTERMINAL_STATE_5.SQLITE-JOURNAL").exists(),
+            std::fs::symlink_metadata(folder.join("LOGS_2.SQLITE-WAL"))
+                .is_ok_and(|metadata| metadata.file_type().is_symlink()),
+            folder.join("ACCOUNTING-PENDING/upper.json").exists(),
+            output.contains("init-upper-held-651"),
         ];
         // Linux keeps denying the shared folder whole (bubblewrap can't deny
         // a name before it exists).
         let ordinary_expected = open || cfg!(target_os = "macos");
-        if !output.contains("ran-651") || ordinary != ordinary_expected || achieved != [open; 8] {
+        if !output.contains("ran-651") || ordinary != ordinary_expected || achieved != [open; 12] {
             wrong.push(format!(
                 "{level:?}: ordinary={ordinary} {achieved:?}: {output}"
             ));
