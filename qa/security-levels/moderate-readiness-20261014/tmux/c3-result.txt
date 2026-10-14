@@ -2,7 +2,7 @@
 │ >_ Corbanu Terminal (v0.1.48)                           │
 │                                                         │
 │ model:     loading   /model to change                   │
-│ directory: /Volumes/CorbanuDrive/…/r2/proj/ledger-notes │
+│ directory: <run>/proj/ledger-notes │
 ╰─────────────────────────────────────────────────────────╯
 
 › Explain this codebase
@@ -13,7 +13,7 @@
 │ >_ Corbanu Terminal (v0.1.48)                           │
 │                                                         │
 │ model:     glm-5.3-flash   /model to change             │
-│ directory: /Volumes/CorbanuDrive/…/r2/proj/ledger-notes │
+│ directory: <run>/proj/ledger-notes │
 ╰─────────────────────────────────────────────────────────╯
 
 › Run exactly this shell command and show me its output: echo moderate-check >> ../outside-notes.txt

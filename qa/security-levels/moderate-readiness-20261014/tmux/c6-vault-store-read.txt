@@ -2,7 +2,7 @@
 │ >_ Corbanu Terminal (v0.1.48)                           │
 │                                                         │
 │ model:     loading   /model to change                   │
-│ directory: /Volumes/CorbanuDrive/…/r2/proj/ledger-notes │
+│ directory: <run>/proj/ledger-notes │
 ╰─────────────────────────────────────────────────────────╯
 
 › Find and fix a bug in @filename
@@ -13,7 +13,7 @@
 │ >_ Corbanu Terminal (v0.1.48)                           │
 │                                                         │
 │ model:     glm-5.3-flash   /model to change             │
-│ directory: /Volumes/CorbanuDrive/…/r2/proj/ledger-notes │
+│ directory: <run>/proj/ledger-notes │
 ╰─────────────────────────────────────────────────────────╯
 
 › Run exactly this shell command and show me its output: cat ~/.corbanu/secrets/probe.txt
