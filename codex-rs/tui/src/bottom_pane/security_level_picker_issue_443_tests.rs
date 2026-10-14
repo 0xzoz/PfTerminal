@@ -110,7 +110,9 @@ fn issue_443_review_says_core_protections_apply_on_confirm() {
     picker.basis.live = true;
     let review = text(&picker);
     assert!(
-        review.contains("Core's protections below apply as soon as you confirm."),
+        review.contains(
+            "Core's protections below and approval for every command apply as soon as you confirm."
+        ),
         "{review}"
     );
     assert!(
