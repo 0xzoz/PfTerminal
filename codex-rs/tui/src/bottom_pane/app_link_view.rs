@@ -25,6 +25,7 @@ use super::approval_typing_guard::Confirm;
 use super::approval_typing_guard::Notice;
 use super::approval_typing_guard::TypingGuard;
 use super::bottom_pane_view::BottomPaneView;
+use super::bottom_pane_view::next_shown_request_generation;
 use super::scroll_state::ScrollState;
 use super::selection_popup_common::GenericDisplayRow;
 use super::selection_popup_common::measure_rows_height;
@@ -249,6 +250,8 @@ pub(crate) struct AppLinkView {
     /// through the approval prompts' guard: a number key only highlights,
     /// Enter confirms, and typed text never answers.
     typing_guard: TypingGuard,
+    /// #787: see [`BottomPaneView::shown_request_generation`].
+    shown_generation: u64,
 }
 
 impl AppLinkView {
@@ -295,6 +298,7 @@ impl AppLinkView {
             complete: false,
             list_keymap,
             typing_guard: TypingGuard::default(),
+            shown_generation: next_shown_request_generation(),
         }
     }
 
@@ -715,6 +719,7 @@ impl AppLinkView {
             Notice::PersistentNeedsArrows => {
                 super::mcp_server_elicitation::PERSISTENT_OPTION_KEY_ERROR
             }
+            Notice::EarlyKeys => super::mcp_server_elicitation::EARLY_KEYS_NOTICE,
         })
     }
 
@@ -922,6 +927,14 @@ impl BottomPaneView for AppLinkView {
     /// Enter must not answer this request.
     fn on_revealed(&mut self) {
         self.require_fresh_choice();
+    }
+
+    fn shown_request_generation(&self) -> u64 {
+        self.shown_generation
+    }
+
+    fn on_early_input(&mut self) {
+        self.typing_guard.on_early_input();
     }
 
     fn handle_paste(&mut self, _pasted: String) -> bool {

@@ -21,6 +21,12 @@
 //! Options that last beyond this request ("don't ask again", session scope)
 //! are never chosen by a key: their key only explains that the arrow keys
 //! choose them, and Enter stays blocked until the user navigates.
+//!
+//! #787: the bottom pane also drops every key but Ctrl+C that reaches a
+//! request in the moment after it appears (see `REQUEST_INPUT_GUARD`), since
+//! those keys were meant for whatever was on screen before. The prompt then
+//! says so and needs navigation before Enter
+//! ([`TypingGuard::on_early_input`]).
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum State {
@@ -59,11 +65,17 @@ pub(super) enum Notice {
     /// The same, where a key is typed text until the user navigates (#523).
     NavigateFirst,
     PersistentNeedsArrows,
+    /// #787: keys that arrived as the request appeared were dropped; Enter
+    /// waits until the user navigates.
+    EarlyKeys,
 }
 
 #[derive(Debug, Default)]
 pub(super) struct TypingGuard {
     state: State,
+    /// #787: keys were dropped as this request appeared; the notice says so
+    /// until the user navigates or the request changes.
+    early: bool,
 }
 
 impl TypingGuard {
@@ -87,6 +99,9 @@ impl TypingGuard {
     }
 
     pub(super) fn notice(&self) -> Option<Notice> {
+        if self.early && matches!(self.state, State::Fresh { .. } | State::Typed) {
+            return Some(Notice::EarlyKeys);
+        }
         match self.state {
             State::Typed => Some(Notice::TypedText),
             State::PersistentKey => Some(Notice::PersistentNeedsArrows),
@@ -168,12 +183,27 @@ impl TypingGuard {
     /// Forget earlier input after deliberate navigation.
     pub(super) fn reset(&mut self) {
         self.state = State::Idle;
+        self.early = false;
+    }
+
+    /// #787: input reached this request in the moment after it appeared and
+    /// was dropped, so it was meant for something else. Enter now waits for
+    /// navigation (a key is typed text until then), and the prompt says why.
+    pub(super) fn on_early_input(&mut self) {
+        self.early = true;
+        if self.state != State::Typed {
+            self.state = State::Fresh {
+                told: true,
+                keys_arm: false,
+            };
+        }
     }
 
     /// The prompt now shows another request. It needs a fresh choice before
     /// Enter confirms; typed text stays typed text, and after a character
     /// the next one may continue a word, so it does not arm an option.
     pub(super) fn on_request_changed(&mut self) {
+        self.early = false;
         self.state = match self.state {
             State::Typed => State::Typed,
             State::Armed(_) | State::PersistentKey => State::Fresh {

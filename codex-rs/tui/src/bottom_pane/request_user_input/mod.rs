@@ -35,7 +35,10 @@ use crate::bottom_pane::approval_typing_guard::Confirm;
 use crate::bottom_pane::approval_typing_guard::Notice;
 use crate::bottom_pane::approval_typing_guard::TypingGuard;
 use crate::bottom_pane::bottom_pane_view::BottomPaneView;
+use crate::bottom_pane::bottom_pane_view::next_shown_request_generation;
 use crate::bottom_pane::mcp_server_elicitation::CHOOSE_FIRST_NOTICE;
+use crate::bottom_pane::mcp_server_elicitation::EARLY_KEYS_NOTICE;
+use crate::bottom_pane::mcp_server_elicitation::FORM_EARLY_KEYS_NOTICE;
 use crate::bottom_pane::mcp_server_elicitation::FORM_FIRST_NOTICE;
 use crate::bottom_pane::mcp_server_elicitation::FORM_TYPED_NOTICE;
 use crate::bottom_pane::mcp_server_elicitation::TYPED_TEXT_NOTICE;
@@ -189,6 +192,9 @@ pub(crate) struct RequestUserInputOverlay {
     list_keymap: ListKeymap,
     /// #544: keeps typed text, pastes and held keys from answering.
     typing_guard: TypingGuard,
+    /// #787: counts the requests shown here (see
+    /// [`BottomPaneView::shown_request_generation`]).
+    shown_generation: u64,
 }
 
 impl RequestUserInputOverlay {
@@ -249,6 +255,7 @@ impl RequestUserInputOverlay {
             interrupt_turn_keys: keymap.chat.interrupt_turn.clone(),
             list_keymap: keymap.list,
             typing_guard: TypingGuard::default(),
+            shown_generation: next_shown_request_generation(),
         };
         overlay.reset_for_request();
         overlay.ensure_focus_available();
@@ -278,12 +285,14 @@ impl RequestUserInputOverlay {
                 Notice::TypedText => TYPED_TEXT_NOTICE,
                 Notice::ChooseFirst | Notice::NavigateFirst => CHOOSE_FIRST_NOTICE,
                 Notice::PersistentNeedsArrows => return None,
+                Notice::EarlyKeys => EARLY_KEYS_NOTICE,
             });
         }
         match notice {
             Notice::TypedText => Some(FORM_TYPED_NOTICE),
             Notice::ChooseFirst | Notice::NavigateFirst => Some(FORM_FIRST_NOTICE),
             Notice::PersistentNeedsArrows => None,
+            Notice::EarlyKeys => Some(FORM_EARLY_KEYS_NOTICE),
         }
     }
 
@@ -361,6 +370,7 @@ impl RequestUserInputOverlay {
     fn advance_queue_or_complete_at(&mut self, now: Instant) {
         if let Some(next) = self.queue.pop_front() {
             self.request = next;
+            self.shown_generation = next_shown_request_generation();
             self.request_started_at = now;
             self.auto_resolution_snoozed = false;
             self.reset_for_request();
@@ -1448,6 +1458,14 @@ impl BottomPaneView for RequestUserInputOverlay {
         // #624: the person couldn't see it while it waited under another
         // view; any auto-resolution countdown starts when it is shown.
         self.request_started_at = Instant::now();
+    }
+
+    fn shown_request_generation(&self) -> u64 {
+        self.shown_generation
+    }
+
+    fn on_early_input(&mut self) {
+        self.typing_guard.on_early_input();
     }
 
     fn will_interrupt_turn_on_key_event(&self, key_event: KeyEvent) -> bool {

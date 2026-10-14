@@ -47,6 +47,7 @@ use codex_protocol::user_input::TextElement;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
+use crossterm::event::KeyModifiers;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Stylize;
@@ -183,6 +184,21 @@ pub(crate) const QUIT_SHORTCUT_TIMEOUT: Duration = Duration::from_secs(1);
 
 const APPROVAL_PROMPT_TYPING_IDLE_DELAY: Duration = Duration::from_secs(1);
 
+/// #787: input that reaches a request (an approval, a question, an MCP form
+/// or link, a Claude pane's request) sooner than this after it was first
+/// drawn, or after the last input dropped this way, is dropped: it was typed
+/// for what was on screen before. Esc too, since it would cancel the request
+/// or interrupt the turn; only Ctrl+C, which never reaches a view as a key,
+/// still cancels at once.
+pub(crate) const REQUEST_INPUT_GUARD: Duration = Duration::from_secs(1);
+
+/// #787: the request on top at the last draw and when it first showed.
+#[derive(Clone, Copy, Debug)]
+struct ShownRequest {
+    generation: u64,
+    shown_at: Instant,
+}
+
 /// Whether Ctrl+C/Ctrl+D require a second press to quit.
 ///
 /// This UX experiment was enabled by default, but requiring a double press to quit feels janky in
@@ -259,6 +275,14 @@ pub(crate) struct BottomPane {
     /// shown soon after must not take the double or held Enter that closed
     /// it.
     last_view_closed_at: Option<Instant>,
+    /// #787: the request on top when last drawn.
+    shown_request: Option<ShownRequest>,
+    /// #787: input to a request stays dropped until then (the last input
+    /// dropped).
+    request_quiet_until: Option<Instant>,
+    /// #787: [`REQUEST_INPUT_GUARD`]; zero in unit tests, whose keys follow
+    /// a request without a draw, unless a test sets it.
+    request_input_guard: Duration,
 
     app_event_tx: AppEventSender,
     frame_requester: FrameRequester,
@@ -330,6 +354,13 @@ impl BottomPane {
             last_top_view: None,
             last_top_depth: 0,
             last_view_closed_at: None,
+            shown_request: None,
+            request_quiet_until: None,
+            request_input_guard: if cfg!(test) {
+                Duration::ZERO
+            } else {
+                REQUEST_INPUT_GUARD
+            },
             app_event_tx,
             frame_requester,
             thread_id: None,
@@ -578,16 +609,19 @@ impl BottomPane {
 
     /// #624: shows a view that answers a request (see
     /// [`BottomPaneView::answers_request`]). Over views the person opened (a
-    /// picker, a menu) it goes underneath them, above any other request
-    /// views, so their keys keep reaching the view they see; it shows when
-    /// those views close, revealed (#523: the next Enter alone can't answer
-    /// it).
+    /// picker, a menu) it goes underneath them, so their keys keep reaching
+    /// the view they see; it shows when those views close, revealed (#523:
+    /// the next Enter alone can't answer it).
+    ///
+    /// #787: it never covers another request either: it waits under the
+    /// requests already here and shows after them, first in, first out, so
+    /// keys meant for the request on screen can't answer a newer one.
     fn push_request_view(&mut self, view: Box<dyn BottomPaneView>) {
         let insert_at = self
             .view_stack
             .iter()
-            .rposition(|view| view.answers_request())
-            .map_or(0, |index| index + 1);
+            .position(|view| view.answers_request())
+            .unwrap_or(0);
         if insert_at == self.view_stack.len() {
             self.push_view(view);
             return;
@@ -697,14 +731,94 @@ impl BottomPane {
         self.push_view(Box::new(modal));
     }
 
+    /// #787: the request on top, if any, by its shown generation.
+    fn top_request_generation(&self) -> Option<u64> {
+        self.view_stack
+            .last()
+            .filter(|view| view.answers_request())
+            .map(|view| view.shown_request_generation())
+    }
+
+    /// #787: before each draw, note when the request on top first shows.
+    fn note_shown_request(&mut self, now: Instant) {
+        let generation = self.top_request_generation();
+        debug_assert!(
+            generation != Some(0),
+            "a view that answers a request must take a shown_request_generation"
+        );
+        if generation != self.shown_request.map(|shown| shown.generation) {
+            self.shown_request = generation.map(|generation| ShownRequest {
+                generation,
+                shown_at: now,
+            });
+        }
+    }
+
+    /// #787: drops input reaching the request on top before the person
+    /// could see it: it isn't drawn yet, it showed less than
+    /// [`REQUEST_INPUT_GUARD`] ago, or input was dropped less than that ago
+    /// (typing or a held key goes on). The request then needs navigation
+    /// before Enter and says why.
+    fn drop_early_request_input(&mut self, now: Instant) -> bool {
+        let early = self.is_early_request_input(now);
+        if early {
+            self.request_quiet_until = now.checked_add(self.request_input_guard);
+            if let Some(view) = self.view_stack.last_mut() {
+                view.on_early_input();
+            }
+            self.request_redraw();
+        }
+        early
+    }
+
+    /// #787: whether input reaching the view on top now would be dropped
+    /// (see [`Self::drop_early_request_input`]); changes nothing.
+    fn is_early_request_input(&self, now: Instant) -> bool {
+        let guard = self.request_input_guard;
+        if guard.is_zero() {
+            return false;
+        }
+        let Some(generation) = self.top_request_generation() else {
+            return false;
+        };
+        // A view on top not yet noticed (`sync_top_view`) was not drawn there.
+        let top = self.view_stack.last().map(|view| {
+            std::ptr::from_ref::<dyn BottomPaneView>(view.as_ref()).cast::<()>() as usize
+        });
+        match self.shown_request {
+            Some(shown) if shown.generation == generation && top == self.last_top_view => {
+                now.saturating_duration_since(shown.shown_at) < guard
+                    || self.request_quiet_until.is_some_and(|until| now < until)
+            }
+            // Not drawn since it became the request on top.
+            _ => true,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_request_input_guard(&mut self, guard: Duration) {
+        self.request_input_guard = guard;
+    }
+
     /// Forward a key event to the active view or the composer.
     pub fn handle_key_event(&mut self, key_event: KeyEvent) -> InputResult {
+        self.handle_key_event_at(key_event, Instant::now())
+    }
+
+    fn handle_key_event_at(&mut self, key_event: KeyEvent, now: Instant) -> InputResult {
         // If a modal/view is active, handle it here; otherwise forward to composer.
         if !self.view_stack.is_empty() {
             if key_event.kind == KeyEventKind::Release {
                 return InputResult::None;
             }
             self.sync_top_view();
+            // #787: Ctrl+C still cancels at once (it normally reaches the view
+            // through `on_ctrl_c`, never as a key).
+            let ctrl_c = key_event.code == KeyCode::Char('c')
+                && key_event.modifiers.contains(KeyModifiers::CONTROL);
+            if !ctrl_c && self.drop_early_request_input(now) {
+                return InputResult::None;
+            }
 
             // We need three pieces of information after routing the key:
             // whether Esc completed the view, whether the view finished for any
@@ -824,9 +938,17 @@ impl BottomPane {
     }
 
     pub fn handle_paste(&mut self, pasted: String) {
+        self.handle_paste_at(pasted, Instant::now());
+    }
+
+    fn handle_paste_at(&mut self, pasted: String, now: Instant) {
         let has_pasted_text = !pasted.is_empty();
         // #523: a view uncovered since the last key learns it first.
         self.sync_top_view();
+        // #787: nor does a paste reach a request before it could be seen.
+        if self.drop_early_request_input(now) {
+            return;
+        }
         if let Some(view) = self.view_stack.last_mut() {
             let needs_redraw = view.handle_paste(pasted);
             let view_complete = view.is_complete();
@@ -865,6 +987,9 @@ impl BottomPane {
         self.maybe_show_delayed_approval_requests_at(now);
         self.tick_active_view(now);
         self.schedule_active_view_frame();
+        // After the tick: the view it closed is gone, so this is drawn next.
+        self.sync_top_view();
+        self.note_shown_request(now);
     }
 
     fn tick_active_view(&mut self, now: Instant) {
@@ -1446,6 +1571,8 @@ impl BottomPane {
             std::ptr::from_ref::<dyn BottomPaneView>(view.as_ref()).cast::<()>() as usize
         });
         if top != self.last_top_view {
+            // #787: whatever shows now is new to the person.
+            self.shown_request = None;
             if top.is_none() {
                 self.last_view_closed_at = Some(Instant::now());
             }
@@ -1583,6 +1710,11 @@ impl BottomPane {
             && self
                 .active_view()
                 .is_some_and(|view| view.will_interrupt_turn_on_key_event(key_event))
+            // #787: a key the guard drops interrupts nothing.
+            && !(key_event.kind != KeyEventKind::Release
+                && !(key_event.code == KeyCode::Char('c')
+                    && key_event.modifiers.contains(KeyModifiers::CONTROL))
+                && self.is_early_request_input(Instant::now()))
     }
 
     pub(crate) fn active_view_id(&self) -> Option<&'static str> {
@@ -2003,14 +2135,18 @@ impl BottomPane {
         self.as_renderable_with_composer_right_reserve(/*composer_right_reserve*/ 0)
     }
 
-    /// #624: whether a request view waits under the view on top.
-    fn request_waits_under_active_view(&self) -> bool {
-        match self.view_stack.split_last() {
-            Some((top, below)) => {
-                !top.answers_request() && below.iter().any(|view| view.answers_request())
-            }
-            None => false,
+    /// #624: the notice shown above the view on top while a request view
+    /// waits under it (#787: under another request too).
+    fn waiting_request_notice(&self) -> Option<&'static str> {
+        let (top, below) = self.view_stack.split_last()?;
+        if !below.iter().any(|view| view.answers_request()) {
+            return None;
         }
+        Some(if top.answers_request() {
+            "Another request is waiting; it shows after you answer this one."
+        } else {
+            "A request is waiting; it shows when you close this."
+        })
     }
 
     pub(crate) fn as_renderable_with_composer_right_reserve(
@@ -2018,15 +2154,15 @@ impl BottomPane {
         composer_right_reserve: u16,
     ) -> RenderableItem<'_> {
         if let Some(view) = self.active_view() {
-            if !self.request_waits_under_active_view() {
+            let Some(notice) = self.waiting_request_notice() else {
                 return RenderableItem::Borrowed(view);
-            }
+            };
             let mut flex = FlexRenderable::new();
             flex.push(
                 /*flex*/ 0,
                 RenderableItem::Owned(Box::new(Line::from(vec![
                     "  ! ".magenta().bold(),
-                    "A request is waiting; it shows when you close this.".magenta(),
+                    notice.magenta(),
                 ]))),
             );
             flex.push(/*flex*/ 1, RenderableItem::Borrowed(view));
@@ -2167,6 +2303,9 @@ impl Renderable for BottomPane {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // tests/issue_787.rs
+    mod issue_787;
     use crate::app::app_server_requests::ResolvedAppServerRequest;
     use crate::app_command::AppCommand as Op;
     use crate::app_event::AppEvent;
@@ -2178,7 +2317,6 @@ mod tests {
     use crossterm::event::KeyCode;
     use crossterm::event::KeyEvent;
     use crossterm::event::KeyEventKind;
-    use crossterm::event::KeyModifiers;
     use insta::assert_snapshot;
     use pretty_assertions::assert_eq;
     use ratatui::buffer::Buffer;
@@ -2519,20 +2657,17 @@ mod tests {
         let tx = AppEventSender::new(tx_raw);
         let features = Features::with_defaults();
         let mut pane = test_pane(tx);
-        pane.push_mcp_server_elicitation_request(mcp_approval_request());
+        pane.push_approval_request(exec_request(), &features);
         pane.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         pane.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
-        pane.push_approval_request(exec_request(), &features);
+        // #787: the MCP approval waits under the prompt on screen.
+        pane.push_mcp_server_elicitation_request(mcp_approval_request());
         assert_eq!(pane.view_stack.len(), 2);
 
-        // The exec approval opened over the form needs a deliberate choice
-        // (#523); Enter then answers it, and the second Enter reaches the
-        // MCP approval it revealed.
+        // Enter answers the exec approval the user chose on; a second Enter
+        // doesn't reach the MCP approval it revealed.
         pane.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(pane.view_stack.len(), 2);
-        for key in [KeyCode::Down, KeyCode::Up, KeyCode::Enter] {
-            pane.handle_key_event(KeyEvent::new(key, KeyModifiers::NONE));
-        }
+        assert!(approval_answered(&mut rx));
         assert_eq!(pane.view_stack.len(), 1);
         pane.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(!elicitation_resolved(&mut rx));

@@ -30,6 +30,7 @@ use crate::bottom_pane::CancellationEvent;
 use crate::bottom_pane::approval_typing_guard::Confirm;
 use crate::bottom_pane::approval_typing_guard::Notice;
 use crate::bottom_pane::approval_typing_guard::TypingGuard;
+use crate::bottom_pane::bottom_pane_view::next_shown_request_generation;
 use crate::bottom_pane::list_selection_view::ListSelectionView;
 use crate::bottom_pane::list_selection_view::SelectionItem;
 use crate::bottom_pane::list_selection_view::SelectionViewParams;
@@ -198,6 +199,9 @@ pub(crate) struct ApprovalOverlay {
     navigated: bool,
     /// PF-25-S01: the grant review of the current command, when open.
     grant_review: Option<GrantReview>,
+    /// #787: counts the requests shown here (see
+    /// [`BottomPaneView::shown_request_generation`]).
+    shown_generation: u64,
 }
 
 impl ApprovalOverlay {
@@ -222,6 +226,7 @@ impl ApprovalOverlay {
             typing_guard: TypingGuard::default(),
             navigated: false,
             grant_review: None,
+            shown_generation: 0,
         };
         view.set_current(request);
         // The first request has not replaced anything.
@@ -271,6 +276,7 @@ impl ApprovalOverlay {
         self.current_complete = false;
         self.navigated = false;
         self.grant_review = None;
+        self.shown_generation = next_shown_request_generation();
         self.typing_guard.on_request_changed();
         let header = build_header(&request);
         let (options, params) = Self::build_options(
@@ -795,6 +801,10 @@ impl ApprovalOverlay {
                 "That option lasts beyond this request, so its key does not choose it. \
                  Highlight it with {up}/{down}, then press {accept}; {cancel} cancels."
             ),
+            Notice::EarlyKeys => format!(
+                "Keys pressed as this request appeared were ignored. Choose an option with \
+                 {up}/{down}, then {accept}; {cancel} cancels."
+            ),
         };
         let wrap_width = usize::from(width.saturating_sub(4)).max(1);
         std::iter::once(Line::from(""))
@@ -953,6 +963,17 @@ impl BottomPaneView for ApprovalOverlay {
     /// Enter must not answer this request.
     fn on_revealed(&mut self) {
         self.require_deliberate_choice();
+    }
+
+    fn shown_request_generation(&self) -> u64 {
+        self.shown_generation
+    }
+
+    /// #787: as when revealed, and an open grant review goes back to the
+    /// approval: the dropped keys may have been meant to answer it.
+    fn on_early_input(&mut self) {
+        self.grant_review = None;
+        self.typing_guard.on_early_input();
     }
 
     fn on_ctrl_c(&mut self) -> CancellationEvent {

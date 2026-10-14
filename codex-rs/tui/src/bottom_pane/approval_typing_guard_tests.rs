@@ -166,3 +166,27 @@ fn deliberate_choice_says_to_navigate_first() {
     assert!(!guard.awaits_navigation());
     assert_eq!(guard.on_confirm(), Confirm::Highlighted);
 }
+
+/// #787: after input was dropped as the request appeared, Enter and a
+/// decision key don't answer it; the prompt says why until the user
+/// navigates, and a new request starts without the notice.
+#[test]
+fn early_input_needs_navigation_before_enter() {
+    let mut guard = TypingGuard::default();
+
+    guard.on_early_input();
+    assert_eq!(guard.notice(), Some(Notice::EarlyKeys));
+    assert_eq!(guard.on_confirm(), Confirm::Blocked);
+    assert_eq!(guard.on_text_key(Some(0)), None);
+    assert_eq!(guard.on_confirm(), Confirm::Blocked);
+    assert_eq!(guard.notice(), Some(Notice::EarlyKeys));
+
+    guard.reset();
+    assert_eq!(guard.notice(), None);
+    assert_eq!(guard.on_confirm(), Confirm::Highlighted);
+
+    guard.on_early_input();
+    guard.on_request_changed();
+    assert_ne!(guard.notice(), Some(Notice::EarlyKeys));
+    assert_eq!(guard.on_confirm(), Confirm::Blocked);
+}

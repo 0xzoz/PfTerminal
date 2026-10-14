@@ -9,6 +9,9 @@
 //!   and since the person last typed in the composer; so an Enter meant for
 //!   the composer, continued typing, a held Enter or a double Enter on the
 //!   next request does nothing;
+//! - #787: the bottom pane also drops every key but Ctrl-C (Esc too) that
+//!   reaches the popup in the second after a request first shows or comes
+//!   back, as for every request;
 //! - repeated (held) keys never confirm;
 //! - requests queue in one popup (first in, first out) instead of covering
 //!   each other, and each one starts on Deny with a fresh guard; the popup
@@ -40,6 +43,7 @@ use ratatui::widgets::Wrap;
 
 use super::BottomPaneView;
 use super::CancellationEvent;
+use super::bottom_pane_view::next_shown_request_generation;
 use super::selection_popup_common::menu_surface_padding_height;
 use super::selection_popup_common::render_menu_surface;
 use crate::claude_panes::approval::ClaudeApprovalRequest;
@@ -78,6 +82,9 @@ pub(crate) struct ClaudeApprovalView {
     max_scroll: Cell<u16>,
     /// The hint was redrawn after the guard ended.
     guard_over_drawn: bool,
+    /// #787: counts the times a request started afresh here (see
+    /// [`BottomPaneView::shown_request_generation`]).
+    shown_generation: u64,
 }
 
 impl ClaudeApprovalView {
@@ -94,6 +101,7 @@ impl ClaudeApprovalView {
             detail_rows: Cell::new(MAX_DETAIL_ROWS),
             max_scroll: Cell::new(0),
             guard_over_drawn: false,
+            shown_generation: next_shown_request_generation(),
         }
     }
 
@@ -113,6 +121,7 @@ impl ClaudeApprovalView {
         self.shown_at.set(None);
         self.seen_end.set(false);
         self.guard_over_drawn = false;
+        self.shown_generation = next_shown_request_generation();
     }
 
     /// Too long to show in full: only Deny.
@@ -322,6 +331,10 @@ impl ClaudeApprovalView {
 impl BottomPaneView for ClaudeApprovalView {
     fn answers_request(&self) -> bool {
         true
+    }
+
+    fn shown_request_generation(&self) -> u64 {
+        self.shown_generation
     }
 
     fn handle_key_event(&mut self, key: KeyEvent) {
