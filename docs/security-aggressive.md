@@ -96,8 +96,9 @@ Grant once lifts, and the command:
   your pip config from `pip config set`, `gh config set`);
 - writes the project's `.git`, `.codex` or `.agents`, or Corbanu's files;
 - reads a protected file, or uses the macOS keychain (below);
-- or shows every file it writes in its text (a plain read, a new link in the
-  current folder).
+- or shows every file it writes in its text (a plain read, a wait such as
+  `sleep`, a `sed` that only prints lines, a new link in the current folder).
+  Child agents' prompts follow the same rules.
 
 Corbanu decides this from the command's text. When it can't tell what a
 program writes (a script, `npm install`), Grant once is still offered, unless
