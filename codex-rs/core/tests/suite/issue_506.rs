@@ -133,18 +133,24 @@ async fn run(
         .build_with_auto_env(&server)
         .await?;
     if confirm {
-        let home = test.codex_home_path();
+        // Off the async runtime, as the TUI commits (#505: the commit waits
+        // for this process's sessions to take approval for every command).
+        let home = test.codex_home_path().to_path_buf();
         let thread = Some(test.session_configured.thread_id);
-        let basis = LevelBasis::read(home, level, thread);
-        let report = commit_human_level_change(
-            home,
-            level,
-            thread,
-            &basis,
-            SecurityLevel::Aggressive,
-            Probes::Passed,
-            /*now_unix_seconds*/ 1_000,
-        )?;
+        let report = tokio::task::spawn_blocking(move || {
+            let home = home.as_path();
+            let basis = LevelBasis::read(home, level, thread);
+            commit_human_level_change(
+                home,
+                level,
+                thread,
+                &basis,
+                SecurityLevel::Aggressive,
+                Probes::Passed,
+                /*now_unix_seconds*/ 1_000,
+            )
+        })
+        .await??;
         assert_eq!(report.kind, LevelChangeKind::Stricter);
         assert!(report.live, "Aggressive applies in this session now");
     }
@@ -161,12 +167,29 @@ async fn run(
         })
         .await?;
     let mut warnings = Vec::new();
-    while let EventMsg::Warning(warning) = wait_for_event(&test.codex, |event| {
-        matches!(event, EventMsg::TurnComplete(_) | EventMsg::Warning(_))
-    })
-    .await
-    {
-        warnings.push(warning.message);
+    // #505: once Aggressive is confirmed a person approves every command
+    // that is not known read-only; approve it (the sandbox still decides).
+    loop {
+        match wait_for_event(&test.codex, |event| {
+            matches!(
+                event,
+                EventMsg::TurnComplete(_) | EventMsg::Warning(_) | EventMsg::ExecApprovalRequest(_)
+            )
+        })
+        .await
+        {
+            EventMsg::Warning(warning) => warnings.push(warning.message),
+            EventMsg::ExecApprovalRequest(approval) => {
+                test.codex
+                    .submit(Op::ExecApproval {
+                        id: approval.effective_approval_id(),
+                        turn_id: None,
+                        decision: codex_protocol::protocol::ReviewDecision::Approved,
+                    })
+                    .await?;
+            }
+            _ => break,
+        }
     }
     let requests = captured.requests();
     let last = requests.last().expect("the model was asked again");

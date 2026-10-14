@@ -91,6 +91,7 @@ mod hooks_mcp;
 mod image_rollout;
 mod issue_443;
 mod issue_445;
+mod issue_505;
 mod issue_506;
 mod issue_507;
 mod issue_507_switch_off;
