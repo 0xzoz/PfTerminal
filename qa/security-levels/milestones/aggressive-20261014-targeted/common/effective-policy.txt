@@ -20,7 +20,7 @@ Closing (first session): restore.sh, kill-lane-procs.sh, restore-fix.sh, sync, c
 verification boot and second clean shutdown (vm-state-end.txt; its unlabelled lines are, in order: ls of the campaign
 paths, agmx account count, /etc/codex/config.toml, AGMS lines in the pf anchor, virtiofs mount count, ~agent/ag-admin).
 Second session for replay Q02c (after evidence check r2): utmctl start at 12:08Z (vm-start-2.txt), guest found at
-baseline (guest-state-start-2.txt), provisioned fresh (provision-2.out, erase-etc-codex-2.out), gate probes and egress
+baseline (guest-state-start-2.txt: ~/agms and /opt/agms absent, then the agmx account count 0), provisioned fresh (provision-2.out, erase-etc-codex-2.out), gate probes and egress
 re-measured (gate/gate-agmx0-20261014T120853Z.summary, gate/agent-egress-2.txt), Q02c run, then restore, sync, clean
 shutdown, verification boot with labelled checks and final clean shutdown (vm-state-end-2.txt). Guard: guard-final-2.txt.
 

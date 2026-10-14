@@ -7,10 +7,10 @@ sign-off.**
 
 ## Result
 
-Re-run on this candidate: 20 cases, **14 passed, 0 failed, 6 blocked** ([dispositions.md](dispositions.md),
+Re-run on this candidate: 20 cases, **12 passed, 1 failed, 7 blocked** ([dispositions.md](dispositions.md),
 [results.json](results.json)).
 
-Combined status of all 64 cases (this run where re-run, the third run otherwise): **55 passed, 2 failed, 7 blocked**.
+Combined status of all 64 cases (this run where re-run, the third run otherwise): **53 passed, 3 failed, 8 blocked**.
 
 - Now passing, after failing or being blocked in run 3:
   - AGG-10: the keychain command is approved, but the keychain stays out of reach and the warning says so (#736, fixed in #752).
@@ -18,8 +18,16 @@ Combined status of all 64 cases (this run where re-run, the third run otherwise)
   - AGG-01 and AGG-25 pass against their 2026-10-14 amendments (#447, #440, #438).
 - Still passing, re-run because #752 changed when Grant once is offered (#740):
   - AGG-11, AGG-T04, AGG-R13, AGG-R18 and AGG-T06: Grant once is no longer offered where it can't apply.
-- Regression sample (see below): AGG-02, AGG-04, AGG-37, AGG-R12 and AGG-R17 pass.
+- Regression sample (see below): AGG-02, AGG-R12 and AGG-R17 pass. AGG-04 fails and AGG-37 is blocked; both passed in
+  run 3.
+- Failed:
+  - AGG-04 (#792): before the restart, the inspector's "This session" Vault row says the vault store and sign-in file
+    are readable to agent commands. The same view says protected reads stay unreadable, and the read was in fact
+    denied. The case's other results all held in replay Q02b. Corrected from passed after evidence check r3.
 - Blocked:
+  - AGG-37: its readable-refusals result was never tested after a restart. Replay Q02c met the other results but
+    triggered no denial. The one refusal seen, in Q02 before the restart, embeds the raw command-failure text.
+    Corrected from passed after evidence check r3.
   - AGG-R07: steps 1-5 were product denials with the full wording, and the #621 defect stays fixed. Step 6 was declined
     twice by the product's model. Its first text says "this cannot be granted" without "even once"; its second doesn't
     say it cannot be granted at all. Corrected from passed after evidence check r1.
@@ -42,6 +50,7 @@ Combined status of all 64 cases (this run where re-run, the third run otherwise)
     chose "Yes, and don't ask again".
   - #789: Grant once is still offered where it cannot apply on child-agent prompts, and on the parent's prompts after a
     spawn (a #740 follow-up).
+- Issue filed (wording defect, fails AGG-04): #792.
 - `qa/code-blind-functional/check.py` stops at AGG-03 ([checker-output.txt](checker-output.txt)), the first case
   carried over from run 3, whose candidate is the old one. That is expected for a targeted run. A clean checker pass
   needs every case passed on one candidate.
@@ -159,6 +168,15 @@ Under the binding rule of 2026-10-14, there are no self-authorized extensions.
   - The AGG-R07 wording was fixed.
   - #789 was filed for the Grant once offers it noticed.
   - The freeze time is backed by the commit: `40e36a39cf` has committer date 2026-10-14T07:37:03Z (`git log`).
+- **r3** (fresh session) failed. It confirmed all of r1's and r2's corrections and the four model-decline blocks. It led
+  to these corrections:
+  - AGG-04 moved from passed to failed: the inspector's Vault row (#792).
+  - AGG-37 moved from passed to blocked: readable refusals were not tested in a valid attempt.
+  - Q02c's empty-profile launch is disclosed.
+  - AGG-R14 now notes the product's protected-path label on the skill-file read.
+  - `guest-state-start-2.txt` is explained.
+  - The relay-window wording for Q02c was fixed.
+- **r4**, the last check within the budget, is recorded in [review-ledger.md](review-ledger.md).
 
 ## Known limits
 
@@ -174,8 +192,9 @@ Under the binding rule of 2026-10-14, there are no self-authorized extensions.
 - **Lane processes:** after each lane wipe, 14 to 21 processes owned by the lane account are still running
   (`runs/*/wipe-after.txt`, a count only). They carry into the next run on the same lane: 15 or 16 were already
   running before a reused lane's run, against 6 to 8 on first use. Home and temp files are wiped.
-- **Relay windows:** each run's `mediator-window.jsonl` starts 2 minutes before its executor. Except for Q01, it holds
-  about 0.3 to 2.5 minutes of the previous run's requests. Rows carry no account, and product and executor requests are
+- **Relay windows:** each run's `mediator-window.jsonl` starts 2 minutes before its executor. Except for Q01 and Q02c,
+  it holds about 0.3 to 2.5 minutes of the previous run's requests. Q02c's window holds the second session's gate
+  probe traffic instead. Rows carry no account, and product and executor requests are
   not labelled. No disposition in this run rests on relay traffic.
 - Product logs (`*.log`) and product homes are kept out of the record. The #787 log lines are quoted in the issue.
   Each run's test project is under `runs/<label>/collected/fixture/`, with its git directory renamed `dot-git/`.

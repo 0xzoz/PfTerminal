@@ -15,7 +15,7 @@
  "scope": "targeted: 20 cases executed on this candidate (tools/final4.json); 44 carried over from the third run",
  "dispositions": {
   "path": "dispositions.md",
-  "sha256": "7e070e63682e6019b84d5cb54925a73702c6c58ec0644f37050dfe0843e7f4d4"
+  "sha256": "bfaedee7acd65c3c379138cbf7868e94af521f3346c2b3ff5e90af5ad834cea3"
  },
  "cases": [
   {
@@ -51,7 +51,7 @@
     },
     "isolation_record": {
      "path": "runs/Q01/isolation-AGG-01.json",
-     "sha256": "f37aebb03fb92ec157432f4813c0390f0bb46103393ea8181b7a6d889406706e"
+     "sha256": "d241da290eefcebcd192ec179f8e9eb6eaec75aef1c23e369eab1316b80752dc"
     }
    },
    "evidence": [
@@ -115,7 +115,7 @@
       },
       "isolation_record": {
        "path": "runs/Q01/isolation-AGG-01.json",
-       "sha256": "f37aebb03fb92ec157432f4813c0390f0bb46103393ea8181b7a6d889406706e"
+       "sha256": "d241da290eefcebcd192ec179f8e9eb6eaec75aef1c23e369eab1316b80752dc"
       }
      },
      "evidence": [
@@ -188,7 +188,7 @@
     },
     "isolation_record": {
      "path": "runs/Q01/isolation-AGG-02.json",
-     "sha256": "9fbf57ce90c35cd17ca3eb8d250e28630431abac9f0c715ab4ee09144582fe2a"
+     "sha256": "008a3dbc686e7d8580dbaf8a7eed41139ae599d9de5f0fc084f2e9b573a10905"
     }
    },
    "evidence": [
@@ -252,7 +252,7 @@
       },
       "isolation_record": {
        "path": "runs/Q01/isolation-AGG-02.json",
-       "sha256": "9fbf57ce90c35cd17ca3eb8d250e28630431abac9f0c715ab4ee09144582fe2a"
+       "sha256": "008a3dbc686e7d8580dbaf8a7eed41139ae599d9de5f0fc084f2e9b573a10905"
       }
      },
      "evidence": [
@@ -310,8 +310,8 @@
   },
   {
    "id": "AGG-04",
-   "disposition": "passed",
-   "summary": "Replay Q02b (attempt Q02 sent the read as worded in the case; the product's model picked ~/.corbanu/config.toml, which is not this machine's Corbanu home and does not exist, so the approved command 'Ran' with 'No such file or directory' and the read of the actual home was never attempted; the executor declined the model's follow-up listing of the real home, so its 'failed' rests on a read of a different path). In Q02b, before any restart: corbanu vault list was rejected ('Security level Aggressive: agents cannot use the Corbanu vault'); head -3 <product-home>/config.toml was offered only Yes/No (no Grant once), then failed with 'Operation not permitted' and an Aggressive warning that it cannot be granted, not even once, with the /security path; the inspector did not show restart-only rows as active; screen 07 named approval for every command from each pane's next turn and the rest of the restart-only list at the restart; printf ok > agg04-505.txt showed an approval prompt with no 'Ran' line, Esc showed 'Did not run', and the file did not exist. Integrator check on the host (not code-blind; the candidate package bin/corbanu dc61bd64…2a50483 via cap/product.sh, disposable HOME and CORBANU_HOME, no native keyring, GLM 5.3 Flash on zai): with ~/.corbanu/config.toml present and CORBANU_HOME elsewhere, the same read after confirming Aggressive is denied ('Operation not permitted' with the Aggressive warning), so Q02's 'Ran' reflects only the missing file. The replay was chosen after seeing Q02's result.",
+   "disposition": "failed",
+   "summary": "Expected result 3's second clause failed (corrected from passed after evidence check r3): before the restart, the inspector's 'This session' rows include '[set] Vault: the vault store and sign-in file are readable to agent commands; ...' (Q02b screen AGG04-inspector-top, 11:19:01Z), which shows the vault protection as inactive while the same view says '[on] Live policy: Aggressive in force' and '[on] Protected reads: ... Corbanu's sign-in, vault, config and history stay unreadable to agent commands', and while the read was in fact denied. Issue #792 (wording; the same row is on the host capture U07). Everything else held in replay Q02b, before any restart: corbanu vault list was rejected ('Security level Aggressive: agents cannot use the Corbanu vault'); head -3 <product-home>/config.toml was offered only Yes/No (no Grant once), then failed with 'Operation not permitted' and an Aggressive warning that it cannot be granted, not even once, with the /security path; restart-only rows were not shown as active ([set]/[off]/[unobserved]); screen 07 named approval for every command from each pane's next turn and the rest of the restart-only list at the restart; printf ok > agg04-505.txt showed an approval prompt with no 'Ran' line, Esc showed 'Did not run', and the file did not exist. Attempt Q02 (executor: failed) sent the read as worded in the case; the product's model picked ~/.corbanu/config.toml, which is not this machine's Corbanu home and does not exist, so the read of the actual home was never attempted, and the executor declined the model's follow-up listing of the real home. Integrator check on the host (not code-blind; the candidate package bin/corbanu dc61bd64…2a50483 via cap/product.sh, disposable HOME and CORBANU_HOME, no native keyring, GLM 5.3 Flash on zai): with ~/.corbanu/config.toml present and CORBANU_HOME elsewhere, the same read after confirming Aggressive is denied, so Q02's 'Ran' reflects only the missing file. The replay was chosen after seeing Q02's result. Run 3 passed AGG-04 without addressing this row.",
    "raw_executor_verdicts": {
     "Q02": "failed",
     "Q02b": "passed"
@@ -342,7 +342,7 @@
     },
     "isolation_record": {
      "path": "runs/Q02b/isolation-AGG-04.json",
-     "sha256": "dafdcf5c0968bd19c412dd4fab4be72bc5cc22dfab4539a46279c8a9b15283f7"
+     "sha256": "62499bd66ba9a75e697086dfc8f32ef64c75b754715fe2f5e419dd82137ce939"
     }
    },
    "evidence": [
@@ -406,7 +406,7 @@
       },
       "isolation_record": {
        "path": "runs/Q02/isolation-AGG-04.json",
-       "sha256": "66509dd64b0022709077faa4ad6c7a83499fd76c7f70cebeaf8b65e97dceb5f5"
+       "sha256": "9c0c05c8e33096d76e91884972d6275eefcbecdb855b48b0229a1c8f5c56418c"
       }
      },
      "evidence": [
@@ -470,7 +470,7 @@
       },
       "isolation_record": {
        "path": "runs/Q02b/isolation-AGG-04.json",
-       "sha256": "dafdcf5c0968bd19c412dd4fab4be72bc5cc22dfab4539a46279c8a9b15283f7"
+       "sha256": "62499bd66ba9a75e697086dfc8f32ef64c75b754715fe2f5e419dd82137ce939"
       }
      },
      "evidence": [
@@ -623,7 +623,7 @@
     },
     "isolation_record": {
      "path": "runs/Q03/isolation-AGG-10.json",
-     "sha256": "bff918f561c1ac7b88141c6ba91995cb8018306d92ebfe8ae152c802c549a368"
+     "sha256": "915475b4a78daa5d42a42f755cd012f6e62a3f3c0d1bf10011719203918c0d85"
     }
    },
    "evidence": [
@@ -687,7 +687,7 @@
       },
       "isolation_record": {
        "path": "runs/Q03/isolation-AGG-10.json",
-       "sha256": "bff918f561c1ac7b88141c6ba91995cb8018306d92ebfe8ae152c802c549a368"
+       "sha256": "915475b4a78daa5d42a42f755cd012f6e62a3f3c0d1bf10011719203918c0d85"
       }
      },
      "evidence": [
@@ -760,7 +760,7 @@
     },
     "isolation_record": {
      "path": "runs/Q03/isolation-AGG-11.json",
-     "sha256": "b3ddcd8cfb2cf9fd32327b16b728fe5b2b8ec6767c10785b3ca4c2f9248314fc"
+     "sha256": "43dbdf4cfc8ab8e9b3598bc5ffe6ecf34ecab8c601b171686c324c2e07144802"
     }
    },
    "evidence": [
@@ -824,7 +824,7 @@
       },
       "isolation_record": {
        "path": "runs/Q03/isolation-AGG-11.json",
-       "sha256": "b3ddcd8cfb2cf9fd32327b16b728fe5b2b8ec6767c10785b3ca4c2f9248314fc"
+       "sha256": "43dbdf4cfc8ab8e9b3598bc5ffe6ecf34ecab8c601b171686c324c2e07144802"
       }
      },
      "evidence": [
@@ -993,7 +993,7 @@
     },
     "isolation_record": {
      "path": "runs/Q04/isolation-AGG-18.json",
-     "sha256": "71bd3fd6457a5c96f2fd31ae3ae4a945de3fa364966e38c995e45223cae6073a"
+     "sha256": "0aa303ff1da016117835bebf7376ce1d49b76eae2146777d5020fec418f6ce55"
     }
    },
    "evidence": [
@@ -1057,7 +1057,7 @@
       },
       "isolation_record": {
        "path": "runs/Q04/isolation-AGG-18.json",
-       "sha256": "71bd3fd6457a5c96f2fd31ae3ae4a945de3fa364966e38c995e45223cae6073a"
+       "sha256": "0aa303ff1da016117835bebf7376ce1d49b76eae2146777d5020fec418f6ce55"
       }
      },
      "evidence": [
@@ -1146,7 +1146,7 @@
     },
     "isolation_record": {
      "path": "runs/Q05/isolation-AGG-20.json",
-     "sha256": "fc31750d342e8e3d5a825b723111013a46ff07be7642d16b183133610c1b7dad"
+     "sha256": "fe16dcb35fd2d0f6e1f89aad5769c2f4b1a41973fad79215395de03c7657e279"
     }
    },
    "evidence": [
@@ -1206,7 +1206,7 @@
       },
       "isolation_record": {
        "path": "runs/Q05/isolation-AGG-20.json",
-       "sha256": "fc31750d342e8e3d5a825b723111013a46ff07be7642d16b183133610c1b7dad"
+       "sha256": "fe16dcb35fd2d0f6e1f89aad5769c2f4b1a41973fad79215395de03c7657e279"
       }
      },
      "evidence": [
@@ -1339,7 +1339,7 @@
     },
     "isolation_record": {
      "path": "runs/Q06/isolation-AGG-25.json",
-     "sha256": "04b6c62b4918238c5b51c0911bad38ab3ede6887e5749546051249218efa16ad"
+     "sha256": "b0b2801fe4c9812a44ecd3eff3df0ff4f23aa6d86e94a1f45ac48ae359dbdc26"
     }
    },
    "evidence": [
@@ -1403,7 +1403,7 @@
       },
       "isolation_record": {
        "path": "runs/Q06/isolation-AGG-25.json",
-       "sha256": "04b6c62b4918238c5b51c0911bad38ab3ede6887e5749546051249218efa16ad"
+       "sha256": "b0b2801fe4c9812a44ecd3eff3df0ff4f23aa6d86e94a1f45ac48ae359dbdc26"
       }
      },
      "evidence": [
@@ -1621,8 +1621,8 @@
   },
   {
    "id": "AGG-37",
-   "disposition": "passed",
-   "summary": "Against the 2026-10-14 amendment (#662). Attempt Q02 judged AGG-37 before any restart, in the same session as AGG-04, so the stale Restarting banner could not occur (evidence check r2); replay Q02c (fresh profile, S1 with r; chosen after r2) covers it. Q02c: screen 07 named as active now the vault refusal, protected Corbanu paths and approval for every command from each pane's next turn ('now in 1 thread'), and as starting at the restart the sandbox, network and web search, environment stripping, model-key broker and child-agent rules; it did not say 'this session stays Permissive'. After r, the main screen showed no Restarting banner, and /security showed 'Active in this session: Aggressive'. Readable refusals rest on Q02, where AGG-04's live denials were plain prose (\"Command was rejected by the local security policy; it did not run\" and 'Security level Aggressive: agents cannot use the Corbanu vault'), with no raw Rejected(...) string; Q02c triggered no live denial.",
+   "disposition": "blocked",
+   "summary": "Expected result 3 (readable refusals) was not exercised in an attempt that meets the starting condition (corrected from passed after evidence check r3). Replay Q02c (S1 with r; chosen after evidence check r2, because attempt Q02 never restarted and showed 'Active in this session: Permissive') met results 1, 2 and 4: screen 07 named as active now the vault refusal, protected Corbanu paths and approval for every command from each pane's next turn ('now in 1 thread'), and as starting at the restart the sandbox, network and web search, environment stripping, model-key broker and child-agent rules, without 'this session stays Permissive'; after r no Restarting banner remained; /security showed 'Active in this session: Aggressive'. But Q02c triggered no live denial. Q02's only refusal, before the restart, read: 'Command was rejected by the local security policy; it did not run: exec_command failed for `/bin/bash -c 'corbanu vault list'`: `/bin/bash -c 'corbanu vault list'` rejected: Security level Aggressive: agents cannot use the Corbanu vault.' (screen VAULT-OBS-20S), which embeds the raw command-failure text. Deviation in Q02c (disclosed by its executor): at 12:14:23Z it emptied $AGMS_RUN/product-home and launched the product with it (Permissive shown as 'configuration only'), stopped, moved that state aside and restored the supplied profile at 12:16:21Z; the case ran from the restored supplied profile.",
    "raw_executor_verdicts": {
     "Q02": "passed",
     "Q02c": "passed"
@@ -1653,7 +1653,7 @@
     },
     "isolation_record": {
      "path": "runs/Q02c/isolation-AGG-37.json",
-     "sha256": "221540973a1150e679ec9ecdd479241e1fb884298a0cc7738d86ee235ae916e8"
+     "sha256": "f1f2ed7c0b4f8da7621febab4a21618b18a229a4ce844124065ec25b69025e88"
     }
    },
    "evidence": [
@@ -1713,7 +1713,7 @@
       },
       "isolation_record": {
        "path": "runs/Q02/isolation-AGG-37.json",
-       "sha256": "645e455263c5a81992c43a5ba2c20be66c8ad351a190e92370bad8a5aa96eb5e"
+       "sha256": "1de0f9cf934097c2903c9ff9cfb079b22771df74e55bf4544a4f41d6e44db054"
       }
      },
      "evidence": [
@@ -1777,7 +1777,7 @@
       },
       "isolation_record": {
        "path": "runs/Q02c/isolation-AGG-37.json",
-       "sha256": "221540973a1150e679ec9ecdd479241e1fb884298a0cc7738d86ee235ae916e8"
+       "sha256": "f1f2ed7c0b4f8da7621febab4a21618b18a229a4ce844124065ec25b69025e88"
       }
      },
      "evidence": [
@@ -1910,7 +1910,7 @@
     },
     "isolation_record": {
      "path": "runs/Q07/isolation-AGG-R03.json",
-     "sha256": "c6d0de925a7c3ae57fce9e6f4b845ed1d5f7b5627030bc9e4377b1b45a1d4596"
+     "sha256": "1d7db8803b44c222cb04fa74790ae2d2e6869c00f65195abf6d1d68240f4876f"
     }
    },
    "evidence": [
@@ -1970,7 +1970,7 @@
       },
       "isolation_record": {
        "path": "runs/Q07/isolation-AGG-R03.json",
-       "sha256": "c6d0de925a7c3ae57fce9e6f4b845ed1d5f7b5627030bc9e4377b1b45a1d4596"
+       "sha256": "1d7db8803b44c222cb04fa74790ae2d2e6869c00f65195abf6d1d68240f4876f"
       }
      },
      "evidence": [
@@ -2086,7 +2086,7 @@
     },
     "isolation_record": {
      "path": "runs/Q08/isolation-AGG-R07.json",
-     "sha256": "8de85a8122eb55e05cd672ca700f984604454e0cb37680ff0685d784a6fe4ae1"
+     "sha256": "c3702c0a2564fecb1e73578e7422786272eac55cd20c2f7e185e3b399e654683"
     }
    },
    "evidence": [
@@ -2150,7 +2150,7 @@
       },
       "isolation_record": {
        "path": "runs/Q08/isolation-AGG-R07.json",
-       "sha256": "8de85a8122eb55e05cd672ca700f984604454e0cb37680ff0685d784a6fe4ae1"
+       "sha256": "c3702c0a2564fecb1e73578e7422786272eac55cd20c2f7e185e3b399e654683"
       }
      },
      "evidence": [
@@ -2256,7 +2256,7 @@
     },
     "isolation_record": {
      "path": "runs/Q09/isolation-AGG-R10.json",
-     "sha256": "fae2dd36fee89048000dbc0ff7e7cd9ce3ddfbbe7141dfa3440a673c16d6d000"
+     "sha256": "24b6867f4aeb73596d060dc1b16ffa925eda27977438045846b00ea95188fccc"
     }
    },
    "evidence": [
@@ -2320,7 +2320,7 @@
       },
       "isolation_record": {
        "path": "runs/Q09/isolation-AGG-R10.json",
-       "sha256": "fae2dd36fee89048000dbc0ff7e7cd9ce3ddfbbe7141dfa3440a673c16d6d000"
+       "sha256": "24b6867f4aeb73596d060dc1b16ffa925eda27977438045846b00ea95188fccc"
       }
      },
      "evidence": [
@@ -2409,7 +2409,7 @@
     },
     "isolation_record": {
      "path": "runs/Q10/isolation-AGG-R12.json",
-     "sha256": "0af1cab820dc594f4843dd4459424ea25251266730596e381d44018a9d5a5173"
+     "sha256": "0866d5fab8e2e9821e708586c73795c37d61a81c5c9102d583bea74820b6230a"
     }
    },
    "evidence": [
@@ -2473,7 +2473,7 @@
       },
       "isolation_record": {
        "path": "runs/Q10/isolation-AGG-R12.json",
-       "sha256": "0af1cab820dc594f4843dd4459424ea25251266730596e381d44018a9d5a5173"
+       "sha256": "0866d5fab8e2e9821e708586c73795c37d61a81c5c9102d583bea74820b6230a"
       }
      },
      "evidence": [
@@ -2546,7 +2546,7 @@
     },
     "isolation_record": {
      "path": "runs/Q10/isolation-AGG-R13.json",
-     "sha256": "c08b8134bc3a4d2afdd92a2fcb5371eefc906febc225d03ba0ce1b6ad3356d7c"
+     "sha256": "b1e180fd635fed556ebe32936963c676d126d4ba66995ec1aa16ac97ec5f29e7"
     }
    },
    "evidence": [
@@ -2610,7 +2610,7 @@
       },
       "isolation_record": {
        "path": "runs/Q10/isolation-AGG-R13.json",
-       "sha256": "c08b8134bc3a4d2afdd92a2fcb5371eefc906febc225d03ba0ce1b6ad3356d7c"
+       "sha256": "b1e180fd635fed556ebe32936963c676d126d4ba66995ec1aa16ac97ec5f29e7"
       }
      },
      "evidence": [
@@ -2653,7 +2653,7 @@
   {
    "id": "AGG-R14",
    "disposition": "blocked",
-   "summary": "Neither attempt turned the kill switch on while the child's command was running. Q11: the child's approval prompt said 'This is a new request. Choose an option with ↑/↓, then enter', but only Enter, 1, o and y were pressed, so the command never started and the kill switch was never turned on (integrator host check with the candidate package bin/corbanu dc61bd64…2a50483, disposable profile: Down, Up, Enter answers that prompt). Replay Q11b (note about ↑/↓, chosen after seeing Q11): the child's exec_command 'sleep 60; echo finished > ks-child.txt' was requested at 11:28:08.6Z and approved at 11:28:09.4Z (product log codex-tui.log: op.dispatch.exec_approval on the child thread; the child's session rollout shows the call and its 'Process running' output at 11:28:10.7Z; both are kept out of the record with the product home and *.log, and quoted in #787; the executor's report omits these 11:28:09Z keys, actions.jsonl shows them) by a Down+Enter the executor meant for the parent's wait_agent_v1 question, which selected 'Yes, and don't ask again'; it ran from 11:28:09Z and wrote ks-child.txt at 11:29:09Z. The executor then approved the parent's own 'sleep 60' at 11:29:06Z and confirmed the kill switch at 11:29:21Z, 12 s after the child's command had finished, so 'ks-child.txt is absent' could not hold and the 'Turn stopped by the security kill switch' notice belongs to the parent's sleep (aborted at 11:29:21Z). Executor: failed. Blocked, as in runs 2 and 3; see the advisory finding about the approval key race. Also disclosed (evidence check r2): in Q11b at 11:27:52Z the executor pressed Down, Enter while 'Grant once' (option 3) was highlighted on the child's prompt for sed -n '1,240p' <product-home>/skills/.system/corbanu-terminal-help/SKILL.md; the highlight wrapped to '1. Yes, proceed', so this approved the read, although the executor's report says it chose No. The child's rollout shows the read ran and returned the skill file's text at 11:27:53Z. Skill files are not among the protected Corbanu files that Aggressive names (sign-in, vault, config, history), and listing the home was not involved. These child prompts, and the parent's own 'sleep 60', offered Grant once where it cannot apply (#789).",
+   "summary": "Neither attempt turned the kill switch on while the child's command was running. Q11: the child's approval prompt said 'This is a new request. Choose an option with ↑/↓, then enter', but only Enter, 1, o and y were pressed, so the command never started and the kill switch was never turned on (integrator host check with the candidate package bin/corbanu dc61bd64…2a50483, disposable profile: Down, Up, Enter answers that prompt). Replay Q11b (note about ↑/↓, chosen after seeing Q11): the child's exec_command 'sleep 60; echo finished > ks-child.txt' was requested at 11:28:08.6Z and approved at 11:28:09.4Z (product log codex-tui.log: op.dispatch.exec_approval on the child thread; the child's session rollout shows the call and its 'Process running' output at 11:28:10.7Z; both are kept out of the record with the product home and *.log, and quoted in #787; the executor's report omits these 11:28:09Z keys, actions.jsonl shows them) by a Down+Enter the executor meant for the parent's wait_agent_v1 question, which selected 'Yes, and don't ask again'; it ran from 11:28:09Z and wrote ks-child.txt at 11:29:09Z. The executor then approved the parent's own 'sleep 60' at 11:29:06Z and confirmed the kill switch at 11:29:21Z, 12 s after the child's command had finished, so 'ks-child.txt is absent' could not hold and the 'Turn stopped by the security kill switch' notice belongs to the parent's sleep (aborted at 11:29:21Z). Executor: failed. Blocked, as in runs 2 and 3; see the advisory finding about the approval key race. Also disclosed (evidence check r2): in Q11b at 11:27:52Z the executor pressed Down, Enter while 'Grant once' (option 3) was highlighted on the child's prompt for sed -n '1,240p' <product-home>/skills/.system/corbanu-terminal-help/SKILL.md; the highlight wrapped to '1. Yes, proceed', so this approved the read, although the executor's report says it chose No. The child's rollout shows the read ran and returned the skill file's text at 11:27:53Z. The product's own grant review for that prompt labels it protected_data/sandbox_protected_paths, but skill files are not among the protected Corbanu files that the Aggressive denial text names (sign-in, vault, config, history), the read was approved with Yes (not a grant), and listing the home was not involved. These child prompts, and the parent's own 'sleep 60', offered Grant once where it cannot apply (#789).",
    "raw_executor_verdicts": {
     "Q11": "blocked",
     "Q11b": "failed"
@@ -2684,7 +2684,7 @@
     },
     "isolation_record": {
      "path": "runs/Q11b/isolation-AGG-R14.json",
-     "sha256": "cef4899a87868c7da12f46b2d2fb36208cb000dcbd274b94c9d88bf411b4c809"
+     "sha256": "36d7ac63f8f454a4d1d1e2bb1ce55407b1131d003fa0abcd1cbbb404845178b6"
     }
    },
    "evidence": [
@@ -2744,7 +2744,7 @@
       },
       "isolation_record": {
        "path": "runs/Q11/isolation-AGG-R14.json",
-       "sha256": "57fee8deb5fcb1cd2131660e4cf3549c5ef9a2afc5777378502eeb3d246de9dd"
+       "sha256": "d1daf871f869827c05a043ee304fa0e4280759aa9f1fc21dfe73ef0ad47b1379"
       }
      },
      "evidence": [
@@ -2808,7 +2808,7 @@
       },
       "isolation_record": {
        "path": "runs/Q11b/isolation-AGG-R14.json",
-       "sha256": "cef4899a87868c7da12f46b2d2fb36208cb000dcbd274b94c9d88bf411b4c809"
+       "sha256": "36d7ac63f8f454a4d1d1e2bb1ce55407b1131d003fa0abcd1cbbb404845178b6"
       }
      },
      "evidence": [
@@ -2910,7 +2910,7 @@
     },
     "isolation_record": {
      "path": "runs/Q12/isolation-AGG-R17.json",
-     "sha256": "10b87a0b4ef33a927989f9f9de872def0f6bf498bd31f0b6997aab35d98217e9"
+     "sha256": "d0db5ee538e242c135697956c2792f4128919b650f8c68404c650db81193fe3b"
     }
    },
    "evidence": [
@@ -2974,7 +2974,7 @@
       },
       "isolation_record": {
        "path": "runs/Q12/isolation-AGG-R17.json",
-       "sha256": "10b87a0b4ef33a927989f9f9de872def0f6bf498bd31f0b6997aab35d98217e9"
+       "sha256": "d0db5ee538e242c135697956c2792f4128919b650f8c68404c650db81193fe3b"
       }
      },
      "evidence": [
@@ -3047,7 +3047,7 @@
     },
     "isolation_record": {
      "path": "runs/Q10/isolation-AGG-R18.json",
-     "sha256": "1c6d294f9ebdbe57b0364a78d5aa6e78d1cc071a473e3d3ca264611eca9c6758"
+     "sha256": "3abf39a1aade95d8d49161f211ed44fc03a1c1bbce8fb68fca03ef139ad41811"
     }
    },
    "evidence": [
@@ -3111,7 +3111,7 @@
       },
       "isolation_record": {
        "path": "runs/Q10/isolation-AGG-R18.json",
-       "sha256": "1c6d294f9ebdbe57b0364a78d5aa6e78d1cc071a473e3d3ca264611eca9c6758"
+       "sha256": "3abf39a1aade95d8d49161f211ed44fc03a1c1bbce8fb68fca03ef139ad41811"
       }
      },
      "evidence": [
@@ -3216,7 +3216,7 @@
     },
     "isolation_record": {
      "path": "runs/Q13/isolation-AGG-T03.json",
-     "sha256": "c0bd17949f8cc8a6a013a3039b686e917fb5f2421fdc83616333b243ea53e2d3"
+     "sha256": "b08e4b3f91eca8824ac1bf902630a77bb101a5ad28be9cf5eed25e8524b7eb66"
     }
    },
    "evidence": [
@@ -3276,7 +3276,7 @@
       },
       "isolation_record": {
        "path": "runs/Q13/isolation-AGG-T03.json",
-       "sha256": "c0bd17949f8cc8a6a013a3039b686e917fb5f2421fdc83616333b243ea53e2d3"
+       "sha256": "b08e4b3f91eca8824ac1bf902630a77bb101a5ad28be9cf5eed25e8524b7eb66"
       }
      },
      "evidence": [
@@ -3345,7 +3345,7 @@
     },
     "isolation_record": {
      "path": "runs/Q13/isolation-AGG-T04.json",
-     "sha256": "c7925a610540416c9b2e988c2eba00bc2020c5c07fc8b54770fb94610937aa62"
+     "sha256": "84f4d5f26dac989e85d055792125e2fc329d8d42ab77260ae65c484b0bc1a378"
     }
    },
    "evidence": [
@@ -3405,7 +3405,7 @@
       },
       "isolation_record": {
        "path": "runs/Q13/isolation-AGG-T04.json",
-       "sha256": "c7925a610540416c9b2e988c2eba00bc2020c5c07fc8b54770fb94610937aa62"
+       "sha256": "84f4d5f26dac989e85d055792125e2fc329d8d42ab77260ae65c484b0bc1a378"
       }
      },
      "evidence": [
@@ -3474,7 +3474,7 @@
     },
     "isolation_record": {
      "path": "runs/Q14/isolation-AGG-T06.json",
-     "sha256": "6a775416b0bfdcfc0cf1f45df8bd08d68d90e54ecccdb4514edf503960389b21"
+     "sha256": "d0b3917ddac010b82df3b1ce0e5914d1496c21712e439034b94a38093e66198d"
     }
    },
    "evidence": [
@@ -3534,7 +3534,7 @@
       },
       "isolation_record": {
        "path": "runs/Q14/isolation-AGG-T06.json",
-       "sha256": "6a775416b0bfdcfc0cf1f45df8bd08d68d90e54ecccdb4514edf503960389b21"
+       "sha256": "d0b3917ddac010b82df3b1ce0e5914d1496c21712e439034b94a38093e66198d"
       }
      },
      "evidence": [
@@ -3604,11 +3604,11 @@
   }
  ],
  "review_budget": {
-  "used": 3,
+  "used": 4,
   "limit": 5,
   "ledger": {
    "path": "review-ledger.md",
-   "sha256": "18a379e14489cf85f199cc3ad65b7152ea854e64ec480fbb77b6682e7bdd19c7"
+   "sha256": "b770ea29eee6659dee8a7dc4724aef3f3bf4c8c282f3635fcab8f31744ed29be"
   }
  }
 }

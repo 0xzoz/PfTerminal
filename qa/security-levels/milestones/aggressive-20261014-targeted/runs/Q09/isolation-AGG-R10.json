@@ -8,7 +8,7 @@
  "candidate_sha256": "dc61bd6403b99a892b3db4ed59fef22f30a4ff65f1cd2a9ee165e994c2a50483",
  "policy": {
   "path": "common/effective-policy.txt",
-  "sha256": "4ad277b70217b47a9ff1dd2990db14e80bf9c151c516eb7d069d5e2df18253ef"
+  "sha256": "180ce225198b54f21b14c3361735e230706912918d9e8d3904411b34914e5ecd"
  },
  "tool_inventory": {
   "path": "common/tool-inventory.json",
