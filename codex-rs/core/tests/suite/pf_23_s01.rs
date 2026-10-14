@@ -2773,6 +2773,7 @@ async fn shared_database_folder_scenario() -> anyhow::Result<()> {
              ln -s /dev/null \"$d/logs_2.$s-$(printf wal)\"; \
              S=\"SQL$(printf ITE)\"; printf x > \"$d/PFTERMINAL_STATE_5.$S-$(printf JOURNAL)\"; \
              ln -s /dev/null \"$d/LOGS_2.$S-$(printf WAL)\"; \
+             mkdir -p \"$d/ACCOUNTING-$(printf PENDING)\"; \
              printf '{{}}' > \"$d/ACCOUNTING-$(printf PENDING)/upper.json\"; \
              perl -e 'use Fcntl qw(:flock); open(my $f, \">>\", $ARGV[0]) or die \"open: $!\\n\"; \
              flock($f, LOCK_EX | LOCK_NB) or die \"lock: $!\\n\"' \
