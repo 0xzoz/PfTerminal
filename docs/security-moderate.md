@@ -70,7 +70,7 @@ The kill switch (`/security` → `g`) works under every level.
   config, sign-in or security state inside the sandbox, so it stops at start
   (with `secretless_agent_launch` on, also when you approve the command).
   Pointed at another Corbanu home, it runs at that home's level: Moderate
-  isn't carried over to it.
+  isn't carried over to it (#766).
 - A remote app server can't enforce a level chosen here; Corbanu refuses to
   start against one until you choose Permissive.
 
