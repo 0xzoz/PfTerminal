@@ -519,16 +519,37 @@ async fn issue_620_startup_file_outside_the_folder_is_never_granted() {
         Some(startup_explanation("~/.zshrc"))
     );
     // Only where the command writes it: reading one, running a program from
-    // `~/.local/bin` or naming one in a message keeps the grant (it may lift
-    // a git write in the current folder).
+    // `~/.local/bin` or naming one in a message is not a start-up file write
+    // (#740 explains a write no grant lifts instead; an unknown program
+    // keeps the grant).
     for script in [
-        "echo '# x' >> notes.txt",
-        "cat ~/.gitconfig >> .git/config",
-        "grep x ~/.bashrc > .git/hooks/pre-commit 2>&1",
         "~/.local/bin/pre-commit install",
         "git commit -m 'document ~/.zshrc > notes'",
     ] {
         assert_eq!(note(&shell(script)).await, None, "{script}");
+    }
+    // This session's profile may not write its folder at all: then a write
+    // there is outside the writable folders, else read-only or plain.
+    for (script, word) in [
+        ("cat ~/.gitconfig >> .git/config", ".git/config"),
+        (
+            "grep x ~/.bashrc > .git/hooks/pre-commit 2>&1",
+            ".git/hooks/pre-commit",
+        ),
+        ("echo '# x' >> notes.txt", "notes.txt"),
+    ] {
+        let explained = note(&shell(script)).await;
+        assert!(
+            [
+                outside_folder_explanation(word),
+                read_only_in_folder_explanation(word),
+                NOTHING_TO_LIFT.to_string(),
+            ]
+            .iter()
+            .any(|expected| explained.as_ref() == Some(expected))
+                && (word == "notes.txt" || explained != Some(NOTHING_TO_LIFT.to_string())),
+            "{script}: {explained:?}"
+        );
     }
 
     assert_eq!(
@@ -574,6 +595,7 @@ fn issue_620_start_up_files_through_links() {
                 /*exclude_slash_tmp*/ true,
             ),
             user_home: Some(home.to_path_buf()),
+            keychain_closed: false,
         }
     };
     let in_work = inputs(work.path());

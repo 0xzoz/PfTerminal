@@ -257,24 +257,23 @@ const POLICY_CONFIG_KEYS: &[&str] = &[
     "shell_environment_policy",
     "projects",
 ];
+/// macOS `security` verbs that read or change keychain items.
+pub(crate) const KEYCHAIN_VERBS: &[&str] = &[
+    "find-generic-password",
+    "find-internet-password",
+    "find-certificate",
+    "add-generic-password",
+    "add-internet-password",
+    "delete-generic-password",
+    "delete-internet-password",
+    "set-generic-password-partition-list",
+    "dump-keychain",
+    "export",
+    "unlock-keychain",
+];
 /// Credential commands: the command name plus words that make it a secret read.
 const CREDENTIAL_COMMANDS: &[(&str, &[&str])] = &[
-    (
-        "security",
-        &[
-            "find-generic-password",
-            "find-internet-password",
-            "find-certificate",
-            "add-generic-password",
-            "add-internet-password",
-            "delete-generic-password",
-            "delete-internet-password",
-            "set-generic-password-partition-list",
-            "dump-keychain",
-            "export",
-            "unlock-keychain",
-        ],
-    ),
+    ("security", KEYCHAIN_VERBS),
     ("gh", &["token"]),
     ("gcloud", &["print-access-token", "print-identity-token"]),
     ("aws", &["export-credentials", "get-session-token"]),

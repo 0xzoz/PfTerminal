@@ -12,6 +12,14 @@
 //! - #584: the same for a command that writes only paths no grant lifts
 //!   under Aggressive (#520: the project's `.codex` and `.agents`; the
 //!   Corbanu home);
+//! - #737, #740: the same for a command that writes only outside the
+//!   current folder (a config file such as `~/.gitconfig` that `git config
+//!   --global` writes, or any other file) or in a read-only part of it (the
+//!   project's `.git`), or that, as far as its text shows, writes nothing a
+//!   grant lifts at all;
+//! - #736: the same for a macOS keychain command (`security
+//!   find-generic-password`): the keychain service is out of reach of
+//!   Aggressive's sandbox, so it runs but cannot read or change items;
 //! - #622: such a denial is listed under the inspector's recent denials.
 //!
 //! Explanation only: it never changes what runs or what is denied (it only
@@ -34,6 +42,12 @@ use super::tainted_action::PolicyBinding;
 use super::tainted_action::USER_PERSISTENCE;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
+use codex_protocol::permissions::FileSystemSandboxPolicy;
+use writes::keychain_command;
+use writes::write_targets;
+
+#[path = "protected_reads_writes.rs"]
+mod writes;
 
 /// Output that says the operating system refused access (on Linux a write
 /// outside the writable folders reports a read-only file system; #620).
@@ -99,6 +113,55 @@ pub(crate) fn never_writable_explanation(path: &str) -> String {
     )
 }
 
+/// #740: the explanation for a write outside the current folder (#737: a
+/// config file such as `~/.npmrc`): Aggressive's sandbox writes only inside
+/// it, and a grant lifts protections only there.
+pub(crate) fn outside_folder_explanation(path: &str) -> String {
+    format!(
+        "Security level Aggressive blocks writing `{}`: it is outside the current folder, and \
+         agent commands can write only inside the current folder, even when you approve them; \
+         this cannot be granted, not even once (Grant once lifts the start-up file and git write \
+         protections only inside the current folder). To allow it, a person can switch to \
+         Permissive in /security (it applies after a restart).",
+        shown_path(path)
+    )
+}
+
+/// #740: the explanation for a write to a read-only part of the current
+/// folder that no grant lifts (the project's `.git`).
+pub(crate) fn read_only_in_folder_explanation(path: &str) -> String {
+    format!(
+        "Security level Aggressive blocks writing `{}`: agent commands cannot write it, even \
+         when you approve them (it is read-only in this session, as the project's .git folder, \
+         its hooks and config included, always is); this cannot be granted, not even once \
+         (Grant once lifts only git hooks and config kept outside a .git folder and, when the \
+         current folder holds your home folder, start-up files). To allow it, a person can \
+         switch to Permissive in /security (it applies after a restart).",
+        shown_path(path)
+    )
+}
+
+/// #740: why no grant is offered for a command that, as far as its text
+/// shows, writes nothing a grant lifts.
+pub(crate) const NOTHING_TO_LIFT: &str = "Grant once is not offered for this command: under \
+     security level Aggressive it only lifts the write protection of git hooks and config kept \
+     outside a .git folder and, when the current folder holds your home folder, of start-up \
+     files, and nothing this command writes is protected that way.";
+
+/// #736: the approval prompt's explanation for a macOS keychain command.
+pub(crate) const KEYCHAIN_PROMPT: &str = "Security level Aggressive keeps the macOS keychain out \
+     of reach of agent commands: if you approve, `security` runs, but it cannot reach the \
+     keychain service, so it cannot read, add or change keychain items (it reports them as not \
+     found, or an error), and this cannot be granted, not even once. To allow it, a person can \
+     switch to Permissive in /security (it applies after a restart).";
+
+/// #736: the explanation where a macOS keychain command failed.
+pub(crate) const KEYCHAIN_DENIAL: &str = "Security level Aggressive kept the macOS keychain out \
+     of reach of this command: agent commands cannot reach the keychain service, so `security` \
+     could not read, add or change keychain items (an error such as \"could not be found\" comes \
+     from that, not from what your keychain holds), and this cannot be granted, not even once. \
+     To allow it, a person can switch to Permissive in /security (it applies after a restart).";
+
 /// `path` as an explanation shows it: it is the command's own spelling, so
 /// escaped and bounded.
 pub(crate) fn shown_path(path: &str) -> String {
@@ -122,6 +185,10 @@ struct ReadPolicyInputs {
     workspace_roots: Vec<AbsolutePathBuf>,
     profile: PermissionProfile,
     user_home: Option<PathBuf>,
+    /// #736: agent commands cannot reach the macOS keychain service: macOS,
+    /// with network off and no network proxy (Seatbelt allows the service
+    /// only with its network rules).
+    keychain_closed: bool,
 }
 
 impl ReadPolicyInputs {
@@ -164,6 +231,13 @@ impl ReadPolicyInputs {
             workspace_roots,
             profile: turn.config.permissions.permission_profile().clone(),
             user_home: dirs::home_dir(),
+            keychain_closed: cfg!(target_os = "macos")
+                && turn.network.is_none()
+                && !turn
+                    .config
+                    .permissions
+                    .network_sandbox_policy()
+                    .is_enabled(),
         })
     }
 
@@ -215,11 +289,13 @@ impl ReadPolicyInputs {
         if !spellings.iter().any(is_startup) {
             return false;
         }
-        // The profile as the orchestrator runs it: project roots are the
-        // workspace roots (or the current folder), also by their real
-        // locations, as the sandbox resolves them. Write permissions granted
-        // for the turn or requested by the command are left out: Aggressive
-        // turns permission requests off and refuses additional writes (#245).
+        !self.base_writable(&self.base_policy(), &path)
+    }
+
+    /// The project roots as the orchestrator runs the profile: the
+    /// workspace roots (or the current folder), also by their real
+    /// locations, as the sandbox resolves them.
+    fn roots(&self) -> Vec<AbsolutePathBuf> {
         let mut roots = if self.workspace_roots.is_empty() {
             vec![self.turn_cwd.clone()]
         } else {
@@ -231,14 +307,95 @@ impl ReadPolicyInputs {
             .filter_map(|root| AbsolutePathBuf::from_absolute_path(root).ok())
             .collect();
         roots.extend(real_roots);
-        // A write through a link lands where it finally points.
-        let target = ReadDenials::real_location(&path).unwrap_or(path);
-        !self
-            .profile
+        roots
+    }
+
+    /// The session's file policy without the protected-path rules (what a
+    /// grant would leave). Write permissions granted for the turn or
+    /// requested by the command are left out: Aggressive turns permission
+    /// requests off and refuses additional writes (#245).
+    fn base_policy(&self) -> FileSystemSandboxPolicy {
+        self.profile
             .clone()
-            .materialize_project_roots_with_workspace_roots(&roots)
+            .materialize_project_roots_with_workspace_roots(&self.roots())
             .file_system_sandbox_policy()
-            .can_write_path_with_cwd(target.as_path(), self.turn_cwd.as_path())
+    }
+
+    /// Whether `policy` writes where a write to `path` lands (a link's final
+    /// target), also through a root spelled by an alias of its location
+    /// (`/tmp` for `/private/tmp`), as the sandboxes match it (#619).
+    fn base_writable(&self, policy: &FileSystemSandboxPolicy, path: &AbsolutePathBuf) -> bool {
+        let target = ReadDenials::real_location(path).unwrap_or_else(|| path.clone());
+        let cwd = self.turn_cwd.as_path();
+        policy.can_write_path_with_cwd(target.as_path(), cwd)
+            || policy.can_write_effective_path_with_cwd(target.as_path(), cwd)
+    }
+
+    /// #740: whether a write to `path` lands inside one of `policy`'s
+    /// writable folders (where it is not writable: a read-only part of the
+    /// current folder), by any spelling of the folder.
+    fn in_writable_folder(&self, policy: &FileSystemSandboxPolicy, path: &AbsolutePathBuf) -> bool {
+        let target = ReadDenials::real_location(path).unwrap_or_else(|| path.clone());
+        policy
+            .get_writable_roots_with_cwd(self.turn_cwd.as_path())
+            .into_iter()
+            .flat_map(|root| {
+                let real = std::fs::canonicalize(root.root.as_path()).ok();
+                std::iter::once(root.root.to_path_buf()).chain(real)
+            })
+            .any(|root| target.as_path().starts_with(&root) || path.as_path().starts_with(&root))
+    }
+
+    /// #737, #740: for a command whose writes its text fully shows, when
+    /// none of them could be lifted by a grant, why: its first write that
+    /// no grant makes possible (outside the current folder, or in a
+    /// read-only part of it such as the project's `.git`), or else that it
+    /// writes nothing a grant lifts. `None` when a write is liftable (a hook
+    /// in `.husky`), or may be (a program or path the text does not show:
+    /// `npx husky install | tee ../log` keeps the offer).
+    fn unliftable_note(&self, command: &[String], cwd: &Path) -> Option<ProtectedNote> {
+        let writes = writes::writes(command);
+        let denials = self.denials();
+        let policy = self.base_policy();
+        let mut understood = writes.understood;
+        let mut first = None;
+        for word in writes.targets {
+            let Some(path) = resolve(&word, cwd, self.user_home.as_deref(), &self.codex_home)
+                .and_then(|path| AbsolutePathBuf::from_absolute_path(path).ok())
+            else {
+                understood = false;
+                continue;
+            };
+            // `/dev/null`, `/dev/stderr`: no file.
+            if path.as_path().starts_with("/dev") {
+                continue;
+            }
+            if self.base_writable(&policy, &path) {
+                if lands_in(path.as_path(), denials.liftable_read_only_paths(), &[]) {
+                    return None;
+                }
+                continue;
+            }
+            if first.is_none() {
+                first = Some(if self.in_writable_folder(&policy, &path) {
+                    ProtectedNote::ReadOnlyInFolder(word)
+                } else {
+                    ProtectedNote::OutsideFolder(word)
+                });
+            }
+        }
+        understood.then(|| first.unwrap_or(ProtectedNote::NothingToLift))
+    }
+
+    /// #740: whether a write to `path` is one no grant makes possible: the
+    /// sandbox does not write there even without the protected-path rules.
+    fn unliftable_write(&self, path: &Path) -> Option<bool> {
+        let path = AbsolutePathBuf::from_absolute_path(path).ok()?;
+        let policy = self.base_policy();
+        if path.as_path().starts_with("/dev") || self.base_writable(&policy, &path) {
+            return None;
+        }
+        Some(self.in_writable_folder(&policy, &path))
     }
 }
 
@@ -372,6 +529,17 @@ pub(crate) async fn denial_explanation(
     if !matches!(exit_code, Some(code) if code != 0) {
         return None;
     }
+    // #736: a keychain command fails without a file denial: the keychain
+    // service is out of reach of the sandbox.
+    if keychain_command(command)
+        && ReadPolicyInputs::capture(session, turn).is_some_and(|inputs| inputs.keychain_closed)
+    {
+        super::inspection::record_sandbox_denial(
+            session.thread_id(),
+            ProtectedNote::Keychain.inspected(),
+        );
+        return Some(KEYCHAIN_DENIAL.to_string());
+    }
     let denial_lines: Vec<String> = output
         .lines()
         .filter(|line| {
@@ -461,6 +629,39 @@ pub(crate) async fn denial_explanation(
                     Some(&denial_lines),
                 )
                 .map(ProtectedNote::NeverWritable)
+            })
+            // #737, #740: a write no grant makes possible (outside the
+            // current folder, the project's `.git`).
+            .or_else(|| {
+                if cfg!(windows) {
+                    return None;
+                }
+                let (user_home, codex_home) = (inputs.user_home.as_deref(), &inputs.codex_home);
+                // The denial line names the path as spelled or in full, not
+                // only its file name (a short name matches too much).
+                let named = |word: &str, path: &Path| {
+                    let full = path.display().to_string();
+                    denial_lines
+                        .iter()
+                        .any(|line| line.contains(word) || line.contains(&full))
+                };
+                let word = written_word(
+                    &command,
+                    &cwd,
+                    user_home,
+                    codex_home,
+                    &|path| inputs.unliftable_write(path).is_some(),
+                    Some(&denial_lines),
+                )?;
+                let path = resolve(&word, &cwd, user_home, codex_home)?;
+                if !named(&word, &path) {
+                    return None;
+                }
+                Some(if inputs.unliftable_write(&path)? {
+                    ProtectedNote::ReadOnlyInFolder(word)
+                } else {
+                    ProtectedNote::OutsideFolder(word)
+                })
             })
             // #621: a protected path the denial line reports that no word
             // of the command names (built at run time). Bounded: only the
@@ -578,9 +779,7 @@ pub(crate) async fn protected_path_in_command(
 ) -> Option<String> {
     match protected_note_in_command(session, turn, command, cwd).await? {
         ProtectedNote::Read(path) => Some(path),
-        ProtectedNote::Listing(_) | ProtectedNote::Startup(_) | ProtectedNote::NeverWritable(_) => {
-            None
-        }
+        _ => None,
     }
 }
 
@@ -596,6 +795,17 @@ pub(crate) enum ProtectedNote {
     /// A path no grant lifts that it writes (#584: the project's `.codex`
     /// and `.agents`, #520; the Corbanu home).
     NeverWritable(String),
+    /// A file outside the current folder that it writes (#740; #737: a
+    /// config file such as `~/.npmrc`).
+    OutsideFolder(String),
+    /// A read-only part of the current folder that it writes, which no
+    /// grant lifts (#740: the project's `.git`).
+    ReadOnlyInFolder(String),
+    /// Nothing a grant lifts, as far as its text shows (#740).
+    NothingToLift,
+    /// A macOS keychain command, which cannot reach the keychain service
+    /// (#736).
+    Keychain,
 }
 
 impl ProtectedNote {
@@ -606,6 +816,10 @@ impl ProtectedNote {
             Self::Listing(path) => listing_explanation(path),
             Self::Startup(path) => startup_explanation(path),
             Self::NeverWritable(path) => never_writable_explanation(path),
+            Self::OutsideFolder(path) => outside_folder_explanation(path),
+            Self::ReadOnlyInFolder(path) => read_only_in_folder_explanation(path),
+            Self::NothingToLift => NOTHING_TO_LIFT.to_string(),
+            Self::Keychain => KEYCHAIN_PROMPT.to_string(),
         }
     }
 
@@ -619,6 +833,11 @@ impl ProtectedNote {
             Self::NeverWritable(_) => {
                 "writing the project's .codex or .agents, or the Corbanu home"
             }
+            Self::OutsideFolder(_) => "writing outside the current folder",
+            Self::ReadOnlyInFolder(_) => "writing a read-only part of the current folder",
+            // Never explained where a command failed.
+            Self::NothingToLift => "a write no grant lifts",
+            Self::Keychain => "using the macOS keychain",
         }
     }
 }
@@ -627,7 +846,10 @@ impl ProtectedNote {
 /// that may not be listed (#506), or else a start-up file outside the
 /// current folder it names (#620), or else, when it writes no path a grant
 /// lifts, a path no grant lifts that it writes (#584: the project's `.codex`
-/// and `.agents`, the Corbanu home): no grant could apply to any of them.
+/// and `.agents`, the Corbanu home; #740: outside the current folder, the
+/// project's `.git`), or else, when its text shows every write, that it
+/// writes nothing a grant lifts (#740): no grant could apply to any of
+/// them. On macOS a keychain command comes first (#736).
 pub(crate) async fn protected_note_in_command(
     session: &Session,
     turn: &TurnContext,
@@ -635,6 +857,9 @@ pub(crate) async fn protected_note_in_command(
     cwd: &Path,
 ) -> Option<ProtectedNote> {
     let inputs = ReadPolicyInputs::capture(session, turn)?;
+    if inputs.keychain_closed && keychain_command(command) {
+        return Some(ProtectedNote::Keychain);
+    }
     let (command, cwd) = (command.to_vec(), cwd.to_path_buf());
     off_thread(move || {
         let matcher = inputs.matcher(&cwd)?;
@@ -687,6 +912,12 @@ pub(crate) async fn protected_note_in_command(
                     })
                     .flatten()
                     .map(ProtectedNote::NeverWritable)
+            })
+            // #737, #740 (Windows enforces writes differently, #554).
+            .or_else(|| {
+                (!cfg!(windows))
+                    .then(|| inputs.unliftable_note(&command, &cwd))
+                    .flatten()
             })
     })
     .await
@@ -848,148 +1079,6 @@ fn written_word(
     })
 }
 
-/// Shells whose `-c` argument is a script.
-const SHELLS: [&str; 6] = ["sh", "bash", "zsh", "dash", "ksh", "fish"];
-
-/// Programs whose path arguments (after the first, for `sed`'s script) are
-/// written, and those whose last argument is (`mv` also removes the others).
-const WRITES_EVERY_ARGUMENT: [&str; 5] = ["tee", "touch", "truncate", "rm", "chmod"];
-const WRITES_LAST_ARGUMENT: [&str; 5] = ["cp", "mv", "ln", "install", "rsync"];
-
-/// Shell scripts inside scripts (`bash -c '…'`) looked into.
-const MAX_SCRIPT_DEPTH: usize = 4;
-
-/// #620: the words a command writes to, as spelled: in a shell script,
-/// redirection targets (`>`, `>>`, `2>`, `&>`, `>&file`, `<>`, attached or
-/// not), and for each simple command every path argument of `tee`,
-/// `touch`, `truncate`, `rm` and `chmod`, the destination of `cp`, `mv`,
-/// `ln`, `install` and `rsync` (and what `mv` moves away), the files of
-/// `sed -i`, and `dd of=`; a shell's `-c` script is looked into. Text-based
-/// and incomplete (newlines, `;` inside a word and `|` attached to a word
-/// do not separate commands, and quotes inside a script are not kept); it
-/// only decides whether a grant offer is withheld as useless, never what
-/// runs.
-fn write_targets(command: &[String]) -> Vec<String> {
-    simple_command_targets(command, MAX_SCRIPT_DEPTH)
-}
-
-/// The words one simple command (already split into words) writes to.
-fn simple_command_targets(words: &[String], depth: usize) -> Vec<String> {
-    // Skip `VAR=value` prefixes and `sudo`/`command`/`env`/`exec`/`nohup`.
-    let words: Vec<&str> = words
-        .iter()
-        .map(String::as_str)
-        .skip_while(|word| {
-            (word.contains('=') && !word.starts_with('-'))
-                || matches!(*word, "sudo" | "command" | "env" | "exec" | "nohup")
-        })
-        .collect();
-    let Some((program, arguments)) = words.split_first() else {
-        return Vec::new();
-    };
-    let program = program.rsplit('/').next().unwrap_or(program);
-    if SHELLS.contains(&program) {
-        // Every argument after a `-c` option is the script (and its `$0`,
-        // `$1`…, which parse as plain words).
-        return arguments
-            .iter()
-            .skip_while(|argument| {
-                !(argument.starts_with('-')
-                    && !argument.starts_with("--")
-                    && argument.contains('c'))
-            })
-            .skip(1)
-            .take(1)
-            .flat_map(|script| script_targets(script, depth))
-            .collect();
-    }
-    let paths: Vec<&&str> = arguments
-        .iter()
-        .filter(|word| !word.starts_with('-'))
-        .collect();
-    let owned = |paths: &[&&str]| paths.iter().map(std::string::ToString::to_string).collect();
-    if WRITES_EVERY_ARGUMENT.contains(&program) || (program == "mv" && paths.len() >= 2) {
-        owned(&paths)
-    } else if WRITES_LAST_ARGUMENT.contains(&program) && paths.len() >= 2 {
-        // With one path, `ln -s x` and `install x` write in the current
-        // folder, not to it.
-        owned(&paths[paths.len() - 1..])
-    } else if program == "sed" && arguments.iter().any(|word| word.starts_with("-i")) {
-        // Every path after the script (or all of them with `-e`).
-        let skip = usize::from(!arguments.contains(&"-e")).min(paths.len());
-        owned(&paths[skip..])
-    } else if program == "dd" {
-        arguments
-            .iter()
-            .filter_map(|word| word.strip_prefix("of="))
-            .map(str::to_string)
-            .collect()
-    } else {
-        Vec::new()
-    }
-}
-
-/// The words a shell script writes to: its redirection targets, and those
-/// of each simple command in it (see [`write_targets`]).
-fn script_targets(script: &str, depth: usize) -> Vec<String> {
-    let Some(depth) = depth.checked_sub(1) else {
-        return Vec::new();
-    };
-    let words = shlex::split(script)
-        .unwrap_or_else(|| script.split_whitespace().map(str::to_string).collect());
-    let mut targets = Vec::new();
-    let mut segment: Vec<String> = Vec::new();
-    let mut redirect_next = false;
-    let mut input_next = false;
-    for word in words {
-        let ends_segment = word.ends_with(';') || matches!(word.as_str(), "&&" | "||" | "|" | "&");
-        let trimmed = word.trim_end_matches(';');
-        if redirect_next {
-            redirect_next = false;
-            targets.push(trimmed.trim_end_matches(['&', '|', ')']).to_string());
-        } else if input_next {
-            // `< file` is read, not written.
-            input_next = false;
-        } else if let Some(target) = trimmed.strip_prefix("<>") {
-            // Opened for reading and writing.
-            if target.is_empty() {
-                redirect_next = !ends_segment;
-            } else {
-                targets.push(target.to_string());
-            }
-        } else if trimmed.starts_with('<') {
-            // `<file`, `<<EOF`; a lone `<` takes the next word.
-            input_next = trimmed == "<" && !ends_segment;
-        } else if let Some(index) = trimmed.find('>') {
-            // `>`, `>>`, `2>`, `&>`, `>|`, `>&file`, alone or attached to its
-            // target or to the word before (`x>>~/.zshrc`); `2>&1` and `>&-`
-            // write no file.
-            let before =
-                trimmed[..index].trim_end_matches(|c: char| c.is_ascii_digit() || c == '&');
-            if !before.is_empty() {
-                segment.push(before.to_string());
-            }
-            let target = trimmed[index..].trim_start_matches(['>', '|']);
-            let target = target.strip_prefix('&').unwrap_or(target).trim();
-            let duplicates = target.starts_with(|c: char| c.is_ascii_digit() || c == '-')
-                && trimmed[index..].contains(">&");
-            match (duplicates, target.is_empty()) {
-                // A file descriptor, not a file.
-                (true, _) => {}
-                (false, true) => redirect_next = !ends_segment,
-                (false, false) => targets.push(target.to_string()),
-            }
-        } else if !trimmed.is_empty() && !matches!(trimmed, "&&" | "||" | "|" | "&") {
-            segment.push(trimmed.to_string());
-        }
-        if ends_segment {
-            targets.extend(simple_command_targets(&std::mem::take(&mut segment), depth));
-        }
-    }
-    targets.extend(simple_command_targets(&segment, depth));
-    targets
-}
-
 /// Characters that end a path inside code.
 const CODE_DELIMITERS: [char; 16] = [
     '\'', '"', '`', '(', ')', '[', ']', '{', '}', ',', ';', '+', ' ', '\t', '\n', '\r',
@@ -1060,3 +1149,7 @@ fn resolve(word: &str, cwd: &Path, user_home: Option<&Path>, codex_home: &Path) 
 #[cfg(test)]
 #[path = "protected_reads_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "protected_reads_writes_tests.rs"]
+mod writes_tests;
