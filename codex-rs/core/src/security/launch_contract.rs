@@ -22,6 +22,7 @@ use codex_protocol::permissions::FileSystemSandboxEntry;
 use codex_protocol::permissions::FileSystemSandboxKind;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::NetworkSandboxPolicy;
+use codex_protocol::permissions::ReadDenyMatcher;
 use codex_protocol::secretless_launch;
 use codex_sandboxing::SandboxCommand;
 use codex_sandboxing::SandboxType;
@@ -538,24 +539,7 @@ impl LaunchContract {
         if file_system.kind != FileSystemSandboxKind::Restricted {
             return Err(LaunchDenied::UnprotectableFileSystem);
         }
-        // A writable root above CODEX_HOME (for example `$TMPDIR`) becomes
-        // read-only there; this only narrows access. A workspace inside
-        // CODEX_HOME stays writable and is refused below. #619: also a root
-        // spelled by an alias of its location (`/tmp` for `/private/tmp`).
-        // #652: also through a root reached through a nested link, spelled
-        // through that root too, which is how the sandboxes honor it.
-        if file_system.can_write_path_with_cwd(self.codex_home.as_path(), cwd)
-            || file_system.can_write_effective_path_with_cwd(self.codex_home.as_path(), cwd)
-        {
-            let spellings =
-                file_system.writable_root_spellings_with_cwd(self.codex_home.as_path(), cwd);
-            for path in std::iter::once(self.codex_home.clone()).chain(spellings) {
-                file_system.entries.push(FileSystemSandboxEntry::new(
-                    FileSystemPath::Path { path },
-                    FileSystemAccessMode::Read,
-                ));
-            }
-        }
+        self.keep_codex_home_read_only(&mut file_system, cwd);
         // #651 (Linux): a database folder (and what Corbanu keeps in it)
         // missing where the command could make it is made as Corbanu would,
         // so bubblewrap holds no missing path there with a placeholder file
@@ -575,6 +559,53 @@ impl LaunchContract {
         let protected = PermissionProfile::from_runtime_permissions(&file_system, network);
         self.verify_permissions(&protected, cwd)?;
         Ok(protected)
+    }
+
+    /// A writable root above CODEX_HOME (for example `$TMPDIR`) becomes
+    /// read-only there; this only narrows access. A workspace inside
+    /// CODEX_HOME stays writable and is refused by `verify_permissions`.
+    /// #619: also a root spelled by an alias of its location (`/tmp` for
+    /// `/private/tmp`). #652: also through a root reached through a nested
+    /// link, spelled through that root too, which is how the sandboxes honor
+    /// it.
+    fn keep_codex_home_read_only(&self, file_system: &mut FileSystemSandboxPolicy, cwd: &Path) {
+        if file_system.can_write_path_with_cwd(self.codex_home.as_path(), cwd)
+            || file_system.can_write_effective_path_with_cwd(self.codex_home.as_path(), cwd)
+        {
+            let spellings =
+                file_system.writable_root_spellings_with_cwd(self.codex_home.as_path(), cwd);
+            for path in std::iter::once(self.codex_home.clone()).chain(spellings) {
+                file_system.entries.push(FileSystemSandboxEntry::new(
+                    FileSystemPath::Path { path },
+                    FileSystemAccessMode::Read,
+                ));
+            }
+        }
+    }
+
+    /// #748: whether this contract alone, at every security level, keeps
+    /// agent commands from reading `path`. Explanation only.
+    pub(crate) fn keeps_unreadable(&self, path: &Path, cwd: &Path) -> bool {
+        let policy = FileSystemSandboxPolicy::restricted(self.protected_entries());
+        ReadDenyMatcher::try_new(&policy, cwd)
+            .ok()
+            .flatten()
+            .is_some_and(|matcher| matcher.is_read_denied(path))
+    }
+
+    /// #748: whether this contract alone, at every security level, keeps
+    /// agent commands from writing `path` where `base` lets them (it keeps
+    /// `CODEX_HOME` read-only and its protected paths unreadable).
+    /// Explanation only.
+    pub(crate) fn keeps_read_only(
+        &self,
+        base: &FileSystemSandboxPolicy,
+        path: &Path,
+        cwd: &Path,
+    ) -> bool {
+        let mut file_system = base.clone();
+        self.keep_codex_home_read_only(&mut file_system, cwd);
+        self.keeps_unreadable(path, cwd) || !file_system.can_write_path_with_cwd(path, cwd)
     }
 
     /// The deny entries [`Self::protect_permissions`] adds: every protected
