@@ -36,6 +36,7 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::user_input::UserInput;
 use codex_security_policy::SecurityLevel;
+use codex_utils_path_uri::PathUri;
 use core_test_support::responses;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
@@ -199,8 +200,20 @@ async fn run(confirm: bool) -> anyhow::Result<Run> {
     }
     Ok(Run {
         asked,
-        wrote: test.cwd_path().join("issue505.txt").exists(),
+        wrote: written(&test, "issue505.txt").await?,
     })
+}
+
+/// Whether the command created `name` in the session's folder, checked on the
+/// filesystem the command ran on (the remote executor's under a remote test
+/// environment, where the host's copy of the folder never sees the write).
+async fn written(test: &TestCodex, name: &str) -> anyhow::Result<bool> {
+    let path = PathUri::from_abs_path(&test.config.cwd.join(name));
+    match test.fs().get_metadata(&path, /*sandbox*/ None).await {
+        Ok(_) => Ok(true),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err.into()),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
