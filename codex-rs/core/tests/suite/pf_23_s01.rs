@@ -431,10 +431,36 @@ async fn pf_23_s01_typing_a_protected_command_into_a_running_shell_needs_the_hum
 /// Inside one code-mode cell, a tool result the script reads makes its next
 /// call post-taint, before anything is recorded: the vault command derived
 /// after it is refused with approvals off. Permissive is unchanged.
+///
+/// #553: this test needs a real code-mode cell run. With the default test
+/// thread stack the setup overflows it, an environmental failure rather
+/// than a product one, so run the async body on threads with room to
+/// spare.
 #[cfg(unix)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn pf_23_s01_code_mode_cell_results_taint_its_later_calls() -> anyhow::Result<()> {
-    skip_if_no_network!(Ok(()));
+#[test]
+fn pf_23_s01_code_mode_cell_results_taint_its_later_calls() {
+    skip_if_no_network!();
+    const TEST_STACK_SIZE_BYTES: usize = 32 * 1024 * 1024;
+    std::thread::Builder::new()
+        .name("pf_23_s01_taint".to_string())
+        .stack_size(TEST_STACK_SIZE_BYTES)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(TEST_STACK_SIZE_BYTES)
+                .enable_all()
+                .build()
+                .expect("test runtime should build")
+                .block_on(pf_23_s01_taint_inner())
+        })
+        .expect("test thread should spawn")
+        .join()
+        .expect("test thread should not panic")
+        .expect("test body should succeed");
+}
+
+#[cfg(unix)]
+async fn pf_23_s01_taint_inner() -> anyhow::Result<()> {
     skip_if_wine_exec!(
         Ok(()),
         "this security test runs host shell commands; Wine-exec routes them to a Windows executor with a non-native cwd"
