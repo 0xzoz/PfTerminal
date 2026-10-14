@@ -24,7 +24,7 @@ use tracing_subscriber::layer::SubscriberExt;
 
 static TRACE_CONTEXT_CONFIG_LOCK: Mutex<()> = Mutex::new(());
 
-/// Upper bound for one exporter round trip; see [`spawn_collector`].
+/// Upper bound for waiting on an export; see [`spawn_collector`].
 const COLLECTOR_DEADLINE: Duration = Duration::from_secs(30);
 
 struct CapturedRequest {
@@ -173,6 +173,15 @@ fn spawn_collector(
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(10));
                 }
+                // A connection the client dropped before it was accepted
+                // (Windows reports these from `accept`); keep listening.
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        std::io::ErrorKind::ConnectionReset
+                            | std::io::ErrorKind::ConnectionAborted
+                            | std::io::ErrorKind::Interrupted
+                    ) => {}
                 Err(_) => break,
             }
         }
