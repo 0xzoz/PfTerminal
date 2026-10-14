@@ -815,8 +815,9 @@ fn utc(text: &str) -> i64 {
 
 /// #361: every OpenAI API-key row states the Standard rates OpenAI publishes,
 /// read 2026-10-09 (GPT-6.1 Sol: 2026-10-14, #368) from
-/// developers.openai.com/api/docs/pricing and each model's page: input, cached input, cache writes ("-" or unlisted means the
-/// sheet states none) and output in milli-USD per million tokens, and, where
+/// developers.openai.com/api/docs/pricing and each model's page: input,
+/// cached input, cache writes ("-" or unlisted means the sheet states none)
+/// and output in milli-USD per million tokens, and, where
 /// the page says prompts above 272K input tokens cost 2x input (cache rates
 /// included) and 1.5x output for the full request, that tier.
 #[test]
