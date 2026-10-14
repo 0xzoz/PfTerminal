@@ -84,6 +84,22 @@ class PrLinuxClippyTest(unittest.TestCase):
             "[[ '${{ needs.lint_build_windows.result }}' == 'success' ]]", rust_ci
         )
 
+    def test_only_the_pr_windows_leg_skips_cache_saves(self) -> None:
+        lint_build = self.workflow("rust-ci-lint-build.yml")
+        for step in ("Save cargo home cache", "Save sccache cache (fallback)"):
+            with self.subTest(step=step):
+                self.assertRegex(
+                    lint_build,
+                    rf"(?m)^      - name: {re.escape(step)}\n        if: .* && inputs\.save_caches$",
+                )
+        self.assertRegex(
+            lint_build,
+            r"(?m)^      save_caches:\n(?:        .*\n)*?        default: true$",
+        )
+        # Postmerge (and so main's saved caches) keeps the default.
+        self.assertNotIn("save_caches", self.workflow("rust-ci-full.yml"))
+        self.assertEqual(self.workflow("rust-ci.yml").count("save_caches: false"), 1)
+
     def test_pr_ci_skips_linux_test_suite(self) -> None:
         self.assertNotIn("nextest", self.workflow("rust-ci.yml"))
 

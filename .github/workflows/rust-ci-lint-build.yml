@@ -24,7 +24,9 @@ on:
           Save the cargo-home and sccache caches. The PR Windows leg turns this
           off so it restores main's caches without adding its own (the repo's
           Actions cache is over its size limit, and LRU eviction drops main's
-          Windows caches within the hour when every PR adds ~700 MB).
+          Windows caches within the hour when every PR adds ~700 MB). Only
+          the local-disk sccache fallback honours it; the sccache GitHub
+          backend, if ever enabled, writes the cache itself.
         type: boolean
         default: true
 
