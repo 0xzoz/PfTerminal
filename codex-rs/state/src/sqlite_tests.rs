@@ -370,12 +370,12 @@ async fn open_failing(code: &'static str, failures: u32) -> (Result<(), sqlx::Er
 /// open is retried, and only that error is.
 #[tokio::test]
 async fn an_open_retries_only_the_shm_reset_race() {
-    let (result, attempts) = open_failing("1546", 2).await;
+    let (result, attempts) = open_failing("1546", /*failures*/ 2).await;
     assert!(result.is_ok(), "{result:?}");
     assert_eq!(attempts, 3);
 
     // Any other error (here SQLITE_IOERR_SHMOPEN) is returned at once.
-    let (result, attempts) = open_failing("4618", 1).await;
+    let (result, attempts) = open_failing("4618", /*failures*/ 1).await;
     assert!(result.is_err());
     assert_eq!(attempts, 1);
 
