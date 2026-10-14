@@ -1,7 +1,7 @@
 # Issue #505: confirming Aggressive requires a person's approval for every command from the next turn, before any restart.
 id = "issue505-approvals-at-confirmation"
-feature = "Approval for every command applies as soon as you confirm Aggressive"
-expected = "The session starts with approvals off (never). After Aggressive is confirmed, screen 07 says approval for every command applies now and the rest at the restart; without restarting, the agent's next write command waits for your approval."
+feature = "Confirming Aggressive requires approval for every command from the next turn"
+expected = "The session starts with approvals off (never). After Aggressive is confirmed, screen 07 says approval for every command applies from each pane's next turn and the rest at the restart; without restarting, the agent's next write command waits for your approval."
 model = "glm-5.3-flash"
 provider = "zai"
 config = """
