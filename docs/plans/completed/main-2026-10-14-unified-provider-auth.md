@@ -1,6 +1,6 @@
 ---
 title: "Unified provider onboarding and management"
-status: active
+status: completed
 change_class: product-initiative
 priority: P1
 owner: "Codex primary agent"
@@ -9,10 +9,10 @@ parallel_lanes: "home-hygiene, account-registry, account-selection, account-ui, 
 integration_owner: "Codex PF-84 lane owner"
 activation_authority: "Final product authority — user decision"
 activation_basis: "The user's 2026-09-01 P1 decision to supersede the remaining Claude-auth planning slot with one provider-auth initiative, preserve the merged Claude implementation evidence, unify onboarding and /providers, support multi-provider setup and deferred Corbanu Plan onboarding, and make every configured provider active by default. Reactivated 2026-10-10 for PF-84 by Travis: \"Yes, let's hit multi-account.\""
-target_release: "TBD"
+target_release: "None: closed without a release; named accounts stay behind the default-off named_accounts flag"
 deadline: "TBD"
 created: 2026-08-30
-updated: 2026-10-11
+updated: 2026-10-14
 product_spec:
   file: docs/corbanu-product-spec.md
   heading: "Shipping MVP — LIVE"
@@ -58,6 +58,23 @@ implementation_worktrees:
 
 # Unified provider onboarding and management
 
+## Closing note (2026-10-14)
+
+**Closed 2026-10-14 to free active slot 2** for Travis's decision of 2026-10-14 to start the
+[PF-60 accounting follow-ups](../active/portfolio-agent-cost-accounting-followups.md) after the Moderate picker
+sprint (decision 29 of that day's list; coordinator brief `pf60-s06`). All three slots were full and this was the
+plan whose sprint programme was finished: PF-84-S01–S06 are accepted and archived (S06 on 2026-10-13, limited
+testing). Travis may reverse this; reopening it needs a free slot.
+
+- **Exception, as for P0 security and PF-60:** closed without a release. Named accounts are on main behind the
+  default-off `named_accounts` flag. The `main-2026-10-14` prefix names the tree, not a release.
+- **Carried forward, not waived:** the six flag-removal prerequisites below (live ChatGPT and Bedrock checks with
+  test accounts, the #425/#426/#428 re-check, the partial #555 legs and REG-02, #588/#609/#689, an isolated
+  code-blind run and Travis's sign-off) move to the draft
+  [named-accounts flag removal](../proposed/named-accounts-flag-removal.md) plan. PF-58-S01 stays a draft residual
+  sprint and the unchecked Completion items below stay open there. Bug fixes for #588, #609, #689 and #694 need no
+  active slot.
+
 2026-10-10 activation: Travis approved PF-84 named accounts ("Yes, let's hit
 multi-account"). The plan takes active slot 2, released when the accounting plan
 completed. Only PF-84 is in scope for this activation; PF-58-S01 stays a draft
@@ -72,7 +89,7 @@ Plan lifecycle: `docs/plans/index.md`
 
 | Field | Value |
 | --- | --- |
-| Status | **Active** from 2026-10-10 for PF-84; deferred 2026-09-11 to 2026-10-10 |
+| Status | **Completed** 2026-10-14 (slot 2 freed for the PF-60 follow-ups; see Closing note); active 2026-10-10 to 2026-10-14 for PF-84; deferred 2026-09-11 to 2026-10-10 |
 | Active-plan slot | **2 of 3** (accounting slot, released when that plan completed) |
 | Priority | **P1** — current drift is disrupting co-founders and users |
 | Product authority | Final product authority — user decision |

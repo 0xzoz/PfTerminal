@@ -2,7 +2,7 @@
 sprint_id: "PF-84-S01"
 title: "Home override hygiene for per-account workers"
 status: completed
-plan_file: "docs/plans/active/unified-provider-auth.md"
+plan_file: "docs/plans/completed/main-2026-10-14-unified-provider-auth.md"
 plan_feature: "PF-84"
 execution_order: 23
 owner: "Codex PF-84 home-hygiene worker"
@@ -45,7 +45,7 @@ Follow-ups: none owned by this record.
 
 ## Plan linkage
 
-- Plan: [Unified provider onboarding and management](../../../plans/active/unified-provider-auth.md)
+- Plan: [Unified provider onboarding and management](../../../plans/completed/main-2026-10-14-unified-provider-auth.md)
 - Feature: `PF-84`
 - Acceptance advanced: "Wrapper/home override" flow.
 

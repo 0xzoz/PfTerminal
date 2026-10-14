@@ -1,20 +1,20 @@
 ---
 sprint_id: "PF-60-S06"
 title: "Side-conversation and temporary-fork attribution"
-status: draft
-plan_file: "docs/plans/proposed/portfolio-agent-cost-accounting-followups.md"
+status: in_progress
+plan_file: "docs/plans/active/portfolio-agent-cost-accounting-followups.md"
 plan_feature: "PF-60"
 execution_order: 1
-owner: "Codex accounting lane (proposed); Travis Good accepts"
-parallel_lane: "UNALLOCATED"
-write_scope: "UNALLOCATED"
-integration_gate: "UNALLOCATED"
-worktree: "UNALLOCATED"
-branch: "UNALLOCATED"
-base_commit: "UNALLOCATED"
+owner: "Codex worker pf60-s06; Travis Good accepts"
+parallel_lane: "accounting"
+write_scope: "codex-rs/core/src/session/mod.rs, codex-rs/core/src/accounting.rs, codex-rs/core/src/agent/control.rs, codex-rs/core/src/session/tests/guardian_tests.rs, codex-rs/core/tests/suite/, codex-rs/protocol/src/protocol.rs, codex-rs/tui/src/app_server_session.rs, docs/sprints/current/portfolio-agent-cost-accounting-followups/pf-60-s06-side-and-fork-attribution.md, qa/portfolio/agent-cost-accounting/pf-60-s06/"
+integration_gate: "One PR to main: focused just test with and without developer-accounting, macOS and Linux clippy -D warnings, independent Opus 5.5 High review to APPROVE, tmux check on GLM 5.3 Flash in a disposable home, SOP video; Travis accepts"
+worktree: "/Volumes/CorbanuDrive/Corbanu/worktrees/pf60-s06"
+branch: "pf60-s06-side-attribution"
+base_commit: "ecb9069c4b3e0bdb20cb88d520fc8b54745cea34"
 depends_on: "PF-60-S04"
 created: 2026-10-10
-updated: 2026-10-10
+updated: 2026-10-14
 ---
 
 # PF-60-S06 — Side-conversation and temporary-fork attribution
@@ -30,7 +30,7 @@ updated: 2026-10-10
 
 ## Plan linkage
 
-- Plan: [Accounting follow-ups after PF-60](../../../plans/proposed/portfolio-agent-cost-accounting-followups.md); feature `PF-60`.
+- Plan: [Accounting follow-ups after PF-60](../../../plans/active/portfolio-agent-cost-accounting-followups.md); feature `PF-60`.
 - Acceptance advanced: every request appears once under the parent conversation, labelled with what it was.
 
 ## Code boundaries
@@ -44,14 +44,15 @@ updated: 2026-10-10
 
 ## Preconditions
 
-- [ ] Plan is active.
-- [ ] Dependencies are completed.
-- [ ] Worktree, branch, and base commit are exact and match the plan.
-- [ ] If parallel, owner/lane/scopes are disjoint and the receiving integration gate is recorded.
+- [x] Plan is active (Travis, 2026-10-14; slot 2).
+- [x] Dependencies are completed (PF-60-S04 archived 2026-10-10).
+- [x] Worktree, branch, and base commit are exact and match the plan.
+- [x] Not parallel: the plan runs one sprint at a time.
 
 ## Done
 
 - [x] Draft sprint created 2026-10-10 from Travis's decision; linked to one plan feature.
+- [x] Allocated 2026-10-14 (worker `pf60-s06`) when Travis started the follow-ups.
 
 ## Remaining
 
