@@ -618,7 +618,7 @@ pub(crate) fn database_has_content(path: &Path) -> bool {
 /// real truncation failure there still fails after the retries.
 fn is_shm_reset_race(err: &Error) -> bool {
     err.as_database_error()
-        .and_then(|err| err.code())
+        .and_then(sqlx::error::DatabaseError::code)
         .is_some_and(|code| code == SQLITE_IOERR_TRUNCATE)
 }
 

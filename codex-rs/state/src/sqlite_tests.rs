@@ -384,8 +384,8 @@ async fn an_open_retries_only_the_shm_reset_race() {
     let code = result
         .expect_err("still failing")
         .as_database_error()
-        .and_then(|err| err.code())
-        .map(|code| code.into_owned());
+        .and_then(sqlx::error::DatabaseError::code)
+        .map(std::borrow::Cow::into_owned);
     assert_eq!(code.as_deref(), Some("1546"));
     assert_eq!(attempts, SHM_RESET_RETRIES + 1);
 }
