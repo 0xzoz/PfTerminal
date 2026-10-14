@@ -12,6 +12,7 @@ use std::path::Path;
 use codex_protocol::config_types::ForcedLoginMethod;
 use codex_vault::ProviderAccountKind;
 use codex_vault::ProviderAccountName;
+use codex_vault::ProviderAccountSignIn;
 use codex_vault::Vault;
 use codex_vault::VaultKeyStorage;
 use zeroize::Zeroizing;
@@ -67,19 +68,49 @@ impl VaultAccountAuthStorage {
     }
 }
 
+/// #609: what a sign-in holds, for its vault metadata (never the value).
+/// ChatGPT tokens count first, as in [`sign_in_restriction`]. `None` for a
+/// sign-in with neither: status then shows it as a ChatGPT sign-in, as
+/// before, and its manager still checks it at use.
+pub(super) fn sign_in_kind(auth: &AuthDotJson) -> Option<ProviderAccountSignIn> {
+    if auth.tokens.is_some() {
+        Some(ProviderAccountSignIn::Chatgpt)
+    } else if auth.openai_api_key.is_some() {
+        Some(ProviderAccountSignIn::ApiKey)
+    } else {
+        None
+    }
+}
+
 impl VaultAccountAuthStorage {
     /// Saves a first sign-in; fails, changing nothing, when the account
     /// already exists (a concurrent add never overwrites it).
     pub(super) fn create(&self, auth: &AuthDotJson) -> std::io::Result<()> {
         let raw = Zeroizing::new(serde_json::to_string(auth).map_err(std::io::Error::other)?);
         self.vault
-            .create_provider_account(
+            .create_provider_account_with_sign_in(
                 &self.provider_id,
                 &self.name,
                 ProviderAccountKind::ChatgptAuth,
                 &raw,
+                sign_in_kind(auth),
             )
             .map_err(std::io::Error::other)
+    }
+
+    /// #609: records what a sign-in read from the vault holds when its
+    /// metadata does not say so yet (saved by an earlier build). Best
+    /// effort: status then shows the account as a ChatGPT sign-in, as before.
+    fn record_sign_in_kind(&self, auth: &AuthDotJson) {
+        let Some(sign_in) = sign_in_kind(auth) else {
+            return;
+        };
+        if let Err(error) =
+            self.vault
+                .record_provider_account_sign_in(&self.provider_id, &self.name, sign_in)
+        {
+            tracing::debug!(%error, "could not record what account `{}` holds", self.name);
+        }
     }
 }
 
@@ -89,19 +120,15 @@ impl AuthStorageBackend for VaultAccountAuthStorage {
         if self.vault.key_storage() == VaultKeyStorage::NotInitialized {
             return Ok(None);
         }
-        let Some(raw) = self
+        let Some((raw, recorded)) = self
             .vault
-            .read_provider_account(
-                &self.provider_id,
-                &self.name,
-                ProviderAccountKind::ChatgptAuth,
-            )
+            .read_provider_account_sign_in(&self.provider_id, &self.name)
             .map_err(std::io::Error::other)?
         else {
             return Ok(None);
         };
         // The parse error never quotes the value.
-        serde_json::from_str(&raw).map(Some).map_err(|error| {
+        let auth: AuthDotJson = serde_json::from_str(&raw).map_err(|error| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!(
@@ -112,17 +139,24 @@ impl AuthStorageBackend for VaultAccountAuthStorage {
                     error.column()
                 ),
             )
-        })
+        })?;
+        // #609: a sign-in saved before its kind was recorded gets it on its
+        // next use (the index only; nothing is written once it is there).
+        if recorded.is_none() {
+            self.record_sign_in_kind(&auth);
+        }
+        Ok(Some(auth))
     }
 
     fn save(&self, auth: &AuthDotJson) -> std::io::Result<()> {
         let raw = Zeroizing::new(serde_json::to_string(auth).map_err(std::io::Error::other)?);
         self.vault
-            .write_provider_account(
+            .write_provider_account_with_sign_in(
                 &self.provider_id,
                 &self.name,
                 ProviderAccountKind::ChatgptAuth,
                 &raw,
+                sign_in_kind(auth),
             )
             .map_err(std::io::Error::other)
     }

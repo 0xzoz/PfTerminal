@@ -1,6 +1,6 @@
 # PF-84-S06 slice A gate: AWS profile accounts for Amazon Bedrock
 
-Sprint: [PF-84-S06](../../../docs/sprints/current/unified-provider-auth/pf-84-s06-aws-and-chatgpt-accounts.md),
+Sprint: [PF-84-S06](../../../docs/sprints/archive/unified-provider-auth/pf-84-s06-aws-and-chatgpt-accounts.md),
 slice A (Travis's D4 option (a), 2026-10-11). Behind the default-off `named_accounts` flag.
 
 ## What changed

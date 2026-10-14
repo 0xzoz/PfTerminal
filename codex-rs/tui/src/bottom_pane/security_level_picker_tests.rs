@@ -183,6 +183,10 @@ fn return_to_permissive_while_aggressive_is_active() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Aggressive cannot be fully applied on a Windows test machine without the Windows sandbox (#691)"
+)]
 fn unreadable_state_is_reported_and_aggressive_selected() {
     let home = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -394,6 +398,10 @@ mod pf_29_s01 {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "PF-27-S06: protected launch is not available on Windows yet, so readiness is never clean (#691)"
+    )]
     fn pf_29_s01_clean_preflight_saves_level_and_receipt() {
         let machine = Machine::new();
         std::fs::write(machine.home().join(".netrc"), "machine x password fake").unwrap();
@@ -425,6 +433,10 @@ mod pf_29_s01 {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "PF-27-S06: protected launch is not available on Windows yet, so readiness is never clean (#691)"
+    )]
     fn pf_29_s01_drift_after_review_refuses_save() {
         let machine = Machine::new();
         std::fs::write(machine.home().join(".netrc"), "one").unwrap();
@@ -444,6 +456,10 @@ mod pf_29_s01 {
     /// Toggling nested agents on a saved Aggressive skips the preflight only
     /// while a receipt is on record (review 3).
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "PF-27-S06: protected launch is not available on Windows yet, so readiness is never clean (#691)"
+    )]
     fn pf_29_s01_saved_aggressive_without_receipt_needs_a_preflight() {
         let machine = Machine::new();
         level::save(
@@ -467,6 +483,10 @@ mod pf_29_s01 {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "PF-27-S06: protected launch is not available on Windows yet, so readiness is never clean (#691)"
+    )]
     fn pf_29_s01_returning_to_permissive_removes_the_receipt() {
         let machine = Machine::new();
         let mut picker = machine.picker(/*flags_on*/ true, ChosenLevel::Permissive);
@@ -612,6 +632,10 @@ mod pf_29_s02 {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "PF-27-S06: protected launch is not available on Windows yet, so readiness is never clean (#691)"
+    )]
     fn pf_29_s02_confirm_moves_reaudits_and_then_saves() {
         let machine = Machine::new();
         let mut picker = machine.picker();
@@ -639,6 +663,10 @@ mod pf_29_s02 {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "PF-27-S06: protected launch is not available on Windows yet, so readiness is never clean (#691)"
+    )]
     fn pf_29_s02_failure_locks_aggressive_until_recovery() {
         let machine = Machine::new();
         machine.store.locked.set(true);
@@ -769,6 +797,10 @@ mod pf_24_s02 {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Aggressive cannot be fully applied on a Windows test machine without the Windows sandbox (#691)"
+    )]
     fn security_confirm_aggressive_raises_core_and_offers_restart() {
         let machine = Machine::new();
         let (mut picker, mut rx) = machine.picker(ChosenLevel::Permissive);
@@ -800,6 +832,10 @@ mod pf_24_s02 {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Aggressive cannot be fully applied on a Windows test machine without the Windows sandbox (#691)"
+    )]
     fn security_confirm_downgrade_shows_removed_protections_first() {
         let machine = Machine::new();
         machine.confirmed_aggressive();
@@ -855,6 +891,10 @@ mod pf_24_s02 {
     /// the restarted process would not get it, so "restart now" is not
     /// offered; the review lists every Aggressive protection.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Aggressive cannot be fully applied on a Windows test machine without the Windows sandbox (#691)"
+    )]
     fn security_confirm_downgrade_never_restarts_without_the_environment_key() {
         let machine = Machine::new();
         machine.confirmed_aggressive();
@@ -882,6 +922,10 @@ mod pf_24_s02 {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Aggressive cannot be fully applied on a Windows test machine without the Windows sandbox (#691)"
+    )]
     fn security_confirm_write_failure_keeps_the_view_open() {
         let machine = Machine::new();
         machine.confirmed_aggressive();
@@ -911,6 +955,10 @@ mod pf_24_s02 {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Aggressive cannot be fully applied on a Windows test machine without the Windows sandbox (#691)"
+    )]
     fn security_confirm_state_changed_elsewhere_reviews_again() {
         let machine = Machine::new();
         let (mut picker, _rx) = machine.picker(ChosenLevel::Permissive);
@@ -938,6 +986,10 @@ mod pf_24_s02 {
     /// An agent command (or anything else) that rewrites the level file to
     /// Permissive outside `/security` does not lower the next start.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Aggressive cannot be fully applied on a Windows test machine without the Windows sandbox (#691)"
+    )]
     fn security_confirm_level_file_edited_by_an_agent_is_caught() {
         let machine = Machine::new();
         machine.confirmed_aggressive();
@@ -985,6 +1037,10 @@ mod pf_24_s02 {
     /// The commit runs off the UI thread: the screen says so until `poll`
     /// collects the result, and keys do nothing meanwhile.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Aggressive cannot be fully applied on a Windows test machine without the Windows sandbox (#691)"
+    )]
     fn security_confirm_saving_screen_until_the_commit_finishes() {
         let machine = Machine::new();
         let (mut picker, _rx) = machine.picker(ChosenLevel::Permissive);

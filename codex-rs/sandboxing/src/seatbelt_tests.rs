@@ -2330,6 +2330,48 @@ fn an_outer_writable_root_keeps_the_workspace_metadata_protected() {
     assert!(workspace.join(".git/HEAD").exists() && !workspace.join(".agents").exists());
 }
 
+/// Whether `dir` is on a volume that ignores case (macOS's default).
+fn ignores_case(dir: &Path) -> bool {
+    let probe = dir.join("case-probe-606");
+    fs::write(&probe, "x").expect("probe");
+    let ignores = dir.join("CASE-PROBE-606").exists();
+    fs::remove_file(&probe).expect("remove probe");
+    ignores
+}
+
+/// #606: on a volume that ignores case, a `.GIT`, `.Codex` or `.AGENTS` made
+/// where the name is missing is the folder git or Corbanu opens. Seatbelt
+/// matches the protected-name rules without regard to case there, at every
+/// level, so none can be created in a writable root.
+#[test]
+fn metadata_names_are_protected_in_any_case() {
+    let base = TempDir::new().expect("tempdir");
+    let base = base.path().canonicalize().expect("canonical");
+    if !ignores_case(&base) {
+        return;
+    }
+    for denies_reads in [true, false] {
+        let workspace = base.join(format!("ws-{denies_reads}"));
+        fs::create_dir_all(&workspace).expect("ws");
+        let mut entries = vec![
+            root_read_entry(),
+            path_entry(&workspace, FileSystemAccessMode::Write),
+        ];
+        if denies_reads {
+            entries.push(path_entry(&base.join("denied"), FileSystemAccessMode::Deny));
+        }
+        let policy = FileSystemSandboxPolicy::restricted(entries);
+        let script = format!(
+            "mkdir '{ws}/.GIT'; echo git=$?; mkdir '{ws}/.Codex'; echo codex=$?; \
+             mkdir '{ws}/.AGENTS'; echo agents=$?; mkdir '{ws}/.gitx'; echo gitx=$?; \
+             echo x > '{ws}/file'; echo ws=$?",
+            ws = workspace.display(),
+        );
+        let stdout = run_in_seatbelt(&policy, &workspace, &script);
+        assert_lines(&stdout, &["git=1", "codex=1", "agents=1", "gitx=0", "ws=0"]);
+    }
+}
+
 /// #529 review: an explicit writable root stays writable when another root
 /// spells its folder through a link (the workspace opened through a nested
 /// link, its real `.git` granted).

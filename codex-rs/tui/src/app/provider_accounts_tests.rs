@@ -270,6 +270,7 @@ async fn app_with_named_accounts_at_top(top: &str) -> (App, TempDir) {
 #[test]
 fn only_a_sign_in_account_change_is_a_switch() {
     use crate::app::event_dispatch::account_switch_message;
+    use crate::app::event_dispatch::account_switch_message_for;
     use crate::app::event_dispatch::sign_in_account_switch;
     use codex_model_provider_info::ModelProviderInfo;
     use codex_model_provider_info::NamedProviderAccount;
@@ -299,8 +300,24 @@ fn only_a_sign_in_account_change_is_a_switch() {
         "Connectors, usage and the model list now use openai account `work`; model list refreshed."
     );
     assert_eq!(
-        account_switch_message(/*account*/ None),
+        account_switch_message_for(
+            /*account*/ None, /*default_login_left_in_place*/ false
+        ),
         "Connectors, usage and the model list now use the default account; model list refreshed."
+    );
+    // #609: a process that left a ruled-out default login in place hides it.
+    assert_eq!(
+        account_switch_message_for(
+            /*account*/ None, /*default_login_left_in_place*/ true
+        ),
+        "Switched to the default account; model list refreshed. If your login restrictions (`forced_login_method`, `forced_chatgpt_workspace_id`) rule out the default login, this session cannot use it and its next request is refused with the reason; sign in with `corbanu login`, or pick a named account in /providers."
+    );
+    assert_eq!(
+        account_switch_message_for(
+            Some(&work_account),
+            /*default_login_left_in_place*/ true
+        ),
+        account_switch_message(Some(&work_account))
     );
 }
 

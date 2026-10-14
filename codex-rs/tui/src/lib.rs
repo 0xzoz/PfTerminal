@@ -1764,6 +1764,7 @@ async fn run_ratatui_app(
                         &initial_config,
                         /*recorded*/ None,
                         deferred_account_check,
+                        resume_launch::ThreadOpening::of(selected),
                     ),
                 }
             }
@@ -2118,6 +2119,7 @@ async fn run_ratatui_app(
         &config,
         resume_recorded_account.as_ref(),
         deferred_account_check,
+        resume_launch::ThreadOpening::of(&session_selection),
     ) {
         shutdown_app_server_if_present(app_server.take()).await;
         terminal_restore_guard.restore_silently();

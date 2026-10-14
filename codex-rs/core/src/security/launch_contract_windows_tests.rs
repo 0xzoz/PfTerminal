@@ -50,6 +50,12 @@ fn pf_27_s06_core_child_entry() {
 
 #[tokio::test]
 async fn pf_27_s06_elevated_launch_cannot_read_protected_files_or_core_memory() {
+    // Bazel gives unit tests no codex-windows-sandbox-setup helper, so this
+    // runs under cargo on a Windows box (the Windows gates), not in nightly
+    // Bazel (#691).
+    if option_env!("BAZEL_PACKAGE").is_some() {
+        return;
+    }
     // Inside the user profile, like the default `~/.codex`: the elevated
     // sandbox's setup grants its user read access to profile folders.
     let profile_dir = std::env::var_os("USERPROFILE").expect("USERPROFILE");

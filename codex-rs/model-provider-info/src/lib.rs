@@ -585,10 +585,47 @@ pub fn claude_plan_api_model(plan_model: &str) -> Option<&'static str> {
     .find(|api| claude_plan_translation(api) == Some(plan_model.trim()))
 }
 
+/// The model that replaces a retired slug on `model_provider_id`, if `model`
+/// is retired there.
+///
+/// Claude Opus 4.8 left the bundled `anthropic` and `claude-plan` catalogues,
+/// so no request can be built for it any more (its maximum output length is
+/// unknown). A pin left in `config.toml`, a saved session or a connector's
+/// state moves to the provider's current default instead of failing every
+/// turn. Other providers keep their own catalogues and are left alone.
+pub fn retired_model_replacement(model: &str, model_provider_id: &str) -> Option<&'static str> {
+    match model_provider_id {
+        CLAUDE_PLAN_PROVIDER_ID if is_retired_model(model) => Some(CLAUDE_PLAN_MODEL),
+        ANTHROPIC_PROVIDER_ID if is_retired_model(model) => Some(ANTHROPIC_DEFAULT_MODEL),
+        _ => None,
+    }
+}
+
+/// Whether `model` is a retired Claude slug (see [`retired_model_replacement`]).
+pub fn is_retired_model(model: &str) -> bool {
+    matches!(
+        model.trim(),
+        ANTHROPIC_LEGACY_OPUS_4_8_MODEL | CLAUDE_PLAN_LEGACY_OPUS_4_8_MODEL
+    )
+}
+
+/// The notice shown when a retired pin is replaced at startup.
+pub fn retired_model_notice(retired: &str, replacement: &str) -> String {
+    format!(
+        "Model `{retired}` has been retired and is no longer available; this session uses `{replacement}` instead. Choose a model with /model, or set `model = \"{replacement}\"` in config.toml, to stop this notice."
+    )
+}
+
 pub fn resolve_model_for_provider(
     model: Option<String>,
     model_provider_id: &str,
 ) -> Option<String> {
+    if let Some(replacement) = model
+        .as_deref()
+        .and_then(|model| retired_model_replacement(model, model_provider_id))
+    {
+        return Some(replacement.to_string());
+    }
     match model_provider_id {
         PFTERMINAL_PLAN_ANTHROPIC_PROVIDER_ID => match model {
             Some(model)

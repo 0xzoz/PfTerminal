@@ -975,7 +975,8 @@ fn windows_elevated_supports_unreadable_globs() {
                     codex_windows_sandbox::DenyReadRule::Glob(
                         temp_dir
                             .path()
-                            .join("**/*.env")
+                            .join("**")
+                            .join("*.env")
                             .to_string_lossy()
                             .into_owned(),
                     ),

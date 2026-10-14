@@ -42,6 +42,13 @@ pub(crate) struct AccountsView {
     pub(crate) rows: Vec<NamedAccountRow>,
     pub(crate) session: BTreeMap<String, String>,
     pub(crate) defaults: BTreeMap<String, String>,
+    /// #609: by catalog entry id, the named account a provider's shown
+    /// status was computed from (from the status host that computed it).
+    pub(crate) status_accounts: BTreeMap<String, String>,
+    /// #609: by catalog entry id, what that account holds when the status
+    /// host knows it (an OpenAI API key or a ChatGPT sign-in, and why the
+    /// configuration rules it out), from the account registry's metadata.
+    pub(crate) status_account_details: BTreeMap<String, String>,
 }
 
 impl AccountsView {
@@ -65,7 +72,32 @@ impl AccountsView {
             rows,
             session,
             defaults,
+            status_accounts: BTreeMap::new(),
+            status_account_details: BTreeMap::new(),
         }
+    }
+
+    /// #609: which named account each entry's status is about, as reported
+    /// by the status host whose statuses are shown with this view.
+    pub(crate) fn with_status_accounts(
+        mut self,
+        status_host: &crate::provider_status_host::ProviderStatusHost,
+    ) -> Self {
+        self.status_accounts = status_host.status_accounts();
+        self.status_account_details = status_host.status_account_details();
+        self
+    }
+
+    /// The named account `entry_id`'s shown status was computed from.
+    pub(crate) fn status_account(&self, entry_id: &str) -> Option<&str> {
+        self.status_accounts.get(entry_id).map(String::as_str)
+    }
+
+    /// #609: what [`Self::status_account`] holds, when known.
+    pub(crate) fn status_account_detail(&self, entry_id: &str) -> Option<&str> {
+        self.status_account_details
+            .get(entry_id)
+            .map(String::as_str)
     }
 
     pub(crate) fn session_account(&self, provider_id: &str) -> &str {
@@ -406,9 +438,13 @@ pub(crate) fn save_account(
         }
         _ => cleaned,
     };
+    // #609: an OpenAI API-key sign-in records what it holds, so status can
+    // tell it from a ChatGPT sign-in without reading it.
+    let sign_in = (method == AddAccountMethod::OpenaiApiKey)
+        .then_some(codex_vault::ProviderAccountSignIn::ApiKey);
     // Adding never replaces an existing account's credential.
     Vault::new(codex_home)
-        .create_provider_account(provider_id, name, method.kind(), &cleaned)
+        .create_provider_account_with_sign_in(provider_id, name, method.kind(), &cleaned, sign_in)
         .map_err(|error| format!("Could not save {provider_id} account `{name}`: {error}"))?;
     Ok(format!("Saved {provider_id} account `{name}`."))
 }

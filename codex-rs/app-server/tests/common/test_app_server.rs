@@ -1830,8 +1830,11 @@ pub struct TestAppServerBuilder {
     exec_server_delay: Option<Duration>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum TestAppServerEnvironment {
     Auto,
+    /// The automatic environment, always on the local executor.
+    LocalAuto,
     None,
 }
 
@@ -1839,6 +1842,13 @@ impl TestAppServerBuilder {
     /// Uses this existing CODEX_HOME instead of a temporary one.
     pub fn with_codex_home(mut self, codex_home: &Path) -> Self {
         self.codex_home = Some(codex_home.to_path_buf());
+        self
+    }
+
+    /// Uses the local executor for the automatic environment, also in the
+    /// remote test lane: for tests whose fixtures or probes live on the host.
+    pub fn with_local_auto_env(mut self) -> Self {
+        self.environment = TestAppServerEnvironment::LocalAuto;
         self
     }
 
@@ -1971,7 +1981,7 @@ impl TestAppServerBuilder {
             None
         };
         let (auto_env, delayed_exec_server) = match environment {
-            TestAppServerEnvironment::Auto => {
+            TestAppServerEnvironment::Auto | TestAppServerEnvironment::LocalAuto => {
                 let environments_toml = codex_home.join("environments.toml");
                 ensure!(
                     !environments_toml.try_exists().with_context(|| format!(
@@ -2006,6 +2016,9 @@ impl TestAppServerBuilder {
                         ))
                         .await?;
                         (auto_env, Some((local_websocket_exec_server, interposer)))
+                    }
+                    None if environment == TestAppServerEnvironment::LocalAuto => {
+                        (TestEnv::local().await?, None)
                     }
                     None => (test_env().await?, None),
                 };

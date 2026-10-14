@@ -494,18 +494,11 @@ async fn openai_on_a_named_sign_in_account_is_configured_without_a_default_login
             "enrolled = {enrolled}"
         );
     }
-    // A default API-key login does not configure an unenrolled named
-    // account; the session's own account vetted at startup (`Account`, e.g.
-    // with a remote app server whose vault this home does not hold) stays.
-    for (default_login, expected) in [
-        (
-            codex_login::OpenAiAuthMetadata::ApiKey,
-            ProviderConfigurationState::NotConfigured,
-        ),
-        (
-            codex_login::OpenAiAuthMetadata::Account,
-            ProviderConfigurationState::Configured,
-        ),
+    // #609: from another provider's session, the default login's state says
+    // nothing about an unenrolled named account, whatever kind it is.
+    for default_login in [
+        codex_login::OpenAiAuthMetadata::ApiKey,
+        codex_login::OpenAiAuthMetadata::Account,
     ] {
         let host = ProviderStatusHost::from_config_with_account_registry(
             &config,
@@ -517,7 +510,32 @@ async fn openai_on_a_named_sign_in_account_is_configured_without_a_default_login
         );
         assert_eq!(
             host.resolve_provider("openai").unwrap().configuration,
-            expected,
+            ProviderConfigurationState::NotConfigured,
+            "{default_login:?}"
+        );
+    }
+    // The session's own account, vetted at startup, stays configured even
+    // when this home's vault does not hold it (a remote app server) and a
+    // refresh re-reads a missing default login.
+    config.model_provider_id = "openai".into();
+    config.model_provider = config.model_providers["openai"].clone();
+    for default_login in [
+        codex_login::OpenAiAuthMetadata::Missing,
+        codex_login::OpenAiAuthMetadata::ApiKey,
+        codex_login::OpenAiAuthMetadata::Account,
+    ] {
+        let host = ProviderStatusHost::from_config_with_account_registry(
+            &config,
+            ProviderAccountMetadata::default(),
+            |_, _| false,
+        );
+        host.update_account_metadata(ProviderAccountMetadata {
+            openai: default_login,
+            ..Default::default()
+        });
+        assert_eq!(
+            host.resolve_provider("openai").unwrap().configuration,
+            ProviderConfigurationState::Configured,
             "{default_login:?}"
         );
     }
@@ -604,6 +622,15 @@ async fn each_connection_on_a_mixed_account_entry_needs_its_own_credential() {
     check(&config, /*enrolled*/ true, &[], Configured);
     // The default key alone sets the entry up for `zai-anthropic`.
     check(&config, /*enrolled*/ false, &["zai"], Configured);
+    // #609: `/providers` names the account only when it set the entry up.
+    assert_eq!(
+        host(&config, /*enrolled*/ true).status_accounts(),
+        std::collections::BTreeMap::from([("zai".to_string(), "work".to_string())])
+    );
+    assert_eq!(
+        host(&config, /*enrolled*/ false).status_accounts(),
+        std::collections::BTreeMap::new()
+    );
 }
 
 /// #665: a key in the environment (or held by the credential broker, which
@@ -660,4 +687,147 @@ async fn an_environment_default_key_serves_the_connection_without_an_account() {
         policy.current("zai-anthropic", "glm-5.3-flash"),
         codex_provider_auth::CurrentSelectionDecision::Preserve(_)
     ));
+}
+
+/// #609 item 4: OpenAI on a named account reports what the account holds,
+/// from the account registry's metadata (the sign-in is not read on a
+/// refresh): an OpenAI API key as an API key, a ChatGPT sign-in as an
+/// account, and either one `forced_login_method` rules out as not
+/// configured. An account saved by an earlier build reads as a ChatGPT
+/// sign-in, as before, until its next use records what it holds.
+#[tokio::test]
+async fn a_named_openai_account_reports_what_it_holds() {
+    use codex_protocol::config_types::ForcedLoginMethod;
+    use codex_provider_auth::ProviderCredentialSource;
+    let home = tempdir().unwrap();
+    let mut config = crate::legacy_core::config::ConfigBuilder::default()
+        .codex_home(home.path().to_path_buf())
+        .build()
+        .await
+        .unwrap();
+    // A Z.AI session, which implies an API-key-only onboarding default that
+    // says nothing about a named account; `/model` offers OpenAI on `work`.
+    config.model_provider_id = "zai".into();
+    config.forced_login_method = Some(ForcedLoginMethod::Api);
+    config
+        .model_providers
+        .get_mut("openai")
+        .expect("built-in openai provider")
+        .account = Some(NamedProviderAccount {
+        provider_id: "openai".into(),
+        name: "work".into(),
+    });
+    let account = codex_login::NamedChatgptAccount {
+        provider_id: "openai".to_string(),
+        name: "work".to_string(),
+    };
+    let status = |config: &Config, forced: Option<ForcedLoginMethod>| {
+        let mut config = config.clone();
+        config.configured_forced_login_method = forced;
+        let status = ProviderStatusHost::from_config(&config, ProviderAccountMetadata::default())
+            .resolve_provider("openai")
+            .unwrap();
+        let source = status.methods.iter().find_map(|method| match method.state {
+            codex_provider_auth::ProviderMethodState::Configured { source, .. } => Some(source),
+            _ => None,
+        });
+        (status.configuration, source)
+    };
+    let detail = |config: &Config, forced: Option<ForcedLoginMethod>| {
+        let mut config = config.clone();
+        config.configured_forced_login_method = forced;
+        ProviderStatusHost::from_config(&config, ProviderAccountMetadata::default())
+            .status_account_details()
+            .get("openai")
+            .cloned()
+    };
+    let configured = |source| (ProviderConfigurationState::Configured, Some(source));
+    let ruled_out = (ProviderConfigurationState::NotConfigured, None);
+
+    codex_login::login_named_account_with_api_key(home.path(), &account, "sk-canary-609")
+        .expect("api key");
+    assert_eq!(
+        status(&config, /*forced*/ None),
+        configured(ProviderCredentialSource::OpenAiApiKey)
+    );
+    assert_eq!(
+        status(&config, Some(ForcedLoginMethod::Api)),
+        configured(ProviderCredentialSource::OpenAiApiKey)
+    );
+    assert_eq!(status(&config, Some(ForcedLoginMethod::Chatgpt)), ruled_out);
+    assert_eq!(
+        detail(&config, /*forced*/ None).as_deref(),
+        Some("an OpenAI API key")
+    );
+    assert_eq!(
+        detail(&config, Some(ForcedLoginMethod::Chatgpt)).as_deref(),
+        Some("an OpenAI API key; this configuration requires a ChatGPT sign-in")
+    );
+
+    let jwt = "e30.eyJlbWFpbCI6ImFubkBleGFtcGxlLmNvbSIsImh0dHBzOi8vYXBpLm9wZW5haS5jb20vYXV0aCI6eyJjaGF0Z3B0X3BsYW5fdHlwZSI6InBsdXMiLCJjaGF0Z3B0X3VzZXJfaWQiOiJ1LTEifX0.c2ln";
+    let sign_in = codex_login::AuthDotJson {
+        auth_mode: Some(codex_protocol::auth::AuthMode::Chatgpt),
+        openai_api_key: None,
+        tokens: Some(codex_login::token_data::TokenData {
+            id_token: codex_login::token_data::parse_chatgpt_jwt_claims(jwt).expect("claims"),
+            access_token: "access-canary-0609".to_string(),
+            refresh_token: "refresh-canary-0609".to_string(),
+            account_id: Some("ws-1".to_string()),
+        }),
+        last_refresh: None,
+        agent_identity: None,
+        personal_access_token: None,
+        bedrock_api_key: None,
+    };
+    codex_login::save_named_account_auth(
+        home.path(),
+        &account,
+        &sign_in,
+        /*must_be_new*/ false,
+    )
+    .expect("sign in");
+    assert_eq!(
+        status(&config, /*forced*/ None),
+        configured(ProviderCredentialSource::OpenAiAccount)
+    );
+    assert_eq!(status(&config, Some(ForcedLoginMethod::Api)), ruled_out);
+    assert_eq!(
+        detail(&config, Some(ForcedLoginMethod::Api)).as_deref(),
+        Some("a ChatGPT sign-in; this configuration requires an API key")
+    );
+
+    // Saved by an earlier build (nothing recorded): an account, as before,
+    // until a use reads the sign-in and records what it holds.
+    let api_key = serde_json::to_string(&codex_login::AuthDotJson {
+        auth_mode: Some(codex_protocol::auth::AuthMode::ApiKey),
+        openai_api_key: Some("sk-canary-old".to_string()),
+        tokens: None,
+        last_refresh: None,
+        agent_identity: None,
+        personal_access_token: None,
+        bedrock_api_key: None,
+    })
+    .unwrap();
+    codex_vault::Vault::new(home.path().to_path_buf())
+        .write_provider_account(
+            "openai",
+            &codex_vault::ProviderAccountName::parse("work").unwrap(),
+            ProviderAccountKind::ChatgptAuth,
+            &api_key,
+        )
+        .expect("earlier build");
+    assert_eq!(
+        status(&config, /*forced*/ None),
+        configured(ProviderCredentialSource::OpenAiAccount)
+    );
+    assert_eq!(detail(&config, /*forced*/ None), None);
+    assert!(
+        codex_login::named_account_summary(home.path(), &account)
+            .expect("use")
+            .is_some()
+    );
+    assert_eq!(
+        status(&config, /*forced*/ None),
+        configured(ProviderCredentialSource::OpenAiApiKey)
+    );
 }

@@ -1080,6 +1080,7 @@ impl App {
                 &resume_config,
                 recorded,
                 codex_model_provider::AccountRecovery::Providers,
+                crate::resume_launch::ThreadOpening::Resume,
             )
         {
             self.harness_overrides.inherited_provider_account = previous_thread_account;

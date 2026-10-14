@@ -41,6 +41,11 @@ pub struct Prompt {
     /// IDs on a Responses request, after source labelling looked them up by
     /// their recorded bytes. `None` leaves every item as recorded.
     pub(crate) producer: Option<String>,
+
+    /// #688: the flat names `tools` offers for namespaced tools on a wire
+    /// without namespaces, so recorded namespaced calls replay under exactly
+    /// the name offered for them. Empty on wires with namespaces.
+    pub(crate) flat_tool_names: crate::tools::flat_tool_names::FlatToolNames,
 }
 
 impl Default for Prompt {
@@ -53,6 +58,7 @@ impl Default for Prompt {
             output_schema: None,
             output_schema_strict: true,
             producer: None,
+            flat_tool_names: Default::default(),
         }
     }
 }

@@ -1,6 +1,6 @@
 # PF-84-S06 slice B gate: named ChatGPT/OpenAI sign-in accounts
 
-Sprint: [PF-84-S06](../../../docs/sprints/current/unified-provider-auth/pf-84-s06-aws-and-chatgpt-accounts.md),
+Sprint: [PF-84-S06](../../../docs/sprints/archive/unified-provider-auth/pf-84-s06-aws-and-chatgpt-accounts.md),
 slice B (D4 option (a); Travis 2026-10-11: the default login stays in place, the same ChatGPT user under two accounts
 is warned, not refused). Behind the default-off `named_accounts` flag. Slice A is [s06a-gate.md](s06a-gate.md) (#543).
 

@@ -38,6 +38,7 @@ use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
 #[cfg(unix)]
 use core_test_support::skip_if_sandbox;
+use core_test_support::skip_if_wine_exec;
 use core_test_support::stdio_server_bin;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
@@ -173,7 +174,9 @@ async fn start_turn_after(
                 .expect("enable source envelopes");
             tweak(config);
         })
-        .build_with_auto_env(&server)
+        // These tests check the host sandbox's protections (#157): pin them to
+        // the local executor, also in the remote test lane.
+        .build(&server)
         .await?;
     // Keep the server alive for the whole test.
     std::mem::forget(server);
@@ -241,6 +244,17 @@ fn output_text(request: &ResponsesRequest, call_id: &str) -> String {
         .unwrap_or_default()
 }
 
+/// #615: what the interactive shell printed when it started, for failures
+/// where typing into it found no session (the shell had already exited).
+#[cfg(unix)]
+fn shell_start_output(captured: &ResponseMock) -> String {
+    captured
+        .requests()
+        .iter()
+        .find_map(|request| request.function_call_output_text("call-open"))
+        .unwrap_or_else(|| "<no call-open output was sent>".to_string())
+}
+
 /// An MCP call whose arguments reach a credential needs the human after
 /// untrusted content, even where the server's tools run unasked and the tool
 /// calls itself read-only; with approvals off it is refused, and ordinary or
@@ -249,6 +263,10 @@ fn output_text(request: &ResponsesRequest, call_id: &str) -> String {
 async fn pf_23_s01_protected_mcp_call_after_untrusted_content_needs_the_human() -> anyhow::Result<()>
 {
     skip_if_no_network!(Ok(()));
+    skip_if_wine_exec!(
+        Ok(()),
+        "this security test runs host shell commands; Wine-exec routes them to a Windows executor with a non-native cwd"
+    );
     let protected = "~/.ssh/id_ed25519";
     let mcp_turn = |level, approval, message: &str| {
         start_turn(
@@ -343,9 +361,12 @@ async fn pf_23_s01_typing_a_protected_command_into_a_running_shell_needs_the_hum
     };
 
     let (test, captured) = stdin_turn(AskForApproval::OnRequest, "corbanu vault list\n").await?;
-    let question = next_question(&test)
-        .await
-        .expect("typing the vault command asks");
+    let Some(question) = next_question(&test).await else {
+        panic!(
+            "typing the vault command asks; the shell started with: {}",
+            shell_start_output(&captured)
+        );
+    };
     let text = &question.questions[0].question;
     assert!(text.contains("corbanu vault list"), "{text}");
     assert!(
@@ -414,6 +435,10 @@ async fn pf_23_s01_typing_a_protected_command_into_a_running_shell_needs_the_hum
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pf_23_s01_code_mode_cell_results_taint_its_later_calls() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
+    skip_if_wine_exec!(
+        Ok(()),
+        "this security test runs host shell commands; Wine-exec routes them to a Windows executor with a non-native cwd"
+    );
     // #553: code mode runs in the `codex-code-mode-host` process. Without
     // it the session falls back to direct tools and the cell never runs, so
     // this test would check nothing; say so instead of failing on the
@@ -2496,7 +2521,7 @@ async fn issue_650_other_worktrees_git_folders_stay_read_only() -> anyhow::Resul
         );
         let cwd = AbsolutePathBuf::from_absolute_path(x.join("wt"))?;
         let (test, captured) = start_turn_in(
-            None,
+            /*home*/ None,
             level,
             AskForApproval::Never,
             vec![
@@ -2566,7 +2591,7 @@ async fn issue_651_a_database_folder_with_glob_syntax_is_protected() -> anyhow::
         let cwd = AbsolutePathBuf::from_absolute_path(&work)?;
         let canary = folder.join("canary.sqlite");
         let (test, captured) = start_turn_after(
-            None,
+            /*home*/ None,
             level,
             AskForApproval::Never,
             vec![
@@ -2599,6 +2624,77 @@ async fn issue_651_a_database_folder_with_glob_syntax_is_protected() -> anyhow::
             achieved.push(output.contains("later-651"));
         }
         if !output.contains("ran-651") || achieved.iter().any(|got| *got != open) {
+            wrong.push(format!("{level:?}: {achieved:?}: {output}"));
+        }
+        drop(test);
+        drop(base);
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
+/// Issue #651 item 7: with a separate database folder missing when the
+/// command runs (state start-up failed), a protected command with full
+/// access cannot create it and put a file or a pending accounting record in
+/// it, and finds no placeholder file at its path (bubblewrap's, which sat on
+/// the host while the command ran); with the paths built at run time.
+/// Permissive is unchanged.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_651_a_missing_database_folder_is_protected() -> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let mut wrong = Vec::new();
+    for (level, open) in [
+        (SecurityLevel::Moderate, false),
+        (SecurityLevel::Aggressive, false),
+        (SecurityLevel::Permissive, true),
+    ] {
+        let base = TempDir::new()?;
+        let folder = base.path().canonicalize()?.join("databases");
+        let path = folder.to_string_lossy().into_owned();
+        // Split inside the folder's own name: neither part names it.
+        let (head, tail) = path.split_at(path.len() - 2);
+        let command = format!(
+            "d=\"$(printf '{head}%s' {tail})\"; [ -f \"$d\" ] && echo placeholder-651; \
+             mkdir -p \"$d/accounting-$(printf pending)\"; printf x > \"$d/planted\"; \
+             printf '{{}}' > \"$d/accounting-$(printf pending)/planted.json\"; echo ran-651"
+        );
+        let sqlite_home = AbsolutePathBuf::from_absolute_path(&folder)?;
+        let missing = folder.clone();
+        let (test, captured) = start_turn_after(
+            /*home*/ None,
+            level,
+            AskForApproval::Never,
+            vec![
+                call("call-651m", "shell_command", json!({ "command": command })),
+                done_step(),
+            ],
+            move |config| {
+                config.sqlite = codex_state::SqliteConfig::from_sqlite_home(sqlite_home.clone());
+                config
+                    .permissions
+                    .set_permission_profile(PermissionProfile::Disabled)
+                    .expect("full access");
+            },
+            move |_| {
+                // Start-up created it; the command meets it missing.
+                std::fs::remove_dir_all(&missing).expect("database folder");
+            },
+        )
+        .await?;
+        assert!(next_exec_approval(&test).await.is_none());
+        let requests = captured.requests();
+        let output = output_text(&requests[requests.len() - 1], "call-651m");
+        let achieved = [
+            folder.join("planted").exists(),
+            folder.join("accounting-pending/planted.json").exists(),
+        ];
+        if !output.contains("ran-651")
+            || output.contains("placeholder-651")
+            || achieved != [open; 2]
+        {
             wrong.push(format!("{level:?}: {achieved:?}: {output}"));
         }
         drop(test);
@@ -3024,7 +3120,11 @@ async fn pf_23_s02_typing_into_a_shell_started_before_untrusted_content_is_confi
         assert!(next_question(&test).await.is_none(), "{approval:?}");
         let requests = captured.requests();
         let typed = output_text(&requests[2], "call-stdin");
-        assert!(typed.contains("typed-one"), "{typed}");
+        assert!(
+            typed.contains("typed-one"),
+            "{typed}\nthe shell started with: {}",
+            shell_start_output(&captured)
+        );
         assert!(!typed.contains(CANARY), "{approval:?}: {typed}");
         assert!(output_text(&requests[3], "call-again").contains("typed-two"));
     }

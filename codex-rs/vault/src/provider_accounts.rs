@@ -244,6 +244,36 @@ pub fn is_provider_managed_account_label(label: &str) -> bool {
     parse_provider_account_label(label).is_some_and(|(_, _, kind)| kind.is_provider_managed())
 }
 
+/// PF-84 (#609): what a named OpenAI sign-in account (`chatgpt_auth`)
+/// holds, recorded in its vault metadata so status can tell the two apart
+/// without reading the sign-in itself. Not secret.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderAccountSignIn {
+    /// ChatGPT tokens.
+    Chatgpt,
+    /// An OpenAI API key.
+    ApiKey,
+}
+
+/// A named account's sign-in with what its metadata records it holds
+/// (`None`: not recorded).
+pub type RecordedSignIn = (Zeroizing<String>, Option<ProviderAccountSignIn>);
+
+/// Reads [`ProviderAccountSignIn`] leniently: a value this build does not
+/// know reads as not recorded instead of failing the whole vault index.
+pub(crate) fn lenient_sign_in<'de, D>(
+    deserializer: D,
+) -> Result<Option<ProviderAccountSignIn>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = <Option<serde_json::Value> as serde::Deserialize>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| serde_json::from_value(value).ok()))
+}
+
 /// Metadata for one named account: no secret material.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderAccountMeta {
@@ -318,6 +348,32 @@ impl Vault {
         })
     }
 
+    /// PF-84 (#609): a named account's `chatgpt_auth` sign-in with what its
+    /// metadata records it holds (`None` when not recorded), from one read
+    /// of the index. `Ok(None)` when the account holds no sign-in.
+    pub fn read_provider_account_sign_in(
+        &self,
+        provider_id: &str,
+        name: &ProviderAccountName,
+    ) -> Result<Option<RecordedSignIn>, VaultError> {
+        let kind = ProviderAccountKind::ChatgptAuth;
+        let label = account_label(provider_id, name, kind)?;
+        self.with_storage_lock(|| {
+            let index = self.load_index()?;
+            let Some(meta) = index
+                .credentials
+                .get(&label)
+                .filter(|meta| meta.credential_type == kind.credential_type())
+            else {
+                return Ok(None);
+            };
+            Ok(self
+                .read_secret(&label)?
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| (Zeroizing::new(value), meta.sign_in)))
+        })
+    }
+
     /// Creates a new named account holding one kind. Fails, changing
     /// nothing, when the account already holds anything: adding never
     /// replaces another account's credential.
@@ -328,11 +384,30 @@ impl Vault {
         kind: ProviderAccountKind,
         value: &str,
     ) -> Result<(), VaultError> {
+        self.create_provider_account_with_sign_in(
+            provider_id,
+            name,
+            kind,
+            value,
+            /*sign_in*/ None,
+        )
+    }
+
+    /// [`Self::create_provider_account`], recording what a sign-in holds
+    /// (#609) in the account's metadata.
+    pub fn create_provider_account_with_sign_in(
+        &self,
+        provider_id: &str,
+        name: &ProviderAccountName,
+        kind: ProviderAccountKind,
+        value: &str,
+        sign_in: Option<ProviderAccountSignIn>,
+    ) -> Result<(), VaultError> {
         let existing = ProviderAccountKind::ALL
             .into_iter()
             .map(|kind| account_label(provider_id, name, kind))
             .collect::<Result<Vec<_>, _>>()?;
-        self.store_provider_account(provider_id, name, kind, value, Some(&existing))
+        self.store_provider_account(provider_id, name, kind, value, sign_in, Some(&existing))
     }
 
     /// Stores (or replaces) one kind of a named account.
@@ -343,7 +418,85 @@ impl Vault {
         kind: ProviderAccountKind,
         value: &str,
     ) -> Result<(), VaultError> {
-        self.store_provider_account(provider_id, name, kind, value, /*refuse_if_any*/ None)
+        self.write_provider_account_with_sign_in(
+            provider_id,
+            name,
+            kind,
+            value,
+            /*sign_in*/ None,
+        )
+    }
+
+    /// [`Self::write_provider_account`], recording what a sign-in holds
+    /// (#609) in the account's metadata (`None`: not known).
+    pub fn write_provider_account_with_sign_in(
+        &self,
+        provider_id: &str,
+        name: &ProviderAccountName,
+        kind: ProviderAccountKind,
+        value: &str,
+        sign_in: Option<ProviderAccountSignIn>,
+    ) -> Result<(), VaultError> {
+        self.store_provider_account(
+            provider_id,
+            name,
+            kind,
+            value,
+            sign_in,
+            /*refuse_if_any*/ None,
+        )
+    }
+
+    /// PF-84 (#609): what a named account's `chatgpt_auth` sign-in holds, as
+    /// recorded in its metadata; `None` when it holds none or it was not
+    /// recorded. Reads the vault index only, never the sign-in.
+    pub fn provider_account_sign_in(
+        &self,
+        provider_id: &str,
+        name: &ProviderAccountName,
+    ) -> Result<Option<ProviderAccountSignIn>, VaultError> {
+        let kind = ProviderAccountKind::ChatgptAuth;
+        let label = account_label(provider_id, name, kind)?;
+        self.with_storage_lock(|| {
+            Ok(self
+                .load_index()?
+                .credentials
+                .get(&label)
+                .filter(|meta| meta.credential_type == kind.credential_type())
+                .and_then(|meta| meta.sign_in))
+        })
+    }
+
+    /// PF-84 (#609): records what a named account's `chatgpt_auth` sign-in
+    /// holds, for one saved before it was recorded. Writes only the vault
+    /// index, and only when the account holds a sign-in with nothing
+    /// recorded: a save records its own kind, which a reader that raced it
+    /// must not overwrite. Returns whether it wrote.
+    pub fn record_provider_account_sign_in(
+        &self,
+        provider_id: &str,
+        name: &ProviderAccountName,
+        sign_in: ProviderAccountSignIn,
+    ) -> Result<bool, VaultError> {
+        let kind = ProviderAccountKind::ChatgptAuth;
+        let label = account_label(provider_id, name, kind)?;
+        self.with_storage_lock(|| {
+            let mut index = self.load_index()?;
+            let Some(meta) = index
+                .credentials
+                .get_mut(&label)
+                .filter(|meta| meta.credential_type == kind.credential_type())
+            else {
+                return Ok(false);
+            };
+            if meta.sign_in.is_some() {
+                return Ok(false);
+            }
+            meta.sign_in = Some(sign_in);
+            self.secrets
+                .apply_batch(&[index_secret_entry(&index)?], &[])?;
+            Ok(true)
+        })
     }
 
     /// Writes one kind under the storage lock. With `refuse_if_any`, fails
@@ -354,6 +507,7 @@ impl Vault {
         name: &ProviderAccountName,
         kind: ProviderAccountKind,
         value: &str,
+        sign_in: Option<ProviderAccountSignIn>,
         refuse_if_any: Option<&[String]>,
     ) -> Result<(), VaultError> {
         let label = account_label(provider_id, name, kind)?;
@@ -388,6 +542,8 @@ impl Vault {
                     created_at,
                     updated_at: now,
                     storage_backend: StorageBackend::EncryptedSecrets,
+                    // Only a sign-in has one.
+                    sign_in: sign_in.filter(|_| kind == ProviderAccountKind::ChatgptAuth),
                 },
             );
             let mut updates = vec![

@@ -114,6 +114,10 @@ fn pf_23_s01_route_matrix() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
 fn pf_23_s01_mcp_calls_are_classified_by_effect_and_arguments() {
     use ProtectedActionKind::*;
     for (tool, acts_outside, arguments, expected) in [
@@ -195,6 +199,10 @@ fn pf_23_s01_mcp_calls_are_classified_by_effect_and_arguments() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
 fn pf_23_s01_typed_input_is_judged_as_the_command_it_amounts_to() {
     use ProtectedActionKind::*;
     let cwd = cwd();

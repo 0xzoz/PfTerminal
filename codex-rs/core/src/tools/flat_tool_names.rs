@@ -39,6 +39,14 @@ impl FlatToolNames {
         self.by_flat_name.get(flat_name)
     }
 
+    /// The flat name this request offers for a namespaced tool, if any.
+    pub(crate) fn flat_name_for(&self, tool_name: &ToolName) -> Option<&str> {
+        self.by_flat_name
+            .iter()
+            .find(|(_, offered)| *offered == tool_name)
+            .map(|(flat, _)| flat.as_str())
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.by_flat_name.is_empty()
     }
@@ -87,6 +95,7 @@ fn portable_chars(name: &str) -> String {
 
 /// The flat name a namespaced tool gets when nothing collides with it: its
 /// preferred name when that is portable, otherwise the hashed form.
+#[cfg(test)]
 pub(crate) fn flat_tool_name_for(tool_name: &ToolName) -> String {
     let preferred = preferred_flat_tool_name(tool_name);
     if is_portable_tool_name(&preferred) {

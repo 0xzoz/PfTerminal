@@ -2337,7 +2337,7 @@ impl ModelClient {
         if !self.state.provider.info().is_openai() {
             retain_latest_contextual_developer_fragments(&mut input);
         }
-        flatten_namespaced_history(&mut input, &prompt.tools);
+        flatten_namespaced_history(&mut input, &prompt.tools, &prompt.flat_tool_names);
         let mut skipped_tool_call_ids = HashSet::new();
         append_chat_messages_for_response_items(
             input,
@@ -2524,7 +2524,7 @@ impl ModelClient {
         if !self.state.provider.info().is_openai() {
             retain_latest_contextual_developer_fragments(&mut input);
         }
-        flatten_namespaced_history(&mut input, &prompt.tools);
+        flatten_namespaced_history(&mut input, &prompt.tools, &prompt.flat_tool_names);
         let mut messages = Vec::new();
         let mut skipped_tool_call_ids = HashSet::new();
         for item in input {
@@ -2587,10 +2587,17 @@ impl ModelClient {
             tool_choice,
             stream: true,
             max_tokens: model_info.max_output_tokens.ok_or_else(|| {
-                CodexErr::InvalidRequest(format!(
-                    "model `{}` has no catalogued maximum output token limit",
-                    model_info.slug
-                ))
+                CodexErr::InvalidRequest(if model_info.used_fallback_model_metadata {
+                    format!(
+                        "model `{}` is not in this provider's model catalog, so its maximum output length is unknown; choose another model with /model or change `model` in config.toml",
+                        model_info.slug
+                    )
+                } else {
+                    format!(
+                        "model `{}` has no catalogued maximum output token limit",
+                        model_info.slug
+                    )
+                })
             })?,
             thinking,
             output_config,
@@ -4923,9 +4930,16 @@ fn chat_replay_function_arguments(arguments: String) -> String {
 
 /// Chat Completions and Anthropic Messages have no namespaces. A namespaced
 /// call recorded on the Responses wire (before a provider switch or in forked
-/// history) replays under the flat name this request offers for it, such as an
-/// MCP tool's `mcp__server__tool`; otherwise under its bare name, as before.
-fn flatten_namespaced_history(input: &mut [ResponseItem], tools: &[ToolSpec]) {
+/// history) replays under the flat name this request offers for that exact
+/// tool (`flat_tool_names`, the request's own mapping), such as an MCP tool's
+/// `mcp__server__tool`; otherwise under its bare name, as before. A tool whose
+/// preferred flat name a plain tool already takes is offered under a hashed
+/// name, so its earlier calls never appear as calls of the plain tool (#688).
+fn flatten_namespaced_history(
+    input: &mut [ResponseItem],
+    tools: &[ToolSpec],
+    flat_tool_names: &crate::tools::flat_tool_names::FlatToolNames,
+) {
     let offered: HashSet<&str> = tools
         .iter()
         .filter(|tool| matches!(tool, ToolSpec::Function(_) | ToolSpec::Freeform(_)))
@@ -4944,11 +4958,12 @@ fn flatten_namespaced_history(input: &mut [ResponseItem], tools: &[ToolSpec]) {
         let Some(namespace) = namespace.take() else {
             continue;
         };
-        let flat = crate::tools::flat_tool_names::flat_tool_name_for(
-            &codex_tools::ToolName::namespaced(namespace, name.clone()),
-        );
-        if offered.contains(flat.as_str()) {
-            *name = flat;
+        let tool_name = codex_tools::ToolName::namespaced(namespace, name.clone());
+        if let Some(flat) = flat_tool_names
+            .flat_name_for(&tool_name)
+            .filter(|flat| offered.contains(flat))
+        {
+            *name = flat.to_string();
         }
     }
 }

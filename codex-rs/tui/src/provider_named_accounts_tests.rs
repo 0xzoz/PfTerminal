@@ -29,6 +29,8 @@ fn view() -> AccountsView {
         rows: vec![row("zai", "work"), row("zai", "spare"), row("kimi", "alt")],
         session: BTreeMap::from([("zai".to_string(), "work".to_string())]),
         defaults: BTreeMap::from([("kimi".to_string(), "alt".to_string())]),
+        status_accounts: BTreeMap::new(),
+        status_account_details: BTreeMap::new(),
     }
 }
 
@@ -313,5 +315,24 @@ fn chatgpt_sign_in_rows_show_the_email_hint_and_plan_only() {
         detail.starts_with("ChatGPT sign-in · a…@example.com · Plus · fp ")
             && !detail.contains("canary"),
         "{detail}"
+    );
+}
+
+/// #609: an OpenAI API key added in `/providers` records that it is one, so
+/// status tells it from a ChatGPT sign-in without reading it.
+#[test]
+fn an_openai_api_key_added_here_records_what_it_holds() {
+    let home = tempfile::tempdir().expect("home");
+    save_account(
+        home.path().to_path_buf(),
+        "openai",
+        &name("work"),
+        AddAccountMethod::OpenaiApiKey,
+        AccountValue::new("sk-canary-609-add".to_string()),
+    )
+    .expect("save");
+    assert_eq!(
+        codex_login::provider_account_sign_in(home.path(), "openai", "work").expect("read"),
+        Some(codex_vault::ProviderAccountSignIn::ApiKey)
     );
 }

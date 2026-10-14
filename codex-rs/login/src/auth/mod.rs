@@ -45,3 +45,4 @@ pub use named_chatgpt::save_named_account_auth;
 pub use provider_key_vault::provider_account_api_key;
 pub use provider_key_vault::provider_account_aws_profile;
 pub use provider_key_vault::provider_account_holds;
+pub use provider_key_vault::provider_account_sign_in;

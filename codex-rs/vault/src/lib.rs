@@ -91,6 +91,8 @@ pub use provider_accounts::ProviderAccountError;
 pub use provider_accounts::ProviderAccountKind;
 pub use provider_accounts::ProviderAccountMeta;
 pub use provider_accounts::ProviderAccountName;
+pub use provider_accounts::ProviderAccountSignIn;
+pub use provider_accounts::RecordedSignIn;
 pub use provider_accounts::is_provider_managed_account_label;
 pub use provider_accounts::parse_provider_account_label;
 pub use provider_accounts::parse_provider_account_selection;
@@ -262,6 +264,17 @@ pub struct VaultCredentialMeta {
     /// Where the credential is physically stored.
     #[serde(default)]
     pub storage_backend: StorageBackend,
+    /// PF-84 (#609): for a named OpenAI sign-in account, whether it holds a
+    /// ChatGPT sign-in or an OpenAI API key (never the value). Recorded when
+    /// the sign-in is saved, or on its next use for one saved before.
+    /// A value this build does not know (from a later one) reads as not
+    /// recorded, so it never makes the index unreadable.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "provider_accounts::lenient_sign_in"
+    )]
+    pub sign_in: Option<ProviderAccountSignIn>,
 }
 
 /// On-disk vault index: a versioned map of label -> metadata.
@@ -399,6 +412,7 @@ impl Vault {
                 created_at: now,
                 updated_at: now,
                 storage_backend: StorageBackend::EncryptedSecrets,
+                sign_in: None,
             };
 
             index.credentials.insert(label.clone(), meta);

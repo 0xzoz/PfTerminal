@@ -208,6 +208,9 @@ pub(crate) struct ReadDenials {
     /// #583: `worktrees` inside the read-only Corbanu home (each spelling),
     /// which stays writable where the profile can write it.
     home_writable: Vec<AbsolutePathBuf>,
+    /// #603: the real location `worktrees` had when it was checked to be a
+    /// real folder in the home ([`Self::protect_home`]).
+    home_writable_real: Option<AbsolutePathBuf>,
     /// Where the profile's relative entries resolve (the turn's folder).
     cwd: Option<AbsolutePathBuf>,
     /// The Corbanu home, unless it is a folder the command keeps.
@@ -375,13 +378,16 @@ impl ReadDenials {
         // #611 (Linux): a separate database folder's missing entries, made
         // as Corbanu would where the command could make them, so bubblewrap
         // puts no placeholder file where Corbanu expects a folder or a lock.
+        // #651: the folder itself too, should it be missing (state start-up
+        // failed): it is then denied whole, as when it exists, instead of
+        // bubblewrap holding its path with a placeholder file on the host.
         if cfg!(target_os = "linux")
             && let Some(folder) = separate_database_folder(codex_home, sqlite_home)
             && profile
                 .file_system_sandbox_policy()
                 .can_write_path_with_cwd(folder.as_path(), turn_cwd.as_path())
         {
-            create_missing_database_folder_entries(folder.as_path());
+            create_missing_database_folder(folder.as_path());
         }
         // #583: the read-only home keeps `worktrees` writable only as a real
         // folder, so it is made (empty, as Corbanu would) where the command
@@ -423,6 +429,11 @@ impl ReadDenials {
     /// pattern (reads of those created later) and [`DATABASE_FOLDER_ENTRIES`]
     /// also before they exist (the init lock, #586). A command a person
     /// approved under Moderate (#540) drops them with the other stores.
+    ///
+    /// #651: a folder missing at launch is denied whole too, before it
+    /// exists, so a command cannot create it and fill it. On Linux `for_turn`
+    /// first makes it where the command could (bubblewrap would otherwise
+    /// hold the missing path with a placeholder file on the host).
     fn protect_database_folder(
         &mut self,
         codex_home: &Path,
@@ -437,8 +448,14 @@ impl ReadDenials {
             || real_folder.as_ref().is_some_and(|real| {
                 std::fs::canonicalize(codex_home).is_ok_and(|home| home.starts_with(real))
             });
-        if folder.as_path().is_dir() && !holds_home && !Self::holds_kept(&folder, keep) {
-            self.push_existing(folder, keep);
+        let missing = std::fs::symlink_metadata(folder.as_path()).is_err();
+        if (missing || folder.as_path().is_dir()) && !holds_home && !Self::holds_kept(&folder, keep)
+        {
+            if missing {
+                self.push_fixed(folder, keep);
+            } else {
+                self.push_existing(folder, keep);
+            }
             return;
         }
         if let Ok(entries) = std::fs::read_dir(folder.as_path()) {
@@ -499,9 +516,9 @@ impl ReadDenials {
         if cfg!(windows) {
             return;
         }
-        if real_location(codex_home).is_none() {
+        let Some(real_home) = real_location(codex_home) else {
             return;
-        }
+        };
         let homes = spellings(codex_home);
         let worktrees = spellings(&codex_home.join(HOME_WRITABLE));
         let inside_home = |folder: &AbsolutePathBuf| {
@@ -535,12 +552,18 @@ impl ReadDenials {
                 .runtime_read_only
                 .iter()
                 .any(|runtime| runtime.as_path().starts_with(folder.as_path()));
+            // #603: `worktrees` itself in a spelling of the home (a link
+            // swapped in before `real_folder` was checked, and a folder put
+            // back after it, would otherwise name the link's target).
+            let names_worktrees = homes.iter().any(|home| folder == home.join(HOME_WRITABLE));
             if real_folder
+                && names_worktrees
                 && inside_home(&folder)
                 && !holds_runtime
                 && !self.home_writable.contains(&folder)
             {
                 self.home_writable.push(folder);
+                self.home_writable_real = Some(real_home.join(HOME_WRITABLE));
             }
         }
     }
@@ -600,10 +623,8 @@ impl ReadDenials {
             return false;
         };
         keep.iter()
-            .filter(|kept| !has_nested_link(kept.as_path()))
-            .any(|kept| {
-                std::fs::canonicalize(kept.as_path()).is_ok_and(|kept| kept.starts_with(&real))
-            })
+            .filter_map(|kept| kept_real_location(kept.as_path()))
+            .any(|kept| kept_within(&kept, &real))
     }
 
     fn push_existing(&mut self, path: AbsolutePathBuf, keep: &[AbsolutePathBuf]) {
@@ -808,6 +829,20 @@ impl ReadDenials {
         if matches!(profile, PermissionProfile::External { .. }) {
             return None;
         }
+        // #603: `worktrees` is writable only as the real folder checked in
+        // `protect_home`. Its location is recorded for the sandboxes, which
+        // grant writes where a root was first seen (#536): a link swapped in
+        // before the command's sandbox is set up (by a command a person
+        // approved, or another session) then refuses the command instead of
+        // opening the link's target (Linux: bound with `--bind-fd` there).
+        if let Some(real) = &self.home_writable_real {
+            for path in &self.home_writable {
+                codex_sandboxing::writable_root_ledger::record_checked_root(
+                    path.as_path(),
+                    real.as_path(),
+                );
+            }
+        }
         let (mut file_system, network) = profile.to_runtime_permissions();
         let entries: Vec<FileSystemSandboxEntry> = self
             .existing
@@ -1006,8 +1041,12 @@ fn separate_database_folder(codex_home: &Path, sqlite_home: &Path) -> Option<Abs
 
 /// #611 (Linux): creates a separate database folder's missing folders and
 /// GPU controller lock, empty and private, as Corbanu would. The init lock
-/// keeps #608's placeholder handling.
-fn create_missing_database_folder_entries(folder: &Path) {
+/// keeps #608's placeholder handling. #651: the folder itself too, where it
+/// is missing (private; the folders above it as state start-up makes them),
+/// unless the nearest existing folder above it is reached through a link: a
+/// command could have planted one there, and the folder would then be made
+/// wherever it points. It is denied either way.
+pub(crate) fn create_missing_database_folder(folder: &Path) {
     #[cfg(unix)]
     let builder = {
         let mut builder = std::fs::DirBuilder::new();
@@ -1016,6 +1055,13 @@ fn create_missing_database_folder_entries(folder: &Path) {
     };
     #[cfg(not(unix))]
     let builder = std::fs::DirBuilder::new();
+    if std::fs::symlink_metadata(folder).is_err() && !reached_through_link(folder) {
+        // Fail harmlessly where they cannot be made.
+        if let Some(parent) = folder.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = builder.create(folder);
+    }
     for name in ["accounting-pending", "db-backups"] {
         // Fails harmlessly where it exists (also as a link).
         let _ = builder.create(folder.join(name));
@@ -1025,6 +1071,15 @@ fn create_missing_database_folder_entries(folder: &Path) {
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     let _ = options.open(folder.join("gpu-controller.lock"));
+}
+
+/// #651: whether the nearest existing folder above `path` is not its real
+/// location (a link on the way). Unknown counts as reached through a link.
+fn reached_through_link(path: &Path) -> bool {
+    let Some(existing) = path.ancestors().skip(1).find(|ancestor| ancestor.exists()) else {
+        return true;
+    };
+    !std::fs::canonicalize(existing).is_ok_and(|real| real == existing)
 }
 
 /// #603 (Linux): creates the missing folders Corbanu reads later, empty and
@@ -1107,6 +1162,43 @@ fn has_nested_link(path: &Path) -> bool {
             std::fs::symlink_metadata(ancestor)
                 .is_ok_and(|metadata| metadata.file_type().is_symlink())
         })
+}
+
+/// #603: where a kept folder really is, resolved only through its top-level
+/// folder (an alias such as `/tmp` on macOS): `None` for one that is or sits
+/// below a link. No link below the top-level folder is followed, so one
+/// swapped in after [`has_nested_link`] looked (review round 4) cannot
+/// redirect the folder to what it points to (`build -> ~/.ssh`).
+fn kept_real_location(kept: &Path) -> Option<PathBuf> {
+    if has_nested_link(kept) {
+        return None;
+    }
+    let mut components = kept.components();
+    let mut real = PathBuf::from(components.next()?.as_os_str());
+    if let Some(top) = components.next() {
+        real = std::fs::canonicalize(real.join(top)).ok()?;
+        let rest = components.as_path();
+        if !rest.as_os_str().is_empty() {
+            real.push(rest);
+        }
+    }
+    // As `canonicalize` did: only a folder that exists.
+    std::fs::symlink_metadata(&real).ok()?;
+    Some(real)
+}
+
+/// Whether kept folder `kept` (resolved by [`kept_real_location`]) is
+/// `real` or inside it; on macOS in any case, as `canonicalize` reported
+/// the stored case before (a working folder typed in another case).
+fn kept_within(kept: &Path, real: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        codex_protocol::permissions::location_within(kept, real)
+    }
+    #[cfg(not(unix))]
+    {
+        kept.starts_with(real)
+    }
 }
 
 /// `path` with its nearest existing folder resolved, or `None` when that

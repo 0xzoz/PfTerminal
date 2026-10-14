@@ -947,7 +947,9 @@ allow_local_binding = true
                 .set_permission_profile(permission_profile_for_config)
                 .expect("set permission profile");
         });
-    let test = builder.build_with_auto_env(server).await?;
+    // The host-side network proxy can't see requests from the remote
+    // container (#708), so these run on the local executor.
+    let test = builder.build(server).await?;
     assert!(
         test.config.permissions.network.is_some(),
         "expected managed network proxy config to be present"
@@ -2921,7 +2923,8 @@ async fn unified_exec_formats_large_output_summary() -> Result<()> {
             .enable(Feature::UnifiedExec)
             .expect("test config should allow feature update");
     });
-    let test = builder.build_with_auto_env(&server).await?;
+    // Pinned to the local executor: fails only in the remote lane (#157, #708).
+    let test = builder.build(&server).await?;
 
     let output_line = "token token \n";
     let output_repetitions = 100_000;
