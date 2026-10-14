@@ -23,6 +23,7 @@ use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
+use core_test_support::skip_if_wine_exec;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use serde_json::json;
@@ -100,7 +101,9 @@ async fn vault_commands_after(
                     .expect("enable unified exec");
             }
         })
-        .build_with_auto_env(&server)
+        // Host-sandbox security test: local executor on purpose, also in the
+        // remote lane (#708).
+        .build(&server)
         .await?;
     if confirm {
         let home = test.codex_home_path();
@@ -153,6 +156,10 @@ async fn vault_commands_after(
 async fn issue_443_vault_commands_are_refused_as_soon_as_aggressive_is_confirmed()
 -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
+    skip_if_wine_exec!(
+        Ok(()),
+        "this security test runs host shell commands; Wine-exec routes them to a Windows executor with a non-native cwd"
+    );
     for unified in [false, true] {
         for (command, output) in vault_commands_after(/*confirm*/ true, unified).await? {
             assert!(
@@ -171,6 +178,10 @@ async fn issue_443_vault_commands_are_refused_as_soon_as_aggressive_is_confirmed
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn issue_443_permissive_sessions_keep_their_vault_commands() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
+    skip_if_wine_exec!(
+        Ok(()),
+        "this security test runs host shell commands; Wine-exec routes them to a Windows executor with a non-native cwd"
+    );
     for unified in [false, true] {
         for (command, output) in vault_commands_after(/*confirm*/ false, unified).await? {
             assert!(

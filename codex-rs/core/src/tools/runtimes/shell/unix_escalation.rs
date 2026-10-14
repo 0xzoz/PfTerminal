@@ -238,6 +238,7 @@ pub(super) async fn try_run_zsh_fork(
     );
     let escalation_policy = CoreShellActionProvider {
         policy: Arc::clone(&exec_policy),
+        live_aggressive,
         strict_rules: ctx
             .session
             .services
@@ -334,6 +335,7 @@ pub(crate) async fn prepare_unified_exec_zsh_fork(
     };
     let escalation_policy = CoreShellActionProvider {
         policy: Arc::clone(&exec_policy),
+        live_aggressive,
         strict_rules: ctx
             .session
             .services
@@ -373,6 +375,9 @@ pub(crate) async fn prepare_unified_exec_zsh_fork(
 
 struct CoreShellActionProvider {
     policy: Arc<RwLock<Policy>>,
+    /// Whether `policy` is the Aggressive one (#626: remembered approvals
+    /// suspended), so a prompt says which were not applied.
+    live_aggressive: bool,
     /// See `ExecPolicyManager::load`.
     strict_rules: bool,
     session: Arc<crate::session::session::Session>,
@@ -460,6 +465,7 @@ impl CoreShellActionProvider {
         workdir: &AbsolutePathBuf,
         stopwatch: &Stopwatch,
         additional_permissions: Option<AdditionalPermissionProfile>,
+        reason: Option<String>,
     ) -> anyhow::Result<ReviewDecision> {
         let command = join_program_and_argv(program, argv);
         let workdir = workdir.clone();
@@ -523,7 +529,7 @@ impl CoreShellActionProvider {
                         environment_id,
                         command,
                         workdir.clone(),
-                        /*reason*/ None,
+                        reason,
                         /*network_approval_context*/ None,
                         /*proposed_execpolicy_amendment*/ None,
                         additional_permissions,
@@ -546,6 +552,7 @@ impl CoreShellActionProvider {
         prompt_permissions: Option<AdditionalPermissionProfile>,
         escalation_execution: EscalationExecution,
         decision_source: DecisionSource,
+        suspended_note: Option<String>,
     ) -> anyhow::Result<EscalationDecision> {
         let action = match decision {
             Decision::Forbidden => {
@@ -555,10 +562,20 @@ impl CoreShellActionProvider {
                 if execve_prompt_is_rejected_by_policy(self.approval_policy, &decision_source)
                     .is_some()
                 {
-                    EscalationDecision::deny(Some("Execution forbidden by policy".to_string()))
+                    EscalationDecision::deny(Some(match suspended_note {
+                        Some(note) => format!("Execution forbidden by policy. {note}"),
+                        None => "Execution forbidden by policy".to_string(),
+                    }))
                 } else {
                     let decision = self
-                        .prompt(program, argv, workdir, &self.stopwatch, prompt_permissions)
+                        .prompt(
+                            program,
+                            argv,
+                            workdir,
+                            &self.stopwatch,
+                            prompt_permissions,
+                            suspended_note,
+                        )
                         .await?;
                     match decision {
                         ReviewDecision::Approved
@@ -640,21 +657,17 @@ impl CoreShellActionProvider {
             return Ok(EscalationDecision::deny(Some(refusal)));
         }
 
+        let policy_context = || InterceptedExecPolicyContext {
+            approval_policy: self.approval_policy,
+            permission_profile: self.permission_profile.clone(),
+            windows_sandbox_level: self.turn.windows_sandbox_level,
+            sandbox_permissions: self.approval_sandbox_permissions,
+            enable_shell_wrapper_parsing: ENABLE_INTERCEPTED_EXEC_POLICY_SHELL_WRAPPER_PARSING,
+        };
         let evaluation = {
             let policy = self.policy.read().await;
-            let mut evaluation = evaluate_intercepted_exec_policy(
-                &policy,
-                program,
-                argv,
-                InterceptedExecPolicyContext {
-                    approval_policy: self.approval_policy,
-                    permission_profile: self.permission_profile.clone(),
-                    windows_sandbox_level: self.turn.windows_sandbox_level,
-                    sandbox_permissions: self.approval_sandbox_permissions,
-                    enable_shell_wrapper_parsing:
-                        ENABLE_INTERCEPTED_EXEC_POLICY_SHELL_WRAPPER_PARSING,
-                },
-            );
+            let mut evaluation =
+                evaluate_intercepted_exec_policy(&policy, program, argv, policy_context());
             if self.strict_rules {
                 crate::exec_policy::apply_strict_forbidden_matches(
                     &mut evaluation,
@@ -664,6 +677,18 @@ impl CoreShellActionProvider {
             }
             evaluation
         };
+        // #626: as for a shell command, a prompt under Aggressive names the
+        // remembered approvals that would have run this program unasked.
+        let suspended_note = (self.live_aggressive && evaluation.decision == Decision::Prompt)
+            .then(|| {
+                self.session
+                    .services
+                    .exec_policy
+                    .aggressive_suspended_note(|policy| {
+                        evaluate_intercepted_exec_policy(policy, program, argv, policy_context())
+                    })
+            })
+            .flatten();
         // When true, means the Evaluation was due to *.rules, not the
         // fallback function.
         let decision_driven_by_policy =
@@ -706,6 +731,7 @@ impl CoreShellActionProvider {
             self.prompt_permissions.clone(),
             escalation_execution,
             decision_source,
+            suspended_note,
         )
         .await
     }

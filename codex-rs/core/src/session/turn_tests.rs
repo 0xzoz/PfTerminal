@@ -232,3 +232,24 @@ async fn completion_check_respects_and_records_the_provider_request_throttle() {
     assert_rate_limited_then_blocked(&first, &second);
     assert_eq!(fixture.requests().await, 1);
 }
+
+/// #688: the notice names the left-out tools (the first ten, then a count)
+/// and says how to offer them.
+#[test]
+fn omitted_tools_notice_names_the_left_out_tools() {
+    let one = omitted_tools_notice(&["mcp__orders__lookup".to_string()]);
+    assert_eq!(
+        one,
+        "Corbanu sends at most 128 tools per request to providers without tool namespaces, so these are not offered to the model (1): `mcp__orders__lookup`. Turn off MCP servers or tools you don't need, or use a provider with tool namespaces (such as OpenAI), to offer them."
+    );
+    let many: Vec<String> = (0..12)
+        .map(|index| format!("mcp__bulk__t{index}"))
+        .collect();
+    let notice = omitted_tools_notice(&many);
+    assert!(
+        notice.contains("not offered to the model (12): `mcp__bulk__t0`,"),
+        "{notice}"
+    );
+    assert!(notice.contains("`mcp__bulk__t9` and 2 more."), "{notice}");
+    assert!(!notice.contains("mcp__bulk__t10"), "{notice}");
+}

@@ -854,6 +854,10 @@ pub(crate) struct App {
     /// kill switch was on (one per pane); it goes with that pane's next turn
     /// after the switch is off (turning it off sends nothing).
     pub(crate) kill_switch_held_claude_tasks: Vec<(String, String)>,
+    /// #660 follow-up: the managed Codex panes whose mailbox holds a task
+    /// another agent sent while the kill switch was on, until that pane's
+    /// next turn starts (it goes with that turn).
+    pub(crate) kill_switch_held_native_tasks: Vec<codex_protocol::ThreadId>,
     /// #507: whether this app last saw the kill switch on, so a change
     /// reported twice (here and by the home's watch) is handled once.
     pub(crate) kill_switch_known_on: bool,
@@ -1029,17 +1033,69 @@ fn active_turn_steer_race(error: &TypedRequestError) -> Option<ActiveTurnSteerRa
     Some(ActiveTurnSteerRace::ExpectedTurnMismatch { actual_turn_id })
 }
 
-fn session_start_error(
+/// [`session_start_failure`]; for a refusal the screen is cleared and the app
+/// server shut down, as on the other early exits.
+async fn end_session_start(
+    tui: &mut tui::Tui,
+    app_server: AppServerSession,
     action: &str,
     target_session: &SessionTarget,
     err: color_eyre::eyre::Report,
-) -> color_eyre::eyre::Report {
+) -> Result<AppExitInfo> {
+    let result = session_start_failure(action, target_session, err);
+    if result.is_ok() {
+        // As for a missing session: the message prints on a clean screen.
+        let _ = tui.terminal.clear();
+        app_server
+            .shutdown()
+            .await
+            .inspect_err(|err| tracing::warn!("app-server shutdown failed: {err}"))
+            .ok();
+    }
+    result
+}
+
+/// A resume/fork the app server refused (archived thread, account rules, ...)
+/// ends the launch with a plain `ERROR:` line like other launch refusals (#656).
+/// Anything else (transport failure, bad response) stays an error report.
+fn session_start_failure(
+    action: &str,
+    target_session: &SessionTarget,
+    err: color_eyre::eyre::Report,
+) -> Result<AppExitInfo> {
     if let Some(message) = archived_session_guidance(&err) {
-        return color_eyre::eyre::eyre!("{message}");
+        return Ok(AppExitInfo::fatal(message));
+    }
+    if let Some(message) = session_start_refusal(action, &err) {
+        let thread_id = target_session.thread_id;
+        return Ok(AppExitInfo::fatal(format!(
+            "Could not {action} session {thread_id}: {message}"
+        )));
     }
 
     let target_label = target_session.display_label();
-    color_eyre::eyre::eyre!("Failed to {action} session from {target_label}: {err}")
+    Err(color_eyre::eyre::eyre!(
+        "Failed to {action} session from {target_label}: {err}"
+    ))
+}
+
+/// The server's own message when `thread/{action}` was answered with a
+/// JSON-RPC error, without the bootstrap context and error code.
+fn session_start_refusal(action: &str, err: &color_eyre::eyre::Report) -> Option<String> {
+    let err = err.to_string();
+    let server_prefix = format!("thread/{action} failed: ");
+    let message = &err[err.find(&server_prefix)? + server_prefix.len()..];
+    // `{message} (code {code})`, then `, data: {data}` when the error has data;
+    // either part may itself contain ` (code `.
+    let (end, _) = message.match_indices(" (code ").find(|(start, marker)| {
+        message[start + marker.len()..]
+            .split_once(')')
+            .is_some_and(|(code, rest)| {
+                code.parse::<i64>().is_ok() && (rest.is_empty() || rest.starts_with(", data: "))
+            })
+    })?;
+    let message = message[..end].trim();
+    (!message.is_empty()).then(|| message.to_string())
 }
 
 fn archived_session_guidance(err: &color_eyre::eyre::Report) -> Option<String> {
@@ -1385,7 +1441,7 @@ impl App {
                         &config,
                         &harness_overrides,
                     );
-                let resumed = app_server
+                let resumed = match app_server
                     .resume_thread(
                         config.clone(),
                         target_session.thread_id,
@@ -1393,7 +1449,13 @@ impl App {
                         permission_settings,
                     )
                     .await
-                    .map_err(|err| session_start_error("resume", &target_session, err))?;
+                {
+                    Ok(resumed) => resumed,
+                    Err(err) => {
+                        return end_session_start(tui, app_server, "resume", &target_session, err)
+                            .await;
+                    }
+                };
                 apply_persisted_resume_runtime(
                     &mut config,
                     Some(&resumed.session.model),
@@ -1451,10 +1513,16 @@ impl App {
                     /*inc*/ 1,
                     &[("source", "cli_subcommand")],
                 );
-                let forked = app_server
+                let forked = match app_server
                     .fork_thread(config.clone(), target_session.thread_id)
                     .await
-                    .map_err(|err| session_start_error("fork", &target_session, err))?;
+                {
+                    Ok(forked) => forked,
+                    Err(err) => {
+                        return end_session_start(tui, app_server, "fork", &target_session, err)
+                            .await;
+                    }
+                };
                 let init = crate::chatwidget::ChatWidgetInit {
                     config: config.clone(),
                     frame_requester: tui.frame_requester(),
@@ -1723,6 +1791,7 @@ See the Corbanu Terminal keymap documentation for supported actions and examples
             spawn_auto_loop_state_by_node: HashMap::new(),
             spawn_operator_input_seen: false,
             kill_switch_held_claude_tasks: Vec::new(),
+            kill_switch_held_native_tasks: Vec::new(),
             // Set from the home's watch at start (`watch_kill_switch_elsewhere`).
             kill_switch_known_on: false,
             spawn_quarantine_notified_by_node: HashSet::new(),

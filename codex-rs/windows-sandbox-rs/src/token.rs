@@ -483,8 +483,8 @@ unsafe fn create_token_with_caps_from(
     // an object it lacks DELETE on when the parent grants FILE_DELETE_CHILD, so a
     // parent that grants the user full control lets the sandbox delete or move
     // children that capability-SID ACEs protect. Legacy sessions close that route
-    // for protected paths with Everyone deny ACEs (`deny_delete_child_route`);
-    // outside writable roots it stays open.
+    // with Low integrity outside writable roots (`integrity.rs`) and with
+    // Everyone deny ACEs for protected paths inside them (`deny_delete_child_route`).
     let flags = DISABLE_MAX_PRIVILEGE | LUA_TOKEN | WRITE_RESTRICTED;
     let ok = CreateRestrictedToken(
         base_token,

@@ -38,6 +38,7 @@ use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
 #[cfg(unix)]
 use core_test_support::skip_if_sandbox;
+use core_test_support::skip_if_wine_exec;
 use core_test_support::stdio_server_bin;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
@@ -173,7 +174,9 @@ async fn start_turn_after(
                 .expect("enable source envelopes");
             tweak(config);
         })
-        .build_with_auto_env(&server)
+        // These tests check the host sandbox's protections (#157): pin them to
+        // the local executor, also in the remote test lane.
+        .build(&server)
         .await?;
     // Keep the server alive for the whole test.
     std::mem::forget(server);
@@ -241,6 +244,17 @@ fn output_text(request: &ResponsesRequest, call_id: &str) -> String {
         .unwrap_or_default()
 }
 
+/// #615: what the interactive shell printed when it started, for failures
+/// where typing into it found no session (the shell had already exited).
+#[cfg(unix)]
+fn shell_start_output(captured: &ResponseMock) -> String {
+    captured
+        .requests()
+        .iter()
+        .find_map(|request| request.function_call_output_text("call-open"))
+        .unwrap_or_else(|| "<no call-open output was sent>".to_string())
+}
+
 /// An MCP call whose arguments reach a credential needs the human after
 /// untrusted content, even where the server's tools run unasked and the tool
 /// calls itself read-only; with approvals off it is refused, and ordinary or
@@ -249,6 +263,10 @@ fn output_text(request: &ResponsesRequest, call_id: &str) -> String {
 async fn pf_23_s01_protected_mcp_call_after_untrusted_content_needs_the_human() -> anyhow::Result<()>
 {
     skip_if_no_network!(Ok(()));
+    skip_if_wine_exec!(
+        Ok(()),
+        "this security test runs host shell commands; Wine-exec routes them to a Windows executor with a non-native cwd"
+    );
     let protected = "~/.ssh/id_ed25519";
     let mcp_turn = |level, approval, message: &str| {
         start_turn(
@@ -343,9 +361,12 @@ async fn pf_23_s01_typing_a_protected_command_into_a_running_shell_needs_the_hum
     };
 
     let (test, captured) = stdin_turn(AskForApproval::OnRequest, "corbanu vault list\n").await?;
-    let question = next_question(&test)
-        .await
-        .expect("typing the vault command asks");
+    let Some(question) = next_question(&test).await else {
+        panic!(
+            "typing the vault command asks; the shell started with: {}",
+            shell_start_output(&captured)
+        );
+    };
     let text = &question.questions[0].question;
     assert!(text.contains("corbanu vault list"), "{text}");
     assert!(
@@ -410,10 +431,40 @@ async fn pf_23_s01_typing_a_protected_command_into_a_running_shell_needs_the_hum
 /// Inside one code-mode cell, a tool result the script reads makes its next
 /// call post-taint, before anything is recorded: the vault command derived
 /// after it is refused with approvals off. Permissive is unchanged.
+///
+/// #553: this test needs a real code-mode cell run. With the default test
+/// thread stack the setup overflows it, an environmental failure rather
+/// than a product one, so run the async body on threads with room to
+/// spare.
 #[cfg(unix)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn pf_23_s01_code_mode_cell_results_taint_its_later_calls() -> anyhow::Result<()> {
-    skip_if_no_network!(Ok(()));
+#[test]
+fn pf_23_s01_code_mode_cell_results_taint_its_later_calls() {
+    skip_if_no_network!();
+    const TEST_STACK_SIZE_BYTES: usize = 32 * 1024 * 1024;
+    std::thread::Builder::new()
+        .name("pf_23_s01_taint".to_string())
+        .stack_size(TEST_STACK_SIZE_BYTES)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(TEST_STACK_SIZE_BYTES)
+                .enable_all()
+                .build()
+                .expect("test runtime should build")
+                .block_on(pf_23_s01_taint_inner())
+        })
+        .expect("test thread should spawn")
+        .join()
+        .expect("test thread should not panic")
+        .expect("test body should succeed");
+}
+
+#[cfg(unix)]
+async fn pf_23_s01_taint_inner() -> anyhow::Result<()> {
+    skip_if_wine_exec!(
+        Ok(()),
+        "this security test runs host shell commands; Wine-exec routes them to a Windows executor with a non-native cwd"
+    );
     // #553: code mode runs in the `codex-code-mode-host` process. Without
     // it the session falls back to direct tools and the cell never runs, so
     // this test would check nothing; say so instead of failing on the
@@ -2496,7 +2547,7 @@ async fn issue_650_other_worktrees_git_folders_stay_read_only() -> anyhow::Resul
         );
         let cwd = AbsolutePathBuf::from_absolute_path(x.join("wt"))?;
         let (test, captured) = start_turn_in(
-            None,
+            /*home*/ None,
             level,
             AskForApproval::Never,
             vec![
@@ -2531,6 +2582,391 @@ async fn issue_650_other_worktrees_git_folders_stay_read_only() -> anyhow::Resul
             !other.exists(),
         ];
         if !output.contains("ran-650") || achieved != [open; 4] || !x.join("wt/file650").exists() {
+            wrong.push(format!("{level:?}: {achieved:?}: {output}"));
+        }
+        drop(test);
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
+/// Issue #651: a protected command working inside a separate database
+/// folder whose path holds glob syntax runs (bubblewrap's glob scan accepts
+/// the escaped pattern) and still cannot read a database there, write the
+/// backups folder, or (macOS, whose sandbox matches the pattern itself) read
+/// a database created during the command. Permissive is unchanged.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_651_a_database_folder_with_glob_syntax_is_protected() -> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let mut wrong = Vec::new();
+    for (level, open) in [
+        (SecurityLevel::Moderate, false),
+        (SecurityLevel::Aggressive, false),
+        (SecurityLevel::Permissive, true),
+    ] {
+        let base = TempDir::new()?;
+        let folder = base.path().canonicalize()?.join("db[1]{2");
+        let work = folder.join("work");
+        std::fs::create_dir_all(&work)?;
+        let command = "cat ../canary.sqlite; echo; printf later-651 > ../new.sqlite; \
+                       cat ../new.sqlite; echo; printf x > ../db-backups/planted; echo ran-651";
+        let sqlite_home = AbsolutePathBuf::from_absolute_path(&folder)?;
+        let cwd = AbsolutePathBuf::from_absolute_path(&work)?;
+        let canary = folder.join("canary.sqlite");
+        let (test, captured) = start_turn_after(
+            /*home*/ None,
+            level,
+            AskForApproval::Never,
+            vec![
+                call("call-651", "shell_command", json!({ "command": command })),
+                done_step(),
+            ],
+            move |config| {
+                config.cwd = cwd.clone();
+                config.sqlite = codex_state::SqliteConfig::from_sqlite_home(sqlite_home.clone());
+                config
+                    .permissions
+                    .set_permission_profile(PermissionProfile::Disabled)
+                    .expect("full access");
+            },
+            move |_| {
+                std::fs::write(&canary, CANARY).expect("canary database");
+                let folder = canary.parent().expect("database folder");
+                std::fs::create_dir_all(folder.join("db-backups")).expect("backups");
+            },
+        )
+        .await?;
+        assert!(next_exec_approval(&test).await.is_none());
+        let requests = captured.requests();
+        let output = output_text(&requests[requests.len() - 1], "call-651");
+        let mut achieved = vec![
+            output.contains(CANARY),
+            folder.join("db-backups/planted").exists(),
+        ];
+        if cfg!(target_os = "macos") {
+            achieved.push(output.contains("later-651"));
+        }
+        if !output.contains("ran-651") || achieved.iter().any(|got| *got != open) {
+            wrong.push(format!("{level:?}: {achieved:?}: {output}"));
+        }
+        drop(test);
+        drop(base);
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
+/// Issue #651 item 7: with a separate database folder missing when the
+/// command runs (state start-up failed), a protected command with full
+/// access cannot create it and put a file or a pending accounting record in
+/// it, and finds no placeholder file at its path (bubblewrap's, which sat on
+/// the host while the command ran); with the paths built at run time.
+/// Permissive is unchanged.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_651_a_missing_database_folder_is_protected() -> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let mut wrong = Vec::new();
+    for (level, open) in [
+        (SecurityLevel::Moderate, false),
+        (SecurityLevel::Aggressive, false),
+        (SecurityLevel::Permissive, true),
+    ] {
+        let base = TempDir::new()?;
+        let folder = base.path().canonicalize()?.join("databases");
+        let path = folder.to_string_lossy().into_owned();
+        // Split inside the folder's own name: neither part names it.
+        let (head, tail) = path.split_at(path.len() - 2);
+        let command = format!(
+            "d=\"$(printf '{head}%s' {tail})\"; [ -f \"$d\" ] && echo placeholder-651; \
+             mkdir -p \"$d/accounting-$(printf pending)\"; printf x > \"$d/planted\"; \
+             printf '{{}}' > \"$d/accounting-$(printf pending)/planted.json\"; echo ran-651"
+        );
+        let sqlite_home = AbsolutePathBuf::from_absolute_path(&folder)?;
+        let missing = folder.clone();
+        let (test, captured) = start_turn_after(
+            /*home*/ None,
+            level,
+            AskForApproval::Never,
+            vec![
+                call("call-651m", "shell_command", json!({ "command": command })),
+                done_step(),
+            ],
+            move |config| {
+                config.sqlite = codex_state::SqliteConfig::from_sqlite_home(sqlite_home.clone());
+                config
+                    .permissions
+                    .set_permission_profile(PermissionProfile::Disabled)
+                    .expect("full access");
+            },
+            move |_| {
+                // Start-up created it; the command meets it missing.
+                std::fs::remove_dir_all(&missing).expect("database folder");
+            },
+        )
+        .await?;
+        assert!(next_exec_approval(&test).await.is_none());
+        let requests = captured.requests();
+        let output = output_text(&requests[requests.len() - 1], "call-651m");
+        let achieved = [
+            folder.join("planted").exists(),
+            folder.join("accounting-pending/planted.json").exists(),
+        ];
+        if !output.contains("ran-651")
+            || output.contains("placeholder-651")
+            || achieved != [open; 2]
+        {
+            wrong.push(format!("{level:?}: {achieved:?}: {output}"));
+        }
+        drop(test);
+        drop(base);
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
+/// Issue #651 item 6 (Travis, 2026-10-13): on macOS a separate database folder
+/// that is a well-known shared folder (here the temporary folder, `TMPDIR`)
+/// is not denied whole: a protected command with full access can still read
+/// and write ordinary files there. On Linux it stays denied whole. On both, it
+/// still cannot read or write a database, create a rollback journal or plant
+/// a link under a runtime database's names, create and hold the missing init
+/// lock, hold the GPU controller's lock or plant a pending accounting record
+/// or a backup, with the paths built at run time. Permissive is unchanged.
+///
+/// The scenario sets `TMPDIR` for the whole process, so the test runs it in a
+/// copy of this test binary of its own (`cargo test` runs tests as threads).
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_651_a_shared_database_folder_is_denied_entry_by_entry() -> anyhow::Result<()> {
+    const SUBPROCESS: &str = "CORBANU_TEST_ISSUE_651_SHARED_FOLDER_SUBPROCESS";
+    const NAME: &str =
+        "suite::pf_23_s01::issue_651_a_shared_database_folder_is_denied_entry_by_entry";
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    if std::env::var_os(SUBPROCESS).is_some() {
+        return shared_database_folder_scenario().await;
+    }
+    let output = tokio::process::Command::new(std::env::current_exe()?)
+        .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+        .env(SUBPROCESS, "1")
+        .output()
+        .await?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "`{NAME}` in its own process failed\nstdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+async fn shared_database_folder_scenario() -> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
+    let mut wrong = Vec::new();
+    let original_tmpdir = std::env::var_os("TMPDIR");
+    for (level, open) in [
+        (SecurityLevel::Moderate, false),
+        (SecurityLevel::Aggressive, false),
+        (SecurityLevel::Permissive, true),
+    ] {
+        let base = TempDir::new()?;
+        let folder = base.path().canonicalize()?.join("shared");
+        std::fs::create_dir_all(&folder)?;
+        let lock = folder.join("pfterminal_db_init.lock");
+        let path = folder.to_string_lossy().into_owned();
+        // Split inside the folder's own name: neither part names it.
+        let (head, tail) = path.split_at(path.len() - 2);
+        let command = format!(
+            "d=\"$(printf '{head}%s' {tail})\"; s=\"sql$(printf ite)\"; \
+             cat \"$d/notes-651.txt\"; echo; printf x > \"$d/scratch-651\" && echo wrote-651; \
+             cat \"$d/canary.$s\"; echo; printf x >> \"$d/canary.$s\"; \
+             perl -e 'use Fcntl qw(:flock); open(my $f, \">>\", $ARGV[0]) or die \"open: $!\\n\"; \
+             flock($f, LOCK_EX | LOCK_NB) or die \"lock: $!\\n\"' \
+             \"$d/pfterminal_db_$(printf init).lock\" && echo init-held-651; \
+             perl -e 'use Fcntl qw(:flock); open(my $f, \"<\", $ARGV[0]) or die \"open: $!\\n\"; \
+             flock($f, LOCK_EX | LOCK_NB) or die \"lock: $!\\n\"' \
+             \"$d/gpu-controller.$(printf lock)\" && echo gpu-held-651; \
+             printf '{{}}' > \"$d/accounting-$(printf pending)/planted.json\"; \
+             printf x > \"$d/db-$(printf backups)/planted\"; \
+             printf x > \"$d/pfterminal_state_5.$s-$(printf journal)\"; \
+             ln -s /dev/null \"$d/logs_2.$s-$(printf wal)\"; \
+             S=\"SQL$(printf ITE)\"; printf x > \"$d/PFTERMINAL_STATE_5.$S-$(printf JOURNAL)\"; \
+             ln -s /dev/null \"$d/LOGS_2.$S-$(printf WAL)\"; \
+             mkdir -p \"$d/ACCOUNTING-$(printf PENDING)\"; \
+             printf '{{}}' > \"$d/ACCOUNTING-$(printf PENDING)/upper.json\"; \
+             perl -e 'use Fcntl qw(:flock); open(my $f, \">>\", $ARGV[0]) or die \"open: $!\\n\"; \
+             flock($f, LOCK_EX | LOCK_NB) or die \"lock: $!\\n\"' \
+             \"$d/PFTERMINAL_DB_$(printf INIT).LOCK\" && echo init-upper-held-651; echo ran-651"
+        );
+        let sqlite_home = AbsolutePathBuf::from_absolute_path(&folder)?;
+        let (shared, missing_lock) = (folder.clone(), lock.clone());
+        let (test, captured) = start_turn_after(
+            /*home*/ None,
+            level,
+            AskForApproval::Never,
+            vec![
+                call("call-651s", "shell_command", json!({ "command": command })),
+                done_step(),
+            ],
+            move |config| {
+                config.sqlite = codex_state::SqliteConfig::from_sqlite_home(sqlite_home.clone());
+                config
+                    .permissions
+                    .set_permission_profile(PermissionProfile::Disabled)
+                    .expect("full access");
+            },
+            move |_| {
+                std::fs::write(shared.join("notes-651.txt"), "ordinary-651").expect("notes");
+                std::fs::write(shared.join("canary.sqlite"), CANARY).expect("canary database");
+                std::fs::write(shared.join("gpu-controller.lock"), "").expect("gpu lock");
+                std::fs::create_dir_all(shared.join("accounting-pending")).expect("pending");
+                std::fs::create_dir_all(shared.join("db-backups")).expect("backups");
+                // Start-up created it; the command meets it missing.
+                let _ = std::fs::remove_file(&missing_lock);
+                // The database folder is the temporary folder from here on
+                // (set after the session's own folders were made).
+                // SAFETY: the scenario runs alone in its own process.
+                unsafe { std::env::set_var("TMPDIR", &shared) };
+            },
+        )
+        .await?;
+        let approval = next_exec_approval(&test).await;
+        // SAFETY: as above.
+        unsafe {
+            match &original_tmpdir {
+                Some(value) => std::env::set_var("TMPDIR", value),
+                None => std::env::remove_var("TMPDIR"),
+            }
+        }
+        assert!(approval.is_none());
+        let requests = captured.requests();
+        let output = output_text(&requests[requests.len() - 1], "call-651s");
+        let ordinary = output.contains("ordinary-651")
+            && output.contains("wrote-651")
+            && folder.join("scratch-651").exists();
+        let achieved = [
+            output.contains(CANARY),
+            std::fs::read_to_string(folder.join("canary.sqlite")).unwrap_or_default() != CANARY,
+            output.contains("init-held-651") || lock.exists(),
+            output.contains("gpu-held-651"),
+            folder.join("accounting-pending/planted.json").exists(),
+            folder.join("db-backups/planted").exists(),
+            folder.join("pfterminal_state_5.sqlite-journal").exists(),
+            std::fs::symlink_metadata(folder.join("logs_2.sqlite-wal"))
+                .is_ok_and(|metadata| metadata.file_type().is_symlink()),
+            // The same names in other letters (one file on macOS's usual
+            // case-insensitive volumes, which Corbanu then opens).
+            folder.join("PFTERMINAL_STATE_5.SQLITE-JOURNAL").exists(),
+            std::fs::symlink_metadata(folder.join("LOGS_2.SQLITE-WAL"))
+                .is_ok_and(|metadata| metadata.file_type().is_symlink()),
+            folder.join("ACCOUNTING-PENDING/upper.json").exists(),
+            output.contains("init-upper-held-651"),
+        ];
+        // Linux keeps denying the shared folder whole (bubblewrap can't deny
+        // a name before it exists).
+        let ordinary_expected = open || cfg!(target_os = "macos");
+        if !output.contains("ran-651") || ordinary != ordinary_expected || achieved != [open; 12] {
+            wrong.push(format!(
+                "{level:?}: ordinary={ordinary} {achieved:?}: {output}"
+            ));
+        }
+        drop(test);
+        drop(base);
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
+/// #652: with a writable root reached through a nested link
+/// (`<base>/link -> <base>/real`) and the Corbanu home at its real location
+/// below it, a protected command still cannot create a name in the home
+/// (`hooks.json`, which would run commands in later sessions) or write a
+/// runtime folder (`skills/`), with the paths built at run time; the root
+/// stays writable. Permissive is unchanged.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_652_home_below_a_root_reached_through_a_nested_link_stays_protected()
+-> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
+    use codex_protocol::permissions::FileSystemAccessMode;
+    use codex_protocol::permissions::FileSystemPath;
+    use codex_protocol::permissions::FileSystemSandboxEntry;
+    use codex_protocol::permissions::FileSystemSandboxPolicy;
+    use codex_protocol::permissions::FileSystemSpecialPath;
+    use codex_protocol::permissions::NetworkSandboxPolicy;
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let mut wrong = Vec::new();
+    for (level, open) in [
+        (SecurityLevel::Moderate, false),
+        (SecurityLevel::Permissive, true),
+    ] {
+        let base = TempDir::new()?;
+        let base_path = base.path().canonicalize()?;
+        let real = base_path.join("real");
+        std::fs::create_dir_all(real.join("ws"))?;
+        let link = base_path.join("link");
+        std::os::unix::fs::symlink(&real, &link)?;
+        let home = Arc::new(TempDir::new_in(&real)?);
+        let home_real = home.path().canonicalize()?;
+        std::fs::create_dir_all(home_real.join("skills"))?;
+        let path = home_real.to_string_lossy().into_owned();
+        // Split inside the home folder's own name: neither part names it.
+        let (head, tail) = path.split_at(path.len() - 2);
+        let command = format!(
+            "h=\"$(printf '{head}%s' {tail})\"; printf x > \"$h/hoo$(printf ks).json\"; \
+             printf x > \"$h/sk$(printf ills)/planted\"; printf x > ./file652; echo ran-652"
+        );
+        let cwd = AbsolutePathBuf::from_absolute_path(link.join("ws"))?;
+        let root = AbsolutePathBuf::from_absolute_path(&link)?;
+        let (test, captured) = start_turn_in(
+            Some(home.clone()),
+            level,
+            AskForApproval::Never,
+            vec![
+                call("call-652", "shell_command", json!({ "command": command })),
+                done_step(),
+            ],
+            move |config| {
+                config.cwd = cwd.clone();
+                let file_system = FileSystemSandboxPolicy::restricted(vec![
+                    FileSystemSandboxEntry::new(
+                        FileSystemPath::Special {
+                            value: FileSystemSpecialPath::Root,
+                        },
+                        FileSystemAccessMode::Read,
+                    ),
+                    FileSystemSandboxEntry::new(
+                        FileSystemPath::Path { path: root.clone() },
+                        FileSystemAccessMode::Write,
+                    ),
+                ]);
+                config
+                    .permissions
+                    .set_permission_profile(PermissionProfile::from_runtime_permissions(
+                        &file_system,
+                        NetworkSandboxPolicy::Restricted,
+                    ))
+                    .expect("nested-link root profile");
+            },
+        )
+        .await?;
+        assert!(next_exec_approval(&test).await.is_none());
+        let requests = captured.requests();
+        let output = output_text(&requests[requests.len() - 1], "call-652");
+        let achieved = [
+            std::fs::read_to_string(home_real.join("hooks.json")).unwrap_or_default() == "x",
+            home_real.join("skills/planted").exists(),
+        ];
+        if !output.contains("ran-652") || achieved != [open; 2] || !real.join("ws/file652").exists()
+        {
             wrong.push(format!("{level:?}: {achieved:?}: {output}"));
         }
         drop(test);
@@ -2864,7 +3300,11 @@ async fn pf_23_s02_typing_into_a_shell_started_before_untrusted_content_is_confi
         assert!(next_question(&test).await.is_none(), "{approval:?}");
         let requests = captured.requests();
         let typed = output_text(&requests[2], "call-stdin");
-        assert!(typed.contains("typed-one"), "{typed}");
+        assert!(
+            typed.contains("typed-one"),
+            "{typed}\nthe shell started with: {}",
+            shell_start_output(&captured)
+        );
         assert!(!typed.contains(CANARY), "{approval:?}: {typed}");
         assert!(output_text(&requests[3], "call-again").contains("typed-two"));
     }

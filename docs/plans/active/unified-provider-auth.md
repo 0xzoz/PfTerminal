@@ -308,7 +308,7 @@ though, for four reasons:
 - S02 amendment (2026-10-10): named OpenAI sign-ins (API-key login, ChatGPT) and AWS
   profiles left S02; selecting such an account fails closed until they ship.
 - Decision D4 (Travis, 2026-10-11, chat with the coordinator): option (a). A new
-  [PF-84-S06](../../sprints/current/unified-provider-auth/pf-84-s06-aws-and-chatgpt-accounts.md)
+  [PF-84-S06](../../sprints/archive/unified-provider-auth/pf-84-s06-aws-and-chatgpt-accounts.md)
   runs after S05: named AWS profile accounts first (slice A), then named
   ChatGPT/OpenAI sign-in accounts (slice B). The other options, (b) AWS only and
   (c) dropping both, were not chosen. This closes the question #423 recorded.
@@ -326,8 +326,30 @@ credentials per provider in one home). When PF-76 is allocated, a profile's
 provider sign-in is stored as a PF-84 named account and the profile selects it
 through `[profiles.<name>.provider_accounts]`; PF-76 does not add a second
 credential scope. PF-84 does not change profile semantics.
+
 - Demo videos via `qa/demos/README.md`.
 - One independent Opus 5.5 High review.
+
+**S06 acceptance and flag-removal prerequisites (Travis, 2026-10-13).** S01–S06
+are accepted and archived; the `named_accounts` flag stays off. S06 slice B was
+accepted as limited testing (mock-only, debug builds, isolation by instruction;
+[record](../../../qa/provider-auth/pf-84/independent-acceptance-s06b-20261013/README.md)).
+Decided with it: PR-02, a missing `--account` of any provider refuses the whole
+launch (kept); D3, the person's own *Use for this session* counts as the approval
+(only a model-chosen account prompts under Aggressive); #588, a fork of an
+earlier turn uses the source conversation's current account, as resume does.
+Before the flag is removed:
+
+1. A live ChatGPT check with a disposable test ChatGPT account (sign-in, refresh
+   written back to that account, default login untouched).
+2. A live Bedrock check with a test AWS account and a least-privilege profile.
+3. The S03 limits #425, #426 and #428 (fixed by #431 and #432) re-verified.
+4. The partial #555 legs re-run (ESC-03 draft, REG-01 flag-off picker, GH-02
+   naming `ghost`, PR-01 `/status`, ESC-04 before-build, ESC-01 terminal restore,
+   D3 approvals-off leg); REG-02 (`login status` shows a key fragment) decided.
+5. Open follow-ups closed or documented: #588, #609, #689.
+6. An isolated code-blind run from a frozen design on the packaged candidate,
+   then Travis's sign-off.
 
 ## Product linkage
 
@@ -445,8 +467,8 @@ credential scope. PF-84 does not change profile semantics.
 | Codex PF-84 lane owner | `/Volumes/CorbanuDrive/Corbanu/worktrees/pf84-s03-select` | `feat/pf-84-s03-account-selection` | `0fa45b54f0ca65a6ce3485c27281624cb6f8b2cb` | PF-84-S03, lane `account-selection` (serial after S02, merged behind `named_accounts`; completed, archived 2026-10-11). |
 | Codex PF-84 lane owner | `/Volumes/CorbanuDrive/Corbanu/worktrees/pf84-s04-providers` | `feat/pf-84-s04-provider-accounts-ui` | `0558c52cc320422d1fc187f4a98afff7a1530286` | PF-84-S04, lane `account-ui` (serial after S03, merged behind `named_accounts`; completed, archived 2026-10-11). |
 | Codex PF-84 lane owner | `/Volumes/CorbanuDrive/Corbanu/worktrees/pf84-s05-usage` | `feat/pf-84-s05-usage-by-account` | `c7e6e07cbc629b8fa366de30cfacefae23b06b69` | PF-84-S05, lane `account-usage` (serial after S04, merged behind `named_accounts`; completed, archived 2026-10-11). |
-| Codex PF-84-S06 worker | `/Volumes/CorbanuDrive/Corbanu/worktrees/pf84-s06-accounts` | `feat/pf-84-s06-accounts` | `8026ce9963f64d411b4dd930d46eabacd859c688` | PF-84-S06 slice A, lane `account-kinds` (merged behind `named_accounts`, #543). |
-| Codex PF-84-S06 worker | `/Volumes/CorbanuDrive/Corbanu/worktrees/pf84-s06b-chatgpt` | `feat/pf-84-s06b-chatgpt-accounts` | `511ec41249ba7897d1474915a17333360e070edd` | PF-84-S06 slice B, lane `account-kinds` (after slice A, merged behind `named_accounts`). |
+| Codex PF-84-S06 worker | `/Volumes/CorbanuDrive/Corbanu/worktrees/pf84-s06-accounts` | `feat/pf-84-s06-accounts` | `8026ce9963f64d411b4dd930d46eabacd859c688` | PF-84-S06 slice A, lane `account-kinds` (merged behind `named_accounts`, #543; completed, archived 2026-10-13). |
+| Codex PF-84-S06 worker | `/Volumes/CorbanuDrive/Corbanu/worktrees/pf84-s06b-chatgpt` | `feat/pf-84-s06b-chatgpt-accounts` | `511ec41249ba7897d1474915a17333360e070edd` | PF-84-S06 slice B, lane `account-kinds` (merged behind `named_accounts`; completed, archived 2026-10-13). |
 | GPT-5.6 Sol high implementation agent (historical) | `/home/pfrpc/repos/worktrees/corbanu-main-f7356a94e0` | `feat/unified-provider-auth` | `f7356a94e032234022a462d65b576a7de2854859` | Serial implementation of PF-48 through PF-56 only. |
 | Codex primary agent | same receiving worktree | same branch | same base | Feature completeness, integration decisions, scope control, review budget, final-tree verification, and TMUX acceptance. |
 | Codex primary integration agent | `/Volumes/CorbanuDrive/Corbanu/worktrees/integrate-unified-provider-auth-final` | `integration/unified-provider-auth-final` | `06211dbfca61d3f36df3bf069a79ed53ad7a6fa2` | PF-57 latest-main merge, conflict resolution, verified regression repairs, combined-tree qualification, and handoff. |
@@ -539,10 +561,10 @@ OpenAI schema, provider authorization or credential format is rewritten.
 | `PF-57` | Reconcile Travis's provider UX/catalog changes with repaired release | [PF-57-S03](../../sprints/archive/unified-provider-auth/pf-57-s03-travis-release-reconciliation.md) | completed; [combined-tree evidence](../../../qa/release/0.1.38/travis-reconciliation.md) at `c37eb277d9` |
 | `PF-84` | Home override hygiene (wrapper pitfall) | [PF-84-S01](../../sprints/archive/unified-provider-auth/pf-84-s01-home-override-hygiene.md) | completed; accepted by Travis 2026-10-11 ([gate](../../../qa/provider-auth/pf-84/s01-gate.md), [acceptance](../../../qa/provider-auth/pf-84/independent-acceptance-20261010/README.md)) |
 | `PF-84` | Named account registry, storage and resolution | [PF-84-S02](../../sprints/archive/unified-provider-auth/pf-84-s02-account-registry-and-resolution.md) | completed; accepted 2026-10-11 behind `named_accounts` (flag off); S02-15 open ([gate](../../../qa/provider-auth/pf-84/s02-gate.md)) |
-| `PF-84` | Account selection per session, CLI and worker | [PF-84-S03](../../sprints/archive/unified-provider-auth/pf-84-s03-account-selection-and-propagation.md) | completed; accepted 2026-10-11 behind `named_accounts` with limits: #425, #426 and #428 must be resolved before the flag is removed ([gate](../../../qa/provider-auth/pf-84/s03-gate.md), [acceptance](../../../qa/provider-auth/pf-84/independent-acceptance-s03-20261010/README.md)) |
+| `PF-84` | Account selection per session, CLI and worker | [PF-84-S03](../../sprints/archive/unified-provider-auth/pf-84-s03-account-selection-and-propagation.md) | completed; accepted 2026-10-11 behind `named_accounts` with limits #425, #426 and #428 (fixed by #431 and #432; re-check in the flag-removal run) ([gate](../../../qa/provider-auth/pf-84/s03-gate.md), [acceptance](../../../qa/provider-auth/pf-84/independent-acceptance-s03-20261010/README.md)) |
 | `PF-84` | `/providers` account management; duplicate-row fix | [PF-84-S04](../../sprints/archive/unified-provider-auth/pf-84-s04-provider-account-management-ui.md) | completed; accepted 2026-10-11 behind `named_accounts` ([gate](../../../qa/provider-auth/pf-84/s04-gate.md), [acceptance](../../../qa/provider-auth/pf-84/independent-acceptance-s04-20261011/README.md); #461/#462 fixed by #472) |
 | `PF-84` | Per-account usage and rate-limit attribution | [PF-84-S05](../../sprints/archive/unified-provider-auth/pf-84-s05-per-account-usage-attribution.md) | completed; accepted 2026-10-11 behind `named_accounts` ([gate](../../../qa/provider-auth/pf-84/s05-gate.md), [acceptance](../../../qa/provider-auth/pf-84/independent-acceptance-s05-20261011/README.md); fixes #485 #486 #489 #490; follow-up #528) |
-| `PF-84` | Named AWS profile and ChatGPT/OpenAI sign-in accounts | [PF-84-S06](../../sprints/current/unified-provider-auth/pf-84-s06-aws-and-chatgpt-accounts.md) | ready (lane account-kinds; D4): slice A #543 and slice B merged behind `named_accounts` ([A gate](../../../qa/provider-auth/pf-84/s06a-gate.md), [B gate](../../../qa/provider-auth/pf-84/s06b-gate.md)); live Bedrock and live ChatGPT pending |
+| `PF-84` | Named AWS profile and ChatGPT/OpenAI sign-in accounts | [PF-84-S06](../../sprints/archive/unified-provider-auth/pf-84-s06-aws-and-chatgpt-accounts.md) | completed; slice A accepted 2026-10-12, slice B 2026-10-13, both behind `named_accounts` as limited testing (mock-only; live Bedrock and live ChatGPT NOT VERIFIABLE) ([A gate](../../../qa/provider-auth/pf-84/s06a-gate.md), [B gate](../../../qa/provider-auth/pf-84/s06b-gate.md), [acceptance](../../../qa/provider-auth/pf-84/independent-acceptance-s06b-20261013/README.md)); see flag-removal prerequisites |
 
 ## Hard dependency graph
 
@@ -737,7 +759,7 @@ see the [reconciliation evidence](../../../qa/release/0.1.38/travis-reconciliati
 | Review remediation | regression | Codex primary integration agent | PF-57 | Completed: fresh onboarding occurs only when the current provider is unconfigured and no ready configured interactive alternative exists; established inactive, unavailable, recovery-required, removed, or missing-current profiles enter chat blocked until explicit recovery. Onboarding caches status, compatible-model persistence precedes selection completion, local/status-only providers remain usable, and command auth stays lazy. Dead legacy UI cleanup remains nonblocking follow-up work. |
 | D1 PF-84 storage | product | Travis | PF-84-S02 | **Recommended default adopted 2026-10-10; Travis may revisit.** one vault per home with account-qualified labels (no new keychain items). Alternative: a home per account (proven, but splits vault, sessions and usage). |
 | D2 PF-84 import | product | Travis | PF-84-S04 | **Recommended default adopted 2026-10-10; Travis may revisit.** no automatic import from per-home workaround homes; re-enroll. |
-| D3 PF-84 model-chosen account | security | Travis | PF-84-S03 | **Recommended default adopted 2026-10-10.** spawn `account` limited to configured names, shown in the spawn event; requires approval under `/security` Aggressive, refused with approvals off. **#428 decided 2026-10-11 by Travis (option 1):** "Aggressive" also covers every state the TUI shows as Aggressive while Core's level stays lower ("Aggressive enforced, boundary unverified", "Active in this session: Aggressive"). Implemented by #432 (refused with approvals off). |
+| D3 PF-84 model-chosen account | security | Travis | PF-84-S03 | **Recommended default adopted 2026-10-10.** spawn `account` limited to configured names, shown in the spawn event; requires approval under `/security` Aggressive, refused with approvals off. **#428 decided 2026-10-11 by Travis (option 1):** "Aggressive" also covers every state the TUI shows as Aggressive while Core's level stays lower ("Aggressive enforced, boundary unverified", "Active in this session: Aggressive"). Implemented by #432 (refused with approvals off). **Scope decided 2026-10-13 by Travis:** the person's own *Use for this session* choice counts as the approval; only a model-chosen account prompts. |
 | D4 PF-84 ChatGPT and AWS accounts | product | Travis | PF-84-S06 | **Decided 2026-10-11 by Travis (option (a))**: new S06 after S05, AWS profile accounts first, then ChatGPT/OpenAI sign-in accounts. S06 open points decided 2026-10-11 with the recommended defaults: the default ChatGPT login stays in place; warn on the same ChatGPT user in two accounts; AWS SSO profiles allowed; no test AWS profile, so live Bedrock is pending. |
 | PF-76-S01 overlap | integration | plan owner | PF-84-S02 | Reconciled 2026-10-10: PF-76 stores a profile's sign-in as a PF-84 named account selected by `[profiles.<name>.provider_accounts]`; see the PF-84 section. |
 

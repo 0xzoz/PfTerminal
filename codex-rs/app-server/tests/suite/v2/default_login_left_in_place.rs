@@ -3,8 +3,10 @@
 //! restrictions rule out in place, never logs it out, refuses a thread on it
 //! with the reason, and says so at initialize. Named accounts off: unchanged.
 
+#[cfg(unix)]
 use anyhow::Context;
 use anyhow::Result;
+#[cfg(unix)]
 use app_test_support::DISABLE_PLUGIN_STARTUP_TASKS_ARG;
 use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;

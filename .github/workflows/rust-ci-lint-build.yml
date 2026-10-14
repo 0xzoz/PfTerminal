@@ -1,7 +1,7 @@
 name: rust-ci lint/build
 
 # Cargo clippy (`--tests -D warnings`) for one runner/target/profile. Shared by
-# rust-ci.yml (PR: Linux gnu dev only) and rust-ci-full.yml (postmerge: gnu,
+# rust-ci.yml (PR: Linux gnu dev and Windows msvc dev) and rust-ci-full.yml (postmerge: gnu,
 # musl, musl release and Windows msvc dev), so both run the same job definition
 # and share the cargo-home and sccache caches.
 on:
@@ -19,6 +19,16 @@ on:
       timeout_minutes:
         required: true
         type: number
+      save_caches:
+        description: >-
+          Save the cargo-home and sccache caches. The PR Windows leg turns this
+          off so it restores main's caches without adding its own (the repo's
+          Actions cache is over its size limit, and LRU eviction drops main's
+          Windows caches within the hour when every PR adds ~700 MB). Only
+          the local-disk sccache fallback honours it; the sccache GitHub
+          backend, if ever enabled, writes the cache itself.
+        type: boolean
+        default: true
 
 jobs:
   clippy:
@@ -200,7 +210,7 @@ jobs:
       # Save caches explicitly; make non-fatal so cache packaging
       # never fails the overall job. Only save when key wasn't hit.
       - name: Save cargo home cache
-        if: always() && !cancelled() && steps.cache_cargo_home_restore.outputs.cache-hit != 'true'
+        if: always() && !cancelled() && steps.cache_cargo_home_restore.outputs.cache-hit != 'true' && inputs.save_caches
         continue-on-error: true
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
@@ -216,7 +226,7 @@ jobs:
           key: cargo-home-${{ inputs.runner }}-${{ inputs.target }}-${{ inputs.profile }}-${{ steps.lockhash.outputs.hash }}-${{ steps.lockhash.outputs.toolchain_hash }}
 
       - name: Save sccache cache (fallback)
-        if: always() && !cancelled() && env.USE_SCCACHE == 'true' && env.SCCACHE_GHA_ENABLED != 'true'
+        if: always() && !cancelled() && env.USE_SCCACHE == 'true' && env.SCCACHE_GHA_ENABLED != 'true' && inputs.save_caches
         continue-on-error: true
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:

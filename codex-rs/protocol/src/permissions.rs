@@ -454,6 +454,61 @@ struct FileSystemSemanticSignature {
     unmovable_paths: Vec<AbsolutePathBuf>,
 }
 
+/// #652: the writable roots of a policy, each as written, normalized and at
+/// its real location, where Seatbelt and bubblewrap grant it (a root reached
+/// through a nested link, `~/ws -> /Volumes/x/ws`, at its target).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WritableRootLinks {
+    roots: Vec<(AbsolutePathBuf, AbsolutePathBuf, PathBuf)>,
+}
+
+impl WritableRootLinks {
+    pub fn is_empty(&self) -> bool {
+        self.roots.is_empty()
+    }
+
+    /// `path` spelled through each root that holds its real location while
+    /// `path` is not below the root as written or normalized (a root reached
+    /// through a nested link, or `path` reached through one). The sandboxes
+    /// grant such a root at its real location, so `path` is writable
+    /// through it, and a read-only entry for `path` must be spelled through
+    /// the root for them to honor it.
+    pub fn spellings(&self, path: &Path, cwd: &Path) -> Vec<AbsolutePathBuf> {
+        #[cfg(unix)]
+        {
+            if self.roots.is_empty() {
+                return Vec::new();
+            }
+            let Some(path) = resolve_candidate_path(path, cwd) else {
+                return Vec::new();
+            };
+            let real = real_location(path.as_path());
+            let normalized = normalize_effective_absolute_path(path.clone());
+            let mut spellings: Vec<AbsolutePathBuf> = Vec::new();
+            for (root, root_normalized, root_real) in &self.roots {
+                if path.as_path().starts_with(root.as_path())
+                    || normalized.as_path().starts_with(root_normalized.as_path())
+                {
+                    continue;
+                }
+                let Ok(suffix) = real.strip_prefix(root_real) else {
+                    continue;
+                };
+                let spelled = root.join(suffix);
+                if !spellings.contains(&spelled) {
+                    spellings.push(spelled);
+                }
+            }
+            spellings
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (path, cwd);
+            Vec::new()
+        }
+    }
+}
+
 /// Runtime matcher for read-deny entries in a filesystem sandbox policy.
 pub struct ReadDenyMatcher {
     denied_candidates: Vec<Vec<PathBuf>>,
@@ -1094,8 +1149,46 @@ impl FileSystemSandboxPolicy {
     /// `/private/tmp`, so `/private/tmp/x` is writable through it (#619).
     /// Everything else, protected metadata names included, is decided as
     /// [`Self::can_write_path_with_cwd`] decides it for the normalized
-    /// policy.
+    /// policy. #652: also writable through a writable root reached through a
+    /// nested link ([`Self::writable_root_spellings_with_cwd`]), which the
+    /// sandboxes grant at its real location. For deciding where a path
+    /// becomes read-only; a write carve-out uses
+    /// [`Self::can_grant_write_effective_path_with_cwd`].
     pub fn can_write_effective_path_with_cwd(&self, path: &Path, cwd: &Path) -> bool {
+        self.can_write_normalized(path, cwd, /*read_only_wins*/ false)
+            || self.can_write_through_links(path, cwd, &self.writable_root_links_with_cwd(cwd))
+    }
+
+    /// [`Self::can_write_effective_path_with_cwd`] with the roots reached
+    /// through a nested link computed once
+    /// ([`Self::writable_root_links_with_cwd`]), for many paths.
+    pub fn can_write_effective_path_with_links(
+        &self,
+        path: &Path,
+        cwd: &Path,
+        links: &WritableRootLinks,
+    ) -> bool {
+        self.can_write_normalized(path, cwd, /*read_only_wins*/ false)
+            || self.can_write_through_links(path, cwd, links)
+    }
+
+    fn can_write_through_links(&self, path: &Path, cwd: &Path, links: &WritableRootLinks) -> bool {
+        links
+            .spellings(path, cwd)
+            .iter()
+            .any(|spelled| self.can_write_path_with_cwd(spelled.as_path(), cwd))
+    }
+
+    /// #652: [`Self::can_write_effective_path_with_cwd`] for adding a write
+    /// carve-out, which must hold under every reading of the policy: where
+    /// it names the same folder in two spellings with different access
+    /// (`/tmp/p` writable, `/private/tmp/p` read-only), the read-only entry
+    /// wins, and roots reached through a nested link are not followed.
+    pub fn can_grant_write_effective_path_with_cwd(&self, path: &Path, cwd: &Path) -> bool {
+        self.can_write_normalized(path, cwd, /*read_only_wins*/ true)
+    }
+
+    fn can_write_normalized(&self, path: &Path, cwd: &Path, read_only_wins: bool) -> bool {
         match self.kind {
             FileSystemSandboxKind::Unrestricted | FileSystemSandboxKind::ExternalSandbox => {
                 return true;
@@ -1108,29 +1201,87 @@ impl FileSystemSandboxPolicy {
         // Each entry naming a folder, by its normalized path; the others
         // (the filesystem root, patterns) as they are.
         let cwd_absolute = AbsolutePathBuf::from_absolute_path(cwd).ok();
+        let mut entries: Vec<FileSystemSandboxEntry> = self
+            .entries
+            .iter()
+            .map(|entry| match &entry.path {
+                FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                } => entry.clone(),
+                path => match resolve_entry_path(path, cwd_absolute.as_ref()) {
+                    Some(path) => FileSystemSandboxEntry {
+                        path: FileSystemPath::Path {
+                            path: normalize_effective_absolute_path(path),
+                        },
+                        ..entry.clone()
+                    },
+                    None => entry.clone(),
+                },
+            })
+            .collect();
+        if read_only_wins {
+            // A writable entry tied with a read-only one for the same
+            // normalized path becomes read-only (a denial wins already).
+            let read_only: Vec<AbsolutePathBuf> = entries
+                .iter()
+                .filter(|entry| entry.access == FileSystemAccessMode::Read)
+                .filter_map(|entry| match &entry.path {
+                    FileSystemPath::Path { path } => Some(path.clone()),
+                    _ => None,
+                })
+                .collect();
+            for entry in &mut entries {
+                if entry.access == FileSystemAccessMode::Write
+                    && matches!(&entry.path, FileSystemPath::Path { path } if read_only.contains(path))
+                {
+                    entry.access = FileSystemAccessMode::Read;
+                }
+            }
+        }
         let normalized = Self {
             kind: self.kind,
             glob_scan_max_depth: self.glob_scan_max_depth,
-            entries: self
-                .entries
-                .iter()
-                .map(|entry| match &entry.path {
-                    FileSystemPath::Special {
-                        value: FileSystemSpecialPath::Root,
-                    } => entry.clone(),
-                    path => match resolve_entry_path(path, cwd_absolute.as_ref()) {
-                        Some(path) => FileSystemSandboxEntry {
-                            path: FileSystemPath::Path {
-                                path: normalize_effective_absolute_path(path),
-                            },
-                            ..entry.clone()
-                        },
-                        None => entry.clone(),
-                    },
-                })
-                .collect(),
+            entries,
         };
         normalized.can_write_path_with_cwd(normalize_effective_absolute_path(path).as_path(), cwd)
+    }
+
+    /// #652: the writable roots with their normalized spellings and real
+    /// locations, where the sandboxes grant them (a root reached through a
+    /// nested link, `~/ws -> /Volumes/x/ws`, at its target), computed once
+    /// for many paths.
+    pub fn writable_root_links_with_cwd(&self, cwd: &Path) -> WritableRootLinks {
+        #[cfg(unix)]
+        {
+            if !matches!(self.kind, FileSystemSandboxKind::Restricted) {
+                return WritableRootLinks::default();
+            }
+            let roots = self
+                .get_writable_roots_with_cwd(cwd)
+                .into_iter()
+                .map(|root| {
+                    let real = real_location(root.root.as_path());
+                    let normalized = normalize_effective_absolute_path(root.root.clone());
+                    (root.root, normalized, real)
+                })
+                .collect();
+            WritableRootLinks { roots }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = cwd;
+            WritableRootLinks::default()
+        }
+    }
+
+    /// #652: `path` spelled through each writable root reached through a
+    /// nested link ([`Self::writable_root_links_with_cwd`]).
+    pub fn writable_root_spellings_with_cwd(
+        &self,
+        path: &Path,
+        cwd: &Path,
+    ) -> Vec<AbsolutePathBuf> {
+        self.writable_root_links_with_cwd(cwd).spellings(path, cwd)
     }
 
     pub fn can_write_path_with_cwd(&self, path: &Path, cwd: &Path) -> bool {
@@ -1438,6 +1589,36 @@ impl FileSystemSandboxPolicy {
                 read_only_path,
             })
             .collect()
+    }
+
+    /// #606: whether `path` may be written as [`Self::can_write_path_with_cwd`]
+    /// says, and not through a writable root
+    /// [`Self::get_writable_roots_with_cwd`] leaves out (#535, `excluded`
+    /// from [`Self::writable_links_into_read_only_paths`]): the sandboxes
+    /// grant nothing there, so approvals must not count it as writable
+    /// either (fail closed).
+    pub fn can_write_path_outside_excluded_links(
+        &self,
+        path: &Path,
+        cwd: &Path,
+        excluded: &[WritableLinkIntoReadOnlyPath],
+    ) -> bool {
+        if !self.can_write_path_with_cwd(path, cwd) {
+            return false;
+        }
+        if excluded.is_empty() {
+            return true;
+        }
+        let Some(target) = resolve_candidate_path(path, cwd) else {
+            return false;
+        };
+        let normalized = normalize_effective_absolute_path(target.clone());
+        !excluded.iter().any(|excluded| {
+            target.as_path().starts_with(excluded.link.as_path())
+                || normalized
+                    .as_path()
+                    .starts_with(normalize_effective_absolute_path(excluded.link.clone()).as_path())
+        })
     }
 
     fn writable_roots_including_links_into_read_only_paths(&self, cwd: &Path) -> Vec<WritableRoot> {
@@ -2474,11 +2655,16 @@ fn has_explicit_resolved_path_entry(
     entries.iter().any(|entry| &entry.path == path)
 }
 
-fn metadata_path_name(name: &OsStr) -> Option<&'static str> {
+/// The protected metadata name `name` is; with `any_case` also in another
+/// case (#606).
+fn metadata_path_name(name: &OsStr, any_case: bool) -> Option<&'static str> {
     PROTECTED_METADATA_PATH_NAMES
         .iter()
         .copied()
-        .find(|metadata_name| name == OsStr::new(metadata_name))
+        .find(|metadata_name| {
+            name == OsStr::new(metadata_name)
+                || (any_case && name.eq_ignore_ascii_case(metadata_name))
+        })
 }
 
 fn metadata_child_of_writable_root(
@@ -2486,6 +2672,12 @@ fn metadata_child_of_writable_root(
     target: &Path,
     cwd: &Path,
 ) -> Option<(AbsolutePathBuf, &'static str)> {
+    // #606: macOS volumes ignore case, so a `.GIT` made where `.git` is
+    // missing is the folder git opens as `.git`, and Seatbelt refuses it
+    // (its rules match without regard to case there). Approvals agree once
+    // the policy denies reads (Moderate and Aggressive); a policy without
+    // denied paths keeps today's answers.
+    let any_case = cfg!(target_os = "macos") && policy.has_denied_read_restrictions();
     policy
         .resolved_entries_with_cwd(cwd)
         .iter()
@@ -2493,8 +2685,10 @@ fn metadata_child_of_writable_root(
         .filter_map(|entry| {
             let relative_path = target.strip_prefix(entry.path.as_path()).ok()?;
             let first_component = relative_path.components().next()?;
-            let metadata_name = metadata_path_name(first_component.as_os_str())?;
-            Some((entry.path.join(metadata_name), metadata_name))
+            let metadata_name = metadata_path_name(first_component.as_os_str(), any_case)?;
+            // As spelled (#606: `.GIT` on macOS), so only an explicit entry
+            // for that spelling opens it.
+            Some((entry.path.join(first_component), metadata_name))
         })
         .next()
 }
@@ -3509,6 +3703,72 @@ mod tests {
                 "{path:?}"
             );
         }
+    }
+
+    /// #652: a policy naming one folder in two spellings with different
+    /// access. Seatbelt grants the writable one, so a path there counts as
+    /// writable where it becomes read-only; a write carve-out there is never
+    /// granted (the read-only entry wins).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn can_grant_write_lets_a_read_only_spelling_win_a_tie() {
+        let root = tempfile::tempdir_in("/tmp").expect("tempdir in /tmp");
+        let logical = root.path().to_path_buf();
+        let physical = logical.canonicalize().expect("canonical");
+        let entry = |path: &Path, access| FileSystemSandboxEntry {
+            path: FileSystemPath::Path {
+                path: AbsolutePathBuf::from_absolute_path(path).expect("absolute"),
+            },
+            access,
+            missing_path_behavior: None,
+        };
+        for (write, read) in [(&logical, &physical), (&physical, &logical)] {
+            let policy = FileSystemSandboxPolicy::restricted(vec![
+                entry(write, FileSystemAccessMode::Write),
+                entry(read, FileSystemAccessMode::Read),
+            ]);
+            let target = physical.join("home/worktrees");
+            assert!(policy.can_write_effective_path_with_cwd(&target, &physical));
+            assert!(!policy.can_grant_write_effective_path_with_cwd(&target, &physical));
+        }
+        let plain =
+            FileSystemSandboxPolicy::restricted(vec![entry(&logical, FileSystemAccessMode::Write)]);
+        assert!(plain.can_grant_write_effective_path_with_cwd(&physical.join("x"), &physical));
+    }
+
+    /// #652: a writable root reached through a nested link is granted at its
+    /// real location, so a path at that location is writable through it,
+    /// spelled through the root; a carve-out there is not granted.
+    #[cfg(unix)]
+    #[test]
+    fn writable_roots_reached_through_a_nested_link_are_followed() {
+        let dir = TempDir::new().expect("tempdir");
+        let base = dir.path().canonicalize().expect("canonical");
+        let real = base.join("real");
+        std::fs::create_dir_all(real.join("home")).expect("home");
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("link");
+        let policy = FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry {
+            path: FileSystemPath::Path {
+                path: AbsolutePathBuf::from_absolute_path(&link).expect("absolute"),
+            },
+            access: FileSystemAccessMode::Write,
+            missing_path_behavior: None,
+        }]);
+        let target = real.join("home/hooks.json");
+        assert!(!policy.can_write_path_with_cwd(&target, &base));
+        assert!(policy.can_write_effective_path_with_cwd(&target, &base));
+        assert!(!policy.can_grant_write_effective_path_with_cwd(&target, &base));
+        assert_eq!(
+            policy.writable_root_spellings_with_cwd(&target, &base),
+            vec![AbsolutePathBuf::from_absolute_path(link.join("home/hooks.json")).expect("abs")]
+        );
+        // Spelled through the root already: nothing more.
+        assert_eq!(
+            policy.writable_root_spellings_with_cwd(&link.join("home/x"), &base),
+            Vec::<AbsolutePathBuf>::new()
+        );
+        assert!(!policy.can_write_effective_path_with_cwd(&base.join("other/x"), &base));
     }
 
     /// Seatbelt matches a denial to a readable root by its normalized
@@ -4684,5 +4944,121 @@ mod tests {
             .map(|root| root.root.into_path_buf())
             .collect();
         assert_eq!(roots, vec![workspace, links.join("elsewhere"), hooks]);
+    }
+
+    /// #606: approvals agree with the sandboxes, which grant nothing through
+    /// a writable link they leave out (#535): a path through one is not
+    /// writable (fail closed); other paths are as before.
+    #[cfg(unix)]
+    #[test]
+    fn paths_through_excluded_links_are_not_writable_for_approvals() {
+        let dir = TempDir::new().expect("tempdir");
+        let base = dir.path().canonicalize().expect("canonical");
+        let workspace = base.join("ws");
+        fs::create_dir_all(workspace.join(".git").join("hooks")).expect("hooks");
+        let link = base.join("git-link");
+        symlink_dir(&workspace.join(".git"), &link).expect("link");
+        let entry = |path: &Path| {
+            FileSystemSandboxEntry::new(
+                FileSystemPath::Path {
+                    path: AbsolutePathBuf::from_absolute_path(path).expect("absolute"),
+                },
+                FileSystemAccessMode::Write,
+            )
+        };
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry::new(
+                FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                FileSystemAccessMode::Read,
+            ),
+            entry(&workspace),
+            entry(&link),
+        ]);
+        let excluded = policy.writable_links_into_read_only_paths(&workspace);
+        assert_eq!(excluded.len(), 1);
+        let hook = link.join("hooks").join("pre-commit");
+        // The literal check still counts it (the disagreement #606 names).
+        assert!(policy.can_write_path_with_cwd(&hook, &workspace));
+        for path in [hook.as_path(), link.as_path(), &link.join("config")] {
+            assert!(
+                !policy.can_write_path_outside_excluded_links(path, &workspace, &excluded),
+                "{}",
+                path.display()
+            );
+        }
+        assert!(policy.can_write_path_outside_excluded_links(
+            &workspace.join("src/main.rs"),
+            &workspace,
+            &excluded
+        ));
+        assert!(!policy.can_write_path_outside_excluded_links(
+            &workspace.join(".git/config"),
+            &workspace,
+            &excluded
+        ));
+        assert!(policy.can_write_path_outside_excluded_links(
+            &workspace.join("src/main.rs"),
+            &workspace,
+            &[]
+        ));
+    }
+
+    /// #606: macOS volumes ignore case, so `.GIT`, `.Codex` and `.AGENTS`
+    /// are protected like `.git`, `.codex` and `.agents` once the policy
+    /// denies reads; a policy without denied paths keeps today's rules.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metadata_names_match_in_any_case_once_reads_are_denied() {
+        let dir = TempDir::new().expect("tempdir");
+        let workspace = dir.path().canonicalize().expect("canonical").join("ws");
+        let absolute = |path: &Path| AbsolutePathBuf::from_absolute_path(path).expect("absolute");
+        let entries = vec![
+            FileSystemSandboxEntry::new(
+                FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                FileSystemAccessMode::Read,
+            ),
+            FileSystemSandboxEntry::new(
+                FileSystemPath::Path {
+                    path: absolute(&workspace),
+                },
+                FileSystemAccessMode::Write,
+            ),
+        ];
+        let open = FileSystemSandboxPolicy::restricted(entries.clone());
+        let mut denying = entries;
+        denying.push(FileSystemSandboxEntry::new(
+            FileSystemPath::Path {
+                path: absolute(&dir.path().join("denied")),
+            },
+            FileSystemAccessMode::Deny,
+        ));
+        let denying = FileSystemSandboxPolicy::restricted(denying);
+        for (name, metadata) in [
+            (".GIT", ".git"),
+            (".Codex", ".codex"),
+            (".AGENTS", ".agents"),
+        ] {
+            let path = workspace.join(name).join("config");
+            assert!(
+                !denying.can_write_path_with_cwd(&path, &workspace),
+                "{name}"
+            );
+            assert_eq!(
+                forbidden_agent_metadata_write(&path, &workspace, &denying),
+                Some(metadata),
+                "{name}"
+            );
+            assert!(open.can_write_path_with_cwd(&path, &workspace), "{name}");
+            assert_eq!(
+                forbidden_agent_metadata_write(&path, &workspace, &open),
+                None,
+                "{name}"
+            );
+        }
+        assert!(denying.can_write_path_with_cwd(&workspace.join(".gitx/config"), &workspace));
     }
 }

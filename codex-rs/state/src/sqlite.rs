@@ -114,6 +114,14 @@ const THREAD_HISTORY_DB: RuntimeDbSpec = RuntimeDbSpec {
 const RUNTIME_DBS: [RuntimeDbSpec; 5] =
     [STATE_DB, LOGS_DB, GOALS_DB, MEMORIES_DB, THREAD_HISTORY_DB];
 
+/// Every runtime database's file name, current and legacy, in the database
+/// folder (#651: a sandbox protects them one by one in a shared folder).
+pub fn runtime_database_filenames() -> impl Iterator<Item = &'static str> {
+    RUNTIME_DBS
+        .iter()
+        .flat_map(|db| [db.filename, db.legacy_filename])
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeDbPath {
     pub label: &'static str,

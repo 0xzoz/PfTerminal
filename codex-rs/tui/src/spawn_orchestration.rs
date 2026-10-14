@@ -1237,7 +1237,12 @@ impl App {
             String::new(),
             Some("Task".to_string()),
             Box::new(move |task| {
-                tx.send(AppEvent::SubmitSpawnAgentTask { thread_id, task });
+                // A person's own task: held only while the switch is on.
+                tx.send(AppEvent::SubmitSpawnAgentTask {
+                    thread_id,
+                    task,
+                    sent_while_kill_switch_on: false,
+                });
             }),
         );
         self.chat_widget.show_custom_prompt_view(view);
@@ -1261,12 +1266,57 @@ impl App {
             .agent_navigation
             .get(&thread_id)
             .is_some_and(|entry| self.is_operator_owned_codex_user_pane(thread_id, entry));
+        // #660: only agents (assignment fires, model dispatch) send through
+        // here; a task sent while the switch is on never starts a turn, even
+        // when it is handled just after switch-off.
+        let sent_while_kill_switch_on = self.kill_switch_on_now();
         if is_operator_pane {
-            self.app_event_tx
-                .send(AppEvent::SubmitCodexUserPaneTask { thread_id, task });
+            self.app_event_tx.send(AppEvent::SubmitCodexUserPaneTask {
+                thread_id,
+                task,
+                sent_while_kill_switch_on,
+            });
         } else {
-            self.app_event_tx
-                .send(AppEvent::SubmitSpawnAgentTask { thread_id, task });
+            self.app_event_tx.send(AppEvent::SubmitSpawnAgentTask {
+                thread_id,
+                task,
+                sent_while_kill_switch_on,
+            });
+        }
+    }
+
+    /// #660 follow-up: a task for the managed Codex pane `thread_id` waits in
+    /// its mailbox because of the kill switch, until that pane's next turn.
+    /// Not when the pane is running a turn: that turn takes the task. Reports
+    /// held in a mailbox are not tasks and are not listed (as for Claude panes).
+    pub(crate) fn note_kill_switch_held_native_task(&mut self, thread_id: ThreadId) {
+        let running = self
+            .agent_navigation
+            .get(&thread_id)
+            .is_some_and(|entry| entry.is_running);
+        if !running && !self.kill_switch_held_native_tasks.contains(&thread_id) {
+            self.kill_switch_held_native_tasks.push(thread_id);
+        }
+    }
+
+    /// #660 follow-up: a turn started in `thread_id` (its waiting task went
+    /// with it) or the pane closed; it no longer has a waiting task.
+    pub(crate) fn clear_kill_switch_held_native_task(&mut self, thread_id: ThreadId) {
+        self.kill_switch_held_native_tasks
+            .retain(|held| *held != thread_id);
+    }
+
+    /// #507/#660: what the person is told when a task for a managed Codex
+    /// pane waits in its mailbox because of the kill switch.
+    pub(crate) fn kill_switch_held_native_task_message(&self, label: &str) -> String {
+        if self.kill_switch_on_now() {
+            format!(
+                "A task for {label} waits: the security kill switch is on. Turning it off starts nothing: the task goes with that pane's next turn, when someone types in it or it gets new work."
+            )
+        } else {
+            format!(
+                "A task for {label} waits: it was sent while the security kill switch was on, and turning the switch off starts nothing. It goes with that pane's next turn, when someone types in it or it gets new work."
+            )
         }
     }
 
@@ -1838,6 +1888,7 @@ impl App {
         );
     }
 
+    #[cfg(test)]
     pub(crate) fn record_spawn_parent_report(&mut self, parent_node_id: String, report: String) {
         self.record_spawn_parent_report_with_notify(
             parent_node_id,
@@ -1847,7 +1898,7 @@ impl App {
         );
     }
 
-    fn record_spawn_parent_report_with_notify(
+    pub(crate) fn record_spawn_parent_report_with_notify(
         &mut self,
         parent_node_id: String,
         report: String,
@@ -1886,11 +1937,10 @@ impl App {
     ) {
         // #507: no turn is started for a report while the kill switch is on
         // either (it would only wait, and could push a real waiting task out
-        // of a Claude pane); the parent has it with its next turn.
-        let start_turns = start_turns
-            && !crate::legacy_core::security_revocation::kill_switch_on(
-                self.config.codex_home.as_ref(),
-            );
+        // of a Claude pane); the parent has it with its next turn. #660: as
+        // this process last learned it too (a switch-off elsewhere is not
+        // handled here yet).
+        let start_turns = start_turns && !self.kill_switch_on_now();
         let summary = "Child report delivered.".to_string();
         let hint = Some(report.to_string());
         // `codex-main` is the native primary Codex thread, not a Claude pane. Route it through the
@@ -2062,17 +2112,59 @@ impl App {
         task: &str,
         detail: impl AsRef<str>,
     ) {
-        let detail = detail.as_ref();
+        self.record_spawn_dispatch_failed_for_task_with_turns(
+            target_node_id,
+            task,
+            detail.as_ref(),
+            /*start_turns*/ true,
+        );
+    }
+
+    /// #660: as `record_spawn_dispatch_failed_for_task`, for a task held or
+    /// refused because of the kill switch: the senders are told, but no turn
+    /// starts for it in them, also when it is handled just after switch-off
+    /// (nothing restarts after switch-off, #507).
+    pub(crate) fn record_kill_switch_dispatch_failed_for_task(
+        &mut self,
+        target_node_id: &str,
+        task: &str,
+        detail: impl AsRef<str>,
+    ) {
+        self.record_spawn_dispatch_failed_for_task_with_turns(
+            target_node_id,
+            task,
+            detail.as_ref(),
+            /*start_turns*/ false,
+        );
+    }
+
+    /// `start_turns` false (#660): as `record_kill_switch_dispatch_failed_for_task`.
+    pub(crate) fn record_spawn_dispatch_failed_for_task_with_turns(
+        &mut self,
+        target_node_id: &str,
+        task: &str,
+        detail: &str,
+        start_turns: bool,
+    ) {
         let acks = self.take_spawn_dispatch_acks_for_task(target_node_id, task);
         self.release_spawn_dispatch_origins(&acks);
         for ack in &acks {
-            self.note_assignment_dispatch_failure(
+            self.note_assignment_dispatch_failure_with_turns(
                 &ack.source_node_id,
                 detail,
                 /*will_retry*/ false,
+                start_turns,
             );
         }
-        self.record_spawn_dispatch_acks(&acks, "failed", detail, /*notify*/ true);
+        for ack in &acks {
+            self.record_spawn_dispatch_ack(
+                ack,
+                "failed",
+                detail,
+                /*notify*/ true,
+                start_turns,
+            );
+        }
     }
 
     pub(crate) fn release_spawn_dispatch_origins(&mut self, acks: &[SpawnDispatchAck]) {
@@ -2090,9 +2182,28 @@ impl App {
         detail: impl AsRef<str>,
         notify: bool,
     ) {
-        let detail = detail.as_ref();
+        self.record_spawn_dispatch_acks_with_turns(
+            acks,
+            status,
+            detail.as_ref(),
+            notify,
+            /*start_turns*/ true,
+        );
+    }
+
+    /// `start_turns` false (#660): the senders are told without a turn
+    /// starting in them (a task another agent sent while the kill switch was
+    /// on, also when it fails just after switch-off).
+    pub(crate) fn record_spawn_dispatch_acks_with_turns(
+        &mut self,
+        acks: &[SpawnDispatchAck],
+        status: &str,
+        detail: &str,
+        notify: bool,
+        start_turns: bool,
+    ) {
         for ack in acks {
-            self.record_spawn_dispatch_ack(ack, status, detail, notify);
+            self.record_spawn_dispatch_ack(ack, status, detail, notify, start_turns);
         }
     }
 
@@ -2102,6 +2213,7 @@ impl App {
         status: &str,
         detail: &str,
         notify: bool,
+        start_turns: bool,
     ) {
         let report = format!(
             "dispatch_ack; #{}; target={}; status={}; detail={}",
@@ -2114,7 +2226,7 @@ impl App {
             ack.source_node_id.clone(),
             report,
             notify,
-            /*start_turns*/ true,
+            start_turns,
         );
     }
 
@@ -2501,7 +2613,15 @@ impl App {
         if !providers.contains(&self.config.model_provider_id) {
             providers.push(self.config.model_provider_id.clone());
         }
+        // #646: Claude Code panes record `external-claude:<profile>`, which is not a
+        // configured provider. Without an explicit allowlist, a crew must accept
+        // the panes a person can create, or a Claude Code member could not join.
+        providers.extend(
+            crate::claude_panes::ClaudeProviderProfileKind::restoration_options()
+                .map(crate::claude_panes::ClaudeProviderProfileKind::crew_runtime_provider_id),
+        );
         providers.sort();
+        providers.dedup();
         providers
     }
 

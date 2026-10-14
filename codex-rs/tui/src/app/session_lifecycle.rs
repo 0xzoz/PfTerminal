@@ -623,6 +623,8 @@ impl App {
         self.spawn_crew = None;
         self.spawn_status_by_thread.clear();
         self.spawn_parent_reports_by_node.clear();
+        // #660 follow-up: the waiting tasks belonged to this session's panes.
+        self.kill_switch_held_native_tasks.clear();
         self.side_threads.clear();
         // PF-84: a new session starts its per-account usage afresh.
         self.chat_widget.session_account_usage.clear();
@@ -1080,6 +1082,7 @@ impl App {
                 &resume_config,
                 recorded,
                 codex_model_provider::AccountRecovery::Providers,
+                crate::resume_launch::ThreadOpening::Resume,
             )
         {
             self.harness_overrides.inherited_provider_account = previous_thread_account;

@@ -661,6 +661,231 @@ fn issue_583_a_worktrees_link_opens_nothing() {
     assert!(fx.codex_home.join("worktrees").is_dir());
 }
 
+/// #603: the profile of a protected command with full access (the
+/// read-only Corbanu home, with the `worktrees` carve-out) and a grant below
+/// `worktrees` (an additional-permission write at `worktrees/w`).
+fn worktrees_carve_out_policy(fx: &Fixture) -> (FileSystemSandboxPolicy, std::path::PathBuf) {
+    let cwd = fx.user_home.join("project");
+    let denials = ReadDenials::collect(
+        &fx.codex_home,
+        Some(&fx.user_home),
+        /*claude_config_dir*/ None,
+        &[abs(&cwd)],
+    );
+    let worktrees = abs(&fx.codex_home.join("worktrees"));
+    assert_eq!(
+        denials.home_writable_paths().collect::<Vec<_>>(),
+        vec![&worktrees]
+    );
+    let mut policy = denials
+        .apply(&PermissionProfile::Disabled)
+        .unwrap()
+        .file_system_sandbox_policy();
+    policy.entries.push(FileSystemSandboxEntry::new(
+        FileSystemPath::Path {
+            path: abs(&fx.codex_home.join("worktrees/w")),
+        },
+        FileSystemAccessMode::Write,
+    ));
+    assert!(policy.can_write_path_with_cwd(&fx.codex_home.join("worktrees/w/x"), &cwd));
+    assert!(!policy.can_write_path_with_cwd(&fx.codex_home.join("hooks.json"), &cwd));
+    (policy, cwd)
+}
+
+/// Replaces the home's `worktrees` with a link to `target`, as a command a
+/// person approved under Moderate, or another session, could.
+fn swap_worktrees_for_a_link(fx: &Fixture, target: &str) {
+    let worktrees = fx.codex_home.join("worktrees");
+    std::fs::rename(&worktrees, fx.codex_home.join("worktrees.old")).unwrap();
+    std::os::unix::fs::symlink(target, &worktrees).unwrap();
+}
+
+/// #603 (launch race): `worktrees` is checked to be a real folder when the
+/// rules are built; a link swapped in before the sandbox is set up used to
+/// be the root's first sight, so the sandboxes granted writes where it led
+/// (the home itself, or its runtime `tmp`). Now the command is refused, as
+/// is a grant below `worktrees` the swap would move. (A link into a
+/// read-only entry such as `tmp` is no writable root at all, #535.)
+#[test]
+fn issue_603_a_worktrees_link_swapped_in_after_the_check_is_refused() {
+    for target in [".", "tmp"] {
+        let fx = fixture();
+        let (policy, cwd) = worktrees_carve_out_policy(&fx);
+        swap_worktrees_for_a_link(&fx, target);
+        let worktrees = fx.codex_home.join("worktrees");
+        match codex_sandboxing::writable_root_ledger::check_writable_roots(&policy, &cwd) {
+            Err(codex_sandboxing::writable_root_ledger::WritableRootRefusal::Changed {
+                root,
+                ..
+            }) => assert_eq!(root, worktrees, "{target}"),
+            Err(refusal) => panic!("{target}: {refusal}"),
+            Ok(pinned) => {
+                let granted: Vec<_> = pinned
+                    .iter()
+                    .filter(|pinned| pinned.root.as_path().starts_with(&worktrees))
+                    .collect();
+                assert!(granted.is_empty(), "{target}: {granted:?}");
+            }
+        }
+    }
+}
+
+/// #603 review: a grant below `worktrees` (an additional-permission write at
+/// `worktrees/w`) where the profile cannot write `worktrees` itself (no
+/// carve-out in the policy) is refused too once `worktrees` leads elsewhere;
+/// before, it was first seen, and granted, at the link's target.
+#[test]
+fn issue_603_a_grant_below_a_swapped_worktrees_is_refused() {
+    let fx = fixture();
+    let cwd = fx.user_home.join("project");
+    let denials = ReadDenials::collect(
+        &fx.codex_home,
+        Some(&fx.user_home),
+        /*claude_config_dir*/ None,
+        &[abs(&cwd)],
+    );
+    // The project only: no temporary folders, which hold the fixture.
+    let project_only = PermissionProfile::workspace_write_with(
+        &[],
+        NetworkSandboxPolicy::Restricted,
+        /*exclude_tmpdir_env_var*/ true,
+        /*exclude_slash_tmp*/ true,
+    )
+    .materialize_project_roots_with_workspace_roots(&[abs(&cwd)]);
+    let mut policy = denials
+        .apply(&project_only)
+        .unwrap()
+        .file_system_sandbox_policy();
+    assert!(!policy.can_write_path_with_cwd(&fx.codex_home.join("worktrees/x"), &cwd));
+    let grant = fx.codex_home.join("worktrees/w");
+    policy.entries.push(FileSystemSandboxEntry::new(
+        FileSystemPath::Path { path: abs(&grant) },
+        FileSystemAccessMode::Write,
+    ));
+    swap_worktrees_for_a_link(&fx, ".");
+    let refused = codex_sandboxing::writable_root_ledger::check_writable_roots(&policy, &cwd);
+    assert!(
+        matches!(
+            &refused,
+            Err(codex_sandboxing::writable_root_ledger::WritableRootRefusal::Changed { root, .. })
+                if root == &fx.codex_home.join("worktrees")
+        ),
+        "{refused:?}"
+    );
+}
+
+/// #603 review: a `worktrees` left as it was, or replaced by another real
+/// folder (removed and made again), runs as before.
+#[test]
+fn issue_603_a_real_worktrees_is_never_refused() {
+    let fx = fixture();
+    let (policy, cwd) = worktrees_carve_out_policy(&fx);
+    assert!(codex_sandboxing::writable_root_ledger::check_writable_roots(&policy, &cwd).is_ok());
+    let worktrees = fx.codex_home.join("worktrees");
+    std::fs::rename(&worktrees, fx.codex_home.join("worktrees.old")).unwrap();
+    std::fs::create_dir_all(worktrees.join("w")).unwrap();
+    assert!(codex_sandboxing::writable_root_ledger::check_writable_roots(&policy, &cwd).is_ok());
+    let (policy, cwd) = worktrees_carve_out_policy(&fx);
+    assert!(codex_sandboxing::writable_root_ledger::check_writable_roots(&policy, &cwd).is_ok());
+}
+
+/// #603 review: a kept folder typed in another case than stored (macOS
+/// ignores case) still keeps a denial that holds it from applying, as when
+/// `canonicalize` gave the stored case.
+#[cfg(target_os = "macos")]
+#[test]
+fn issue_603_a_kept_folder_in_another_case_is_kept() {
+    let fx = fixture();
+    let typed = fx.user_home.join(".CORBANU").join("worktrees").join("w");
+    if !typed.exists() {
+        // A volume that does not ignore case.
+        return;
+    }
+    let denied = abs(&fx.codex_home.join("worktrees"));
+    assert!(ReadDenials::holds_kept(&denied, &[abs(&typed)]));
+}
+
+/// #603 (launch race) with the real sandbox (`sandbox-exec`, bubblewrap): a
+/// command whose `worktrees` was swapped for a link to the home after the
+/// rules were built is refused, and creates no `hooks.json` in the home.
+/// Before, it ran with the root granted at the home (the home's own
+/// read-only rule still refused that write).
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn issue_603_a_worktrees_link_swapped_in_refuses_the_command_in_the_real_sandbox() {
+    use codex_sandboxing::SandboxCommand;
+    use codex_sandboxing::SandboxManager;
+    use codex_sandboxing::SandboxTransformRequest;
+    use codex_sandboxing::SandboxType;
+    use codex_utils_path_uri::PathUri;
+
+    #[cfg(target_os = "linux")]
+    let Ok(linux_sandbox_exe) = codex_utils_cargo_bin::cargo_bin("codex-linux-sandbox") else {
+        // Skipped where the helper is not built.
+        return;
+    };
+    #[cfg(not(target_os = "linux"))]
+    let linux_sandbox_exe = std::path::PathBuf::new();
+    let fx = fixture();
+    let (policy, cwd) = worktrees_carve_out_policy(&fx);
+    swap_worktrees_for_a_link(&fx, ".");
+    let profile =
+        PermissionProfile::from_runtime_permissions(&policy, NetworkSandboxPolicy::Restricted);
+    let cwd_uri = PathUri::from_abs_path(&abs(&cwd));
+    let script = format!(
+        "printf x > '{}'; echo wrote=$?",
+        fx.codex_home.join("worktrees/hooks.json").display()
+    );
+    let transformed = SandboxManager::new().transform(SandboxTransformRequest {
+        command: SandboxCommand {
+            program: "/bin/sh".into(),
+            args: vec!["-c".to_string(), script],
+            cwd: cwd_uri.clone(),
+            env: std::collections::HashMap::new(),
+            managed_network: None,
+            additional_permissions: None,
+        },
+        permissions: &profile,
+        sandbox: if cfg!(target_os = "macos") {
+            SandboxType::MacosSeatbelt
+        } else {
+            SandboxType::LinuxSeccomp
+        },
+        enforce_managed_network: false,
+        environment_id: None,
+        network: None,
+        sandbox_policy_cwd: &cwd_uri,
+        codex_linux_sandbox_exe: Some(&linux_sandbox_exe),
+        use_legacy_landlock: false,
+        windows_sandbox_level: codex_protocol::config_types::WindowsSandboxLevel::Disabled,
+        windows_sandbox_private_desktop: false,
+    });
+    let output = match transformed {
+        Err(codex_sandboxing::SandboxTransformError::WritableRootRefused(refused)) => {
+            format!("refused: {refused}")
+        }
+        Err(err) => panic!("{err}"),
+        Ok(request) => {
+            let mut command = std::process::Command::new(&request.command[0]);
+            command.args(&request.command[1..]).current_dir(&cwd);
+            if let Some(arg0) = &request.arg0 {
+                std::os::unix::process::CommandExt::arg0(&mut command, arg0);
+            }
+            let output = command.output().unwrap();
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        }
+    };
+    assert!(
+        !fx.codex_home.join("hooks.json").exists(),
+        "created through the link: {output}"
+    );
+    assert!(output.starts_with("refused: "), "{output}");
+}
+
 /// #583 review: a Corbanu home reached through a link inside the workspace
 /// (`~/.corbanu -> /elsewhere/home`) gets no `worktrees` carve-out where the
 /// profile never covered the real folder: Seatbelt would resolve the link
@@ -800,6 +1025,57 @@ fn issue_619_a_home_below_a_tmp_spelled_root_is_protected() {
     assert!(!policy.can_write_effective_path_with_cwd(&home.join("worktrees/w"), &cwd));
 }
 
+/// Issue #652: a profile naming the folder holding the Corbanu home in two
+/// spellings with different access (`/tmp/x` writable, `/private/tmp/x`
+/// read-only). Seatbelt grants the writable one, so the home's entries are
+/// still made read-only, but no `worktrees` write carve-out is added: one
+/// reading of the profile keeps it read-only.
+#[cfg(target_os = "macos")]
+#[test]
+fn issue_652_a_folder_named_twice_adds_no_worktrees_carve_out() {
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let logical = dir.path().to_path_buf();
+    let real = logical.canonicalize().unwrap();
+    let entry = |path: &Path, access| {
+        FileSystemSandboxEntry::new(FileSystemPath::Path { path: abs(path) }, access)
+    };
+    let profile = PermissionProfile::from_runtime_permissions(
+        &FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry::new(
+                FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                FileSystemAccessMode::Read,
+            ),
+            entry(&logical, FileSystemAccessMode::Write),
+            entry(&real, FileSystemAccessMode::Read),
+        ]),
+        NetworkSandboxPolicy::Restricted,
+    );
+    let cwd = real.join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let home = real.join("home");
+    std::fs::create_dir_all(home.join("worktrees")).unwrap();
+    let denials = ReadDenials::collect(
+        &home,
+        /*user_home*/ None,
+        /*claude_config_dir*/ None,
+        &[abs(&cwd)],
+    );
+    let policy = denials
+        .apply(&profile)
+        .unwrap()
+        .file_system_sandbox_policy();
+    assert!(!policy.can_write_effective_path_with_cwd(&home.join("AGENTS.md"), &cwd));
+    assert!(!policy.can_write_effective_path_with_cwd(&home.join("worktrees/w"), &cwd));
+    assert!(
+        !policy.entries.iter().any(|entry| entry.access == FileSystemAccessMode::Write
+            && matches!(&entry.path, FileSystemPath::Path { path } if path.as_path().ends_with("worktrees"))),
+        "{:?}",
+        policy.entries
+    );
+}
+
 /// Issue #586: the database init lock is denied before it exists, so a
 /// protected command can neither create it nor hold it, also where #583
 /// leaves the Corbanu home writable (a command working in the home or in a
@@ -912,6 +1188,183 @@ fn issue_611_a_separate_database_folder_is_denied_like_the_home() {
         &profile,
     );
     assert_eq!(same, home);
+}
+
+/// Issue #651: a database folder (or Corbanu home) whose path holds glob
+/// syntax is escaped in the database glob, so a database created later is
+/// still covered and nothing else is; databases recovery set aside beside
+/// the folder (`<folder>.db-backups`) are denied when present; and a command
+/// working in the home cannot create `accounting-pending` or `db-backups`.
+#[test]
+fn issue_651_glob_syntax_and_backups_of_the_database_folder() {
+    let fx = fixture();
+    let profile = PermissionProfile::Disabled;
+    let databases = fx.user_home.join("db[1]{2*?");
+    let inside = abs(&databases.join("work"));
+    std::fs::create_dir_all(inside.as_path()).unwrap();
+    let backups = fx.user_home.join("db[1]{2*?.db-backups/sqlite-1-0");
+    std::fs::create_dir_all(&backups).unwrap();
+    let denials = ReadDenials::for_turn(
+        &fx.codex_home,
+        &databases,
+        &inside,
+        std::slice::from_ref(&inside),
+        &profile,
+    );
+    let matcher = denials.matcher().expect("a valid matcher");
+    for denied in [
+        databases.join("later.sqlite"),
+        databases.join("later.sqlite-wal"),
+        backups.join("state_5.sqlite"),
+    ] {
+        assert!(matcher.is_read_denied(&denied), "{}", denied.display());
+    }
+    for readable in [
+        databases.join("notes.txt"),
+        inside.join("file").to_path_buf(),
+        fx.user_home.join("db1/later.sqlite"),
+    ] {
+        assert!(!matcher.is_read_denied(&readable), "{}", readable.display());
+    }
+
+    // A Corbanu home whose path holds glob syntax.
+    let home = fx.user_home.join("h[o]me");
+    std::fs::create_dir_all(&home).unwrap();
+    let project = abs(&fx.user_home.join("project"));
+    let denials = ReadDenials::for_turn(
+        &home,
+        &home,
+        &project,
+        std::slice::from_ref(&project),
+        &profile,
+    );
+    let matcher = denials.matcher().expect("a valid matcher");
+    assert!(matcher.is_read_denied(&home.join("later.sqlite")));
+    assert!(!matcher.is_read_denied(&fx.user_home.join("home/later.sqlite")));
+
+    // Working in the home: neither may be created.
+    let in_home = abs(&fx.codex_home);
+    let denials = ReadDenials::for_turn(
+        &fx.codex_home,
+        &fx.codex_home,
+        &in_home,
+        std::slice::from_ref(&in_home),
+        &profile,
+    );
+    let policy = denials
+        .apply(&profile)
+        .unwrap()
+        .file_system_sandbox_policy();
+    for name in ["accounting-pending/x.json", "db-backups/x"] {
+        let path = fx.codex_home.join(name);
+        assert!(
+            !policy.can_write_path_with_cwd(&path, in_home.as_path()),
+            "{name}"
+        );
+    }
+}
+
+/// Issue #651: a pattern below a folder reached through a link whose real
+/// location holds glob syntax is copied with that location escaped.
+#[test]
+fn issue_651_real_location_of_a_pattern_is_escaped() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let real = base.join("db[1]{2");
+    std::fs::create_dir_all(&real).unwrap();
+    std::os::unix::fs::symlink(&real, base.join("link")).unwrap();
+    let pattern = format!("{}/*.sqlite*", base.join("link").display());
+    assert_eq!(
+        real_pattern(&pattern),
+        Some(format!("{}/db[[]1][{{]2/*.sqlite*", base.display()))
+    );
+}
+
+/// Issue #651 item 7: a separate database folder missing at launch (state
+/// start-up failed) is denied whole, as when it exists, so a command can
+/// neither create it nor put anything in it. On Linux it is first made,
+/// private, with what Corbanu keeps there (bubblewrap would otherwise hold
+/// its path with a placeholder file on the host); elsewhere it stays missing
+/// and is denied before it exists. Not made where the command could not
+/// make it.
+#[test]
+fn issue_651_a_missing_database_folder_is_denied_whole() {
+    let fx = fixture();
+    let profile = PermissionProfile::Disabled;
+    let databases = fx.user_home.join("data/db");
+    let project = abs(&fx.user_home.join("project"));
+    let denials = ReadDenials::for_turn(
+        &fx.codex_home,
+        &databases,
+        &project,
+        std::slice::from_ref(&project),
+        &profile,
+    );
+    let folder = abs(&databases);
+    let linux = cfg!(target_os = "linux");
+    assert_eq!(databases.is_dir(), linux);
+    if linux {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&databases).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+        assert!(databases.join("accounting-pending").is_dir());
+        assert!(databases.join("gpu-controller.lock").is_file());
+        assert!(denials.existing.contains(&folder), "{denials:?}");
+    } else {
+        assert!(denials.fixed.contains(&folder), "{denials:?}");
+    }
+    // Whole: nothing is denied one by one in it.
+    assert!(
+        !denials
+            .paths()
+            .any(|path| path.as_path().starts_with(&databases) && *path != folder),
+        "{denials:?}"
+    );
+    let policy = denials
+        .apply(&profile)
+        .unwrap()
+        .file_system_sandbox_policy();
+    let matcher = denials.matcher().unwrap();
+    for path in ["notes.txt", "later.sqlite", "sub/x"]
+        .map(|name| databases.join(name))
+        .into_iter()
+        .chain([databases])
+    {
+        assert!(matcher.is_read_denied(&path), "{}", path.display());
+        assert!(
+            !policy.can_write_path_with_cwd(&path, project.as_path()),
+            "{}",
+            path.display()
+        );
+    }
+
+    // Where the command could not make it, it is not made.
+    let elsewhere = fx.user_home.join("other/db");
+    let denials = ReadDenials::for_turn(
+        &fx.codex_home,
+        &elsewhere,
+        &project,
+        std::slice::from_ref(&project),
+        &PermissionProfile::read_only(),
+    );
+    assert!(!fx.user_home.join("other").exists());
+    assert!(denials.fixed.contains(&abs(&elsewhere)), "{denials:?}");
+
+    // Nor where a folder above it is reached through a link (one a command
+    // may have planted): it would be made wherever the link points.
+    let target = fx.user_home.join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    std::os::unix::fs::symlink(&target, fx.user_home.join("linked")).unwrap();
+    let linked = fx.user_home.join("linked/sub/db");
+    let denials = ReadDenials::for_turn(
+        &fx.codex_home,
+        &linked,
+        &project,
+        std::slice::from_ref(&project),
+        &profile,
+    );
+    assert!(!target.join("sub").exists());
+    assert!(denials.fixed.contains(&abs(&linked)), "{denials:?}");
 }
 
 /// Issue #562: on Linux the missing runtime folders are created, empty,
@@ -1989,4 +2442,124 @@ fn issue_594_598_the_home_is_unmovable_in_each_spelling() {
     let mut sorted = expected;
     sorted.sort();
     assert_eq!(unmovable, sorted);
+}
+
+/// Issue #651 item 6: which database folders count as well-known shared
+/// folders, by spelling or by real location; a folder inside one does not.
+#[test]
+fn issue_651_well_known_shared_folders() {
+    let fx = fixture();
+    let temp = fx.user_home.join("temp");
+    std::fs::create_dir_all(temp.join("db")).unwrap();
+    std::os::unix::fs::symlink(&temp, fx.user_home.join("temp-link")).unwrap();
+    let shared = |folder: &Path| is_well_known_shared_folder(folder, Some(&fx.user_home), &temp);
+    for folder in [
+        "/tmp",
+        "/tmp/",
+        "/var/tmp",
+        "/private/tmp",
+        "/private/var/tmp",
+    ] {
+        assert!(shared(Path::new(folder)), "{folder}");
+    }
+    assert!(shared(&temp));
+    assert!(shared(&fx.user_home.join("temp-link")));
+    assert!(shared(&fx.user_home));
+    // A relative `TMPDIR`, or `/`, is never a shared folder.
+    assert!(!is_well_known_shared_folder(
+        Path::new("temp"),
+        None,
+        Path::new("temp")
+    ));
+    assert!(!is_well_known_shared_folder(
+        Path::new("/"),
+        Some(Path::new("/")),
+        Path::new("/")
+    ));
+    for folder in [
+        Path::new("/tmp/db"),
+        Path::new("/var/tmp/db"),
+        &temp.join("db"),
+        &fx.user_home.join("db"),
+        &fx.codex_home,
+    ] {
+        assert!(!shared(folder), "{}", folder.display());
+    }
+}
+
+/// Issue #651 item 6 (Travis, 2026-10-13): on macOS a database folder that is
+/// a well-known shared folder (here the temporary folder, and the user's
+/// home) is denied one entry at a time, not whole: other files stay readable
+/// and writable; the databases (reads also of one created later, and each
+/// runtime database's name with its `-wal`, `-shm` and `-journal` files before
+/// they exist), the init lock, the GPU controller's lock, pending accounting
+/// records and backups stay denied. On Linux the temporary folder stays
+/// denied whole (bubblewrap can't deny a name before it exists); the home
+/// holds the Corbanu home, so it is denied one entry at a time there too.
+/// Another folder is still denied whole.
+#[test]
+fn issue_651_a_shared_database_folder_is_denied_entry_by_entry() {
+    let fx = fixture();
+    let temp = fx.user_home.join("temp");
+    std::fs::create_dir_all(temp.join("accounting-pending")).unwrap();
+    std::fs::write(temp.join("state_5.sqlite"), "x").unwrap();
+    std::fs::create_dir_all(fx.user_home.join("db")).unwrap();
+    let project = abs(&fx.user_home.join("project"));
+    let profile = PermissionProfile::Disabled;
+    let denied = |databases: &Path, name: &str| {
+        let mut denials = ReadDenials::collect(
+            &fx.codex_home,
+            Some(&fx.user_home),
+            /*claude_config_dir*/ None,
+            std::slice::from_ref(&project),
+        );
+        denials.protect_database_folder(
+            &fx.codex_home,
+            databases,
+            std::slice::from_ref(&project),
+            Some(&fx.user_home),
+            &temp,
+        );
+        let policy = denials
+            .apply(&profile)
+            .unwrap()
+            .file_system_sandbox_policy();
+        let path = databases.join(name);
+        let read = denials.matcher().unwrap().is_read_denied(&path);
+        let write = !policy.can_write_path_with_cwd(&path, project.as_path());
+        (read, write)
+    };
+    let macos = cfg!(target_os = "macos");
+    for shared in [temp.as_path(), fx.user_home.as_path()] {
+        let whole = !macos && shared == temp;
+        for (name, expected) in [
+            // Only the temporary folder holds one; the pattern covers both.
+            ("state_5.sqlite", (true, shared == temp || macos)),
+            ("later.sqlite-wal", (true, whole)),
+            ("pfterminal_state_5.sqlite-journal", (true, macos || whole)),
+            ("pfterminal_logs_2.sqlite-wal", (true, macos || whole)),
+            ("state_5.sqlite-shm", (true, macos || whole)),
+            ("pfterminal_db_init.lock", (true, true)),
+            ("gpu-controller.lock", (true, true)),
+            ("accounting-pending/x.json", (true, true)),
+            ("db-backups/x", (true, true)),
+            ("notes.txt", (whole, whole)),
+            ("build/out.o", (whole, whole)),
+        ] {
+            assert_eq!(
+                denied(shared, name),
+                expected,
+                "{} {name}",
+                shared.display()
+            );
+        }
+    }
+    // A folder of its own is still denied whole.
+    for name in ["notes.txt", "state_5.sqlite", "gpu-controller.lock"] {
+        assert_eq!(
+            denied(&fx.user_home.join("db"), name),
+            (true, true),
+            "{name}"
+        );
+    }
 }

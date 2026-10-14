@@ -314,8 +314,14 @@ fn sec_win_341_commands_start_in_the_launchers_window_station() {
     }
     let station = current_window_station_name().expect("window station");
     assert!(station.starts_with("Service-0x0-"), "{station}");
-    let shared = LaunchDesktop::prepare(/*use_private_desktop*/ false, None).expect("desktop");
-    let private = LaunchDesktop::prepare(/*use_private_desktop*/ true, None).expect("desktop");
+    let shared = LaunchDesktop::prepare(
+        /*use_private_desktop*/ false, /*low_integrity*/ false, None,
+    )
+    .expect("desktop");
+    let private = LaunchDesktop::prepare(
+        /*use_private_desktop*/ true, /*low_integrity*/ false, None,
+    )
+    .expect("desktop");
     let name = |desktop: &LaunchDesktop| {
         let start = desktop.startup_info_desktop();
         let len = (0..).take_while(|&i| unsafe { *start.add(i) } != 0).count();
@@ -748,6 +754,11 @@ fn window_station_probe_in_the_sandbox() {
 /// ended. Elevated: the sandbox's setup needs it.
 #[test]
 fn sec_win_345_sandboxed_commands_dont_get_the_runners_access() {
+    // Bazel gives unit tests no staged sandbox helpers, so this runs under
+    // cargo on a Windows box (the Windows gates), not in nightly Bazel (#691).
+    if option_env!("BAZEL_PACKAGE").is_some() {
+        return;
+    }
     if !on_fresh_window_station(
         "window_station::tests::sec_win_345_sandboxed_commands_dont_get_the_runners_access",
     ) {
@@ -1058,6 +1069,11 @@ fn slow_command_line(cmd: &std::path::Path, seconds: u32) -> String {
 /// the launcher, Core gets its thread too, grants its logon, and resumes it.
 #[test]
 fn sec_win_345_launcher_path_grants_the_logon_and_resumes() {
+    // Bazel gives unit tests no staged sandbox helpers, so this runs under
+    // cargo on a Windows box (the Windows gates), not in nightly Bazel (#691).
+    if option_env!("BAZEL_PACKAGE").is_some() {
+        return;
+    }
     if !on_fresh_window_station(
         "window_station::tests::sec_win_345_launcher_path_grants_the_logon_and_resumes",
     ) {
@@ -1158,6 +1174,11 @@ fn window_station_core_that_exits_early() {
 /// Core removed it, so it stayed until the window station went away.
 #[test]
 fn sec_win_345_access_goes_with_the_runner_even_after_core_exits() {
+    // Bazel gives unit tests no staged sandbox helpers, so this runs under
+    // cargo on a Windows box (the Windows gates), not in nightly Bazel (#691).
+    if option_env!("BAZEL_PACKAGE").is_some() {
+        return;
+    }
     if !on_fresh_window_station(
         "window_station::tests::sec_win_345_access_goes_with_the_runner_even_after_core_exits",
     ) {

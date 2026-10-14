@@ -151,6 +151,7 @@ async fn submit_turn_with_approval_and_environments(
     prompt: &str,
     environments: Vec<TurnEnvironmentSelection>,
     approval_policy: AskForApproval,
+    sandbox_policy: SandboxPolicy,
 ) -> Result<()> {
     let turn_environment_selections = codex_protocol::protocol::TurnEnvironmentSelections::new(
         test.config.cwd.clone(),
@@ -169,7 +170,7 @@ async fn submit_turn_with_approval_and_environments(
                 environments: Some(turn_environment_selections),
                 approval_policy: Some(approval_policy),
                 approvals_reviewer: Some(ApprovalsReviewer::User),
-                sandbox_policy: Some(SandboxPolicy::new_read_only_policy()),
+                sandbox_policy: Some(sandbox_policy),
                 collaboration_mode: Some(codex_protocol::config_types::CollaborationMode {
                     mode: codex_protocol::config_types::ModeKind::Default,
                     settings: codex_protocol::config_types::Settings {
@@ -1632,7 +1633,7 @@ async fn exec_command_routes_to_selected_remote_environment() -> Result<()> {
         &server,
         "call-multi-env",
         json!({
-            "shell": "/bin/sh",
+            "shell": "bash",
             "cmd": format!("cat {remote_marker_name}"),
             "login": false,
             "yield_time_ms": 1_000,
@@ -1912,7 +1913,7 @@ async fn remote_request_permissions_grant_unblocks_later_remote_exec() -> Result
                     "exec-call",
                     "exec_command",
                     &json!({
-                        "shell": "/bin/sh",
+                        "shell": "bash",
                         "cmd": command,
                         "login": false,
                         "yield_time_ms": 1_000,
@@ -1943,6 +1944,7 @@ async fn remote_request_permissions_grant_unblocks_later_remote_exec() -> Result
             },
         ],
         AskForApproval::OnRequest,
+        SandboxPolicy::new_read_only_policy(),
     )
     .await?;
 
@@ -2168,6 +2170,16 @@ async fn apply_patch_approvals_are_remembered_per_environment() -> Result<()> {
             workspace_roots: vec![PathUri::from_abs_path(&remote_cwd)],
         },
     ];
+    // Issue #709: edit tools are only offered when the turn has a writable
+    // root (the fork hides apply_patch under read-only), so the workspace is
+    // writable but the shared target path in /tmp is outside it in both
+    // environments and every patch to it needs approval.
+    let patch_sandbox_policy = SandboxPolicy::WorkspaceWrite {
+        writable_roots: Vec::new(),
+        network_access: false,
+        exclude_tmpdir_env_var: true,
+        exclude_slash_tmp: true,
+    };
     let local_patch = format!(
         "*** Begin Patch\n*** Environment ID: {LOCAL_ENVIRONMENT_ID}\n*** Add File: {}\n+local\n*** End Patch",
         target_path.display()
@@ -2223,6 +2235,7 @@ async fn apply_patch_approvals_are_remembered_per_environment() -> Result<()> {
         "apply patch in local environment",
         environments.clone(),
         AskForApproval::OnRequest,
+        patch_sandbox_policy.clone(),
     )
     .await?;
     let approval = expect_patch_approval(&test, "call-local").await;
@@ -2243,6 +2256,7 @@ async fn apply_patch_approvals_are_remembered_per_environment() -> Result<()> {
         "apply patch in remote environment",
         environments.clone(),
         AskForApproval::OnRequest,
+        patch_sandbox_policy.clone(),
     )
     .await?;
     let approval = expect_patch_approval(&test, "call-remote").await;
@@ -2268,6 +2282,7 @@ async fn apply_patch_approvals_are_remembered_per_environment() -> Result<()> {
         "apply patch again in remote environment",
         environments,
         AskForApproval::OnRequest,
+        patch_sandbox_policy,
     )
     .await?;
     wait_for_completion_without_patch_approval(&test).await;
@@ -2342,7 +2357,7 @@ async fn apply_patch_intercepted_exec_command_routes_to_selected_remote_environm
                     call_id,
                     "exec_command",
                     &serde_json::to_string(&json!({
-                        "shell": "/bin/sh",
+                        "shell": "bash",
                         "cmd": command,
                         "login": false,
                         "yield_time_ms": 5_000,

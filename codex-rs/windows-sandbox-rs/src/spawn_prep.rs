@@ -16,6 +16,10 @@ use crate::env::inherit_path_env;
 use crate::env::normalize_null_device_env;
 use crate::identity::SandboxCreds;
 use crate::identity::require_logon_sandbox_creds;
+use crate::integrity::effective_label_is_low;
+use crate::integrity::label_protected_path_medium;
+use crate::integrity::set_token_low_integrity;
+use crate::integrity_leases::IntegrityLease;
 use crate::logging::log_start;
 use crate::path_normalization::canonicalize_path;
 use crate::resolved_permissions::ResolvedWindowsSandboxPermissions;
@@ -173,6 +177,14 @@ pub(crate) fn prepare_legacy_session_security(
             (h_token, Some(psid), Some(caps.readonly), Vec::new())
         }
     };
+    // #158: Low integrity closes the parent FILE_DELETE_CHILD route that the
+    // write-restricted token leaves open outside the writable roots.
+    if let Err(err) = unsafe { set_token_low_integrity(h_token) } {
+        unsafe {
+            CloseHandle(h_token);
+        }
+        return Err(err);
+    }
 
     Ok(LegacySessionSecurity {
         h_token,
@@ -248,6 +260,15 @@ fn deny_root_capabilities_for_path<'a>(
     }
 }
 
+/// Whether `path` lies below one of `roots` and holds none of them (a planted
+/// `gitdir: .` must not relabel the workspace itself). All paths canonical.
+fn strictly_inside_a_root(path: &Path, roots: &[PathBuf]) -> bool {
+    roots
+        .iter()
+        .any(|root| path != root.as_path() && path.starts_with(root))
+        && !roots.iter().any(|root| root.starts_with(path))
+}
+
 pub(crate) fn allow_null_device_for_workspace_write(is_workspace_write: bool) {
     if !is_workspace_write {
         return;
@@ -265,6 +286,9 @@ pub(crate) fn allow_null_device_for_workspace_write(is_workspace_write: bool) {
     }
 }
 
+/// Applies a legacy session's ACL rules. With `session`, also labels its
+/// writable roots Low for the returned lease's lifetime (#158); the
+/// preflight passes false and labels nothing.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_legacy_session_acl_rules(
     permissions: &ResolvedWindowsSandboxPermissions,
@@ -274,9 +298,39 @@ pub(crate) fn apply_legacy_session_acl_rules(
     additional_deny_read_paths: &[PathBuf],
     additional_deny_write_paths: &[PathBuf],
     acl_sids: LegacyAclSids<'_>,
-) -> Result<()> {
+    session: bool,
+) -> Result<Option<IntegrityLease>> {
     let AllowDenyPaths { allow, mut deny } =
         compute_allow_paths_for_permissions(permissions, current_dir, env_map);
+    // #158: the sandbox runs at Low integrity; its writable roots carry a
+    // Low label while it runs, so writes inside them keep working.
+    let log_dir = codex_home.join(".sandbox");
+    let lease = if session && !allow.is_empty() {
+        let roots: Vec<PathBuf> = allow.iter().cloned().collect();
+        Some(crate::integrity_leases::acquire(
+            &roots,
+            Some(log_dir.as_path()),
+        )?)
+    } else {
+        // Nothing to label, but labels a crashed session left behind must
+        // not let this one (read-only, say) delete there.
+        if session && let Err(err) = crate::integrity_leases::repair_stale_integrity_labels() {
+            crate::logging::log_note(
+                &format!("integrity labels: could not repair stale labels: {err:#}"),
+                Some(log_dir.as_path()),
+            );
+        }
+        None
+    };
+    let canonical_allow: Vec<PathBuf> = allow.iter().map(|root| canonicalize_path(root)).collect();
+    // The label records must not be writable from a session whose root
+    // holds them: protect them like `.git`.
+    if let Some(registry) = crate::integrity_leases::registry_parent_dir()
+        && registry.exists()
+        && strictly_inside_a_root(&canonicalize_path(&registry), &canonical_allow)
+    {
+        deny.insert(registry);
+    }
     unsafe {
         for path in additional_deny_write_paths {
             // Explicit carveouts must exist before the command starts so the
@@ -300,6 +354,29 @@ pub(crate) fn apply_legacy_session_acl_rules(
             }
         }
         for p in &deny {
+            // #158: keep the writable root's Low label off protected paths, so
+            // other Low-integrity programs can't write them either.
+            // Only where a Low label can be inherited (canonically inside a
+            // writable root), and never through a link the sandbox may have
+            // planted: the host must not relabel a folder it picked.
+            if p.exists()
+                && !crate::workspace_acl::is_reparse_point(p)
+                && dunce::canonicalize(p)
+                    .is_ok_and(|canonical| strictly_inside_a_root(&canonical, &canonical_allow))
+            {
+                // A path that isn't Low anyway (its root could not be
+                // labelled) needs no label of its own.
+                if let Err(err) = label_protected_path_medium(p)
+                    && !matches!(effective_label_is_low(p), Ok(false))
+                {
+                    return Err(err).with_context(|| {
+                        format!(
+                            "the Windows sandbox could not keep protected path {} at Medium integrity",
+                            p.display()
+                        )
+                    });
+                }
+            }
             for root_sid in deny_root_capabilities_for_path(p, acl_sids.write_root_sids) {
                 let _ = add_deny_write_ace(p, root_sid.sid.as_ptr());
             }
@@ -364,7 +441,7 @@ pub(crate) fn apply_legacy_session_acl_rules(
             }
         }
     }
-    Ok(())
+    Ok(lease)
 }
 
 #[allow(clippy::too_many_arguments)]

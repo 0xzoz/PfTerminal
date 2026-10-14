@@ -86,7 +86,9 @@ async fn run_calls(
                 .enable(Feature::UnifiedExec)
                 .expect("enable unified exec");
         })
-        .build_with_auto_env(&server)
+        // Host-sandbox security test: local executor on purpose, also in the
+        // remote lane (#708).
+        .build(&server)
         .await?;
     let root = test.cwd_path().canonicalize()?;
     std::fs::create_dir_all(root.join(".agents"))?;

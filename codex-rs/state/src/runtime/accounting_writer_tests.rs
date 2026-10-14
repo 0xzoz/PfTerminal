@@ -674,11 +674,10 @@ async fn ten_sessions_on_one_home_wait_briefly_and_lose_no_record() -> anyhow::R
     let max = waits[waits.len() - 1];
     eprintln!("request waits: p50 {p50:?}, p99 {p99:?}, max {max:?}");
     // One short wait on the lock (`QUICK_BUSY_TIMEOUT`) plus the work of
-    // ten sessions sharing four test threads.
-    assert!(
-        p99 < Duration::from_millis(1_500),
-        "p99 {p99:?}, max {max:?}"
-    );
+    // ten sessions sharing four test threads. Windows runners take longer
+    // to open and lock SQLite files (p99 1.6-1.9 s on nightly-ci, #636).
+    let bound = Duration::from_millis(if cfg!(windows) { 3_000 } else { 1_500 });
+    assert!(p99 < bound, "p99 {p99:?}, max {max:?}");
     assert!(
         max < Duration::from_millis(2_500),
         "p99 {p99:?}, max {max:?}"

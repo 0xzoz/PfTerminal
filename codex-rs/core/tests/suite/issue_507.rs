@@ -31,6 +31,7 @@ use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
+use core_test_support::skip_if_wine_exec;
 use core_test_support::streaming_sse::StreamingSseChunk;
 use core_test_support::streaming_sse::start_streaming_sse_server;
 use core_test_support::test_codex::TestCodex;
@@ -43,6 +44,8 @@ use serde_json::json;
 /// How long a stopped command would have needed to leave its mark.
 const COMMAND_SECONDS: u64 = 3;
 
+/// The kill-switch tests check host processes and the host sandbox: their
+/// sessions use the local executor on purpose, also in the remote lane (#708).
 fn builder(approval: AskForApproval, unified: bool) -> TestCodexBuilder {
     test_codex()
         .with_model("test-gpt-5.1-codex")
@@ -167,13 +170,17 @@ fn done() -> Vec<serde_json::Value> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn issue_507_kill_switch_stops_the_running_command_and_its_turn() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
+    skip_if_wine_exec!(
+        Ok(()),
+        "this security test runs host shell commands; Wine-exec routes them to a Windows executor with a non-native cwd"
+    );
     let marker_dir = tempfile::TempDir::new()?;
     let marker = marker_dir.path().join("ran-after-kill-switch");
     let command = format!("sleep {COMMAND_SECONDS}; touch '{}'", marker.display());
     let server = start_mock_server().await;
     let captured = mount_sse_sequence(&server, vec![sse(shell_call("call-1", &command))]).await;
     let test = builder(AskForApproval::Never, /*unified*/ false)
-        .build_with_auto_env(&server)
+        .build(&server)
         .await?;
     submit(&test, "run the slow command").await?;
     wait_for_event(&test.codex, |event| {
@@ -228,6 +235,10 @@ fn other_process_switch(
 async fn issue_507_kill_switch_from_another_process_stops_the_running_command() -> anyhow::Result<()>
 {
     skip_if_no_network!(Ok(()));
+    skip_if_wine_exec!(
+        Ok(()),
+        "this security test runs host shell commands; Wine-exec routes them to a Windows executor with a non-native cwd"
+    );
     let marker_dir = tempfile::TempDir::new()?;
     let marker = marker_dir.path().join("ran-after-kill-switch");
     let command = format!(
@@ -238,7 +249,7 @@ async fn issue_507_kill_switch_from_another_process_stops_the_running_command() 
     let server = start_mock_server().await;
     let captured = mount_sse_sequence(&server, vec![sse(shell_call("call-1", &command))]).await;
     let test = builder(AskForApproval::Never, /*unified*/ false)
-        .build_with_auto_env(&server)
+        .build(&server)
         .await?;
     let home = test.codex_home_path().to_path_buf();
     submit(&test, "run the slow command").await?;
@@ -333,13 +344,17 @@ async fn issue_507_kill_switch_cancels_a_streaming_reply_and_its_tool_calls() ->
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn issue_507_a_command_waiting_for_approval_never_runs() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
+    skip_if_wine_exec!(
+        Ok(()),
+        "this security test runs host shell commands; Wine-exec routes them to a Windows executor with a non-native cwd"
+    );
     let marker_dir = tempfile::TempDir::new()?;
     let marker = marker_dir.path().join("ran-after-kill-switch");
     let command = format!("touch '{}'", marker.display());
     let server = start_mock_server().await;
     let captured = mount_sse_sequence(&server, vec![sse(shell_call("call-1", &command))]).await;
     let test = builder(AskForApproval::UnlessTrusted, /*unified*/ false)
-        .build_with_auto_env(&server)
+        .build(&server)
         .await?;
     submit(&test, "write the marker").await?;
     let approval = match wait_for_event(&test.codex, |event| {
@@ -393,7 +408,7 @@ async fn issue_507_kill_switch_ends_background_terminals() -> anyhow::Result<()>
     )
     .await;
     let test = builder(AskForApproval::Never, /*unified*/ true)
-        .build_with_auto_env(&server)
+        .build(&server)
         .await?;
     submit(&test, "start it in the background").await?;
     wait_for_event(&test.codex, |event| {
@@ -412,6 +427,10 @@ async fn issue_507_kill_switch_ends_background_terminals() -> anyhow::Result<()>
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn issue_507_control_background_command_runs_without_the_kill_switch() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
+    skip_if_wine_exec!(
+        Ok(()),
+        "this security test runs host shell commands; Wine-exec routes them to a Windows executor with a non-native cwd"
+    );
     let marker_dir = tempfile::TempDir::new()?;
     let marker = marker_dir.path().join("ran");
     let command = format!("sleep {COMMAND_SECONDS}; touch '{}'", marker.display());
@@ -433,7 +452,7 @@ async fn issue_507_control_background_command_runs_without_the_kill_switch() -> 
     )
     .await;
     let test = builder(AskForApproval::Never, /*unified*/ true)
-        .build_with_auto_env(&server)
+        .build(&server)
         .await?;
     submit(&test, "start it in the background").await?;
     wait_for_event(&test.codex, |event| {
@@ -450,6 +469,10 @@ async fn issue_507_control_background_command_runs_without_the_kill_switch() -> 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn issue_507_revoke_all_leaves_the_running_command_alone() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
+    skip_if_wine_exec!(
+        Ok(()),
+        "this security test runs host shell commands; Wine-exec routes them to a Windows executor with a non-native cwd"
+    );
     let marker_dir = tempfile::TempDir::new()?;
     let marker = marker_dir.path().join("ran");
     let command = format!("sleep {COMMAND_SECONDS}; touch '{}'", marker.display());
@@ -460,7 +483,7 @@ async fn issue_507_revoke_all_leaves_the_running_command_alone() -> anyhow::Resu
     )
     .await;
     let test = builder(AskForApproval::Never, /*unified*/ false)
-        .build_with_auto_env(&server)
+        .build(&server)
         .await?;
     submit(&test, "run the slow command").await?;
     wait_for_event(&test.codex, |event| {

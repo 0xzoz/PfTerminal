@@ -102,7 +102,9 @@ async fn start(
                 config.features.enable(feature).expect("enable feature");
             }
         })
-        .build_with_auto_env(&server)
+        // Host-sandbox security test: local executor on purpose, also in the
+        // remote lane (#708).
+        .build(&server)
         .await?;
     std::mem::forget(server);
     test.codex

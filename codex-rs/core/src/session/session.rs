@@ -64,6 +64,9 @@ pub(crate) struct Session {
     pub(super) git_enrichment_policy: GitEnrichmentPolicy,
     pub(super) fork_persistence: ForkPersistence,
     pub(super) next_internal_sub_id: AtomicU64,
+    /// #564: sampling responses streaming whose usage is not recorded yet
+    /// (see `begin_response_usage`).
+    pub(super) response_usage_pending: watch::Sender<usize>,
 }
 
 #[derive(Clone)]
@@ -1204,7 +1207,11 @@ impl Session {
                 user_shell: Arc::new(default_shell),
                 show_raw_agent_reasoning: config.show_raw_agent_reasoning,
                 exec_policy,
-                active_auth: crate::state::ActiveAuthManager::new(Arc::clone(&auth_manager)),
+                active_auth: crate::state::ActiveAuthManager::new(Arc::clone(&auth_manager))
+                    .for_user_session(
+                        !session_configuration.session_source.is_non_root_agent(),
+                        &session_configuration.provider,
+                    ),
                 openai_file_upload_client_pool: RouteAwareClientPool::new_without_request_logging(
                     config.http_client_factory(),
                     ClientRouteClass::Api,
@@ -1305,6 +1312,7 @@ impl Session {
                 git_enrichment_policy,
                 fork_persistence,
                 next_internal_sub_id: AtomicU64::new(0),
+                response_usage_pending: watch::Sender::new(0),
             });
             if let Some(network_policy_decider_session) = network_policy_decider_session {
                 let mut guard = network_policy_decider_session.write().await;

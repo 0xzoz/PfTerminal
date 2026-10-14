@@ -157,6 +157,11 @@ pub(crate) struct SyntheticMountTarget {
     // If an empty metadata path was already present, remember its inode so
     // cleanup does not delete a real pre-existing file or directory.
     pre_existing_path: Option<FileIdentity>,
+    /// #607: where it is, with the folder above it resolved when the run
+    /// registered it (before the command ran). It is removed there, without
+    /// following a link, so a folder the command swaps for a link cannot
+    /// redirect the removal.
+    real_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -182,6 +187,7 @@ impl SyntheticMountTarget {
             path: path.to_path_buf(),
             kind: SyntheticMountTargetKind::EmptyFile,
             pre_existing_path: None,
+            real_path: None,
         }
     }
 
@@ -190,6 +196,7 @@ impl SyntheticMountTarget {
             path: path.to_path_buf(),
             kind: SyntheticMountTargetKind::EmptyDirectory,
             pre_existing_path: None,
+            real_path: None,
         }
     }
 
@@ -198,15 +205,33 @@ impl SyntheticMountTarget {
             path: path.to_path_buf(),
             kind: SyntheticMountTargetKind::EmptyFile,
             pre_existing_path: Some(FileIdentity::from_metadata(metadata)),
+            real_path: None,
         }
     }
 
-    fn existing_empty_directory(path: &Path, metadata: &Metadata) -> Self {
+    pub(crate) fn existing_empty_directory(path: &Path, metadata: &Metadata) -> Self {
         Self {
             path: path.to_path_buf(),
             kind: SyntheticMountTargetKind::EmptyDirectory,
             pre_existing_path: Some(FileIdentity::from_metadata(metadata)),
+            real_path: None,
         }
+    }
+
+    /// #607: the same target, at `real_path` (see [`Self::removal_path`]).
+    pub(crate) fn with_real_path(mut self, real_path: Option<PathBuf>) -> Self {
+        self.real_path = real_path;
+        self
+    }
+
+    /// #607: where it is removed: its location when it was registered, or
+    /// its path when that could not be resolved.
+    pub(crate) fn removal_path(&self) -> &Path {
+        self.real_path.as_deref().unwrap_or(&self.path)
+    }
+
+    pub(crate) fn real_path(&self) -> Option<&Path> {
+        self.real_path.as_deref()
     }
 
     pub(crate) fn preserves_pre_existing_path(&self) -> bool {
@@ -233,22 +258,32 @@ impl SyntheticMountTarget {
         self.kind
     }
 
-    pub(crate) fn should_remove_after_bwrap(&self, metadata: &Metadata) -> bool {
+    /// Whether what is at the path after bubblewrap ran is still this
+    /// placeholder: an empty file, or a folder (`empty_file`, `dir`), and not
+    /// the pre-existing path found when the arguments were built (`identity`
+    /// is its `(dev, ino)`).
+    pub(crate) fn should_remove(&self, empty_file: bool, dir: bool, identity: (u64, u64)) -> bool {
         match self.kind {
             SyntheticMountTargetKind::EmptyFile => {
-                if !metadata.file_type().is_file() || metadata.len() != 0 {
+                if !empty_file {
                     return false;
                 }
             }
             SyntheticMountTargetKind::EmptyDirectory => {
-                if !metadata.file_type().is_dir() {
+                if !dir {
                     return false;
                 }
             }
         }
 
         match self.pre_existing_path {
-            Some(pre_existing_path) => pre_existing_path != FileIdentity::from_metadata(metadata),
+            Some(pre_existing_path) => {
+                pre_existing_path
+                    != FileIdentity {
+                        dev: identity.0,
+                        ino: identity.1,
+                    }
+            }
             None => true,
         }
     }
@@ -782,11 +817,6 @@ fn create_filesystem_args_with_pins(
                 let real =
                     crate::pinned::expected_location(pins.roots, &checked, &writable_root.root);
                 let file = crate::pinned::open_at(&[root, mount_root], &real)?;
-                // `--ro-bind-data` masks read the first preserved file as
-                // `/dev/null`; keep it first.
-                if bwrap_args.preserved_files.is_empty() {
-                    bwrap_args.preserved_files.push(File::open("/dev/null")?);
-                }
                 bwrap_args.args.push("--bind-fd".to_string());
                 bwrap_args.args.push(file.as_raw_fd().to_string());
                 bwrap_args.args.push(path_to_string(mount_root));
@@ -1803,13 +1833,15 @@ fn append_read_only_subpath_args(
 }
 
 fn append_empty_file_bind_data_args(bwrap_args: &mut BwrapArgs, path: &Path) -> Result<()> {
-    if bwrap_args.preserved_files.is_empty() {
-        bwrap_args.preserved_files.push(File::open("/dev/null")?);
-    }
-    let null_fd = bwrap_args.preserved_files[0].as_raw_fd().to_string();
+    // bubblewrap reads a `--ro-bind-data` descriptor to its end and then
+    // closes it, so every mask needs its own. A shared one left the second
+    // mask reading a closed descriptor ("Can't write data to file ...: Bad
+    // file descriptor") unless bubblewrap happened to reuse its number (#636).
+    let null = File::open("/dev/null")?;
     bwrap_args.args.push("--ro-bind-data".to_string());
-    bwrap_args.args.push(null_fd);
+    bwrap_args.args.push(null.as_raw_fd().to_string());
     bwrap_args.args.push(path_to_string(path));
+    bwrap_args.preserved_files.push(null);
     Ok(())
 }
 
@@ -2007,6 +2039,19 @@ fn append_unreadable_root_args(
         bwrap_args.args.push("000".to_string());
         return append_existing_empty_file_bind_data_args(bwrap_args, unreadable_root, &metadata);
     }
+    // #607: the same for another live run's placeholder folder (a protected
+    // metadata name it holds read-only): masked as a denied folder and
+    // registered, so its maker's cleanup (or a sweep after that run was
+    // killed) cannot remove it, and the mask with it, from under this run.
+    if let Some(metadata) = live_placeholder_directory(unreadable_root) {
+        append_existing_unreadable_path_args(bwrap_args, unreadable_root, allowed_write_paths)?;
+        if !has_synthetic_mount_target(bwrap_args, unreadable_root) {
+            bwrap_args.synthetic_mount_targets.push(
+                SyntheticMountTarget::existing_empty_directory(unreadable_root, &metadata),
+            );
+        }
+        return Ok(());
+    }
 
     append_existing_unreadable_path_args(bwrap_args, unreadable_root, allowed_write_paths)
 }
@@ -2057,6 +2102,15 @@ fn has_read_only_bind(bwrap_args: &BwrapArgs, path: &Path) -> bool {
 fn live_placeholder_file(path: &Path) -> Option<Metadata> {
     let metadata = empty_file_metadata(path)?;
     crate::linux_run_main::is_live_placeholder(path).then_some(metadata)
+}
+
+/// #607: `path` when it is an empty folder another live run registered as
+/// its placeholder.
+fn live_placeholder_directory(path: &Path) -> Option<Metadata> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    (metadata.file_type().is_dir() && directory_is_empty(path))
+        .then_some(metadata)
+        .filter(|_| crate::linux_run_main::is_live_placeholder(path))
 }
 
 fn empty_file_metadata(path: &Path) -> Option<Metadata> {
@@ -3011,7 +3065,11 @@ mod tests {
         );
         let metadata = std::fs::symlink_metadata(&dot_git).expect("stat .git");
         assert!(
-            !args.synthetic_mount_targets[0].should_remove_after_bwrap(&metadata),
+            !args.synthetic_mount_targets[0].should_remove(
+                metadata.file_type().is_file() && metadata.len() == 0,
+                metadata.file_type().is_dir(),
+                (metadata.dev(), metadata.ino()),
+            ),
             "pre-existing empty preserved files must not be cleaned up as synthetic targets",
         );
     }
@@ -3303,9 +3361,9 @@ mod tests {
 
     /// #536: with pinned roots, each writable root is bound with `--bind-fd`
     /// from the folder opened at its pinned location (never `--bind` by
-    /// path), `/dev/null` stays the first preserved file for the
-    /// `--ro-bind-data` masks, a root swapped for a link is refused, and so
-    /// is a bubblewrap without `--bind-fd`.
+    /// path), each `--ro-bind-data` mask reads its own `/dev/null`
+    /// descriptor, a root swapped for a link is refused, and so is a
+    /// bubblewrap without `--bind-fd`.
     #[test]
     fn pinned_writable_roots_are_bound_from_checked_folders() {
         let temp_dir = TempDir::new().expect("temp dir");
@@ -3364,17 +3422,21 @@ mod tests {
         let fd_target =
             |fd: &str| std::fs::read_link(format!("/proc/self/fd/{fd}")).expect("preserved fd");
         assert_eq!(fd_target(&bind[1]), workspace);
+        // The masks read `/dev/null`, each through its own descriptor.
+        let masks = args
+            .args
+            .windows(3)
+            .filter(|window| window[0] == "--ro-bind-data")
+            .map(|window| window[1].clone())
+            .collect::<Vec<_>>();
+        assert!(!masks.is_empty(), "{:?}", args.args);
+        for fd in &masks {
+            assert_eq!(fd_target(fd), PathBuf::from("/dev/null"));
+        }
         assert_eq!(
-            fd_target(&args.preserved_files[0].as_raw_fd().to_string()),
-            PathBuf::from("/dev/null")
-        );
-        assert!(
-            args.args
-                .windows(3)
-                .any(|window| window[0] == "--ro-bind-data"
-                    && window[1] == args.preserved_files[0].as_raw_fd().to_string()),
-            "{:?}",
-            args.args
+            masks.iter().collect::<std::collections::HashSet<_>>().len(),
+            masks.len(),
+            "{masks:?}"
         );
 
         assert!(
@@ -4318,6 +4380,63 @@ mod tests {
         }));
     }
 
+    /// #636: bubblewrap closes a `--ro-bind-data` descriptor once it has read
+    /// it, so two masked files must not share one.
+    #[test]
+    fn every_masked_file_gets_its_own_null_descriptor() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let mut entries = vec![FileSystemSandboxEntry {
+            path: FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            },
+            access: FileSystemAccessMode::Read,
+            missing_path_behavior: None,
+        }];
+        let mut blocked = Vec::new();
+        for name in ["first.txt", "second.txt", "third.txt"] {
+            let path = temp_dir.path().join(name);
+            std::fs::write(&path, "secret").expect("create blocked file");
+            entries.push(FileSystemSandboxEntry {
+                path: FileSystemPath::Path {
+                    path: AbsolutePathBuf::from_absolute_path(&path).expect("absolute"),
+                },
+                access: FileSystemAccessMode::Deny,
+                missing_path_behavior: None,
+            });
+            blocked.push(path_to_string(&path));
+        }
+        let policy = FileSystemSandboxPolicy::restricted(entries);
+
+        let args =
+            create_filesystem_args(&policy, temp_dir.path(), NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
+                .expect("filesystem args");
+
+        let masks = args
+            .args
+            .windows(3)
+            .filter(|window| window[0] == "--ro-bind-data")
+            .map(|window| (window[2].clone(), window[1].clone()))
+            .collect::<Vec<_>>();
+        let mut masked = masks
+            .iter()
+            .map(|(path, _)| path.clone())
+            .collect::<Vec<_>>();
+        masked.sort();
+        assert_eq!(masked, blocked);
+        let fds = masks
+            .iter()
+            .map(|(_, fd)| fd.clone())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(fds.len(), blocked.len(), "{masks:?}");
+        for fd in fds {
+            assert_eq!(
+                std::fs::read_link(format!("/proc/self/fd/{fd}")).expect("preserved fd"),
+                PathBuf::from("/dev/null")
+            );
+        }
+        assert_eq!(args.preserved_files.len(), blocked.len());
+    }
+
     #[test]
     fn unreadable_globs_expand_existing_matches_with_configured_depth() {
         if !ripgrep_available() {
@@ -4369,7 +4488,7 @@ mod tests {
             std::fs::write(root.join(name), "x").expect("write");
         }
         let expand = |globs: Vec<String>| {
-            expand_unreadable_globs_with_ripgrep(&globs, root, None)
+            expand_unreadable_globs_with_ripgrep(&globs, root, /*max_depth*/ None)
                 .expect("expand")
                 .into_iter()
                 .map(|path| path.as_path().file_name().expect("name").to_os_string())
@@ -4486,7 +4605,7 @@ mod tests {
         // writable first: its entries are pinned too.
         let outer = base.join("outer");
         let args = {
-            let _read_only = ModeGuard::set(&outer, 0o555);
+            let _read_only = ModeGuard::set(&outer, /*mode*/ 0o555);
             create_filesystem_args(&policy, &base, NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
                 .expect("bwrap fs args")
                 .args

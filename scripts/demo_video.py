@@ -742,6 +742,10 @@ def record(args: argparse.Namespace) -> Path:
             ("default-terminal", "xterm-256color"),
         ):
             tmux.run("set-option", "-g", *option)
+        # The default "Pane is dead" line is written on the last row with a
+        # newline, scrolling the top row (often a launch refusal) away. tmux
+        # before 3.3 has no such option; the line then stays.
+        tmux.run("set-option", "-g", "remain-on-exit-format", "", check=False)
         tmux.run("set-option", "-s", "escape-time", "0")
         tmux.run(
             "resize-window", "-t", "demo", "-x", str(spec.cols), "-y", str(spec.rows)

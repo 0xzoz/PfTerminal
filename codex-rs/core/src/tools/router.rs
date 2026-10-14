@@ -79,6 +79,8 @@ pub struct ToolRouter {
     model_visible_specs: Vec<ToolSpec>,
     /// Flat names offered for namespaced tools on wires without namespaces.
     flat_tool_names: FlatToolNames,
+    /// Tools left out because a wire without namespaces caps the tool count.
+    omitted_tools: Vec<ToolName>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -114,12 +116,29 @@ impl ToolRouter {
             registry,
             model_visible_specs,
             flat_tool_names: FlatToolNames::default(),
+            omitted_tools: Vec::new(),
         }
     }
 
     pub(crate) fn with_flat_tool_names(mut self, flat_tool_names: FlatToolNames) -> Self {
         self.flat_tool_names = flat_tool_names;
         self
+    }
+
+    pub(crate) fn with_omitted_tools(mut self, omitted_tools: Vec<ToolName>) -> Self {
+        self.omitted_tools = omitted_tools;
+        self
+    }
+
+    /// Flat names this router offers for namespaced tools (empty on wires
+    /// with namespaces).
+    pub(crate) fn flat_tool_names(&self) -> &FlatToolNames {
+        &self.flat_tool_names
+    }
+
+    /// Tools not offered because of the tool-count limit, sorted by name.
+    pub(crate) fn omitted_tools(&self) -> &[ToolName] {
+        &self.omitted_tools
     }
 
     /// Maps a call to a flat tool name back to the namespaced tool it was

@@ -77,12 +77,21 @@ impl LaunchDesktop {
     /// SID, unlike the user SID the desktop grants, and fail to start
     /// without it (#345). The elevated sandbox's runner can't change Core's
     /// desktop; Core gave the runner's logon that access before starting it.
-    pub fn prepare(use_private_desktop: bool, logs_base_dir: Option<&Path>) -> Result<Self> {
+    ///
+    /// `low_integrity` (the legacy sandbox, #158): the desktop the command
+    /// starts on gets a Low label, without which a Low-integrity process
+    /// fails to start (`0xC0000142`). The interactive `Winsta0\Default`
+    /// already admits Low-integrity processes.
+    pub fn prepare(
+        use_private_desktop: bool,
+        low_integrity: bool,
+        logs_base_dir: Option<&Path>,
+    ) -> Result<Self> {
         let own_station = crate::window_station::current_window_station_name()
             .filter(|name| !crate::window_station::is_interactive_window_station(name));
         let station = own_station.as_deref().unwrap_or("Winsta0");
         if use_private_desktop {
-            let private_desktop = PrivateDesktop::create(logs_base_dir)?;
+            let private_desktop = PrivateDesktop::create(low_integrity, logs_base_dir)?;
             let startup_name = to_wide(format!("{station}\\{}", private_desktop.name));
             Ok(Self {
                 _private_desktop: Some(private_desktop),
@@ -91,11 +100,18 @@ impl LaunchDesktop {
             })
         } else {
             let (desktop, window_access) = match own_station {
-                Some(_) => (
-                    crate::window_station::current_desktop_name()
-                        .unwrap_or_else(|| "Default".to_string()),
-                    grant_own_desktop(logs_base_dir),
-                ),
+                Some(_) => {
+                    let desktop = crate::window_station::current_desktop_name()
+                        .unwrap_or_else(|| "Default".to_string());
+                    if low_integrity && let Err(err) = crate::integrity::label_desktop_low(&desktop)
+                    {
+                        logging::debug_log(
+                            &format!("could not label this process's desktop Low: {err:#}"),
+                            logs_base_dir,
+                        );
+                    }
+                    (desktop, grant_own_desktop(logs_base_dir))
+                }
                 None => ("Default".to_string(), None),
             };
             Ok(Self {
@@ -142,7 +158,7 @@ struct PrivateDesktop {
 }
 
 impl PrivateDesktop {
-    fn create(logs_base_dir: Option<&Path>) -> Result<Self> {
+    fn create(low_integrity: bool, logs_base_dir: Option<&Path>) -> Result<Self> {
         let mut rng = SmallRng::from_entropy();
         let name = format!("CodexSandboxDesktop-{:x}", rng.r#gen::<u128>());
         let name_wide = to_wide(&name);
@@ -171,6 +187,11 @@ impl PrivateDesktop {
 
         unsafe {
             if let Err(err) = grant_desktop_access(handle, logs_base_dir) {
+                let _ = CloseDesktop(handle);
+                return Err(err);
+            }
+            // #158: a Low-integrity command can only attach to a Low desktop.
+            if low_integrity && let Err(err) = crate::integrity::label_window_object_low(handle) {
                 let _ = CloseDesktop(handle);
                 return Err(err);
             }

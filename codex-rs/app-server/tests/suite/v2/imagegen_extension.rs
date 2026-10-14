@@ -485,6 +485,7 @@ async fn standalone_image_generation_is_exposed_in_code_mode_only() -> Result<()
 #[cfg(not(windows))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn standalone_image_generation_is_callable_from_code_mode_only() -> Result<()> {
+    require_code_mode_host();
     let call_id = "code-mode-image-run-1";
     let server = responses::start_mock_server().await;
     mount_image_response(&server).await;
@@ -542,6 +543,11 @@ generatedImage(result);
     assert_eq!(requests.len(), 2);
     assert!(requests[0].body_contains_text("image_gen__imagegen"));
     let output = requests[1].custom_tool_call_output(call_id);
+    assert!(
+        output["output"].is_array(),
+        "the cell should return content items, got {}",
+        output["output"]
+    );
     assert_eq!(
         output["output"][1],
         json!({
@@ -558,6 +564,19 @@ generatedImage(result);
     assert_eq!(output["output"].as_array().map(Vec::len), Some(3));
 
     Ok(())
+}
+
+/// Code mode runs cells in the `codex-code-mode-host` process, found next to
+/// the app server. `cargo test -p codex-app-server` builds only this package's
+/// binaries; `just test`, CI and Bazel also build the host. Without it the
+/// cell cannot start and its output is a spawn error, not the image (#371).
+#[cfg(not(windows))]
+fn require_code_mode_host() {
+    assert!(
+        codex_utils_cargo_bin::cargo_bin("codex-code-mode-host").is_ok(),
+        "build `codex-code-mode-host` first (`cargo build -p codex-code-mode-host`, or run \
+         through `just test`): without it code mode cannot run the cell"
+    );
 }
 
 async fn start_image_generation_turn(

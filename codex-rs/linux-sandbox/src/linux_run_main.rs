@@ -57,6 +57,8 @@ struct SyntheticMountTargetRegistration {
     target: crate::bwrap::SyntheticMountTarget,
     marker_file: PathBuf,
     marker_dir: PathBuf,
+    /// #607: whether this run wrote the record (it makes the placeholder).
+    wrote_record: bool,
 }
 
 #[derive(Debug)]
@@ -1026,22 +1028,35 @@ fn register_synthetic_mount_targets(
                 } else {
                     target.clone()
                 };
-                if !target.preserves_pre_existing_path() {
+                // #607: its location now, before the command runs, where it
+                // is removed (without following a link).
+                let real_path = crate::placeholder_registry::real_placeholder_path(target.path());
+                let target = target.with_real_path(real_path);
+                // #607: a placeholder another run made (still there) keeps
+                // its record, whose time is when it was made.
+                let made_by_another_run = fs::symlink_metadata(target.path()).is_ok()
+                    && read_synthetic_mount_target_record(&marker_dir)
+                        .is_some_and(|made| made.path() == target.path());
+                let wrote_record = !target.preserves_pre_existing_path() && !made_by_another_run;
+                if wrote_record {
                     write_synthetic_mount_target_record(&marker_dir, &target);
                 }
                 let marker_file = marker_dir.join(std::process::id().to_string());
-                fs::write(&marker_file, synthetic_mount_marker_contents(&target)).unwrap_or_else(
-                    |err| {
-                        panic!(
-                            "failed to register synthetic bubblewrap mount target {}: {err}",
-                            target.path().display()
-                        )
-                    },
-                );
+                crate::placeholder_registry::write_marker(
+                    &marker_file,
+                    synthetic_mount_marker_contents(&target),
+                )
+                .unwrap_or_else(|err| {
+                    panic!(
+                        "failed to register synthetic bubblewrap mount target {}: {err}",
+                        target.path().display()
+                    )
+                });
                 SyntheticMountTargetRegistration {
                     target,
                     marker_file,
                     marker_dir,
+                    wrote_record,
                 }
             })
             .collect()
@@ -1063,12 +1078,13 @@ fn register_protected_create_targets(
                     )
                 });
                 let marker_file = marker_dir.join(std::process::id().to_string());
-                fs::write(&marker_file, PROTECTED_CREATE_MARKER).unwrap_or_else(|err| {
-                    panic!(
-                        "failed to register protected create target {}: {err}",
-                        target.path().display()
-                    )
-                });
+                crate::placeholder_registry::write_marker(&marker_file, PROTECTED_CREATE_MARKER)
+                    .unwrap_or_else(|err| {
+                        panic!(
+                            "failed to register protected create target {}: {err}",
+                            target.path().display()
+                        )
+                    });
                 ProtectedCreateTargetRegistration {
                     target: target.clone(),
                     marker_file,
@@ -1131,8 +1147,8 @@ fn synthetic_mount_marker_dir_has_active_process_matching(
         else {
             continue;
         };
-        if !process_is_active(pid) {
-            match fs::remove_file(&path) {
+        if !crate::placeholder_registry::marker_run_is_active(&path, pid) {
+            match crate::placeholder_registry::remove_marker(&path) {
                 Ok(()) => {}
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
                 Err(err) => panic!(
@@ -1153,7 +1169,7 @@ fn synthetic_mount_marker_dir_has_active_process_matching(
 fn cleanup_synthetic_mount_targets(targets: &[SyntheticMountTargetRegistration]) {
     with_synthetic_mount_registry_lock(|| {
         for target in targets.iter().rev() {
-            match fs::remove_file(&target.marker_file) {
+            match crate::placeholder_registry::remove_marker(&target.marker_file) {
                 Ok(()) => {}
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
                 Err(err) => panic!(
@@ -1170,11 +1186,27 @@ fn cleanup_synthetic_mount_targets(targets: &[SyntheticMountTargetRegistration])
             // #582: a placeholder another run made (and was killed before
             // removing) goes as its record says, also when this run only
             // held it as an existing path.
+            // #607: one another run made is removed only as the placeholder
+            // made for its record (that run may have been killed long ago);
+            // this run's own as before. A record without its location (an
+            // older run's) is removed at this run's, resolved when it
+            // registered.
             match read_synthetic_mount_target_record(&target.marker_dir) {
                 Some(made) if target.target.pre_existing_path_is_unchanged() => {
-                    remove_synthetic_mount_target(&made);
+                    let made = if made.real_path().is_none() && made.path() == target.target.path()
+                    {
+                        made.with_real_path(target.target.real_path().map(Path::to_path_buf))
+                    } else {
+                        made
+                    };
+                    let recorded_at = if target.wrote_record {
+                        None
+                    } else {
+                        synthetic_mount_target_record_time(&target.marker_dir)
+                    };
+                    remove_synthetic_mount_target(&made, recorded_at);
                 }
-                _ => remove_synthetic_mount_target(&target.target),
+                _ => remove_synthetic_mount_target(&target.target, /*recorded_at*/ None),
             }
             remove_synthetic_mount_target_record(&target.marker_dir);
             match fs::remove_dir(&target.marker_dir) {
@@ -1193,7 +1225,7 @@ fn cleanup_synthetic_mount_targets(targets: &[SyntheticMountTargetRegistration])
 fn cleanup_protected_create_targets(targets: &[ProtectedCreateTargetRegistration]) -> bool {
     with_synthetic_mount_registry_lock(|| {
         for target in targets.iter().rev() {
-            match fs::remove_file(&target.marker_file) {
+            match crate::placeholder_registry::remove_marker(&target.marker_file) {
                 Ok(()) => {}
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
                 Err(err) => panic!(
@@ -1313,38 +1345,50 @@ fn make_directory_tree_writable(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn remove_synthetic_mount_target(target: &crate::bwrap::SyntheticMountTarget) {
-    let path = target.path();
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
+/// Removes `target` where it was registered, without following a link in
+/// the folders above it (#607): an empty file, or an empty folder, that it
+/// still is. With `recorded_at` (the time of the record of a placeholder
+/// another run made), only when it was made for that record: not the
+/// person's own empty file made there later.
+fn remove_synthetic_mount_target(
+    target: &crate::bwrap::SyntheticMountTarget,
+    recorded_at: Option<std::time::SystemTime>,
+) {
+    let path = target.removal_path();
+    let found = match crate::placeholder_registry::find_without_links(path) {
+        Ok(Some(found)) => found,
+        Ok(None) => return,
         Err(err) => panic!(
             "failed to inspect synthetic bubblewrap mount target {}: {err}",
             path.display()
         ),
     };
-    if !target.should_remove_after_bwrap(&metadata) {
+    if !target.should_remove(found.is_empty_file(), found.is_dir(), found.identity()) {
         return;
     }
-    match target.kind() {
-        crate::bwrap::SyntheticMountTargetKind::EmptyFile => match fs::remove_file(path) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => panic!(
-                "failed to remove synthetic bubblewrap mount target {}: {err}",
-                path.display()
-            ),
-        },
-        crate::bwrap::SyntheticMountTargetKind::EmptyDirectory => match fs::remove_dir(path) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) if err.kind() == std::io::ErrorKind::DirectoryNotEmpty => {}
-            Err(err) => panic!(
-                "failed to remove synthetic bubblewrap mount target {}: {err}",
-                path.display()
-            ),
-        },
+    if !target.preserves_pre_existing_path()
+        && recorded_at.is_some_and(|recorded_at| {
+            !crate::placeholder_registry::made_for_record(found.changed_at(), recorded_at)
+        })
+    {
+        return;
     }
+    match found.remove() {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) if err.kind() == std::io::ErrorKind::DirectoryNotEmpty => {}
+        Err(err) => panic!(
+            "failed to remove synthetic bubblewrap mount target {}: {err}",
+            path.display()
+        ),
+    }
+}
+
+/// When the record in `marker_dir` was written, if there is one.
+fn synthetic_mount_target_record_time(marker_dir: &Path) -> Option<std::time::SystemTime> {
+    fs::symlink_metadata(marker_dir.join(SYNTHETIC_MOUNT_TARGET_RECORD))
+        .and_then(|metadata| metadata.modified())
+        .ok()
 }
 
 /// #582: records the placeholder this run makes, for
@@ -1360,6 +1404,13 @@ fn write_synthetic_mount_target_record(
     };
     let mut record = format!("{kind}\n").into_bytes();
     record.extend_from_slice(target.path().as_os_str().as_bytes());
+    // #607: then where it is removed (see `SyntheticMountTarget::real_path`).
+    // A path holds no NUL byte; an older run reads such a record as naming
+    // another path and leaves it alone.
+    if let Some(real_path) = target.real_path() {
+        record.push(0);
+        record.extend_from_slice(real_path.as_os_str().as_bytes());
+    }
     let path = marker_dir.join(SYNTHETIC_MOUNT_TARGET_RECORD);
     // Only this user may change it (the registry folder may be group
     // writable).
@@ -1404,17 +1455,32 @@ fn read_synthetic_mount_target_record(
     }
     let record = fs::read(path).ok()?;
     let newline = record.iter().position(|byte| *byte == b'\n')?;
-    let path = Path::new(std::ffi::OsStr::from_bytes(&record[newline + 1..]));
+    let rest = &record[newline + 1..];
+    // #607: the path, then (after a NUL byte) where it is removed.
+    let (path, real_path) = match rest.iter().position(|byte| *byte == 0) {
+        Some(nul) => (&rest[..nul], Some(&rest[nul + 1..])),
+        None => (rest, None),
+    };
+    let path = Path::new(std::ffi::OsStr::from_bytes(path));
     if !path.is_absolute() || synthetic_mount_marker_dir(path) != marker_dir {
         return None;
     }
-    match &record[..newline] {
-        b"file" => Some(crate::bwrap::SyntheticMountTarget::missing(path)),
-        b"directory" => Some(crate::bwrap::SyntheticMountTarget::missing_empty_directory(
-            path,
-        )),
-        _ => None,
-    }
+    let real_path = match real_path {
+        Some(real_path) => {
+            let real_path = Path::new(std::ffi::OsStr::from_bytes(real_path));
+            if !real_path.is_absolute() || real_path.file_name() != path.file_name() {
+                return None;
+            }
+            Some(real_path.to_path_buf())
+        }
+        None => None,
+    };
+    let target = match &record[..newline] {
+        b"file" => crate::bwrap::SyntheticMountTarget::missing(path),
+        b"directory" => crate::bwrap::SyntheticMountTarget::missing_empty_directory(path),
+        _ => return None,
+    };
+    Some(target.with_real_path(real_path))
 }
 
 /// Whether `path` is a record (or the registry folder) of this user that no
@@ -1491,19 +1557,38 @@ fn remove_stale_synthetic_mount_targets() {
         if !only_ended_runs(&marker_dir) {
             continue;
         }
-        let removed = match fs::symlink_metadata(target.path()) {
-            Err(err) => err.kind() == std::io::ErrorKind::NotFound,
-            Ok(metadata) if !target.should_remove_after_bwrap(&metadata) => true,
-            Ok(_) => match target.kind() {
-                crate::bwrap::SyntheticMountTargetKind::EmptyFile => {
-                    fs::remove_file(target.path()).is_ok()
-                }
+        let recorded_at = synthetic_mount_target_record_time(&marker_dir);
+        // A record without its location (an older run's): resolved now, as
+        // before.
+        let target = if target.real_path().is_none() {
+            let real_path = crate::placeholder_registry::real_placeholder_path(target.path());
+            target.with_real_path(real_path)
+        } else {
+            target
+        };
+        // #607: reached without following a link above it, and only the
+        // placeholder made for this record (not the person's own empty file
+        // or folder made there later); anything else is no longer one.
+        let removed = match crate::placeholder_registry::find_without_links(target.removal_path()) {
+            Err(_) => false,
+            Ok(None) => true,
+            Ok(Some(found))
+                if !target.should_remove(
+                    found.is_empty_file(),
+                    found.is_dir(),
+                    found.identity(),
+                ) || recorded_at.is_some_and(|recorded_at| {
+                    !crate::placeholder_registry::made_for_record(found.changed_at(), recorded_at)
+                }) =>
+            {
+                true
+            }
+            Ok(Some(found)) => match found.remove() {
+                Ok(()) => true,
                 // A folder that is no longer empty is no longer a placeholder.
-                crate::bwrap::SyntheticMountTargetKind::EmptyDirectory => {
-                    match fs::remove_dir(target.path()) {
-                        Ok(()) => true,
-                        Err(err) => err.kind() == std::io::ErrorKind::DirectoryNotEmpty,
-                    }
+                Err(err) => {
+                    err.kind() == std::io::ErrorKind::NotFound
+                        || err.kind() == std::io::ErrorKind::DirectoryNotEmpty
                 }
             },
         };
@@ -1527,7 +1612,7 @@ fn only_ended_runs(marker_dir: &Path) -> bool {
         let Some(pid) = marker_pid(&path) else {
             continue;
         };
-        if process_is_active(pid) {
+        if crate::placeholder_registry::marker_run_is_active(&path, pid) {
             return false;
         }
         match fs::read(&path) {
@@ -1548,6 +1633,9 @@ fn remove_ended_markers(marker_dir: &Path) {
     for entry in entries.flatten() {
         let path = entry.path();
         if marker_pid(&path).is_some() {
+            let _ = crate::placeholder_registry::remove_marker(&path);
+        } else if marker_pid(&path.with_extension("")).is_some() {
+            // #607: a PID namespace file whose marker is gone.
             let _ = fs::remove_file(path);
         }
     }
@@ -1557,15 +1645,6 @@ fn marker_pid(path: &Path) -> Option<libc::pid_t> {
     path.file_name()
         .and_then(|name| name.to_str())
         .and_then(|name| name.parse::<libc::pid_t>().ok())
-}
-
-fn process_is_active(pid: libc::pid_t) -> bool {
-    let result = unsafe { libc::kill(pid, 0) };
-    if result == 0 {
-        return true;
-    }
-    let err = std::io::Error::last_os_error();
-    !matches!(err.raw_os_error(), Some(libc::ESRCH))
 }
 
 fn with_synthetic_mount_registry_lock<T>(f: impl FnOnce() -> T) -> T {
@@ -1620,12 +1699,32 @@ pub(crate) fn is_live_placeholder(path: &Path) -> bool {
         return false;
     }
     with_synthetic_mount_registry_lock(|| {
-        synthetic_mount_marker_dir_has_active_synthetic_owner(&marker_dir)
+        let live = synthetic_mount_marker_dir_has_active_synthetic_owner(&marker_dir)
             // #582: one whose maker was killed before removing it: held as
             // a placeholder too, so a sweep leaves it while this run uses it,
             // and the last run out removes it.
             || read_synthetic_mount_target_record(&marker_dir)
-                .is_some_and(|made| made.path() == path)
+                .is_some_and(|made| made.path() == path);
+        if live {
+            // #673: hold it now, under the same lock as the check. This run
+            // only registers just before bubblewrap starts; until then its
+            // maker's cleanup could remove it, and bubblewrap cannot make a
+            // new one where this run's sandbox is read-only (`Can't create
+            // file at ...: Read-only file system`). Registration rewrites
+            // this marker; a run that ends first leaves it to the sweep.
+            let marker_file = marker_dir.join(std::process::id().to_string());
+            crate::placeholder_registry::write_marker(
+                &marker_file,
+                SYNTHETIC_MOUNT_MARKER_EXISTING,
+            )
+            .unwrap_or_else(|err| {
+                panic!(
+                    "failed to hold synthetic bubblewrap mount target {}: {err}",
+                    path.display()
+                )
+            });
+        }
+        live
     })
 }
 

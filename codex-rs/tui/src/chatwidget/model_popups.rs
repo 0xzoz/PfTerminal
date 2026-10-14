@@ -385,7 +385,8 @@ impl ChatWidget {
             .into_iter()
             .filter(|preset| {
                 Self::show_in_pfterminal_model_picker(preset)
-                    && self.model_catalog.preset_is_selectable(preset)
+                    && (self.model_catalog.preset_is_selectable(preset)
+                        || self.another_route_is_selectable(preset))
             })
             .collect();
 

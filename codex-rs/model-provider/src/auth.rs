@@ -250,6 +250,19 @@ pub fn named_sign_in_account(
     })
 }
 
+/// PF-84-S06 (#658): the OpenAI sign-in a session on `provider` runs on: a
+/// named account, the default login, or none (a provider without OpenAI
+/// sign-in).
+pub fn session_sign_in(provider: &ModelProviderInfo) -> codex_login::SessionSignIn {
+    if !provider.requires_openai_auth || provider.aws.is_some() || provider.auth.is_some() {
+        return codex_login::SessionSignIn::NotOpenAi;
+    }
+    match named_sign_in_account(provider) {
+        Some(account) => codex_login::SessionSignIn::Named(account),
+        None => codex_login::SessionSignIn::Default,
+    }
+}
+
 /// PF-84: the named account `provider`'s auth command must serve, checked
 /// against the registry in `registry_home` before the command runs.
 pub(crate) fn external_bearer_account(

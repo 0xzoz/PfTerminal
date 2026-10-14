@@ -12942,3 +12942,63 @@ async fn incompatible_fallback_uses_non_openai_provider_default() -> std::io::Re
     assert_eq!(config.model.as_deref(), Some(DEEPSEEK_DEFAULT_MODEL));
     Ok(())
 }
+
+/// #412: a managed pin on shell_snapshot is detected, not silently kept on.
+#[test]
+fn issue_412_turn_off_unless_required_honours_a_shell_snapshot_pin() -> std::io::Result<()> {
+    let pinned = |enabled: bool| {
+        Some(Sourced::new(
+            FeatureRequirementsToml {
+                entries: BTreeMap::from([("shell_snapshot".to_string(), enabled)]),
+            },
+            RequirementSource::Unknown,
+        ))
+    };
+    let mut configured = Features::with_defaults();
+    configured.enable(Feature::ShellSnapshot);
+
+    let mut features = ManagedFeatures::from_configured(configured.clone(), pinned(true))?;
+    assert!(features.enabled(Feature::ShellSnapshot));
+    // `disable` succeeds and leaves the pin in place; that is why it can't
+    // be the check.
+    assert!(features.disable(Feature::ShellSnapshot).is_ok());
+    assert!(features.enabled(Feature::ShellSnapshot));
+    assert!(!features.turn_off_unless_required(Feature::ShellSnapshot));
+    assert!(features.enabled(Feature::ShellSnapshot));
+
+    let mut features =
+        ManagedFeatures::from_configured(configured, /*feature_requirements*/ None)?;
+    assert!(features.turn_off_unless_required(Feature::ShellSnapshot));
+    assert!(!features.enabled(Feature::ShellSnapshot));
+    Ok(())
+}
+
+/// #412: secret_output_gate fails closed before arming when policy pins
+/// shell snapshots on.
+#[tokio::test]
+async fn issue_412_secret_output_gate_fails_closed_on_a_shell_snapshot_pin() -> std::io::Result<()>
+{
+    let codex_home = TempDir::new()?;
+    std::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        "[features]\nsecret_output_gate = true\n",
+    )?;
+    let err = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .cloud_config_bundle(
+            CloudConfigBundleFixture::loader_with_enterprise_requirement(
+                "[features]\nshell_snapshot = true\n",
+            ),
+        )
+        .build()
+        .await
+        .expect_err("a pinned shell snapshot must refuse the gate");
+    assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    assert!(
+        err.to_string()
+            .contains("secret_output_gate: shell_snapshot is required by policy"),
+        "{err}"
+    );
+    Ok(())
+}

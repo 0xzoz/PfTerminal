@@ -1,10 +1,11 @@
 //! Flat, provider-valid names for namespaced tools on wires without namespaces.
 //!
 //! Chat Completions and Anthropic Messages accept only top-level function tools,
-//! while MCP tools are registered under a namespace (`mcp__server` + `tool`). On
-//! those wires each MCP tool is offered under one flat name, and a call to that
-//! name is mapped back to the namespaced [`ToolName`] before dispatch, so the
-//! same handler, approvals and security gates run as on the Responses wire.
+//! while MCP tools (`mcp__server` + `tool`) and other grouped tools (`clock` +
+//! `sleep`, ...) are registered under a namespace. On those wires each such tool
+//! is offered under one flat name, and a call to that name is mapped back to the
+//! namespaced [`ToolName`] before dispatch, so the same handler, approvals and
+//! security gates run as on the Responses wire.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -36,6 +37,14 @@ impl FlatToolNames {
     /// Returns the namespaced tool a flat name stands for.
     pub(crate) fn resolve(&self, flat_name: &str) -> Option<&ToolName> {
         self.by_flat_name.get(flat_name)
+    }
+
+    /// The flat name this request offers for a namespaced tool, if any.
+    pub(crate) fn flat_name_for(&self, tool_name: &ToolName) -> Option<&str> {
+        self.by_flat_name
+            .iter()
+            .find(|(_, offered)| *offered == tool_name)
+            .map(|(flat, _)| flat.as_str())
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -86,6 +95,7 @@ fn portable_chars(name: &str) -> String {
 
 /// The flat name a namespaced tool gets when nothing collides with it: its
 /// preferred name when that is portable, otherwise the hashed form.
+#[cfg(test)]
 pub(crate) fn flat_tool_name_for(tool_name: &ToolName) -> String {
     let preferred = preferred_flat_tool_name(tool_name);
     if is_portable_tool_name(&preferred) {

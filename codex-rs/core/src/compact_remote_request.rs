@@ -72,6 +72,7 @@ pub(super) async fn run_remote_compact_attempt(
         output_schema: None,
         output_schema_strict: true,
         producer: Some(turn_context.output_producer()),
+        flat_tool_names: tool_router.flat_tool_names().clone(),
     };
     let window_id = sess.current_window_id().await;
     let responses_metadata = turn_context.turn_metadata_state.to_responses_metadata(

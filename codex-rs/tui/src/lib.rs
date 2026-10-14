@@ -1526,6 +1526,11 @@ pub async fn run_main(
             if let Err(err) = codex_state::scrub_sandbox_logs_once(&sandbox_dir) {
                 tracing::warn!("failed to scrub old secrets from the sandbox logs: {err}");
             }
+            // #158: put back integrity labels a crashed sandbox session left.
+            #[cfg(target_os = "windows")]
+            if let Err(err) = codex_windows_sandbox::repair_stale_integrity_labels() {
+                tracing::warn!("failed to repair stale sandbox integrity labels: {err:#}");
+            }
         }
     });
 
@@ -1759,6 +1764,7 @@ async fn run_ratatui_app(
                         &initial_config,
                         /*recorded*/ None,
                         deferred_account_check,
+                        resume_launch::ThreadOpening::of(selected),
                     ),
                 }
             }
@@ -2113,6 +2119,7 @@ async fn run_ratatui_app(
         &config,
         resume_recorded_account.as_ref(),
         deferred_account_check,
+        resume_launch::ThreadOpening::of(&session_selection),
     ) {
         shutdown_app_server_if_present(app_server.take()).await;
         terminal_restore_guard.restore_silently();

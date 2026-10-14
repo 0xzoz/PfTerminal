@@ -187,6 +187,8 @@ fn replacement_candidates_for(
     statuses: &[ProviderStatusSnapshot],
     current_model: Option<String>,
 ) -> Vec<ExplicitProviderSelection> {
+    // #665: a connection without its own credential cannot replace anything.
+    let without_credential = status_host.connections_without_credential();
     statuses
         .iter()
         .filter(|status| {
@@ -197,7 +199,11 @@ fn replacement_candidates_for(
         })
         .filter_map(|status| {
             let entry = status_host.catalog().get(status.id.as_str())?;
-            let runtime_provider_id = entry.runtime_provider_ids.first()?.clone();
+            let runtime_provider_id = entry
+                .runtime_provider_ids
+                .iter()
+                .find(|id| !without_credential.contains(id.as_str()))?
+                .clone();
             let model = codex_model_provider_info::resolve_model_for_provider(
                 current_model.clone(),
                 runtime_provider_id.as_str(),

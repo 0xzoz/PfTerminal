@@ -144,6 +144,9 @@ fn assert_permission_effects(path: &std::path::Path, count: usize) -> Result<()>
     Ok(())
 }
 
+/// Every test here runs `shell_command` probes that write markers on the host,
+/// and `shell_command` never runs in a remote environment (#708, #721), so its
+/// app-server uses the local executor.
 async fn native_permission_fixture(
     workspace: &std::path::Path,
     script: Vec<String>,
@@ -152,6 +155,7 @@ async fn native_permission_fixture(
     let home = TempDir::new()?;
     create_config_toml(home.path(), &server.uri())?;
     let mut mcp = TestAppServer::builder()
+        .with_local_auto_env()
         .with_codex_home(home.path())
         .build_initialized_with_timeout(Duration::from_secs(60))
         .await?;
@@ -503,6 +507,7 @@ async fn restart_settled_permission_case(
     )
     .await;
     let mut restarted = TestAppServer::builder()
+        .with_local_auto_env()
         .with_codex_home(home.path())
         .build_initialized_with_timeout(Duration::from_secs(60))
         .await?;
@@ -587,6 +592,7 @@ async fn thread_settings_f10_restart_does_not_accept_pending_approval() -> Resul
     )
     .await;
     let mut restarted = TestAppServer::builder()
+        .with_local_auto_env()
         .with_codex_home(home.path())
         .build_initialized_with_timeout(Duration::from_secs(60))
         .await?;
@@ -690,6 +696,7 @@ async fn thread_settings_confirmation_f04_restricts_work_steered_after_applied()
     let home = TempDir::new()?;
     create_config_toml(home.path(), &server.uri())?;
     let mut mcp = TestAppServer::builder()
+        .with_local_auto_env()
         .with_codex_home(home.path())
         .build_initialized_with_timeout(Duration::from_secs(60))
         .await?;
@@ -821,6 +828,7 @@ async fn thread_settings_inject_items_waits_for_latest_authorization() -> Result
     let home = TempDir::new()?;
     create_config_toml(home.path(), &server.uri())?;
     let mut mcp = TestAppServer::builder()
+        .with_local_auto_env()
         .with_codex_home(home.path())
         .build_initialized_with_timeout(Duration::from_secs(60))
         .await?;
@@ -887,6 +895,7 @@ async fn thread_settings_authorization_boundary_returns_input_and_discriminator(
     let home = TempDir::new()?;
     create_config_toml(home.path(), &server.uri())?;
     let mut mcp = TestAppServer::builder()
+        .with_local_auto_env()
         .with_codex_home(home.path())
         .build_initialized_with_timeout(Duration::from_secs(60))
         .await?;
@@ -969,6 +978,7 @@ async fn thread_settings_confirmation_next_turn_tightening_and_loosening() -> Re
     let server = create_mock_responses_server_sequence_unchecked(script).await;
     create_config_toml(home.path(), &server.uri())?;
     let mut mcp = TestAppServer::builder()
+        .with_local_auto_env()
         .with_codex_home(home.path())
         .build_initialized_with_timeout(Duration::from_secs(60))
         .await?;
@@ -1011,6 +1021,7 @@ async fn thread_settings_confirmation_preserves_pending_approval() -> Result<()>
     .await;
     create_config_toml(home.path(), &server.uri())?;
     let mut mcp = TestAppServer::builder()
+        .with_local_auto_env()
         .with_codex_home(home.path())
         .build_initialized_with_timeout(Duration::from_secs(60))
         .await?;
@@ -1094,6 +1105,7 @@ async fn preserve_running_authority_after_confirmation(
     let home = TempDir::new()?;
     create_config_toml(home.path(), &server.uri())?;
     let mut mcp = TestAppServer::builder()
+        .with_local_auto_env()
         .with_codex_home(home.path())
         .build_initialized_with_timeout(Duration::from_secs(60))
         .await?;
@@ -1180,6 +1192,7 @@ async fn thread_settings_confirmation_leaves_mcp_status_responses_unaffected() -
         };
         config("echo")?;
         let mut mcp = TestAppServer::builder()
+            .with_local_auto_env()
             .with_codex_home(home.path())
             .build_initialized_with_timeout(Duration::from_secs(60))
             .await?;
@@ -1247,6 +1260,7 @@ async fn thread_settings_confirmation_noop_concurrent_and_legacy() -> Result<()>
     create_config_toml(codex_home.path(), &server.uri())?;
     write_models_cache(codex_home.path())?;
     let mut mcp = TestAppServer::builder()
+        .with_local_auto_env()
         .with_codex_home(codex_home.path())
         .build_initialized_with_timeout(DEFAULT_TIMEOUT)
         .await?;
@@ -1325,6 +1339,7 @@ async fn thread_settings_update_emits_notification_and_updates_future_turns() ->
     let (model_id, service_tier_id) = service_tier_model_and_tier_id()?;
 
     let mut mcp = TestAppServer::builder()
+        .with_local_auto_env()
         .with_codex_home(codex_home.path())
         .build_initialized_with_timeout(DEFAULT_TIMEOUT)
         .await?;
@@ -1391,6 +1406,7 @@ async fn thread_settings_update_cwd_retargets_default_environment() -> Result<()
     create_config_toml(codex_home.path(), &server.uri())?;
 
     let mut mcp = TestAppServer::builder()
+        .with_local_auto_env()
         .with_codex_home(codex_home.path())
         .build_initialized_with_timeout(DEFAULT_TIMEOUT)
         .await?;
@@ -1458,6 +1474,7 @@ async fn thread_settings_update_while_turn_is_active_emits_notification() -> Res
     create_config_toml(codex_home.path(), &server.uri())?;
 
     let mut mcp = TestAppServer::builder()
+        .with_local_auto_env()
         .with_codex_home(codex_home.path())
         .build_initialized_with_timeout(DEFAULT_TIMEOUT)
         .await?;
@@ -1503,6 +1520,7 @@ async fn thread_settings_update_null_service_tier_uses_default() -> Result<()> {
     let (model_id, service_tier_id) = service_tier_model_and_tier_id()?;
 
     let mut mcp = TestAppServer::builder()
+        .with_local_auto_env()
         .with_codex_home(codex_home.path())
         .build_initialized_with_timeout(DEFAULT_TIMEOUT)
         .await?;
@@ -1571,6 +1589,7 @@ async fn thread_settings_update_rejects_sandbox_policy_with_permissions() -> Res
     create_config_toml(codex_home.path(), &server.uri())?;
 
     let mut mcp = TestAppServer::builder()
+        .with_local_auto_env()
         .with_codex_home(codex_home.path())
         .build_initialized_with_timeout(DEFAULT_TIMEOUT)
         .await?;
@@ -1608,6 +1627,7 @@ async fn turn_start_settings_override_emits_thread_settings_updated() -> Result<
     create_config_toml(codex_home.path(), &server.uri())?;
 
     let mut mcp = TestAppServer::builder()
+        .with_local_auto_env()
         .with_codex_home(codex_home.path())
         .build_initialized_with_timeout(DEFAULT_TIMEOUT)
         .await?;

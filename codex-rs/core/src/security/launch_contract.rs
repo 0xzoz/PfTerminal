@@ -57,6 +57,9 @@ const PROTECTED_CODEX_HOME_ENTRIES: &[&str] = &[
     "sessions",
     "archived_sessions",
     "history.jsonl",
+    // #651: the database init lock (#586); a command holding it would stall
+    // every new launch on this home.
+    super::preflight::DB_INIT_LOCK,
 ];
 
 /// The entries of [`PROTECTED_CODEX_HOME_ENTRIES`] that are directories. On
@@ -83,9 +86,6 @@ const PROTECTED_HOME_ENTRIES: &[&str] = &[
     ".npmrc",
     ".claude/.credentials.json",
 ];
-
-/// Glob (relative to `CODEX_HOME`) for Core's state and log databases.
-const PROTECTED_CODEX_HOME_GLOB: &str = "*.sqlite*";
 
 /// Set in protected launches so zsh does not source `~/.zshenv`, which can
 /// export credentials; `/var/empty` holds no start-up files.
@@ -191,6 +191,10 @@ pub(crate) struct LaunchContract {
     protected_read_paths: Vec<AbsolutePathBuf>,
     managed_values: Vec<Zeroizing<String>>,
     hardened: bool,
+    /// #651: database folders set apart from `CODEX_HOME` (`sqlite_home`)
+    /// that this process's configs use, noted once each is loaded. Added
+    /// to, never removed.
+    database_folders: std::sync::Mutex<Vec<AbsolutePathBuf>>,
     /// PF-27-S07: the armed lock on `CODEX_HOME`, held while this contract
     /// exists; protected launches are refused without it.
     #[cfg(windows)]
@@ -290,6 +294,14 @@ pub fn protect_external_agent_launch(
         .map_err(|err| err.to_string())
 }
 
+/// #651: the armed contract also protects the database folder `sqlite_home`
+/// when it is set apart from `CODEX_HOME`. Called once a config is loaded.
+pub(crate) fn protect_database_folder(sqlite_home: &Path) {
+    if let Some(contract) = active() {
+        contract.note_database_folder(sqlite_home);
+    }
+}
+
 /// True once the secretless launch contract is armed in this process.
 pub fn external_agent_contract_armed() -> bool {
     active().is_some()
@@ -370,6 +382,7 @@ impl LaunchContract {
             protected_read_paths,
             managed_values,
             hardened,
+            database_folders: std::sync::Mutex::new(Vec::new()),
             #[cfg(windows)]
             armed_lock: std::sync::Mutex::new(ArmedLock::open(codex_home.as_path())),
         }
@@ -529,15 +542,30 @@ impl LaunchContract {
         // read-only there; this only narrows access. A workspace inside
         // CODEX_HOME stays writable and is refused below. #619: also a root
         // spelled by an alias of its location (`/tmp` for `/private/tmp`).
+        // #652: also through a root reached through a nested link, spelled
+        // through that root too, which is how the sandboxes honor it.
         if file_system.can_write_path_with_cwd(self.codex_home.as_path(), cwd)
             || file_system.can_write_effective_path_with_cwd(self.codex_home.as_path(), cwd)
         {
-            file_system.entries.push(FileSystemSandboxEntry::new(
-                FileSystemPath::Path {
-                    path: self.codex_home.clone(),
-                },
-                FileSystemAccessMode::Read,
-            ));
+            let spellings =
+                file_system.writable_root_spellings_with_cwd(self.codex_home.as_path(), cwd);
+            for path in std::iter::once(self.codex_home.clone()).chain(spellings) {
+                file_system.entries.push(FileSystemSandboxEntry::new(
+                    FileSystemPath::Path { path },
+                    FileSystemAccessMode::Read,
+                ));
+            }
+        }
+        // #651 (Linux): a database folder (and what Corbanu keeps in it)
+        // missing where the command could make it is made as Corbanu would,
+        // so bubblewrap holds no missing path there with a placeholder file
+        // on the host; its entries are then denied as when it exists.
+        if cfg!(target_os = "linux") {
+            for folder in self.database_folders() {
+                if file_system.can_write_path_with_cwd(folder.as_path(), cwd) {
+                    super::protected_surface::create_missing_database_folder(folder.as_path());
+                }
+            }
         }
         for entry in self.protected_entries() {
             if !file_system.entries.contains(&entry) {
@@ -552,20 +580,25 @@ impl LaunchContract {
     /// The deny entries [`Self::protect_permissions`] adds: every protected
     /// path and Core's databases.
     fn protected_entries(&self) -> Vec<FileSystemSandboxEntry> {
-        let glob = FileSystemSandboxEntry::new(
-            FileSystemPath::GlobPattern {
-                pattern: self
-                    .codex_home
-                    .join(PROTECTED_CODEX_HOME_GLOB)
-                    .to_string_lossy()
-                    .into_owned(),
-            },
-            FileSystemAccessMode::Deny,
-        );
-        self.protected_read_paths
-            .iter()
+        // #651: each folder escaped, should its path hold glob syntax.
+        let globs = std::iter::once(self.codex_home.clone())
+            .chain(self.database_folders())
+            .map(|folder| {
+                FileSystemSandboxEntry::new(
+                    FileSystemPath::GlobPattern {
+                        pattern: crate::security::preflight::database_glob(folder.as_path())
+                            .to_string_lossy()
+                            .into_owned(),
+                    },
+                    FileSystemAccessMode::Deny,
+                )
+            })
+            .collect::<Vec<_>>();
+        self.protected_paths()
+            .into_iter()
             .map(|path| {
                 let path_entry = FileSystemPath::Path { path: path.clone() };
+                let path = &path;
                 // PF-27-S06: the Windows sandbox drops every skip-if-missing
                 // entry, so a path that exists is denied outright there. So
                 // is a protected CODEX_HOME directory that does not exist yet
@@ -582,8 +615,66 @@ impl LaunchContract {
                     )
                 }
             })
-            .chain(std::iter::once(glob))
+            .chain(globs)
             .collect()
+    }
+
+    /// #651: notes `sqlite_home` when it is not `CODEX_HOME` (by any
+    /// spelling).
+    pub(crate) fn note_database_folder(&self, sqlite_home: &Path) {
+        let Ok(folder) = AbsolutePathBuf::from_absolute_path(sqlite_home) else {
+            return;
+        };
+        let same_folder = folder == self.codex_home
+            || std::fs::canonicalize(sqlite_home).is_ok_and(|real| {
+                std::fs::canonicalize(self.codex_home.as_path()).is_ok_and(|home| home == real)
+            });
+        let mut folders = self
+            .database_folders
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !same_folder && !folders.contains(&folder) {
+            folders.push(folder);
+        }
+    }
+
+    fn database_folders(&self) -> Vec<AbsolutePathBuf> {
+        self.database_folders
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Every path agent commands may not read: [`Self::protected_read_paths`],
+    /// what Corbanu keeps in each separate database folder besides the
+    /// databases, and the backups beside each folder (#651).
+    fn protected_paths(&self) -> Vec<AbsolutePathBuf> {
+        let mut paths = self.protected_read_paths.clone();
+        for folder in self.database_folders() {
+            paths.extend(
+                super::preflight::DATABASE_FOLDER_ENTRIES
+                    .iter()
+                    .map(|entry| folder.join(entry)),
+            );
+        }
+        // Databases recovery set aside beside each folder (the home's too).
+        // On Linux only when present: bubblewrap would hold a missing one
+        // with a placeholder file beside the folder (in the user's home for
+        // the default home, #348), as `ReadDenials` does.
+        for folder in std::iter::once(self.codex_home.clone()).chain(self.database_folders()) {
+            if let Some(name) = folder.as_path().file_name() {
+                let mut backups = name.to_os_string();
+                backups.push(".db-backups");
+                if let Ok(backups) =
+                    AbsolutePathBuf::from_absolute_path(folder.as_path().with_file_name(backups))
+                    && (!cfg!(target_os = "linux")
+                        || std::fs::symlink_metadata(backups.as_path()).is_ok())
+                {
+                    paths.push(backups);
+                }
+            }
+        }
+        paths
     }
 
     /// #294: the Windows deny-read ACL targets for the protected paths. Every
@@ -615,7 +706,7 @@ impl LaunchContract {
         if file_system.kind != FileSystemSandboxKind::Restricted {
             return Err(LaunchDenied::UnprotectableFileSystem);
         }
-        for path in &self.protected_read_paths {
+        for path in &self.protected_paths() {
             if file_system.can_read_path_with_cwd(path.as_path(), cwd) {
                 return Err(LaunchDenied::ProtectedPathReadable(
                     path.display().to_string(),

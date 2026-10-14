@@ -63,7 +63,7 @@ pub unsafe fn deny_delete_child_route(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn is_reparse_point(path: &Path) -> bool {
+pub(crate) fn is_reparse_point(path: &Path) -> bool {
     use std::os::windows::fs::MetadataExt;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
     std::fs::symlink_metadata(path)

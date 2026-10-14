@@ -152,6 +152,82 @@ async fn approval_keys_include_environment_id() {
     );
 }
 
+/// Issue #709: "approve for session" of a patch in one environment is not an
+/// approval of the same path in another; each environment asks on its own.
+#[tokio::test]
+async fn session_approval_does_not_carry_across_environments() {
+    use crate::tools::sandboxing::asking_person;
+    use crate::tools::sandboxing::with_cached_approval;
+
+    let (session, _turn) = crate::session::tests::make_session_and_context().await;
+    let runtime = ApplyPatchRuntime::new();
+    let path_uri = PathUri::from_abs_path(
+        &std::env::temp_dir()
+            .join("issue-709-approval-scope.txt")
+            .abs(),
+    );
+    let keys_for = |environment_id: &str| {
+        runtime.approval_keys(&ApplyPatchRequest {
+            turn_environment: test_turn_environment(environment_id),
+            action: ApplyPatchAction::new_add_for_test(&path_uri, "hello".to_string()),
+            file_paths: vec![path_uri.clone()],
+            changes: HashMap::new(),
+            exec_approval_requirement: ExecApprovalRequirement::NeedsApproval {
+                reason: None,
+                proposed_execpolicy_amendment: None,
+            },
+            additional_permissions: None,
+            permissions_preapproved: false,
+        })
+    };
+    let ask = |keys, decision: ReviewDecision| {
+        let services = &session.services;
+        asking_person(move || {
+            with_cached_approval(
+                services,
+                "apply_patch",
+                keys,
+                /*fresh_human_authority*/ false,
+                move || async move { decision },
+            )
+        })
+    };
+
+    // A person approves the local patch for the session.
+    assert_eq!(
+        ask(keys_for("local"), ReviewDecision::ApprovedForSession).await,
+        (ReviewDecision::ApprovedForSession, true)
+    );
+    // The same path in the remote environment still asks the person.
+    assert_eq!(
+        ask(keys_for("remote"), ReviewDecision::denied("issue 709")).await,
+        (ReviewDecision::denied("issue 709"), true)
+    );
+    // The local approval is still remembered for the local environment.
+    assert_eq!(
+        ask(keys_for("local"), ReviewDecision::denied("issue 709")).await,
+        (ReviewDecision::ApprovedForSession, false)
+    );
+    // And the reverse: a remote session approval does not cover a third
+    // environment, while it covers the remote one.
+    assert_eq!(
+        ask(keys_for("remote"), ReviewDecision::ApprovedForSession).await,
+        (ReviewDecision::ApprovedForSession, true)
+    );
+    assert_eq!(
+        ask(keys_for("remote"), ReviewDecision::denied("issue 709")).await,
+        (ReviewDecision::ApprovedForSession, false)
+    );
+    assert_eq!(
+        ask(
+            keys_for("other-remote"),
+            ReviewDecision::denied("issue 709")
+        )
+        .await,
+        (ReviewDecision::denied("issue 709"), true)
+    );
+}
+
 #[tokio::test]
 async fn sandbox_cwd_uses_patch_action_cwd() {
     let runtime = ApplyPatchRuntime::new();

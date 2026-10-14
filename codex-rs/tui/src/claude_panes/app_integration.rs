@@ -822,7 +822,7 @@ impl App {
                         .unwrap_or_else(|| role.label().to_string()),
                     crate::dispatch_queue::SavedNativeSpawnRuntime {
                         model: profile_config.provider_model.to_string(),
-                        provider: format!("external-claude:{profile:?}").to_ascii_lowercase(),
+                        provider: profile.crew_runtime_provider_id(),
                         reasoning_effort: None,
                     },
                 ) {
@@ -1090,7 +1090,13 @@ impl App {
         if let Some(reason) = crate::security::level::external_agent_block_reason() {
             let node_key = crate::spawn_orchestration::pane_node_id(&pane_id);
             self.abort_spawn_auto_processing_turn(&node_key);
-            self.record_spawn_dispatch_failed_for_task(&target_node_id, &task, reason.clone());
+            // #660: no sender turn for a task sent while the switch was on.
+            self.record_spawn_dispatch_failed_for_task_with_turns(
+                &target_node_id,
+                &task,
+                &reason,
+                /*start_turns*/ !sent_while_kill_switch_on,
+            );
             self.chat_widget.add_error_message(reason);
             return;
         }
@@ -1112,7 +1118,8 @@ impl App {
                 .map(|pane| pane.title.clone())
             else {
                 let detail = format!("Claude pane `{pane_id}` does not exist");
-                self.record_spawn_dispatch_failed_for_task(&target_node_id, &task, &detail);
+                // #660: the sender is told; no turn starts for it there.
+                self.record_kill_switch_dispatch_failed_for_task(&target_node_id, &task, &detail);
                 self.chat_widget.add_error_message(detail);
                 return;
             };
@@ -1127,7 +1134,7 @@ impl App {
             // The same text again is the same task: its acks stay with it
             // (they are keyed by text) instead of being reported superseded.
             for old in superseded.iter().filter(|old| **old != task) {
-                self.record_spawn_dispatch_failed_for_task(
+                self.record_kill_switch_dispatch_failed_for_task(
                     &target_node_id,
                     old,
                     "superseded by a newer task while the security kill switch was on",
@@ -1407,10 +1414,11 @@ impl App {
     }
 
     /// #507: the kill switch was turned off. Nothing starts: each task held
-    /// for a Claude pane goes with that pane's next turn. The person is told
+    /// for a Claude pane, or (#660 follow-up) waiting in a managed Codex
+    /// pane's mailbox, goes with that pane's next turn. The person is told
     /// which panes have one.
     pub(crate) fn on_kill_switch_turned_off(&mut self) {
-        let titles: Vec<String> = self
+        let claude_titles = self
             .kill_switch_held_claude_tasks
             .iter()
             .filter_map(|(pane_id, _)| {
@@ -1418,15 +1426,27 @@ impl App {
                     .panes()
                     .iter()
                     .find(|pane| pane.id == *pane_id)
-                    .map(|pane| format!("`{}`", pane.title))
+                    .map(|pane| pane.title.clone())
+            });
+        let codex_titles = self
+            .kill_switch_held_native_tasks
+            .iter()
+            .filter(|thread_id| {
+                self.agent_navigation
+                    .get(thread_id)
+                    .is_some_and(|entry| !entry.is_closed)
             })
+            .map(|thread_id| self.thread_label(*thread_id));
+        let titles: Vec<String> = claude_titles
+            .chain(codex_titles)
+            .map(|title| format!("`{title}`"))
             .collect();
         if titles.is_empty() {
             return;
         }
         self.chat_widget.add_info_message(
             format!(
-                "Nothing restarted. A task waits for each of these Claude panes and goes with that pane's next turn, when someone types in it or it gets new work: {}.",
+                "Nothing restarted. A task waits for each of these panes and goes with that pane's next turn, when someone types in it or it gets new work: {}.",
                 titles.join(", ")
             ),
             /*hint*/ None,

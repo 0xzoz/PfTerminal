@@ -316,7 +316,7 @@ impl App {
         let profile = pane.profile.profile();
         Ok(SavedNativeSpawnRuntime {
             model: profile.provider_model.to_string(),
-            provider: format!("external-claude:{:?}", pane.profile).to_ascii_lowercase(),
+            provider: pane.profile.crew_runtime_provider_id(),
             reasoning_effort: None,
         })
     }

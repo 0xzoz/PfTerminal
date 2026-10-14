@@ -367,6 +367,21 @@ impl ExecPolicyManager {
         }
     }
 
+    /// #626: the note an approval prompt carries under Aggressive, naming the
+    /// remembered approvals [`Self::current_for`] suspended where they would
+    /// have run the command unasked. `evaluate` checks the command against a
+    /// policy as the caller does (a shell command or a zsh-fork interception).
+    pub(crate) fn aggressive_suspended_note(
+        &self,
+        evaluate: impl FnOnce(&Policy) -> Evaluation,
+    ) -> Option<String> {
+        let full = evaluate(&self.current().merge_overlay(aggressive_vault_policy()));
+        aggressive::suspended_note(&aggressive::suspended_prefixes(
+            &full,
+            &self.aggressive_approved.load(),
+        ))
+    }
+
     /// See [`Self::load`]; the vault rule of [`Self::current_for`] also
     /// matches wrapped commands.
     pub(crate) fn strict_rules_for(&self, live_aggressive: bool) -> bool {
@@ -468,18 +483,13 @@ impl ExecPolicyManager {
                 // the full policy would have run the command unasked.
                 let suspended_note = live_aggressive
                     .then(|| {
-                        let full = self
-                            .current()
-                            .merge_overlay(aggressive_vault_policy())
-                            .check_multiple_with_options(
+                        self.aggressive_suspended_note(|policy| {
+                            policy.check_multiple_with_options(
                                 commands.iter(),
                                 &exec_policy_fallback,
                                 &match_options,
-                            );
-                        aggressive::suspended_note(&aggressive::suspended_prefixes(
-                            &full,
-                            &self.aggressive_approved.load(),
-                        ))
+                            )
+                        })
                     })
                     .flatten();
                 let with_note = |reason: String| match &suspended_note {

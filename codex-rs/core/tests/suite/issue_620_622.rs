@@ -127,7 +127,9 @@ async fn run(
                 .enable(Feature::UnifiedExec)
                 .expect("enable unified exec");
         })
-        .build_with_auto_env(&server)
+        // Host-sandbox security test: local executor on purpose, also in the
+        // remote lane (#708).
+        .build(&server)
         .await?;
     std::mem::forget(server);
     let thread = test.session_configured.thread_id;

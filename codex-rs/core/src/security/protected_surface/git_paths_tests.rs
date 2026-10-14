@@ -189,7 +189,7 @@ fn issue_650_other_worktrees_folders_are_protected() {
         format!("gitdir: {}\n", common.join("worktrees/w").display()),
     )
     .unwrap();
-    let paths = git_persistence_paths(&repo, None);
+    let paths = git_persistence_paths(&repo, /*user_home*/ None);
     for protected in [
         "worktrees/other/commondir",
         "worktrees/other/config.worktree",
@@ -203,7 +203,7 @@ fn issue_650_other_worktrees_folders_are_protected() {
     }
     // The main worktree finds them the same way.
     std::fs::create_dir_all(base.join("main/src").as_path()).unwrap();
-    let paths = git_persistence_paths(&base.join("main/src"), None);
+    let paths = git_persistence_paths(&base.join("main/src"), /*user_home*/ None);
     assert!(
         paths.contains(&common.join("worktrees/other/commondir")),
         "{paths:?}"
