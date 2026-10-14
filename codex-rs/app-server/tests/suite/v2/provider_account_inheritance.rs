@@ -1,6 +1,7 @@
 //! PF-84-S03 follow-up: a worker a client (the TUI) starts with
 //! `thread/spawnAgent` inherits its parent's live named account, and a fork
-//! runs on its source thread's account (#555).
+//! runs on its source thread's account (#555), also when it is cut at an
+//! earlier turn (#588).
 
 use anyhow::Result;
 use app_test_support::TestAppServer;
@@ -9,6 +10,9 @@ use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ThreadForkParams;
 use codex_app_server_protocol::ThreadForkResponse;
+use codex_app_server_protocol::ThreadHistoryMode;
+use codex_app_server_protocol::ThreadResumeParams;
+use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadSpawnAgentParams;
 use codex_app_server_protocol::ThreadSpawnAgentResponse;
 use codex_app_server_protocol::ThreadStartParams;
@@ -343,6 +347,130 @@ async fn an_explicit_fork_account_beats_the_source_account() -> Result<()> {
         bearers(&response_mock),
         vec![
             Some(format!("Bearer {WORK_KEY}")),
+            Some(format!("Bearer {OTHER_KEY}")),
+        ]
+    );
+    Ok(())
+}
+
+/// #588 (Travis, 2026-10-13, option A): a fork cut at an earlier turn of a
+/// stored paginated thread runs on the source's current account, as a resume
+/// does, not on the account that turn ran on.
+#[tokio::test]
+async fn fork_of_an_earlier_turn_runs_on_the_source_current_account() -> Result<()> {
+    let server = responses::start_mock_server().await;
+    let response_mock = responses::mount_sse_sequence(
+        &server,
+        vec![
+            pong("resp-1"),
+            pong("resp-2"),
+            pong("resp-3"),
+            pong("resp-4"),
+        ],
+    )
+    .await;
+    let codex_home = fork_home(&server.uri())?;
+
+    // Turn 1 on `work`.
+    let mut app = start_app(&codex_home).await?;
+    let request = app
+        .send_thread_start_request(ThreadStartParams {
+            model: Some("mock-model".to_string()),
+            provider_account: Some("work".to_string()),
+            history_mode: Some(ThreadHistoryMode::Paginated),
+            ..Default::default()
+        })
+        .await?;
+    let response = timeout(
+        DEFAULT_TIMEOUT,
+        app.read_stream_until_response_message(RequestId::Integer(request)),
+    )
+    .await??;
+    let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(response)?;
+    let source = thread.id;
+    let first_turn = timeout(
+        DEFAULT_TIMEOUT,
+        app.start_turn_and_wait_for_completion(TurnStartParams {
+            thread_id: source.clone(),
+            input: vec![UserInput::Text {
+                text: "say pong".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        }),
+    )
+    .await??
+    .turn
+    .id;
+    app.shutdown_gracefully().await?;
+
+    // The conversation moves to `other`; turn 2 runs there.
+    let mut app = start_app(&codex_home).await?;
+    let request = app
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: source.clone(),
+            provider_account: Some("other".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    let response = timeout(
+        DEFAULT_TIMEOUT,
+        app.read_stream_until_response_message(RequestId::Integer(request)),
+    )
+    .await??;
+    let resumed = to_response::<ThreadResumeResponse>(response)?;
+    assert_eq!(
+        resumed.provider_account.as_deref(),
+        Some("mock_provider:other")
+    );
+    let second_turn = timeout(
+        DEFAULT_TIMEOUT,
+        app.start_turn_and_wait_for_completion(TurnStartParams {
+            thread_id: source.clone(),
+            input: vec![UserInput::Text {
+                text: "say pong".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        }),
+    )
+    .await??
+    .turn
+    .id;
+    app.shutdown_gracefully().await?;
+
+    // A new app server has not loaded the thread. A fork through turn 1 and a
+    // fork before turn 2 (both keep only turn 1, which ran on `work`) run on
+    // `other`, the account the conversation runs on now.
+    let mut app = start_app(&codex_home).await?;
+    for (last_turn_id, before_turn_id) in [(Some(first_turn), None), (None, Some(second_turn))] {
+        let request = app
+            .send_thread_fork_request(ThreadForkParams {
+                thread_id: source.clone(),
+                last_turn_id,
+                before_turn_id,
+                ..Default::default()
+            })
+            .await?;
+        let response = timeout(
+            DEFAULT_TIMEOUT,
+            app.read_stream_until_response_message(RequestId::Integer(request)),
+        )
+        .await??;
+        let forked = to_response::<ThreadForkResponse>(response)?;
+        assert_eq!(
+            forked.provider_account.as_deref(),
+            Some("mock_provider:other")
+        );
+        say_pong(&mut app, forked.thread.id).await?;
+    }
+
+    assert_eq!(
+        bearers(&response_mock),
+        vec![
+            Some(format!("Bearer {WORK_KEY}")),
+            Some(format!("Bearer {OTHER_KEY}")),
+            Some(format!("Bearer {OTHER_KEY}")),
             Some(format!("Bearer {OTHER_KEY}")),
         ]
     );

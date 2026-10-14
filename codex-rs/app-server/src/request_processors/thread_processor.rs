@@ -4736,50 +4736,52 @@ impl ThreadRequestProcessor {
         // PF-84 (#555): a fork runs on the account its source thread runs on
         // (the loaded thread's, else the newest one it recorded), as a spawned
         // worker does. An explicit account of the same provider beats it; an
-        // account of another provider never applies (#425).
+        // account of another provider never applies (#425). A fork cut at an
+        // earlier turn of a paginated thread also takes the source's current
+        // account, not the one that turn ran on (#588, Travis 2026-10-13).
         typesafe_overrides.provider_account = provider_account;
-        typesafe_overrides.inherited_provider_account =
-            match self.thread_manager.get_thread(source_thread_id).await {
-                Ok(source) => source.config_snapshot().await.provider_account,
-                Err(_) if self.config.features.enabled(Feature::NamedAccounts) => {
-                    recorded_provider_account(
-                        source_history_items.as_ref(),
-                        /*resumed_provider_id*/ None,
-                    )
-                }
-                Err(_) => None,
-            };
-        let latest_context = if paginated_source
+        let loaded_source = self.thread_manager.get_thread(source_thread_id).await.ok();
+        let named_accounts = self.config.features.enabled(Feature::NamedAccounts);
+        let reviewer_from_history = paginated_source
             && typesafe_overrides.approvals_reviewer.is_none()
             && !request_overrides
                 .as_ref()
-                .is_some_and(|overrides| overrides.contains_key("approvals_reviewer"))
+                .is_some_and(|overrides| overrides.contains_key("approvals_reviewer"));
+        let cut_at_earlier_turn =
+            paginated_source && (last_turn_id.is_some() || before_turn_id.is_some());
+        let latest_context = if loaded_source.is_none()
+            && cut_at_earlier_turn
+            && (reviewer_from_history || named_accounts)
         {
-            if let Ok(parent) = self.thread_manager.get_thread(source_thread_id).await {
-                typesafe_overrides.approvals_reviewer =
-                    Some(parent.config_snapshot().await.approvals_reviewer);
-                None
-            } else if last_turn_id.is_some() || before_turn_id.is_some() {
-                Some(
-                    self.thread_store
-                        .load_latest_model_context(StoreLoadThreadHistoryParams {
-                            thread_id: source_thread_id,
-                            include_archived: true,
-                        })
-                        .await
-                        .map_err(thread_store_resume_read_error)?
-                        .items,
-                )
-            } else {
-                None
-            }
+            Some(
+                self.thread_store
+                    .load_latest_model_context(StoreLoadThreadHistoryParams {
+                        thread_id: source_thread_id,
+                        include_archived: true,
+                    })
+                    .await
+                    .map_err(thread_store_resume_read_error)?
+                    .items,
+            )
         } else {
             None
         };
+        let current_source_history = latest_context
+            .as_deref()
+            .unwrap_or_else(|| source_history_items.as_ref());
+        typesafe_overrides.inherited_provider_account = match loaded_source.as_ref() {
+            Some(source) => source.config_snapshot().await.provider_account,
+            None if named_accounts => {
+                recorded_provider_account(current_source_history, /*resumed_provider_id*/ None)
+            }
+            None => None,
+        };
+        if reviewer_from_history && let Some(source) = loaded_source.as_ref() {
+            typesafe_overrides.approvals_reviewer =
+                Some(source.config_snapshot().await.approvals_reviewer);
+        }
         merge_persisted_approvals_reviewer(
-            latest_context
-                .as_deref()
-                .unwrap_or_else(|| source_history_items.as_ref()),
+            current_source_history,
             request_overrides.as_ref(),
             &mut typesafe_overrides,
         );
