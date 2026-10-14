@@ -274,17 +274,29 @@ async fn serve_one(
             _ = changes.changed() => {}
             result = &mut driver, if driving => {
                 driving = false;
-                if let Err(error) = result { return Outcome::Failed(error.to_string()); }
+                if let Err(error) = result { return failed_or_expired(&scope, &error); }
                 // A clean driver EOF can leave valid buffered Incoming frames.
             }
             result = &mut server => {
                 return match result {
                     Ok(()) if scope.check().is_ok() => Outcome::Complete,
                     Ok(()) => Outcome::Expired(scope.phase.borrow().stage),
-                    Err(error) => Outcome::Failed(error.to_string()),
+                    Err(error) => failed_or_expired(&scope, &error),
                 };
             }
         }
+    }
+}
+
+/// An error that ends a connection after its phase expired is the expiry:
+/// the body stream checks the deadline as each chunk arrives and can fail the
+/// connection before the deadline's own timer wakes (coarse Windows timers
+/// made that common). Before the deadline, it is a failure.
+fn failed_or_expired(scope: &Scope, error: &dyn std::fmt::Display) -> Outcome {
+    if scope.check().is_ok() {
+        Outcome::Failed(error.to_string())
+    } else {
+        Outcome::Expired(scope.phase.borrow().stage)
     }
 }
 
