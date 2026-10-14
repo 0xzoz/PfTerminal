@@ -5443,6 +5443,7 @@ impl App {
                             /*notify*/ false,
                         );
                         if hold {
+                            self.note_kill_switch_held_native_task(thread_id);
                             self.chat_widget.add_info_message(
                                 self.kill_switch_held_native_task_message(&label),
                                 /*hint*/ None,
@@ -5507,6 +5508,9 @@ impl App {
                                             /*notify*/ false,
                                         );
                                         if hold {
+                                            self.note_kill_switch_held_native_task(
+                                                materialized_thread_id,
+                                            );
                                             self.chat_widget.add_info_message(
                                                 self.kill_switch_held_native_task_message(&label),
                                                 /*hint*/ None,

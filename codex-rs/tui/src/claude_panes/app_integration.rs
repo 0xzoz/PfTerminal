@@ -1414,10 +1414,11 @@ impl App {
     }
 
     /// #507: the kill switch was turned off. Nothing starts: each task held
-    /// for a Claude pane goes with that pane's next turn. The person is told
+    /// for a Claude pane, or (#660 follow-up) waiting in a managed Codex
+    /// pane's mailbox, goes with that pane's next turn. The person is told
     /// which panes have one.
     pub(crate) fn on_kill_switch_turned_off(&mut self) {
-        let titles: Vec<String> = self
+        let claude_titles = self
             .kill_switch_held_claude_tasks
             .iter()
             .filter_map(|(pane_id, _)| {
@@ -1425,15 +1426,27 @@ impl App {
                     .panes()
                     .iter()
                     .find(|pane| pane.id == *pane_id)
-                    .map(|pane| format!("`{}`", pane.title))
+                    .map(|pane| pane.title.clone())
+            });
+        let codex_titles = self
+            .kill_switch_held_native_tasks
+            .iter()
+            .filter(|thread_id| {
+                self.agent_navigation
+                    .get(thread_id)
+                    .is_some_and(|entry| !entry.is_closed)
             })
+            .map(|thread_id| self.thread_label(*thread_id));
+        let titles: Vec<String> = claude_titles
+            .chain(codex_titles)
+            .map(|title| format!("`{title}`"))
             .collect();
         if titles.is_empty() {
             return;
         }
         self.chat_widget.add_info_message(
             format!(
-                "Nothing restarted. A task waits for each of these Claude panes and goes with that pane's next turn, when someone types in it or it gets new work: {}.",
+                "Nothing restarted. A task waits for each of these panes and goes with that pane's next turn, when someone types in it or it gets new work: {}.",
                 titles.join(", ")
             ),
             /*hint*/ None,

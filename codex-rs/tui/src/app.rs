@@ -854,6 +854,10 @@ pub(crate) struct App {
     /// kill switch was on (one per pane); it goes with that pane's next turn
     /// after the switch is off (turning it off sends nothing).
     pub(crate) kill_switch_held_claude_tasks: Vec<(String, String)>,
+    /// #660 follow-up: the managed Codex panes whose mailbox holds a task
+    /// another agent sent while the kill switch was on, until that pane's
+    /// next turn starts (it goes with that turn).
+    pub(crate) kill_switch_held_native_tasks: Vec<codex_protocol::ThreadId>,
     /// #507: whether this app last saw the kill switch on, so a change
     /// reported twice (here and by the home's watch) is handled once.
     pub(crate) kill_switch_known_on: bool,
@@ -1787,6 +1791,7 @@ See the Corbanu Terminal keymap documentation for supported actions and examples
             spawn_auto_loop_state_by_node: HashMap::new(),
             spawn_operator_input_seen: false,
             kill_switch_held_claude_tasks: Vec::new(),
+            kill_switch_held_native_tasks: Vec::new(),
             // Set from the home's watch at start (`watch_kill_switch_elsewhere`).
             kill_switch_known_on: false,
             spawn_quarantine_notified_by_node: HashSet::new(),

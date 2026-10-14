@@ -200,3 +200,29 @@ async fn issue_660_failures_of_tasks_sent_while_on_start_no_sender_turn() -> Res
     }
     Ok(())
 }
+
+/// #660 follow-up: a held task that reaches a pane while it runs a turn goes
+/// with that turn, so the pane is not listed as having a waiting task; an
+/// idle pane is, until its next turn starts or the session is reset.
+#[tokio::test]
+async fn issue_660_running_pane_takes_its_held_task_and_is_not_listed() -> Result<()> {
+    let mut app = make_test_app().await;
+    let pane = ThreadId::from_string("00000000-0000-0000-0000-000000006607")?;
+    app.upsert_agent_picker_thread(
+        pane,
+        Some("Snaga".to_string()),
+        Some("orc".to_string()),
+        /*is_closed*/ false,
+    );
+    app.agent_navigation.set_running(pane, /*is_running*/ true);
+    app.note_kill_switch_held_native_task(pane);
+    assert_eq!(app.kill_switch_held_native_tasks, Vec::<ThreadId>::new());
+
+    app.agent_navigation.set_running(pane, /*is_running*/ false);
+    app.note_kill_switch_held_native_task(pane);
+    app.note_kill_switch_held_native_task(pane);
+    assert_eq!(app.kill_switch_held_native_tasks, vec![pane]);
+    app.clear_kill_switch_held_native_task(pane);
+    assert_eq!(app.kill_switch_held_native_tasks, Vec::<ThreadId>::new());
+    Ok(())
+}

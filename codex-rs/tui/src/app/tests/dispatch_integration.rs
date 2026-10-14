@@ -1290,6 +1290,102 @@ fn issue_660_agent_task_sent_while_on_and_handled_after_off_waits() -> Result<()
     })
 }
 
+/// #660 follow-up: the transcript text added since `from` cells.
+fn transcript_since(app: &App, from: usize) -> String {
+    app.transcript_cells
+        .iter()
+        .skip(from)
+        .map(|cell| lines_to_single_string(&cell.display_lines(/*width*/ 400)))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// #660 follow-up (Travis, 2026-10-13): when the switch is turned off, a
+/// managed Codex pane whose task waits is named in the same "Nothing
+/// restarted" notice Claude panes get. Once the task went with the pane's
+/// next turn, the pane is no longer named.
+#[test]
+fn issue_660_switch_off_names_a_codex_pane_whose_task_waits() -> Result<()> {
+    run_dispatch_integration(|| async {
+        use crate::legacy_core::security_revocation::HumanRevocation;
+        let mock = MockServer::start().await;
+        let responses = mount_sse_repeating(&mock, sse_completed("pf660n-response")).await;
+        let mut fixture = RealDispatchFixture::start(&mock, /*max_threads*/ 3).await?;
+        let target = fixture.spawn_target("Snaga").await?;
+        let label = fixture.app.thread_label(target);
+
+        super::issue_507_switch(&fixture.app, HumanRevocation::KillSwitchOn);
+        fixture
+            .app
+            .on_kill_switch_changed(/*on*/ true, /*elsewhere*/ false);
+        fixture
+            .app
+            .app_event_tx
+            .send(AppEvent::SubmitSpawnAgentTask {
+                thread_id: target,
+                task: "pf660 waits".to_string(),
+                sent_while_kill_switch_on: fixture.app.kill_switch_on_now(),
+            });
+        fixture
+            .route_until(std::time::Duration::from_secs(20), |app| {
+                transcript_since(app, 0).contains("waits: the security kill switch is on")
+            })
+            .await?;
+        assert!(responses.requests().is_empty(), "no turn started");
+
+        let from = fixture.app.transcript_cells.len();
+        super::issue_507_switch(&fixture.app, HumanRevocation::KillSwitchOff);
+        fixture
+            .app
+            .on_kill_switch_changed(/*on*/ false, /*elsewhere*/ false);
+        route_for(&mut fixture, std::time::Duration::from_millis(200)).await?;
+        let notice = transcript_since(&fixture.app, from);
+        assert!(
+            notice.contains("Nothing restarted") && notice.contains(&format!("`{label}`")),
+            "{notice}"
+        );
+        assert!(
+            responses.requests().is_empty(),
+            "switch-off started nothing"
+        );
+
+        // The person's next task starts the pane's turn; the waiting task
+        // goes with it, so the next switch-off names nothing.
+        fixture
+            .app
+            .app_event_tx
+            .send(AppEvent::SubmitSpawnAgentTask {
+                thread_id: target,
+                task: "pf660 next".to_string(),
+                sent_while_kill_switch_on: false,
+            });
+        fixture
+            .route_until(std::time::Duration::from_secs(20), |app| {
+                !responses.requests().is_empty()
+                    && app
+                        .agent_navigation
+                        .get(&target)
+                        .is_some_and(|entry| !entry.is_running)
+            })
+            .await?;
+        super::issue_507_switch(&fixture.app, HumanRevocation::KillSwitchOn);
+        fixture
+            .app
+            .on_kill_switch_changed(/*on*/ true, /*elsewhere*/ false);
+        route_for(&mut fixture, std::time::Duration::from_millis(200)).await?;
+        let from = fixture.app.transcript_cells.len();
+        super::issue_507_switch(&fixture.app, HumanRevocation::KillSwitchOff);
+        fixture
+            .app
+            .on_kill_switch_changed(/*on*/ false, /*elsewhere*/ false);
+        route_for(&mut fixture, std::time::Duration::from_millis(200)).await?;
+        let notice = transcript_since(&fixture.app, from);
+        assert!(!notice.contains("Nothing restarted"), "{notice}");
+        fixture.server.shutdown().await?;
+        Ok(())
+    })
+}
+
 /// #660: a task another agent sent to a pane the person opened in `/panes`
 /// while the switch was on, handled only after it was turned off, is
 /// reported not sent instead of being submitted as a user turn.
