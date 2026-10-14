@@ -244,6 +244,7 @@ fn issue_758_contained_pane_reaches_no_keychain_under_aggressive() {
         );
         assert_eq!(shown.contains(SECRET), found, "{level:?}: {shown}");
     }
+}
 
 /// #743: the pane's sandbox keeps the session's `TMPDIR`, where the Linux
 /// sandbox keeps its shared placeholder registry; Claude Code's own
