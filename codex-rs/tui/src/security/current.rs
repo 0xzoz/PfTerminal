@@ -82,7 +82,10 @@ pub(crate) fn current_values(
     let escapes = restricted && !file_system.has_denied_read_restrictions() && !moderate;
     // #749: Moderate's rules deny the vault store and sign-in file to every
     // agent command (PF-23, #239), with the untrusted-content labels.
-    let moderate_denies_store = moderate && config.features.enabled(Feature::SourceEnvelopes);
+    // An external sandbox takes none of Core's rules (it keeps its own).
+    let moderate_denies_store = moderate
+        && config.features.enabled(Feature::SourceEnvelopes)
+        && !matches!(file_system.kind, FileSystemSandboxKind::ExternalSandbox);
     let secretless = config.features.enabled(Feature::SecretlessAgentLaunch)
         || codex_protocol::secretless_launch::is_armed();
 

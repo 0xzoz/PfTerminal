@@ -47,7 +47,7 @@ impl Facts {
 pub(crate) const SANDBOX: &str = "agent commands always stay in your own sandbox, even when you approve a request to run outside it, and \"retry without sandbox?\" is not offered; commands you allowed with \"don't ask again\" skip the prompt but stay in it. Your own sandbox, approval, network and web search settings are kept (if your settings turn the sandbox off, commands outside the protected-file rules run without one)";
 
 /// Why Moderate cannot be saved, if it cannot.
-pub(crate) fn blocker(facts: &Facts) -> Option<&'static str> {
+pub(crate) fn blocker(facts: Facts) -> Option<&'static str> {
     (!facts.untrusted_content).then_some(
         "Moderate needs the untrusted-content labels (the source_envelopes feature): without them Corbanu refuses every model request under Moderate. Turn source_envelopes on and restart Corbanu Terminal first.",
     )
@@ -55,10 +55,10 @@ pub(crate) fn blocker(facts: &Facts) -> Option<&'static str> {
 
 /// What Core's Moderate rules do in a running session, as the confirmation
 /// and the saved screen name them.
-pub(crate) const EFFECTS: &str = "agent commands stay in the sandbox, cannot read credential files in your home folder or Corbanu's sign-in, vault, config, history and state, and cannot write files that run code later unless you approve that one command; after untrusted content, protected actions need your fresh approval";
+pub(crate) const EFFECTS: &str = "agent commands stay in the sandbox and cannot read credential files in your home folder or Corbanu's sign-in, vault, config, history and state, or write files that run code later, unless you approve that one command; after untrusted content, protected actions need your fresh approval";
 
 /// The rows of the Moderate review, in order: control and Moderate's value.
-pub(crate) fn rows(facts: &Facts) -> Vec<(&'static str, String)> {
+pub(crate) fn rows(facts: Facts) -> Vec<(&'static str, String)> {
     vec![
         ("Sandbox", SANDBOX.to_string()),
         (
@@ -149,7 +149,7 @@ pub(crate) const REMOVED_FROM_AGGRESSIVE: [(&str, &str); 5] = [
 ];
 
 /// The inspector's nested-agents row under Moderate (D5, #749).
-pub(crate) const NESTED: &str = "not refused: an agent command can start another agent (`corbanu exec`, `review`), but inside the sandbox the new agent cannot read Corbanu's config, sign-in or security state, so it stops at start (with secretless_agent_launch on, also when you approve the command)";
+pub(crate) const NESTED: &str = "not refused: an agent command can start another agent (`corbanu exec`, `review`). With this Corbanu home it cannot read Corbanu's config, sign-in or security state inside the sandbox, so it stops at start (with secretless_agent_launch on, also when you approve the command); pointed at another Corbanu home it runs at that home's level, because Moderate is not carried over";
 
 /// What stays as configured under Moderate.
 pub(crate) const UNCHANGED: &str = "Unchanged: model and provider, your approval, sandbox, network and web search settings, MCP servers, apps and hooks (they run outside the sandbox), and wallet scopes.";

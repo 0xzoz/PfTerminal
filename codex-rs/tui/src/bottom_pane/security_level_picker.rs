@@ -235,6 +235,18 @@ impl SecurityLevelPicker {
     pub(crate) fn set_core_levels(&mut self, core: CoreLevels) {
         self.core = core;
         self.basis = LevelBasis::read(&self.codex_home, core.configured, core.thread);
+        // #750: Moderate that Core keeps is the level selected first.
+        if let Some(index) = ROWS
+            .iter()
+            .position(|row| row.chosen() == self.next_level())
+        {
+            self.selected = index;
+        }
+    }
+
+    /// #750: the level the next start enforces ([`level::next_start`]).
+    fn next_level(&self) -> ChosenLevel {
+        level::next_start(&self.stored, self.basis.next_start)
     }
 
     fn read_basis(&self) -> LevelBasis {
@@ -298,13 +310,15 @@ impl SecurityLevelPicker {
                     self.selected = (self.selected + 1) % ROWS.len();
                     self.screen = Screen::List { note: None };
                 } else if accept {
+                    // Choosing reads Core's state first (#750: "already
+                    // saved" must not rest on an old basis).
+                    self.basis = self.read_basis();
                     self.screen = self.choose(ROWS[self.selected]);
                     self.nested_choice = self.nested;
                     self.scroll = 0;
                     self.preflight_note = None;
                     // Only a move to Aggressive is a transition; a saved
                     // Aggressive reopens its review for the nested setting.
-                    self.basis = self.read_basis();
                     self.preflight = match (&self.screen, &self.preflight_input) {
                         (Screen::Review(ChosenLevel::Aggressive), Some(input))
                             if self.stored != StoredLevel::Chosen(ChosenLevel::Aggressive)
@@ -359,7 +373,7 @@ impl SecurityLevelPicker {
                         return;
                     }
                     if target == ChosenLevel::Moderate
-                        && let Some(blocker) = crate::security::moderate::blocker(&self.moderate)
+                        && let Some(blocker) = crate::security::moderate::blocker(self.moderate)
                     {
                         self.preflight_note = Some(format!("Not saved: {blocker}"));
                         return;
@@ -601,6 +615,13 @@ impl SecurityLevelPicker {
         Some(ROWS[self.selected].chosen())
     }
 
+    /// #750: Core keeps Moderate for the next start under a Permissive (or
+    /// absent) level file. A stricter Core level from config or a record
+    /// that another session saved is handled as before.
+    fn permissive_core_behind(&self) -> bool {
+        self.next_level() == ChosenLevel::Moderate
+    }
+
     /// #750: Core's record still needs a saved Moderate confirmed (the
     /// level file was saved without it, or a step did not finish).
     fn moderate_core_behind(&self, target: ChosenLevel) -> bool {
@@ -617,7 +638,7 @@ impl SecurityLevelPicker {
 
     fn restart_pending(&self) -> bool {
         let pending =
-            self.stored.enforced() != self.active || self.basis.in_force != self.basis.next_start;
+            self.next_level() != self.active || self.basis.in_force != self.basis.next_start;
         match &self.screen {
             Screen::Saved(Ok(_)) | Screen::List { .. } => pending,
             _ => false,
@@ -732,16 +753,24 @@ impl SecurityLevelPicker {
         match row.chosen() {
             // A saved Aggressive opens its review again so the nested-agent
             // setting can be changed.
+            // #750: unless Core keeps a stricter level for the next start
+            // (Moderate from config, or a save that did not finish): then
+            // the review lowers it.
             ChosenLevel::Permissive
-                if self.stored == StoredLevel::Chosen(ChosenLevel::Permissive) =>
+                if self.stored == StoredLevel::Chosen(ChosenLevel::Permissive)
+                    && !self.permissive_core_behind() =>
             {
                 Screen::List {
                     note: Some("Permissive is already saved. Nothing changed.".to_string()),
                 }
             }
-            ChosenLevel::Permissive if self.stored == StoredLevel::Absent => Screen::List {
-                note: Some("Permissive is already in effect. Nothing changed.".to_string()),
-            },
+            ChosenLevel::Permissive
+                if self.stored == StoredLevel::Absent && !self.permissive_core_behind() =>
+            {
+                Screen::List {
+                    note: Some("Permissive is already in effect. Nothing changed.".to_string()),
+                }
+            }
             ChosenLevel::Moderate
                 if self.stored == StoredLevel::Chosen(ChosenLevel::Moderate)
                     && !self.moderate_core_behind(ChosenLevel::Moderate) =>
@@ -755,7 +784,7 @@ impl SecurityLevelPicker {
     }
 
     fn status_lines(&self) -> Vec<String> {
-        let saved = self.stored.enforced();
+        let saved = self.next_level();
         let mut lines = vec![format!("Active in this session: {}", self.active.name())];
         match &self.stored {
             StoredLevel::Invalid(reason) => lines.push(format!(
@@ -1020,7 +1049,7 @@ impl SecurityLevelPicker {
                 } else if self.core_aggressive_now() {
                     "Core's Aggressive protections stay on in this session until you restart; saving cancels the Aggressive level saved for the next start."
                 } else {
-                    match self.stored.enforced() {
+                    match self.next_level() {
                         ChosenLevel::Moderate => {
                             "This session is already Permissive; saving cancels the Moderate level saved for the next start."
                         }
@@ -1135,7 +1164,7 @@ impl SecurityLevelPicker {
                 lines.extend(wrap(&format!("{}.", failure.message)));
                 lines.extend(wrap(&format!(
                     "Saved for the next start: {}. Active in this session: {}.",
-                    self.stored.enforced().name(),
+                    self.next_level().name(),
                     self.active.name()
                 )));
             }
@@ -1233,7 +1262,7 @@ impl SecurityLevelPicker {
                         .as_ref()
                         .is_some_and(|preflight| !preflight.is_clean()))
                     || (target == ChosenLevel::Moderate
-                        && crate::security::moderate::blocker(&self.moderate).is_some())
+                        && crate::security::moderate::blocker(self.moderate).is_some())
                 {
                     format!("{scroll}{migrate}esc back, nothing changes")
                 } else {
@@ -1342,13 +1371,13 @@ impl SecurityLevelPicker {
         };
         let (indent, hanging) = if width < 20 { ("", "") } else { ("  ", "    ") };
         let mut lines: Vec<Line<'static>> = vec!["Switch to Moderate?".bold().into()];
-        if let Some(blocker) = crate::security::moderate::blocker(&self.moderate) {
+        if let Some(blocker) = crate::security::moderate::blocker(self.moderate) {
             lines.extend(wrap(blocker).into_iter().map(Stylize::red));
         }
         lines.extend(wrap(
             "Moderate keeps your own approval, sandbox and network settings and adds these, in Corbanu Terminal sessions and their child agents:",
         ));
-        for (control, value) in crate::security::moderate::rows(&self.moderate) {
+        for (control, value) in crate::security::moderate::rows(self.moderate) {
             lines.extend(word_wrap_lines(
                 [Line::from(vec![format!("• {control}").bold()])],
                 RtOptions::new(width).subsequent_indent(hanging.into()),

@@ -324,3 +324,42 @@ fn saved_level(picker: &SecurityLevelPicker) -> Option<ChosenLevel> {
         _ => None,
     }
 }
+
+/// Review 1 (#750): Moderate that Core keeps (from config, or Core's record
+/// over a Permissive level file after a save that did not finish) is the
+/// next start's level: no "Saved: Permissive", no pointless restart, and
+/// choosing Permissive opens the review that lowers Core.
+#[test]
+fn issue_750_moderate_kept_by_core_is_the_next_start() {
+    let home = tempfile::tempdir().unwrap();
+    for stored in [None, Some(ChosenLevel::Permissive)] {
+        if let Some(level) = stored {
+            level::save(home.path(), level, NestedAgents::Refuse).unwrap();
+        }
+        let mut picker = open_picker(home.path(), ChosenLevel::Moderate, ALL_ON);
+        picker.basis.live = true;
+        picker.basis.in_force = SecurityLevel::Moderate;
+        picker.basis.next_start = SecurityLevel::Moderate;
+        let list = text(&picker);
+        assert!(!list.contains("Saved:"), "{stored:?}: {list}");
+        assert!(
+            !picker.footer().contains("r restart now"),
+            "{stored:?}: {}",
+            picker.footer()
+        );
+        while ROWS[picker.selected] != Row::Permissive {
+            picker.handle_key_event(key(KeyCode::Up));
+        }
+        // Choosing reads Core's state again; keep the simulated live tree.
+        picker.screen = picker.choose(Row::Permissive);
+        assert_eq!(
+            picker.screen,
+            Screen::Review(ChosenLevel::Permissive),
+            "{stored:?}"
+        );
+        assert!(
+            text(&picker).contains("Protections removed at the next start:"),
+            "{stored:?}"
+        );
+    }
+}

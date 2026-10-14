@@ -1,6 +1,7 @@
 use pretty_assertions::assert_eq;
 
 use super::*;
+use crate::legacy_core::security_level_change::SecurityLevel;
 
 fn write_state(home: &Path, contents: &str) {
     std::fs::write(state_path(home), contents).unwrap();
@@ -104,16 +105,26 @@ fn rules_forbid_every_vault_entry_point() {
 fn status_line_reports_active_and_pending_levels() {
     assert_eq!(
         [
-            status_line(ChosenLevel::Permissive, &StoredLevel::Absent),
             status_line(
-                ChosenLevel::Aggressive,
-                &StoredLevel::Chosen(ChosenLevel::Aggressive)
+                ChosenLevel::Permissive,
+                &StoredLevel::Absent,
+                SecurityLevel::Permissive
             ),
             status_line(
                 ChosenLevel::Aggressive,
-                &StoredLevel::Chosen(ChosenLevel::Permissive)
+                &StoredLevel::Chosen(ChosenLevel::Aggressive),
+                SecurityLevel::Aggressive
             ),
-            status_line(ChosenLevel::Aggressive, &StoredLevel::Invalid("x".into())),
+            status_line(
+                ChosenLevel::Aggressive,
+                &StoredLevel::Chosen(ChosenLevel::Permissive),
+                SecurityLevel::Permissive
+            ),
+            status_line(
+                ChosenLevel::Aggressive,
+                &StoredLevel::Invalid("x".into()),
+                SecurityLevel::Permissive
+            ),
         ],
         [
             "Permissive active (/security)".to_string(),
@@ -262,4 +273,34 @@ fn issue_441_rules_follow_the_nested_agents_setting() {
     assert!(codex_security_level::level::is_rules_contents(&pass));
     assert!(codex_security_level::level::is_rules_contents(&refuse));
     assert!(!codex_security_level::level::is_rules_contents("# mine\n"));
+}
+
+/// #750: Moderate that Core keeps (config, or Core's record over a
+/// Permissive file) is the next start's level, not "Permissive saved".
+#[test]
+fn issue_750_status_line_counts_the_moderate_core_keeps() {
+    assert_eq!(
+        [
+            status_line(
+                ChosenLevel::Moderate,
+                &StoredLevel::Absent,
+                SecurityLevel::Moderate
+            ),
+            status_line(
+                ChosenLevel::Moderate,
+                &StoredLevel::Chosen(ChosenLevel::Permissive),
+                SecurityLevel::Permissive
+            ),
+            status_line(
+                ChosenLevel::Permissive,
+                &StoredLevel::Chosen(ChosenLevel::Moderate),
+                SecurityLevel::Moderate
+            ),
+        ],
+        [
+            "Moderate active (/security)".to_string(),
+            "Moderate active; Permissive saved for next start (/security)".to_string(),
+            "Permissive active; Moderate saved for next start (/security)".to_string(),
+        ]
+    );
 }

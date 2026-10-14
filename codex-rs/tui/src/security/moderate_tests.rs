@@ -13,7 +13,7 @@ fn issue_750_rows_claim_only_what_is_enforced() {
         output_gate: true,
     };
     for facts in [on, Facts::default()] {
-        let rows = rows(&facts);
+        let rows = rows(facts);
         let labels = rows.iter().map(|(label, _)| *label).collect::<Vec<_>>();
         assert_eq!(
             labels,
@@ -39,6 +39,6 @@ fn issue_750_rows_claim_only_what_is_enforced() {
             !facts.secretless_launch,
             "{secrets}"
         );
-        assert_eq!(blocker(&facts).is_some(), !facts.untrusted_content);
+        assert_eq!(blocker(facts).is_some(), !facts.untrusted_content);
     }
 }

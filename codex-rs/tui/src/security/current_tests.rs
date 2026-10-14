@@ -481,4 +481,18 @@ async fn issue_749_moderate_rows_keep_commands_in_the_sandbox() {
         "{vault}"
     );
     assert!(permissive_vault.contains("readable to agent commands"));
+
+    // An external sandbox takes none of Core's rules: no Moderate claim.
+    let mut external = config;
+    external
+        .permissions
+        .set_permission_profile(codex_protocol::models::PermissionProfile::External {
+            network: codex_protocol::permissions::NetworkSandboxPolicy::Restricted,
+        })
+        .unwrap();
+    let vault = &current_values(&external, SecurityLevel::Moderate)[3];
+    assert!(
+        vault.starts_with("the vault store and sign-in file are readable to agent commands"),
+        "{vault}"
+    );
 }

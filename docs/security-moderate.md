@@ -54,8 +54,9 @@ changed.
 
 Choosing Permissive or Aggressive from Moderate shows what changes first.
 Back to Permissive takes effect when you restart; until then Moderate stays
-on. Aggressive applies Core's stricter rules at once and the rest at the
-restart. The kill switch (`/security` → `g`) works under every level.
+on. Aggressive applies Core's stricter rules at once when its preflight
+passes (the `protected_mode_preflight` feature), and the rest at the restart.
+The kill switch (`/security` → `g`) works under every level.
 
 ## Limits
 
@@ -65,9 +66,11 @@ restart. The kill switch (`/security` → `g`) works under every level.
 - MCP servers, apps, hooks and `!` shell commands run outside the sandbox, as
   under every level.
 - An agent command can start `corbanu exec` or `review`, and Moderate doesn't
-  refuse it, but inside the sandbox the new agent can't read Corbanu's config,
-  sign-in or security state, so it stops at start (with
-  `secretless_agent_launch` on, also when you approve the command).
+  refuse it. With this Corbanu home, the new agent can't read Corbanu's
+  config, sign-in or security state inside the sandbox, so it stops at start
+  (with `secretless_agent_launch` on, also when you approve the command).
+  Pointed at another Corbanu home, it runs at that home's level: Moderate
+  isn't carried over to it.
 - A remote app server can't enforce a level chosen here; Corbanu refuses to
   start against one until you choose Permissive.
 
