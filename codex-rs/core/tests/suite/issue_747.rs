@@ -20,6 +20,7 @@ use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::user_input::UserInput;
 use codex_security_policy::SecurityLevel;
+use core_test_support::responses::ev_apply_patch_custom_tool_call;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call;
@@ -39,7 +40,7 @@ use tempfile::TempDir;
 /// Moderate.
 const STAYS: &str = "still runs inside the sandbox";
 /// In the model's permissions instructions under Moderate.
-const INSTRUCTED: &str = "commands always run inside the sandbox";
+const INSTRUCTED: &str = "a command never leaves the sandbox it runs in";
 
 /// How the command asks to leave the sandbox, if it does.
 #[derive(Clone, Copy, Debug)]
@@ -52,6 +53,12 @@ enum Route {
     Retry,
     /// An exec-policy allow rule saved earlier ("don't ask again").
     Rule,
+    /// `exec_command` (unified exec) with `require_escalated`, approved.
+    EscalatedExec,
+    /// `apply_patch` adding a file outside the writable folder, approved: it
+    /// is applied inside the sandbox with that one extra write, under every
+    /// level (not a run outside the sandbox).
+    Patch,
 }
 
 struct Run {
@@ -73,11 +80,40 @@ async fn run(level: SecurityLevel, route: Route) -> anyhow::Result<Run> {
     // No redirection: an exec-policy rule applies only to commands it can
     // parse.
     let command = format!("touch '{}'", target.display());
-    let mut arguments = json!({ "command": command });
-    if matches!(route, Route::Escalated) {
-        arguments["sandbox_permissions"] = json!("require_escalated");
-        arguments["justification"] = json!("write the notes");
-    }
+    let call = match route {
+        Route::Escalated => ev_function_call(
+            "call-0",
+            "shell_command",
+            &json!({
+                "command": command,
+                "sandbox_permissions": "require_escalated",
+                "justification": "write the notes",
+            })
+            .to_string(),
+        ),
+        Route::EscalatedExec => ev_function_call(
+            "call-0",
+            "exec_command",
+            &json!({
+                "cmd": command,
+                "sandbox_permissions": "require_escalated",
+                "justification": "write the notes",
+            })
+            .to_string(),
+        ),
+        Route::Patch => ev_apply_patch_custom_tool_call(
+            "call-0",
+            &format!(
+                "*** Begin Patch\n*** Add File: {}\n+moderate-747\n*** End Patch",
+                target.display()
+            ),
+        ),
+        Route::Retry | Route::Rule => ev_function_call(
+            "call-0",
+            "shell_command",
+            &json!({ "command": command }).to_string(),
+        ),
+    };
     let home = Arc::new(TempDir::new()?);
     if matches!(route, Route::Rule) {
         std::fs::create_dir_all(home.path().join("rules"))?;
@@ -92,7 +128,7 @@ async fn run(level: SecurityLevel, route: Route) -> anyhow::Result<Run> {
         vec![
             sse(vec![
                 ev_response_created("call-0"),
-                ev_function_call("call-0", "shell_command", &arguments.to_string()),
+                call,
                 ev_completed("call-0"),
             ]),
             sse(vec![
@@ -104,8 +140,10 @@ async fn run(level: SecurityLevel, route: Route) -> anyhow::Result<Run> {
     )
     .await;
     let approval = match route {
-        Route::Escalated | Route::Rule => AskForApproval::OnRequest,
         Route::Retry => AskForApproval::UnlessTrusted,
+        Route::Escalated | Route::Rule | Route::EscalatedExec | Route::Patch => {
+            AskForApproval::OnRequest
+        }
     };
     let test = test_codex()
         .with_home(home)
@@ -130,6 +168,13 @@ async fn run(level: SecurityLevel, route: Route) -> anyhow::Result<Run> {
                 .features
                 .enable(Feature::SourceEnvelopes)
                 .expect("enable source envelopes");
+            if matches!(route, Route::EscalatedExec) {
+                config.use_experimental_unified_exec_tool = true;
+                config
+                    .features
+                    .enable(Feature::UnifiedExec)
+                    .expect("enable unified exec");
+            }
         })
         // Host-sandbox security test: local executor on purpose, also in the
         // remote lane (#708).
@@ -152,30 +197,41 @@ async fn run(level: SecurityLevel, route: Route) -> anyhow::Result<Run> {
     let mut reasons = Vec::new();
     let mut errors = Vec::new();
     loop {
-        let approval = match wait_for_event(&test.codex, |event| {
+        let (reason, op) = match wait_for_event(&test.codex, |event| {
             matches!(
                 event,
-                EventMsg::ExecApprovalRequest(_) | EventMsg::TurnComplete(_) | EventMsg::Error(_)
+                EventMsg::ExecApprovalRequest(_)
+                    | EventMsg::ApplyPatchApprovalRequest(_)
+                    | EventMsg::TurnComplete(_)
+                    | EventMsg::Error(_)
             )
         })
         .await
         {
-            EventMsg::ExecApprovalRequest(approval) => approval,
+            EventMsg::ExecApprovalRequest(approval) => (
+                approval.reason.clone(),
+                Op::ExecApproval {
+                    id: approval.effective_approval_id(),
+                    turn_id: None,
+                    decision: ReviewDecision::Approved,
+                },
+            ),
+            EventMsg::ApplyPatchApprovalRequest(approval) => (
+                approval.reason,
+                Op::PatchApproval {
+                    id: approval.call_id,
+                    decision: ReviewDecision::Approved,
+                },
+            ),
             EventMsg::Error(error) => {
                 errors.push(error.message);
                 continue;
             }
             _ => break,
         };
-        reasons.push(approval.reason.clone().unwrap_or_default());
+        reasons.push(reason.unwrap_or_default());
         asked += 1;
-        test.codex
-            .submit(Op::ExecApproval {
-                id: approval.effective_approval_id(),
-                turn_id: None,
-                decision: ReviewDecision::Approved,
-            })
-            .await?;
+        test.codex.submit(op).await?;
     }
     let requests = captured.requests();
     anyhow::ensure!(
@@ -184,7 +240,17 @@ async fn run(level: SecurityLevel, route: Route) -> anyhow::Result<Run> {
     );
     let output = requests
         .last()
-        .and_then(|request| request.function_call_output_text("call-0"))
+        .map(|request| {
+            request
+                .function_call_output_text("call-0")
+                .unwrap_or_else(|| {
+                    request
+                        .custom_tool_call_output("call-0")
+                        .get("output")
+                        .map(ToString::to_string)
+                        .unwrap_or_default()
+                })
+        })
         .unwrap_or_default();
     Ok(Run {
         asked,
@@ -215,11 +281,15 @@ async fn issue_747_moderate_never_runs_a_command_outside_the_sandbox() -> anyhow
         // Approved once, its retry outside the sandbox runs unasked.
         (SecurityLevel::Permissive, Route::Retry, 1, true),
         (SecurityLevel::Permissive, Route::Rule, 0, true),
+        (SecurityLevel::Moderate, Route::EscalatedExec, 1, false),
+        (SecurityLevel::Permissive, Route::EscalatedExec, 1, true),
+        (SecurityLevel::Moderate, Route::Patch, 1, true),
+        (SecurityLevel::Permissive, Route::Patch, 1, true),
     ] {
         let run = run(level, route).await?;
         let moderate = level == SecurityLevel::Moderate;
         // Only a request to leave the sandbox gets the note on its prompt.
-        let noted = moderate && matches!(route, Route::Escalated);
+        let noted = moderate && matches!(route, Route::Escalated | Route::EscalatedExec);
         if run.asked != asks
             || run.wrote != writes
             || run.reasons.iter().any(|reason| reason.contains(STAYS)) != noted

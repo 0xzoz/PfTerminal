@@ -1554,9 +1554,9 @@ async fn issue_513_moderate_grant_never_carries_a_persistence_write() -> anyhow:
 /// command (#239: here a protected command after untrusted content), the
 /// Corbanu home's runtime entries stay read-only in that command's real
 /// sandbox (Seatbelt, bubblewrap; full access gets one for it), while its
-/// other rules are lifted (the credential file is readable). A command a person
-/// approves to run outside the sandbox has no sandbox to hold the rule
-/// (documented exception). Permissive is unchanged.
+/// other rules are lifted (the credential file is readable). #747 (D3): a
+/// command a person approves to run outside the sandbox stays in one under
+/// Moderate, so the rule holds there too. Permissive is unchanged.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn issue_540_runtime_entries_stay_read_only_when_a_person_lifts_the_rules()
@@ -1566,7 +1566,8 @@ async fn issue_540_runtime_entries_stay_read_only_when_a_person_lifts_the_rules(
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
     let mut wrong = Vec::new();
-    // (level, outside the sandbox, exec-policy allow rule, launcher replaced)
+    // (level, asks to run outside the sandbox, exec-policy allow rule,
+    // launcher replaced)
     for (level, escalated, allowed_by_rule, replaced) in [
         (SecurityLevel::Moderate, false, false, false),
         // An allow rule (it would skip the sandbox) does not take the run

@@ -83,10 +83,9 @@ pub(crate) fn level_broker_setting(
 /// What turned `broker_model_auth` on when `level` did (#391, D2).
 pub(crate) fn level_origin(level: SecurityLevel) -> BrokerModelAuthOrigin {
     match level {
+        SecurityLevel::Permissive => BrokerModelAuthOrigin::Config,
         SecurityLevel::Moderate => BrokerModelAuthOrigin::ModerateLevel,
-        SecurityLevel::Permissive | SecurityLevel::Aggressive => {
-            BrokerModelAuthOrigin::AggressiveLevel
-        }
+        SecurityLevel::Aggressive => BrokerModelAuthOrigin::AggressiveLevel,
     }
 }
 

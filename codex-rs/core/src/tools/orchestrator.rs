@@ -322,14 +322,23 @@ impl ToolOrchestrator {
             }
             let protected_read_note =
                 protected_read_note(grant_operation.as_ref(), tool_ctx, turn_ctx).await;
+            // #747: and that it stays in the sandbox under Moderate.
+            let stays_sandboxed = moderate_sandbox_note(tool, req, moderate_keeps_sandbox);
             let approval_ctx = ApprovalCtx {
                 session: &tool_ctx.session,
                 turn: &tool_ctx.turn,
                 call_id: &tool_ctx.call_id,
-                retry_reason: Some(match &protected_read_note {
-                    Some(note) => format!("{} {note}", action.approval_reason()),
-                    None => action.approval_reason(),
-                }),
+                retry_reason: Some(
+                    [
+                        Some(action.approval_reason()),
+                        protected_read_note.clone(),
+                        stays_sandboxed.map(str::to_string),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                ),
                 network_approval_context: None,
                 fresh_human_authority: true,
             };
@@ -481,13 +490,8 @@ impl ToolOrchestrator {
                 };
                 // #747: a request to run outside the sandbox stays in it
                 // under Moderate; the person is told before approving.
-                let stays_sandboxed = (moderate_keeps_sandbox
-                    && tool
-                        .sandbox_permissions(req)
-                        .requires_escalated_permissions())
-                .then(|| {
-                    crate::security::protected_additional::MODERATE_STAYS_SANDBOXED.to_string()
-                });
+                let stays_sandboxed =
+                    moderate_sandbox_note(tool, req, moderate_keeps_sandbox).map(str::to_string);
                 let approval_ctx = ApprovalCtx {
                     session: &tool_ctx.session,
                     turn: &tool_ctx.turn,
@@ -615,8 +619,8 @@ impl ToolOrchestrator {
                 && !tool
                     .sandbox_permissions(req)
                     .requires_escalated_permissions());
-        let policy_allows_no_sandbox = !moderate_keeps_sandbox
-            && unsandboxed_execution_allowed(&file_system_sandbox_policy);
+        let policy_allows_no_sandbox =
+            !moderate_keeps_sandbox && unsandboxed_execution_allowed(&file_system_sandbox_policy);
 
         // 2) First attempt under the selected sandbox.
         let sandbox_override = if keeps_sandbox {
@@ -1067,6 +1071,25 @@ where
         "post-taint protected action needs fresh human approval"
     );
     Some(crate::security::tainted_action::PostTaintAction { kind, state })
+}
+
+/// #747 (D3): under Moderate, what a person is told before approving a
+/// request to run outside the sandbox: it stays in it. `None` elsewhere. (An
+/// approved patch outside the writable folders is applied inside the sandbox
+/// with that one extra write, under every level.)
+fn moderate_sandbox_note<Rq, Out, T>(
+    tool: &T,
+    req: &Rq,
+    moderate_keeps_sandbox: bool,
+) -> Option<&'static str>
+where
+    T: ToolRuntime<Rq, Out>,
+{
+    (moderate_keeps_sandbox
+        && tool
+            .sandbox_permissions(req)
+            .requires_escalated_permissions())
+    .then_some(crate::security::protected_additional::MODERATE_STAYS_SANDBOXED)
 }
 
 /// Issue #239: under Moderate before untrusted content, whether this command

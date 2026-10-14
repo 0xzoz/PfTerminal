@@ -194,10 +194,10 @@ Limits:
 
 The default depends on the security level:
 
-| Level                                                                       | Default                         |
-| --------------------------------------------------------------------------- | ------------------------------- |
-| Permissive                                                                  | off                             |
-| Moderate or Aggressive (chosen in `/security` or set as `[security] level`) | on, on macOS, Linux and Windows |
+| Level                                                                           | Default                         |
+| ------------------------------------------------------------------------------- | ------------------------------- |
+| Permissive                                                                      | off                             |
+| Moderate or Aggressive (`[security] level`, or the level chosen in `/security`) | on, on macOS, Linux and Windows |
 
 On other systems it stays off, because the broker isn't supported there. A value
 you set yourself always wins over the level's default; only a managed policy

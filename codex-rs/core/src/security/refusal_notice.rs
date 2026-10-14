@@ -17,7 +17,7 @@ pub(crate) const AGGRESSIVE_INSTRUCTIONS: &str = "The person chose security leve
 /// #747 (decision D3): added to the permissions instructions while security
 /// level Moderate is in force, so the model does not promise that an
 /// approved request runs outside the sandbox.
-pub(crate) const MODERATE_INSTRUCTIONS: &str = "The person chose security level Moderate in Corbanu Terminal's /security. Under it, commands always run inside the sandbox, even when the person approves a request to run outside it (`require_escalated`): such an approval can lift Moderate's protection of credential and Corbanu files for that one command, but a write outside the writable folders, or network the sandbox blocks, still fails. When a request needs that, do not try another way around it: tell the person that security level Moderate keeps commands in the sandbox and that they can choose another level with /security.";
+pub(crate) const MODERATE_INSTRUCTIONS: &str = "The person chose security level Moderate in Corbanu Terminal's /security. Under it, a command never leaves the sandbox it runs in, even when the person approves a request to run outside it (`require_escalated`): such an approval can lift Moderate's protection of credential and Corbanu files for that one command, but a write outside the writable folders, or network the sandbox blocks, still fails. When a request needs that, do not try another way around it: tell the person that security level Moderate keeps commands in the sandbox and that they can choose another level with /security.";
 
 /// What the Aggressive sandbox stopped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

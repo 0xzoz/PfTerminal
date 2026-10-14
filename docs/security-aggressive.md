@@ -169,5 +169,8 @@ sandbox too.
 The Corbanu home's runtime files (the sandbox launchers in `tmp`, shell
 snapshots, skills, plugins, packages and `AGENTS.md`) stay read-only to agent
 commands, even after a person approves a command. If your own settings turn
-the sandbox off (full access), commands that Moderate's rules don't cover run
-without one; choose a sandbox in your settings to keep every command in it.
+the sandbox off (full access, or an external sandbox), commands that
+Moderate's rules don't cover run without one; choose a sandbox in your
+settings to keep every command in it. Where the sandbox can't start (for
+example Linux without user namespaces), commands fail under Moderate instead
+of running outside it.
