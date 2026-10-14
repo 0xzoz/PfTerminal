@@ -3,8 +3,8 @@
 //! sandbox (Seatbelt on macOS, bubblewrap on Linux): not a request to run
 //! outside it that a person approves, not the "retry without sandbox?" after
 //! a sandbox denial, and not a remembered exec-policy rule (D6: it still
-//! skips the prompt). The prompt and the model's instructions say so, with
-//! or without the untrusted-content labels. Permissive is unchanged.
+//! skips the prompt). The prompt and the model's instructions say so.
+//! Permissive is unchanged.
 #![cfg(any(target_os = "macos", target_os = "linux"))]
 
 use std::path::Path;
@@ -46,8 +46,9 @@ const INSTRUCTED: &str = "commands always run inside the sandbox";
 enum Route {
     /// `sandbox_permissions: require_escalated`, approved by the person.
     Escalated,
-    /// An ordinary command under `untrusted`; the person approves the run
-    /// and, if offered, the retry without the sandbox.
+    /// An ordinary command under `untrusted`, approved by the person; after
+    /// the sandbox denies it, the retry without the sandbox needs no new
+    /// answer.
     Retry,
     /// An exec-policy allow rule saved earlier ("don't ask again").
     Rule,
@@ -56,8 +57,8 @@ enum Route {
 struct Run {
     /// Approval prompts shown.
     asked: usize,
-    /// The first prompt's reason.
-    reason: String,
+    /// The prompts' reasons.
+    reasons: Vec<String>,
     /// Whether the command wrote outside the writable folder.
     wrote: bool,
     /// What the model got back.
@@ -66,10 +67,12 @@ struct Run {
     instructed: bool,
 }
 
-async fn run(level: SecurityLevel, route: Route, envelopes: bool) -> anyhow::Result<Run> {
+async fn run(level: SecurityLevel, route: Route) -> anyhow::Result<Run> {
     let outside = TempDir::new()?;
     let target = outside.path().canonicalize()?.join("notes.txt");
-    let command = format!("printf moderate-747 >> '{}'", target.display());
+    // No redirection: an exec-policy rule applies only to commands it can
+    // parse.
+    let command = format!("touch '{}'", target.display());
     let mut arguments = json!({ "command": command });
     if matches!(route, Route::Escalated) {
         arguments["sandbox_permissions"] = json!("require_escalated");
@@ -80,7 +83,7 @@ async fn run(level: SecurityLevel, route: Route, envelopes: bool) -> anyhow::Res
         std::fs::create_dir_all(home.path().join("rules"))?;
         std::fs::write(
             home.path().join("rules/policy.rules"),
-            "prefix_rule(pattern=[\"printf\"], decision=\"allow\")\n",
+            "prefix_rule(pattern=[\"touch\"], decision=\"allow\")\n",
         )?;
     }
     let server = start_mock_server().await;
@@ -122,12 +125,11 @@ async fn run(level: SecurityLevel, route: Route, envelopes: bool) -> anyhow::Res
                     /*exclude_slash_tmp*/ true,
                 ))
                 .expect("workspace write");
-            if envelopes {
-                config
-                    .features
-                    .enable(Feature::SourceEnvelopes)
-                    .expect("enable source envelopes");
-            }
+            // Moderate needs the untrusted-content labels.
+            config
+                .features
+                .enable(Feature::SourceEnvelopes)
+                .expect("enable source envelopes");
         })
         // Host-sandbox security test: local executor on purpose, also in the
         // remote lane (#708).
@@ -147,18 +149,25 @@ async fn run(level: SecurityLevel, route: Route, envelopes: bool) -> anyhow::Res
         })
         .await?;
     let mut asked = 0;
-    let mut reason = String::new();
-    while let EventMsg::ExecApprovalRequest(approval) = wait_for_event(&test.codex, |event| {
-        matches!(
-            event,
-            EventMsg::ExecApprovalRequest(_) | EventMsg::TurnComplete(_)
-        )
-    })
-    .await
-    {
-        if asked == 0 {
-            reason = approval.reason.clone().unwrap_or_default();
-        }
+    let mut reasons = Vec::new();
+    let mut errors = Vec::new();
+    loop {
+        let approval = match wait_for_event(&test.codex, |event| {
+            matches!(
+                event,
+                EventMsg::ExecApprovalRequest(_) | EventMsg::TurnComplete(_) | EventMsg::Error(_)
+            )
+        })
+        .await
+        {
+            EventMsg::ExecApprovalRequest(approval) => approval,
+            EventMsg::Error(error) => {
+                errors.push(error.message);
+                continue;
+            }
+            _ => break,
+        };
+        reasons.push(approval.reason.clone().unwrap_or_default());
         asked += 1;
         test.codex
             .submit(Op::ExecApproval {
@@ -169,13 +178,17 @@ async fn run(level: SecurityLevel, route: Route, envelopes: bool) -> anyhow::Res
             .await?;
     }
     let requests = captured.requests();
+    anyhow::ensure!(
+        !requests.is_empty(),
+        "{level:?} {route:?}: the model was never asked: {errors:?}"
+    );
     let output = requests
         .last()
         .and_then(|request| request.function_call_output_text("call-0"))
         .unwrap_or_default();
     Ok(Run {
         asked,
-        reason,
+        reasons,
         wrote: written(&target),
         output,
         instructed: requests[0].body_contains_text(INSTRUCTED),
@@ -183,7 +196,7 @@ async fn run(level: SecurityLevel, route: Route, envelopes: bool) -> anyhow::Res
 }
 
 fn written(target: &Path) -> bool {
-    std::fs::read_to_string(target).is_ok_and(|contents| contents.contains("moderate-747"))
+    target.exists()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -191,32 +204,32 @@ async fn issue_747_moderate_never_runs_a_command_outside_the_sandbox() -> anyhow
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
     let mut wrong = Vec::new();
-    // (level, route, labels on, prompts expected, writes outside)
-    for (level, route, envelopes, asks, writes) in [
-        (SecurityLevel::Moderate, Route::Escalated, true, 1, false),
-        (SecurityLevel::Moderate, Route::Escalated, false, 1, false),
+    // (level, route, prompts expected, writes outside)
+    for (level, route, asks, writes) in [
+        (SecurityLevel::Moderate, Route::Escalated, 1, false),
         // The sandbox denies the write; no retry outside it is offered.
-        (SecurityLevel::Moderate, Route::Retry, false, 1, false),
+        (SecurityLevel::Moderate, Route::Retry, 1, false),
         // D6: the remembered rule still skips the prompt, inside the sandbox.
-        (SecurityLevel::Moderate, Route::Rule, false, 0, false),
-        (SecurityLevel::Permissive, Route::Escalated, false, 1, true),
-        (SecurityLevel::Permissive, Route::Retry, false, 2, true),
-        (SecurityLevel::Permissive, Route::Rule, false, 0, true),
+        (SecurityLevel::Moderate, Route::Rule, 0, false),
+        (SecurityLevel::Permissive, Route::Escalated, 1, true),
+        // Approved once, its retry outside the sandbox runs unasked.
+        (SecurityLevel::Permissive, Route::Retry, 1, true),
+        (SecurityLevel::Permissive, Route::Rule, 0, true),
     ] {
-        let run = run(level, route, envelopes).await?;
+        let run = run(level, route).await?;
         let moderate = level == SecurityLevel::Moderate;
         // Only a request to leave the sandbox gets the note on its prompt.
         let noted = moderate && matches!(route, Route::Escalated);
         if run.asked != asks
             || run.wrote != writes
-            || run.reason.contains(STAYS) != noted
+            || run.reasons.iter().any(|reason| reason.contains(STAYS)) != noted
             || run.instructed != moderate
             || run.output.contains("Protected launch refused")
         {
             wrong.push(format!(
-                "{level:?} {route:?} labels={envelopes}: asked={} wrote={} instructed={} \
-                 reason={:?} output={:?}",
-                run.asked, run.wrote, run.instructed, run.reason, run.output
+                "{level:?} {route:?}: asked={} wrote={} instructed={} \
+                 reasons={:?} output={:?}",
+                run.asked, run.wrote, run.instructed, run.reasons, run.output
             ));
         }
     }

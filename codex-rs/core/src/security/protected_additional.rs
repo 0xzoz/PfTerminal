@@ -364,7 +364,7 @@ pub(crate) fn protected_level(session: &crate::session::session::Session) -> Opt
 /// exec-policy rule that would skip the sandbox. A person's approval still
 /// lifts Moderate's protected-path rules for one command (#239, #513), inside
 /// the sandbox. Follows the level in force now (also right after `/security`
-/// confirms Moderate), whatever `source_envelopes` says.
+/// confirms Moderate).
 pub(crate) fn moderate_keeps_sandbox(session: &crate::session::session::Session) -> bool {
     session.services.model_client().live_level() == SecurityLevel::Moderate
 }

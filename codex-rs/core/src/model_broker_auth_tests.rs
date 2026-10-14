@@ -432,9 +432,25 @@ async fn sec_391_config_load_applies_the_aggressive_default() {
                 BrokerModelAuthOrigin::Config,
             ),
         ),
+        // D2 (Travis, 2026-10-14): Moderate turns it on too.
         (
             "moderate",
             level(SecurityLevel::Moderate),
+            false,
+            Vec::new(),
+            (
+                SecurityLevel::Moderate,
+                expected_on,
+                if expected_on {
+                    BrokerModelAuthOrigin::ModerateLevel
+                } else {
+                    BrokerModelAuthOrigin::Config
+                },
+            ),
+        ),
+        (
+            "moderate, config off",
+            level(SecurityLevel::Moderate) + off,
             false,
             Vec::new(),
             (
