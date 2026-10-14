@@ -22,7 +22,8 @@ updated: 2026-10-14
 ## Execution mandate
 
 - Deliver: item (iii) from Travis's 2026-10-10 decision, the five price items of #368, so that each request is priced
-  from the provider's current published rate or plainly shows "no price".
+  from the provider's current published rate or plainly shows "no price". The exception is OpenRouter, which is priced from the
+  charge it reports (AC1).
 - **Deadline:** the Sol promotion item (AC4) must land before 2026-11-21.
 - Excludes: re-pricing history; changing what Corbanu charges; Grok tiers (#127) and OpenRouter caps (#129).
 
@@ -43,7 +44,7 @@ updated: 2026-10-14
 - [ ] Plan is active, or Travis authorises AC4 alone as a bounded fix before 2026-11-21.
 - [ ] Dependencies are completed.
 - [ ] Worktree, branch, and base commit are exact and match the plan.
-- [ ] Travis chooses the OpenRouter rule for AC1.
+- [x] Travis chooses the OpenRouter rule for AC1 (2026-10-14).
 
 ## Done
 
@@ -54,11 +55,15 @@ updated: 2026-10-14
       so `scripts/check_price_calendars.py` (nightly) fails from 2026-12-01 until the dates are added; AC2 read but not
       priceable as data (custom routes are not priced per token, BigModel bills CNY, slugs clash with Z.AI, K3 TTL writes).
 
+- [x] AC1 OpenRouter (Travis 2026-10-14: reported charge first, catalogue as a labelled fallback estimate, else
+      "no price"): `/cost` prices each OpenRouter request from `usage.cost` (`billed_usd`), labels it
+      "charged by OpenRouter", and every request and attempt page states its `Price basis`. The ledger keeps the
+      catalogue estimate unchanged (no re-pricing of records). Landed as a bounded fix under that decision
+      (coordinator-assigned, PR #784) while the sprint stays draft for its other items; its code-blind cases run
+      in PF-60-S10. Evidence: `qa/portfolio/agent-cost-accounting/issue-368/openrouter-charge/`.
+
 ## Remaining
 
-- [ ] AC1 OpenRouter: a request is priced from the charge OpenRouter reports for it when present, labelled as the
-      provider's charge; without one, the catalogue rate is shown only as a labelled estimate, or "no price"
-      (Travis's choice). A real request matches OpenRouter's reported charge exactly.
 - [ ] AC2 Moonshot/Kimi Open Platform (`api.moonshot.ai/v1`) and BigModel (`open.bigmodel.cn/api/paas/v4`): rows from
       the official pricing pages, with K3 cache writes by TTL; a request on each recomputes exactly (or the route stays
       "no price" with the reason recorded if no key is available).
