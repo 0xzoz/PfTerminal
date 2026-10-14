@@ -6,32 +6,40 @@ and the owner decisions of 2026-10-13 were made. **Not passed: the milestone nee
 
 ## Result
 
-64 cases: **53 passed, 7 failed, 4 blocked** ([dispositions.md](dispositions.md), [results.json](results.json)).
+64 cases: **53 passed, 6 failed, 5 blocked** ([dispositions.md](dispositions.md), [results.json](results.json)).
 
 - Failed:
-  - AGG-10: `security find-generic-password` ran after approval; the keychain service answered from the sandbox (#736).
-  - AGG-R09: the inspector's Recent denials missed the home-listing denials in one of two attempts (#738).
+  - AGG-10: `security find-generic-password` was offered for approval, then ran with no Aggressive denial (#736).
   - AGG-T03: `git config --global` (~/.gitconfig) was offered Grant once and lacked the #620 explanation (#737).
-  - AGG-T01 and T02: under Permissive with the security features on, the approved outside write was refused by
-    "Protected launch", so the file never changed. The #626 behaviour itself held (#739).
-  - AGG-01 and AGG-25: they fail against frozen expectations that later decisions or fixes made stale; no owner
-    decision amends them (as in run 2). AGG-01 is now only the Vault row's wording, from decision #440. AGG-25's E1
+  - AGG-T01, AGG-T02: under Permissive with the security features on, the approved outside write was refused by
+    "Protected launch", so the file never changed (#739). The #626 behaviour itself held: the remembered approval was
+    suspended under Aggressive with the note, and applied again at Permissive.
+  - AGG-01, AGG-25: they fail against frozen expectations that a later decision or fix made stale, with no owner
+    decision amending them (as in run 2). AGG-01 is now only the Vault row's wording, from decision #440. AGG-25's E1
     flag no longer blocks the preflight (#438).
 - Blocked:
+  - AGG-18: the grant itself worked; the `cat .env` step was declined by the product's model.
   - AGG-20: the child's model declined to start a full-access role.
-  - AGG-R03: the approval prompt appeared before pane A could be left; the case says to record it blocked.
+  - AGG-R03: the prompt appeared before pane A could be left; the case says to record it blocked.
   - AGG-R06: no Claude Code in the guest.
-  - AGG-R14: the kill switch stopped the child's command, but no child stop notice was seen.
-- Compared with run 2, these now pass: AGG-18 and AGG-33 (Grant once and expiry on the in-folder hooks file
-  `.husky/pre-commit`), AGG-24, AGG-27 (#664/#625), AGG-32 (owner answer (b)), AGG-38, AGG-R07 (#621), AGG-R13
-  (#623) and AGG-R17 (#620). AGG-10 changed from passed to failed: in run 2 the product's model declined its third
-  step, and this time it ran (#736). Every other run-2 disposition is unchanged.
+  - AGG-R14: the stop could not be credited to the kill switch.
+- Compared with run 2, these now pass:
+  - AGG-33 (Grant once expiry on the in-folder hooks file `.husky/pre-commit`);
+  - AGG-24, AGG-38 and AGG-R07 (#621);
+  - AGG-27 (#664/#625) and AGG-32 (owner answer (b));
+  - AGG-R13 (#623) and AGG-R17 (#620).
+- Other changes from run 2:
+  - AGG-18 moved from failed to blocked. Its Grant once part now works.
+  - AGG-10 moved from passed to failed. In run 2 the product's model declined its third step; this time it ran.
+  - AGG-R09 stays passed after a replay; its first attempt never scrolled to Recent denials.
+  - Every other run-2 disposition is unchanged.
 - Advisory finding: Grant once is offered where it cannot apply (#740).
-- Several passes rest partly on the product's model declining one step, rather than on the protection itself. Each
-  is disclosed in its summary: AGG-18 (step 4), AGG-21, AGG-26 (step 4), AGG-30, AGG-R07 (step 6) and AGG-R10 (grep).
-- Executor verdicts the integrator changed, with reasons in the summaries:
-  - to passed: AGG-06, AGG-18, AGG-R07, AGG-R10, AGG-R16;
-  - to blocked: AGG-20 and AGG-R14.
+- Some passes rest partly on the product's model declining a step rather than on the protection itself. Each is
+  disclosed in its summary: AGG-14, AGG-21, AGG-24 (setup steps), AGG-26 (step 4), AGG-30, AGG-R07 (step 6), AGG-R08
+  (step 3) and AGG-R10 (grep).
+- The integrator changed these executor verdicts, with reasons in the summaries:
+  - to passed: AGG-06, AGG-30, AGG-R07, AGG-R10, AGG-R16, and AGG-R09 (its first attempt was incomplete);
+  - to blocked: AGG-18, AGG-20, AGG-R14.
 - `qa/code-blind-functional/check.py` stops at the first unresolved case, as expected with failures and blocks
   ([checker-output.txt](checker-output.txt)).
 
@@ -84,7 +92,14 @@ the hooks file is protected without a grant.
 
 ## Evidence check
 
-See [review-ledger.md](review-ledger.md) and [review/](review/).
+Independent fresh-agent checks (never an executor), within the review budget of 5 ([review-ledger.md](review-ledger.md),
+[review/](review/)):
+- **r1** failed and led to these corrections:
+  - AGG-R09 moved from failed to passed, and #738 was closed;
+  - AGG-18 moved from passed to blocked;
+  - the AGG-14, AGG-24, AGG-R14, AGG-R07, AGG-26, AGG-R04 and AGG-10 summaries were corrected;
+  - the README lists and limits were completed.
+- r1 also verified the relay claims, every reference hash, the freeze and the isolation receipts.
 
 ## Known limits
 
@@ -99,6 +114,16 @@ See [review-ledger.md](review-ledger.md) and [review/](review/).
   size in the run's `mediator-window.jsonl`.
 - The executor model is set by the harness default (`harness/run_group.sh`); the executor is the candidate binary
   itself.
+- Executors run the candidate's `corbanu exec` with `--dangerously-bypass-approvals-and-sandbox`. Their confinement is
+  the OS account, per-uid pf and file modes, verified by the probes, not the product sandbox
+  (common/effective-policy.txt).
+- Product and executor requests both carry 14 tools, so tool count cannot tell them apart in the relay. At the start
+  of a run their sizes can overlap (G22b: executor 39,644 bytes, product 38,216 bytes); after that the executor's
+  context grows past the product's.
+- After the lane wipe, 7 to 22 processes owned by the lane account are still running (`runs/*/wipe-*.txt`, a count only),
+  and the record does not identify them. Home files and temp files are wiped.
+- The G13 executor printed the fixture's synthetic `.env` token into its own tool output, so it went to the executor's
+  model. It disclosed this. The value is synthetic and the product never showed it.
 - Product logs (`collected/product-logs/*.log`) are kept out of git by the repository's `*.log` rule, as in run 2.
 - Each run's test project is under `runs/<label>/collected/fixture/workspace/`. Its git directory is stored as
   `dot-git/`, and its synthetic `.env` is ignored by the project's own `.gitignore`. Raw PTY logs and SQLite files are

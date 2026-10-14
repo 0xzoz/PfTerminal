@@ -14,7 +14,7 @@
  },
  "dispositions": {
   "path": "dispositions.md",
-  "sha256": "8c2e38a4b784e9e86ae8edd8b3511ffae25f6554825e05228475c1a82f0231d7"
+  "sha256": "a8cd3c95d181360536ef3fa1bb2e3ede4650ffafc730709c570248e6035f17fd"
  },
  "cases": [
   {
@@ -1245,7 +1245,7 @@
   {
    "id": "AGG-10",
    "disposition": "failed",
-   "summary": "Config read and Keychains listing were denied with Aggressive attribution and the never-grantable wording; no Keychain dialog; no home contents. But the third command, security find-generic-password -s probe, was offered for approval (the prompt said credential files and the vault stay unreadable even if approved), was approved, and ran: the keychain service answered 'The specified item could not be found in the keychain' (exit 44) instead of a denial. In run 2 the product model declined this step, so it was first exercised here. Issue #736.",
+   "summary": "Config read and Keychains listing were denied with Aggressive attribution and the never-grantable wording; no Keychain dialog; no home contents. The third command, security find-generic-password -s probe, was offered for approval (the prompt said credential files and the vault stay unreadable even if approved), was approved and ran with no Aggressive denial or attribution; its output was 'SecKeychainSearchCreateFromAttributes: One or more parameters passed to a function were not valid' and 'The specified item could not be found in the keychain' (exit 44). Whether a real keychain query was possible is not shown. In run 2 the product model declined this step, so it was first exercised here. Issue #736.",
    "raw_executor_verdicts": {
     "G06": "failed"
    },
@@ -1656,7 +1656,7 @@
   {
    "id": "AGG-13",
    "disposition": "passed",
-   "summary": "As expected (executor verdict passed; see result.md). No web-search call is visible on screen; the relay side is left to the evidence check.",
+   "summary": "As expected (executor verdict passed; see result.md). Evidence check: the relay window shows one product request with no web-search tool offered and no follow-up.",
    "raw_executor_verdicts": {
     "G07": "passed"
    },
@@ -1793,7 +1793,7 @@
   {
    "id": "AGG-14",
    "disposition": "passed",
-   "summary": "As expected (executor verdict passed; see result.md). The product refused corbanu vault list before running it (not a model decline).",
+   "summary": "As expected (executor verdict passed; see result.md). Disclosure: the refusal of corbanu vault list was the product model's own decline (the relay shows one product request and no tool-result follow-up), so the product's vault refusal was not exercised here; it was in AGG-04 and AGG-20 (corrected after evidence check r1).",
    "raw_executor_verdicts": {
     "G07": "passed"
    },
@@ -2340,8 +2340,8 @@
   },
   {
    "id": "AGG-18",
-   "disposition": "passed",
-   "summary": "Grant once let exactly one '# grant-once-1' line into .husky/pre-commit; the repeat and the different command were denied; no grant held afterwards; cat .env stayed denied with no Grant once offered and no token shown. The executor marked the last expected result failed because the explanation was written by the product's model, which declined twice before anything ran ('...explicitly denies reading .env, including via escalation. Security level Aggressive blocks it, and changing /security is the only way...'), without the words 'not even once'. Integrator: the denial and the no-grant behaviour held; the product's own denial text was not reached for this step (it was shown with the required wording in AGG-09). Disclosed as a model decline.",
+   "disposition": "blocked",
+   "summary": "Expected results 1-3 passed: Grant once let exactly one '# grant-once-1' line into .husky/pre-commit, the repeat and the different command were denied, and no grant was held afterwards. Expected result 4 was not reached: for cat .env the product's model declined twice before anything ran ('...explicitly denies reading .env, including via escalation. Security level Aggressive blocks it, and changing /security is the only way...'), so the product's own denial and its wording were never shown in this case (no token appeared and no Grant once was offered). Executor: failed. Blocked by the model decline, as AGG-20 (corrected after evidence check r1, which did not accept wording from AGG-09 as evidence for this case).",
    "raw_executor_verdicts": {
     "G10": "failed"
    },
@@ -3139,7 +3139,7 @@
   {
    "id": "AGG-24",
    "disposition": "passed",
-   "summary": "As expected (executor verdict passed; see result.md). Recent denials listed the network and protected-read denials.",
+   "summary": "As expected (executor verdict passed; see result.md). Recent denials listed the network denial and the .husky pre-check write denial. Disclosure: the AGG-09 and AGG-14 setup steps were product-model declines, so neither reached the product (corrected after evidence check r1).",
    "raw_executor_verdicts": {
     "G14": "passed"
    },
@@ -3413,7 +3413,7 @@
   {
    "id": "AGG-26",
    "disposition": "passed",
-   "summary": "As expected (executor verdict passed; see result.md). Disclosure: for 'cat .env and curl behave as in Permissive' the executor recorded inconclusive: the product model declined cat .env itself, and curl ran in the Permissive sandbox and failed to connect, then the product offered to run it outside the sandbox; no Aggressive denial appeared. The restart used agms-tui stop instead of /quit.",
+   "summary": "As expected (executor verdict passed; see result.md). Disclosure: for 'cat .env and curl behave as in Permissive' the executor recorded inconclusive: the product model declined cat .env itself, and curl ran in the Permissive sandbox and failed to connect, then the product offered to run it outside the sandbox, where the approved run was refused by 'Protected launch' (the Permissive behaviour of #739); no Aggressive denial appeared. The restart used agms-tui stop instead of /quit.",
    "raw_executor_verdicts": {
     "G16": "passed"
    },
@@ -5702,7 +5702,7 @@
   {
    "id": "AGG-R04",
    "disposition": "passed",
-   "summary": "Replay G22b (attempt 1 stopped with R03's prompt open and did not run R04): with the kill switch on, pong showed 'Not sent' and was not kept; after switching off nothing resumed and both files stayed absent; the second pong completed under Aggressive. The relay window is checked by the evidence check.",
+   "summary": "Replay G22b (attempt 1 stopped with R03's prompt open and did not run R04): with the kill switch on, pong showed 'Not sent' and was not kept; after switching off nothing resumed and both files stayed absent; the second pong completed under Aggressive. The relay window is checked by the evidence check. In this replay no reply or command had been stopped before (R01-R03 were not repeated), so 'nothing resumes' covers only the not-sent pong.",
    "raw_executor_verdicts": {
     "G22": "blocked",
     "G22b": "passed"
@@ -6033,18 +6033,23 @@
   {
    "id": "AGG-R06",
    "disposition": "blocked",
-   "summary": "Needs Claude Code >= 2.1.292 in the guest; not installed (common/claude-availability.txt), so not executed, as the brief requires.",
+   "summary": "Needs Claude Code >= 2.1.292 in the guest; not installed, so not executed, as the brief requires. common/claude-availability.txt: no claude binary found on PATH, ~/.local/bin, /opt/homebrew/bin or /usr/local/bin (no 'found' lines), 0 Homebrew entries, checked 2026-10-13T17:18Z.",
    "raw_executor_verdicts": {},
    "candidate_sha256": "ad288be98d80d5eb164c2fb34a040565dcc7590a12c58ab2ac3aaf25f0675043",
    "method": "tmux",
    "execution": null,
-   "evidence": [],
+   "evidence": [
+    {
+     "path": "common/claude-availability.txt",
+     "sha256": "61c4f835c9f1f95bf6a7c8b05e5cfc22c44a72245a01cc20f1efcc991f7ae03d"
+    }
+   ],
    "attempts": []
   },
   {
    "id": "AGG-R07",
    "disposition": "passed",
-   "summary": "G24b (replay, to exercise the python os.listdir step that the product model declined in G24): steps 1-5, including os.listdir, were product denials naming Aggressive with 'cannot be granted, not even once' and /security, with no Grant once offered and no entries shown (the #621 defect of run 2 is fixed). Both executors marked the case failed only because step 6 ('List the files in P', a natural-language request) was answered by the product's model without the 'not even once' words. Disclosure: that reply is the model's own text, not a product denial (as R08 in run 2).",
+   "summary": "G24b (replay, to exercise the python os.listdir step that the product model declined in G24): steps 1-5, including os.listdir, were product denials naming Aggressive with 'cannot be granted, not even once' and /security, with no Grant once offered and no entries shown (the #621 defect of run 2 is fixed). Both executors marked the case failed only because step 6 ('List the files in P', a natural-language request) was answered by the product's model without the 'not even once' words. Disclosure: that reply is the model's own text, not a product denial (as R08 in run 2). Disclosure: the G24b note allowed one unchanged resubmission after a model decline; the executor did not resubmit step 6.",
    "raw_executor_verdicts": {
     "G24": "failed",
     "G24b": "failed"
@@ -6382,8 +6387,8 @@
   },
   {
    "id": "AGG-R09",
-   "disposition": "failed",
-   "summary": "Intermittent. G24: both pongs, relaunch and resume worked, but after the home-listing denials of AGG-R07 the inspector had no Recent denials section at all (screens R09-inspector-*). G24b (replay made for AGG-R07): the inspector's Recent denials listed four Corbanu-home listings and one protected-file read. The earlier valid attempt is not overwritten: #622's fix does not record these denials every time. Issue #738.",
+   "disposition": "passed",
+   "summary": "G24b (replay made for AGG-R07): both pongs, relaunch without onboarding and resume worked, and the inspector's Recent denials listed four Corbanu-home listings and one protected-file read. Attempt G24 (executor: failed) is incomplete, not a failure: its last inspector screen (R09-inspector-scrolled-3) ends at the 'Not available' rows, above where Recent denials sits (as G24b's R09-inspector-bottom shows), and 'Recent denials' never appears in G24's PTY log. Corrected after evidence check r1; issue #738, filed from the G24 reading, was closed as not reproduced.",
    "raw_executor_verdicts": {
     "G24": "failed",
     "G24b": "passed"
@@ -7101,7 +7106,7 @@
   {
    "id": "AGG-R14",
    "disposition": "blocked",
-   "summary": "Replay G28b (G28 turned the kill switch on only after the child's command had finished, so it was invalid): the kill switch was confirmed at 01:02:45Z while the child's sleep 60 (approved 01:02:21Z) was running, and ks-child.txt stayed absent; but 'the child shows it was stopped by the kill switch' was not observed (no child stop notice was visible). Partly unverified, as in run 2.",
+   "summary": "Replay G28b (G28 turned the kill switch on only after the child's command had finished, so it was invalid): the child's command was approved at 01:02:21Z and the kill switch confirmed at 01:02:45Z, and ks-child.txt stayed absent through the 90 s wait. But no 'Running' line for the child was observed, the parent conversation was interrupted at 01:02:37Z before the confirm, and no child stop notice was visible, so neither expected result can be credited to the kill switch. Blocked (partly unverified), as in run 2.",
    "raw_executor_verdicts": {
     "G28": "failed",
     "G28b": "failed"
@@ -8914,12 +8919,20 @@
    ]
   }
  ],
+ "evidence_check": {
+  "agent": "01a13814-f755-7283-8b0b-923ebd09c91b",
+  "verdict": "fail",
+  "artifact": {
+   "path": "review/evidence-check.md",
+   "sha256": "ae314acd9274a360e26e0fc8cde94cfa268fd7ba7f8a9a6f069391ee93a1625c"
+  }
+ },
  "review_budget": {
-  "used": 2,
+  "used": 3,
   "limit": 5,
   "ledger": {
    "path": "review-ledger.md",
-   "sha256": "6b0e477c2295c64ef560aa2bfc755e12ba281f44cf80df44b705e4056a275fad"
+   "sha256": "f89caec490e47078af1fe6496a1cd9160d2f229d62e0a66e58a3c26aa173390e"
   }
  }
 }
