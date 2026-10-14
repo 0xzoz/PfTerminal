@@ -13,6 +13,11 @@
 //! settings. Core's level in force now adds what Core enforces on top
 //! (#749): under Moderate no command leaves the sandbox (#747) and, with the
 //! untrusted-content labels, the vault store and sign-in file are denied.
+//! #792: so under Aggressive in force before the restart (confirmed in
+//! `/security`): its protected-path rules deny them from confirmation
+//! (#443), and their denied reads keep every run in the sandbox, also when
+//! you approve it (#747's Aggressive cases); `corbanu vault …` commands are
+//! refused.
 
 use std::path::Path;
 
@@ -77,9 +82,18 @@ pub(crate) fn current_values(
     let restricted = matches!(file_system.kind, FileSystemSandboxKind::Restricted);
     // #747 (D3): under Moderate no command leaves the sandbox.
     let moderate = level == crate::legacy_core::security_level_change::SecurityLevel::Moderate;
+    let aggressive = level == crate::legacy_core::security_level_change::SecurityLevel::Aggressive;
+    // #792: Aggressive's protected-path rules (with the untrusted-content
+    // labels) deny the vault store and sign-in file to every agent command,
+    // from confirmation, and no approval lifts them (#442). Only a sandbox
+    // takes the rules, and an external one keeps its own.
+    let aggressive_rules =
+        aggressive && restricted && config.features.enabled(Feature::SourceEnvelopes);
     // Without denied reads, escalated, allow-listed and retried commands run
-    // outside the sandbox (`unsandboxed_execution_allowed` in core).
-    let escapes = restricted && !file_system.has_denied_read_restrictions() && !moderate;
+    // outside the sandbox (`unsandboxed_execution_allowed` in core); the
+    // denied reads of Aggressive's rules keep them in it.
+    let escapes =
+        restricted && !file_system.has_denied_read_restrictions() && !moderate && !aggressive_rules;
     // #749: Moderate's rules deny the vault store and sign-in file to every
     // agent command (PF-23, #239), with the untrusted-content labels.
     // An external sandbox takes none of Core's rules (it keeps its own).
@@ -136,6 +150,11 @@ pub(crate) fn current_values(
         sandbox.push_str(
             "; under Moderate approved and allow-listed commands stay inside the sandbox",
         );
+    } else if aggressive_rules && !file_system.has_denied_read_restrictions() {
+        // #792: before the restart, Core's rules do it.
+        sandbox.push_str(
+            "; under Aggressive approved and allow-listed commands stay inside the sandbox",
+        );
     }
     let request_tools = config.features.enabled(Feature::RequestPermissionsTool)
         || config.features.enabled(Feature::ExecPermissionApprovals);
@@ -172,6 +191,7 @@ pub(crate) fn current_values(
 
     let secrets = config.codex_home.join("secrets");
     let store_readable = !moderate_denies_store
+        && !aggressive_rules
         && (escapes
             || !restricted
             || [
@@ -189,9 +209,11 @@ pub(crate) fn current_values(
         std::env::vars(),
     );
     let vault = format!(
-        "the vault store and sign-in file are {} to agent commands; {}; {}",
+        "the vault store and sign-in file are {} to agent commands{}; {}; {}",
         if store_readable {
             "readable"
+        } else if aggressive_rules {
+            "unreadable (Aggressive, also when you approve a command)"
         } else if moderate_denies_store && secretless {
             "unreadable (Moderate and secretless_agent_launch, also when you approve a command)"
         } else if moderate_denies_store {
@@ -200,6 +222,12 @@ pub(crate) fn current_values(
             "unreadable (unless an approved permission request grants access)"
         } else {
             "unreadable"
+        },
+        // #443: Core refuses them under Aggressive from confirmation.
+        if aggressive {
+            ", and direct `corbanu vault …` commands are refused"
+        } else {
+            ""
         },
         // #440: the secretless launch keeps only allowlisted names and names
         // set explicitly, not every name that is not secret-like (and not
