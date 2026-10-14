@@ -2740,7 +2740,12 @@ async fn issue_651_a_missing_database_folder_is_protected() -> anyhow::Result<()
 /// or a backup, with the paths built at run time. Permissive is unchanged.
 ///
 /// The scenario sets `TMPDIR` for the whole process, so the test runs it in a
-/// copy of this test binary of its own (`cargo test` runs tests as threads).
+/// copy of this test binary of its own (`cargo test` runs tests as threads),
+/// with a home and working folder of its own too (#673): the Linux sandbox
+/// keeps its placeholder registry under `TMPDIR`, so the copy's commands
+/// cannot see the placeholders other tests' commands make in the shared home
+/// (`~/.aws`) or working folder (`.git/hooks`), nor those tests see its own.
+/// One removed from under another command made bubblewrap fail it.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn issue_651_a_shared_database_folder_is_denied_entry_by_entry() -> anyhow::Result<()> {
@@ -2752,9 +2757,12 @@ async fn issue_651_a_shared_database_folder_is_denied_entry_by_entry() -> anyhow
     if std::env::var_os(SUBPROCESS).is_some() {
         return shared_database_folder_scenario().await;
     }
+    let own = TempDir::new()?;
     let output = tokio::process::Command::new(std::env::current_exe()?)
         .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
         .env(SUBPROCESS, "1")
+        .env("HOME", own.path())
+        .current_dir(own.path())
         .output()
         .await?;
     let stdout = String::from_utf8_lossy(&output.stdout);
