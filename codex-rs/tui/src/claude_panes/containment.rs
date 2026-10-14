@@ -160,8 +160,8 @@ impl ClaudeContainment {
     /// missing protected paths in the home, such as `~/.aws`) in a registry
     /// under `TMPDIR`; a pane with its own `TMPDIR` could not see the main
     /// session's placeholders, and a command in either could fail to start.
-    /// Claude Code gets its own temporary folder through `CLAUDE_CODE_TMPDIR`
-    /// only (its own files and the `TMPDIR` its Bash commands see).
+    /// Claude Code keeps its own files under `CLAUDE_CODE_TMPDIR`; its Bash
+    /// commands see the session's `TMPDIR`, which the pane cannot write.
     pub(crate) fn claude_env(&self) -> BTreeMap<String, String> {
         let config = self.config_dir().to_string_lossy().into_owned();
         let tmp = self.tmp_dir().to_string_lossy().into_owned();

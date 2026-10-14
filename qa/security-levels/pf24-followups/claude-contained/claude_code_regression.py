@@ -305,8 +305,6 @@ def run(claude, which, mode, keep, prompt_text):
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": home,
         "CLAUDE_CONFIG_DIR": config_dir,
-        # #743: Corbanu leaves TMPDIR as the session's.
-        "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
         "CLAUDE_CODE_TMPDIR": os.path.join(state, "tmp"),
         "ANTHROPIC_BASE_URL": base_url,
         "ANTHROPIC_API_KEY": "",
@@ -315,6 +313,9 @@ def run(claude, which, mode, keep, prompt_text):
         "DISABLE_AUTOUPDATER": "1",
         "CLAUDECODE": "",
     }
+    # #743: Corbanu leaves TMPDIR as the session's (unset stays unset).
+    if "TMPDIR" in os.environ:
+        env["TMPDIR"] = os.environ["TMPDIR"]
     argv = [claude] + corbanu_flags(settings_path, which, mode) + [
         "--session-id",
         "11111111-1111-4111-8111-111111111111",
