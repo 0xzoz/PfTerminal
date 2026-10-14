@@ -85,7 +85,8 @@ A file written this way runs code later, outside the sandbox. Nothing else
 changes: credential files and Corbanu's sign-in, vault, config and history stay
 unreadable; Corbanu's own files and the project's `.git` folder (its hooks and config
 included), `.codex` and `.agents` stay read-only; other folders and the
-network stay closed.
+network stay closed (with a managed network proxy, see
+[its limit](#a-managed-network-proxy)).
 
 **When it is not offered.** The approval prompt leaves Grant once out, and
 says why, when it could not help: nothing the command writes is something
@@ -129,9 +130,15 @@ Aggressive turns the network off for agent commands, with one known limit:
 when your organization's requirements enforce a managed network proxy
 (`experimental_network`), agent commands can still connect to that proxy.
 That is how network access works in that setup, so what they reach through
-it is decided by your organization's proxy rules, not by Aggressive. When
-those rules allow local binding, local ports stay reachable too. The macOS
-keychain stays closed either way (above, #758).
+it is decided by your organization's proxy rules, not by Aggressive.
+
+- **macOS:** when those requirements also allow local binding, agent
+  commands can also listen on and connect to local ports, and send DNS
+  queries (port 53) straight to any server, outside the proxy.
+- **Linux:** agent commands run in their own network, which reaches only
+  the proxy; local binding gives them no access to the computer's own ports.
+
+The macOS keychain stays closed either way (above, #758).
 
 ## A separate database folder
 
