@@ -376,7 +376,10 @@ impl StatusHistoryCell {
                 model_details,
                 directory: config.cwd.to_path_buf(),
                 permissions,
-                security: crate::security::view::status_summary(config.security_level),
+                security: crate::security::view::status_summary(
+                    config.security_level,
+                    crate::legacy_core::security_level_change::configured_level(config),
+                ),
                 collaboration_mode: collaboration_mode.map(ToString::to_string),
                 model_provider,
                 remote_connection: remote_connection.cloned(),

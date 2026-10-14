@@ -23,6 +23,9 @@ ZAI_API_KEY = "provider/zai_api_key"
 
 [[steps]]
 wait = "Corbanu Terminal \\(v"
+# The session has started (its policy runs in this process) once the model shows.
+[[steps]]
+wait = "model:\\s+glm-5\\.3-flash"
 [[steps]]
 pause = 1.0
 [[steps]]

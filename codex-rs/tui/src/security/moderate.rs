@@ -55,7 +55,7 @@ pub(crate) fn blocker(facts: Facts) -> Option<&'static str> {
 
 /// What Core's Moderate rules do in a running session, as the confirmation
 /// and the saved screen name them.
-pub(crate) const EFFECTS: &str = "agent commands stay in the sandbox and cannot read credential files in your home folder or Corbanu's sign-in, vault, config, history and state, or write files that run code later, unless you approve that one command; after untrusted content, protected actions need your fresh approval";
+pub(crate) const EFFECTS: &str = "agent commands always stay in the sandbox; unless you approve that one command, they cannot read credential files in your home folder or Corbanu's sign-in, vault, config, history and state, or write files that run code later; after untrusted content, protected actions need your fresh approval";
 
 /// The rows of the Moderate review, in order: control and Moderate's value.
 pub(crate) fn rows(facts: Facts) -> Vec<(&'static str, String)> {

@@ -1079,7 +1079,18 @@ impl SecurityLevelPicker {
                     }
                 };
                 lines.push(saved.bold().into());
-                if level == self.active {
+                if level == self.active
+                    && self.basis.live
+                    && self.basis.in_force > confirm::core_level(level)
+                {
+                    // #750: a level confirmed earlier in this session raised
+                    // Core, and a downgrade waits for the restart.
+                    lines.extend(wrap(&format!(
+                        "Core's {} rules stay on in this session until you restart Corbanu Terminal; then {} applies.",
+                        name(self.basis.in_force),
+                        level.name()
+                    )));
+                } else if level == self.active {
                     lines.extend(wrap(&format!(
                         "{} is active in this session.",
                         level.name()

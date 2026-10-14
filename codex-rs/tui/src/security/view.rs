@@ -37,26 +37,38 @@ pub(crate) fn requested_summary(requested: Option<SecurityLevel>) -> String {
     }
 }
 
-pub(crate) fn status_summary(requested: SecurityLevel) -> String {
+/// `configured` is Core's configured level without the stored state
+/// (`security_level_change::configured_level`), so a level lowered in
+/// `/security` since the start is seen.
+pub(crate) fn status_summary(requested: SecurityLevel, configured: SecurityLevel) -> String {
     if let Some(context) = super::level::context().filter(|context| context.picker_enabled) {
-        let core_next = crate::legacy_core::security_level_change::LevelBasis::read(
-            &context.codex_home,
-            requested,
-            /*thread*/ None,
-        )
-        .next_start;
-        let line = super::level::status_line(
-            context.active,
-            &super::level::load(&context.codex_home),
-            core_next,
-        );
-        return match &context.boundary {
-            Some(boundary) => format!("{line}; {}", boundary.summary()),
-            None => line,
-        };
+        return level_summary(context, configured);
     }
     format!(
         "Requested {}; effective protection unverified (/security)",
         profile_name(requested)
     )
 }
+
+/// The `/status` line under the flagged picker.
+fn level_summary(context: &super::level::LevelContext, configured: SecurityLevel) -> String {
+    let core_next = crate::legacy_core::security_level_change::LevelBasis::read(
+        &context.codex_home,
+        configured,
+        /*thread*/ None,
+    )
+    .next_start;
+    let line = super::level::status_line(
+        context.active,
+        &super::level::load(&context.codex_home),
+        core_next,
+    );
+    match &context.boundary {
+        Some(boundary) => format!("{line}; {}", boundary.summary()),
+        None => line,
+    }
+}
+
+#[cfg(test)]
+#[path = "view_tests.rs"]
+mod tests;

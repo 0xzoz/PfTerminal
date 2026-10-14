@@ -205,6 +205,29 @@ fn issue_750_a_live_session_takes_cores_rules_now_and_the_broker_at_restart() {
         list.contains("Saved: Moderate. Core's Moderate rules apply in this session now"),
         "{list}"
     );
+
+    // Back to Permissive before restarting: Core's Moderate stays on until
+    // the restart, so Permissive is not "active" yet.
+    picker.screen = Screen::Saved(Ok(TransitionOutcome {
+        level: ChosenLevel::Permissive,
+        core: None,
+    }));
+    picker.stored = StoredLevel::Chosen(ChosenLevel::Permissive);
+    picker.basis.next_start = SecurityLevel::Permissive;
+    let saved = text(&picker);
+    assert!(
+        saved.contains("Core's Moderate rules stay on in this session until you restart Corbanu Terminal; then Permissive applies."),
+        "{saved}"
+    );
+    assert!(
+        !saved.contains("Permissive is active in this session"),
+        "{saved}"
+    );
+    assert!(
+        picker.footer().contains("r restart now"),
+        "{}",
+        picker.footer()
+    );
 }
 
 /// Core refuses every model request under Moderate without the
