@@ -2468,7 +2468,7 @@ fn issue_651_well_known_shared_folders() {
     // A relative `TMPDIR`, or `/`, is never a shared folder.
     assert!(!is_well_known_shared_folder(
         Path::new("temp"),
-        None,
+        /*home*/ None,
         Path::new("temp")
     ));
     assert!(!is_well_known_shared_folder(
