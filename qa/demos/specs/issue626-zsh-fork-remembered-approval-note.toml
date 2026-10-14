@@ -1,6 +1,8 @@
 # #626 follow-up (Travis, 2026-10-13): with zsh-fork on, the prompt for a program
 # a command's script starts also says which remembered approval Aggressive
-# suspended.
+# suspended. Record it with a candidate laid out as a package whose
+# codex-resources/zsh/bin/zsh is the zsh-fork build
+# (codex-rs/app-server/tests/suite/zsh, a DotSlash file).
 id = "issue626-zsh-fork-remembered-approval-note"
 feature = "#626 follow-up: the suspended-approval note also appears for zsh-fork commands"
 expected = "With zsh-fork on, the person approves `touch remembered.txt` with \"don't ask again\" under Permissive. Under Aggressive the model runs `f=remembered.txt; touch \"$f\"`; the script's `touch` is intercepted and its prompt says the remembered approval was not applied because Aggressive is on."
@@ -8,12 +10,9 @@ model = "glm-5.3-flash"
 provider = "zai"
 cols = 120
 rows = 40
-setup = "cp \"$(dotslash -- fetch {run}/../../../../codex-rs/app-server/tests/suite/zsh)\" {home}/fork-zsh"
-setup_timeout = 300
 config = """
 suppress_unstable_features_warning = true
 approval_policy = "untrusted"
-zsh_path = "{home}/fork-zsh"
 
 [features]
 shell_zsh_fork = true
@@ -102,7 +101,7 @@ pause = 1.5
 [[steps]]
 key = "Enter"
 [[steps]]
-wait = "(?s)/touch remembered\\.txt.*Reason: A remembered approval.*was not\\s+applied"
+wait = "(?s)Reason: A remembered approval.*was not\\s+applied.*/touch remembered\\.txt"
 timeout = 120
 compress = 2
 [[steps]]
