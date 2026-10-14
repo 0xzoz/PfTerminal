@@ -1352,25 +1352,59 @@ fn legacy_label_registry_is_closed_to_low_integrity() {
     use windows_sys::Win32::Storage::FileSystem::FILE_EXECUTE;
     use windows_sys::Win32::Storage::FileSystem::FILE_READ_DATA;
     use windows_sys::Win32::Storage::FileSystem::FILE_WRITE_DATA;
+    use windows_sys::Win32::System::SystemServices::SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP;
+    use windows_sys::Win32::System::SystemServices::SYSTEM_MANDATORY_LABEL_NO_READ_UP;
+    use windows_sys::Win32::System::SystemServices::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP;
     let _guard = legacy_process_test_guard();
     let test_root = user_owned_test_root();
     let root = test_root.path().join("root");
     fs::create_dir_all(&root).expect("create root");
+    let canonical_root = dunce::canonicalize(&root).expect("canonical root");
     // A lease creates the registry and its files.
-    let lease = crate::integrity_leases::acquire(
-        &[dunce::canonicalize(&root).expect("canonical root")],
-        /*log_dir*/ None,
-    )
-    .expect("lease");
-    drop(lease);
+    drop(
+        crate::integrity_leases::acquire(
+            std::slice::from_ref(&canonical_root),
+            /*log_dir*/ None,
+        )
+        .expect("lease"),
+    );
     let parent = crate::integrity_leases::registry_parent_dir().expect("registry parent");
     let registry = parent.join("integrity-labels");
+    // A registry with an older label (no no-execute-up) is relabelled.
+    let older = crate::integrity::LabelAce {
+        flags: 0x3,
+        mask: SYSTEM_MANDATORY_LABEL_NO_WRITE_UP | SYSTEM_MANDATORY_LABEL_NO_READ_UP,
+        sid: "S-1-16-8192".to_string(),
+    };
+    for dir in [&parent, &registry] {
+        // SAFETY: relabels the registry folders this test's lease made.
+        unsafe { crate::integrity::set_explicit_labels(dir, std::slice::from_ref(&older)) }
+            .expect("set the older label");
+    }
+    drop(crate::integrity_leases::acquire(&[canonical_root], /*log_dir*/ None).expect("lease"));
+    for dir in [&parent, &registry] {
+        // SAFETY: reads the label of a registry folder.
+        let labels = unsafe { crate::integrity::read_explicit_labels(dir) }.expect("read label");
+        assert!(
+            labels
+                .iter()
+                .any(|ace| ace.mask & SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP != 0),
+            "{} was not relabelled: {labels:?}",
+            dir.display()
+        );
+    }
+    // Positive control: a Medium folder without no-execute-up can be held
+    // open for execute by a Low token.
+    assert!(
+        low_integrity_can_open(test_root.path(), FILE_EXECUTE, /*share*/ 0),
+        "the Low token can't open an ordinary Medium folder for execute"
+    );
     let mut opened = Vec::new();
     for path in [
-        parent.clone(),
-        registry.clone(),
         registry.join("registry.lock"),
         registry.join("labels.json"),
+        registry,
+        parent,
     ] {
         assert!(path.exists(), "{} is missing", path.display());
         for (name, access) in [
@@ -1507,9 +1541,10 @@ fn legacy_crashed_session_labels_are_repaired() {
 
     let repaired = crate::repair_stale_integrity_labels().expect("repair");
     let recorded = crate::integrity_leases::recorded_roots().expect("records");
+    // Another sweep (any legacy command of this user) may have repaired them
+    // first, so the count is not checked.
     assert_eq!(
         (
-            repaired >= 2,
             low_integrity_can_open_for_write(&crashed.join("file.txt")),
             low_integrity_can_open_for_write(&kept.join("file.txt")),
             labels(&crashed) == crashed_before,
@@ -1517,7 +1552,7 @@ fn legacy_crashed_session_labels_are_repaired() {
             recorded.contains(&canonical(&crashed)),
             recorded.contains(&canonical(&kept)),
         ),
-        (true, false, false, true, true, false, false),
+        (false, false, true, true, false, false),
         "repaired {repaired}: {recorded:?}"
     );
 

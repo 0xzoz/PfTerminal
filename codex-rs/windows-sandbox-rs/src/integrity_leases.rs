@@ -183,10 +183,14 @@ impl IntegrityLease {
     /// away when none does, so a caller that reports the exit afterwards
     /// finds the labels back; otherwise, when `descendants_preserved` (the
     /// command exited and left processes running on purpose), on a thread of
-    /// its own when the last of them exits. Without it (the job was
-    /// terminated, or still kills its processes when its handle closes), the
-    /// lease ends after a short wait and holds no reference to the job.
+    /// its own when the last of them exits. Without it (the job timed out, or
+    /// still kills its processes when its handle closes), what is left of the
+    /// job is ended now, so nothing Low keeps running in the roots while
+    /// their label is put back, and the release keeps no reference to the job.
     pub(crate) fn release_after_job(self, job: Arc<JobObject>, descendants_preserved: bool) {
+        if !descendants_preserved {
+            let _ = job.terminate();
+        }
         if wait_for_empty_job(&job, Duration::from_secs(/*secs*/ 2)) || !descendants_preserved {
             drop(self);
             return;
@@ -444,7 +448,7 @@ fn load_labels(registry: &Path) -> Result<Labels> {
     match std::fs::read(&path) {
         Ok(bytes) => serde_json::from_slice(&bytes).with_context(|| {
             format!(
-                "{} is damaged, so the Windows sandbox doesn't know which folders' integrity labels to put back; remove it, and give each writable root you used a Medium label again (icacls <folder> /setintegritylevel (OI)(CI)M)",
+                "{} is damaged, so the Windows sandbox doesn't know which folders' integrity labels to put back; remove it, and give each writable root you used (%TEMP% included, and any nested root) a Medium label again (icacls <folder> /setintegritylevel (OI)(CI)M)",
                 path.display()
             )
         }),
