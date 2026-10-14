@@ -122,6 +122,11 @@ fn issue_737_740_config_writers_and_understood_commands() {
         "bash -c 'sed -n \"$1\" notes.txt' _ '1w x'",
         "sed '1w x' -e p notes.txt",
         "sed -l '1w x' p notes.txt",
+        // Review r2: an operand or script a shell expands, or a glob.
+        "f=-e1w.githooks/pre-commit; sed -n 1p \"$f\" notes.txt",
+        "bash -c 'sed -n 1p \"$1\" notes.txt' _ -e1wx",
+        "sed -n \"$@\" notes.txt",
+        "sed -n 1p *.txt",
         "arch -arm64 sh -c 'echo x > .githooks/pre-commit'",
         "bash script.sh",
         "python3 -c 'open(\"x\", \"w\")'",

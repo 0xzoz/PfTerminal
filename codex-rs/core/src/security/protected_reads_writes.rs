@@ -290,6 +290,11 @@ fn sed_scripts<'a>(arguments: &[&'a str]) -> Option<Vec<&'a str>> {
                 }
             }
         } else {
+            // Review r2: an operand a shell expands (`"$f"` holding
+            // `-e1wx`) or a glob may become an option or a script.
+            if word.contains(['$', '*', '?', '[']) {
+                return None;
+            }
             operands.push(word);
         }
     }
@@ -301,9 +306,11 @@ fn sed_scripts<'a>(arguments: &[&'a str]) -> Option<Vec<&'a str>> {
 
 /// #789: whether a `sed` script only selects lines by number and prints,
 /// deletes, lists or counts them, or quits: no `w` (write), `e` (run), `r`
-/// (read) or substitution, whose flags could write or run. A `$` that a
-/// shell may have expanded (`"$p"`, `${p}`) is refused too, since the text
-/// no longer shows whether it was quoted; so is `$p` (the last line).
+/// (read) or substitution, whose flags could write or run. A `$` is the
+/// last line only where a shell would leave it alone (`$=`, `$!N`, `1,$`);
+/// one a shell may have expanded (`"$p"`, `${p}`, `$@`) is refused, since
+/// the text no longer shows whether it was quoted; so is `$p` (the last
+/// line).
 fn sed_script_only_reads(script: &str) -> bool {
     let chars: Vec<char> = script.chars().collect();
     !script.trim().is_empty()
@@ -313,7 +320,7 @@ fn sed_script_only_reads(script: &str) -> bool {
                 || (*c == '$'
                     && chars
                         .get(index + 1)
-                        .is_none_or(|next| !(next.is_alphanumeric() || matches!(next, '_' | '{'))))
+                        .is_none_or(|next| next.is_whitespace() || ",;!=}".contains(*next)))
         })
 }
 
