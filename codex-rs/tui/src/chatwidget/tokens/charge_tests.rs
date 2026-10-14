@@ -212,11 +212,26 @@ fn openrouter_day() -> Vec<InspectorPage> {
     let byok = openrouter_body(serde_json::json!({"cost": 0.000005, "is_byok": true}));
     let unlisted_charged = openrouter_body(serde_json::json!({"cost": 5e-5}));
     inspection_pages(Ok(day(vec![
-        attempt(1, "x-ai/grok-4.7", /*catalogue*/ true, &charged),
-        attempt(2, "minimax/minimax-m3", /*catalogue*/ true, &byok),
-        attempt(3, "some/unlisted-model", /*catalogue*/ false, &silent),
         attempt(
-            4,
+            /*id*/ 1,
+            "x-ai/grok-4.7",
+            /*catalogue*/ true,
+            &charged,
+        ),
+        attempt(
+            /*id*/ 2,
+            "minimax/minimax-m3",
+            /*catalogue*/ true,
+            &byok,
+        ),
+        attempt(
+            /*id*/ 3,
+            "some/unlisted-model",
+            /*catalogue*/ false,
+            &silent,
+        ),
+        attempt(
+            /*id*/ 4,
             "moonshotai/kimi-k3",
             /*catalogue*/ false,
             &unlisted_charged,
@@ -429,8 +444,13 @@ fn partly_priced(id: u128) -> ObservationQuote {
 fn charge_and_estimate_parts_add_up_with_a_partly_priced_attempt() {
     let charged = openrouter_body(serde_json::json!({"cost": 0.000123}));
     let pages = inspection_pages(Ok(day(vec![
-        attempt(1, "x-ai/grok-4.7", /*catalogue*/ true, &charged),
-        partly_priced(2),
+        attempt(
+            /*id*/ 1,
+            "x-ai/grok-4.7",
+            /*catalogue*/ true,
+            &charged,
+        ),
+        partly_priced(/*id*/ 2),
     ])));
     assert!(
         has(
@@ -461,7 +481,7 @@ fn charge_and_estimate_parts_add_up_with_a_partly_priced_attempt() {
 fn a_zero_charge_is_a_stated_cost() {
     let free = openrouter_body(serde_json::json!({"cost": 0}));
     let pages = inspection_pages(Ok(day(vec![attempt(
-        1,
+        /*id*/ 1,
         "tencent/hy3:free",
         /*catalogue*/ false,
         &free,
@@ -479,7 +499,7 @@ fn a_zero_charge_is_a_stated_cost() {
 #[test]
 fn a_refused_openrouter_attempt_has_no_price_basis() {
     let mut refused = attempt(
-        1,
+        /*id*/ 1,
         "x-ai/grok-4.7",
         /*catalogue*/ true,
         &openrouter_body(serde_json::json!({"cost": 0.5})),
@@ -510,7 +530,12 @@ fn other_conversations_and_ranges_use_the_charge() {
     let InspectionDay::Ready(mut view) = day(Vec::new()) else {
         unreachable!()
     };
-    let mut other = attempt(9, "x-ai/grok-4.7", /*catalogue*/ true, &charged);
+    let mut other = attempt(
+        /*id*/ 9,
+        "x-ai/grok-4.7",
+        /*catalogue*/ true,
+        &charged,
+    );
     other.attempt.thread_id = ThreadId::from_string(&Uuid::from_u128(2).to_string()).unwrap();
     view.other_conversations = Some(OtherConversations {
         conversations: 1,
@@ -528,9 +553,14 @@ fn other_conversations_and_ranges_use_the_charge() {
     );
 
     let InspectionDay::Ready(view) = day(vec![
-        attempt(1, "x-ai/grok-4.7", /*catalogue*/ true, &charged),
         attempt(
-            2,
+            /*id*/ 1,
+            "x-ai/grok-4.7",
+            /*catalogue*/ true,
+            &charged,
+        ),
+        attempt(
+            /*id*/ 2,
             "minimax/minimax-m3",
             /*catalogue*/ true,
             &openrouter_body(serde_json::json!({})),
@@ -571,7 +601,12 @@ fn other_conversations_and_ranges_use_the_charge() {
 #[test]
 fn a_refused_attempt_beside_a_charge_adds_no_estimate_part() {
     let charged = openrouter_body(serde_json::json!({"cost": 0.000123}));
-    let mut refused = attempt(2, "x-ai/grok-4.7", /*catalogue*/ true, &charged);
+    let mut refused = attempt(
+        /*id*/ 2,
+        "x-ai/grok-4.7",
+        /*catalogue*/ true,
+        &charged,
+    );
     refused.usage = Usage {
         refused_status: Some(401),
         ..Usage::default()
@@ -580,7 +615,12 @@ fn a_refused_attempt_beside_a_charge_adds_no_estimate_part() {
     refused.known_subtotal = Decimal::default();
     refused.all_buckets_priced = Some(Decimal::default());
     let pages = inspection_pages(Ok(day(vec![
-        attempt(1, "x-ai/grok-4.7", /*catalogue*/ true, &charged),
+        attempt(
+            /*id*/ 1,
+            "x-ai/grok-4.7",
+            /*catalogue*/ true,
+            &charged,
+        ),
         refused,
     ])));
     let screen = first_screen(&pages[0]);
@@ -599,13 +639,18 @@ fn a_refused_attempt_beside_a_charge_adds_no_estimate_part() {
 #[test]
 fn openrouter_attempt_priced_in_part_is_a_lower_bound_estimate() {
     let silent = openrouter_body(serde_json::json!({}));
-    let mut partial = attempt(1, "x-ai/grok-4.7", /*catalogue*/ true, &silent);
+    let mut partial = attempt(
+        /*id*/ 1,
+        "x-ai/grok-4.7",
+        /*catalogue*/ true,
+        &silent,
+    );
     partial.usage.output = None;
     partial.buckets[3] = BucketQuote::MissingUsage;
     partial.known_subtotal = decimal("0.00041");
     partial.all_buckets_priced = None;
     let mut charged = attempt(
-        2,
+        /*id*/ 2,
         "x-ai/grok-4.7",
         /*catalogue*/ true,
         &openrouter_body(serde_json::json!({"cost": 0.000123})),
