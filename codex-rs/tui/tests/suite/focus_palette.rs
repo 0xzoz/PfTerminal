@@ -129,7 +129,7 @@ impl PtyCodex {
                     return Err(std::io::Error::last_os_error());
                 }
                 let unused_argument: libc::c_int = 0;
-                if libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY, unused_argument) == -1 {
+                if libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY as _, unused_argument) == -1 {
                     return Err(std::io::Error::last_os_error());
                 }
                 Ok(())
