@@ -623,3 +623,37 @@ fn issue_744_the_refusal_is_logged_with_its_check() {
     assert!(recent.contains(&protected), "{recent:?}");
     assert!(recent.contains(&timeout), "{recent:?}");
 }
+
+/// #744 follow-up (review): the log shows a command-derived target as the
+/// refusal does: control characters escaped and at most 200 characters.
+#[test]
+fn issue_744_the_logged_target_is_escaped_and_bounded() {
+    let buffer: &'static std::sync::Mutex<Vec<u8>> =
+        Box::leak(Box::new(std::sync::Mutex::new(Vec::new())));
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(tracing_test::internal::MockWriter::new(buffer))
+        .finish();
+    let target = format!("x\nWARN forged line\u{1b}[31m{}", "a".repeat(300));
+    let landed =
+        AbsolutePathBuf::from_absolute_path(std::env::temp_dir().join(&target)).expect("absolute");
+    let kept = AbsolutePathBuf::from_absolute_path(std::env::temp_dir()).expect("absolute");
+    tracing::subscriber::with_default(subscriber, || {
+        log_refusal(
+            &Refused {
+                target: target.clone(),
+                by: RefusedBy::ProtectedTarget { landed, kept },
+            },
+            std::time::Duration::from_millis(1),
+        );
+    });
+    let logs = String::from_utf8(buffer.lock().expect("buffer").clone()).expect("utf8");
+    assert_eq!(logs.lines().count(), 1, "{logs}");
+    assert!(!logs.contains('\u{1b}'), "{logs}");
+    assert!(
+        logs.contains(&format!("target={}", shown_path(&target))),
+        "{logs}"
+    );
+    assert!(shown_path(&target).chars().count() <= 201);
+    assert!(!logs.contains(&"a".repeat(250)), "{logs}");
+}

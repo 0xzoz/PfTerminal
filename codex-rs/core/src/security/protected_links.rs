@@ -193,15 +193,20 @@ const RECENT_LIMIT: usize = 16;
 static RECENT_REFUSALS: std::sync::Mutex<std::collections::VecDeque<String>> =
     std::sync::Mutex::new(std::collections::VecDeque::new());
 
-/// Logs which check refused a command and keeps it among the latest (the
-/// command's text is not logged).
+/// Logs which check refused a command and keeps it among the latest. The
+/// command's text is not logged; its target and where it landed are shown
+/// as the refusal shows the target (escaped and bounded, `shown_path`).
 fn log_refusal(refused: &Refused, elapsed: std::time::Duration) {
-    let mut detail = format!("refused_by={} target={}", refused.by.name(), refused.target);
+    let mut detail = format!(
+        "refused_by={} target={}",
+        refused.by.name(),
+        shown_path(&refused.target)
+    );
     if let RefusedBy::ProtectedTarget { landed, kept } = &refused.by {
         detail.push_str(&format!(
             " landed={} kept={}",
-            landed.as_path().display(),
-            kept.as_path().display()
+            shown_path(&landed.as_path().to_string_lossy()),
+            shown_path(&kept.as_path().to_string_lossy())
         ));
     }
     detail.push_str(&format!(" elapsed_ms={}", elapsed.as_millis()));
@@ -463,7 +468,7 @@ fn landing(
                             && folder.as_path().starts_with(kept.as_path())
                     })
             })
-            .map(|kept| (spelling.clone(), kept.clone()))
+            .map(|kept| (spelling, kept.clone()))
     })
 }
 
