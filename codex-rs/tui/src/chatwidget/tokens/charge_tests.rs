@@ -677,3 +677,143 @@ fn openrouter_attempt_priced_in_part_is_a_lower_bound_estimate() {
         partial_page.text
     );
 }
+
+/// `quote` as an attempt on `provider`, charged `charge` if any.
+fn on(provider: &str, charge: Option<&str>, mut quote: ObservationQuote) -> ObservationQuote {
+    quote.attempt.provider = provider.into();
+    quote.usage.billed_usd = charge.map(decimal);
+    quote
+}
+
+/// Travis, 2026-10-14: the Vercel AI Gateway and the Corbanu API report what
+/// they charged with each response, so their requests are priced from that
+/// charge by the same rule as OpenRouter's, with the catalogue rate as a
+/// labelled estimate when no charge was reported.
+#[test]
+fn vercel_and_corbanu_api_requests_are_priced_from_their_charge() {
+    for (provider, name, field) in [
+        ("vercel", "Vercel", "gatewayCost"),
+        ("pfterminal-plan", "Corbanu API", "usage.corbanu_charge_usd"),
+        (
+            "pfterminal-plan-anthropic",
+            "Corbanu API",
+            "usage.corbanu_charge_usd",
+        ),
+    ] {
+        let silent = openrouter_body(serde_json::json!({}));
+        let pages = inspection_pages(Ok(day(vec![
+            on(
+                provider,
+                Some("0.000123"),
+                attempt(
+                    /*id*/ 1,
+                    "charged/model",
+                    /*catalogue*/ true,
+                    &silent,
+                ),
+            ),
+            on(
+                provider,
+                None,
+                attempt(
+                    /*id*/ 2,
+                    "silent/model",
+                    /*catalogue*/ true,
+                    &silent,
+                ),
+            ),
+        ])));
+        let charged = request_page(&pages, "charged/model");
+        assert!(
+            has(charged, &format!("Cost: $0.000123, charged by {name}")),
+            "{provider}: {:#?}",
+            charged.text
+        );
+        assert!(
+            has(
+                charged,
+                &format!("Price basis: the charge {name} reported with the response ({field})")
+            ),
+            "{provider}: {:#?}",
+            charged.text
+        );
+        // The charge is the cost, so it is not repeated as a second figure.
+        assert!(
+            !charged
+                .text
+                .iter()
+                .any(|line| line.starts_with("Billed by provider:")),
+            "{provider}: {:#?}",
+            charged.text
+        );
+        let attempt_page = &pages[charged.links[0].1];
+        assert!(
+            has(
+                attempt_page,
+                &format!(
+                    "Published-price estimate (not used — {name} reported its charge): $0.000710"
+                )
+            ),
+            "{provider}: {:#?}",
+            attempt_page.text
+        );
+        assert!(has(attempt_page, "Known subtotal exact USD: 0.000123"));
+        let estimated = request_page(&pages, "silent/model");
+        assert!(
+            has(estimated, "Estimated cost: $0.000710"),
+            "{provider}: {:#?}",
+            estimated.text
+        );
+        assert!(
+            has(
+                estimated,
+                &format!(
+                    "Price basis: estimate from published prices — {name} reported no charge for this response"
+                )
+            ),
+            "{provider}: {:#?}",
+            estimated.text
+        );
+        // The day is the charge plus the estimate, never the charged
+        // request's catalogue estimate.
+        assert!(
+            has(&pages[0], "Known subtotal exact USD: 0.000833"),
+            "{provider}: {:#?}",
+            pages[0].text
+        );
+    }
+}
+
+/// Charges from several routes on one screen name every route they came from.
+#[test]
+fn charges_from_several_routes_name_each_provider() {
+    let silent = openrouter_body(serde_json::json!({}));
+    let pages = inspection_pages(Ok(day(vec![
+        on(
+            "openrouter",
+            Some("0.0001"),
+            attempt(/*id*/ 1, "a/model", /*catalogue*/ true, &silent),
+        ),
+        on(
+            "vercel",
+            Some("0.0002"),
+            attempt(/*id*/ 2, "b/model", /*catalogue*/ true, &silent),
+        ),
+    ])));
+    let screen = first_screen(&pages[0]);
+    for line in [
+        "• OpenRouter · a/model — Pay per use. 1 request, 110 tokens. Cost: $0.000100, charged by OpenRouter.",
+        "• Vercel · b/model — Pay per use. 1 request, 110 tokens. Cost: $0.000200, charged by Vercel.",
+        "Costs marked \"charged by\" a provider (OpenRouter and Vercel) are the charges that provider reported with those responses.",
+    ] {
+        assert!(screen.contains(&line.to_string()), "{line}\n{screen:#?}");
+    }
+    assert!(
+        has(
+            &pages[0],
+            "Token cost for recorded attempts: $0.000300, charged by OpenRouter and Vercel"
+        ),
+        "{:#?}",
+        pages[0].text
+    );
+}

@@ -456,6 +456,85 @@ pub(super) fn chat_original(
     )
 }
 
+/// Moonshot's published prices on its Kimi Open Platform
+/// (`https://api.moonshot.ai/v1`), in milli-USD per million tokens: (model,
+/// input, cached input, cache write, output). Source:
+/// platform.kimi.ai/docs/pricing/chat (platform.moonshot.ai redirects there),
+/// read 2026-10-14; the reading is kept in
+/// qa/portfolio/agent-cost-accounting/issue-368/data/.
+///
+/// Cache writes:
+/// - K3 bills them by the cache lifetime the request asks for:
+///   $3.00 for five minutes, $6.00 for one hour. A request that names no
+///   lifetime gets five minutes, and this client never names one (its Chat
+///   Completions body has no `prompt_cache_options`), so every request it
+///   sends is priced at the five-minute rate.
+/// - K2 rows state only a cache-hit and a cache-miss price. A token written
+///   to the cache was not served from it, so it is billed as a miss: the
+///   input price.
+///
+/// The API reports cache reads and writes as separate parts of
+/// `prompt_tokens` (platform.kimi.ai/docs/api/chat, usage fields).
+const MOONSHOT_OPEN_PLATFORM_RATES: [(&str, u32, u32, u32, u32); 4] = [
+    ("kimi-k3", 3_000, 300, 3_000, 15_000),
+    ("kimi-k2.7-code", 950, 190, 950, 4_000),
+    ("kimi-k2.7-code-highspeed", 1_900, 380, 1_900, 8_000),
+    ("kimi-k2.6", 950, 160, 950, 4_000),
+];
+
+/// The cache lifetime this client's requests get on the Moonshot route: none
+/// is named, so the operator's default applies.
+const MOONSHOT_CACHE_TTL: &str = "cache_write_5m";
+
+/// Rates the operator of `route` publishes for `model`, for a request a
+/// user-configured provider sent there on an API key. Nothing for a model the
+/// published table does not list.
+pub(super) fn route_original(
+    route: crate::config::PricedRoute,
+    model: &str,
+    provider: &str,
+    scope: Uuid,
+    accepted_at: i64,
+) -> anyhow::Result<Vec<Snapshot>> {
+    let (table, endpoint) = match route {
+        crate::config::PricedRoute::MoonshotOpenPlatform => {
+            (&MOONSHOT_OPEN_PLATFORM_RATES, "https://api.moonshot.ai/v1")
+        }
+    };
+    let Some(&(_, input, read, write, output)) = table.iter().find(|(slug, ..)| *slug == model)
+    else {
+        return Ok(Vec::new());
+    };
+    // The provider id is the user's name for the route, so it is not part of
+    // the price identity: the same route and model are the same price.
+    let reference = serde_json::to_vec(&(
+        "route-published-v1",
+        endpoint,
+        model,
+        "api_key",
+        "USD/million",
+        input,
+        read,
+        (MOONSHOT_CACHE_TTL, write),
+        output,
+    ))?;
+    snapshot(
+        model,
+        provider,
+        scope,
+        accepted_at,
+        Rates {
+            noncached: Some(rate(input)?),
+            read: Some(rate(read)?),
+            write: Some(rate(write)?),
+            output: Some(rate(output)?),
+        },
+        reference,
+        Basis::Billed,
+        /*plan_burn_millis*/ None,
+    )
+}
+
 pub(super) fn anthropic_original(
     model: &str,
     provider: &str,

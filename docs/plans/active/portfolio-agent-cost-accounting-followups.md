@@ -7,7 +7,7 @@ owner: "Codex accounting lane; Travis Good accepts"
 parallel_sprint_limit: 1
 integration_owner: "Codex coordinator"
 activation_authority: "Travis Good"
-activation_basis: "Travis, 2026-10-10: accept PF-60-S04's remaining gaps on condition that each is carried into a future sprint. Travis, 2026-10-14 (decision 29): start PF-60-S06 to S10 after the Moderate picker sprint. Activated in slot 2, freed when the coordinator's worker closed the provider-onboarding plan (PF-84 sprints all archived); Travis's confirmation of that closing is pending."
+activation_basis: "Travis, 2026-10-10: accept PF-60-S04's remaining gaps on condition that each is carried into a future sprint. Travis, 2026-10-14 (decision 29): start PF-60-S06 to S10 after the Moderate picker sprint. Activated in slot 2, freed when the coordinator's worker closed the provider-onboarding plan (PF-84 sprints all archived); Travis confirmed that closing on 2026-10-14 (#574)."
 target_release: "TBD"
 deadline: "TBD (S07's Sol promotion end landed in #762 before 2026-11-21)"
 created: 2026-10-10
@@ -20,6 +20,9 @@ implementation_worktrees:
   - path: "/Volumes/CorbanuDrive/Corbanu/worktrees/pf60-s06"
     branch: "pf60-s06-side-attribution"
     base_commit: "ecb9069c4b3e0bdb20cb88d520fc8b54745cea34"
+  - path: "/Volumes/CorbanuDrive/Corbanu/worktrees/pf60-s07"
+    branch: "pf60-s07/moonshot-route-pricing"
+    base_commit: "df3d8c5d1c521228a8dbb1035831af572afe1284"
 ---
 
 # Accounting follow-ups after PF-60
@@ -35,7 +38,8 @@ Policy: repository-root `AGENTS.md`. Lifecycle: [plans](../index.md). Predecesso
   (done: #764, #781). All three slots were full; the coordinator's worker closed the
   [provider-onboarding plan](../completed/main-2026-10-14-unified-provider-auth.md), whose PF-84 sprints were all
   accepted and archived, to free slot 2, and moved its flag-removal work to a
-  [draft plan](../proposed/named-accounts-flag-removal.md). Travis's confirmation of that closing is pending.
+  [draft plan](../proposed/named-accounts-flag-removal.md). Travis confirmed that closing on 2026-10-14 (comment on
+  #574).
 - Source: Travis's 2026-10-10 decisions when accepting [PF-60-S04](../../sprints/archive/portfolio-agent-cost-accounting/pf-60-s04-cost-accounting-acceptance-and-handoff.md):
   accept the remaining gaps (i)–(viii) but make sure each is covered by a future sprint.
 - Gate: Travis activates the plan (or authorises single sprints as bounded fixes), and decides the open questions below.
@@ -89,6 +93,7 @@ here and in the sprint before it becomes `ready`.
 | Owner | Worktree | Branch | Base commit | Scope |
 | --- | --- | --- | --- | --- |
 | Codex worker `pf60-s06` | `/Volumes/CorbanuDrive/Corbanu/worktrees/pf60-s06` | `pf60-s06-side-attribution` | `ecb9069c4b3e0bdb20cb88d520fc8b54745cea34` | PF-60-S06 (lane `accounting`) |
+| Codex worker `pf60-next` | `/Volumes/CorbanuDrive/Corbanu/worktrees/pf60-s07` | `pf60-s07/moonshot-route-pricing` | `df3d8c5d1c521228a8dbb1035831af572afe1284` | PF-60-S07 (lane `accounting`) |
 
 ## Useful code references
 
@@ -162,8 +167,12 @@ Finished-feature docs change only if Travis authorises shipping `/cost`; until t
 - **Decided:** activation (Travis, 2026-10-14; slot 2); S07's OpenRouter rule (Travis, 2026-10-14: the reported
   charge first, the catalogue rate as a labelled estimate, else "no price"; PR #784); the Sol promotion end landed as
   a bounded fix (#762).
-- **Decisions for Travis:** S08's warm-up choice (avoid or show; recommendation in the sprint); S09's ChatGPT test
-  account and TensorCash access; S07's Moonshot/BigModel route-keyed pricing (new accounting code).
+- **Decided 2026-10-14 (Travis, all as recommended):** S06 accepted as limited testing (S10 runs it code-blind); the
+  PF-84 plan closing confirmed; S07 prices Moonshot by route first (BigModel deferred) and prices Vercel and Corbanu
+  API requests from their reported charges, as OpenRouter's; #786 option (a), a reasoning count above the output count
+  is recorded as not reported; S08 takes #403 option (C), the reopen warm-up shown in `/cost` and on reopen with a
+  setting to skip it (off by default); S09 verifies ChatGPT login with a mock sign-in server only, records TensorCash
+  as not applicable until access is granted, and runs image generation and realtime for real on an OpenAI API key.
 - **Isolation infrastructure** (S10) is shared with P1 security's milestone runs; reuse it rather than build twice.
 - **Open accounting issues not assigned here** (Travis to place or leave): #352 `/cost` display nits, #359 busy state
   DB waits, #325 `/cost` leftovers, #324 delete-time retention sweep, #314 invisible unrecorded gaps, #290

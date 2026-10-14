@@ -648,3 +648,224 @@ async fn account_fingerprint_without_a_vault_is_name_only_and_creates_nothing() 
     );
     assert_eq!(std::fs::read_dir(home.path()).expect("home").count(), 0);
 }
+
+/// #368 (Travis, 2026-10-14): a provider the user configured at Moonshot's Kimi
+/// Open Platform is priced from Moonshot's published rates, looked up by the
+/// route it used, whatever the user named it. Anything this client cannot
+/// attribute to that route on an API key keeps no rate.
+#[test]
+fn moonshot_route_is_priced_by_the_route() {
+    use crate::config::PricedRoute;
+    let custom = |wire_api| ModelProviderInfo {
+        name: "kimi".into(),
+        env_key: Some("MOONSHOT_API_KEY".into()),
+        wire_api,
+        ..ModelProviderInfo::default()
+    };
+    let chat = custom(codex_model_provider_info::WireApi::Chat);
+    let mut header_key = chat.clone();
+    header_key.http_headers = Some(
+        [("Authorization".to_string(), "Bearer elsewhere".to_string())]
+            .into_iter()
+            .collect(),
+    );
+    let mut declared = chat.clone();
+    declared.billing = Some(BillingBasis::PayPerUse);
+    let moonshot = "https://api.moonshot.ai/v1";
+    let cases = [
+        (
+            "kimi",
+            &chat,
+            moonshot,
+            (
+                PriceAuthority::RouteRates(PricedRoute::MoonshotOpenPlatform),
+                BasisSource::BuiltIn,
+            ),
+        ),
+        (
+            "my-moonshot",
+            &chat,
+            "https://api.moonshot.ai/v1/",
+            (
+                PriceAuthority::RouteRates(PricedRoute::MoonshotOpenPlatform),
+                BasisSource::BuiltIn,
+            ),
+        ),
+        (
+            "kimi",
+            &declared,
+            moonshot,
+            (
+                PriceAuthority::RouteRates(PricedRoute::MoonshotOpenPlatform),
+                BasisSource::UserConfig,
+            ),
+        ),
+        // A credential in a configured header is not one this client can
+        // attribute to the account the published price is for.
+        (
+            "kimi",
+            &header_key,
+            moonshot,
+            (PriceAuthority::Unavailable, BasisSource::BuiltIn),
+        ),
+        // The rates are quoted for Chat Completions only.
+        (
+            "kimi",
+            &custom(codex_model_provider_info::WireApi::Responses),
+            moonshot,
+            (PriceAuthority::Unavailable, BasisSource::BuiltIn),
+        ),
+        // Another route Moonshot runs is not declared, so not priced.
+        (
+            "kimi",
+            &chat,
+            "https://api.moonshot.ai/anthropic",
+            (PriceAuthority::Undeclared, BasisSource::BuiltIn),
+        ),
+    ];
+    for (id, provider, endpoint, expected) in cases {
+        assert_eq!(
+            bound(id, provider, /*auth*/ None, endpoint),
+            expected,
+            "{id} at {endpoint}"
+        );
+    }
+}
+
+/// #368: admission on the Moonshot route binds Moonshot's published rates for
+/// a model it lists, five-minute cache writes included, and no rate for one it
+/// does not; the provider's name is not part of the price identity. A usage
+/// report in Moonshot's documented shape then prices exactly: cache reads and
+/// writes are separate parts of `prompt_tokens`.
+#[tokio::test(flavor = "current_thread")]
+async fn moonshot_route_admission_binds_published_rates() -> anyhow::Result<()> {
+    let home = tempfile::tempdir()?;
+    let db = StateRuntime::init(
+        SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(home.path())?),
+        "kimi".into(),
+    )
+    .await?;
+    let owner = ThreadId::new();
+    db.upsert_thread(
+        &ThreadMetadataBuilder::new(
+            owner,
+            home.path().join("moonshot.jsonl"),
+            chrono::Utc::now(),
+            SessionSource::Cli,
+        )
+        .build("kimi"),
+    )
+    .await?;
+    let day = chrono::Utc::now().timestamp_millis() / 86_400_000;
+    let rates = |input: &str, read: &str, write: &str, output: &str| Rates {
+        noncached: Some(input.to_string().try_into().unwrap()),
+        read: Some(read.to_string().try_into().unwrap()),
+        write: Some(write.to_string().try_into().unwrap()),
+        output: Some(output.to_string().try_into().unwrap()),
+    };
+    let cases = [
+        (
+            "kimi",
+            "kimi-k3",
+            Some(rates("3.000", "0.300", "3.000", "15.000")),
+        ),
+        (
+            "my-moonshot",
+            "kimi-k3",
+            Some(rates("3.000", "0.300", "3.000", "15.000")),
+        ),
+        (
+            "kimi",
+            "kimi-k2.6",
+            Some(rates("0.950", "0.160", "0.950", "4.000")),
+        ),
+        ("kimi", "kimi-k9-unlisted", None),
+    ];
+    let mut references = Vec::new();
+    for (index, (provider, model, expected)) in cases.into_iter().enumerate() {
+        let mode = AccountingMode::Provider {
+            scope: Uuid::new_v4(),
+            provider_id: provider.into(),
+            wire_api: codex_model_provider_info::WireApi::Chat,
+            approved_endpoint: "https://api.moonshot.ai/v1".into(),
+            approved_query: None,
+            pricing: PriceAuthority::RouteRates(crate::config::PricedRoute::MoonshotOpenPlatform),
+            basis_source: BasisSource::BuiltIn,
+            account: None,
+        };
+        let turn = format!("moonshot-{index}");
+        let sampling = Sampling::start(db.clone(), owner, turn.clone(), &mode).await?;
+        let attempt = sampling
+            .admit(model, "https://api.moonshot.ai/v1/chat/completions")
+            .await?;
+        let body = serde_json::json!({
+            "id": "chatcmpl-moonshot",
+            "object": "chat.completion",
+            "model": model,
+            "choices": [{"index": 0, "finish_reason": "stop",
+                "message": {"role": "assistant", "content": "ok"}}],
+            "usage": {
+                "prompt_tokens": 10000,
+                "completion_tokens": 500,
+                "total_tokens": 10500,
+                "cached_tokens": 2000,
+                "prompt_tokens_details": {"cached_tokens": 2000, "cache_write_tokens": 7168}
+            }
+        });
+        let usage = codex_api::chat_body_usage(&serde_json::to_vec(&body)?)
+            .map_err(|_| anyhow::anyhow!("Moonshot usage must parse"))?
+            .expect("the body reports usage");
+        sampling
+            .observe_patch(
+                &attempt,
+                Uuid::new_v4(),
+                /*position*/ 1,
+                chat::patch(usage, provider, sampling.route)?,
+            )
+            .await?;
+        let codex_state::accounting::InspectionDay::Ready(view) =
+            codex_state::accounting::AccountingStore::inspect_day(
+                &db,
+                owner,
+                day,
+                chrono::Utc::now().timestamp_millis(),
+            )
+            .await?
+        else {
+            panic!("expected the day");
+        };
+        let quote = view
+            .requests
+            .values()
+            .flatten()
+            .find(|quote| quote.attempt.turn == turn)
+            .expect("the attempt is recorded");
+        let snapshot = quote.snapshot.clone().expect("every attempt binds a basis");
+        // K3: 832 uncached at $3/M, 2,000 cached at $0.30/M, 7,168 written at
+        // $3/M (five minutes), 500 output at $15/M. K2.6: 832 at $0.95/M,
+        // 2,000 at $0.16/M, 7,168 written billed as misses at $0.95/M, 500 at
+        // $4/M. An unlisted model has no price.
+        let expected_cost = match model {
+            "kimi-k3" => Some("0.0321"),
+            "kimi-k2.6" => Some("0.00992"),
+            _ => None,
+        };
+        assert_eq!(
+            quote.all_buckets_priced,
+            expected_cost.map(|cost| cost.to_string().try_into().unwrap()),
+            "{provider} {model}"
+        );
+        assert_eq!(snapshot.basis, Basis::Billed, "{provider} {model}");
+        assert_eq!(
+            snapshot.rates,
+            expected.unwrap_or_default(),
+            "{provider} {model}"
+        );
+        if model == "kimi-k3" {
+            references.push(snapshot.source_reference);
+        }
+    }
+    assert_eq!(references.len(), 2);
+    assert_eq!(references[0], references[1]);
+    Ok(())
+}

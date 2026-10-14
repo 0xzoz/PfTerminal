@@ -2991,15 +2991,21 @@ fn accounting_inspect_reads_plainly_for_every_provider() {
     }
     let labels: Vec<_> = pages[0].links.iter().map(|(l, _)| l.as_str()).collect();
     let billed = money(decimal("0.002246"));
-    for route in [
-        "Corbanu API · corbanu/glm-5.3-flash",
-        "DeepSeek · deepseek-chat",
-    ] {
-        assert!(
-            labels.contains(&format!("{route} — billed {billed} (1 request)").as_str()),
-            "{labels:?}"
-        );
-    }
+    assert!(
+        labels
+            .contains(&format!("DeepSeek · deepseek-chat — billed {billed} (1 request)").as_str()),
+        "{labels:?}"
+    );
+    // The Corbanu API's reported charge is the cost (Travis, 2026-10-14).
+    assert!(
+        labels.contains(
+            &format!(
+                "Corbanu API · corbanu/glm-5.3-flash — {billed}, charged by Corbanu API (1 request)"
+            )
+            .as_str()
+        ),
+        "{labels:?}"
+    );
     assert!(
         labels.contains(&"OpenRouter · some/unlisted-model — no price available (1 request)")
             || labels

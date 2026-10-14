@@ -743,6 +743,15 @@ pub(crate) fn turn_mode(
                 && !credential_header(&provider.env_http_headers);
             if own_route && attributable {
                 PriceAuthority::ApiKeyRates
+            } else if let Some(route) = crate::config::PricedRoute::at(resolved_endpoint)
+                && attributable
+                && provider.wire_api == codex_model_provider_info::WireApi::Chat
+                && credential == codex_model_provider_info::BillingCredential::ApiKey
+            {
+                // #368: a provider the user configured at a route whose
+                // operator publishes per-token prices for it. The provider id
+                // is the user's own name, so the route is the key.
+                PriceAuthority::RouteRates(route)
             } else {
                 PriceAuthority::Unavailable
             }
@@ -984,6 +993,8 @@ enum Pricing {
     Anthropic,
     Responses,
     Chat,
+    /// Pay per use on a priced route a user-configured provider reached (#368).
+    Route(crate::config::PricedRoute),
     /// Subscription capacity: record the plan rate and the API equivalent, not spend.
     Plan,
     /// Subscription capacity with no catalogue figure.
@@ -1007,6 +1018,12 @@ fn pricing_for(mode: &AccountingMode) -> Pricing {
                 codex_model_provider_info::WireApi::Anthropic => Pricing::Anthropic,
                 codex_model_provider_info::WireApi::Responses => Pricing::Responses,
                 codex_model_provider_info::WireApi::Chat => Pricing::Chat,
+            },
+            // Route rates are quoted for one dialect, Chat Completions.
+            PriceAuthority::RouteRates(route) => match wire_api {
+                codex_model_provider_info::WireApi::Chat => Pricing::Route(*route),
+                codex_model_provider_info::WireApi::Anthropic
+                | codex_model_provider_info::WireApi::Responses => Pricing::Unavailable,
             },
             PriceAuthority::PlanRate => Pricing::Plan,
             PriceAuthority::PlanBasis => Pricing::PlanBasis,
@@ -1048,6 +1065,9 @@ pub(crate) struct Sampling {
     account: Option<codex_state::accounting::AttemptAccount>,
     dialect: Dialect,
     pricing: Pricing,
+    /// The priced route the requests go to, if any (#368): its usage fields
+    /// have the meaning its operator documents, however the provider is named.
+    pub(super) route: Option<crate::config::PricedRoute>,
     /// Pinned to OpenAI's image generation endpoint under API-key rates: priced
     /// from OpenAI's published image rates rather than the chat-model
     /// catalogue, and its body read as an Images API usage report. Any other
@@ -1233,6 +1253,7 @@ impl Sampling {
             },
             dialect,
             pricing: pricing_for(mode),
+            route: crate::config::PricedRoute::at(approved_endpoint),
             image_generation: path_override == Some(prices::IMAGE_GENERATIONS_PATH)
                 && pricing_for(mode) == Pricing::Responses
                 && provider == codex_model_provider_info::OPENAI_PROVIDER_ID,
@@ -1377,6 +1398,9 @@ impl Sampling {
             }
             Pricing::Chat => {
                 prices::chat_original(model, &self.provider, self.scope, dispatched_at)?
+            }
+            Pricing::Route(route) => {
+                prices::route_original(route, model, &self.provider, self.scope, dispatched_at)?
             }
         };
         // Pay per use with no attributable rate still binds its basis and
