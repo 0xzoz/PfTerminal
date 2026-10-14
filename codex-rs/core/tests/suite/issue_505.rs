@@ -163,10 +163,14 @@ async fn run(confirm: bool) -> anyhow::Result<Run> {
         ],
     )
     .await;
+    // A local environment: `shell_command` runs commands on the Codex host
+    // only and refuses a remote one (#721), so under a remote test
+    // environment the write would be refused regardless and neither run's
+    // write check would test anything.
     let test = test_codex()
         .with_model("test-gpt-5.1-codex")
         .with_config(permissive_without_approvals)
-        .build_with_auto_env(&server)
+        .build(&server)
         .await?;
     if confirm {
         let report = confirm_aggressive(&test).await?;
