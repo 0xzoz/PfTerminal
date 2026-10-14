@@ -132,11 +132,14 @@ when your organization's requirements enforce a managed network proxy
 That is how network access works in that setup, so what they reach through
 it is decided by your organization's proxy rules, not by Aggressive.
 
-- **macOS:** when those requirements also allow local binding, agent
-  commands can also listen on and connect to local ports, and send DNS
-  queries (port 53) straight to any server, outside the proxy.
+- **macOS:** Unix sockets those requirements allow stay open. When they
+  also allow local binding, agent commands can also accept and make local
+  connections (any local port), and send DNS queries (port 53) straight to
+  any server, outside the proxy.
 - **Linux:** agent commands run in their own network, which reaches only
   the proxy; local binding gives them no access to the computer's own ports.
+- **Windows:** when those requirements also allow local binding, agent
+  commands can also connect to any local port, outside the proxy.
 
 The macOS keychain stays closed either way (above, #758).
 
