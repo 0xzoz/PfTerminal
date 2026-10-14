@@ -123,6 +123,16 @@ all its other rules (#758). Contained Claude panes get the same rule under
 Aggressive. Certificate checks for secure connections use a different
 service (`trustd`) and keep working.
 
+## A managed network proxy
+
+Aggressive turns the network off for agent commands, with one known limit:
+when your organization's requirements enforce a managed network proxy
+(`experimental_network`), agent commands can still connect to that proxy.
+That is how network access works in that setup, so what they reach through
+it is decided by your organization's proxy rules, not by Aggressive. When
+those rules allow local binding, local ports stay reachable too. The macOS
+keychain stays closed either way (above, #758).
+
 ## A separate database folder
 
 Under Moderate and Aggressive, agent commands can't use Corbanu's database folder
