@@ -90,29 +90,20 @@ pub(crate) async fn refusal(
         .map(|candidate| candidate.target.clone())
         .unwrap_or_else(|| "a path it names".to_string());
     let (command, cwd, fallback) = (command.to_vec(), cwd.to_path_buf(), first.clone());
-    let looked = tokio::time::timeout(
-        LOOKUP_TIMEOUT,
-        tokio::task::spawn_blocking(move || {
-            // It makes a link and names `.codex` or `.agents` anywhere
-            // (through a variable, `$(…)`, `eval` or a pipe into a shell
-            // too).
-            if let Some(named) = inputs.settings_named(&command, &cwd) {
-                return Some(named);
-            }
-            // Too many paths to look at: refused, naming the first.
-            if found.overflow {
-                return Some(fallback);
-            }
-            inputs.protected_target(&found.candidates, &cwd)
-        }),
-    )
-    .await;
-    let found = match looked {
-        Ok(Ok(found)) => found?,
-        // The lookups did not finish: refused (nothing is created), naming
-        // the first link target.
-        Ok(Err(_)) | Err(_) => first,
-    };
+    let found = looked_up(LOOKUP_TIMEOUT, first, move || {
+        // It makes a link and names `.codex` or `.agents` anywhere
+        // (through a variable, `$(…)`, `eval` or a pipe into a shell
+        // too).
+        if let Some(named) = inputs.settings_named(&command, &cwd) {
+            return Some(named);
+        }
+        // Too many paths to look at: refused, naming the first.
+        if found.overflow {
+            return Some(fallback);
+        }
+        inputs.protected_target(&found.candidates, &cwd)
+    })
+    .await?;
     let refusal = explanation(&found);
     super::protected_reads::notify(session, turn, refusal.clone()).await;
     super::inspection::record_refusal(
@@ -143,7 +134,22 @@ pub(crate) fn applies(session: &Session) -> bool {
 }
 
 /// How long the path lookups may take before the command is refused anyway.
-const LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+/// #744: 2 s refused ordinary commands on a loaded machine; 10 s (Travis,
+/// 2026-10-14) still fails closed.
+const LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// What `lookup` finds, run off the async threads; `first` (refused, nothing
+/// is created) when it does not finish within `timeout` or fails.
+async fn looked_up(
+    timeout: std::time::Duration,
+    first: String,
+    lookup: impl FnOnce() -> Option<String> + Send + 'static,
+) -> Option<String> {
+    match tokio::time::timeout(timeout, tokio::task::spawn_blocking(lookup)).await {
+        Ok(Ok(found)) => found,
+        Ok(Err(_)) | Err(_) => Some(first),
+    }
+}
 
 /// What the protected paths are built from (see `protected_reads`).
 struct Inputs {
