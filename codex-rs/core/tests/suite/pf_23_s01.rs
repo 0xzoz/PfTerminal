@@ -2704,13 +2704,14 @@ async fn issue_651_a_missing_database_folder_is_protected() -> anyhow::Result<()
     Ok(())
 }
 
-/// Issue #651 item 6 (Travis, 2026-10-13): a separate database folder that is
-/// a well-known shared folder (here the temporary folder, `TMPDIR`) is not
-/// denied whole: a protected command with full access can still read and
-/// write ordinary files there, and still cannot read or write a database,
-/// create and hold the missing init lock, hold the GPU controller's lock or
-/// plant a pending accounting record or a backup, with the paths built at run
-/// time. Permissive is unchanged.
+/// Issue #651 item 6 (Travis, 2026-10-13): on macOS a separate database folder
+/// that is a well-known shared folder (here the temporary folder, `TMPDIR`)
+/// is not denied whole: a protected command with full access can still read
+/// and write ordinary files there. On Linux it stays denied whole. On both, it
+/// still cannot read or write a database, create a rollback journal or plant
+/// a link under a runtime database's names, create and hold the missing init
+/// lock, hold the GPU controller's lock or plant a pending accounting record
+/// or a backup, with the paths built at run time. Permissive is unchanged.
 ///
 /// The scenario sets `TMPDIR` for the whole process, so the test runs it in a
 /// copy of this test binary of its own (`cargo test` runs tests as threads).
@@ -2767,7 +2768,9 @@ async fn shared_database_folder_scenario() -> anyhow::Result<()> {
              flock($f, LOCK_EX | LOCK_NB) or die \"lock: $!\\n\"' \
              \"$d/gpu-controller.$(printf lock)\" && echo gpu-held-651; \
              printf '{{}}' > \"$d/accounting-$(printf pending)/planted.json\"; \
-             printf x > \"$d/db-$(printf backups)/planted\"; echo ran-651"
+             printf x > \"$d/db-$(printf backups)/planted\"; \
+             printf x > \"$d/pfterminal_state_5.$s-$(printf journal)\"; \
+             ln -s /dev/null \"$d/logs_2.$s-$(printf wal)\"; echo ran-651"
         );
         let sqlite_home = AbsolutePathBuf::from_absolute_path(&folder)?;
         let (shared, missing_lock) = (folder.clone(), lock.clone());
@@ -2822,8 +2825,14 @@ async fn shared_database_folder_scenario() -> anyhow::Result<()> {
             output.contains("gpu-held-651"),
             folder.join("accounting-pending/planted.json").exists(),
             folder.join("db-backups/planted").exists(),
+            folder.join("pfterminal_state_5.sqlite-journal").exists(),
+            std::fs::symlink_metadata(folder.join("logs_2.sqlite-wal"))
+                .is_ok_and(|metadata| metadata.file_type().is_symlink()),
         ];
-        if !output.contains("ran-651") || !ordinary || achieved != [open; 6] {
+        // Linux keeps denying the shared folder whole (bubblewrap can't deny
+        // a name before it exists).
+        let ordinary_expected = open || cfg!(target_os = "macos");
+        if !output.contains("ran-651") || ordinary != ordinary_expected || achieved != [open; 8] {
             wrong.push(format!(
                 "{level:?}: ordinary={ordinary} {achieved:?}: {output}"
             ));

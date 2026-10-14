@@ -441,11 +441,16 @@ impl ReadDenials {
     /// first makes it where the command could (bubblewrap would otherwise
     /// hold the missing path with a placeholder file on the host).
     ///
-    /// #651 item 6 (Travis, 2026-10-13): a well-known shared folder (see
-    /// [`is_well_known_shared_folder`]; `user_home` and `temp_dir` are the
-    /// user's home and temporary folders) is denied one entry at a time too,
-    /// so ordinary commands keep using it; what Corbanu keeps there stays
-    /// denied.
+    /// #651 item 6 (Travis, 2026-10-13): on macOS a well-known shared folder
+    /// that exists (see [`is_well_known_shared_folder`]; `user_home` and
+    /// `temp_dir` are the user's home and temporary folders) is denied one
+    /// entry at a time too, so ordinary commands keep using it. On macOS each
+    /// runtime database's name and its `-wal`, `-shm` and `-journal` files
+    /// are also denied before they exist: the pattern alone stops reading a
+    /// database created later, not creating one (or a link) under its name.
+    /// Bubblewrap can't deny a name before it exists without putting a
+    /// placeholder file on the host, where SQLite would meet it, so on Linux
+    /// a shared folder stays denied whole (never weaker, Travis 2026-10-13).
     fn protect_database_folder(
         &mut self,
         codex_home: &Path,
@@ -463,7 +468,9 @@ impl ReadDenials {
                 std::fs::canonicalize(codex_home).is_ok_and(|home| home.starts_with(real))
             });
         let missing = std::fs::symlink_metadata(folder.as_path()).is_err();
-        let shared = is_well_known_shared_folder(folder.as_path(), user_home, temp_dir);
+        let shared = cfg!(target_os = "macos")
+            && !missing
+            && is_well_known_shared_folder(folder.as_path(), user_home, temp_dir);
         if (missing || folder.as_path().is_dir())
             && !holds_home
             && !shared
@@ -485,6 +492,13 @@ impl ReadDenials {
         }
         for name in DATABASE_FOLDER_ENTRIES {
             self.push_fixed(folder.join(name), keep);
+        }
+        if cfg!(target_os = "macos") {
+            for database in codex_state::runtime_database_filenames() {
+                for suffix in ["", "-wal", "-shm", "-journal"] {
+                    self.push_fixed(folder.join(format!("{database}{suffix}")), keep);
+                }
+            }
         }
         let databases = crate::security::preflight::database_glob(folder.as_path())
             .to_string_lossy()
@@ -1070,6 +1084,9 @@ fn is_well_known_shared_folder(folder: &Path, home: Option<&Path>, temp: &Path) 
         .map(Path::new)
         .chain(std::iter::once(temp))
         .chain(home)
+        // A relative `TMPDIR` would resolve against Corbanu's own folder;
+        // `/` is never shared (its pattern isn't usable).
+        .filter(|shared| shared.is_absolute() && shared.parent().is_some())
         .any(|shared| {
             folder.components().eq(shared.components())
                 || folder_real

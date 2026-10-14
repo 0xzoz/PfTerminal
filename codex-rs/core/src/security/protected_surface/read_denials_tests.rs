@@ -2465,6 +2465,17 @@ fn issue_651_well_known_shared_folders() {
     assert!(shared(&temp));
     assert!(shared(&fx.user_home.join("temp-link")));
     assert!(shared(&fx.user_home));
+    // A relative `TMPDIR`, or `/`, is never a shared folder.
+    assert!(!is_well_known_shared_folder(
+        Path::new("temp"),
+        None,
+        Path::new("temp")
+    ));
+    assert!(!is_well_known_shared_folder(
+        Path::new("/"),
+        Some(Path::new("/")),
+        Path::new("/")
+    ));
     for folder in [
         Path::new("/tmp/db"),
         Path::new("/var/tmp/db"),
@@ -2476,12 +2487,16 @@ fn issue_651_well_known_shared_folders() {
     }
 }
 
-/// Issue #651 item 6 (Travis, 2026-10-13): a database folder that is a
-/// well-known shared folder (here the temporary folder, and the user's home)
-/// is denied one entry at a time, not whole: other files stay readable and
-/// writable, and the databases (also one created later), the init lock, the
-/// GPU controller's lock, pending accounting records and backups stay
-/// denied, also before they exist. Another folder is still denied whole.
+/// Issue #651 item 6 (Travis, 2026-10-13): on macOS a database folder that is
+/// a well-known shared folder (here the temporary folder, and the user's
+/// home) is denied one entry at a time, not whole: other files stay readable
+/// and writable; the databases (reads also of one created later, and each
+/// runtime database's name with its `-wal`, `-shm` and `-journal` files before
+/// they exist), the init lock, the GPU controller's lock, pending accounting
+/// records and backups stay denied. On Linux the temporary folder stays
+/// denied whole (bubblewrap can't deny a name before it exists); the home
+/// holds the Corbanu home, so it is denied one entry at a time there too.
+/// Another folder is still denied whole.
 #[test]
 fn issue_651_a_shared_database_folder_is_denied_entry_by_entry() {
     let fx = fixture();
@@ -2514,17 +2529,22 @@ fn issue_651_a_shared_database_folder_is_denied_entry_by_entry() {
         let write = !policy.can_write_path_with_cwd(&path, project.as_path());
         (read, write)
     };
+    let macos = cfg!(target_os = "macos");
     for shared in [temp.as_path(), fx.user_home.as_path()] {
+        let whole = !macos && shared == temp;
         for (name, expected) in [
             // Only the temporary folder holds one; the pattern covers both.
-            ("state_5.sqlite", (true, shared == temp)),
-            ("later.sqlite-wal", (true, false)),
+            ("state_5.sqlite", (true, shared == temp || macos)),
+            ("later.sqlite-wal", (true, whole)),
+            ("pfterminal_state_5.sqlite-journal", (true, macos || whole)),
+            ("pfterminal_logs_2.sqlite-wal", (true, macos || whole)),
+            ("state_5.sqlite-shm", (true, macos || whole)),
             ("pfterminal_db_init.lock", (true, true)),
             ("gpu-controller.lock", (true, true)),
             ("accounting-pending/x.json", (true, true)),
             ("db-backups/x", (true, true)),
-            ("notes.txt", (false, false)),
-            ("build/out.o", (false, false)),
+            ("notes.txt", (whole, whole)),
+            ("build/out.o", (whole, whole)),
         ] {
             assert_eq!(
                 denied(shared, name),

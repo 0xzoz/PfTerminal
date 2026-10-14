@@ -34,6 +34,7 @@ pub use runtime::QUICK_BUSY_TIMEOUT;
 pub use runtime::StateRuntime;
 pub use runtime::is_state_db_busy;
 pub use sqlite::SqliteConfig;
+pub use sqlite::runtime_database_filenames;
 
 pub use audit::ThreadStateAuditRow;
 pub use audit::read_thread_state_audit_rows;

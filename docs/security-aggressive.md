@@ -91,24 +91,36 @@ network stay closed.
 
 Under Moderate and Aggressive, agent commands can't use Corbanu's database folder
 when you move it out of the Corbanu home (`sqlite_home` or `CODEX_SQLITE_HOME`).
-Usually the whole folder is hidden from them.
+The whole folder is hidden from them, and so is `<folder>.db-backups` beside it.
+If the folder holds the current folder or the Corbanu home, only Corbanu's own
+entries in it are hidden.
 
-Some folders are shared by many programs:
+**On macOS, shared folders are handled the same way.** These folders are shared by
+many programs:
 
-- `/tmp` and `/var/tmp`, also as `/private/tmp` and `/private/var/tmp` on macOS;
+- `/tmp` and `/var/tmp`, also as `/private/tmp` and `/private/var/tmp`;
 - the temporary folder (`TMPDIR`);
 - your home folder itself.
 
-If the database folder is one of these, only Corbanu's own entries in it are
-hidden, so other commands can still use the folder. These entries are:
+If the database folder is one of these, only Corbanu's own entries are hidden, so
+other commands can still use the folder:
 
-- the databases, including ones created later;
-- the database init lock (`pfterminal_db_init.lock`);
-- the GPU lock (`gpu-controller.lock`);
+- the databases, and any database created later;
+- each database's journal and `-wal`/`-shm` files, which commands can't create either;
+- the database init lock (`pfterminal_db_init.lock`) and the GPU lock
+  (`gpu-controller.lock`);
 - the `accounting-pending` and `db-backups` folders.
 
-They stay protected before they exist too. A folder inside a shared one, such as
+These stay protected even before they exist. A folder inside a shared one, such as
 `/tmp/corbanu-db`, is still hidden whole.
+
+**On Linux, a shared folder is still hidden whole.** The Linux sandbox can't stop a
+command from creating a file under a database's name, so hiding entries one by one
+would be weaker there. Commands that need the folder fail under Moderate and
+Aggressive.
+
+Don't keep the databases in `/tmp` or `/var/tmp`: other people on the machine can
+create files there too.
 
 ## Commands run outside the sandbox
 
