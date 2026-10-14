@@ -26,6 +26,9 @@ impl Fixture {
             project.path().canonicalize().expect("project path"),
         );
         std::fs::write(home_path.join("auth.json"), "{}").expect("auth.json");
+        // Before any explanation: on Linux, building the rules for a profile
+        // that can write the home creates its missing runtime folders.
+        std::fs::create_dir(home_path.join("skills")).expect("skills");
         std::fs::create_dir(project_path.join(".codex")).expect(".codex");
         Self {
             _dirs: (home, project),
@@ -157,7 +160,6 @@ fn issue_748_moderate_write_denial_names_the_level() {
 
     // A runtime entry of Corbanu's home: Moderate's, and secretless
     // launch's when it is on.
-    std::fs::create_dir(fixture.home.join("skills")).expect("skills");
     let skill = format!("{}/skills/x.md", fixture.home.display());
     let skill_script = format!("printf x > '{skill}'");
     let skill_line = format!("bash: {skill}: Operation not permitted");
