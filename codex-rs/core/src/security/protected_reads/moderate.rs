@@ -1,0 +1,189 @@
+//! #748: under security level Moderate, a command the sandbox stopped because
+//! of Moderate's protected-path rules says so where it failed, to the person
+//! (a warning) and to the model (a note on the output), as #442 does under
+//! Aggressive. Without it both saw only "Operation not permitted".
+//!
+//! Only a denial the rules add counts: the path is one they protect, and the
+//! person's own permissions (the profile without the rules) allow the access.
+//! A write outside the project, a network failure or the person's own denial
+//! is not Moderate's and is not attributed to it. The way forward is
+//! switching to Permissive, unless the secretless launch contract keeps the
+//! path from agent commands at every level (or, with the person's own full
+//! access, refuses every launch outside a sandbox). Nothing is said about
+//! approvals lifting the rules (#747). Explanation only: it never changes
+//! what runs or what is denied.
+
+use std::cell::RefCell;
+use std::path::Path;
+use std::path::PathBuf;
+
+use codex_protocol::permissions::FileSystemSandboxKind;
+use codex_protocol::permissions::FileSystemSandboxPolicy;
+use codex_protocol::permissions::ReadDenyMatcher;
+use codex_utils_absolute_path::AbsolutePathBuf;
+
+use super::MAX_REPORTED_LINES;
+use super::ReadDenials;
+use super::ReadPolicyInputs;
+use crate::security::launch_contract::LaunchContract;
+
+/// The explanation for a read of `path` that Moderate's rules denied.
+/// `every_level`: the secretless launch contract keeps it too.
+pub(crate) fn read_explanation(path: &str, every_level: bool) -> String {
+    format!(
+        "Security level Moderate blocked access to `{}`: agent commands can't read credential \
+         files in your home folder (such as SSH keys, cloud and CLI tokens, and keychains) or \
+         Corbanu's own files (its sign-in, vault, config and history). {}",
+        super::shown_path(path),
+        way_forward(every_level)
+    )
+}
+
+/// The explanation for a write to `path` that Moderate's rules denied.
+pub(crate) fn write_explanation(path: &str, every_level: bool) -> String {
+    format!(
+        "Security level Moderate blocked writing `{}`: agent commands can't change files that \
+         run code or set policy later (shell start-up files, git hooks and config, the \
+         project's .codex and .agents) or Corbanu's own files in its home. {}",
+        super::shown_path(path),
+        way_forward(every_level)
+    )
+}
+
+fn way_forward(every_level: bool) -> &'static str {
+    if every_level {
+        "Secretless agent launch also keeps it from agent commands at every security level, \
+         even when you approve them, so changing the level would not allow it."
+    } else {
+        "To allow it, a person can switch to Permissive in /security (it applies after a \
+         restart)."
+    }
+}
+
+/// The explanation for a command that failed with `denial_lines`, when
+/// Moderate's rules denied a path it names (or reports) and the person's
+/// own permissions would have allowed it.
+pub(super) async fn denial_explanation(
+    inputs: ReadPolicyInputs,
+    command: &[String],
+    cwd: &Path,
+    denial_lines: Vec<String>,
+) -> Option<String> {
+    let contract = crate::security::launch_contract::active();
+    let (command, cwd) = (command.to_vec(), cwd.to_path_buf());
+    super::off_thread(move || explain(&inputs, contract, &command, &cwd, &denial_lines)).await
+}
+
+fn explain(
+    inputs: &ReadPolicyInputs,
+    contract: Option<&LaunchContract>,
+    command: &[String],
+    cwd: &Path,
+    denial_lines: &[String],
+) -> Option<String> {
+    let base = own_policy(inputs);
+    let denials = inputs.denials();
+    // A malformed pattern denies every path; explain nothing then.
+    let own = ReadDenyMatcher::try_new(&base, cwd).ok()?;
+    let protected = denials.apply(&inputs.profile)?.file_system_sandbox_policy();
+    let protected = ReadDenyMatcher::try_new(&protected, cwd).ok().flatten()?;
+    let (user_home, codex_home) = (inputs.user_home.as_deref(), inputs.codex_home.as_path());
+    // The secretless launch contract refuses a launch outside a sandbox at
+    // every level, so with the person's own full access no level change
+    // lets the command run at all.
+    let unsandboxed = base.kind != FileSystemSandboxKind::Restricted;
+    // The path the last accepted word or line names.
+    let found: RefCell<Option<PathBuf>> = RefCell::new(None);
+
+    let read = |path: &Path| {
+        let blocked = protected.is_read_denied(path)
+            && base.can_read_path_with_cwd(path, cwd)
+            && !own.as_ref().is_some_and(|own| own.is_read_denied(path));
+        if blocked {
+            found.replace(Some(path.to_path_buf()));
+        }
+        blocked
+    };
+    let lines = &denial_lines[..denial_lines.len().min(MAX_REPORTED_LINES)];
+    let read_word = read(cwd)
+        .then(|| cwd.display().to_string())
+        .or_else(|| {
+            super::denied_word(
+                command,
+                cwd,
+                user_home,
+                codex_home,
+                read,
+                Some(denial_lines),
+            )
+        })
+        // #621: a path built at run time that the denial line reports.
+        .or_else(|| super::path_in_lines(command, cwd, user_home, codex_home, lines, &read));
+    if let Some(word) = read_word {
+        let path = found.take();
+        let every_level = contract.is_some_and(|contract| {
+            unsandboxed
+                || path
+                    .as_deref()
+                    .is_some_and(|path| contract.keeps_unreadable(path, cwd))
+        });
+        return Some(read_explanation(&word, every_level));
+    }
+
+    let writable: Vec<&AbsolutePathBuf> = denials.home_writable_paths().collect();
+    let write = |path: &Path| {
+        // A write lands where a link finally points.
+        let target = AbsolutePathBuf::from_absolute_path(path)
+            .ok()
+            .and_then(|path| ReadDenials::real_location(&path))
+            .map_or_else(|| path.to_path_buf(), AbsolutePathBuf::into_path_buf);
+        let blocked = super::lands_in(path, denials.read_only_paths(), &writable)
+            && base.can_write_path_with_cwd(&target, cwd);
+        if blocked {
+            found.replace(Some(target));
+        }
+        blocked
+    };
+    let word = super::written_word(
+        command,
+        cwd,
+        user_home,
+        codex_home,
+        &write,
+        Some(denial_lines),
+    )?;
+    let path = found.take();
+    let every_level = contract.is_some_and(|contract| {
+        unsandboxed
+            || path
+                .as_deref()
+                .is_some_and(|path| contract.keeps_read_only(&base, path, cwd))
+    });
+    Some(write_explanation(&word, every_level))
+}
+
+/// The person's own permissions for the command: the profile without
+/// Moderate's rules, its project roots the workspace roots (or the current
+/// folder), also by their real locations, as the sandbox resolves them.
+fn own_policy(inputs: &ReadPolicyInputs) -> FileSystemSandboxPolicy {
+    let mut roots = if inputs.workspace_roots.is_empty() {
+        vec![inputs.turn_cwd.clone()]
+    } else {
+        inputs.workspace_roots.clone()
+    };
+    let real_roots: Vec<AbsolutePathBuf> = roots
+        .iter()
+        .filter_map(|root| std::fs::canonicalize(root.as_path()).ok())
+        .filter_map(|root| AbsolutePathBuf::from_absolute_path(root).ok())
+        .collect();
+    roots.extend(real_roots);
+    inputs
+        .profile
+        .clone()
+        .materialize_project_roots_with_workspace_roots(&roots)
+        .file_system_sandbox_policy()
+}
+
+#[cfg(test)]
+#[path = "moderate_tests.rs"]
+mod tests;

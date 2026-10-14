@@ -98,6 +98,8 @@ mod issue_584;
 mod issue_620_622;
 mod issue_623;
 mod issue_626;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod issue_748;
 mod items;
 mod json_result;
 mod live_cli;

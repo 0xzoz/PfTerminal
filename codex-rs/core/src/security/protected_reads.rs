@@ -13,6 +13,8 @@
 //!   under Aggressive (#520: the project's `.codex` and `.agents`; the
 //!   Corbanu home);
 //! - #622: such a denial is listed under the inspector's recent denials.
+//! - #748: under Moderate, a denial its rules add is explained too (the
+//!   [`moderate`] module).
 //!
 //! Explanation only: it never changes what runs or what is denied (it only
 //! withholds a grant offer that could not apply). The path
@@ -128,13 +130,18 @@ impl ReadPolicyInputs {
     /// Only under a live (or configured) Aggressive level, not when the
     /// policy is unreadable and Aggressive is only the fallback.
     fn capture(session: &Session, turn: &TurnContext) -> Option<Self> {
+        Self::capture_at(session, turn, SecurityLevel::Aggressive)
+    }
+
+    /// Only while `level` is the effective level the protected-path rules
+    /// apply under, not when the policy is unreadable.
+    fn capture_at(session: &Session, turn: &TurnContext, level: SecurityLevel) -> Option<Self> {
         session
             .services
             .model_client()
             .post_taint_state()
             .filter(|state| {
-                state.level == SecurityLevel::Aggressive
-                    && !matches!(state.policy, PolicyBinding::Unavailable)
+                state.level == level && !matches!(state.policy, PolicyBinding::Unavailable)
             })?;
         // Local paths only: a remote command's paths are not this host's.
         if turn
@@ -382,6 +389,10 @@ pub(crate) async fn denial_explanation(
         .collect();
     if denial_lines.is_empty() {
         return None;
+    }
+    // #748: Moderate explains the denials its own rules add.
+    if let Some(inputs) = ReadPolicyInputs::capture_at(session, turn, SecurityLevel::Moderate) {
+        return moderate::denial_explanation(inputs, command, cwd, denial_lines).await;
     }
     let inputs = ReadPolicyInputs::capture(session, turn)?;
     let (command, cwd) = (command.to_vec(), cwd.to_path_buf());
@@ -1056,6 +1067,8 @@ fn resolve(word: &str, cwd: &Path, user_home: Option<&Path>, codex_home: &Path) 
     }
     Some(cwd.join(expanded))
 }
+
+mod moderate;
 
 #[cfg(test)]
 #[path = "protected_reads_tests.rs"]
