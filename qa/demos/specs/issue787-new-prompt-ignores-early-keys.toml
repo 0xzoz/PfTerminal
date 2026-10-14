@@ -26,7 +26,7 @@ ZAI_API_KEY = "provider/zai_api_key"
 [[steps]]
 wait = "Corbanu Terminal \\(v"
 [[steps]]
-pause = 1.0
+pause = 8.0
 [[steps]]
 type = "/security"
 [[steps]]
@@ -58,7 +58,7 @@ compress = 2
 [[steps]]
 pause = 1.0
 [[steps]]
-type = "Spawn a child agent and have it run exactly this command: sleep 60; echo finished > ks-child.txt"
+type = "Spawn a child agent and have it run exactly this command: sleep 60; echo finished > ks-child.txt. Then wait for the child agent to finish."
 [[steps]]
 key = "Enter"
 [[steps]]
