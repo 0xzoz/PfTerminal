@@ -173,7 +173,7 @@ pub(crate) fn assessment_turn_label(sub_id: &str) -> String {
 /// fine. Keep the prefix and as much of the id as fits.
 fn scoped_turn_label(prefix: &str, sub_id: &str) -> String {
     const LIMIT: usize = 128;
-    let room = LIMIT - prefix.len();
+    let room = LIMIT.saturating_sub(prefix.len());
     if sub_id.len() <= room {
         return format!("{prefix}{sub_id}");
     }
@@ -331,8 +331,9 @@ pub(crate) struct AccountingOwner {
     pub(crate) thread: ThreadId,
     pub(crate) db: codex_rollout::state_db::StateDbHandle,
     /// Prefixed to the turn label of work recorded for another conversation
-    /// (`review:`, `consolidation:`, `side:`); empty for a session's own.
-    pub(crate) label_prefix: &'static str,
+    /// (`review:`, `consolidation:`, `agent:`, `code-review:`, `side:`,
+    /// `fork:`, nested as in `side:review:`); empty for a session's own.
+    pub(crate) label_prefix: String,
 }
 
 /// The conversation an internal worker with no thread of its own (memory
@@ -517,7 +518,7 @@ pub(crate) async fn attach_scopes(
         .map(|owner| (Arc::clone(&owner.db), owner.thread));
     let turn = match &owner {
         Some(owner) if !owner.label_prefix.is_empty() => {
-            scoped_turn_label(owner.label_prefix, &turn)
+            scoped_turn_label(&owner.label_prefix, &turn)
         }
         Some(_) | None => turn,
     };

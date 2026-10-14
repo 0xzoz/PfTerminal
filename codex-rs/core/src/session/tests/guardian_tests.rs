@@ -851,13 +851,33 @@ async fn accounting_owner_of_a_guardian_fork_is_the_reviewed_conversation() -> a
         .accounting_owner()
         .await
         .map_err(|why| anyhow::anyhow!("{why:?}"))?;
-    assert_eq!((owner.thread, owner.label_prefix), (parent, "review:"));
+    assert_eq!(
+        (owner.thread, owner.label_prefix.as_str()),
+        (parent, "review:")
+    );
     assert!(Arc::ptr_eq(&owner.db, &db));
+    // PF-60-S06: another sub-agent with no thread of its own works for its
+    // parent too, so it records there as `agent:`; without a parent it stays
+    // excluded.
     {
         let mut state = session.state.lock().await;
         state.session_configuration.session_source =
             SessionSource::SubAgent(SubAgentSource::Other("another-helper".to_string()));
     }
+    let owner = session
+        .accounting_owner()
+        .await
+        .map_err(|why| anyhow::anyhow!("{why:?}"))?;
+    assert_eq!(
+        (owner.thread, owner.label_prefix.as_str()),
+        (parent, "agent:")
+    );
+    session
+        .state
+        .lock()
+        .await
+        .session_configuration
+        .parent_thread_id = None;
     assert_eq!(
         session.accounting_owner().await.err(),
         Some(crate::accounting::Uncollected::Excluded(
@@ -936,11 +956,38 @@ async fn accounting_owner_of_side_and_consolidation_sessions() -> anyhow::Result
         Some(Uncollected::Excluded("parent_not_persisted"))
     );
     persist_thread(&db, home.path(), parent).await?;
+    // PF-60-S06: an ephemeral fork that is not `/side` is a plain `fork:`.
     let owner = side
         .accounting_owner()
         .await
         .map_err(|why| anyhow::anyhow!("{why:?}"))?;
-    assert_eq!((owner.thread, owner.label_prefix), (parent, "side:"));
+    assert_eq!(
+        (owner.thread, owner.label_prefix.as_str()),
+        (parent, "fork:")
+    );
+    side.state.lock().await.session_configuration.thread_source = Some(
+        codex_protocol::protocol::ThreadSource::Feature("side".to_string()),
+    );
+    let owner = side
+        .accounting_owner()
+        .await
+        .map_err(|why| anyhow::anyhow!("{why:?}"))?;
+    assert_eq!(
+        (owner.thread, owner.label_prefix.as_str()),
+        (parent, "side:")
+    );
+    // Another feature's fork is not `/side`.
+    side.state.lock().await.session_configuration.thread_source = Some(
+        codex_protocol::protocol::ThreadSource::Feature("automation".to_string()),
+    );
+    let owner = side
+        .accounting_owner()
+        .await
+        .map_err(|why| anyhow::anyhow!("{why:?}"))?;
+    assert_eq!(
+        (owner.thread, owner.label_prefix.as_str()),
+        (parent, "fork:")
+    );
 
     // Consolidation: recorded under the conversation that started it, ahead
     // of any fork origin, and only once that conversation is persisted.
@@ -966,7 +1013,7 @@ async fn accounting_owner_of_side_and_consolidation_sessions() -> anyhow::Result
         .await
         .map_err(|why| anyhow::anyhow!("{why:?}"))?;
     assert_eq!(
-        (owner.thread, owner.label_prefix),
+        (owner.thread, owner.label_prefix.as_str()),
         (starter, "consolidation:")
     );
 
@@ -983,7 +1030,10 @@ async fn accounting_owner_of_side_and_consolidation_sessions() -> anyhow::Result
         .accounting_owner()
         .await
         .map_err(|why| anyhow::anyhow!("{why:?}"))?;
-    assert_eq!((owner.thread, owner.label_prefix), (starter, "review:"));
+    assert_eq!(
+        (owner.thread, owner.label_prefix.as_str()),
+        (starter, "review:")
+    );
 
     // A persisted fork, or a persisted session carrying a starter, records
     // under its own thread, unlabelled.
@@ -1037,8 +1087,75 @@ async fn accounting_owner_of_side_and_consolidation_sessions() -> anyhow::Result
         .await
         .map_err(|why| anyhow::anyhow!("{why:?}"))?;
     assert_eq!(
-        (owner.thread, owner.label_prefix),
+        (owner.thread, owner.label_prefix.as_str()),
         (persisted.thread_id, "")
+    );
+    Ok(())
+}
+
+/// PF-60-S06: a sub-agent with no thread of its own records under the
+/// conversation it works for, labelled with what it is: a spawned agent
+/// `agent:` (also when it was spawned as a fork), a `/review` task
+/// `code-review:`. A parent that is not persisted and not live leaves it
+/// excluded.
+#[tokio::test]
+async fn accounting_owner_of_ephemeral_sub_agents() -> anyhow::Result<()> {
+    use crate::accounting::Uncollected;
+    let home = tempfile::tempdir()?;
+    let db = codex_state::StateRuntime::init(
+        codex_state::SqliteConfig::from_sqlite_home(
+            codex_utils_absolute_path::AbsolutePathBuf::try_from(home.path().to_path_buf())?,
+        ),
+        "openai".into(),
+    )
+    .await?;
+    let parent = codex_protocol::ThreadId::new();
+
+    let agent = ephemeral_session_on(&db).await;
+    {
+        let mut state = agent.state.lock().await;
+        state.session_configuration.session_source =
+            SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: parent,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: None,
+                agent_class: None,
+            });
+        state.session_configuration.forked_from_thread_id = Some(parent);
+        state.session_configuration.thread_source = Some(
+            codex_protocol::protocol::ThreadSource::Feature("side".to_string()),
+        );
+    }
+    assert_eq!(
+        agent.accounting_owner().await.err(),
+        Some(Uncollected::Excluded("parent_not_persisted"))
+    );
+    persist_thread(&db, home.path(), parent).await?;
+    let owner = agent
+        .accounting_owner()
+        .await
+        .map_err(|why| anyhow::anyhow!("{why:?}"))?;
+    assert_eq!(
+        (owner.thread, owner.label_prefix.as_str()),
+        (parent, "agent:")
+    );
+
+    let review = ephemeral_session_on(&db).await;
+    {
+        let mut state = review.state.lock().await;
+        state.session_configuration.session_source =
+            SessionSource::SubAgent(SubAgentSource::Review);
+        state.session_configuration.parent_thread_id = Some(parent);
+    }
+    let owner = review
+        .accounting_owner()
+        .await
+        .map_err(|why| anyhow::anyhow!("{why:?}"))?;
+    assert_eq!(
+        (owner.thread, owner.label_prefix.as_str()),
+        (parent, "code-review:")
     );
     Ok(())
 }
