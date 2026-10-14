@@ -45,7 +45,7 @@ pause = 1.5
 [[steps]]
 key = "Enter"
 [[steps]]
-wait = "Approval for every command: from each pane's next turn"
+wait = "now in \\d+ threads? of this Corbanu Terminal"
 [[steps]]
 pause = 5.0
 [[steps]]
