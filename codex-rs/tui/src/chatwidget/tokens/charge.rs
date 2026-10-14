@@ -60,7 +60,7 @@ pub(super) fn published_estimate(quote: &ObservationQuote) -> String {
         .iter()
         .any(|bucket| matches!(bucket, BucketQuote::MissingUsage))
     {
-        return "not available — the response did not report every token count it needs"
+        return "not available — the response did not report every token count its published price needs"
             .to_string();
     }
     quote

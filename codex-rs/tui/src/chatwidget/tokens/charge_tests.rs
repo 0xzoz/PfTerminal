@@ -565,3 +565,70 @@ fn other_conversations_and_ranges_use_the_charge() {
         pages.iter().map(|page| &page.text).collect::<Vec<_>>()
     );
 }
+
+/// Review of #784, round 2: a refused attempt beside a charged one adds no
+/// "$0 estimated" part.
+#[test]
+fn a_refused_attempt_beside_a_charge_adds_no_estimate_part() {
+    let charged = openrouter_body(serde_json::json!({"cost": 0.000123}));
+    let mut refused = attempt(2, "x-ai/grok-4.7", /*catalogue*/ true, &charged);
+    refused.usage = Usage {
+        refused_status: Some(401),
+        ..Usage::default()
+    };
+    refused.buckets = [BucketQuote::Priced(Decimal::default()); 4];
+    refused.known_subtotal = Decimal::default();
+    refused.all_buckets_priced = Some(Decimal::default());
+    let pages = inspection_pages(Ok(day(vec![
+        attempt(1, "x-ai/grok-4.7", /*catalogue*/ true, &charged),
+        refused,
+    ])));
+    let screen = first_screen(&pages[0]);
+    let line = screen
+        .iter()
+        .find(|line| line.starts_with("• OpenRouter · OpenRouter Grok 4.7"))
+        .unwrap();
+    assert!(
+        line.contains(" Cost: $0.000123, charged by OpenRouter.") && !line.contains("estimated"),
+        "{line}"
+    );
+}
+
+/// An OpenRouter attempt with no charge and only part of its published price
+/// known is a lower-bound estimate, and says OpenRouter reported no charge.
+#[test]
+fn openrouter_attempt_priced_in_part_is_a_lower_bound_estimate() {
+    let silent = openrouter_body(serde_json::json!({}));
+    let mut partial = attempt(1, "x-ai/grok-4.7", /*catalogue*/ true, &silent);
+    partial.usage.output = None;
+    partial.buckets[3] = BucketQuote::MissingUsage;
+    partial.known_subtotal = decimal("0.00041");
+    partial.all_buckets_priced = None;
+    let mut charged = attempt(
+        2,
+        "x-ai/grok-4.7",
+        /*catalogue*/ true,
+        &openrouter_body(serde_json::json!({"cost": 0.000123})),
+    );
+    charged.attempt.request_id = partial.attempt.request_id;
+    charged.attempt.retry_of = Some(partial.attempt.attempt_id);
+    let pages = inspection_pages(Ok(day(vec![partial, charged])));
+    let page = request_page(&pages, "Grok 4.7");
+    assert!(
+        has(
+            page,
+            "Price basis: 1 attempt priced from the charge OpenRouter reported; 1 attempt estimated in part from published prices (a lower bound) — OpenRouter reported no charge for 1 attempt"
+        ),
+        "{:#?}",
+        page.text
+    );
+    let partial_page = &pages[page.links[0].1];
+    assert!(
+        has(
+            partial_page,
+            "Price basis: partial estimate from published prices, a lower bound — OpenRouter reported no charge for this response"
+        ),
+        "{:#?}",
+        partial_page.text
+    );
+}

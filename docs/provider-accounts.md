@@ -114,9 +114,9 @@ memory consolidation, which `/cost` records under the conversation and
 `/cost` prices an OpenRouter request from the charge OpenRouter reported with
 the response (`usage.cost`), shown as `Cost: $…, charged by OpenRouter`. If
 OpenRouter reported no charge (for example with your own upstream key), the
-published price is shown as `Estimated cost`; with neither, the request shows
-`no price available`. Request and attempt pages say which of the three was used
-on their `Price basis` line. Other providers' costs are estimates from
+published price is shown as `Estimated cost` (a lower bound if only part of it
+is known); with neither, the request shows `no price available`. Request and
+attempt pages say which was used on their `Price basis` line. Other providers' costs are estimates from
 published prices.
 
 ## Amazon Bedrock: AWS profile accounts

@@ -1559,8 +1559,9 @@ struct EstimateGaps {
 
 /// The known pay-per-use cost split by basis (#368): attempts priced from the
 /// charge their provider reported, and estimates from published prices,
-/// complete or in part. The two sums add up to the known cost. A sum the exact
-/// type cannot hold is `None` and not stated.
+/// complete or in part. Refused attempts cost nothing and are neither. The two
+/// sums add up to the known cost. A sum the exact type cannot hold is `None`
+/// and not stated.
 #[derive(Clone, Copy, Default)]
 struct ChargeSplit {
     charged_attempts: i64,
@@ -1585,11 +1586,15 @@ impl ChargeSplit {
         if self.estimated_attempts == 0 {
             return Some(format!("charged by {provider}"));
         }
-        Some(format!(
-            "{} charged by {provider} + {} estimated from published prices",
-            money(self.charged?),
-            money(self.estimated?)
-        ))
+        Some(match self.charged.zip(self.estimated) {
+            Some((charged, estimated)) => format!(
+                "{} charged by {provider} + {} estimated from published prices",
+                money(charged),
+                money(estimated)
+            ),
+            // The parts are too large to state exactly; the basis still is.
+            None => format!("partly charged by {provider}, partly estimated from published prices"),
+        })
     }
 }
 
@@ -1613,7 +1618,9 @@ impl EstimateGaps {
             if let Some(charge) = charge::reported_charge(q) {
                 split.charged_attempts = split.charged_attempts.saturating_add(1);
                 split.charged = split.charged.and_then(|sum| sum.add(charge).ok());
-            } else if q.all_buckets_priced.is_some() || q.known_subtotal != Decimal::default() {
+            } else if q.usage.refused_status.is_none()
+                && (q.all_buckets_priced.is_some() || q.known_subtotal != Decimal::default())
+            {
                 split.estimated_attempts = split.estimated_attempts.saturating_add(1);
                 split.estimated = split
                     .estimated

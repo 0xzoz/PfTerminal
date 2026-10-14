@@ -1,7 +1,9 @@
 # #368 item 1: OpenRouter requests priced from the reported charge
 
-Requirement: PF-60-S07 AC1 (`docs/sprints/current/portfolio-agent-cost-accounting-followups/pf-60-s07-price-catalogue-refresh.md`).
-This is a bounded fix under Travis's decision, PR #784. The code-blind functional cases for it run in PF-60-S10.
+Requirement: PF-60-S07 "Remaining", AC1 (`docs/sprints/current/portfolio-agent-cost-accounting-followups/pf-60-s07-price-catalogue-refresh.md`):
+"a request is priced from the charge OpenRouter reports for it when present, labelled as the provider's charge;
+without one, the catalogue rate is shown only as a labelled estimate, or 'no price'". This is a bounded fix under
+Travis's 2026-10-14 decision on #368, PR #784. The code-blind functional cases for it run in PF-60-S10.
 
 Travis's decision, 2026-10-14: an OpenRouter request is priced from the charge OpenRouter reports with the
 response (`usage.cost`, recorded as `billed_usd`). The catalogue rate is shown only as a labelled fallback
@@ -17,8 +19,8 @@ parser the accounting path uses.
 
 | Tree | Result |
 | --- | --- |
-| Base `dcfcb2048a` plus only the test file | 6 of 7 fail: no "charged by OpenRouter", no `Price basis`, and the day total uses the charged requests' catalogue estimates. The parser guard passes. |
-| This change | 7 of 7 pass |
+| Base `dcfcb2048a` plus only the first 7 tests | 6 of 7 fail: no "charged by OpenRouter", no `Price basis`, and the day total uses the charged requests' catalogue estimates. The parser guard passes. |
+| This change | All 13 pass. The first 7 plus 6 added in review: partly priced attempts, a $0 charge, refused attempts, other conversations and ranges. |
 
 The core suite test `accounting_chat_openrouter_records_the_reported_charge` streams a mocked OpenRouter Chat
 response with and without `usage.cost`. The ledger observation records `billed_usd` 0.000123 and 0.000015, and

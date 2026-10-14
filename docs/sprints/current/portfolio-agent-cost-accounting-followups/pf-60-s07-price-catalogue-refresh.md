@@ -22,7 +22,8 @@ updated: 2026-10-14
 ## Execution mandate
 
 - Deliver: item (iii) from Travis's 2026-10-10 decision, the five price items of #368, so that each request is priced
-  from the provider's current published rate or plainly shows "no price".
+  from the provider's current published rate or plainly shows "no price". The exception is OpenRouter, which is priced from the
+  charge it reports (AC1).
 - **Deadline:** the Sol promotion item (AC4) must land before 2026-11-21.
 - Excludes: re-pricing history; changing what Corbanu charges; Grok tiers (#127) and OpenRouter caps (#129).
 
