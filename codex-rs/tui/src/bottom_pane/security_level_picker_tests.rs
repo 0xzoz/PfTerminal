@@ -1099,3 +1099,37 @@ fn pf_25_s02_kill_switch_status_and_g_key() {
     picker.handle_key_event(key(KeyCode::Char('g')));
     assert!(picker.open_revocations);
 }
+
+/// #691 (Travis, 2026-10-14): on Windows without its sandbox set up,
+/// Aggressive cannot be chosen: the list says so, Enter explains how to set
+/// it up, and nothing is saved.
+#[test]
+fn issue_691_aggressive_waits_for_the_windows_sandbox() {
+    let home = tempfile::tempdir().unwrap();
+    let mut picker = SecurityLevelPicker::new(
+        &context(home.path(), ChosenLevel::Permissive),
+        current(),
+        /*preflight_input*/ None,
+        RuntimeKeymap::defaults().list,
+    );
+    picker.set_windows_sandbox_blocker(Some(
+        "Aggressive needs the default Windows sandbox. The Windows sandbox is not set up. Open \
+         /permissions, choose Default and pick \"Set up default sandbox\" (it needs \
+         Administrator permission), then choose Aggressive again. Nothing changed."
+            .to_string(),
+    ));
+    picker.handle_key_event(key(KeyCode::Up));
+    picker.handle_key_event(key(KeyCode::Enter));
+    insta::assert_snapshot!(
+        "security_level_picker_aggressive_needs_windows_sandbox",
+        render(&picker, /*width*/ 80)
+    );
+    assert!(matches!(picker.screen, Screen::List { .. }));
+    assert_eq!(level::load(home.path()), StoredLevel::Absent);
+    assert_eq!(files(home.path()), Vec::<String>::new());
+
+    // Once it is set up, Aggressive's review opens as before.
+    picker.set_windows_sandbox_blocker(None);
+    picker.handle_key_event(key(KeyCode::Enter));
+    assert_eq!(picker.screen, Screen::Review(ChosenLevel::Aggressive));
+}
