@@ -13,6 +13,7 @@
 //! request correlation, transient/completed card state, and integration with
 //! `ChatWidget` history insertion.
 
+mod charge;
 mod chart;
 mod scope;
 
@@ -411,6 +412,10 @@ fn has_no_price(quote: &ObservationQuote) -> bool {
     if !per_use(quote) {
         return false;
     }
+    // Priced from the charge its provider reported, published price or not.
+    if charge::reported_charge(quote).is_some() {
+        return false;
+    }
     let usage = &quote.usage;
     // Only tokens that were actually recorded and are not zero count here.
     // Zero tokens cost nothing whatever the rate, and a bucket priced at zero
@@ -434,7 +439,8 @@ fn has_no_price(quote: &ObservationQuote) -> bool {
     unpriced && !priced
 }
 
-fn estimate(totals: &codex_state::accounting::DayTotals) -> Vec<String> {
+/// `gaps` must come from the same attempts as `totals`.
+fn estimate(totals: &codex_state::accounting::DayTotals, gaps: EstimateGaps) -> Vec<String> {
     if totals.attempts == 0 {
         return vec!["No recorded attempts; collection coverage unknown.".into()];
     }
@@ -471,7 +477,29 @@ fn estimate(totals: &codex_state::accounting::DayTotals) -> Vec<String> {
     );
     // A known part of zero is not a figure worth stating beside an unknown
     // estimate: "$0.000000 + unknown" reads as a zero-cost claim.
-    let mut lines = if unknown == 0 {
+    let charges = gaps.charges.text();
+    let mut lines = if let Some(split) = charges {
+        // #368: reported charges are costs, not estimates.
+        if unknown == 0 && gaps.charges.all_charged() {
+            vec![format!(
+                "Token cost for recorded attempts: {}, {split}",
+                money(known)
+            )]
+        } else if unknown == 0 {
+            vec![format!(
+                "Token cost for recorded attempts: {} ({split})",
+                money(known)
+            )]
+        } else {
+            vec![
+                format!(
+                    "Known token cost: {} + unknown costs ({split})",
+                    money(known)
+                ),
+                incomplete,
+            ]
+        }
+    } else if unknown == 0 {
         vec![format!(
             "Estimated token cost for recorded attempts: {}",
             money(known)
@@ -583,7 +611,8 @@ fn known_exact(t: &codex_state::accounting::DayTotals, gaps: EstimateGaps) -> St
         "none — subscription work is not billed per token".to_string()
     } else if t.per_use_attempts() == 0 {
         "none — no work here is billed per token".to_string()
-    } else if t.known_usd == Decimal::default() && unknown > 0 {
+    } else if t.known_usd == Decimal::default() && unknown > 0 && gaps.charges.charged_attempts == 0
+    {
         match gaps.incomplete_usage.min(unknown) {
             0 => "none — no price for these attempts",
             usage if usage == unknown => "none — usage incomplete for these attempts",
@@ -687,6 +716,7 @@ fn attempt_text(q: &ObservationQuote) -> Vec<String> {
     if per_use(q)
         && no_rates(q)
         && q.usage.refused_status.is_none()
+        && charge::reported_charge(q).is_none()
         && !q.buckets.iter().any(
             |bucket| matches!(bucket, BucketQuote::Priced(amount) if *amount != Decimal::default()),
         )
@@ -694,7 +724,7 @@ fn attempt_text(q: &ObservationQuote) -> Vec<String> {
         lines.push("Token cost: unavailable — no applicable price; recorded usage is not a zero-cost claim.".into());
     } else {
         match codex_state::accounting::DayTotals::from_quotes([q]) {
-            Ok(attempt_totals) => lines.extend(estimate(&attempt_totals)),
+            Ok(attempt_totals) => lines.extend(estimate(&attempt_totals, EstimateGaps::of([q]))),
             Err(_) => lines.push("Token cost: unavailable — exact arithmetic overflow".into()),
         }
     }
@@ -707,6 +737,7 @@ fn attempt_text(q: &ObservationQuote) -> Vec<String> {
         lines.push("Plan rate at dispatch: not stated by the vendor".into());
     }
     lines.push(format!("Billing basis: {}", basis_text(q)));
+    lines.extend(charge::price_basis(&[q]));
     lines.extend(billed_line(&[q]));
     let u = &q.usage;
     let priced = q.priced_counts();
@@ -769,6 +800,18 @@ fn attempt_text(q: &ObservationQuote) -> Vec<String> {
                 BucketQuote::MissingUsage => "unknown — no retained numeric evidence".into(),
                 BucketQuote::MissingRate => "unknown — rate unavailable".into(),
             }
+        ));
+    }
+    // #368: the components above are the published prices; a reported
+    // charge replaces their sum.
+    if charge::reported_charge(q).is_some() {
+        lines.push(format!(
+            "Published-price estimate (not used — {} reported its charge): {}",
+            charge::charging_provider(),
+            charge::published_estimate(q).map_or_else(
+                || "none — no published price covers every component".into(),
+                money
+            )
         ));
     }
     lines.push(format!(
@@ -913,6 +956,11 @@ fn inspection_pages_for(
     result: Result<InspectionDay, String>,
     period: Option<String>,
 ) -> Vec<InspectorPage> {
+    // #368: OpenRouter requests are priced from the charge it reported.
+    let result = result.and_then(|day| {
+        charge::priced_from_charges(day)
+            .map_err(|_| "Cost unavailable — exact arithmetic overflow".to_string())
+    });
     if let Ok(InspectionDay::Range {
         requested,
         aggregate_day_floor,
@@ -988,7 +1036,7 @@ fn inspection_pages_for(
         if t.attempts == 0 {
             vec!["No recorded attempts in this conversation or its subagents; collection coverage unknown.".into()]
         } else {
-            estimate(t)
+            estimate(t, EstimateGaps::of(ready.requests.values().flatten()))
         },
     );
     pages[0]
@@ -1080,11 +1128,9 @@ fn inspection_pages_for(
                 .links
                 .push((format!("Technical details (attempt {})", index + 1), target));
             let mut text = plain_header(&[quote], named);
-            text.extend(
-                attempt_text(quote)
-                    .into_iter()
-                    .filter(|line| !line.starts_with("Billed cost:")),
-            );
+            text.extend(attempt_text(quote).into_iter().filter(|line| {
+                !line.starts_with("Billed cost:") && !line.starts_with("Price basis:")
+            }));
             pages.push(InspectorPage {
                 title: "Attempt, components and original price".into(),
                 text,
@@ -1170,12 +1216,18 @@ fn inspection_pages_for(
         );
         match codex_state::accounting::DayTotals::from_quotes(quotes.iter().copied()) {
             Ok(t) => {
-                text.extend(estimate(&t));
+                let gaps = EstimateGaps::of(quotes.iter().copied());
+                text.extend(estimate(&t, gaps));
                 text.push(format!("Recorded attempts: {}", t.attempts));
                 if t.attempts > 0 {
                     text.push(format!(
-                        "Known estimate exact USD: {}",
-                        known_exact(&t, EstimateGaps::of(quotes.iter().copied()))
+                        "Known {} exact USD: {}",
+                        if gaps.charges.charged_attempts > 0 {
+                            "cost"
+                        } else {
+                            "estimate"
+                        },
+                        known_exact(&t, gaps)
                     ));
                 }
             }
@@ -1239,7 +1291,10 @@ fn inspection_pages_for(
         text.push(note);
         text.push("Estimates below cover inspectable attempts only; unavailable threads may have additional unknown costs.".into());
     }
-    text.extend(estimate(u));
+    text.extend(estimate(
+        u,
+        EstimateGaps::of(ready.unknown_parent_requests.values().flatten()),
+    ));
     text.extend(billed_line(
         &ready
             .unknown_parent_requests
@@ -1496,21 +1551,74 @@ const NO_USAGE: &str = "Estimated cost: not available — usage incomplete";
 const DAY_COVERED: &str = "Day covered (UTC):";
 
 /// How many pay-per-use attempts with no complete estimate lack a price, and
-/// how many have one but are missing a usage count the price needs.
+/// how many have one but are missing a usage count the price needs; and how
+/// much of the known cost is charges a provider reported (`charge`) rather
+/// than estimates from published prices.
 #[derive(Clone, Copy, Default)]
 struct EstimateGaps {
     incomplete_usage: i64,
+    charges: ChargeSplit,
+}
+
+/// The known pay-per-use cost split by basis (#368): attempts priced from the
+/// charge their provider reported, and complete estimates from published
+/// prices. A sum the exact type cannot hold is `None` and not stated.
+#[derive(Clone, Copy, Default)]
+struct ChargeSplit {
+    charged_attempts: i64,
+    charged: Option<Decimal>,
+    estimated_attempts: i64,
+    estimated: Option<Decimal>,
+}
+
+impl ChargeSplit {
+    /// Every known figure is a reported charge.
+    fn all_charged(self) -> bool {
+        self.charged_attempts > 0 && self.estimated_attempts == 0
+    }
+
+    /// "charged by OpenRouter", or "$A charged by OpenRouter + $B estimated
+    /// from published prices"; `None` when no figure is a reported charge.
+    fn text(self) -> Option<String> {
+        if self.charged_attempts == 0 {
+            return None;
+        }
+        let provider = charge::charging_provider();
+        if self.estimated_attempts == 0 {
+            return Some(format!("charged by {provider}"));
+        }
+        Some(format!(
+            "{} charged by {provider} + {} estimated from published prices",
+            money(self.charged?),
+            money(self.estimated?)
+        ))
+    }
 }
 
 impl EstimateGaps {
     fn of<'a>(quotes: impl IntoIterator<Item = &'a ObservationQuote>) -> Self {
-        let incomplete_usage = quotes
-            .into_iter()
-            .filter(|q| per_use(q) && q.all_buckets_priced.is_none() && !lacks_price(q))
-            .count();
-        Self {
-            incomplete_usage: i64::try_from(incomplete_usage).unwrap_or(i64::MAX),
+        let mut gaps = Self {
+            charges: ChargeSplit {
+                charged: Some(Decimal::default()),
+                estimated: Some(Decimal::default()),
+                ..ChargeSplit::default()
+            },
+            ..Self::default()
+        };
+        for q in quotes.into_iter().filter(|q| per_use(q)) {
+            if q.all_buckets_priced.is_none() && !lacks_price(q) {
+                gaps.incomplete_usage = gaps.incomplete_usage.saturating_add(1);
+            }
+            let split = &mut gaps.charges;
+            if let Some(charge) = charge::reported_charge(q) {
+                split.charged_attempts += 1;
+                split.charged = split.charged.and_then(|sum| sum.add(charge).ok());
+            } else if let Some(estimate) = q.all_buckets_priced {
+                split.estimated_attempts += 1;
+                split.estimated = split.estimated.and_then(|sum| sum.add(estimate).ok());
+            }
         }
+        gaps
     }
 
     /// "1 attempt had no price, 2 had incomplete usage" for `unknown` attempts.
@@ -1561,22 +1669,32 @@ fn plain_billing(
 ) -> (&'static str, String) {
     let billed = t.per_use_attempts();
     let unknown = t.per_use_unknown();
-    let per_use = (billed > 0).then(|| {
-        if unknown == 0 {
-            format!("Estimated cost: {}", money(t.known_usd))
-        } else if t.known_usd == Decimal::default() {
+    let charges = gaps.charges;
+    let per_use = (billed > 0).then(|| match (unknown, charges.text()) {
+        (0, None) => format!("Estimated cost: {}", money(t.known_usd)),
+        // #368: a figure that is the provider's own charge is a cost, not an
+        // estimate, and says whose charge it is.
+        (0, Some(split)) if charges.all_charged() => {
+            format!("Cost: {}, {split}", money(t.known_usd))
+        }
+        (0, Some(split)) => format!("Cost: {} ({split})", money(t.known_usd)),
+        (_, None) if t.known_usd == Decimal::default() => {
             match gaps.incomplete_usage.min(unknown) {
                 0 => NO_PRICE.to_string(),
                 usage if usage == unknown => NO_USAGE.to_string(),
                 _ => format!("Estimated cost: not available ({})", gaps.reasons(unknown)),
             }
-        } else {
-            format!(
-                "Estimated cost: at least {} ({})",
-                money(t.known_usd),
-                gaps.reasons(unknown)
-            )
         }
+        (_, None) => format!(
+            "Estimated cost: at least {} ({})",
+            money(t.known_usd),
+            gaps.reasons(unknown)
+        ),
+        (_, Some(split)) => format!(
+            "Cost: at least {} ({}; {split})",
+            money(t.known_usd),
+            gaps.reasons(unknown)
+        ),
     });
     let covered = (t.plan_attempts > 0).then(|| {
         if t.unknown_equivalents == 0 {
@@ -1720,6 +1838,21 @@ fn billed_charge(quotes: &[&ObservationQuote]) -> Option<BilledCharge> {
 
 fn billed_figure(quotes: &[&ObservationQuote]) -> Option<String> {
     billed_charge(quotes).map(|charge| charge.text())
+}
+
+/// The provider's stated charge as a second figure beside the cost, unless
+/// every stated charge here already is the cost (#368: OpenRouter's charges
+/// price its requests), where it would only repeat it.
+fn extra_billed_figure(quotes: &[&ObservationQuote]) -> Option<String> {
+    let repeats_cost = quotes
+        .iter()
+        .filter(|quote| has_bill(quote) && quote.usage.billed_usd.is_some())
+        .all(|quote| charge::reported_charge(quote).is_some());
+    if repeats_cost {
+        None
+    } else {
+        billed_figure(quotes)
+    }
 }
 
 fn billed_detail(figure: &str) -> String {
@@ -1909,7 +2042,8 @@ fn short_cost(quotes: &[&ObservationQuote]) -> String {
                 .replacen(NO_PRICE, "no price available", 1)
                 .replacen(NO_USAGE, "usage incomplete", 1)
                 .replacen("Estimated cost: not available", "cost not available", 1)
-                .replacen("Estimated cost: ", "estimated ", 1),
+                .replacen("Estimated cost: ", "estimated ", 1)
+                .replacen("Cost: ", "", 1),
         },
         Err(_) => "cost unavailable".to_string(),
     }
@@ -1976,8 +2110,9 @@ fn plain_header(quotes: &[&ObservationQuote], named: bool) -> Vec<String> {
                 format!("Billing: {billing}")
             });
             lines.push(cost);
+            lines.extend(charge::price_basis(quotes));
             lines.extend(scope::no_price_next_step(quotes.iter().copied()));
-            if let Some(billed) = billed_figure(quotes) {
+            if let Some(billed) = extra_billed_figure(quotes) {
                 lines.push(format!("Billed by provider: {billed}"));
             }
             lines.push(format!("Tokens: {}", plain_tokens(&t)));
@@ -2046,10 +2181,12 @@ fn route_line(quotes: &[&ObservationQuote], named: bool) -> String {
                     "• {route} — {billing}. {}, {}. {cost}.{}{refused}",
                     request_count(quotes),
                     plain_tokens(&t),
-                    billed.map_or_else(String::new, |billed| format!(
-                        " Billed by {provider}: {}.",
-                        billed.text()
-                    ))
+                    billed
+                        .filter(|_| extra_billed_figure(quotes).is_some())
+                        .map_or_else(String::new, |billed| format!(
+                            " Billed by {provider}: {}.",
+                            billed.text()
+                        ))
                 ),
             }
         }
@@ -2087,7 +2224,7 @@ fn plain_overview<'a>(
                 all.iter().copied().filter(|q| q.is_plan()),
             );
             if let (Ok(per_use_totals), Ok(covered)) = (per_use_totals, covered) {
-                let billed = billed_figure(&all)
+                let billed = extra_billed_figure(&all)
                     .map_or_else(String::new, |billed| format!("; billed: {billed}"));
                 lines.push(format!(
                     "Pay-per-use total — {}{billed}",
@@ -2114,8 +2251,14 @@ fn plain_overview<'a>(
     } else {
         lines.extend(scope::overflow_note(all.iter().copied()));
     }
+    let everywhere: Vec<&ObservationQuote> = all.iter().chain(&outside_per_use).copied().collect();
     lines.push(
-        if billed_figure(&all).is_some() {
+        if everywhere
+            .iter()
+            .any(|quote| charge::reported_charge(quote).is_some())
+        {
+            charged_costs_note(&everywhere)
+        } else if billed_figure(&all).is_some() {
             "Estimates use published prices; billed figures are what the provider stated with each response.".to_string()
         } else if outside_per_use.is_empty() && !all.is_empty() && all.iter().all(|quote| quote.is_plan()) {
             // No bill exists for subscription work; pointing at one would
@@ -2150,6 +2293,31 @@ fn plain_overview<'a>(
     }
     lines.push("—— Details ——".to_string());
     lines
+}
+
+/// #368: the first screen's one statement of what its figures are, when some
+/// are charges a provider reported: those are costs, and anything else is an
+/// estimate whose real amount is on the bill it names.
+fn charged_costs_note(quotes: &[&ObservationQuote]) -> String {
+    let provider = charge::charging_provider();
+    let mut note =
+        format!("{provider} costs are the charges {provider} reported with each response");
+    let rest: Vec<&ObservationQuote> = quotes
+        .iter()
+        .copied()
+        .filter(|quote| has_bill(quote) && charge::reported_charge(quote).is_none())
+        .collect();
+    if !rest.is_empty() {
+        note.push_str("; other costs are estimates from published prices");
+        if let Some((clause, bill)) = unstated_charge(rest.iter().copied()) {
+            note.push_str(&format!("; {clause} — check {bill}"));
+        }
+        if billed_figure(&rest).is_some() {
+            note.push_str("; billed figures are what the provider stated with each response");
+        }
+    }
+    note.push('.');
+    note
 }
 
 /// A UTC instant in milliseconds as RFC 3339, else the raw count.
@@ -2369,9 +2537,10 @@ fn range_pages(
         named.extend(scope::no_price_next_step(quotes.clone()));
         named.extend(billed_line(&quotes.clone().collect::<Vec<_>>()));
         named.extend(scope::overflow_note(quotes.clone()));
+        let gaps = EstimateGaps::of(quotes.clone());
         match codex_state::accounting::DayTotals::from_quotes(quotes) {
             Ok(total) => {
-                pages[0].text.extend(estimate(&total));
+                pages[0].text.extend(estimate(&total, gaps));
                 pages[0].text.extend(named);
             }
             // A total this client cannot compute does not unsay which attempts

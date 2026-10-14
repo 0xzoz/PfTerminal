@@ -783,3 +783,61 @@ async fn accounting_chat_completion_assessment_collects() -> anyhow::Result<()> 
     stop(&test).await;
     Ok(())
 }
+
+/// #368: OpenRouter states what it charged in `usage.cost`. The ledger keeps
+/// that charge with the attempt beside the price bound at dispatch, so `/cost`
+/// can price the request from the charge and fall back to the catalogue
+/// estimate only when no charge was reported.
+#[tokio::test]
+async fn accounting_chat_openrouter_records_the_reported_charge() -> anyhow::Result<()> {
+    for (cost, expected) in [
+        (Some(json!(0.000123)), Some("0.000123")),
+        (Some(json!(1.5e-5)), Some("0.000015")),
+        (None, None),
+    ] {
+        let server = MockServer::start().await;
+        let endpoint = format!("{}/v1", server.uri());
+        let mut usage = usage();
+        if let Some(cost) = cost {
+            usage["cost"] = cost;
+        }
+        mount(&server, success(usage)).await;
+        let mode = AccountingMode::Provider {
+            scope: uuid::Uuid::new_v4(),
+            provider_id: "openrouter".into(),
+            wire_api: codex_model_provider_info::WireApi::Chat,
+            approved_endpoint: endpoint.clone(),
+            approved_query: None,
+            pricing: PriceAuthority::ApiKeyRates,
+            basis_source: Default::default(),
+            account: None,
+        };
+        let test = builder(endpoint, mode)
+            .with_config(|config| {
+                config.model = Some("z-ai/glm-5.3-flash".into());
+                config.model_provider_id = "openrouter".into();
+                config.model_provider.name = "OpenRouter".into();
+            })
+            .build_with_auto_env(&server)
+            .await?;
+        test.submit_turn("openrouter accounting").await?;
+        let db = test.codex.state_db().unwrap();
+        let records = attempts(&db).await?;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].provider, "openrouter");
+        // The charge is recorded beside whatever price was bound at
+        // dispatch, never in place of it.
+        let prices: Vec<Snapshot> = payloads(&db, "draft_accounting_price_snapshots").await?;
+        assert_eq!(prices.len(), 1);
+        let observed = observations(&db).await?;
+        assert_eq!(observed.len(), 1);
+        assert_eq!(
+            observed[0].patch.billed_usd,
+            expected
+                .map(|text| Decimal::try_from(text.to_string()))
+                .transpose()?
+        );
+        stop(&test).await;
+    }
+    Ok(())
+}

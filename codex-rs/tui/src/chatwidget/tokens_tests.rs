@@ -594,7 +594,7 @@ fn accounting_inspect_range_hour_in_progress_total_sums_whole_and_current() {
         ),
         "{range:#?}"
     );
-    for line in estimate(&sum) {
+    for line in estimate(&sum, EstimateGaps::default()) {
         assert!(range.contains(&line), "{line}: {range:#?}");
     }
     assert!(!range.iter().any(|s| s == NOT_CURRENT), "{range:#?}");
@@ -1227,7 +1227,7 @@ fn plan_day(equivalent: Decimal, burn_milli_tokens: i64, unknown_equivalents: i6
 fn accounting_inspect_plan_work_is_never_reported_as_money_spent() {
     // Plan work with an API equivalent: the plan rate, what it consumed, and
     // what the same tokens would have cost - none of it spend.
-    insta::assert_snapshot!(estimate(&plan_day(decimal("0.00161"), /*burn_milli_tokens*/ 140_000, /*unknown_equivalents*/ 0)).join("\n"), @"
+    insta::assert_snapshot!(estimate(&plan_day(decimal("0.00161"), /*burn_milli_tokens*/ 140_000, /*unknown_equivalents*/ 0), EstimateGaps::default()).join("\n"), @"
     No recorded attempt here was billed per token.
     Subscription capacity: 2 of 2 attempts, not billed per token
     Plan consumption: 140 tokens at the plan rate that applied
@@ -1235,7 +1235,7 @@ fn accounting_inspect_plan_work_is_never_reported_as_money_spent() {
     ");
     // A plan row the catalogue states no API price for says so, rather than
     // reporting zero.
-    insta::assert_snapshot!(estimate(&plan_day(Decimal::default(), /*burn_milli_tokens*/ 280_000, /*unknown_equivalents*/ 2)).join("\n"), @"
+    insta::assert_snapshot!(estimate(&plan_day(Decimal::default(), /*burn_milli_tokens*/ 280_000, /*unknown_equivalents*/ 2), EstimateGaps::default()).join("\n"), @"
     No recorded attempt here was billed per token.
     Subscription capacity: 2 of 2 attempts, not billed per token
     Plan consumption: 280 tokens at the plan rate that applied
@@ -1243,11 +1243,10 @@ fn accounting_inspect_plan_work_is_never_reported_as_money_spent() {
     ");
     // A day with no plan work says nothing about plans at all.
     assert_eq!(
-        estimate(&money_day(
-            decimal("0.00018"),
-            /*unknown*/ 0,
-            /*attempts*/ 1
-        )),
+        estimate(
+            &money_day(decimal("0.00018"), /*unknown*/ 0, /*attempts*/ 1),
+            EstimateGaps::default()
+        ),
         vec!["Estimated token cost for recorded attempts: $0.000180"]
     );
     // A mixed day is the case the two populations exist for. Three attempts,
@@ -1268,7 +1267,7 @@ fn accounting_inspect_plan_work_is_never_reported_as_money_spent() {
         equivalent_usd: decimal("0.00161"),
         ..Default::default()
     };
-    insta::assert_snapshot!(estimate(&mixed).join("\n"), @"
+    insta::assert_snapshot!(estimate(&mixed, EstimateGaps::default()).join("\n"), @"
     Estimated token cost for recorded attempts: $0.000180
     Subscription capacity: 2 of 3 attempts, not billed per token
     Plan consumption: 140 tokens at the plan rate that applied
@@ -1281,7 +1280,7 @@ fn accounting_inspect_plan_work_is_never_reported_as_money_spent() {
         known_usd: Decimal::default(),
         ..mixed
     };
-    insta::assert_snapshot!(estimate(&mixed_unpriced).join("\n"), @"
+    insta::assert_snapshot!(estimate(&mixed_unpriced, EstimateGaps::default()).join("\n"), @"
     Estimated token cost: unknown
     Full recorded estimate: unavailable (1 of 1 billed attempts incomplete)
     Subscription capacity: 2 of 3 attempts, not billed per token
@@ -1319,7 +1318,7 @@ fn accounting_inspect_plan_work_is_never_reported_as_money_spent() {
 
 #[test]
 fn accounting_inspect_partial_and_unknown_copy() {
-    insta::assert_snapshot!(estimate(&money_day(decimal("0.00018"), /*unknown*/ 1, /*attempts*/ 1)).join("\n"), @"
+    insta::assert_snapshot!(estimate(&money_day(decimal("0.00018"), /*unknown*/ 1, /*attempts*/ 1), EstimateGaps::default()).join("\n"), @"
     Known estimated token cost: $0.000180 + unknown costs
     Full recorded estimate: unavailable (1 of 1 billed attempts incomplete)
     ");
@@ -1344,16 +1343,15 @@ fn accounting_inspect_partial_and_unknown_copy() {
 
 #[test]
 fn accounting_inspect_unpriced_zero_and_missing_rate() {
-    insta::assert_snapshot!(estimate(&money_day(Decimal::default(), /*unknown*/ 1, /*attempts*/ 1)).join("\n"), @"
+    insta::assert_snapshot!(estimate(&money_day(Decimal::default(), /*unknown*/ 1, /*attempts*/ 1), EstimateGaps::default()).join("\n"), @"
     Estimated token cost: unknown
     Full recorded estimate: unavailable (1 of 1 billed attempts incomplete)
     ");
     assert_eq!(
-        estimate(&money_day(
-            Decimal::default(),
-            /*unknown*/ 0,
-            /*attempts*/ 1
-        )),
+        estimate(
+            &money_day(Decimal::default(), /*unknown*/ 0, /*attempts*/ 1),
+            EstimateGaps::default()
+        ),
         vec!["Estimated token cost for recorded attempts: $0.000000"]
     );
     let mut q = quote();
@@ -2677,6 +2675,9 @@ fn accounting_inspect_multi_day_bucket_heading_names_the_whole_bucket() {
     );
 }
 
+/// #368: OpenRouter's stated charge prices its request, so it is the cost
+/// rather than a second figure beside an estimate; a response that stated
+/// none keeps its estimate.
 #[test]
 fn accounting_inspect_states_the_providers_billed_charge() {
     let InspectionDay::Ready(mut view) = breakdown_packet() else {
@@ -2702,9 +2703,10 @@ fn accounting_inspect_states_the_providers_billed_charge() {
         .find(|s| s.starts_with("• OpenRouter · one"))
         .unwrap();
     assert!(
-        line.ends_with(&format!(" Billed by OpenRouter: {billed}.")),
+        line.ends_with(&format!(" Cost: {billed}, charged by OpenRouter.")),
         "{line}"
     );
+    assert!(!line.contains("Billed"), "{line}");
     let other = root
         .text
         .iter()
@@ -2728,7 +2730,9 @@ fn accounting_inspect_states_the_providers_billed_charge() {
     assert!(
         request
             .text
-            .contains(&format!("Billed by provider: {billed}"))
+            .contains(&format!("Cost: {billed}, charged by OpenRouter")),
+        "{:#?}",
+        request.text
     );
     assert!(request.text.contains(&billed_detail(&billed)));
     assert!(
