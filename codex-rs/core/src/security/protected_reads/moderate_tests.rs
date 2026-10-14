@@ -1,3 +1,6 @@
+// Real folders, `/bin/bash` and the Unix sandboxes' protected paths.
+#![cfg(unix)]
+
 use super::*;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::FileSystemAccessMode;
@@ -83,8 +86,8 @@ impl Fixture {
 }
 
 /// #748 (c6, c3): a read of Corbanu's sign-in (or vault, or config) that
-/// Moderate's rules denied names Moderate; secretless launch keeps it at
-/// every level, so then switching to Permissive is not offered.
+/// Moderate's rules denied names Moderate and /security; when secretless
+/// launch keeps it at every level too, that is named instead.
 #[test]
 fn issue_748_moderate_read_denial_names_the_level() {
     let fixture = Fixture::new();
@@ -95,7 +98,7 @@ fn issue_748_moderate_read_denial_names_the_level() {
     let explained = fixture.explain(Fixture::profile(), None, &script, &line);
     assert_eq!(
         explained,
-        Some(read_explanation(&auth, /*every_level*/ false))
+        Some(read_explanation(&auth, WayForward::Permissive))
     );
     let explained = explained.expect("explained");
     assert!(
@@ -104,14 +107,16 @@ fn issue_748_moderate_read_denial_names_the_level() {
     );
     assert!(explained.contains("Permissive in /security"), "{explained}");
 
+    // Not Moderate's alone: a person's approval may have lifted its rules.
     let contract = fixture.contract();
     let explained = fixture.explain(Fixture::profile(), Some(&contract), &script, &line);
-    assert_eq!(
-        explained,
-        Some(read_explanation(&auth, /*every_level*/ true))
-    );
+    assert_eq!(explained, Some(kept_read_explanation(&auth)));
     let explained = explained.expect("explained");
-    assert!(explained.contains("at every security level"), "{explained}");
+    assert!(
+        explained.starts_with("Secretless agent launch blocked access to"),
+        "{explained}"
+    );
+    assert!(explained.contains("Moderate included"), "{explained}");
     assert!(!explained.contains("Permissive"), "{explained}");
 
     // A failure that names no denied path is not the level's.
@@ -129,7 +134,8 @@ fn issue_748_moderate_read_denial_names_the_level() {
 /// #748: with the person's own full access, a write to the project's
 /// `.codex` that Moderate's rules denied names Moderate. Under secretless
 /// launch no level runs the command outside a sandbox, so then switching to
-/// Permissive is not offered.
+/// Permissive is not offered. A write to Corbanu's home that secretless
+/// launch keeps read-only is attributed to it.
 #[test]
 fn issue_748_moderate_write_denial_names_the_level() {
     let fixture = Fixture::new();
@@ -137,18 +143,41 @@ fn issue_748_moderate_write_denial_names_the_level() {
     let line = "bash: .codex/p.toml: Operation not permitted";
     assert_eq!(
         fixture.explain(PermissionProfile::Disabled, None, script, line),
-        Some(write_explanation(
-            ".codex/p.toml",
-            /*every_level*/ false
-        ))
+        Some(write_explanation(".codex/p.toml", WayForward::Permissive))
     );
     let contract = fixture.contract();
+    let explained = fixture.explain(PermissionProfile::Disabled, Some(&contract), script, line);
     assert_eq!(
-        fixture.explain(PermissionProfile::Disabled, Some(&contract), script, line),
-        Some(write_explanation(
-            ".codex/p.toml",
-            /*every_level*/ true
-        ))
+        explained,
+        Some(write_explanation(".codex/p.toml", WayForward::NoLevel))
+    );
+    let explained = explained.expect("explained");
+    assert!(explained.contains("only inside a sandbox"), "{explained}");
+    assert!(!explained.contains("Permissive"), "{explained}");
+
+    // A runtime entry of Corbanu's home: Moderate's, and secretless
+    // launch's when it is on.
+    std::fs::create_dir(fixture.home.join("skills")).expect("skills");
+    let skill = format!("{}/skills/x.md", fixture.home.display());
+    let skill_script = format!("printf x > '{skill}'");
+    let skill_line = format!("bash: {skill}: Operation not permitted");
+    assert_eq!(
+        fixture.explain(
+            PermissionProfile::Disabled,
+            None,
+            &skill_script,
+            &skill_line
+        ),
+        Some(write_explanation(&skill, WayForward::Permissive))
+    );
+    assert_eq!(
+        fixture.explain(
+            PermissionProfile::Disabled,
+            Some(&contract),
+            &skill_script,
+            &skill_line
+        ),
+        Some(kept_write_explanation(&skill))
     );
     // Workspace-write keeps `.codex` read-only itself: not Moderate's.
     assert_eq!(

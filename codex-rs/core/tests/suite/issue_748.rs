@@ -14,6 +14,7 @@ use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
+use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::user_input::UserInput;
 use codex_security_policy::SecurityLevel;
 use core_test_support::responses::ev_assistant_message;
@@ -67,7 +68,10 @@ enum Command {
     WriteOutside,
 }
 
-async fn run(level: SecurityLevel, command: Command) -> anyhow::Result<Outcome> {
+/// Runs `command` as the session's first tool call, or with `approved`
+/// after untrusted content (another tool's output), approved by the person
+/// when asked.
+async fn run(level: SecurityLevel, command: Command, approved: bool) -> anyhow::Result<Outcome> {
     let home = Arc::new(TempDir::new()?);
     let auth = home.path().canonicalize()?.join("auth.json");
     std::fs::write(&auth, CANARY)?;
@@ -88,7 +92,7 @@ async fn run(level: SecurityLevel, command: Command) -> anyhow::Result<Outcome> 
         ),
     };
     let server = start_mock_server().await;
-    let steps = vec![
+    let mut steps = vec![
         call(CALL_ID, name, arguments),
         vec![
             ev_response_created("done"),
@@ -96,13 +100,26 @@ async fn run(level: SecurityLevel, command: Command) -> anyhow::Result<Outcome> 
             ev_completed("done"),
         ],
     ];
+    let approval = if approved {
+        steps.insert(
+            0,
+            call(
+                "call-untrusted",
+                "shell_command",
+                json!({ "command": "printf 'notes'" }),
+            ),
+        );
+        AskForApproval::OnRequest
+    } else {
+        AskForApproval::Never
+    };
     let captured = mount_sse_sequence(&server, steps.into_iter().map(sse).collect()).await;
     let test = test_codex()
         .with_home(home)
         .with_model("test-gpt-5.1-codex")
         .with_config(move |config| {
             config.security_level = level;
-            config.permissions.approval_policy = Constrained::allow_any(AskForApproval::Never);
+            config.permissions.approval_policy = Constrained::allow_any(approval);
             for feature in [Feature::SourceEnvelopes, Feature::UnifiedExec] {
                 config
                     .features
@@ -142,12 +159,27 @@ async fn run(level: SecurityLevel, command: Command) -> anyhow::Result<Outcome> 
         })
         .await?;
     let mut warnings = Vec::new();
-    while let EventMsg::Warning(warning) = wait_for_event(&test.codex, |event| {
-        matches!(event, EventMsg::Warning(_) | EventMsg::TurnComplete(_))
-    })
-    .await
-    {
-        warnings.push(warning.message);
+    loop {
+        match wait_for_event(&test.codex, |event| {
+            matches!(
+                event,
+                EventMsg::Warning(_) | EventMsg::ExecApprovalRequest(_) | EventMsg::TurnComplete(_)
+            )
+        })
+        .await
+        {
+            EventMsg::Warning(warning) => warnings.push(warning.message),
+            EventMsg::ExecApprovalRequest(request) => {
+                test.codex
+                    .submit(Op::ExecApproval {
+                        id: request.effective_approval_id(),
+                        turn_id: None,
+                        decision: ReviewDecision::Approved,
+                    })
+                    .await?;
+            }
+            _ => break,
+        }
     }
     let output = captured
         .requests()
@@ -193,7 +225,7 @@ async fn issue_748_moderate_refusals_name_the_level() -> anyhow::Result<()> {
         (Command::WriteCodex, None),
         (Command::WriteOutside, None),
     ] {
-        let moderate = run(SecurityLevel::Moderate, command).await?;
+        let moderate = run(SecurityLevel::Moderate, command, /*approved*/ false).await?;
         let warnings = level_warnings(&moderate);
         let explained = match expected {
             Some(expected) => {
@@ -211,7 +243,7 @@ async fn issue_748_moderate_refusals_name_the_level() -> anyhow::Result<()> {
             ));
         }
 
-        let permissive = run(SecurityLevel::Permissive, command).await?;
+        let permissive = run(SecurityLevel::Permissive, command, /*approved*/ false).await?;
         let reads = matches!(command, Command::Read | Command::ReadExec);
         if !level_warnings(&permissive).is_empty()
             || permissive.output.contains("Security level")
@@ -225,5 +257,31 @@ async fn issue_748_moderate_refusals_name_the_level() -> anyhow::Result<()> {
         }
     }
     assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
+/// #748 review: a protected read a person approves after untrusted content
+/// runs with Moderate's rules lifted, so nothing blames Moderate for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_748_an_approved_read_is_not_attributed_to_moderate() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let approved = run(
+        SecurityLevel::Moderate,
+        Command::Read,
+        /*approved*/ true,
+    )
+    .await?;
+    assert!(approved.output.contains(CANARY), "{}", approved.output);
+    assert!(
+        level_warnings(&approved).is_empty(),
+        "{:?}",
+        approved.warnings
+    );
+    assert!(
+        !approved.output.contains("Security level"),
+        "{}",
+        approved.output
+    );
     Ok(())
 }
