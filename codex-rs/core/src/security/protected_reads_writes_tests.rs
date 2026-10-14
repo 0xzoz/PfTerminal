@@ -80,6 +80,16 @@ fn issue_737_740_config_writers_and_understood_commands() {
         ),
         ("ls -la | grep x > out 2>&1", &["out"]),
         ("find . -name '*.rs'", &[]),
+        // #789: waiting, and a sed script that only prints lines.
+        ("sleep 60", &[]),
+        ("sleep 60; echo finished > ks-child.txt", &["ks-child.txt"]),
+        ("sed -n 1p notes.txt", &[]),
+        ("sed -n '1,240p' /x/skills/SKILL.md", &[]),
+        ("sed -ne 1p -e 2d notes.txt", &[]),
+        ("sed -n -e '2,$' -e p notes.txt", &[]),
+        ("sed -n = notes.txt", &[]),
+        ("sed -n -e '$!N' -e 1d notes.txt", &[]),
+        ("sed --quiet --expression=5q notes.txt", &[]),
     ] {
         assert_eq!(of(script), known(expected), "{script}");
     }
@@ -94,7 +104,39 @@ fn issue_737_740_config_writers_and_understood_commands() {
         "echo $(cat x) > notes.txt",
         "echo a\n./build.sh",
         "find . -delete",
-        "sed -n 1p notes.txt",
+        // #789: a sed script that may write, run or read, or comes from a
+        // file, or a sed that edits in place.
+        "sed -n '1w out.txt' notes.txt",
+        "sed 's/a/b/' notes.txt",
+        "sed -n -e 1p -e 's/x/y/e' notes.txt",
+        "sed 1r/etc/passwd notes.txt",
+        "sed -f script.sed notes.txt",
+        "sed -ni 1p notes.txt",
+        "sed -i '' 1d notes.txt",
+        "sed --in-place 1d notes.txt",
+        "sed --sandbox 1p notes.txt",
+        "sed -n",
+        // Review r1: a script a shell expands, an option after an operand
+        // (macOS reads it as a file name), `-l` (a flag on macOS), and
+        // `arch`, which runs a program on macOS.
+        "p='1w x'; sed -n \"$p\" notes.txt",
+        "sed -n '${p}' notes.txt",
+        "bash -c 'sed -n \"$1\" notes.txt' _ '1w x'",
+        "sed '1w x' -e p notes.txt",
+        "sed -l '1w x' p notes.txt",
+        // Review r2: an operand or script a shell expands, or a glob.
+        "f=-e1w.githooks/pre-commit; sed -n 1p \"$f\" notes.txt",
+        "bash -c 'sed -n 1p \"$1\" notes.txt' _ -e1wx",
+        "sed -n \"$@\" notes.txt",
+        "sed -n 1p *.txt",
+        // Review r3: zsh's `$=p` splits `$p`; `$=` is refused altogether.
+        "p=1w.githooks/pre-commit; sed -n -e \"$=p\" notes.txt",
+        "sed -n -e \"$==p\" notes.txt",
+        "zsh -c 'sed -n -e \"$=1\" notes.txt' _ 1wx",
+        "sed -ne '$=' -e 2d notes.txt",
+        "sed -n '$p' notes.txt",
+        "sed -n -e =nl notes.txt",
+        "arch -arm64 sh -c 'echo x > .githooks/pre-commit'",
         "bash script.sh",
         "python3 -c 'open(\"x\", \"w\")'",
         "ln -s ../x",
@@ -223,6 +265,10 @@ fn issue_740_unliftable_notes() {
     );
     for script in [
         "ln -s notes.txt notes-link.txt && cat notes-link.txt",
+        // #789: the commands of AGG-R14's child agent and parent.
+        "sleep 60; echo finished > ks-child.txt",
+        "sleep 60",
+        "sed -n '1,240p' notes.txt",
         "cat .codex/notes.md",
         "echo x > notes.txt 2>/dev/null",
         "git config --global --get user.name",

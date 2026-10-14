@@ -156,7 +156,7 @@ nav:
               - "PF-60 — Unified agent cost and usage accounting":
                   - Plan: plans/completed/main-2026-10-10-portfolio-agent-cost-accounting.md
               - "PF-60 follow-ups — Accounting follow-ups after PF-60":
-                  - Plan: plans/proposed/portfolio-agent-cost-accounting-followups.md
+                  - Plan: plans/active/portfolio-agent-cost-accounting-followups.md
                   - "PF-60-S06 — Side-conversation and temporary-fork attribution": sprints/current/portfolio-agent-cost-accounting-followups/pf-60-s06-side-and-fork-attribution.md
                   - "PF-60-S07 — Price catalogue refresh (#368)": sprints/current/portfolio-agent-cost-accounting-followups/pf-60-s07-price-catalogue-refresh.md
                   - "PF-60-S08 — /cost page clarity and reopen warm-up cost": sprints/current/portfolio-agent-cost-accounting-followups/pf-60-s08-cost-page-clarity-and-reopen-warmup.md
@@ -260,7 +260,7 @@ nav:
           - P0 Security Levels: plans/completed/main-2026-10-08-p0-security-levels.md
           - P0 Security History (to 2026-10-06): plans/history/p0-security-levels-2026-10-06.md
           - P1 Security Hardening: plans/active/p1-security-hardening.md
-          - Unified Provider Onboarding: plans/active/unified-provider-auth.md
+          - Unified Provider Onboarding: plans/completed/main-2026-10-14-unified-provider-auth.md
           - Security Source Reconciliation: plans/security-source-reconciliation.md
           - OpenClaw Source Review: plans/openclaw-source-review-2026-08-28.md
           - Architecture refinements: plans/security-architecture-refinements-2026-08-28.md
@@ -269,6 +269,7 @@ nav:
               - Overview: plans/proposed/index.md
               - Arbitrary-model Autoreview: plans/proposed/arbitrary-model-autoreview.md
               - Historical Firewall Design: plans/proposed/prompt-injection-firewall.md
+              - "Named accounts (PF-84): flag removal": plans/proposed/named-accounts-flag-removal.md
           - Completed Plans: plans/completed/index.md
           - Cancelled Plans: plans/cancelled/index.md
           - Plan Template: plans/PLAN_TEMPLATE.md

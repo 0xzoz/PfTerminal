@@ -13,7 +13,7 @@ in [PF-84-S02.md](PF-84-S02.md) … [PF-84-S06.md](PF-84-S06.md) and the follow-
   ChatGPT sign-ins and Amazon Bedrock were verified against mock servers with fake tokens and keys only (see the
   [S06 closure](../../../docs/sprints/archive/unified-provider-auth/pf-84-s06-aws-and-chatgpt-accounts.md)). The
   flag-removal prerequisites (live ChatGPT and Bedrock checks, re-checks, an isolated code-blind run) are in the
-  [plan's PF-84 section](../../../docs/plans/active/unified-provider-auth.md); the reel says they remain.
+  [plan's PF-84 section](../../../docs/plans/completed/main-2026-10-14-unified-provider-auth.md); the reel says they remain.
 - Every terminal frame is a published demo recording (GLM 5.3 Flash on Z.AI, or GPT-5.4 against the OpenAI and
   Bedrock mocks). Clips are trimmed to the moment that proves the criterion; waiting is sped up (an on-screen badge
   shows the rate) and proof frames are held. Added on top: chapter cards, one evidence card, a side panel naming the
