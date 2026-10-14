@@ -307,20 +307,24 @@ fn sed_scripts<'a>(arguments: &[&'a str]) -> Option<Vec<&'a str>> {
 /// #789: whether a `sed` script only selects lines by number and prints,
 /// deletes, lists or counts them, or quits: no `w` (write), `e` (run), `r`
 /// (read) or substitution, whose flags could write or run. A `$` is the
-/// last line only where a shell would leave it alone (`$=`, `$!N`, `1,$`);
-/// one a shell may have expanded (`"$p"`, `${p}`, `$@`) is refused, since
-/// the text no longer shows whether it was quoted; so is `$p` (the last
-/// line).
+/// last line only where no shell would expand it (`1,$`, `$!N`: `$!` is a
+/// process number at most); one a shell may have expanded (`"$p"`, `${p}`,
+/// `$@`, zsh's `$=p`) is refused, since the text no longer shows whether it
+/// was quoted, and so are `$p` and `$=` (the last line). Only scripts given
+/// with `-e` get here with a `$`: a first operand holding one is refused as
+/// an operand a shell expands. A script that starts with `=` and goes on
+/// is refused too: zsh turns `=nl` into a program's path.
 fn sed_script_only_reads(script: &str) -> bool {
     let chars: Vec<char> = script.chars().collect();
     !script.trim().is_empty()
+        && (script == "=" || !script.starts_with('='))
         && chars.iter().enumerate().all(|(index, c)| {
             c.is_ascii_digit()
                 || " \t\n,;!{}pdqQ=nNl".contains(*c)
                 || (*c == '$'
                     && chars
                         .get(index + 1)
-                        .is_none_or(|next| next.is_whitespace() || ",;!=}".contains(*next)))
+                        .is_none_or(|next| next.is_whitespace() || ",;!}".contains(*next)))
         })
 }
 
