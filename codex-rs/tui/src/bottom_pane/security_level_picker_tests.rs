@@ -1129,7 +1129,7 @@ fn issue_691_aggressive_waits_for_the_windows_sandbox() {
     assert_eq!(files(home.path()), Vec::<String>::new());
 
     // Once it is set up, Aggressive's review opens as before.
-    picker.set_windows_sandbox_blocker(None);
+    picker.set_windows_sandbox_blocker(/*blocker*/ None);
     picker.handle_key_event(key(KeyCode::Enter));
     assert_eq!(picker.screen, Screen::Review(ChosenLevel::Aggressive));
 }
