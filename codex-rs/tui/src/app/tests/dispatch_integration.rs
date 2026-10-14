@@ -1326,7 +1326,11 @@ fn issue_660_switch_off_names_a_codex_pane_whose_task_waits() -> Result<()> {
                 task: "pf660 waits".to_string(),
                 sent_while_kill_switch_on: fixture.app.kill_switch_on_now(),
             });
-        route_for(&mut fixture, std::time::Duration::from_secs(2)).await?;
+        fixture
+            .route_until(std::time::Duration::from_secs(20), |app| {
+                transcript_since(app, 0).contains("waits: the security kill switch is on")
+            })
+            .await?;
         assert!(responses.requests().is_empty(), "no turn started");
 
         let from = fixture.app.transcript_cells.len();

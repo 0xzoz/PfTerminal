@@ -1287,8 +1287,14 @@ impl App {
 
     /// #660 follow-up: a task for the managed Codex pane `thread_id` waits in
     /// its mailbox because of the kill switch, until that pane's next turn.
+    /// Not when the pane is running a turn: that turn takes the task. Reports
+    /// held in a mailbox are not tasks and are not listed (as for Claude panes).
     pub(crate) fn note_kill_switch_held_native_task(&mut self, thread_id: ThreadId) {
-        if !self.kill_switch_held_native_tasks.contains(&thread_id) {
+        let running = self
+            .agent_navigation
+            .get(&thread_id)
+            .is_some_and(|entry| entry.is_running);
+        if !running && !self.kill_switch_held_native_tasks.contains(&thread_id) {
             self.kill_switch_held_native_tasks.push(thread_id);
         }
     }
