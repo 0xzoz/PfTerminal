@@ -34,6 +34,7 @@ use codex_protocol::secretless_launch;
 use codex_sandboxing::SandboxCommand;
 use codex_sandboxing::SandboxManager;
 use codex_sandboxing::SandboxTransformRequest;
+use codex_sandboxing::SandboxType;
 use codex_sandboxing::get_platform_sandbox;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
@@ -161,8 +162,10 @@ impl ClaudeContainment {
     /// missing protected paths in the home, such as `~/.aws`) in a registry
     /// under `TMPDIR`; a pane with its own `TMPDIR` could not see the main
     /// session's placeholders, and a command in either could fail to start.
-    /// Claude Code keeps its own files under `CLAUDE_CODE_TMPDIR`; its Bash
-    /// commands see the session's `TMPDIR`, which the pane cannot write.
+    /// Claude Code keeps its own files under `CLAUDE_CODE_TMPDIR`. On Linux
+    /// it starts inside the sandbox with the pane's `TMPDIR` (see
+    /// [`pane_command`]); on macOS its Bash commands see the session's
+    /// `TMPDIR`, which the pane cannot write.
     pub(crate) fn claude_env(&self) -> BTreeMap<String, String> {
         let config = self.config_dir().to_string_lossy().into_owned();
         let tmp = self.tmp_dir().to_string_lossy().into_owned();
@@ -322,15 +325,42 @@ pub(crate) fn contain(
         cwd,
     )
     .map_err(|err| anyhow!(err))?;
+    let (program, program_args) = pane_command(sandbox, &containment.tmp_dir(), executable, args);
     sandboxed(
         containment,
-        executable,
-        args,
+        &program,
+        &program_args,
         env,
         cwd,
         bridge_port,
         &level_rules(profile),
     )
+}
+
+/// The program and arguments run inside the sandbox for `executable args`.
+///
+/// #743 follow-up (Travis, 2026-10-14, option b): on Linux, Claude Code
+/// starts inside the sandbox with `TMPDIR` set to the pane's own temporary
+/// folder `tmp_dir`, through `/usr/bin/env`, so `mktemp` and here-documents
+/// in its Bash commands work. The sandbox itself keeps the session's
+/// `TMPDIR`, under which it keeps the placeholder registry it shares with the
+/// main session, so that bookkeeping and the sandbox policy are unchanged.
+/// macOS is unchanged.
+pub(crate) fn pane_command(
+    sandbox: SandboxType,
+    tmp_dir: &Path,
+    executable: &str,
+    args: &[String],
+) -> (String, Vec<String>) {
+    if sandbox != SandboxType::LinuxSeccomp {
+        return (executable.to_string(), args.to_vec());
+    }
+    let mut env_args = vec![
+        format!("TMPDIR={}", tmp_dir.to_string_lossy()),
+        executable.to_string(),
+    ];
+    env_args.extend(args.iter().cloned());
+    ("/usr/bin/env".to_string(), env_args)
 }
 
 /// #758: under Aggressive a contained pane may not reach the macOS keychain

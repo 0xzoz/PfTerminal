@@ -271,3 +271,121 @@ fn issue_743_the_pane_keeps_the_session_tmpdir() {
     );
     assert!(!containment.claude_env().contains_key("TMPDIR"));
 }
+
+/// #743 follow-up (Travis, 2026-10-14, option b): on Linux, Claude Code
+/// starts inside the sandbox with the pane's own `TMPDIR`, while the sandbox
+/// (and its shared placeholder registry) keeps the session's. macOS is
+/// unchanged.
+#[test]
+fn issue_743_on_linux_claude_starts_with_the_pane_tmpdir() {
+    let tmp = Path::new("/state/pane-a/tmp");
+    let args = ["-p".to_string(), "--verbose".to_string()];
+    assert_eq!(
+        pane_command(SandboxType::LinuxSeccomp, tmp, "/usr/local/bin/claude", &args),
+        (
+            "/usr/bin/env".to_string(),
+            vec![
+                "TMPDIR=/state/pane-a/tmp".to_string(),
+                "/usr/local/bin/claude".to_string(),
+                "-p".to_string(),
+                "--verbose".to_string(),
+            ]
+        )
+    );
+    assert_eq!(
+        pane_command(SandboxType::MacosSeatbelt, tmp, "/usr/local/bin/claude", &args),
+        ("/usr/local/bin/claude".to_string(), args.to_vec())
+    );
+    // The sandbox's own environment keeps the session's `TMPDIR`.
+    let containment = ClaudeContainment {
+        state_dir: PathBuf::from("/state/pane-a"),
+        panes_dir: PathBuf::from("/home/someone/.corbanu/panes"),
+        linux_sandbox_exe: None,
+    };
+    assert_eq!(containment.tmp_dir(), tmp);
+    let env = launch_env(
+        [("TMPDIR".to_string(), "/session/tmp".to_string())],
+        &containment.claude_env(),
+    );
+    assert_eq!(env.get("TMPDIR").map(String::as_str), Some("/session/tmp"));
+}
+
+/// #743 follow-up, real Linux sandbox: a contained pane's commands can make
+/// temporary files (`mktemp`, a here-document) in the pane's own `TMPDIR`,
+/// while the session's `TMPDIR` (`/tmp` here) stays read-only to the pane.
+/// Skipped where `codex-linux-sandbox` is not built or cannot run.
+#[cfg(target_os = "linux")]
+#[test]
+fn issue_743_linux_pane_commands_can_make_temporary_files() {
+    let Ok(exe) = codex_utils_cargo_bin::cargo_bin("codex-linux-sandbox") else {
+        eprintln!("skipped: codex-linux-sandbox is not built");
+        return;
+    };
+    let cwd = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let containment = ClaudeContainment {
+        state_dir: state.path().canonicalize().unwrap(),
+        panes_dir: cwd.path().join("panes"),
+        linux_sandbox_exe: Some(exe),
+    };
+    std::fs::create_dir_all(containment.tmp_dir()).unwrap();
+    let env = HashMap::from([
+        ("PATH".to_string(), "/usr/bin:/bin".to_string()),
+        ("HOME".to_string(), cwd.path().to_string_lossy().into_owned()),
+        ("TMPDIR".to_string(), "/tmp".to_string()),
+    ]);
+    let run = |script: &str| {
+        let (program, args) = pane_command(
+            SandboxType::LinuxSeccomp,
+            &containment.tmp_dir(),
+            "/bin/sh",
+            &["-c".to_string(), script.to_string()],
+        );
+        let command = sandboxed(
+            &containment,
+            &program,
+            &args,
+            env.clone(),
+            cwd.path(),
+            /*bridge_port*/ 4242,
+            &base_profile(&containment).unwrap(),
+        )
+        .unwrap();
+        let mut process = std::process::Command::new(&command.argv[0]);
+        process
+            .args(&command.argv[1..])
+            .env_clear()
+            .envs(&command.env)
+            .current_dir(cwd.path());
+        if let Some(arg0) = &command.arg0 {
+            std::os::unix::process::CommandExt::arg0(&mut process, arg0);
+        }
+        process.output().unwrap()
+    };
+    let probe = run("true");
+    if !probe.status.success() {
+        eprintln!(
+            "skipped: the Linux sandbox cannot run here: {}",
+            String::from_utf8_lossy(&probe.stderr)
+        );
+        return;
+    }
+    let output = run(
+        "f=$(mktemp) && echo made > \"$f\" && cat \"$f\" && echo \"$f\" && \
+         cat <<'DOC'\nheredoc-ok\nDOC\n\
+         if touch /tmp/corbanu-743-$$ 2>/dev/null; then echo session-tmp-writable; fi",
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stdout}\n{stderr}");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.first().copied(), Some("made"), "{stdout}\n{stderr}");
+    assert!(
+        lines
+            .get(1)
+            .is_some_and(|path| Path::new(path).starts_with(containment.tmp_dir())),
+        "{stdout}"
+    );
+    assert!(lines.contains(&"heredoc-ok"), "{stdout}\n{stderr}");
+    assert!(!lines.contains(&"session-tmp-writable"), "{stdout}");
+}
