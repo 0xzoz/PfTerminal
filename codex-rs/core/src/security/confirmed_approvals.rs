@@ -112,8 +112,9 @@ pub(crate) fn note_outcome(thread: ThreadId, outcome: &ApprovalsOutcome) {
 }
 
 /// Register a session of this process on `codex_home`. A confirmation made
-/// while it was starting reaches it here.
-pub(crate) fn register(codex_home: &Path, session: &Arc<Session>) {
+/// while it was starting reaches it here; `started_confirmed`: the home was
+/// already confirmed when its settings were built, so it has its outcome.
+pub(crate) fn register(codex_home: &Path, session: &Arc<Session>, started_confirmed: bool) {
     let home = canonical(codex_home);
     let runtime = tokio::runtime::Handle::current();
     let confirmed = {
@@ -129,7 +130,7 @@ pub(crate) fn register(codex_home: &Path, session: &Arc<Session>) {
         });
         state.homes.contains(&home)
     };
-    if confirmed {
+    if confirmed && !started_confirmed {
         let session = Arc::clone(session);
         runtime.spawn(async move {
             let outcome = session.require_approval_for_every_command().await;
@@ -142,7 +143,9 @@ pub(crate) fn register(codex_home: &Path, session: &Arc<Session>) {
 /// session of this process on it requires approval for every command from
 /// its next turn, and sessions that start later on it start that way. Waits
 /// up to [`WAIT`] for the sessions to answer. Blocking: call it off the
-/// async runtime.
+/// async runtime (the TUI commits on its own thread; tests use
+/// `spawn_blocking`). On a runtime worker a session's task can wait behind the
+/// blocked worker; it is then reported pending and still takes it.
 pub(crate) fn confirm(codex_home: &Path) -> ApprovalsAtConfirmation {
     let home = canonical(codex_home);
     let sessions: Vec<(ThreadId, Arc<Session>, tokio::runtime::Handle)> = {
@@ -200,10 +203,10 @@ pub(crate) fn confirm(codex_home: &Path) -> ApprovalsAtConfirmation {
 /// Shown in a thread whose managed configuration rules it out.
 pub(crate) fn kept_warning(reason: &str) -> String {
     format!(
-        "Aggressive: approval for every command was not applied to this thread because your managed configuration rules it out ({reason}). Its approval settings stay as they are; Aggressive cannot be fully active here until that requirement allows it."
+        "Aggressive: approval for every command was not applied to this thread ({reason}). Its approval settings stay as they are; Aggressive cannot be fully active here until that changes."
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "confirmed_approvals_tests.rs"]
 mod tests;

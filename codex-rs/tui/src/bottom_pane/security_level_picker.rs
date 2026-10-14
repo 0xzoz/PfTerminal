@@ -750,7 +750,7 @@ impl SecurityLevelPicker {
                         .is_some_and(crate::legacy_core::security_level_change::approvals_held)
                     {
                         format!(
-                            "Saved: Aggressive. Core's protections ({protections}) and approval for every command apply in this session now; the sandbox, network, environment, model-key and child-agent rows take effect when you restart Corbanu Terminal."
+                            "Saved: Aggressive. Core's protections ({protections}) apply in this session now, and approval for every command from its next turn; the sandbox, network, environment, model-key and child-agent rows take effect when you restart Corbanu Terminal."
                         )
                     } else {
                         format!(
@@ -887,7 +887,7 @@ impl SecurityLevelPicker {
                 } else if self.core_aggressive_on_confirm() && !self.approvals_on_confirm() {
                     "Core's protections below apply as soon as you confirm. The rest of the rows above take effect when you restart Corbanu Terminal (you can restart right after saving); until then this session keeps its current sandbox, approval, network, environment, model-key and child-agent settings, apart from Core's protected-path denials, and commands already running keep the permissions they started with. Your config.toml is not modified."
                 } else if self.core_aggressive_on_confirm() {
-                    "Core's protections below and approval for every command apply as soon as you confirm. The rest of the rows above take effect when you restart Corbanu Terminal (you can restart right after saving); until then this session keeps its current sandbox, network, environment, model-key and child-agent settings, apart from Core's protected-path denials, and commands already running keep the permissions they started with. Your config.toml is not modified."
+                    "Core's protections below apply as soon as you confirm, and approval for every command from each pane's next turn. The rest of the rows above take effect when you restart Corbanu Terminal (you can restart right after saving); until then this session keeps its current sandbox, network, environment, model-key and child-agent settings, apart from Core's protected-path denials, and commands already running keep the permissions they started with. Your config.toml is not modified."
                 } else {
                     "The rows above take effect when you restart Corbanu Terminal (you can restart right after saving); this session keeps its current settings until then. Your config.toml is not modified."
                 }));
@@ -939,6 +939,13 @@ impl SecurityLevelPicker {
                 ));
                 lines.extend(wrap(if self.active == ChosenLevel::Aggressive {
                     "Takes effect when you restart Corbanu Terminal; this session stays Aggressive until then, and its pending approvals end with it."
+                } else if self.core_aggressive_now()
+                    && self
+                        .core
+                        .thread
+                        .is_some_and(crate::legacy_core::security_level_change::approvals_held)
+                {
+                    "Core's Aggressive protections and approval for every command stay on in this session until you restart; saving cancels the Aggressive level saved for the next start."
                 } else if self.core_aggressive_now() {
                     "Core's Aggressive protections stay on in this session until you restart; saving cancels the Aggressive level saved for the next start."
                 } else {
@@ -984,7 +991,9 @@ impl SecurityLevelPicker {
                             lines.extend(wrap(&line));
                         }
                     }
-                    lines.extend(wrap(&at_restart(approvals.is_some())));
+                    lines.extend(wrap(&at_restart(
+                        approvals.is_some_and(|approvals| approvals.held > 0),
+                    )));
                 } else {
                     lines.extend(wrap(&format!(
                         "Restart Corbanu Terminal to activate {}. Until then this session stays {}.",
@@ -1162,7 +1171,7 @@ impl SecurityLevelPicker {
 
 /// #505: what confirming Aggressive does to approvals in the sessions of
 /// this Corbanu Terminal.
-const APPROVALS_NOW: &str = "from each pane's next turn you approve every command that is not known read-only (reviewer: you, never the automatic reviewer), in every Corbanu pane and child agent of this Corbanu Terminal, and in those you start before you restart; a pane whose managed configuration rules this out keeps its own approval settings and says so";
+const APPROVALS_NOW: &str = "from each pane's next turn you approve every command that is not known read-only (reviewer: you), in every Corbanu pane and child agent of this Corbanu Terminal, and in those you start before you restart; a pane whose managed configuration rules this out keeps its own approval settings and says so";
 
 /// #505: what the confirmation did to approvals in this process's sessions.
 fn approvals_lines(
@@ -1175,13 +1184,16 @@ fn approvals_lines(
             format!("{count} threads")
         }
     };
-    let mut lines = vec![format!(
-        "Approval for every command: from each pane's next turn you approve every command that is not known read-only (reviewer: you), now in {} of this Corbanu Terminal and in those you start before you restart.",
-        threads(approvals.held)
-    )];
+    let mut lines = Vec::new();
+    if approvals.held > 0 {
+        lines.push(format!(
+            "Approval for every command: from each pane's next turn you approve every command that is not known read-only (reviewer: you), now in {} of this Corbanu Terminal and in those you start before you restart.",
+            threads(approvals.held)
+        ));
+    }
     if !approvals.kept.is_empty() {
         lines.push(format!(
-            "Not applied in {}: your managed configuration rules it out, so the approval settings there stay as they are ({}).",
+            "Approval for every command was not applied in {} (their approval settings stay as they are): {}.",
             threads(approvals.kept.len()),
             approvals.kept.join("; ")
         ));

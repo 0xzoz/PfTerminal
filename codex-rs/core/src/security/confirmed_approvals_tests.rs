@@ -6,7 +6,6 @@ use super::confirmed_here;
 
 /// #505 (review r1, #619): a home confirmed under one spelling is the same
 /// home under another (a link to it, as `/tmp` is to `/private/tmp`).
-#[cfg(unix)]
 #[test]
 fn issue_505_a_confirmed_home_is_found_by_any_spelling() {
     let dir = tempfile::tempdir().expect("tempdir");

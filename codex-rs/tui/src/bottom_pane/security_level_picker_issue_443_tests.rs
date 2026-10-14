@@ -111,7 +111,7 @@ fn issue_443_review_says_core_protections_apply_on_confirm() {
     let review = text(&picker);
     assert!(
         review.contains(
-            "Core's protections below and approval for every command apply as soon as you confirm."
+            "Core's protections below apply as soon as you confirm, and approval for every command from each pane's next turn."
         ),
         "{review}"
     );
@@ -256,7 +256,7 @@ fn issue_505_review_says_approvals_apply_on_confirm() {
     let review = text(&picker);
     assert!(
         review.contains(
-            "Core's protections below and approval for every command apply as soon as you confirm."
+            "Core's protections below apply as soon as you confirm, and approval for every command from each pane's next turn."
         ),
         "{review}"
     );
@@ -265,7 +265,7 @@ fn issue_505_review_says_approvals_apply_on_confirm() {
         "{review}"
     );
     assert!(
-        review.contains("Approval for every command: from each pane's next turn you approve every command that is not known read-only (reviewer: you, never the automatic reviewer)"),
+        review.contains("Approval for every command: from each pane's next turn you approve every command that is not known read-only (reviewer: you), in every Corbanu pane"),
         "{review}"
     );
     assert!(
@@ -308,7 +308,7 @@ fn issue_505_screen_07_reports_approvals_and_kept_threads() {
         !saved.contains("approval for every command that is not known read-only, network"),
         "approvals are no longer listed for the restart: {saved}"
     );
-    assert!(!saved.contains("Not applied"), "{saved}");
+    assert!(!saved.contains("was not applied"), "{saved}");
 
     saved_live_with(
         &mut picker,
@@ -320,13 +320,19 @@ fn issue_505_screen_07_reports_approvals_and_kept_threads() {
     );
     let saved = text(&picker);
     assert!(
-        saved.contains("Not applied in 1 thread: your managed configuration rules it out, so the approval settings there stay as they are (thread-1: managed reviewer)."),
+        saved.contains("Approval for every command was not applied in 1 thread (their approval settings stay as they are): thread-1: managed reviewer."),
         "{saved}"
     );
     assert!(
         saved.contains(
             "Still applying in 1 thread: not answered yet; it applies there as soon as it answers."
         ),
+        "{saved}"
+    );
+    // Held nowhere: nothing claims it, and the restart list keeps it.
+    assert!(!saved.contains("now in 0 threads"), "{saved}");
+    assert!(
+        saved.contains("approval for every command that is not known read-only, network"),
         "{saved}"
     );
 

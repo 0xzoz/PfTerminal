@@ -35,6 +35,17 @@ impl Session {
                 })
                 .await
             {
+                // Reported only once the stored settings hold it.
+                Ok(())
+                    if !self
+                        .state
+                        .lock()
+                        .await
+                        .session_configuration
+                        .aggressive_approvals =>
+                {
+                    ApprovalsOutcome::Kept("the settings update did not take it".to_string())
+                }
                 Ok(()) => {
                     let msg = super::handlers::thread_settings_applied_event(self).await;
                     self.send_event_raw_without_materializing_rollout(Event {

@@ -175,18 +175,25 @@ impl SessionConfiguration {
         &mut self,
     ) -> crate::security::confirmed_approvals::ApprovalsOutcome {
         use crate::security::confirmed_approvals::ApprovalsOutcome;
+        match self.try_require_approval_for_every_command() {
+            Ok(true) => ApprovalsOutcome::Held,
+            Ok(false) => ApprovalsOutcome::NotCovered,
+            Err(err) => ApprovalsOutcome::Kept(err.to_string()),
+        }
+    }
+
+    /// [`Self::require_approval_for_every_command`]: whether the session is
+    /// covered (and now holds it), or why a requirement rules it out.
+    fn try_require_approval_for_every_command(&mut self) -> ConstraintResult<bool> {
         match &self.session_source {
             SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. }) => {}
-            SessionSource::SubAgent(_) | SessionSource::Internal(_) => {
-                return ApprovalsOutcome::NotCovered;
-            }
+            SessionSource::SubAgent(_) | SessionSource::Internal(_) => return Ok(false),
             _ => {}
         }
         if self.aggressive_approvals {
-            return ApprovalsOutcome::Held;
+            return Ok(true);
         }
-        let allowed = self
-            .approval_policy
+        self.approval_policy
             .can_set(&AskForApproval::UnlessTrusted)
             .and_then(|()| {
                 self.original_config_do_not_use
@@ -195,13 +202,10 @@ impl SessionConfiguration {
                     .approvals_reviewer
                     .can_set(&ApprovalsReviewer::User)
             })
-            .and_then(|()| self.approval_policy.set(AskForApproval::UnlessTrusted));
-        if let Err(err) = allowed {
-            return ApprovalsOutcome::Kept(err.to_string());
-        }
+            .and_then(|()| self.approval_policy.set(AskForApproval::UnlessTrusted))?;
         self.approvals_reviewer = ApprovalsReviewer::User;
         self.aggressive_approvals = true;
-        ApprovalsOutcome::Held
+        Ok(true)
     }
 
     pub(super) fn mcp_inputs_differ(&self, next: &Self) -> bool {
@@ -372,7 +376,9 @@ impl SessionConfiguration {
             }
         }
         if updates.aggressive_approvals {
-            next_configuration.require_approval_for_every_command();
+            // A requirement that rules it out fails the update: nothing
+            // changes, and the caller reports it.
+            next_configuration.try_require_approval_for_every_command()?;
         }
         if let Some(windows_sandbox_level) = updates.windows_sandbox_level {
             next_configuration.windows_sandbox_level = windows_sandbox_level;
@@ -1135,7 +1141,9 @@ impl Session {
             export_config_lock_if_configured(&session_configuration, thread_id).await?;
             // #505: a person confirmed Aggressive in this process on this
             // home: the session starts requiring approval for every command.
-            if crate::security::confirmed_approvals::confirmed_here(config.codex_home.as_path()) {
+            let started_confirmed =
+                crate::security::confirmed_approvals::confirmed_here(config.codex_home.as_path());
+            if started_confirmed {
                 let outcome = session_configuration.require_approval_for_every_command();
                 crate::security::confirmed_approvals::note_outcome(thread_id, &outcome);
                 if let crate::security::confirmed_approvals::ApprovalsOutcome::Kept(reason) =
@@ -1386,7 +1394,11 @@ impl Session {
                 .register_revocation_sink(Arc::downgrade(&sess) as _);
             // #505: a person's Aggressive confirmation in this process
             // reaches this session's stored settings.
-            crate::security::confirmed_approvals::register(config.codex_home.as_path(), &sess);
+            crate::security::confirmed_approvals::register(
+                config.codex_home.as_path(),
+                &sess,
+                started_confirmed,
+            );
             // #507: turning the kill switch on also stops this session's work.
             let kill_switch_stop = sess.services.thread_extension_data.get_or_init(|| {
                 crate::security::kill_switch_stop::KillSwitchStop::new(
