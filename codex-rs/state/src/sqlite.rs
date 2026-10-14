@@ -483,23 +483,28 @@ impl SqliteConfig {
             sqlx::query("VACUUM").execute(&mut creator).await?;
             creator.close().await?;
         }
-        SqlitePoolOptions::new()
+        let pool = SqlitePoolOptions::new()
             .max_connections(5)
             .connect_with(options)
-            .await
+            .await?;
+        open_wal_index(pool).await
     }
 
     /// Open an existing Codex SQLite database without creating or modifying it.
     pub async fn open_read_only_pool(&self, path: &Path) -> Result<SqlitePool, Error> {
-        let options = SqliteConnectOptions::new()
-            .filename(path)
-            .create_if_missing(false)
-            .read_only(true)
-            .log_statements(LevelFilter::Off);
-        SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await
+        retry_shm_reset_race(path, || async {
+            let options = SqliteConnectOptions::new()
+                .filename(path)
+                .create_if_missing(false)
+                .read_only(true)
+                .log_statements(LevelFilter::Off);
+            let pool = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(options)
+                .await?;
+            open_wal_index(pool).await
+        })
+        .await
     }
 }
 
@@ -615,6 +620,22 @@ fn is_shm_reset_race(err: &Error) -> bool {
     err.as_database_error()
         .and_then(|err| err.code())
         .is_some_and(|code| code == SQLITE_IOERR_TRUNCATE)
+}
+
+/// Reads the schema once, which opens a WAL database's index (`-shm`), so
+/// [`is_shm_reset_race`] shows while opening, where it is retried, rather
+/// than at the caller's first query.
+async fn open_wal_index(pool: SqlitePool) -> Result<SqlitePool, Error> {
+    match sqlx::query("SELECT 1 FROM sqlite_master LIMIT 1")
+        .fetch_optional(&pool)
+        .await
+    {
+        Ok(_) => Ok(pool),
+        Err(err) => {
+            pool.close().await;
+            Err(err)
+        }
+    }
 }
 
 /// Runs `open`, retrying it after [`is_shm_reset_race`] errors.
