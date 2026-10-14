@@ -345,7 +345,9 @@ pub(crate) fn contain(
 /// in its Bash commands work. The sandbox itself keeps the session's
 /// `TMPDIR`, under which it keeps the placeholder registry it shares with the
 /// main session, so that bookkeeping and the sandbox policy are unchanged.
-/// macOS is unchanged.
+/// macOS is unchanged. `env` would take an `executable` containing `=` as an
+/// assignment; such a path then fails the `--version` check and the launch is
+/// refused.
 pub(crate) fn pane_command(
     sandbox: SandboxType,
     tmp_dir: &Path,

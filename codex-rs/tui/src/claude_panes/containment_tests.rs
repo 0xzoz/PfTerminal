@@ -355,13 +355,19 @@ fn issue_743_linux_pane_commands_can_make_temporary_files() {
             "http://127.0.0.1:4242".to_string(),
         ),
     ]);
-    let run = |script: &str| {
-        let (program, args) = pane_command(
-            SandboxType::LinuxSeccomp,
-            &containment.tmp_dir(),
-            "/bin/sh",
-            &["-c".to_string(), script.to_string()],
-        );
+    // `wrapped`: through `pane_command`, as a pane's Claude Code starts.
+    let run = |script: &str, wrapped: bool| {
+        let sh_args = ["-c".to_string(), script.to_string()];
+        let (program, args) = if wrapped {
+            pane_command(
+                SandboxType::LinuxSeccomp,
+                &containment.tmp_dir(),
+                "/bin/sh",
+                &sh_args,
+            )
+        } else {
+            ("/bin/sh".to_string(), sh_args.to_vec())
+        };
         let command = sandboxed(
             &containment,
             &program,
@@ -383,7 +389,8 @@ fn issue_743_linux_pane_commands_can_make_temporary_files() {
         }
         process.output().unwrap()
     };
-    let probe = run("true");
+    // Unwrapped, so only a sandbox that cannot run here skips the test.
+    let probe = run("true", /*wrapped*/ false);
     if !probe.status.success() {
         eprintln!(
             "skipped: the Linux sandbox cannot run here: {}",
@@ -395,6 +402,7 @@ fn issue_743_linux_pane_commands_can_make_temporary_files() {
         "f=$(mktemp) && echo made > \"$f\" && cat \"$f\" && echo \"$f\" && \
          cat <<'DOC'\nheredoc-ok\nDOC\n\
          if touch /tmp/corbanu-743-$$ 2>/dev/null; then echo session-tmp-writable; fi",
+        /*wrapped*/ true,
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
