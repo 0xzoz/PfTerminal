@@ -503,7 +503,10 @@ async fn issue_744_lookups_that_do_not_finish_still_refuse() {
     })
     .await;
     assert_eq!(slow, Some(".agents".to_string()));
-    let failed = looked_up(timeout, ".codex".to_string(), || panic!("lookup failed")).await;
+    let failed = looked_up(LOOKUP_TIMEOUT, ".codex".to_string(), || {
+        panic!("lookup failed")
+    })
+    .await;
     assert_eq!(failed, Some(".codex".to_string()));
     let named = looked_up(LOOKUP_TIMEOUT, ".codex".to_string(), || {
         Some("x/.agents".to_string())
