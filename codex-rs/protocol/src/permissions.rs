@@ -452,6 +452,7 @@ struct FileSystemSemanticSignature {
     unreadable_globs: Vec<String>,
     unlistable_directories: Vec<AbsolutePathBuf>,
     unmovable_paths: Vec<AbsolutePathBuf>,
+    keychain_services_denied: bool,
 }
 
 /// #652: the writable roots of a policy, each as written, normalized and at
@@ -772,6 +773,41 @@ impl FileSystemSandboxEntry {
     }
 }
 
+/// Special-path token of a `deny` entry that keeps agent commands away from
+/// the macOS keychain services (issue #758): Seatbelt denies looking them up
+/// after every other rule, so neither its network rules (a managed network
+/// proxy, allowed Unix sockets) nor its platform defaults reopen them. It
+/// changes no file access. Carried as [`FileSystemSpecialPath::Unknown`],
+/// like [`DIRECTORY_LISTING_SPECIAL_PATH`]; other sandboxes ignore it.
+pub const KEYCHAIN_SERVICES_SPECIAL_PATH: &str = ":keychain_services";
+
+impl FileSystemSandboxEntry {
+    /// A `deny` entry that keeps agent commands away from the macOS
+    /// keychain services.
+    pub fn deny_keychain_services() -> Self {
+        Self::new(
+            FileSystemPath::Special {
+                value: FileSystemSpecialPath::unknown(
+                    KEYCHAIN_SERVICES_SPECIAL_PATH,
+                    /*subpath*/ None,
+                ),
+            },
+            FileSystemAccessMode::Deny,
+        )
+    }
+
+    /// Whether this is a [`Self::deny_keychain_services`] entry.
+    pub fn denies_keychain_services(&self) -> bool {
+        self.access == FileSystemAccessMode::Deny
+            && matches!(
+                &self.path,
+                FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Unknown { path, subpath: None },
+                } if path == KEYCHAIN_SERVICES_SPECIAL_PATH
+            )
+    }
+}
+
 fn read_only_file_system_entries() -> Vec<FileSystemSandboxEntry> {
     vec![FileSystemSandboxEntry::new(
         FileSystemPath::Special {
@@ -854,6 +890,8 @@ impl FileSystemSandboxPolicy {
                 // approves outside the sandbox may drop it.
                 entry.access == FileSystemAccessMode::Deny
                     && entry.unmovable_path().is_none()
+                    // #758: neither does a keychain-services entry.
+                    && !entry.denies_keychain_services()
                     && !matches!(
                         &entry.path,
                         FileSystemPath::Special {
@@ -1840,6 +1878,17 @@ impl FileSystemSandboxPolicy {
         )
     }
 
+    /// Whether agent commands are kept away from the macOS keychain services
+    /// (issue #758), from a [`FileSystemSandboxEntry::deny_keychain_services`]
+    /// entry. Only a restricted policy carries it.
+    pub fn denies_keychain_services(&self) -> bool {
+        matches!(self.kind, FileSystemSandboxKind::Restricted)
+            && self
+                .entries
+                .iter()
+                .any(FileSystemSandboxEntry::denies_keychain_services)
+    }
+
     pub fn to_legacy_sandbox_policy(
         &self,
         network_policy: NetworkSandboxPolicy,
@@ -1981,6 +2030,7 @@ impl FileSystemSandboxPolicy {
             unreadable_globs: self.get_unreadable_globs_with_cwd(cwd),
             unlistable_directories: sorted_absolute_paths(self.get_unlistable_directories()),
             unmovable_paths: sorted_absolute_paths(self.get_unmovable_paths()),
+            keychain_services_denied: self.denies_keychain_services(),
         }
     }
 }
@@ -4868,6 +4918,43 @@ mod tests {
                 .get_unmovable_paths()
                 .is_empty()
         );
+    }
+
+    /// #758: a keychain-services entry is its own kind of entry: it changes
+    /// no file access, is no read denial, and needs the sandbox that
+    /// enforces it.
+    #[test]
+    fn issue_758_keychain_services_entry_changes_no_file_access() {
+        let temp = TempDir::new().expect("tempdir");
+        let cwd = temp.path();
+        let entry = FileSystemSandboxEntry::deny_keychain_services();
+        assert!(entry.denies_keychain_services());
+        assert_eq!(entry.unlistable_directory(), None);
+        assert_eq!(entry.unmovable_path(), None);
+        let mut read = entry.clone();
+        read.access = FileSystemAccessMode::Read;
+        assert!(!read.denies_keychain_services());
+
+        let full = FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry::new(
+            FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            },
+            FileSystemAccessMode::Write,
+        )]);
+        let mut policy = full.clone();
+        policy.entries.push(entry.clone());
+        assert!(policy.denies_keychain_services());
+        assert!(!full.denies_keychain_services());
+        assert!(policy.has_full_disk_write_access());
+        assert!(policy.has_full_disk_read_access());
+        assert!(!policy.has_denied_read_restrictions());
+        assert!(policy.get_unreadable_roots_with_cwd(cwd).is_empty());
+        assert!(policy.get_unreadable_globs_with_cwd(cwd).is_empty());
+        assert!(policy.needs_direct_runtime_enforcement(NetworkSandboxPolicy::Restricted, cwd));
+        assert!(!policy.is_semantically_equivalent_to(&full, cwd));
+        let mut unrestricted = FileSystemSandboxPolicy::unrestricted();
+        unrestricted.entries.push(entry);
+        assert!(!unrestricted.denies_keychain_services());
     }
 
     /// #535: a writable link whose real location is, or lies inside, another

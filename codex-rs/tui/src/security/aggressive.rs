@@ -75,7 +75,11 @@ pub(crate) const GRANT_ONCE_LIFTS: &str = "lets one command write files that run
 pub(crate) const MODEL_KEYS_LABEL: &str = "Model keys";
 
 /// #391: Aggressive turns `broker_model_auth` on where the broker runs.
-const MODEL_KEYS_ROW: &str = if cfg!(any(target_os = "macos", target_os = "linux", windows)) {
+pub(crate) const MODEL_KEYS_ROW: &str = if cfg!(any(
+    target_os = "macos",
+    target_os = "linux",
+    windows
+)) {
     "provider API keys from the environment or the vault are held by the isolated credential broker, which sends model requests for Corbanu (sign-in tokens are passed to it; command, AWS and header sign-ins are not brokered; realtime and websockets are off); if it cannot start, model requests are refused, never sent directly (broker_model_auth; `broker_model_auth = false` in your own config keeps it off)"
 } else {
     "unchanged: the credential broker does not run on this system, so Corbanu reads provider keys itself (broker_model_auth)"

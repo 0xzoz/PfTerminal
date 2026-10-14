@@ -27,6 +27,7 @@ use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::FileSystemAccessMode;
 use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::FileSystemSandboxEntry;
+use codex_protocol::permissions::FileSystemSandboxKind;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::secretless_launch;
@@ -127,8 +128,9 @@ pub(crate) fn contained_launch_ready() -> bool {
 /// How one contained turn is launched.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ClaudeContainment {
-    /// The pane's own Claude state (`CLAUDE_CONFIG_DIR` and `TMPDIR`), the
-    /// only writable place besides the pane's folder.
+    /// The pane's own Claude state (`CLAUDE_CONFIG_DIR` and
+    /// `CLAUDE_CODE_TMPDIR`), the only writable place besides the pane's
+    /// folder.
     pub(crate) state_dir: PathBuf,
     /// `CODEX_HOME/panes`: every pane's transcripts and audits, unreadable
     /// to a contained pane, like the contract's `sessions`.
@@ -153,14 +155,19 @@ impl ClaudeContainment {
     /// What a contained Claude Code gets on top of the launch environment
     /// (besides the bridge as its proxy): its own config and temporary
     /// folders, and no updater or other traffic.
+    ///
+    /// #743 (Travis, 2026-10-14, option a): `TMPDIR` stays the session's.
+    /// The Linux sandbox keeps the placeholders it shares between runs (for
+    /// missing protected paths in the home, such as `~/.aws`) in a registry
+    /// under `TMPDIR`; a pane with its own `TMPDIR` could not see the main
+    /// session's placeholders, and a command in either could fail to start.
+    /// Claude Code keeps its own files under `CLAUDE_CODE_TMPDIR`; its Bash
+    /// commands see the session's `TMPDIR`, which the pane cannot write.
     pub(crate) fn claude_env(&self) -> BTreeMap<String, String> {
         let config = self.config_dir().to_string_lossy().into_owned();
         let tmp = self.tmp_dir().to_string_lossy().into_owned();
         BTreeMap::from([
             ("CLAUDE_CONFIG_DIR".to_string(), config),
-            // Claude Code keeps its own temporary files (the Bash tool's
-            // working folder) under `CLAUDE_CODE_TMPDIR`, not `TMPDIR`.
-            ("TMPDIR".to_string(), tmp.clone()),
             ("CLAUDE_CODE_TMPDIR".to_string(), tmp),
             (
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_string(),
@@ -315,6 +322,49 @@ pub(crate) fn contain(
         cwd,
     )
     .map_err(|err| anyhow!(err))?;
+    sandboxed(
+        containment,
+        executable,
+        args,
+        env,
+        cwd,
+        bridge_port,
+        &level_rules(profile),
+    )
+}
+
+/// #758: under Aggressive a contained pane may not reach the macOS keychain
+/// services either, although its bridge port selects Seatbelt's network
+/// rules, which allow `com.apple.SecurityServer` (Travis, 2026-10-14). Claude
+/// Code reaches the bridge over plain HTTP with the bridge's token, so it
+/// needs neither TLS nor the keychain. Other levels keep the profile.
+pub(crate) fn level_rules(profile: PermissionProfile) -> PermissionProfile {
+    if !crate::security::level::aggressive_active() {
+        return profile;
+    }
+    let (mut file_system, network) = profile.to_runtime_permissions();
+    if !matches!(file_system.kind, FileSystemSandboxKind::Restricted) {
+        return profile;
+    }
+    file_system
+        .entries
+        .push(FileSystemSandboxEntry::deny_keychain_services());
+    PermissionProfile::from_runtime_permissions(&file_system, network)
+}
+
+/// `executable args` wrapped in the platform sandbox under `profile`, with
+/// network only to `bridge_port` (`enforce_managed_network`).
+pub(crate) fn sandboxed(
+    containment: &ClaudeContainment,
+    executable: &str,
+    args: &[String],
+    env: HashMap<String, String>,
+    cwd: &Path,
+    bridge_port: u16,
+    profile: &PermissionProfile,
+) -> Result<ContainedCommand> {
+    let sandbox = get_platform_sandbox(/*windows_sandbox_enabled*/ false)
+        .ok_or_else(|| anyhow!("contained Claude panes need macOS or Linux"))?;
     let cwd = AbsolutePathBuf::from_absolute_path(cwd).context("pane folder is not absolute")?;
     let cwd = PathUri::from_abs_path(&cwd);
     let request = SandboxManager::new()
@@ -330,7 +380,7 @@ pub(crate) fn contain(
                 }),
                 additional_permissions: None,
             },
-            permissions: &profile,
+            permissions: profile,
             sandbox,
             enforce_managed_network: true,
             environment_id: None,

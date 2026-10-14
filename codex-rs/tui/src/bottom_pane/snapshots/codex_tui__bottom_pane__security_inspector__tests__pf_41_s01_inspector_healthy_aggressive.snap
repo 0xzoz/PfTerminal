@@ -69,9 +69,13 @@ Not contained
       allowlist; allowed because you configured or started it [fixed]
 
 Not available
+  [not available] Financial preview and approvals: not available in this build (PF-38, PF-39)
+      [fixed]
+  [not available] Isolated retrieval: not available in this build (PF-31) [fixed]
   [not available] Screened search routing: not available in this build (PF-32) [fixed]
   [not available] Brokered browser login: not available in this build (PF-37) [fixed]
   [not available] Quarantine: not available in this build (PF-34) [fixed]
+  [not available] Untrusted-content detectors: not available in this build (PF-35, PF-36) [fixed]
   [not available] Agent Sweep: not available in this build (PF-40) [fixed]
 
 Recent denials

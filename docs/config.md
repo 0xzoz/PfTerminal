@@ -194,15 +194,15 @@ Limits:
 
 The default depends on the security level:
 
-| Level                                                           | Default                         |
-| --------------------------------------------------------------- | ------------------------------- |
-| Permissive, Moderate                                            | off                             |
-| Aggressive (chosen in `/security` or set as `[security] level`) | on, on macOS, Linux and Windows |
+| Level                                                                           | Default                         |
+| ------------------------------------------------------------------------------- | ------------------------------- |
+| Permissive                                                                      | off                             |
+| Moderate or Aggressive (`[security] level`, or the level chosen in `/security`) | on, on macOS, Linux and Windows |
 
 On other systems it stays off, because the broker isn't supported there. A value
 you set yourself always wins over the level's default; only a managed policy
 outranks it. A project's `.codex/config.toml` doesn't change it under
-Aggressive:
+Moderate or Aggressive:
 
 ```toml
 [features]
@@ -212,9 +212,10 @@ broker_model_auth = false   # or true, at any level
 `-c features.broker_model_auth=false` and `--disable broker_model_auth` work
 the same way. A level you choose in `/security` while Corbanu is running takes
 effect when Corbanu restarts; a `[security] level` in config applies from the
-next new session. Under Aggressive with the broker off, Corbanu shows a startup
-warning and `/security` reports the level as partial. What Aggressive protects
-(credential files, links, Grant once) and its limits are on
+next new session. Under Moderate or Aggressive with the broker off, Corbanu
+shows a startup warning and `/security` reports the level as partial. What
+the levels protect and their limits are on
+[Moderate security level](security-moderate.md) and
 [Aggressive security level: protected files](security-aggressive.md).
 
 ### Kill switch

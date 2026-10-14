@@ -107,16 +107,20 @@ given where such a command fails.
 
 ## The macOS keychain
 
-On macOS the sandbox doesn't let agent commands reach the keychain service.
+On macOS the sandbox doesn't let agent commands reach the keychain services.
 If you approve `security find-generic-password` or another keychain command,
 it runs but can't read, add or change any keychain item: it reports the item
 as not found, or an error, and Corbanu says that Aggressive caused it. No
 grant lifts this, and `~/Library/Keychains` is unreadable too. To allow it,
 switch to Permissive.
 
-This holds while agent commands have no network. If your organization's
-requirements route them through a network proxy, the sandbox opens the
-keychain service with the network rules; Corbanu then makes no such claim.
+This holds in every case, also when your organization's requirements route
+agent commands through a network proxy or allow a Unix socket: Aggressive's
+sandbox denies the keychain services (`com.apple.SecurityServer`,
+`com.apple.securityd.xpc` and `com.apple.securityd.systemkeychain`) after
+all its other rules (#758). Contained Claude panes get the same rule under
+Aggressive. Certificate checks for secure connections use a different
+service (`trustd`) and keep working.
 
 ## A separate database folder
 
@@ -157,10 +161,21 @@ create files there too.
 
 ## Commands run outside the sandbox
 
-Under Moderate, the Corbanu home's runtime files (the sandbox launchers in
-`tmp`, shell snapshots, skills, plugins, packages and `AGENTS.md`) stay
-read-only to sandboxed commands, even after a person approves a command.
-**Exception:** a command that a person approves to run outside the sandbox
-(an escalation request, or "retry without sandbox?") can write them, as it
-can change anything else. Approve such a command only when you would run it
-yourself. Under Aggressive, running outside the sandbox is not offered.
+Under Moderate no agent command runs outside the sandbox, even when you
+approve it; Aggressive, once it applies after a restart, keeps every command in
+its sandbox too. Under Moderate a command can still ask to run outside it
+(an escalation request): the prompt says it stays in the sandbox, and
+approving it only lifts Moderate's protection of credential and Corbanu files
+for that one command. A write outside your writable folders, or network your
+sandbox blocks, still fails, and "retry without sandbox?" is not offered.
+Commands you allowed with "don't ask again" skip the prompt but stay in the
+sandbox too.
+
+The Corbanu home's runtime files (the sandbox launchers in `tmp`, shell
+snapshots, skills, plugins, packages and `AGENTS.md`) stay read-only to agent
+commands, even after a person approves a command. If your own settings turn
+the sandbox off (full access, or an external sandbox), commands that
+Moderate's rules don't cover run without one; choose a sandbox in your
+settings to keep every command in it. Where the sandbox can't start (for
+example Linux without user namespaces), commands fail under Moderate instead
+of running outside it.

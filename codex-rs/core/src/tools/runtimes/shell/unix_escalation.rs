@@ -20,7 +20,7 @@ use crate::tools::sandboxing::SandboxAttempt;
 use crate::tools::sandboxing::ToolCtx;
 use crate::tools::sandboxing::ToolError;
 use crate::tools::sandboxing::managed_network_for_sandbox_permissions;
-use crate::tools::sandboxing::sandbox_permissions_preserving_denied_reads;
+use crate::tools::sandboxing::sandbox_permissions_for_session;
 use crate::tools::sandboxing::unsandboxed_execution_allowed;
 use codex_execpolicy::Decision;
 use codex_execpolicy::Evaluation;
@@ -120,9 +120,10 @@ pub(super) async fn try_run_zsh_fork(
     }
 
     let (attempt_file_system_sandbox_policy, _) = attempt.permissions.to_runtime_permissions();
-    let sandbox_permissions = sandbox_permissions_preserving_denied_reads(
+    let sandbox_permissions = sandbox_permissions_for_session(
         req.sandbox_permissions,
         &attempt_file_system_sandbox_policy,
+        &ctx.session,
     );
     let req = &ShellRequest {
         sandbox_permissions,
@@ -696,9 +697,12 @@ impl CoreShellActionProvider {
         // Issue #540: where the protected-path rules apply, an intercepted
         // exec leaves the sandbox only within a request a person approved to
         // run outside it, never through an allow rule (as in the
-        // orchestrator).
+        // orchestrator). #747: under Moderate, never.
+        let moderate_keeps_sandbox =
+            crate::security::protected_additional::moderate_keeps_sandbox(&self.session);
         let unsandboxed_allowed =
             unsandboxed_execution_allowed(&self.permission_profile.file_system_sandbox_policy())
+                && !moderate_keeps_sandbox
                 && (self.sandbox_permissions == SandboxPermissions::RequireEscalated
                     || crate::security::protected_additional::protected_level(&self.session)
                         .is_none());
@@ -717,7 +721,13 @@ impl CoreShellActionProvider {
             DecisionSource::PrefixRule if unsandboxed_allowed => EscalationExecution::Unsandboxed,
             DecisionSource::PrefixRule => EscalationExecution::TurnDefault,
             DecisionSource::UnmatchedCommandFallback => Self::shell_request_escalation_execution(
-                self.sandbox_permissions,
+                if moderate_keeps_sandbox
+                    && self.sandbox_permissions == SandboxPermissions::RequireEscalated
+                {
+                    SandboxPermissions::UseDefault
+                } else {
+                    self.sandbox_permissions
+                },
                 &self.permission_profile,
                 self.prompt_permissions.as_ref(),
             ),

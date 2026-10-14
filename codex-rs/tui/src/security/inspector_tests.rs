@@ -140,7 +140,7 @@ fn sec_391_model_key_broker_off_under_aggressive_is_partial() {
         (broker.state, broker.value.as_str()),
         (
             State::Off,
-            "off: Core reads provider keys itself (broker_model_auth is off in config, or this process started before Aggressive)"
+            "off: Core reads provider keys itself (broker_model_auth is off in config, or this process started before the level was chosen)"
         )
     );
     let expected = if cfg!(any(target_os = "macos", target_os = "linux", windows)) {
@@ -506,9 +506,12 @@ fn pf_41_s01_unsandboxed_routes_are_not_contained_and_p1_controls_not_available(
     assert_eq!(
         states("Not available"),
         [
+            "Financial preview and approvals",
+            "Isolated retrieval",
             "Screened search routing",
             "Brokered browser login",
             "Quarantine",
+            "Untrusted-content detectors",
             "Agent Sweep"
         ]
         .map(|label| (label.to_string(), State::NotAvailable))
@@ -539,4 +542,79 @@ fn sec_437_active_row_claims_only_the_launch_check() {
         active.value
     );
     assert_eq!(find(&rows, "Model key broker").state, State::Off);
+}
+
+/// #749: under Moderate the rows say what is enforced: the level is
+/// Moderate (not "Permissive" beside "Moderate in force"), the nested-agents
+/// row describes Moderate, a broker that is off counts (D2), and a saved
+/// Moderate that waits for the restart is never shown as Permissive.
+#[test]
+fn issue_749_moderate_rows_match_what_is_enforced() {
+    let root = ThreadId::new();
+    let moderate = RuntimeFacts {
+        policy: PolicyFacts::Live(tree(
+            SecurityLevel::Moderate,
+            vec![AgentFacts {
+                thread: root,
+                depth: 0,
+                level: SecurityLevel::Moderate,
+                stricter_than_session: false,
+                stopped: false,
+            }],
+        )),
+        ..healthy(root)
+    };
+    let input = input(ChosenLevel::Moderate);
+    let saved = saved(ChosenLevel::Moderate);
+    let rows = sections(&input, &saved, &moderate, NOW);
+    let active = find(&rows, "Active this run");
+    assert!(active.value.starts_with("Moderate"), "{}", active.value);
+    assert!(
+        find(&rows, "Live policy")
+            .value
+            .starts_with("Moderate in force"),
+        "{}",
+        find(&rows, "Live policy").value
+    );
+    let nested = find(&rows, "Nested agents");
+    assert!(
+        !nested.value.contains("Aggressive is enforced"),
+        "{}",
+        nested.value
+    );
+    assert_eq!(nested.value, super::super::moderate::NESTED);
+    assert_eq!(
+        verdict(&input, &saved, &moderate, NOW),
+        Badge::Protected("Moderate")
+    );
+    let broker_off = RuntimeFacts {
+        model_broker: ControlFacts::Off,
+        ..moderate.clone()
+    };
+    assert_eq!(
+        verdict(&input, &saved, &broker_off, NOW),
+        Badge::Partial("Moderate", vec!["Model key broker".to_string()])
+    );
+
+    // Saved, Core raised now (D4), launched Permissive: the broker waits.
+    let started_permissive = self::input(ChosenLevel::Permissive);
+    assert_eq!(
+        verdict(&started_permissive, &saved, &moderate, NOW),
+        Badge::Partial(
+            "Moderate",
+            vec!["Moderate's model-key broker applies after restart".to_string()]
+        )
+    );
+    // Saved, not applied yet: not shown as Permissive.
+    let permissive = RuntimeFacts {
+        policy: PolicyFacts::Live(tree(SecurityLevel::Permissive, Vec::new())),
+        ..healthy(root)
+    };
+    assert_eq!(
+        verdict(&started_permissive, &saved, &permissive, NOW),
+        Badge::Degraded(
+            "Permissive",
+            vec!["Moderate is saved but not active until restart".to_string()]
+        )
+    );
 }

@@ -947,10 +947,11 @@ async fn pf_30_s03_permission_hook_allow_does_not_approve_a_tainted_protected_ac
 }
 
 /// PF-30-S03 slice 2: when the sandbox blocks an approved post-taint action,
-/// running it outside the sandbox asks the human again, with the reason.
+/// it is not run outside the sandbox. #747 (D3): under Moderate no retry
+/// outside the sandbox is offered at all (it used to ask the human again).
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn pf_30_s03_escalation_retry_asks_the_human_again() -> anyhow::Result<()> {
+async fn pf_30_s03_escalation_retry_is_not_offered_under_moderate() -> anyhow::Result<()> {
     use codex_protocol::models::PermissionProfile;
     use codex_protocol::permissions::NetworkSandboxPolicy;
     use codex_protocol::protocol::AskForApproval;
@@ -999,7 +1000,7 @@ async fn pf_30_s03_escalation_retry_asks_the_human_again() -> anyhow::Result<()>
         .iter()
         .filter_map(|(protected, reason)| protected.then_some(reason))
         .collect();
-    assert_eq!(protected.len(), 2, "{reasons:?}");
+    assert_eq!(protected.len(), 1, "{reasons:?}");
     for reason in protected {
         assert!(
             reason.contains("a security policy change after untrusted content"),

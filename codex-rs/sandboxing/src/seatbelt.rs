@@ -42,6 +42,21 @@ const PLATFORM_TMP_ACCESS: &str = r#"(allow file-read* (subpath "/tmp"))
 (allow file-write* (subpath "/var/tmp"))
 (allow file-write* (subpath "/private/var/tmp"))"#;
 
+/// #758: the macOS keychain services agent commands may not look up, denied
+/// after every other section so neither the network rules (which allow
+/// `com.apple.SecurityServer` for TLS, including the restricted-network
+/// branch a managed proxy or an allowed Unix socket selects) nor the platform
+/// defaults reopen them: the file-based keychains' `securityd`
+/// (`com.apple.SecurityServer`), the data-protection keychain's `secd`
+/// (`com.apple.securityd.xpc`) and the system data-protection keychain
+/// (`com.apple.securityd.systemkeychain`). Certificate trust stays with
+/// `trustd`, which is not denied.
+pub(crate) const MACOS_KEYCHAIN_SERVICES_DENY_POLICY: &str = r#"; deny the keychain services (#758)
+(deny mach-lookup
+  (global-name "com.apple.SecurityServer")
+  (global-name "com.apple.securityd.xpc")
+  (global-name "com.apple.securityd.systemkeychain"))"#;
+
 /// When working with `sandbox-exec`, only consider `sandbox-exec` in `/usr/bin`
 /// to defend against an attacker trying to inject a malicious version on the
 /// PATH. If /usr/bin/sandbox-exec has been tampered with, then the attacker
@@ -1341,6 +1356,10 @@ pub fn create_seatbelt_command_args(
         if platform_tmp_unchanged {
             policy_sections.push(PLATFORM_TMP_ACCESS.to_string());
         }
+    }
+    // #758: last, so no allow above can reopen them.
+    if file_system_sandbox_policy.denies_keychain_services() {
+        policy_sections.push(MACOS_KEYCHAIN_SERVICES_DENY_POLICY.to_string());
     }
 
     let full_policy = policy_sections.join("\n");

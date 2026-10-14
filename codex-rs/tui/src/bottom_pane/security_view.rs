@@ -86,6 +86,15 @@ impl SecurityView {
         self
     }
 
+    /// #691: why Aggressive cannot be chosen yet (Windows without its
+    /// sandbox set up).
+    pub(crate) fn with_windows_sandbox_blocker(mut self, blocker: Option<String>) -> Self {
+        if let Some(picker) = self.picker.as_mut() {
+            picker.set_windows_sandbox_blocker(blocker);
+        }
+        self
+    }
+
     /// PF-24-S02: Core's configured levels, and where "restart now" goes.
     pub(crate) fn with_confirmation(
         mut self,
@@ -95,6 +104,14 @@ impl SecurityView {
         if let Some(picker) = self.picker.as_mut() {
             picker.set_core_levels(core);
             picker.set_app_event_tx(app_event_tx);
+        }
+        self
+    }
+
+    /// #750: the feature flags the Moderate review describes.
+    pub(crate) fn with_moderate_facts(mut self, facts: crate::security::moderate::Facts) -> Self {
+        if let Some(picker) = self.picker.as_mut() {
+            picker.set_moderate_facts(facts);
         }
         self
     }

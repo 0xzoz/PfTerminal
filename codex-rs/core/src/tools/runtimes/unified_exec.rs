@@ -36,7 +36,7 @@ use crate::tools::sandboxing::ToolCtx;
 use crate::tools::sandboxing::ToolError;
 use crate::tools::sandboxing::ToolRuntime;
 use crate::tools::sandboxing::managed_network_for_sandbox_permissions;
-use crate::tools::sandboxing::sandbox_permissions_preserving_denied_reads;
+use crate::tools::sandboxing::sandbox_permissions_for_session;
 use crate::tools::sandboxing::with_cached_approval;
 use crate::unified_exec::NoopSpawnLifecycle;
 use crate::unified_exec::UnifiedExecError;
@@ -330,9 +330,10 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecProcess> for UnifiedExecRunt
         ctx: &ToolCtx,
     ) -> Option<NetworkApprovalSpec> {
         let file_system_sandbox_policy = ctx.turn.file_system_sandbox_policy();
-        let sandbox_permissions = sandbox_permissions_preserving_denied_reads(
+        let sandbox_permissions = sandbox_permissions_for_session(
             req.sandbox_permissions,
             &file_system_sandbox_policy,
+            &ctx.session,
         );
         let network =
             managed_network_for_sandbox_permissions(req.network.as_ref(), sandbox_permissions)?;
@@ -406,9 +407,10 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecProcess> for UnifiedExecRunt
                 confined,
             );
         }
-        let launch_sandbox_permissions = sandbox_permissions_preserving_denied_reads(
+        let launch_sandbox_permissions = sandbox_permissions_for_session(
             req.sandbox_permissions,
             &file_system_sandbox_policy,
+            &ctx.session,
         );
         let managed_network = attempt.network_proxy(managed_network_for_sandbox_permissions(
             req.network.as_ref(),

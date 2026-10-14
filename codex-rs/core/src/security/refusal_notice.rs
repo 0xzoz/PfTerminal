@@ -14,6 +14,11 @@ use crate::config::Config;
 /// search, it tried `curl` instead).
 pub(crate) const AGGRESSIVE_INSTRUCTIONS: &str = "The person chose security level Aggressive in Corbanu Terminal's /security. Under it, agent commands stay in the sandbox even when the person approves them: they can write only inside the workspace, have no network access, and can never read protected files (such as .env and keychains), not even with a grant; web search is off, and agents cannot use the Corbanu vault (the person can use /vault themselves). When a request needs something this blocks, do not try another way around it (for example, do not fetch web pages with curl when web search is off): tell the person that security level Aggressive blocks it and that they can choose another level with /security.";
 
+/// #747 (decision D3): added to the permissions instructions while security
+/// level Moderate is in force, so the model does not promise that an
+/// approved request runs outside the sandbox.
+pub(crate) const MODERATE_INSTRUCTIONS: &str = "The person chose security level Moderate in Corbanu Terminal's /security. Under it, a command never leaves the sandbox it runs in, even when the person approves a request to run outside it (`require_escalated`): such an approval can lift Moderate's protection of credential and Corbanu files for that one command, but a write outside the writable folders, or network the sandbox blocks, still fails. When a request needs that, do not try another way around it: tell the person that security level Moderate keeps commands in the sandbox and that they can choose another level with /security.";
+
 /// What the Aggressive sandbox stopped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Blocked {
