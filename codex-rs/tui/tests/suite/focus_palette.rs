@@ -4,6 +4,7 @@ use std::io::Write;
 use std::os::fd::AsRawFd;
 use std::os::fd::FromRawFd;
 use std::os::fd::OwnedFd;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Child;
 use std::process::Command;
@@ -19,9 +20,11 @@ use tempfile::TempDir;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 15);
 /// How long typed input may take to show after a focus event. Input that is
 /// discarded never shows, and the blocking refresh this guards against sends
-/// new colour queries, which the test checks separately. So the bound only has
-/// to allow for a slow machine: 500 ms was too short for nightly Bazel runs
-/// (#636), where the first input sometimes took longer to render.
+/// new color queries, which the test checks separately (the PTY is the
+/// child's controlling terminal, so queries written to `/dev/tty` are seen).
+/// So the bound only has to allow for a slow machine: 500 ms was too short for
+/// nightly Bazel runs (#636), where the first input sometimes took longer to
+/// render.
 const FOCUS_INPUT_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 5);
 const FOCUS_PROBE_INPUT: &str = "focus-palette-24527";
 
@@ -101,7 +104,8 @@ impl PtyCodex {
 
         let codex = codex_utils_cargo_bin::cargo_bin("codex")
             .or_else(|_| codex_utils_cargo_bin::cargo_bin("codex-tui"))?;
-        let child = Command::new(codex)
+        let mut command = Command::new(codex);
+        command
             .arg("--no-alt-screen")
             .arg("-C")
             .arg(repo_root)
@@ -112,7 +116,26 @@ impl PtyCodex {
             .env("CODEX_HOME", codex_home.path())
             .stdin(stdin)
             .stdout(stdout)
-            .stderr(slave)
+            .stderr(slave);
+        // Make the PTY the child's controlling terminal, as a real terminal
+        // is. crossterm writes its color queries to `/dev/tty`; without this
+        // they would go to the test runner's terminal, if it has one, and the
+        // no-new-queries check could not see them.
+        // SAFETY: the closure runs in the forked child before `exec` and only
+        // calls the async-signal-safe `setsid` and `ioctl`.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let unused_argument: libc::c_int = 0;
+                if libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY, unused_argument) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let child = command
             .spawn()
             .context("start Codex in focus-test pseudo-terminal")?;
 
