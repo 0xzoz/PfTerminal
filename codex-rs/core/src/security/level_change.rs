@@ -14,8 +14,9 @@
 //! is reported, except a stricter level whose save failed (it applies now and
 //! says it will not survive a restart).
 //!
-//! The commit blocks for up to the store's lock wait (2 s); call it off the
-//! async runtime.
+//! The commit blocks for up to the store's lock wait (2 s), and a confirmed
+//! Aggressive for up to 5 s more while the sessions of this process take
+//! approval for every command (#505); call it off the async runtime.
 
 use std::path::Path;
 
@@ -28,6 +29,9 @@ use codex_security_policy::AuthorityEpoch;
 use codex_security_policy::PolicyPrincipal;
 use codex_security_policy::PrincipalKind;
 pub use codex_security_policy::SecurityLevel;
+
+pub use super::confirmed_approvals::ApprovalsAtConfirmation;
+pub use super::confirmed_approvals::approvals_held;
 use codex_security_policy::SecuritySettings;
 use thiserror::Error;
 
@@ -184,6 +188,9 @@ pub struct LevelChangeReport {
     pub live: bool,
     /// A stricter level applied now but could not be saved.
     pub not_saved: Option<String>,
+    /// #505: Aggressive confirmed in a session of this process: what
+    /// requiring approval for every command did to its sessions.
+    pub approvals: Option<super::confirmed_approvals::ApprovalsAtConfirmation>,
 }
 
 #[derive(Debug, Error)]
@@ -270,9 +277,12 @@ pub fn commit_human_level_change(
         &HomeTransitionStore::new(codex_home),
         now_unix_seconds,
     )?;
-    if live {
-        note_confirmed_here(codex_home, committed.level);
-    }
+    // #505: approval for every command, in the stored settings of every
+    // session of this process on the home, from its next turn.
+    let approvals = (live
+        && target == SecurityLevel::Aggressive
+        && committed.level == SecurityLevel::Aggressive)
+        .then(|| super::confirmed_approvals::confirm(codex_home));
     Ok(LevelChangeReport {
         kind: match committed.kind {
             TransitionKind::Restrictive => LevelChangeKind::Stricter,
@@ -285,35 +295,8 @@ pub fn commit_human_level_change(
         next_start: committed.next_start_level,
         live,
         not_saved: committed.not_saved,
+        approvals,
     })
-}
-
-/// #505: Corbanu homes where a person confirmed Aggressive in `/security` in
-/// this process (raising the live policy of its sessions before the restart
-/// that loads the Aggressive rules). Lowering the level removes the home.
-static CONFIRMED_AGGRESSIVE: std::sync::Mutex<Vec<std::path::PathBuf>> =
-    std::sync::Mutex::new(Vec::new());
-
-fn note_confirmed_here(codex_home: &Path, level: SecurityLevel) {
-    let mut homes = CONFIRMED_AGGRESSIVE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    homes.retain(|home| home != codex_home);
-    if level == SecurityLevel::Aggressive {
-        homes.push(codex_home.to_path_buf());
-    }
-}
-
-/// #505: whether a person confirmed Aggressive for `codex_home` in this
-/// process, so its sessions run Aggressive before the restart that loads its
-/// rules (`corbanu exec` or an IDE session started over a stored Aggressive
-/// level was not confirmed here).
-pub(crate) fn aggressive_confirmed_here(codex_home: &Path) -> bool {
-    CONFIRMED_AGGRESSIVE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .iter()
-        .any(|home| home == codex_home)
 }
 
 /// A policy tree built from the stored state, for a commit made while no

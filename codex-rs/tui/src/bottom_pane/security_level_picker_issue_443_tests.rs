@@ -14,6 +14,7 @@ use super::*;
 use crate::keymap::RuntimeKeymap;
 use crate::legacy_core::protected_preflight::InventorySources;
 use crate::legacy_core::protected_preflight::ReadinessFlags;
+use crate::legacy_core::security_level_change::ApprovalsAtConfirmation;
 use crate::legacy_core::security_level_change::LevelChangeReport;
 
 fn key(code: KeyCode) -> KeyEvent {
@@ -161,7 +162,7 @@ fn issue_443_screen_07_names_what_applies_now_and_at_restart() {
     picker.screen = Screen::List { note: None };
     let list = text(&picker);
     assert!(
-        list.contains("Saved: Aggressive. Core's protections (vault refusal, protected paths, approval for every command) apply in this session now"),
+        list.contains("Saved: Aggressive. Core's protections (vault refusal, protected paths) apply in this session now"),
         "{list}"
     );
     assert!(!list.contains("It takes effect when you restart"), "{list}");
@@ -170,6 +171,17 @@ fn issue_443_screen_07_names_what_applies_now_and_at_restart() {
 
 /// Screen 07 as a running session's tree reports it after the commit.
 fn saved_live(picker: &mut SecurityLevelPicker) {
+    saved_live_with(
+        picker,
+        Some(ApprovalsAtConfirmation {
+            held: 2,
+            kept: Vec::new(),
+            pending: 0,
+        }),
+    );
+}
+
+fn saved_live_with(picker: &mut SecurityLevelPicker, approvals: Option<ApprovalsAtConfirmation>) {
     raised_live(picker);
     picker.stored = StoredLevel::Chosen(ChosenLevel::Aggressive);
     picker.screen = Screen::Saved(Ok(TransitionOutcome {
@@ -180,6 +192,7 @@ fn saved_live(picker: &mut SecurityLevelPicker) {
             next_start: SecurityLevel::Aggressive,
             live: true,
             not_saved: None,
+            approvals,
         }),
     }));
 }
@@ -225,5 +238,102 @@ fn issue_443_permissive_review_before_restart_keeps_core_protections() {
     assert!(
         !review.contains("This session is already Permissive"),
         "{review}"
+    );
+}
+
+/// #505: confirming through a live tree requires approval for every command
+/// from each pane's next turn; the review says so, and that the rest waits
+/// for the restart.
+#[test]
+fn issue_505_review_says_approvals_apply_on_confirm() {
+    let root = tempfile::tempdir().unwrap();
+    let mut picker = picker(&root, /*live*/ true);
+    picker.handle_key_event(key(KeyCode::Up));
+    picker.handle_key_event(key(KeyCode::Enter));
+    picker.basis.live = true;
+    let review = text(&picker);
+    assert!(
+        review.contains(
+            "Core's protections below and approval for every command apply as soon as you confirm."
+        ),
+        "{review}"
+    );
+    assert!(
+        review.contains("this session keeps its current sandbox, network, environment, model-key and child-agent settings"),
+        "{review}"
+    );
+    assert!(
+        review.contains("Approval for every command: from each pane's next turn you approve every command that is not known read-only (reviewer: you, never the automatic reviewer)"),
+        "{review}"
+    );
+    assert!(
+        review.contains(
+            "a pane whose managed configuration rules this out keeps its own approval settings"
+        ),
+        "{review}"
+    );
+}
+
+/// #505: without a live tree nothing changes before the restart, approvals
+/// included.
+#[test]
+fn issue_505_review_without_a_live_tree_keeps_approvals_for_the_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let mut picker = picker(&root, /*live*/ false);
+    picker.handle_key_event(key(KeyCode::Up));
+    picker.handle_key_event(key(KeyCode::Enter));
+    let review = text(&picker);
+    assert!(!review.contains("Approval for every command:"), "{review}");
+    assert!(
+        review.contains("this session keeps its current settings until then"),
+        "{review}"
+    );
+}
+
+/// #505: screen 07 reports what the confirmation did: approvals now, the
+/// rest at restart; a thread a managed requirement kept is named.
+#[test]
+fn issue_505_screen_07_reports_approvals_and_kept_threads() {
+    let root = tempfile::tempdir().unwrap();
+    let mut picker = picker(&root, /*live*/ true);
+    saved_live(&mut picker);
+    let saved = text(&picker);
+    assert!(
+        saved.contains("Approval for every command: from each pane's next turn you approve every command that is not known read-only (reviewer: you), now in 2 threads of this Corbanu Terminal"),
+        "{saved}"
+    );
+    assert!(
+        !saved.contains("approval for every command that is not known read-only, network"),
+        "approvals are no longer listed for the restart: {saved}"
+    );
+    assert!(!saved.contains("Not applied"), "{saved}");
+
+    saved_live_with(
+        &mut picker,
+        Some(ApprovalsAtConfirmation {
+            held: 0,
+            kept: vec!["thread-1: managed reviewer".to_string()],
+            pending: 1,
+        }),
+    );
+    let saved = text(&picker);
+    assert!(
+        saved.contains("Not applied in 1 thread: your managed configuration rules it out, so the approval settings there stay as they are (thread-1: managed reviewer)."),
+        "{saved}"
+    );
+    assert!(
+        saved.contains(
+            "Still applying in 1 thread: not answered yet; it applies there as soon as it answers."
+        ),
+        "{saved}"
+    );
+
+    // A commit that did not reach this process's sessions claims nothing.
+    saved_live_with(&mut picker, /*approvals*/ None);
+    let saved = text(&picker);
+    assert!(!saved.contains("Approval for every command:"), "{saved}");
+    assert!(
+        saved.contains("approval for every command that is not known read-only, network"),
+        "{saved}"
     );
 }

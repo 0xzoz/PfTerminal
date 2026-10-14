@@ -103,19 +103,25 @@ async fn vault_commands_after(
         .build_with_auto_env(&server)
         .await?;
     if confirm {
-        let home = test.codex_home_path();
+        // Off the async runtime, as the TUI commits (#505: the commit waits
+        // for this process's sessions to take approval for every command).
+        let home = test.codex_home_path().to_path_buf();
         let thread = Some(test.session_configured.thread_id);
-        let basis = LevelBasis::read(home, SecurityLevel::Permissive, thread);
-        assert!(basis.live, "the session's policy tree runs in this process");
-        let report = commit_human_level_change(
-            home,
-            SecurityLevel::Permissive,
-            thread,
-            &basis,
-            SecurityLevel::Aggressive,
-            Probes::Passed,
-            /*now_unix_seconds*/ 1_000,
-        )?;
+        let report = tokio::task::spawn_blocking(move || {
+            let home = home.as_path();
+            let basis = LevelBasis::read(home, SecurityLevel::Permissive, thread);
+            assert!(basis.live, "the session's policy tree runs in this process");
+            commit_human_level_change(
+                home,
+                SecurityLevel::Permissive,
+                thread,
+                &basis,
+                SecurityLevel::Aggressive,
+                Probes::Passed,
+                /*now_unix_seconds*/ 1_000,
+            )
+        })
+        .await??;
         assert_eq!(report.kind, LevelChangeKind::Stricter);
         assert!(report.live, "Aggressive applies in this session now");
     }

@@ -1100,51 +1100,6 @@ impl Session {
         .await
     }
 
-    /// #505: a person confirmed Aggressive in `/security` in this process
-    /// (its live policy is Aggressive) while the session's own configured
-    /// level is lower, so the restart that loads the Aggressive rules has not
-    /// happened yet. From each
-    /// thread's next turn every command that is not known read-only needs
-    /// approval, decided by a person (never the automatic reviewer), as after
-    /// the restart. A session configured at Aggressive keeps its own settings
-    /// (the launch sets them; `corbanu exec` and IDE sessions are not covered).
-    /// The session's stored settings are unchanged.
-    fn approvals_for_confirmed_aggressive(&self, configuration: &mut SessionConfiguration) {
-        use codex_security_policy::SecurityLevel;
-        let config = &configuration.original_config_do_not_use;
-        if config.security_level == SecurityLevel::Aggressive
-            || !crate::security::level_change::aggressive_confirmed_here(
-                config.codex_home.as_path(),
-            )
-        {
-            return;
-        }
-        let live_aggressive =
-            self.services
-                .model_client()
-                .post_taint_state()
-                .is_some_and(|state| {
-                    matches!(
-                        state.policy,
-                        crate::security::tainted_action::PolicyBinding::Bound {
-                            level: SecurityLevel::Aggressive,
-                            ..
-                        }
-                    )
-                });
-        if !live_aggressive {
-            return;
-        }
-        let untrusted = AskForApproval::UnlessTrusted;
-        if configuration.approval_policy.value() != untrusted
-            && let Err(err) = configuration.approval_policy.set(untrusted)
-        {
-            // A managed requirement pins the policy; keep it and say so.
-            tracing::warn!(%err, "Aggressive: could not require approval for every command");
-        }
-        configuration.approvals_reviewer = codex_protocol::config_types::ApprovalsReviewer::User;
-    }
-
     #[instrument(name = "turn_context.build", level = "trace", skip_all)]
     async fn new_turn_context_from_configuration(
         &self,
@@ -1154,8 +1109,6 @@ impl Session {
         multi_agent_runtime: TurnMultiAgentRuntime,
         git_enrichment_policy: GitEnrichmentPolicy,
     ) -> Arc<TurnContext> {
-        let mut session_configuration = session_configuration;
-        self.approvals_for_confirmed_aggressive(&mut session_configuration);
         let turn_environments = self.services.turn_environments.snapshot().await;
         let primary_turn_environment = turn_environments.primary();
         // TODO(anp): Migrate per-turn config and legacy TurnContext cwd consumers to PathUri so
