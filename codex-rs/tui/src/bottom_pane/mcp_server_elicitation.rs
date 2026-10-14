@@ -45,6 +45,7 @@ use crate::bottom_pane::approval_typing_guard::Confirm;
 use crate::bottom_pane::approval_typing_guard::Notice;
 use crate::bottom_pane::approval_typing_guard::TypingGuard;
 use crate::bottom_pane::bottom_pane_view::BottomPaneView;
+use crate::bottom_pane::bottom_pane_view::next_shown_request_generation;
 use crate::bottom_pane::scroll_state::ScrollState;
 use crate::bottom_pane::selection_popup_common::GenericDisplayRow;
 use crate::bottom_pane::selection_popup_common::measure_rows_height;
@@ -80,6 +81,11 @@ pub(super) const TYPED_TEXT_NOTICE: &str = "Typed text is not sent while this re
 pub(super) const CHOOSE_FIRST_NOTICE: &str =
     "This is a new request; choose an option with ↑/↓, then enter";
 pub(super) const FORM_FIRST_NOTICE: &str = "This is a new request; review it, then press enter";
+/// #787: keys reached the request as it appeared and were dropped.
+pub(super) const EARLY_KEYS_NOTICE: &str =
+    "Keys pressed as this request appeared were ignored; choose an option with ↑/↓, then enter";
+pub(super) const FORM_EARLY_KEYS_NOTICE: &str =
+    "Keys pressed as this request appeared were ignored; press ↑/↓ first, then answer";
 pub(super) const FORM_TYPED_NOTICE: &str =
     "Typed text was not entered in this new request; press ↑/↓ first, then type";
 const TOOL_TYPE_KEY: &str = "tool_type";
@@ -731,6 +737,9 @@ pub(crate) struct McpServerElicitationOverlay {
     /// approval prompt. A number key only highlights its option and Enter
     /// confirms it. Used only for approvals.
     typing_guard: TypingGuard,
+    /// #787: counts the requests shown here (see
+    /// [`BottomPaneView::shown_request_generation`]).
+    shown_generation: u64,
 }
 
 impl McpServerElicitationOverlay {
@@ -780,6 +789,7 @@ impl McpServerElicitationOverlay {
             validation_error: None,
             list_keymap,
             typing_guard: TypingGuard::default(),
+            shown_generation: next_shown_request_generation(),
         };
         overlay.reset_for_request();
         overlay.restore_current_draft();
@@ -1214,12 +1224,14 @@ impl McpServerElicitationOverlay {
                 Notice::TypedText => Some(FORM_TYPED_NOTICE),
                 Notice::ChooseFirst | Notice::NavigateFirst => Some(FORM_FIRST_NOTICE),
                 Notice::PersistentNeedsArrows => None,
+                Notice::EarlyKeys => Some(FORM_EARLY_KEYS_NOTICE),
             };
         }
         Some(match notice {
             Notice::TypedText => TYPED_TEXT_NOTICE,
             Notice::ChooseFirst | Notice::NavigateFirst => CHOOSE_FIRST_NOTICE,
             Notice::PersistentNeedsArrows => PERSISTENT_OPTION_KEY_ERROR,
+            Notice::EarlyKeys => EARLY_KEYS_NOTICE,
         })
     }
 
@@ -1360,6 +1372,7 @@ impl McpServerElicitationOverlay {
     fn advance_queue_or_complete(&mut self) {
         if let Some(next) = self.queue.pop_front() {
             self.request = next;
+            self.shown_generation = next_shown_request_generation();
             self.reset_for_request();
             self.restore_current_draft();
             // A double or held Enter must not answer a request not yet seen.
@@ -1733,6 +1746,14 @@ impl BottomPaneView for McpServerElicitationOverlay {
     /// Enter must not answer this request.
     fn on_revealed(&mut self) {
         self.require_fresh_choice();
+    }
+
+    fn shown_request_generation(&self) -> u64 {
+        self.shown_generation
+    }
+
+    fn on_early_input(&mut self) {
+        self.typing_guard.on_early_input();
     }
 
     fn handle_key_event(&mut self, key_event: KeyEvent) {
