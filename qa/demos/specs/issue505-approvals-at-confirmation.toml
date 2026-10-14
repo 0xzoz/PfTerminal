@@ -41,7 +41,9 @@ key = "Enter"
 [[steps]]
 wait = "Switch to Aggressive\\?"
 [[steps]]
-pause = 1.5
+wait = "enter confirm and save"
+[[steps]]
+pause = 3.0
 [[steps]]
 key = "Enter"
 [[steps]]
