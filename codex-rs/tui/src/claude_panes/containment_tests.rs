@@ -264,9 +264,10 @@ fn issue_743_the_pane_keeps_the_session_tmpdir() {
     .map(|(name, value)| (name.to_string(), value.to_string()));
     let env = launch_env(inherited, &containment.claude_env());
     assert_eq!(env.get("TMPDIR").map(String::as_str), Some("/session/tmp"));
+    let pane_tmp = containment.state_dir.join("tmp");
     assert_eq!(
         env.get("CLAUDE_CODE_TMPDIR").map(String::as_str),
-        Some("/state/pane-a/tmp")
+        Some(pane_tmp.to_string_lossy().as_ref())
     );
     assert!(!containment.claude_env().contains_key("TMPDIR"));
 }
