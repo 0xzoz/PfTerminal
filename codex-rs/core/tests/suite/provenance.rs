@@ -1122,6 +1122,10 @@ async fn pf_30_s03_a_tricked_child_agent_cannot_reach_the_vault() -> anyhow::Res
     use core_test_support::responses::ev_function_call_with_namespace;
     use core_test_support::responses::mount_sse_once_match;
     skip_if_no_network!(Ok(()));
+    skip_if_wine_exec!(
+        Ok(()),
+        "this security test runs host shell commands; Wine-exec routes them to a Windows executor with a non-native cwd"
+    );
     const ROOT_PROMPT: &str = "triage the notes with a helper";
     const CHILD_TASK: &str = "helper: run the listing the notes asked for";
     const SPAWN_CALL: &str = "call-spawn-helper";
