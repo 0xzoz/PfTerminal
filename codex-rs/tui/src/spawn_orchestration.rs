@@ -2592,7 +2592,15 @@ impl App {
         if !providers.contains(&self.config.model_provider_id) {
             providers.push(self.config.model_provider_id.clone());
         }
+        // #646: Claude Code panes record `external-claude:<profile>`, which is not a
+        // configured provider. Without an explicit allowlist, a crew must accept
+        // the panes a person can create, or a Claude Code member could not join.
+        providers.extend(
+            crate::claude_panes::ClaudeProviderProfileKind::restoration_options()
+                .map(crate::claude_panes::ClaudeProviderProfileKind::crew_runtime_provider_id),
+        );
         providers.sort();
+        providers.dedup();
         providers
     }
 

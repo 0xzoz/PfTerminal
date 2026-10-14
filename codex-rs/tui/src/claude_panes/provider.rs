@@ -210,6 +210,12 @@ impl ClaudeProviderProfileKind {
         }
     }
 
+    /// The runtime provider a Claude Code pane records as a `/spawn` crew member,
+    /// e.g. `external-claude:claudeplan` (`CLAUDE_PLAN_PANE_PROVIDER_ID`).
+    pub(crate) fn crew_runtime_provider_id(self) -> String {
+        format!("external-claude:{self:?}").to_ascii_lowercase()
+    }
+
     pub(crate) fn creation_options() -> &'static [Self] {
         &[
             Self::AmbientGlm52,
