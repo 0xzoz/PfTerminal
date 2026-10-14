@@ -1133,3 +1133,38 @@ fn issue_691_aggressive_waits_for_the_windows_sandbox() {
     picker.handle_key_event(key(KeyCode::Enter));
     assert_eq!(picker.screen, Screen::Review(ChosenLevel::Aggressive));
 }
+
+/// #691: with Aggressive saved and active, its review (nested-agent setting)
+/// also waits for the Windows sandbox; switching to Permissive still works.
+#[test]
+fn issue_691_saved_aggressive_waits_for_the_windows_sandbox_and_permissive_stays() {
+    let home = tempfile::tempdir().unwrap();
+    level::save(home.path(), ChosenLevel::Aggressive, NestedAgents::Refuse).unwrap();
+    let mut picker = SecurityLevelPicker::new(
+        &context(home.path(), ChosenLevel::Aggressive),
+        current(),
+        /*preflight_input*/ None,
+        RuntimeKeymap::defaults().list,
+    );
+    picker.set_windows_sandbox_blocker(Some("needs the sandbox".to_string()));
+    assert!(
+        render(&picker, /*width*/ 80)
+            .contains("> Aggressive  (active), needs the Windows sandbox set up"),
+        "{}",
+        render(&picker, /*width*/ 80)
+    );
+    picker.handle_key_event(key(KeyCode::Enter));
+    assert_eq!(
+        picker.screen,
+        Screen::List {
+            note: Some("needs the sandbox".to_string())
+        }
+    );
+    assert_eq!(
+        level::load(home.path()),
+        StoredLevel::Chosen(ChosenLevel::Aggressive)
+    );
+    picker.handle_key_event(key(KeyCode::Down));
+    picker.handle_key_event(key(KeyCode::Enter));
+    assert_eq!(picker.screen, Screen::Review(ChosenLevel::Permissive));
+}
