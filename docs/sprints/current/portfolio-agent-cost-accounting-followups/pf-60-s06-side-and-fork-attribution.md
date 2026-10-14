@@ -1,7 +1,7 @@
 ---
 sprint_id: "PF-60-S06"
 title: "Side-conversation and temporary-fork attribution"
-status: in_progress
+status: ready
 plan_file: "docs/plans/active/portfolio-agent-cost-accounting-followups.md"
 plan_feature: "PF-60"
 execution_order: 1
@@ -53,32 +53,38 @@ updated: 2026-10-14
 
 - [x] Draft sprint created 2026-10-10 from Travis's decision; linked to one plan feature.
 - [x] Allocated 2026-10-14 (worker `pf60-s06`) when Travis started the follow-ups.
+- [x] Audit: [coverage audit](../../../../qa/portfolio/agent-cost-accounting/pf-60-s06/coverage-audit.md), listing every
+      session with no thread of its own, its owner and its label.
+- [x] AC1: a guardian review inside `/side` is recorded once under the saved conversation, as `side:review:`. Shown by
+      a test, in a live tmux run and in the video.
+- [x] AC2: a sub-agent from `/side` is recorded under the saved conversation, as `side:agent:`. The test checks exact
+      rows and the day total. It wasn't shown live, because `/side` tells the model not to spawn agents (see the gate).
+- [x] AC3: `side:` only for TUI `/side` (thread source `side`); every other temporary fork is `fork:`; sub-agents and
+      `/review` tasks without a thread are `agent:` and `code-review:`.
+- [x] AC4: the ledger format is unchanged; the labels are ordinary turn labels, so older rows read as before.
+- [x] AC5: `exec --ephemeral`, and work done for it, stay excluded, with one log line per session (existing
+      `an_uncollected_session_is_named_once` plus a new sub-agent guard).
+- [x] Gate: [gate.md](../../../../qa/portfolio/agent-cost-accounting/pf-60-s06/gate.md); PR #793 at code head
+      `604fe9c89d`; plan activation in #790.
 
 ## Remaining
 
-- [ ] Audit every code path that creates a session without its own saved thread; list each fork kind and its owner.
-- [ ] AC1: a guardian review of a tool call inside `/side` is recorded under the parent conversation, labelled so it
-      reads as a review of side work (for example `side:review:`); its tokens are counted once.
-- [ ] AC2: a sub-agent spawned from `/side` is recorded under the parent conversation as a descendant, with its own
-      label; each of its requests is counted once and `/cost` totals reconcile.
-- [ ] AC3: each fork kind found by the audit has its own label; `side:` appears only on TUI `/side` work; an unknown
-      kind gets a neutral label (for example `fork:`), never `side:`.
-- [ ] AC4: existing ledger rows are unchanged and still read; any format change is versioned.
-- [ ] AC5: `exec --ephemeral` stays excluded with exactly one `accounting.excluded` warning; the coverage audit is updated.
-- [ ] Code-blind functional design frozen before test-result disclosure.
+- [ ] Code-blind functional design frozen before test-result disclosure (PF-60-S10).
+- [ ] Travis accepts S06; #400 and #401 closed on acceptance.
 
 ## Verification
 
-- [ ] Focused: `just test -p codex-core --features developer-accounting -E 'test(accounting) | test(guardian)'`, and without the feature.
-- [ ] Linux clippy `-D warnings` with and without `developer-accounting`.
-- [ ] TUI: tmux run with real keys (`/side`, a guardian review and a sub-agent from it); captures and demo video.
+- [x] Focused `just test -p codex-core -E 'test(accounting) | test(guardian) | test(side) | test(spawn)'`: 523/523 with
+      `developer-accounting`, 518/518 without; `codex-tui` `test(side)` 94/94.
+- [x] macOS and Linux clippy `-D warnings --tests`, with and without `developer-accounting`.
+- [x] TUI: tmux run with real keys (`/side` plus a guardian review), the ledger read back, and the
+      [demo video](https://github.com/CorbanuCore/CorbanuTerminal/releases/download/demos/pf-60-s06-pf60s06-side-guardian-review-cost-604fe9c89da3-2026-10-14.mp4).
 - [ ] Code-blind cases executed independently (in PF-60-S10 under the enforced gate).
 
 ## Exit evidence
 
-- [ ] Implementation commit recorded.
-- [ ] Final-tree test output linked.
+- [x] Implementation commits recorded: `1bb8e8d834`, `604fe9c89d` (PR #793).
+- [x] Final-tree test output linked (gate).
 - [ ] Code-blind handoff checker passes, or explicit limited-testing agreement/blocker recorded; no automatic human acceptance.
-- [ ] Parallel handoff, if applicable: commit, contract versions, scope audit and combined-tree test evidence recorded.
 - [ ] `Done` and `Remaining` ledgers reflect reality; #400 and #401 closed.
 - [ ] Completed record moved to `docs/sprints/archive/portfolio-agent-cost-accounting-followups/`.
