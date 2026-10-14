@@ -17,7 +17,12 @@ use anyhow::ensure;
 use tempfile::TempDir;
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 15);
-const FOCUS_INPUT_TIMEOUT: Duration = Duration::from_millis(/*millis*/ 500);
+/// How long typed input may take to show after a focus event. Input that is
+/// discarded never shows, and the blocking refresh this guards against sends
+/// new colour queries, which the test checks separately. So the bound only has
+/// to allow for a slow machine: 500 ms was too short for nightly Bazel runs
+/// (#636), where the first input sometimes took longer to render.
+const FOCUS_INPUT_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 5);
 const FOCUS_PROBE_INPUT: &str = "focus-palette-24527";
 
 #[test]
