@@ -358,6 +358,21 @@ pub(crate) fn protected_level(session: &crate::session::session::Session) -> Opt
         .map(|state| state.level)
 }
 
+/// #747 (Travis, 2026-10-14, decision D3): under security level Moderate no
+/// command runs outside the OS sandbox: not a request to run outside it
+/// (`require_escalated`), not the retry after a sandbox denial, not an
+/// exec-policy rule that would skip the sandbox. A person's approval still
+/// lifts Moderate's protected-path rules for one command (#239, #513), inside
+/// the sandbox. Follows the level in force now (also right after `/security`
+/// confirms Moderate).
+pub(crate) fn moderate_keeps_sandbox(session: &crate::session::session::Session) -> bool {
+    session.services.model_client().live_level() == SecurityLevel::Moderate
+}
+
+/// #747: added where a person is asked to approve a command that asked to
+/// run outside the sandbox under Moderate.
+pub(crate) const MODERATE_STAYS_SANDBOXED: &str = "Under security level Moderate it still runs inside the sandbox, even if you approve: writes outside your writable folders and network your sandbox blocks still fail.";
+
 /// Issues #245 and #513: a permission grant (`request_permissions`)
 /// without the entries that would open a protected path or reopen a
 /// read-only one under `level`'s rules, and the refusal to show when any

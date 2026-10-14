@@ -96,5 +96,39 @@ async fn sec_391_saved_level_waits_for_restart_config_level_applies_now() -> std
             }
         )
     );
+
+    // D2 (Travis, 2026-10-14): Moderate turns the broker on too, and says
+    // so; the person's own `broker_model_auth = false` still wins.
+    let moderate_home = TempDir::new()?;
+    let moderate = vec![(
+        "security".to_string(),
+        toml::toml! { version = 1
+        level = "moderate" }
+        .into(),
+    )];
+    assert_eq!(
+        broker(&load(&moderate_home, &cwd, moderate.clone()).await?),
+        (
+            SecurityLevel::Moderate,
+            supported,
+            if supported {
+                BrokerModelAuthOrigin::ModerateLevel
+            } else {
+                BrokerModelAuthOrigin::Config
+            }
+        )
+    );
+    std::fs::write(
+        moderate_home.path().join("config.toml"),
+        "[features]\nbroker_model_auth = false\n",
+    )?;
+    assert_eq!(
+        broker(&load(&moderate_home, &cwd, moderate).await?),
+        (
+            SecurityLevel::Moderate,
+            false,
+            BrokerModelAuthOrigin::Config
+        )
+    );
     Ok(())
 }

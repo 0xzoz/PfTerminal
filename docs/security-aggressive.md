@@ -161,10 +161,21 @@ create files there too.
 
 ## Commands run outside the sandbox
 
-Under Moderate, the Corbanu home's runtime files (the sandbox launchers in
-`tmp`, shell snapshots, skills, plugins, packages and `AGENTS.md`) stay
-read-only to sandboxed commands, even after a person approves a command.
-**Exception:** a command that a person approves to run outside the sandbox
-(an escalation request, or "retry without sandbox?") can write them, as it
-can change anything else. Approve such a command only when you would run it
-yourself. Under Aggressive, running outside the sandbox is not offered.
+Under Moderate no agent command runs outside the sandbox, even when you
+approve it; Aggressive, once it applies after a restart, keeps every command in
+its sandbox too. Under Moderate a command can still ask to run outside it
+(an escalation request): the prompt says it stays in the sandbox, and
+approving it only lifts Moderate's protection of credential and Corbanu files
+for that one command. A write outside your writable folders, or network your
+sandbox blocks, still fails, and "retry without sandbox?" is not offered.
+Commands you allowed with "don't ask again" skip the prompt but stay in the
+sandbox too.
+
+The Corbanu home's runtime files (the sandbox launchers in `tmp`, shell
+snapshots, skills, plugins, packages and `AGENTS.md`) stay read-only to agent
+commands, even after a person approves a command. If your own settings turn
+the sandbox off (full access, or an external sandbox), commands that
+Moderate's rules don't cover run without one; choose a sandbox in your
+settings to keep every command in it. Where the sandbox can't start (for
+example Linux without user namespaces), commands fail under Moderate instead
+of running outside it.

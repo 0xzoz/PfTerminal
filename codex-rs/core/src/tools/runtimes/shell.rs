@@ -37,7 +37,7 @@ use crate::tools::sandboxing::ToolCtx;
 use crate::tools::sandboxing::ToolError;
 use crate::tools::sandboxing::ToolRuntime;
 use crate::tools::sandboxing::managed_network_for_sandbox_permissions;
-use crate::tools::sandboxing::sandbox_permissions_preserving_denied_reads;
+use crate::tools::sandboxing::sandbox_permissions_for_session;
 use crate::tools::sandboxing::with_cached_approval;
 use codex_network_proxy::NetworkProxy;
 use codex_protocol::exec_output::ExecToolCallOutput;
@@ -238,9 +238,10 @@ impl ToolRuntime<ShellRequest, ExecToolCallOutput> for ShellRuntime {
         ctx: &ToolCtx,
     ) -> Option<NetworkApprovalSpec> {
         let file_system_sandbox_policy = ctx.turn.file_system_sandbox_policy();
-        let sandbox_permissions = sandbox_permissions_preserving_denied_reads(
+        let sandbox_permissions = sandbox_permissions_for_session(
             req.sandbox_permissions,
             &file_system_sandbox_policy,
+            &ctx.session,
         );
         let network =
             managed_network_for_sandbox_permissions(req.network.as_ref(), sandbox_permissions)?;
@@ -285,9 +286,10 @@ impl ToolRuntime<ShellRequest, ExecToolCallOutput> for ShellRuntime {
             .unwrap_or(session_shell.as_ref());
         let shell_snapshot_location = req.turn_environment.shell_snapshot(&req.cwd);
         let (file_system_sandbox_policy, _) = attempt.permissions.to_runtime_permissions();
-        let sandbox_permissions = sandbox_permissions_preserving_denied_reads(
+        let sandbox_permissions = sandbox_permissions_for_session(
             req.sandbox_permissions,
             &file_system_sandbox_policy,
+            &ctx.session,
         );
         let managed_network =
             managed_network_for_sandbox_permissions(req.network.as_ref(), sandbox_permissions);
