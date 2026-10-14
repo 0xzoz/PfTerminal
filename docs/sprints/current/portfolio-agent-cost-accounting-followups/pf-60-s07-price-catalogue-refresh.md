@@ -57,7 +57,9 @@ updated: 2026-10-14
 - [x] AC1 OpenRouter (Travis 2026-10-14: reported charge first, catalogue as a labelled fallback estimate, else
       "no price"): `/cost` prices each OpenRouter request from `usage.cost` (`billed_usd`), labels it
       "charged by OpenRouter", and every request and attempt page states its `Price basis`. The ledger keeps the
-      catalogue estimate unchanged (no re-pricing of records). Evidence: `qa/portfolio/agent-cost-accounting/issue-368/openrouter-charge/`.
+      catalogue estimate unchanged (no re-pricing of records). Landed as a bounded fix under that decision
+      (coordinator-assigned, PR #784) while the sprint stays draft for its other items; its code-blind cases run
+      in PF-60-S10. Evidence: `qa/portfolio/agent-cost-accounting/issue-368/openrouter-charge/`.
 
 ## Remaining
 

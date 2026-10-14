@@ -139,9 +139,9 @@ fn attempt(id: u128, model: &str, catalogue: bool, body: &[u8]) -> ObservationQu
     }
 }
 
-/// The open conversation's day, as the store returns it: totals summed from
-/// the recorded quotes.
-fn day(quotes: Vec<ObservationQuote>) -> InspectionDay {
+fn by_request(
+    quotes: Vec<ObservationQuote>,
+) -> std::collections::BTreeMap<Uuid, Vec<ObservationQuote>> {
     let mut requests = std::collections::BTreeMap::<Uuid, Vec<ObservationQuote>>::new();
     for quote in quotes {
         requests
@@ -149,6 +149,13 @@ fn day(quotes: Vec<ObservationQuote>) -> InspectionDay {
             .or_default()
             .push(quote);
     }
+    requests
+}
+
+/// The open conversation's day, as the store returns it: totals summed from
+/// the recorded quotes.
+fn day(quotes: Vec<ObservationQuote>) -> InspectionDay {
+    let requests = by_request(quotes);
     let totals = DayTotals::from_quotes(requests.values().flatten()).unwrap();
     let read_at_ms = utc_day() * DAY_MS + DAY_MS * 3 / 4;
     InspectionDay::Ready(Inspection {
@@ -348,7 +355,7 @@ fn cost_overview_states_each_routes_basis_and_sums_charges() {
         "• OpenRouter · OpenRouter MiniMax M3 — Pay per use. 1 request, 110 tokens. Estimated cost: $0.000710.",
         "• OpenRouter · some/unlisted-model — Pay per use. 1 request, 110 tokens. Estimated cost: no price available.",
         "• OpenRouter · OpenRouter Grok 4.7 — Pay per use. 1 request, 110 tokens. Cost: $0.000123, charged by OpenRouter.",
-        "OpenRouter costs are the charges OpenRouter reported with each response; other costs are estimates from published prices; OpenRouter stated no charge for this work — check OpenRouter's bill.",
+        "Costs marked \"charged by OpenRouter\" are the charges OpenRouter reported with those responses; other costs are estimates from published prices; OpenRouter stated no charge for this work — check OpenRouter's bill.",
     ] {
         assert!(screen.contains(&line.to_string()), "{line}\n{screen:#?}");
     }
@@ -395,4 +402,166 @@ fn every_openrouter_page_names_its_price_basis() {
             page.text
         );
     }
+}
+
+/// A pay-per-use attempt on another provider whose output count was not
+/// reported: $0.00041 of its published-price estimate is known.
+fn partly_priced(id: u128) -> ObservationQuote {
+    let mut quote = attempt(
+        id,
+        "deepseek-chat",
+        /*catalogue*/ true,
+        &openrouter_body(serde_json::json!({})),
+    );
+    quote.attempt.provider = "deepseek".into();
+    quote.usage.billed_usd = None;
+    quote.usage.output = None;
+    quote.buckets[3] = BucketQuote::MissingUsage;
+    quote.known_subtotal = decimal("0.00041");
+    quote.all_buckets_priced = None;
+    quote.subtotal_display = quote.known_subtotal.display();
+    quote
+}
+
+/// Review of #784: a partly priced attempt elsewhere is an estimate, not part
+/// of OpenRouter's charge, and the two parts add up to the known cost.
+#[test]
+fn charge_and_estimate_parts_add_up_with_a_partly_priced_attempt() {
+    let charged = openrouter_body(serde_json::json!({"cost": 0.000123}));
+    let pages = inspection_pages(Ok(day(vec![
+        attempt(1, "x-ai/grok-4.7", /*catalogue*/ true, &charged),
+        partly_priced(2),
+    ])));
+    assert!(
+        has(
+            &pages[0],
+            "Known token cost: $0.000533 + unknown costs ($0.000123 charged by OpenRouter + $0.000410 estimated from published prices)"
+        ),
+        "{:#?}",
+        pages[0].text
+    );
+    // The other provider's page keeps its own estimate wording.
+    let (_, deepseek) = pages[0]
+        .links
+        .iter()
+        .find(|(label, _)| label.starts_with("DeepSeek"))
+        .unwrap();
+    assert!(
+        pages[*deepseek]
+            .text
+            .iter()
+            .any(|line| line.starts_with("Estimated cost: at least $0.000410")),
+        "{:#?}",
+        pages[*deepseek].text
+    );
+}
+
+/// A free model's reported charge of $0 is a cost of $0, not a missing price.
+#[test]
+fn a_zero_charge_is_a_stated_cost() {
+    let free = openrouter_body(serde_json::json!({"cost": 0}));
+    let pages = inspection_pages(Ok(day(vec![attempt(
+        1,
+        "tencent/hy3:free",
+        /*catalogue*/ false,
+        &free,
+    )])));
+    let page = request_page(&pages, "Hy3");
+    assert!(
+        has(page, "Cost: $0.000000, charged by OpenRouter"),
+        "{:#?}",
+        page.text
+    );
+    assert!(!pages[0].text.iter().any(|line| line.contains("no price")));
+}
+
+/// A refused attempt states no charge and has no price basis to name.
+#[test]
+fn a_refused_openrouter_attempt_has_no_price_basis() {
+    let mut refused = attempt(
+        1,
+        "x-ai/grok-4.7",
+        /*catalogue*/ true,
+        &openrouter_body(serde_json::json!({"cost": 0.5})),
+    );
+    refused.usage = Usage {
+        refused_status: Some(402),
+        ..Usage::default()
+    };
+    refused.buckets = [BucketQuote::Priced(Decimal::default()); 4];
+    refused.known_subtotal = Decimal::default();
+    refused.all_buckets_priced = Some(Decimal::default());
+    let pages = inspection_pages(Ok(day(vec![refused])));
+    let page = request_page(&pages, "Grok 4.7");
+    assert!(
+        !page
+            .text
+            .iter()
+            .any(|line| line.starts_with("Price basis:") || line.contains("charged by")),
+        "{:#?}",
+        page.text
+    );
+}
+
+/// The day's other conversations and a range read the same charges.
+#[test]
+fn other_conversations_and_ranges_use_the_charge() {
+    let charged = openrouter_body(serde_json::json!({"cost": 0.000123}));
+    let InspectionDay::Ready(mut view) = day(Vec::new()) else {
+        unreachable!()
+    };
+    let mut other = attempt(9, "x-ai/grok-4.7", /*catalogue*/ true, &charged);
+    other.attempt.thread_id = ThreadId::from_string(&Uuid::from_u128(2).to_string()).unwrap();
+    view.other_conversations = Some(OtherConversations {
+        conversations: 1,
+        requests: by_request(vec![other]),
+        ..OtherConversations::default()
+    });
+    let pages = inspection_pages(Ok(InspectionDay::Ready(view)));
+    assert!(
+        has(
+            &pages[0],
+            "Other conversations' cost: $0.000123, charged by OpenRouter."
+        ),
+        "{:#?}",
+        pages[0].text
+    );
+
+    let InspectionDay::Ready(view) = day(vec![
+        attempt(1, "x-ai/grok-4.7", /*catalogue*/ true, &charged),
+        attempt(
+            2,
+            "minimax/minimax-m3",
+            /*catalogue*/ true,
+            &openrouter_body(serde_json::json!({})),
+        ),
+    ]) else {
+        unreachable!()
+    };
+    let start = utc_day() * DAY_MS;
+    let range = InspectionDay::Range {
+        requested: codex_state::accounting::InspectionRange {
+            start_ms: start,
+            end_ms: start + DAY_MS,
+            grouping: codex_state::accounting::InspectionGrouping::Day,
+        },
+        aggregate_day_floor: Some(0),
+        read_at_ms: start + 2 * DAY_MS,
+        buckets: vec![codex_state::accounting::InspectionBucket {
+            start_ms: start,
+            end_ms: start + DAY_MS,
+            effective: Some((start, start + DAY_MS)),
+            partial: false,
+            days: vec![InspectionDay::Ready(view)],
+        }],
+    };
+    let pages = inspection_pages(Ok(range));
+    let line = "Token cost for recorded attempts: $0.000833 ($0.000123 charged by OpenRouter + $0.000710 estimated from published prices)";
+    // The range overview, and the bucket's own pages.
+    assert!(has(&pages[0], line), "{:#?}", pages[0].text);
+    assert!(
+        pages[1..].iter().any(|page| has(page, line)),
+        "{:#?}",
+        pages.iter().map(|page| &page.text).collect::<Vec<_>>()
+    );
 }

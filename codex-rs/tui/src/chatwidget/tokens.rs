@@ -808,10 +808,7 @@ fn attempt_text(q: &ObservationQuote) -> Vec<String> {
         lines.push(format!(
             "Published-price estimate (not used — {} reported its charge): {}",
             charge::charging_provider(),
-            charge::published_estimate(q).map_or_else(
-                || "none — no published price covers every component".into(),
-                money
-            )
+            charge::published_estimate(q)
         ));
     }
     lines.push(format!(
@@ -1561,8 +1558,9 @@ struct EstimateGaps {
 }
 
 /// The known pay-per-use cost split by basis (#368): attempts priced from the
-/// charge their provider reported, and complete estimates from published
-/// prices. A sum the exact type cannot hold is `None` and not stated.
+/// charge their provider reported, and estimates from published prices,
+/// complete or in part. The two sums add up to the known cost. A sum the exact
+/// type cannot hold is `None` and not stated.
 #[derive(Clone, Copy, Default)]
 struct ChargeSplit {
     charged_attempts: i64,
@@ -1609,13 +1607,17 @@ impl EstimateGaps {
             if q.all_buckets_priced.is_none() && !lacks_price(q) {
                 gaps.incomplete_usage = gaps.incomplete_usage.saturating_add(1);
             }
+            // Every known dollar is either a reported charge or a (possibly
+            // partial) estimate, so the two parts always add up to the total.
             let split = &mut gaps.charges;
             if let Some(charge) = charge::reported_charge(q) {
-                split.charged_attempts += 1;
+                split.charged_attempts = split.charged_attempts.saturating_add(1);
                 split.charged = split.charged.and_then(|sum| sum.add(charge).ok());
-            } else if let Some(estimate) = q.all_buckets_priced {
-                split.estimated_attempts += 1;
-                split.estimated = split.estimated.and_then(|sum| sum.add(estimate).ok());
+            } else if q.all_buckets_priced.is_some() || q.known_subtotal != Decimal::default() {
+                split.estimated_attempts = split.estimated_attempts.saturating_add(1);
+                split.estimated = split
+                    .estimated
+                    .and_then(|sum| sum.add(q.known_subtotal).ok());
             }
         }
         gaps
@@ -2167,10 +2169,11 @@ fn route_line(quotes: &[&ObservationQuote], named: bool) -> String {
             let provider = provider_name(&quotes[0].attempt.provider);
             let refused = refusal_note(quotes).map_or_else(String::new, |note| format!(" {note}."));
             match leading_charge(quotes, &t).ok_or_else(|| billed_charge(quotes)) {
-                // Every request carries the provider's own charge, but the
-                // published prices cannot reproduce it (the provider omits a
-                // counter the estimate needs): the charge is the figure, and a
-                // partial estimate would only mislead.
+                // Every request that reported usage carries the provider's own
+                // charge, but some figure is still unknown (a counter the
+                // estimate needs is missing, or an attempt failed without
+                // usage): the charge is the figure, and a partial estimate
+                // would only mislead.
                 Ok(billed) => format!(
                     "• {route} — {billing}. {}, {}. Billed by {provider}: {}.{refused}",
                     request_count(quotes),
@@ -2300,8 +2303,9 @@ fn plain_overview<'a>(
 /// estimate whose real amount is on the bill it names.
 fn charged_costs_note(quotes: &[&ObservationQuote]) -> String {
     let provider = charge::charging_provider();
-    let mut note =
-        format!("{provider} costs are the charges {provider} reported with each response");
+    let mut note = format!(
+        "Costs marked \"charged by {provider}\" are the charges {provider} reported with those responses"
+    );
     let rest: Vec<&ObservationQuote> = quotes
         .iter()
         .copied()

@@ -14,10 +14,12 @@
 use codex_state::accounting::BucketQuote;
 use codex_state::accounting::DayTotals;
 use codex_state::accounting::Decimal;
+use codex_state::accounting::Inspection;
 use codex_state::accounting::InspectionDay;
 use codex_state::accounting::ObservationQuote;
 
 use super::lacks_price;
+use super::money;
 use super::per_use;
 use super::provider_name;
 
@@ -43,9 +45,24 @@ pub(super) fn reported_charge(quote: &ObservationQuote) -> Option<Decimal> {
     .flatten()
 }
 
-/// What the published prices put the attempt at when they price every
-/// bucket: the figure a reported charge replaces.
-pub(super) fn published_estimate(quote: &ObservationQuote) -> Option<Decimal> {
+/// What the published prices put the attempt at, the figure a reported charge
+/// replaces, or why there is no such figure.
+pub(super) fn published_estimate(quote: &ObservationQuote) -> String {
+    if quote
+        .buckets
+        .iter()
+        .any(|bucket| matches!(bucket, BucketQuote::MissingRate))
+    {
+        return "none — no published price covers every component".to_string();
+    }
+    if quote
+        .buckets
+        .iter()
+        .any(|bucket| matches!(bucket, BucketQuote::MissingUsage))
+    {
+        return "not available — the response did not report every token count it needs"
+            .to_string();
+    }
     quote
         .buckets
         .iter()
@@ -53,6 +70,10 @@ pub(super) fn published_estimate(quote: &ObservationQuote) -> Option<Decimal> {
             BucketQuote::Priced(amount) => sum.add(*amount).ok(),
             BucketQuote::MissingUsage | BucketQuote::MissingRate => None,
         })
+        .map_or_else(
+            || "unavailable — exact arithmetic overflow".to_string(),
+            money,
+        )
 }
 
 /// Price the attempt from its reported charge. Returns whether it changed;
@@ -70,29 +91,37 @@ fn reprice(quote: &mut ObservationQuote) -> bool {
     true
 }
 
-/// `day` with every attempt priced from its reported charge where it has one,
-/// and its totals summed again where any attempt changed. Fails only when
-/// the exact sums overflow.
+/// Price every attempt in `view` from its reported charge where it has one.
+/// Returns whether any attempt in the view's own totals changed.
+fn reprice_view(view: &mut Inspection) -> bool {
+    let mut changed = false;
+    for quote in view
+        .requests
+        .values_mut()
+        .chain(view.unknown_parent_requests.values_mut())
+        .flatten()
+    {
+        changed |= reprice(quote);
+    }
+    if let Some(others) = &mut view.other_conversations {
+        // Other conversations have no stored totals here; their figures are
+        // summed from these quotes when shown.
+        for quote in others.requests.values_mut().flatten() {
+            reprice(quote);
+        }
+    }
+    changed
+}
+
+/// `day` with every attempt priced from its reported charge where it has one.
+/// A single day's totals are summed again where any attempt changed, and fail
+/// only when the exact sums overflow. A range's days keep their stored totals:
+/// the range view sums every total it shows from the attempts, bucket by
+/// bucket, so an overflow there stays confined to its bucket.
 pub(super) fn priced_from_charges(day: InspectionDay) -> anyhow::Result<InspectionDay> {
     Ok(match day {
         InspectionDay::Ready(mut view) => {
-            let mut changed = false;
-            for quote in view
-                .requests
-                .values_mut()
-                .chain(view.unknown_parent_requests.values_mut())
-                .flatten()
-            {
-                changed |= reprice(quote);
-            }
-            if let Some(others) = &mut view.other_conversations {
-                // Other conversations have no stored totals here; their
-                // figures are summed from these quotes when shown.
-                for quote in others.requests.values_mut().flatten() {
-                    reprice(quote);
-                }
-            }
-            if changed {
+            if reprice_view(&mut view) {
                 let owner = view.owner;
                 let all = || view.requests.values().flatten();
                 view.totals = DayTotals::from_quotes(all())?;
@@ -111,11 +140,10 @@ pub(super) fn priced_from_charges(day: InspectionDay) -> anyhow::Result<Inspecti
             read_at_ms,
             mut buckets,
         } => {
-            for bucket in &mut buckets {
-                bucket.days = std::mem::take(&mut bucket.days)
-                    .into_iter()
-                    .map(priced_from_charges)
-                    .collect::<anyhow::Result<_>>()?;
+            for day in buckets.iter_mut().flat_map(|bucket| &mut bucket.days) {
+                if let InspectionDay::Ready(view) = day {
+                    reprice_view(view);
+                }
             }
             InspectionDay::Range {
                 requested,
@@ -126,6 +154,26 @@ pub(super) fn priced_from_charges(day: InspectionDay) -> anyhow::Result<Inspecti
         }
         other => other,
     })
+}
+
+/// How one attempt without a reported charge is priced.
+enum Fallback {
+    /// Every component priced from published prices.
+    Estimate,
+    /// Only some components priced: a lower bound.
+    Partial,
+    /// No figure at all.
+    None,
+}
+
+fn fallback(quote: &ObservationQuote) -> Fallback {
+    if quote.all_buckets_priced.is_some() {
+        Fallback::Estimate
+    } else if quote.known_subtotal != Decimal::default() {
+        Fallback::Partial
+    } else {
+        Fallback::None
+    }
 }
 
 /// "Price basis: …" for pages holding work on a route priced from reported
@@ -145,40 +193,43 @@ pub(super) fn price_basis(quotes: &[&ObservationQuote]) -> Option<String> {
         return None;
     }
     let provider = charging_provider();
+    // A single attempt here is on the charge-priced route.
     if let [quote] = billable.as_slice() {
-        let silent = prices_from_charge(&quote.attempt.provider);
-        return Some(if reported_charge(quote).is_some() {
-            format!("Price basis: the charge {provider} reported with the response (usage.cost)")
-        } else if quote.all_buckets_priced.is_some() {
-            if silent {
-                format!(
-                    "Price basis: estimate from published prices — {provider} reported no charge for this response"
-                )
-            } else {
-                "Price basis: estimate from published prices".to_string()
-            }
-        } else {
-            let why = if lacks_price(quote) {
-                "no published price covers this response"
-            } else {
-                "the response did not report every token count its published price needs"
-            };
-            if silent {
-                format!("Price basis: none — {provider} reported no charge, and {why}")
-            } else {
-                format!("Price basis: none — {why}")
-            }
+        if reported_charge(quote).is_some() {
+            return Some(format!(
+                "Price basis: the charge {provider} reported with the response (usage.cost)"
+            ));
+        }
+        return Some(match fallback(quote) {
+            Fallback::Estimate => format!(
+                "Price basis: estimate from published prices — {provider} reported no charge for this response"
+            ),
+            Fallback::Partial => format!(
+                "Price basis: partial estimate from published prices, a lower bound — {provider} reported no charge for this response"
+            ),
+            Fallback::None => format!(
+                "Price basis: none — {provider} reported no charge, and {}",
+                if lacks_price(quote) {
+                    "no published price covers this response"
+                } else {
+                    "the response did not report every token count its published price needs"
+                }
+            ),
         });
     }
-    let (mut charged, mut estimated, mut silent_estimated, mut none) = (0, 0, 0, 0);
+    let (mut charged, mut estimated, mut partial, mut silent, mut none) = (0, 0, 0, 0, 0);
     for quote in &billable {
         if reported_charge(quote).is_some() {
             charged += 1;
-        } else if quote.all_buckets_priced.is_some() {
-            estimated += 1;
-            silent_estimated += usize::from(prices_from_charge(&quote.attempt.provider));
-        } else {
-            none += 1;
+            continue;
+        }
+        match fallback(quote) {
+            Fallback::Estimate => estimated += 1,
+            Fallback::Partial => partial += 1,
+            Fallback::None => none += 1,
+        }
+        if prices_from_charge(&quote.attempt.provider) {
+            silent += 1;
         }
     }
     let attempts = |n: usize| format!("{n} {}", if n == 1 { "attempt" } else { "attempts" });
@@ -190,19 +241,28 @@ pub(super) fn price_basis(quotes: &[&ObservationQuote]) -> Option<String> {
         ));
     }
     if estimated > 0 {
-        parts.push(if silent_estimated > 0 {
-            format!(
-                "{} estimated from published prices ({provider} reported no charge for {silent_estimated})",
-                attempts(estimated)
-            )
-        } else {
-            format!("{} estimated from published prices", attempts(estimated))
-        });
+        parts.push(format!(
+            "{} estimated from published prices",
+            attempts(estimated)
+        ));
+    }
+    if partial > 0 {
+        parts.push(format!(
+            "{} estimated in part from published prices (a lower bound)",
+            attempts(partial)
+        ));
     }
     if none > 0 {
         parts.push(format!("{} with no price", attempts(none)));
     }
-    Some(format!("Price basis: {}", parts.join("; ")))
+    let mut basis = format!("Price basis: {}", parts.join("; "));
+    if silent > 0 {
+        basis.push_str(&format!(
+            " — {provider} reported no charge for {}",
+            attempts(silent)
+        ));
+    }
+    Some(basis)
 }
 
 #[cfg(test)]

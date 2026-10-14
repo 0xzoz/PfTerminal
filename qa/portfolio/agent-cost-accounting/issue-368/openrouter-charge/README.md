@@ -1,5 +1,8 @@
 # #368 item 1: OpenRouter requests priced from the reported charge
 
+Requirement: PF-60-S07 AC1 (`docs/sprints/current/portfolio-agent-cost-accounting-followups/pf-60-s07-price-catalogue-refresh.md`).
+This is a bounded fix under Travis's decision, PR #784. The code-blind functional cases for it run in PF-60-S10.
+
 Travis's decision, 2026-10-14: an OpenRouter request is priced from the charge OpenRouter reports with the
 response (`usage.cost`, recorded as `billed_usd`). The catalogue rate is shown only as a labelled fallback
 estimate when no charge is reported, and "no price" is shown when neither exists. `/cost` and the request page
