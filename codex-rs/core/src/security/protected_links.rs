@@ -196,11 +196,7 @@ static RECENT_REFUSALS: std::sync::Mutex<std::collections::VecDeque<String>> =
 /// Logs which check refused a command and keeps it among the latest (the
 /// command's text is not logged).
 fn log_refusal(refused: &Refused, elapsed: std::time::Duration) {
-    let mut detail = format!(
-        "refused_by={} target={}",
-        refused.by.name(),
-        refused.target
-    );
+    let mut detail = format!("refused_by={} target={}", refused.by.name(), refused.target);
     if let RefusedBy::ProtectedTarget { landed, kept } = &refused.by {
         detail.push_str(&format!(
             " landed={} kept={}",
