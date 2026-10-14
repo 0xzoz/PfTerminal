@@ -1533,6 +1533,7 @@ impl ExternalAuth for StaticExternalAuth {
 }
 
 #[tokio::test]
+#[serial(codex_auth_env)]
 async fn external_auth_provider_can_install_headers() {
     let mut headers = http::HeaderMap::new();
     headers.insert(
