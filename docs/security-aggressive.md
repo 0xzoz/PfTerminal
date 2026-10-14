@@ -157,8 +157,9 @@ create files there too.
 
 ## Commands run outside the sandbox
 
-Under Moderate and Aggressive no agent command runs outside the sandbox, even
-when you approve it. Under Moderate a command can still ask to run outside it
+Under Moderate no agent command runs outside the sandbox, even when you
+approve it; Aggressive, once it applies after a restart, keeps every command in
+its sandbox too. Under Moderate a command can still ask to run outside it
 (an escalation request): the prompt says it stays in the sandbox, and
 approving it only lifts Moderate's protection of credential and Corbanu files
 for that one command. A write outside your writable folders, or network your
