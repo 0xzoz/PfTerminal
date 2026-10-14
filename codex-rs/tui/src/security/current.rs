@@ -13,11 +13,13 @@
 //! settings. Core's level in force now adds what Core enforces on top
 //! (#749): under Moderate no command leaves the sandbox (#747) and, with the
 //! untrusted-content labels, the vault store and sign-in file are denied.
-//! #792: so under Aggressive in force before the restart (confirmed in
-//! `/security`): its protected-path rules deny them from confirmation
-//! (#443), and their denied reads keep every run in the sandbox, also when
-//! you approve it (#747's Aggressive cases); `corbanu vault …` commands are
-//! refused.
+//! #792: the same holds under Aggressive in force, also before the restart
+//! that follows confirming it in `/security` (#443): with the
+//! untrusted-content labels and a sandbox Corbanu applies, its
+//! protected-path rules deny the vault store and sign-in file, no approval
+//! lifts them, and their denied reads keep every run in the sandbox (#747's
+//! Aggressive cases). Direct `corbanu vault …` commands are refused under
+//! Aggressive in any case.
 
 use std::path::Path;
 

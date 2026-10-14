@@ -542,10 +542,7 @@ source_envelopes = {labels}
     .await;
     let before_restart = rows(current_values(&config, SecurityLevel::Aggressive));
     insta::assert_snapshot!("issue_792_aggressive_before_restart_rows", before_restart);
-    assert!(
-        !before_restart.contains("readable to agent"),
-        "{before_restart}"
-    );
+    assert!(!before_restart.contains("are readable"), "{before_restart}");
     assert!(!before_restart.contains("run outside"), "{before_restart}");
     // Permissive in force: unchanged.
     let permissive_rows = rows(current_values(&config, SecurityLevel::Permissive));
@@ -581,6 +578,28 @@ source_envelopes = {labels}
     assert!(
         unlabelled.contains("approved or allow-listed commands can run outside the sandbox"),
         "{unlabelled}"
+    );
+
+    // After the restart the session's own Aggressive profile denies them
+    // too; the row names the level and the refused vault commands.
+    let extra = tempfile::tempdir().unwrap();
+    let restarted = build(
+        home.path(),
+        cwd.path(),
+        &format!(
+            "{}\n[features]\nsource_envelopes = true\n",
+            workspace_write(extra.path(), /*network*/ false)
+        ),
+        /*aggressive_level*/ true,
+    )
+    .await;
+    let [sandbox, _, _, vault, _, _] = current_values(&restarted, SecurityLevel::Aggressive);
+    assert!(!sandbox.contains("outside the sandbox"), "{sandbox}");
+    assert!(
+        vault.starts_with(
+            "the vault store and sign-in file are unreadable (Aggressive, also when you approve a command) to agent commands, and direct `corbanu vault …` commands are refused; "
+        ),
+        "{vault}"
     );
 
     // An external sandbox takes none of Core's rules.
