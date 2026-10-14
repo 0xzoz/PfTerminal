@@ -100,8 +100,10 @@ Grant once lifts, and the command:
   current folder).
 
 Corbanu decides this from the command's text. When it can't tell what a
-program writes (a script, `npm install`), Grant once is still offered. The
-same reasons are given where such a command fails.
+program writes (a script, `npm install`), Grant once is still offered, unless
+the command also writes a start-up file outside the current folder, the
+project's `.codex` or `.agents`, or Corbanu's files. The same reasons are
+given where such a command fails.
 
 ## The macOS keychain
 
@@ -111,6 +113,10 @@ it runs but can't read, add or change any keychain item: it reports the item
 as not found, or an error, and Corbanu says that Aggressive caused it. No
 grant lifts this, and `~/Library/Keychains` is unreadable too. To allow it,
 switch to Permissive.
+
+This holds while agent commands have no network. If your organization's
+requirements route them through a network proxy, the sandbox opens the
+keychain service with the network rules; Corbanu then makes no such claim.
 
 ## A separate database folder
 

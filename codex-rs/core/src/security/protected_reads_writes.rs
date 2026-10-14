@@ -1,7 +1,9 @@
 //! #620, #737, #740: the words a command writes to, as spelled, and whether
-//! every file it writes is among them. Text-based and incomplete; it only
-//! decides whether a grant offer is withheld as useless (and explained),
-//! never what runs.
+//! every file it writes is among them; #736: whether it runs a macOS
+//! keychain command. Text-based and incomplete; it only decides whether a
+//! grant offer is withheld as useless (and explained), never what runs.
+
+use super::super::tainted_action::KEYCHAIN_VERBS;
 
 /// Shells whose `-c` argument is a script.
 const SHELLS: [&str; 6] = ["sh", "bash", "zsh", "dash", "ksh", "fish"];
@@ -56,6 +58,10 @@ const WRITES_NOTHING: [&str; 40] = [
     "jq",
     "printenv",
 ];
+
+/// #737: programs whose config file [`writes`] names (`python` for
+/// `python -m pip`).
+const CONFIG_WRITERS: [&str; 5] = ["git", "npm", "pip", "python", "gh"];
 
 /// #740: `find` options that write or run something.
 const FIND_ACTIONS: [&str; 9] = [
@@ -119,6 +125,7 @@ pub(super) fn write_targets(command: &[String]) -> Vec<String> {
 /// What one simple command (already split into words) writes.
 fn simple_command_writes(words: &[String], depth: usize) -> Writes {
     // Skip `VAR=value` prefixes and `sudo`/`command`/`env`/`exec`/`nohup`.
+    let all = words.len();
     let words: Vec<&str> = words
         .iter()
         .map(String::as_str)
@@ -131,6 +138,15 @@ fn simple_command_writes(words: &[String], depth: usize) -> Writes {
         return Writes::known(Vec::new());
     };
     let program = program.rsplit('/').next().unwrap_or(program);
+    // A variable set for it may move a config file (`GIT_CONFIG_GLOBAL`,
+    // `HOME=. git config --global`, `NPM_CONFIG_USERCONFIG`).
+    if words.len() < all
+        && CONFIG_WRITERS
+            .iter()
+            .any(|writer| program.starts_with(writer))
+    {
+        return Writes::unknown();
+    }
     if SHELLS.contains(&program) {
         // Every argument after a `-c` option is the script (and its `$0`,
         // `$1`…, which parse as plain words). A script file is not looked
@@ -155,8 +171,12 @@ fn simple_command_writes(words: &[String], depth: usize) -> Writes {
         Writes::known(owned(&paths))
     } else if WRITES_LAST_ARGUMENT.contains(&program) {
         // With one path, `ln -s x` and `install x` write in the current
-        // folder, not to it.
-        if paths.len() >= 2 {
+        // folder, not to it; with `-t DIR` the destination comes first.
+        let target_first = arguments.iter().any(|word| {
+            word.starts_with("--target-directory")
+                || (word.starts_with('-') && !word.starts_with("--") && word.contains('t'))
+        });
+        if paths.len() >= 2 && !target_first {
             Writes::known(owned(&paths[paths.len() - 1..]))
         } else {
             Writes::unknown()
@@ -448,4 +468,87 @@ fn script_writes(script: &str, depth: usize) -> Writes {
     }
     writes.add(simple_command_writes(&segment, depth));
     writes
+}
+
+/// #736: whether `command` runs macOS's `security` tool with a keychain
+/// verb ([`KEYCHAIN_VERBS`]) as its subcommand, in command position (after
+/// `VAR=value`, `sudo`, `env`, `command`, `exec`, `nohup` and their
+/// options), also inside a shell's `-c` script. Text-based: a match only
+/// adds the explanation (keychain commands are never granted anyway).
+pub(super) fn keychain_command(command: &[String]) -> bool {
+    simple_command_keychain(command, MAX_SCRIPT_DEPTH)
+}
+
+fn simple_command_keychain(words: &[String], depth: usize) -> bool {
+    let mut words = words.iter().map(String::as_str);
+    let program = loop {
+        match words.next() {
+            None => return false,
+            Some("sudo" | "command" | "env" | "exec" | "nohup") => {}
+            // sudo's options that take a value.
+            Some("-u" | "-g" | "-C" | "-h" | "-p" | "-U" | "-r" | "-t") => {
+                words.next();
+            }
+            Some(word)
+                if word.starts_with('-') || (word.contains('=') && !word.starts_with('=')) => {}
+            Some(word) => break word.rsplit('/').next().unwrap_or(word),
+        }
+    };
+    let arguments: Vec<&str> = words.collect();
+    if SHELLS.contains(&program) {
+        let Some(depth) = depth.checked_sub(1) else {
+            return false;
+        };
+        return arguments
+            .iter()
+            .skip_while(|argument| {
+                !(argument.starts_with('-')
+                    && !argument.starts_with("--")
+                    && argument.contains('c'))
+            })
+            .nth(1)
+            .is_some_and(|script| {
+                script_segments(script)
+                    .iter()
+                    .any(|segment| simple_command_keychain(segment, depth))
+            });
+    }
+    if program != "security" {
+        return false;
+    }
+    // `security [-hilqv] [-p prompt] command …`
+    let mut arguments = arguments.into_iter();
+    while let Some(word) = arguments.next() {
+        match word {
+            "-p" => {
+                arguments.next();
+            }
+            _ if word.starts_with('-') => {}
+            verb => return KEYCHAIN_VERBS.contains(&verb.trim_end_matches(';')),
+        }
+    }
+    false
+}
+
+/// The simple commands of a shell script, split at `;`, `&&`, `||`, `|`,
+/// `&` and newlines (text-based, as [`script_writes`]).
+fn script_segments(script: &str) -> Vec<Vec<String>> {
+    let mut segments = Vec::new();
+    for line in script.lines() {
+        let words = shlex::split(line)
+            .unwrap_or_else(|| line.split_whitespace().map(str::to_string).collect());
+        let mut segment = Vec::new();
+        for word in words {
+            let ends = word.ends_with(';') || matches!(word.as_str(), "&&" | "||" | "|" | "&");
+            let trimmed = word.trim_end_matches(';');
+            if !trimmed.is_empty() && !matches!(trimmed, "&&" | "||" | "|" | "&") {
+                segment.push(trimmed.to_string());
+            }
+            if ends {
+                segments.push(std::mem::take(&mut segment));
+            }
+        }
+        segments.push(segment);
+    }
+    segments
 }

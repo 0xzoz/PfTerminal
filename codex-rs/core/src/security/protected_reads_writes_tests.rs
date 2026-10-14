@@ -4,7 +4,6 @@
 use super::writes::Writes;
 use super::writes::writes;
 use super::*;
-use codex_protocol::permissions::NetworkSandboxPolicy;
 use pretty_assertions::assert_eq;
 
 fn shell(script: &str) -> Vec<String> {
@@ -100,6 +99,12 @@ fn issue_737_740_config_writers_and_understood_commands() {
         "python3 -c 'open(\"x\", \"w\")'",
         "ln -s ../x",
         "(printf x > notes.txt)",
+        // The destination comes first, or a variable moves the config file.
+        "cp -t .husky pre-commit",
+        "install --target-directory=.husky pre-commit",
+        "HOME=. git config --global a.b c",
+        "GIT_CONFIG_GLOBAL=x git config --global a.b c",
+        "NPM_CONFIG_USERCONFIG=x npm config set a b",
     ] {
         assert!(!of(script).understood, "{script}: {:?}", of(script));
     }
@@ -124,6 +129,8 @@ fn issue_736_keychain_commands() {
         shell("security find-generic-password -s probe"),
         shell("/usr/bin/security find-internet-password -s x -w"),
         shell("FOO=1 sudo security dump-keychain; echo done"),
+        shell("sudo -u root security -q export -k x"),
+        shell("echo start && security find-certificate -a"),
         shell("bash -c 'security add-generic-password -s x -w y'"),
         vec![
             "security".to_string(),
@@ -139,6 +146,12 @@ fn issue_736_keychain_commands() {
         shell("security verify-cert -c cert.pem"),
         shell("echo find-generic-password"),
         shell("cat security.md"),
+        // `security` as a folder, `export` as the shell builtin.
+        shell("ls core/src/security | grep export"),
+        shell("cd codex-rs/core/src/security && export RUST_LOG=debug && cargo test"),
+        shell("security list-keychains; export X=1"),
+        shell("git commit -m \"fix security export\""),
+        shell("echo security find-generic-password"),
     ] {
         assert!(!keychain_command(&command), "{command:?}");
     }
@@ -151,6 +164,7 @@ fn issue_736_keychain_commands() {
 #[cfg(unix)]
 #[test]
 fn issue_740_unliftable_notes() {
+    use codex_protocol::permissions::NetworkSandboxPolicy;
     let base = tempfile::tempdir().unwrap();
     let base = base.path().canonicalize().unwrap();
     let home = base.join("home");
@@ -178,6 +192,7 @@ fn issue_740_unliftable_notes() {
                 /*exclude_slash_tmp*/ true,
             ),
             user_home: Some(user_home),
+            keychain_closed: false,
         }
     };
     let in_work = inputs(&work);
@@ -216,6 +231,8 @@ fn issue_740_unliftable_notes() {
     }
     // A grant lifts it, or may: offered.
     for script in [
+        "./missing-script.sh | tee ../install.log",
+        "npx husky install > ../install.log",
         "printf x > .husky/pre-commit",
         "printf x > .husky/pre-commit; echo x >> ../outside.txt",
         "./install-hooks.sh",

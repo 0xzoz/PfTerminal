@@ -38,12 +38,12 @@ use codex_security_policy::SecurityLevel;
 use codex_utils_absolute_path::AbsolutePathBuf;
 
 use super::protected_surface::ReadDenials;
-use super::tainted_action::KEYCHAIN_VERBS;
 use super::tainted_action::PolicyBinding;
 use super::tainted_action::USER_PERSISTENCE;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
+use writes::keychain_command;
 use writes::write_targets;
 
 #[path = "protected_reads_writes.rs"]
@@ -185,6 +185,10 @@ struct ReadPolicyInputs {
     workspace_roots: Vec<AbsolutePathBuf>,
     profile: PermissionProfile,
     user_home: Option<PathBuf>,
+    /// #736: agent commands cannot reach the macOS keychain service: macOS,
+    /// with network off and no network proxy (Seatbelt allows the service
+    /// only with its network rules).
+    keychain_closed: bool,
 }
 
 impl ReadPolicyInputs {
@@ -227,6 +231,13 @@ impl ReadPolicyInputs {
             workspace_roots,
             profile: turn.config.permissions.permission_profile().clone(),
             user_home: dirs::home_dir(),
+            keychain_closed: cfg!(target_os = "macos")
+                && turn.network.is_none()
+                && !turn
+                    .config
+                    .permissions
+                    .network_sandbox_policy()
+                    .is_enabled(),
         })
     }
 
@@ -335,13 +346,13 @@ impl ReadPolicyInputs {
             .any(|root| target.as_path().starts_with(&root) || path.as_path().starts_with(&root))
     }
 
-    /// #737, #740: when no write of `command` could be lifted by a grant,
-    /// why: its first write that no grant makes possible (outside the
-    /// current folder, or in a read-only part of it such as the project's
-    /// `.git`), or, for a command whose writes its text fully shows, that
-    /// it writes nothing a grant lifts. `None` when a write is liftable (a
-    /// hook in `.husky`), or may be (a program or path the text does not
-    /// show).
+    /// #737, #740: for a command whose writes its text fully shows, when
+    /// none of them could be lifted by a grant, why: its first write that
+    /// no grant makes possible (outside the current folder, or in a
+    /// read-only part of it such as the project's `.git`), or else that it
+    /// writes nothing a grant lifts. `None` when a write is liftable (a hook
+    /// in `.husky`), or may be (a program or path the text does not show:
+    /// `npx husky install | tee ../log` keeps the offer).
     fn unliftable_note(&self, command: &[String], cwd: &Path) -> Option<ProtectedNote> {
         let writes = writes::writes(command);
         let denials = self.denials();
@@ -373,7 +384,7 @@ impl ReadPolicyInputs {
                 });
             }
         }
-        first.or_else(|| understood.then_some(ProtectedNote::NothingToLift))
+        understood.then(|| first.unwrap_or(ProtectedNote::NothingToLift))
     }
 
     /// #740: whether a write to `path` is one no grant makes possible: the
@@ -520,8 +531,9 @@ pub(crate) async fn denial_explanation(
     }
     // #736: a keychain command fails without a file denial: the keychain
     // service is out of reach of the sandbox.
-    if cfg!(target_os = "macos") && keychain_command(command) {
-        ReadPolicyInputs::capture(session, turn)?;
+    if keychain_command(command)
+        && ReadPolicyInputs::capture(session, turn).is_some_and(|inputs| inputs.keychain_closed)
+    {
         super::inspection::record_sandbox_denial(
             session.thread_id(),
             ProtectedNote::Keychain.inspected(),
@@ -625,6 +637,14 @@ pub(crate) async fn denial_explanation(
                     return None;
                 }
                 let (user_home, codex_home) = (inputs.user_home.as_deref(), &inputs.codex_home);
+                // The denial line names the path as spelled or in full, not
+                // only its file name (a short name matches too much).
+                let named = |word: &str, path: &Path| {
+                    let full = path.display().to_string();
+                    denial_lines
+                        .iter()
+                        .any(|line| line.contains(word) || line.contains(&full))
+                };
                 let word = written_word(
                     &command,
                     &cwd,
@@ -634,6 +654,9 @@ pub(crate) async fn denial_explanation(
                     Some(&denial_lines),
                 )?;
                 let path = resolve(&word, &cwd, user_home, codex_home)?;
+                if !named(&word, &path) {
+                    return None;
+                }
                 Some(if inputs.unliftable_write(&path)? {
                     ProtectedNote::ReadOnlyInFolder(word)
                 } else {
@@ -834,7 +857,7 @@ pub(crate) async fn protected_note_in_command(
     cwd: &Path,
 ) -> Option<ProtectedNote> {
     let inputs = ReadPolicyInputs::capture(session, turn)?;
-    if cfg!(target_os = "macos") && keychain_command(command) {
+    if inputs.keychain_closed && keychain_command(command) {
         return Some(ProtectedNote::Keychain);
     }
     let (command, cwd) = (command.to_vec(), cwd.to_path_buf());
@@ -899,29 +922,6 @@ pub(crate) async fn protected_note_in_command(
     })
     .await
 }
-
-/// #736: whether `command` runs macOS's `security` tool with a keychain
-/// item or keychain verb ([`KEYCHAIN_VERBS`]), also inside a shell script.
-/// Text-based: a match only adds the explanation (keychain commands are
-/// never granted anyway).
-pub(crate) fn keychain_command(command: &[String]) -> bool {
-    fn words_match(words: &[String], depth: usize) -> bool {
-        words.iter().enumerate().any(|(index, word)| {
-            let word = word.trim_matches(|c: char| matches!(c, ';' | '|' | '&' | '(' | ')'));
-            (word.rsplit('/').next() == Some("security")
-                && words[index + 1..]
-                    .iter()
-                    .any(|verb| KEYCHAIN_VERBS.contains(&verb.trim_end_matches(';'))))
-                || (depth > 0
-                    && word.contains(char::is_whitespace)
-                    && shlex::split(word).is_some_and(|inner| words_match(&inner, depth - 1)))
-        })
-    }
-    words_match(command, MAX_KEYCHAIN_DEPTH)
-}
-
-/// Scripts inside scripts [`keychain_command`] looks into.
-const MAX_KEYCHAIN_DEPTH: usize = 4;
 
 /// Issue #245: under Aggressive, the explanation for a request whose own
 /// additional permissions would open a protected path. Checked before the
