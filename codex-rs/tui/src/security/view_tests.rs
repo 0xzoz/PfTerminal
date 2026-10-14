@@ -32,7 +32,7 @@ fn issue_750_status_follows_cores_record_and_configured_level() {
     crate::security::level::save(home.path(), ChosenLevel::Moderate, NestedAgents::Refuse).unwrap();
     record(home.path(), "moderate");
     assert_eq!(
-        level_summary(&context, SecurityLevel::Permissive),
+        level_summary(&context, SecurityLevel::Permissive, /*thread*/ None),
         "Moderate active (/security)"
     );
     // Lowered to Permissive in /security: both records say Permissive.
@@ -40,7 +40,7 @@ fn issue_750_status_follows_cores_record_and_configured_level() {
         .unwrap();
     record(home.path(), "permissive");
     assert_eq!(
-        level_summary(&context, SecurityLevel::Permissive),
+        level_summary(&context, SecurityLevel::Permissive, /*thread*/ None),
         "Moderate active; Permissive saved for next start (/security)"
     );
     // `[security] level = "moderate"` in config, nothing saved.
@@ -50,7 +50,7 @@ fn issue_750_status_follows_cores_record_and_configured_level() {
         ..context
     };
     assert_eq!(
-        level_summary(&context, SecurityLevel::Moderate),
+        level_summary(&context, SecurityLevel::Moderate, /*thread*/ None),
         "Moderate active (/security)"
     );
 }

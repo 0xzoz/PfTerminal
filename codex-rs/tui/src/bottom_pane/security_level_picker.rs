@@ -1085,11 +1085,20 @@ impl SecurityLevelPicker {
                 {
                     // #750: a level confirmed earlier in this session raised
                     // Core, and a downgrade waits for the restart.
-                    lines.extend(wrap(&format!(
-                        "Core's {} rules stay on in this session until you restart Corbanu Terminal; then {} applies.",
-                        name(self.basis.in_force),
-                        level.name()
-                    )));
+                    // A stricter level set outside the person's config.toml
+                    // keeps applying; its line below says so.
+                    lines.extend(wrap(&if self.outside_user_config_floor(level).is_some() {
+                        format!(
+                            "Core's {} rules stay on in this session until you restart Corbanu Terminal.",
+                            name(self.basis.in_force)
+                        )
+                    } else {
+                        format!(
+                            "Core's {} rules stay on in this session until you restart Corbanu Terminal; then {} applies.",
+                            name(self.basis.in_force),
+                            level.name()
+                        )
+                    }));
                 } else if level == self.active {
                     lines.extend(wrap(&format!(
                         "{} is active in this session.",

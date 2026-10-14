@@ -39,10 +39,14 @@ pub(crate) fn requested_summary(requested: Option<SecurityLevel>) -> String {
 
 /// `configured` is Core's configured level without the stored state
 /// (`security_level_change::configured_level`), so a level lowered in
-/// `/security` since the start is seen.
-pub(crate) fn status_summary(requested: SecurityLevel, configured: SecurityLevel) -> String {
+/// `/security` since the start is seen; `thread` is the session's.
+pub(crate) fn status_summary(
+    requested: SecurityLevel,
+    configured: SecurityLevel,
+    thread: Option<codex_protocol::ThreadId>,
+) -> String {
     if let Some(context) = super::level::context().filter(|context| context.picker_enabled) {
-        return level_summary(context, configured);
+        return level_summary(context, configured, thread);
     }
     format!(
         "Requested {}; effective protection unverified (/security)",
@@ -50,12 +54,18 @@ pub(crate) fn status_summary(requested: SecurityLevel, configured: SecurityLevel
     )
 }
 
-/// The `/status` line under the flagged picker.
-fn level_summary(context: &super::level::LevelContext, configured: SecurityLevel) -> String {
+/// The `/status` line under the flagged picker. With the session's
+/// `thread`, its live policy says what the next start enforces (a level
+/// lowered in `/security` rewrites config the session does not reload).
+fn level_summary(
+    context: &super::level::LevelContext,
+    configured: SecurityLevel,
+    thread: Option<codex_protocol::ThreadId>,
+) -> String {
     let core_next = crate::legacy_core::security_level_change::LevelBasis::read(
         &context.codex_home,
         configured,
-        /*thread*/ None,
+        thread,
     )
     .next_start;
     let line = super::level::status_line(

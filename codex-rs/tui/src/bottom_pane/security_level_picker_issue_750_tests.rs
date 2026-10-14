@@ -192,7 +192,7 @@ fn issue_750_a_live_session_takes_cores_rules_now_and_the_broker_at_restart() {
     picker.basis.next_start = SecurityLevel::Moderate;
     let saved = text(&picker);
     assert!(
-        saved.contains("Active now in this session: agent commands stay in the sandbox"),
+        saved.contains("Active now in this session: agent commands always stay in the sandbox"),
         "{saved}"
     );
     assert!(
