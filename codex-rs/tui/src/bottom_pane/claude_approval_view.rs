@@ -9,6 +9,9 @@
 //!   and since the person last typed in the composer; so an Enter meant for
 //!   the composer, continued typing, a held Enter or a double Enter on the
 //!   next request does nothing;
+//! - #787: the bottom pane also drops every key but Ctrl-C (Esc too) that
+//!   reaches the popup in the second after a request first shows or comes
+//!   back, as for every request;
 //! - repeated (held) keys never confirm;
 //! - requests queue in one popup (first in, first out) instead of covering
 //!   each other, and each one starts on Deny with a fresh guard; the popup

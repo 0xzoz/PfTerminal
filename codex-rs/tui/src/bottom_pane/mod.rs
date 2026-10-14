@@ -187,7 +187,9 @@ const APPROVAL_PROMPT_TYPING_IDLE_DELAY: Duration = Duration::from_secs(1);
 /// #787: input that reaches a request (an approval, a question, an MCP form
 /// or link, a Claude pane's request) sooner than this after it was first
 /// drawn, or after the last input dropped this way, is dropped: it was typed
-/// for what was on screen before. Esc and Ctrl+C still decline or cancel.
+/// for what was on screen before. Esc too, since it would cancel the request
+/// or interrupt the turn; only Ctrl+C, which never reaches a view as a key,
+/// still cancels at once.
 pub(crate) const REQUEST_INPUT_GUARD: Duration = Duration::from_secs(1);
 
 /// #787: the request on top at the last draw and when it first showed.
@@ -740,6 +742,10 @@ impl BottomPane {
     /// #787: before each draw, note when the request on top first shows.
     fn note_shown_request(&mut self, now: Instant) {
         let generation = self.top_request_generation();
+        debug_assert!(
+            generation != Some(0),
+            "a view that answers a request must take a shown_request_generation"
+        );
         if generation != self.shown_request.map(|shown| shown.generation) {
             self.shown_request = generation.map(|generation| ShownRequest {
                 generation,
@@ -754,23 +760,9 @@ impl BottomPane {
     /// (typing or a held key goes on). The request then needs navigation
     /// before Enter and says why.
     fn drop_early_request_input(&mut self, now: Instant) -> bool {
-        let guard = self.request_input_guard;
-        if guard.is_zero() {
-            return false;
-        }
-        let Some(generation) = self.top_request_generation() else {
-            return false;
-        };
-        let early = match self.shown_request {
-            Some(shown) if shown.generation == generation => {
-                now.saturating_duration_since(shown.shown_at) < guard
-                    || self.request_quiet_until.is_some_and(|until| now < until)
-            }
-            // Not drawn since it became the request on top.
-            _ => true,
-        };
+        let early = self.is_early_request_input(now);
         if early {
-            self.request_quiet_until = now.checked_add(guard);
+            self.request_quiet_until = now.checked_add(self.request_input_guard);
             if let Some(view) = self.view_stack.last_mut() {
                 view.on_early_input();
             }
@@ -779,8 +771,32 @@ impl BottomPane {
         early
     }
 
+    /// #787: whether input reaching the view on top now would be dropped
+    /// (see [`Self::drop_early_request_input`]); changes nothing.
+    fn is_early_request_input(&self, now: Instant) -> bool {
+        let guard = self.request_input_guard;
+        if guard.is_zero() {
+            return false;
+        }
+        let Some(generation) = self.top_request_generation() else {
+            return false;
+        };
+        // A view on top not yet noticed (`sync_top_view`) was not drawn there.
+        let top = self.view_stack.last().map(|view| {
+            std::ptr::from_ref::<dyn BottomPaneView>(view.as_ref()).cast::<()>() as usize
+        });
+        match self.shown_request {
+            Some(shown) if shown.generation == generation && top == self.last_top_view => {
+                now.saturating_duration_since(shown.shown_at) < guard
+                    || self.request_quiet_until.is_some_and(|until| now < until)
+            }
+            // Not drawn since it became the request on top.
+            _ => true,
+        }
+    }
+
     #[cfg(test)]
-    fn set_request_input_guard(&mut self, guard: Duration) {
+    pub(crate) fn set_request_input_guard(&mut self, guard: Duration) {
         self.request_input_guard = guard;
     }
 
@@ -796,11 +812,11 @@ impl BottomPane {
                 return InputResult::None;
             }
             self.sync_top_view();
-            // #787: Esc and Ctrl+C only decline or cancel, so they still act.
-            let declines = key_event.code == KeyCode::Esc
-                || (key_event.code == KeyCode::Char('c')
-                    && key_event.modifiers.contains(KeyModifiers::CONTROL));
-            if !declines && self.drop_early_request_input(now) {
+            // #787: Ctrl+C still cancels at once (it normally reaches the view
+            // through `on_ctrl_c`, never as a key).
+            let ctrl_c = key_event.code == KeyCode::Char('c')
+                && key_event.modifiers.contains(KeyModifiers::CONTROL);
+            if !ctrl_c && self.drop_early_request_input(now) {
                 return InputResult::None;
             }
 
@@ -1694,6 +1710,11 @@ impl BottomPane {
             && self
                 .active_view()
                 .is_some_and(|view| view.will_interrupt_turn_on_key_event(key_event))
+            // #787: a key the guard drops interrupts nothing.
+            && !(key_event.kind != KeyEventKind::Release
+                && !(key_event.code == KeyCode::Char('c')
+                    && key_event.modifiers.contains(KeyModifiers::CONTROL))
+                && self.is_early_request_input(Instant::now()))
     }
 
     pub(crate) fn active_view_id(&self) -> Option<&'static str> {

@@ -276,6 +276,7 @@ fn issue_787_type_ahead_never_answers_any_kind_of_request() {
                 &[KeyCode::Char('1'), KeyCode::Enter],
                 &[KeyCode::Char('y'), KeyCode::Enter],
                 &[KeyCode::Char('2'), KeyCode::Enter],
+                &[KeyCode::Esc],
             ] {
                 press_at(&mut pane, keys, keys_at);
             }
@@ -340,29 +341,37 @@ fn issue_787_type_ahead_never_answers_any_kind_of_request() {
 }
 
 /// A held or repeated key keeps the prompt guarded: each dropped key
-/// restarts the guard. Esc still declines at once.
+/// restarts the guard. Esc is dropped too (it would cancel the request or
+/// interrupt the turn); after a quiet guard it declines.
 #[test]
-fn issue_787_held_keys_stay_dropped_and_esc_still_declines() {
+fn issue_787_held_keys_and_esc_stay_dropped_until_quiet() {
     let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
     let features = Features::with_defaults();
     let mut pane = guarded_pane(AppEventSender::new(tx_raw));
     pane.push_approval_request(child_exec_request(), &features);
     let start = Instant::now();
     pane.pre_draw_tick_at(start);
+    let mut last = start;
     for step in 1..=6 {
-        let at = start + Duration::from_millis(400 * step);
-        press_at(&mut pane, &[KeyCode::Down], at);
+        last = start + Duration::from_millis(400 * step);
+        press_at(&mut pane, &[KeyCode::Down], last);
         pane.handle_key_event_at(
             KeyEvent::new_with_kind(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Repeat),
-            at,
+            last,
         );
     }
+    press_at(
+        &mut pane,
+        &[KeyCode::Esc],
+        last + Duration::from_millis(900),
+    );
     assert_eq!(exec_decisions(&mut rx), Vec::new());
+    assert_eq!(pane.view_stack.len(), 1);
 
     press_at(
         &mut pane,
         &[KeyCode::Esc],
-        start + Duration::from_millis(2500),
+        last + Duration::from_millis(900) + REQUEST_INPUT_GUARD,
     );
     assert_eq!(
         exec_decisions(&mut rx),

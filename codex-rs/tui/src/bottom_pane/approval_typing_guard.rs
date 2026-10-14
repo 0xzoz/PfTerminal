@@ -22,10 +22,11 @@
 //! are never chosen by a key: their key only explains that the arrow keys
 //! choose them, and Enter stays blocked until the user navigates.
 //!
-//! #787: the bottom pane also drops every key that reaches a request in the
-//! moment after it appears (see `REQUEST_INPUT_GUARD`), since those keys were
-//! meant for whatever was on screen before. The prompt then says so and
-//! needs navigation before Enter ([`TypingGuard::on_early_input`]).
+//! #787: the bottom pane also drops every key but Ctrl+C that reaches a
+//! request in the moment after it appears (see `REQUEST_INPUT_GUARD`), since
+//! those keys were meant for whatever was on screen before. The prompt then
+//! says so and needs navigation before Enter
+//! ([`TypingGuard::on_early_input`]).
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum State {
