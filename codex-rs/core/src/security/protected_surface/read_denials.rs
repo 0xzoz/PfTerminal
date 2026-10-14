@@ -403,7 +403,13 @@ impl ReadDenials {
                 .map(Path::new),
             &keep,
         );
-        denials.protect_database_folder(codex_home, sqlite_home, &keep);
+        denials.protect_database_folder(
+            codex_home,
+            sqlite_home,
+            &keep,
+            dirs::home_dir().as_deref(),
+            &std::env::temp_dir(),
+        );
         denials.protect_database_backups(sqlite_home, &keep);
         // #594: the home variable's own spelling (a link the home was found
         // through; the home itself is its real location).
@@ -434,11 +440,24 @@ impl ReadDenials {
     /// exists, so a command cannot create it and fill it. On Linux `for_turn`
     /// first makes it where the command could (bubblewrap would otherwise
     /// hold the missing path with a placeholder file on the host).
+    ///
+    /// #651 item 6 (Travis, 2026-10-13): on macOS a well-known shared folder
+    /// that exists (see [`is_well_known_shared_folder`]; `user_home` and
+    /// `temp_dir` are the user's home and temporary folders) is denied one
+    /// entry at a time too, so ordinary commands keep using it. On macOS each
+    /// runtime database's name and its `-wal`, `-shm` and `-journal` files
+    /// are also denied before they exist: the pattern alone stops reading a
+    /// database created later, not creating one (or a link) under its name.
+    /// Bubblewrap can't deny a name before it exists without putting a
+    /// placeholder file on the host, where SQLite would meet it, so on Linux
+    /// a shared folder stays denied whole (never weaker, Travis 2026-10-13).
     fn protect_database_folder(
         &mut self,
         codex_home: &Path,
         sqlite_home: &Path,
         keep: &[AbsolutePathBuf],
+        user_home: Option<&Path>,
+        temp_dir: &Path,
     ) {
         let Some(folder) = separate_database_folder(codex_home, sqlite_home) else {
             return;
@@ -449,7 +468,13 @@ impl ReadDenials {
                 std::fs::canonicalize(codex_home).is_ok_and(|home| home.starts_with(real))
             });
         let missing = std::fs::symlink_metadata(folder.as_path()).is_err();
-        if (missing || folder.as_path().is_dir()) && !holds_home && !Self::holds_kept(&folder, keep)
+        let shared = cfg!(target_os = "macos")
+            && !missing
+            && is_well_known_shared_folder(folder.as_path(), user_home, temp_dir);
+        if (missing || folder.as_path().is_dir())
+            && !holds_home
+            && !shared
+            && !Self::holds_kept(&folder, keep)
         {
             if missing {
                 self.push_fixed(folder, keep);
@@ -467,6 +492,13 @@ impl ReadDenials {
         }
         for name in DATABASE_FOLDER_ENTRIES {
             self.push_fixed(folder.join(name), keep);
+        }
+        if cfg!(target_os = "macos") {
+            for database in codex_state::runtime_database_filenames() {
+                for suffix in ["", "-wal", "-shm", "-journal"] {
+                    self.push_fixed(folder.join(format!("{database}{suffix}")), keep);
+                }
+            }
         }
         let databases = crate::security::preflight::database_glob(folder.as_path())
             .to_string_lossy()
@@ -1037,6 +1069,30 @@ fn separate_database_folder(codex_home: &Path, sqlite_home: &Path) -> Option<Abs
         || std::fs::canonicalize(sqlite_home)
             .is_ok_and(|real| std::fs::canonicalize(codex_home).is_ok_and(|home| home == real));
     (!same_folder).then_some(folder)
+}
+
+/// #651 item 6: the folders many programs share, which a database folder in
+/// them would otherwise deny whole: `/tmp`, `/var/tmp` (and their macOS
+/// locations below `/private`), the temporary folder (`TMPDIR`) and the
+/// user's home folder itself. By spelling or by real location; a folder
+/// inside one of them is not shared.
+fn is_well_known_shared_folder(folder: &Path, home: Option<&Path>, temp: &Path) -> bool {
+    let real = |path: &Path| std::fs::canonicalize(path).ok();
+    let folder_real = real(folder);
+    ["/tmp", "/var/tmp", "/private/tmp", "/private/var/tmp"]
+        .into_iter()
+        .map(Path::new)
+        .chain(std::iter::once(temp))
+        .chain(home)
+        // A relative `TMPDIR` would resolve against Corbanu's own folder;
+        // `/` is never shared (its pattern isn't usable).
+        .filter(|shared| shared.is_absolute() && shared.parent().is_some())
+        .any(|shared| {
+            folder.components().eq(shared.components())
+                || folder_real
+                    .as_ref()
+                    .is_some_and(|folder| real(shared).is_some_and(|shared| shared == *folder))
+        })
 }
 
 /// #611 (Linux): creates a separate database folder's missing folders and

@@ -2443,3 +2443,123 @@ fn issue_594_598_the_home_is_unmovable_in_each_spelling() {
     sorted.sort();
     assert_eq!(unmovable, sorted);
 }
+
+/// Issue #651 item 6: which database folders count as well-known shared
+/// folders, by spelling or by real location; a folder inside one does not.
+#[test]
+fn issue_651_well_known_shared_folders() {
+    let fx = fixture();
+    let temp = fx.user_home.join("temp");
+    std::fs::create_dir_all(temp.join("db")).unwrap();
+    std::os::unix::fs::symlink(&temp, fx.user_home.join("temp-link")).unwrap();
+    let shared = |folder: &Path| is_well_known_shared_folder(folder, Some(&fx.user_home), &temp);
+    for folder in [
+        "/tmp",
+        "/tmp/",
+        "/var/tmp",
+        "/private/tmp",
+        "/private/var/tmp",
+    ] {
+        assert!(shared(Path::new(folder)), "{folder}");
+    }
+    assert!(shared(&temp));
+    assert!(shared(&fx.user_home.join("temp-link")));
+    assert!(shared(&fx.user_home));
+    // A relative `TMPDIR`, or `/`, is never a shared folder.
+    assert!(!is_well_known_shared_folder(
+        Path::new("temp"),
+        None,
+        Path::new("temp")
+    ));
+    assert!(!is_well_known_shared_folder(
+        Path::new("/"),
+        Some(Path::new("/")),
+        Path::new("/")
+    ));
+    for folder in [
+        Path::new("/tmp/db"),
+        Path::new("/var/tmp/db"),
+        &temp.join("db"),
+        &fx.user_home.join("db"),
+        &fx.codex_home,
+    ] {
+        assert!(!shared(folder), "{}", folder.display());
+    }
+}
+
+/// Issue #651 item 6 (Travis, 2026-10-13): on macOS a database folder that is
+/// a well-known shared folder (here the temporary folder, and the user's
+/// home) is denied one entry at a time, not whole: other files stay readable
+/// and writable; the databases (reads also of one created later, and each
+/// runtime database's name with its `-wal`, `-shm` and `-journal` files before
+/// they exist), the init lock, the GPU controller's lock, pending accounting
+/// records and backups stay denied. On Linux the temporary folder stays
+/// denied whole (bubblewrap can't deny a name before it exists); the home
+/// holds the Corbanu home, so it is denied one entry at a time there too.
+/// Another folder is still denied whole.
+#[test]
+fn issue_651_a_shared_database_folder_is_denied_entry_by_entry() {
+    let fx = fixture();
+    let temp = fx.user_home.join("temp");
+    std::fs::create_dir_all(temp.join("accounting-pending")).unwrap();
+    std::fs::write(temp.join("state_5.sqlite"), "x").unwrap();
+    std::fs::create_dir_all(fx.user_home.join("db")).unwrap();
+    let project = abs(&fx.user_home.join("project"));
+    let profile = PermissionProfile::Disabled;
+    let denied = |databases: &Path, name: &str| {
+        let mut denials = ReadDenials::collect(
+            &fx.codex_home,
+            Some(&fx.user_home),
+            /*claude_config_dir*/ None,
+            std::slice::from_ref(&project),
+        );
+        denials.protect_database_folder(
+            &fx.codex_home,
+            databases,
+            std::slice::from_ref(&project),
+            Some(&fx.user_home),
+            &temp,
+        );
+        let policy = denials
+            .apply(&profile)
+            .unwrap()
+            .file_system_sandbox_policy();
+        let path = databases.join(name);
+        let read = denials.matcher().unwrap().is_read_denied(&path);
+        let write = !policy.can_write_path_with_cwd(&path, project.as_path());
+        (read, write)
+    };
+    let macos = cfg!(target_os = "macos");
+    for shared in [temp.as_path(), fx.user_home.as_path()] {
+        let whole = !macos && shared == temp;
+        for (name, expected) in [
+            // Only the temporary folder holds one; the pattern covers both.
+            ("state_5.sqlite", (true, shared == temp || macos)),
+            ("later.sqlite-wal", (true, whole)),
+            ("pfterminal_state_5.sqlite-journal", (true, macos || whole)),
+            ("pfterminal_logs_2.sqlite-wal", (true, macos || whole)),
+            ("state_5.sqlite-shm", (true, macos || whole)),
+            ("pfterminal_db_init.lock", (true, true)),
+            ("gpu-controller.lock", (true, true)),
+            ("accounting-pending/x.json", (true, true)),
+            ("db-backups/x", (true, true)),
+            ("notes.txt", (whole, whole)),
+            ("build/out.o", (whole, whole)),
+        ] {
+            assert_eq!(
+                denied(shared, name),
+                expected,
+                "{} {name}",
+                shared.display()
+            );
+        }
+    }
+    // A folder of its own is still denied whole.
+    for name in ["notes.txt", "state_5.sqlite", "gpu-controller.lock"] {
+        assert_eq!(
+            denied(&fx.user_home.join("db"), name),
+            (true, true),
+            "{name}"
+        );
+    }
+}

@@ -87,6 +87,43 @@ unreadable; Corbanu's own files and the project's `.git` folder (its hooks and c
 included), `.codex` and `.agents` stay read-only; other folders and the
 network stay closed.
 
+## A separate database folder
+
+Under Moderate and Aggressive, agent commands can't use Corbanu's database folder
+when you move it out of the Corbanu home (`sqlite_home` or `CODEX_SQLITE_HOME`).
+The whole folder is hidden from them, and so is `<folder>.db-backups` beside it.
+If the folder holds the current folder or the Corbanu home, only Corbanu's own
+entries in it are hidden.
+
+**On macOS, shared folders are handled the same way.** These folders are shared by
+many programs:
+
+- `/tmp` and `/var/tmp`, also as `/private/tmp` and `/private/var/tmp`;
+- the temporary folder (`TMPDIR`);
+- your home folder itself.
+
+If the database folder is one of these, only Corbanu's own entries are hidden, so
+other commands can still use the folder:
+
+- the databases, and any `*.sqlite*` file created later there (so other programs'
+  databases at the top of that folder are unreadable to commands too);
+- Corbanu's own database names with their journal and `-wal`/`-shm` files, which
+  commands can't create either, in any letter case;
+- the database init lock (`pfterminal_db_init.lock`) and the GPU lock
+  (`gpu-controller.lock`);
+- the `accounting-pending` and `db-backups` folders.
+
+These stay protected even before they exist. A folder inside a shared one, such as
+`/tmp/corbanu-db`, is still hidden whole.
+
+**On Linux and Windows, a shared folder is still hidden whole.** Their sandboxes
+can't stop a command from creating a file under a database's name, so hiding entries
+one by one would be weaker there. Commands that need the folder fail under Moderate and
+Aggressive.
+
+Don't keep the databases in `/tmp` or `/var/tmp`: other people on the machine can
+create files there too.
+
 ## Commands run outside the sandbox
 
 Under Moderate, the Corbanu home's runtime files (the sandbox launchers in
