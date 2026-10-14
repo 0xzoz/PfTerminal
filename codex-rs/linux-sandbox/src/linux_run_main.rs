@@ -477,6 +477,7 @@ fn build_bwrap_argv(
         preserved_files: bwrap_args.preserved_files,
         synthetic_mount_targets: bwrap_args.synthetic_mount_targets,
         protected_create_targets: bwrap_args.protected_create_targets,
+        registry_lock: bwrap_args.registry_lock,
     })
 }
 
@@ -573,6 +574,8 @@ fn run_or_exec_bwrap(
         && bwrap_args.protected_create_targets.is_empty()
         && credential_watcher.is_none()
     {
+        // #673: nothing to register.
+        drop(bwrap_args.registry_lock);
         exec_bwrap(bwrap_args.args, bwrap_args.preserved_files);
     }
     run_bwrap_in_child_with_synthetic_mount_cleanup(bwrap_args, credential_watcher);
@@ -587,11 +590,14 @@ fn run_bwrap_in_child_with_synthetic_mount_cleanup(
         preserved_files,
         synthetic_mount_targets,
         protected_create_targets,
+        registry_lock,
     } = bwrap_args;
     let setup_signal_mask = ForwardedSignalMask::block();
-    let synthetic_mount_registrations = register_synthetic_mount_targets(&synthetic_mount_targets);
-    let protected_create_registrations =
-        register_protected_create_targets(&protected_create_targets);
+    let (synthetic_mount_registrations, protected_create_registrations) = register_mount_targets(
+        &synthetic_mount_targets,
+        &protected_create_targets,
+        registry_lock,
+    );
     let exec_start_pipe = create_exec_start_pipe(
         !protected_create_targets.is_empty() || credential_watcher.is_some(),
     );
@@ -992,6 +998,23 @@ fn wait_for_bwrap_child(pid: libc::pid_t) -> libc::c_int {
     }
 }
 
+/// Registers a run's placeholders and protected-create targets, then
+/// releases the registry lock its arguments were built under (#673,
+/// [`RegistryLock`]).
+fn register_mount_targets(
+    synthetic_mount_targets: &[crate::bwrap::SyntheticMountTarget],
+    protected_create_targets: &[crate::bwrap::ProtectedCreateTarget],
+    registry_lock: Option<RegistryLock>,
+) -> (
+    Vec<SyntheticMountTargetRegistration>,
+    Vec<ProtectedCreateTargetRegistration>,
+) {
+    let synthetic = register_synthetic_mount_targets(synthetic_mount_targets);
+    let protected = register_protected_create_targets(protected_create_targets);
+    drop(registry_lock);
+    (synthetic, protected)
+}
+
 fn register_synthetic_mount_targets(
     targets: &[crate::bwrap::SyntheticMountTarget],
 ) -> Vec<SyntheticMountTargetRegistration> {
@@ -1006,11 +1029,11 @@ fn register_synthetic_mount_targets(
                         marker_dir.display()
                     )
                 });
-                // #562: another live run made it, or (checked under this
-                // lock, separately from the check when the arguments were
-                // built) it has gone since: then the mount target bubblewrap
-                // makes is this run's own placeholder, and its marker must
-                // say so for later runs.
+                // #562: another live run made it, or it has gone since the
+                // arguments were built (where this run could not take the
+                // registry lock for them, #673, or the person removed it):
+                // then the mount target bubblewrap makes is this run's own
+                // placeholder, and its marker must say so for later runs.
                 let target = if target.preserves_pre_existing_path()
                     && (synthetic_mount_marker_dir_has_active_synthetic_owner(&marker_dir)
                         || !target.pre_existing_path_is_unchanged())
@@ -1512,20 +1535,17 @@ fn owned_by_this_user(path: &Path, file: bool) -> bool {
 /// `~/Library` for `~/Library/Keychains`) failed every protected run until
 /// #579 held it in place.
 ///
-/// A run that meets a recorded placeholder holds it (registers itself,
-/// [`is_live_placeholder`]), so one with any live marker is left alone, as
-/// is a marker folder of another kind (a protected-create target). This
-/// never fails a run: without a usable registry it does nothing, and what
-/// cannot be removed keeps its record for a later run.
+/// A run that meets a recorded placeholder registers itself for it (under
+/// the [`RegistryLock`] it took before finding it, #673), so one with any
+/// live marker is left alone, as is a marker folder of another kind (a
+/// protected-create target). This never fails a run: without a usable
+/// registry it does nothing, and what cannot be removed keeps its record for
+/// a later run.
 fn remove_stale_synthetic_mount_targets() {
-    // Found without the panicking checks of `synthetic_mount_registry_root`:
-    // a run without placeholders must not fail here.
-    let Ok(temp_dir) = std::env::temp_dir().canonicalize() else {
+    // A run without placeholders must not fail here.
+    let Some(registry_root) = unchecked_synthetic_mount_registry_root() else {
         return;
     };
-    // SAFETY: `geteuid` has no preconditions.
-    let euid = unsafe { libc::geteuid() };
-    let registry_root = temp_dir.join(format!("codex-bwrap-synthetic-mount-targets-{euid}"));
     if !owned_by_this_user(&registry_root, /*file*/ false) {
         return;
     }
@@ -1542,7 +1562,11 @@ fn remove_stale_synthetic_mount_targets() {
         return;
     }
     // A registry this run cannot lock (read-only in a nested sandbox) is
-    // left as it is.
+    // left as it is. (#673: never while this thread holds the lock, which a
+    // second descriptor would wait for forever.)
+    if REGISTRY_LOCK_HELD.get() {
+        return;
+    }
     let Ok(lock_file) = File::open(registry_root.join("lock")) else {
         return;
     };
@@ -1647,27 +1671,105 @@ fn marker_pid(path: &Path) -> Option<libc::pid_t> {
         .and_then(|name| name.parse::<libc::pid_t>().ok())
 }
 
-fn with_synthetic_mount_registry_lock<T>(f: impl FnOnce() -> T) -> T {
-    let registry_root = synthetic_mount_registry_root();
-    fs::create_dir_all(&registry_root).unwrap_or_else(|err| {
-        panic!(
-            "failed to create synthetic bubblewrap mount registry {}: {err}",
-            registry_root.display()
-        )
-    });
-    let lock_path = registry_root.join("lock");
-    let lock_file = OpenOptions::new()
+thread_local! {
+    /// #673: whether this thread holds a [`RegistryLock`].
+    static REGISTRY_LOCK_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// #673: the placeholder registry's lock, held by a run from just before it
+/// looks at the paths it mounts until it has registered the placeholders it
+/// found or makes ([`register_mount_targets`]). The registry's runs remove a
+/// placeholder only under this lock (its makers' and holders' cleanup, the
+/// sweep), so none is removed between this run finding it and registering
+/// it.
+///
+/// Before, the arguments were built without it and each check locked on its
+/// own: a placeholder found (`~/.aws`, or `~/.claude` above a missing
+/// `.credentials.json`) could be removed by its maker's cleanup before the
+/// check that it was a live placeholder. The run then took it for a path of
+/// the person's own and mounted it unregistered, and bubblewrap failed the
+/// command (`Can't create file at ~/.aws: Read-only file system`, `Can't find
+/// source path ~/.claude`).
+#[derive(Debug)]
+pub(crate) struct RegistryLock {
+    file: File,
+    /// Released on the thread that took it (`REGISTRY_LOCK_HELD`).
+    _not_send: std::marker::PhantomData<*const ()>,
+}
+
+impl RegistryLock {
+    /// `None` where the registry cannot be made or locked (read-only, as in
+    /// a nested sandbox, or another user's), or when this thread holds it
+    /// already; each step then locks on its own, as before.
+    pub(crate) fn acquire() -> Option<Self> {
+        if REGISTRY_LOCK_HELD.get() {
+            return None;
+        }
+        // Without the panicking checks of `synthetic_mount_registry_root`
+        // (a run with nothing to register must not fail here), then the
+        // same folder the markers are in.
+        if unchecked_synthetic_mount_registry_root()?.is_symlink() {
+            return None;
+        }
+        let registry_root = synthetic_mount_registry_root();
+        let file = open_synthetic_mount_registry_lock(&registry_root).ok()?;
+        if !owned_by_this_user(&registry_root, /*file*/ false) {
+            return None;
+        }
+        // SAFETY: locks a descriptor this function owns.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } < 0 {
+            return None;
+        }
+        REGISTRY_LOCK_HELD.set(true);
+        Some(Self {
+            file,
+            _not_send: std::marker::PhantomData,
+        })
+    }
+}
+
+impl Drop for RegistryLock {
+    fn drop(&mut self) {
+        REGISTRY_LOCK_HELD.set(false);
+        // Closing the descriptor releases it too.
+        // SAFETY: unlocks a descriptor this lock owns.
+        unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+/// The registry folder, without the panicking checks of
+/// [`synthetic_mount_registry_root`].
+fn unchecked_synthetic_mount_registry_root() -> Option<PathBuf> {
+    let temp_dir = std::env::temp_dir().canonicalize().ok()?;
+    // SAFETY: `geteuid` has no preconditions.
+    let euid = unsafe { libc::geteuid() };
+    Some(temp_dir.join(format!("codex-bwrap-synthetic-mount-targets-{euid}")))
+}
+
+/// The registry's lock file, opened (and the registry made) for locking.
+fn open_synthetic_mount_registry_lock(registry_root: &Path) -> std::io::Result<File> {
+    fs::create_dir_all(registry_root)?;
+    OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(&lock_path)
-        .unwrap_or_else(|err| {
-            panic!(
-                "failed to open synthetic bubblewrap mount registry lock {}: {err}",
-                lock_path.display()
-            )
-        });
+        .open(registry_root.join("lock"))
+}
+
+fn with_synthetic_mount_registry_lock<T>(f: impl FnOnce() -> T) -> T {
+    // #673: part of this run's lock for its arguments.
+    if REGISTRY_LOCK_HELD.get() {
+        return f();
+    }
+    let registry_root = synthetic_mount_registry_root();
+    let lock_path = registry_root.join("lock");
+    let lock_file = open_synthetic_mount_registry_lock(&registry_root).unwrap_or_else(|err| {
+        panic!(
+            "failed to open synthetic bubblewrap mount registry lock {}: {err}",
+            lock_path.display()
+        )
+    });
     if unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) } < 0 {
         let err = std::io::Error::last_os_error();
         panic!(
@@ -1689,7 +1791,8 @@ fn with_synthetic_mount_registry_lock<T>(f: impl FnOnce() -> T) -> T {
 /// #562: whether a live run registered a placeholder it made at `path`
 /// (an empty file standing in for a missing protected path). A run that
 /// finds one must register it too, so the owner's cleanup leaves it in
-/// place until the last run using it ends.
+/// place until the last run using it ends; until then (#673) the run holds
+/// the [`RegistryLock`] it took before finding it.
 pub(crate) fn is_live_placeholder(path: &Path) -> bool {
     let marker_dir = synthetic_mount_marker_dir(path);
     // A run registers its marker before bubblewrap makes the placeholder, so
@@ -1699,32 +1802,12 @@ pub(crate) fn is_live_placeholder(path: &Path) -> bool {
         return false;
     }
     with_synthetic_mount_registry_lock(|| {
-        let live = synthetic_mount_marker_dir_has_active_synthetic_owner(&marker_dir)
+        synthetic_mount_marker_dir_has_active_synthetic_owner(&marker_dir)
             // #582: one whose maker was killed before removing it: held as
             // a placeholder too, so a sweep leaves it while this run uses it,
             // and the last run out removes it.
             || read_synthetic_mount_target_record(&marker_dir)
-                .is_some_and(|made| made.path() == path);
-        if live {
-            // #673: hold it now, under the same lock as the check. This run
-            // only registers just before bubblewrap starts; until then its
-            // maker's cleanup could remove it, and bubblewrap cannot make a
-            // new one where this run's sandbox is read-only (`Can't create
-            // file at ...: Read-only file system`). Registration rewrites
-            // this marker; a run that ends first leaves it to the sweep.
-            let marker_file = marker_dir.join(std::process::id().to_string());
-            crate::placeholder_registry::write_marker(
-                &marker_file,
-                SYNTHETIC_MOUNT_MARKER_EXISTING,
-            )
-            .unwrap_or_else(|err| {
-                panic!(
-                    "failed to hold synthetic bubblewrap mount target {}: {err}",
-                    path.display()
-                )
-            });
-        }
-        live
+                .is_some_and(|made| made.path() == path)
     })
 }
 
@@ -1815,11 +1898,14 @@ fn run_bwrap_in_child_capture_stderr(bwrap_args: crate::bwrap::BwrapArgs) -> Str
         preserved_files,
         synthetic_mount_targets,
         protected_create_targets,
+        registry_lock,
     } = bwrap_args;
     let setup_signal_mask = ForwardedSignalMask::block();
-    let synthetic_mount_registrations = register_synthetic_mount_targets(&synthetic_mount_targets);
-    let protected_create_registrations =
-        register_protected_create_targets(&protected_create_targets);
+    let (synthetic_mount_registrations, protected_create_registrations) = register_mount_targets(
+        &synthetic_mount_targets,
+        &protected_create_targets,
+        registry_lock,
+    );
 
     let mut pipe_fds = [0; 2];
     let pipe_res = unsafe { libc::pipe2(pipe_fds.as_mut_ptr(), libc::O_CLOEXEC) };

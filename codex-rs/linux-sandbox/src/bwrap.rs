@@ -24,6 +24,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
+use crate::linux_run_main::RegistryLock;
 use crate::linux_run_main::synthetic_mount_registry_root;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result;
@@ -127,6 +128,9 @@ pub(crate) struct BwrapArgs {
     pub preserved_files: Vec<File>,
     pub synthetic_mount_targets: Vec<SyntheticMountTarget>,
     pub protected_create_targets: Vec<ProtectedCreateTarget>,
+    /// #673: held from before the paths were looked at until the targets
+    /// are registered.
+    pub registry_lock: Option<RegistryLock>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -323,6 +327,7 @@ pub(crate) fn create_bwrap_command_args(
                 preserved_files: Vec::new(),
                 synthetic_mount_targets: Vec::new(),
                 protected_create_targets: Vec::new(),
+                registry_lock: None,
             })
         } else {
             Ok(create_bwrap_flags_full_filesystem(command, options))
@@ -368,6 +373,7 @@ fn create_bwrap_flags_full_filesystem(command: Vec<String>, options: BwrapOption
         preserved_files: Vec::new(),
         synthetic_mount_targets: Vec::new(),
         protected_create_targets: Vec::new(),
+        registry_lock: None,
     }
 }
 
@@ -384,6 +390,7 @@ fn create_bwrap_flags(
         preserved_files,
         synthetic_mount_targets,
         protected_create_targets,
+        registry_lock,
     } = create_filesystem_args_with_pins(
         file_system_sandbox_policy,
         sandbox_policy_cwd,
@@ -424,6 +431,7 @@ fn create_bwrap_flags(
         preserved_files,
         synthetic_mount_targets,
         protected_create_targets,
+        registry_lock,
     })
 }
 
@@ -546,6 +554,10 @@ fn create_filesystem_args_with_pins(
     );
     unreadable_roots.sort();
     unreadable_roots.dedup();
+    // #673: from here on, whether a path exists and is another run's
+    // placeholder decides how it is mounted; no placeholder is removed until
+    // this run has registered those it found.
+    let registry_lock = RegistryLock::acquire();
 
     // Read-only roots reached through a link and mounted at the link's path
     // (restricted reads), with their real targets (#501).
@@ -631,6 +643,7 @@ fn create_filesystem_args_with_pins(
         preserved_files: Vec::new(),
         synthetic_mount_targets: Vec::new(),
         protected_create_targets: Vec::new(),
+        registry_lock,
     };
     let mut allowed_write_paths = Vec::with_capacity(writable_roots.len());
     for writable_root in &writable_roots {

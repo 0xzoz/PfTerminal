@@ -2771,6 +2771,13 @@ async fn shared_database_folder_scenario() -> anyhow::Result<()> {
     use codex_protocol::models::PermissionProfile;
     let mut wrong = Vec::new();
     let original_tmpdir = std::env::var_os("TMPDIR");
+    // #673: the commands keep the temporary folder the other tests' commands
+    // have. The Linux sandbox keeps its placeholder registry there; with
+    // another, these commands and the other tests' (other processes) could
+    // not see each other's placeholders in the folders they share (the home,
+    // `/tmp/.git`), and one removed from under another failed it to start.
+    // Corbanu itself still sees the database folder as `TMPDIR`.
+    let command_tmpdir = std::env::temp_dir().to_string_lossy().into_owned();
     for (level, open) in [
         (SecurityLevel::Moderate, false),
         (SecurityLevel::Aggressive, false),
@@ -2815,12 +2822,23 @@ async fn shared_database_folder_scenario() -> anyhow::Result<()> {
                 call("call-651s", "shell_command", json!({ "command": command })),
                 done_step(),
             ],
-            move |config| {
-                config.sqlite = codex_state::SqliteConfig::from_sqlite_home(sqlite_home.clone());
-                config
-                    .permissions
-                    .set_permission_profile(PermissionProfile::Disabled)
-                    .expect("full access");
+            {
+                let command_tmpdir = command_tmpdir.clone();
+                move |config| {
+                    config.sqlite =
+                        codex_state::SqliteConfig::from_sqlite_home(sqlite_home.clone());
+                    config
+                        .permissions
+                        .set_permission_profile(PermissionProfile::Disabled)
+                        .expect("full access");
+                    if cfg!(target_os = "linux") {
+                        config
+                            .permissions
+                            .shell_environment_policy
+                            .r#set
+                            .insert("TMPDIR".to_string(), command_tmpdir.clone());
+                    }
+                }
             },
             move |_| {
                 std::fs::write(shared.join("notes-651.txt"), "ordinary-651").expect("notes");
