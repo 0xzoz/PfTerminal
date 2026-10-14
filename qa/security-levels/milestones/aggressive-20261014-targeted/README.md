@@ -28,6 +28,9 @@ Combined status of all 64 cases (this run where re-run, the third run otherwise)
   - AGG-37: its readable-refusals result was never tested after a restart. Replay Q02c met the other results but
     triggered no denial. The one refusal seen, in Q02 before the restart, embeds the raw command-failure text.
     Corrected from passed after evidence check r3.
+    - In Q02c, the executor first emptied `product-home` and launched the product with it at 12:14:23Z, which showed
+      Permissive as "configuration only". It then stopped, moved that state aside, and ran the case from the supplied
+      profile, restored at 12:16:21Z.
   - AGG-R07: steps 1-5 were product denials with the full wording, and the #621 defect stays fixed. Step 6 was declined
     twice by the product's model. Its first text says "this cannot be granted" without "even once"; its second doesn't
     say it cannot be granted at all. Corrected from passed after evidence check r1.
@@ -176,7 +179,14 @@ Under the binding rule of 2026-10-14, there are no self-authorized extensions.
   - AGG-R14 now notes the product's protected-path label on the skill-file read.
   - `guest-state-start-2.txt` is explained.
   - The relay-window wording for Q02c was fixed.
-- **r4**, the last check within the budget, is recorded in [review-ledger.md](review-ledger.md).
+- **r4** (fresh session) was the last check within the budget of 5. It failed on two disclosure points; every
+  disposition, count, the freeze and the isolation record were otherwise confirmed. Both points are now applied, but
+  **not independently verified**:
+  - AGG-R14's Q11b setup deviation is disclosed: Esc instead of r, `agms-tui stop`, then `agms-tui start r`.
+  - The README describes Q02c's empty-profile launch.
+  - Its advisory note on AGG-T04's profile reset is also disclosed.
+  - The budget is spent without a major defect, so under the binding rule of 2026-10-14 there is no further check
+    and no self-authorized extension.
 
 ## Known limits
 

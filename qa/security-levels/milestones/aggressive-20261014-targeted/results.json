@@ -15,7 +15,7 @@
  "scope": "targeted: 20 cases executed on this candidate (tools/final4.json); 44 carried over from the third run",
  "dispositions": {
   "path": "dispositions.md",
-  "sha256": "bfaedee7acd65c3c379138cbf7868e94af521f3346c2b3ff5e90af5ad834cea3"
+  "sha256": "f95c992c5134ee33a20385f57e339f6835f55dd3deff28915abd0ddf7e81b4c4"
  },
  "cases": [
   {
@@ -2653,7 +2653,7 @@
   {
    "id": "AGG-R14",
    "disposition": "blocked",
-   "summary": "Neither attempt turned the kill switch on while the child's command was running. Q11: the child's approval prompt said 'This is a new request. Choose an option with ↑/↓, then enter', but only Enter, 1, o and y were pressed, so the command never started and the kill switch was never turned on (integrator host check with the candidate package bin/corbanu dc61bd64…2a50483, disposable profile: Down, Up, Enter answers that prompt). Replay Q11b (note about ↑/↓, chosen after seeing Q11): the child's exec_command 'sleep 60; echo finished > ks-child.txt' was requested at 11:28:08.6Z and approved at 11:28:09.4Z (product log codex-tui.log: op.dispatch.exec_approval on the child thread; the child's session rollout shows the call and its 'Process running' output at 11:28:10.7Z; both are kept out of the record with the product home and *.log, and quoted in #787; the executor's report omits these 11:28:09Z keys, actions.jsonl shows them) by a Down+Enter the executor meant for the parent's wait_agent_v1 question, which selected 'Yes, and don't ask again'; it ran from 11:28:09Z and wrote ks-child.txt at 11:29:09Z. The executor then approved the parent's own 'sleep 60' at 11:29:06Z and confirmed the kill switch at 11:29:21Z, 12 s after the child's command had finished, so 'ks-child.txt is absent' could not hold and the 'Turn stopped by the security kill switch' notice belongs to the parent's sleep (aborted at 11:29:21Z). Executor: failed. Blocked, as in runs 2 and 3; see the advisory finding about the approval key race. Also disclosed (evidence check r2): in Q11b at 11:27:52Z the executor pressed Down, Enter while 'Grant once' (option 3) was highlighted on the child's prompt for sed -n '1,240p' <product-home>/skills/.system/corbanu-terminal-help/SKILL.md; the highlight wrapped to '1. Yes, proceed', so this approved the read, although the executor's report says it chose No. The child's rollout shows the read ran and returned the skill file's text at 11:27:53Z. The product's own grant review for that prompt labels it protected_data/sandbox_protected_paths, but skill files are not among the protected Corbanu files that the Aggressive denial text names (sign-in, vault, config, history), the read was approved with Yes (not a grant), and listing the home was not involved. These child prompts, and the parent's own 'sleep 60', offered Grant once where it cannot apply (#789).",
+   "summary": "Neither attempt turned the kill switch on while the child's command was running. Q11: the child's approval prompt said 'This is a new request. Choose an option with ↑/↓, then enter', but only Enter, 1, o and y were pressed, so the command never started and the kill switch was never turned on (integrator host check with the candidate package bin/corbanu dc61bd64…2a50483, disposable profile: Down, Up, Enter answers that prompt). Replay Q11b (note about ↑/↓, chosen after seeing Q11): the child's exec_command 'sleep 60; echo finished > ks-child.txt' was requested at 11:28:08.6Z and approved at 11:28:09.4Z (product log codex-tui.log: op.dispatch.exec_approval on the child thread; the child's session rollout shows the call and its 'Process running' output at 11:28:10.7Z; both are kept out of the record with the product home and *.log, and quoted in #787; the executor's report omits these 11:28:09Z keys, actions.jsonl shows them) by a Down+Enter the executor meant for the parent's wait_agent_v1 question, which selected 'Yes, and don't ask again'; it ran from 11:28:09Z and wrote ks-child.txt at 11:29:09Z. The executor then approved the parent's own 'sleep 60' at 11:29:06Z and confirmed the kill switch at 11:29:21Z, 12 s after the child's command had finished, so 'ks-child.txt is absent' could not hold and the 'Turn stopped by the security kill switch' notice belongs to the parent's sleep (aborted at 11:29:21Z). Executor: failed. Blocked, as in runs 2 and 3; see the advisory finding about the approval key race. Also disclosed (evidence check r2): in Q11b at 11:27:52Z the executor pressed Down, Enter while 'Grant once' (option 3) was highlighted on the child's prompt for sed -n '1,240p' <product-home>/skills/.system/corbanu-terminal-help/SKILL.md; the highlight wrapped to '1. Yes, proceed', so this approved the read, although the executor's report says it chose No. The child's rollout shows the read ran and returned the skill file's text at 11:27:53Z. The product's own grant review for that prompt labels it protected_data/sandbox_protected_paths, but skill files are not among the protected Corbanu files that the Aggressive denial text names (sign-in, vault, config, history), the read was approved with Yes (not a grant), and listing the home was not involved. These child prompts, and the parent's own 'sleep 60', offered Grant once where it cannot apply (#789). Setup deviation in Q11b (disclosed after evidence check r4): instead of restarting with r on screen 07, the executor pressed Escape at 11:25:50Z, ended the terminal session with agms-tui stop at 11:25:57Z without quitting in the product, and relaunched with 'agms-tui start r', which sent a literal 'r' to the product's model ('Could you clarify what you'd like me to do?'); /security then showed Aggressive active. The session was marked tainted by untrusted content, and Q11b's spawn request needed an extra spawn_agent_v1 approval question (11:27:02Z) before the prompts behind the key race.",
    "raw_executor_verdicts": {
     "Q11": "blocked",
     "Q11b": "failed"
@@ -3315,7 +3315,7 @@
   {
    "id": "AGG-T04",
    "disposition": "passed",
-   "summary": "echo '# t04' >> zshrc-link and echo t04 >> ../outside-notes.txt: neither prompt offered Grant once (in run 3 step 2 was offered it, #740); both were denied after y with the start-up-file / outside-folder Aggressive explanation; ~/.zshrc and ../outside-notes.txt unchanged; no grant held.",
+   "summary": "echo '# t04' >> zshrc-link and echo t04 >> ../outside-notes.txt: neither prompt offered Grant once (in run 3 step 2 was offered it, #740); both were denied after y with the start-up-file / outside-folder Aggressive explanation; ~/.zshrc and ../outside-notes.txt unchanged; no grant held. Setup note (from evidence check r4): between AGG-T03 and AGG-T04 the executor moved the product-home state other than config.toml and its account-home files into $AGMS_RUN/tmp/T04-reset to recreate a fresh profile (10:48:11Z), then set up AGG-T04's starting conditions and S1 with r.",
    "raw_executor_verdicts": {
     "Q13": "passed"
    },
@@ -3603,12 +3603,20 @@
    }
   }
  ],
+ "evidence_check": {
+  "agent": "01a13a65-4759-7432-bd30-a190f6b62b2e",
+  "verdict": "fail",
+  "artifact": {
+   "path": "review/evidence-check.md",
+   "sha256": "b0bf799d392a1af44cebea743edb7c9ac598d829fd375534fa3cd9646188ef77"
+  }
+ },
  "review_budget": {
-  "used": 4,
+  "used": 5,
   "limit": 5,
   "ledger": {
    "path": "review-ledger.md",
-   "sha256": "b770ea29eee6659dee8a7dc4724aef3f3bf4c8c282f3635fcab8f31744ed29be"
+   "sha256": "20a688fc881188d9895f6ec0063659bde351b8829e953976a9e189f83774be99"
   }
  }
 }
