@@ -47,6 +47,7 @@ mod accounting_responses_ws;
 mod accounting_responses_ws_recovery;
 #[path = "accounting_responses_ws_support.rs"]
 mod accounting_responses_ws_support;
+mod accounting_side_forks;
 mod additional_context;
 mod agent_execution;
 mod agent_websocket;

@@ -1153,7 +1153,9 @@ async fn accounting_side_conversation_is_recorded_under_its_conversation() -> an
             codex_core::ForkSnapshot::Interrupted,
             side_config,
             test.codex.rollout_path().unwrap(),
-            /*thread_source*/ None,
+            Some(codex_protocol::protocol::ThreadSource::Feature(
+                codex_protocol::protocol::ThreadSource::SIDE_CONVERSATION.to_string(),
+            )),
             /*parent_trace*/ None,
         )
         .await?;

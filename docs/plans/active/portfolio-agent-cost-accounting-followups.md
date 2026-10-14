@@ -1,33 +1,41 @@
 ---
 title: "Accounting follow-ups after PF-60"
-status: draft
+status: active
 change_class: product-initiative
 priority: P1
-owner: "Codex accounting lane (proposed); Travis Good accepts"
+owner: "Codex accounting lane; Travis Good accepts"
 parallel_sprint_limit: 1
-integration_owner: "Codex coordinator (proposed)"
+integration_owner: "Codex coordinator"
 activation_authority: "Travis Good"
-activation_basis: "Travis, 2026-10-10: accept PF-60-S04's remaining gaps on condition that each is carried into a future sprint; activation pending a free slot and his decision"
+activation_basis: "Travis, 2026-10-10: accept PF-60-S04's remaining gaps on condition that each is carried into a future sprint. Travis, 2026-10-14 (decision 29): start PF-60-S06 to S10 after the Moderate picker sprint. Activated in slot 2, freed when the coordinator's worker closed the provider-onboarding plan (PF-84 sprints all archived); Travis's confirmation of that closing is pending."
 target_release: "TBD"
-deadline: "TBD; PF-60-S07's Sol promotion item must land before 2026-11-21"
+deadline: "TBD (S07's Sol promotion end landed in #762 before 2026-11-21)"
 created: 2026-10-10
-updated: 2026-10-10
+updated: 2026-10-14
 product_spec:
   file: docs/corbanu-product-spec.md
   heading: "Product measurement"
   requirement_excerpt: "No commercial performance numbers have been supplied."
-implementation_worktrees: []
+implementation_worktrees:
+  - path: "/Volumes/CorbanuDrive/Corbanu/worktrees/pf60-s06"
+    branch: "pf60-s06-side-attribution"
+    base_commit: "ecb9069c4b3e0bdb20cb88d520fc8b54745cea34"
 ---
 
 # Accounting follow-ups after PF-60
 
 Policy: repository-root `AGENTS.md`. Lifecycle: [plans](../index.md). Predecessor:
 [PF-60 accounting](../completed/main-2026-10-10-portfolio-agent-cost-accounting.md), completed 2026-10-10.
-This is a **draft**: it authorizes no implementation until Travis activates it into a free slot.
+**Active** from 2026-10-14 in slot 2 (Travis's decision); one sprint at a time.
 
 ## Activation record
 
-- Status: draft; no active slot. Created 2026-10-10 when PF-60 closed to free slot 2 for PF-84.
+- Status: **active** from 2026-10-14, slot 2. Created 2026-10-10 as a draft when PF-60 closed to free slot 2 for PF-84.
+- Activation: Travis, 2026-10-14 (decision 29 of that day's list): start S06–S10 after the Moderate picker sprint
+  (done: #764, #781). All three slots were full; the coordinator's worker closed the
+  [provider-onboarding plan](../completed/main-2026-10-14-unified-provider-auth.md), whose PF-84 sprints were all
+  accepted and archived, to free slot 2, and moved its flag-removal work to a
+  [draft plan](../proposed/named-accounts-flag-removal.md). Travis's confirmation of that closing is pending.
 - Source: Travis's 2026-10-10 decisions when accepting [PF-60-S04](../../sprints/archive/portfolio-agent-cost-accounting/pf-60-s04-cost-accounting-acceptance-and-handoff.md):
   accept the remaining gaps (i)–(viii) but make sure each is covered by a future sprint.
 - Gate: Travis activates the plan (or authorises single sprints as bounded fixes), and decides the open questions below.
@@ -75,8 +83,12 @@ by an independent executor inside an enforced isolation gate.
 
 ## Ownership and implementation worktrees
 
-Unallocated. On activation each sprint gets its own worktree under `/Volumes/CorbanuDrive/Corbanu/worktrees/`, branch
-and base commit, recorded here and in the sprint before it becomes `ready`.
+Each sprint gets its own worktree under `/Volumes/CorbanuDrive/Corbanu/worktrees/`, branch and base commit, recorded
+here and in the sprint before it becomes `ready`.
+
+| Owner | Worktree | Branch | Base commit | Scope |
+| --- | --- | --- | --- | --- |
+| Codex worker `pf60-s06` | `/Volumes/CorbanuDrive/Corbanu/worktrees/pf60-s06` | `pf60-s06-side-attribution` | `ecb9069c4b3e0bdb20cb88d520fc8b54745cea34` | PF-60-S06 (lane `accounting`) |
 
 ## Useful code references
 
@@ -147,10 +159,11 @@ Finished-feature docs change only if Travis authorises shipping `/cost`; until t
 
 ## Dependencies, decisions, and blockers
 
-- **Decisions for Travis:** activation and slot; S07's OpenRouter rule (reported charge first, catalogue as a labelled
-  fallback, or "no price"); S08's warm-up choice (avoid or show; recommendation in the sprint); S09's ChatGPT test
-  account and TensorCash access; whether S07's Sol promotion item may land as a bounded fix before 2026-11-21 if this
-  plan is not active by then.
+- **Decided:** activation (Travis, 2026-10-14; slot 2); S07's OpenRouter rule (Travis, 2026-10-14: the reported
+  charge first, the catalogue rate as a labelled estimate, else "no price"; PR #784); the Sol promotion end landed as
+  a bounded fix (#762).
+- **Decisions for Travis:** S08's warm-up choice (avoid or show; recommendation in the sprint); S09's ChatGPT test
+  account and TensorCash access; S07's Moonshot/BigModel route-keyed pricing (new accounting code).
 - **Isolation infrastructure** (S10) is shared with P1 security's milestone runs; reuse it rather than build twice.
 - **Open accounting issues not assigned here** (Travis to place or leave): #352 `/cost` display nits, #359 busy state
   DB waits, #325 `/cost` leftovers, #324 delete-time retention sweep, #314 invisible unrecorded gaps, #290

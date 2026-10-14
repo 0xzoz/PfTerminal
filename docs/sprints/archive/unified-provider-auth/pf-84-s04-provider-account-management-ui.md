@@ -2,7 +2,7 @@
 sprint_id: "PF-84-S04"
 title: "Account management in /providers and onboarding"
 status: completed
-plan_file: "docs/plans/active/unified-provider-auth.md"
+plan_file: "docs/plans/completed/main-2026-10-14-unified-provider-auth.md"
 plan_feature: "PF-84"
 execution_order: 26
 owner: "Codex PF-84 lane owner"
@@ -56,7 +56,7 @@ PF-84-S06 (D4).
 
 ## Plan linkage
 
-- Plan: [Unified provider onboarding and management](../../../plans/active/unified-provider-auth.md)
+- Plan: [Unified provider onboarding and management](../../../plans/completed/main-2026-10-14-unified-provider-auth.md)
 - Feature: `PF-84`
 - Acceptance advanced: "Add second account", "Session account switch", "One row per account".
 

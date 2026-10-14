@@ -2974,6 +2974,11 @@ pub enum ThreadSource {
 }
 
 impl ThreadSource {
+    /// The feature name a TUI `/side` conversation is forked with
+    /// (`ThreadSource::Feature`); developer accounting labels its paid work
+    /// `side:` and every other temporary fork `fork:` (PF-60-S06).
+    pub const SIDE_CONVERSATION: &'static str = "side";
+
     pub fn as_str(&self) -> &str {
         match self {
             ThreadSource::User => "user",

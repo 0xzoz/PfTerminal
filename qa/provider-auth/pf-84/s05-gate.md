@@ -2,7 +2,7 @@
 
 Candidate: branch `feat/pf-84-s05-usage-by-account`, code at `a1921d736b`. Change class: product
 initiative (plan PF-84). Acceptance row "Per-account usage" in
-[the plan](../../../docs/plans/active/unified-provider-auth.md).
+[the plan](../../../docs/plans/completed/main-2026-10-14-unified-provider-auth.md).
 
 ## What shipped
 

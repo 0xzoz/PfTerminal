@@ -724,6 +724,18 @@ impl AgentControl {
         Some(thread.config_snapshot().await)
     }
 
+    /// The live session of `thread_id`, if this thread manager holds it. Used
+    /// to attribute paid work done for a conversation that is not persisted
+    /// itself (PF-60-S06).
+    pub(crate) async fn live_session(
+        &self,
+        thread_id: ThreadId,
+    ) -> Option<Arc<crate::session::session::Session>> {
+        let state = self.upgrade().ok()?;
+        let thread = state.get_thread(thread_id).await.ok()?;
+        Some(Arc::clone(&thread.session))
+    }
+
     pub(crate) async fn resolve_agent_reference(
         &self,
         _current_thread_id: ThreadId,
