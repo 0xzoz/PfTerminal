@@ -49,6 +49,12 @@ const DB_INIT_LOCK_POLL: Duration = Duration::from_millis(20);
 /// A wait longer than this is logged, so a stalled holder can be found.
 const DB_INIT_LOCK_REPORT_AFTER: Duration = Duration::from_secs(1);
 const MIGRATION_RETRY_DELAY: Duration = Duration::from_millis(50);
+/// SQLite's extended code SQLITE_IOERR_TRUNCATE; see [`is_shm_reset_race`].
+const SQLITE_IOERR_TRUNCATE: &str = "1546";
+/// Retries of an open that hit [`is_shm_reset_race`]; the pause before retry
+/// `n` is `n` times the delay, about 1.8 s in all.
+const SHM_RESET_RETRIES: u32 = 8;
+const SHM_RESET_RETRY_DELAY: Duration = Duration::from_millis(50);
 
 #[derive(Clone, Copy)]
 struct RuntimeDbSpec {
@@ -449,6 +455,10 @@ impl SqliteConfig {
 
     /// Open a writable Codex SQLite database, creating it if necessary.
     pub async fn open_read_write_pool(&self, path: &Path) -> Result<SqlitePool, Error> {
+        retry_shm_reset_race(path, || self.open_read_write_pool_once(path)).await
+    }
+
+    async fn open_read_write_pool_once(&self, path: &Path) -> Result<SqlitePool, Error> {
         let options = SqliteConnectOptions::new()
             .filename(path)
             .create_if_missing(true)
@@ -591,6 +601,43 @@ fn log_unlocked(path: &Path, err: &std::io::Error) {
 /// Whether `path` is an existing, non-empty database file.
 pub(crate) fn database_has_content(path: &Path) -> bool {
     std::fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0)
+}
+
+/// Whether `err` is the Windows WAL reset race. A connection that finds no
+/// other process using a WAL database resets (truncates) its `-shm` file. A
+/// process that has just exited without closing its connections can still
+/// have that file mapped for a moment after its lock is gone; the truncation
+/// then fails with SQLITE_IOERR_TRUNCATE ("disk I/O error"), and succeeds once
+/// the mapping is released. Seen when launches start on a new home while
+/// earlier ones exit (#691). Other platforms don't report this race, and a
+/// real truncation failure there still fails after the retries.
+fn is_shm_reset_race(err: &Error) -> bool {
+    err.as_database_error()
+        .and_then(|err| err.code())
+        .is_some_and(|code| code == SQLITE_IOERR_TRUNCATE)
+}
+
+/// Runs `open`, retrying it after [`is_shm_reset_race`] errors.
+async fn retry_shm_reset_race<T, F, Fut>(path: &Path, mut open: F) -> Result<T, Error>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, Error>>,
+{
+    let mut retries = 0;
+    loop {
+        match open().await {
+            Err(err) if retries < SHM_RESET_RETRIES && is_shm_reset_race(&err) => {
+                retries += 1;
+                tracing::info!(
+                    "retrying to open {} (attempt {}) after: {err}",
+                    path.display(),
+                    retries + 1
+                );
+                tokio::time::sleep(SHM_RESET_RETRY_DELAY * retries).await;
+            }
+            result => return result,
+        }
+    }
 }
 
 /// Keep fault-fixture connection options and checkout barriers intact at the SQLite boundary.
