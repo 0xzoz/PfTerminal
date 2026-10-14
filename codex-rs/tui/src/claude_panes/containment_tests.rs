@@ -139,3 +139,28 @@ fn contained_launch_is_refused_without_the_secretless_contract() {
         "{err:#}"
     );
 }
+
+/// #743: the pane's sandbox keeps the session's `TMPDIR`, where the Linux
+/// sandbox keeps its shared placeholder registry; Claude Code's own
+/// temporary folder is `CLAUDE_CODE_TMPDIR` in the pane's state.
+#[test]
+fn issue_743_the_pane_keeps_the_session_tmpdir() {
+    let containment = ClaudeContainment {
+        state_dir: PathBuf::from("/state/pane-a"),
+        panes_dir: PathBuf::from("/home/someone/.corbanu/panes"),
+        linux_sandbox_exe: None,
+    };
+    let inherited = [
+        ("PATH", "/usr/bin"),
+        ("HOME", "/home/someone"),
+        ("TMPDIR", "/session/tmp"),
+    ]
+    .map(|(name, value)| (name.to_string(), value.to_string()));
+    let env = launch_env(inherited, &containment.claude_env());
+    assert_eq!(env.get("TMPDIR").map(String::as_str), Some("/session/tmp"));
+    assert_eq!(
+        env.get("CLAUDE_CODE_TMPDIR").map(String::as_str),
+        Some("/state/pane-a/tmp")
+    );
+    assert!(!containment.claude_env().contains_key("TMPDIR"));
+}

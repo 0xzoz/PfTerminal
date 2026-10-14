@@ -305,7 +305,8 @@ def run(claude, which, mode, keep, prompt_text):
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": home,
         "CLAUDE_CONFIG_DIR": config_dir,
-        "TMPDIR": os.path.join(state, "tmp"),
+        # #743: Corbanu leaves TMPDIR as the session's.
+        "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
         "CLAUDE_CODE_TMPDIR": os.path.join(state, "tmp"),
         "ANTHROPIC_BASE_URL": base_url,
         "ANTHROPIC_API_KEY": "",

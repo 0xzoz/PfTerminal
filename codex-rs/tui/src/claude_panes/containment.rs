@@ -127,8 +127,9 @@ pub(crate) fn contained_launch_ready() -> bool {
 /// How one contained turn is launched.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ClaudeContainment {
-    /// The pane's own Claude state (`CLAUDE_CONFIG_DIR` and `TMPDIR`), the
-    /// only writable place besides the pane's folder.
+    /// The pane's own Claude state (`CLAUDE_CONFIG_DIR` and
+    /// `CLAUDE_CODE_TMPDIR`), the only writable place besides the pane's
+    /// folder.
     pub(crate) state_dir: PathBuf,
     /// `CODEX_HOME/panes`: every pane's transcripts and audits, unreadable
     /// to a contained pane, like the contract's `sessions`.
@@ -153,14 +154,19 @@ impl ClaudeContainment {
     /// What a contained Claude Code gets on top of the launch environment
     /// (besides the bridge as its proxy): its own config and temporary
     /// folders, and no updater or other traffic.
+    ///
+    /// #743 (Travis, 2026-10-14, option a): `TMPDIR` stays the session's.
+    /// The Linux sandbox keeps the placeholders it shares between runs (for
+    /// missing protected paths in the home, such as `~/.aws`) in a registry
+    /// under `TMPDIR`; a pane with its own `TMPDIR` could not see the main
+    /// session's placeholders, and a command in either could fail to start.
+    /// Claude Code gets its own temporary folder through `CLAUDE_CODE_TMPDIR`
+    /// only (its own files and the `TMPDIR` its Bash commands see).
     pub(crate) fn claude_env(&self) -> BTreeMap<String, String> {
         let config = self.config_dir().to_string_lossy().into_owned();
         let tmp = self.tmp_dir().to_string_lossy().into_owned();
         BTreeMap::from([
             ("CLAUDE_CONFIG_DIR".to_string(), config),
-            // Claude Code keeps its own temporary files (the Bash tool's
-            // working folder) under `CLAUDE_CODE_TMPDIR`, not `TMPDIR`.
-            ("TMPDIR".to_string(), tmp.clone()),
             ("CLAUDE_CODE_TMPDIR".to_string(), tmp),
             (
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_string(),
