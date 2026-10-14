@@ -62,6 +62,44 @@ class PrLinuxClippyTest(unittest.TestCase):
             "[[ '${{ needs.lint_build_linux.result }}' == 'success' ]]", rust_ci
         )
 
+    def test_pr_runs_windows_clippy_within_budget(self) -> None:
+        # #717: same leg (and caches) as postmerge rust-ci-full's Windows clippy.
+        self.assertRegex(
+            self.workflow("rust-ci.yml"),
+            r"(?m)^  lint_build_windows:\n(?:    .*\n)*?"
+            r"    if: \$\{\{ needs\.changed\.outputs\.codex == 'true' \|\| needs\.changed\.outputs\.workflows == 'true' \}\}\n"
+            r"    uses: \./\.github/workflows/rust-ci-lint-build\.yml\n"
+            r"    with:\n"
+            r"      runner: windows-2022\n"
+            r"      target: x86_64-pc-windows-msvc\n"
+            r"      profile: dev\n"
+            r"      timeout_minutes: 60\n"
+            r"      save_caches: false$",
+        )
+
+    def test_pr_windows_clippy_is_required(self) -> None:
+        rust_ci = self.workflow("rust-ci.yml")
+        self.assertRegex(rust_ci, r"(?ms)^  results:\n.*?^        lint_build_windows,$")
+        self.assertIn(
+            "[[ '${{ needs.lint_build_windows.result }}' == 'success' ]]", rust_ci
+        )
+
+    def test_only_the_pr_windows_leg_skips_cache_saves(self) -> None:
+        lint_build = self.workflow("rust-ci-lint-build.yml")
+        for step in ("Save cargo home cache", "Save sccache cache (fallback)"):
+            with self.subTest(step=step):
+                self.assertRegex(
+                    lint_build,
+                    rf"(?m)^      - name: {re.escape(step)}\n        if: .* && inputs\.save_caches$",
+                )
+        self.assertRegex(
+            lint_build,
+            r"(?m)^      save_caches:\n(?:        .*\n)*?        default: true$",
+        )
+        # Postmerge (and so main's saved caches) keeps the default.
+        self.assertNotIn("save_caches", self.workflow("rust-ci-full.yml"))
+        self.assertEqual(self.workflow("rust-ci.yml").count("save_caches: false"), 1)
+
     def test_pr_ci_skips_linux_test_suite(self) -> None:
         self.assertNotIn("nextest", self.workflow("rust-ci.yml"))
 
