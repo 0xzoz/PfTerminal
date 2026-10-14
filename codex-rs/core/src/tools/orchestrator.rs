@@ -1289,9 +1289,10 @@ fn post_taint_read_denials(
     if granted {
         denials.lift_write_rules();
     }
-    // #506: no grant lifts it either.
+    // #506, #758: no grant lifts these either.
     if state.level == codex_security_policy::SecurityLevel::Aggressive {
         denials.deny_home_listing();
+        denials.deny_keychain_services();
     }
     let (Some(exec_server), Some(materialized)) =
         (denials.apply(exec_server), denials.apply(materialized))

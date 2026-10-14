@@ -3390,3 +3390,224 @@ fn glob_below_a_link_to_a_folder_with_glob_syntax_is_escaped() {
     assert_lines(&stdout, &["db=1", "link=1", "notes=0"]);
     assert!(!stdout.contains("secret-651"), "{stdout}");
 }
+
+/// A disposable keychain file with one item, made and deleted with `HOME`
+/// and the preferences folder (`CFFIXED_USER_HOME`) pointed at its own
+/// folder, so the search list and login keychain of the person running the
+/// test are never touched; every query names the file (#758).
+struct DisposableKeychain {
+    folder: TempDir,
+    path: PathBuf,
+}
+
+impl DisposableKeychain {
+    const SERVICE: &str = "corbanu-probe-758";
+    const SECRET: &str = "keychain-canary-758";
+
+    fn security(folder: &Path, args: &[&str]) -> std::process::Output {
+        Command::new("/usr/bin/security")
+            .args(args)
+            .env("HOME", folder)
+            .env("CFFIXED_USER_HOME", folder)
+            .output()
+            .expect("run /usr/bin/security")
+    }
+
+    fn create() -> Self {
+        let folder = TempDir::new().expect("tempdir");
+        let path = folder.path().join("probe-758.keychain-db");
+        let keychain = path.to_str().expect("UTF-8 path");
+        for args in [
+            vec!["create-keychain", "-p", "disposable-758", keychain],
+            vec!["unlock-keychain", "-p", "disposable-758", keychain],
+            vec![
+                "add-generic-password",
+                "-A",
+                "-s",
+                Self::SERVICE,
+                "-a",
+                "kc-758",
+                "-w",
+                Self::SECRET,
+                keychain,
+            ],
+        ] {
+            let output = Self::security(folder.path(), &args);
+            assert!(
+                output.status.success(),
+                "security {}: {}",
+                args[0],
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Self { folder, path }
+    }
+
+    fn find_argv(&self) -> Vec<String> {
+        [
+            "/usr/bin/security",
+            "find-generic-password",
+            "-s",
+            Self::SERVICE,
+            "-w",
+            self.path.to_str().expect("UTF-8 path"),
+        ]
+        .map(String::from)
+        .to_vec()
+    }
+
+    /// What `security find-generic-password` prints under `args`
+    /// (`sandbox-exec` arguments ending with the command).
+    fn find_in(&self, args: &[String]) -> String {
+        let output = Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
+            .args(args)
+            .env("HOME", self.folder.path())
+            .env("CFFIXED_USER_HOME", self.folder.path())
+            .output()
+            .expect("run seatbelt");
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    }
+}
+
+impl Drop for DisposableKeychain {
+    fn drop(&mut self) {
+        let keychain = self.path.to_str().unwrap_or_default();
+        let _ = Self::security(self.folder.path(), &["delete-keychain", keychain]);
+    }
+}
+
+/// #758: a keychain-services entry denies the keychain services after
+/// every other rule: in each branch whose network rules allow
+/// `com.apple.SecurityServer` (full network, a managed network's proxy
+/// ports, an allowed Unix socket) the item is found without the entry and
+/// not with it; with network off it is never found. Real `sandbox-exec`,
+/// disposable keychain.
+#[test]
+fn keychain_services_entry_closes_the_keychain_in_every_network_branch() {
+    let keychain = DisposableKeychain::create();
+    let outside = DisposableKeychain::security(
+        keychain.folder.path(),
+        &keychain.find_argv()[1..]
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&outside.stdout).trim(),
+        DisposableKeychain::SECRET,
+        "the item is there outside the sandbox: {}",
+        String::from_utf8_lossy(&outside.stderr)
+    );
+    let cwd = keychain.folder.path();
+    let managed_network = ManagedNetworkSandboxContext {
+        loopback_ports: vec![43123],
+        allow_local_binding: false,
+    };
+    let socket = vec![absolute_path("/tmp/codex-kc-758.sock")];
+    struct Branch<'a> {
+        name: &'a str,
+        network: NetworkSandboxPolicy,
+        enforce_managed_network: bool,
+        managed_network: Option<&'a ManagedNetworkSandboxContext>,
+        unix_sockets: &'a [AbsolutePathBuf],
+        opens_keychain: bool,
+    }
+    let branches = [
+        Branch {
+            name: "network off",
+            network: NetworkSandboxPolicy::Restricted,
+            enforce_managed_network: false,
+            managed_network: None,
+            unix_sockets: &[],
+            opens_keychain: false,
+        },
+        Branch {
+            name: "managed network proxy",
+            network: NetworkSandboxPolicy::Restricted,
+            enforce_managed_network: true,
+            managed_network: Some(&managed_network),
+            unix_sockets: &[],
+            opens_keychain: true,
+        },
+        Branch {
+            name: "allowed Unix socket",
+            network: NetworkSandboxPolicy::Restricted,
+            enforce_managed_network: false,
+            managed_network: None,
+            unix_sockets: &socket,
+            opens_keychain: true,
+        },
+        Branch {
+            name: "full network",
+            network: NetworkSandboxPolicy::Enabled,
+            enforce_managed_network: false,
+            managed_network: None,
+            unix_sockets: &[],
+            opens_keychain: true,
+        },
+    ];
+    for branch in branches {
+        for deny in [false, true] {
+            let mut policy = FileSystemSandboxPolicy::restricted(vec![root_read_entry()]);
+            if deny {
+                policy
+                    .entries
+                    .push(FileSystemSandboxEntry::deny_keychain_services());
+            }
+            let args = create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
+                command: keychain.find_argv(),
+                file_system_sandbox_policy: &policy,
+                network_sandbox_policy: branch.network,
+                sandbox_policy_cwd: cwd,
+                enforce_managed_network: branch.enforce_managed_network,
+                managed_network: branch.managed_network,
+                environment_id: None,
+                network: None,
+                extra_allow_unix_sockets: branch.unix_sockets,
+            })
+            .expect("seatbelt args");
+            let text = seatbelt_policy_arg(&args);
+            assert_eq!(
+                text.trim_end()
+                    .ends_with(super::MACOS_KEYCHAIN_SERVICES_DENY_POLICY),
+                deny,
+                "{}: the deny section comes last:\n{text}",
+                branch.name
+            );
+            let found = keychain.find_in(&args);
+            assert_eq!(
+                found.contains(DisposableKeychain::SECRET),
+                branch.opens_keychain && !deny,
+                "{} (entry: {deny}): {found}",
+                branch.name
+            );
+        }
+    }
+}
+
+/// #758: without the entry the keychain services are not denied, and the
+/// network rules keep `com.apple.SecurityServer` (Permissive and Moderate
+/// unchanged).
+#[test]
+fn keychain_services_are_denied_only_with_the_entry() {
+    let policy = FileSystemSandboxPolicy::restricted(vec![root_read_entry()]);
+    let args = create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
+        command: vec!["/usr/bin/true".to_string()],
+        file_system_sandbox_policy: &policy,
+        network_sandbox_policy: NetworkSandboxPolicy::Enabled,
+        sandbox_policy_cwd: Path::new("/"),
+        enforce_managed_network: false,
+        managed_network: None,
+        environment_id: None,
+        network: None,
+        extra_allow_unix_sockets: &[],
+    })
+    .expect("seatbelt args");
+    let text = seatbelt_policy_arg(&args);
+    assert!(text.contains("(global-name \"com.apple.SecurityServer\")"));
+    assert!(!text.contains("(deny mach-lookup"), "{text}");
+}

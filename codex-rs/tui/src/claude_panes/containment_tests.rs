@@ -139,3 +139,109 @@ fn contained_launch_is_refused_without_the_secretless_contract() {
         "{err:#}"
     );
 }
+
+/// #758: a contained pane's sandbox (network only to its bridge port, which
+/// selects Seatbelt's network rules) keeps the keychain services out of
+/// reach under Aggressive and only there: a disposable keychain item (its
+/// own `HOME`, never the login keychain or search list) is found under
+/// Permissive and not under Aggressive. Real `sandbox-exec`.
+#[cfg(target_os = "macos")]
+#[test]
+fn issue_758_contained_pane_reaches_no_keychain_under_aggressive() {
+    use crate::security::level::ChosenLevel;
+    use crate::security::level::test_levels;
+
+    const SERVICE: &str = "corbanu-probe-758";
+    const SECRET: &str = "keychain-canary-758";
+    struct Keychain(tempfile::TempDir, String);
+    impl Keychain {
+        fn security(&self, args: &[&str]) -> std::process::Output {
+            std::process::Command::new("/usr/bin/security")
+                .args(args)
+                .env("HOME", self.0.path())
+                .env("CFFIXED_USER_HOME", self.0.path())
+                .output()
+                .expect("run /usr/bin/security")
+        }
+    }
+    impl Drop for Keychain {
+        fn drop(&mut self) {
+            let _ = self.security(&["delete-keychain", &self.1]);
+        }
+    }
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().join("probe-758.keychain-db");
+    let keychain = Keychain(folder, path.to_string_lossy().into_owned());
+    let file = keychain.1.clone();
+    for args in [
+        vec!["create-keychain", "-p", "disposable-758", &file],
+        vec!["unlock-keychain", "-p", "disposable-758", &file],
+        vec![
+            "add-generic-password",
+            "-A",
+            "-s",
+            SERVICE,
+            "-a",
+            "kc-758",
+            "-w",
+            SECRET,
+            &file,
+        ],
+    ] {
+        let output = keychain.security(&args);
+        assert!(output.status.success(), "security {}", args[0]);
+    }
+    let find = ["find-generic-password", "-s", SERVICE, "-w", &file];
+    let outside = keychain.security(&find);
+    assert_eq!(String::from_utf8_lossy(&outside.stdout).trim(), SECRET);
+
+    let cwd = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    // A folder of its own: the profile denies each sibling of the state
+    // folder (other panes' state).
+    let state_dir = state.path().join("pane-758");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let containment = ClaudeContainment {
+        state_dir,
+        panes_dir: cwd.path().join("panes"),
+        linux_sandbox_exe: None,
+    };
+    let base = base_profile(&containment).unwrap();
+    for (level, found) in [
+        (ChosenLevel::Permissive, true),
+        (ChosenLevel::Aggressive, false),
+    ] {
+        let _levels = test_levels::set(level, level);
+        let env = HashMap::from([
+            ("HOME".to_string(), keychain.0.path().display().to_string()),
+            (
+                "CFFIXED_USER_HOME".to_string(),
+                keychain.0.path().display().to_string(),
+            ),
+            ("PATH".to_string(), "/usr/bin:/bin".to_string()),
+        ]);
+        let command = sandboxed(
+            &containment,
+            "/usr/bin/security",
+            &find.map(String::from),
+            env,
+            cwd.path(),
+            /*bridge_port*/ 4242,
+            &level_rules(base.clone()),
+        )
+        .unwrap();
+        let output = std::process::Command::new(&command.argv[0])
+            .args(&command.argv[1..])
+            .env_clear()
+            .envs(&command.env)
+            .current_dir(cwd.path())
+            .output()
+            .unwrap();
+        let shown = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(shown.contains(SECRET), found, "{level:?}: {shown}");
+    }
+}
