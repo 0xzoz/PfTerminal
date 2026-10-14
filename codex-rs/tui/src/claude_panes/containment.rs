@@ -27,6 +27,7 @@ use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::FileSystemAccessMode;
 use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::FileSystemSandboxEntry;
+use codex_protocol::permissions::FileSystemSandboxKind;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::secretless_launch;
@@ -321,6 +322,49 @@ pub(crate) fn contain(
         cwd,
     )
     .map_err(|err| anyhow!(err))?;
+    sandboxed(
+        containment,
+        executable,
+        args,
+        env,
+        cwd,
+        bridge_port,
+        &level_rules(profile),
+    )
+}
+
+/// #758: under Aggressive a contained pane may not reach the macOS keychain
+/// services either, although its bridge port selects Seatbelt's network
+/// rules, which allow `com.apple.SecurityServer` (Travis, 2026-10-14). Claude
+/// Code reaches the bridge over plain HTTP with the bridge's token, so it
+/// needs neither TLS nor the keychain. Other levels keep the profile.
+pub(crate) fn level_rules(profile: PermissionProfile) -> PermissionProfile {
+    if !crate::security::level::aggressive_active() {
+        return profile;
+    }
+    let (mut file_system, network) = profile.to_runtime_permissions();
+    if !matches!(file_system.kind, FileSystemSandboxKind::Restricted) {
+        return profile;
+    }
+    file_system
+        .entries
+        .push(FileSystemSandboxEntry::deny_keychain_services());
+    PermissionProfile::from_runtime_permissions(&file_system, network)
+}
+
+/// `executable args` wrapped in the platform sandbox under `profile`, with
+/// network only to `bridge_port` (`enforce_managed_network`).
+pub(crate) fn sandboxed(
+    containment: &ClaudeContainment,
+    executable: &str,
+    args: &[String],
+    env: HashMap<String, String>,
+    cwd: &Path,
+    bridge_port: u16,
+    profile: &PermissionProfile,
+) -> Result<ContainedCommand> {
+    let sandbox = get_platform_sandbox(/*windows_sandbox_enabled*/ false)
+        .ok_or_else(|| anyhow!("contained Claude panes need macOS or Linux"))?;
     let cwd = AbsolutePathBuf::from_absolute_path(cwd).context("pane folder is not absolute")?;
     let cwd = PathUri::from_abs_path(&cwd);
     let request = SandboxManager::new()
@@ -336,7 +380,7 @@ pub(crate) fn contain(
                 }),
                 additional_permissions: None,
             },
-            permissions: &profile,
+            permissions: profile,
             sandbox,
             enforce_managed_network: true,
             environment_id: None,

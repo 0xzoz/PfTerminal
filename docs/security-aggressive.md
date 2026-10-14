@@ -107,16 +107,20 @@ given where such a command fails.
 
 ## The macOS keychain
 
-On macOS the sandbox doesn't let agent commands reach the keychain service.
+On macOS the sandbox doesn't let agent commands reach the keychain services.
 If you approve `security find-generic-password` or another keychain command,
 it runs but can't read, add or change any keychain item: it reports the item
 as not found, or an error, and Corbanu says that Aggressive caused it. No
 grant lifts this, and `~/Library/Keychains` is unreadable too. To allow it,
 switch to Permissive.
 
-This holds while agent commands have no network. If your organization's
-requirements route them through a network proxy, the sandbox opens the
-keychain service with the network rules; Corbanu then makes no such claim.
+This holds in every case, also when your organization's requirements route
+agent commands through a network proxy or allow a Unix socket: Aggressive's
+sandbox denies the keychain services (`com.apple.SecurityServer`,
+`com.apple.securityd.xpc` and `com.apple.securityd.systemkeychain`) after
+all its other rules (#758). Contained Claude panes get the same rule under
+Aggressive. Certificate checks for secure connections use a different
+service (`trustd`) and keep working.
 
 ## A separate database folder
 

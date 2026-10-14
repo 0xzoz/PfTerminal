@@ -18,9 +18,12 @@
 //!   project's `.git`), or that, as far as its text shows, writes nothing a
 //!   grant lifts at all;
 //! - #736: the same for a macOS keychain command (`security
-//!   find-generic-password`): the keychain service is out of reach of
-//!   Aggressive's sandbox, so it runs but cannot read or change items;
+//!   find-generic-password`): the keychain services are out of reach of
+//!   Aggressive's sandbox (#758: denied after its network rules too), so it
+//!   runs but cannot read or change items;
 //! - #622: such a denial is listed under the inspector's recent denials.
+//! - #748: under Moderate, a denial its rules add is explained too (the
+//!   [`moderate`] module).
 //!
 //! Explanation only: it never changes what runs or what is denied (it only
 //! withholds a grant offer that could not apply). The path
@@ -185,9 +188,9 @@ struct ReadPolicyInputs {
     workspace_roots: Vec<AbsolutePathBuf>,
     profile: PermissionProfile,
     user_home: Option<PathBuf>,
-    /// #736: agent commands cannot reach the macOS keychain service: macOS,
-    /// with network off and no network proxy (Seatbelt allows the service
-    /// only with its network rules).
+    /// #736, #758: agent commands cannot reach the macOS keychain services:
+    /// on macOS, Aggressive's sandbox denies them after every other rule,
+    /// also with a managed network proxy or an allowed Unix socket.
     keychain_closed: bool,
 }
 
@@ -195,13 +198,18 @@ impl ReadPolicyInputs {
     /// Only under a live (or configured) Aggressive level, not when the
     /// policy is unreadable and Aggressive is only the fallback.
     fn capture(session: &Session, turn: &TurnContext) -> Option<Self> {
+        Self::capture_at(session, turn, SecurityLevel::Aggressive)
+    }
+
+    /// Only while `level` is the effective level the protected-path rules
+    /// apply under, not when the policy is unreadable.
+    fn capture_at(session: &Session, turn: &TurnContext, level: SecurityLevel) -> Option<Self> {
         session
             .services
             .model_client()
             .post_taint_state()
             .filter(|state| {
-                state.level == SecurityLevel::Aggressive
-                    && !matches!(state.policy, PolicyBinding::Unavailable)
+                state.level == level && !matches!(state.policy, PolicyBinding::Unavailable)
             })?;
         // Local paths only: a remote command's paths are not this host's.
         if turn
@@ -224,20 +232,18 @@ impl ReadPolicyInputs {
                     .collect()
             })
             .unwrap_or_default();
+        let profile = turn.config.permissions.permission_profile().clone();
         Some(Self {
             codex_home: turn.config.codex_home.to_path_buf(),
             sqlite_home: turn.config.sqlite.home().to_path_buf(),
             turn_cwd,
             workspace_roots,
-            profile: turn.config.permissions.permission_profile().clone(),
-            user_home: dirs::home_dir(),
+            // #758: the denial is a rule of Corbanu's sandbox, which an
+            // external sandbox does not take.
             keychain_closed: cfg!(target_os = "macos")
-                && turn.network.is_none()
-                && !turn
-                    .config
-                    .permissions
-                    .network_sandbox_policy()
-                    .is_enabled(),
+                && !matches!(profile, PermissionProfile::External { .. }),
+            profile,
+            user_home: dirs::home_dir(),
         })
     }
 
@@ -550,6 +556,10 @@ pub(crate) async fn denial_explanation(
         .collect();
     if denial_lines.is_empty() {
         return None;
+    }
+    // #748: Moderate explains the denials its own rules add.
+    if let Some(inputs) = ReadPolicyInputs::capture_at(session, turn, SecurityLevel::Moderate) {
+        return moderate::denial_explanation(inputs, command, cwd, denial_lines).await;
     }
     let inputs = ReadPolicyInputs::capture(session, turn)?;
     let (command, cwd) = (command.to_vec(), cwd.to_path_buf());
@@ -1145,6 +1155,8 @@ fn resolve(word: &str, cwd: &Path, user_home: Option<&Path>, codex_home: &Path) 
     }
     Some(cwd.join(expanded))
 }
+
+mod moderate;
 
 #[cfg(test)]
 #[path = "protected_reads_tests.rs"]
