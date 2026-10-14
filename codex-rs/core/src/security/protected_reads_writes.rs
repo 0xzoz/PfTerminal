@@ -15,8 +15,15 @@ const WRITES_EVERY_ARGUMENT: [&str; 7] =
 const WRITES_LAST_ARGUMENT: [&str; 5] = ["cp", "mv", "ln", "install", "rsync"];
 
 /// #740: programs that write no file themselves (a redirection of their
-/// output may, and is counted), whatever their arguments.
-const WRITES_NOTHING: [&str; 40] = [
+/// output may, and is counted), whatever their arguments. #789: `sleep`
+/// and other commands that only report or wait, too.
+const WRITES_NOTHING: [&str; 46] = [
+    "sleep",
+    "date",
+    "seq",
+    "expr",
+    "nproc",
+    "uptime",
     "cat",
     "ls",
     "head",
@@ -184,15 +191,21 @@ fn simple_command_writes(words: &[String], depth: usize) -> Writes {
     } else if program == "sed" {
         // Every path after the script (or all of them with `-e`); a sed
         // script may write (`w`) or run (`e`) more.
-        let targets = if arguments.iter().any(|word| word.starts_with("-i")) {
+        let in_place = arguments.iter().any(|word| word.starts_with("-i"));
+        let targets = if in_place {
             let skip = usize::from(!arguments.contains(&"-e")).min(paths.len());
             owned(&paths[skip..])
         } else {
             Vec::new()
         };
+        // #789: a script that only prints, deletes or quits lines
+        // (`sed -n '1,240p' file`) writes nothing.
+        let understood = !in_place
+            && sed_scripts(arguments)
+                .is_some_and(|scripts| scripts.iter().all(|script| sed_script_only_reads(script)));
         Writes {
             targets,
-            understood: false,
+            understood,
         }
     } else if program == "dd" {
         Writes::known(
@@ -227,6 +240,92 @@ fn simple_command_writes(words: &[String], depth: usize) -> Writes {
     } else {
         Writes::unknown()
     }
+}
+
+/// #789: the scripts of a `sed` that takes them as arguments (`-e`,
+/// `--expression`, or else its first operand), or `None` when it may write
+/// or read a script from elsewhere: in place (`-i`, `--in-place`), a script
+/// file (`-f`), an option this does not know, `-l` (a value on GNU sed, a
+/// flag on macOS), or an option after an operand (macOS stops reading
+/// options at the first operand; GNU sed does not).
+fn sed_scripts<'a>(arguments: &[&'a str]) -> Option<Vec<&'a str>> {
+    let (mut scripts, mut operands) = (Vec::new(), Vec::new());
+    let mut expression = false;
+    let mut words = arguments.iter().copied();
+    while let Some(word) = words.next() {
+        if word == "--" {
+            operands.extend(words.by_ref());
+            break;
+        }
+        let option = word.starts_with('-') && word != "-";
+        if option && !operands.is_empty() {
+            return None;
+        }
+        if let Some(long) = word.strip_prefix("--") {
+            match long {
+                "expression" => {
+                    scripts.push(words.next()?);
+                    expression = true;
+                }
+                _ if long.starts_with("expression=") => {
+                    scripts.push(&word["--expression=".len()..]);
+                    expression = true;
+                }
+                "quiet" | "silent" | "posix" | "debug" | "regexp-extended" | "null-data"
+                | "zero-terminated" | "separate" | "unbuffered" => {}
+                _ => return None,
+            }
+        } else if let Some(flags) = word.strip_prefix('-').filter(|flags| !flags.is_empty()) {
+            for (index, flag) in flags.char_indices() {
+                match flag {
+                    'n' | 'E' | 'r' | 's' | 'u' | 'z' => {}
+                    // The rest of the word, or the next one, is its value.
+                    'e' => {
+                        let rest = &flags[index + 1..];
+                        scripts.push(if rest.is_empty() { words.next()? } else { rest });
+                        expression = true;
+                        break;
+                    }
+                    _ => return None,
+                }
+            }
+        } else {
+            // Review r2: an operand a shell expands (`"$f"` holding
+            // `-e1wx`) or a glob may become an option or a script.
+            if word.contains(['$', '*', '?', '[']) {
+                return None;
+            }
+            operands.push(word);
+        }
+    }
+    if !expression {
+        scripts.push(operands.first().copied()?);
+    }
+    Some(scripts)
+}
+
+/// #789: whether a `sed` script only selects lines by number and prints,
+/// deletes, lists or counts them, or quits: no `w` (write), `e` (run), `r`
+/// (read) or substitution, whose flags could write or run. A `$` is the
+/// last line only where no shell would expand it (`1,$`, `$!N`: `$!` is a
+/// process number at most); one a shell may have expanded (`"$p"`, `${p}`,
+/// `$@`, zsh's `$=p`) is refused, since the text no longer shows whether it
+/// was quoted, and so are `$p` and `$=` (the last line). Only scripts given
+/// with `-e` get here with a `$`: a first operand holding one is refused as
+/// an operand a shell expands. A script that starts with `=` and goes on
+/// is refused too: zsh turns `=nl` into a program's path.
+fn sed_script_only_reads(script: &str) -> bool {
+    let chars: Vec<char> = script.chars().collect();
+    !script.trim().is_empty()
+        && (script == "=" || !script.starts_with('='))
+        && chars.iter().enumerate().all(|(index, c)| {
+            c.is_ascii_digit()
+                || " \t\n,;!{}pdqQ=nNl".contains(*c)
+                || (*c == '$'
+                    && chars
+                        .get(index + 1)
+                        .is_none_or(|next| next.is_whitespace() || ",;!}".contains(*next)))
+        })
 }
 
 /// #737: the config file `git config` writes (`--global`: `~/.gitconfig`;

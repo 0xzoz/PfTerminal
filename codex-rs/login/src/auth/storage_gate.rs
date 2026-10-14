@@ -171,10 +171,37 @@ mod tests {
         }
     }
 
+    /// Set in the child process that runs
+    /// [`pf_28_s01_login_and_refresh_after_arm_are_protected`]'s body.
+    const PF28_CHILD_ENV: &str = "CODEX_LOGIN_PF28_GATE_CHILD";
+
     #[test]
     fn pf_28_s01_login_and_refresh_after_arm_are_protected() {
-        // Process-wide gate (nextest runs each test in its own process):
-        // armed before any sign-in, as Core does.
+        // The gate and its registrations are process-wide. Under nextest each
+        // test has its own process, but `cargo test` and Bazel run the whole
+        // binary in one, where other tests' sign-ins retire these values. So
+        // the body runs in a child process of its own.
+        if std::env::var_os(PF28_CHILD_ENV).is_none() {
+            let test_name = format!(
+                "{}::pf_28_s01_login_and_refresh_after_arm_are_protected",
+                module_path!()
+                    .split_once("::")
+                    .map_or(module_path!(), |(_, path)| path)
+            );
+            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args(["--exact", &test_name, "--test-threads=1"])
+                .env(PF28_CHILD_ENV, "1")
+                .output()
+                .expect("run the test in a child process");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "{stdout}{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        // Armed before any sign-in, as Core does.
         output_gate::global().arm().expect("arm");
         let scrub = |text: &str| output_gate::scrub_if_armed(OutputSink::ToolResult, text);
         // Production creates a store per load or save; registrations are

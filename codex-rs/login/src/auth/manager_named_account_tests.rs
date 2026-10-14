@@ -18,6 +18,7 @@ fn account(name: &str) -> NamedChatgptAccount {
 /// The manager itself refuses a sign-in the login restrictions rule out, and
 /// a named manager hands default-account providers back to its base.
 #[tokio::test]
+#[serial_test::serial(codex_auth_env)]
 async fn restricted_sign_ins_never_load_and_the_base_stays_the_default() {
     let home = tempfile::tempdir().expect("home");
     login_named_account_with_api_key(home.path(), &account("work"), "sk-canary-restricted")
