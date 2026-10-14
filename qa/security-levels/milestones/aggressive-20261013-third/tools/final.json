@@ -517,7 +517,7 @@
   "raw": {
    "G25": "passed"
   },
-  "summary": "As expected (executor verdict passed; see result.md)."
+  "summary": "As expected (executor verdict passed; see result.md). Disclosure: step 3 ('List the files in P') was the product model's own decline (screen 26-r3-after-15s; one product request at 22:32:08Z in runs/G25/mediator-window.jsonl, no tool follow-up); its text met the expected wording, so the pass stands as for AGG-14 (corrected after evidence check r3)."
  },
  "AGG-R09": {
   "disposition": "passed",

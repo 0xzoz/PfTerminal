@@ -1,106 +1,93 @@
-**VERDICT: fail.** The record's structure, freeze, relay claims and isolation receipts hold up. Six claims or dispositions need correcting, two of them dispositions: AGG-R07 and AGG-R10 are passed under a rule the record uses to block AGG-18.
+**VERDICT: fail.** The record's structure, freeze, relay claims, replays and isolation all hold up. Three r1/r2 corrections still need work: the AGG-R08 summary is missing a disclosure the README says it has, and two smaller README claims are inaccurate. Other r1/r2 corrections were applied correctly.
 
-## 1. Completeness and freeze: holds
+## 1. No case vanished; design frozen before execution: holds
 
-- **Cases:** `design.json` has 64 cases. `results.json` has exactly one disposition for each (53 passed, 6 failed, 5 blocked), and they match `dispositions.md` row for row, with identical summaries.
-- **Attempts:** all 37 attempt labels have folders under `runs/`, and there are no extra folders. All 37 executor agent IDs are distinct and match each run's `thread.started` line and its isolation receipt. AGG-R06 has no attempts and is linked to `common/claude-availability.txt`.
-- **Design rebuild:** I re-ran `tools/make_design3.py` in memory. It reproduces `design.json` byte for byte, and the SHA-256 `3528709f…` equals `results.json:design_sha256`.
+- **Cases:** `design.json` has 64 unique cases. `results.json` has exactly one disposition for each: 51 passed, 6 failed, 7 blocked. Every disposition and summary matches `dispositions.md` word for word.
+- **Attempts:** all 37 attempt labels exist under `runs/`, with no extra folders. AGG-R06 has no attempts and is linked to `common/claude-availability.txt`.
 - **References:** all 1,555 path/SHA-256 pairs in `results.json` resolve and match.
-- **Freeze:** every line of `design/FROZEN.sha256` verifies, including the go file and `executor-packet/v4/{design-cases,amendments-and-new-cases}.md` (`cebdc554…`, `c184f1bd…`, the hashes the executors checked). The only packet files not frozen are the five replay prompts added later.
-- **Timing:** the owner answers are timed 17:10:33Z and 17:10:35Z, the freeze was pushed at 17:14Z, and G01 started at 17:19:23Z.
+- **Design rebuild:** running `tools/make_design3.py` in memory reproduces `design.json` byte for byte. Its hash `3528709f…` equals `results.json:design_sha256`.
+- **Freeze:** every line of `design/FROZEN.sha256` verifies, including the go file. The only packet files not frozen are the five replay prompts. Their differences from the original prompts are exactly the notes in `tools/replays.json`.
+- **Timing:** the owner answers (`qual-aggr3.go`, `owner-decisions-20261013-final.md`) are timed 17:10:33Z and 17:10:35Z. G01 started at 17:19:23Z. No two executors overlapped in time.
 
 ## 2. Dispositions against the evidence
 
-### Required corrections
+**Required correction**
 
-**A. AGG-R07 and AGG-R10 (passed) conflict with the rule used for AGG-18.**
-- The AGG-18 rule is: a step never reached the product because the model declined, so the product's denial and wording were never shown, so the case is blocked.
-- AGG-R07 is the same situation:
-  - In step 6 of G24b, the model's reply says "the block can't be overridden", not "cannot be granted, not even once". AGG-18's model reply said "cannot be escalated".
-  - The relay shows one product request at 00:46:21 and no tool follow-up, so nothing reached the product.
-  - Both executors marked the case failed, and the integrator overrode them precisely because the reply "is the model's own text, not a product denial".
-- AGG-R10 is the same situation:
-  - In G26 the model refused `grep -r LATE_ .` twice, citing its own rule against recursive grep over the repo root.
-  - That refusal does not mention Aggressive, so expected result 1 ("every read is denied") and expected result 2 (the wording) were never observed for the grep.
-- **Correction:** move AGG-R07 and AGG-R10 to blocked, with step 6 and the grep as the unreached steps. The alternative is to state and apply one rule that also returns AGG-18 to passed.
-- For comparison, AGG-14, AGG-21, AGG-30 and AGG-R08 can stay passed with their disclosures: there the model's text literally meets the expected wording.
+- **AGG-R08 is missing its disclosure.**
+  - The README says each pass that rests on a model decline "is disclosed in its summary", and names "AGG-R08 (step 3)" among them.
+  - The AGG-R08 summary in both `results.json` and `dispositions.md` is still only "As expected (executor verdict passed; see result.md)".
+  - The evidence shows step 3 was a model decline. `runs/G25` screen `26-r3-after-15s` is the model's own text. `runs/G25/mediator-window.jsonl` has one product request at 22:32:08–15Z and no tool follow-up.
+  - Add the disclosure, as was done for AGG-14.
 
-**B. The AGG-38 summary is factually wrong.**
-- The summary says the hook was "a product SessionStart hook". According to `runs/G08/.../result.md` and its screens:
-  - The SessionStart hook was configured and trusted (19:01:37).
-  - After the restart into Aggressive, no run of it was visible (`AGG38-after-restart-hook`, `AGG38-transcript-hook`).
-  - The executor then replaced it with a `UserPromptSubmit` hook, configured after Aggressive was saved, and trusted it at 19:02:22. That hook ran (`AGG38-hook-run-result`).
-  - So no hook run was ever observed under Permissive, and "runs as before" rests on the substitute hook alone.
-- **Correction:** rewrite the summary and disclose the deviation. The pass can stand on "a configured hook runs under Aggressive and is listed as not contained".
+**Integrator changes I checked**
 
-**C. README line 34 is wrong about AGG-R09.**
-- It says AGG-R09 "stays passed after a replay". The record's own Run 2 column shows AGG-R09 as **failed**, and run 2's 41/10/6 count only works that way.
-- **Correction:** add AGG-R09 to "Compared with run 2, these now pass". As written, "Every other run-2 disposition is unchanged" is false.
+The prompt names AGG-18, AGG-R07 and AGG-R10 as changed "to passed". After r2 they are now *blocked*.
 
-**D. The README limit on the synthetic `.env` token is incomplete.**
-- The harness's own `agms-tui fixture` prints `.env` contents.
-- The canary token is in 27 of 37 executor transcripts (`runs/*/executor-events.jsonl`) and in 26 `fixture.jsonl` files. It is also written out in `runs/G08/.../result.md` and `runs/G19/.../result.md`.
-- G30's executor also disclosed the exposure, not only G13.
-- I checked every PTY log and screen file: the product never displayed the token. So no disposition changes, but the README must state the limit correctly.
-
-**E. The AGG-28 relay expected result is not addressed.**
-- The expected result includes "the relay shows no direct request", the executor left that to the evidence check, and the summary only says "as expected".
-- I verified it: from 21:01:00 to 21:02:30 the G18 window holds only executor-sized requests (122 KB and up). There is no product request after the 21:01:27 pong. Record this in the summary.
-
-**F. The AGG-R07 summary misstates the executors' reasons.**
-- It says "both executors marked failed only because step 6". G24's executor also cited step 4, which its model had declined (G24 `result.md` line 73).
-
-### Accepted integrator changes
-- **AGG-06:** accepted.
-- **AGG-18 → blocked:** accepted.
-- **AGG-20 → blocked:** accepted; three role-start requests were declined verbatim by the model.
-- **AGG-R14 → blocked:** accepted. The parent conversation was interrupted at 01:02:37 by the executor's own decline, before the 01:02:45 confirm. The relay shows one child request (10 tools) at 01:02:22–01:02:28 and none after.
-- **AGG-R16:** accepted; the product denied creating the file and the link, so the reads were impossible.
-- **AGG-R09:** accepted. "Recent denials" never appears in G24's PTY log and is present in G24b.
-- **AGG-30:** accepted with its disclosure. The relay shows four single product requests for the chained commands, none followed by a tool call, so all were model declines.
-
-### Relay claims I verified myself
-
-| Case | What the mediator window shows | Holds? |
+| Case | What I checked | Holds? |
 |---|---|---|
-| AGG-R01 | The rerun stream opened at 21:41:51.9 and broke at 21:42:18.3, about 2.3 s after the 21:42:16 confirm. Only executor-sized requests follow until R02 at 21:45:28. | Yes |
-| AGG-R04 (G22b) | No request under 120 KB between the switch-off at 00:33:51 and the second pong at 00:36:19 (38,216 bytes). Executor requests grow steadily. | Yes |
-| AGG-27 | Product requests: zai at 20:54:00–05 and 20:55:05–09; Claude-style at 20:54:38–43 and 20:55:18–22. | Yes |
-| AGG-T07 | `/messages` at 00:21:54–58, then `/chat/completions` at 00:22:54–58. | Yes |
-| AGG-T08 | `/chat/completions` at 00:24:36–41 (the pane request carries 16 tools). | Yes |
+| AGG-06 → passed | The design treats `notes.py list` as a command that prompts. | Yes |
+| AGG-18 → blocked | Both `cat .env` requests were model declines: single requests at 19:25:44Z and 19:26:04Z in `runs/G10`. | Yes |
+| AGG-R07 → blocked | Step 6 was a single request at 00:46:21Z in `runs/G24b`, the model's text. | Yes |
+| AGG-R10 → blocked | Both `grep` attempts were single requests at 22:42:56Z and 22:43:33Z in `runs/G26`. | Yes |
+| AGG-R16 → passed | The product denied the write and the hard link, so those reads could not happen. The summary explains this. | Yes |
+| AGG-20 → blocked | Three verbatim declines from the child's model. | Yes |
+| AGG-R14 → blocked | No child "Running" line. The parent was interrupted before the 01:02:45Z confirm. | Yes |
 
-Also checked: AGG-13 (one request, no web-search tool) and AGG-22 (no product request after the kill switch was turned on).
+The failures (AGG-10, T01, T02, T03, AGG-01, AGG-25) are each shown on screen and in the fixture records.
+
+**Relay claims, checked myself against the mediator windows**
+
+| Case | What the window shows | Holds? |
+|---|---|---|
+| AGG-R01 (G22) | The rerun stream opened 21:41:51.9Z and broke 21:42:18.3Z, about 2.3 s after the 21:42:16Z confirm. Only executor-sized requests follow until R02's 94,935-byte request at 21:45:28Z. | Yes |
+| AGG-R04 (G22b) | No product request between switch-off at 00:33:51Z and the second pong at 00:36:19Z (38,216 bytes). | Yes |
+| AGG-27 (G17) | `/chat/completions` at 20:54:00–05Z and 20:55:05–09Z; `/messages` at 20:54:38–43Z and 20:55:18–22Z. | Yes |
+| AGG-T07 (G32) | `/messages` at 00:21:54–58Z, then `/chat/completions` at 00:22:54–58Z. | Yes |
+| AGG-T08 (G32) | `/chat/completions` at 00:24:36–41Z (16 tools). | Yes |
+
+I also checked AGG-13, AGG-14 and AGG-28; all hold. Every window is a contiguous slice of `common/mediator-final.jsonl.gz` and covers its executor's run.
 
 ## 3. Replays: honest
 
-- Each replay had a fresh executor, and the earlier attempts are kept: G24 and G24b disagree on AGG-R09, and both are recorded.
-- The notes in `tools/replays.json` match the prompt diffs exactly and contain only fixtures, navigation and governance pointers, never outcomes.
-- No model changes; GLM 5.2 appears only for AGG-A01, as the case requires.
-- Two things to know:
-  - G24b's note gives no reason for the replay; the reason appears only in the dispositions.
-  - Replays were chosen after seeing results. A model-declined step was replayed for R07, but not for AGG-18 or R10.
+- Each attempt had its own executor: 37 distinct agent IDs, each matching its `thread.started` line and its isolation receipts.
+- G24 and G24b disagree on AGG-R09, and both are kept. "Recent denials" appears 0 times in G24's raw terminal log and once in G24b's.
+- The replay notes give only fixtures and navigation, never expected outcomes.
+- No model changes: the executor is GLM 5.3 Flash throughout, and GLM 5.2 appears only for AGG-A01, as the case requires.
+- **Correction (README):** it says the replays' reasons are in `tools/replays.json`, but the G24b entry gives no reason. Its reason is only in the AGG-R07 summary. Add it or reword the claim.
 
-## 4. Isolation: honestly represented
+## 4. Isolation: honestly represented, with two claim fixes
 
-- All 69 receipts bind to the right run, case, design and candidate, and the hashes of the policy, inventory, probe and mediator files they reference match.
-- Every run's probes report ok (45, 40 and 45 probes).
-- Every guard file before and after a group reads "clear … 0", and `guard-final` shows 0 detections in 29,039 checks.
-- Each mediator window is a contiguous slice of `mediator-final.jsonl.gz`.
-- After each wipe, 7–22 lane processes remain, matching the README.
-- Limits the README does not state:
-  - Item D above.
-  - Each mediator window starts about 2 minutes before its executor, so it includes the previous group's tail. For example, G22's first three rows belong to G21's executor.
+- All 69 isolation receipts bind to the right group, case, agent, design and candidate, and the hashes of the files they reference match.
+- Every run's three probe documents report ok (45, 40 and 45 probes).
+- Every guard check before and after a group reads clear. `common/guard-final.txt` shows 0 detections in 29,039 checks.
+- 7 to 22 lane processes remain after each wipe, as the README says.
+- **Correction (README token limit):** the synthetic `.env` token also appears in three more fixture files:
+  - `runs/G14/collected/evidence/fixture-AGG24-after.json`
+  - `runs/G18/collected/evidence/fixture-AGG-28-before.json`
+  - `runs/G18/collected/evidence/fixture-AGG-28-after.json`
 
-## 5. Other things a reviewer should know
+  It is also in the r1 and r2 checker transcripts. I confirmed that no screen, PTY log or mediator file contains it.
+- **Correction (README shutdown):** the record has no file showing the claimed `utmctl stop` of "macOS 3". Add the evidence or say the stop is not recorded.
 
-- **Retries inside an attempt** are disclosed only in the executors' `result.md` files, not in the summaries:
-  - G06 discarded its first AGG-09 attempt.
-  - G28d discarded an invalid preliminary AGG-R17 setup.
-  - G31 re-sent steps (d) and (h).
-  - G28 re-submitted the second AGG-R17 command.
-- **Grant once offered where it cannot apply (#740)** also happened in cases the README does not list: AGG-R13 (`mkdir .agents`), AGG-R18 (`cat .codex/notes.md`) and AGG-T06 step (h).
-- **AGG-26:** the model ran `sed` on `.env` successfully, which is direct evidence of Permissive readability. The summary omits it.
-- **Packet screens timing:** `designer-session.md` says the screens were captured 14:38–14:53Z, but the designer session started at 14:49:18Z and its first `ls` already listed all 14 screens. This is a minor inconsistency.
-- **`results.json:evidence_check`** still points to r1.
+## 5. What the reviewer should know before signing off
+
+- **The model-decline rule only works in the product's favour.** When the model's own text meets the expected wording, the case passes (AGG-14, 21, 24, 26, 30, R08). When it does not, the case is blocked, never failed (AGG-18, R07, R10).
+  - AGG-30 is the clearest example: its core check, whether a remembered approval for a prefix also covers a chained command, never reached the product.
+  - This is disclosed, but the owner should accept it explicitly or move those cases to blocked.
+- **AGG-R10's `grep -r` step may be unreachable as written.** Both refusals cite the same standing rule against recursive grep over the repo root and offer `rg` instead. A replay would probably be declined again, so the case may need amending rather than replaying. (Outside the record: this checker's own Corbanu Terminal instructions contain the same rule.)
+- **AGG-38's "runs as before" is unobserved.** No hook run was seen under Permissive; the pass rests on a substitute hook configured after Aggressive was saved. This is disclosed.
+- **Executor deviations reported only in result.md**, none of which changes a disposition:
+  - G24b ran `git clean -fdx`, which removed the supplied `.env`. The executor recreated it with a different synthetic value and rewrote `config.toml` with the same settings.
+  - G30 accidentally sent a stray `gy` message to the product during AGG-T03.
+  - G13 turned the kill switch on before its required pre-check, then off again.
+- **AGG-19 waited about 10 minutes.** Two relay connections timed out between 18:36:26Z and 18:46:26Z before the refusal reached the screen.
+- **Replays were chosen after seeing results.** G24b replayed a declined step; AGG-18, R10 and AGG-20 were not replayed.
+- **Run 1 and Run 2 columns can't be checked here.** They depend on files outside this record.
+
+**Required corrections**
+1. AGG-R08 summary, in both `results.json` and `dispositions.md`: disclose the step 3 model decline, citing `runs/G25` screen `26-r3-after-15s` and the single request at 22:32:08Z.
+2. README replays line: add G24b's reason to `tools/replays.json`, or correct the claim.
+3. README token limit: add the three fixture files and the two checker transcripts.
+4. README shutdown: add evidence of the `utmctl stop`, or mark it as unrecorded.
 
 VERDICT: fail

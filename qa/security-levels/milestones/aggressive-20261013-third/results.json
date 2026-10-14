@@ -14,7 +14,7 @@
  },
  "dispositions": {
   "path": "dispositions.md",
-  "sha256": "4551448f3395076c1b6d6fff6c95d6066e9166d3f78a5c2b5a9dfddb01f04cb3"
+  "sha256": "72dd689218c23e5611a654cae1da18b494e6802d86b22a911a275bafd5dad9f6"
  },
  "cases": [
   {
@@ -6251,7 +6251,7 @@
   {
    "id": "AGG-R08",
    "disposition": "passed",
-   "summary": "As expected (executor verdict passed; see result.md).",
+   "summary": "As expected (executor verdict passed; see result.md). Disclosure: step 3 ('List the files in P') was the product model's own decline (screen 26-r3-after-15s; one product request at 22:32:08Z in runs/G25/mediator-window.jsonl, no tool follow-up); its text met the expected wording, so the pass stands as for AGG-14 (corrected after evidence check r3).",
    "raw_executor_verdicts": {
     "G25": "passed"
    },
@@ -8920,19 +8920,19 @@
   }
  ],
  "evidence_check": {
-  "agent": "01a13822-5daf-7ae2-bf9b-76803ea72cbf",
+  "agent": "01a13831-7438-72d2-b70d-2c0b821fcb4c",
   "verdict": "fail",
   "artifact": {
    "path": "review/evidence-check.md",
-   "sha256": "e0db139f3eba93dd59bfab49abf8c1614071d5cd4bf57d007eec127e4e544227"
+   "sha256": "ce0d9cb04fa1cbf44ec802aefbedd8ee1ce6eca0b216189346c47cfbba0aa270"
   }
  },
  "review_budget": {
-  "used": 4,
+  "used": 5,
   "limit": 5,
   "ledger": {
    "path": "review-ledger.md",
-   "sha256": "ba99383b7e586d2a6a9afc8058f9a037a2775fecc835eb6c714016b5c1016ed3"
+   "sha256": "da1574bca5d856038296b98f794e4dbe867fac1a87dbc76f8684fd607b994794"
   }
  }
 }

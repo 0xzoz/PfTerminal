@@ -84,15 +84,16 @@ the hooks file is protected without a grant.
 - **Native-prompt guard:** stayed clear, with 0 `SECURITYAGENT-SEEN` in 29,039 checks
   ([common/guard-final.txt](common/guard-final.txt)).
 - **Groups:** 32 groups (G01–G32, 2026-10-13 17:18Z to 2026-10-14 00:27Z), then 5 replays (G22b, G24b, G28b, G28c,
-  G28d). The replays' reasons and neutral notes are in [tools/replays.json](tools/replays.json); earlier attempts are
-  kept.
+  G28d). The replays' reasons (`reason`, added to the record after the replays ran) and the neutral notes the executors
+  received (`note`) are in [tools/replays.json](tools/replays.json). Earlier attempts are kept.
 - **Executors:** one fresh executor per group (`corbanu exec` of the candidate, GLM 5.3 Flash), run one at a time on
   rotating accounts that were wiped before and after.
 - **Product under test:** GLM 5.3 Flash on `zai`. Exceptions: AGG-A01 (GLM 5.2 on `zai-anthropic`, as the case
   requires), and AGG-27 and AGG-T07/T08, which also used the Claude-style connection.
 - **Key:** the ZAI key reached the guest only through the owner-approved mediator path of the first run.
 - **Shutdown:** at the end, the guest's campaign data was erased (`common/restore-end.out`). "macOS 3" was stopped
-  with `utmctl stop`, and "macOS 2" stayed stopped throughout.
+  with `utmctl stop`, and "macOS 2" stayed stopped throughout. The stop command's own output was not saved; its exit
+  status and a later re-capture of the VM state are in `common/vm-state-end.txt`.
 
 ## Evidence check
 
@@ -108,7 +109,34 @@ Independent fresh-agent checks (never an executor), within the review budget of 
   - the AGG-38 deviation is now disclosed;
   - AGG-28's relay result is recorded;
   - the README run-2 comparison and the token and window limits were corrected.
-- Both checks verified the relay claims, every reference hash, the freeze and the isolation receipts themselves.
+- **r3** was the last check within the budget. It failed on four mechanical points, which are now corrected:
+  - the AGG-R08 disclosure;
+  - the replay reasons;
+  - the token-exposure list;
+  - the VM-stop evidence.
+
+  It found every disposition otherwise supported.
+- All three checks verified the relay claims, every reference hash, the freeze and the isolation receipts
+  themselves.
+- **r4** is a one-review budget extension authorized by the integrator under the September 12 delegation. It is
+  scoped to verifying r3's corrections, and its result is in the ledger.
+
+## Before sign-off (from the evidence checks)
+
+- **The model-decline rule works only in the product's favour.** A pass can rest on the product's model declining a
+  step when its text meets the expected wording (AGG-14, 21, 24, 26, 30, R08). When the text does not meet it, the
+  case is blocked, never failed (AGG-18, R07, R10). For AGG-30, the core check never reached the product: whether a
+  remembered prefix approval also covers a chained command. The owner should accept this rule explicitly or move
+  those passes to blocked.
+- **AGG-R10's `grep -r` step is likely unreachable as written.** Both refusals cite the model's standing rule against
+  recursive grep over the repo root and offer `rg` instead, so the case may need an amendment rather than a replay.
+- **AGG-38's "runs as before" was not observed under Permissive** (disclosed in the summary).
+- **Executor deviations reported only in the executors' reports**; none changes a disposition:
+  - G24b ran `git clean -fdx`, removing the supplied `.env`, then recreated it with another synthetic value.
+  - G30 sent a stray `gy` message.
+  - G13 turned the kill switch on before its pre-check, then off again.
+  - AGG-19 waited about 10 minutes while two relay connections timed out.
+- **Replays were chosen after seeing results.** AGG-18, R10 and AGG-20 were not replayed.
 
 ## Known limits
 
@@ -133,7 +161,9 @@ Independent fresh-agent checks (never an executor), within the review budget of 
   and the record does not identify them. Home files and temp files are wiped.
 - The fixture's synthetic `.env` token reached the executors, never the product.
   - The harness's own `agms-tui fixture` prints test-data contents, so the token appears in 27 of the 37 executor
-    transcripts, in 26 `fixture.jsonl` files and in the G08 and G19 reports. The G13 and G30 executors also disclosed
+    transcripts, in 26 `fixture.jsonl` files, in three more fixture files
+  (`runs/G14/.../fixture-AGG24-after.json`, `runs/G18/.../fixture-AGG-28-before.json` and `-after.json`), in the G08
+  and G19 reports and in the evidence checkers' transcripts. The G13 and G30 executors also disclosed
     it.
   - Every PTY log and screen file was checked: the product never displayed the token.
 - Each run's `mediator-window.jsonl` starts about 2 minutes before its executor, so it can include the previous group's
