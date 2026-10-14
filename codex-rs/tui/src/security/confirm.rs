@@ -14,6 +14,10 @@
 //!   files. A crash before Core leaves Core's record stricter than the file,
 //!   which the next start reads as changed outside `/security` and enforces
 //!   Aggressive.
+//! - Moderate (#750): level file, then Core, raising or lowering it. A Core
+//!   failure restores the previous files. A crash before Core leaves a
+//!   Moderate file over a weaker record, which the next start reports and
+//!   does not show as Moderate, or an Aggressive record, which it enforces.
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -38,6 +42,7 @@ const CHANGED: &str = "Not saved: the security state changed since you reviewed 
 pub(crate) fn core_level(level: ChosenLevel) -> SecurityLevel {
     match level {
         ChosenLevel::Permissive => SecurityLevel::Permissive,
+        ChosenLevel::Moderate => SecurityLevel::Moderate,
         ChosenLevel::Aggressive => SecurityLevel::Aggressive,
     }
 }
@@ -80,6 +85,11 @@ pub(crate) fn core_commit_needed(basis: &LevelBasis, target: ChosenLevel, raise:
             basis.next_start != SecurityLevel::Permissive
                 || matches!(basis.stored, StoredSecurityState::Unreadable(_))
                 || matches!(basis.stored, StoredSecurityState::Level(level) if level != SecurityLevel::Permissive)
+        }
+        // Moderate is Core's level: always recorded with the level file.
+        ChosenLevel::Moderate => {
+            basis.next_start != SecurityLevel::Moderate
+                || basis.stored != StoredSecurityState::Level(SecurityLevel::Moderate)
         }
     }
 }
@@ -259,7 +269,7 @@ pub(crate) fn run(request: TransitionRequest) -> TransitionResult {
     let saved = match (request.target, &request.passed_preflight) {
         (ChosenLevel::Aggressive, Some(passed)) => preflight::save_receipt(home, passed),
         (ChosenLevel::Aggressive, None) => Ok(()),
-        (ChosenLevel::Permissive, _) => preflight::remove_receipt(home),
+        (ChosenLevel::Permissive | ChosenLevel::Moderate, _) => preflight::remove_receipt(home),
     }
     .and_then(|()| level::save(home, request.target, request.nested));
     if let Err(err) = saved {

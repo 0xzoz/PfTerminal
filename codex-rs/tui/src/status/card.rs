@@ -340,6 +340,11 @@ impl StatusHistoryCell {
         let show_chatgpt_usage_link = config.model_provider.requires_openai_auth;
         let account = compose_account_display(account_display);
         let account_value = status_account_value(config, account_display);
+        let security = crate::security::view::status_summary(
+            config.security_level,
+            crate::legacy_core::security_level_change::configured_level(config),
+            *session_id,
+        );
         let session_id = session_id.as_ref().map(std::string::ToString::to_string);
         let forked_from = forked_from.map(|id| id.to_string());
         let default_usage = TokenUsage::default();
@@ -376,7 +381,7 @@ impl StatusHistoryCell {
                 model_details,
                 directory: config.cwd.to_path_buf(),
                 permissions,
-                security: crate::security::view::status_summary(config.security_level),
+                security,
                 collaboration_mode: collaboration_mode.map(ToString::to_string),
                 model_provider,
                 remote_connection: remote_connection.cloned(),

@@ -96,10 +96,9 @@ fn list_review_and_saved_screens() {
     insta::assert_snapshot!("security_level_picker_list", render(&picker, /*width*/ 80));
     picker.handle_key_event(key(KeyCode::Down));
     picker.handle_key_event(key(KeyCode::Enter));
-    insta::assert_snapshot!(
-        "security_level_picker_moderate_unavailable",
-        render(&picker, /*width*/ 80)
-    );
+    // #750: Moderate opens its review; Esc goes back to the list.
+    assert_eq!(picker.screen, Screen::Review(ChosenLevel::Moderate));
+    picker.handle_key_event(key(KeyCode::Esc));
     picker.handle_key_event(key(KeyCode::Down));
     picker.handle_key_event(key(KeyCode::Enter));
     insta::assert_snapshot!(

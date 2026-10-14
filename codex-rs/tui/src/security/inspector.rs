@@ -32,11 +32,15 @@ pub(crate) const STALE_AFTER_SECONDS: i64 = 30;
 /// Recent denials shown.
 const MAX_DENIALS_SHOWN: usize = 8;
 
-/// Controls that belong to the P1 hardening plan (decision 3, 2026-10-06).
-const NOT_AVAILABLE: [(&str, &str); 4] = [
+/// Controls that belong to the P1 hardening plan (decision 3, 2026-10-06),
+/// with those Moderate promises that are not built yet (#750, D1).
+pub(crate) const NOT_AVAILABLE: [(&str, &str); 7] = [
+    ("Financial preview and approvals", "PF-38, PF-39"),
+    ("Isolated retrieval", "PF-31"),
     ("Screened search routing", "PF-32"),
     ("Brokered browser login", "PF-37"),
     ("Quarantine", "PF-34"),
+    ("Untrusted-content detectors", "PF-35, PF-36"),
     ("Agent Sweep", "PF-40"),
 ];
 
@@ -128,7 +132,10 @@ impl InspectorInput {
             outside_user_config,
             active: context.map_or(ChosenLevel::Permissive, |context| context.active),
             boundary: context.and_then(|context| context.boundary.clone()),
-            current: super::current::current_values(config),
+            current: super::current::current_values(
+                config,
+                super::current::level_now(config, thread),
+            ),
             sandbox: sandbox_name(config),
             destination_policy: config.features.enabled(Feature::UrlDestinationPolicy),
             network_broker: config.features.enabled(Feature::IsolatedCredentialBroker),
@@ -318,12 +325,17 @@ pub(crate) fn sections(
             row(
                 "Active this run",
                 State::Resolved,
-                if launch_checked {
+                match input.active {
                     // #437: the launch check covers the session rows, not the
                     // runtime controls (which say what is observed).
-                    "Aggressive; rows marked \"checked at launch\" passed the launch check (runtime controls below show what is observed now)"
-                } else {
-                    "Permissive"
+                    ChosenLevel::Aggressive => {
+                        "Aggressive; rows marked \"checked at launch\" passed the launch check (runtime controls below show what is observed now)"
+                    }
+                    // #749: Moderate is Core's level, confirmed at launch.
+                    ChosenLevel::Moderate => {
+                        "Moderate: Core's level was Moderate at launch; your own sandbox, approval and network settings apply (runtime controls below show what Core enforces now)"
+                    }
+                    ChosenLevel::Permissive => "Permissive",
                 },
                 "resolved: launch check",
             ),
@@ -465,6 +477,10 @@ pub(crate) fn sections(
         "Nested agents",
         State::Resolved,
         match saved.nested {
+            // #749: what applies under Moderate, which has no nested setting.
+            _ if in_force(input, facts) == SecurityLevel::Moderate => {
+                super::moderate::NESTED
+            }
             NestedAgents::Refuse => {
                 "refuse (default): agent commands that start another agent (`corbanu exec`, `review`, `resume`, `fork`, a new session, `app-server` or `mcp-server`) are refused while Aggressive is enforced"
             }
@@ -611,7 +627,8 @@ fn runtime_rows(input: &InspectorInput, facts: &RuntimeFacts) -> Vec<Row> {
     // Core gates at the stricter of the session's configured level and
     // its live policy.
     let core_protected = input.configured.max(core_level(facts)) != SecurityLevel::Permissive;
-    let aggressive_brokers = in_force(input, facts) == SecurityLevel::Aggressive
+    // #391, D2: Moderate and Aggressive turn the broker on where it runs.
+    let level_brokers = in_force(input, facts) != SecurityLevel::Permissive
         && cfg!(any(target_os = "macos", target_os = "linux", windows));
     let control = |label: &str, facts: ControlFacts, on: &str, off: &str| match facts {
         ControlFacts::Enforcing => row(label, State::Enforcing, on, "observed: this process"),
@@ -655,14 +672,14 @@ fn runtime_rows(input: &InspectorInput, facts: &RuntimeFacts) -> Vec<Row> {
                 "installed; its health is not probed",
                 "installed: this process",
             ),
-            // #391: Aggressive turns it on where the broker runs, so off
-            // there means config turned it off, or the level was chosen
-            // after this process started.
-            other if aggressive_brokers => required(control(
+            // #391, D2: Moderate and Aggressive turn it on where the broker
+            // runs, so off there means config turned it off, or the level was
+            // chosen after this process started.
+            other if level_brokers => required(control(
                 "Model key broker",
                 other,
                 "provider keys are brokered",
-                "off: Core reads provider keys itself (broker_model_auth is off in config, or this process started before Aggressive)",
+                "off: Core reads provider keys itself (broker_model_auth is off in config, or this process started before the level was chosen)",
             )),
             other => control(
                 "Model key broker",
@@ -755,6 +772,7 @@ fn runtime_rows(input: &InspectorInput, facts: &RuntimeFacts) -> Vec<Row> {
 fn launch_level(input: &InspectorInput) -> SecurityLevel {
     match input.active {
         ChosenLevel::Permissive => SecurityLevel::Permissive,
+        ChosenLevel::Moderate => SecurityLevel::Moderate,
         ChosenLevel::Aggressive => SecurityLevel::Aggressive,
     }
 }
@@ -805,9 +823,12 @@ pub(crate) fn badge(
     let level = level_name(in_force(input, facts));
     if level == "Permissive" {
         return match saved.level.enforced() {
-            ChosenLevel::Aggressive => Badge::Degraded(
+            saved @ (ChosenLevel::Moderate | ChosenLevel::Aggressive) => Badge::Degraded(
                 level,
-                vec!["Aggressive is saved but not active until restart".to_string()],
+                vec![format!(
+                    "{} is saved but not active until restart",
+                    saved.name()
+                )],
             ),
             ChosenLevel::Permissive => Badge::Permissive,
         };
@@ -819,6 +840,9 @@ pub(crate) fn badge(
     if input.active == ChosenLevel::Permissive {
         if saved.level.enforced() == ChosenLevel::Aggressive {
             degraded.push("Aggressive's session controls apply after restart".to_string());
+        } else if saved.level.enforced() == ChosenLevel::Moderate {
+            // D4: Core's rules apply now; the credential broker at restart.
+            partial.push("Moderate's model-key broker applies after restart".to_string());
         } else {
             // Core's level comes from config: this session's sandbox,
             // approval and network values were not checked against it.

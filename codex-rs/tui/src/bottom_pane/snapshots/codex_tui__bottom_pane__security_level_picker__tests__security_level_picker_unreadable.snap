@@ -1,6 +1,5 @@
 ---
 source: tui/src/bottom_pane/security_level_picker_tests.rs
-assertion_line: 146
 expression: rendered
 ---
 Security level
@@ -8,7 +7,7 @@ Active in this session: Aggressive
 Stored level is unreadable or was changed outside /security (<home>/security_level.toml: unknown level `max`); Aggressive is enforced. Choose a level to repair it.
 
   Permissive
-  Moderate  not available yet
+  Moderate
 > Aggressive  (active)
 
 Sensitive access denied by default, built from existing sandbox, approval, network and exec-policy controls.
