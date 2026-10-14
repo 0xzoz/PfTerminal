@@ -2,7 +2,7 @@
 
 Candidate: branch `feat/pf-84-s04-provider-accounts-ui`, code at `7a1ab9bc9d` (later commits are
 docs only). Change class: product initiative (plan PF-84). Product spec: "Unified provider
-onboarding and management" in [the plan](../../../docs/plans/active/unified-provider-auth.md),
+onboarding and management" in [the plan](../../../docs/plans/completed/main-2026-10-14-unified-provider-auth.md),
 acceptance rows "Add second account", "Session account switch", "One row per account".
 
 ## What shipped

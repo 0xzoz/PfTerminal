@@ -173,7 +173,13 @@ pub(crate) fn assessment_turn_label(sub_id: &str) -> String {
 /// fine. Keep the prefix and as much of the id as fits.
 fn scoped_turn_label(prefix: &str, sub_id: &str) -> String {
     const LIMIT: usize = 128;
-    let room = LIMIT - prefix.len();
+    // Nested prefixes (`side:agent:review:`) stay far below this; the digest
+    // form below needs room for `-` and 16 hex digits.
+    debug_assert!(
+        prefix.len() <= LIMIT - 17,
+        "turn label prefix too long: {prefix}"
+    );
+    let room = LIMIT.saturating_sub(prefix.len());
     if sub_id.len() <= room {
         return format!("{prefix}{sub_id}");
     }
@@ -331,8 +337,9 @@ pub(crate) struct AccountingOwner {
     pub(crate) thread: ThreadId,
     pub(crate) db: codex_rollout::state_db::StateDbHandle,
     /// Prefixed to the turn label of work recorded for another conversation
-    /// (`review:`, `consolidation:`, `side:`); empty for a session's own.
-    pub(crate) label_prefix: &'static str,
+    /// (`review:`, `consolidation:`, `agent:`, `code-review:`, `side:`,
+    /// `fork:`, nested as in `side:review:`); empty for a session's own.
+    pub(crate) label_prefix: String,
 }
 
 /// The conversation an internal worker with no thread of its own (memory
@@ -473,11 +480,13 @@ pub(crate) async fn attach_scopes(
     client_session: &crate::client::ModelClientSession,
     turn: String,
 ) -> Result<TurnScopes, CodexErr> {
-    // A persisted session records under its own thread. A guardian reviewer,
-    // a memory consolidation agent or a side conversation records under the
-    // conversation it works for, labelled as such (`Session::accounting_owner`).
-    // Any other session has no owner to attribute its attempts to, so it is
-    // left uncollected - named once in the log - and its turns run.
+    // A persisted session records under its own thread. A session with no
+    // thread of its own (a guardian reviewer, a memory consolidation agent, a
+    // sub-agent, a `/side` conversation or another temporary fork) records
+    // under the saved conversation it works for, labelled as such
+    // (`Session::accounting_owner`). Any other session (`exec --ephemeral` and
+    // work for it) is left uncollected - named once in the log - and its turns
+    // run.
     // A ledger that cannot be reached leaves this turn's requests unrecorded;
     // it never stops them.
     let mut candidate = match accounting {
@@ -517,7 +526,7 @@ pub(crate) async fn attach_scopes(
         .map(|owner| (Arc::clone(&owner.db), owner.thread));
     let turn = match &owner {
         Some(owner) if !owner.label_prefix.is_empty() => {
-            scoped_turn_label(owner.label_prefix, &turn)
+            scoped_turn_label(&owner.label_prefix, &turn)
         }
         Some(_) | None => turn,
     };

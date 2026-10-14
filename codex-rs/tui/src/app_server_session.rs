@@ -1043,24 +1043,28 @@ impl AppServerSession {
         }
         let request_id = self.next_request_id();
         let session_config = self.session_config_with_effective_service_tier(&config);
+        let mut params = ThreadForkParams {
+            last_turn_id,
+            before_turn_id,
+            defer_goal_continuation: goal_continuation == ForkGoalContinuation::DeferUntilNextTurn,
+            exclude_turns: presentation == ForkPresentation::SideConversation,
+            ..thread_fork_params_from_config(
+                session_config,
+                thread_id,
+                self.thread_params_mode(),
+                self.remote_cwd_override.as_deref(),
+            )
+        };
+        if presentation == ForkPresentation::SideConversation {
+            // PF-60-S06: developer accounting labels `/side` work `side:` and
+            // every other temporary fork `fork:`.
+            params.thread_source = Some(ThreadSource::Feature(
+                codex_protocol::protocol::ThreadSource::SIDE_CONVERSATION.to_string(),
+            ));
+        }
         let response: ThreadForkResponse = self
             .client
-            .request_typed(ClientRequest::ThreadFork {
-                request_id,
-                params: ThreadForkParams {
-                    last_turn_id,
-                    before_turn_id,
-                    defer_goal_continuation: goal_continuation
-                        == ForkGoalContinuation::DeferUntilNextTurn,
-                    exclude_turns: presentation == ForkPresentation::SideConversation,
-                    ..thread_fork_params_from_config(
-                        session_config,
-                        thread_id,
-                        self.thread_params_mode(),
-                        self.remote_cwd_override.as_deref(),
-                    )
-                },
-            })
+            .request_typed(ClientRequest::ThreadFork { request_id, params })
             .await
             .map_err(|err| {
                 bootstrap_request_error("thread/fork failed during TUI bootstrap", err)
@@ -3531,6 +3535,20 @@ requires_openai_auth = false
                 }]
         ));
         assert_eq!(side.turns, Vec::<Turn>::new());
+
+        // PF-60-S06: only the side fork is marked as `/side`, so developer
+        // accounting labels its work `side:` and the regular fork's `fork:`.
+        let side_thread = app_server
+            .thread_read(side.session.thread_id, /*include_turns*/ false)
+            .await?;
+        assert_eq!(
+            side_thread.thread_source,
+            Some(ThreadSource::Feature("side".to_string()))
+        );
+        let regular_thread = app_server
+            .thread_read(regular.session.thread_id, /*include_turns*/ false)
+            .await?;
+        assert_eq!(regular_thread.thread_source, Some(ThreadSource::User));
         app_server.shutdown().await?;
         Ok(())
     }

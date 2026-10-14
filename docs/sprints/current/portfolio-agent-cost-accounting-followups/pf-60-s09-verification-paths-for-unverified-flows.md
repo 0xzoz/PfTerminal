@@ -2,7 +2,7 @@
 sprint_id: "PF-60-S09"
 title: "Verification paths for unverified flows"
 status: draft
-plan_file: "docs/plans/proposed/portfolio-agent-cost-accounting-followups.md"
+plan_file: "docs/plans/active/portfolio-agent-cost-accounting-followups.md"
 plan_feature: "PF-60"
 execution_order: 4
 owner: "Codex accounting lane (proposed); Travis Good accepts"
@@ -28,7 +28,7 @@ updated: 2026-10-10
 
 ## Plan linkage
 
-- Plan: [Accounting follow-ups after PF-60](../../../plans/proposed/portfolio-agent-cost-accounting-followups.md); feature `PF-60`.
+- Plan: [Accounting follow-ups after PF-60](../../../plans/active/portfolio-agent-cost-accounting-followups.md); feature `PF-60`.
 - Acceptance advanced: no accounting flow is left unverified without Travis's recorded decision.
 
 ## Code boundaries

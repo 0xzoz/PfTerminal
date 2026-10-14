@@ -2,7 +2,7 @@
 sprint_id: "PF-84-S05"
 title: "Per-account usage and rate-limit attribution"
 status: completed
-plan_file: "docs/plans/active/unified-provider-auth.md"
+plan_file: "docs/plans/completed/main-2026-10-14-unified-provider-auth.md"
 plan_feature: "PF-84"
 execution_order: 27
 owner: "Codex PF-84 lane owner"
@@ -59,7 +59,7 @@ Known limits (tracked, not blockers):
 
 ## Plan linkage
 
-- Plan: [Unified provider onboarding and management](../../../plans/active/unified-provider-auth.md)
+- Plan: [Unified provider onboarding and management](../../../plans/completed/main-2026-10-14-unified-provider-auth.md)
 - Feature: `PF-84`
 - Acceptance advanced: "Per-account usage".
 
