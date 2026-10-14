@@ -335,6 +335,11 @@ fn issue_743_linux_pane_commands_can_make_temporary_files() {
         ("PATH".to_string(), "/usr/bin:/bin".to_string()),
         ("HOME".to_string(), cwd.path().to_string_lossy().into_owned()),
         ("TMPDIR".to_string(), "/tmp".to_string()),
+        // The bridge, as a pane's plan sets it.
+        (
+            "HTTP_PROXY".to_string(),
+            "http://127.0.0.1:4242".to_string(),
+        ),
     ]);
     let run = |script: &str| {
         let (program, args) = pane_command(
