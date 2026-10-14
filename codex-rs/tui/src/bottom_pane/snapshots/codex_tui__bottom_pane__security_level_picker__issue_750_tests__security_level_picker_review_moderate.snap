@@ -57,9 +57,9 @@ Unchanged: model and provider, your approval, sandbox, network and web search
 settings, MCP servers, apps and hooks (they run outside the sandbox), and wallet
 scopes.
 Core's level becomes Moderate from the next start (this session's policy does
-not run in this process yet): agent commands stay in the sandbox, cannot read
-credential files in your home folder or Corbanu's sign-in, vault, config,
-history and state, and cannot write files that run code later unless you approve
+not run in this process yet): agent commands stay in the sandbox and cannot
+read credential files in your home folder or Corbanu's sign-in, vault, config,
+history and state, or write files that run code later, unless you approve
 that one command; after untrusted content, protected actions need your fresh
 approval.
 Your config.toml is not modified.

@@ -12,7 +12,7 @@ Protected modes are blocked; required controls are not qualified.
 > Aggressive
 
 Sensitive access denied by default: writes only in the current folder, approval
-for every command, no network, and no vault access for agents. Chosen in /
-security with the security_levels feature.
+for every command that is not known read-only, no network, and no vault access
+for agents. Chosen in /security with the security_levels feature.
 
 ↑/↓ explore · enter inspect · esc close
