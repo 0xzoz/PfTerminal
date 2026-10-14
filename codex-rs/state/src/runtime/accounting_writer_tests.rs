@@ -678,10 +678,11 @@ async fn ten_sessions_on_one_home_wait_briefly_and_lose_no_record() -> anyhow::R
     // to open and lock SQLite files (p99 1.6-1.9 s on nightly-ci, #636).
     let bound = Duration::from_millis(if cfg!(windows) { 3_000 } else { 1_500 });
     assert!(p99 < bound, "p99 {p99:?}, max {max:?}");
-    assert!(
-        max < Duration::from_millis(2_500),
-        "p99 {p99:?}, max {max:?}"
-    );
+    // With 120 waits, p99 is the second-largest, so a max bound under the
+    // p99 bound would override it: Windows keeps its 3 s here too (the 2.5 s
+    // bound failed nightly-ci at max 2.50 s and 2.87 s, #691).
+    let max_bound = Duration::from_millis(if cfg!(windows) { 3_000 } else { 2_500 });
+    assert!(max < max_bound, "p99 {p99:?}, max {max:?}");
     assert_eq!(attempts.len(), SESSIONS * REQUESTS);
     for attempt in &attempts {
         assert_eq!(recorded(&setup, attempt).await?, (1, 1));
