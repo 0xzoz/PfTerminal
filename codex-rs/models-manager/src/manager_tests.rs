@@ -2238,6 +2238,95 @@ fn bundled_orchestration_states_published_rates_for_opus_5_5_and_gpt_6_sol() {
     assert_eq!(model("gpt-6-sol").max_output_tokens, Some(128_000));
 }
 
+/// #368: GPT-6.1 Sol at the Standard rates OpenAI publishes, read 2026-10-14
+/// from developers.openai.com/api/docs/pricing and
+/// developers.openai.com/api/docs/models/gpt-6.1-sol: $2 input, $0.10 cached
+/// input (5% of input), $2.50 cache writes (1.25x), $10 output per million;
+/// above 272K input tokens 2x input and cache rates and 1.5x output. Manual
+/// selection only, like GPT-6 Astra and Luna: it states its price for
+/// accounting and takes no automatically allocated work.
+#[test]
+fn bundled_orchestration_states_published_rates_for_gpt_6_1_sol() {
+    let response = crate::bundled_models_response()
+        .unwrap_or_else(|err| panic!("bundled models.json should parse: {err}"));
+    let model = response
+        .models
+        .iter()
+        .find(|model| model.slug == "gpt-6.1-sol")
+        .expect("gpt-6.1-sol must be in the bundled catalogue");
+    assert_eq!(
+        model.orchestration,
+        Some(ModelOrchestrationMetadata::Disabled {
+            provider_id: "openai".to_string(),
+            capability: ModelCapabilityTier::Frontier,
+            reason: "manual selection only; automatic allocation economics are not configured"
+                .to_string(),
+            billing: Some(ModelBilling::Metered {
+                input_milli_usd_per_million_tokens: 2_000,
+                output_milli_usd_per_million_tokens: 10_000,
+                cached_input_milli_usd_per_million_tokens: Some(100),
+                cache_write_milli_usd_per_million_tokens: Some(2_500),
+                long_context: Some(LongContextRates {
+                    above_input_tokens: 272_000,
+                    input_milli_usd_per_million_tokens: 4_000,
+                    output_milli_usd_per_million_tokens: 15_000,
+                    cached_input_milli_usd_per_million_tokens: Some(200),
+                    cache_write_milli_usd_per_million_tokens: Some(5_000),
+                }),
+                valid_through_utc: None,
+            }),
+        })
+    );
+    assert_eq!(model.context_window, Some(1_050_000));
+    assert_eq!(model.max_output_tokens, Some(128_000));
+    assert_eq!(model.visibility, ModelVisibility::List);
+    assert!(model.base_instructions.contains("based on GPT-6.1 Sol"));
+}
+
+/// Off-peak holiday dates are whole UTC days on which a weekday peak would
+/// otherwise apply. Listing a weekend or repeating a date is a transcription
+/// slip, and rows of one provider must agree: `scripts/check_price_calendars.py`
+/// reads each list as covering through the end of its last year (#368).
+#[test]
+fn bundled_off_peak_dates_are_sorted_unique_weekdays_shared_per_provider() {
+    let response = crate::bundled_models_response()
+        .unwrap_or_else(|err| panic!("bundled models.json should parse: {err}"));
+    let mut lists = std::collections::BTreeMap::<String, Vec<String>>::new();
+    for model in &response.models {
+        let Some(metadata) = model.orchestration.as_ref() else {
+            continue;
+        };
+        let Some(ModelBilling::MeteredSchedule {
+            peak_weekdays,
+            off_peak_dates_utc,
+            ..
+        }) = metadata.billing()
+        else {
+            continue;
+        };
+        for pair in off_peak_dates_utc.windows(2) {
+            assert!(pair[0] < pair[1], "{}: {pair:?} out of order", model.slug);
+        }
+        for date in off_peak_dates_utc {
+            let day = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+                .unwrap_or_else(|err| panic!("{}: {date}: {err}", model.slug));
+            let weekday = day.format("%A").to_string();
+            assert!(
+                peak_weekdays.is_none_or(|weekdays| weekdays.names().contains(&weekday.as_str())),
+                "{}: {date} is not a peak weekday",
+                model.slug
+            );
+        }
+        if let Some(other) = lists.insert(
+            metadata.provider_id().to_string(),
+            off_peak_dates_utc.clone(),
+        ) {
+            assert_eq!(&other, off_peak_dates_utc, "{}", model.slug);
+        }
+    }
+    assert!(lists.contains_key("deepseek"));
+}
+
 #[test]
 fn bundled_models_json_contains_ambient_and_zai_models() {
     let response = crate::bundled_models_response()
