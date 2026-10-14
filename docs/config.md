@@ -194,15 +194,15 @@ Limits:
 
 The default depends on the security level:
 
-| Level                                                           | Default                         |
-| --------------------------------------------------------------- | ------------------------------- |
-| Permissive, Moderate                                            | off                             |
-| Aggressive (chosen in `/security` or set as `[security] level`) | on, on macOS, Linux and Windows |
+| Level                                                                       | Default                         |
+| --------------------------------------------------------------------------- | ------------------------------- |
+| Permissive                                                                  | off                             |
+| Moderate or Aggressive (chosen in `/security` or set as `[security] level`) | on, on macOS, Linux and Windows |
 
 On other systems it stays off, because the broker isn't supported there. A value
 you set yourself always wins over the level's default; only a managed policy
 outranks it. A project's `.codex/config.toml` doesn't change it under
-Aggressive:
+Moderate or Aggressive:
 
 ```toml
 [features]

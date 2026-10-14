@@ -281,9 +281,10 @@ fn sec_391_not_started_message_names_the_setting_and_the_level() {
 }
 
 /// #391: the default matrix (level x OS x the person's own setting x a
-/// project's setting). Only Aggressive on an OS where the broker runs turns
-/// `broker_model_auth` on; the person's own setting always wins, and a
-/// project layer cannot turn the Aggressive default off.
+/// project's setting). Aggressive, and Moderate (D2, 2026-10-14), on an OS
+/// where the broker runs turn `broker_model_auth` on; the person's own
+/// setting always wins, and a project layer cannot turn the level's default
+/// off.
 #[test]
 fn sec_391_default_matrix_level_os_and_explicit_setting() {
     use SecurityLevel::Aggressive;
@@ -299,7 +300,7 @@ fn sec_391_default_matrix_level_os_and_explicit_setting() {
         for supported in [true, false] {
             for own in [None, Some(true), Some(false)] {
                 for project in [None, Some(true), Some(false)] {
-                    let expected = if level == Aggressive && supported {
+                    let expected = if level != Permissive && supported {
                         own.unwrap_or(true)
                     } else {
                         project.or(own).unwrap_or(false)
@@ -328,7 +329,21 @@ fn sec_391_default_matrix_level_os_and_explicit_setting() {
     );
     assert_eq!(
         level_broker_setting(Moderate, /*supported*/ true, /*explicit*/ None),
+        Some(true)
+    );
+    assert_eq!(
+        level_broker_setting(Moderate, /*supported*/ true, Some(false)),
+        Some(false)
+    );
+    assert_eq!(
+        level_broker_setting(Moderate, /*supported*/ false, /*explicit*/ None),
         None
+    );
+    assert!(!resolve(Moderate, true, Some(false), Some(true)));
+    assert_eq!(level_origin(Moderate), BrokerModelAuthOrigin::ModerateLevel);
+    assert_eq!(
+        level_origin(Aggressive),
+        BrokerModelAuthOrigin::AggressiveLevel
     );
     assert_eq!(
         level_broker_setting(Permissive, /*supported*/ true, /*explicit*/ None),

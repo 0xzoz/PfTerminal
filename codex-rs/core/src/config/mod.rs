@@ -3775,16 +3775,18 @@ impl Config {
             },
             feature_overrides,
         );
-        // #391: Aggressive (Core's level or the stored `/security` level)
-        // turns `broker_model_auth` on unless the person's own configuration
+        // #391, D2: Aggressive or Moderate (Core's level or the stored
+        // `/security` level) turns `broker_model_auth` on unless the person's own configuration
         // sets it; a project layer cannot turn it off.
         let explicit_broker = explicit_feature_setting(
             &config_layer_stack,
             cfg.features.as_ref(),
             Feature::BrokerModelAuth,
         );
+        let level_for_broker =
+            crate::model_broker_auth::level_for_defaults(codex_home.as_path(), configured_level);
         let level_broker = crate::model_broker_auth::level_broker_setting(
-            crate::model_broker_auth::level_for_defaults(codex_home.as_path(), configured_level),
+            level_for_broker,
             crate::model_broker_auth::LEVEL_DEFAULT_SUPPORTED,
             explicit_broker,
         );
@@ -3803,7 +3805,7 @@ impl Config {
             } else if features.pinned(Feature::BrokerModelAuth) == Some(true) {
                 BrokerModelAuthOrigin::Policy
             } else if level_broker == Some(true) && explicit_broker.is_none() {
-                BrokerModelAuthOrigin::AggressiveLevel
+                crate::model_broker_auth::level_origin(level_for_broker)
             } else {
                 BrokerModelAuthOrigin::Config
             }

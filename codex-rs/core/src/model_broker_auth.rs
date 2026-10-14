@@ -19,8 +19,9 @@
 //! all fail the request. The broker is never restarted within a process.
 //!
 //! #391: security level Aggressive turns the feature on by default where the
-//! broker runs (macOS, Linux, Windows); the person's own setting still wins
-//! (see [`level_broker_setting`]).
+//! broker runs (macOS, Linux, Windows), and so does Moderate (Travis,
+//! 2026-10-14, decision D2); the person's own setting still wins (see
+//! [`level_broker_setting`]).
 
 use crate::config::Config;
 use codex_api::AuthError;
@@ -54,26 +55,39 @@ pub enum BrokerModelAuthOrigin {
     Config,
     /// Security level Aggressive turned it on; nothing sets it explicitly.
     AggressiveLevel,
+    /// Security level Moderate turned it on (decision D2, 2026-10-14);
+    /// nothing sets it explicitly.
+    ModerateLevel,
     /// A managed requirement pins it on.
     Policy,
 }
 
-/// Operating systems where Aggressive turns the broker on by default: the
+/// Operating systems where a protected level turns the broker on by default: the
 /// model-auth broker is qualified on macOS and Linux (PF-27-S05) and Windows
 /// (PF-27-S09). Elsewhere it stays off unless config turns it on.
 pub(crate) const LEVEL_DEFAULT_SUPPORTED: bool =
     cfg!(any(target_os = "macos", target_os = "linux", windows));
 
 /// #391: the `broker_model_auth` value `level` sets, or `None` to keep
-/// config's merged value. Aggressive on a `supported` OS sets it on unless
-/// the person's own configuration sets it (`explicit`, which leaves out
-/// project layers, so a repository cannot turn it off).
+/// config's merged value. Aggressive or Moderate (D2) on a `supported` OS
+/// sets it on unless the person's own configuration sets it (`explicit`,
+/// which leaves out project layers, so a repository cannot turn it off).
 pub(crate) fn level_broker_setting(
     level: SecurityLevel,
     supported: bool,
     explicit: Option<bool>,
 ) -> Option<bool> {
-    (level == SecurityLevel::Aggressive && supported).then(|| explicit.unwrap_or(true))
+    (level != SecurityLevel::Permissive && supported).then(|| explicit.unwrap_or(true))
+}
+
+/// What turned `broker_model_auth` on when `level` did (#391, D2).
+pub(crate) fn level_origin(level: SecurityLevel) -> BrokerModelAuthOrigin {
+    match level {
+        SecurityLevel::Moderate => BrokerModelAuthOrigin::ModerateLevel,
+        SecurityLevel::Permissive | SecurityLevel::Aggressive => {
+            BrokerModelAuthOrigin::AggressiveLevel
+        }
+    }
 }
 
 /// #391: the level that decides the default for `codex_home`: the stricter
@@ -270,6 +284,11 @@ fn remedy(origin: BrokerModelAuthOrigin) -> &'static str {
     match origin {
         BrokerModelAuthOrigin::AggressiveLevel => {
             "Security level Aggressive turns broker_model_auth on. To send model requests \
+             without the broker, choose Permissive in /security, or set \
+             `broker_model_auth = false` under [features] in config.toml, then restart"
+        }
+        BrokerModelAuthOrigin::ModerateLevel => {
+            "Security level Moderate turns broker_model_auth on. To send model requests \
              without the broker, choose Permissive in /security, or set \
              `broker_model_auth = false` under [features] in config.toml, then restart"
         }

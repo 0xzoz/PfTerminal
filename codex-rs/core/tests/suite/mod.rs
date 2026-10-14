@@ -100,6 +100,7 @@ mod issue_620_622;
 mod issue_623;
 mod issue_626;
 mod issue_736_740;
+mod issue_747;
 mod items;
 mod json_result;
 mod live_cli;

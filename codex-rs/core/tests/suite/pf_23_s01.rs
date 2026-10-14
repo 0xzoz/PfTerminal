@@ -1572,8 +1572,9 @@ async fn issue_540_runtime_entries_stay_read_only_when_a_person_lifts_the_rules(
         // An allow rule (it would skip the sandbox) does not take the run
         // outside it either (review r1).
         (SecurityLevel::Moderate, false, true, false),
-        // No sandbox runs it, so nothing can hold the rule.
-        (SecurityLevel::Moderate, true, false, true),
+        // #747 (D3): a run a person approved to leave the sandbox stays in
+        // it under Moderate, so the runtime entries stay read-only there too.
+        (SecurityLevel::Moderate, true, false, false),
         (SecurityLevel::Permissive, false, false, true),
     ] {
         let home = Arc::new(TempDir::new()?);

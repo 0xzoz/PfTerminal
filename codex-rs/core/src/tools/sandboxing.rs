@@ -358,6 +358,23 @@ pub(crate) fn sandbox_permissions_preserving_denied_reads(
     }
 }
 
+/// [`sandbox_permissions_preserving_denied_reads`] for a run in `session`:
+/// under security level Moderate a request to run outside the sandbox runs
+/// inside it too (#747, decision D3).
+pub(crate) fn sandbox_permissions_for_session(
+    sandbox_permissions: SandboxPermissions,
+    file_system_sandbox_policy: &FileSystemSandboxPolicy,
+    session: &crate::session::session::Session,
+) -> SandboxPermissions {
+    if sandbox_permissions.requires_escalated_permissions()
+        && crate::security::protected_additional::moderate_keeps_sandbox(session)
+    {
+        SandboxPermissions::UseDefault
+    } else {
+        sandbox_permissions_preserving_denied_reads(sandbox_permissions, file_system_sandbox_policy)
+    }
+}
+
 pub(crate) fn managed_network_for_sandbox_permissions(
     network: Option<&NetworkProxy>,
     sandbox_permissions: SandboxPermissions,

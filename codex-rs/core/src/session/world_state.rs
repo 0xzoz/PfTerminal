@@ -136,6 +136,10 @@ impl Session {
             world_state.add_section(
                 if turn_context.config.permissions.launch_enforces_aggressive() {
                     permissions.with_note(crate::security::refusal_notice::AGGRESSIVE_INSTRUCTIONS)
+                } else if self.services.model_client().live_level()
+                    == codex_security_policy::SecurityLevel::Moderate
+                {
+                    permissions.with_note(crate::security::refusal_notice::MODERATE_INSTRUCTIONS)
                 } else {
                     permissions
                 },

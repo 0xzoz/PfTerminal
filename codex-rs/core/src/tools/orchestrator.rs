@@ -194,6 +194,9 @@ impl ToolOrchestrator {
         // asked. A cached approval or a permission hook may still answer
         // without them; then no review is shown and nothing is confirmed.
         let mut grant_offer = None;
+        // #747 (D3): under Moderate a run never leaves the sandbox.
+        let moderate_keeps_sandbox =
+            crate::security::protected_additional::moderate_keeps_sandbox(&tool_ctx.session);
         // Issue #513: under Moderate, the persistence file a person's approval
         // of this request would let it write, for the approval prompt.
         let mut persistence_note = None;
@@ -381,8 +384,11 @@ impl ToolOrchestrator {
         match &requirement {
             _ if post_taint.is_some() => {}
             _ if ask_human_to_escalate => {
-                let note =
-                    "Approving also lifts the Moderate credential protection for this command.";
+                // #747: and it stays inside the sandbox.
+                let note = format!(
+                    "Approving also lifts the Moderate credential protection for this command. {}",
+                    crate::security::protected_additional::MODERATE_STAYS_SANDBOXED
+                );
                 let mut approval_ctx = ApprovalCtx {
                     session: &tool_ctx.session,
                     turn: &tool_ctx.turn,
@@ -408,7 +414,7 @@ impl ToolOrchestrator {
                 };
                 approval_ctx.retry_reason = Some(match why {
                     Some(why) => format!("{why} {note}"),
-                    None => note.to_string(),
+                    None => note,
                 });
                 approved_by = Some(
                     resolve_tool_apporval(
@@ -473,6 +479,15 @@ impl ToolOrchestrator {
                 } else {
                     None
                 };
+                // #747: a request to run outside the sandbox stays in it
+                // under Moderate; the person is told before approving.
+                let stays_sandboxed = (moderate_keeps_sandbox
+                    && tool
+                        .sandbox_permissions(req)
+                        .requires_escalated_permissions())
+                .then(|| {
+                    crate::security::protected_additional::MODERATE_STAYS_SANDBOXED.to_string()
+                });
                 let approval_ctx = ApprovalCtx {
                     session: &tool_ctx.session,
                     turn: &tool_ctx.turn,
@@ -483,6 +498,7 @@ impl ToolOrchestrator {
                         persistence_note
                             .as_ref()
                             .filter(|_| reviewer == ApprovalReviewer::User),
+                        stays_sandboxed.as_ref(),
                     ]
                     .into_iter()
                     .flatten()
@@ -589,12 +605,18 @@ impl ToolOrchestrator {
         // allow rule: in a run whose rules a person lifted, only the sandbox
         // keeps the Corbanu home's runtime entries read-only. (Elsewhere the
         // rules' read denials already keep such runs sandboxed.)
-        let keeps_sandbox =
-            crate::security::protected_additional::protected_level(&tool_ctx.session).is_some()
+        // #747 (D3): under Moderate nothing leaves the sandbox at all (read
+        // again: a level confirmed while the person was asked counts).
+        let moderate_keeps_sandbox = moderate_keeps_sandbox
+            || crate::security::protected_additional::moderate_keeps_sandbox(&tool_ctx.session);
+        let keeps_sandbox = moderate_keeps_sandbox
+            || (crate::security::protected_additional::protected_level(&tool_ctx.session)
+                .is_some()
                 && !tool
                     .sandbox_permissions(req)
-                    .requires_escalated_permissions();
-        let policy_allows_no_sandbox = unsandboxed_execution_allowed(&file_system_sandbox_policy);
+                    .requires_escalated_permissions());
+        let policy_allows_no_sandbox = !moderate_keeps_sandbox
+            && unsandboxed_execution_allowed(&file_system_sandbox_policy);
 
         // 2) First attempt under the selected sandbox.
         let sandbox_override = if keeps_sandbox {
@@ -1212,8 +1234,8 @@ fn post_taint_read_denials(
         .filter(crate::security::tainted_action::PostTaintState::protected_paths_apply)?;
     if state.human_approval_lifts_rules(human_approved_at) {
         // Issue #540: except the Corbanu home's runtime entries, which stay
-        // read-only in the command's sandbox (a command approved to run
-        // outside any sandbox has none to hold them).
+        // read-only in the command's sandbox (under Moderate every command
+        // keeps one, #747).
         let denials = ReadDenials::for_turn(
             tool_ctx.turn.config.codex_home.as_path(),
             tool_ctx.turn.config.sqlite.home(),
