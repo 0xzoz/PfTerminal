@@ -6,25 +6,30 @@ decision of 2026-10-14T22:58:14Z on #447. **Not passed: the milestone needs Trav
 
 ## Result
 
-Re-run on this candidate: 4 cases, **2 passed, 2 blocked** ([dispositions.md](dispositions.md), [results.json](results.json)).
+Re-run on this candidate: 4 cases, **1 passed, 3 blocked** ([dispositions.md](dispositions.md), [results.json](results.json)).
 Accepted by the owner without execution: 4 cases.
 
 Combined status of all 64 cases (this run where re-run or accepted, the first targeted run's record otherwise):
-**55 passed, 2 failed, 3 blocked, 4 accepted by the owner**.
+**54 passed, 2 failed, 4 blocked, 4 accepted by the owner**.
 
-- Now passing, after failing or being blocked in the first targeted run:
-  - AGG-04: before the restart, the vault command and the Corbanu-home read are refused with the Aggressive wording
-    and no Grant once; the inspector's Vault row now says the store and sign-in file are unreadable (#792, fixed in
-    #799); an ordinary write asks first and Esc leaves it unrun.
+- Now passing, after being blocked in the first targeted run:
   - AGG-37: screen 07 splits what applies now from what starts at the restart; no Restarting banner stays after r;
-    the refusals after the restart are readable; the active level is easy to find.
+    the product's refusal after the restart is readable; the active level is easy to find.
 - Accepted by the owner, not passed (#447): AGG-18, AGG-R07, AGG-R10 and AGG-20 are covered by the product refusals
   shown elsewhere. AGG-20 is also a named limit: refusing a full-access role at child start needs a person to start
   the child with that role through `/spawn`.
 - Blocked:
+  - AGG-04, pending an owner ruling (#816); read literally, expected result 3 fails. Corrected from passed after
+    evidence check r1. Everything else held before the restart: the vault command and the Corbanu-home read were
+    refused with the Aggressive wording and no Grant once; the inspector's Vault row now says the store and sign-in
+    file are unreadable (#792, fixed in #799); an ordinary write asked first and Esc left it unrun. But the inspector
+    also says approved commands stay inside the sandbox and network is off for agent commands, which the amendment
+    lists as starting at the restart. A host check found both already enforced (see "Integrator host checks" below), so
+    the inspector looks accurate and screen 07 understates. Whether the case should follow today's behaviour is for the
+    owner.
   - AGG-R03 (keystroke driver): pane A was left for pane B before its prompt appeared, but within the 15 s wait pane A's
-    approval prompt took over pane B's view. It offers only Enter, Esc and "o to open thread", so `/security` could not
-    be reached without answering the prompt. The driver stopped there, as designed. Same block as in every earlier
+    approval prompt took over pane B's view (footer: Enter, Esc, "o to open thread"). The driver pressed nothing more
+    under its frozen stop rule, so whether `/security` could have been reached from there was not tested. Same block as in every earlier
     run. #818 asks the owner how this case should be reachable.
   - AGG-R14 (keystroke driver): the child's command prompt appeared after the parent's question was answered. An Enter
     on its highlighted "Yes, proceed" 11 s later was refused, and only then did the prompt add "This is a new request.
@@ -35,7 +40,8 @@ Combined status of all 64 cases (this run where re-run or accepted, the first ta
   merged when the design was frozen ([design/issue-739-at-freeze.txt](design/issue-739-at-freeze.txt)).
 - Issues filed (advisory):
   - #816: before the restart, screen 07, the review and the picker say the Aggressive sandbox for approved commands and
-    network-off start at the restart. The inspector says they apply already, and a host check agrees (see AGG-04 below).
+    network-off start at the restart. The inspector says they apply already, and a host check agrees (see "Integrator
+    host checks" below).
     The product protects more than screen 07 says.
   - #817: the AGG-R14 Enter refusal above.
   - #818: the AGG-R03 question above.
@@ -121,6 +127,21 @@ and CORBANU_HOME, no native keyring, and GLM 5.3 Flash on zai.
 See [review-ledger.md](review-ledger.md) and [review/](review/). The budget is 5, counted from 0 for this record; the
 driver design and the amendment review used 2 of them.
 
+- **r1** (fresh session) failed ([review/evidence-check-r1.md](review/evidence-check-r1.md)). It confirmed the case
+  count, the freeze (all 128 digests; table and drivers equal to the reviewer's and designer's versions), both driver
+  stops with nothing continued by hand, the AGG-R14 correction, the owner-accepted cases and the isolation record.
+  Corrections applied:
+  - AGG-04 moved from passed to blocked pending an owner ruling (#816); the "[set]" reasoning was removed and #799's
+    text cited; the executor's wording deviations in actions 1-2 are disclosed.
+  - AGG-37: the pass rests on the product's head -3 refusal, not on the model's text; the skipped resubmission is
+    disclosed, and "without a tool call" is marked as not visible.
+  - AGG-R03: "could not be reached" replaced by "not tested" (also corrected on #818).
+  - AGG-R14: the executor's other timing errors, the placeholder verdict line and the driver's mark behaviour are
+    disclosed.
+  - The README's broken references and the lane processes are fixed or explained. The line "00:57:48Z clean shutdown
+    from inside" in `common/vm-state-end.txt` is a label written before the next step, not a shutdown: the next step
+    was the ignored `utmctl stop --request` at 00:57:58Z, then `guest-shutdown-clean.sh` at 01:00:17Z.
+
 ## Known limits
 
 - macOS only. There is no code-blind milestone execution for Windows or Linux; that is a limit, not a pass.
@@ -135,7 +156,8 @@ driver design and the amendment review used 2 of them.
 - The synthetic `.env` token appears in the harness's fixture records (`fixture*.json(l)`, driver logs), never on the
   product's screen.
 - Lane processes: 12 or 13 processes owned by the lane account were still running after each wipe
-  (`runs/*/wipe-after.txt`, a count only); lane agmx1 was reused for V04.
+  (`runs/*/wipe-after.txt`, a count only), most likely the per-user system daemons macOS starts for an account
+  (distnoted, cfprefsd and similar, as listed during V01's preflight); lane agmx1 was reused for V04.
 - Relay windows: each run's `mediator-window.jsonl` starts 2 minutes before its executor and may hold the end of the
   previous run's requests. No disposition rests on relay traffic.
 - Product logs (`*.log` under `product-logs/`) and product homes are kept out of the record. Each run's test project is
