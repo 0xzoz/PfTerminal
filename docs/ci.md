@@ -49,7 +49,18 @@ save none, so PR churn can't evict them. setup-node and setup-zig can't restore
 without saving, so their caches are on only for `main` (both are used only by
 postmerge or nightly jobs). Where blocking-ci and postmerge run the same
 clippy leg on `main`, only postmerge `rust-ci-full` saves it.
-`.github/scripts/test_ci_timeout_budgets.py` enforces this. Check usage with
+
+Build caches such as sccache are keyed by run ID, so every `main` run saves a
+fresh copy (up to 2.1 GB each). The `cache-prune` workflow keeps only the newest
+copy of each such cache: it runs after blocking-ci, postmerge-ci, nightly-ci,
+tmux smoke and CodeQL finish on `main`, and hourly, and deletes older `main`
+copies with `.github/scripts/prune_actions_caches.py` (`--dry-run` lists them).
+It is the only job here that holds `actions: write` (`cla.yml` asks for it but
+runs only upstream). Caches without a run ID in the key (cargo-home, apt) are
+saved only on a key miss and aren't pruned.
+`.github/scripts/test_ci_timeout_budgets.py` enforces this; a new workflow that
+saves a run-ID-keyed cache on `main` must be added to `cache-prune`'s trigger
+list. Check usage with
 `gh api repos/CorbanuCore/CorbanuTerminal/actions/cache/usage`.
 
 ## Nightly Coverage
