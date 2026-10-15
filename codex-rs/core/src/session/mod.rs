@@ -2670,6 +2670,14 @@ impl Session {
             .await;
     }
 
+    /// Delivers an event to the client without writing it to the rollout: a
+    /// notice about this session's own start that a later reopen must not
+    /// replay as if it had happened again.
+    pub(crate) async fn send_event_raw_unpersisted(&self, event: Event) {
+        self.send_event_raw_with_persistence(event, /*persist*/ false)
+            .await;
+    }
+
     /// Delivers an event without creating a local rollout for a thread that has not materialized.
     pub(crate) async fn send_event_raw_without_materializing_rollout(&self, event: Event) {
         let persist = match self.current_rollout_path().await {

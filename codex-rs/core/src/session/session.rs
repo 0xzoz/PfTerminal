@@ -1498,8 +1498,17 @@ impl Session {
             )
             .await?;
             sess.start_mcp_prewarm_worker(mcp_prewarm_rx, mcp_auth_changes);
-            sess.schedule_startup_prewarm(session_configuration.base_instructions.clone())
-                .await;
+            // #403: a resumed or forked conversation is a reopen; its warm-up
+            // is shown as such, and can be skipped.
+            let reopened = matches!(
+                &initial_history,
+                InitialHistory::Resumed(_) | InitialHistory::Forked(_)
+            );
+            sess.schedule_startup_prewarm(
+                session_configuration.base_instructions.clone(),
+                reopened,
+            )
+            .await;
             let session_start_source = match &initial_history {
                 InitialHistory::Resumed(_) => codex_hooks::SessionStartSource::Resume,
                 InitialHistory::New | InitialHistory::Forked(_) => {

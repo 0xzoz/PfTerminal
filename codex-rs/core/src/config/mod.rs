@@ -1230,6 +1230,10 @@ pub struct Config {
     /// When `true`, suppress warnings about unstable (under development) features.
     pub suppress_unstable_features_warning: bool,
 
+    /// When `true`, a reopened conversation sends no startup warm-up request
+    /// (#403). A new conversation still does.
+    pub skip_reopen_warmup: bool,
+
     /// The currently active project config, resolved by checking if cwd:
     /// is (1) part of a git repo, (2) a git worktree, or (3) just using the cwd
     pub active_project: ProjectConfig,
@@ -5104,6 +5108,7 @@ impl Config {
             suppress_unstable_features_warning: cfg
                 .suppress_unstable_features_warning
                 .unwrap_or(false),
+            skip_reopen_warmup: cfg.skip_reopen_warmup.unwrap_or(false),
             active_project,
             notices,
             check_for_update_on_startup,

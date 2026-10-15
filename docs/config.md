@@ -148,6 +148,19 @@ corbanu -m zai/glm-5.2-fast
 
 The model picker maps these model slugs to the correct built-in provider.
 
+## Reopen Warm-Up
+
+When you reopen a conversation (`/resume`, restarting Corbanu on it, `/side`, or another fork) on a provider that
+uses a WebSocket connection, such as OpenAI, Corbanu sends one warm-up request to prime the model's cache, so the
+first reply is faster. It is billed like any request (about 10,000 input tokens), and Corbanu says so when it is sent.
+To skip it:
+
+```toml
+skip_reopen_warmup = true
+```
+
+The first reply after reopening may then be slower. A new conversation still warms up.
+
 ## Vault And Secrets
 
 Provider API keys saved by Corbanu Terminal are stored in the encrypted vault, not in

@@ -508,6 +508,12 @@ pub struct ConfigToml {
     /// Suppress warnings about unstable (under development) features.
     pub suppress_unstable_features_warning: Option<bool>,
 
+    /// When `true`, reopening a conversation (resume, restart, `/side` or any
+    /// other fork) does not send the paid warm-up request that primes the
+    /// model's cache; the first reply after reopening may be slower. Defaults
+    /// to `false`.
+    pub skip_reopen_warmup: Option<bool>,
+
     /// Compatibility-only settings retained so legacy `ghost_snapshot`
     /// config still loads.
     #[serde(default)]
