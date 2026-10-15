@@ -9,11 +9,13 @@ mod diagnostics;
 
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
+use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
 use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -97,6 +99,9 @@ pub(crate) async fn wait_if_home_unreadable(
     let Some(step) = wait.next_step(err.is_home_unreadable(), now, home_wait_window()) else {
         return Err(err);
     };
+    if let Some(mut failures) = home_failures() {
+        failures.failed(wait.started.unwrap_or(now));
+    }
     let message = format!(
         "{HOME_UNREADABLE_HEADLINE}; waiting {} for access to return (attempt {}, gives up in {})",
         human_duration(step.delay),
@@ -109,52 +114,80 @@ pub(crate) async fn wait_if_home_unreadable(
     Ok(())
 }
 
-/// The rollout folder an append could not write (EPERM) and when that
-/// started; cleared when an append succeeds. The writer keeps the unwritten
-/// items until its next flush.
-static UNSAVED_ROLLOUT: Mutex<Option<(PathBuf, Instant)>> = Mutex::new(None);
+/// What this process knows about home failures: when the current run of
+/// them started (a turn waiting on the home, or a rollout append failing with
+/// EPERM), and which threads' rollout folders hold unwritten items. The
+/// writer keeps those items until its next flush.
+#[derive(Debug, Default)]
+struct HomeFailures {
+    since: Option<Instant>,
+    unsaved: HashMap<ThreadId, PathBuf>,
+}
 
-/// Records whether a rollout append succeeded, or failed with EPERM in `dir`.
-pub(crate) fn note_rollout_append(failed_in: Option<PathBuf>) {
-    if let Ok(mut unsaved) = UNSAVED_ROLLOUT.lock() {
-        *unsaved = next_unsaved(unsaved.take(), failed_in, Instant::now());
+static HOME_FAILURES: LazyLock<Mutex<HomeFailures>> = LazyLock::new(Mutex::default);
+
+impl HomeFailures {
+    fn failed(&mut self, now: Instant) {
+        self.since.get_or_insert(now);
+    }
+
+    fn unwritten(&mut self, thread: ThreadId, dir: PathBuf, now: Instant) {
+        self.failed(now);
+        self.unsaved.insert(thread, dir);
+    }
+
+    /// An append wrote to the home: this thread is saved, and once none is
+    /// left unsaved the run of failures is over.
+    fn written(&mut self, thread: ThreadId) {
+        self.unsaved.remove(&thread);
+        if self.unsaved.is_empty() {
+            self.since = None;
+        }
     }
 }
 
-/// The unsaved rollout after an append: none after a success; after a
-/// failure, the failing folder, since the first failure in a row.
-fn next_unsaved(
-    unsaved: Option<(PathBuf, Instant)>,
-    failed_in: Option<PathBuf>,
-    now: Instant,
-) -> Option<(PathBuf, Instant)> {
-    let dir = failed_in?;
-    Some((dir, unsaved.map_or(now, |(_, since)| since)))
+fn home_failures() -> Option<std::sync::MutexGuard<'static, HomeFailures>> {
+    HOME_FAILURES.lock().ok()
 }
 
-/// When a rollout append failed with EPERM and none has succeeded since,
-/// waits until its folder lists again, within what is left of the window
-/// since that failure. `corbanu exec` calls it before the session is saved at
-/// exit, so the buffered items are written instead of lost.
+/// A rollout append of `thread` that had items to write succeeded.
+pub(crate) fn note_rollout_written(thread: ThreadId) {
+    if let Some(mut failures) = home_failures() {
+        failures.written(thread);
+    }
+}
+
+/// A rollout append of `thread` failed with EPERM in `dir`.
+pub(crate) fn note_rollout_unwritten(thread: ThreadId, dir: PathBuf) {
+    if let Some(mut failures) = home_failures() {
+        failures.unwritten(thread, dir, Instant::now());
+    }
+}
+
+/// When rollout items are still unwritten, waits until their folders list
+/// again, within what is left of the window since the first home failure of
+/// this run (a turn that already waited leaves little or nothing). `corbanu
+/// exec` calls it before the session is saved at exit, so the items are
+/// written instead of lost.
 pub async fn wait_for_unsaved_rollout() {
-    let unsaved = UNSAVED_ROLLOUT
-        .lock()
-        .ok()
-        .and_then(|unsaved| unsaved.clone());
-    let Some((dir, since)) = unsaved else {
-        return;
+    let (dirs, since) = match home_failures() {
+        Some(failures) if !failures.unsaved.is_empty() => (
+            failures.unsaved.values().cloned().collect::<Vec<_>>(),
+            failures.since,
+        ),
+        _ => return,
     };
     wait_until_readable(
-        &dir,
-        |path| {
-            let path = path.to_path_buf();
-            async move { tokio::fs::read_dir(path).await.map(drop) }
+        &dirs,
+        |dir| {
+            let dir = dir.to_path_buf();
+            async move { tokio::fs::read_dir(dir).await.map(drop) }
         },
         |operation, path, error| {
             record_home_access_failure(operation, path, error);
         },
         HomeWait {
-            started: Some(since),
+            started: since,
             attempts: 0,
         },
         home_wait_window(),
@@ -163,7 +196,7 @@ pub async fn wait_for_unsaved_rollout() {
 }
 
 async fn wait_until_readable<F>(
-    dir: &Path,
+    dirs: &[PathBuf],
     read_dir: impl Fn(&Path) -> F,
     mut record: impl FnMut(&str, &Path, &str),
     mut wait: HomeWait,
@@ -173,9 +206,15 @@ async fn wait_until_readable<F>(
 {
     const EPERM: i32 = 1;
     loop {
-        let error = match read_dir(dir).await {
-            Ok(()) => return,
-            Err(error) => error,
+        let mut failure = None;
+        for dir in dirs {
+            if let Err(error) = read_dir(dir).await {
+                failure = Some((dir, error));
+                break;
+            }
+        }
+        let Some((dir, error)) = failure else {
+            return;
         };
         let not_permitted = error.raw_os_error() == Some(EPERM);
         let now = tokio::time::Instant::now().into_std();

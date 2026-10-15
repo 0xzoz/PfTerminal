@@ -1123,6 +1123,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
         // exit with a non-zero status for automation-friendly signaling.
         let mut error_seen = false;
         let mut interrupt_channel_open = true;
+        let mut interrupted = false;
         let primary_thread_id_for_requests = primary_thread_id.to_string();
         loop {
             let server_event = tokio::select! {
@@ -1151,6 +1152,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                         interrupt_channel_open = false;
                         continue;
                     }
+                    interrupted = true;
                     if let Err(err) = send_request_with_response::<TurnInterruptResponse>(
                         &client,
                         ClientRequest::TurnInterrupt {
@@ -1217,11 +1219,13 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                             CodexStatus::Running => {}
                             CodexStatus::InitiateShutdown => {
                                 // #616: rollout items the home could not take are
-                                // saved at shutdown; let it come back (Ctrl-C stops
-                                // waiting).
-                                tokio::select! {
-                                    () = codex_core::home_access::wait_for_unsaved_rollout() => {}
-                                    Some(()) = interrupt_rx.recv(), if interrupt_channel_open => {}
+                                // saved at shutdown; let it come back, unless the
+                                // run was interrupted (Ctrl-C also stops the wait).
+                                if !interrupted {
+                                    tokio::select! {
+                                        () = codex_core::home_access::wait_for_unsaved_rollout() => {}
+                                        Some(()) = interrupt_rx.recv(), if interrupt_channel_open => {}
+                                    }
                                 }
                                 if let Err(err) = request_shutdown(
                                     &client,

@@ -10,7 +10,8 @@ retries with backoff (1 s, doubling to at most 60 s) for up to an hour,
 printing each attempt, and continues the turn once access returns. If session
 items could not be written meanwhile (they are kept in memory), exec waits for
 their folder before it saves the session at exit, within what is left of the
-same window (Ctrl-C stops waiting). If access does not return in time, the turn
+same window since the first failure (an interrupted run does not wait, and
+Ctrl-C stops the wait). If access does not return in time, the turn
 fails and exec exits 1. Change the window with `--home-wait-secs` (`0` fails at
 once).
 

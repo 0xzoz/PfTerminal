@@ -4714,7 +4714,12 @@ impl Session {
             return;
         };
         let Err(e) = live_thread.append_items(items).await else {
-            crate::home_access::note_rollout_append(/*failed_in*/ None);
+            // #616: only an append that wrote something shows the home works.
+            if items.iter().any(|item| {
+                codex_rollout::is_persisted_rollout_item(item, live_thread.history_mode())
+            }) {
+                crate::home_access::note_rollout_written(self.thread_id());
+            }
             return;
         };
         error!("failed to record rollout items: {e:#}");
@@ -4726,7 +4731,7 @@ impl Session {
             && let Ok(Some(rollout)) = live_thread.local_rollout_path().await
         {
             if let Some(dir) = rollout.parent() {
-                crate::home_access::note_rollout_append(Some(dir.to_path_buf()));
+                crate::home_access::note_rollout_unwritten(self.thread_id(), dir.to_path_buf());
             }
             tokio::task::spawn_blocking(move || {
                 crate::home_access::record_home_access_failure("rollout write", &rollout, &message)
