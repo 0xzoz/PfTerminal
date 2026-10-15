@@ -157,6 +157,18 @@ pub(crate) fn prewarm_turn_label() -> String {
     format!("prewarm:{}", Uuid::new_v4())
 }
 
+/// #403: the warm-up a conversation the user reopens (resume, restart) or
+/// forks (`/side`, editing a message) sends, told apart from a new
+/// conversation's so `/cost` can name it. Still a `prewarm:` label, so anything
+/// that reads warm-ups reads it. The TUI's `/cost` matches the prefix by value;
+/// `reopen_prewarm_label_is_stable` pins it.
+pub(crate) fn reopen_prewarm_turn_label() -> String {
+    format!("{REOPEN_PREWARM_LABEL}{}", Uuid::new_v4())
+}
+
+/// The turn-label prefix of a reopen warm-up; the TUI's `/cost` matches it.
+pub(crate) const REOPEN_PREWARM_LABEL: &str = "prewarm:reopen:";
+
 /// A bounded turn label for the completion assessment of `sub_id`.
 ///
 /// The classifier is a second model request the operator paid for, issued on its
