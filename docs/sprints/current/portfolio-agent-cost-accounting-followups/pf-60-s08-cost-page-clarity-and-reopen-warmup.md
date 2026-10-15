@@ -52,11 +52,11 @@ updated: 2026-10-14
 - [x] Draft sprint created 2026-10-10 from Travis's decision; linked to one plan feature.
 - [x] AC1 (#396.1): a component with no rate states no money; a 0-token one reads "none — 0 tokens". Components with
       a rate keep their figure, zero included.
-- [x] AC2 (#396.2): the basis-only price line reads "records only its billing basis: pay per use, set in your
+- [x] AC2 (#396.2): the basis-only price line reads "records only its billing basis: pay per use; set in your
       config"; the `Billing basis:` line keeps its parentheses.
-- [x] AC3 (#403, option C): a resumed or forked session's warm-up is labelled `prewarm:reopen:<id>` (still a
-      `prewarm:` label); once it is sent the session shows a notice naming `skip_reopen_warmup`, not written to the
-      conversation, so a later reopen doesn't replay it. `/cost` says "Reopen warm-up: N request(s), <cost>" on the
+- [x] AC3 (#403, option C): a conversation the user resumes or forks labels its warm-up `prewarm:reopen:<id>`
+      (still a `prewarm:` label; sub-agents and reviewers are not reopens); once it has gone out the session shows a
+      notice naming `skip_reopen_warmup`, not written to the conversation, so a later reopen doesn't replay it. `/cost` says "Reopen warm-up: N request(s), <cost>" on the
       first screen and "Reopen warm-up" on the request link and page. `skip_reopen_warmup = true` (default false)
       sends no warm-up on reopen; a new conversation still warms up. Earlier totals are unchanged; nothing is hidden
       or counted twice. [Gate](../../../../qa/portfolio/agent-cost-accounting/pf-60-s08/gate.md).
@@ -68,9 +68,9 @@ updated: 2026-10-14
 
 ## Verification
 
-- [x] Focused: core `test(accounting) | test(spawn) | test(prewarm) | test(websocket) | test(config)` 1094/1094 with
-      `developer-accounting`, 964/964 without; codex-tui `test(tokens) | test(charge) | test(cost) | test(resume)`
-      306/307 (the local-only `cost_scope` tmux test).
+- [x] Focused: core `test(accounting) | test(spawn) | test(prewarm) | test(websocket) | test(config) | test(reopen)`
+      1115/1115 with `developer-accounting`, 985/985 without; codex-tui `test(tokens) | test(charge) | test(cost) |
+      test(resume)` 308/309 (the local-only `cost_scope` tmux test).
 - [x] macOS and Linux clippy `-D warnings --tests`, with and without `developer-accounting`.
 - [x] TUI: tmux with a real OpenAI key (restart reopen, `/resume`, `/side`, skip setting, Fast tier, declared
       basis) and the demo video; see the gate.
