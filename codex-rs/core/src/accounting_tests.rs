@@ -1101,6 +1101,9 @@ async fn accounting_failure_logs_its_step_and_cause() -> anyhow::Result<()> {
 /// can't import the constant), so a change here must change it there too.
 #[test]
 fn reopen_prewarm_label_is_stable() {
+    use crate::accounting::REOPEN_PREWARM_LABEL;
+    use crate::accounting::prewarm_turn_label;
+    use crate::accounting::reopen_prewarm_turn_label;
     assert_eq!(REOPEN_PREWARM_LABEL, "prewarm:reopen:");
     let label = reopen_prewarm_turn_label();
     assert!(label.starts_with("prewarm:reopen:"), "{label}");
