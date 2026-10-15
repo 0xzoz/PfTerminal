@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import re
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -366,6 +367,130 @@ class RunScopedCachePruneTest(unittest.TestCase):
         }
         self.assertEqual(holders, {"cache-prune.yml", "cla.yml"})
         self.assertIn("github.repository_owner == 'openai'", (self.WORKFLOWS / "cla.yml").read_text())
+
+
+class PrWindowsNativeTestsTest(unittest.TestCase):
+    """#636 (owner decision 2026-10-15): native Windows tests on PRs that
+    change codex-tui, codex-core, codex-state or codex-login."""
+
+    CRATES = ("tui", "core", "state", "login")
+    REUSABLE = "rust-ci-windows-native-tests.yml"
+
+    def workflow(self, name: str) -> str:
+        return (REPO_ROOT / ".github" / "workflows" / name).read_text()
+
+    def job(self, text: str, name: str) -> str:
+        match = re.search(rf"(?ms)^  {re.escape(name)}:\n.*?(?=^  \S|\Z)", text)
+        self.assertIsNotNone(match, name)
+        return match.group(0)
+
+    def detect(self, files: list[str]) -> bool:
+        """Runs the `changed` job's path loop on `files`."""
+        script = self.job(self.workflow("rust-ci.yml"), "changed")
+        loop = re.search(r'(?ms)^ +for f in "\$\{files\[@\]\}"; do\n.*?^ +done$', script)
+        self.assertIsNotNone(loop)
+        program = "\n".join(
+            [
+                "set -euo pipefail",
+                "files=(" + " ".join(f"'{f}'" for f in files) + ")",
+                "codex=false argument_comment_lint=false argument_comment_lint_package=false",
+                "workflows=false windows_native_tests=false",
+                loop.group(0),
+                'echo "$windows_native_tests"',
+            ]
+        )
+        result = subprocess.run(
+            ["bash", "-c", program], capture_output=True, text=True, check=True
+        )
+        return result.stdout.strip() == "true"
+
+    def test_runs_only_for_the_four_crates_and_its_workflow(self) -> None:
+        for crate in self.CRATES:
+            with self.subTest(crate=crate):
+                self.assertTrue(self.detect(["README.md", f"codex-rs/{crate}/src/lib.rs"]))
+        self.assertTrue(self.detect([f".github/workflows/{self.REUSABLE}"]))
+        for files in (
+            ["codex-rs/core-api/src/lib.rs", "codex-rs/tui-markdown/x.rs"],
+            ["codex-rs/cli/src/main.rs", "codex-rs/Cargo.lock", "docs/ci.md"],
+            [".github/workflows/rust-ci.yml", ".bazelrc"],
+        ):
+            with self.subTest(files=files):
+                self.assertFalse(self.detect(files))
+
+    def test_skipped_on_main_pushes_and_nightly(self) -> None:
+        # Non-PR events get the forced file list; nightly runs every crate's
+        # native Windows tests in bazel.yml instead.
+        forced = re.search(
+            r'(?m)^            files=\((.*)\)$', self.job(self.workflow("rust-ci.yml"), "changed")
+        )
+        self.assertIsNotNone(forced)
+        files = re.findall(r'"([^"]+)"', forced.group(1))
+        self.assertIn("codex-rs/force", files)
+        self.assertFalse(self.detect(files))
+
+    def test_pr_job_calls_the_reusable_workflow(self) -> None:
+        rust_ci = self.workflow("rust-ci.yml")
+        self.assertIn(
+            "windows_native_tests: ${{ steps.detect.outputs.windows_native_tests }}",
+            self.job(rust_ci, "changed"),
+        )
+        self.assertRegex(
+            self.job(rust_ci, "windows_native_tests"),
+            r"(?m)^    needs: changed\n"
+            r"    if: \$\{\{ needs\.changed\.outputs\.windows_native_tests == 'true' \}\}\n"
+            rf"    uses: \./\.github/workflows/{re.escape(self.REUSABLE)}\n"
+            r"    secrets: inherit$",
+        )
+
+    def test_required_when_it_runs(self) -> None:
+        rust_ci = self.workflow("rust-ci.yml")
+        self.assertRegex(rust_ci, r"(?ms)^  results:\n.*?^        windows_native_tests,$")
+        self.assertIn(
+            "if [[ \"${NEEDS_CHANGED_OUTPUTS_WINDOWS_NATIVE_TESTS}\" == 'true' ]]; then\n"
+            "            [[ '${{ needs.windows_native_tests.result }}' == 'success' ]]",
+            rust_ci,
+        )
+        self.assertIn(
+            "NEEDS_CHANGED_OUTPUTS_WINDOWS_NATIVE_TESTS: "
+            "${{ needs.changed.outputs.windows_native_tests }}",
+            rust_ci,
+        )
+
+    def test_scoped_native_bazel_test_within_budget(self) -> None:
+        reusable = self.workflow(self.REUSABLE)
+        triggers = reusable.split("\njobs:")[0]
+        self.assertRegex(triggers, r"(?m)^  workflow_call:$")
+        self.assertNotRegex(triggers, r"(?m)^  (pull_request|push|schedule):")
+        self.assertIn("runs-on: windows-2022", reusable)
+        self.assertIn("timeout-minutes: 90", reusable)
+        targets = re.search(r"(?ms)^ +bazel_targets=\(\n(.*?)^ +\)$", reusable)
+        self.assertIsNotNone(targets)
+        self.assertEqual(
+            targets.group(1).split(), [f"//codex-rs/{crate}/..." for crate in self.CRATES]
+        )
+        self.assertIn("--build_tests_only", reusable)
+        # Native, like nightly's test-windows-native-main, not the gnullvm
+        # cross build that needs BuildBuddy.
+        self.assertNotIn("--windows-cross-compile", reusable)
+
+    def test_restores_nightlys_cache_and_saves_none(self) -> None:
+        reusable = self.workflow(self.REUSABLE)
+        self.assertIn("cache-scope: bazel-test-windows-native-main", reusable)
+        # bazel.yml scopes that job's cache by its job ID.
+        self.assertIn("cache-scope: bazel-${{ github.job }}", self.job(self.workflow("bazel.yml"), "test-windows-native-main"))
+        self.assertNotIn("actions/cache/save@", reusable)
+        self.assertNotRegex(reusable, r"uses: actions/cache@")
+
+    def test_login_unit_tests_get_one_rerun_on_windows(self) -> None:
+        # #691: one automatic re-run in both native Windows jobs, and only
+        # there (not in .bazelrc, which every platform reads).
+        flag = "--flaky_test_attempts=//codex-rs/login:login-unit-tests@2"
+        native_main = self.job(self.workflow("bazel.yml"), "test-windows-native-main")
+        for name, text in (("pr", self.workflow(self.REUSABLE)), ("nightly", native_main)):
+            with self.subTest(job=name):
+                self.assertEqual(re.findall(r"--flaky_test_attempts=\S+", text), [flag])
+        self.assertEqual(self.workflow("bazel.yml").count("--flaky_test_attempts"), 1)
+        self.assertNotIn("flaky_test_attempts", (REPO_ROOT / ".bazelrc").read_text())
 
 
 class NightlyHeavyJobsTest(unittest.TestCase):
