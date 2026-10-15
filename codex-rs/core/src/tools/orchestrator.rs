@@ -206,6 +206,13 @@ impl ToolOrchestrator {
                 .sandbox_permissions(req)
                 .requires_escalated_permissions()
         {
+            // The person sees it too, not only the model (an exec_command
+            // refused before it starts shows no command cell).
+            warn(
+                tool_ctx,
+                crate::security::protected_additional::PROTECTED_LAUNCH_NO_ESCALATION,
+            )
+            .await;
             return Err(ToolError::Rejected(
                 crate::security::protected_additional::PROTECTED_LAUNCH_NO_ESCALATION.to_string(),
             ));

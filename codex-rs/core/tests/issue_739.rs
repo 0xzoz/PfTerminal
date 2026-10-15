@@ -269,6 +269,7 @@ async fn issue_739_permissive_under_protected_launch_offers_no_run_outside_the_s
     use SecurityLevel::Permissive;
     let mut wrong = Vec::new();
     // (level, route, prompts expected, writes, text in the output, warning)
+    // The refusal is also a warning, so the person sees it, not only the model.
     for (level, route, asks, writes, said, warned) in [
         (
             Permissive,
@@ -276,7 +277,7 @@ async fn issue_739_permissive_under_protected_launch_offers_no_run_outside_the_s
             0,
             false,
             Some(NOT_POSSIBLE),
-            None,
+            Some(NOT_POSSIBLE),
         ),
         (
             Permissive,
@@ -284,7 +285,7 @@ async fn issue_739_permissive_under_protected_launch_offers_no_run_outside_the_s
             0,
             false,
             Some(NOT_POSSIBLE),
-            None,
+            Some(NOT_POSSIBLE),
         ),
         // Still no prompt, but inside the sandbox, and the person is told.
         (Permissive, Route::Rule, 0, false, None, Some(RULE_NOTE)),
@@ -306,10 +307,11 @@ async fn issue_739_permissive_under_protected_launch_offers_no_run_outside_the_s
                     .count()
                     == 1
             }
-            None => !run
-                .warnings
-                .iter()
-                .any(|warning| warning.contains(RULE_NOTE) || warning.contains(RETRY_NOTE)),
+            None => !run.warnings.iter().any(|warning| {
+                [RULE_NOTE, RETRY_NOTE, NOT_POSSIBLE]
+                    .iter()
+                    .any(|note| warning.contains(note))
+            }),
         };
         if run.asked != asks
             || run.wrote != writes

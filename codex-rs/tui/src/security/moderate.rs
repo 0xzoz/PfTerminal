@@ -106,7 +106,7 @@ pub(crate) fn rows(facts: Facts) -> Vec<(&'static str, String)> {
 /// #739: [`REMOVED`]'s protected-files row while protected launch
 /// (secretless_agent_launch) stays on: its launch contract keeps Corbanu's
 /// own files and some home credential files unreadable to agent commands.
-pub(crate) const REMOVED_PROTECTED_FILES_UNDER_PROTECTED_LAUNCH: &str = "most credential files in your home folder are no longer denied to agent commands, and files that run code later are no longer read-only; Corbanu's sign-in, vault, config and history, and a few CLI token files (such as .netrc, .aws/credentials and .npmrc), stay unreadable to them (secretless_agent_launch)";
+pub(crate) const REMOVED_PROTECTED_FILES_UNDER_PROTECTED_LAUNCH: &str = "most credential files in your home folder are no longer denied to agent commands, and files that run code later are no longer read-only; your own sandbox settings decide, except that Corbanu's sign-in, vault, config and history, and a few CLI token files (such as .netrc, .aws/credentials and .npmrc), stay unreadable to them (secretless_agent_launch)";
 
 /// What a move from Moderate to Permissive removes at the next start.
 pub(crate) const REMOVED: [(&str, &str); 4] = [
