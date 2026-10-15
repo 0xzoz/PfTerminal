@@ -137,7 +137,7 @@ async fn exec_ends_with_an_error_when_the_home_stays_unreadable() -> anyhow::Res
     let helper = write_helper(&test)?;
 
     let output = tokio::task::spawn_blocking({
-        let mut cmd = exec_command(&test, &server, &helper, Some(3));
+        let mut cmd = exec_command(&test, &server, &helper, /*home_wait_secs*/ Some(3));
         move || cmd.output()
     })
     .await??;
