@@ -6,27 +6,31 @@ sprint (#750 with #747, #749; #764, #781, #760). Owner decisions D1-D7 (#750, 20
 
 ## Result
 
-34 cases: **17 passed, 14 failed, 3 blocked** ([dispositions.md](dispositions.md), [results.json](results.json)).
-Blocker cases: 15 passed, 9 failed, 2 blocked of 26. Advisory cases: 2 passed, 5 failed, 1 blocked of 8. Corrected
-after evidence check r1 (it was 17/10/7): MOD-15, MOD-17, MOD-22 and MOD-29 moved from blocked to failed.
+34 cases: **16 passed, 15 failed, 3 blocked** ([dispositions.md](dispositions.md), [results.json](results.json)).
+Blocker cases: 14 passed, 10 failed, 2 blocked of 26. Advisory cases: 2 passed, 5 failed, 1 blocked of 8. Corrected
+after the evidence checks (it was 17/10/7): r1 moved MOD-15, MOD-17, MOD-22 and MOD-29 from blocked to failed; r2
+moved MOD-24 from passed to failed. The r2 corrections were not re-checked (review budget spent).
 
-- **Passed (17):**
+- **Passed (16):**
   - Confirming and restarting: MOD-02, 03, 04, 05, and 25 (both Z.AI connection styles).
   - Sandbox: MOD-07 (an approved outside write stays sandboxed; no "retry without sandbox").
   - Untrusted content: MOD-12 and 13 (instructions hidden in MCP output or a project file trigger no protected action),
     14 and 16 (fresh approval needed after untrusted content, including MCP calls that send data).
-  - Secrets and keys: MOD-18 (environment secrets don't reach agent commands), 24 (an unbrokerable URL is refused and
-    nothing is sent), 27 (vault values removed from output), 34 (the person's `broker_model_auth = false` wins).
+  - Secrets and keys: MOD-18 (environment secrets don't reach agent commands), 27 (vault values removed from output),
+    34 (the person's `broker_model_auth = false` wins).
   - Other: MOD-19 (kill switch), 23 (Moderate isn't saved without the untrusted-content labels), 31 (`!` commands run
     and are shown as not contained).
 - **Failed, Moderate defects (blockers):**
   - MOD-10 (#838, security): after one fresh approval an agent command read `security_state.json` and
     `source-origin.key` in the Corbanu home. Config, history and vault reads were refused as expected.
   - MOD-06 and MOD-11 (#837): `.git` stays read-only in Moderate's sandbox even after approval, so an agent can't commit
-    and an approved hook write fails. MOD-06 also got an extra untrusted-content prompt for edit-then-run (#841).
+    and an approved hook write fails. In MOD-06 the agent's file tools also failed ("macOS is blocking access to the
+    Corbanu home", #847), and the shell edit it fell back to drew an untrusted-content prompt (#841).
   - MOD-08 (#840): a "don't ask again" rule saved under Permissive prompts again under Moderate (D6 says keep it).
   - MOD-15 and MOD-20 (#839): Recent denials misses refusals (the credential refusal with approvals off; the
     Corbanu-file refusals).
+  - MOD-24 (#839): an unbrokerable model URL is refused and nothing reaches the relay, but the inspector still says
+    model keys are held by the broker instead of showing it degraded or off.
   - MOD-17 (#845): a project `.codex/config.toml` with a `[security]` table stops Corbanu from starting ("missing field
     `version`"); the level itself stayed Moderate.
 - **Failed on #739 (Permissive, fixed on main by #813 after this candidate):** MOD-01 (everything Moderate-related
@@ -42,7 +46,8 @@ after evidence check r1 (it was 17/10/7): MOD-15, MOD-17, MOD-22 and MOD-29 move
   - MOD-28: the UI offered no grant or "for session" approval to revoke, only a saved "don't ask again" rule, which
     revoke does not cover by its own description. Owner question below.
 - Dispositions that differ from the executor's verdict: MOD-11, 15, 17, 22, 26, 29 and 33 (executor blocked; an expected
-  result was observed to fail, so failed) and MOD-28 (executor failed; starting condition not met, so blocked).
+  result was observed to fail, so failed), MOD-24 (executor passed; an expected result lacks evidence and the screens
+  contradict it, so failed) and MOD-28 (executor failed; starting condition not met, so blocked).
 - `qa/code-blind-functional/check.py` stops at MOD-01 ([checker-output.txt](checker-output.txt)), as expected while
   cases are unresolved.
 
@@ -148,4 +153,5 @@ after evidence check r1 (it was 17/10/7): MOD-15, MOD-17, MOD-22 and MOD-29 move
 
 ## Review budget
 
-See [review-ledger.md](review-ledger.md): 3 of 5 used by the design; the independent evidence check uses the rest.
+5 of 5 used ([review-ledger.md](review-ledger.md)): design 1, design review 2, evidence checks r1 and r2. The last
+verdict is **fail**; its corrections are applied but not independently re-checked, and no extension was requested.

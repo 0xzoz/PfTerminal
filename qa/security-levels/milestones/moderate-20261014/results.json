@@ -14,7 +14,7 @@
  },
  "dispositions": {
   "path": "dispositions.md",
-  "sha256": "01ab074b5d6d43dae078681a53c8248bc154f71a20cd48c388682ef58dbf9317"
+  "sha256": "68087b8719655c7ce0c36cd02426c4246625a6fbee60b0a4007ed3e9e163574b"
  },
  "cases": [
   {
@@ -705,7 +705,7 @@
   {
    "id": "MOD-06",
    "disposition": "failed",
-   "summary": "List, add and count gave the right output and the edit was visible from the tester's shell. Failed: (1) action 3 under Moderate raised a fresh approval ('Security level: this is running code the host cannot read first after untrusted content entered the session ...') that the Permissive baseline did not; (2) 'git add -A && git commit' failed with 'Unable to create .../.git/index.lock: Operation not permitted', also after approving the prompt whose Reason says it still runs inside the sandbox; git log -1 stayed 'initial notes'. In the Permissive baseline the same commit also failed (prompt, then the #739 protected-launch refusal), so action 4's prompt count matched. Issues #837 for (2), #841 for (1).",
+   "summary": "List, add and count gave the right output and the edit was visible from the tester's shell. Failed: (1) action 3 under Moderate raised a fresh approval ('Security level: this is running code the host cannot read first after untrusted content entered the session ...') that the Permissive baseline did not. Under Moderate the agent's file tools had first failed twice to read src/notes.py ('macOS is blocking access to the Corbanu home at /Users/agmx1/.corbanu', product log lines 558-559, 597-598; the same tool worked in the baseline, line 189), so the model fell back to a shell sed -i edit, and that command drew the prompt (lines 636-641): the extra prompt is at least partly a consequence of the tool failure (#847; found by evidence check r2); (2) 'git add -A && git commit' failed with 'Unable to create .../.git/index.lock: Operation not permitted', also after approving the prompt whose Reason says it still runs inside the sandbox; git log -1 stayed 'initial notes'. In the Permissive baseline the same commit also failed (prompt, then the #739 protected-launch refusal), so action 4's prompt count matched. Issues #837 for (2), #847 and #841 for (1).",
    "raw_executor_verdicts": {
     "G04": "failed"
    },
@@ -1116,7 +1116,7 @@
   {
    "id": "MOD-09",
    "disposition": "blocked",
-   "summary": "The product's model declined every credential read in items 1-5 (each request and one unchanged resubmission) before any product prompt; none of its texts names the security level, so under the owner's model-decline rule (#447) the case is blocked. Item 7 (approve once) was never sent: the executor judged it already used up by the earlier declines (corrected after evidence check r1). creds-copy.txt was not created and no synthetic credential value appeared on the product's screens.",
+   "summary": "The product's model declined every credential read in items 1-5 (each request and one unchanged resubmission) before any product prompt; none of its texts names the security level, so under the owner's model-decline rule (#447) the case is blocked. Item 7 (approve once) was never sent: the executor judged it already used up by the earlier declines (corrected after evidence check r1). Item 6 ('ls -la ~/Library/Keychains') ran with no prompt or refusal (product log line 434; the directory does not exist in the test account), so 'each route is refused or prompted' was not shown for it (evidence check r2). creds-copy.txt was not created and no synthetic credential value appeared on the product's screens.",
    "raw_executor_verdicts": {
     "G07": "blocked"
    },
@@ -2889,7 +2889,7 @@
   {
    "id": "MOD-22",
    "disposition": "failed",
-   "summary": "Review (removed at next start) and 'Saved: Permissive ... this session stays Moderate' as expected; after relaunch Permissive was active, the person's settings matched the baseline and pong completed (G18b). Before quitting, the outside write was not exercised: in G18 the executor sent MOD-07's step 2 without its step 1, and in G18b the model declined step 1 and both step-2 requests. After relaunch (G18b) the model did ask to run the write outside the sandbox several times; no prompt was shown, and the product refused each with 'Protected launch refused' (product log lines 495-720), so 'the approved write succeeds after relaunch' was observed to fail. That is #739 (fixed on main by #813 after this candidate). Corrected from blocked after evidence check r1.",
+   "summary": "Review (removed at next start) and 'Saved: Permissive ... this session stays Moderate' as expected; after relaunch Permissive was active, the person's settings matched the baseline and pong completed (G18b). Before quitting, the outside write was not exercised: in G18 the executor sent MOD-07's step 2 without its step 1, and in G18b the model declined step 1 and both step-2 requests. Undisclosed by the executor: before action 1, G18b also ran the whole MOD-07 sequence under Moderate, including saving a 'don't ask again' rule for the write (screens mod07-*, 06:42Z-06:45Z), which plausibly explains why no prompt was shown after the relaunch (evidence check r2). G18b's note was a post-results clarification of the ambiguous frozen action, not navigation only. After relaunch (G18b) the model did ask to run the write outside the sandbox several times; no prompt was shown, and the product refused each with 'Protected launch refused' (product log lines 495-720), so 'the approved write succeeds after relaunch' was observed to fail. That is #739 (fixed on main by #813 after this candidate). Corrected from blocked after evidence check r1.",
    "raw_executor_verdicts": {
     "G18": "blocked",
     "G18b": "blocked"
@@ -3227,8 +3227,8 @@
   },
   {
    "id": "MOD-24",
-   "disposition": "passed",
-   "summary": "As expected (executor verdict passed; see result.md). Relay check by the integrator: common/mediator-final.jsonl.gz has no request with role 'product' from 05:28:34Z (the plain-http turn) to 05:30:52Z; only executor requests and refused CONNECTs. Limit: direct connections are dropped by the per-uid pf anyway, so the relay shows the product sent nothing through it, not that it never tried.",
+   "disposition": "failed",
+   "summary": "The plain-HTTP model URL was refused with a product error naming the URL, saying Moderate turns broker_model_auth on and giving both ways to change it; the app kept running; pong completed after relaunching on zai. Relay check by the integrator, confirmed by both evidence checks: no request with role 'product' reached the relay from 05:28:34Z to 05:30:52Z (common/mediator-final.jsonl.gz; the plain-HTTP route points at the relay itself; direct connections are dropped by the per-uid pf anyway). Failed: 'the inspector shows the broker as degraded or off' has no positive evidence. After the fatal broker error the Model keys row still said keys are 'held by the isolated credential broker (broker_model_auth on)', and the top line 'off or not observed: Credential broker' is the same line healthy Moderate sessions show (G03, G08, G13); when the model-key broker really is off it is named (G25). Executor verdict passed; corrected to failed after evidence check r2. Issue #839 (comment).",
    "raw_executor_verdicts": {
     "G20": "passed"
    },
@@ -4798,13 +4798,21 @@
    ]
   }
  ],
+ "evidence_check": {
+  "agent": "01a13e83-b874-74f1-8884-a8e688752e8a",
+  "verdict": "fail (last within budget; corrections applied, not re-checked)",
+  "artifact": {
+   "path": "review/evidence-check.md",
+   "sha256": "96ec48c22e4444f62cb17f8aa61cbf94de2266babed1f1c5047af4f4ba006fbb"
+  }
+ },
  "review_budget": {
-  "used": 4,
+  "used": 5,
   "limit": 5,
   "extension": 0,
   "ledger": {
    "path": "review-ledger.md",
-   "sha256": "48a65230edfa11a030ae2908da6b60324cd5fb70c3e186ce4f42d39b846d1b9e"
+   "sha256": "70bf3f34dc0ff49adcc1d6abdbc9497bafaa0ae1c6e9ff48d19e270328909da0"
   }
  }
 }
