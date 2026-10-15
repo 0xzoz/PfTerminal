@@ -35,10 +35,11 @@ red status noise without testing the code.
   Bazel repository cache that nightly saves on `main` and saves nothing. With
   no build cache it compiles cold: about 43 minutes, about as long as the
   Windows argument comment lint that already runs on PRs (90-minute timeout).
-  Retries come from `.bazelrc`'s `windows-native-tests` config: Bazel's usual
-  three attempts for the sharded core and tui unit tests, and one re-run of
-  `//codex-rs/login:login-unit-tests` for the intermittent #691 test. If that
-  test fails both attempts again, add it to the config's skip list.
+  Bazel gives the sharded core and tui unit tests its usual three attempts.
+  This job and the nightly one also give `//codex-rs/login:login-unit-tests`
+  one re-run (`--flaky_test_attempts`) for the intermittent #691 test. If that
+  test fails both attempts again, add it to the skip list in `.bazelrc`'s
+  `windows-native-tests` config.
 - Argument comment lint on changed crates
   (`rust-ci / Argument comment lint - changed crates`, #636): runs the
   `/*param*/` lint, test code included, on every `codex-rs` crate whose `.rs`

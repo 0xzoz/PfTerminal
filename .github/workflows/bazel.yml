@@ -383,6 +383,11 @@ jobs:
 
           bazel_test_args=(
             test
+            # #691: the intermittent login test gets one automatic re-run
+            # (Bazel re-runs the whole target and reports it FLAKY). Owner
+            # decision 2026-10-15; if it fails both attempts again, add it to
+            # .bazelrc's windows-native-tests skip list.
+            --flaky_test_attempts=//codex-rs/login:login-unit-tests@2
             --test_tag_filters=-argument-comment-lint
             --test_verbose_timeout_warnings
             --build_metadata=COMMIT_SHA=${GITHUB_SHA}

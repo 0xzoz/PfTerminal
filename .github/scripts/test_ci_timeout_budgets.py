@@ -482,12 +482,15 @@ class PrWindowsNativeTestsTest(unittest.TestCase):
         self.assertNotRegex(reusable, r"uses: actions/cache@")
 
     def test_login_unit_tests_get_one_rerun_on_windows(self) -> None:
-        # #691: one automatic re-run, on Windows only.
-        bazelrc = (REPO_ROOT / ".bazelrc").read_text()
-        self.assertEqual(
-            re.findall(r"(?m)^(\S+) --flaky_test_attempts=(.*)$", bazelrc),
-            [("common:windows-native-tests", "//codex-rs/login:login-unit-tests@2")],
-        )
+        # #691: one automatic re-run in both native Windows jobs, and only
+        # there (not in .bazelrc, which every platform reads).
+        flag = "--flaky_test_attempts=//codex-rs/login:login-unit-tests@2"
+        native_main = self.job(self.workflow("bazel.yml"), "test-windows-native-main")
+        for name, text in (("pr", self.workflow(self.REUSABLE)), ("nightly", native_main)):
+            with self.subTest(job=name):
+                self.assertEqual(re.findall(r"--flaky_test_attempts=\S+", text), [flag])
+        self.assertEqual(self.workflow("bazel.yml").count("--flaky_test_attempts"), 1)
+        self.assertNotIn("flaky_test_attempts", (REPO_ROOT / ".bazelrc").read_text())
 
 
 class NightlyHeavyJobsTest(unittest.TestCase):
