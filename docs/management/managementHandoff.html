@@ -19,8 +19,8 @@ th{background:#f5f5f7}.warn{background:#fff4e5;border-left:4px solid #f0a020;pad
 State as of 2026-10-15 07:15 UTC (2026-10-15 00:15 America/Phoenix). Owner: <b>Travis</b>. Repository: <code>CorbanuCore/CorbanuTerminal</code> (base branch <code>main</code>, head <code>f64bc0e690</code>).
 Coordinator since 2026-10-13 04:30Z: a new Claude coordinator, resumed from the 2026-10-12 pause handoff when Travis said resume.
 Previous updates: PR #706 (to 2026-10-13 18:46Z), PR #754 (to 2026-10-14 05:40Z) and PR #804 (to 2026-10-14 16:56Z).
-<b>Addendum at 2026-10-15 20:50 UTC (13:50 America/Phoenix)</b> below the next box: read it first — it supersedes the 07:15Z worker, PR and CI
-details in sections 3, 6, 10 and 12.</small></p>
+<b>Addenda at 2026-10-15 20:50 UTC and 21:15 UTC (13:50 and 14:15 America/Phoenix)</b> below the next box: read them first — they supersede
+the 07:15Z worker, PR and CI details in sections 3, 6, 10 and 12, and the open questions in section 11.</small></p>
 
 <div class="warn"><b>Where things stand.</b> The program is <b>running</b> (not paused). After the 2026-10-12 orderly pause
 (credits), Travis said resume on 2026-10-13; the new coordinator has run “wave 2” since: 57 workers finished and 127 PRs merged by
@@ -55,6 +55,22 @@ design and never took the VM. <b>Main is red</b>: postmerge on <code>7666bdf3d4<
 (<code>$W/&lt;name&gt;.relaunch*.md</code>) and launched <b>main-ci4</b> (cargo-deny + the two Linux tests). <b>PRs #849–#853 are from another
 account (<code>citadelculture</code>), not this program</b> — their titles look like fixes for issues filed here (#845, #847, #822, #820, #814);
 don't merge or close them without Travis.</div>
+
+<div class="warn"><b>Addendum 2026-10-15 21:15 UTC (14:15 America/Phoenix) — second outage, decisions answered, workers moved to the internal disk.</b>
+<b>Second outage 20:59–21:01Z:</b> the same failure killed main-ci4, qual-mod1, qual-aggr6 and handoff-doc4 (the coordinator's own shell kept
+working). Evidence (todo.md 21:11): TCC allowed Terminal throughout, no Seatbelt denials, no ES clients; all three episodes (10-12 ~11:01Z,
+10-15 07:59Z, 20:59Z) fall at ~:59–:01 past an hour, in the <code>claude-plan</code> auth helper's home preflight (<code>read_dir</code> of the home
+→ EPERM, <code>cli/src/pfterminal_home.rs</code>). <b>Travis's answers:</b> 20:55Z — open decisions 1–6 as recommended (section 9; section 11 is
+now empty); 21:07Z — <b>implement all resilience fixes</b> (todo.md “decision 8”) and the Kimi/Moonshot key is stored in the vault under the label
+<code>kimi_api</code>. <b>New worker infrastructure (decision 8):</b> the worker tmux server, logs and results now live on the internal disk in
+<code>$HOME/.corbanu-workers</code> (<code>launch.sh</code>, <code>mon.sh</code>, <code>wait-event.sh</code>, and <code>watchdog.sh</code>, which
+checks every 2 minutes and, once the home is readable again, relaunches a worker that died of the access error with a recovery note, at most 3
+times per worker). <code>launch.sh NAME BRIEF</code> copies the brief there as <code>NAME.brief.md</code> and writes <code>NAME.log</code> and
+<code>NAME.result.md</code> there; run folders, the VM lock and <code>todo.md</code> stay in <code>$W</code> on the drive. <b>Running at 21:15Z:</b> qual-mod1 (merge #844 when green; its draft result has the Moderate sign-off request and
+Decisions), qual-aggr6, main-ci4, handoff-doc4 (this PR), <b>resil-616</b> (#616: home-access diagnostics, exec waits and retries for up to ~60
+minutes instead of exiting, investigate the hourly pattern) and <b>pf60-moonshot</b> (a real Moonshot request with <code>kimi_api</code>).
+<b>ci-win-tests finished</b> (result 20:55Z): #828 works as intended and throwaways #829–#833 are closed with branches deleted. #854 is a
+sixth <code>citadelculture</code> PR. The VM lock is free (qual-aggr6 takes it next). Main is still red on <code>7666bdf3d4</code> until main-ci4 lands.</div>
 
 <h2>1. How to resume (read first)</h2>
 <ol>
@@ -687,6 +703,11 @@ comments “Owner decision (Travis, 2026-10-15, as recommended)” at 04:53Z):</
 <tr><td>10-15</td><td>(9) CI cache: leave as is (lower the two biggest caps only if nightly Bazel caches go cold); (10) leave the two minor cache-test gaps until those files next change.</td><td>#636</td></tr>
 <tr><td>10-15</td><td>(11) Run the native Windows tests on PRs that touch tui, core, state or login (ci-win-tests, PR #828).</td><td>#636</td></tr>
 <tr><td>10-15</td><td>(12) Windows login test: allow one re-run for now; skip on Windows only if it fails again; (13) #800's Windows writer timing (2.5 → 3 s, 6 s hold): noted, no change.</td><td>#691</td></tr>
+<tr><td colspan="3"><i>The six decisions queued at 05:28Z and 06:18Z, “1-6 as recommended”, 2026-10-15 20:55Z (todo.md “20:55 TRAVIS”):</i></td></tr>
+<tr><td>10-15</td><td>(1) Accept PF-60 S07, S08 and S09 (#812, #821, #825); (2) #824: option (a), record each realtime session as one request with tokens unknown, now; (3) #814: option (b), the “reasoning above output” rule on Responses routes now.</td><td>todo.md 20:55</td></tr>
+<tr><td>10-15</td><td>(4) Moonshot: the stand-in check is accepted, and Travis offered a key (stored 21:07Z as vault label <code>kimi_api</code>; pf60-moonshot makes a real request); (5) S10 may run on “macOS 3” when it's free.</td><td>todo.md 20:55, 21:07</td></tr>
+<tr><td>10-15</td><td>(6) #826: option (a), block new user namespaces for agent commands under protected levels, with security sign-off.</td><td>todo.md 20:55</td></tr>
+<tr><td>10-15</td><td>(8) Implement all the resilience fixes for the drive-access outages (#616): workers on the internal disk with a watchdog, and resil-616 (diagnostics, exec wait-and-retry, investigate the hourly pattern).</td><td>todo.md 21:07, 21:11</td></tr>
 </table>
 
 <h2>10. Current state</h2>
@@ -752,7 +773,9 @@ If a break does reach main, repair it quickly with a small PR via <code>coord-me
 <h2>11. Open questions for Travis</h2>
 <p>Every “Decision(s) queued” item in <code>todo.md</code> that Travis has not answered yet, with the worker's recommendation. Everything
 queued up to 10-15 04:53Z was answered (section 9: the 21-item answer of 10-14 ~22:58Z and the 13-item answer of 10-15 04:53Z); the six items
-below were queued after it (todo.md 05:28 and 06:18). Per Travis's process rule, repeat them in every 5-minute status note until he answers.
+below were queued after it (todo.md 05:28 and 06:18). <b>Update 21:15Z: Travis answered all six as recommended at 20:55Z</b> (section 9), so
+none is open; the next decisions will be the Moderate sign-off and its per-defect Decisions, which qual-mod1 brings when it finishes. Per
+Travis's process rule, repeat every new one in each 5-minute status note until he answers.
 Details and options are in the named result file (<code>$W/&lt;name&gt;.result.md</code>).</p>
 <table>
 <tr><th>#</th><th>Question</th><th>Recommendation</th><th>Source</th></tr>
