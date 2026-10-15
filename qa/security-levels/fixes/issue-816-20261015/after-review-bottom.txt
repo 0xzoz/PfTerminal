@@ -1,4 +1,5 @@
 
+    with Grant once (it only lets one command write git hooks and config kept outside a .git folder and, when the current folder holds your home folder, start-
     up files, login agents and .claude settings); reading credential files (.env, .env.* and .envrc files, also ones created later;
     not .env.example, .env.sample or .env.template; SSH, cloud and CLI tokens) or Corbanu's sign-in, vault, config and history is denied to agent commands and
     is never granted, not even once (switch to Permissive in /security to allow it); on Linux and Windows a command is stopped when such a file appears while it
@@ -36,12 +37,11 @@ Browser profiles and keychains are listed, not read. MCP servers, hooks and noti
 Unchanged: model and provider, MCP servers, apps and hooks (they run outside the sandbox), wallet scopes, and commands you have already allowed permanently
 (they skip the prompt but stay sandboxed). `corbanu exec` that you start yourself and IDE sessions are not covered yet, except that they also hold provider keys
 in the credential broker.
-Core's protections below apply as soon as you confirm, and approval for every command from each pane's next turn. From then until the restart this session
-also has: approved and allow-listed commands stay inside this session's sandbox (commands can write to the current folder, /private/tmp), network off for agent
-commands, and secret-like environment variables removed and login profiles and shell snapshots unused. The rest of the rows above take effect when you restart
-Corbanu Terminal (you can restart right after saving); until then this session keeps its current sandbox, network, environment, model-key and child-agent
-settings, apart from Core's protected-path denials and what is listed as in force, and commands already running keep the permissions they started with. Your
-config.toml is not modified.
+Core's protections below apply as soon as you confirm, and approval for every command from each pane's next turn. From then until the restart, also: approved
+and allow-listed commands stay inside this session's sandbox (commands can write to the current folder, /private/tmp), network is off for agent commands, and
+secret-like environment variables are removed and login profiles and shell snapshots are not used. The rest of the rows above take effect when you restart
+Corbanu Terminal (you can restart right after saving); until then this session keeps its current settings for the rest, apart from Core's protected-path
+denials, and commands already running keep the permissions they started with. Your config.toml is not modified.
 Core's level becomes Aggressive as soon as you confirm, in this session and the others of this Corbanu Terminal: agent commands cannot run `corbanu vault …` and
 cannot open protected paths (the vault store, sign-in and credential files, and Corbanu's config, history and state), sensitive surfaces need a grant, external
 content reaches the model labelled untrusted, and memory summaries stop; grants and "for session" approvals end. Approval for every command: from each pane's
