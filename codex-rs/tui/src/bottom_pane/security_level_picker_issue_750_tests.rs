@@ -387,6 +387,43 @@ fn issue_750_moderate_kept_by_core_is_the_next_start() {
     }
 }
 
+/// #739 (option B): with protected launch on, the Permissive summary and its
+/// review say that no command runs outside the sandbox, so none is offered;
+/// without it they are unchanged.
+#[test]
+fn issue_739_permissive_says_protected_launch_keeps_commands_in_the_sandbox() {
+    let home = tempfile::tempdir().unwrap();
+    for (facts, protected) in [(ALL_ON, true), (Facts::default(), false)] {
+        level::save(home.path(), ChosenLevel::Moderate, NestedAgents::Refuse).unwrap();
+        let mut picker = open_picker(home.path(), ChosenLevel::Moderate, facts);
+        while ROWS[picker.selected] != Row::Permissive {
+            picker.handle_key_event(key(KeyCode::Up));
+        }
+        let list = text(&picker);
+        assert_eq!(
+            list.contains("agent commands never run outside the sandbox, even when you approve"),
+            protected,
+            "{list}"
+        );
+        assert_eq!(list.contains("Today's behaviour."), !protected, "{list}");
+        picker.handle_key_event(key(KeyCode::Enter));
+        assert_eq!(picker.screen, Screen::Review(ChosenLevel::Permissive));
+        let review = text(&picker);
+        assert_eq!(
+            review.contains("so no approval to run outside it is offered"),
+            protected,
+            "{review}"
+        );
+        assert!(!review.contains("can run outside the sandbox"), "{review}");
+        // Moderate's sandbox rule is listed as removed only without it.
+        assert_eq!(
+            review.contains("a command you approve to run outside the sandbox"),
+            !protected,
+            "{review}"
+        );
+    }
+}
+
 /// #783 (Travis, 2026-10-14): on Windows without its sandbox set up, Moderate
 /// cannot be chosen either, exactly like Aggressive (#691): the list says so,
 /// Enter explains how to set it up, and nothing is saved. Permissive stays.

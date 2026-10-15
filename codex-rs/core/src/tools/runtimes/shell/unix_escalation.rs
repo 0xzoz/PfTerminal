@@ -697,12 +697,15 @@ impl CoreShellActionProvider {
         // Issue #540: where the protected-path rules apply, an intercepted
         // exec leaves the sandbox only within a request a person approved to
         // run outside it, never through an allow rule (as in the
-        // orchestrator). #747: under Moderate, never.
-        let moderate_keeps_sandbox =
-            crate::security::protected_additional::moderate_keeps_sandbox(&self.session);
+        // orchestrator). #747: under Moderate, never; #739: nor under
+        // Permissive with protected launch armed, which refuses such a run
+        // (unlike the orchestrator, no note says so: zsh-fork is off by
+        // default).
+        let always_sandboxed =
+            crate::security::protected_additional::keeps_sandbox_always(&self.session);
         let unsandboxed_allowed =
             unsandboxed_execution_allowed(&self.permission_profile.file_system_sandbox_policy())
-                && !moderate_keeps_sandbox
+                && !always_sandboxed
                 && (self.sandbox_permissions == SandboxPermissions::RequireEscalated
                     || crate::security::protected_additional::protected_level(&self.session)
                         .is_none());
@@ -721,7 +724,7 @@ impl CoreShellActionProvider {
             DecisionSource::PrefixRule if unsandboxed_allowed => EscalationExecution::Unsandboxed,
             DecisionSource::PrefixRule => EscalationExecution::TurnDefault,
             DecisionSource::UnmatchedCommandFallback => Self::shell_request_escalation_execution(
-                if moderate_keeps_sandbox
+                if always_sandboxed
                     && self.sandbox_permissions == SandboxPermissions::RequireEscalated
                 {
                     SandboxPermissions::UseDefault
