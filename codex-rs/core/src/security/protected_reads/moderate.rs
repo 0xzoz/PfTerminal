@@ -12,7 +12,9 @@
 //! Otherwise the way forward is switching to Permissive, unless the person's
 //! own full access runs commands outside a sandbox, which the contract
 //! refuses at every level. Nothing is said about approvals lifting the rules
-//! (#747). Explanation only: it never changes what runs or what is denied.
+//! (#747), except that Corbanu's security state and keys stay denied even
+//! then (#838). Explanation only: it never changes what runs or what is
+//! denied.
 
 use std::cell::RefCell;
 use std::path::Path;

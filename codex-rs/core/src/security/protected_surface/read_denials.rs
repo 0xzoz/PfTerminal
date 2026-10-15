@@ -93,6 +93,15 @@ const CORBANU_SECURITY_FILES: &[&str] = &[
     "security_level.lock",
 ];
 
+/// #838 (Linux): the lock files among them, made empty and private before an
+/// approved run where it could create them, so they stay denied without a
+/// placeholder (see [`CORBANU_READ_LATER_LOCKS`]).
+const CORBANU_SECURITY_LOCKS: &[&str] = &[
+    "security_state.lock",
+    "security_confirm.lock",
+    "security_level.lock",
+];
+
 /// Corbanu home entries that stay readable but never writable: they run, or
 /// are read as instructions, in later commands and sessions.
 const CORBANU_READ_ONLY: &[&str] = &[
@@ -247,8 +256,9 @@ pub(crate) struct ReadDenials {
     /// #766: the registry of homes Moderate runs on, read-only to the command
     /// so it cannot drop this home from it.
     moderate_registry: Vec<AbsolutePathBuf>,
-    /// #838: Corbanu's security state and keys ([`security_files`]), denied
-    /// in [`Self::runtime_only`] as well.
+    /// #838: Corbanu's security state and keys ([`CORBANU_SECURITY_FILES`])
+    /// in this and the other Corbanu homes, denied in [`Self::runtime_only`]
+    /// as well.
     security_files: Vec<AbsolutePathBuf>,
     /// Denials dropped because they hold the command's folder or a writable
     /// root (denying them would deny the workspace itself).
@@ -328,7 +338,7 @@ impl ReadDenials {
         for store in CORBANU_STORES {
             denials.push_fixed(codex_home.join(store), keep);
         }
-        denials.security_files = security_files(&codex_home, keep);
+        denials.add_security_files(&codex_home, keep);
         // #651: the home escaped, should its path hold glob syntax.
         denials.globs.push(
             crate::security::preflight::database_glob(codex_home.as_path())
@@ -349,6 +359,10 @@ impl ReadDenials {
                         .is_some_and(|(home, other)| home == other)
                 {
                     continue;
+                }
+                // #838: what stays denied in it after an approval.
+                if std::fs::symlink_metadata(other.as_path()).is_ok() {
+                    denials.add_security_files(&other, keep);
                 }
                 denials.push_fixed(other, keep);
             }
@@ -397,6 +411,10 @@ impl ReadDenials {
         // #562: only where the command could otherwise create them.
         if cfg!(target_os = "linux") && can_write_home {
             create_missing_runtime_folders(codex_home);
+            // #838: so the security locks stay denied after an approval
+            // without bubblewrap holding them with a placeholder that is
+            // removed while Corbanu may hold the lock.
+            create_missing_security_locks(codex_home);
             // #603: the same for the folders Corbanu reads later, where the
             // home stays writable because the command works in it.
             if AbsolutePathBuf::from_absolute_path(codex_home)
@@ -433,6 +451,20 @@ impl ReadDenials {
                 .map(Path::new),
             &keep,
         );
+        // #838 (Linux): a missing security file where the command could
+        // create it (its home writable once an approval lifts the rules)
+        // cannot be denied without bubblewrap putting an empty placeholder
+        // there for the run, which Corbanu would read as a broken security
+        // state; such a file is left out (see `docs/security-moderate.md`).
+        if cfg!(target_os = "linux") {
+            let policy = profile.file_system_sandbox_policy();
+            denials.security_files.retain(|path| {
+                std::fs::symlink_metadata(path.as_path()).is_ok()
+                    || !path.parent().is_some_and(|parent| {
+                        can_write(&policy, parent.as_path(), turn_cwd.as_path())
+                    })
+            });
+        }
         denials.protect_database_folder(
             codex_home,
             sqlite_home,
@@ -804,6 +836,26 @@ impl ReadDenials {
             moderate_registry: self.moderate_registry,
             skipped: self.skipped,
             ..Self::default()
+        }
+    }
+
+    /// #838: Corbanu's security state and keys in `home` (the active Corbanu
+    /// home or another one), also before they exist, each by its real
+    /// location (bubblewrap refuses a deny spelled through a writable link,
+    /// as a home reached through one would be, #766) and on macOS also as
+    /// given. One that holds a kept folder is skipped, as other denials are.
+    fn add_security_files(&mut self, home: &AbsolutePathBuf, keep: &[AbsolutePathBuf]) {
+        for file in CORBANU_SECURITY_FILES {
+            let path = home.join(file);
+            if Self::holds_kept(&path, keep) {
+                self.skipped.push(path);
+                continue;
+            }
+            for spelling in moderate_spellings(path.as_path()) {
+                if !self.security_files.contains(&spelling) {
+                    self.security_files.push(spelling);
+                }
+            }
         }
     }
 
@@ -1303,6 +1355,19 @@ fn create_missing_read_later_folders(codex_home: &Path) {
     }
 }
 
+/// #838 (Linux): creates the Corbanu home's missing security locks, empty
+/// and private, as Corbanu would.
+fn create_missing_security_locks(codex_home: &Path) {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    for lock in CORBANU_SECURITY_LOCKS {
+        // Fails harmlessly where it exists (also as a link).
+        let _ = options.open(codex_home.join(lock));
+    }
+}
+
 /// Each spelling of `path` the sandboxes compare, as read-only paths are
 /// recorded: its real location, and on macOS the link name too.
 fn spellings(path: &AbsolutePathBuf) -> Vec<AbsolutePathBuf> {
@@ -1442,33 +1507,6 @@ fn real_location_within(path: &AbsolutePathBuf, hops: usize) -> Option<AbsoluteP
         real.push(name);
     }
     AbsolutePathBuf::from_absolute_path(real).ok()
-}
-
-/// #838: Corbanu's security state and keys in `codex_home`, as they stay
-/// denied to a command a person approved under Moderate: the stores among
-/// them also before they exist, the names Corbanu reads later only when they
-/// exist (as before the approval, where the home is read-only or only those
-/// names are). Each by its real location, as bubblewrap needs for a home
-/// spelled through a link it could otherwise not deny through (#766), and on
-/// macOS also as given.
-fn security_files(codex_home: &AbsolutePathBuf, keep: &[AbsolutePathBuf]) -> Vec<AbsolutePathBuf> {
-    CORBANU_SECURITY_FILES
-        .iter()
-        .map(|file| codex_home.join(file))
-        .filter(|path| {
-            CORBANU_STORES
-                .iter()
-                .any(|store| path.as_path().file_name() == Some(std::ffi::OsStr::new(store)))
-                || std::fs::symlink_metadata(path.as_path()).is_ok()
-        })
-        .filter(|path| !ReadDenials::holds_kept(path, keep))
-        .flat_map(|path| moderate_spellings(path.as_path()))
-        .fold(Vec::new(), |mut paths, path| {
-            if !paths.contains(&path) {
-                paths.push(path);
-            }
-            paths
-        })
 }
 
 /// In-process file tools (the patch pre-check, structured edits, image

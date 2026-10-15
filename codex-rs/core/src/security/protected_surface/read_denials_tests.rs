@@ -1994,7 +1994,11 @@ fn issue_540_runtime_entries_stay_read_only_when_the_rules_are_lifted() {
         assert_eq!(
             denied,
             [
+                "security_confirm.lock",
+                "security_level.lock",
                 "security_level.toml",
+                "security_migration.toml",
+                "security_preflight.toml",
                 "security_state.json",
                 "security_state.lock",
                 "source-origin.key",
@@ -2110,6 +2114,39 @@ fn issue_838_security_state_and_keys_stay_denied_when_the_rules_are_lifted() {
             "{cwd:?} {profile:?}"
         );
     }
+    // The same files of another Corbanu home (denied whole before).
+    let other = fx.user_home.join(".pfterminal");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(other.join("source-origin.key"), "x").unwrap();
+    std::fs::write(other.join("auth.json"), "x").unwrap();
+    let all = ReadDenials::collect(
+        &fx.codex_home,
+        Some(&fx.user_home),
+        /*claude_config_dir*/ None,
+        &[abs(&cwd)],
+    );
+    let before = all
+        .apply(&PermissionProfile::Disabled)
+        .unwrap()
+        .file_system_sandbox_policy();
+    let policy = all
+        .runtime_only()
+        .apply(&PermissionProfile::Disabled)
+        .unwrap()
+        .file_system_sandbox_policy();
+    for name in ["source-origin.key", "security_state.json"] {
+        for policy in [&before, &policy] {
+            assert!(
+                !policy.can_read_path_with_cwd(&other.join(name), &cwd),
+                "{name}"
+            );
+            assert!(
+                !policy.can_write_path_with_cwd(&other.join(name), &cwd),
+                "{name}"
+            );
+        }
+    }
+    assert!(policy.can_read_path_with_cwd(&other.join("auth.json"), &cwd));
     // Explanations name them by any spelling of the home.
     let link = fx.user_home.join("home-link");
     std::os::unix::fs::symlink(&fx.codex_home, &link).unwrap();
