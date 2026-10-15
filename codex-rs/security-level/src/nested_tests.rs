@@ -81,3 +81,113 @@ fn a_file_in_place_of_a_home_is_not_an_origin() {
     let below = placeholder.join("home");
     assert_eq!(nested_origins(vec![placeholder, below]), Vec::new());
 }
+
+/// #766: under Moderate an agent launch runs with Moderate enforced; what
+/// cannot be held to it is refused, naming Moderate.
+#[test]
+fn moderate_origin_holds_agents_and_refuses_the_rest() {
+    let origin = PathBuf::from("/moderate-home");
+    assert_eq!(
+        decide_with("exec", NestedKind::Agent, &[], Some(&origin)),
+        NestedLaunch::EnforceModerate(origin.clone())
+    );
+    for kind in [
+        NestedKind::Interactive,
+        NestedKind::Host,
+        NestedKind::Credentials,
+    ] {
+        match decide_with("", kind, &[], Some(&origin)) {
+            NestedLaunch::Refuse(message) => assert!(
+                message.contains("while security level Moderate is enforced (/moderate-home)")
+                    && !message.contains("Aggressive"),
+                "{kind:?}: {message}"
+            ),
+            other => panic!("{kind:?}: {other:?}"),
+        }
+    }
+    let standalone = standalone_refusal_with("codex-exec", NestedKind::Agent, &[], Some(&origin))
+        .expect("a standalone binary cannot hold a run to Moderate");
+    assert!(
+        standalone.contains(
+            "Only `corbanu exec` and `corbanu review` can run there, with Moderate enforced"
+        ),
+        "{standalone}"
+    );
+}
+
+/// An Aggressive origin wins over a Moderate one, in both settings.
+#[test]
+fn aggressive_origin_wins_over_moderate() {
+    let aggressive = PathBuf::from("/aggressive-home");
+    let moderate = PathBuf::from("/moderate-home");
+    assert_eq!(
+        decide_with(
+            "exec",
+            NestedKind::Agent,
+            &[(aggressive.clone(), NestedAgents::Pass)],
+            Some(&moderate)
+        ),
+        NestedLaunch::EnforceAggressive(aggressive.clone())
+    );
+    match decide_with(
+        "exec",
+        NestedKind::Agent,
+        &[(aggressive, NestedAgents::Refuse)],
+        Some(&moderate),
+    ) {
+        NestedLaunch::Refuse(message) => assert!(message.contains("set to refuse"), "{message}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Only a marker this process may not read counts: a missing one, a link or
+/// a folder in its place, or a readable one does not.
+#[cfg(unix)]
+#[test]
+fn only_an_unreadable_marker_marks_moderate() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = tempfile::tempdir().unwrap();
+    assert!(!moderate_marker_denied(home.path()));
+    let marker = prepare_moderate_marker(home.path()).unwrap();
+    assert_eq!(marker, home.path().join(MODERATE_MARKER));
+    assert!(marker.is_file());
+    assert!(!moderate_marker_denied(home.path()));
+    // As bubblewrap masks a denied file.
+    std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let readable_anyway = std::fs::File::open(&marker).is_ok();
+    assert_eq!(moderate_marker_denied(home.path()), !readable_anyway);
+    std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o644)).unwrap();
+    // Made again only when missing; something else in its place is refused.
+    assert_eq!(prepare_moderate_marker(home.path()).unwrap(), marker);
+    std::fs::remove_file(&marker).unwrap();
+    let elsewhere = home.path().join("elsewhere");
+    std::fs::write(&elsewhere, "").unwrap();
+    std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o000)).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &marker).unwrap();
+    assert!(!moderate_marker_denied(home.path()));
+    assert!(prepare_moderate_marker(home.path()).is_err());
+    std::fs::remove_file(&marker).unwrap();
+    std::fs::create_dir(&marker).unwrap();
+    assert!(!moderate_marker_denied(home.path()));
+    assert!(prepare_moderate_marker(home.path()).is_err());
+}
+
+/// Registering keeps homes with a marker and drops those whose marker is
+/// gone.
+#[test]
+fn moderate_registry_keeps_only_marked_homes() {
+    let registry = tempfile::tempdir().unwrap();
+    let kept = tempfile::tempdir().unwrap();
+    let gone = tempfile::tempdir().unwrap();
+    for home in [kept.path(), gone.path()] {
+        prepare_moderate_marker(home).unwrap();
+        register_moderate_home(registry.path(), home).unwrap();
+    }
+    std::fs::remove_file(gone.path().join(MODERATE_MARKER)).unwrap();
+    register_moderate_home(registry.path(), kept.path()).unwrap();
+    assert_eq!(
+        registered_homes(registry.path()),
+        vec![kept.path().to_path_buf()]
+    );
+}

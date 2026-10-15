@@ -1117,6 +1117,9 @@ fn stage_str(stage: Stage) -> &'static str {
 fn main() -> anyhow::Result<()> {
     codex_tui::take_restart_marker();
     pfterminal_home::configure_for_current_process()?;
+    // #766: before any thread, as it may change the Corbanu home variables.
+    // Held until the run ends, when its folder is removed.
+    let _nested_moderate_home = nested_moderate_home();
     pfterminal_home::exit_if_home_blocked_by_macos_privacy();
     let remote_control_disabled = codex_app_server::take_remote_control_disabled_env();
     arg0_dispatch_or_else(move |arg0_paths: Arg0DispatchPaths| async move {
@@ -1147,7 +1150,7 @@ async fn cli_main(
     if let Some(subcommand) = subcommand.as_ref() {
         profile_v2_for_subcommand(&interactive, subcommand)?;
     }
-    let nested_aggressive = match nested_security::nested_launch_kind(subcommand.as_ref())
+    let nested = match nested_security::nested_launch_kind(subcommand.as_ref())
         .map(|(name, kind)| codex_tui::nested_launch(name, kind))
     {
         None | Some(codex_tui::NestedLaunch::NotNested) => None,
@@ -1158,18 +1161,24 @@ async fn cli_main(
             }
             std::process::exit(1);
         }
-        Some(codex_tui::NestedLaunch::EnforceAggressive(origin)) => Some(origin),
+        Some(launch) => Some(launch),
     };
-    let exec_enforcement = match (&nested_aggressive, subcommand.as_ref()) {
-        (Some(origin), Some(Subcommand::Exec(_) | Subcommand::Review(_))) => {
-            Some(nested_security::NestedAggressive::new(origin.clone())?)
-        }
-        (Some(_), _) => anyhow::bail!("this nested launch cannot be held to Aggressive"),
-        (None, _) => None,
-    };
-    let exec_enforcement = exec_enforcement
-        .as_ref()
-        .map(|enforcement| enforcement as &dyn codex_exec::EnforcedSecurity);
+    let exec_enforcement: Option<Box<dyn codex_exec::EnforcedSecurity>> =
+        match (nested, subcommand.as_ref()) {
+            (
+                Some(codex_tui::NestedLaunch::EnforceAggressive(origin)),
+                Some(Subcommand::Exec(_) | Subcommand::Review(_)),
+            ) => Some(Box::new(nested_security::NestedAggressive::new(origin)?)),
+            (
+                Some(codex_tui::NestedLaunch::EnforceModerate(origin)),
+                Some(Subcommand::Exec(_) | Subcommand::Review(_)),
+            ) => Some(Box::new(nested_security::NestedModerate::new(origin)?)),
+            (Some(_), _) => {
+                anyhow::bail!("this nested launch cannot be held to its security level")
+            }
+            (None, _) => None,
+        };
+    let exec_enforcement = exec_enforcement.as_deref();
 
     match subcommand {
         None => {
@@ -1975,6 +1984,35 @@ async fn cli_main(
     }
 
     Ok(())
+}
+
+/// #766: a Corbanu home of its own for `corbanu exec` or `review` started by
+/// an agent command under Moderate that cannot write the home it was given
+/// (see [`nested_security::prepare_moderate_home`]). Anything else, or a
+/// command line that does not parse, is left alone.
+fn nested_moderate_home() -> Option<tempfile::TempDir> {
+    let matches = MultitoolCli::command()
+        .try_get_matches_from(std::env::args_os())
+        .ok()?;
+    let cli = MultitoolCli::from_arg_matches(&matches).ok()?;
+    let (name, kind) = nested_security::nested_launch_kind(cli.subcommand.as_ref())?;
+    if kind != codex_tui::NestedKind::Agent {
+        return None;
+    }
+    let codex_tui::NestedLaunch::EnforceModerate(origin) = codex_tui::nested_launch(name, kind)
+    else {
+        return None;
+    };
+    match nested_security::prepare_moderate_home(&origin) {
+        Ok(home) => home,
+        Err(message) => {
+            #[allow(clippy::print_stderr)]
+            {
+                eprintln!("{message}");
+            }
+            std::process::exit(1);
+        }
+    }
 }
 
 fn parse_multitool_cli() -> MultitoolCli {

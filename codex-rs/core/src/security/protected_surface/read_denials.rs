@@ -224,6 +224,13 @@ pub(crate) struct ReadDenials {
     /// location, and a link naming it): it and the folders above it may not
     /// be moved aside, not even by a command a person approved (#540).
     unmovable: Vec<AbsolutePathBuf>,
+    /// #766: under Moderate, the marker in the Corbanu home that is denied
+    /// to the command, so a `corbanu exec` it starts knows Moderate is in
+    /// force on this home.
+    moderate_marker: Option<AbsolutePathBuf>,
+    /// #766: the registry of homes Moderate runs on, read-only to the command
+    /// so it cannot drop this home from it.
+    moderate_registry: Option<AbsolutePathBuf>,
     /// Denials dropped because they hold the command's folder or a writable
     /// root (denying them would deny the workspace itself).
     pub(crate) skipped: Vec<AbsolutePathBuf>,
@@ -771,8 +778,50 @@ impl ReadDenials {
             runtime_read_only: self.runtime_read_only,
             unmovable: self.unmovable,
             cwd: self.cwd,
+            moderate_marker: self.moderate_marker,
+            moderate_registry: self.moderate_registry,
             skipped: self.skipped,
             ..Self::default()
+        }
+    }
+
+    /// #766 (Travis, 2026-10-14): under Moderate, deny the command the
+    /// Corbanu home's Moderate marker (made here when it is missing) and keep
+    /// the registry of Moderate homes (with this home in it) read-only, so a
+    /// `corbanu exec` or `review` the command starts runs with Moderate
+    /// enforced, also when pointed at another home. The marker sits in the
+    /// home's runtime folder, which these rules keep read-only at every
+    /// level. No approval lifts either. Only on macOS and Linux, whose
+    /// sandboxes this is checked with; elsewhere such a launch is treated as
+    /// before.
+    pub(crate) fn mark_moderate(&mut self, codex_home: &Path) {
+        if !cfg!(any(target_os = "macos", target_os = "linux")) {
+            return;
+        }
+        let registry = codex_security_level::nested::account_home()
+            .ok()
+            .flatten()
+            .map(|account| codex_security_level::nested::moderate_registry_dir(&account));
+        self.mark_moderate_with(codex_home, registry.as_deref());
+    }
+
+    /// [`Self::mark_moderate`] with the registry folder given.
+    pub(crate) fn mark_moderate_with(&mut self, codex_home: &Path, registry: Option<&Path>) {
+        use codex_security_level::nested;
+        match nested::prepare_moderate_marker(codex_home) {
+            Ok(marker) => self.moderate_marker = AbsolutePathBuf::from_absolute_path(marker).ok(),
+            Err(err) => tracing::warn!("could not prepare the Moderate marker: {err}"),
+        }
+        let Some(registry) = registry else {
+            return;
+        };
+        if let Err(err) = nested::register_moderate_home(registry, codex_home) {
+            tracing::warn!("could not register the Moderate home: {err}");
+        }
+        // Read-only also when this home could not be added (a nested run's
+        // own home, inside another command's sandbox).
+        if registry.is_dir() {
+            self.moderate_registry = AbsolutePathBuf::from_absolute_path(registry).ok();
         }
     }
 
@@ -821,7 +870,10 @@ impl ReadDenials {
     /// Issue #513: the read-only paths no grant lifts (#442): the runtime
     /// entries and the project's `.codex` and `.agents`.
     pub(crate) fn never_lifted_paths(&self) -> impl Iterator<Item = &AbsolutePathBuf> {
-        self.runtime_read_only.iter().chain(&self.never_lifted)
+        self.runtime_read_only
+            .iter()
+            .chain(&self.never_lifted)
+            .chain(&self.moderate_registry)
     }
 
     /// `path` with its nearest existing folder resolved (links followed),
@@ -922,11 +974,18 @@ impl ReadDenials {
                 self.keychain_services_denied
                     .then(FileSystemSandboxEntry::deny_keychain_services),
             )
+            .chain(self.moderate_marker.iter().map(|path| {
+                FileSystemSandboxEntry::new(
+                    FileSystemPath::Path { path: path.clone() },
+                    FileSystemAccessMode::Deny,
+                )
+            }))
             .collect();
         if entries.is_empty()
             && self.read_only.is_empty()
             && self.runtime_read_only.is_empty()
             && self.never_lifted.is_empty()
+            && self.moderate_registry.is_none()
         {
             return Some(profile.clone());
         }

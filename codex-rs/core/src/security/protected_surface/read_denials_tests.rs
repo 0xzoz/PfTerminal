@@ -2563,3 +2563,46 @@ fn issue_651_a_shared_database_folder_is_denied_entry_by_entry() {
         );
     }
 }
+
+/// #766: under Moderate the command may not read the home's Moderate marker
+/// (made when missing) and may not write the registry of Moderate homes,
+/// which records this home; a person's approval of the command lifts
+/// neither. Other runtime files stay readable.
+#[test]
+fn issue_766_moderate_marker_denied_and_registry_read_only() {
+    let fx = fixture();
+    // The registry inside the workspace, where the profile could write it.
+    let cwd = fx.user_home.join("project");
+    let registry = cwd.join("registry");
+    let marker = fx
+        .codex_home
+        .join(codex_security_level::nested::MODERATE_MARKER);
+    for approved in [false, true] {
+        let mut denials = ReadDenials::collect(
+            &fx.codex_home,
+            Some(&fx.user_home),
+            /*claude_config_dir*/ None,
+            &[abs(&cwd)],
+        );
+        if approved {
+            denials = denials.runtime_only();
+        }
+        denials.mark_moderate_with(&fx.codex_home, Some(&registry));
+        let policy = denials
+            .apply(&workspace(&cwd))
+            .unwrap()
+            .file_system_sandbox_policy();
+        assert_eq!(
+            (
+                marker.is_file(),
+                policy.can_read_path_with_cwd(&marker, &cwd),
+                policy.can_read_path_with_cwd(&fx.codex_home.join("tmp/arg0"), &cwd),
+                policy.can_write_path_with_cwd(&registry.join("entry"), &cwd),
+                policy.can_write_path_with_cwd(&cwd.join("file"), &cwd),
+                codex_security_level::nested::registered_homes(&registry),
+            ),
+            (true, false, true, false, true, vec![fx.codex_home.clone()]),
+            "approved: {approved}"
+        );
+    }
+}
