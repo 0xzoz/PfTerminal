@@ -148,9 +148,16 @@ impl EnforcedSecurity for NestedAggressive {
     }
 }
 
-/// #766: the Corbanu home this process was given, when
-/// [`prepare_moderate_home`] replaced it with one of its own.
-static PROTECTED_HOME: OnceLock<PathBuf> = OnceLock::new();
+/// #766: the Corbanu home this process was given, and the Moderate origin,
+/// when [`prepare_moderate_home`] replaced that home with one of its own.
+static PROTECTED_HOME: OnceLock<(PathBuf, PathBuf)> = OnceLock::new();
+
+/// #766: the Moderate origin found before the home was replaced. Detection
+/// after the change may no longer find it (it was found through the home
+/// this process was given), so it stays held to Moderate.
+pub(crate) fn relocated_origin() -> Option<PathBuf> {
+    PROTECTED_HOME.get().map(|(_, origin)| origin.clone())
+}
 
 /// #766: before any thread starts, for `corbanu exec` or `review` held to
 /// Moderate. Inside the sandbox of the agent command that started it, the
@@ -181,15 +188,18 @@ pub(crate) fn prepare_moderate_home(origin: &Path) -> Result<Option<tempfile::Te
                 std::env::temp_dir().display()
             )
         })?;
-    // SAFETY: called from `main` before the runtime or any other thread
-    // exists, so nothing reads the environment concurrently.
+    // SAFETY: called from `main` before the async runtime starts. No thread
+    // of this program exists yet; the account lookup above may have started
+    // system helper threads, which do not read the environment. The debug
+    // home variables need no change: `configure_for_current_process` already
+    // turned them into `CODEX_HOME`, which wins here.
     unsafe {
         std::env::remove_var("CORBANU_HOME");
         std::env::remove_var("PFTERMINAL_HOME");
         std::env::remove_var(codex_state::SQLITE_HOME_ENV);
         std::env::set_var("CODEX_HOME", own.path());
     }
-    let _ = PROTECTED_HOME.set(home.to_path_buf());
+    let _ = PROTECTED_HOME.set((home.to_path_buf(), origin.to_path_buf()));
     Ok(Some(own))
 }
 
@@ -216,7 +226,7 @@ impl EnforcedSecurity for NestedModerate {
             "Security level Moderate is enforced because an agent command under Moderate started this run ({}).",
             self.origin.display()
         );
-        if let Some(protected) = PROTECTED_HOME.get() {
+        if let Some((protected, _)) = PROTECTED_HOME.get() {
             let which = if *protected == self.origin {
                 "that Corbanu home".to_string()
             } else {

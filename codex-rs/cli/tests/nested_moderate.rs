@@ -39,6 +39,9 @@ const VAULT_CANARY: &str = "moderate-766-vault-canary";
 enum Level {
     Permissive,
     Moderate,
+    /// `[security] level = "aggressive"` in config (Core's level), with a
+    /// stored level file that agent commands cannot read.
+    AggressiveInCore,
 }
 
 /// What the outer agent's command starts.
@@ -51,6 +54,32 @@ enum Target {
     OtherHome,
     /// A session, a host and a credential command, each in the same home.
     NotAgents,
+    /// `corbanu exec` with `CORBANU_SECURITY_ORIGIN` naming a home the agent
+    /// made, with an unreadable marker file in it.
+    MadeUpMarker,
+}
+
+/// How the outer run is set up.
+#[derive(Clone, Copy, Debug)]
+struct Setup {
+    level: Level,
+    target: Target,
+    /// The outer agent runs a command before the nested launch, so untrusted
+    /// content (its output) is in the session by then.
+    untrusted_first: bool,
+    /// Whether Core can register the home in the account's registry.
+    registry_writable: bool,
+}
+
+impl Setup {
+    fn new(level: Level, target: Target) -> Self {
+        Self {
+            level,
+            target,
+            untrusted_first: false,
+            registry_writable: true,
+        }
+    }
 }
 
 /// Answers each request with the next response of a sequence set after the
@@ -132,9 +161,13 @@ fn provider_flags(server_uri: &str) -> Vec<String> {
     ]
 }
 
-/// `untrusted_first`: the outer agent runs a command before the nested
-/// launch, so untrusted content (its output) is in the session by then.
-async fn run(level: Level, target: Target, untrusted_first: bool) -> Result<Run> {
+async fn run(setup: Setup) -> Result<Run> {
+    let Setup {
+        level,
+        target,
+        untrusted_first,
+        registry_writable,
+    } = setup;
     let home = TempDir::new()?;
     let root = TempDir::new()?;
     // Resolved as the session resolves its folder (macOS temp folders sit
@@ -145,6 +178,10 @@ async fn run(level: Level, target: Target, untrusted_first: bool) -> Result<Run>
     let account = root_path.join("account");
     std::fs::create_dir_all(&cwd)?;
     std::fs::create_dir_all(&account)?;
+    if !registry_writable {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&account, std::fs::Permissions::from_mode(0o555))?;
+    }
     // A vault store exists, as it does once the person has used /vault.
     std::fs::create_dir_all(home.path().join("secrets"))?;
     std::fs::write(home.path().join("secrets/probe.txt"), VAULT_CANARY)?;
@@ -168,6 +205,9 @@ async fn run(level: Level, target: Target, untrusted_first: bool) -> Result<Run>
     let bin_word = quote(&bin.to_string_lossy());
     let script = match target {
         Target::SameHome => format!("{nested} 2>&1"),
+        Target::MadeUpMarker => format!(
+            "mkdir -p made-up/tmp && : > made-up/tmp/security-moderate-marker && chmod 000 made-up/tmp/security-moderate-marker && CORBANU_SECURITY_ORIGIN=\"$PWD/made-up\" {nested} 2>&1"
+        ),
         Target::NotAgents => [
             "resume --last",
             "app-server",
@@ -205,7 +245,7 @@ async fn run(level: Level, target: Target, untrusted_first: bool) -> Result<Run>
         Some(120_000),
         "nested",
     )?);
-    if !matches!(target, Target::NotAgents) {
+    if matches!(target, Target::SameHome | Target::OtherHome) {
         responses.push(create_final_assistant_message_sse_response(NESTED_REPLY)?);
     }
     responses.push(create_final_assistant_message_sse_response("outer done")?);
@@ -222,6 +262,13 @@ async fn run(level: Level, target: Target, untrusted_first: bool) -> Result<Run>
     let level_config = match level {
         Level::Permissive => "",
         Level::Moderate => "[security]\nversion = 1\nlevel = \"moderate\"\n",
+        Level::AggressiveInCore => {
+            std::fs::write(
+                home.path().join("security_level.toml"),
+                "version = 1\nlevel = \"aggressive\"\n",
+            )?;
+            "[security]\nversion = 1\nlevel = \"aggressive\"\n"
+        }
     };
     MockResponsesConfig::new(&server.uri())
         .with_sandbox_mode("workspace-write")
@@ -249,6 +296,10 @@ async fn run(level: Level, target: Target, untrusted_first: bool) -> Result<Run>
         .args(["exec", "--skip-git-repo-check", OUTER_PROMPT])
         .timeout(std::time::Duration::from_secs(300))
         .output()?;
+    if !registry_writable {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&account, std::fs::Permissions::from_mode(0o755))?;
+    }
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     let bodies = server
         .received_requests()
@@ -293,12 +344,7 @@ fn assert_held_to_moderate(run: &Run) {
 /// the Corbanu config inside the sandbox.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn issue_766_same_home_starts_held_to_moderate() -> Result<()> {
-    let run = run(
-        Level::Moderate,
-        Target::SameHome,
-        /*untrusted_first*/ false,
-    )
-    .await?;
+    let run = run(Setup::new(Level::Moderate, Target::SameHome)).await?;
     assert_held_to_moderate(&run);
     let output = run.command_output();
     assert!(
@@ -312,12 +358,7 @@ async fn issue_766_same_home_starts_held_to_moderate() -> Result<()> {
 /// marker in the environment: before #766 it ran at that home's level.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn issue_766_other_home_is_held_to_moderate() -> Result<()> {
-    let run = run(
-        Level::Moderate,
-        Target::OtherHome,
-        /*untrusted_first*/ false,
-    )
-    .await?;
+    let run = run(Setup::new(Level::Moderate, Target::OtherHome)).await?;
     assert_held_to_moderate(&run);
     Ok(())
 }
@@ -326,12 +367,7 @@ async fn issue_766_other_home_is_held_to_moderate() -> Result<()> {
 /// (the agent would answer its prompts), a host and a credential command.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn issue_766_sessions_hosts_and_credentials_are_refused() -> Result<()> {
-    let run = run(
-        Level::Moderate,
-        Target::NotAgents,
-        /*untrusted_first*/ false,
-    )
-    .await?;
+    let run = run(Setup::new(Level::Moderate, Target::NotAgents)).await?;
     let output = run.command_output();
     assert_eq!(
         (
@@ -353,12 +389,7 @@ async fn issue_766_sessions_hosts_and_credentials_are_refused() -> Result<()> {
 /// untrusted content, starts at Permissive as before.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn issue_766_permissive_nested_run_is_unchanged() -> Result<()> {
-    let run = run(
-        Level::Permissive,
-        Target::SameHome,
-        /*untrusted_first*/ false,
-    )
-    .await?;
+    let run = run(Setup::new(Level::Permissive, Target::SameHome)).await?;
     let output = run.command_output();
     let nested = run
         .nested_request()
@@ -378,11 +409,10 @@ async fn issue_766_permissive_nested_run_is_unchanged() -> Result<()> {
 /// too: nothing marks Moderate, and the nested run is not held to it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn issue_766_permissive_after_a_command_is_unchanged() -> Result<()> {
-    let run = run(
-        Level::Permissive,
-        Target::SameHome,
-        /*untrusted_first*/ true,
-    )
+    let run = run(Setup {
+        untrusted_first: true,
+        ..Setup::new(Level::Permissive, Target::SameHome)
+    })
     .await?;
     let output = run.command_output();
     let nested = run
@@ -394,6 +424,40 @@ async fn issue_766_permissive_after_a_command_is_unchanged() -> Result<()> {
             nested.contains(MODERATE_INSTRUCTED)
         ),
         (false, false),
+        "{output}"
+    );
+    Ok(())
+}
+
+/// The same home when Core cannot register it (the account's registry is
+/// read-only): the run that moved to a home of its own stays held to
+/// Moderate, although it can no longer find the origin itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_766_same_home_without_registry_stays_held() -> Result<()> {
+    let run = run(Setup {
+        registry_writable: false,
+        ..Setup::new(Level::Moderate, Target::SameHome)
+    })
+    .await?;
+    assert_held_to_moderate(&run);
+    Ok(())
+}
+
+/// Aggressive in Core refuses nested launches (its level file is unreadable
+/// to agent commands). A marker an agent command made in a home of its own
+/// and named in `CORBANU_SECURITY_ORIGIN` does not turn that into a run held
+/// only to Moderate.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_766_made_up_marker_does_not_relax_aggressive() -> Result<()> {
+    let run = run(Setup::new(Level::AggressiveInCore, Target::MadeUpMarker)).await?;
+    let output = run.command_output();
+    assert_eq!(
+        (
+            output.contains("while security level Aggressive is enforced"),
+            output.contains("Moderate"),
+            run.nested_request().is_some(),
+        ),
+        (true, false, false),
         "{output}"
     );
     Ok(())

@@ -79,9 +79,12 @@ The kill switch (`/security` → `g`) works under every level.
   Moderate by denying agent commands a file in the Corbanu home's `tmp`
   folder, and lists the homes Moderate runs on in
   `~/Library/Application Support/Corbanu/moderate-homes` (macOS) or
-  `~/.local/state/corbanu/moderate-homes` (Linux), which agent commands can't
-  change. A program started outside the sandbox (MCP servers, hooks, `!`
-  commands) isn't an agent command and isn't held to Moderate (#766).
+  `~/.local/state/corbanu/moderate-homes` (Linux), so a launch pointed at
+  another home finds its origin; under Moderate agent commands can't change
+  that list. A program started outside the sandbox (MCP servers, hooks, `!`
+  commands) isn't an agent command and isn't held to Moderate. A nested run's
+  own Corbanu home is removed when the run ends, but stays in the temporary
+  folder if the run stops on an error (#766).
 - A remote app server can't enforce a level chosen here; Corbanu refuses to
   start against one until you choose Permissive.
 

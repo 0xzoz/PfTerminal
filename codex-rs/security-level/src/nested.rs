@@ -80,17 +80,23 @@ pub fn nested_launch(name: &str, kind: NestedKind) -> NestedLaunch {
 /// Aggressive origins with their nested-launch setting.
 type Origins = Vec<(PathBuf, NestedAgents)>;
 
-/// The Aggressive origins and the Moderate origin of this process. With a
-/// Moderate origin only Aggressive origins whose level reads as Aggressive
-/// count: inside the sandbox of an agent command under Moderate every
-/// protected Corbanu home's level is unreadable, which on its own would
-/// read as Aggressive.
+/// The Aggressive origins and the Moderate origin of this process.
+///
+/// With a Moderate origin, an Aggressive origin found only because its level
+/// cannot be read is dropped when Moderate's rules explain that: it is the
+/// marked home itself, or a home denied whole (its runtime folder cannot be
+/// listed, as the protected-file rules deny other Corbanu homes). Any other
+/// such origin stays, so a marker an agent command made elsewhere never
+/// relaxes a refusal (Aggressive set in Core also keeps the level file
+/// unreadable).
 fn detect() -> Result<(Origins, Option<PathBuf>), String> {
     let homes = candidate_homes()?;
-    let moderate = moderate_origin(&homes);
+    let moderate = moderate_origin(&homes)?;
     let mut origins = nested_origins(homes);
-    if moderate.is_some() {
-        origins.retain(|(home, _)| level_reads_aggressive(home));
+    if let Some(marked) = &moderate {
+        origins.retain(|(home, _)| {
+            level_reads_aggressive(home) || !(same_folder(home, marked) || denied_whole(home))
+        });
     }
     Ok((origins, moderate))
 }
@@ -103,40 +109,97 @@ fn level_reads_aggressive(home: &Path) -> bool {
             .is_ok_and(|contents| level::is_rules_contents(&contents))
 }
 
+fn same_folder(a: &Path, b: &Path) -> bool {
+    a == b
+        || std::fs::canonicalize(a)
+            .ok()
+            .zip(std::fs::canonicalize(b).ok())
+            .is_some_and(|(a, b)| a == b)
+}
+
+/// Whether listing `home`'s runtime folder is refused, as for a Corbanu home
+/// the sandbox denies whole. A missing folder does not count.
+fn denied_whole(home: &Path) -> bool {
+    let Some(folder) = home.join(MODERATE_MARKER).parent().map(Path::to_path_buf) else {
+        return false;
+    };
+    std::fs::read_dir(folder).is_err_and(|err| {
+        matches!(
+            err.kind(),
+            io::ErrorKind::PermissionDenied | io::ErrorKind::NotADirectory
+        )
+    })
+}
+
 /// #766: the first of `homes`, or of the homes Moderate registered, whose
-/// marker this process cannot read.
-pub fn moderate_origin(homes: &[PathBuf]) -> Option<PathBuf> {
+/// marker this process cannot read (macOS and Linux, whose sandboxes Core
+/// marks). An error, so the launch is refused, when this process ran out of
+/// file descriptors while checking: an agent command can cause that.
+pub fn moderate_origin(homes: &[PathBuf]) -> Result<Option<PathBuf>, String> {
+    if !cfg!(any(target_os = "macos", target_os = "linux")) {
+        return Ok(None);
+    }
     let registered = account_home()
         .ok()
         .flatten()
         .map(|account| registered_homes(&moderate_registry_dir(&account)))
         .unwrap_or_default();
-    homes
-        .iter()
-        .chain(&registered)
-        .find(|home| moderate_marker_denied(home))
-        .cloned()
+    for home in homes.iter().chain(&registered) {
+        match moderate_marker(home) {
+            Ok(true) => return Ok(Some(home.clone())),
+            Ok(false) => {}
+            Err(err) => {
+                return Err(format!(
+                    "Could not check whether security level Moderate applies to this launch ({err}), so it is refused."
+                ));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Whether this process may not read `home`'s Moderate marker while it may
-/// list the runtime folder that holds it: Seatbelt refuses even the
-/// marker's metadata; bubblewrap masks it with an unreadable file. A
-/// missing marker, a link or a folder in its place, or one this process can
-/// read is not denied, and neither is a marker in a home denied whole (as
-/// the protected-file rules deny other Corbanu homes at every level).
+/// list the runtime folder that holds it (see [`moderate_marker`]).
 pub fn moderate_marker_denied(home: &Path) -> bool {
+    moderate_marker(home).unwrap_or(false)
+}
+
+/// `Ok(true)` when the sandbox denies `home`'s Moderate marker to this
+/// process while it may list the runtime folder that holds it. Only what
+/// file permissions cannot produce counts: Seatbelt's EPERM on the marker's
+/// metadata (macOS), or bubblewrap's unreadable placeholder, a regular file
+/// that cannot be opened (Linux; its owner could make one, but a marker made
+/// elsewhere never relaxes a refusal, see [`detect`]). A missing marker, a
+/// link or a folder in its place, a readable one, or one in a home denied
+/// whole is not denied. `Err` when the file descriptors ran out.
+fn moderate_marker(home: &Path) -> io::Result<bool> {
     let marker = home.join(MODERATE_MARKER);
     let Some(folder) = marker.parent() else {
-        return false;
+        return Ok(false);
     };
-    if std::fs::read_dir(folder).is_err() {
-        return false;
+    let exhausted = |err: io::Error| -> io::Result<bool> {
+        #[cfg(unix)]
+        if matches!(err.raw_os_error(), Some(libc::EMFILE | libc::ENFILE)) {
+            return Err(err);
+        }
+        let _ = err;
+        Ok(false)
+    };
+    if let Err(err) = std::fs::read_dir(folder) {
+        return exhausted(err);
     }
     match std::fs::symlink_metadata(&marker) {
-        Err(err) => err.kind() == io::ErrorKind::PermissionDenied,
-        Ok(metadata) if metadata.file_type().is_file() => std::fs::File::open(&marker)
-            .is_err_and(|err| err.kind() == io::ErrorKind::PermissionDenied),
-        Ok(_) => false,
+        #[cfg(target_os = "macos")]
+        Err(err) if err.raw_os_error() == Some(libc::EPERM) => Ok(true),
+        Err(err) => exhausted(err),
+        Ok(metadata) if cfg!(target_os = "linux") && metadata.file_type().is_file() => {
+            match std::fs::File::open(&marker) {
+                Ok(_) => Ok(false),
+                Err(err) if err.kind() == io::ErrorKind::PermissionDenied => Ok(true),
+                Err(err) => exhausted(err),
+            }
+        }
+        Ok(_) => Ok(false),
     }
 }
 

@@ -1153,7 +1153,12 @@ async fn cli_main(
     let nested = match nested_security::nested_launch_kind(subcommand.as_ref())
         .map(|(name, kind)| codex_tui::nested_launch(name, kind))
     {
-        None | Some(codex_tui::NestedLaunch::NotNested) => None,
+        // #766: `main` gave this run a Corbanu home of its own because it is
+        // held to Moderate; detection from that home may not find the
+        // origin again.
+        None | Some(codex_tui::NestedLaunch::NotNested) => {
+            nested_security::relocated_origin().map(codex_tui::NestedLaunch::EnforceModerate)
+        }
         Some(codex_tui::NestedLaunch::Refuse(message)) => {
             #[allow(clippy::print_stderr)]
             {
