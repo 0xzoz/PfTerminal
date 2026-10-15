@@ -11,32 +11,32 @@
 //! prompt explains how to answer until the user navigates with the arrow,
 //! Page, Home or End keys. No timing is involved.
 //!
-//! Some prompts need a fresh choice (a decision key or navigation) before
-//! Enter confirms: a request reached by answering or replacing the previous
-//! one, so a double or held Enter cannot answer a request the user has not
-//! seen; a prompt that was held back while the user typed, whose next Enter
-//! may be meant for their draft; and the prompt right after a character
-//! command key such as open thread, whose following keys may be a word.
+//! The prompt right after a character command key such as open thread needs
+//! navigation before Enter confirms, since its following keys may be a word.
 //!
 //! Options that last beyond this request ("don't ask again", session scope)
 //! are never chosen by a key: their key only explains that the arrow keys
 //! choose them, and Enter stays blocked until the user navigates.
 //!
 //! #787: the bottom pane also drops every key but Ctrl+C that reaches a
-//! request in the moment after it appears (see `REQUEST_INPUT_GUARD`), since
-//! those keys were meant for whatever was on screen before. The prompt then
-//! says so and needs navigation before Enter
-//! ([`TypingGuard::on_early_input`]).
+//! request before it is drawn or in the second after (see
+//! `REQUEST_INPUT_GUARD`), since those keys were meant for whatever was on
+//! screen before. The prompt then says so and needs navigation before Enter
+//! ([`TypingGuard::on_early_input`]). #817: that guard is the only one for a
+//! request coming on screen (a new request, the next of a queue, one revealed
+//! or held back while the user typed): once its second has passed with no key
+//! dropped, a deliberate Enter confirms the highlighted option.
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum State {
     /// The prompt just opened; Enter confirms the highlighted option.
     #[default]
     Idle,
-    /// Enter waits for a choice (see the module docs for when); `told`
-    /// records that the prompt is explaining this. `keys_arm` is false right
-    /// after a character command key, whose following keys may be a word.
-    Fresh { told: bool, keys_arm: bool },
+    /// Enter waits for navigation, and a key is typed text until then: right
+    /// after a character command key, whose following keys may be a word, or
+    /// after keys were dropped as the request appeared (#787). `told`
+    /// records that the prompt is explaining this.
+    Fresh { told: bool },
     /// One decision key highlighted this option; Enter confirms it.
     Armed(usize),
     /// The key of an option that lasts beyond this request was pressed. It
@@ -61,8 +61,7 @@ pub(super) enum Confirm {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Notice {
     TypedText,
-    ChooseFirst,
-    /// The same, where a key is typed text until the user navigates (#523).
+    /// After a character command key: navigate, then Enter (#523).
     NavigateFirst,
     PersistentNeedsArrows,
     /// #787: keys that arrived as the request appeared were dropped; Enter
@@ -89,13 +88,7 @@ impl TypingGuard {
     /// the user typed or over another view (or was revealed), and nothing
     /// but typed text came since. A form's text fields take no keys then.
     pub(super) fn awaits_navigation(&self) -> bool {
-        matches!(
-            self.state,
-            State::Fresh {
-                keys_arm: false,
-                ..
-            } | State::Typed
-        )
+        matches!(self.state, State::Fresh { .. } | State::Typed)
     }
 
     pub(super) fn notice(&self) -> Option<Notice> {
@@ -105,14 +98,7 @@ impl TypingGuard {
         match self.state {
             State::Typed => Some(Notice::TypedText),
             State::PersistentKey => Some(Notice::PersistentNeedsArrows),
-            State::Fresh {
-                told: true,
-                keys_arm: true,
-            } => Some(Notice::ChooseFirst),
-            State::Fresh {
-                told: true,
-                keys_arm: false,
-            } => Some(Notice::NavigateFirst),
+            State::Fresh { told: true } => Some(Notice::NavigateFirst),
             State::Idle | State::Fresh { told: false, .. } | State::Armed(_) => None,
         }
     }
@@ -121,7 +107,7 @@ impl TypingGuard {
     /// Returns the option to highlight when the key armed one.
     pub(super) fn on_text_key(&mut self, option: Option<usize>) -> Option<usize> {
         match (self.state, option) {
-            (State::Idle | State::Fresh { keys_arm: true, .. }, Some(idx)) => {
+            (State::Idle, Some(idx)) => {
                 self.state = State::Armed(idx);
                 Some(idx)
             }
@@ -144,13 +130,10 @@ impl TypingGuard {
     /// otherwise it is typed text like any other character.
     pub(super) fn on_persistent_key(&mut self) {
         self.state = match self.state {
-            State::Idle | State::Fresh { keys_arm: true, .. } => State::PersistentKey,
-            State::Fresh {
-                keys_arm: false, ..
+            State::Idle => State::PersistentKey,
+            State::Fresh { .. } | State::Armed(_) | State::PersistentKey | State::Typed => {
+                State::Typed
             }
-            | State::Armed(_)
-            | State::PersistentKey
-            | State::Typed => State::Typed,
         };
     }
 
@@ -169,11 +152,8 @@ impl TypingGuard {
                 self.state = State::Idle;
                 Confirm::Option(idx)
             }
-            State::Fresh { keys_arm, .. } => {
-                self.state = State::Fresh {
-                    told: true,
-                    keys_arm,
-                };
+            State::Fresh { .. } => {
+                self.state = State::Fresh { told: true };
                 Confirm::Blocked
             }
             State::PersistentKey | State::Typed => Confirm::Blocked,
@@ -192,29 +172,22 @@ impl TypingGuard {
     pub(super) fn on_early_input(&mut self) {
         self.early = true;
         if self.state != State::Typed {
-            self.state = State::Fresh {
-                told: true,
-                keys_arm: false,
-            };
+            self.state = State::Fresh { told: true };
         }
     }
 
-    /// The prompt now shows another request. It needs a fresh choice before
-    /// Enter confirms; typed text stays typed text, and after a character
-    /// the next one may continue a word, so it does not arm an option.
+    /// #817: the prompt now shows another request, or the same one again
+    /// (revealed, or back from a screen of its own). Keys that reach it
+    /// before it is drawn or in the second after are dropped by the bottom
+    /// pane (#787), which is what keeps a double or held Enter from answering
+    /// it; nothing else waits, so Enter confirms after that. A key armed or
+    /// pressed for the previous request is forgotten; typed text stays typed
+    /// text.
     pub(super) fn on_request_changed(&mut self) {
         self.early = false;
-        self.state = match self.state {
-            State::Typed => State::Typed,
-            State::Armed(_) | State::PersistentKey => State::Fresh {
-                told: false,
-                keys_arm: false,
-            },
-            State::Idle | State::Fresh { .. } => State::Fresh {
-                told: false,
-                keys_arm: true,
-            },
-        };
+        if self.state != State::Typed {
+            self.state = State::Idle;
+        }
     }
 
     /// A character command key (such as open thread) acted. Enter waits for
@@ -222,10 +195,7 @@ impl TypingGuard {
     pub(super) fn on_command_key(&mut self) {
         // Typed text stays typed text (#523: a prompt revealed mid-word).
         if self.state != State::Typed {
-            self.state = State::Fresh {
-                told: false,
-                keys_arm: false,
-            };
+            self.state = State::Fresh { told: false };
         }
     }
 
@@ -240,8 +210,9 @@ impl TypingGuard {
         matches!(self.state, State::Armed(_))
     }
 
-    /// #523: whether Enter waits for a choice: the prompt is new to the
-    /// user, or text was typed into it.
+    /// #523: whether Enter waits for a choice: keys were dropped as the
+    /// prompt appeared, a character command key acted, or text was typed
+    /// into it.
     pub(super) fn awaits_choice(&self) -> bool {
         matches!(self.state, State::Fresh { .. } | State::Typed)
     }

@@ -234,23 +234,6 @@ impl ApprovalOverlay {
         view
     }
 
-    /// Require a fresh choice before Enter confirms. Used for a prompt that
-    /// was held back while the user typed, whose next Enter may be meant to
-    /// send their draft.
-    pub(crate) fn require_fresh_choice(&mut self) {
-        self.typing_guard.on_request_changed();
-    }
-
-    /// #523: require a deliberate choice before Enter confirms: the prompt
-    /// opened over another view, or was revealed when the view above it
-    /// closed. Until the user navigates, a key is typed text too.
-    pub(crate) fn require_deliberate_choice(&mut self) {
-        // An open grant review goes back to the approval: a double or held
-        // Enter meant for the view above must not grant.
-        self.grant_review = None;
-        self.typing_guard.on_command_key();
-    }
-
     pub fn enqueue_request(&mut self, req: ApprovalRequest) {
         self.queue.push(req);
     }
@@ -789,14 +772,9 @@ impl ApprovalOverlay {
                  to answer, or {cancel} to cancel. Slash commands such as /permissions work \
                  after you answer."
             ),
-            Notice::ChooseFirst => format!(
-                "This is a new request. Choose an option with {up}/{down} or its key, then \
-                 {accept}; {cancel} cancels."
-            ),
-            Notice::NavigateFirst => format!(
-                "This is a new request. Choose an option with {up}/{down}, then {accept}; \
-                 {cancel} cancels."
-            ),
+            Notice::NavigateFirst => {
+                format!("Choose an option with {up}/{down}, then {accept}; {cancel} cancels.")
+            }
             Notice::PersistentNeedsArrows => format!(
                 "That option lasts beyond this request, so its key does not choose it. \
                  Highlight it with {up}/{down}, then press {accept}; {cancel} cancels."
@@ -892,9 +870,11 @@ impl ApprovalOverlay {
         self.advance_queue();
     }
 
-    /// Back to the approval, nothing granted; its Enter needs a fresh choice.
+    /// Back to the approval, nothing granted. #817: it shows anew, so the
+    /// bottom pane drops keys for its first second (#787).
     fn close_grant_review(&mut self) {
         self.grant_review = None;
+        self.shown_generation = next_shown_request_generation();
         self.typing_guard.on_request_changed();
     }
 }
@@ -959,10 +939,15 @@ impl BottomPaneView for ApprovalOverlay {
         true
     }
 
-    /// #523: back from under another prompt or view, whose double or held
-    /// Enter must not answer this request.
+    /// #523: back from under another prompt or view. #817: the bottom pane
+    /// drops keys until it is drawn again and for a second after (#787),
+    /// so a double or held Enter meant for that view answers nothing; a
+    /// later Enter does.
     fn on_revealed(&mut self) {
-        self.require_deliberate_choice();
+        // An open grant review goes back to the approval: keys meant for the
+        // view above must not reach it.
+        self.grant_review = None;
+        self.typing_guard.on_request_changed();
     }
 
     fn shown_request_generation(&self) -> u64 {
@@ -2320,6 +2305,9 @@ mod tests {
         assert_eq!(exec_decisions(&mut rx), vec!["Cancel".to_string()]);
     }
 
+    /// A key armed on one request does not carry over to the next: its Enter
+    /// confirms the next request's own highlighted row. #817: the next one
+    /// shows anew, so the bottom pane drops keys in its first second (#787).
     #[test]
     fn armed_key_does_not_carry_over_to_the_next_request() {
         let (tx, mut rx) = unbounded_channel::<AppEvent>();
@@ -2333,21 +2321,27 @@ mod tests {
         };
         second.id = "second".to_string();
         view.enqueue_request(ApprovalRequest::Exec(second));
+        let first = view.shown_request_generation();
 
-        press(&mut view, KeyCode::Char('y'), KeyModifiers::NONE);
+        press(&mut view, KeyCode::Char('3'), KeyModifiers::NONE);
         // Another client resolves the first request before Enter arrives.
         assert!(
             view.dismiss_resolved_request(&ResolvedAppServerRequest::ExecApproval {
                 id: "test".to_string(),
             })
         );
+        assert_ne!(view.shown_request_generation(), first);
+        assert!(render_overlay_lines(&view, /*width*/ 80).contains("› 1. Yes"));
         press(&mut view, KeyCode::Enter, KeyModifiers::NONE);
 
-        assert_eq!(exec_decisions(&mut rx), Vec::<String>::new());
+        assert_eq!(exec_decisions(&mut rx), vec!["Accept".to_string()]);
     }
 
+    /// A held Enter never answers the next request. #817: a double Enter is
+    /// the bottom pane's to drop, since the next request shows anew (#787);
+    /// the prompt asks for nothing more.
     #[test]
-    fn double_or_held_enter_does_not_answer_the_next_request() {
+    fn held_enter_does_not_answer_the_next_request() {
         let (tx, mut rx) = unbounded_channel::<AppEvent>();
         let mut view = make_overlay(
             make_prefix_exec_request(),
@@ -2359,6 +2353,7 @@ mod tests {
         };
         second.id = "second".to_string();
         view.enqueue_request(ApprovalRequest::Exec(second));
+        let first = view.shown_request_generation();
 
         press(&mut view, KeyCode::Enter, KeyModifiers::NONE);
         view.handle_key_event(KeyEvent::new_with_kind(
@@ -2366,13 +2361,11 @@ mod tests {
             KeyModifiers::NONE,
             KeyEventKind::Repeat,
         ));
-        press(&mut view, KeyCode::Enter, KeyModifiers::NONE);
 
         assert_eq!(exec_decisions(&mut rx), vec!["Accept".to_string()]);
-        assert_snapshot!(
-            "approval_overlay_next_request_notice",
-            render_overlay_lines(&view, /*width*/ 80)
-        );
+        assert_ne!(view.shown_request_generation(), first);
+        let lines = render_overlay_lines(&view, /*width*/ 80);
+        assert!(!lines.contains("new request"), "{lines}");
         press(&mut view, KeyCode::Char('3'), KeyModifiers::NONE);
         press(&mut view, KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(exec_decisions(&mut rx), vec!["Cancel".to_string()]);
@@ -2486,25 +2479,6 @@ mod tests {
         press(&mut view, KeyCode::Enter, KeyModifiers::NONE);
 
         assert_eq!(exec_decisions(&mut rx), Vec::<String>::new());
-    }
-
-    #[test]
-    fn prompt_held_back_while_typing_needs_a_choice_before_enter() {
-        let (tx, mut rx) = unbounded_channel::<AppEvent>();
-        let mut view = make_overlay(
-            make_prefix_exec_request(),
-            AppEventSender::new(tx),
-            Features::with_defaults(),
-        );
-        view.require_fresh_choice();
-
-        // The Enter meant to send the user's draft.
-        press(&mut view, KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!(exec_decisions(&mut rx), Vec::<String>::new());
-
-        press(&mut view, KeyCode::Char('1'), KeyModifiers::NONE);
-        press(&mut view, KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!(exec_decisions(&mut rx), vec!["Accept".to_string()]);
     }
 
     #[test]
@@ -2845,6 +2819,10 @@ mod tests {
         assert!(render_overlay_lines(&view, /*width*/ 80).contains("› 1. Yes"));
     }
 
+    /// A persistent option's key pressed for one request does not carry over
+    /// to the next. Typing that goes on across the swap ("py") is the bottom
+    /// pane's to drop, since the next request shows anew (#787, #817:
+    /// `tests/issue_817.rs`).
     #[test]
     fn persistent_key_then_request_dismissed_does_not_carry_over() {
         let (tx, mut rx) = unbounded_channel::<AppEvent>();
@@ -2854,16 +2832,18 @@ mod tests {
             Features::with_defaults(),
         );
         view.enqueue_request(second_prefix_request());
+        let first = view.shown_request_generation();
 
         press(&mut view, KeyCode::Char('p'), KeyModifiers::NONE);
-        // Another client answers the first request; the user keeps typing "py".
+        // Another client answers the first request.
         assert!(
             view.dismiss_resolved_request(&ResolvedAppServerRequest::ExecApproval {
                 id: "test".to_string(),
             })
         );
-        press_and_confirm(&mut view, KeyCode::Char('y'));
-        assert_eq!(exec_decisions(&mut rx), Vec::<String>::new());
+        assert_ne!(view.shown_request_generation(), first);
+        let lines = render_overlay_lines(&view, /*width*/ 80);
+        assert!(!lines.contains("lasts beyond this request"), "{lines}");
 
         // Navigation then Enter answers the request now shown.
         press(&mut view, KeyCode::Down, KeyModifiers::NONE);

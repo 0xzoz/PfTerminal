@@ -62,26 +62,26 @@ fn editing_input_after_a_decision_key_blocks_enter() {
     assert_eq!(guard.on_confirm(), Confirm::Blocked);
 }
 
+/// #817: the next request waits for nothing but the bottom pane's guard
+/// (#787), which drops a double or held Enter; after it, Enter confirms.
 #[test]
-fn next_request_needs_a_fresh_choice() {
+fn next_request_takes_a_later_enter() {
     let mut guard = TypingGuard::default();
     guard.on_text_key(Some(0));
     assert_eq!(guard.on_confirm(), Confirm::Option(0));
 
     guard.on_request_changed();
 
-    // A second Enter is explained, not confirmed.
     assert_eq!(guard.notice(), None);
-    assert_eq!(guard.on_confirm(), Confirm::Blocked);
-    assert_eq!(guard.notice(), Some(Notice::ChooseFirst));
-    // A decision key or navigation makes Enter work again.
-    assert_eq!(guard.on_text_key(Some(2)), Some(2));
-    assert_eq!(guard.on_confirm(), Confirm::Option(2));
+    assert_eq!(guard.on_confirm(), Confirm::Highlighted);
+    assert_eq!(guard.notice(), None);
 }
 
+/// A key armed or pressed for the previous request does not carry over:
+/// Enter on the new one confirms its own highlighted row. Keys that reach
+/// the new request as it appears are the bottom pane's to drop (#787).
 #[test]
-fn character_before_a_request_change_does_not_let_the_next_one_arm() {
-    // "py" split across a request swap: `y` must not arm "yes" on the new one.
+fn a_key_for_the_previous_request_does_not_carry_over() {
     for first in [Some(1), None] {
         let mut guard = TypingGuard::default();
         match first {
@@ -93,8 +93,8 @@ fn character_before_a_request_change_does_not_let_the_next_one_arm() {
 
         guard.on_request_changed();
 
-        assert_eq!(guard.on_text_key(Some(0)), None, "{first:?}");
-        assert_eq!(guard.on_confirm(), Confirm::Blocked, "{first:?}");
+        assert_eq!(guard.notice(), None, "{first:?}");
+        assert_eq!(guard.on_confirm(), Confirm::Highlighted, "{first:?}");
     }
 }
 
@@ -149,9 +149,9 @@ fn persistent_option_key_inside_a_word_is_typed_text() {
     assert_eq!(guard.on_confirm(), Confirm::Blocked);
 }
 
-/// #523: a prompt that needs a deliberate choice (it opened over another
-/// view or was revealed) says to navigate, takes a key as typed text, and
-/// waits for the arrow keys.
+/// #523: right after a character command key such as open thread, the
+/// prompt says to navigate, takes a key as typed text, and waits for the
+/// arrow keys.
 #[test]
 fn deliberate_choice_says_to_navigate_first() {
     let mut guard = TypingGuard::default();
@@ -185,8 +185,9 @@ fn early_input_needs_navigation_before_enter() {
     assert_eq!(guard.notice(), None);
     assert_eq!(guard.on_confirm(), Confirm::Highlighted);
 
+    // #817: keys dropped for one request do not hold the next.
     guard.on_early_input();
     guard.on_request_changed();
-    assert_ne!(guard.notice(), Some(Notice::EarlyKeys));
-    assert_eq!(guard.on_confirm(), Confirm::Blocked);
+    assert_eq!(guard.notice(), None);
+    assert_eq!(guard.on_confirm(), Confirm::Highlighted);
 }
