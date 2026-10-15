@@ -80,7 +80,11 @@ impl Fixture {
             .spawn()?;
         // Profile aliases are intentionally absent, like the actual helper's
         // environment allowlist. HOME is synthetic to avoid operator state.
-        child.stdin.take().expect("piped stdin").write_all(input)?;
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("stdin was not piped"))?
+            .write_all(input)?;
         Ok(child.wait_with_output()?)
     }
 
@@ -98,10 +102,10 @@ impl Fixture {
     }
 }
 
-fn uri(path: &Path) -> String {
+fn uri(path: &Path) -> Result<String> {
     url::Url::from_file_path(path)
-        .expect("absolute fixture path")
-        .to_string()
+        .map(|url| url.to_string())
+        .map_err(|()| anyhow::anyhow!("fixture path is not absolute: {}", path.display()))
 }
 
 #[test]
@@ -109,7 +113,7 @@ fn allowed_project_read_works_with_a_denied_default_profile() -> Result<()> {
     let fixture = Fixture::new()?;
     let response = fixture.helper(json!({
         "operation": "fs/readFile",
-        "params": {"path": uri(&fixture.path("project/notes.txt"))}
+        "params": {"path": uri(&fixture.path("project/notes.txt"))?}
     }))?;
     assert_eq!(
         response,
@@ -133,7 +137,7 @@ fn allowed_project_write_and_repeated_read_work() -> Result<()> {
     ] {
         let response = fixture.helper(json!({
             "operation": "fs/writeFile", "params": {
-                "path": uri(&fixture.path("project/notes.txt")), "dataBase64": data
+                "path": uri(&fixture.path("project/notes.txt"))?, "dataBase64": data
             }
         }))?;
         assert_eq!(
@@ -145,7 +149,7 @@ fn allowed_project_write_and_repeated_read_work() -> Result<()> {
             expected
         );
         let response = fixture.helper(json!({
-            "operation": "fs/readFile", "params": {"path": uri(&fixture.path("project/notes.txt"))}
+            "operation": "fs/readFile", "params": {"path": uri(&fixture.path("project/notes.txt"))?}
         }))?;
         assert_eq!(response["payload"]["response"]["dataBase64"], data);
     }
@@ -159,8 +163,8 @@ fn protected_profile_and_other_denied_paths_remain_denied() -> Result<()> {
         let target = fixture.path(relative);
         let original = std::fs::read(&target)?;
         for request in [
-            json!({"operation":"fs/readFile","params":{"path":uri(&target)}}),
-            json!({"operation":"fs/writeFile","params":{"path":uri(&target),"dataBase64":"bm90IGFsbG93ZWQ="}}),
+            json!({"operation":"fs/readFile","params":{"path":uri(&target)?}}),
+            json!({"operation":"fs/writeFile","params":{"path":uri(&target)?,"dataBase64":"bm90IGFsbG93ZWQ="}}),
         ] {
             let response = fixture.helper(request)?;
             assert_eq!(response["status"], "error");
