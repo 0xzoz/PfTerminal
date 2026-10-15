@@ -33,8 +33,8 @@ async def pipe(reader, writer):
 async def handle(reader, writer):
     head = await reader.readuntil(b"\r\n\r\n")
     method, target, _ = head.decode("latin1").split("\r\n")[0].split(" ", 2)
-    host = target.rsplit(":", 1)[0]
-    if method != "CONNECT" or host not in HOSTS:
+    host, _, port = target.rpartition(":")
+    if method != "CONNECT" or host not in HOSTS or port != "443":
         log({"refused": f"{method} {target}"})
         writer.write(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
         await writer.drain()

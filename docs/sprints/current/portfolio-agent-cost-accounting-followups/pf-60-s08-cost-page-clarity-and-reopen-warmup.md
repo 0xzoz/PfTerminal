@@ -62,6 +62,7 @@ updated: 2026-10-14
       or counted twice. [Gate](../../../../qa/portfolio/agent-cost-accounting/pf-60-s08/gate.md).
 
 - [x] Merged: PR #821 as `4d0d1597a9` (head `a4ef32068d`); review APPROVE on that head.
+
 ## Remaining
 
 - [ ] Code-blind functional design frozen before test-result disclosure (PF-60-S10).

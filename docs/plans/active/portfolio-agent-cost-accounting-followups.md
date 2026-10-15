@@ -158,7 +158,7 @@ with `CORBANU_TEST_NO_NATIVE_KEYRING=1`, plus demo videos per `qa/demos/README.m
 
 | Repository | Applicability for this scope | Checkout/base | Result |
 | --- | --- | --- | --- |
-| TensorCash | Required by S09 (was NOT VERIFIABLE in PF-60-S04) | Access to be resolved in S09 | pending |
+| TensorCash | Not applicable until access is granted (Travis, 2026-10-14); S09 recorded it | n/a | not applicable |
 | Isometric Game | Not applicable: accounting doesn't change repository work | n/a | n/a |
 
 ## Human acceptance

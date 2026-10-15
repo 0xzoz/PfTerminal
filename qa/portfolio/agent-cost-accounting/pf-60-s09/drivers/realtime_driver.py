@@ -2,12 +2,14 @@
 """PF-60-S09 realtime driver: one real realtime session through the app server.
 
 Starts `<corbanu> app-server` on stdio in the caller's environment (a disposable
-home with an API-key login), opens a thread, starts realtime with text output,
-sends one text message, waits for the reply, stops, and exits. It prints the
-JSON-RPC methods it saw and the reply text; it never prints credentials (it
-never reads any: the server uses the home's login).
+home with an API-key login), opens a thread, starts realtime (text output by
+default), sends "Reply with the single word OK." with `appendSpeech` (which asks
+for a response; `appendText` only adds an item), waits for the reply, stops, and
+exits. It prints the JSON-RPC methods it saw and the reply text; it never prints
+credentials (it never reads any: the server uses the home's login).
 
-usage: realtime_driver.py <corbanu> <workspace> [--transport websocket|webrtc-offer FILE] [--model M]
+usage: realtime_driver.py <corbanu> <workspace> [--transport websocket|webrtc --sdp-file F]
+                          [--modality text|audio] [--version v1|v2|v3] [--model M]
 """
 import argparse
 import json
@@ -99,6 +101,8 @@ call("initialize", {
 })
 send("initialized", notify=True)
 thread = call("thread/start", {})["thread"]["id"]
+if args.transport not in ("websocket", "webrtc"):
+    sys.exit(f"unknown transport {args.transport!r}")
 transport = {"type": "websocket"}
 if args.transport == "webrtc":
     transport = {"type": "webrtc", "sdp": open(args.sdp_file).read()}

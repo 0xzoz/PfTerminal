@@ -56,7 +56,7 @@ updated: 2026-10-14
 - [x] AC2 Image generation: **PASS**. A real API-key `gpt-image-2` request recomputes exactly at $5/M input and $30/M
       output ($0.007110); the ChatGPT-login image path (stand-in) is recorded as subscription.
 - [x] AC3 Realtime: **FAIL, filed as #824**. A real WebSocket session isn't recorded; the WebRTC call is recorded but
-      OpenAI refuses it on an API key; realtime has no token counts to recompute.
+      OpenAI refused it on this API key (v1: header; v3: no access); realtime has no token counts to recompute.
 - [x] AC4 TensorCash: not applicable until access is granted (Travis, 2026-10-14).
 - [x] Each driver is documented for the PF-60-S10 executor: [drivers](../../../../qa/portfolio/agent-cost-accounting/pf-60-s09/drivers/README.md);
       [gate](../../../../qa/portfolio/agent-cost-accounting/pf-60-s09/gate.md).
@@ -75,8 +75,8 @@ updated: 2026-10-14
 
 ## Exit evidence
 
-- [ ] Driver commit and evidence directory recorded.
-- [ ] Per-flow PASS/FAIL linked; any FAIL filed as an issue.
+- [x] Driver commit and evidence directory recorded (PR #825; `qa/portfolio/agent-cost-accounting/pf-60-s09/`).
+- [x] Per-flow PASS/FAIL linked; the FAIL filed as #824.
 - [ ] Code-blind handoff checker passes, or explicit limited-testing agreement/blocker recorded; no automatic human acceptance.
 - [ ] Parallel handoff, if applicable: commit, contract versions, scope audit and combined-tree test evidence recorded.
 - [ ] `Done` and `Remaining` ledgers reflect reality; #402 closed.
