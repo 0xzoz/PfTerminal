@@ -17,6 +17,7 @@
 //!
 //! Its own test binary, because arming protected launch is process-wide.
 #![cfg(any(target_os = "macos", target_os = "linux"))]
+#![allow(clippy::expect_used)]
 
 use std::sync::Arc;
 
@@ -49,13 +50,17 @@ use tempfile::TempDir;
 const NOT_POSSIBLE: &str = "asked to run outside the OS sandbox, and that isn't possible here";
 /// The note when a remembered rule would have skipped the sandbox.
 const RULE_NOTE: &str =
-    "A remembered approval (\"don't ask again\") would run this command outside the OS sandbox";
+    "A remembered approval or allow rule would run this command outside the OS sandbox";
 /// The note when no retry without the sandbox is offered.
 const RETRY_NOTE: &str = "\"retry without sandbox?\" is not offered";
 /// In the model's permissions instructions.
 const INSTRUCTED: &str = "Corbanu Terminal's protected launch (secretless_agent_launch) is on";
 /// What the launch contract says when it refuses a run (the old behaviour).
 const CONTRACT_REFUSED: &str = "Protected launch refused";
+
+/// Protected launch keeps the first home it loads for the whole process:
+/// that folder is kept until the process ends.
+static FIRST_HOME: std::sync::OnceLock<Arc<TempDir>> = std::sync::OnceLock::new();
 
 #[derive(Clone, Copy, Debug)]
 enum Route {
@@ -84,6 +89,7 @@ struct Run {
 async fn run(level: SecurityLevel, route: Route) -> anyhow::Result<Run> {
     let outside = TempDir::new()?;
     let home = Arc::new(TempDir::new()?);
+    FIRST_HOME.get_or_init(|| Arc::clone(&home));
     // Arms protected launch for this process when the config loads.
     std::fs::write(
         home.path().join("config.toml"),
@@ -170,22 +176,29 @@ async fn run(level: SecurityLevel, route: Route) -> anyhow::Result<Run> {
             &json!({ "command": command }).to_string(),
         ),
     };
-    let captured = mount_sse_sequence(
-        &server,
-        vec![
-            sse(vec![
-                ev_response_created("call-0"),
-                call,
-                ev_completed("call-0"),
-            ]),
-            sse(vec![
-                ev_response_created("done"),
-                ev_assistant_message("msg-done", "done"),
-                ev_completed("done"),
-            ]),
-        ],
-    )
-    .await;
+    let mut responses = vec![sse(vec![
+        ev_response_created("call-0"),
+        call,
+        ev_completed("call-0"),
+    ])];
+    // The rule's note is shown once per session: a second matching command.
+    if matches!(route, Route::Rule) {
+        responses.push(sse(vec![
+            ev_response_created("call-1"),
+            ev_function_call(
+                "call-1",
+                "shell_command",
+                &json!({ "command": command }).to_string(),
+            ),
+            ev_completed("call-1"),
+        ]));
+    }
+    responses.push(sse(vec![
+        ev_response_created("done"),
+        ev_assistant_message("msg-done", "done"),
+        ev_completed("done"),
+    ]));
+    let captured = mount_sse_sequence(&server, responses).await;
     std::mem::forget(server);
     test.codex
         .submit(Op::UserInput {
@@ -285,7 +298,14 @@ async fn issue_739_permissive_under_protected_launch_offers_no_run_outside_the_s
         let run = Box::pin(run(level, route)).await?;
         let instructed = level == Permissive;
         let warned_ok = match warned {
-            Some(note) => run.warnings.iter().any(|warning| warning.contains(note)),
+            // Once, also where a second command matches the rule.
+            Some(note) => {
+                run.warnings
+                    .iter()
+                    .filter(|warning| warning.contains(note))
+                    .count()
+                    == 1
+            }
             None => !run
                 .warnings
                 .iter()

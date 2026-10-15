@@ -660,11 +660,15 @@ impl ToolOrchestrator {
         } else {
             unkept_override
         };
-        // #739: a remembered rule that would skip the sandbox is not applied
-        // silently under protected launch: the run stays in it, and the
-        // person is told why.
+        // #739: a remembered approval or allow rule that would skip the
+        // sandbox is not applied silently under protected launch: the run
+        // stays in it, and the person is told why (once per session).
         if permissive_launch
             && matches!(unkept_override, SandboxOverride::BypassSandboxFirstAttempt)
+            && !tool
+                .sandbox_permissions(req)
+                .requires_escalated_permissions()
+            && crate::security::protected_additional::first_rule_note(tool_ctx.session.thread_id())
         {
             warn(
                 tool_ctx,

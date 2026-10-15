@@ -1007,13 +1007,22 @@ impl SecurityLevelPicker {
                     );
                     let hanging = if width < 20 { "" } else { "    " };
                     // #739: protected launch keeps every command in the
-                    // sandbox under Permissive too, so that is not removed.
-                    for (control, value) in
-                        crate::security::moderate::REMOVED
-                            .into_iter()
-                            .filter(|(control, _)| {
-                                !(self.moderate.secretless_launch && *control == "Sandbox")
-                            })
+                    // sandbox under Permissive too, so that is not removed,
+                    // and it keeps Corbanu's own files unreadable.
+                    let protected_launch = self.moderate.secretless_launch;
+                    for (control, value) in crate::security::moderate::REMOVED
+                        .into_iter()
+                        .filter(|(control, _)| !(protected_launch && *control == "Sandbox"))
+                        .map(|(control, value)| {
+                            if protected_launch && control == "Protected files" {
+                                (
+                                    control,
+                                    crate::security::moderate::REMOVED_PROTECTED_FILES_UNDER_PROTECTED_LAUNCH,
+                                )
+                            } else {
+                                (control, value)
+                            }
+                        })
                     {
                         lines.extend(word_wrap_lines(
                             [Line::from(vec![

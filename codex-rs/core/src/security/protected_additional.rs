@@ -377,9 +377,11 @@ pub(crate) const MODERATE_STAYS_SANDBOXED: &str = "Under security level Moderate
 /// level Permissive with protected launch armed (`secretless_agent_launch`),
 /// whose launch contract refuses every command outside the OS sandbox, no
 /// approval to run outside it is offered. A request to run outside it
-/// (`require_escalated`) is refused before anyone is asked, "retry without
-/// sandbox?" is not offered, and a remembered exec-policy rule that would
-/// skip the sandbox runs the command inside it, with a note. Permissive
+/// (`require_escalated`) is refused before anyone is asked (where the
+/// policy's own denied reads keep it in the sandbox anyway, it is asked
+/// about and runs there, as without protected launch), "retry without
+/// sandbox?" is not offered, and a remembered approval or allow rule that
+/// would skip the sandbox runs the command inside it, with a note. Permissive
 /// without protected launch is unchanged; Moderate and Aggressive keep their
 /// own handling (#747).
 pub(crate) fn permissive_launch_keeps_sandbox(session: &crate::session::session::Session) -> bool {
@@ -397,13 +399,27 @@ pub(crate) fn keeps_sandbox_always(session: &crate::session::session::Session) -
 /// a request to run outside the sandbox under protected launch.
 pub(crate) const PROTECTED_LAUNCH_NO_ESCALATION: &str = "Not run: this command asked to run outside the OS sandbox, and that isn't possible here. Protected launch (secretless_agent_launch) keeps every agent command inside the sandbox, also at security level Permissive and even with an approval, so no approval was asked for. Inside the sandbox it cannot write outside your writable folders or use network the sandbox blocks.";
 
-/// #739: shown to the person when a remembered approval would have run a
-/// command outside the sandbox under protected launch.
-pub(crate) const PROTECTED_LAUNCH_RULE_STAYS_SANDBOXED: &str = "A remembered approval (\"don't ask again\") would run this command outside the OS sandbox, which isn't possible here: protected launch (secretless_agent_launch) keeps every agent command inside it, also at security level Permissive. It runs inside the sandbox instead, so writes outside your writable folders and network the sandbox blocks fail.";
+/// #739: shown to the person, once per session, when a remembered approval
+/// or allow rule would have run a command outside the sandbox under
+/// protected launch.
+pub(crate) const PROTECTED_LAUNCH_RULE_STAYS_SANDBOXED: &str = "A remembered approval or allow rule would run this command outside the OS sandbox, which isn't possible here: protected launch (secretless_agent_launch) keeps every agent command inside it, also at security level Permissive. This command, and others such rules match in this session, still skip the prompt but run inside the sandbox, so writes outside your writable folders and network the sandbox blocks fail.";
 
-/// #739: shown to the person when the sandbox blocked a command and a retry
-/// without it would have been offered (or run) under Permissive.
-pub(crate) const PROTECTED_LAUNCH_NO_RETRY: &str = "The sandbox blocked this command. Running it outside the sandbox isn't possible here: protected launch (secretless_agent_launch) keeps every agent command inside it, also at security level Permissive, so \"retry without sandbox?\" is not offered.";
+/// #739: whether the session `thread` has not yet been told
+/// [`PROTECTED_LAUNCH_RULE_STAYS_SANDBOXED`] (it is told once).
+pub(crate) fn first_rule_note(thread: codex_protocol::ThreadId) -> bool {
+    static NOTED: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashSet<codex_protocol::ThreadId>>,
+    > = std::sync::OnceLock::new();
+    match NOTED.get_or_init(Default::default).lock() {
+        Ok(mut noted) => noted.insert(thread),
+        Err(_) => true,
+    }
+}
+
+/// #739: shown to the person when the sandbox blocked a command (or failed to
+/// start) and a retry without it would have been offered (or run) under
+/// Permissive.
+pub(crate) const PROTECTED_LAUNCH_NO_RETRY: &str = "Running this command outside the sandbox isn't possible here: protected launch (secretless_agent_launch) keeps every agent command inside it, also at security level Permissive, so \"retry without sandbox?\" is not offered.";
 
 /// Issues #245 and #513: a permission grant (`request_permissions`)
 /// without the entries that would open a protected path or reopen a

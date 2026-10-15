@@ -163,10 +163,12 @@ pub(crate) fn current_values(
             "; under Aggressive approved and allow-listed commands stay inside the sandbox",
         );
     } else if secretless && restricted && !file_system.has_denied_read_restrictions() {
-        // #739: protected launch does it.
-        sandbox.push_str(
-            "; with protected launch (secretless_agent_launch) no command runs outside the sandbox, so none is offered",
-        );
+        // #739: protected launch does it; under Permissive nothing offers it.
+        sandbox.push_str(if moderate || aggressive {
+            "; with protected launch (secretless_agent_launch) no command runs outside the sandbox"
+        } else {
+            "; with protected launch (secretless_agent_launch) no command runs outside the sandbox, so none is offered"
+        });
     }
     let request_tools = config.features.enabled(Feature::RequestPermissionsTool)
         || config.features.enabled(Feature::ExecPermissionApprovals);
