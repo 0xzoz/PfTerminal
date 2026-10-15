@@ -180,6 +180,11 @@ common:ci-windows --config=windows-native-tests
 # The other ConPTY/PTY tests pass under cargo on the same hosted runner but
 # time out waiting on their child processes in Bazel's Windows test env.
 common:windows-native-tests --test_env=CODEX_BAZEL_TEST_SKIP_FILTERS=suite::code_mode::code_mode_can_call_hidden_dynamic_tools,tests::windows_tests::conpty_ctrl_c_interrupts_powershell_foreground_child,tests::windows_tests::conpty_delivers_input_to_foreground_children,tests::windows_tests::normal_exit_preserves_descendants_for_pipe_and_conpty,tests::pty_python_repl_emits_output_and_exits
+# #691: auth::manager::tests::unauthorized_recovery_uses_external_refresh_for_bearer_manager
+# fails now and then on loaded Windows runners. Owner decision 2026-10-15:
+# one automatic re-run (Bazel re-runs the whole login unit-test target and
+# reports it FLAKY); if it fails again, add it to the skip list above.
+common:windows-native-tests --flaky_test_attempts=//codex-rs/login:login-unit-tests@2
 
 # We prefer to run the build actions entirely remotely so we can dial up the concurrency.
 # We have platform-specific tests, so we want to execute the tests on all platforms using the strongest sandboxing available on each platform.
