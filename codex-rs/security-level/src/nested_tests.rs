@@ -255,10 +255,13 @@ fn an_unreadable_marker_is_made_readable_again() {
     let home = tempfile::tempdir().unwrap();
     keep_moderate_marker_readable(home.path()).unwrap();
     let marker = prepare_moderate_marker(home.path()).unwrap();
-    std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o000)).unwrap();
-    keep_moderate_marker_readable(home.path()).unwrap();
-    assert_eq!(mode(&marker), 0o644);
-    assert!(!moderate_marker_denied(home.path()));
+    // Whatever others may do, the owner cannot read these.
+    for unreadable in [0o000, 0o044, 0o004, 0o040] {
+        std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(unreadable)).unwrap();
+        keep_moderate_marker_readable(home.path()).unwrap();
+        assert_eq!(mode(&marker), 0o644, "{unreadable:o}");
+        assert!(!moderate_marker_denied(home.path()));
+    }
 
     // A private file of the user's (0600) is not "unreadable".
     std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o600)).unwrap();

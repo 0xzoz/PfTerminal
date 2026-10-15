@@ -224,12 +224,12 @@ fn moderate_marker(home: &Path) -> io::Result<bool> {
 
 /// Core, before an agent command not under Moderate runs where the
 /// protected-file rules apply (Linux, where an unreadable regular file is the
-/// evidence; on macOS only Seatbelt's EPERM is): a marker that nobody can
+/// evidence; on macOS only Seatbelt's EPERM is): a marker its owner cannot
 /// read is given read permission again (0644), so it never passes for
 /// Moderate's. Only the marker itself: it is opened without following a
 /// link and changed through that open file, and only when it is a regular
-/// file of this user with one link and no read bit (never a link, a hard
-/// link to another file, or a private file of the user's).
+/// file of this user with one link and no owner read bit (never a link, a
+/// hard link to another file, or a private file of the user's).
 pub fn keep_moderate_marker_readable(codex_home: &Path) -> io::Result<()> {
     #[cfg(target_os = "linux")]
     {
@@ -253,7 +253,7 @@ pub fn keep_moderate_marker_readable(codex_home: &Path) -> io::Result<()> {
         if metadata.file_type().is_file()
             && metadata.nlink() == 1
             && metadata.uid() == user
-            && metadata.mode() & 0o444 == 0
+            && metadata.mode() & 0o400 == 0
         {
             std::fs::set_permissions(
                 format!("/proc/self/fd/{}", file.as_raw_fd()),
