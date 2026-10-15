@@ -18,7 +18,9 @@ th{background:#f5f5f7}.warn{background:#fff4e5;border-left:4px solid #f0a020;pad
 <p><small>Kept by the coordinating agent (Claude, running in Corbanu Terminal as “coordinator”) for its successor; this update written by the coordinator's handoff-doc4 worker.
 State as of 2026-10-15 07:15 UTC (2026-10-15 00:15 America/Phoenix). Owner: <b>Travis</b>. Repository: <code>CorbanuCore/CorbanuTerminal</code> (base branch <code>main</code>, head <code>f64bc0e690</code>).
 Coordinator since 2026-10-13 04:30Z: a new Claude coordinator, resumed from the 2026-10-12 pause handoff when Travis said resume.
-Previous updates: PR #706 (to 2026-10-13 18:46Z), PR #754 (to 2026-10-14 05:40Z) and PR #804 (to 2026-10-14 16:56Z).</small></p>
+Previous updates: PR #706 (to 2026-10-13 18:46Z), PR #754 (to 2026-10-14 05:40Z) and PR #804 (to 2026-10-14 16:56Z).
+<b>Addendum at 2026-10-15 20:50 UTC (13:50 America/Phoenix)</b> below the next box: read it first — it supersedes the 07:15Z worker, PR and CI
+details in sections 3, 6, 10 and 12.</small></p>
 
 <div class="warn"><b>Where things stand.</b> The program is <b>running</b> (not paused). After the 2026-10-12 orderly pause
 (credits), Travis said resume on 2026-10-13; the new coordinator has run “wave 2” since: 57 workers finished and 127 PRs merged by
@@ -38,6 +40,21 @@ Travis's 10-14 process rule, <b>repeats every decision still waiting on him unti
 <b>Overnight rule:</b> 01:30–09:30 Pacific Travis is unavailable — only launch work that needs no decision from him (queue the
 decisions, with recommendations, for the morning). In October that is 08:30Z–16:30Z; at the time of this update (07:15Z) the overnight window
 starts in about 75 minutes.</div>
+
+<div class="warn"><b>Addendum 2026-10-15 20:50 UTC (13:50 America/Phoenix) — drive access revoked overnight.</b> At about <b>07:59Z</b>
+macOS revoked the terminal's access to <code>/Volumes/CorbanuDrive</code> (the #616 class: the <code>claude-plan</code> auth helper and the session
+store got “Operation not permitted”). It stopped <b>every</b> worker: qual-mod1, qual-aggr6, ci-win-tests and handoff-doc4 exited, and the tmux
+server was gone. Thanks to the #638 fix (in the installed binary) they <b>exited cleanly with an error instead of hanging</b> as on 10-12, so
+nothing had to be killed; their logs were moved to <code>$W/&lt;name&gt;.log.died-20261015T2049</code>. Nothing ran from ~08:00Z to ~20:49Z.
+State found at 20:49Z (todo.md): the Moderate run had finished — record <b>PR #844</b> (branch <code>qa/moderate-first-20261014</code>, head
+<code>c8126e37a5</code>): <b>34 cases, 16 passed / 15 failed / 3 blocked</b>, issues #837–#843 and #845–#847; “macOS 3” stopped and the VM lock
+released (07:18Z); #835 (#817) merged 07:30Z and #828 (Windows tests on PRs) merged 07:58Z; #836 (this update) open; qual-aggr6 was still in
+design and never took the VM. <b>Main is red</b>: postmerge on <code>7666bdf3d4</code> (#828's merge) failed two Linux tests
+(<code>remote_control::disable_waits_for_in_flight_durable_enable</code>, <code>execute_waits_for_nested_tool_during_yield_grace</code>; auto-issue
+#848), and a new cargo-deny finding fails every PR. The coordinator relaunched all four with RECOVERY NOTEs
+(<code>$W/&lt;name&gt;.relaunch*.md</code>) and launched <b>main-ci4</b> (cargo-deny + the two Linux tests). <b>PRs #849–#853 are from another
+account (<code>citadelculture</code>), not this program</b> — their titles look like fixes for issues filed here (#845, #847, #822, #820, #814);
+don't merge or close them without Travis.</div>
 
 <h2>1. How to resume (read first)</h2>
 <ol>
@@ -145,7 +162,9 @@ on top of the original brief).</li>
 <li><b>VM lock for “macOS 3”</b> (since 10-14 22:59Z): only one milestone run may use the VM. The integrator that holds it writes
 <code>$W/vm-macos3.lock</code> (its name and the UTC time), and deletes it (<code>rm</code>, not <code>rm -f</code>) as soon as the VM is stopped and
 guest data erased — even if it fails. A waiting integrator polls every 5 minutes until the file is gone, then creates it. qual-aggr5 held it and
-passed it to qual-mod1 (lock content <code>qual-mod1 2026-10-15T01:02:39Z</code>). Write this rule into every milestone-run brief.</li>
+passed it to qual-mod1 (lock content <code>qual-mod1 2026-10-15T01:02:39Z</code>), which released it at 07:18:14Z; it is free at 20:50Z and
+qual-aggr6 takes it next. Write this rule into every milestone-run brief; a relaunched integrator first checks whether its previous life still
+holds the lock (the file names the holder) before waiting on it.</li>
 <li><b>CODE REVIEW ROUNDS</b> (coordinator, 2026-10-15, in <code>wave2-common.md</code>): the review budget is <b>5 rounds per PR</b> (code,
 security or evidence) unless the brief names another number; a 6th round needs a request file, as for evidence checks; re-reviews of a merge
 commit only are cheap but still count. Added after mod-766 took 9 rounds with no budget named. The one grant so far: <code>perm-739.grant.md</code>
@@ -671,6 +690,13 @@ comments “Owner decision (Travis, 2026-10-15, as recommended)” at 04:53Z):</
 </table>
 
 <h2>10. Current state</h2>
+<p class="warn"><b>Superseded in part (20:50Z addendum at the top):</b> at 20:50Z the running workers are the relaunched <b>qual-mod1</b> (finish:
+confirm guest erase, merge #844 when green, Decisions for Travis), <b>qual-aggr6</b> (targeted3 Aggressive re-run; finishes the design freeze, then
+takes the VM lock), <b>ci-win-tests</b> (confirm the #828 filter, close throwaway #832), <b>handoff-doc4</b> (this PR) and <b>main-ci4</b> (cargo-deny
+and the two Linux postmerge failures; comments on #406). Check with <code>$W/mon.sh qual-mod1 qual-aggr6 ci-win-tests handoff-doc4 main-ci4</code>.
+Open PRs of this program: #844, #836, #832 (throwaway); #849–#853 belong to <code>citadelculture</code>. Main head <code>7666bdf3d4</code>: postmerge
+green on <code>4c9b0a0cf0</code> (#835) and <code>f64bc0e690</code> (#834), <b>failed</b> on <code>7666bdf3d4</code> (#828). The tables below are the
+07:15Z snapshot.</p>
 <h3>Workers</h3>
 <p>Running at 2026-10-15 07:15 UTC (00:15 America/Phoenix) (tmux sessions on <code>$W/tmux.sock</code>; check with
 <code>$W/mon.sh qual-mod1 agg-fix6 ci-win-tests</code>; all three logs active within the last ~4 minutes, no model-provider panics). The 57
@@ -762,6 +788,9 @@ prerequisite for PF-84 flag removal (S09's ChatGPT path was verified on a stand-
 </ul>
 
 <h2>12. What to do next (recommended order)</h2>
+<p><small>20:50Z: items 2–4 below are partly done (see the addendum): #835 and #828 merged, the Moderate record is PR #844. First get main green
+again (main-ci4), then let qual-mod1 merge #844 and bring Travis the Moderate results and its Decisions; watch the five relaunched workers on the
+5-minute loop. If drive access is revoked again, the workers exit on their own: move the logs aside, write RECOVERY NOTEs and relaunch.</small></p>
 <ol>
 <li>Keep the 5-minute loop on qual-mod1, agg-fix6 and ci-win-tests (<code>$W/wait-event.sh 285 qual-mod1 agg-fix6 ci-win-tests</code>); in
 each round also check for <code>$W/*.request.md</code> (answer with <code>&lt;name&gt;.grant.md</code>, record in the ledger and an issue) and who holds
