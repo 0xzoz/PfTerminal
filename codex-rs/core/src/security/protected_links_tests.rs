@@ -346,6 +346,7 @@ fn refused(project: &Project, command: &[String], cwd: &Path) -> Option<String> 
         project
             .inputs
             .protected_target(&link_targets(command).candidates, cwd)
+            .map(|refused| refused.target)
     })
 }
 
@@ -502,15 +503,157 @@ async fn issue_744_lookups_that_do_not_finish_still_refuse() {
         None
     })
     .await;
-    assert_eq!(slow, Some(".agents".to_string()));
+    // #744 follow-up: and say which check refused it.
+    assert_eq!(
+        slow,
+        Some(Refused {
+            target: ".agents".to_string(),
+            by: RefusedBy::Timeout
+        })
+    );
     let failed = looked_up(LOOKUP_TIMEOUT, ".codex".to_string(), || {
         panic!("lookup failed")
     })
     .await;
-    assert_eq!(failed, Some(".codex".to_string()));
-    let named = looked_up(LOOKUP_TIMEOUT, ".codex".to_string(), || {
-        Some("x/.agents".to_string())
-    })
-    .await;
-    assert_eq!(named, Some("x/.agents".to_string()));
+    assert_eq!(
+        failed,
+        Some(Refused {
+            target: ".codex".to_string(),
+            by: RefusedBy::LookupFailed
+        })
+    );
+    let named = Refused {
+        target: "x/.agents".to_string(),
+        by: RefusedBy::SettingsNamed,
+    };
+    let found = named.clone();
+    let named_found = looked_up(LOOKUP_TIMEOUT, ".codex".to_string(), move || Some(found)).await;
+    assert_eq!(named_found, Some(named));
+}
+
+/// #744 follow-up (Travis, 2026-10-14): a refusal says which check made it;
+/// for a path no grant lifts, where the target landed and which kept path
+/// it landed in.
+#[cfg(unix)]
+#[test]
+fn issue_744_a_protected_target_names_where_it_landed() {
+    let project = project();
+    let root = project.root.as_path();
+    let agents = AbsolutePathBuf::from_absolute_path(root.join(".agents")).expect("absolute");
+    let refused = project
+        .inputs
+        .protected_target(&link_targets(&shell("ln -s .agents ag")).candidates, root)
+        .expect("refused");
+    assert_eq!(refused.target, ".agents");
+    assert_eq!(
+        refused.by,
+        RefusedBy::ProtectedTarget {
+            landed: agents.clone(),
+            kept: agents.clone(),
+        }
+    );
+    // Through an existing link: it lands where the link points.
+    std::os::unix::fs::symlink(root.join(".agents"), root.join("al")).expect("al");
+    let refused = project
+        .inputs
+        .protected_target(&link_targets(&shell("ln -s al x")).candidates, root)
+        .expect("refused");
+    assert_eq!(refused.target, "al");
+    assert_eq!(
+        refused.by,
+        RefusedBy::ProtectedTarget {
+            landed: agents.clone(),
+            kept: agents,
+        }
+    );
+}
+
+/// #744 follow-up: the refusal is logged with its check and, for a protected
+/// target, the paths; the command's text is not.
+#[test]
+fn issue_744_the_refusal_is_logged_with_its_check() {
+    let buffer: &'static std::sync::Mutex<Vec<u8>> =
+        Box::leak(Box::new(std::sync::Mutex::new(Vec::new())));
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(tracing_test::internal::MockWriter::new(buffer))
+        .finish();
+    let root = std::env::temp_dir();
+    let landed = AbsolutePathBuf::from_absolute_path(root.join("p/.agents/x")).expect("absolute");
+    let kept = AbsolutePathBuf::from_absolute_path(root.join("p/.agents")).expect("absolute");
+    tracing::subscriber::with_default(subscriber, || {
+        log_refusal(
+            &Refused {
+                target: "'{\"hooks\":{}}'".to_string(),
+                by: RefusedBy::ProtectedTarget {
+                    landed: landed.clone(),
+                    kept: kept.clone(),
+                },
+            },
+            std::time::Duration::from_millis(1234),
+        );
+        log_refusal(
+            &Refused {
+                target: ".agents".to_string(),
+                by: RefusedBy::Timeout,
+            },
+            std::time::Duration::from_secs(10),
+        );
+    });
+    let logs = String::from_utf8(buffer.lock().expect("buffer").clone()).expect("utf8");
+    let lines: Vec<&str> = logs.lines().collect();
+    assert_eq!(lines.len(), 2, "{logs}");
+    let protected = format!(
+        "refused_by=protected_target target='{{\"hooks\":{{}}}}' landed={} kept={} elapsed_ms=1234",
+        landed.as_path().display(),
+        kept.as_path().display()
+    );
+    let timeout = "refused_by=timeout target=.agents elapsed_ms=10000".to_string();
+    for (line, detail) in lines.iter().zip([&protected, &timeout]) {
+        assert!(line.contains(" WARN "), "{line}");
+        assert!(
+            line.ends_with(&format!(
+                "Aggressive link check (#623) refused a command: {detail}"
+            )),
+            "{line}"
+        );
+    }
+    // Kept for tests to report (other tests may add their own).
+    let recent = recent_refusals();
+    assert!(recent.contains(&protected), "{recent:?}");
+    assert!(recent.contains(&timeout), "{recent:?}");
+}
+
+/// #744 follow-up (review): the log shows a command-derived target as the
+/// refusal does: control characters escaped and at most 200 characters.
+#[test]
+fn issue_744_the_logged_target_is_escaped_and_bounded() {
+    let buffer: &'static std::sync::Mutex<Vec<u8>> =
+        Box::leak(Box::new(std::sync::Mutex::new(Vec::new())));
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(tracing_test::internal::MockWriter::new(buffer))
+        .finish();
+    let target = format!("x\nWARN forged line\u{1b}[31m{}", "a".repeat(300));
+    let landed =
+        AbsolutePathBuf::from_absolute_path(std::env::temp_dir().join(&target)).expect("absolute");
+    let kept = AbsolutePathBuf::from_absolute_path(std::env::temp_dir()).expect("absolute");
+    tracing::subscriber::with_default(subscriber, || {
+        log_refusal(
+            &Refused {
+                target: target.clone(),
+                by: RefusedBy::ProtectedTarget { landed, kept },
+            },
+            std::time::Duration::from_millis(1),
+        );
+    });
+    let logs = String::from_utf8(buffer.lock().expect("buffer").clone()).expect("utf8");
+    assert_eq!(logs.lines().count(), 1, "{logs}");
+    assert!(!logs.contains('\u{1b}'), "{logs}");
+    assert!(
+        logs.contains(&format!("target={}", shown_path(&target))),
+        "{logs}"
+    );
+    assert!(shown_path(&target).chars().count() <= 201);
+    assert!(!logs.contains(&"a".repeat(250)), "{logs}");
 }

@@ -61,6 +61,12 @@ pub fn set_thread_manager_test_mode(enabled: bool) {
     thread_manager::set_thread_manager_test_mode_for_tests(enabled);
 }
 
+/// #744: the latest Aggressive link check (#623) refusals in this process,
+/// each with the check that made it, for a test to report when it fails.
+pub fn recent_link_check_refusals() -> Vec<String> {
+    crate::security::protected_links::recent_refusals()
+}
+
 pub fn set_deterministic_process_ids(enabled: bool) {
     unified_exec::set_deterministic_process_ids_for_tests(enabled);
 }
