@@ -339,6 +339,16 @@ class RunScopedCachePruneTest(unittest.TestCase):
         # Nothing but the checkout runs third-party code next to the token.
         self.assertEqual(re.findall(r"uses: ([\w/-]+)@", prune), ["actions/checkout"])
 
+    def test_no_other_workflow_holds_actions_write(self) -> None:
+        # cla.yml is upstream's and runs only in openai's repositories.
+        holders = {
+            path.name
+            for path in self.WORKFLOWS.glob("*.yml")
+            if re.search(r"(?m)^\s+actions: write$", path.read_text())
+        }
+        self.assertEqual(holders, {"cache-prune.yml", "cla.yml"})
+        self.assertIn("github.repository_owner == 'openai'", (self.WORKFLOWS / "cla.yml").read_text())
+
 
 class NightlyHeavyJobsTest(unittest.TestCase):
     def workflow(self, name: str) -> str:

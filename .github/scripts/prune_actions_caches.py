@@ -18,11 +18,13 @@ import subprocess
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime
 
 
 MAIN_REF = "refs/heads/main"
-# `-<run id>` or `-<run id>-<attempt>` at the end of the key.
-RUN_ID_SUFFIX = re.compile(r"-\d{8,12}(?:-\d{1,3})?$")
+# `-<run id>` or `-<run id>-<attempt>` at the end of the key. Run IDs have 11
+# digits now; 10+ keeps short all-digit hashes (rust-cache) from matching.
+RUN_ID_SUFFIX = re.compile(r"-\d{10,12}(?:-\d{1,3})?$")
 # Lockfile, toolchain or commit hashes right before the run ID; restores fall
 # back across them by prefix, so they don't make a separate family.
 HASH_SUFFIX = re.compile(r"-[0-9a-f]{16,64}$")
@@ -49,6 +51,10 @@ def family(key: str) -> str | None:
         stripped = shorter
 
 
+def created(entry: CacheEntry) -> datetime:
+    return datetime.fromisoformat(entry.created_at.replace("Z", "+00:00"))
+
+
 def plan_deletions(entries: list[CacheEntry]) -> list[CacheEntry]:
     families: dict[str, list[CacheEntry]] = defaultdict(list)
     for entry in entries:
@@ -57,8 +63,7 @@ def plan_deletions(entries: list[CacheEntry]) -> list[CacheEntry]:
             families[name].append(entry)
     deletions = []
     for members in families.values():
-        # ISO-8601 UTC timestamps sort chronologically; the ID breaks ties.
-        members.sort(key=lambda entry: (entry.created_at, entry.id), reverse=True)
+        members.sort(key=lambda entry: (created(entry), entry.id), reverse=True)
         deletions.extend(members[1:])
     return sorted(deletions, key=lambda entry: entry.key)
 
@@ -107,11 +112,13 @@ def main() -> int:
             gh_api("--method", "DELETE", f"repos/{args.repo}/actions/caches/{entry.id}")
             freed += entry.size_in_bytes
         except subprocess.CalledProcessError as error:
-            # A concurrent prune run may have deleted it first; keep going.
-            failed += 1
+            # 404: a concurrent prune run deleted it first. Anything else
+            # (e.g. a 403 token policy) fails the job after the other deletes.
+            if "HTTP 404" not in error.stderr:
+                failed += 1
             print(f"  failed: {error.stderr.strip()}", file=sys.stderr)
-    print(f"{len(deletions) - failed} entries, {freed / 1e9:.2f} GB freed; {failed} failed")
-    return 0
+    print(f"{freed / 1e9:.2f} GB freed; {failed} deletes failed")
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

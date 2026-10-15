@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 
+import io
+import subprocess
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from unittest import mock
 
+import prune_actions_caches
 from prune_actions_caches import CacheEntry, family, plan_deletions
 
 
@@ -38,6 +43,8 @@ class FamilyTest(unittest.TestCase):
             "apt-ubuntu-24.04-x86_64-unknown-linux-musl-v1",
             "setup-zig-tarball-zig-linux-x86_64-0.14.0",
             "v0-rust-real-tui-Linux-x64-14d2a2b0-958071ca",
+            # A short rust-cache hash can be all digits; it isn't a run ID.
+            "v0-rust-real-tui-Linux-x64-14d2a2b0-95807123",
             f"argument-comment-lint-Linux-5.0.0-5.0.0-{LOCK}",
         ):
             with self.subTest(key=key):
@@ -60,6 +67,44 @@ class PlanDeletionsTest(unittest.TestCase):
             entry(4, f"cargo-home-macos-dev-{TOOLCHAIN}-{LOCK}", "2026-10-15T00:00:00Z"),
         ]
         self.assertEqual(plan_deletions(entries), [])
+
+    def test_orders_by_time_not_by_text(self) -> None:
+        # Fractional seconds vary in precision; text order would pick `a`.
+        a = entry(1, "sccache-tmux-smoke-Linux-ad92baf5dbb36bcc-38646905550", "2026-10-15T00:47:28.9Z")
+        b = entry(2, "sccache-tmux-smoke-Linux-ad92baf5dbb36bcc-38646905551", "2026-10-15T00:47:28.95Z")
+        self.assertEqual(plan_deletions([a, b]), [a])
+
+
+class MainTest(unittest.TestCase):
+    OLD = entry(1, "sccache-tmux-smoke-Linux-ad92baf5dbb36bcc-38646905550", "2026-10-14T00:00:00Z")
+    NEW = entry(2, "sccache-tmux-smoke-Linux-ad92baf5dbb36bcc-38646905551", "2026-10-15T00:00:00Z")
+
+    def run_main(self, delete_error: str | None) -> int:
+        def gh_api(*args: str) -> str:
+            if delete_error is not None and "DELETE" in args:
+                raise subprocess.CalledProcessError(1, "gh", stderr=delete_error)
+            return ""
+
+        with (
+            mock.patch.object(prune_actions_caches, "list_main_caches", return_value=[self.OLD, self.NEW]),
+            mock.patch.object(prune_actions_caches, "gh_api", side_effect=gh_api) as api,
+            mock.patch("sys.argv", ["prune", "--repo", "o/r"]),
+            redirect_stdout(io.StringIO()),
+            redirect_stderr(io.StringIO()),
+        ):
+            code = prune_actions_caches.main()
+        if delete_error is None:
+            api.assert_called_once_with("--method", "DELETE", "repos/o/r/actions/caches/1")
+        return code
+
+    def test_deletes_older_copy(self) -> None:
+        self.assertEqual(self.run_main(delete_error=None), 0)
+
+    def test_already_deleted_is_fine(self) -> None:
+        self.assertEqual(self.run_main(delete_error="gh: Not Found (HTTP 404)"), 0)
+
+    def test_other_delete_errors_fail_the_job(self) -> None:
+        self.assertEqual(self.run_main(delete_error="gh: Forbidden (HTTP 403)"), 1)
 
 
 if __name__ == "__main__":
