@@ -1054,7 +1054,13 @@ impl SecurityLevelPicker {
                     if self.preflight_input.is_some() {
                         removed.push((
                             "Protected paths",
-                            "credential files (such as .env and keychains) and Corbanu's history and state are no longer denied to agent commands; your own sandbox settings decide",
+                            // #739: protected launch keeps Corbanu's own
+                            // files unreadable.
+                            if self.moderate.secretless_launch {
+                                "credential files (such as .env and keychains) are no longer denied to agent commands; your own sandbox settings decide, except that Corbanu's sign-in, vault, config and history, and a few CLI token files (such as .netrc, .aws/credentials and .npmrc), stay unreadable to them (secretless_agent_launch)"
+                            } else {
+                                "credential files (such as .env and keychains) and Corbanu's history and state are no longer denied to agent commands; your own sandbox settings decide"
+                            },
                         ));
                     }
                     for (control, value) in removed {

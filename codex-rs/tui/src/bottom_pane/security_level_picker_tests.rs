@@ -830,6 +830,40 @@ mod pf_24_s02 {
         ));
     }
 
+    /// #739: with protected launch on, the move from Aggressive to
+    /// Permissive does not list Corbanu's own files as no longer denied: the
+    /// launch contract keeps them unreadable.
+    #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Aggressive cannot be fully applied on a Windows test machine without the Windows sandbox (#691)"
+    )]
+    fn issue_739_downgrade_under_protected_launch_keeps_corbanu_files_denied() {
+        let machine = Machine::new();
+        machine.confirmed_aggressive();
+        for (protected, kept, removed) in [(true, true, false), (false, false, true)] {
+            let (mut picker, _rx) = machine.picker(ChosenLevel::Aggressive);
+            picker.set_moderate_facts(crate::security::moderate::Facts {
+                secretless_launch: protected,
+                ..Default::default()
+            });
+            picker.handle_key_event(key(KeyCode::Down));
+            picker.handle_key_event(key(KeyCode::Enter));
+            let review = machine.text(&picker);
+            assert_eq!(
+                review.contains("Corbanu's sign-in, vault, config and history, and a few CLI token files (such as .netrc, .aws/credentials and .npmrc), stay unreadable to them (secretless_agent_launch)"),
+                kept,
+                "{review}"
+            );
+            assert_eq!(
+                review.contains("Corbanu's history and state are no longer denied"),
+                removed,
+                "{review}"
+            );
+            picker.handle_key_event(key(KeyCode::Esc));
+        }
+    }
+
     #[test]
     #[cfg_attr(
         windows,
