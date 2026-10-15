@@ -44,7 +44,7 @@ wait = "Preflight passed"
 key = "Down"
 repeat = 80
 [[steps]]
-wait = "From then until the restart this session also has"
+wait = "From then until\\s+the restart"
 [[steps]]
 run = "tmux -L \"$(ls -t \"${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)\" | grep '^demo-issue816-aggressive-before-restart-says-what-holds-' | head -1)\" capture-pane -p -t demo > {run}/816-review-bottom.txt"
 [[steps]]
@@ -52,7 +52,7 @@ pause = 4.0
 [[steps]]
 key = "Enter"
 [[steps]]
-wait = "Also in force now in this session"
+wait = "Also in\\s+force now in"
 timeout = 60
 [[steps]]
 run = "tmux -L \"$(ls -t \"${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)\" | grep '^demo-issue816-aggressive-before-restart-says-what-holds-' | head -1)\" capture-pane -p -t demo > {run}/816-screen07.txt"
@@ -67,7 +67,7 @@ type = "/security"
 [[steps]]
 key = "Enter"
 [[steps]]
-wait = "also in force now"
+wait = "also in\\s+force now"
 [[steps]]
 run = "tmux -L \"$(ls -t \"${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)\" | grep '^demo-issue816-aggressive-before-restart-says-what-holds-' | head -1)\" capture-pane -p -t demo > {run}/816-picker.txt"
 [[steps]]
