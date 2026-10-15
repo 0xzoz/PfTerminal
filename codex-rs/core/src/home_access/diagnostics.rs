@@ -7,6 +7,12 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
+/// Whether this process's sandbox denies reading `path`; `None` when that
+/// cannot be checked.
+pub(super) fn sandbox_denies_read(path: &Path) -> Option<bool> {
+    platform::sandbox_denies_read(path)
+}
+
 /// The record for one failed `operation` on `path`.
 pub(super) fn record(operation: &str, path: &Path, error: &str, now: &str) -> String {
     let mut out = String::new();
@@ -112,47 +118,51 @@ mod platform {
             let responsible: ResponsiblePid = unsafe { std::mem::transmute(address) };
             // SAFETY: takes a pid and returns one.
             let responsible_pid = unsafe { responsible(pid) };
-            format!("pid={responsible_pid} path={}", process_path(responsible_pid))
+            format!(
+                "pid={responsible_pid} path={}",
+                process_path(responsible_pid)
+            )
         });
         let _ = writeln!(
             out,
             "responsible process: {}",
             responsible.as_deref().unwrap_or("unavailable")
         );
-        let sandbox = match (
-            symbol(c"sandbox_check"),
-            CString::new(path.as_os_str().as_bytes()),
-        ) {
-            (Some(address), Ok(c_path)) => {
-                // SAFETY: sandbox_check(pid, operation, SANDBOX_FILTER_PATH, path).
-                let check: SandboxCheck = unsafe { std::mem::transmute(address) };
-                // SAFETY: both strings are NUL-terminated and outlive the call.
-                let result = unsafe {
-                    check(
-                        pid,
-                        c"file-read-data".as_ptr(),
-                        SANDBOX_FILTER_PATH,
-                        c_path.as_ptr(),
-                    )
-                };
-                match result {
-                    0 => "allowed".to_string(),
-                    1 => "denied".to_string(),
-                    other => format!("error ({other})"),
-                }
-            }
-            _ => "unavailable".to_string(),
+        let sandbox = match sandbox_denies_read(path) {
+            Some(true) => "denied",
+            Some(false) => "allowed",
+            None => "unavailable",
         };
         let _ = writeln!(out, "sandbox_check(file-read-data): {sandbox}");
         let _ = writeln!(out, "mounted volume: {}", mount_facts(path));
     }
 
+    pub(super) fn sandbox_denies_read(path: &Path) -> Option<bool> {
+        let check = symbol(c"sandbox_check")?;
+        let c_path = CString::new(path.as_os_str().as_bytes()).ok()?;
+        // SAFETY: sandbox_check(pid, operation, SANDBOX_FILTER_PATH, path).
+        let check: SandboxCheck = unsafe { std::mem::transmute(check) };
+        // SAFETY: both strings are NUL-terminated and outlive the call.
+        let result = unsafe {
+            check(
+                libc::getpid(),
+                c"file-read-data".as_ptr(),
+                SANDBOX_FILTER_PATH,
+                c_path.as_ptr(),
+            )
+        };
+        match result {
+            0 => Some(false),
+            1 => Some(true),
+            _ => None,
+        }
+    }
+
     fn process_path(pid: libc::pid_t) -> String {
         let mut buffer = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
         // SAFETY: the buffer is writable for its full length.
-        let len = unsafe {
-            libc::proc_pidpath(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32)
-        };
+        let len =
+            unsafe { libc::proc_pidpath(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
         if len <= 0 {
             return "unknown".to_string();
         }
@@ -248,6 +258,10 @@ mod platform {
     use std::path::Path;
 
     pub(super) fn process_facts(_out: &mut String, _path: &Path) {}
+
+    pub(super) fn sandbox_denies_read(_path: &Path) -> Option<bool> {
+        None
+    }
 
     pub(super) fn entry_facts(_out: &mut String, _path: &Path, _metadata: &std::fs::Metadata) {}
 }

@@ -128,7 +128,10 @@ fn a_record_lists_the_failure_and_each_parent_without_contents() {
             "error: Operation not permitted (os error 1)",
         ]
     );
-    assert!(lines.iter().any(|line| line.starts_with("cwd: ")), "{record}");
+    assert!(
+        lines.iter().any(|line| line.starts_with("cwd: ")),
+        "{record}"
+    );
     for ancestor in home.ancestors() {
         assert!(
             record.contains(&format!("  {}: ", ancestor.display())),
@@ -163,7 +166,10 @@ fn the_message_lists_causes_without_asserting_one() {
          (Operation not permitted (os error 1))."
     );
     assert_eq!(lines[1], "Possible causes:");
-    assert_eq!(lines.iter().filter(|line| line.starts_with("- ")).count(), 4);
+    assert_eq!(
+        lines.iter().filter(|line| line.starts_with("- ")).count(),
+        4
+    );
     assert_eq!(
         lines.last().copied(),
         Some("Details: /Users/me/Library/Logs/Corbanu/home-access.log")

@@ -112,7 +112,10 @@ async fn exec_waits_for_an_unreadable_home_and_then_finishes_the_turn() -> anyho
                 break;
             }
         }
-        assert!(started.elapsed() < Duration::from_secs(120), "no helper run");
+        assert!(
+            started.elapsed() < Duration::from_secs(120),
+            "no helper run"
+        );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     std::fs::remove_file(test.home_path().join("blocked"))?;

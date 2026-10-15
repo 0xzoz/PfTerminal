@@ -105,8 +105,9 @@ fn debug_home(
 /// remounted, a sandbox) surface as EPERM from arbitrary later reads, which
 /// reads as an unexplained "Operation not permitted". Only the `corbanu`
 /// entrypoints are checked: sandboxed helper aliases can see EPERM from the
-/// sandbox instead. The exit status tells a waiting parent (`corbanu exec`
-/// running this as its auth helper) that the failure may be temporary.
+/// sandbox instead. Unless this process's own sandbox denies the read, the
+/// exit status tells a waiting parent (`corbanu exec` running this as its
+/// auth helper) that the failure may be temporary.
 pub(crate) fn exit_if_home_unreadable() {
     #[cfg(unix)]
     {
@@ -116,18 +117,26 @@ pub(crate) fn exit_if_home_unreadable() {
         let Ok(home) = codex_core::config::find_codex_home() else {
             return;
         };
-        if let Err(message) = check_home_readable(
+        if let Err(unreadable) = check_home_readable(
             home.as_path(),
             |path| std::fs::read_dir(path).map(drop),
+            codex_core::home_access::sandbox_denies_read,
             codex_core::home_access::record_home_access_failure,
         ) {
             #[allow(clippy::print_stderr)]
             {
-                eprintln!("{message}");
+                eprintln!("{}", unreadable.message);
             }
-            std::process::exit(codex_protocol::home_unreadable::HOME_UNREADABLE_EXIT_CODE);
+            std::process::exit(unreadable.exit_code);
         }
     }
+}
+
+#[cfg(unix)]
+#[derive(Debug, PartialEq, Eq)]
+struct HomeUnreadable {
+    message: String,
+    exit_code: i32,
 }
 
 /// The report for a home that `read_dir` cannot read with EPERM, after
@@ -136,8 +145,9 @@ pub(crate) fn exit_if_home_unreadable() {
 fn check_home_readable(
     home: &std::path::Path,
     read_dir: impl FnOnce(&std::path::Path) -> std::io::Result<()>,
+    sandbox_denies_read: impl FnOnce(&std::path::Path) -> bool,
     record: impl FnOnce(&str, &std::path::Path, &str) -> Option<PathBuf>,
-) -> Result<(), String> {
+) -> Result<(), HomeUnreadable> {
     const EPERM: i32 = 1;
     let Err(error) = read_dir(home) else {
         return Ok(());
@@ -147,11 +157,16 @@ fn check_home_readable(
     }
     let error = error.to_string();
     let log = record("read_dir (opendir)", home, &error);
-    Err(codex_core::home_access::unreadable_home_message(
-        home,
-        &error,
-        log.as_deref(),
-    ))
+    let mut message =
+        codex_core::home_access::unreadable_home_message(home, &error, log.as_deref());
+    // Waiting cannot lift this process's own sandbox: fail as before.
+    let exit_code = if sandbox_denies_read(home) {
+        message.push_str("\nThis process's sandbox denies reading it.");
+        1
+    } else {
+        codex_protocol::home_unreadable::HOME_UNREADABLE_EXIT_CODE
+    };
+    Err(HomeUnreadable { message, exit_code })
 }
 
 fn entrypoint_from_argv0(arg0: &std::ffi::OsStr) -> Option<String> {
@@ -297,15 +312,18 @@ mod tests {
     }
 
     /// #616: EPERM from the home is recorded and reported with its possible
-    /// causes; other outcomes pass the check.
+    /// causes, as temporary unless this process's sandbox denies the read;
+    /// other outcomes pass the check.
     #[cfg(unix)]
     #[test]
     fn an_unreadable_home_is_recorded_and_reported() {
         let home = std::path::Path::new("/Volumes/Drive/home");
+        let eperm = |_: &std::path::Path| Err(std::io::Error::from_raw_os_error(1));
         let mut recorded = Vec::new();
-        let message = check_home_readable(
+        let unreadable = check_home_readable(
             home,
-            |_| Err(std::io::Error::from_raw_os_error(1)),
+            eperm,
+            |_| false,
             |operation, path, error| {
                 recorded.push((operation.to_string(), path.to_path_buf(), error.to_string()));
                 Some(PathBuf::from("/logs/home-access.log"))
@@ -320,6 +338,8 @@ mod tests {
                 "Operation not permitted (os error 1)".to_string()
             )]
         );
+        assert_eq!(unreadable.exit_code, 75);
+        let message = &unreadable.message;
         assert!(
             message.starts_with(
                 "Corbanu could not read its home (Operation not permitted): /Volumes/Drive/home"
@@ -331,15 +351,29 @@ mod tests {
             "{message}"
         );
 
+        let sandboxed = check_home_readable(home, eperm, |_| true, |_, _, _| None)
+            .expect_err("EPERM is reported");
+        assert_eq!(sandboxed.exit_code, 1, "waiting cannot lift a sandbox");
+        assert!(
+            sandboxed
+                .message
+                .ends_with("This process's sandbox denies reading it."),
+            "{}",
+            sandboxed.message
+        );
+
         let not_recorded = |_: &str, _: &std::path::Path, _: &str| -> Option<PathBuf> {
             panic!("only EPERM is recorded")
         };
         let missing = std::io::Error::from(std::io::ErrorKind::NotFound);
         assert_eq!(
-            check_home_readable(home, |_| Err(missing), not_recorded),
+            check_home_readable(home, |_| Err(missing), |_| false, not_recorded),
             Ok(())
         );
-        assert_eq!(check_home_readable(home, |_| Ok(()), not_recorded), Ok(()));
+        assert_eq!(
+            check_home_readable(home, |_| Ok(()), |_| false, not_recorded),
+            Ok(())
+        );
     }
 
     #[test]

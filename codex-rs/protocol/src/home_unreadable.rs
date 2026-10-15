@@ -26,12 +26,16 @@ impl std::error::Error for HomeUnreadableError {}
 
 /// An [`io::Error`] (`PermissionDenied`) marked as caused by an unreadable home.
 pub fn home_unreadable_io_error(message: String) -> io::Error {
-    io::Error::new(io::ErrorKind::PermissionDenied, HomeUnreadableError(message))
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        HomeUnreadableError(message),
+    )
 }
 
 /// Whether `error` was made by [`home_unreadable_io_error`].
 pub fn is_home_unreadable(error: &io::Error) -> bool {
-    error
-        .get_ref()
-        .is_some_and(|inner| inner.is::<HomeUnreadableError>())
+    let Some(inner) = error.get_ref() else {
+        return false;
+    };
+    inner.is::<HomeUnreadableError>()
 }

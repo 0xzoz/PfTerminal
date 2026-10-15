@@ -8,8 +8,8 @@ mod auth_env;
 #[path = "completion_backfill_tests.rs"]
 mod completion_backfill;
 mod ephemeral;
-mod hooks;
 mod home_unreadable_wait;
+mod hooks;
 mod mcp_required_exit;
 mod named_account_login_restrictions;
 mod nested_launch;

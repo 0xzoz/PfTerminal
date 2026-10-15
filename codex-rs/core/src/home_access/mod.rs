@@ -149,6 +149,12 @@ pub fn is_operation_not_permitted(message: &str) -> bool {
     message.contains("Operation not permitted")
 }
 
+/// Whether this process's own sandbox denies reading `path` (macOS), a
+/// failure that waiting cannot fix.
+pub fn sandbox_denies_read(path: &Path) -> bool {
+    diagnostics::sandbox_denies_read(path) == Some(true)
+}
+
 /// The diagnostics log on the internal disk (never under the Corbanu home).
 pub fn diagnostics_log_path() -> Option<PathBuf> {
     let user_home = dirs::home_dir()?;

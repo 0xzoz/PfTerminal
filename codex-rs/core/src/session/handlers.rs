@@ -801,10 +801,9 @@ pub async fn shutdown(sess: &Arc<Session>, sub_id: String) -> bool {
     // #616: the writer keeps unwritten items, so an unwritable home is waited
     // out (within exec's window) instead of losing them.
     if let Some(live_thread) = sess.live_thread()
-        && let Err(e) = crate::home_access::retry_while_not_permitted(
-            "saving the session",
-            || live_thread.shutdown(),
-        )
+        && let Err(e) = crate::home_access::retry_while_not_permitted("saving the session", || {
+            live_thread.shutdown()
+        })
         .await
     {
         warn!("failed to shutdown thread persistence: {e}");

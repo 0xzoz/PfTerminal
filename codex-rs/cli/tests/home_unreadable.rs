@@ -1,5 +1,7 @@
-//! #616: the Claude Plan token helper reports an unreadable Corbanu home as a
-//! temporary failure (exit 75) with diagnostics, not as "macOS privacy".
+//! #616: the Claude Plan token helper reports an unreadable Corbanu home with
+//! its possible causes and diagnostics, not as "macOS privacy". Here its own
+//! sandbox denies the read, which waiting cannot fix, so it exits 1 (an
+//! unexplained denial exits 75, which `corbanu exec` waits out).
 #![cfg(target_os = "macos")]
 
 use anyhow::Result;
@@ -7,7 +9,7 @@ use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 
 #[test]
-fn token_helper_reports_an_unreadable_home_as_temporary_with_diagnostics() -> Result<()> {
+fn token_helper_reports_an_unreadable_home_with_diagnostics() -> Result<()> {
     if std::env::var_os("CODEX_SANDBOX").is_some() {
         // Seatbelt cannot be nested.
         return Ok(());
@@ -38,7 +40,7 @@ fn token_helper_reports_an_unreadable_home_as_temporary_with_diagnostics() -> Re
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(
         (output.status.code(), output.stdout.is_empty()),
-        (Some(75), true),
+        (Some(1), true),
         "stderr:\n{stderr}"
     );
     let log = user_home.join("Library/Logs/Corbanu/home-access.log");
@@ -54,7 +56,10 @@ fn token_helper_reports_an_unreadable_home_as_temporary_with_diagnostics() -> Re
         )
     );
     assert!(
-        stderr.contains(&format!("Details: {}", log.display())),
+        stderr.contains(&format!(
+            "Details: {}\nThis process's sandbox denies reading it.",
+            log.display()
+        )),
         "{stderr}"
     );
     let record = std::fs::read_to_string(&log)?;
