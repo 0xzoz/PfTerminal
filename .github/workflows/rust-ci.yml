@@ -184,6 +184,8 @@ jobs:
     with:
       runner: ${{ matrix.runner }}
       target: ${{ matrix.target }}
+      # postmerge rust-ci-full saves the macOS cache for the same commit.
+      save_cache: ${{ matrix.runner != 'macos-15' }}
     secrets: inherit
 
   argument_comment_lint_package:

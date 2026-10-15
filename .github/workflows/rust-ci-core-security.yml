@@ -22,6 +22,14 @@ on:
       target:
         required: true
         type: string
+      save_cache:
+        description: >-
+          Save the sccache cache (only ever on main, #636). blocking-ci turns
+          it off for macOS because postmerge rust-ci-full saves the same
+          cache for the same commit.
+        required: false
+        type: boolean
+        default: true
   workflow_dispatch:
     inputs:
       runner:
@@ -139,7 +147,7 @@ jobs:
 
       # Only main saves caches; PRs and branch runs restore main's (#636).
       - name: Save sccache cache
-        if: always() && !cancelled() && github.ref == 'refs/heads/main'
+        if: always() && !cancelled() && inputs.save_cache && github.ref == 'refs/heads/main'
         continue-on-error: true
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
