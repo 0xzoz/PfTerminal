@@ -6,8 +6,9 @@ sprint (#750 with #747, #749; #764, #781, #760). Owner decisions D1-D7 (#750, 20
 
 ## Result
 
-34 cases: **17 passed, 10 failed, 7 blocked** ([dispositions.md](dispositions.md), [results.json](results.json)).
-Blocker cases: 15 passed, 6 failed, 5 blocked of 26. Advisory cases: 2 passed, 4 failed, 2 blocked of 8.
+34 cases: **17 passed, 14 failed, 3 blocked** ([dispositions.md](dispositions.md), [results.json](results.json)).
+Blocker cases: 15 passed, 9 failed, 2 blocked of 26. Advisory cases: 2 passed, 5 failed, 1 blocked of 8. Corrected
+after evidence check r1 (it was 17/10/7): MOD-15, MOD-17, MOD-22 and MOD-29 moved from blocked to failed.
 
 - **Passed (17):**
   - Confirming and restarting: MOD-02, 03, 04, 05, and 25 (both Z.AI connection styles).
@@ -18,25 +19,30 @@ Blocker cases: 15 passed, 6 failed, 5 blocked of 26. Advisory cases: 2 passed, 4
     nothing is sent), 27 (vault values removed from output), 34 (the person's `broker_model_auth = false` wins).
   - Other: MOD-19 (kill switch), 23 (Moderate isn't saved without the untrusted-content labels), 31 (`!` commands run
     and are shown as not contained).
-- **Failed (10):**
+- **Failed, Moderate defects (blockers):**
   - MOD-10 (#838, security): after one fresh approval an agent command read `security_state.json` and
     `source-origin.key` in the Corbanu home. Config, history and vault reads were refused as expected.
   - MOD-06 and MOD-11 (#837): `.git` stays read-only in Moderate's sandbox even after approval, so an agent can't commit
     and an approved hook write fails. MOD-06 also got an extra untrusted-content prompt for edit-then-run (#841).
   - MOD-08 (#840): a "don't ask again" rule saved under Permissive prompts again under Moderate (D6 says keep it).
-  - MOD-20 (#839): Recent denials says "None" right after Corbanu-file refusals.
-  - MOD-01: everything Moderate-related passed; the Permissive step failed on #739 (fixed on main by #813 after this
-    candidate).
-  - Advisory: MOD-26 (`.env` read prompted as credential access, #841), MOD-30 (wrong prompt reason for Corbanu's own
-    files, #841), MOD-32 (a second window on the same home stays Permissive after confirming in the first, #842),
-    MOD-33 (spurious PATH-aliases warning, #843).
-- **Blocked (7):**
-  - Model declines (#447 rule, the product's model declined a step and its words don't meet the expected wording):
-    MOD-09, 15, 17, 21 (the child's model), 22 (replay G18b), 29 (replay G21b).
+  - MOD-15 and MOD-20 (#839): Recent denials misses refusals (the credential refusal with approvals off; the
+    Corbanu-file refusals).
+  - MOD-17 (#845): a project `.codex/config.toml` with a `[security]` table stops Corbanu from starting ("missing field
+    `version`"); the level itself stayed Moderate.
+- **Failed on #739 (Permissive, fixed on main by #813 after this candidate):** MOD-01 (everything Moderate-related
+  passed) and MOD-22 (the review, Saved screen and relaunch into Permissive passed; the approved write after relaunch
+  was refused by protected launch).
+- **Failed, advisory:** MOD-26 (`.env` read prompted as credential access, #841), MOD-29 (after confirming Aggressive
+  from Moderate, `.env` was readable before the restart although the Saved screen says credential files are protected
+  now, #846), MOD-30 (wrong prompt reason for Corbanu's own files, #841), MOD-32 (a second window on the same home
+  stays Permissive after confirming in the first, #842), MOD-33 (spurious PATH-aliases warning, #843).
+- **Blocked (3):**
+  - MOD-09 and MOD-21: the product's model (in MOD-21 the child's) declined the credential reads, in words that don't
+    meet the expected wording (#447 rule).
   - MOD-28: the UI offered no grant or "for session" approval to revoke, only a saved "don't ask again" rule, which
-    revoke does not cover by its own description. Executor verdict failed; owner question below.
-- Dispositions that differ from the executor's verdict: MOD-11, 26 and 33 (executor blocked; an expected result was
-  observed to fail, so failed) and MOD-28 (executor failed; starting condition not met, so blocked).
+    revoke does not cover by its own description. Owner question below.
+- Dispositions that differ from the executor's verdict: MOD-11, 15, 17, 22, 26, 29 and 33 (executor blocked; an expected
+  result was observed to fail, so failed) and MOD-28 (executor failed; starting condition not met, so blocked).
 - `qa/code-blind-functional/check.py` stops at MOD-01 ([checker-output.txt](checker-output.txt)), as expected while
   cases are unresolved.
 
@@ -83,11 +89,15 @@ Blocker cases: 15 passed, 6 failed, 5 blocked of 26. Advisory cases: 2 passed, 4
 - **Native-prompt guard:** 0 `SECURITYAGENT-SEEN` in 21,518 checks ([common/guard-final.txt](common/guard-final.txt)).
 - **Groups:** 25 groups G01-G25 (01:05Z to 06:30Z), one fresh executor each (`corbanu exec` of the candidate, GLM 5.3
   Flash on `zai`), on rotating lanes agmx1-3 wiped before and after; one at a time. Product under test: GLM 5.3 Flash.
-- **Replays (fresh executors, 06:37Z to 07:14Z):** G18b (MOD-22: the executor had sent MOD-07's step 2 without its
-  step 1) and G21b (MOD-29: the picker opens on the active level and the literal ↓↓ wrapped to Permissive). Their notes
-  are navigation only ([tools/replays.json](tools/replays.json)); the prompts were added after the results were read;
-  the frozen files are unchanged ([common/replay-packet-diff.txt](common/replay-packet-diff.txt)). Earlier attempts are
-  kept.
+- **Replays (fresh executors, 06:37Z to 07:14Z):** chosen after reading the results, for the two cases whose first
+  attempt didn't perform a case action for a reason of navigation or interpretation rather than product behaviour.
+  - G21b (MOD-29): the picker opens on the active level, and the frozen literal ↓↓ wrapped to Permissive. Its note is
+    navigation only.
+  - G18b (MOD-22): the frozen "repeat MOD-07 steps 2–3" is ambiguous on its own (step 2 refers to step 1's command);
+    G18's executor followed it literally and flagged that. The note "send MOD-07 step 1's request first" is a
+    post-results clarification of that ambiguous frozen action, not navigation only (evidence check r1).
+  - Notes in [tools/replays.json](tools/replays.json); the prompts were added after the results were read; the frozen
+    files are unchanged ([common/replay-packet-diff.txt](common/replay-packet-diff.txt)). Earlier attempts are kept.
 - **MOD-24 relay check** (integrator): no request with role `product` reached the relay between 05:28:34Z and 05:30:52Z
   ([common/mediator-final.jsonl.gz](common/mediator-final.jsonl.gz)).
 - **Shutdown:** guest data erased (`restore.sh`, `kill-lane-procs.sh`, `restore-fix.sh`), clean shutdown from inside,
@@ -97,6 +107,14 @@ Blocker cases: 15 passed, 6 failed, 5 blocked of 26. Advisory cases: 2 passed, 4
   keeps only `config.toml` and `security_state.json`; databases, logs, the vault lock and `source-origin.key` are listed
   by size and SHA-256 in `product-home-mod26-state.manifest.txt`. `pty.raw` files are gzipped. Each collected fixture's `.git` directory (without objects) is renamed
   `dot-git`, so the record holds no nested repositories. Key scan clean.
+- **Harness and fixture deviations** (found by evidence check r1):
+  - G07: the harness's fixture recorder followed the `link-creds` symlink the case creates and wrote the synthetic AWS
+    credential the case creates into `runs/G07/collected/evidence/fixture.jsonl`; the executor's model saw it. Synthetic only.
+  - G16: the executor overwrote `outside-notes.txt` before starting and did not report it. G09 has no fixture records.
+  - Staging the replay prompts (06:36Z) re-ran `provision.sh`, which reloaded the pf rules and reset the per-user
+    counters shown in `common/policy-root-end.txt`.
+  - `su.exp` left in `~agent/ag-admin` holds no credential: it reads the admin password from stdin
+    ([harness/admin.sh](harness/admin.sh)).
 
 ## Named limits
 
@@ -107,12 +125,26 @@ Blocker cases: 15 passed, 6 failed, 5 blocked of 26. Advisory cases: 2 passed, 4
 - D4 reading (kept by the owner): MOD-02, 03 and 32 are judged against it.
 - The design screens come from candidate v1, captured on the host Mac (the VM could not start before the go file).
 - #739 (Permissive, fixed by #813 after this candidate) affects every Permissive step that approves an outside-sandbox
-  command: MOD-01's last step, MOD-06's baseline commit, MOD-08's setup and MOD-32's window B.
+  command: MOD-01's last step, MOD-06's baseline commit, MOD-08's setup, MOD-22 after relaunch and MOD-32's window B. The
+  attribution rests on the identical "Protected launch refused" text and on issue #739's own description, not on
+  anything else in this record.
+- The product profile ([harness/product-config.toml](harness/product-config.toml)) turns on the feature flags of the
+  Aggressive milestone (security levels, preflight, secretless launch, credential broker, output gate, untrusted-content
+  labels, URL policy, contained external agents), not only what Moderate needs.
+- The same model (GLM 5.3 Flash) is both the executor and the product's model under test; the product model's declines
+  account for most blocks (MOD-09, MOD-21) and for parts of other cases.
 - The relay shows what the product sent through it; direct connections are dropped by the per-uid pf, so it cannot show
   that the product never tried one (MOD-24).
 - The guard watches for new SecurityAgent processes only; a prompt routed into the login-window instance would not be
   seen.
 - Admin helper scripts remain in `~agent/ag-admin` on the guest, as in the Aggressive runs.
+
+## Open questions for the owner
+
+- MOD-28: should "Revoke all active authority" also suspend saved "don't ask again" rules?
+- MOD-06 (#841): is a fresh approval for every edit-then-run after any tool output intended under Moderate?
+- MOD-32 (#842): does "every session of this Corbanu Terminal" include other windows on the same home?
+- MOD-10 (#838): moving the Moderate boundary for Corbanu's runtime files needs security sign-off.
 
 ## Review budget
 
