@@ -5,11 +5,11 @@ Model: GPT-6 Luna
 Billing: Pay per use
 Estimated cost: $0.001465
 Tokens: 14,650 tokens
-Kind: Reopen warm-up — sent when this conversation was reopened, to prime the model's cache. Billed like any request; set skip_reopen_warmup = true in
-config.toml to skip it.
+Kind: Reopen warm-up — sent when this conversation was reopened or forked, to prime the model's cache. Billed like any request; set skip_reopen_warmup =
+true in config.toml to skip it.
 —— Details ——
 Billed cost: OpenAI doesn't report its charges, so any cost here is an estimate — check OpenAI's bill.
-Request: 69d803f2-a5a4-408c-850a-ab601023559d
+Request: 667ae0aa-11aa-4697-a8d9-8f69041c3691
 Snapshot is not current; newer activity is unverified
 —— Open ——
 → Technical details (attempt 1)

@@ -3,7 +3,7 @@
 # to skip it, and /cost lists it as a "Reopen warm-up" with its cost. One real OpenAI API-key turn on GPT-6 Luna.
 id = "pf60s08-reopen-warmup-cost"
 feature = "Reopen warm-up shown on reopen and in /cost, with a setting to skip it (#403)"
-expected = "Opening /side reopens the conversation: a notice says a warm-up request was sent and names skip_reopen_warmup; /cost lists 'Reopen warm-up: 1 request' with its cost, and the request page names its kind."
+expected = "Opening /side forks the conversation: a notice says a warm-up request was sent and names skip_reopen_warmup; /cost lists 'Reopen warm-up: 1 request' with its cost, and the request page names its kind."
 model = "gpt-6-luna"
 provider = "openai"
 rows = 46
@@ -31,7 +31,7 @@ type = "/side"
 [[steps]]
 key = "Enter"
 [[steps]]
-wait = "Reopening this conversation sent a warm-up request"
+wait = "Reopening or forking this conversation sent a warm-up request"
 timeout = 60
 [[steps]]
 pause = 5
