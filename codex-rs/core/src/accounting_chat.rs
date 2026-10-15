@@ -428,15 +428,16 @@ pub(super) fn patch(
     Ok(codex_state::accounting::Patch {
         input: presence(usage.input_tokens)?,
         read: presence(read)?,
+        // The route decides before the provider's name does.
         write: match (provider_id, route) {
+            (_, Some(crate::config::PricedRoute::MoonshotOpenPlatform)) => {
+                presence(moonshot_part(usage.cache_write_tokens))?
+            }
             (codex_model_provider_info::OPENROUTER_PROVIDER_ID, _) => {
                 match usage.cache_write_tokens {
                     ChatTokenPresence::Missing => Presence::Number(0.try_into()?),
                     other => presence(other)?,
                 }
-            }
-            (_, Some(crate::config::PricedRoute::MoonshotOpenPlatform)) => {
-                presence(moonshot_part(usage.cache_write_tokens))?
             }
             (codex_model_provider_info::OPENAI_PROVIDER_ID, _) => {
                 presence(usage.cache_write_tokens)?

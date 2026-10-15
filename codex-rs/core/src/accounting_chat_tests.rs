@@ -941,11 +941,31 @@ fn accounting_chat_moonshot_counts_left_out_are_zero() -> anyhow::Result<()> {
             (Presence::Missing, Presence::Missing),
         ),
     ];
-    for ((input, cached, usage_cached, write), (read, written)) in cases {
-        let patch = patch(usage(input, cached, usage_cached, write), "kimi", moonshot)?;
-        assert_eq!((patch.read, patch.write), (read, written));
+    // Whatever the provider is named, the route decides.
+    for provider in [
+        "kimi",
+        codex_model_provider_info::OPENAI_PROVIDER_ID,
+        codex_model_provider_info::OPENROUTER_PROVIDER_ID,
+    ] {
+        for ((input, cached, usage_cached, write), (read, written)) in cases {
+            let patch = patch(
+                usage(input, cached, usage_cached, write),
+                provider,
+                moonshot,
+            )?;
+            assert_eq!((patch.read, patch.write), (read, written), "{provider}");
+        }
     }
-    for provider in ["kimi", codex_model_provider_info::OPENAI_PROVIDER_ID] {
+    // Off the route `usage.cached_tokens` never counts and a missing read stays
+    // unknown; only OpenRouter's own write rule makes a missing write zero.
+    for (provider, written) in [
+        ("kimi", Presence::Missing),
+        (
+            codex_model_provider_info::OPENAI_PROVIDER_ID,
+            Presence::Missing,
+        ),
+        (codex_model_provider_info::OPENROUTER_PROVIDER_ID, zero),
+    ] {
         let patch = patch(
             usage(n(100), missing, n(40), missing),
             provider,
@@ -953,7 +973,8 @@ fn accounting_chat_moonshot_counts_left_out_are_zero() -> anyhow::Result<()> {
         )?;
         assert_eq!(
             (patch.read, patch.write),
-            (Presence::Missing, Presence::Missing)
+            (Presence::Missing, written),
+            "{provider}"
         );
     }
     Ok(())

@@ -188,12 +188,13 @@ fn chat_accounting_top_level_containers_only() {
         );
     }
     // `usage.cached_tokens` is kept apart from the prompt details' count; a
-    // value there that is not a count reads as missing.
+    // value there that is not a count reads as null, never failing the report.
     for (value, expected) in [
         (json!(12), ChatTokenPresence::Number(12)),
         (json!(null), ChatTokenPresence::Null),
-        (json!("12"), ChatTokenPresence::Missing),
-        (json!(-1), ChatTokenPresence::Missing),
+        (json!("12"), ChatTokenPresence::Null),
+        (json!(12.5), ChatTokenPresence::Null),
+        (json!(-1), ChatTokenPresence::Null),
     ] {
         assert_eq!(
             accounting::decode(&json!({"usage":{"cached_tokens":value}}).to_string()),
