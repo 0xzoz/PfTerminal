@@ -1,7 +1,7 @@
 ---
 sprint_id: "PF-60-S08"
 title: "/cost page clarity and reopen warm-up cost"
-status: in_progress
+status: ready
 plan_file: "docs/plans/active/portfolio-agent-cost-accounting-followups.md"
 plan_feature: "PF-60"
 execution_order: 3
@@ -61,6 +61,7 @@ updated: 2026-10-14
       sends no warm-up on reopen; a new conversation still warms up. Earlier totals are unchanged; nothing is hidden
       or counted twice. [Gate](../../../../qa/portfolio/agent-cost-accounting/pf-60-s08/gate.md).
 
+- [x] Merged: PR #821 as `4d0d1597a9` (head `a4ef32068d`); review APPROVE on that head.
 ## Remaining
 
 - [ ] Code-blind functional design frozen before test-result disclosure (PF-60-S10).

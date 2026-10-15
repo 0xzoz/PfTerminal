@@ -1,7 +1,7 @@
 ---
 sprint_id: "PF-60-S09"
 title: "Verification paths for unverified flows"
-status: in_progress
+status: ready
 plan_file: "docs/plans/active/portfolio-agent-cost-accounting-followups.md"
 plan_feature: "PF-60"
 execution_order: 4

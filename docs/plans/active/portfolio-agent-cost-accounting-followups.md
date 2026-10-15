@@ -26,6 +26,9 @@ implementation_worktrees:
   - path: "/Volumes/CorbanuDrive/Corbanu/worktrees/pf60-s08"
     branch: "pf60-s08/cost-clarity-reopen-warmup"
     base_commit: "45916ab64ef7faf4a5525a8dbdbfd4f706dd9f79"
+  - path: "/Volumes/CorbanuDrive/Corbanu/worktrees/pf60-s09"
+    branch: "pf60-s09/verification-paths"
+    base_commit: "643838f2f4ed87dfe71be24f983a6dcc91709faa"
 ---
 
 # Accounting follow-ups after PF-60
@@ -98,6 +101,7 @@ here and in the sprint before it becomes `ready`.
 | Codex worker `pf60-s06` | `/Volumes/CorbanuDrive/Corbanu/worktrees/pf60-s06` | `pf60-s06-side-attribution` | `ecb9069c4b3e0bdb20cb88d520fc8b54745cea34` | PF-60-S06 (lane `accounting`) |
 | Codex worker `pf60-next` | `/Volumes/CorbanuDrive/Corbanu/worktrees/pf60-s07` | `pf60-s07/moonshot-route-pricing` | `df3d8c5d1c521228a8dbb1035831af572afe1284` | PF-60-S07 (lane `accounting`) |
 | Codex worker `pf60-next` | `/Volumes/CorbanuDrive/Corbanu/worktrees/pf60-s08` | `pf60-s08/cost-clarity-reopen-warmup` | `45916ab64ef7faf4a5525a8dbdbfd4f706dd9f79` | PF-60-S08 (lane `accounting`) |
+| Codex worker `pf60-next` | `/Volumes/CorbanuDrive/Corbanu/worktrees/pf60-s09` | `pf60-s09/verification-paths` | `643838f2f4ed87dfe71be24f983a6dcc91709faa` | PF-60-S09 (lane `accounting`) |
 
 ## Useful code references
 
