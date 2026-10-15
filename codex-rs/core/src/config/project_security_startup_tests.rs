@@ -102,7 +102,8 @@ impl Fixture {
 
     fn project_path(&self) -> String {
         self.project
-            .join(".codex/config.toml")
+            .join(".codex")
+            .join("config.toml")
             .display()
             .to_string()
     }
