@@ -329,6 +329,24 @@ class RunScopedCachePruneTest(unittest.TestCase):
             checked, {"blocking-ci.yml", "postmerge-ci.yml", "nightly-ci.yml", "tmux-smoke.yml"}
         )
 
+    def test_macos_core_security_cache_is_saved_once_per_push(self) -> None:
+        # blocking-ci and postmerge both run it on main; only postmerge saves.
+        core = (self.WORKFLOWS / "rust-ci-core-security.yml").read_text()
+        self.assertRegex(core, r"(?m)^      save_cache:\n(?:        .*\n)*?        default: true$")
+        self.assertIn(
+            "if: always() && !cancelled() && inputs.save_cache && github.ref == 'refs/heads/main'",
+            core,
+        )
+        self.assertRegex(
+            (self.WORKFLOWS / "rust-ci.yml").read_text(),
+            r"(?m)^    uses: \./\.github/workflows/rust-ci-core-security\.yml\n(?:    .*\n|      .*\n)*?"
+            r"      save_cache: \$\{\{ matrix\.runner != 'macos-15' \}\}$",
+        )
+        full = (self.WORKFLOWS / "rust-ci-full.yml").read_text()
+        macos = re.search(r"(?ms)^  core_security_tests_macos:\n(.*?)^    secrets:", full)
+        self.assertIsNotNone(macos)
+        self.assertNotIn("save_cache", macos.group(1))
+
     def test_prune_job_alone_holds_actions_write(self) -> None:
         prune = (self.WORKFLOWS / "cache-prune.yml").read_text()
         self.assertRegex(prune, r"(?m)^permissions: \{\}$")

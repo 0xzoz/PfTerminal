@@ -48,7 +48,8 @@ and workflows dispatched on other branches, restore the caches `main` saved and
 save none, so PR churn can't evict them. setup-node and setup-zig can't restore
 without saving, so their caches are on only for `main` (both are used only by
 postmerge or nightly jobs). Where blocking-ci and postmerge run the same
-clippy leg on `main`, only postmerge `rust-ci-full` saves it.
+clippy leg or the macOS core security tests on `main`, only postmerge
+`rust-ci-full` saves the cache.
 
 Build caches such as sccache are keyed by run ID, so every `main` run saves a
 fresh copy (up to 2.1 GB each). The `cache-prune` workflow keeps only the newest
