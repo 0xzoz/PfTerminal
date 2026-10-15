@@ -4,7 +4,7 @@ use super::*;
 #[tokio::test]
 async fn issue822_refused_command_preserves_reason_and_never_claims_execution() {
     for (name, command) in [("shell", "echo refused"), ("exploring", "cat refused.txt")] {
-        let (mut chat, mut rx, _ops) = make_chatwidget_manual(None).await;
+        let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
         chat.on_task_started();
         let mut item = begin_exec(&mut chat, "refused", command);
         let AppServerThreadItem::CommandExecution {
@@ -30,8 +30,8 @@ async fn issue822_refused_command_preserves_reason_and_never_claims_execution() 
                 _ => None,
             })
             .expect("refused command must flush to history");
-        let display = cell.display_lines(80);
-        let transcript = cell.transcript_lines(80);
+        let display = cell.display_lines(/*width*/ 80);
+        let transcript = cell.transcript_lines(/*width*/ 80);
         for lines in [&display, &transcript] {
             let text = lines_to_single_string(lines);
             assert!(text.contains("Did not run"), "{text}");
@@ -57,7 +57,7 @@ async fn issue822_refused_command_preserves_reason_and_never_claims_execution() 
                 "display:\n{}transcript:\n{}narrow:\n{}",
                 lines_to_single_string(&display),
                 lines_to_single_string(&transcript),
-                lines_to_single_string(&cell.display_lines(32)),
+                lines_to_single_string(&cell.display_lines(/*width*/ 32)),
             )
         );
     }

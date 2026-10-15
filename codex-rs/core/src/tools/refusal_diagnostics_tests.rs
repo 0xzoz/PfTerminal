@@ -25,17 +25,27 @@ async fn assert_command_status(
             &command,
             PathUri::from_abs_path(&cwd),
             ExecCommandSource::UnifiedExecStartup,
-            None,
-            None,
+            /*process_id*/ None,
+            /*plugin_attribution*/ None,
         )
     } else {
-        ToolEmitter::shell(command, cwd, ExecCommandSource::Agent, None)
+        ToolEmitter::shell(
+            command,
+            cwd,
+            ExecCommandSource::Agent,
+            /*plugin_attribution*/ None,
+        )
     };
     let result = emitter
         .finish(
-            ToolEventCtx::new(session.as_ref(), turn.as_ref(), "issue822", None),
+            ToolEventCtx::new(
+                session.as_ref(),
+                turn.as_ref(),
+                "issue822",
+                /*turn_diff_tracker*/ None,
+            ),
             out,
-            None,
+            /*applied_patch_delta*/ None,
         )
         .await;
     if denied {
@@ -103,7 +113,7 @@ async fn issue822_other_approval_resolutions_stay_denied() {
         }
         .into_tool_result()
         .expect_err("approval denied");
-        assert_command_status(Err(error), "declined", false).await;
+        assert_command_status(Err(error), "declined", /*unified*/ false).await;
     }
 }
 
