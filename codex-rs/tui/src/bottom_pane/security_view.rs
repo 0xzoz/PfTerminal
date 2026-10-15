@@ -86,11 +86,11 @@ impl SecurityView {
         self
     }
 
-    /// #691: why Aggressive cannot be chosen yet (Windows without its
-    /// sandbox set up).
-    pub(crate) fn with_windows_sandbox_blocker(mut self, blocker: Option<String>) -> Self {
+    /// #691/#783: how to set up the Windows sandbox, which Moderate and
+    /// Aggressive need before they can be chosen.
+    pub(crate) fn with_windows_sandbox_steps(mut self, steps: Option<String>) -> Self {
         if let Some(picker) = self.picker.as_mut() {
-            picker.set_windows_sandbox_blocker(blocker);
+            picker.set_windows_sandbox_steps(steps);
         }
         self
     }
@@ -112,6 +112,17 @@ impl SecurityView {
     pub(crate) fn with_moderate_facts(mut self, facts: crate::security::moderate::Facts) -> Self {
         if let Some(picker) = self.picker.as_mut() {
             picker.set_moderate_facts(facts);
+        }
+        self
+    }
+
+    /// #816: what confirming Aggressive puts in force before the restart.
+    pub(crate) fn with_before_restart(
+        mut self,
+        facts: impl FnOnce() -> crate::security::current::BeforeRestart,
+    ) -> Self {
+        if let Some(picker) = self.picker.as_mut() {
+            picker.set_before_restart(facts());
         }
         self
     }

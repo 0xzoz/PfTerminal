@@ -1,7 +1,8 @@
 # Unified provider-auth execution sprints
 
-The active [unified provider onboarding and management plan](../../../plans/active/unified-provider-auth.md)
-reserves two PF-84 lanes. PF-42 through PF-47 are the merged Claude-auth
+The [unified provider onboarding and management plan](../../../plans/completed/main-2026-10-14-unified-provider-auth.md)
+closed on 2026-10-14 (PF-84 flag removal is a [draft plan](../../../plans/proposed/named-accounts-flag-removal.md));
+it reserves no lanes. PF-42 through PF-47 are the merged Claude-auth
 foundation. PF-48 through PF-57 are completed and archived; no implementation
 sprint from that sequence remains open. PF-57-S02 also completed the user's
 2026-09-04 Astra reconciliation repairs in its isolated serial worktree.

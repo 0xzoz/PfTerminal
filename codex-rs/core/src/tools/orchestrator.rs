@@ -190,6 +190,33 @@ impl ToolOrchestrator {
         {
             return Err(ToolError::Rejected(refusal));
         }
+        // #739 (option B, security sign-off): under Permissive with protected
+        // launch armed, a request to run outside the sandbox is refused before
+        // anyone is asked, since the launch contract would refuse the run. A
+        // forbidden request keeps its own refusal; where denied reads already
+        // keep the run in the sandbox, nothing is refused.
+        let permissive_launch =
+            crate::security::protected_additional::permissive_launch_keeps_sandbox(
+                &tool_ctx.session,
+            );
+        if permissive_launch
+            && !matches!(requirement, ExecApprovalRequirement::Forbidden { .. })
+            && unsandboxed_execution_allowed(&file_system_sandbox_policy)
+            && tool
+                .sandbox_permissions(req)
+                .requires_escalated_permissions()
+        {
+            // The person sees it too, not only the model (an exec_command
+            // refused before it starts shows no command cell).
+            warn(
+                tool_ctx,
+                crate::security::protected_additional::PROTECTED_LAUNCH_NO_ESCALATION,
+            )
+            .await;
+            return Err(ToolError::Rejected(
+                crate::security::protected_additional::PROTECTED_LAUNCH_NO_ESCALATION.to_string(),
+            ));
+        }
         // Registered just before the user (not an automatic reviewer) is
         // asked. A cached approval or a permission hook may still answer
         // without them; then no review is shown and nothing is confirmed.
@@ -611,27 +638,51 @@ impl ToolOrchestrator {
         // rules' read denials already keep such runs sandboxed.)
         // #747 (D3): under Moderate nothing leaves the sandbox at all (read
         // again: a level confirmed while the person was asked counts).
-        let moderate_keeps_sandbox = moderate_keeps_sandbox
+        // #739: nor under Permissive with protected launch armed, whose launch
+        // contract refuses every run outside the sandbox.
+        let permissive_launch = permissive_launch
+            || crate::security::protected_additional::permissive_launch_keeps_sandbox(
+                &tool_ctx.session,
+            );
+        let always_sandboxed = permissive_launch
+            || moderate_keeps_sandbox
             || crate::security::protected_additional::moderate_keeps_sandbox(&tool_ctx.session);
-        let keeps_sandbox = moderate_keeps_sandbox
+        let keeps_sandbox = always_sandboxed
             || (crate::security::protected_additional::protected_level(&tool_ctx.session)
                 .is_some()
                 && !tool
                     .sandbox_permissions(req)
                     .requires_escalated_permissions());
         let policy_allows_no_sandbox =
-            !moderate_keeps_sandbox && unsandboxed_execution_allowed(&file_system_sandbox_policy);
+            !always_sandboxed && unsandboxed_execution_allowed(&file_system_sandbox_policy);
 
         // 2) First attempt under the selected sandbox.
+        let unkept_override = sandbox_override_for_first_attempt(
+            tool.sandbox_permissions(req),
+            &requirement,
+            &file_system_sandbox_policy,
+        );
         let sandbox_override = if keeps_sandbox {
             SandboxOverride::NoOverride
         } else {
-            sandbox_override_for_first_attempt(
-                tool.sandbox_permissions(req),
-                &requirement,
-                &file_system_sandbox_policy,
-            )
+            unkept_override
         };
+        // #739: a remembered approval or allow rule that would skip the
+        // sandbox is not applied silently under protected launch: the run
+        // stays in it, and the person is told why (once per session).
+        if permissive_launch
+            && matches!(unkept_override, SandboxOverride::BypassSandboxFirstAttempt)
+            && !tool
+                .sandbox_permissions(req)
+                .requires_escalated_permissions()
+            && crate::security::protected_additional::first_rule_note(tool_ctx.session.thread_id())
+        {
+            warn(
+                tool_ctx,
+                crate::security::protected_additional::PROTECTED_LAUNCH_RULE_STAYS_SANDBOXED,
+            )
+            .await;
+        }
         let managed_network_active = turn_ctx.network.is_some();
         let sandbox_preference = tool.sandbox_preference();
         let sandbox_requested = match sandbox_override {
@@ -814,6 +865,17 @@ impl ToolOrchestrator {
                     }
                 }
                 if !unsandboxed_allowed && network_approval_context.is_none() {
+                    // #739: where only protected launch keeps this run in the
+                    // sandbox, say why no retry outside it is offered.
+                    if permissive_launch
+                        && unsandboxed_execution_allowed(&file_system_sandbox_policy)
+                    {
+                        warn(
+                            tool_ctx,
+                            crate::security::protected_additional::PROTECTED_LAUNCH_NO_RETRY,
+                        )
+                        .await;
+                    }
                     otel.sandbox_outcome(
                         &otel_tn,
                         otel_ci,
@@ -1073,6 +1135,19 @@ where
     Some(crate::security::tainted_action::PostTaintAction { kind, state })
 }
 
+/// #739: tells the person `message` (a warning in the transcript).
+async fn warn(tool_ctx: &ToolCtx, message: &str) {
+    tool_ctx
+        .session
+        .send_event(
+            &tool_ctx.turn,
+            codex_protocol::protocol::EventMsg::Warning(codex_protocol::protocol::WarningEvent {
+                message: message.to_string(),
+            }),
+        )
+        .await;
+}
+
 /// #747 (D3): under Moderate, what a person is told before approving a
 /// request to run outside the sandbox: it stays in it. `None` elsewhere. (An
 /// approved patch outside the writable folders is applied inside the sandbox
@@ -1259,7 +1334,7 @@ fn post_taint_read_denials(
         // Issue #540: except the Corbanu home's runtime entries, which stay
         // read-only in the command's sandbox (under Moderate every command
         // keeps one, #747).
-        let denials = ReadDenials::for_turn(
+        let mut denials = ReadDenials::for_turn(
             tool_ctx.turn.config.codex_home.as_path(),
             tool_ctx.turn.config.sqlite.home(),
             &cwd,
@@ -1267,6 +1342,17 @@ fn post_taint_read_denials(
             materialized,
         )
         .runtime_only();
+        // #766: the approval lifts no rule a nested `corbanu exec` relies on.
+        if !tool_ctx
+            .turn
+            .config
+            .permissions
+            .launch_enforces_aggressive()
+        {
+            denials.mark_moderate(tool_ctx.turn.config.codex_home.as_path());
+        } else {
+            ReadDenials::keep_moderate_marker_readable(tool_ctx.turn.config.codex_home.as_path());
+        }
         tracing::info!(
             target: "codex_core::security::tainted_action",
             taint_generation = state.taint_generation,
@@ -1338,6 +1424,20 @@ fn post_taint_read_denials(
     if state.level == codex_security_policy::SecurityLevel::Aggressive {
         denials.deny_home_listing();
         denials.deny_keychain_services();
+    }
+    // #766: `corbanu exec` started by this command runs with Moderate; not
+    // where the launch enforces Aggressive, whose own nested-launch rules
+    // apply (its level file may be unreadable under Core's Moderate rules).
+    if state.level == codex_security_policy::SecurityLevel::Moderate
+        && !tool_ctx
+            .turn
+            .config
+            .permissions
+            .launch_enforces_aggressive()
+    {
+        denials.mark_moderate(tool_ctx.turn.config.codex_home.as_path());
+    } else {
+        ReadDenials::keep_moderate_marker_readable(tool_ctx.turn.config.codex_home.as_path());
     }
     let (Some(exec_server), Some(materialized)) =
         (denials.apply(exec_server), denials.apply(materialized))

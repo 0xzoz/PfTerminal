@@ -839,7 +839,9 @@ pub(crate) fn badge(
     // network and vault rows apply only from the next start.
     if input.active == ChosenLevel::Permissive {
         if saved.level.enforced() == ChosenLevel::Aggressive {
-            degraded.push("Aggressive's session controls apply after restart".to_string());
+            // #816: Core's level, and what the rows below show, hold now.
+            degraded
+                .push("the rest of Aggressive's session controls apply after restart".to_string());
         } else if saved.level.enforced() == ChosenLevel::Moderate {
             // D4: Core's rules apply now; the credential broker at restart.
             partial.push("Moderate's model-key broker applies after restart".to_string());

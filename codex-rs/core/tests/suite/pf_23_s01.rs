@@ -2314,9 +2314,12 @@ async fn issue_603_a_command_in_the_corbanu_home_cannot_create_names_corbanu_rea
                 || !free
                 || !placeholder_files.is_empty()
             {
+                // #744: which check refused it, if the #623 link check did
+                // (the list is process-wide: other tests' refusals too).
+                let link_check = codex_core::test_support::recent_link_check_refusals();
                 wrong.push(format!(
                     "{level:?} in_other={in_other} real_cwd={real_cwd}: present={present:?} free={free} \
-                     placeholder_files={placeholder_files:?}: {output}"
+                     placeholder_files={placeholder_files:?} link_check={link_check:?}: {output}"
                 ));
             }
         }

@@ -792,10 +792,29 @@ fn attempt_text(q: &ObservationQuote) -> Vec<String> {
             })
         ));
     }
-    for (label, bucket) in BUCKETS.iter().zip(q.buckets) {
+    // #396: a component with no rate states no money, even when it had no
+    // tokens: zero tokens of an unpriced component is not a $0 price.
+    // A long-context tier's rate counts too: pricing may apply it instead.
+    let component_rates = q.snapshot.as_ref().map(|s| {
+        let tier = s.long_context.as_ref().map(|tier| &tier.rates);
+        let rated = |base: bool, long: fn(&codex_state::accounting::Rates) -> bool| {
+            base || tier.is_some_and(long)
+        };
+        [
+            rated(s.rates.noncached.is_some(), |r| r.noncached.is_some()),
+            rated(s.rates.read.is_some(), |r| r.read.is_some()),
+            rated(s.rates.write.is_some(), |r| r.write.is_some()),
+            rated(s.rates.output.is_some(), |r| r.output.is_some()),
+        ]
+    });
+    for (index, (label, bucket)) in BUCKETS.iter().zip(q.buckets).enumerate() {
+        let rated = component_rates.is_some_and(|rated| rated[index]);
         lines.push(format!(
             "{label} cost: {}",
             match bucket {
+                BucketQuote::Priced(v) if v == Decimal::default() && !rated => {
+                    "none — 0 tokens".into()
+                }
                 BucketQuote::Priced(v) => format!("{}; exact USD {}", money(v), exact(v)),
                 BucketQuote::MissingUsage => "unknown — no retained numeric evidence".into(),
                 BucketQuote::MissingRate => "unknown — rate unavailable".into(),
@@ -807,7 +826,7 @@ fn attempt_text(q: &ObservationQuote) -> Vec<String> {
     if charge::reported_charge(q).is_some() {
         lines.push(format!(
             "Published-price estimate (not used — {} reported its charge): {}",
-            charge::charging_provider(),
+            provider_name(&q.attempt.provider),
             charge::published_estimate(q)
         ));
     }
@@ -828,8 +847,8 @@ fn attempt_text(q: &ObservationQuote) -> Vec<String> {
     });
     if q.snapshot.is_some() && priced.is_none() {
         lines.push(format!(
-            "Price: none recorded — this request records only its billing basis ({})",
-            basis_text(q)
+            "Price: none recorded — this request records only its billing basis: {}",
+            basis_clause(q)
         ));
     } else if let Some(s) = priced {
         lines.extend([
@@ -953,7 +972,7 @@ fn inspection_pages_for(
     result: Result<InspectionDay, String>,
     period: Option<String>,
 ) -> Vec<InspectorPage> {
-    // #368: OpenRouter requests are priced from the charge it reported.
+    // #368: requests on a charge-reporting route are priced from that charge.
     let result = result.and_then(|day| {
         charge::priced_from_charges(day)
             .map_err(|_| "Cost unavailable — exact arithmetic overflow".to_string())
@@ -1105,12 +1124,25 @@ fn inspection_pages_for(
         // Attempts in the order they were sent, so attempt 1 is the original.
         let mut attempts: Vec<&ObservationQuote> = quotes.iter().collect();
         attempts.sort_by_key(|q| (i64::from(q.attempt.dispatched_at_ms), q.attempt.attempt_id));
+        let kind = if reopen_warmup(&attempts) {
+            " · Reopen warm-up"
+        } else {
+            ""
+        };
         let label = match request_route(quotes, named) {
-            Some(route) => format!("Request {number} · {route} · {}", short_cost(&attempts)),
-            None => format!("Request {number}"),
+            Some(route) => format!(
+                "Request {number}{kind} · {route} · {}",
+                short_cost(&attempts)
+            ),
+            None => format!("Request {number}{kind}"),
         };
         pages[0].links.push((label, request_page));
         let mut text = plain_header(&attempts, named);
+        if reopen_warmup(&attempts)
+            && let Some(divider) = text.iter().position(|line| line == "—— Details ——")
+        {
+            text.insert(divider, REOPEN_WARMUP_KIND.to_string());
+        }
         text.push(format!("Request: {request}"));
         pages.push(InspectorPage {
             title: "Request".into(),
@@ -1540,6 +1572,54 @@ fn basis_text(quote: &ObservationQuote) -> String {
         codex_state::accounting::BasisSource::BuiltIn => basis.to_string(),
     }
 }
+
+/// #396: the basis inside a sentence that already ends in it, without a
+/// second pair of parentheses: "pay per use; set in your config".
+fn basis_clause(quote: &ObservationQuote) -> String {
+    basis_text(quote).replace(" (set in your config)", "; set in your config")
+}
+/// #403: the turn-label prefix core gives the warm-up a reopened or forked
+/// conversation sends (core `accounting::REOPEN_PREWARM_LABEL`, pinned by
+/// core's `reopen_prewarm_label_is_stable`); a label can carry an owner prefix
+/// before it, such as `side:`.
+const REOPEN_PREWARM_LABEL: &str = "prewarm:reopen:";
+
+/// Whether these attempts are a reopen warm-up request.
+fn reopen_warmup(quotes: &[&ObservationQuote]) -> bool {
+    quotes
+        .iter()
+        .any(|quote| quote.attempt.turn.contains(REOPEN_PREWARM_LABEL))
+}
+
+const REOPEN_WARMUP_KIND: &str = "Kind: Reopen warm-up — sent when this conversation was reopened or forked, to prime the model's cache. Billed like any request; set skip_reopen_warmup = true in config.toml to skip it.";
+
+/// "Reopen warm-up: 1 request, estimated $0.024812. Sent when …" for the
+/// first screen, or nothing when no request here is one.
+fn reopen_warmup_line<'a>(
+    quotes: impl IntoIterator<Item = &'a ObservationQuote>,
+) -> Option<String> {
+    let warmups: Vec<&ObservationQuote> = quotes
+        .into_iter()
+        .filter(|quote| quote.attempt.turn.contains(REOPEN_PREWARM_LABEL))
+        .collect();
+    if warmups.is_empty() {
+        return None;
+    }
+    let mut requests: Vec<Uuid> = warmups.iter().map(|q| q.attempt.request_id).collect();
+    requests.sort_unstable();
+    requests.dedup();
+    let noun = if requests.len() == 1 {
+        "request"
+    } else {
+        "requests"
+    };
+    Some(format!(
+        "Reopen warm-up: {} {noun}, {}. Sent when this conversation was reopened or forked, to prime the model's cache.",
+        requests.len(),
+        short_cost(&warmups)
+    ))
+}
+
 const NO_PRICE: &str = "Estimated cost: no price available";
 /// A price applies but the provider did not report every token count it
 /// needs, so no estimate is possible. Not a missing price: the next step for
@@ -1565,6 +1645,8 @@ struct EstimateGaps {
 #[derive(Clone, Copy, Default)]
 struct ChargeSplit {
     charged_attempts: i64,
+    /// Whose reported charges those are.
+    charged_by: charge::Chargers,
     charged: Option<Decimal>,
     estimated_attempts: i64,
     estimated: Option<Decimal>,
@@ -1577,12 +1659,13 @@ impl ChargeSplit {
     }
 
     /// "charged by OpenRouter", or "$A charged by OpenRouter + $B estimated
-    /// from published prices"; `None` when no figure is a reported charge.
+    /// from published prices", naming every provider whose charge is counted;
+    /// `None` when no figure is a reported charge.
     fn text(self) -> Option<String> {
         if self.charged_attempts == 0 {
             return None;
         }
-        let provider = charge::charging_provider();
+        let provider = self.charged_by.names();
         if self.estimated_attempts == 0 {
             return Some(format!("charged by {provider}"));
         }
@@ -1617,6 +1700,7 @@ impl EstimateGaps {
             let split = &mut gaps.charges;
             if let Some(charge) = charge::reported_charge(q) {
                 split.charged_attempts = split.charged_attempts.saturating_add(1);
+                split.charged_by = split.charged_by.with(&q.attempt.provider);
                 split.charged = split.charged.and_then(|sum| sum.add(charge).ok());
             } else if q.usage.refused_status.is_none()
                 && (q.all_buckets_priced.is_some() || q.known_subtotal != Decimal::default())
@@ -1850,8 +1934,8 @@ fn billed_figure(quotes: &[&ObservationQuote]) -> Option<String> {
 }
 
 /// The provider's stated charge as a second figure beside the cost, unless
-/// every stated charge here already is the cost (#368: OpenRouter's charges
-/// price its requests), where it would only repeat it.
+/// every stated charge here already is the cost (#368: a charge-reporting
+/// route's charges price its requests), where it would only repeat it.
 fn extra_billed_figure(quotes: &[&ObservationQuote]) -> Option<String> {
     let repeats_cost = quotes
         .iter()
@@ -1868,17 +1952,10 @@ fn billed_detail(figure: &str) -> String {
     format!("Billed cost: {figure} — as stated by the provider with each response")
 }
 
-/// Whether a provider states what it charged with each response. Only these
-/// routes record `billed_usd` (core `accounting_chat.rs`,
-/// `accounting_responses.rs` and `accounting.rs`); keep the lists in step.
+/// Whether a provider states what it charged with each response
+/// ([`charge::CHARGE_REPORTING`]).
 fn states_charges(provider_id: &str) -> bool {
-    matches!(
-        provider_id,
-        codex_model_provider_info::OPENROUTER_PROVIDER_ID
-            | codex_model_provider_info::VERCEL_PROVIDER_ID
-            | codex_model_provider_info::PFTERMINAL_PLAN_PROVIDER_ID
-            | codex_model_provider_info::PFTERMINAL_PLAN_ANTHROPIC_PROVIDER_ID
-    )
+    charge::prices_from_charge(provider_id)
 }
 
 /// Whether an attempt can appear on a provider's bill: not subscription work,
@@ -2224,6 +2301,7 @@ fn plain_overview<'a>(
     };
     lines.extend(groups.values().map(|quotes| route_line(quotes, named)));
     let all: Vec<&ObservationQuote> = groups.values().flatten().copied().collect();
+    lines.extend(reopen_warmup_line(all.iter().copied()));
     if let Ok(t) = codex_state::accounting::DayTotals::from_quotes(all.iter().copied()) {
         let billed = t.per_use_attempts();
         if billed > 0 && t.plan_attempts > 0 {
@@ -2309,10 +2387,17 @@ fn plain_overview<'a>(
 /// are charges a provider reported: those are costs, and anything else is an
 /// estimate whose real amount is on the bill it names.
 fn charged_costs_note(quotes: &[&ObservationQuote]) -> String {
-    let provider = charge::charging_provider();
-    let mut note = format!(
-        "Costs marked \"charged by {provider}\" are the charges {provider} reported with those responses"
-    );
+    let chargers = charge::Chargers::of(quotes.iter().copied());
+    let provider = chargers.names();
+    let mut note = if chargers.several() {
+        format!(
+            "Costs marked \"charged by\" a provider ({provider}) are the charges that provider reported with those responses"
+        )
+    } else {
+        format!(
+            "Costs marked \"charged by {provider}\" are the charges {provider} reported with those responses"
+        )
+    };
     let rest: Vec<&ObservationQuote> = quotes
         .iter()
         .copied()

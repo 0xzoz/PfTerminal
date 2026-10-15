@@ -204,6 +204,59 @@ async fn issue_440_vault_row_says_the_environment_is_allowlisted_under_secretles
     );
 }
 
+/// #739 (option B): with protected launch on (secretless_agent_launch),
+/// whose launch contract refuses every run outside the sandbox and every
+/// read of the vault store and sign-in file, the Permissive rows no longer
+/// claim that approved or allow-listed commands can run outside it, nor what
+/// would follow from that.
+#[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "workspace-write falls back to read-only on Windows without the Windows sandbox (#691)"
+)]
+async fn issue_739_rows_under_protected_launch_claim_no_run_outside_the_sandbox() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let extra = tempfile::tempdir().unwrap();
+    let mut config = build(
+        home.path(),
+        cwd.path(),
+        &workspace_write(extra.path(), /*network*/ false),
+        /*aggressive_level*/ false,
+    )
+    .await;
+    let [sandbox, _, network, vault, _, _] = current_values(&config, SecurityLevel::Permissive);
+    assert!(
+        sandbox.contains("approved or allow-listed commands can run outside the sandbox"),
+        "{sandbox}"
+    );
+    assert!(network.starts_with("off inside the sandbox, on for commands that run outside it"));
+    assert!(vault.starts_with("the vault store and sign-in file are readable"));
+    // Enabled after loading, so this test process is not armed.
+    config
+        .features
+        .enable(Feature::SecretlessAgentLaunch)
+        .expect("enable the secretless launch");
+    let [sandbox, _, network, vault, _, _] = current_values(&config, SecurityLevel::Permissive);
+    assert!(
+        !sandbox.contains("can run outside the sandbox"),
+        "{sandbox}"
+    );
+    assert!(
+        sandbox.contains(
+            "with protected launch (secretless_agent_launch) no command runs outside the sandbox, so none is offered"
+        ),
+        "{sandbox}"
+    );
+    assert_eq!(network, "off for agent commands; web search live");
+    assert!(
+        vault.starts_with(
+            "the vault store and sign-in file are unreadable (secretless_agent_launch, also when you approve a command) to agent commands"
+        ),
+        "{vault}"
+    );
+}
+
 /// Names the user lists explicitly are reported, not just the fixed probes.
 #[test]
 fn secret_kinds_include_named_variables_from_the_environment() {
@@ -495,4 +548,300 @@ async fn issue_749_moderate_rows_keep_commands_in_the_sandbox() {
         vault.starts_with("the vault store and sign-in file are readable to agent commands"),
         "{vault}"
     );
+}
+
+/// #792 (AGG-04): before the restart that follows confirming Aggressive in
+/// `/security`, the session keeps its own sandbox (no denied reads of its
+/// own) while Core's Aggressive is in force. With the untrusted-content
+/// labels Core's rules deny the vault store and sign-in file to every agent
+/// command and keep every run in the sandbox (#747's Aggressive cases), so
+/// the rows no longer say the store is readable or that approved commands
+/// leave the sandbox; `corbanu vault …` commands are refused (#443).
+#[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "workspace-write falls back to read-only on Windows without the Windows sandbox (#691)"
+)]
+async fn issue_792_aggressive_before_restart_rows_say_what_core_enforces() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let permissive = |labels: bool| {
+        format!(
+            r#"approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+web_search = "cached"
+
+[sandbox_workspace_write]
+network_access = false
+exclude_tmpdir_env_var = true
+exclude_slash_tmp = true
+
+[features]
+source_envelopes = {labels}
+"#
+        )
+    };
+    let rows = |values: CurrentValues| {
+        let [sandbox, _, network, vault, _, _] = values;
+        let vault = vault.split("; ").next().unwrap().to_string();
+        format!("Sandbox: {sandbox}\nNetwork: {network}\nVault: {vault}")
+    };
+    let config = build(
+        home.path(),
+        cwd.path(),
+        &permissive(true),
+        /*aggressive_level*/ false,
+    )
+    .await;
+    let before_restart = rows(current_values(&config, SecurityLevel::Aggressive));
+    insta::assert_snapshot!("issue_792_aggressive_before_restart_rows", before_restart);
+    assert!(!before_restart.contains("are readable"), "{before_restart}");
+    assert!(!before_restart.contains("run outside"), "{before_restart}");
+    // Permissive in force: unchanged.
+    let permissive_rows = rows(current_values(&config, SecurityLevel::Permissive));
+    assert!(
+        permissive_rows.contains("the vault store and sign-in file are readable to agent commands"),
+        "{permissive_rows}"
+    );
+    assert!(
+        permissive_rows.contains("approved or allow-listed commands can run outside the sandbox"),
+        "{permissive_rows}"
+    );
+    assert!(
+        !permissive_rows.contains("corbanu vault"),
+        "{permissive_rows}"
+    );
+
+    // Without the labels Core's rules do not apply: only the vault
+    // commands are refused.
+    let unlabelled = build(
+        home.path(),
+        cwd.path(),
+        &permissive(false),
+        /*aggressive_level*/ false,
+    )
+    .await;
+    let unlabelled = rows(current_values(&unlabelled, SecurityLevel::Aggressive));
+    assert!(
+        unlabelled.contains(
+            "Vault: the vault store and sign-in file are readable to agent commands, and direct `corbanu vault …` commands are refused"
+        ),
+        "{unlabelled}"
+    );
+    assert!(
+        unlabelled.contains("approved or allow-listed commands can run outside the sandbox"),
+        "{unlabelled}"
+    );
+
+    // After the restart the session's own Aggressive profile denies them
+    // too; the row names the level and the refused vault commands.
+    let extra = tempfile::tempdir().unwrap();
+    let restarted = build(
+        home.path(),
+        cwd.path(),
+        &format!(
+            "{}\n[features]\nsource_envelopes = true\n",
+            workspace_write(extra.path(), /*network*/ false)
+        ),
+        /*aggressive_level*/ true,
+    )
+    .await;
+    let [sandbox, _, _, vault, _, _] = current_values(&restarted, SecurityLevel::Aggressive);
+    assert!(!sandbox.contains("outside the sandbox"), "{sandbox}");
+    assert!(
+        vault.starts_with(
+            "the vault store and sign-in file are unreadable (Aggressive, also when you approve a command) to agent commands, and direct `corbanu vault …` commands are refused; "
+        ),
+        "{vault}"
+    );
+
+    // An external sandbox takes none of Core's rules.
+    let mut external = config;
+    external
+        .permissions
+        .set_permission_profile(codex_protocol::models::PermissionProfile::External {
+            network: codex_protocol::permissions::NetworkSandboxPolicy::Restricted,
+        })
+        .unwrap();
+    let vault = &current_values(&external, SecurityLevel::Aggressive)[3];
+    assert!(
+        vault.starts_with("the vault store and sign-in file are readable to agent commands"),
+        "{vault}"
+    );
+}
+
+/// #816: what screen 07, the review and the level list say holds from
+/// confirming Aggressive until the restart ([`before_restart`], read when
+/// `/security` opens) is what the inspector's rows say once Core is
+/// Aggressive and confirmation has set approval for every command (#505),
+/// for each kind of session.
+#[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "workspace-write falls back to read-only on Windows without the Windows sandbox (#691)"
+)]
+async fn issue_816_before_restart_facts_match_the_inspector_rows() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let session = |approvals: &str, sandbox: &str, network: bool, web: &str, rest: &str| {
+        format!(
+            r#"approval_policy = "{approvals}"
+sandbox_mode = "{sandbox}"
+web_search = "{web}"
+
+[sandbox_workspace_write]
+network_access = {network}
+exclude_tmpdir_env_var = true
+exclude_slash_tmp = true
+
+{rest}
+"#
+        )
+    };
+    let labels = "[features]\nsource_envelopes = true";
+    let cases = [
+        // The AGG-04 run and the host check.
+        (
+            "labels",
+            session("on-request", "workspace-write", false, "cached", labels),
+        ),
+        // Without the labels approved commands can leave the sandbox.
+        (
+            "no labels",
+            session("on-request", "workspace-write", false, "cached", ""),
+        ),
+        (
+            "network on",
+            session("on-request", "workspace-write", true, "cached", labels),
+        ),
+        (
+            "permission requests",
+            session(
+                "on-request",
+                "workspace-write",
+                false,
+                "cached",
+                "[features]\nsource_envelopes = true\nrequest_permissions_tool = true",
+            ),
+        ),
+        // No approvals before; confirmation sets them, so the tools count.
+        (
+            "never with permission requests",
+            session(
+                "never",
+                "workspace-write",
+                false,
+                "cached",
+                "[features]\nsource_envelopes = true\nrequest_permissions_tool = true",
+            ),
+        ),
+        (
+            "own settings",
+            session(
+                "on-request",
+                "workspace-write",
+                false,
+                "disabled",
+                "[features]\nsource_envelopes = true\nsecretless_agent_launch = true\nbroker_model_auth = true\nshell_snapshot = false",
+            ),
+        ),
+        // Names set explicitly reach commands under protected launch too.
+        (
+            "protected launch with a secret set",
+            session(
+                "on-request",
+                "workspace-write",
+                false,
+                "disabled",
+                "[shell_environment_policy.set]\nGH_TOKEN = \"synthetic-not-a-token\"\n\n[features]\nsource_envelopes = true\nsecretless_agent_launch = true\nshell_snapshot = false",
+            ),
+        ),
+        (
+            "named profile",
+            format!(
+                "approval_policy = \"on-request\"\ndefault_permissions = \"locked\"\n\n[permissions.locked]\nextends = \":workspace\"\n\n[permissions.locked.filesystem]\n\":tmpdir\" = \"read\"\n\":slash_tmp\" = \"read\"\n\n[permissions.locked.network]\nenabled = false\n\n{labels}\n"
+            ),
+        ),
+        (
+            "no sandbox",
+            session("on-request", "danger-full-access", false, "cached", labels),
+        ),
+        ("external sandbox", String::new()),
+    ];
+    let mut seen = Vec::new();
+    for (name, user_config) in cases {
+        let mut config = if name == "external sandbox" {
+            let mut config = build(
+                home.path(),
+                cwd.path(),
+                &session("on-request", "workspace-write", false, "cached", labels),
+                /*aggressive_level*/ false,
+            )
+            .await;
+            config
+                .permissions
+                .set_permission_profile(codex_protocol::models::PermissionProfile::External {
+                    network: codex_protocol::permissions::NetworkSandboxPolicy::Restricted,
+                })
+                .unwrap();
+            config
+        } else {
+            build(
+                home.path(),
+                cwd.path(),
+                &user_config,
+                /*aggressive_level*/ false,
+            )
+            .await
+        };
+        let facts = before_restart(&config);
+        // What confirmation does to approvals (#505).
+        config
+            .permissions
+            .approval_policy
+            .set(AskForApproval::UnlessTrusted)
+            .unwrap();
+        let [sandbox, _, network, vault, model_keys, _] =
+            current_values(&config, SecurityLevel::Aggressive);
+        let kept = !sandbox.contains("no sandbox")
+            && !sandbox.starts_with("an external sandbox")
+            && !sandbox.contains("can run outside the sandbox");
+        assert_eq!(facts.sandbox_kept.is_some(), kept, "{name}: {sandbox}");
+        if let Some(writable) = &facts.sandbox_kept {
+            assert!(sandbox.starts_with(writable.as_str()), "{name}: {sandbox}");
+        }
+        assert_eq!(
+            facts.widenable,
+            sandbox.ends_with("permission-request tools are on"),
+            "{name}: {sandbox}"
+        );
+        assert_eq!(
+            facts.network_off,
+            network.starts_with("off for agent commands;"),
+            "{name}: {network}"
+        );
+        assert_eq!(
+            facts.web_search_off,
+            network.ends_with("web search disabled"),
+            "{name}: {network}"
+        );
+        // The row never says more than the facts: "removed" or "only
+        // allowlisted" with no profile or snapshot; a secret set explicitly
+        // is not removed, so the facts claim nothing then.
+        if facts.environment {
+            assert!(
+                (vault.contains("; only allowlisted environment variables reach agent commands")
+                    || vault.contains("; secret-like environment variables are removed;"))
+                    && vault.ends_with("login profiles and shell snapshots are not used"),
+                "{name}: {vault}"
+            );
+        }
+        assert_eq!(
+            facts.broker,
+            model_keys.starts_with("held by the isolated credential broker"),
+            "{name}: {model_keys}"
+        );
+        seen.push(format!("{name}: {facts:?}"));
+    }
+    insta::assert_snapshot!("issue_816_before_restart_facts", seen.join("\n"));
 }

@@ -11,6 +11,8 @@
 //!   outside the current folder: no grant, with the #620 explanation.
 //! - #740: a write outside the current folder, or to the project's `.git`,
 //!   is offered no grant either, and the prompt says why.
+//! - #789: nor a wait or a sed script that only prints lines, also on a
+//!   child agent's prompt.
 #![cfg(any(target_os = "macos", target_os = "linux"))]
 
 use std::path::Path;
@@ -447,6 +449,183 @@ async fn issue_740_no_grant_where_it_cannot_apply() -> anyhow::Result<()> {
             .contains("Grant once is not offered for this command"),
         "{}",
         run.reason
+    );
+    Ok(())
+}
+
+/// #789 (AGG-R14, replays Q11 and Q11b): commands whose text shows every
+/// write, none of them liftable, that #740 did not read: a wait, then a
+/// write in the current folder (the child agent's command) and a wait
+/// alone (the parent's). No grant, and why. (A sed script that only prints
+/// lines, asked about only after untrusted content, is in the unit tests.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_789_no_grant_for_waits() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    for command in ["sleep 1; echo finished > ks-child.txt", "sleep 1"] {
+        let run = run(command, &[]).await?;
+        assert!(!run.offered, "{command}: no grant");
+        assert!(
+            run.reason
+                .contains("Grant once is not offered for this command"),
+            "{command}: {}",
+            run.reason
+        );
+    }
+    Ok(())
+}
+
+/// #789: a child agent's command prompt follows the same rules as its
+/// parent's: the child spawned under Aggressive asks to run the Q11b command
+/// and is offered no grant, with the reason.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_789_child_agent_prompt_offers_no_useless_grant() -> anyhow::Result<()> {
+    use core_test_support::responses::ev_function_call_with_namespace;
+    use core_test_support::responses::mount_sse_once_match;
+
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    const PARENT_PROMPT: &str = "spawn a child to run the command";
+    const CHILD_PROMPT: &str = "child-789: run sleep 1; echo finished > ks-child.txt";
+    const SPAWN_CALL: &str = "spawn-call-789";
+    const CHILD_CALL: &str = "child-call-789";
+    let body = |request: &wiremock::Request| String::from_utf8_lossy(&request.body).to_string();
+    let server = start_mock_server().await;
+    mount_sse_once_match(
+        &server,
+        move |request: &wiremock::Request| body(request).contains(CHILD_CALL),
+        sse(vec![
+            ev_response_created("child-2"),
+            ev_assistant_message("child-msg", "child done"),
+            ev_completed("child-2"),
+        ]),
+    )
+    .await;
+    mount_sse_once_match(
+        &server,
+        move |request: &wiremock::Request| {
+            let body = body(request);
+            body.contains(CHILD_PROMPT) && !body.contains(SPAWN_CALL)
+        },
+        sse(vec![
+            ev_response_created("child-1"),
+            ev_function_call(
+                CHILD_CALL,
+                "exec_command",
+                &json!({ "cmd": "sleep 1; echo finished > ks-child.txt" }).to_string(),
+            ),
+            ev_completed("child-1"),
+        ]),
+    )
+    .await;
+    mount_sse_once_match(
+        &server,
+        move |request: &wiremock::Request| body(request).contains(SPAWN_CALL),
+        sse(vec![
+            ev_response_created("parent-2"),
+            ev_assistant_message("parent-msg", "parent done"),
+            ev_completed("parent-2"),
+        ]),
+    )
+    .await;
+    mount_sse_once_match(
+        &server,
+        move |request: &wiremock::Request| body(request).contains(PARENT_PROMPT),
+        sse(vec![
+            ev_response_created("parent-1"),
+            ev_function_call_with_namespace(
+                SPAWN_CALL,
+                "collaboration",
+                "spawn_agent",
+                &json!({ "message": CHILD_PROMPT, "task_name": "worker" }).to_string(),
+            ),
+            ev_completed("parent-1"),
+        ]),
+    )
+    .await;
+    let test = test_codex()
+        .with_home(Arc::new(TempDir::new()?))
+        .with_model("test-gpt-5.1-codex")
+        .with_config(|config| {
+            config.security_level = SecurityLevel::Aggressive;
+            config.permissions.approval_policy =
+                Constrained::allow_any(AskForApproval::UnlessTrusted);
+            let folder = config.cwd.clone();
+            config
+                .permissions
+                .set_permission_profile(PermissionProfile::workspace_write_with(
+                    &[folder],
+                    NetworkSandboxPolicy::Restricted,
+                    /*exclude_tmpdir_env_var*/ true,
+                    /*exclude_slash_tmp*/ true,
+                ))
+                .expect("workspace write");
+            for feature in [
+                Feature::SourceEnvelopes,
+                Feature::UnifiedExec,
+                Feature::Collab,
+                Feature::MultiAgentV2,
+            ] {
+                config.features.enable(feature).expect("enable feature");
+            }
+            config.use_experimental_unified_exec_tool = true;
+        })
+        // Host-sandbox security test: local executor on purpose (#708).
+        .build(&server)
+        .await?;
+    std::mem::forget(server);
+    let parent = test.session_configured.thread_id;
+    test.codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: PARENT_PROMPT.into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await?;
+    let child = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            if let Some(child) = test
+                .thread_manager
+                .list_thread_ids()
+                .await
+                .into_iter()
+                .find(|id| *id != parent)
+            {
+                return child;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+    let child_thread = test.thread_manager.get_thread(child).await?;
+    let EventMsg::ExecApprovalRequest(approval) = wait_for_event(&child_thread, |event| {
+        matches!(
+            event,
+            EventMsg::ExecApprovalRequest(_) | EventMsg::TurnComplete(_)
+        )
+    })
+    .await
+    else {
+        anyhow::bail!("the child's command did not ask first");
+    };
+    let offered = security_grant::offer(child, &approval.effective_approval_id()).is_some();
+    let reason = approval.reason.clone().unwrap_or_default();
+    child_thread
+        .submit(Op::ExecApproval {
+            id: approval.effective_approval_id(),
+            turn_id: None,
+            decision: ReviewDecision::Abort,
+        })
+        .await?;
+    assert!(!offered, "no grant on the child's prompt: {reason}");
+    assert!(
+        reason.contains("Grant once is not offered for this command"),
+        "{reason}"
     );
     Ok(())
 }

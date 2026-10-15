@@ -2,7 +2,7 @@
 sprint_id: "PF-84-S06"
 title: "Named AWS profile and ChatGPT/OpenAI sign-in accounts"
 status: completed
-plan_file: "docs/plans/active/unified-provider-auth.md"
+plan_file: "docs/plans/completed/main-2026-10-14-unified-provider-auth.md"
 plan_feature: "PF-84"
 execution_order: 28
 owner: "Codex PF-84-S06 worker"
@@ -64,7 +64,7 @@ the S03 limits #425/#426/#428 re-verified, the partial #555 legs, #588/#609/#689
 
 ## Plan linkage
 
-- Plan: [Unified provider onboarding and management](../../../plans/active/unified-provider-auth.md)
+- Plan: [Unified provider onboarding and management](../../../plans/completed/main-2026-10-14-unified-provider-auth.md)
 - Feature: `PF-84`
 - Acceptance advanced: "Named AWS and ChatGPT accounts" (decision D4).
 

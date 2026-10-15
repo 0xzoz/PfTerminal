@@ -212,11 +212,26 @@ fn openrouter_day() -> Vec<InspectorPage> {
     let byok = openrouter_body(serde_json::json!({"cost": 0.000005, "is_byok": true}));
     let unlisted_charged = openrouter_body(serde_json::json!({"cost": 5e-5}));
     inspection_pages(Ok(day(vec![
-        attempt(1, "x-ai/grok-4.7", /*catalogue*/ true, &charged),
-        attempt(2, "minimax/minimax-m3", /*catalogue*/ true, &byok),
-        attempt(3, "some/unlisted-model", /*catalogue*/ false, &silent),
         attempt(
-            4,
+            /*id*/ 1,
+            "x-ai/grok-4.7",
+            /*catalogue*/ true,
+            &charged,
+        ),
+        attempt(
+            /*id*/ 2,
+            "minimax/minimax-m3",
+            /*catalogue*/ true,
+            &byok,
+        ),
+        attempt(
+            /*id*/ 3,
+            "some/unlisted-model",
+            /*catalogue*/ false,
+            &silent,
+        ),
+        attempt(
+            /*id*/ 4,
             "moonshotai/kimi-k3",
             /*catalogue*/ false,
             &unlisted_charged,
@@ -429,8 +444,13 @@ fn partly_priced(id: u128) -> ObservationQuote {
 fn charge_and_estimate_parts_add_up_with_a_partly_priced_attempt() {
     let charged = openrouter_body(serde_json::json!({"cost": 0.000123}));
     let pages = inspection_pages(Ok(day(vec![
-        attempt(1, "x-ai/grok-4.7", /*catalogue*/ true, &charged),
-        partly_priced(2),
+        attempt(
+            /*id*/ 1,
+            "x-ai/grok-4.7",
+            /*catalogue*/ true,
+            &charged,
+        ),
+        partly_priced(/*id*/ 2),
     ])));
     assert!(
         has(
@@ -461,7 +481,7 @@ fn charge_and_estimate_parts_add_up_with_a_partly_priced_attempt() {
 fn a_zero_charge_is_a_stated_cost() {
     let free = openrouter_body(serde_json::json!({"cost": 0}));
     let pages = inspection_pages(Ok(day(vec![attempt(
-        1,
+        /*id*/ 1,
         "tencent/hy3:free",
         /*catalogue*/ false,
         &free,
@@ -479,7 +499,7 @@ fn a_zero_charge_is_a_stated_cost() {
 #[test]
 fn a_refused_openrouter_attempt_has_no_price_basis() {
     let mut refused = attempt(
-        1,
+        /*id*/ 1,
         "x-ai/grok-4.7",
         /*catalogue*/ true,
         &openrouter_body(serde_json::json!({"cost": 0.5})),
@@ -510,7 +530,12 @@ fn other_conversations_and_ranges_use_the_charge() {
     let InspectionDay::Ready(mut view) = day(Vec::new()) else {
         unreachable!()
     };
-    let mut other = attempt(9, "x-ai/grok-4.7", /*catalogue*/ true, &charged);
+    let mut other = attempt(
+        /*id*/ 9,
+        "x-ai/grok-4.7",
+        /*catalogue*/ true,
+        &charged,
+    );
     other.attempt.thread_id = ThreadId::from_string(&Uuid::from_u128(2).to_string()).unwrap();
     view.other_conversations = Some(OtherConversations {
         conversations: 1,
@@ -528,9 +553,14 @@ fn other_conversations_and_ranges_use_the_charge() {
     );
 
     let InspectionDay::Ready(view) = day(vec![
-        attempt(1, "x-ai/grok-4.7", /*catalogue*/ true, &charged),
         attempt(
-            2,
+            /*id*/ 1,
+            "x-ai/grok-4.7",
+            /*catalogue*/ true,
+            &charged,
+        ),
+        attempt(
+            /*id*/ 2,
             "minimax/minimax-m3",
             /*catalogue*/ true,
             &openrouter_body(serde_json::json!({})),
@@ -571,7 +601,12 @@ fn other_conversations_and_ranges_use_the_charge() {
 #[test]
 fn a_refused_attempt_beside_a_charge_adds_no_estimate_part() {
     let charged = openrouter_body(serde_json::json!({"cost": 0.000123}));
-    let mut refused = attempt(2, "x-ai/grok-4.7", /*catalogue*/ true, &charged);
+    let mut refused = attempt(
+        /*id*/ 2,
+        "x-ai/grok-4.7",
+        /*catalogue*/ true,
+        &charged,
+    );
     refused.usage = Usage {
         refused_status: Some(401),
         ..Usage::default()
@@ -580,7 +615,12 @@ fn a_refused_attempt_beside_a_charge_adds_no_estimate_part() {
     refused.known_subtotal = Decimal::default();
     refused.all_buckets_priced = Some(Decimal::default());
     let pages = inspection_pages(Ok(day(vec![
-        attempt(1, "x-ai/grok-4.7", /*catalogue*/ true, &charged),
+        attempt(
+            /*id*/ 1,
+            "x-ai/grok-4.7",
+            /*catalogue*/ true,
+            &charged,
+        ),
         refused,
     ])));
     let screen = first_screen(&pages[0]);
@@ -599,13 +639,18 @@ fn a_refused_attempt_beside_a_charge_adds_no_estimate_part() {
 #[test]
 fn openrouter_attempt_priced_in_part_is_a_lower_bound_estimate() {
     let silent = openrouter_body(serde_json::json!({}));
-    let mut partial = attempt(1, "x-ai/grok-4.7", /*catalogue*/ true, &silent);
+    let mut partial = attempt(
+        /*id*/ 1,
+        "x-ai/grok-4.7",
+        /*catalogue*/ true,
+        &silent,
+    );
     partial.usage.output = None;
     partial.buckets[3] = BucketQuote::MissingUsage;
     partial.known_subtotal = decimal("0.00041");
     partial.all_buckets_priced = None;
     let mut charged = attempt(
-        2,
+        /*id*/ 2,
         "x-ai/grok-4.7",
         /*catalogue*/ true,
         &openrouter_body(serde_json::json!({"cost": 0.000123})),
@@ -630,5 +675,149 @@ fn openrouter_attempt_priced_in_part_is_a_lower_bound_estimate() {
         ),
         "{:#?}",
         partial_page.text
+    );
+}
+
+/// `quote` as an attempt on `provider`, charged `charge` if any.
+fn on(provider: &str, charge: Option<&str>, mut quote: ObservationQuote) -> ObservationQuote {
+    quote.attempt.provider = provider.into();
+    quote.usage.billed_usd = charge.map(decimal);
+    quote
+}
+
+/// Travis, 2026-10-14: the Vercel AI Gateway and the Corbanu API report what
+/// they charged with each response, so their requests are priced from that
+/// charge by the same rule as OpenRouter's, with the catalogue rate as a
+/// labelled estimate when no charge was reported.
+#[test]
+fn vercel_and_corbanu_api_requests_are_priced_from_their_charge() {
+    for (provider, name, field) in [
+        ("vercel", "Vercel", "gatewayCost"),
+        (
+            "pfterminal-plan",
+            "Corbanu API",
+            "usage.corbanu_charge_usd or usage.cost",
+        ),
+        (
+            "pfterminal-plan-anthropic",
+            "Corbanu API",
+            "usage.corbanu_charge_usd",
+        ),
+    ] {
+        let silent = openrouter_body(serde_json::json!({}));
+        let pages = inspection_pages(Ok(day(vec![
+            on(
+                provider,
+                Some("0.000123"),
+                attempt(
+                    /*id*/ 1,
+                    "charged/model",
+                    /*catalogue*/ true,
+                    &silent,
+                ),
+            ),
+            on(
+                provider,
+                /*charge*/ None,
+                attempt(
+                    /*id*/ 2,
+                    "silent/model",
+                    /*catalogue*/ true,
+                    &silent,
+                ),
+            ),
+        ])));
+        let charged = request_page(&pages, "charged/model");
+        assert!(
+            has(charged, &format!("Cost: $0.000123, charged by {name}")),
+            "{provider}: {:#?}",
+            charged.text
+        );
+        assert!(
+            has(
+                charged,
+                &format!("Price basis: the charge {name} reported with the response ({field})")
+            ),
+            "{provider}: {:#?}",
+            charged.text
+        );
+        // The charge is the cost, so it is not repeated as a second figure.
+        assert!(
+            !charged
+                .text
+                .iter()
+                .any(|line| line.starts_with("Billed by provider:")),
+            "{provider}: {:#?}",
+            charged.text
+        );
+        let attempt_page = &pages[charged.links[0].1];
+        assert!(
+            has(
+                attempt_page,
+                &format!(
+                    "Published-price estimate (not used — {name} reported its charge): $0.000710"
+                )
+            ),
+            "{provider}: {:#?}",
+            attempt_page.text
+        );
+        assert!(has(attempt_page, "Known subtotal exact USD: 0.000123"));
+        let estimated = request_page(&pages, "silent/model");
+        assert!(
+            has(estimated, "Estimated cost: $0.000710"),
+            "{provider}: {:#?}",
+            estimated.text
+        );
+        assert!(
+            has(
+                estimated,
+                &format!(
+                    "Price basis: estimate from published prices — {name} reported no charge for this response"
+                )
+            ),
+            "{provider}: {:#?}",
+            estimated.text
+        );
+        // The day is the charge plus the estimate, never the charged
+        // request's catalogue estimate.
+        assert!(
+            has(&pages[0], "Known subtotal exact USD: 0.000833"),
+            "{provider}: {:#?}",
+            pages[0].text
+        );
+    }
+}
+
+/// Charges from several routes on one screen name every route they came from.
+#[test]
+fn charges_from_several_routes_name_each_provider() {
+    let silent = openrouter_body(serde_json::json!({}));
+    let pages = inspection_pages(Ok(day(vec![
+        on(
+            "openrouter",
+            Some("0.0001"),
+            attempt(/*id*/ 1, "a/model", /*catalogue*/ true, &silent),
+        ),
+        on(
+            "vercel",
+            Some("0.0002"),
+            attempt(/*id*/ 2, "b/model", /*catalogue*/ true, &silent),
+        ),
+    ])));
+    let screen = first_screen(&pages[0]);
+    for line in [
+        "• OpenRouter · a/model — Pay per use. 1 request, 110 tokens. Cost: $0.000100, charged by OpenRouter.",
+        "• Vercel · b/model — Pay per use. 1 request, 110 tokens. Cost: $0.000200, charged by Vercel.",
+        "Costs marked \"charged by\" a provider (OpenRouter and Vercel) are the charges that provider reported with those responses.",
+    ] {
+        assert!(screen.contains(&line.to_string()), "{line}\n{screen:#?}");
+    }
+    assert!(
+        has(
+            &pages[0],
+            "Token cost for recorded attempts: $0.000300, charged by OpenRouter and Vercel"
+        ),
+        "{:#?}",
+        pages[0].text
     );
 }

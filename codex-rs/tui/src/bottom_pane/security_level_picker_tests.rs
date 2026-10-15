@@ -830,6 +830,40 @@ mod pf_24_s02 {
         ));
     }
 
+    /// #739: with protected launch on, the move from Aggressive to
+    /// Permissive does not list Corbanu's own files as no longer denied: the
+    /// launch contract keeps them unreadable.
+    #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Aggressive cannot be fully applied on a Windows test machine without the Windows sandbox (#691)"
+    )]
+    fn issue_739_downgrade_under_protected_launch_keeps_corbanu_files_denied() {
+        let machine = Machine::new();
+        machine.confirmed_aggressive();
+        for (protected, kept, removed) in [(true, true, false), (false, false, true)] {
+            let (mut picker, _rx) = machine.picker(ChosenLevel::Aggressive);
+            picker.set_moderate_facts(crate::security::moderate::Facts {
+                secretless_launch: protected,
+                ..Default::default()
+            });
+            picker.handle_key_event(key(KeyCode::Down));
+            picker.handle_key_event(key(KeyCode::Enter));
+            let review = machine.text(&picker);
+            assert_eq!(
+                review.contains("Corbanu's sign-in, vault, config and history, and a few CLI token files (such as .netrc, .aws/credentials and .npmrc), stay unreadable to them (secretless_agent_launch)"),
+                kept,
+                "{review}"
+            );
+            assert_eq!(
+                review.contains("Corbanu's history and state are no longer denied"),
+                removed,
+                "{review}"
+            );
+            picker.handle_key_event(key(KeyCode::Esc));
+        }
+    }
+
     #[test]
     #[cfg_attr(
         windows,
@@ -1111,10 +1145,9 @@ fn issue_691_aggressive_waits_for_the_windows_sandbox() {
         /*preflight_input*/ None,
         RuntimeKeymap::defaults().list,
     );
-    picker.set_windows_sandbox_blocker(Some(
-        "Aggressive needs the default Windows sandbox. The Windows sandbox is not set up. Open \
-         /permissions, choose Default and pick \"Set up default sandbox\" (it needs \
-         Administrator permission), then choose Aggressive again. Nothing changed."
+    picker.set_windows_sandbox_steps(Some(
+        "The Windows sandbox is not set up. Open /permissions, choose Default and pick \
+         \"Set up default sandbox\" (it needs Administrator permission)"
             .to_string(),
     ));
     picker.handle_key_event(key(KeyCode::Up));
@@ -1128,7 +1161,7 @@ fn issue_691_aggressive_waits_for_the_windows_sandbox() {
     assert_eq!(files(home.path()), Vec::<String>::new());
 
     // Once it is set up, Aggressive's review opens as before.
-    picker.set_windows_sandbox_blocker(/*blocker*/ None);
+    picker.set_windows_sandbox_steps(/*steps*/ None);
     picker.handle_key_event(key(KeyCode::Enter));
     assert_eq!(picker.screen, Screen::Review(ChosenLevel::Aggressive));
 }
@@ -1145,7 +1178,7 @@ fn issue_691_saved_aggressive_waits_for_the_windows_sandbox_and_permissive_stays
         /*preflight_input*/ None,
         RuntimeKeymap::defaults().list,
     );
-    picker.set_windows_sandbox_blocker(Some("needs the sandbox".to_string()));
+    picker.set_windows_sandbox_steps(Some("Run /setup-default-sandbox".to_string()));
     assert!(
         render(&picker, /*width*/ 80)
             .contains("> Aggressive  (active), needs the Windows sandbox set up"),
@@ -1156,7 +1189,11 @@ fn issue_691_saved_aggressive_waits_for_the_windows_sandbox_and_permissive_stays
     assert_eq!(
         picker.screen,
         Screen::List {
-            note: Some("needs the sandbox".to_string())
+            note: Some(
+                "Aggressive needs the default Windows sandbox. Run /setup-default-sandbox, \
+                 then choose Aggressive again. Nothing changed."
+                    .to_string()
+            )
         }
     );
     assert_eq!(

@@ -90,21 +90,29 @@ pub(crate) async fn refusal(
         .map(|candidate| candidate.target.clone())
         .unwrap_or_else(|| "a path it names".to_string());
     let (command, cwd, fallback) = (command.to_vec(), cwd.to_path_buf(), first.clone());
+    let started = std::time::Instant::now();
     let found = looked_up(LOOKUP_TIMEOUT, first, move || {
         // It makes a link and names `.codex` or `.agents` anywhere
         // (through a variable, `$(…)`, `eval` or a pipe into a shell
         // too).
         if let Some(named) = inputs.settings_named(&command, &cwd) {
-            return Some(named);
+            return Some(Refused {
+                target: named,
+                by: RefusedBy::SettingsNamed,
+            });
         }
         // Too many paths to look at: refused, naming the first.
         if found.overflow {
-            return Some(fallback);
+            return Some(Refused {
+                target: fallback,
+                by: RefusedBy::Overflow,
+            });
         }
         inputs.protected_target(&found.candidates, &cwd)
     })
     .await?;
-    let refusal = explanation(&found);
+    log_refusal(&found, started.elapsed());
+    let refusal = explanation(&found.target);
     super::protected_reads::notify(session, turn, refusal.clone()).await;
     super::inspection::record_refusal(
         session.thread_id(),
@@ -138,16 +146,107 @@ pub(crate) fn applies(session: &Session) -> bool {
 /// 2026-10-14) still fails closed.
 const LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// A refused command: the target it is told about, and which check refused
+/// it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Refused {
+    target: String,
+    by: RefusedBy,
+}
+
+/// #744 (Travis, 2026-10-14): which check refused a command, logged so a
+/// rare refusal of an ordinary command can be traced from CI and user logs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RefusedBy {
+    /// The lookups did not finish within the timeout.
+    Timeout,
+    /// The lookups failed.
+    LookupFailed,
+    /// It names `.codex` or `.agents` (`target` is the name found).
+    SettingsNamed,
+    /// Too many paths to look at.
+    Overflow,
+    /// `target` read from a folder lands in `kept`, a path no grant lifts,
+    /// as `landed` (spelled, through a link, or where it finally points).
+    ProtectedTarget {
+        landed: AbsolutePathBuf,
+        kept: AbsolutePathBuf,
+    },
+}
+
+impl RefusedBy {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Timeout => "timeout",
+            Self::LookupFailed => "lookup_failed",
+            Self::SettingsNamed => "settings_named",
+            Self::Overflow => "overflow",
+            Self::ProtectedTarget { .. } => "protected_target",
+        }
+    }
+}
+
+/// How many refusals [`recent_refusals`] keeps.
+const RECENT_LIMIT: usize = 16;
+
+/// The latest refusals, as logged (for tests to report, #744).
+static RECENT_REFUSALS: std::sync::Mutex<std::collections::VecDeque<String>> =
+    std::sync::Mutex::new(std::collections::VecDeque::new());
+
+/// Logs which check refused a command and keeps it among the latest. The
+/// command's text is not logged; its target and where it landed are shown
+/// as the refusal shows the target (escaped and bounded, `shown_path`).
+fn log_refusal(refused: &Refused, elapsed: std::time::Duration) {
+    let mut detail = format!(
+        "refused_by={} target={}",
+        refused.by.name(),
+        shown_path(&refused.target)
+    );
+    if let RefusedBy::ProtectedTarget { landed, kept } = &refused.by {
+        detail.push_str(&format!(
+            " landed={} kept={}",
+            shown_path(&landed.as_path().to_string_lossy()),
+            shown_path(&kept.as_path().to_string_lossy())
+        ));
+    }
+    detail.push_str(&format!(" elapsed_ms={}", elapsed.as_millis()));
+    tracing::warn!("Aggressive link check (#623) refused a command: {detail}");
+    let mut recent = RECENT_REFUSALS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if recent.len() == RECENT_LIMIT {
+        recent.pop_front();
+    }
+    recent.push_back(detail);
+}
+
+/// The latest refusals in this process, oldest first, as logged.
+pub(crate) fn recent_refusals() -> Vec<String> {
+    RECENT_REFUSALS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .cloned()
+        .collect()
+}
+
 /// What `lookup` finds, run off the async threads; `first` (refused, nothing
 /// is created) when it does not finish within `timeout` or fails.
 async fn looked_up(
     timeout: std::time::Duration,
     first: String,
-    lookup: impl FnOnce() -> Option<String> + Send + 'static,
-) -> Option<String> {
+    lookup: impl FnOnce() -> Option<Refused> + Send + 'static,
+) -> Option<Refused> {
     match tokio::time::timeout(timeout, tokio::task::spawn_blocking(lookup)).await {
         Ok(Ok(found)) => found,
-        Ok(Err(_)) | Err(_) => Some(first),
+        Ok(Err(_)) => Some(Refused {
+            target: first,
+            by: RefusedBy::LookupFailed,
+        }),
+        Err(_) => Some(Refused {
+            target: first,
+            by: RefusedBy::Timeout,
+        }),
     }
 }
 
@@ -201,8 +300,9 @@ impl Inputs {
         })
     }
 
-    /// The first candidate, as spelled, that lands in a path no grant lifts.
-    fn protected_target(&self, candidates: &[Candidate], cwd: &Path) -> Option<String> {
+    /// The first candidate, as spelled, that lands in a path no grant lifts,
+    /// and where it lands.
+    fn protected_target(&self, candidates: &[Candidate], cwd: &Path) -> Option<Refused> {
         let denials = ReadDenials::for_turn(
             &self.codex_home,
             &self.sqlite_home,
@@ -219,8 +319,11 @@ impl Inputs {
             self.bases(candidate, cwd)
                 .iter()
                 .flat_map(|base| self.resolve(&candidate.target, base))
-                .any(|path| lands_in(&path, &kept, &writable))
-                .then(|| candidate.target.clone())
+                .find_map(|path| landing(&path, &kept, &writable))
+                .map(|(landed, kept)| Refused {
+                    target: candidate.target.clone(),
+                    by: RefusedBy::ProtectedTarget { landed, kept },
+                })
         })
     }
 
@@ -346,24 +449,26 @@ fn physical(base: &Path, path: &Path) -> Option<AbsolutePathBuf> {
     AbsolutePathBuf::from_absolute_path(current).ok()
 }
 
-/// Whether `path`, as spelled, through a link on the way or where it
-/// finally points, is in one of `kept` and not in a folder of `writable`
-/// inside it (`worktrees` in the Corbanu home, #583).
-fn lands_in(
+/// Where `path`, as spelled, through a link on the way or where it finally
+/// points, is in one of `kept` and not in a folder of `writable` inside it
+/// (`worktrees` in the Corbanu home, #583): that spelling and the kept path.
+fn landing(
     path: &AbsolutePathBuf,
     kept: &[AbsolutePathBuf],
     writable: &[&AbsolutePathBuf],
-) -> bool {
+) -> Option<(AbsolutePathBuf, AbsolutePathBuf)> {
     let mut spellings = vec![path.clone()];
     spellings.extend(ReadDenials::real_location(path));
-    spellings.iter().any(|spelling| {
-        kept.iter().any(|kept| {
-            spelling.as_path().starts_with(kept.as_path())
-                && !writable.iter().any(|folder| {
-                    spelling.as_path().starts_with(folder.as_path())
-                        && folder.as_path().starts_with(kept.as_path())
-                })
-        })
+    spellings.into_iter().find_map(|spelling| {
+        kept.iter()
+            .find(|kept| {
+                spelling.as_path().starts_with(kept.as_path())
+                    && !writable.iter().any(|folder| {
+                        spelling.as_path().starts_with(folder.as_path())
+                            && folder.as_path().starts_with(kept.as_path())
+                    })
+            })
+            .map(|kept| (spelling, kept.clone()))
     })
 }
 

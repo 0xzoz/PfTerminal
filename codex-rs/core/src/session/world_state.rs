@@ -140,6 +140,12 @@ impl Session {
                     == codex_security_policy::SecurityLevel::Moderate
                 {
                     permissions.with_note(crate::security::refusal_notice::MODERATE_INSTRUCTIONS)
+                } else if crate::security::protected_additional::permissive_launch_keeps_sandbox(
+                    self,
+                ) {
+                    // #739: Permissive under protected launch.
+                    permissions
+                        .with_note(crate::security::refusal_notice::PROTECTED_LAUNCH_INSTRUCTIONS)
                 } else {
                     permissions
                 },

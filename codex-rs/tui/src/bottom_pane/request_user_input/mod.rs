@@ -35,7 +35,10 @@ use crate::bottom_pane::approval_typing_guard::Confirm;
 use crate::bottom_pane::approval_typing_guard::Notice;
 use crate::bottom_pane::approval_typing_guard::TypingGuard;
 use crate::bottom_pane::bottom_pane_view::BottomPaneView;
+use crate::bottom_pane::bottom_pane_view::next_shown_request_generation;
 use crate::bottom_pane::mcp_server_elicitation::CHOOSE_FIRST_NOTICE;
+use crate::bottom_pane::mcp_server_elicitation::EARLY_KEYS_NOTICE;
+use crate::bottom_pane::mcp_server_elicitation::FORM_EARLY_KEYS_NOTICE;
 use crate::bottom_pane::mcp_server_elicitation::FORM_FIRST_NOTICE;
 use crate::bottom_pane::mcp_server_elicitation::FORM_TYPED_NOTICE;
 use crate::bottom_pane::mcp_server_elicitation::TYPED_TEXT_NOTICE;
@@ -189,6 +192,9 @@ pub(crate) struct RequestUserInputOverlay {
     list_keymap: ListKeymap,
     /// #544: keeps typed text, pastes and held keys from answering.
     typing_guard: TypingGuard,
+    /// #787: counts the requests shown here (see
+    /// [`BottomPaneView::shown_request_generation`]).
+    shown_generation: u64,
 }
 
 impl RequestUserInputOverlay {
@@ -249,6 +255,7 @@ impl RequestUserInputOverlay {
             interrupt_turn_keys: keymap.chat.interrupt_turn.clone(),
             list_keymap: keymap.list,
             typing_guard: TypingGuard::default(),
+            shown_generation: next_shown_request_generation(),
         };
         overlay.reset_for_request();
         overlay.ensure_focus_available();
@@ -256,17 +263,12 @@ impl RequestUserInputOverlay {
         overlay
     }
 
-    /// #544: require a deliberate choice before Enter answers: the view
-    /// opened while the user was typing, over another view, or was revealed
-    /// when the view above it closed. Until they navigate, a number key is
-    /// typed text too, and a freeform answer field takes no text.
-    pub(crate) fn require_fresh_choice(&mut self) {
-        self.typing_guard.on_command_key();
-    }
-
-    /// #544: the view opened just after another prompt was answered: a
-    /// double or held Enter must not answer it.
-    pub(crate) fn require_fresh_choice_after_answer(&mut self) {
+    /// #817: the view shows something new: another question, the
+    /// unanswered-questions check, or a question again. The bottom pane drops
+    /// keys until it is drawn and for a second after (#787), so a double or
+    /// held Enter answers nothing; a later Enter does.
+    fn show_anew(&mut self) {
+        self.shown_generation = next_shown_request_generation();
         self.typing_guard.on_request_changed();
     }
 
@@ -276,14 +278,16 @@ impl RequestUserInputOverlay {
         if self.confirm_unanswered_active() || (self.has_options() && !self.focus_is_notes()) {
             return Some(match notice {
                 Notice::TypedText => TYPED_TEXT_NOTICE,
-                Notice::ChooseFirst | Notice::NavigateFirst => CHOOSE_FIRST_NOTICE,
+                Notice::NavigateFirst => CHOOSE_FIRST_NOTICE,
                 Notice::PersistentNeedsArrows => return None,
+                Notice::EarlyKeys => EARLY_KEYS_NOTICE,
             });
         }
         match notice {
             Notice::TypedText => Some(FORM_TYPED_NOTICE),
-            Notice::ChooseFirst | Notice::NavigateFirst => Some(FORM_FIRST_NOTICE),
+            Notice::NavigateFirst => Some(FORM_FIRST_NOTICE),
             Notice::PersistentNeedsArrows => None,
+            Notice::EarlyKeys => Some(FORM_EARLY_KEYS_NOTICE),
         }
     }
 
@@ -361,13 +365,16 @@ impl RequestUserInputOverlay {
     fn advance_queue_or_complete_at(&mut self, now: Instant) {
         if let Some(next) = self.queue.pop_front() {
             self.request = next;
+            self.shown_generation = next_shown_request_generation();
             self.request_started_at = now;
             self.auto_resolution_snoozed = false;
             self.reset_for_request();
             self.ensure_focus_available();
             self.restore_current_draft();
-            // A double or held Enter must not answer a request not yet seen.
-            self.typing_guard.on_request_changed();
+            // A double or held Enter must not answer a request not yet seen:
+            // the bottom pane drops it (#787); nothing typed before carries
+            // over (#817).
+            self.typing_guard.on_new_request();
         } else {
             self.done = true;
         }
@@ -972,14 +979,14 @@ impl RequestUserInputOverlay {
             if self.unanswered_count() > 0 {
                 self.open_unanswered_confirmation();
                 // #544: a double Enter must not submit with questions left.
-                self.typing_guard.on_request_changed();
+                self.show_anew();
             } else {
                 self.submit_answers();
             }
         } else {
             self.move_question(/*next*/ true);
             // #544: nor answer the next question.
-            self.typing_guard.on_request_changed();
+            self.show_anew();
         }
     }
 
@@ -1272,7 +1279,7 @@ impl RequestUserInputOverlay {
             } else if let Some(idx) = self.first_unanswered_index() {
                 self.jump_to_question(idx);
                 // A double Enter must not answer the question shown now.
-                self.typing_guard.on_request_changed();
+                self.show_anew();
             }
             return;
         }
@@ -1291,7 +1298,7 @@ impl RequestUserInputOverlay {
                     self.jump_to_question(idx);
                 }
                 // Typed text stays typed text; a double Enter answers nothing.
-                self.typing_guard.on_request_changed();
+                self.show_anew();
             }
             _ if navigation => {
                 self.typing_guard.reset();
@@ -1441,13 +1448,22 @@ impl BottomPaneView for RequestUserInputOverlay {
         true
     }
 
-    /// #544: back from under another prompt or view, whose double or held
-    /// Enter must not answer this request.
+    /// #544: back from under another prompt or view. #817: the bottom pane
+    /// drops keys until it is drawn again and for a second after (#787), so
+    /// a double or held Enter meant for that view answers nothing.
     fn on_revealed(&mut self) {
-        self.require_fresh_choice();
+        self.typing_guard.on_request_changed();
         // #624: the person couldn't see it while it waited under another
         // view; any auto-resolution countdown starts when it is shown.
         self.request_started_at = Instant::now();
+    }
+
+    fn shown_request_generation(&self) -> u64 {
+        self.shown_generation
+    }
+
+    fn on_early_input(&mut self) {
+        self.typing_guard.on_early_input();
     }
 
     fn will_interrupt_turn_on_key_event(&self, key_event: KeyEvent) -> bool {
@@ -2456,6 +2472,7 @@ mod tests {
             /*disable_paste_burst*/ false,
         );
 
+        let first = overlay.shown_request_generation();
         overlay.handle_key_event(KeyEvent::from(KeyCode::Enter));
         assert_eq!(overlay.current_index(), 1);
         let first_answer = &overlay.answers[0];
@@ -2466,12 +2483,10 @@ mod tests {
             "unexpected AppEvent before full submission"
         );
 
-        // #544: a double Enter does not answer the next question.
-        overlay.handle_key_event(KeyEvent::from(KeyCode::Enter));
-        assert!(rx.try_recv().is_err(), "a double Enter answered");
-        assert_eq!(overlay.notice(), Some(CHOOSE_FIRST_NOTICE));
-        overlay.handle_key_event(KeyEvent::from(KeyCode::Down));
-        overlay.handle_key_event(KeyEvent::from(KeyCode::Up));
+        // #544: the next question shows anew, so the bottom pane drops a
+        // double Enter (#787); #817: nothing else waits, so Enter answers.
+        assert_ne!(overlay.shown_request_generation(), first);
+        assert_eq!(overlay.notice(), None);
         overlay.handle_key_event(KeyEvent::from(KeyCode::Enter));
         let event = rx.try_recv().expect("expected AppEvent");
         let AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) = event else {
@@ -2617,47 +2632,41 @@ mod tests {
         assert_eq!(answered(&mut rx), Some(vec!["Option 3".to_string()]));
     }
 
-    /// #544: shown over another view, while the user typed, or revealed,
-    /// the view needs navigation before a number key or Enter counts; shown
-    /// just after another prompt closed, it takes no double Enter.
+    /// #544/#787: once keys were dropped as the view appeared, it needs
+    /// navigation before a number key or Enter counts. #817: revealed with no
+    /// key dropped (the bottom pane drops them as it reappears), Enter
+    /// answers.
     #[test]
-    fn issue_544_fresh_choice_needs_navigation() {
-        for revealed in [false, true] {
-            let (tx, mut rx) = test_sender();
-            let mut overlay = options_overlay(tx);
-            if revealed {
-                overlay.on_revealed();
-            } else {
-                overlay.require_fresh_choice();
-            }
-            press(
-                &mut overlay,
-                &[KeyCode::Enter, KeyCode::Char('2'), KeyCode::Enter],
-            );
-            assert_eq!(answered(&mut rx), None, "revealed={revealed}");
-            assert_eq!(overlay.selected_option_index(), Some(0));
-            press(
-                &mut overlay,
-                &[KeyCode::Down, KeyCode::Up, KeyCode::Char('2')],
-            );
-            assert_eq!(answered(&mut rx), None);
-            press(&mut overlay, &[KeyCode::Enter]);
-            assert_eq!(answered(&mut rx), Some(vec!["Option 2".to_string()]));
-        }
+    fn issue_544_dropped_keys_need_navigation() {
+        let (tx, mut rx) = test_sender();
+        let mut overlay = options_overlay(tx);
+        overlay.on_early_input();
+        press(
+            &mut overlay,
+            &[KeyCode::Enter, KeyCode::Char('2'), KeyCode::Enter],
+        );
+        assert_eq!(answered(&mut rx), None);
+        assert_eq!(overlay.selected_option_index(), Some(0));
+        assert_eq!(overlay.notice(), Some(EARLY_KEYS_NOTICE));
+        press(
+            &mut overlay,
+            &[KeyCode::Down, KeyCode::Up, KeyCode::Char('2')],
+        );
+        assert_eq!(answered(&mut rx), None);
+        press(&mut overlay, &[KeyCode::Enter]);
+        assert_eq!(answered(&mut rx), Some(vec!["Option 2".to_string()]));
 
         let (tx, mut rx) = test_sender();
         let mut overlay = options_overlay(tx);
-        overlay.require_fresh_choice_after_answer();
+        overlay.on_revealed();
+        assert_eq!(overlay.notice(), None);
         press(&mut overlay, &[KeyCode::Enter]);
-        assert_eq!(answered(&mut rx), None);
-        assert_eq!(overlay.notice(), Some(CHOOSE_FIRST_NOTICE));
-        press(&mut overlay, &[KeyCode::Char('2'), KeyCode::Enter]);
-        assert_eq!(answered(&mut rx), Some(vec!["Option 2".to_string()]));
+        assert_eq!(answered(&mut rx), Some(vec!["Option 1".to_string()]));
     }
 
-    /// #544 (#523): a freeform answer field shown while the user typed takes
-    /// no text, editing keys or pastes until they navigate; shown just after
-    /// an answer, it takes no double Enter.
+    /// #544 (#523, #787): a freeform answer field whose first keys were
+    /// dropped as it appeared (the user typed on) takes no text, editing keys
+    /// or pastes until they navigate.
     #[test]
     fn issue_544_freeform_field_takes_no_typed_text_first() {
         let (tx, mut rx) = test_sender();
@@ -2668,7 +2677,7 @@ mod tests {
             /*enhanced_keys_supported*/ false,
             /*disable_paste_burst*/ true,
         );
-        overlay.require_fresh_choice();
+        overlay.on_early_input();
         press(
             &mut overlay,
             &[KeyCode::Char('y'), KeyCode::Char('e'), KeyCode::Char('s')],
@@ -2678,7 +2687,7 @@ mod tests {
         press(&mut overlay, &[KeyCode::Enter]);
         assert_eq!(answered(&mut rx), None);
         assert_eq!(overlay.composer.current_text_with_pending(), "");
-        assert_eq!(overlay.notice(), Some(FORM_TYPED_NOTICE));
+        assert_eq!(overlay.notice(), Some(FORM_EARLY_KEYS_NOTICE));
         press(
             &mut overlay,
             &[
@@ -2689,27 +2698,13 @@ mod tests {
             ],
         );
         assert_eq!(answered(&mut rx), Some(vec!["user_note: ok".to_string()]));
-
-        let (tx, mut rx) = test_sender();
-        let mut overlay = RequestUserInputOverlay::new(
-            request_event("turn-1", vec![question_without_options("q1", "Details")]),
-            tx,
-            /*has_input_focus*/ true,
-            /*enhanced_keys_supported*/ false,
-            /*disable_paste_burst*/ true,
-        );
-        overlay.require_fresh_choice_after_answer();
-        press(&mut overlay, &[KeyCode::Enter]);
-        assert_eq!(answered(&mut rx), None);
-        assert_eq!(overlay.notice(), Some(FORM_FIRST_NOTICE));
-        press(&mut overlay, &[KeyCode::Char('x'), KeyCode::Enter]);
-        assert_eq!(answered(&mut rx), Some(vec!["user_note: x".to_string()]));
     }
 
     /// #544: a queued request, and the "unanswered questions" confirmation,
-    /// shown by an Enter take no second Enter.
+    /// shown by an Enter show anew: the bottom pane drops a double Enter
+    /// (#787). #817: nothing else waits, so a later Enter answers.
     #[test]
-    fn issue_544_next_request_and_confirmation_take_no_double_enter() {
+    fn issue_544_next_request_and_confirmation_show_anew() {
         let (tx, mut rx) = test_sender();
         let mut overlay = options_overlay(tx);
         assert!(
@@ -2720,22 +2715,23 @@ mod tests {
                 ))
                 .is_none()
         );
+        let first = overlay.shown_request_generation();
         press(&mut overlay, &[KeyCode::Enter]);
         assert_eq!(answered(&mut rx), Some(vec!["Option 1".to_string()]));
-        press(&mut overlay, &[KeyCode::Enter]);
-        assert_eq!(answered(&mut rx), None);
-        press(&mut overlay, &[KeyCode::Char('1'), KeyCode::Enter]);
-        assert_eq!(answered(&mut rx), Some(vec!["Option 1".to_string()]));
+        let second = overlay.shown_request_generation();
+        assert_ne!(second, first);
+        assert_eq!(overlay.notice(), None);
+        press(&mut overlay, &[KeyCode::Char('2'), KeyCode::Enter]);
+        assert_eq!(answered(&mut rx), Some(vec!["Option 2".to_string()]));
 
         let (tx, mut rx) = test_sender();
         let mut overlay = options_overlay(tx);
+        let first = overlay.shown_request_generation();
         // Clearing the selection answers nothing; Enter asks to confirm.
         press(&mut overlay, &[KeyCode::Backspace, KeyCode::Enter]);
         assert!(overlay.confirm_unanswered_active());
-        press(
-            &mut overlay,
-            &[KeyCode::Enter, KeyCode::Char('x'), KeyCode::Enter],
-        );
+        assert_ne!(overlay.shown_request_generation(), first);
+        press(&mut overlay, &[KeyCode::Char('x'), KeyCode::Enter]);
         assert_eq!(answered(&mut rx), None);
         assert!(overlay.confirm_unanswered_active());
         press(&mut overlay, &[KeyCode::Down, KeyCode::Up, KeyCode::Enter]);
@@ -2743,10 +2739,10 @@ mod tests {
     }
 
     /// #544 review: going back from the "unanswered questions"
-    /// confirmation shows a question that takes no double Enter; typed text
-    /// stays typed text (Backspace is an editing key there too); the
-    /// freeform queue key (Tab) submits only like Enter; Ctrl+P/N move only
-    /// once nothing is pending.
+    /// confirmation shows the question anew (the bottom pane drops a double
+    /// Enter, #787); typed text stays typed text (Backspace is an editing key
+    /// there too); the freeform queue key (Tab) submits only like Enter;
+    /// Ctrl+P/N move only once nothing is pending.
     #[test]
     fn issue_544_review_going_back_tab_and_chords() {
         let two = |tx| {
@@ -2769,14 +2765,13 @@ mod tests {
         let mut overlay = two(tx);
         press(&mut overlay, &[KeyCode::Right, KeyCode::Enter]);
         assert!(overlay.confirm_unanswered_active());
-        // "Go back", then a double Enter: question 1 stays unanswered.
-        press(
-            &mut overlay,
-            &[KeyCode::Down, KeyCode::Enter, KeyCode::Enter],
-        );
+        // "Go back": question 1 shows anew, unanswered.
+        let confirmation = overlay.shown_request_generation();
+        press(&mut overlay, &[KeyCode::Down, KeyCode::Enter]);
         assert!(!overlay.confirm_unanswered_active());
         assert_eq!(overlay.current_index(), 0);
         assert!(!overlay.answers[0].answer_committed);
+        assert_ne!(overlay.shown_request_generation(), confirmation);
         assert_eq!(answered(&mut rx), None);
 
         // Typed text, Backspace, Enter in the confirmation answer nothing.
@@ -2793,8 +2788,8 @@ mod tests {
         assert!(!overlay.answers[0].answer_committed);
         assert_eq!(answered(&mut rx), None);
 
-        // Freeform: Tab (the composer's queue key) after an answer, or
-        // held, does not submit; after a key it does.
+        // Freeform: Tab (the composer's queue key) held does not submit; a
+        // press does.
         let (tx, mut rx) = test_sender();
         let mut overlay = RequestUserInputOverlay::new(
             request_event("turn-1", vec![question_without_options("q1", "Details")]),
@@ -2806,15 +2801,13 @@ mod tests {
         overlay
             .composer
             .set_text_content("draft".to_string(), Vec::new(), Vec::new());
-        overlay.require_fresh_choice_after_answer();
-        press(&mut overlay, &[KeyCode::Tab]);
         overlay.handle_key_event(KeyEvent::new_with_kind(
             KeyCode::Tab,
             KeyModifiers::NONE,
             KeyEventKind::Repeat,
         ));
         assert_eq!(answered(&mut rx), None);
-        press(&mut overlay, &[KeyCode::End, KeyCode::Tab]);
+        press(&mut overlay, &[KeyCode::Tab]);
         assert_eq!(
             answered(&mut rx),
             Some(vec!["user_note: draft".to_string()])
@@ -2853,7 +2846,8 @@ mod tests {
     }
 
     /// #544 review r2: a remapped queue key in an option's notes submits
-    /// only like Enter (never held or before a fresh choice).
+    /// only like Enter (never held, nor after keys were dropped as the view
+    /// appeared).
     #[test]
     fn issue_544_remapped_queue_key_in_notes_is_guarded() {
         let (tx, mut rx) = test_sender();
@@ -2869,7 +2863,7 @@ mod tests {
         );
         press(&mut overlay, &[KeyCode::Tab, KeyCode::Char('n')]);
         assert!(overlay.focus_is_notes());
-        overlay.require_fresh_choice_after_answer();
+        overlay.on_early_input();
         let queue = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL);
         overlay.handle_key_event(queue);
         overlay.handle_key_event(KeyEvent::new_with_kind(
@@ -3866,9 +3860,6 @@ mod tests {
         overlay.composer.handle_paste(large.clone());
 
         overlay.handle_key_event(KeyEvent::from(KeyCode::Enter));
-        // #544: back to the first question with navigation (the second
-        // shows after an answer, so a chord there is typed text).
-        overlay.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
         assert_eq!(overlay.current_index(), 1);
         overlay.handle_key_event(KeyEvent::from(KeyCode::PageUp));
         assert_eq!(overlay.current_index(), 0);

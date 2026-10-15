@@ -520,19 +520,25 @@ fn stale_placeholders_of_ended_runs_are_removed() {
     let temp_dir = tempfile::TempDir::new().expect("tempdir");
     let placeholder = temp_dir.path().join("Library");
     std::fs::write(&placeholder, "").expect("placeholder");
-    let marker_dir = plant_stale_placeholder(&placeholder, &[]);
     let changed = temp_dir.path().join("changed");
     std::fs::write(&changed, "real contents").expect("a real file now");
-    let changed_marker_dir = plant_stale_placeholder(&changed, &[]);
-    let record = marker_dir.join(SYNTHETIC_MOUNT_TARGET_RECORD);
-    assert_eq!(
-        std::fs::metadata(&record)
-            .expect("record")
-            .permissions()
-            .mode()
-            & 0o777,
-        0o600
-    );
+    // Other tests in this process sweep the same registry, and these records
+    // are stale on purpose: plant and inspect them under the registry lock,
+    // which every sweep takes, so none removes them before the mode check.
+    let (marker_dir, changed_marker_dir) = with_synthetic_mount_registry_lock(|| {
+        let marker_dir = plant_stale_placeholder(&placeholder, &[]);
+        let changed_marker_dir = plant_stale_placeholder(&changed, &[]);
+        let record = marker_dir.join(SYNTHETIC_MOUNT_TARGET_RECORD);
+        assert_eq!(
+            std::fs::metadata(&record)
+                .expect("record")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        (marker_dir, changed_marker_dir)
+    });
 
     remove_stale_synthetic_mount_targets();
 

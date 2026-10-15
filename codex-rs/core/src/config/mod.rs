@@ -389,6 +389,11 @@ pub enum PriceAuthority {
     /// Pay per use: the rates the provider charges per token for this route
     /// and this credential.
     ApiKeyRates,
+    /// Pay per use on a known route reached through a provider the user
+    /// configured: the rates the route's operator publishes for it, looked up
+    /// by the route actually used, since the provider id is the user's own
+    /// name (#368).
+    RouteRates(PricedRoute),
     /// Subscription capacity at a built-in route: the plan rate that applied,
     /// and any API equivalent the catalogue states for the same row.
     PlanRate,
@@ -403,6 +408,25 @@ pub enum PriceAuthority {
     /// No basis is declared for this route and credential: neither money
     /// spent nor subscription work.
     Undeclared,
+}
+
+/// A route whose operator publishes per-token prices for it, priced by the
+/// route rather than by a built-in provider's catalogue row (#368).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PricedRoute {
+    /// Moonshot's Kimi Open Platform, `https://api.moonshot.ai/v1`, billed in
+    /// US dollars per token.
+    MoonshotOpenPlatform,
+}
+
+impl PricedRoute {
+    /// The priced route at `endpoint`, the base URL a request actually went to.
+    pub fn at(endpoint: &str) -> Option<Self> {
+        match endpoint.trim_end_matches('/') {
+            "https://api.moonshot.ai/v1" => Some(Self::MoonshotOpenPlatform),
+            _ => None,
+        }
+    }
 }
 
 /// Application configuration loaded from disk and merged with overrides.
@@ -1229,6 +1253,10 @@ pub struct Config {
 
     /// When `true`, suppress warnings about unstable (under development) features.
     pub suppress_unstable_features_warning: bool,
+
+    /// When `true`, a reopened conversation sends no startup warm-up request
+    /// (#403). A new conversation still does.
+    pub skip_reopen_warmup: bool,
 
     /// The currently active project config, resolved by checking if cwd:
     /// is (1) part of a git repo, (2) a git worktree, or (3) just using the cwd
@@ -5104,6 +5132,7 @@ impl Config {
             suppress_unstable_features_warning: cfg
                 .suppress_unstable_features_warning
                 .unwrap_or(false),
+            skip_reopen_warmup: cfg.skip_reopen_warmup.unwrap_or(false),
             active_project,
             notices,
             check_for_update_on_startup,

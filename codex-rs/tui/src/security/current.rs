@@ -13,12 +13,20 @@
 //! settings. Core's level in force now adds what Core enforces on top
 //! (#749): under Moderate no command leaves the sandbox (#747) and, with the
 //! untrusted-content labels, the vault store and sign-in file are denied.
+//! #792: the same holds under Aggressive in force, also before the restart
+//! that follows confirming it in `/security` (#443): with the
+//! untrusted-content labels and a sandbox Corbanu applies, its
+//! protected-path rules deny the vault store and sign-in file, no approval
+//! lifts them, and their denied reads keep every run in the sandbox (#747's
+//! Aggressive cases). Direct `corbanu vault …` commands are refused under
+//! Aggressive in any case.
 
 use std::path::Path;
 
 use codex_features::Feature;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::ShellEnvironmentPolicy;
+use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::permissions::FileSystemSandboxKind;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::shell_environment::create_env_from_vars;
@@ -67,27 +75,88 @@ pub(crate) fn level_now(
         .max(config.security_level)
 }
 
+/// #816: what this session enforces once Core's level is Aggressive and
+/// before the restart applies Aggressive's own settings: the facts behind
+/// [`current_values`] for Aggressive, which the inspector's rows show from
+/// confirmation. Each field is true only when that row says so then.
+///
+/// Confirming Aggressive sets approval for every command (#505), so a
+/// session's permission-request tools can widen its sandbox or turn its
+/// network on from then on even if it asked for no approvals before:
+/// these facts count them whatever the approval policy is now.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct BeforeRestart {
+    /// Approved and allow-listed commands stay inside this session's
+    /// sandbox; the folders it lets them write to, as the Sandbox row says
+    /// ("commands can write to the current folder, /private/tmp").
+    pub(crate) sandbox_kept: Option<String>,
+    /// Permission requests you approve can widen that sandbox (its
+    /// permission-request tools are on).
+    pub(crate) widenable: bool,
+    /// The Network row says "off for agent commands".
+    pub(crate) network_off: bool,
+    /// Web search is disabled.
+    pub(crate) web_search_off: bool,
+    /// No secret-like environment variable reaches agent commands (or only
+    /// allowlisted ones do), and login profiles and shell snapshots are not
+    /// used.
+    pub(crate) environment: bool,
+    /// Model keys are held by the isolated credential broker.
+    pub(crate) broker: bool,
+}
+
+/// #816: [`BeforeRestart`] for this session.
+pub(crate) fn before_restart(config: &Config) -> BeforeRestart {
+    evaluate(
+        config,
+        crate::legacy_core::security_level_change::SecurityLevel::Aggressive,
+    )
+    .1
+}
+
 /// `level` is Core's level in force now ([`level_now`]).
 pub(crate) fn current_values(
     config: &Config,
     level: crate::legacy_core::security_level_change::SecurityLevel,
 ) -> CurrentValues {
+    evaluate(config, level).0
+}
+
+/// The rows and, for Aggressive in force, what they say holds (#816).
+fn evaluate(
+    config: &Config,
+    level: crate::legacy_core::security_level_change::SecurityLevel,
+) -> (CurrentValues, BeforeRestart) {
     let cwd = config.cwd.as_path();
     let file_system = config.permissions.file_system_sandbox_policy();
     let restricted = matches!(file_system.kind, FileSystemSandboxKind::Restricted);
     // #747 (D3): under Moderate no command leaves the sandbox.
     let moderate = level == crate::legacy_core::security_level_change::SecurityLevel::Moderate;
+    let aggressive = level == crate::legacy_core::security_level_change::SecurityLevel::Aggressive;
+    // #792: Aggressive's protected-path rules (with the untrusted-content
+    // labels) deny the vault store and sign-in file to every agent command,
+    // from confirmation, and no approval lifts them (#442). Only a sandbox
+    // takes the rules, and an external one keeps its own.
+    let aggressive_rules =
+        aggressive && restricted && config.features.enabled(Feature::SourceEnvelopes);
+    let secretless = config.features.enabled(Feature::SecretlessAgentLaunch)
+        || codex_protocol::secretless_launch::is_armed();
     // Without denied reads, escalated, allow-listed and retried commands run
-    // outside the sandbox (`unsandboxed_execution_allowed` in core).
-    let escapes = restricted && !file_system.has_denied_read_restrictions() && !moderate;
+    // outside the sandbox (`unsandboxed_execution_allowed` in core); the
+    // denied reads of Aggressive's rules keep them in it. #739: protected
+    // launch (secretless_agent_launch) refuses every run outside it, so none
+    // is offered.
+    let escapes = restricted
+        && !file_system.has_denied_read_restrictions()
+        && !moderate
+        && !aggressive_rules
+        && !secretless;
     // #749: Moderate's rules deny the vault store and sign-in file to every
     // agent command (PF-23, #239), with the untrusted-content labels.
     // An external sandbox takes none of Core's rules (it keeps its own).
     let moderate_denies_store = moderate
         && config.features.enabled(Feature::SourceEnvelopes)
         && !matches!(file_system.kind, FileSystemSandboxKind::ExternalSandbox);
-    let secretless = config.features.enabled(Feature::SecretlessAgentLaunch)
-        || codex_protocol::secretless_launch::is_armed();
 
     let mut sandbox = match file_system.kind {
         FileSystemSandboxKind::Unrestricted => {
@@ -130,12 +199,26 @@ pub(crate) fn current_values(
     {
         sandbox = format!("profile {}: {sandbox}", profile.id);
     }
+    // #816: no command leaves a sandbox Corbanu applies.
+    let sandbox_kept = (restricted && !escapes).then(|| sandbox.clone());
     if escapes {
         sandbox.push_str("; approved or allow-listed commands can run outside the sandbox");
     } else if moderate && restricted {
         sandbox.push_str(
             "; under Moderate approved and allow-listed commands stay inside the sandbox",
         );
+    } else if aggressive_rules && !file_system.has_denied_read_restrictions() {
+        // #792: before the restart, Core's rules do it.
+        sandbox.push_str(
+            "; under Aggressive approved and allow-listed commands stay inside the sandbox",
+        );
+    } else if secretless && restricted && !file_system.has_denied_read_restrictions() {
+        // #739: protected launch does it; under Permissive nothing offers it.
+        sandbox.push_str(if moderate || aggressive {
+            "; with protected launch (secretless_agent_launch) no command runs outside the sandbox"
+        } else {
+            "; with protected launch (secretless_agent_launch) no command runs outside the sandbox, so none is offered"
+        });
     }
     let request_tools = config.features.enabled(Feature::RequestPermissionsTool)
         || config.features.enabled(Feature::ExecPermissionApprovals);
@@ -159,6 +242,12 @@ pub(crate) fn current_values(
         config.permissions.approval_policy.value()
     );
 
+    // #816: from confirmation every command needs approval (#505), so the
+    // tools can widen the sandbox whatever the policy is now.
+    let network_off = restricted
+        && !config.permissions.network_sandbox_policy().is_enabled()
+        && !escapes
+        && !request_tools;
     let network = if !restricted || config.permissions.network_sandbox_policy().is_enabled() {
         "on for agent commands"
     } else if escapes {
@@ -171,7 +260,11 @@ pub(crate) fn current_values(
     let network = format!("{network}; web search {}", config.web_search_mode.value());
 
     let secrets = config.codex_home.join("secrets");
+    // #739: the launch contract denies them to every agent command and
+    // refuses a launch that could read them.
     let store_readable = !moderate_denies_store
+        && !aggressive_rules
+        && !secretless
         && (escapes
             || !restricted
             || [
@@ -188,18 +281,31 @@ pub(crate) fn current_values(
         &config.permissions.shell_environment_policy,
         std::env::vars(),
     );
+    let profiles_used = config.features.enabled(Feature::ShellSnapshot)
+        || config.permissions.allow_login_shell
+        || config.permissions.shell_environment_policy.use_profile;
     let vault = format!(
-        "the vault store and sign-in file are {} to agent commands; {}; {}",
+        "the vault store and sign-in file are {} to agent commands{}; {}; {}",
         if store_readable {
             "readable"
+        } else if aggressive_rules {
+            "unreadable (Aggressive, also when you approve a command)"
         } else if moderate_denies_store && secretless {
             "unreadable (Moderate and secretless_agent_launch, also when you approve a command)"
         } else if moderate_denies_store {
             "unreadable (Moderate; your fresh approval of one command lifts this for that command)"
+        } else if secretless {
+            "unreadable (secretless_agent_launch, also when you approve a command)"
         } else if widenable {
             "unreadable (unless an approved permission request grants access)"
         } else {
             "unreadable"
+        },
+        // #443: Core refuses them under Aggressive from confirmation.
+        if aggressive {
+            ", and direct `corbanu vault …` commands are refused"
+        } else {
+            ""
         },
         // #440: the secretless launch keeps only allowlisted names and names
         // set explicitly, not every name that is not secret-like (and not
@@ -214,17 +320,15 @@ pub(crate) fn current_values(
                 kept.join(", ")
             )
         },
-        if config.features.enabled(Feature::ShellSnapshot)
-            || config.permissions.allow_login_shell
-            || config.permissions.shell_environment_policy.use_profile
-        {
+        if profiles_used {
             "login profiles or shell snapshots are used"
         } else {
             "login profiles and shell snapshots are not used"
         }
     );
 
-    let model_keys = if config.features.enabled(Feature::BrokerModelAuth) {
+    let broker = config.features.enabled(Feature::BrokerModelAuth);
+    let model_keys = if broker {
         "held by the isolated credential broker (broker_model_auth on)"
     } else {
         "Corbanu reads provider keys itself (broker_model_auth off)"
@@ -246,7 +350,30 @@ pub(crate) fn current_values(
         )
     };
 
-    [sandbox, approvals, network, vault, model_keys, children]
+    // Names set explicitly in shell_environment_policy.set reach commands
+    // under protected launch too.
+    let set_secret = config
+        .permissions
+        .shell_environment_policy
+        .r#set
+        .keys()
+        .any(|name| is_secret_name(name));
+    let facts = BeforeRestart {
+        sandbox_kept,
+        widenable: request_tools,
+        network_off,
+        web_search_off: config.web_search_mode.value() == WebSearchMode::Disabled,
+        environment: (if secretless {
+            !set_secret
+        } else {
+            kept.is_empty()
+        }) && !profiles_used,
+        broker,
+    };
+    (
+        [sandbox, approvals, network, vault, model_keys, children],
+        facts,
+    )
 }
 
 /// Secret-like name fragments whose variables reach agent commands: the fixed

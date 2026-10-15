@@ -47,6 +47,7 @@ use codex_protocol::user_input::TextElement;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
+use crossterm::event::KeyModifiers;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Stylize;
@@ -183,6 +184,24 @@ pub(crate) const QUIT_SHORTCUT_TIMEOUT: Duration = Duration::from_secs(1);
 
 const APPROVAL_PROMPT_TYPING_IDLE_DELAY: Duration = Duration::from_secs(1);
 
+/// #787: input that reaches a request (an approval, a question, an MCP form
+/// or link, a Claude pane's request) sooner than this after it was first
+/// drawn, or after the last input dropped this way, is dropped: it was typed
+/// for what was on screen before. Esc too, since it would cancel the request
+/// or interrupt the turn; only Ctrl+C, which never reaches a view as a key,
+/// still cancels at once. #817: this is the only guard for a request coming
+/// on screen (new, queued, revealed, or held back while the user typed);
+/// after it, a deliberate Enter answers unless keys were dropped for that
+/// request.
+pub(crate) const REQUEST_INPUT_GUARD: Duration = Duration::from_secs(1);
+
+/// #787: the request on top at the last draw and when it first showed.
+#[derive(Clone, Copy, Debug)]
+struct ShownRequest {
+    generation: u64,
+    shown_at: Instant,
+}
+
 /// Whether Ctrl+C/Ctrl+D require a second press to quit.
 ///
 /// This UX experiment was enabled by default, but requiring a double press to quit feels janky in
@@ -223,17 +242,6 @@ struct DelayedApprovalRequest {
     features: Features,
 }
 
-/// #523: what a request view needs before Enter confirms, by how it opens.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum FreshChoice {
-    /// Over another view, or while the user is typing: a deliberate choice
-    /// (navigation; a number key is typed text until then).
-    Deliberate,
-    /// Just after another view closed: any choice before Enter.
-    AfterAnswer,
-    None,
-}
-
 /// Pane displayed in the lower half of the chat UI.
 ///
 /// This is the owning container for the prompt input (`ChatComposer`) and the view stack
@@ -255,10 +263,14 @@ pub(crate) struct BottomPane {
     last_top_view: Option<usize>,
     /// The view stack's depth when `last_top_view` was recorded.
     last_top_depth: usize,
-    /// #523: when the last view closed and left the stack empty. A request
-    /// shown soon after must not take the double or held Enter that closed
-    /// it.
-    last_view_closed_at: Option<Instant>,
+    /// #787: the request on top when last drawn.
+    shown_request: Option<ShownRequest>,
+    /// #787: input to a request stays dropped until then (the last input
+    /// dropped).
+    request_quiet_until: Option<Instant>,
+    /// #787: [`REQUEST_INPUT_GUARD`]; zero in unit tests, whose keys follow
+    /// a request without a draw, unless a test sets it.
+    request_input_guard: Duration,
 
     app_event_tx: AppEventSender,
     frame_requester: FrameRequester,
@@ -329,7 +341,13 @@ impl BottomPane {
             last_composer_key_at: None,
             last_top_view: None,
             last_top_depth: 0,
-            last_view_closed_at: None,
+            shown_request: None,
+            request_quiet_until: None,
+            request_input_guard: if cfg!(test) {
+                Duration::ZERO
+            } else {
+                REQUEST_INPUT_GUARD
+            },
             app_event_tx,
             frame_requester,
             thread_id: None,
@@ -578,16 +596,19 @@ impl BottomPane {
 
     /// #624: shows a view that answers a request (see
     /// [`BottomPaneView::answers_request`]). Over views the person opened (a
-    /// picker, a menu) it goes underneath them, above any other request
-    /// views, so their keys keep reaching the view they see; it shows when
-    /// those views close, revealed (#523: the next Enter alone can't answer
-    /// it).
+    /// picker, a menu) it goes underneath them, so their keys keep reaching
+    /// the view they see; it shows when those views close, revealed (#523:
+    /// the next Enter alone can't answer it).
+    ///
+    /// #787: it never covers another request either: it waits under the
+    /// requests already here and shows after them, first in, first out, so
+    /// keys meant for the request on screen can't answer a newer one.
     fn push_request_view(&mut self, view: Box<dyn BottomPaneView>) {
         let insert_at = self
             .view_stack
             .iter()
-            .rposition(|view| view.answers_request())
-            .map_or(0, |index| index + 1);
+            .position(|view| view.answers_request())
+            .unwrap_or(0);
         if insert_at == self.view_stack.len() {
             self.push_view(view);
             return;
@@ -627,24 +648,6 @@ impl BottomPane {
     fn on_view_stack_depth_decreased(&mut self) {
         if self.view_stack.is_empty() {
             self.on_active_view_complete();
-        }
-    }
-
-    /// #523: what a request view shown now needs before Enter confirms.
-    fn fresh_choice_for_request(&self, now: Instant) -> FreshChoice {
-        if !self.view_stack.is_empty() || self.approval_prompt_delay_remaining(now).is_some() {
-            // The next keys may be meant for that view or for the draft.
-            FreshChoice::Deliberate
-        } else if self.last_top_view.is_some()
-            || self.last_view_closed_at.is_some_and(|closed_at| {
-                now.saturating_duration_since(closed_at) < APPROVAL_PROMPT_TYPING_IDLE_DELAY
-            })
-        {
-            // A view just closed (or is closing, not yet noticed): a double
-            // or held Enter must not answer this request.
-            FreshChoice::AfterAnswer
-        } else {
-            FreshChoice::None
         }
     }
 
@@ -688,8 +691,6 @@ impl BottomPane {
             self.keymap.approval.clone(),
             self.keymap.list.clone(),
         );
-        // The user was typing; their next Enter may be meant for their draft.
-        modal.require_fresh_choice();
         while let Some(delayed) = self.delayed_approval_requests.pop_back() {
             modal.enqueue_request(delayed.request);
         }
@@ -697,14 +698,94 @@ impl BottomPane {
         self.push_view(Box::new(modal));
     }
 
+    /// #787: the request on top, if any, by its shown generation.
+    fn top_request_generation(&self) -> Option<u64> {
+        self.view_stack
+            .last()
+            .filter(|view| view.answers_request())
+            .map(|view| view.shown_request_generation())
+    }
+
+    /// #787: before each draw, note when the request on top first shows.
+    fn note_shown_request(&mut self, now: Instant) {
+        let generation = self.top_request_generation();
+        debug_assert!(
+            generation != Some(0),
+            "a view that answers a request must take a shown_request_generation"
+        );
+        if generation != self.shown_request.map(|shown| shown.generation) {
+            self.shown_request = generation.map(|generation| ShownRequest {
+                generation,
+                shown_at: now,
+            });
+        }
+    }
+
+    /// #787: drops input reaching the request on top before the person
+    /// could see it: it isn't drawn yet, it showed less than
+    /// [`REQUEST_INPUT_GUARD`] ago, or input was dropped less than that ago
+    /// (typing or a held key goes on). The request then needs navigation
+    /// before Enter and says why.
+    fn drop_early_request_input(&mut self, now: Instant) -> bool {
+        let early = self.is_early_request_input(now);
+        if early {
+            self.request_quiet_until = now.checked_add(self.request_input_guard);
+            if let Some(view) = self.view_stack.last_mut() {
+                view.on_early_input();
+            }
+            self.request_redraw();
+        }
+        early
+    }
+
+    /// #787: whether input reaching the view on top now would be dropped
+    /// (see [`Self::drop_early_request_input`]); changes nothing.
+    fn is_early_request_input(&self, now: Instant) -> bool {
+        let guard = self.request_input_guard;
+        if guard.is_zero() {
+            return false;
+        }
+        let Some(generation) = self.top_request_generation() else {
+            return false;
+        };
+        // A view on top not yet noticed (`sync_top_view`) was not drawn there.
+        let top = self.view_stack.last().map(|view| {
+            std::ptr::from_ref::<dyn BottomPaneView>(view.as_ref()).cast::<()>() as usize
+        });
+        match self.shown_request {
+            Some(shown) if shown.generation == generation && top == self.last_top_view => {
+                now.saturating_duration_since(shown.shown_at) < guard
+                    || self.request_quiet_until.is_some_and(|until| now < until)
+            }
+            // Not drawn since it became the request on top.
+            _ => true,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_request_input_guard(&mut self, guard: Duration) {
+        self.request_input_guard = guard;
+    }
+
     /// Forward a key event to the active view or the composer.
     pub fn handle_key_event(&mut self, key_event: KeyEvent) -> InputResult {
+        self.handle_key_event_at(key_event, Instant::now())
+    }
+
+    fn handle_key_event_at(&mut self, key_event: KeyEvent, now: Instant) -> InputResult {
         // If a modal/view is active, handle it here; otherwise forward to composer.
         if !self.view_stack.is_empty() {
             if key_event.kind == KeyEventKind::Release {
                 return InputResult::None;
             }
             self.sync_top_view();
+            // #787: Ctrl+C still cancels at once (it normally reaches the view
+            // through `on_ctrl_c`, never as a key).
+            let ctrl_c = key_event.code == KeyCode::Char('c')
+                && key_event.modifiers.contains(KeyModifiers::CONTROL);
+            if !ctrl_c && self.drop_early_request_input(now) {
+                return InputResult::None;
+            }
 
             // We need three pieces of information after routing the key:
             // whether Esc completed the view, whether the view finished for any
@@ -824,9 +905,17 @@ impl BottomPane {
     }
 
     pub fn handle_paste(&mut self, pasted: String) {
+        self.handle_paste_at(pasted, Instant::now());
+    }
+
+    fn handle_paste_at(&mut self, pasted: String, now: Instant) {
         let has_pasted_text = !pasted.is_empty();
         // #523: a view uncovered since the last key learns it first.
         self.sync_top_view();
+        // #787: nor does a paste reach a request before it could be seen.
+        if self.drop_early_request_input(now) {
+            return;
+        }
         if let Some(view) = self.view_stack.last_mut() {
             let needs_redraw = view.handle_paste(pasted);
             let view_complete = view.is_complete();
@@ -865,6 +954,9 @@ impl BottomPane {
         self.maybe_show_delayed_approval_requests_at(now);
         self.tick_active_view(now);
         self.schedule_active_view_frame();
+        // After the tick: the view it closed is gone, so this is drawn next.
+        self.sync_top_view();
+        self.note_shown_request(now);
     }
 
     fn tick_active_view(&mut self, now: Instant) {
@@ -1446,9 +1538,8 @@ impl BottomPane {
             std::ptr::from_ref::<dyn BottomPaneView>(view.as_ref()).cast::<()>() as usize
         });
         if top != self.last_top_view {
-            if top.is_none() {
-                self.last_view_closed_at = Some(Instant::now());
-            }
+            // #787: whatever shows now is new to the person.
+            self.shown_request = None;
             self.last_top_view = top;
             // A shallower stack: the view now on top was under the one that
             // closed, rather than just pushed.
@@ -1583,6 +1674,11 @@ impl BottomPane {
             && self
                 .active_view()
                 .is_some_and(|view| view.will_interrupt_turn_on_key_event(key_event))
+            // #787: a key the guard drops interrupts nothing.
+            && !(key_event.kind != KeyEventKind::Release
+                && !(key_event.code == KeyCode::Char('c')
+                    && key_event.modifiers.contains(KeyModifiers::CONTROL))
+                && self.is_early_request_input(Instant::now()))
     }
 
     pub(crate) fn active_view_id(&self) -> Option<&'static str> {
@@ -1615,22 +1711,14 @@ impl BottomPane {
     }
 
     /// #514: shows an app-link view. One that answers a request (a server's
-    /// link) needs a fresh choice as the other request views do (#523).
-    pub(crate) fn show_app_link_view(&mut self, mut view: AppLinkView) {
-        self.require_fresh_app_link_choice(&mut view);
+    /// link) takes no key before it is drawn or in the second after, as the
+    /// other request views (#787).
+    pub(crate) fn show_app_link_view(&mut self, view: AppLinkView) {
         // #624: a server's link request waits under a view the person opened.
         if view.answers_request() {
             self.push_request_view(Box::new(view));
         } else {
             self.push_view(Box::new(view));
-        }
-    }
-
-    fn require_fresh_app_link_choice(&self, view: &mut AppLinkView) {
-        match self.fresh_choice_for_request(Instant::now()) {
-            FreshChoice::Deliberate => view.require_fresh_choice(),
-            FreshChoice::AfterAnswer => view.require_fresh_choice_after_answer(),
-            FreshChoice::None => {}
         }
     }
 
@@ -1679,19 +1767,13 @@ impl BottomPane {
             self.maybe_show_delayed_approval_requests_at(now);
         } else {
             // No recent composer activity, so show the approval modal immediately.
-            let mut modal = ApprovalOverlay::new(
+            let modal = ApprovalOverlay::new(
                 request,
                 self.app_event_tx.clone(),
                 features.clone(),
                 self.keymap.approval.clone(),
                 self.keymap.list.clone(),
             );
-            // #523: over another view, or just after one closed.
-            match self.fresh_choice_for_request(now) {
-                FreshChoice::Deliberate => modal.require_deliberate_choice(),
-                FreshChoice::AfterAnswer => modal.require_fresh_choice(),
-                FreshChoice::None => {}
-            }
             self.pause_status_timer_for_modal();
             self.push_request_view(Box::new(modal));
         }
@@ -1715,7 +1797,7 @@ impl BottomPane {
             }
         }
 
-        let mut modal = RequestUserInputOverlay::new_with_keymap(
+        let modal = RequestUserInputOverlay::new_with_keymap(
             request,
             self.app_event_tx.clone(),
             self.has_input_focus,
@@ -1723,13 +1805,6 @@ impl BottomPane {
             self.disable_paste_burst,
             self.keymap.clone(),
         );
-        // #544: over another view or while the user typed, or just after a
-        // view closed, as for the other request views (#523).
-        match self.fresh_choice_for_request(Instant::now()) {
-            FreshChoice::Deliberate => modal.require_fresh_choice(),
-            FreshChoice::AfterAnswer => modal.require_fresh_choice_after_answer(),
-            FreshChoice::None => {}
-        }
         self.pause_status_timer_for_modal();
         self.set_composer_input_enabled(
             /*enabled*/ false,
@@ -1771,7 +1846,7 @@ impl BottomPane {
                 tool_suggestion.suggest_type,
                 mcp_server_elicitation::ToolSuggestionType::Enable
             );
-            let mut view = AppLinkView::new_with_keymap(
+            let view = AppLinkView::new_with_keymap(
                 AppLinkViewParams {
                     app_id: tool_suggestion.tool_id.clone(),
                     title: tool_suggestion.tool_name.clone(),
@@ -1804,7 +1879,6 @@ impl BottomPane {
                 self.app_event_tx.clone(),
                 self.keymap.list.clone(),
             );
-            self.require_fresh_app_link_choice(&mut view);
             self.pause_status_timer_for_modal();
             self.set_composer_input_enabled(
                 /*enabled*/ false,
@@ -1814,7 +1888,7 @@ impl BottomPane {
             return;
         }
 
-        let mut modal = McpServerElicitationOverlay::new_with_keymap(
+        let modal = McpServerElicitationOverlay::new_with_keymap(
             request,
             self.app_event_tx.clone(),
             self.has_input_focus,
@@ -1822,14 +1896,6 @@ impl BottomPane {
             self.disable_paste_burst,
             self.keymap.list.clone(),
         );
-        // #192: the user was typing, or another view is open; their next keys
-        // may be meant for their draft or for that view. #523: or a view
-        // just closed.
-        match self.fresh_choice_for_request(Instant::now()) {
-            FreshChoice::Deliberate => modal.require_fresh_choice(),
-            FreshChoice::AfterAnswer => modal.require_fresh_choice_after_answer(),
-            FreshChoice::None => {}
-        }
         self.pause_status_timer_for_modal();
         self.set_composer_input_enabled(
             /*enabled*/ false,
@@ -2003,14 +2069,18 @@ impl BottomPane {
         self.as_renderable_with_composer_right_reserve(/*composer_right_reserve*/ 0)
     }
 
-    /// #624: whether a request view waits under the view on top.
-    fn request_waits_under_active_view(&self) -> bool {
-        match self.view_stack.split_last() {
-            Some((top, below)) => {
-                !top.answers_request() && below.iter().any(|view| view.answers_request())
-            }
-            None => false,
+    /// #624: the notice shown above the view on top while a request view
+    /// waits under it (#787: under another request too).
+    fn waiting_request_notice(&self) -> Option<&'static str> {
+        let (top, below) = self.view_stack.split_last()?;
+        if !below.iter().any(|view| view.answers_request()) {
+            return None;
         }
+        Some(if top.answers_request() {
+            "Another request is waiting; it shows after you answer this one."
+        } else {
+            "A request is waiting; it shows when you close this."
+        })
     }
 
     pub(crate) fn as_renderable_with_composer_right_reserve(
@@ -2018,15 +2088,15 @@ impl BottomPane {
         composer_right_reserve: u16,
     ) -> RenderableItem<'_> {
         if let Some(view) = self.active_view() {
-            if !self.request_waits_under_active_view() {
+            let Some(notice) = self.waiting_request_notice() else {
                 return RenderableItem::Borrowed(view);
-            }
+            };
             let mut flex = FlexRenderable::new();
             flex.push(
                 /*flex*/ 0,
                 RenderableItem::Owned(Box::new(Line::from(vec![
                     "  ! ".magenta().bold(),
-                    "A request is waiting; it shows when you close this.".magenta(),
+                    notice.magenta(),
                 ]))),
             );
             flex.push(/*flex*/ 1, RenderableItem::Borrowed(view));
@@ -2167,6 +2237,11 @@ impl Renderable for BottomPane {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // tests/issue_787.rs
+    mod issue_787;
+    // tests/issue_817.rs
+    mod issue_817;
     use crate::app::app_server_requests::ResolvedAppServerRequest;
     use crate::app_command::AppCommand as Op;
     use crate::app_event::AppEvent;
@@ -2178,7 +2253,6 @@ mod tests {
     use crossterm::event::KeyCode;
     use crossterm::event::KeyEvent;
     use crossterm::event::KeyEventKind;
-    use crossterm::event::KeyModifiers;
     use insta::assert_snapshot;
     use pretty_assertions::assert_eq;
     use ratatui::buffer::Buffer;
@@ -2467,79 +2541,92 @@ mod tests {
 
     /// #192: an MCP approval that opens while the user is typing, or over
     /// another view, takes neither the Enter nor the next digit and Enter
-    /// meant for the draft or that view; the arrow keys then Enter answer.
+    /// meant for the draft or that view (#787 drops them as it appears); the
+    /// arrow keys then Enter answer.
     #[test]
-    fn mcp_approval_opened_mid_typing_or_over_a_view_needs_a_deliberate_choice() {
+    fn mcp_approval_opened_mid_typing_or_over_a_view_takes_no_key_meant_before() {
         for over_view in [false, true] {
             let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
             let tx = AppEventSender::new(tx_raw);
-            let mut pane = test_pane(tx);
+            let mut pane = guarded_test_pane(tx);
+            let start = Instant::now();
             if over_view {
-                pane.show_selection_view(SelectionViewParams {
-                    title: Some("Some picker".to_string()),
-                    items: vec![SelectionItem {
-                        name: "Item".to_string(),
-                        ..Default::default()
-                    }],
-                    ..Default::default()
-                });
+                pane.show_selection_view(picker());
             } else {
-                pane.last_composer_activity_at = Some(Instant::now());
+                pane.last_composer_activity_at = Some(start);
             }
             pane.push_mcp_server_elicitation_request(mcp_approval_request());
+            pane.pre_draw_tick_at(start);
 
-            for key in [KeyCode::Enter, KeyCode::Char('1'), KeyCode::Enter] {
-                pane.handle_key_event(KeyEvent::new(key, KeyModifiers::NONE));
-            }
+            let at = start + Duration::from_millis(300);
+            press_keys_at(
+                &mut pane,
+                &[KeyCode::Enter, KeyCode::Char('1'), KeyCode::Enter],
+                at,
+            );
             assert!(!elicitation_resolved(&mut rx), "over_view={over_view}");
             if over_view {
                 // #624: it waited under the picker; closing the picker
                 // reveals it, and the same keys still don't answer it.
-                pane.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+                press_keys_at(&mut pane, &[KeyCode::Esc], at);
                 assert_eq!(pane.view_stack.len(), 1);
-                for key in [KeyCode::Enter, KeyCode::Char('1'), KeyCode::Enter] {
-                    pane.handle_key_event(KeyEvent::new(key, KeyModifiers::NONE));
-                }
+                press_keys_at(
+                    &mut pane,
+                    &[KeyCode::Enter, KeyCode::Char('1'), KeyCode::Enter],
+                    at,
+                );
                 assert!(!elicitation_resolved(&mut rx));
+                pane.pre_draw_tick_at(at);
             }
 
-            for key in [KeyCode::Down, KeyCode::Up, KeyCode::Enter] {
-                pane.handle_key_event(KeyEvent::new(key, KeyModifiers::NONE));
-            }
+            let later = at + REQUEST_INPUT_GUARD * 2;
+            press_keys_at(
+                &mut pane,
+                &[KeyCode::Down, KeyCode::Up, KeyCode::Enter],
+                later,
+            );
             assert!(elicitation_resolved(&mut rx), "over_view={over_view}");
         }
     }
 
     /// #192: an MCP approval revealed when the prompt above it closes takes
-    /// neither a double Enter nor a held one; the arrow keys then Enter
-    /// answer it.
+    /// neither a double Enter nor one in the second after it shows (#787);
+    /// the arrow keys then Enter answer it.
     #[test]
-    fn mcp_approval_revealed_by_a_closing_prompt_needs_a_deliberate_choice() {
+    fn mcp_approval_revealed_by_a_closing_prompt_takes_no_double_enter() {
         let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
         let tx = AppEventSender::new(tx_raw);
         let features = Features::with_defaults();
-        let mut pane = test_pane(tx);
-        pane.push_mcp_server_elicitation_request(mcp_approval_request());
-        pane.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        pane.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        let mut pane = guarded_test_pane(tx);
+        let start = Instant::now();
         pane.push_approval_request(exec_request(), &features);
+        pane.pre_draw_tick_at(start);
+        let at = start + Duration::from_secs(2);
+        press_keys_at(&mut pane, &[KeyCode::Down, KeyCode::Up], at);
+        // #787: the MCP approval waits under the prompt on screen.
+        pane.push_mcp_server_elicitation_request(mcp_approval_request());
         assert_eq!(pane.view_stack.len(), 2);
 
-        // The exec approval opened over the form needs a deliberate choice
-        // (#523); Enter then answers it, and the second Enter reaches the
-        // MCP approval it revealed.
-        pane.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(pane.view_stack.len(), 2);
-        for key in [KeyCode::Down, KeyCode::Up, KeyCode::Enter] {
-            pane.handle_key_event(KeyEvent::new(key, KeyModifiers::NONE));
-        }
+        // Enter answers the exec approval the user chose on; a second Enter
+        // doesn't reach the MCP approval it revealed.
+        press_keys_at(&mut pane, &[KeyCode::Enter], at);
+        assert!(approval_answered(&mut rx));
         assert_eq!(pane.view_stack.len(), 1);
-        pane.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        press_keys_at(&mut pane, &[KeyCode::Enter], at);
+        pane.pre_draw_tick_at(at);
+        press_keys_at(
+            &mut pane,
+            &[KeyCode::Enter],
+            at + Duration::from_millis(500),
+        );
         assert!(!elicitation_resolved(&mut rx));
 
-        for key in [KeyCode::Down, KeyCode::Up, KeyCode::Enter] {
-            pane.handle_key_event(KeyEvent::new(key, KeyModifiers::NONE));
-        }
+        let later = at + REQUEST_INPUT_GUARD * 2;
+        press_keys_at(
+            &mut pane,
+            &[KeyCode::Down, KeyCode::Up, KeyCode::Enter],
+            later,
+        );
         assert!(elicitation_resolved(&mut rx));
     }
 
@@ -2551,6 +2638,19 @@ mod tests {
     fn press_keys(pane: &mut BottomPane, keys: &[KeyCode]) {
         for key in keys {
             pane.handle_key_event(KeyEvent::new(*key, KeyModifiers::NONE));
+        }
+    }
+
+    /// #787: a pane with the production input guard, as the TUI runs it.
+    fn guarded_test_pane(app_event_tx: AppEventSender) -> BottomPane {
+        let mut pane = test_pane(app_event_tx);
+        pane.set_request_input_guard(REQUEST_INPUT_GUARD);
+        pane
+    }
+
+    fn press_keys_at(pane: &mut BottomPane, keys: &[KeyCode], at: Instant) {
+        for key in keys {
+            pane.handle_key_event_at(KeyEvent::new(*key, KeyModifiers::NONE), at);
         }
     }
 
@@ -2567,32 +2667,49 @@ mod tests {
 
     /// #523, #624: the main approval prompt that arrives over another view
     /// waits under it, so neither the Enter nor the number key and Enter
-    /// meant for that view reach it; once the view closes, it is revealed and
-    /// the arrow keys then Enter answer it.
+    /// meant for that view reach it; once the view closes it is revealed,
+    /// keys in the second after take nothing (#787), and the arrow keys then
+    /// Enter answer it.
     #[test]
-    fn approval_opened_over_a_view_needs_a_deliberate_choice() {
+    fn approval_opened_over_a_view_takes_no_key_meant_for_it() {
         let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
         let features = Features::with_defaults();
-        let mut pane = test_pane(AppEventSender::new(tx_raw));
+        let mut pane = guarded_test_pane(AppEventSender::new(tx_raw));
+        let start = Instant::now();
         pane.show_selection_view(picker());
         pane.push_approval_request(exec_request(), &features);
+        pane.pre_draw_tick_at(start);
         assert_eq!(pane.view_stack.len(), 2);
 
-        press_keys(
+        let at = start + Duration::from_secs(2);
+        press_keys_at(
             &mut pane,
             &[KeyCode::Enter, KeyCode::Char('1'), KeyCode::Enter],
+            at,
         );
         assert!(!approval_answered(&mut rx));
 
-        press_keys(&mut pane, &[KeyCode::Esc]);
+        press_keys_at(&mut pane, &[KeyCode::Esc], at);
         assert_eq!(pane.view_stack.len(), 1);
-        press_keys(
+        press_keys_at(
             &mut pane,
             &[KeyCode::Enter, KeyCode::Char('1'), KeyCode::Enter],
+            at,
+        );
+        pane.pre_draw_tick_at(at);
+        press_keys_at(
+            &mut pane,
+            &[KeyCode::Enter, KeyCode::Char('1'), KeyCode::Enter],
+            at + Duration::from_millis(300),
         );
         assert!(!approval_answered(&mut rx));
 
-        press_keys(&mut pane, &[KeyCode::Down, KeyCode::Up, KeyCode::Enter]);
+        let later = at + REQUEST_INPUT_GUARD * 2;
+        press_keys_at(
+            &mut pane,
+            &[KeyCode::Down, KeyCode::Up, KeyCode::Enter],
+            later,
+        );
         assert!(approval_answered(&mut rx));
     }
 
@@ -2658,7 +2775,11 @@ mod tests {
             "no key reached the approval"
         );
 
-        pane.pre_draw_tick();
+        // #787: as it shows, an Enter typed on is dropped; after that the
+        // arrow keys then Enter answer it.
+        pane.set_request_input_guard(REQUEST_INPUT_GUARD);
+        let shown = Instant::now();
+        pane.pre_draw_tick_at(shown);
         assert_eq!(pane.view_stack.len(), 1);
         assert!(pane.view_stack[0].answers_request(), "the approval shows");
         let area = Rect::new(0, 0, 60, pane.desired_height(/*width*/ 60));
@@ -2667,9 +2788,18 @@ mod tests {
             render_snapshot(&pane, area)
         );
 
-        press_keys(&mut pane, &[KeyCode::Enter]);
-        assert!(!approval_answered(&mut rx), "revealed: Enter alone");
-        press_keys(&mut pane, &[KeyCode::Down, KeyCode::Up, KeyCode::Enter]);
+        press_keys_at(
+            &mut pane,
+            &[KeyCode::Enter],
+            shown + Duration::from_millis(200),
+        );
+        assert!(!approval_answered(&mut rx), "revealed: Enter typed on");
+        let later = shown + REQUEST_INPUT_GUARD * 2;
+        press_keys_at(
+            &mut pane,
+            &[KeyCode::Down, KeyCode::Up, KeyCode::Enter],
+            later,
+        );
         assert!(approval_answered(&mut rx));
     }
 
@@ -2711,64 +2841,89 @@ mod tests {
     }
 
     /// #523: the main approval prompt revealed when the view above it closes
-    /// takes neither a double Enter nor a number key and Enter.
+    /// takes neither a double Enter nor a number key and Enter (#787).
     #[test]
-    fn approval_revealed_by_a_closing_view_needs_a_deliberate_choice() {
+    fn approval_revealed_by_a_closing_view_takes_no_double_enter() {
         let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
         let features = Features::with_defaults();
-        let mut pane = test_pane(AppEventSender::new(tx_raw));
+        let mut pane = guarded_test_pane(AppEventSender::new(tx_raw));
+        let start = Instant::now();
         pane.push_approval_request(exec_request(), &features);
         pane.push_mcp_server_elicitation_request(mcp_approval_request());
+        pane.pre_draw_tick_at(start);
         assert_eq!(pane.view_stack.len(), 2);
 
         // Answer the MCP approval on top; the next Enter and a number key
-        // then Enter reach the exec approval it revealed.
-        press_keys(&mut pane, &[KeyCode::Down, KeyCode::Up, KeyCode::Enter]);
+        // then Enter reach the exec approval it revealed and are dropped.
+        let at = start + Duration::from_secs(2);
+        press_keys_at(&mut pane, &[KeyCode::Down, KeyCode::Up, KeyCode::Enter], at);
         assert_eq!(pane.view_stack.len(), 1);
         assert!(approval_answered(&mut rx));
-        press_keys(
+        press_keys_at(
             &mut pane,
             &[KeyCode::Enter, KeyCode::Char('1'), KeyCode::Enter],
+            at,
         );
         assert!(!approval_answered(&mut rx));
 
-        press_keys(&mut pane, &[KeyCode::Down, KeyCode::Up, KeyCode::Enter]);
+        pane.pre_draw_tick_at(at);
+        let later = at + REQUEST_INPUT_GUARD * 2;
+        press_keys_at(
+            &mut pane,
+            &[KeyCode::Down, KeyCode::Up, KeyCode::Enter],
+            later,
+        );
         assert!(approval_answered(&mut rx));
         assert!(pane.view_stack.is_empty());
     }
 
     /// #523: a request shown just after another prompt closed (the next one
-    /// arrives a few ms after the answer) does not take a double Enter; a
-    /// choice and Enter answer it. Later requests are unaffected.
+    /// arrives a few ms after the answer) does not take a double Enter or a
+    /// key in the second after it shows (#787); a choice and Enter answer it.
+    /// #817: with no key dropped, Enter after that second answers.
     #[test]
     fn request_shown_just_after_a_prompt_closed_takes_no_double_enter() {
         for mcp in [false, true] {
             let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
             let features = Features::with_defaults();
-            let mut pane = test_pane(AppEventSender::new(tx_raw));
+            let mut pane = guarded_test_pane(AppEventSender::new(tx_raw));
+            let start = Instant::now();
             pane.push_approval_request(exec_request(), &features);
-            press_keys(&mut pane, &[KeyCode::Enter]);
+            pane.pre_draw_tick_at(start);
+            let at = start + Duration::from_secs(2);
+            press_keys_at(&mut pane, &[KeyCode::Enter], at);
             assert!(approval_answered(&mut rx));
             assert!(pane.view_stack.is_empty());
 
-            if mcp {
-                pane.push_mcp_server_elicitation_request(mcp_approval_request());
-            } else {
-                pane.push_approval_request(exec_request(), &features);
-            }
-            press_keys(&mut pane, &[KeyCode::Enter]);
+            let push = |pane: &mut BottomPane| {
+                if mcp {
+                    pane.push_mcp_server_elicitation_request(mcp_approval_request());
+                } else {
+                    pane.push_approval_request(exec_request(), &features);
+                }
+            };
+            push(&mut pane);
+            press_keys_at(&mut pane, &[KeyCode::Enter], at);
+            pane.pre_draw_tick_at(at);
+            press_keys_at(
+                &mut pane,
+                &[KeyCode::Char('1'), KeyCode::Enter],
+                at + Duration::from_millis(200),
+            );
             assert!(!approval_answered(&mut rx), "mcp={mcp}");
-            press_keys(&mut pane, &[KeyCode::Char('1'), KeyCode::Enter]);
+            let later = at + REQUEST_INPUT_GUARD * 2;
+            press_keys_at(
+                &mut pane,
+                &[KeyCode::Down, KeyCode::Up, KeyCode::Enter],
+                later,
+            );
             assert!(approval_answered(&mut rx), "mcp={mcp}");
 
-            // Once the moment has passed, Enter answers as before.
-            pane.last_view_closed_at = Some(Instant::now() - APPROVAL_PROMPT_TYPING_IDLE_DELAY);
-            if mcp {
-                pane.push_mcp_server_elicitation_request(mcp_approval_request());
-            } else {
-                pane.push_approval_request(exec_request(), &features);
-            }
-            press_keys(&mut pane, &[KeyCode::Enter]);
+            // With no key in its first second, Enter answers it.
+            push(&mut pane);
+            let shown = later + Duration::from_millis(16);
+            pane.pre_draw_tick_at(shown);
+            press_keys_at(&mut pane, &[KeyCode::Enter], shown + REQUEST_INPUT_GUARD);
             assert!(approval_answered(&mut rx), "mcp={mcp}");
         }
     }
@@ -2810,39 +2965,56 @@ mod tests {
 
     /// #544: an agent's question shown over another view, or just after a
     /// prompt closed, takes neither the Enter nor a number key and Enter
-    /// meant for what came before.
+    /// meant for what came before (#787).
     #[test]
-    fn user_input_request_over_a_view_or_after_a_prompt_needs_a_choice() {
+    fn user_input_request_over_a_view_or_after_a_prompt_takes_no_key_meant_before() {
         let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
-        let mut pane = test_pane(AppEventSender::new(tx_raw));
+        let mut pane = guarded_test_pane(AppEventSender::new(tx_raw));
+        let start = Instant::now();
         pane.show_selection_view(picker());
         pane.push_user_input_request(user_input_request());
-        press_keys(
+        pane.pre_draw_tick_at(start);
+        let at = start + Duration::from_secs(2);
+        press_keys_at(
             &mut pane,
             &[KeyCode::Enter, KeyCode::Char('1'), KeyCode::Enter],
+            at,
         );
         assert!(!question_answered(&mut rx));
         // #624: the question waited under the picker until it closed.
-        press_keys(&mut pane, &[KeyCode::Esc]);
+        press_keys_at(&mut pane, &[KeyCode::Esc], at);
         assert_eq!(pane.view_stack.len(), 1);
-        press_keys(
+        press_keys_at(
             &mut pane,
             &[KeyCode::Enter, KeyCode::Char('1'), KeyCode::Enter],
+            at,
         );
         assert!(!question_answered(&mut rx));
-        press_keys(&mut pane, &[KeyCode::Down, KeyCode::Up, KeyCode::Enter]);
+        pane.pre_draw_tick_at(at);
+        let later = at + REQUEST_INPUT_GUARD * 2;
+        press_keys_at(
+            &mut pane,
+            &[KeyCode::Down, KeyCode::Up, KeyCode::Enter],
+            later,
+        );
         assert!(question_answered(&mut rx));
 
         let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
         let features = Features::with_defaults();
-        let mut pane = test_pane(AppEventSender::new(tx_raw));
+        let mut pane = guarded_test_pane(AppEventSender::new(tx_raw));
         pane.push_approval_request(exec_request(), &features);
-        press_keys(&mut pane, &[KeyCode::Enter]);
+        pane.pre_draw_tick_at(start);
+        press_keys_at(&mut pane, &[KeyCode::Enter], at);
         assert!(approval_answered(&mut rx));
         pane.push_user_input_request(user_input_request());
-        press_keys(&mut pane, &[KeyCode::Enter]);
+        press_keys_at(&mut pane, &[KeyCode::Enter], at);
         assert!(!question_answered(&mut rx));
-        press_keys(&mut pane, &[KeyCode::Char('2'), KeyCode::Enter]);
+        pane.pre_draw_tick_at(at);
+        press_keys_at(
+            &mut pane,
+            &[KeyCode::Down, KeyCode::Down, KeyCode::Enter],
+            later,
+        );
         assert!(question_answered(&mut rx));
     }
 
@@ -2876,31 +3048,38 @@ mod tests {
 
     /// #514/#523: a server's link request shown over another view, or just
     /// after a prompt closed, takes neither the Enter nor a number key and
-    /// Enter meant for what came before.
+    /// Enter meant for what came before (#787).
     #[test]
-    fn link_request_over_a_view_or_after_a_prompt_needs_a_choice() {
+    fn link_request_over_a_view_or_after_a_prompt_takes_no_key_meant_before() {
         let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
         let tx = AppEventSender::new(tx_raw);
-        let mut pane = test_pane(tx.clone());
+        let mut pane = guarded_test_pane(tx.clone());
+        let start = Instant::now();
         pane.show_selection_view(picker());
         pane.show_app_link_view(url_link_view(tx));
-        press_keys(
+        pane.pre_draw_tick_at(start);
+        let at = start + Duration::from_secs(2);
+        press_keys_at(
             &mut pane,
             &[KeyCode::Enter, KeyCode::Char('1'), KeyCode::Enter],
+            at,
         );
         assert!(!link_acted(&mut rx));
         // #624: it waited under the picker (the picker's arrows don't reach
-        // it either); closing the picker shows it, still needing a choice.
-        press_keys(&mut pane, &[KeyCode::Down, KeyCode::Up, KeyCode::Enter]);
+        // it either); closing the picker shows it.
+        press_keys_at(&mut pane, &[KeyCode::Down, KeyCode::Up, KeyCode::Enter], at);
         assert!(!link_acted(&mut rx));
-        press_keys(&mut pane, &[KeyCode::Esc]);
+        press_keys_at(&mut pane, &[KeyCode::Esc], at);
         assert_eq!(pane.view_stack.len(), 1);
-        press_keys(
+        press_keys_at(
             &mut pane,
             &[KeyCode::Enter, KeyCode::Char('1'), KeyCode::Enter],
+            at,
         );
         assert!(!link_acted(&mut rx));
-        press_keys(
+        pane.pre_draw_tick_at(at);
+        let later = at + REQUEST_INPUT_GUARD * 2;
+        press_keys_at(
             &mut pane,
             &[
                 KeyCode::Down,
@@ -2908,20 +3087,32 @@ mod tests {
                 KeyCode::Char('2'),
                 KeyCode::Enter,
             ],
+            later,
         );
         assert!(link_acted(&mut rx));
 
         let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
         let tx = AppEventSender::new(tx_raw);
         let features = Features::with_defaults();
-        let mut pane = test_pane(tx.clone());
+        let mut pane = guarded_test_pane(tx.clone());
         pane.push_approval_request(exec_request(), &features);
-        press_keys(&mut pane, &[KeyCode::Enter]);
+        pane.pre_draw_tick_at(start);
+        press_keys_at(&mut pane, &[KeyCode::Enter], at);
         assert!(approval_answered(&mut rx));
         pane.show_app_link_view(url_link_view(tx));
-        press_keys(&mut pane, &[KeyCode::Enter]);
+        press_keys_at(&mut pane, &[KeyCode::Enter], at);
         assert!(!link_acted(&mut rx));
-        press_keys(&mut pane, &[KeyCode::Char('2'), KeyCode::Enter]);
+        pane.pre_draw_tick_at(at);
+        press_keys_at(
+            &mut pane,
+            &[
+                KeyCode::Down,
+                KeyCode::Up,
+                KeyCode::Char('2'),
+                KeyCode::Enter,
+            ],
+            later,
+        );
         assert!(link_acted(&mut rx));
     }
 
@@ -3052,19 +3243,25 @@ mod tests {
     }
 
     /// The prompt was held back because the user was typing; the Enter they
-    /// press to send their draft must not approve the highlighted "Yes".
+    /// press to send their draft as it appears must not approve the
+    /// highlighted "Yes" (#787 drops it).
     #[test]
     fn enter_after_a_delayed_prompt_appears_does_not_approve() {
         let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
         let tx = AppEventSender::new(tx_raw);
         let features = Features::with_defaults();
-        let mut pane = test_pane(tx);
+        let mut pane = guarded_test_pane(tx);
         let now = Instant::now();
         pane.last_composer_activity_at = Some(now);
         pane.push_approval_request(exec_request(), &features);
 
-        pane.pre_draw_tick_at(now + APPROVAL_PROMPT_TYPING_IDLE_DELAY);
-        pane.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let shown = now + APPROVAL_PROMPT_TYPING_IDLE_DELAY;
+        pane.pre_draw_tick_at(shown);
+        press_keys_at(
+            &mut pane,
+            &[KeyCode::Enter],
+            shown + Duration::from_millis(300),
+        );
 
         assert_eq!(pane.view_stack.len(), 1);
         while let Ok(event) = rx.try_recv() {

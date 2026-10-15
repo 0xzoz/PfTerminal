@@ -863,6 +863,7 @@ async fn pro_account_with_no_api_key_uses_chatgpt_auth() {
 }
 
 #[tokio::test]
+#[serial(codex_auth_env)]
 async fn product_homes_fall_back_to_legacy_codex_auth() {
     for product_home_name in [".corbanu", ".pfterminal"] {
         let root = tempdir().unwrap();
@@ -1532,6 +1533,7 @@ impl ExternalAuth for StaticExternalAuth {
 }
 
 #[tokio::test]
+#[serial(codex_auth_env)]
 async fn external_auth_provider_can_install_headers() {
     let mut headers = http::HeaderMap::new();
     headers.insert(

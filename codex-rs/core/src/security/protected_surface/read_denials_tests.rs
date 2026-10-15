@@ -2563,3 +2563,123 @@ fn issue_651_a_shared_database_folder_is_denied_entry_by_entry() {
         );
     }
 }
+
+/// #766: under Moderate the command may not read the home's Moderate marker
+/// (made when missing) and may not write the registry of Moderate homes,
+/// which records this home; a person's approval of the command lifts
+/// neither. Other runtime files stay readable.
+#[test]
+fn issue_766_moderate_marker_denied_and_registry_read_only() {
+    let fx = fixture();
+    // The registry inside the workspace, where the profile could write it.
+    let cwd = fx.user_home.join("project");
+    let registry = cwd.join("registry");
+    let marker = fx
+        .codex_home
+        .join(codex_security_level::nested::MODERATE_MARKER);
+    for approved in [false, true] {
+        let mut denials = ReadDenials::collect(
+            &fx.codex_home,
+            Some(&fx.user_home),
+            /*claude_config_dir*/ None,
+            &[abs(&cwd)],
+        );
+        if approved {
+            denials = denials.runtime_only();
+        }
+        denials.mark_moderate_with(&fx.codex_home, Some(&registry));
+        let policy = denials
+            .apply(&workspace(&cwd))
+            .unwrap()
+            .file_system_sandbox_policy();
+        assert_eq!(
+            (
+                marker.is_file(),
+                policy.can_read_path_with_cwd(&marker, &cwd),
+                policy.can_read_path_with_cwd(&fx.codex_home.join("tmp/arg0"), &cwd),
+                policy.can_write_path_with_cwd(&registry.join("entry"), &cwd),
+                policy.can_write_path_with_cwd(&cwd.join("file"), &cwd),
+                codex_security_level::nested::registered_homes(&registry),
+            ),
+            (true, false, true, false, true, vec![fx.codex_home.clone()]),
+            "approved: {approved}"
+        );
+    }
+}
+
+/// #766 round 3: a home whose stored level is Aggressive (or unreadable),
+/// or that still holds an Aggressive session's rule file, is not marked,
+/// even where Core's level is only Moderate.
+#[test]
+fn issue_766_no_marker_where_aggressive_is_stored() {
+    use codex_security_level::level;
+    let marker = codex_security_level::nested::MODERATE_MARKER;
+    for (stored, rules) in [
+        (Some("version = 1\nlevel = \"aggressive\"\n"), false),
+        (Some("not a level"), false),
+        (None, true),
+    ] {
+        let fx = fixture();
+        if let Some(contents) = stored {
+            std::fs::write(level::state_path(&fx.codex_home), contents).unwrap();
+        }
+        if rules {
+            std::fs::create_dir_all(fx.codex_home.join(level::RULES_DIR)).unwrap();
+            std::fs::write(level::rules_path(&fx.codex_home), level::rules_contents()).unwrap();
+        }
+        let cwd = fx.user_home.join("project");
+        let registry = cwd.join("registry");
+        let mut denials = ReadDenials::collect(
+            &fx.codex_home,
+            Some(&fx.user_home),
+            /*claude_config_dir*/ None,
+            &[abs(&cwd)],
+        );
+        denials.mark_moderate_with(&fx.codex_home, Some(&registry));
+        assert_eq!(
+            (
+                fx.codex_home.join(marker).exists(),
+                registry.exists(),
+                !denials.moderate_marker.is_empty()
+            ),
+            (false, false, false),
+            "{stored:?} {rules}"
+        );
+    }
+}
+
+/// #766 round 4: where Aggressive is stored, a marker someone made
+/// unreadable is made readable again (it would pass for Moderate's on
+/// Linux), and nothing is marked.
+#[cfg(target_os = "linux")]
+#[test]
+fn issue_766_unreadable_marker_is_restored_where_aggressive_is_stored() {
+    use codex_security_level::level;
+    use std::os::unix::fs::PermissionsExt;
+    let fx = fixture();
+    std::fs::write(
+        level::state_path(&fx.codex_home),
+        "version = 1\nlevel = \"aggressive\"\n",
+    )
+    .unwrap();
+    let marker = fx
+        .codex_home
+        .join(codex_security_level::nested::MODERATE_MARKER);
+    std::fs::write(&marker, "").unwrap();
+    std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let cwd = fx.user_home.join("project");
+    let mut denials = ReadDenials::collect(
+        &fx.codex_home,
+        Some(&fx.user_home),
+        /*claude_config_dir*/ None,
+        &[abs(&cwd)],
+    );
+    denials.mark_moderate_with(&fx.codex_home, Some(&cwd.join("registry")));
+    assert_eq!(
+        (
+            std::fs::metadata(&marker).unwrap().permissions().mode() & 0o777,
+            !denials.moderate_marker.is_empty(),
+        ),
+        (0o644, false)
+    );
+}

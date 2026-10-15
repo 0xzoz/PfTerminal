@@ -172,12 +172,12 @@ fn registry_records_and_forgets_origins() {
     let registry = tempfile::tempdir().unwrap();
     let registry = registry.path().join("aggressive-homes");
     let home = tempfile::tempdir().unwrap();
-    registry_entry(&registry, home.path(), /*aggressive*/ true).unwrap();
-    registry_entry(&registry, home.path(), /*aggressive*/ true).unwrap();
+    registry_entry(&registry, home.path(), /*present*/ true).unwrap();
+    registry_entry(&registry, home.path(), /*present*/ true).unwrap();
     std::fs::write(registry.join("relative"), "not/absolute").unwrap();
     assert_eq!(registered_homes(&registry), vec![home.path().to_path_buf()]);
-    registry_entry(&registry, home.path(), /*aggressive*/ false).unwrap();
-    registry_entry(&registry, home.path(), /*aggressive*/ false).unwrap();
+    registry_entry(&registry, home.path(), /*present*/ false).unwrap();
+    registry_entry(&registry, home.path(), /*present*/ false).unwrap();
     assert_eq!(registered_homes(&registry), Vec::<PathBuf>::new());
 }
 

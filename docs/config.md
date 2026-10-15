@@ -148,6 +148,21 @@ corbanu -m zai/glm-5.2-fast
 
 The model picker maps these model slugs to the correct built-in provider.
 
+## Reopen Warm-Up
+
+When you reopen a conversation (`/resume`, restarting Corbanu on it) or fork it (`/side`, editing an earlier
+message) on a provider that uses a WebSocket connection, such as OpenAI, Corbanu sends one warm-up request to prime
+the model's cache, so the first reply is faster. It is billed like any request (the session's instructions and
+tools, typically 10,000 to 15,000 input tokens), and Corbanu says so once it has been sent. To skip it, set this at
+the top level of `config.toml` (or pass `-c skip_reopen_warmup=true`):
+
+```toml
+skip_reopen_warmup = true
+```
+
+The first reply after reopening may then be slower, and when approvals go to the auto-reviewer, its session starts at
+the first review instead of on reopen. A new conversation still warms up, and so do sub-agents.
+
 ## Vault And Secrets
 
 Provider API keys saved by Corbanu Terminal are stored in the encrypted vault, not in
@@ -217,6 +232,26 @@ shows a startup warning and `/security` reports the level as partial. What
 the levels protect and their limits are on
 [Moderate security level](security-moderate.md) and
 [Aggressive security level: protected files](security-aggressive.md).
+
+### Protected launch (`secretless_agent_launch`)
+
+With `secretless_agent_launch` on, every agent command runs inside the OS
+sandbox, with only allowlisted environment variables, and can't read
+Corbanu's vault, sign-in files or config. Nothing runs outside the sandbox at
+any level. At Permissive, Corbanu therefore doesn't offer it (#739):
+
+- A command that asks to run outside the sandbox isn't run, and you aren't
+  asked. Corbanu says it isn't possible here. (If your own permission profile
+  denies reads, you're asked as before and the command runs in the sandbox.)
+- After a sandbox denial, "retry without sandbox?" isn't offered.
+- A command that a remembered approval or allow rule ("don't ask again")
+  matches still skips the prompt, but runs inside the sandbox. Corbanu says so
+  the first time in a session.
+
+Moderate and Aggressive keep their own handling: Moderate still asks you about
+such a request, because approving lifts its file protections for that command,
+and runs it inside the sandbox. Without the feature, Permissive works as
+configured.
 
 ### Kill switch
 

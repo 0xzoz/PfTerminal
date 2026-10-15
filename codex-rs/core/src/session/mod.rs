@@ -2066,7 +2066,8 @@ impl Session {
             .cloned()
     }
 
-    /// Where this session's paid requests are recorded (PF-60-S05, PF-60-S04).
+    /// Where this session's paid requests are recorded (PF-60-S05, PF-60-S04,
+    /// PF-60-S06).
     ///
     /// A persisted session records under its own thread. A session with no
     /// thread of its own records under the conversation it works for, in that
@@ -2076,33 +2077,73 @@ impl Session {
     /// - a memory consolidation agent: the conversation that started it, as
     ///   `consolidation:` (bound when the session is built, so its first
     ///   request, a startup prewarm included, already has its owner);
-    /// - any other ephemeral fork - in the TUI, a `/side` conversation; the
-    ///   label names that case - the conversation it was forked from, as
-    ///   `side:`.
+    /// - a sub-agent (a spawned agent, a `/review` task): the conversation it
+    ///   works for, as `agent:` or `code-review:`;
+    /// - an ephemeral fork: the conversation it was forked from, as `side:`
+    ///   for a TUI `/side` conversation and `fork:` for any other.
+    ///
+    /// When the conversation worked for is not persisted either (a guardian
+    /// review or a sub-agent inside `/side`), its own owner is used and the
+    /// labels nest (`side:review:`, `side:agent:`), so the work is counted
+    /// once under the persisted conversation at the root.
     ///
     /// `Err` says why there is none: a session that is not collected by design
     /// (`exec --ephemeral`, or work for a conversation that is itself not
-    /// persisted), or a ledger that could not be reached.
+    /// collected), or a ledger that could not be reached.
     pub(crate) async fn accounting_owner(
         &self,
     ) -> Result<crate::accounting::AccountingOwner, crate::accounting::Uncollected> {
+        self.accounting_owner_at(/*depth*/ 0).await
+    }
+
+    async fn accounting_owner_at(
+        &self,
+        depth: usize,
+    ) -> Result<crate::accounting::AccountingOwner, crate::accounting::Uncollected> {
         use crate::accounting::Uncollected;
-        let (guardian_parent, forked_from) = {
+        use codex_protocol::protocol::SubAgentSource;
+        let (guardian_parent, worked_for, forked_from) = {
             let state = self.state.lock().await;
             let configuration = &state.session_configuration;
             let guardian_parent = match &configuration.session_source {
-                SessionSource::SubAgent(codex_protocol::protocol::SubAgentSource::Other(name))
+                SessionSource::SubAgent(SubAgentSource::Other(name))
                     if name == crate::guardian::GUARDIAN_REVIEWER_NAME =>
                 {
                     Some(configuration.parent_thread_id)
                 }
                 _ => None,
             };
-            (guardian_parent, configuration.forked_from_thread_id)
+            let worked_for = match &configuration.session_source {
+                SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                    parent_thread_id, ..
+                }) => Some((*parent_thread_id, "agent:")),
+                SessionSource::SubAgent(SubAgentSource::Review) => configuration
+                    .parent_thread_id
+                    .map(|parent| (parent, "code-review:")),
+                SessionSource::SubAgent(
+                    SubAgentSource::Compact
+                    | SubAgentSource::MemoryConsolidation
+                    | SubAgentSource::Other(_),
+                ) => configuration
+                    .parent_thread_id
+                    .map(|parent| (parent, "agent:")),
+                _ => None,
+            };
+            let forked_from = configuration.forked_from_thread_id.map(|parent| {
+                let side = matches!(
+                    &configuration.thread_source,
+                    Some(ThreadSource::Feature(feature))
+                        if feature == ThreadSource::SIDE_CONVERSATION
+                );
+                (parent, if side { "side:" } else { "fork:" })
+            });
+            (guardian_parent, worked_for, forked_from)
         };
         if let Some(parent) = guardian_parent {
             let parent = parent.ok_or(Uncollected::Excluded("guardian_without_parent"))?;
-            return self.accounting_owner_elsewhere(parent, "review:").await;
+            return self
+                .accounting_owner_elsewhere(parent, "review:", depth)
+                .await;
         }
         if self.live_thread().is_some() {
             let db = self
@@ -2111,7 +2152,7 @@ impl Session {
             return Ok(crate::accounting::AccountingOwner {
                 thread: self.thread_id,
                 db,
-                label_prefix: "",
+                label_prefix: String::new(),
             });
         }
         if let Some(started_by) = self
@@ -2120,24 +2161,28 @@ impl Session {
             .get::<crate::accounting::StartedBy>()
         {
             return self
-                .accounting_owner_elsewhere(started_by.0, "consolidation:")
+                .accounting_owner_elsewhere(started_by.0, "consolidation:", depth)
                 .await;
         }
-        if let Some(parent) = forked_from {
-            return self.accounting_owner_elsewhere(parent, "side:").await;
+        if let Some((parent, label)) = worked_for.or(forked_from) {
+            return self.accounting_owner_elsewhere(parent, label, depth).await;
         }
         Err(Uncollected::Excluded("ephemeral_session"))
     }
 
     /// `parent`'s ledger, for a session with no thread of its own that works
     /// for `parent`. Such a session has no database of its own; it shares the
-    /// parent's thread store, and so the parent's ledger.
+    /// parent's thread store, and so the parent's ledger. A parent that is not
+    /// persisted either is followed, while it is live, to its own owner.
     async fn accounting_owner_elsewhere(
         &self,
         parent: ThreadId,
-        label_prefix: &'static str,
+        label: &'static str,
+        depth: usize,
     ) -> Result<crate::accounting::AccountingOwner, crate::accounting::Uncollected> {
         use crate::accounting::Uncollected;
+        /// Nested temporary work deeper than this is not followed further.
+        const MAX_DEPTH: usize = 4;
         let db = match self.state_db() {
             Some(db) => Some(db),
             None => match self
@@ -2151,15 +2196,36 @@ impl Session {
             },
         }
         .ok_or(Uncollected::Failed("no state database"))?;
-        // Work for a conversation that is itself not persisted (exec
-        // --ephemeral, a side conversation) has no thread to record under.
         match db.get_thread(parent).await {
             Ok(Some(_)) => Ok(crate::accounting::AccountingOwner {
                 thread: parent,
                 db,
-                label_prefix,
+                label_prefix: label.to_string(),
             }),
-            Ok(None) => Err(Uncollected::Excluded("parent_not_persisted")),
+            // Work for a conversation that is itself not persisted (a side
+            // conversation, a sub-agent of one) records where that
+            // conversation records; work for one that is not collected at all
+            // (exec --ephemeral) has no thread to record under.
+            Ok(None) => {
+                let parent_session = if depth < MAX_DEPTH && parent != self.thread_id {
+                    self.services.agent_control.live_session(parent).await
+                } else {
+                    None
+                };
+                let Some(parent_session) = parent_session else {
+                    return Err(Uncollected::Excluded("parent_not_persisted"));
+                };
+                match Box::pin(parent_session.accounting_owner_at(depth + 1)).await {
+                    Ok(owner) => Ok(crate::accounting::AccountingOwner {
+                        label_prefix: format!("{}{label}", owner.label_prefix),
+                        ..owner
+                    }),
+                    Err(Uncollected::Excluded(_)) => {
+                        Err(Uncollected::Excluded("parent_not_persisted"))
+                    }
+                    Err(error) => Err(error),
+                }
+            }
             Err(_) => Err(Uncollected::Failed("parent thread unreadable")),
         }
     }
@@ -2601,6 +2667,14 @@ impl Session {
 
     pub(crate) async fn send_event_raw(&self, event: Event) {
         self.send_event_raw_with_persistence(event, /*persist*/ true)
+            .await;
+    }
+
+    /// Delivers an event to the client without writing it to the rollout: a
+    /// notice about this session's own start that a later reopen must not
+    /// replay as if it had happened again.
+    pub(crate) async fn send_event_raw_unpersisted(&self, event: Event) {
+        self.send_event_raw_with_persistence(event, /*persist*/ false)
             .await;
     }
 

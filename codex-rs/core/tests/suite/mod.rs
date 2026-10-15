@@ -47,6 +47,7 @@ mod accounting_responses_ws;
 mod accounting_responses_ws_recovery;
 #[path = "accounting_responses_ws_support.rs"]
 mod accounting_responses_ws_support;
+mod accounting_side_forks;
 mod additional_context;
 mod agent_execution;
 mod agent_websocket;
@@ -103,6 +104,7 @@ mod issue_736_740;
 mod issue_747;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod issue_748;
+mod issue_766;
 mod items;
 mod json_result;
 mod live_cli;

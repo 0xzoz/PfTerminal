@@ -85,7 +85,8 @@ A file written this way runs code later, outside the sandbox. Nothing else
 changes: credential files and Corbanu's sign-in, vault, config and history stay
 unreadable; Corbanu's own files and the project's `.git` folder (its hooks and config
 included), `.codex` and `.agents` stay read-only; other folders and the
-network stay closed.
+network stay closed (with a managed network proxy, see
+[its limit](#a-managed-network-proxy)).
 
 **When it is not offered.** The approval prompt leaves Grant once out, and
 says why, when it could not help: nothing the command writes is something
@@ -96,8 +97,9 @@ Grant once lifts, and the command:
   your pip config from `pip config set`, `gh config set`);
 - writes the project's `.git`, `.codex` or `.agents`, or Corbanu's files;
 - reads a protected file, or uses the macOS keychain (below);
-- or shows every file it writes in its text (a plain read, a new link in the
-  current folder).
+- or shows every file it writes in its text (a plain read, a wait such as
+  `sleep`, a `sed` that only prints lines, a new link in the current folder).
+  Child agents' prompts follow the same rules.
 
 Corbanu decides this from the command's text. When it can't tell what a
 program writes (a script, `npm install`), Grant once is still offered, unless
@@ -121,6 +123,25 @@ sandbox denies the keychain services (`com.apple.SecurityServer`,
 all its other rules (#758). Contained Claude panes get the same rule under
 Aggressive. Certificate checks for secure connections use a different
 service (`trustd`) and keep working.
+
+## A managed network proxy
+
+Aggressive turns the network off for agent commands, with one known limit:
+when your organization's requirements enforce a managed network proxy
+(`experimental_network`), agent commands can still connect to that proxy.
+That is how network access works in that setup, so what they reach through
+it is decided by your organization's proxy rules, not by Aggressive.
+
+- **macOS:** Unix sockets those requirements allow stay open. When they
+  also allow local binding, agent commands can also accept and make local
+  connections (any local port), and connect to port 53 (DNS) on any server,
+  outside the proxy.
+- **Linux:** agent commands run in their own network, which reaches only
+  the proxy; local binding gives them no access to the computer's own ports.
+- **Windows:** when those requirements also allow local binding, agent
+  commands can also connect to any local port, outside the proxy.
+
+The macOS keychain stays closed either way (above, #758).
 
 ## A separate database folder
 
@@ -162,8 +183,20 @@ create files there too.
 ## Commands run outside the sandbox
 
 Under Moderate no agent command runs outside the sandbox, even when you
-approve it; Aggressive, once it applies after a restart, keeps every command in
-its sandbox too. Under Moderate a command can still ask to run outside it
+approve it; Aggressive keeps every command in its sandbox too, once it applies
+after a restart. Before the restart, from when you confirm Aggressive in
+`/security`, the same holds when the untrusted-content labels are on and the
+session uses a sandbox Corbanu applies (not an external one): Core's
+protected-path rules then deny the vault store and sign-in file to every
+command and keep each run in its sandbox. The inspector's "This session" rows
+say which applies. The Aggressive review, the saved screen and the level list
+say the same (#816): what holds from confirmation (approved commands kept in
+the session's sandbox, network off when its sandbox has no network and its
+permission-request tools are off, and any of Aggressive's environment, web
+search and model-key settings your own config already has), and that the rest
+starts at the restart.
+
+Under Moderate a command can still ask to run outside it
 (an escalation request): the prompt says it stays in the sandbox, and
 approving it only lifts Moderate's protection of credential and Corbanu files
 for that one command. A write outside your writable folders, or network your

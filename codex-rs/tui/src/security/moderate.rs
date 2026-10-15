@@ -11,7 +11,8 @@
 //!   protected level without the `source_envelopes` labels, so Moderate is
 //!   not saved without them;
 //! - model keys through the credential broker, from the next start (D2);
-//! - spawned agents with Moderate enforced (D5).
+//! - spawned agents with Moderate enforced (D5), and `corbanu exec` or
+//!   `review` started by an agent command (#766).
 //!
 //! Core's rules apply as soon as the person confirms; the broker at the next
 //! start (D4).
@@ -94,7 +95,7 @@ pub(crate) fn rows(facts: Facts) -> Vec<(&'static str, String)> {
         ),
         (
             "Child agents",
-            "agents started in this Corbanu Terminal (/spawn and the agent tools) run with Moderate enforced; Claude panes are refused because Claude Code runs outside the sandbox, unless contained_external_agents and secretless_agent_launch run them in it".to_string(),
+            "agents started in this Corbanu Terminal (/spawn and the agent tools), and on macOS and Linux `corbanu exec` or `review` started by an agent command, run with Moderate enforced; Claude panes are refused because Claude Code runs outside the sandbox, unless contained_external_agents and secretless_agent_launch run them in it".to_string(),
         ),
         (
             "Kill switch",
@@ -102,6 +103,11 @@ pub(crate) fn rows(facts: Facts) -> Vec<(&'static str, String)> {
         ),
     ]
 }
+
+/// #739: [`REMOVED`]'s protected-files row while protected launch
+/// (secretless_agent_launch) stays on: its launch contract keeps Corbanu's
+/// own files and some home credential files unreadable to agent commands.
+pub(crate) const REMOVED_PROTECTED_FILES_UNDER_PROTECTED_LAUNCH: &str = "most credential files in your home folder are no longer denied to agent commands, and files that run code later are no longer read-only; your own sandbox settings decide, except that Corbanu's sign-in, vault, config and history, and a few CLI token files (such as .netrc, .aws/credentials and .npmrc), stay unreadable to them (secretless_agent_launch)";
 
 /// What a move from Moderate to Permissive removes at the next start.
 pub(crate) const REMOVED: [(&str, &str); 4] = [
@@ -148,8 +154,8 @@ pub(crate) const REMOVED_FROM_AGGRESSIVE: [(&str, &str); 5] = [
     ),
 ];
 
-/// The inspector's nested-agents row under Moderate (D5, #749).
-pub(crate) const NESTED: &str = "not refused: an agent command can start another agent (`corbanu exec`, `review`). With this Corbanu home it cannot read Corbanu's config, sign-in or security state inside the sandbox, so it stops at start (with secretless_agent_launch on, also when you approve the command); pointed at another Corbanu home it runs at that home's level, because Moderate is not carried over";
+/// The inspector's nested-agents row under Moderate (D5, #749, #766).
+pub(crate) const NESTED: &str = "on macOS and Linux, `corbanu exec` and `review` started by an agent command run with Moderate enforced, also pointed at another Corbanu home; with this Corbanu home, which they cannot write inside the sandbox, they run in a Corbanu home of their own, without your config, sign-in or model keys. Interactive sessions, `app-server`, `mcp-server` and credential commands they start are refused";
 
 /// What stays as configured under Moderate.
 pub(crate) const UNCHANGED: &str = "Unchanged: model and provider, your approval, sandbox, network and web search settings, MCP servers, apps and hooks (they run outside the sandbox), and wallet scopes.";

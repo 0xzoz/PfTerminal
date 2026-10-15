@@ -157,6 +157,18 @@ pub(crate) fn prewarm_turn_label() -> String {
     format!("prewarm:{}", Uuid::new_v4())
 }
 
+/// #403: the warm-up a conversation the user reopens (resume, restart) or
+/// forks (`/side`, editing a message) sends, told apart from a new
+/// conversation's so `/cost` can name it. Still a `prewarm:` label, so anything
+/// that reads warm-ups reads it. The TUI's `/cost` matches the prefix by value;
+/// `reopen_prewarm_label_is_stable` pins it.
+pub(crate) fn reopen_prewarm_turn_label() -> String {
+    format!("{REOPEN_PREWARM_LABEL}{}", Uuid::new_v4())
+}
+
+/// The turn-label prefix of a reopen warm-up; the TUI's `/cost` matches it.
+pub(crate) const REOPEN_PREWARM_LABEL: &str = "prewarm:reopen:";
+
 /// A bounded turn label for the completion assessment of `sub_id`.
 ///
 /// The classifier is a second model request the operator paid for, issued on its
@@ -173,7 +185,13 @@ pub(crate) fn assessment_turn_label(sub_id: &str) -> String {
 /// fine. Keep the prefix and as much of the id as fits.
 fn scoped_turn_label(prefix: &str, sub_id: &str) -> String {
     const LIMIT: usize = 128;
-    let room = LIMIT - prefix.len();
+    // Nested prefixes (`side:agent:review:`) stay far below this; the digest
+    // form below needs room for `-` and 16 hex digits.
+    debug_assert!(
+        prefix.len() <= LIMIT - 17,
+        "turn label prefix too long: {prefix}"
+    );
+    let room = LIMIT.saturating_sub(prefix.len());
     if sub_id.len() <= room {
         return format!("{prefix}{sub_id}");
     }
@@ -331,8 +349,9 @@ pub(crate) struct AccountingOwner {
     pub(crate) thread: ThreadId,
     pub(crate) db: codex_rollout::state_db::StateDbHandle,
     /// Prefixed to the turn label of work recorded for another conversation
-    /// (`review:`, `consolidation:`, `side:`); empty for a session's own.
-    pub(crate) label_prefix: &'static str,
+    /// (`review:`, `consolidation:`, `agent:`, `code-review:`, `side:`,
+    /// `fork:`, nested as in `side:review:`); empty for a session's own.
+    pub(crate) label_prefix: String,
 }
 
 /// The conversation an internal worker with no thread of its own (memory
@@ -473,11 +492,13 @@ pub(crate) async fn attach_scopes(
     client_session: &crate::client::ModelClientSession,
     turn: String,
 ) -> Result<TurnScopes, CodexErr> {
-    // A persisted session records under its own thread. A guardian reviewer,
-    // a memory consolidation agent or a side conversation records under the
-    // conversation it works for, labelled as such (`Session::accounting_owner`).
-    // Any other session has no owner to attribute its attempts to, so it is
-    // left uncollected - named once in the log - and its turns run.
+    // A persisted session records under its own thread. A session with no
+    // thread of its own (a guardian reviewer, a memory consolidation agent, a
+    // sub-agent, a `/side` conversation or another temporary fork) records
+    // under the saved conversation it works for, labelled as such
+    // (`Session::accounting_owner`). Any other session (`exec --ephemeral` and
+    // work for it) is left uncollected - named once in the log - and its turns
+    // run.
     // A ledger that cannot be reached leaves this turn's requests unrecorded;
     // it never stops them.
     let mut candidate = match accounting {
@@ -517,7 +538,7 @@ pub(crate) async fn attach_scopes(
         .map(|owner| (Arc::clone(&owner.db), owner.thread));
     let turn = match &owner {
         Some(owner) if !owner.label_prefix.is_empty() => {
-            scoped_turn_label(owner.label_prefix, &turn)
+            scoped_turn_label(&owner.label_prefix, &turn)
         }
         Some(_) | None => turn,
     };
@@ -734,6 +755,15 @@ pub(crate) fn turn_mode(
                 && !credential_header(&provider.env_http_headers);
             if own_route && attributable {
                 PriceAuthority::ApiKeyRates
+            } else if let Some(route) = crate::config::PricedRoute::at(resolved_endpoint)
+                && attributable
+                && provider.wire_api == codex_model_provider_info::WireApi::Chat
+                && credential == codex_model_provider_info::BillingCredential::ApiKey
+            {
+                // #368: a provider the user configured at a route whose
+                // operator publishes per-token prices for it. The provider id
+                // is the user's own name, so the route is the key.
+                PriceAuthority::RouteRates(route)
             } else {
                 PriceAuthority::Unavailable
             }
@@ -975,6 +1005,8 @@ enum Pricing {
     Anthropic,
     Responses,
     Chat,
+    /// Pay per use on a priced route a user-configured provider reached (#368).
+    Route(crate::config::PricedRoute),
     /// Subscription capacity: record the plan rate and the API equivalent, not spend.
     Plan,
     /// Subscription capacity with no catalogue figure.
@@ -998,6 +1030,12 @@ fn pricing_for(mode: &AccountingMode) -> Pricing {
                 codex_model_provider_info::WireApi::Anthropic => Pricing::Anthropic,
                 codex_model_provider_info::WireApi::Responses => Pricing::Responses,
                 codex_model_provider_info::WireApi::Chat => Pricing::Chat,
+            },
+            // Route rates are quoted for one dialect, Chat Completions.
+            PriceAuthority::RouteRates(route) => match wire_api {
+                codex_model_provider_info::WireApi::Chat => Pricing::Route(*route),
+                codex_model_provider_info::WireApi::Anthropic
+                | codex_model_provider_info::WireApi::Responses => Pricing::Unavailable,
             },
             PriceAuthority::PlanRate => Pricing::Plan,
             PriceAuthority::PlanBasis => Pricing::PlanBasis,
@@ -1039,6 +1077,9 @@ pub(crate) struct Sampling {
     account: Option<codex_state::accounting::AttemptAccount>,
     dialect: Dialect,
     pricing: Pricing,
+    /// The priced route the requests go to, if any (#368): its usage fields
+    /// have the meaning its operator documents, however the provider is named.
+    pub(super) route: Option<crate::config::PricedRoute>,
     /// Pinned to OpenAI's image generation endpoint under API-key rates: priced
     /// from OpenAI's published image rates rather than the chat-model
     /// catalogue, and its body read as an Images API usage report. Any other
@@ -1224,6 +1265,7 @@ impl Sampling {
             },
             dialect,
             pricing: pricing_for(mode),
+            route: crate::config::PricedRoute::at(approved_endpoint),
             image_generation: path_override == Some(prices::IMAGE_GENERATIONS_PATH)
                 && pricing_for(mode) == Pricing::Responses
                 && provider == codex_model_provider_info::OPENAI_PROVIDER_ID,
@@ -1368,6 +1410,9 @@ impl Sampling {
             }
             Pricing::Chat => {
                 prices::chat_original(model, &self.provider, self.scope, dispatched_at)?
+            }
+            Pricing::Route(route) => {
+                prices::route_original(route, model, &self.provider, self.scope, dispatched_at)?
             }
         };
         // Pay per use with no attributable rate still binds its basis and

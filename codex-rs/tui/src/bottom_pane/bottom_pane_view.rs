@@ -70,6 +70,19 @@ pub(crate) trait BottomPaneView: Renderable {
         false
     }
 
+    /// #787: changes whenever this request view starts showing another
+    /// request (its queue advanced), so the pane knows a new request just
+    /// appeared and drops the keys of the moment that follows.
+    /// Every view that answers a request returns a value from
+    /// [`next_shown_request_generation`], taken anew for each request.
+    fn shown_request_generation(&self) -> u64 {
+        0
+    }
+
+    /// #787: the pane dropped input that reached this request in the moment
+    /// after it appeared. Require navigation before Enter and say why.
+    fn on_early_input(&mut self) {}
+
     /// Stable identifier for views that need external refreshes while open.
     fn view_id(&self) -> Option<&'static str> {
         None
@@ -185,4 +198,11 @@ pub(crate) trait BottomPaneView: Renderable {
     fn next_frame_delay(&self) -> Option<std::time::Duration> {
         None
     }
+}
+
+/// #787: a value no other shown request had (see
+/// [`BottomPaneView::shown_request_generation`]).
+pub(crate) fn next_shown_request_generation() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }

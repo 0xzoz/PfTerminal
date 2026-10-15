@@ -554,27 +554,38 @@ async fn accounting_chat_native_spawned_role_children_and_fork() -> anyhow::Resu
 #[tokio::test]
 async fn accounting_chat_native_invalid_evidence_no_repair() -> anyhow::Result<()> {
     // Invalid usage only. A malformed chunk is a provider stream error, handled
-    // as one whether or not accounting is on.
-    for bad in [json!({"usage":{"prompt_tokens":-1}}).to_string(),
-        json!({"usage":{"prompt_tokens":100,"prompt_tokens_details":{"cached_tokens":101}}}).to_string(),
-        json!({"usage":{"completion_tokens":40,"completion_tokens_details":{"reasoning_tokens":41}}}).to_string(),
-        json!({"usage":{"prompt_tokens":100,"completion_tokens":40,"total_tokens":139}}).to_string()] {
+    // as one whether or not accounting is on. A reasoning count above the
+    // output count is not invalid evidence: it is recorded as not reported
+    // (#786; `accounting_chat_reasoning_above_output_keeps_the_record`).
+    for bad in [
+        json!({"usage":{"prompt_tokens":-1}}).to_string(),
+        json!({"usage":{"prompt_tokens":100,"prompt_tokens_details":{"cached_tokens":101}}})
+            .to_string(),
+        json!({"usage":{"prompt_tokens":100,"completion_tokens":40,"total_tokens":139}})
+            .to_string(),
+    ] {
         let server = MockServer::start().await;
         let mut gate = Gate::start(GateRoutes::ChatOnly).await?;
         let test = builder(gate.endpoint.clone(), enabled(&gate.endpoint))
             .with_config(|c| c.model_provider.stream_max_retries = Some(1))
-            .build_with_auto_env(&server).await?;
+            .build_with_auto_env(&server)
+            .await?;
         submit(&test).await?;
         let held = gate.next().await?;
         held.chunks.send(event(usage())).await?;
         let db = test.codex.state_db().unwrap();
         wait_observations(&db, /*count*/ 1).await?;
         let before = observations(&db).await?;
-        held.chunks.send(format!("data: {bad}\n\n") + &ending("stop")).await?;
+        held.chunks
+            .send(format!("data: {bad}\n\n") + &ending("stop"))
+            .await?;
         let events = terminal(&test).await?;
         // Invalid usage closes collection; the stream itself carries on.
         core_test_support::assert_accounting_gap(&events);
-        assert!(!events.iter().any(|e| matches!(e, EventMsg::StreamError(_))), "accounting failure must not cause a reconnect");
+        assert!(
+            !events.iter().any(|e| matches!(e, EventMsg::StreamError(_))),
+            "accounting failure must not cause a reconnect"
+        );
         assert_eq!(observations(&db).await?, before);
         assert_eq!(attempts(&db).await?.len(), 1);
         gate.no_pending();
