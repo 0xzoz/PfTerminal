@@ -83,22 +83,40 @@ type Origins = Vec<(PathBuf, NestedAgents)>;
 /// The Aggressive origins and the Moderate origin of this process.
 ///
 /// With a Moderate origin, an Aggressive origin found only because its level
-/// cannot be read is dropped when Moderate's rules explain that: it is the
-/// marked home itself, or a home denied whole (its runtime folder cannot be
-/// listed, as the protected-file rules deny other Corbanu homes). Any other
-/// such origin stays, so a marker an agent command made elsewhere never
-/// relaxes a refusal (Aggressive set in Core also keeps the level file
-/// unreadable).
+/// cannot be read is dropped when Moderate's rules explain that and the
+/// evidence cannot come from an agent command: it is the marked home itself,
+/// or a home denied whole (its runtime folder cannot be listed, as the
+/// protected-file rules deny the other default Corbanu homes) while the
+/// marked home is one of the account's default homes, where an agent command
+/// cannot make a marker (the runtime folder of the active home is read-only
+/// to it, the others are denied whole). Every other such origin stays, so a
+/// marker an agent command made elsewhere never relaxes a refusal.
 fn detect() -> Result<(Origins, Option<PathBuf>), String> {
     let homes = candidate_homes()?;
     let moderate = moderate_origin(&homes)?;
     let mut origins = nested_origins(homes);
     if let Some(marked) = &moderate {
+        let default_marked = default_homes().iter().any(|home| same_folder(home, marked));
         origins.retain(|(home, _)| {
-            level_reads_aggressive(home) || !(same_folder(home, marked) || denied_whole(home))
+            level_reads_aggressive(home) || !explained_by_moderate(home, marked, default_marked)
         });
     }
     Ok((origins, moderate))
+}
+
+/// Whether Moderate's rules on `marked` explain why `home`'s level cannot be
+/// read (see [`detect`]).
+fn explained_by_moderate(home: &Path, marked: &Path, default_marked: bool) -> bool {
+    same_folder(home, marked) || (default_marked && denied_whole(home))
+}
+
+/// The account's default Corbanu homes, from the account database (not
+/// `$HOME`, which an agent command can change).
+fn default_homes() -> Vec<PathBuf> {
+    match account_home() {
+        Ok(Some(account)) => vec![account.join(".corbanu"), account.join(".pfterminal")],
+        Ok(None) | Err(_) => Vec::new(),
+    }
 }
 
 /// Whether `home`'s stored level, or its rule file, can be read here and

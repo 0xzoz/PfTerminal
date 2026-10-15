@@ -204,3 +204,36 @@ fn moderate_registry_keeps_only_marked_homes() {
         vec![kept.path().to_path_buf()]
     );
 }
+
+/// #766 round 2: a home denied whole is explained by Moderate only when the
+/// marked home is a default home, where no agent command can make a marker;
+/// the marked home itself always is.
+#[cfg(unix)]
+#[test]
+fn only_moderate_explains_an_unreadable_level() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let marked = root.path().join("marked");
+    let other = root.path().join("other");
+    for home in [&marked, &other] {
+        std::fs::create_dir_all(home.join("tmp")).unwrap();
+    }
+    assert!(explained_by_moderate(
+        &marked, &marked, /*default_marked*/ false
+    ));
+    assert!(!explained_by_moderate(
+        &other, &marked, /*default_marked*/ true
+    ));
+    // Denied whole, as the protected-file rules deny other default homes.
+    std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let denied = std::fs::read_dir(other.join("tmp")).is_err();
+    assert_eq!(
+        (
+            explained_by_moderate(&other, &marked, /*default_marked*/ true),
+            explained_by_moderate(&other, &marked, /*default_marked*/ false),
+        ),
+        (denied, false)
+    );
+    std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o755)).unwrap();
+}

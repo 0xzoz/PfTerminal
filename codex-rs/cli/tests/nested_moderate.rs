@@ -69,6 +69,10 @@ struct Setup {
     untrusted_first: bool,
     /// Whether Core can register the home in the account's registry.
     registry_writable: bool,
+    /// The Corbanu home is the account's default `~/.corbanu`, beside a
+    /// `~/.pfterminal` that stores a level and a vault (denied whole to agent
+    /// commands by the protected-file rules), with `HOME` set to the account.
+    default_home: bool,
 }
 
 impl Setup {
@@ -78,6 +82,7 @@ impl Setup {
             target,
             untrusted_first: false,
             registry_writable: true,
+            default_home: false,
         }
     }
 }
@@ -167,8 +172,9 @@ async fn run(setup: Setup) -> Result<Run> {
         target,
         untrusted_first,
         registry_writable,
+        default_home,
     } = setup;
-    let home = TempDir::new()?;
+    let temp_home = TempDir::new()?;
     let root = TempDir::new()?;
     // Resolved as the session resolves its folder (macOS temp folders sit
     // behind a symlink).
@@ -178,13 +184,26 @@ async fn run(setup: Setup) -> Result<Run> {
     let account = root_path.join("account");
     std::fs::create_dir_all(&cwd)?;
     std::fs::create_dir_all(&account)?;
+    let home = if default_home {
+        let other = account.join(".pfterminal");
+        std::fs::create_dir_all(other.join("secrets"))?;
+        std::fs::create_dir_all(other.join("tmp"))?;
+        std::fs::write(
+            other.join("security_level.toml"),
+            "version = 1\nlevel = \"permissive\"\n",
+        )?;
+        account.join(".corbanu")
+    } else {
+        temp_home.path().to_path_buf()
+    };
+    std::fs::create_dir_all(&home)?;
     if !registry_writable {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&account, std::fs::Permissions::from_mode(0o555))?;
     }
     // A vault store exists, as it does once the person has used /vault.
-    std::fs::create_dir_all(home.path().join("secrets"))?;
-    std::fs::write(home.path().join("secrets/probe.txt"), VAULT_CANARY)?;
+    std::fs::create_dir_all(home.join("secrets"))?;
+    std::fs::write(home.join("secrets/probe.txt"), VAULT_CANARY)?;
 
     let server = MockServer::start().await;
     let sequence = Sequence {
@@ -206,7 +225,7 @@ async fn run(setup: Setup) -> Result<Run> {
     let script = match target {
         Target::SameHome => format!("{nested} 2>&1"),
         Target::MadeUpMarker => format!(
-            "mkdir -p made-up/tmp && : > made-up/tmp/security-moderate-marker && chmod 000 made-up/tmp/security-moderate-marker && CORBANU_SECURITY_ORIGIN=\"$PWD/made-up\" {nested} 2>&1"
+            "mkdir -p made-up/tmp && : > made-up/tmp/security-moderate-marker && chmod 000 made-up/tmp/security-moderate-marker && CORBANU_SECURITY_ORIGIN=\"$PWD/made-up\" {nested} 2>&1; echo \"exit=$?\"; env -u CORBANU_HOME -u PFTERMINAL_HOME CODEX_HOME=\"$PWD/made-up\" {nested} 2>&1; echo \"exit=$?\""
         ),
         Target::NotAgents => [
             "resume --last",
@@ -264,7 +283,7 @@ async fn run(setup: Setup) -> Result<Run> {
         Level::Moderate => "[security]\nversion = 1\nlevel = \"moderate\"\n",
         Level::AggressiveInCore => {
             std::fs::write(
-                home.path().join("security_level.toml"),
+                home.join("security_level.toml"),
                 "version = 1\nlevel = \"aggressive\"\n",
             )?;
             "[security]\nversion = 1\nlevel = \"aggressive\"\n"
@@ -277,7 +296,7 @@ async fn run(setup: Setup) -> Result<Run> {
             "{level_config}\n[sandbox_workspace_write]\nnetwork_access = true\n\n[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
             cwd.display()
         ))
-        .write(home.path())?;
+        .write(&home)?;
 
     let mut command = assert_cmd::Command::new(&bin);
     for name in [
@@ -288,9 +307,12 @@ async fn run(setup: Setup) -> Result<Run> {
     ] {
         command.env_remove(name);
     }
+    if default_home {
+        command.env("HOME", &account);
+    }
     let output = command
         .current_dir(&cwd)
-        .env("CODEX_HOME", home.path())
+        .env("CODEX_HOME", &home)
         .env("CORBANU_TEST_ACCOUNT_HOME", &account)
         .env("CORBANU_TEST_NO_NATIVE_KEYRING", "1")
         .args(["exec", "--skip-git-repo-check", OUTER_PROMPT])
@@ -444,21 +466,43 @@ async fn issue_766_same_home_without_registry_stays_held() -> Result<()> {
 }
 
 /// Aggressive in Core refuses nested launches (its level file is unreadable
-/// to agent commands). A marker an agent command made in a home of its own
-/// and named in `CORBANU_SECURITY_ORIGIN` does not turn that into a run held
-/// only to Moderate.
+/// to agent commands). A marker an agent command made in a home of its own,
+/// named in `CORBANU_SECURITY_ORIGIN` or as the run's `CODEX_HOME`, does not
+/// turn that into a run held only to Moderate, also beside another default
+/// home the rules deny whole.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn issue_766_made_up_marker_does_not_relax_aggressive() -> Result<()> {
-    let run = run(Setup::new(Level::AggressiveInCore, Target::MadeUpMarker)).await?;
+    let run = run(Setup {
+        default_home: true,
+        ..Setup::new(Level::AggressiveInCore, Target::MadeUpMarker)
+    })
+    .await?;
     let output = run.command_output();
     assert_eq!(
         (
-            output.contains("while security level Aggressive is enforced"),
+            output
+                .matches("while security level Aggressive is enforced")
+                .count(),
+            output.matches("exit=1").count(),
             output.contains("Moderate"),
             run.nested_request().is_some(),
         ),
-        (true, false, false),
+        (2, 2, false, false),
         "{output}"
     );
+    Ok(())
+}
+
+/// The account's default home beside another default home that stores a
+/// level and a vault (denied whole to agent commands, so its level reads as
+/// unreadable): the nested run still starts, held to Moderate.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_766_default_home_beside_another_stored_level_starts_held() -> Result<()> {
+    let run = run(Setup {
+        default_home: true,
+        ..Setup::new(Level::Moderate, Target::SameHome)
+    })
+    .await?;
+    assert_held_to_moderate(&run);
     Ok(())
 }

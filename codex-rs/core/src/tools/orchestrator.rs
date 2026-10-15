@@ -1343,7 +1343,14 @@ fn post_taint_read_denials(
         )
         .runtime_only();
         // #766: the approval lifts no rule a nested `corbanu exec` relies on.
-        denials.mark_moderate(tool_ctx.turn.config.codex_home.as_path());
+        if !tool_ctx
+            .turn
+            .config
+            .permissions
+            .launch_enforces_aggressive()
+        {
+            denials.mark_moderate(tool_ctx.turn.config.codex_home.as_path());
+        }
         tracing::info!(
             target: "codex_core::security::tainted_action",
             taint_generation = state.taint_generation,
@@ -1416,8 +1423,16 @@ fn post_taint_read_denials(
         denials.deny_home_listing();
         denials.deny_keychain_services();
     }
-    // #766: `corbanu exec` started by this command runs with Moderate.
-    if state.level == codex_security_policy::SecurityLevel::Moderate {
+    // #766: `corbanu exec` started by this command runs with Moderate; not
+    // where the launch enforces Aggressive, whose own nested-launch rules
+    // apply (its level file may be unreadable under Core's Moderate rules).
+    if state.level == codex_security_policy::SecurityLevel::Moderate
+        && !tool_ctx
+            .turn
+            .config
+            .permissions
+            .launch_enforces_aggressive()
+    {
         denials.mark_moderate(tool_ctx.turn.config.codex_home.as_path());
     }
     let (Some(exec_server), Some(materialized)) =
