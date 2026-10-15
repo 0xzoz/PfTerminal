@@ -350,6 +350,7 @@ async fn run_remote_compaction_request_v2(
         .min(MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES);
     let mut retries = 0;
     let mut unresolvable_item_retries = 0;
+    let mut home_wait = crate::home_access::HomeWait::default();
     loop {
         ensure_gpu_runtime_provider_active(sess, turn_context).await?;
         // #509: each attempt is a model request on the turn's key.
@@ -392,6 +393,17 @@ async fn run_remote_compaction_request_v2(
                 ) => {}
             Err(err) if !err.is_retryable() => return Err(err),
             Err(err) => {
+                // #616: wait out an unreadable home without using retries.
+                let Err(err) = crate::home_access::wait_if_home_unreadable(
+                    &mut home_wait,
+                    sess,
+                    turn_context,
+                    err,
+                )
+                .await
+                else {
+                    continue;
+                };
                 handle_retryable_response_stream_error(
                     &mut retries,
                     max_retries,

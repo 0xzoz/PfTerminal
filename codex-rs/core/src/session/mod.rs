@@ -4714,6 +4714,20 @@ impl Session {
             && let Err(e) = live_thread.append_items(items).await
         {
             error!("failed to record rollout items: {e:#}");
+            // #616: the writer keeps unwritten items for its next flush; record
+            // why the home could not be written.
+            let message = format!("{e:#}");
+            if crate::home_access::is_operation_not_permitted(&message)
+                && let Ok(home) = crate::config::find_codex_home()
+            {
+                tokio::task::spawn_blocking(move || {
+                    crate::home_access::record_home_access_failure(
+                        "rollout write",
+                        home.as_path(),
+                        &message,
+                    )
+                });
+            }
         }
     }
 

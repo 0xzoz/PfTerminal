@@ -18,6 +18,7 @@ pub mod crew;
 pub mod dynamic_tools;
 pub mod error;
 pub mod exec_output;
+pub mod home_unreadable;
 pub mod items;
 mod legacy_events;
 pub mod mcp;

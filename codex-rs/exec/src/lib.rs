@@ -302,8 +302,11 @@ pub async fn run_main_enforced(
         prompt,
         output_schema: output_schema_path,
         account,
+        home_wait_secs,
         config_overrides,
     } = cli;
+    // #616: wait out an unreadable Corbanu home instead of ending the turn.
+    codex_core::home_access::set_home_wait_window(std::time::Duration::from_secs(home_wait_secs));
     let shared = shared.into_inner();
     let SharedCliOptions {
         images,

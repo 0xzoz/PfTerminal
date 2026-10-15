@@ -1489,6 +1489,46 @@ async fn corbanu_internal_helper_failure_keeps_its_message_redacted() {
     assert!(!message.contains(TOKEN), "{message}");
 }
 
+/// #616: only Corbanu's own helper exiting 75 marks an unreadable home, the
+/// failure `corbanu exec` waits out.
+#[cfg(unix)]
+#[tokio::test]
+async fn internal_helper_exit_75_marks_an_unreadable_home() {
+    use std::os::unix::fs::PermissionsExt;
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let path = tempdir.path().join("corbanu");
+    std::fs::write(
+        &path,
+        "#!/bin/sh\necho 'Corbanu could not read its home (Operation not permitted)' >&2\nexit 75\n",
+    )
+    .expect("write helper");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let config = |args: &[&str]| -> ModelProviderAuthInfo {
+        serde_json::from_value(json!({
+            "command": path,
+            "args": args,
+            "timeout_ms": 10_000,
+            "cwd": tempdir.path(),
+        }))
+        .expect("provider auth config should deserialize")
+    };
+    let mut marked = Vec::new();
+    for args in [&["internal-claude-oauth-token"][..], &[]] {
+        let error = loop {
+            let error = crate::auth::validate_provider_auth_command(&config(args))
+                .await
+                .expect_err("failing helper");
+            // Linux may still report the just-written helper busy.
+            if !error.to_string().contains("Text file busy") {
+                break error;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+        marked.push(codex_protocol::home_unreadable::is_home_unreadable(&error));
+    }
+    assert_eq!(marked, vec![true, false]);
+}
+
 #[tokio::test]
 async fn unauthorized_recovery_uses_external_refresh_for_bearer_manager() {
     let script = ProviderAuthScript::new(&["provider-token", "refreshed-provider-token"]).unwrap();

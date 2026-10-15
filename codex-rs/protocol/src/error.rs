@@ -402,6 +402,13 @@ impl CodexErr {
         }
     }
 
+    /// #616: whether this failure came from an unreadable Corbanu home
+    /// (see [`crate::home_unreadable`]).
+    pub fn is_home_unreadable(&self) -> bool {
+        matches!(self.details(), CodexErrorDetails::Io(error)
+            if crate::home_unreadable::is_home_unreadable(error))
+    }
+
     pub fn retry_delay(&self) -> Option<Duration> {
         self.retry_delay
     }

@@ -9,6 +9,7 @@ mod auth_env;
 mod completion_backfill;
 mod ephemeral;
 mod hooks;
+mod home_unreadable_wait;
 mod mcp_required_exit;
 mod named_account_login_restrictions;
 mod nested_launch;
