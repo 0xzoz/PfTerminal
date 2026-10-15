@@ -518,7 +518,7 @@ fn issue814_chat_normalization_remains_unchanged() -> anyhow::Result<()> {
                 ..Default::default()
             },
             codex_model_provider_info::OPENAI_PROVIDER_ID,
-            None,
+            /*route*/ None,
         )?;
         assert_eq!(
             (value.output, value.reasoning),
@@ -538,7 +538,7 @@ async fn issue814_replay_rejection_is_atomic_and_normalized_report_retains_charg
     // This is a disposable synthetic ledger, with no transport, credential or charge action.
     let fixture = Fixture::new().await?;
     let owner = fixture.deferred.session.thread_id;
-    let store = AccountingStore::open(&fixture.db, 0).await?;
+    let store = AccountingStore::open(&fixture.db, /*as_of*/ 0).await?;
     let attempt = Attempt {
         attempt_id: Uuid::new_v4(),
         request_id: Uuid::new_v4(),
@@ -552,7 +552,7 @@ async fn issue814_replay_rejection_is_atomic_and_normalized_report_retains_charg
         dispatched_at_ms: 0.try_into()?,
         account: None,
     };
-    store.admit(owner, &attempt, &[], 0).await?;
+    store.admit(owner, &attempt, &[], /*as_of*/ 0).await?;
     let normalized = patch(
         ResponsesUsagePatch {
             input_tokens: ResponsesTokenPresence::Number(100),
@@ -574,14 +574,14 @@ async fn issue814_replay_rejection_is_atomic_and_normalized_report_retains_charg
         patch: raw,
     };
     let error = store
-        .observe(owner, &attempt, &[observation.clone()], 0)
+        .observe(owner, &attempt, &[observation.clone()], /*as_of*/ 0)
         .await
         .unwrap_err();
     assert!(format!("{error:#}").contains("reasoning exceeds output"));
     assert_eq!(fixture.rows::<Observation>(OBSERVATIONS).await?, vec![]);
     observation.patch = normalized;
     let quote = store
-        .observe(owner, &attempt, &[observation.clone()], 0)
+        .observe(owner, &attempt, &[observation.clone()], /*as_of*/ 0)
         .await?;
     assert_eq!(
         quote.usage,
