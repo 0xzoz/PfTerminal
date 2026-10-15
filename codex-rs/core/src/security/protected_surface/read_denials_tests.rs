@@ -2651,6 +2651,7 @@ fn issue_766_no_marker_where_aggressive_is_stored() {
 /// #766 round 4: where Aggressive is stored, a marker someone made
 /// unreadable is made readable again (it would pass for Moderate's on
 /// Linux), and nothing is marked.
+#[cfg(target_os = "linux")]
 #[test]
 fn issue_766_unreadable_marker_is_restored_where_aggressive_is_stored() {
     use codex_security_level::level;

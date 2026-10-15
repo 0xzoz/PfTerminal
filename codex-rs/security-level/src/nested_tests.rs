@@ -238,20 +238,43 @@ fn only_moderate_explains_an_unreadable_level() {
     std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-/// A marker made unreadable outside Moderate is given its permissions back.
-#[cfg(unix)]
+/// A marker nobody can read is given read permission again (Linux), but a
+/// link, a hard link or a private file at its place is left alone.
+#[cfg(target_os = "linux")]
 #[test]
 fn an_unreadable_marker_is_made_readable_again() {
     use std::os::unix::fs::PermissionsExt;
 
+    let mode = |path: &std::path::Path| {
+        std::fs::symlink_metadata(path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777
+    };
     let home = tempfile::tempdir().unwrap();
     keep_moderate_marker_readable(home.path()).unwrap();
     let marker = prepare_moderate_marker(home.path()).unwrap();
     std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o000)).unwrap();
     keep_moderate_marker_readable(home.path()).unwrap();
-    assert_eq!(
-        std::fs::metadata(&marker).unwrap().permissions().mode() & 0o777,
-        0o644
-    );
+    assert_eq!(mode(&marker), 0o644);
     assert!(!moderate_marker_denied(home.path()));
+
+    // A private file of the user's (0600) is not "unreadable".
+    std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o600)).unwrap();
+    keep_moderate_marker_readable(home.path()).unwrap();
+    assert_eq!(mode(&marker), 0o600);
+
+    // A link or a hard link to another file: its target keeps its mode.
+    let key = home.path().join("key");
+    std::fs::write(&key, "").unwrap();
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o000)).unwrap();
+    std::fs::remove_file(&marker).unwrap();
+    std::os::unix::fs::symlink(&key, &marker).unwrap();
+    keep_moderate_marker_readable(home.path()).unwrap();
+    assert_eq!(mode(&key), 0o000);
+    std::fs::remove_file(&marker).unwrap();
+    std::fs::hard_link(&key, &marker).unwrap();
+    keep_moderate_marker_readable(home.path()).unwrap();
+    assert_eq!(mode(&key), 0o000);
 }

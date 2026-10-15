@@ -223,25 +223,45 @@ fn moderate_marker(home: &Path) -> io::Result<bool> {
 }
 
 /// Core, before an agent command not under Moderate runs where the
-/// protected-file rules apply: an existing marker that cannot be read under
-/// its own permissions is given them back (0644), so it never passes for
-/// Moderate's. Links and folders are left alone (they never count).
+/// protected-file rules apply (Linux, where an unreadable regular file is the
+/// evidence; on macOS only Seatbelt's EPERM is): a marker that nobody can
+/// read is given read permission again (0644), so it never passes for
+/// Moderate's. Only the marker itself: it is opened without following a
+/// link and changed through that open file, and only when it is a regular
+/// file of this user with one link and no read bit (never a link, a hard
+/// link to another file, or a private file of the user's).
 pub fn keep_moderate_marker_readable(codex_home: &Path) -> io::Result<()> {
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::MetadataExt;
+        use std::os::unix::fs::OpenOptionsExt;
         use std::os::unix::fs::PermissionsExt;
 
-        let marker = codex_home.join(MODERATE_MARKER);
-        let metadata = match std::fs::symlink_metadata(&marker) {
-            Ok(metadata) => metadata,
+        let file = match std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_PATH | libc::O_NOFOLLOW)
+            .open(codex_home.join(MODERATE_MARKER))
+        {
+            Ok(file) => file,
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(err) => return Err(err),
         };
-        if metadata.file_type().is_file() && metadata.permissions().mode() & 0o444 != 0o444 {
-            std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o644))?;
+        let metadata = file.metadata()?;
+        // SAFETY: geteuid has no preconditions.
+        let user = unsafe { libc::geteuid() };
+        if metadata.file_type().is_file()
+            && metadata.nlink() == 1
+            && metadata.uid() == user
+            && metadata.mode() & 0o444 == 0
+        {
+            std::fs::set_permissions(
+                format!("/proc/self/fd/{}", file.as_raw_fd()),
+                std::fs::Permissions::from_mode(0o644),
+            )?;
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(not(target_os = "linux"))]
     let _ = codex_home;
     Ok(())
 }

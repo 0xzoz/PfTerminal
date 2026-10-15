@@ -153,7 +153,8 @@ async fn issue_766_only_moderate_denies_the_marker() -> anyhow::Result<()> {
         (SecurityLevel::Moderate, true, Some(0o644)),
         (SecurityLevel::Permissive, false, Some(0o644)),
         (SecurityLevel::Aggressive, false, Some(0o644)),
-        // Made readable again where the rules apply without Moderate.
+        // Made readable again where the rules apply without Moderate
+        // (Linux).
         (SecurityLevel::Aggressive, false, Some(0o000)),
     ] {
         // Boxed: the session future is large for the test thread's stack.
@@ -170,7 +171,14 @@ async fn issue_766_only_moderate_denies_the_marker() -> anyhow::Result<()> {
             (SecurityLevel::Moderate, true, Some(0o644), true, true),
             (SecurityLevel::Permissive, false, Some(0o644), true, true),
             (SecurityLevel::Aggressive, false, Some(0o644), true, true),
-            (SecurityLevel::Aggressive, false, Some(0o000), true, true),
+            // Linux only: on macOS such a file never passes for Moderate's.
+            (
+                SecurityLevel::Aggressive,
+                false,
+                Some(0o000),
+                true,
+                cfg!(target_os = "linux")
+            ),
         ]
     );
     Ok(())

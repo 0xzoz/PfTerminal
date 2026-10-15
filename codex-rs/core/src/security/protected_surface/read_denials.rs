@@ -808,12 +808,10 @@ impl ReadDenials {
     /// #766: where the protected-file rules apply but Moderate does not mark
     /// the home, a marker someone made unreadable is made readable again, so
     /// it never passes for Moderate's (on Linux an unreadable file is the
-    /// evidence). The file stays: a Moderate session on this home may hold
-    /// it masked for a running command.
+    /// evidence; see `nested::keep_moderate_marker_readable`). The file
+    /// stays: a Moderate session on this home may hold it masked for a
+    /// running command.
     pub(crate) fn keep_moderate_marker_readable(codex_home: &Path) {
-        if !cfg!(any(target_os = "macos", target_os = "linux")) {
-            return;
-        }
         if let Err(err) = codex_security_level::nested::keep_moderate_marker_readable(codex_home) {
             tracing::warn!("could not make the Moderate marker readable: {err}");
         }
