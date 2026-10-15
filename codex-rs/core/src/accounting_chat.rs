@@ -362,14 +362,25 @@ pub(super) fn legacy_eligible(
 /// provider pointed at another base URL gets the same reading; a report whose
 /// writes fall outside the prompt fails replay rather than being mispriced.
 ///
+/// Moonshot's Kimi Open Platform documents `cache_write_tokens` as the part of
+/// `prompt_tokens` written to the cache, apart from the cached part
+/// (platform.kimi.ai/docs/api/chat, usage fields), so it is kept on that route
+/// (`route`), whatever the user named the provider that reached it.
+///
 /// Every other route leaves the cache-write count unknown, reported or not: the
-/// field's meaning is only established for OpenRouter and OpenAI (a subset of
-/// the prompt). A price sheet that states writes free bills written tokens as
-/// ordinary input, and a gateway reporting writes outside the prompt count would
-/// fail replay.
+/// field's meaning is only established for OpenRouter, OpenAI and Moonshot (a
+/// subset of the prompt). A price sheet that states writes free bills written
+/// tokens as ordinary input, and a gateway reporting writes outside the prompt
+/// count would fail replay.
+///
+/// #786: a reasoning count above the output count it is part of is not a count
+/// this client can state (OpenRouter's MiniMax M3 reported 37 reasoning tokens
+/// of 36 output). It is recorded as not reported, and the rest of the report,
+/// the charge included, is kept; replay would otherwise refuse the whole record.
 pub(super) fn patch(
     usage: codex_api::ChatUsagePatch,
     provider_id: &str,
+    route: Option<crate::config::PricedRoute>,
 ) -> anyhow::Result<codex_state::accounting::Patch> {
     use codex_api::ChatTokenPresence;
     use codex_state::accounting::Presence;
@@ -380,15 +391,31 @@ pub(super) fn patch(
             ChatTokenPresence::Number(value) => Presence::Number(value.try_into()?),
         })
     };
+    let output = presence(usage.output_tokens)?;
+    let mut reasoning = presence(usage.reasoning_tokens)?;
+    if let (Presence::Number(reasoning_count), Presence::Number(output_count)) = (reasoning, output)
+        && i64::from(reasoning_count) > i64::from(output_count)
+    {
+        tracing::debug!(
+            target: "codex_core::accounting",
+            "reasoning count above the output count; recorded as not reported"
+        );
+        reasoning = Presence::Missing;
+    }
     Ok(codex_state::accounting::Patch {
         input: presence(usage.input_tokens)?,
         read: presence(usage.cached_tokens)?,
-        write: match provider_id {
-            codex_model_provider_info::OPENROUTER_PROVIDER_ID => match usage.cache_write_tokens {
-                ChatTokenPresence::Missing => Presence::Number(0.try_into()?),
-                other => presence(other)?,
-            },
-            codex_model_provider_info::OPENAI_PROVIDER_ID => presence(usage.cache_write_tokens)?,
+        write: match (provider_id, route) {
+            (codex_model_provider_info::OPENROUTER_PROVIDER_ID, _) => {
+                match usage.cache_write_tokens {
+                    ChatTokenPresence::Missing => Presence::Number(0.try_into()?),
+                    other => presence(other)?,
+                }
+            }
+            (codex_model_provider_info::OPENAI_PROVIDER_ID, _)
+            | (_, Some(crate::config::PricedRoute::MoonshotOpenPlatform)) => {
+                presence(usage.cache_write_tokens)?
+            }
             _ => Presence::Missing,
         },
         // OpenRouter and the Corbanu API state what they charged with every
@@ -403,8 +430,8 @@ pub(super) fn patch(
         .then_some(usage.billed_usd)
         .flatten()
         .and_then(|text| codex_state::accounting::Decimal::try_from(text).ok()),
-        output: presence(usage.output_tokens)?,
-        reasoning: presence(usage.reasoning_tokens)?,
+        output,
+        reasoning,
         total: presence(usage.total_tokens)?,
         refused_status: None,
     })

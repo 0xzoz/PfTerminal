@@ -66,11 +66,11 @@ updated: 2026-10-14
       `an_uncollected_session_is_named_once` plus a new sub-agent guard).
 - [x] Gate: [gate.md](../../../../qa/portfolio/agent-cost-accounting/pf-60-s06/gate.md); PR #793 at code head
       `604fe9c89d`; plan activation in #790.
+- [x] Travis accepted S06 as limited testing (2026-10-14). #400 and #401 stay open until S10's code-blind run.
 
 ## Remaining
 
 - [ ] Code-blind functional design frozen before test-result disclosure (PF-60-S10).
-- [ ] Travis accepts S06; #400 and #401 closed on acceptance.
 
 ## Verification
 
@@ -85,6 +85,7 @@ updated: 2026-10-14
 
 - [x] Implementation commits recorded: `1bb8e8d834`, `604fe9c89d` (PR #793).
 - [x] Final-tree test output linked (gate).
-- [ ] Code-blind handoff checker passes, or explicit limited-testing agreement/blocker recorded; no automatic human acceptance.
+- [x] Limited-testing agreement recorded: Travis, 2026-10-14 (comment on #400), accepted S06 as limited testing; the
+      code-blind cases run in PF-60-S10, which may still reopen it. No automatic human acceptance.
 - [ ] `Done` and `Remaining` ledgers reflect reality; #400 and #401 closed.
 - [ ] Completed record moved to `docs/sprints/archive/portfolio-agent-cost-accounting-followups/`.

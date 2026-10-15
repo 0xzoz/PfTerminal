@@ -159,7 +159,7 @@ impl codex_api::ChatUsageObserver for ResponseEvidence {
                         attempt,
                         self.source,
                         position,
-                        super::chat::patch(usage, &self.sampling.provider)?,
+                        super::chat::patch(usage, &self.sampling.provider, self.sampling.route)?,
                     )
                     .await
             }

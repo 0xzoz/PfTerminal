@@ -841,3 +841,79 @@ async fn accounting_chat_openrouter_records_the_reported_charge() -> anyhow::Res
     }
     Ok(())
 }
+
+/// #368: Moonshot bills K3 cache writes by the lifetime a request names, and
+/// five minutes when it names none. This client's Chat Completions request
+/// names none, which is why the Moonshot route is priced at the five-minute
+/// rate (`accounting_prices::MOONSHOT_OPEN_PLATFORM_RATES`).
+#[tokio::test]
+async fn accounting_chat_requests_name_no_cache_lifetime() -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    let endpoint = format!("{}/v1", server.uri());
+    mount(&server, success(usage())).await;
+    let test = builder(endpoint.clone(), enabled(&endpoint))
+        .build_with_auto_env(&server)
+        .await?;
+    test.submit_turn("cache lifetime").await?;
+    let requests = server.received_requests().await.unwrap();
+    assert!(!requests.is_empty());
+    for request in requests {
+        let body: Value = serde_json::from_slice(&request.body)?;
+        assert!(body.get("prompt_cache_options").is_none(), "{body}");
+    }
+    stop(&test).await;
+    Ok(())
+}
+
+/// #786 (Travis, 2026-10-14, option a): OpenRouter's MiniMax M3 reported 37
+/// reasoning tokens of 36 output. The reasoning count is recorded as not
+/// reported and the rest of the record, the charge included, is kept: before,
+/// replay refused the whole record and `/cost` lost the charge.
+#[tokio::test]
+async fn accounting_chat_reasoning_above_output_keeps_the_record() -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    let endpoint = format!("{}/v1", server.uri());
+    mount(
+        &server,
+        success(json!({
+            "prompt_tokens": 9098,
+            "completion_tokens": 36,
+            "total_tokens": 9134,
+            "cost": 0.00274188,
+            "completion_tokens_details": {"reasoning_tokens": 37}
+        })),
+    )
+    .await;
+    let mode = AccountingMode::Provider {
+        scope: uuid::Uuid::new_v4(),
+        provider_id: "openrouter".into(),
+        wire_api: codex_model_provider_info::WireApi::Chat,
+        approved_endpoint: endpoint.clone(),
+        approved_query: None,
+        pricing: PriceAuthority::ApiKeyRates,
+        basis_source: Default::default(),
+        account: None,
+    };
+    let test = builder(endpoint, mode)
+        .with_config(|config| {
+            config.model = Some("minimax/minimax-m3".into());
+            config.model_provider_id = "openrouter".into();
+            config.model_provider.name = "OpenRouter".into();
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    test.submit_turn("reasoning above output").await?;
+    let db = test.codex.state_db().unwrap();
+    let records = attempts(&db).await?;
+    assert_eq!(records.len(), 1);
+    let observed = observations(&db).await?;
+    assert_eq!(observed.len(), 1);
+    assert_eq!(observed[0].patch.reasoning, Presence::Missing);
+    assert_eq!(observed[0].patch.output, Presence::Number(36.try_into()?));
+    assert_eq!(
+        observed[0].patch.billed_usd,
+        Some(Decimal::try_from("0.00274188".to_string())?)
+    );
+    stop(&test).await;
+    Ok(())
+}
