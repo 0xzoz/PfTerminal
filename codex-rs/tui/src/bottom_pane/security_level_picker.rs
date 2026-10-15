@@ -1449,7 +1449,7 @@ fn approvals_lines(
 /// What Core's Aggressive level does in a running session (PF-23, #443).
 /// #846: the project's credential files (`.env` and the like) are denied by
 /// Aggressive's sandbox profile, which starts at the restart, not by these.
-const CORE_EFFECTS: &str = "agent commands cannot run `corbanu vault …` and cannot open protected paths (the vault store, sign-in files, the credential files in your home folder, and Corbanu's config, history and state), sensitive surfaces need a grant, external content reaches the model labelled untrusted, and memory summaries stop";
+const CORE_EFFECTS: &str = "agent commands cannot run `corbanu vault …` and cannot open protected paths (the vault store, sign-in files, credential files in your home folder such as .ssh, .aws and .netrc, and Corbanu's config, history and state), sensitive surfaces need a grant, external content reaches the model labelled untrusted, and memory summaries stop";
 
 /// Issue #443: what only the restart applies after Aggressive is saved;
 /// `approvals_now` when the confirmation already required approval for

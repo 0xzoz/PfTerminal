@@ -4,10 +4,10 @@ expression: "render(&picker, 80)"
 ---
 Saved: Aggressive (nested agents: refuse)
 Active now in this session: agent commands cannot run `corbanu vault …` and
-cannot open protected paths (the vault store, sign-in files, the credential
-files in your home folder, and Corbanu's config, history and state), sensitive
-surfaces need a grant, external content reaches the model labelled untrusted,
-and memory summaries stop.
+cannot open protected paths (the vault store, sign-in files, credential files
+in your home folder such as .ssh, .aws and .netrc, and Corbanu's config, history
+and state), sensitive surfaces need a grant, external content reaches the model
+labelled untrusted, and memory summaries stop.
 Also in force now in this session: approved and allow-listed commands stay
 inside this session's sandbox (commands can write to the current folder, /
 private/tmp) and network is off for agent commands.

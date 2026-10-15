@@ -618,3 +618,51 @@ fn issue_749_moderate_rows_match_what_is_enforced() {
         )
     );
 }
+
+fn input_aggressive() -> InspectorInput {
+    input(ChosenLevel::Aggressive)
+}
+
+/// #846 (MOD-29): launched under Moderate, Aggressive confirmed and Core
+/// already Aggressive, before the restart: the project's `.env` files are
+/// not denied yet (Aggressive's sandbox starts at the restart), and the
+/// "Protected reads" row says so instead of claiming they are unreadable.
+#[test]
+fn issue_846_protected_reads_before_the_restart_leave_out_project_env_files() {
+    let root = ThreadId::new();
+    let facts = healthy(root);
+    let input = input(ChosenLevel::Moderate);
+    let before_restart = sections(&input, &saved(ChosenLevel::Aggressive), &facts, NOW);
+    let reads = find(&before_restart, "Protected reads");
+    assert!(
+        reads
+            .value
+            .contains("credential files in your home folder (SSH, cloud and CLI tokens)"),
+        "{}",
+        reads.value
+    );
+    assert!(
+        reads.value.ends_with(
+            "The project's credential files (.env, .env.* and .envrc files) are denied to agent commands only after you restart Corbanu Terminal"
+        ),
+        "{}",
+        reads.value
+    );
+    assert!(
+        !reads.value.contains("also ones created later"),
+        "{}",
+        reads.value
+    );
+    // Launched under Aggressive: as before.
+    let launched = sections(
+        &input_aggressive(),
+        &saved(ChosenLevel::Aggressive),
+        &facts,
+        NOW,
+    );
+    assert!(
+        find(&launched, "Protected reads")
+            .value
+            .starts_with("never granted under Aggressive, not even once: credential files (.env, .env.* and .envrc files, also ones created later;")
+    );
+}

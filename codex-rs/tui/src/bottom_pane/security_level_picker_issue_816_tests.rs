@@ -200,8 +200,14 @@ fn issue_816_permission_requests_qualify_the_sandbox() {
 #[test]
 fn issue_846_saved_screen_says_project_env_files_wait_for_the_restart() {
     let root = tempfile::tempdir().unwrap();
-    for before_restart in [Some(agg_04_session()), None] {
+    // MOD-29 started from Moderate.
+    for (active, before_restart) in [
+        (ChosenLevel::Moderate, Some(agg_04_session())),
+        (ChosenLevel::Moderate, None),
+        (ChosenLevel::Permissive, None),
+    ] {
         let mut picker = picker(&root, /*live*/ true);
+        picker.active = active;
         if let Some(before_restart) = before_restart {
             picker.set_before_restart(before_restart);
         }
@@ -210,7 +216,9 @@ fn issue_846_saved_screen_says_project_env_files_wait_for_the_restart() {
         let now = line_with(&saved, "Active now in this session");
         assert!(!now.contains("sign-in and credential files"), "{now}");
         assert!(
-            now.contains("sign-in files, the credential files in your home folder,"),
+            now.contains(
+                "sign-in files, credential files in your home folder such as .ssh, .aws and .netrc,"
+            ),
             "{now}"
         );
         assert!(
@@ -220,4 +228,15 @@ fn issue_846_saved_screen_says_project_env_files_wait_for_the_restart() {
             "{saved}"
         );
     }
+    // The review uses the same words for what applies at confirmation.
+    let mut picker = picker(&root, /*live*/ true);
+    picker.active = ChosenLevel::Moderate;
+    picker.basis.live = true;
+    picker.screen = Screen::Review(ChosenLevel::Aggressive);
+    let review = text(&picker);
+    assert!(
+        review.contains("credential files in your home folder such as .ssh, .aws and .netrc"),
+        "{review}"
+    );
+    assert!(!review.contains("sign-in and credential files"), "{review}");
 }
