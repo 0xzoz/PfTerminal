@@ -371,8 +371,10 @@ impl RequestUserInputOverlay {
             self.reset_for_request();
             self.ensure_focus_available();
             self.restore_current_draft();
-            // A double or held Enter must not answer a request not yet seen.
-            self.typing_guard.on_request_changed();
+            // A double or held Enter must not answer a request not yet seen:
+            // the bottom pane drops it (#787); nothing typed before carries
+            // over (#817).
+            self.typing_guard.on_new_request();
         } else {
             self.done = true;
         }

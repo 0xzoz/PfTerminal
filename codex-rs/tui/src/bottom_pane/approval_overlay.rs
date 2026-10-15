@@ -260,7 +260,7 @@ impl ApprovalOverlay {
         self.navigated = false;
         self.grant_review = None;
         self.shown_generation = next_shown_request_generation();
-        self.typing_guard.on_request_changed();
+        self.typing_guard.on_new_request();
         let header = build_header(&request);
         let (options, params) = Self::build_options(
             &request,

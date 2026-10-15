@@ -422,3 +422,95 @@ fn issue_817_link_confirmation_takes_a_later_enter_only() {
         );
     }
 }
+
+fn second_mcp_approval_request() -> McpServerElicitationFormRequest {
+    let params = codex_app_server_protocol::McpServerElicitationRequestParams {
+        thread_id: "thread-1".to_string(),
+        turn_id: Some("turn-1".to_string()),
+        server_name: "server-1".to_string(),
+        request: codex_app_server_protocol::McpServerElicitationRequest::Form {
+            meta: None,
+            message: "Allow the second request?".to_string(),
+            requested_schema: serde_json::from_value(serde_json::json!({
+                "type": "object",
+                "properties": {},
+            }))
+            .expect("schema"),
+        },
+    };
+    McpServerElicitationFormRequest::from_app_server_request(
+        codex_protocol::ThreadId::default(),
+        codex_app_server_protocol::RequestId::String("request-2".to_string()),
+        &params,
+    )
+    .expect("approval request")
+}
+
+/// Review r1: a stray character typed into one request, which another
+/// client then answers, does not block a deliberate Enter on the next
+/// request of the same prompt; typing that goes on as it appears is still
+/// dropped (see the swap test above).
+#[test]
+fn issue_817_text_typed_into_a_resolved_request_does_not_hold_the_next() {
+    for kind in [Kind::Exec, Kind::Question, Kind::McpApproval] {
+        let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
+        let features = Features::with_defaults();
+        let mut pane = guarded_pane(AppEventSender::new(tx_raw));
+        let start = Instant::now();
+        let resolved = match kind {
+            Kind::Exec => {
+                pane.push_approval_request(exec_request(), &features);
+                pane.push_approval_request(child_exec_request(), &features);
+                let ApprovalRequest::Exec(first) = exec_request() else {
+                    unreachable!("exec request");
+                };
+                ResolvedAppServerRequest::ExecApproval { id: first.id }
+            }
+            Kind::Question => {
+                pane.push_user_input_request(user_input_request());
+                let mut second = user_input_request();
+                second.item_id = "call-2".to_string();
+                pane.push_user_input_request(second);
+                ResolvedAppServerRequest::UserInput {
+                    call_id: "call-1".to_string(),
+                }
+            }
+            Kind::McpApproval => {
+                pane.push_mcp_server_elicitation_request(mcp_approval_request());
+                pane.push_mcp_server_elicitation_request(second_mcp_approval_request());
+                ResolvedAppServerRequest::McpElicitation {
+                    server_name: "server-1".to_string(),
+                    request_id: codex_app_server_protocol::RequestId::String(
+                        "request-1".to_string(),
+                    ),
+                }
+            }
+        };
+        assert_eq!(
+            pane.view_stack.len(),
+            1,
+            "{kind:?}: one prompt, two requests"
+        );
+        pane.pre_draw_tick_at(start);
+
+        let at = start + Duration::from_secs(2);
+        press_at(&mut pane, &[KeyCode::Char('x')], at);
+        assert_eq!(answers(&mut rx), Vec::new(), "{kind:?}");
+        assert!(pane.dismiss_app_server_request(&resolved), "{kind:?}");
+        let shown_at = at + Duration::from_millis(16);
+        pane.pre_draw_tick_at(shown_at);
+        let shown = screen(&pane);
+        assert!(!shown.contains("Typed text"), "{kind:?}: {shown}");
+        assert!(!shown.contains(EARLY), "{kind:?}: {shown}");
+
+        let enter_at = shown_at + REQUEST_INPUT_GUARD + Duration::from_millis(500);
+        pane.pre_draw_tick_at(enter_at);
+        press_at(&mut pane, &[KeyCode::Enter], enter_at);
+        assert_eq!(
+            answers(&mut rx),
+            vec![expected(kind)],
+            "{kind:?}: {}",
+            screen(&pane)
+        );
+    }
+}

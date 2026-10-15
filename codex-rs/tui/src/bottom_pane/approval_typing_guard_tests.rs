@@ -191,3 +191,20 @@ fn early_input_needs_navigation_before_enter() {
     assert_eq!(guard.notice(), None);
     assert_eq!(guard.on_confirm(), Confirm::Highlighted);
 }
+
+/// #817 (review r1): text typed into one request does not block the next
+/// request of the same prompt; on the same request shown again it stays.
+#[test]
+fn typed_text_stays_with_its_request() {
+    let mut guard = TypingGuard::default();
+    guard.on_typed_input();
+    guard.on_new_request();
+    assert_eq!(guard.notice(), None);
+    assert_eq!(guard.on_confirm(), Confirm::Highlighted);
+
+    let mut guard = TypingGuard::default();
+    guard.on_early_input();
+    guard.on_new_request();
+    assert_eq!(guard.notice(), None);
+    assert_eq!(guard.on_confirm(), Confirm::Highlighted);
+}

@@ -176,18 +176,27 @@ impl TypingGuard {
         }
     }
 
-    /// #817: the prompt now shows another request, or the same one again
-    /// (revealed, or back from a screen of its own). Keys that reach it
+    /// #817: the prompt shows its request anew: revealed, the next screen or
+    /// question of it, or back from a screen of its own. Keys that reach it
     /// before it is drawn or in the second after are dropped by the bottom
     /// pane (#787), which is what keeps a double or held Enter from answering
-    /// it; nothing else waits, so Enter confirms after that. A key armed or
-    /// pressed for the previous request is forgotten; typed text stays typed
-    /// text.
+    /// it; nothing else waits, so Enter confirms after that. An armed or
+    /// persistent key is forgotten; text typed into this request stays typed
+    /// text. A different request uses [`Self::on_new_request`].
     pub(super) fn on_request_changed(&mut self) {
         self.early = false;
         if self.state != State::Typed {
             self.state = State::Idle;
         }
+    }
+
+    /// #817 (review r1): a different request now shows in this prompt (the
+    /// next of its queue). Nothing typed into the previous one carries over:
+    /// keys still typed as it appears are dropped by the bottom pane, which
+    /// then calls [`Self::on_early_input`].
+    pub(super) fn on_new_request(&mut self) {
+        self.early = false;
+        self.state = State::Idle;
     }
 
     /// A character command key (such as open thread) acted. Enter waits for
