@@ -1,7 +1,7 @@
 ---
 sprint_id: "PF-60-S07"
 title: "Price catalogue refresh (#368)"
-status: in_progress
+status: ready
 plan_file: "docs/plans/active/portfolio-agent-cost-accounting-followups.md"
 plan_feature: "PF-60"
 execution_order: 2
@@ -67,6 +67,7 @@ updated: 2026-10-14
       the rest, charge included, is kept. Responses routes and split reports: #814.
 - [x] AC6: new rates cite source and read date; prices bind at admission and the charge rule is display-only, so
       history is not re-priced. [Gate](../../../../qa/portfolio/agent-cost-accounting/pf-60-s07/gate.md).
+- [x] Merged: PR #812 as `b519fb088d` (head `b8311ff490`); review APPROVE on that head.
 
 ## Remaining
 

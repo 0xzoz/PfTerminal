@@ -723,3 +723,80 @@ async fn metadata_terminal_matrix(
     }
     Ok(())
 }
+
+/// #403 (Travis, 2026-10-14, option C): reopening a conversation sends its
+/// warm-up as a reopen warm-up, recorded under its own label and announced
+/// once sent. With `skip_reopen_warmup` set, a reopen sends no warm-up at all,
+/// while a new conversation still warms up as before.
+#[tokio::test]
+async fn accounting_reopen_warmup_is_labelled_announced_and_skippable() -> anyhow::Result<()> {
+    const NOTICE: &str = "Reopening or forking this conversation sent a warm-up request";
+    for skip in [false, true] {
+        let server = MockServer::start().await;
+        let mut gate = Gate::start().await?;
+        let test = builder(gate.endpoint.clone(), enabled(&gate.endpoint))
+            .with_config(move |config| config.skip_reopen_warmup = skip)
+            .build_with_auto_env(&server)
+            .await?;
+        submit(&test).await?;
+        gate.next().await?.complete().await?;
+        let events = terminal(&test).await?;
+        assert!(
+            !events.iter().any(
+                |event| matches!(event, EventMsg::Warning(warning) if warning.message.contains(NOTICE))
+            ),
+            "a new conversation is not a reopen"
+        );
+        let warmups_before = gate.counts.lock().unwrap().1;
+        assert_eq!(
+            warmups_before, 1,
+            "a new conversation warms up (skip={skip})"
+        );
+        let labels = |attempts: Vec<Attempt>| {
+            attempts
+                .into_iter()
+                .map(|attempt| attempt.turn)
+                .filter(|turn| turn.starts_with("prewarm:"))
+                .collect::<Vec<_>>()
+        };
+        let db = test.codex.state_db().unwrap();
+        let new_prewarms = labels(attempts(&db).await?);
+        assert_eq!(new_prewarms.len(), 1);
+        assert!(!new_prewarms[0].starts_with("prewarm:reopen:"));
+        let home = test.home.clone();
+        let rollout = test.codex.rollout_path().unwrap();
+        stop(&test).await;
+        drop(test);
+        db.close().await;
+
+        let reopened = builder(gate.endpoint.clone(), enabled(&gate.endpoint))
+            .with_config(move |config| config.skip_reopen_warmup = skip)
+            .resume(&server, home, rollout)
+            .await?;
+        // The first turn after a reopen waits for any warm-up, so by its end a
+        // warm-up was either sent and announced, or never sent.
+        submit(&reopened).await?;
+        gate.next().await?.complete().await?;
+        let events = terminal(&reopened).await?;
+        let announced = events.iter().any(
+            |event| matches!(event, EventMsg::Warning(warning) if warning.message.contains(NOTICE)),
+        );
+        let db = reopened.codex.state_db().unwrap();
+        let reopen_prewarms: Vec<String> = labels(attempts(&db).await?)
+            .into_iter()
+            .filter(|turn| turn.starts_with("prewarm:reopen:"))
+            .collect();
+        let warmups_after = gate.counts.lock().unwrap().1;
+        if skip {
+            assert!(!announced, "a skipped warm-up is not announced");
+            assert!(reopen_prewarms.is_empty(), "{reopen_prewarms:?}");
+            assert_eq!(warmups_after, warmups_before, "no warm-up sent on reopen");
+        } else {
+            assert!(announced, "the reopen warm-up is announced: {events:?}");
+            assert_eq!(reopen_prewarms.len(), 1, "{reopen_prewarms:?}");
+            assert_eq!(warmups_after, warmups_before + 1);
+        }
+        stop(&reopened).await;
+    }
+    Ok(())
+}

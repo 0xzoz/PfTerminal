@@ -1476,12 +1476,15 @@ fn accounting_inspect_basis_only_request_shows_no_price_metadata() {
         ));
         let text = attempt_text(&q).join("\n");
         assert!(text.contains(&format!("Billing basis: {shown}")), "{text}");
+        // #396: no parentheses inside the sentence's own clause.
+        let clause = shown.replace(" (set in your config)", "; set in your config");
         assert!(
             text.contains(&format!(
-                "Price: none recorded — this request records only its billing basis ({shown})"
+                "Price: none recorded — this request records only its billing basis: {clause}"
             )),
             "{text}"
         );
+        assert!(!text.contains("(set in your config))"), "{text}");
         for absent in PRICE_METADATA
             .iter()
             .chain(&["no dispatch-time price snapshot"])
@@ -3305,4 +3308,115 @@ fn accounting_inspect_refused_request_reads_as_failed_with_no_charge() {
             }
         }
     }
+}
+
+/// #396 item 1: a component with no rate states no money even when it had no
+/// tokens ("none — 0 tokens", never "$0.000000"); a component with a rate
+/// keeps its zero figure.
+#[test]
+fn accounting_unpriced_zero_token_component_states_no_money() {
+    let mut q = quote();
+    q.usage.write = Some(0);
+    q.buckets = [
+        BucketQuote::MissingRate,
+        BucketQuote::MissingRate,
+        BucketQuote::Priced(Decimal::default()),
+        BucketQuote::MissingRate,
+    ];
+    q.known_subtotal = Decimal::default();
+    q.all_buckets_priced = None;
+    q.subtotal_display = Decimal::default().display();
+    q.snapshot = Some(native_snapshot(
+        serde_json::json!({"noncached":null,"read":null,"write":null,"output":null}),
+        "Billed",
+        /*basis_source*/ None,
+        /*plan_burn_millis*/ None,
+    ));
+    let unpriced = attempt_text(&q);
+    assert!(
+        unpriced
+            .iter()
+            .any(|line| line == "Cache write cost: none — 0 tokens"),
+        "{unpriced:#?}"
+    );
+    assert!(
+        !unpriced.iter().any(|line| line.contains("$0.000000")),
+        "{unpriced:#?}"
+    );
+    q.snapshot = Some(native_snapshot(
+        serde_json::json!({"noncached":"1","read":"0.1","write":"1.25","output":"8"}),
+        "Billed",
+        /*basis_source*/ None,
+        /*plan_burn_millis*/ None,
+    ));
+    let priced = attempt_text(&q);
+    assert!(
+        priced
+            .iter()
+            .any(|line| line == "Cache write cost: $0.000000; exact USD 0"),
+        "{priced:#?}"
+    );
+}
+
+/// #403 (Travis, 2026-10-14, option C): `/cost` names the warm-up a reopened
+/// conversation sent, on the first screen, in the request's link and on its
+/// page, with its cost; an ordinary request is not named so.
+#[test]
+fn accounting_reopen_warmup_is_named_with_its_cost() {
+    let InspectionDay::Ready(mut view) = packet() else {
+        unreachable!()
+    };
+    let mut warmup = quote();
+    warmup.attempt.attempt_id = Uuid::from_u128(11);
+    warmup.attempt.request_id = Uuid::from_u128(12);
+    warmup.attempt.retry_of = None;
+    warmup.attempt.turn = format!("side:prewarm:reopen:{}", Uuid::from_u128(13));
+    warmup.attempt.dispatched_at_ms = 1.try_into().unwrap();
+    view.requests
+        .insert(warmup.attempt.request_id, vec![warmup]);
+    view.totals = DayTotals::from_quotes(view.requests.values().flatten()).unwrap();
+    view.own_totals = view.totals.clone();
+    let pages = inspection_pages(Ok(InspectionDay::Ready(view)));
+    let screen: Vec<&String> = pages[0]
+        .text
+        .iter()
+        .take_while(|line| line.as_str() != "—— Details ——")
+        .collect();
+    assert!(
+        screen.iter().any(|line| line.as_str()
+            == "Reopen warm-up: 1 request, estimated at least $0.000180 (1 attempt had no price). Sent when this conversation was reopened or forked, to prime the model's cache."),
+        "{screen:#?}"
+    );
+    let labels: Vec<&str> = pages[0]
+        .links
+        .iter()
+        .map(|(label, _)| label.as_str())
+        .collect();
+    let warmup_links: Vec<&&str> = labels
+        .iter()
+        .filter(|label| label.contains("Reopen warm-up"))
+        .collect();
+    assert_eq!(warmup_links.len(), 1, "{labels:?}");
+    assert!(
+        warmup_links[0].starts_with("Request 2 · Reopen warm-up · "),
+        "{labels:?}"
+    );
+    assert!(
+        labels
+            .iter()
+            .any(|label| label.starts_with("Request 1 · ") && !label.contains("warm-up")),
+        "{labels:?}"
+    );
+    let (_, index) = pages[0]
+        .links
+        .iter()
+        .find(|(label, _)| label.contains("Reopen warm-up"))
+        .unwrap();
+    assert!(
+        pages[*index].text.iter().any(|line| line.starts_with(
+            "Kind: Reopen warm-up — sent when this conversation was reopened or forked"
+        )),
+        "{:#?}",
+        pages[*index].text
+    );
 }

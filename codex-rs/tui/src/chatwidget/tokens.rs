@@ -792,10 +792,29 @@ fn attempt_text(q: &ObservationQuote) -> Vec<String> {
             })
         ));
     }
-    for (label, bucket) in BUCKETS.iter().zip(q.buckets) {
+    // #396: a component with no rate states no money, even when it had no
+    // tokens: zero tokens of an unpriced component is not a $0 price.
+    // A long-context tier's rate counts too: pricing may apply it instead.
+    let component_rates = q.snapshot.as_ref().map(|s| {
+        let tier = s.long_context.as_ref().map(|tier| &tier.rates);
+        let rated = |base: bool, long: fn(&codex_state::accounting::Rates) -> bool| {
+            base || tier.is_some_and(long)
+        };
+        [
+            rated(s.rates.noncached.is_some(), |r| r.noncached.is_some()),
+            rated(s.rates.read.is_some(), |r| r.read.is_some()),
+            rated(s.rates.write.is_some(), |r| r.write.is_some()),
+            rated(s.rates.output.is_some(), |r| r.output.is_some()),
+        ]
+    });
+    for (index, (label, bucket)) in BUCKETS.iter().zip(q.buckets).enumerate() {
+        let rated = component_rates.is_some_and(|rated| rated[index]);
         lines.push(format!(
             "{label} cost: {}",
             match bucket {
+                BucketQuote::Priced(v) if v == Decimal::default() && !rated => {
+                    "none — 0 tokens".into()
+                }
                 BucketQuote::Priced(v) => format!("{}; exact USD {}", money(v), exact(v)),
                 BucketQuote::MissingUsage => "unknown — no retained numeric evidence".into(),
                 BucketQuote::MissingRate => "unknown — rate unavailable".into(),
@@ -828,8 +847,8 @@ fn attempt_text(q: &ObservationQuote) -> Vec<String> {
     });
     if q.snapshot.is_some() && priced.is_none() {
         lines.push(format!(
-            "Price: none recorded — this request records only its billing basis ({})",
-            basis_text(q)
+            "Price: none recorded — this request records only its billing basis: {}",
+            basis_clause(q)
         ));
     } else if let Some(s) = priced {
         lines.extend([
@@ -1105,12 +1124,25 @@ fn inspection_pages_for(
         // Attempts in the order they were sent, so attempt 1 is the original.
         let mut attempts: Vec<&ObservationQuote> = quotes.iter().collect();
         attempts.sort_by_key(|q| (i64::from(q.attempt.dispatched_at_ms), q.attempt.attempt_id));
+        let kind = if reopen_warmup(&attempts) {
+            " · Reopen warm-up"
+        } else {
+            ""
+        };
         let label = match request_route(quotes, named) {
-            Some(route) => format!("Request {number} · {route} · {}", short_cost(&attempts)),
-            None => format!("Request {number}"),
+            Some(route) => format!(
+                "Request {number}{kind} · {route} · {}",
+                short_cost(&attempts)
+            ),
+            None => format!("Request {number}{kind}"),
         };
         pages[0].links.push((label, request_page));
         let mut text = plain_header(&attempts, named);
+        if reopen_warmup(&attempts)
+            && let Some(divider) = text.iter().position(|line| line == "—— Details ——")
+        {
+            text.insert(divider, REOPEN_WARMUP_KIND.to_string());
+        }
         text.push(format!("Request: {request}"));
         pages.push(InspectorPage {
             title: "Request".into(),
@@ -1540,6 +1572,54 @@ fn basis_text(quote: &ObservationQuote) -> String {
         codex_state::accounting::BasisSource::BuiltIn => basis.to_string(),
     }
 }
+
+/// #396: the basis inside a sentence that already ends in it, without a
+/// second pair of parentheses: "pay per use; set in your config".
+fn basis_clause(quote: &ObservationQuote) -> String {
+    basis_text(quote).replace(" (set in your config)", "; set in your config")
+}
+/// #403: the turn-label prefix core gives the warm-up a reopened or forked
+/// conversation sends (core `accounting::REOPEN_PREWARM_LABEL`, pinned by
+/// core's `reopen_prewarm_label_is_stable`); a label can carry an owner prefix
+/// before it, such as `side:`.
+const REOPEN_PREWARM_LABEL: &str = "prewarm:reopen:";
+
+/// Whether these attempts are a reopen warm-up request.
+fn reopen_warmup(quotes: &[&ObservationQuote]) -> bool {
+    quotes
+        .iter()
+        .any(|quote| quote.attempt.turn.contains(REOPEN_PREWARM_LABEL))
+}
+
+const REOPEN_WARMUP_KIND: &str = "Kind: Reopen warm-up — sent when this conversation was reopened or forked, to prime the model's cache. Billed like any request; set skip_reopen_warmup = true in config.toml to skip it.";
+
+/// "Reopen warm-up: 1 request, estimated $0.024812. Sent when …" for the
+/// first screen, or nothing when no request here is one.
+fn reopen_warmup_line<'a>(
+    quotes: impl IntoIterator<Item = &'a ObservationQuote>,
+) -> Option<String> {
+    let warmups: Vec<&ObservationQuote> = quotes
+        .into_iter()
+        .filter(|quote| quote.attempt.turn.contains(REOPEN_PREWARM_LABEL))
+        .collect();
+    if warmups.is_empty() {
+        return None;
+    }
+    let mut requests: Vec<Uuid> = warmups.iter().map(|q| q.attempt.request_id).collect();
+    requests.sort_unstable();
+    requests.dedup();
+    let noun = if requests.len() == 1 {
+        "request"
+    } else {
+        "requests"
+    };
+    Some(format!(
+        "Reopen warm-up: {} {noun}, {}. Sent when this conversation was reopened or forked, to prime the model's cache.",
+        requests.len(),
+        short_cost(&warmups)
+    ))
+}
+
 const NO_PRICE: &str = "Estimated cost: no price available";
 /// A price applies but the provider did not report every token count it
 /// needs, so no estimate is possible. Not a missing price: the next step for
@@ -2221,6 +2301,7 @@ fn plain_overview<'a>(
     };
     lines.extend(groups.values().map(|quotes| route_line(quotes, named)));
     let all: Vec<&ObservationQuote> = groups.values().flatten().copied().collect();
+    lines.extend(reopen_warmup_line(all.iter().copied()));
     if let Ok(t) = codex_state::accounting::DayTotals::from_quotes(all.iter().copied()) {
         let billed = t.per_use_attempts();
         if billed > 0 && t.plan_attempts > 0 {

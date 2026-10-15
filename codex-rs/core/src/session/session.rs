@@ -1498,8 +1498,19 @@ impl Session {
             )
             .await?;
             sess.start_mcp_prewarm_worker(mcp_prewarm_rx, mcp_auth_changes);
-            sess.schedule_startup_prewarm(session_configuration.base_instructions.clone())
-                .await;
+            // #403: a conversation the user resumes or forks (restart, `/resume`,
+            // `/side`, editing a message) is a reopen: its warm-up is shown as
+            // such, and can be skipped. A sub-agent or reviewer started with
+            // copied history is not one; its warm-up stays an ordinary one.
+            let reopened = crate::session_startup_prewarm::is_reopen(
+                &initial_history,
+                &session_configuration.session_source,
+            );
+            sess.schedule_startup_prewarm(
+                session_configuration.base_instructions.clone(),
+                reopened,
+            )
+            .await;
             let session_start_source = match &initial_history {
                 InitialHistory::Resumed(_) => codex_hooks::SessionStartSource::Resume,
                 InitialHistory::New | InitialHistory::Forked(_) => {

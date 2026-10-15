@@ -3,7 +3,7 @@
 # "Price source" and price metadata as if a price existed. One real Kimi Code K3 turn; no seeding.
 id = "pf60s04-basis-only-request"
 feature = "/cost technical page of a subscription request with no price: one plain line, no 'Price source'"
-expected = "The request's technical page shows 'Billing basis: subscription' and 'Price: none recorded — this request records only its billing basis (subscription)', with no Price ID, Price source or rate lines."
+expected = "The request's technical page shows 'Billing basis: subscription' and 'Price: none recorded — this request records only its billing basis: subscription', with no Price ID, Price source or rate lines."
 model = "k3"
 provider = "kimi-code"
 rows = 46
@@ -59,6 +59,6 @@ wait = "Attempt, components and original price"
 key = "Down"
 repeat = 37
 [[steps]]
-wait = "› Price: none recorded — this request records only its billing basis \\(subscription\\)"
+wait = "› Price: none recorded — this request records only its billing basis: subscription"
 [[steps]]
 pause = 5
