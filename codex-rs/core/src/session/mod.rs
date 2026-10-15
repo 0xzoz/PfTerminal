@@ -4710,25 +4710,27 @@ impl Session {
             items,
         );
         let items = gated.as_deref().unwrap_or(items);
-        if let Some(live_thread) = self.live_thread()
-            && let Err(e) = live_thread.append_items(items).await
+        let Some(live_thread) = self.live_thread() else {
+            return;
+        };
+        let Err(e) = live_thread.append_items(items).await else {
+            crate::home_access::note_rollout_append(/*failed_in*/ None);
+            return;
+        };
+        error!("failed to record rollout items: {e:#}");
+        // #616: the writer keeps unwritten items for its next flush; exec
+        // waits for their folder before it saves the session at exit. Record
+        // why the rollout could not be written.
+        let message = format!("{e:#}");
+        if crate::home_access::is_operation_not_permitted(&message)
+            && let Ok(Some(rollout)) = live_thread.local_rollout_path().await
         {
-            error!("failed to record rollout items: {e:#}");
-            // #616: the writer keeps unwritten items for its next flush (exec
-            // waits for the home before it saves the session at exit); record
-            // why the rollout could not be written.
-            let message = format!("{e:#}");
-            if crate::home_access::is_operation_not_permitted(&message)
-                && let Ok(Some(rollout)) = live_thread.local_rollout_path().await
-            {
-                tokio::task::spawn_blocking(move || {
-                    crate::home_access::record_home_access_failure(
-                        "rollout write",
-                        &rollout,
-                        &message,
-                    )
-                });
+            if let Some(dir) = rollout.parent() {
+                crate::home_access::note_rollout_append(Some(dir.to_path_buf()));
             }
+            tokio::task::spawn_blocking(move || {
+                crate::home_access::record_home_access_failure("rollout write", &rollout, &message)
+            });
         }
     }
 

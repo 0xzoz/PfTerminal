@@ -90,21 +90,27 @@ fn the_window_bounds_the_wait_and_other_failures_never_wait() {
     );
 }
 
-/// Exec's wait before saving the session: until the home lists again, or the
-/// window is spent; other errors never wait.
+fn eperm() -> std::future::Ready<std::io::Result<()>> {
+    std::future::ready(Err(std::io::Error::from_raw_os_error(1)))
+}
+
+/// Exec's wait before saving the session: until the folder lists again, or
+/// what is left of the window since the first failure is spent; other errors
+/// never wait.
 #[tokio::test]
-async fn the_exit_wait_ends_when_the_home_lists_again_or_the_window_is_spent() {
+async fn the_exit_wait_ends_when_the_folder_lists_again_or_the_window_is_spent() {
     let reads = std::sync::atomic::AtomicU32::new(0);
-    let home = Path::new("/Volumes/Drive/home");
+    let dir = Path::new("/Volumes/Drive/home/sessions/2026/10/15");
     let mut recorded = Vec::new();
     let started = Instant::now();
     wait_until_readable(
-        home,
+        dir,
         |_| match reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
-            0 => Err(std::io::Error::from_raw_os_error(1)),
-            _ => Ok(()),
+            0 => eperm(),
+            _ => std::future::ready(Ok(())),
         },
         |operation, path, error| recorded.push(format!("{operation} {} {error}", path.display())),
+        HomeWait::default(),
         WINDOW,
     )
     .await;
@@ -113,37 +119,59 @@ async fn the_exit_wait_ends_when_the_home_lists_again_or_the_window_is_spent() {
         (reads.into_inner(), recorded),
         (
             2,
-            vec![
-                "read_dir (opendir) /Volumes/Drive/home Operation not permitted (os error 1)"
-                    .to_string()
-            ]
+            vec![format!(
+                "read_dir (opendir) {} Operation not permitted (os error 1)",
+                dir.display()
+            )]
         )
     );
     assert!(waited >= FIRST_WAIT && waited < WINDOW, "{waited:?}");
 
+    // The turn already waited most of the window: only the rest is left.
+    let first_failure = Instant::now()
+        .checked_sub(WINDOW - Duration::from_millis(1500))
+        .expect("an hour ago");
     let started = Instant::now();
     wait_until_readable(
-        home,
-        |_| Err(std::io::Error::from_raw_os_error(1)),
+        dir,
+        |_| eperm(),
         |_, _, _| {},
-        Duration::from_millis(1500),
+        HomeWait {
+            started: Some(first_failure),
+            attempts: 0,
+        },
+        WINDOW,
     )
     .await;
     let waited = started.elapsed();
     assert!(
-        waited >= Duration::from_millis(1500) && waited < Duration::from_secs(30),
-        "spent after the window: {waited:?}"
+        waited >= Duration::from_millis(1400) && waited < Duration::from_secs(30),
+        "only the rest of the window: {waited:?}"
     );
 
     let started = Instant::now();
     wait_until_readable(
-        home,
-        |_| Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+        dir,
+        |_| std::future::ready(Err(std::io::Error::from(std::io::ErrorKind::NotFound))),
         |_, _, _| panic!("only EPERM is recorded"),
+        HomeWait::default(),
         WINDOW,
     )
     .await;
     assert!(started.elapsed() < FIRST_WAIT);
+}
+
+#[test]
+fn an_unsaved_rollout_keeps_its_first_failure_until_an_append_succeeds() {
+    let start = Instant::now();
+    let later = start + Duration::from_secs(30);
+    let dir = PathBuf::from("/home/sessions");
+    let first = next_unsaved(None, Some(dir.clone()), start);
+    let again = next_unsaved(first.clone(), Some(dir.clone()), later);
+    assert_eq!(
+        (first, again.clone(), next_unsaved(again, None, later)),
+        (Some((dir.clone(), start)), Some((dir, start)), None)
+    );
 }
 
 #[test]

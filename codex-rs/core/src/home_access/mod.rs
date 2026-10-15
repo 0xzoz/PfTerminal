@@ -109,31 +109,71 @@ pub(crate) async fn wait_if_home_unreadable(
     Ok(())
 }
 
-/// Waits, within the window, until `home` can be listed again. `corbanu exec`
-/// calls it before the session is saved at exit, so rollout items buffered
-/// while the home was unreadable are written instead of lost.
-pub async fn wait_until_home_readable(home: &Path) {
+/// The rollout folder an append could not write (EPERM) and when that
+/// started; cleared when an append succeeds. The writer keeps the unwritten
+/// items until its next flush.
+static UNSAVED_ROLLOUT: Mutex<Option<(PathBuf, Instant)>> = Mutex::new(None);
+
+/// Records whether a rollout append succeeded, or failed with EPERM in `dir`.
+pub(crate) fn note_rollout_append(failed_in: Option<PathBuf>) {
+    if let Ok(mut unsaved) = UNSAVED_ROLLOUT.lock() {
+        *unsaved = next_unsaved(unsaved.take(), failed_in, Instant::now());
+    }
+}
+
+/// The unsaved rollout after an append: none after a success; after a
+/// failure, the failing folder, since the first failure in a row.
+fn next_unsaved(
+    unsaved: Option<(PathBuf, Instant)>,
+    failed_in: Option<PathBuf>,
+    now: Instant,
+) -> Option<(PathBuf, Instant)> {
+    let dir = failed_in?;
+    Some((dir, unsaved.map_or(now, |(_, since)| since)))
+}
+
+/// When a rollout append failed with EPERM and none has succeeded since,
+/// waits until its folder lists again, within what is left of the window
+/// since that failure. `corbanu exec` calls it before the session is saved at
+/// exit, so the buffered items are written instead of lost.
+pub async fn wait_for_unsaved_rollout() {
+    let unsaved = UNSAVED_ROLLOUT
+        .lock()
+        .ok()
+        .and_then(|unsaved| unsaved.clone());
+    let Some((dir, since)) = unsaved else {
+        return;
+    };
     wait_until_readable(
-        home,
-        |path| std::fs::read_dir(path).map(drop),
+        &dir,
+        |path| {
+            let path = path.to_path_buf();
+            async move { tokio::fs::read_dir(path).await.map(drop) }
+        },
         |operation, path, error| {
             record_home_access_failure(operation, path, error);
+        },
+        HomeWait {
+            started: Some(since),
+            attempts: 0,
         },
         home_wait_window(),
     )
     .await;
 }
 
-async fn wait_until_readable(
-    home: &Path,
-    read_dir: impl Fn(&Path) -> std::io::Result<()>,
+async fn wait_until_readable<F>(
+    dir: &Path,
+    read_dir: impl Fn(&Path) -> F,
     mut record: impl FnMut(&str, &Path, &str),
+    mut wait: HomeWait,
     window: Duration,
-) {
+) where
+    F: std::future::Future<Output = std::io::Result<()>>,
+{
     const EPERM: i32 = 1;
-    let mut wait = HomeWait::default();
     loop {
-        let error = match read_dir(home) {
+        let error = match read_dir(dir).await {
             Ok(()) => return,
             Err(error) => error,
         };
@@ -143,13 +183,13 @@ async fn wait_until_readable(
             return;
         };
         if step.attempt == 1 {
-            record("read_dir (opendir)", home, &error.to_string());
+            record("read_dir (opendir)", dir, &error.to_string());
         }
         // Exec prints errors only; each attempt must be visible.
         tracing::error!(
             "{HOME_UNREADABLE_HEADLINE}: {}; waiting {} before saving the session (attempt {}, \
              gives up in {})",
-            home.display(),
+            dir.display(),
             human_duration(step.delay),
             step.attempt,
             human_duration(step.remaining),
