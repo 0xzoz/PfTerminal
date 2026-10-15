@@ -2195,6 +2195,70 @@ fn issue_838_security_state_and_keys_stay_denied_when_the_rules_are_lifted() {
             "{path:?}"
         );
     }
+    assert!(ReadDenials::is_security_file(
+        &fx.codex_home,
+        &other.join("source-origin.key")
+    ));
+}
+
+/// #838 (review r2): where an approved command could write the folder of a
+/// missing security file, Linux leaves it out (bubblewrap would hold it with
+/// an empty placeholder Corbanu reads as a broken security state) and makes
+/// the missing security locks first, empty and private; macOS denies it
+/// before it exists. Existing ones stay denied everywhere.
+#[test]
+fn issue_838_missing_security_files_where_the_home_is_writable() {
+    let fx = fixture();
+    let cwd = abs(&fx.user_home.join("project"));
+    std::fs::write(fx.codex_home.join("source-origin.key"), "x").unwrap();
+    let denials = ReadDenials::for_turn(
+        &fx.codex_home,
+        &fx.codex_home,
+        &cwd,
+        std::slice::from_ref(&cwd),
+        &PermissionProfile::Disabled,
+    )
+    .runtime_only();
+    let denied: Vec<&AbsolutePathBuf> = denials.paths().collect();
+    let denied_here = |name: &str| denied.contains(&&abs(&fx.codex_home.join(name)));
+    assert!(denied_here("source-origin.key"), "{denied:?}");
+    assert_eq!(
+        denied_here("security_state.json"),
+        !cfg!(target_os = "linux"),
+        "{denied:?}"
+    );
+    for lock in [
+        "security_state.lock",
+        "security_confirm.lock",
+        "security_level.lock",
+    ] {
+        let path = fx.codex_home.join(lock);
+        if cfg!(target_os = "linux") {
+            let metadata = std::fs::metadata(&path).expect(lock);
+            assert_eq!(metadata.len(), 0, "{lock}");
+            assert_eq!(
+                std::os::unix::fs::PermissionsExt::mode(&metadata.permissions()) & 0o777,
+                0o600,
+                "{lock}"
+            );
+        }
+        assert!(denied_here(lock), "{lock}: {denied:?}");
+    }
+    // Where the home is not writable (a workspace elsewhere), every one stays
+    // denied before it exists, also on Linux.
+    let denials = ReadDenials::for_turn(
+        &fx.codex_home,
+        &fx.codex_home,
+        &cwd,
+        std::slice::from_ref(&cwd),
+        &workspace(cwd.as_path()),
+    )
+    .runtime_only();
+    assert!(
+        denials
+            .paths()
+            .any(|path| *path == abs(&fx.codex_home.join("security_migration.toml")))
+    );
 }
 
 /// A user home reached through a link (`user -> real-user`) holding a

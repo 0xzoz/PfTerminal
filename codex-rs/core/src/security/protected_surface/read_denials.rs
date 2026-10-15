@@ -827,8 +827,15 @@ impl ReadDenials {
     /// stay in place too (#598), and Corbanu's security state and keys stay
     /// denied (#838).
     pub(crate) fn runtime_only(self) -> Self {
+        // Existing ones as they are (the Windows sandbox drops entries that
+        // may be missing), missing ones before they exist.
+        let (existing, fixed) = self
+            .security_files
+            .into_iter()
+            .partition(|path| std::fs::symlink_metadata(path.as_path()).is_ok());
         Self {
-            fixed: self.security_files,
+            existing,
+            fixed,
             runtime_read_only: self.runtime_read_only,
             unmovable: self.unmovable,
             cwd: self.cwd,
@@ -848,7 +855,9 @@ impl ReadDenials {
         for file in CORBANU_SECURITY_FILES {
             let path = home.join(file);
             if Self::holds_kept(&path, keep) {
-                self.skipped.push(path);
+                if !self.skipped.contains(&path) {
+                    self.skipped.push(path);
+                }
                 continue;
             }
             for spelling in moderate_spellings(path.as_path()) {
@@ -869,12 +878,23 @@ impl ReadDenials {
             real(path.parent()?).map(|parent| parent.join(name))
         });
         let homes = [Some(codex_home.to_path_buf()), real(codex_home)];
-        CORBANU_SECURITY_FILES.iter().any(|file| {
-            homes.iter().flatten().any(|home| {
-                let candidate = home.join(file);
-                candidate == path || real_path.as_ref() == Some(&candidate)
+        // Also another Corbanu home's (`~/.codex` and the like).
+        let in_other_home = |path: &Path| {
+            path.parent()
+                .and_then(Path::file_name)
+                .is_some_and(|name| OTHER_CORBANU_HOMES.iter().any(|other| name == *other))
+                && path
+                    .file_name()
+                    .is_some_and(|name| CORBANU_SECURITY_FILES.iter().any(|file| name == *file))
+        };
+        in_other_home(path)
+            || real_path.as_deref().is_some_and(in_other_home)
+            || CORBANU_SECURITY_FILES.iter().any(|file| {
+                homes.iter().flatten().any(|home| {
+                    let candidate = home.join(file);
+                    candidate == path || real_path.as_ref() == Some(&candidate)
+                })
             })
-        })
     }
 
     /// #766 (Travis, 2026-10-14): under Moderate, deny the command the
