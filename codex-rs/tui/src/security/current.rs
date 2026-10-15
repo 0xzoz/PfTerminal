@@ -79,12 +79,20 @@ pub(crate) fn level_now(
 /// before the restart applies Aggressive's own settings: the facts behind
 /// [`current_values`] for Aggressive, which the inspector's rows show from
 /// confirmation. Each field is true only when that row says so then.
+///
+/// Confirming Aggressive sets approval for every command (#505), so a
+/// session's permission-request tools can widen its sandbox or turn its
+/// network on from then on even if it asked for no approvals before:
+/// these facts count them whatever the approval policy is now.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct BeforeRestart {
     /// Approved and allow-listed commands stay inside this session's
     /// sandbox; the folders it lets them write to, as the Sandbox row says
     /// ("commands can write to the current folder, /private/tmp").
     pub(crate) sandbox_kept: Option<String>,
+    /// Permission requests you approve can widen that sandbox (its
+    /// permission-request tools are on).
+    pub(crate) widenable: bool,
     /// The Network row says "off for agent commands".
     pub(crate) network_off: bool,
     /// Web search is disabled.
@@ -234,10 +242,12 @@ fn evaluate(
         config.permissions.approval_policy.value()
     );
 
+    // #816: from confirmation every command needs approval (#505), so the
+    // tools can widen the sandbox whatever the policy is now.
     let network_off = restricted
         && !config.permissions.network_sandbox_policy().is_enabled()
         && !escapes
-        && !widenable;
+        && !request_tools;
     let network = if !restricted || config.permissions.network_sandbox_policy().is_enabled() {
         "on for agent commands"
     } else if escapes {
@@ -340,11 +350,24 @@ fn evaluate(
         )
     };
 
+    // Names set explicitly in shell_environment_policy.set reach commands
+    // under protected launch too.
+    let set_secret = config
+        .permissions
+        .shell_environment_policy
+        .r#set
+        .keys()
+        .any(|name| is_secret_name(name));
     let facts = BeforeRestart {
         sandbox_kept,
+        widenable: request_tools,
         network_off,
         web_search_off: config.web_search_mode.value() == WebSearchMode::Disabled,
-        environment: (secretless || kept.is_empty()) && !profiles_used,
+        environment: (if secretless {
+            !set_secret
+        } else {
+            kept.is_empty()
+        }) && !profiles_used,
         broker,
     };
     (

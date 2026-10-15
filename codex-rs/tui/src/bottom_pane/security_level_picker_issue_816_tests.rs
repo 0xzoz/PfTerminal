@@ -21,6 +21,7 @@ use super::*;
 fn agg_04_session() -> BeforeRestart {
     BeforeRestart {
         sandbox_kept: Some("commands can write to the current folder, /private/tmp".to_string()),
+        widenable: false,
         network_off: true,
         web_search_off: false,
         environment: false,
@@ -44,7 +45,7 @@ fn issue_816_screen_07_says_the_sandbox_and_network_hold_now() {
     let saved = text(&picker);
     assert_eq!(
         line_with(&saved, "Also in force now"),
-        "Also in force now in this session: approved and allow-listed commands stay inside this session's sandbox (commands can write to the current folder, /private/tmp) and network off for agent commands."
+        "Also in force now in this session: approved and allow-listed commands stay inside this session's sandbox (commands can write to the current folder, /private/tmp) and network is off for agent commands."
     );
     assert_eq!(
         line_with(&saved, "Starts when you restart"),
@@ -61,7 +62,7 @@ fn issue_816_screen_07_says_the_sandbox_and_network_hold_now() {
     let list = text(&picker);
     assert_eq!(
         line_with(&list, "Saved: Aggressive."),
-        "Saved: Aggressive. Core's protections (vault refusal, protected paths) apply in this session now; also in force now: approved and allow-listed commands stay inside this session's sandbox and network off for agent commands; Aggressive's sandbox, approval, web search, environment, model-key and child-agent rows take effect when you restart Corbanu Terminal."
+        "Saved: Aggressive. Core's protections (vault refusal, protected paths) apply in this session now; also in force now: approved and allow-listed commands stay inside this session's sandbox and network is off for agent commands; Aggressive's sandbox, approval, network (web search), environment, model-key and child-agent rows take effect when you restart Corbanu Terminal."
     );
     insta::assert_snapshot!(
         "issue_816_list_aggressive_before_restart",
@@ -82,7 +83,7 @@ fn issue_816_review_says_what_holds_from_confirmation() {
     let paragraph = line_with(&review, "apply as soon as you confirm");
     assert_eq!(
         paragraph,
-        "Core's protections below apply as soon as you confirm, and approval for every command from each pane's next turn. From then until the restart this session also has: approved and allow-listed commands stay inside this session's sandbox (commands can write to the current folder, /private/tmp) and network off for agent commands. The rest of the rows above take effect when you restart Corbanu Terminal (you can restart right after saving); until then this session keeps its current sandbox, network, environment, model-key and child-agent settings, apart from Core's protected-path denials and what is listed as in force, and commands already running keep the permissions they started with. Your config.toml is not modified."
+        "Core's protections below apply as soon as you confirm, and approval for every command from each pane's next turn. From then until the restart, also: approved and allow-listed commands stay inside this session's sandbox (commands can write to the current folder, /private/tmp) and network is off for agent commands. The rest of the rows above take effect when you restart Corbanu Terminal (you can restart right after saving); until then this session keeps its current settings for the rest, apart from Core's protected-path denials, and commands already running keep the permissions they started with. Your config.toml is not modified."
     );
     // The paragraph as the review renders it at 80 columns (the rest of the
     // review depends on the platform's preflight).
@@ -135,6 +136,7 @@ fn issue_816_everything_held_now_is_not_listed_for_the_restart() {
     let mut picker = picker(&root, /*live*/ true);
     picker.set_before_restart(BeforeRestart {
         sandbox_kept: Some("commands can write to the current folder".to_string()),
+        widenable: false,
         network_off: true,
         web_search_off: true,
         environment: true,
@@ -144,7 +146,7 @@ fn issue_816_everything_held_now_is_not_listed_for_the_restart() {
     let saved = text(&picker);
     assert_eq!(
         line_with(&saved, "Also in force now"),
-        "Also in force now in this session: approved and allow-listed commands stay inside this session's sandbox (commands can write to the current folder), network off for agent commands and web search off, secret-like environment variables removed and login profiles and shell snapshots unused, and model keys held by the credential broker."
+        "Also in force now in this session: approved and allow-listed commands stay inside this session's sandbox (commands can write to the current folder), network is off for agent commands and web search is off, secret-like environment variables are removed and login profiles and shell snapshots are not used, and model keys are held by the credential broker."
     );
     assert!(
         saved.contains(
@@ -159,5 +161,33 @@ fn issue_816_everything_held_now_is_not_listed_for_the_restart() {
             "; Aggressive's sandbox, approval and child-agent rows take effect when you restart"
         ),
         "{list}"
+    );
+}
+
+/// Review r1: with permission-request tools on, a request you approve can
+/// widen the sandbox (and turn network on), so the folders are not the
+/// limit and network is not claimed off.
+#[test]
+fn issue_816_permission_requests_qualify_the_sandbox() {
+    let root = tempfile::tempdir().unwrap();
+    let mut picker = picker(&root, /*live*/ true);
+    picker.set_before_restart(BeforeRestart {
+        sandbox_kept: Some("commands can write to the current folder".to_string()),
+        widenable: true,
+        network_off: false,
+        web_search_off: false,
+        environment: false,
+        broker: false,
+    });
+    saved_live(&mut picker);
+    let saved = text(&picker);
+    assert_eq!(
+        line_with(&saved, "Also in force now"),
+        "Also in force now in this session: approved and allow-listed commands stay inside this session's sandbox (commands can write to the current folder; a permission request you approve can widen it)."
+    );
+    assert!(
+        line_with(&saved, "Starts when you restart")
+            .starts_with("Starts when you restart: the Aggressive sandbox (writes only in the current folder), network and web search off,"),
+        "{saved}"
     );
 }

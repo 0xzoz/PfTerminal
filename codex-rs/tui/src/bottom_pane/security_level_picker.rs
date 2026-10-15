@@ -1492,28 +1492,34 @@ fn at_restart(approvals_now: bool, now: &BeforeRestart) -> String {
 fn now_items(now: &BeforeRestart, short: bool) -> Vec<String> {
     let mut items = Vec::new();
     if let Some(sandbox) = &now.sandbox_kept {
-        items.push(if short {
-            "approved and allow-listed commands stay inside this session's sandbox".to_string()
-        } else {
-            format!(
+        items.push(match (short, now.widenable) {
+            (true, _) => {
+                "approved and allow-listed commands stay inside this session's sandbox".to_string()
+            }
+            (false, false) => format!(
                 "approved and allow-listed commands stay inside this session's sandbox ({sandbox})"
-            )
+            ),
+            (false, true) => format!(
+                "approved and allow-listed commands stay inside this session's sandbox ({sandbox}; a permission request you approve can widen it)"
+            ),
         });
     }
     match (now.network_off, now.web_search_off) {
-        (true, true) => items.push("network off for agent commands and web search off".to_string()),
-        (true, false) => items.push("network off for agent commands".to_string()),
-        (false, true) => items.push("web search off".to_string()),
+        (true, true) => {
+            items.push("network is off for agent commands and web search is off".to_string())
+        }
+        (true, false) => items.push("network is off for agent commands".to_string()),
+        (false, true) => items.push("web search is off".to_string()),
         (false, false) => {}
     }
     if now.environment {
         items.push(
-            "secret-like environment variables removed and login profiles and shell snapshots unused"
+            "secret-like environment variables are removed and login profiles and shell snapshots are not used"
                 .to_string(),
         );
     }
     if now.broker {
-        items.push("model keys held by the credential broker".to_string());
+        items.push("model keys are held by the credential broker".to_string());
     }
     items
 }
@@ -1527,7 +1533,7 @@ fn restart_rows(now: &BeforeRestart, approvals_now: bool) -> String {
     }
     match (now.network_off, now.web_search_off) {
         (true, true) => {}
-        (true, false) => rows.push("web search"),
+        (true, false) => rows.push("network (web search)"),
         (false, _) => rows.push("network"),
     }
     if !now.environment {
@@ -1702,7 +1708,7 @@ impl SecurityLevelPicker {
         let approvals = self.approvals_on_confirm();
         let also = now_items(&self.before_restart, /*short*/ false);
         format!(
-            "Core's protections below apply as soon as you confirm{}.{} The rest of the rows above take effect when you restart Corbanu Terminal (you can restart right after saving); until then this session keeps its current {} settings, apart from Core's protected-path denials{}, and commands already running keep the permissions they started with. Your config.toml is not modified.",
+            "Core's protections below apply as soon as you confirm{}.{} The rest of the rows above take effect when you restart Corbanu Terminal (you can restart right after saving); until then this session keeps its current {}, apart from Core's protected-path denials, and commands already running keep the permissions they started with. Your config.toml is not modified.",
             if approvals {
                 ", and approval for every command from each pane's next turn"
             } else {
@@ -1712,19 +1718,17 @@ impl SecurityLevelPicker {
                 String::new()
             } else {
                 format!(
-                    " From then until the restart this session also has: {}.",
+                    " From then until the restart, also: {}.",
                     and_list_oxford(&also)
                 )
             },
-            if approvals {
-                "sandbox, network, environment, model-key and child-agent"
-            } else {
-                "sandbox, approval, network, environment, model-key and child-agent"
-            },
-            if also.is_empty() {
-                ""
-            } else {
-                " and what is listed as in force"
+            match (also.is_empty(), approvals) {
+                // #816: what holds now is said just before.
+                (false, _) => "settings for the rest",
+                (true, true) => "sandbox, network, environment, model-key and child-agent settings",
+                (true, false) => {
+                    "sandbox, approval, network, environment, model-key and child-agent settings"
+                }
             },
         )
     }

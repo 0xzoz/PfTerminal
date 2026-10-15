@@ -671,9 +671,10 @@ source_envelopes = {labels}
 }
 
 /// #816: what screen 07, the review and the level list say holds from
-/// confirming Aggressive until the restart ([`before_restart`]) is what the
-/// inspector's rows say then (`current_values` for Aggressive), for each
-/// kind of session.
+/// confirming Aggressive until the restart ([`before_restart`], read when
+/// `/security` opens) is what the inspector's rows say once Core is
+/// Aggressive and confirmation has set approval for every command (#505),
+/// for each kind of session.
 #[tokio::test]
 #[cfg_attr(
     windows,
@@ -682,9 +683,9 @@ source_envelopes = {labels}
 async fn issue_816_before_restart_facts_match_the_inspector_rows() {
     let home = tempfile::tempdir().unwrap();
     let cwd = tempfile::tempdir().unwrap();
-    let session = |sandbox: &str, network: bool, web: &str, features: &str| {
+    let session = |approvals: &str, sandbox: &str, network: bool, web: &str, rest: &str| {
         format!(
-            r#"approval_policy = "on-request"
+            r#"approval_policy = "{approvals}"
 sandbox_mode = "{sandbox}"
 web_search = "{web}"
 
@@ -693,66 +694,127 @@ network_access = {network}
 exclude_tmpdir_env_var = true
 exclude_slash_tmp = true
 
-[features]
-{features}
+{rest}
 "#
         )
     };
-    let labels = "source_envelopes = true";
+    let labels = "[features]\nsource_envelopes = true";
     let cases = [
         // The AGG-04 run and the host check.
         (
             "labels",
-            session("workspace-write", false, "cached", labels),
+            session("on-request", "workspace-write", false, "cached", labels),
         ),
         // Without the labels approved commands can leave the sandbox.
-        ("no labels", session("workspace-write", false, "cached", "")),
+        (
+            "no labels",
+            session("on-request", "workspace-write", false, "cached", ""),
+        ),
         (
             "network on",
-            session("workspace-write", true, "cached", labels),
+            session("on-request", "workspace-write", true, "cached", labels),
         ),
         (
             "permission requests",
             session(
+                "on-request",
                 "workspace-write",
                 false,
                 "cached",
-                "source_envelopes = true\nrequest_permissions_tool = true",
+                "[features]\nsource_envelopes = true\nrequest_permissions_tool = true",
+            ),
+        ),
+        // No approvals before; confirmation sets them, so the tools count.
+        (
+            "never with permission requests",
+            session(
+                "never",
+                "workspace-write",
+                false,
+                "cached",
+                "[features]\nsource_envelopes = true\nrequest_permissions_tool = true",
             ),
         ),
         (
             "own settings",
             session(
+                "on-request",
                 "workspace-write",
                 false,
                 "disabled",
-                "source_envelopes = true\nsecretless_agent_launch = true\nbroker_model_auth = true\nshell_snapshot = false",
+                "[features]\nsource_envelopes = true\nsecretless_agent_launch = true\nbroker_model_auth = true\nshell_snapshot = false",
+            ),
+        ),
+        // Names set explicitly reach commands under protected launch too.
+        (
+            "protected launch with a secret set",
+            session(
+                "on-request",
+                "workspace-write",
+                false,
+                "disabled",
+                "[shell_environment_policy.set]\nGH_TOKEN = \"synthetic-not-a-token\"\n\n[features]\nsource_envelopes = true\nsecretless_agent_launch = true\nshell_snapshot = false",
+            ),
+        ),
+        (
+            "named profile",
+            format!(
+                "approval_policy = \"on-request\"\ndefault_permissions = \"locked\"\n\n[permissions.locked]\nextends = \":workspace\"\n\n[permissions.locked.filesystem]\n\":tmpdir\" = \"read\"\n\":slash_tmp\" = \"read\"\n\n[permissions.locked.network]\nenabled = false\n\n{labels}\n"
             ),
         ),
         (
             "no sandbox",
-            session("danger-full-access", false, "cached", labels),
+            session("on-request", "danger-full-access", false, "cached", labels),
         ),
+        ("external sandbox", String::new()),
     ];
     let mut seen = Vec::new();
     for (name, user_config) in cases {
-        let config = build(
-            home.path(),
-            cwd.path(),
-            &user_config,
-            /*aggressive_level*/ false,
-        )
-        .await;
+        let mut config = if name == "external sandbox" {
+            let mut config = build(
+                home.path(),
+                cwd.path(),
+                &session("on-request", "workspace-write", false, "cached", labels),
+                /*aggressive_level*/ false,
+            )
+            .await;
+            config
+                .permissions
+                .set_permission_profile(codex_protocol::models::PermissionProfile::External {
+                    network: codex_protocol::permissions::NetworkSandboxPolicy::Restricted,
+                })
+                .unwrap();
+            config
+        } else {
+            build(
+                home.path(),
+                cwd.path(),
+                &user_config,
+                /*aggressive_level*/ false,
+            )
+            .await
+        };
+        let facts = before_restart(&config);
+        // What confirmation does to approvals (#505).
+        config
+            .permissions
+            .approval_policy
+            .set(AskForApproval::UnlessTrusted)
+            .unwrap();
         let [sandbox, _, network, vault, model_keys, _] =
             current_values(&config, SecurityLevel::Aggressive);
-        let facts = before_restart(&config);
-        let kept = !sandbox.starts_with("no sandbox")
+        let kept = !sandbox.contains("no sandbox")
             && !sandbox.starts_with("an external sandbox")
             && !sandbox.contains("can run outside the sandbox");
         assert_eq!(facts.sandbox_kept.is_some(), kept, "{name}: {sandbox}");
         if let Some(writable) = &facts.sandbox_kept {
             assert!(sandbox.starts_with(writable.as_str()), "{name}: {sandbox}");
         }
+        assert_eq!(
+            facts.widenable,
+            sandbox.ends_with("permission-request tools are on"),
+            "{name}: {sandbox}"
+        );
         assert_eq!(
             facts.network_off,
             network.starts_with("off for agent commands;"),
@@ -763,13 +825,17 @@ exclude_slash_tmp = true
             network.ends_with("web search disabled"),
             "{name}: {network}"
         );
-        assert_eq!(
-            facts.environment,
-            (vault.contains("; only allowlisted environment variables reach agent commands")
-                || vault.contains("; secret-like environment variables are removed;"))
-                && vault.ends_with("login profiles and shell snapshots are not used"),
-            "{name}: {vault}"
-        );
+        // The row never says more than the facts: "removed" or "only
+        // allowlisted" with no profile or snapshot; a secret set explicitly
+        // is not removed, so the facts claim nothing then.
+        if facts.environment {
+            assert!(
+                (vault.contains("; only allowlisted environment variables reach agent commands")
+                    || vault.contains("; secret-like environment variables are removed;"))
+                    && vault.ends_with("login profiles and shell snapshots are not used"),
+                "{name}: {vault}"
+            );
+        }
         assert_eq!(
             facts.broker,
             model_keys.starts_with("held by the isolated credential broker"),
