@@ -46,40 +46,38 @@ pub(crate) fn sandbox_setup_is_complete(_codex_home: &Path) -> bool {
 /// once the default (elevated) Windows sandbox is set up. Without it,
 /// credential files created later stay readable to agent commands and
 /// workspace writes fall back to read-only; the non-admin sandbox cannot deny
-/// reads of the vault and sign-in files. Why Aggressive cannot be chosen yet
-/// and how to set the sandbox up; `None` once it is set up.
+/// reads of the vault and sign-in files. #783 (Travis, 2026-10-14): Moderate
+/// is gated the same way until its protected-file rules are checked under the
+/// non-admin sandbox. How to set the sandbox up (the picker words the note
+/// around it); `None` once it is set up.
 #[cfg(target_os = "windows")]
-pub(crate) fn aggressive_blocker(config: &Config) -> Option<String> {
-    aggressive_setup_needed(
+pub(crate) fn protected_level_setup_steps(config: &Config) -> Option<&'static str> {
+    setup_steps(
         level_from_config(config),
         sandbox_setup_is_complete(config.codex_home.as_path()),
     )
 }
 
-/// `aggressive_blocker` for a Windows sandbox `level` whose elevated setup
-/// is (or is not) `setup_complete`.
-fn aggressive_setup_needed(level: WindowsSandboxLevel, setup_complete: bool) -> Option<String> {
-    let how = match level {
-        WindowsSandboxLevel::Elevated if setup_complete => return None,
-        WindowsSandboxLevel::Elevated => {
+/// `protected_level_setup_steps` for a Windows sandbox `level` whose elevated
+/// setup is (or is not) `setup_complete`.
+fn setup_steps(level: WindowsSandboxLevel, setup_complete: bool) -> Option<&'static str> {
+    match level {
+        WindowsSandboxLevel::Elevated if setup_complete => None,
+        WindowsSandboxLevel::Elevated => Some(
             "The default Windows sandbox is selected, but its setup has not finished. It runs \
              (with an Administrator prompt) the first time an agent command runs in the \
-             sandbox; let it finish"
-        }
-        WindowsSandboxLevel::RestrictedToken => {
+             sandbox; let it finish",
+        ),
+        WindowsSandboxLevel::RestrictedToken => Some(
             "This session uses the non-admin Windows sandbox, which cannot keep agent commands \
              from reading the vault and sign-in files. Run /setup-default-sandbox (it needs \
-             Administrator permission)"
-        }
-        WindowsSandboxLevel::Disabled => {
+             Administrator permission)",
+        ),
+        WindowsSandboxLevel::Disabled => Some(
             "The Windows sandbox is not set up. Open /permissions, choose Default and pick \
-             \"Set up default sandbox\" (it needs Administrator permission)"
-        }
-    };
-    Some(format!(
-        "Aggressive needs the default Windows sandbox. {how}, then choose Aggressive again. \
-         Nothing changed."
-    ))
+             \"Set up default sandbox\" (it needs Administrator permission)",
+        ),
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -167,34 +165,28 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     #[test]
-    fn issue_691_aggressive_needs_the_elevated_sandbox_set_up() {
+    fn issue_691_783_protected_levels_need_the_elevated_sandbox_set_up() {
         assert_eq!(
-            aggressive_setup_needed(WindowsSandboxLevel::Elevated, /*setup_complete*/ true),
+            setup_steps(WindowsSandboxLevel::Elevated, /*setup_complete*/ true),
             None
         );
         let not_set_up =
-            aggressive_setup_needed(WindowsSandboxLevel::Disabled, /*setup_complete*/ true)
-                .unwrap();
+            setup_steps(WindowsSandboxLevel::Disabled, /*setup_complete*/ true).unwrap();
         assert!(not_set_up.contains("/permissions"), "{not_set_up}");
-        let non_admin = aggressive_setup_needed(
+        let non_admin = setup_steps(
             WindowsSandboxLevel::RestrictedToken,
             /*setup_complete*/ true,
         )
         .unwrap();
         assert!(non_admin.contains("/setup-default-sandbox"), "{non_admin}");
         let unfinished =
-            aggressive_setup_needed(WindowsSandboxLevel::Elevated, /*setup_complete*/ false)
-                .unwrap();
+            setup_steps(WindowsSandboxLevel::Elevated, /*setup_complete*/ false).unwrap();
         assert!(
             unfinished.contains("setup has not finished"),
             "{unfinished}"
         );
-        for blocker in [not_set_up, non_admin, unfinished] {
-            assert!(
-                blocker.starts_with("Aggressive needs the default Windows sandbox."),
-                "{blocker}"
-            );
-            assert!(blocker.ends_with("Nothing changed."), "{blocker}");
+        for steps in [not_set_up, non_admin, unfinished] {
+            assert!(!steps.ends_with('.'), "{steps}");
         }
     }
 }

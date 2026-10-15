@@ -1145,10 +1145,9 @@ fn issue_691_aggressive_waits_for_the_windows_sandbox() {
         /*preflight_input*/ None,
         RuntimeKeymap::defaults().list,
     );
-    picker.set_windows_sandbox_blocker(Some(
-        "Aggressive needs the default Windows sandbox. The Windows sandbox is not set up. Open \
-         /permissions, choose Default and pick \"Set up default sandbox\" (it needs \
-         Administrator permission), then choose Aggressive again. Nothing changed."
+    picker.set_windows_sandbox_steps(Some(
+        "The Windows sandbox is not set up. Open /permissions, choose Default and pick \
+         \"Set up default sandbox\" (it needs Administrator permission)"
             .to_string(),
     ));
     picker.handle_key_event(key(KeyCode::Up));
@@ -1162,7 +1161,7 @@ fn issue_691_aggressive_waits_for_the_windows_sandbox() {
     assert_eq!(files(home.path()), Vec::<String>::new());
 
     // Once it is set up, Aggressive's review opens as before.
-    picker.set_windows_sandbox_blocker(/*blocker*/ None);
+    picker.set_windows_sandbox_steps(/*steps*/ None);
     picker.handle_key_event(key(KeyCode::Enter));
     assert_eq!(picker.screen, Screen::Review(ChosenLevel::Aggressive));
 }
@@ -1179,7 +1178,7 @@ fn issue_691_saved_aggressive_waits_for_the_windows_sandbox_and_permissive_stays
         /*preflight_input*/ None,
         RuntimeKeymap::defaults().list,
     );
-    picker.set_windows_sandbox_blocker(Some("needs the sandbox".to_string()));
+    picker.set_windows_sandbox_steps(Some("Run /setup-default-sandbox".to_string()));
     assert!(
         render(&picker, /*width*/ 80)
             .contains("> Aggressive  (active), needs the Windows sandbox set up"),
@@ -1190,7 +1189,11 @@ fn issue_691_saved_aggressive_waits_for_the_windows_sandbox_and_permissive_stays
     assert_eq!(
         picker.screen,
         Screen::List {
-            note: Some("needs the sandbox".to_string())
+            note: Some(
+                "Aggressive needs the default Windows sandbox. Run /setup-default-sandbox, \
+                 then choose Aggressive again. Nothing changed."
+                    .to_string()
+            )
         }
     );
     assert_eq!(

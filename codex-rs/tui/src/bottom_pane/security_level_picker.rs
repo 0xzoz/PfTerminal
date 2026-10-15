@@ -135,9 +135,10 @@ pub(crate) struct SecurityLevelPicker {
     pub(super) open_revocations: bool,
     /// #750: the feature flags the Moderate rows depend on.
     pub(super) moderate: crate::security::moderate::Facts,
-    /// #691: why Aggressive cannot be chosen on this Windows machine yet
-    /// (its sandbox is not set up); `None` elsewhere.
-    pub(super) windows_sandbox_blocker: Option<String>,
+    /// #691/#783: how to set up the Windows sandbox, which Moderate and
+    /// Aggressive need before they can be chosen on this Windows machine;
+    /// `None` once it is set up and elsewhere.
+    pub(super) windows_sandbox_steps: Option<String>,
 }
 
 /// Core's `[security]` levels from the session's config layers, and the
@@ -196,7 +197,7 @@ impl SecurityLevelPicker {
             restart_blocked: crate::security::restart::restart_blocker(),
             open_revocations: false,
             moderate: crate::security::moderate::Facts::default(),
-            windows_sandbox_blocker: None,
+            windows_sandbox_steps: None,
         }
     }
 
@@ -205,9 +206,24 @@ impl SecurityLevelPicker {
         self.moderate = facts;
     }
 
-    /// #691: Aggressive is not offered until the Windows sandbox is set up.
-    pub(crate) fn set_windows_sandbox_blocker(&mut self, blocker: Option<String>) {
-        self.windows_sandbox_blocker = blocker;
+    /// #691/#783: Moderate and Aggressive are not offered until the Windows
+    /// sandbox is set up; `steps` says how.
+    pub(crate) fn set_windows_sandbox_steps(&mut self, steps: Option<String>) {
+        self.windows_sandbox_steps = steps;
+    }
+
+    /// #691/#783: why `level` cannot be chosen yet and how to set the Windows
+    /// sandbox up; `None` for Permissive and once the sandbox is set up.
+    fn windows_sandbox_note(&self, level: ChosenLevel) -> Option<String> {
+        if level == ChosenLevel::Permissive {
+            return None;
+        }
+        let steps = self.windows_sandbox_steps.as_deref()?;
+        let level = level.name();
+        Some(format!(
+            "{level} needs the default Windows sandbox. {steps}, then choose {level} again. \
+             Nothing changed."
+        ))
     }
 
     /// PF-25-S02: whether the grants and kill switch view is offered: Core
@@ -780,6 +796,16 @@ impl SecurityLevelPicker {
                     note: Some("Permissive is already in effect. Nothing changed.".to_string()),
                 }
             }
+            // #691/#783: Moderate and Aggressive wait for the Windows
+            // sandbox, also a saved level's review (Aggressive's nested-agent
+            // setting, an unfinished commit).
+            level @ (ChosenLevel::Moderate | ChosenLevel::Aggressive)
+                if self.windows_sandbox_steps.is_some() =>
+            {
+                Screen::List {
+                    note: self.windows_sandbox_note(level),
+                }
+            }
             ChosenLevel::Moderate
                 if self.stored == StoredLevel::Chosen(ChosenLevel::Moderate)
                     && !self.moderate_core_behind(ChosenLevel::Moderate) =>
@@ -788,11 +814,6 @@ impl SecurityLevelPicker {
                     note: Some("Moderate is already saved. Nothing changed.".to_string()),
                 }
             }
-            // #691: also a saved Aggressive's review (its nested-agent
-            // setting, an unfinished commit) waits for the sandbox.
-            ChosenLevel::Aggressive if self.windows_sandbox_blocker.is_some() => Screen::List {
-                note: self.windows_sandbox_blocker.clone(),
-            },
             target => Screen::Review(target),
         }
     }
@@ -887,15 +908,16 @@ impl SecurityLevelPicker {
                 for (index, row) in ROWS.iter().enumerate() {
                     let marker = if index == self.selected { ">" } else { " " };
                     let suffix = match row.chosen() {
-                        // #691: also when Aggressive is active (its review
-                        // stays closed until the sandbox is set up).
-                        ChosenLevel::Aggressive
-                            if self.windows_sandbox_blocker.is_some()
-                                && self.active == ChosenLevel::Aggressive =>
+                        // #691/#783: also when the level is active (its
+                        // review stays closed until the sandbox is set up).
+                        level @ (ChosenLevel::Moderate | ChosenLevel::Aggressive)
+                            if self.windows_sandbox_steps.is_some() && self.active == level =>
                         {
                             "  (active), needs the Windows sandbox set up"
                         }
-                        ChosenLevel::Aggressive if self.windows_sandbox_blocker.is_some() => {
+                        ChosenLevel::Moderate | ChosenLevel::Aggressive
+                            if self.windows_sandbox_steps.is_some() =>
+                        {
                             "  needs the Windows sandbox set up"
                         }
                         level if level == self.active => "  (active)",

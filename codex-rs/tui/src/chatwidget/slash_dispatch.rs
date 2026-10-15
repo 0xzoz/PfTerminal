@@ -376,13 +376,14 @@ impl ChatWidget {
                             &self.config,
                         ),
                 };
-                // #691: only Windows needs its sandbox set up before
-                // Aggressive can be chosen.
+                // #691/#783: only Windows needs its sandbox set up before
+                // Moderate or Aggressive can be chosen.
                 #[cfg(target_os = "windows")]
-                let windows_sandbox_blocker =
-                    crate::windows_sandbox::aggressive_blocker(&self.config);
+                let windows_sandbox_steps =
+                    crate::windows_sandbox::protected_level_setup_steps(&self.config)
+                        .map(str::to_string);
                 #[cfg(not(target_os = "windows"))]
-                let windows_sandbox_blocker = None;
+                let windows_sandbox_steps = None;
                 self.bottom_pane.show_view(Box::new(
                     crate::bottom_pane::security_view::SecurityView::new(
                         Some(self.config.security_level),
@@ -408,7 +409,7 @@ impl ChatWidget {
                     .with_moderate_facts(crate::security::moderate::Facts::from_config(
                         &self.config,
                     ))
-                    .with_windows_sandbox_blocker(windows_sandbox_blocker)
+                    .with_windows_sandbox_steps(windows_sandbox_steps)
                     .with_inspector(|| {
                         crate::security::inspector::InspectorInput::from_config(
                             &self.config,
