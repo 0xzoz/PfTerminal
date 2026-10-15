@@ -1,0 +1,117 @@
+# Milestone "Aggressive ships": third targeted re-run (2026-10-15)
+
+Third targeted code-blind functional re-run of the P1 security milestone, after the second targeted run
+([../aggressive-20261014-targeted2](../aggressive-20261014-targeted2), #819: 54 passed, 2 failed, 4 blocked, 4 accepted
+of 64). Owner decisions of 2026-10-15 on #447, #816, #817 and #818 ([design/decisions/](design/decisions/)).
+**Not passed: the milestone needs Travis's named sign-off.**
+
+## Result
+
+Re-run on this candidate: 4 cases, **3 passed, 1 blocked** (AGG-T01 with its #626 step as part B, AGG-T02, AGG-R03,
+AGG-R14). Judged again on the second targeted run's recorded screens, without re-running (owner decision): AGG-04 and
+AGG-37, **both passed** ([dispositions.md](dispositions.md), [results.json](results.json)).
+
+Combined status of all 64 cases (this run where re-run or re-judged, the second targeted run's record otherwise):
+**58 passed, 0 failed, 2 blocked, 4 accepted by the owner**.
+
+- Now passing:
+  - AGG-T01 (was failed, #739): part A, at Permissive with protected launch on, no prompt offered to run the write
+    outside the sandbox; both requests ended in a sandbox denial ("Operation not permitted"), and the file kept its N
+    lines. Under Aggressive, before and after the relaunch, the prompt appeared and Esc left the command unrun. Part B
+    (the #626 step, a rule saved with protected launch off): the rule ran the write twice; with protected launch on it
+    skipped the prompt but showed the note that it now runs inside the sandbox, and the write was denied; under
+    Aggressive, before and after a relaunch, the prompt said the remembered approval "was not applied because security
+    level Aggressive is on". The file ended at N+2. The executor marked part A failed on the old advisory result, which
+    amendment 6 moved to part B (see AGG-T01 in [dispositions.md](dispositions.md)).
+  - AGG-T02 (was failed, #739): back at Permissive (quit and relaunch, as the screen offered), the request ran without a
+    prompt and was denied by the sandbox; the file kept N lines.
+  - AGG-R03 (was blocked in every run, #818): from a second Corbanu Terminal on the same home, the kill switch went on
+    while terminal A's approval prompt was pending. Within a second A said the switch was turned on in another Corbanu
+    Terminal and the turn was stopped; the prompt was gone, the typed y showed "Not sent" with the kill-switch message,
+    and ks-pending.txt was never created.
+  - AGG-04 (was blocked pending #816): judged against amendment 6 on the second targeted run's run V01. The inspector's
+    rows before the restart show only what holds from confirmation, and screen 07 separates now from restart; it
+    understates (lists the sandbox and network-off under the restart), which amendment 6 allows for screens before #834.
+  - AGG-37: its pass stands under amended result 1.
+- Blocked:
+  - AGG-R14 (advisory): #817's fix held (the Enter on the child's prompt approved it) and ks-child.txt was absent 90 s
+    after the kill switch (result 1 passed). Result 2, "the child shows it was stopped", is blocked: only the parent's
+    turn notice is shown, and `/panes` lists no child, because the model spawned it rather than `/spawn` (#867).
+    The first attempt was blocked earlier: the parent's model asked to run its own polling command before the child's
+    prompt appeared, and the frozen driver answered nothing. One fresh replay was run; both attempts are recorded.
+  - AGG-R06: no Claude Code in the guest (a named limit, unchanged).
+- Accepted by the owner, not passed (#447, unchanged): AGG-18, AGG-R07, AGG-R10, AGG-20 (AGG-20 also a named limit).
+- Issue filed (advisory): #867, the AGG-R14 result 2 question above.
+- `qa/code-blind-functional/check.py` stops at AGG-01 ([checker-output.txt](checker-output.txt)), the first case carried
+  over from an earlier candidate. That is expected for a targeted run; a clean checker pass needs every case on one
+  candidate.
+
+## Owner decisions applied (2026-10-15)
+
+- **Amendment 6** ([design/amendments6-final.md](design/amendments6-final.md); part 7 of
+  [executor-packet/v7/amendments-and-new-cases.md](executor-packet/v7/amendments-and-new-cases.md)):
+  - AGG-04 result 3 and the screen 07 split in AGG-04 and AGG-37 follow today's behaviour (#816, fixed in #834): what
+    holds from confirmation may show as in force; what holds only after the restart may not; screen 07 must still name
+    the restart-only protections; a pre-#834 screen that lists already-held protections under the restart understates
+    and does not fail. Both cases rest on the second targeted run's recorded screens.
+  - AGG-T01/T02 follow #739 option B (no offer, a plain refusal or sandbox denial, the file unchanged, the note for a
+    remembered rule). The #626 step is AGG-T01 part B, its own group: a rule saved with protected launch off
+    (`-c features.secretless_agent_launch=false -c allow_login_shell=false` on the first launch only; the second flag
+    makes the saved rule match the command later launches send, see
+    [executor-packet/v7/new-screens-6/README.txt](executor-packet/v7/new-screens-6/README.txt), Y vs Z), then
+    Permissive with protected launch on, then Aggressive before and after a relaunch.
+  - AGG-R03 runs from a second Corbanu Terminal on the same home, played by a new frozen driver
+    ([executor-packet/v7/drivers/AGG-R03.json](executor-packet/v7/drivers/AGG-R03.json)). The harness gained
+    second-terminal steps (`agms-tui --term 2`, [harness/agms-tui](harness/agms-tui),
+    [harness/agms-drive](harness/agms-drive)); a host smoke of those steps with a fake product is in
+    [design/harness-smoke.txt](design/harness-smoke.txt).
+  - AGG-R14 replays the second targeted run's frozen driver byte-for-byte (SHA-256 `0310f8cb…89701`).
+- **Driver design and review:** a fresh read-only designer wrote the AGG-R03 driver from the case text, the draft table,
+  the tools and this candidate's screens ([design/designer-output.md](design/designer-output.md)); its first attempt
+  died with no reply when macOS blocked the Corbanu home and was retried once. A fresh read-only reviewer checked the
+  table and both drivers against the decisions, the case text and the screens
+  ([design/review-output.md](design/review-output.md)): verdict CHANGES, with a final table and a final AGG-R03 driver,
+  applied verbatim (the table rows were checked identical by script).
+- **Freeze:** SHA-256 in [design/FROZEN.sha256](design/FROZEN.sha256), committed and pushed at `9daaaf93b8`
+  (2026-10-15T21:32:55Z/21:32:58Z), before the first VM start attempt (21:33:10Z). The executors checked the packet,
+  driver and candidate digests themselves.
+
+## Candidate and execution
+
+- Candidate: origin/main `4c9b0a0cf0` (contains #813, #834, #835), Corbanu Terminal 0.1.48, `bin/corbanu` SHA-256
+  `d8fc9509…1fdf4` ([candidate/candidate-manifest.md](candidate/candidate-manifest.md)). origin/main moved to
+  `7666bdf3d4` before the freeze with CI files only.
+- VM "macOS 3" only; "macOS 2" stayed stopped; no VM created or deleted. The first start was refused by UTM because the
+  VM's shared folder (/Volumes/FASTDRIVE2/z23) was missing: the host drive had been unmounted at 21:25:42Z, outside this
+  run. The lock was released and the coordinator told through a request file outside the repository
+  ([common/vm-start.txt](common/vm-start.txt)); this run changed neither the drive nor the VM settings. When the drive
+  was back the run continued (22:49Z).
+- Isolation gate: the first probe failed one positive check because the harness still expected the previous
+  candidate's digest; after correcting `expected.json` it passed 85 of 85, with a smoke turn on GLM 5.3 Flash
+  ([common/gate/](common/gate/), [common/effective-policy.txt](common/effective-policy.txt)). No system password or
+  Keychain prompt: 0 extra SecurityAgent processes in 3,160 checks.
+- Executors: fresh `corbanu exec` sessions of the candidate on GLM 5.3 Flash (zai), one group at a time on lanes
+  agmx1-3: W01 (AGG-T01 part A, AGG-T02), W02 (AGG-T01 part B), W03 (AGG-R03), W04 and W04-a2 (AGG-R14), 22:55Z to
+  23:43Z ([runs/](runs/)).
+- Closing: guest data erased and checked by two verification boots (no ~/agms, /opt/agms, agmx accounts, AGMS pf
+  lines or admin helper folder; /etc/codex, `set skip on lo0` and the share restored). A shutdown request was not
+  answered, so the already-verified guest was powered off with `utmctl stop` (23:49:42Z); the lock was deleted at
+  23:49:43Z.
+
+## Known limits
+
+- AGG-T02's "Permissive active" rests on "Saved: Permissive", the relaunch, the request running without the prompt
+  Aggressive shows for every command, and the saved level files; the executor took no `/security` screen after the
+  relaunch.
+- AGG-04 and AGG-37 were not re-run: they are judged on the second targeted run's screens (candidate `df3d8c5d1c`,
+  before #834's wording), as the owner decided. This run's screens of the current candidate show #834's wording
+  (for example W01's saved screen, "Also in force now in this session: …").
+- AGG-04's inspector also shows "Nested agents: refuse (default) … refused while Aggressive is enforced
+  [configured: /security]"; amendment 6 does not list the nested-agent refusal among the restart-only items.
+- The packet says a part 7 amendment governs and that what it "does not mention stays as before"; W01's executor read
+  that as keeping part A's old advisory result. The amended table replaces part A's expected results as a whole.
+
+## Review budget
+
+[review-ledger.md](review-ledger.md): the driver design and the amendment review used 2 of 5; the independent evidence
+checks are recorded there.
