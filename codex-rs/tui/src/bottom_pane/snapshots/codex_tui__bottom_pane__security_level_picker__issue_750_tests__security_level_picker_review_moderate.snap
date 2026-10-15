@@ -42,9 +42,10 @@ in Corbanu Terminal sessions and their child agents:
     model requests are refused, never sent directly (broker_model_auth;
     `broker_model_auth = false` in your own config keeps it off)
 • Child agents
-  Moderate: agents started in this Corbanu Terminal (/spawn and the agent tools)
-    run with Moderate enforced; Claude panes are refused because Claude Code
-    runs outside the sandbox, unless contained_external_agents and
+  Moderate: agents started in this Corbanu Terminal (/spawn and the agent
+    tools), and on macOS and Linux `corbanu exec` or `review` started by an
+    agent command, run with Moderate enforced; Claude panes are refused because
+    Claude Code runs outside the sandbox, unless contained_external_agents and
     secretless_agent_launch run them in it
 • Kill switch
   Moderate: /security → g stops the work in every pane and refuses model turns

@@ -104,6 +104,7 @@ mod issue_736_740;
 mod issue_747;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod issue_748;
+mod issue_766;
 mod items;
 mod json_result;
 mod live_cli;

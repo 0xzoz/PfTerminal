@@ -1334,7 +1334,7 @@ fn post_taint_read_denials(
         // Issue #540: except the Corbanu home's runtime entries, which stay
         // read-only in the command's sandbox (under Moderate every command
         // keeps one, #747).
-        let denials = ReadDenials::for_turn(
+        let mut denials = ReadDenials::for_turn(
             tool_ctx.turn.config.codex_home.as_path(),
             tool_ctx.turn.config.sqlite.home(),
             &cwd,
@@ -1342,6 +1342,17 @@ fn post_taint_read_denials(
             materialized,
         )
         .runtime_only();
+        // #766: the approval lifts no rule a nested `corbanu exec` relies on.
+        if !tool_ctx
+            .turn
+            .config
+            .permissions
+            .launch_enforces_aggressive()
+        {
+            denials.mark_moderate(tool_ctx.turn.config.codex_home.as_path());
+        } else {
+            ReadDenials::keep_moderate_marker_readable(tool_ctx.turn.config.codex_home.as_path());
+        }
         tracing::info!(
             target: "codex_core::security::tainted_action",
             taint_generation = state.taint_generation,
@@ -1413,6 +1424,20 @@ fn post_taint_read_denials(
     if state.level == codex_security_policy::SecurityLevel::Aggressive {
         denials.deny_home_listing();
         denials.deny_keychain_services();
+    }
+    // #766: `corbanu exec` started by this command runs with Moderate; not
+    // where the launch enforces Aggressive, whose own nested-launch rules
+    // apply (its level file may be unreadable under Core's Moderate rules).
+    if state.level == codex_security_policy::SecurityLevel::Moderate
+        && !tool_ctx
+            .turn
+            .config
+            .permissions
+            .launch_enforces_aggressive()
+    {
+        denials.mark_moderate(tool_ctx.turn.config.codex_home.as_path());
+    } else {
+        ReadDenials::keep_moderate_marker_readable(tool_ctx.turn.config.codex_home.as_path());
     }
     let (Some(exec_server), Some(materialized)) =
         (denials.apply(exec_server), denials.apply(materialized))

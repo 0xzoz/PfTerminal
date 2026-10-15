@@ -39,6 +39,16 @@ without them Corbanu refuses every model request under Moderate, so
   agent tools) run with Moderate enforced. Claude panes are refused, because
   Claude Code runs outside the sandbox, unless `contained_external_agents` and
   `secretless_agent_launch` run them in it.
+- **Nested agents.** `corbanu exec` and `review` started by an agent command
+  run with Moderate enforced, also when pointed at another Corbanu home. With
+  this Corbanu home, which they can't write inside the sandbox, they run in
+  an empty Corbanu home of their own, without your config, sign-in or
+  model keys: the agent passes the model and provider with `-m` and `-c`, and
+  they reach the model only if agent commands have network access and a key.
+  They run headless, nobody approves their commands, and a run without a
+  sandbox is refused. Interactive sessions, `app-server`, `mcp-server` and
+  credential commands (such as `corbanu vault`) an agent command starts are
+  refused.
 
 Not available yet: financial preview and approvals, isolated retrieval,
 screened search, brokered browser login, quarantine, the untrusted-content
@@ -65,12 +75,21 @@ The kill switch (`/security` → `g`) works under every level.
   settings to keep every command in it.
 - MCP servers, apps, hooks and `!` shell commands run outside the sandbox, as
   under every level.
-- An agent command can start `corbanu exec` or `review`, and Moderate doesn't
-  refuse it. With this Corbanu home, the new agent can't read Corbanu's
-  config, sign-in or security state inside the sandbox, so it stops at start
-  (with `secretless_agent_launch` on, also when you approve the command).
-  Pointed at another Corbanu home, it runs at that home's level: Moderate
-  isn't carried over to it (#766).
+- Nested agents are recognised on macOS and Linux only, and on Linux not when
+  they run as root or in a user namespace of their own (#826). Corbanu marks
+  Moderate by denying agent commands a file in the Corbanu home's `tmp`
+  folder, and lists the homes Moderate runs on in the `moderate-homes` folder
+  under `~/Library/Application Support/Corbanu` (macOS) or
+  `~/.local/state/corbanu` (Linux); under Moderate agent commands can't change
+  that list. A launch pointed at another Corbanu home finds its origin through
+  that list or your default home (`~/.corbanu`); if the list can't be written
+  or your account can't be looked up, such a launch runs at that home's level,
+  as before. With a Corbanu home other than the default, a nested launch is
+  refused, as before, while `~/.corbanu` or `~/.pfterminal` also stores a
+  security level and a vault. A program started outside the sandbox (MCP
+  servers, hooks, `!` commands) isn't an agent command and isn't held to
+  Moderate. A nested run's own Corbanu home is removed when the run ends, but
+  stays in the temporary folder if the run stops on an error (#766).
 - A remote app server can't enforce a level chosen here; Corbanu refuses to
   start against one until you choose Permissive.
 
