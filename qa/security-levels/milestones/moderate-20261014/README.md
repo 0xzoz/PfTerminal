@@ -95,7 +95,8 @@ Blocker cases: 15 passed, 6 failed, 5 blocked of 26. Advisory cases: 2 passed, 4
   restored), second clean shutdown; "macOS 3" stopped at 07:18:08Z ([common/vm-state-end.txt](common/vm-state-end.txt)).
 - **Export redaction:** `runs/G21/collected/evidence/product-home-mod26-state/` (a product home the executor moved aside)
   keeps only `config.toml` and `security_state.json`; databases, logs, the vault lock and `source-origin.key` are listed
-  by size and SHA-256 in `product-home-mod26-state.manifest.txt`. `pty.raw` files are gzipped. Key scan clean.
+  by size and SHA-256 in `product-home-mod26-state.manifest.txt`. `pty.raw` files are gzipped. Each collected fixture's `.git` directory (without objects) is renamed
+  `dot-git`, so the record holds no nested repositories. Key scan clean.
 
 ## Named limits
 
