@@ -1,20 +1,20 @@
 ---
 sprint_id: "PF-60-S09"
 title: "Verification paths for unverified flows"
-status: draft
+status: in_progress
 plan_file: "docs/plans/active/portfolio-agent-cost-accounting-followups.md"
 plan_feature: "PF-60"
 execution_order: 4
-owner: "Codex accounting lane (proposed); Travis Good accepts"
-parallel_lane: "UNALLOCATED"
-write_scope: "UNALLOCATED"
-integration_gate: "UNALLOCATED"
-worktree: "UNALLOCATED"
-branch: "UNALLOCATED"
-base_commit: "UNALLOCATED"
+owner: "Codex worker pf60-next; Travis Good accepts"
+parallel_lane: "accounting"
+write_scope: "qa/portfolio/agent-cost-accounting/pf-60-s09/, qa/demos/index/PF-60-S09.md, qa/demos/specs/pf60s09-image-cost.toml, qa/demos/specs/pf60s09-chatgpt-login-cost.toml, docs/sprints/current/portfolio-agent-cost-accounting-followups/pf-60-s09-verification-paths-for-unverified-flows.md, docs/sprints/current/portfolio-agent-cost-accounting-followups/pf-60-s08-cost-page-clarity-and-reopen-warmup.md, docs/plans/active/portfolio-agent-cost-accounting-followups.md, docs/sprints/index.md"
+integration_gate: "One PR to main: each flow run once with captures (PASS, FAIL with an issue, or Travis decision), drivers documented for S10, docs checkers, independent Opus 5.5 High review to APPROVE on the exact head, SOP videos; Travis accepts"
+worktree: "/Volumes/CorbanuDrive/Corbanu/worktrees/pf60-s09"
+branch: "pf60-s09/verification-paths"
+base_commit: "643838f2f4ed87dfe71be24f983a6dcc91709faa"
 depends_on: "PF-60-S04"
 created: 2026-10-10
-updated: 2026-10-10
+updated: 2026-10-14
 ---
 
 # PF-60-S09 — Verification paths for unverified flows
@@ -40,34 +40,37 @@ updated: 2026-10-10
 
 ## Preconditions
 
-- [ ] Plan is active.
-- [ ] Dependencies are completed.
-- [ ] Worktree, branch, and base commit are exact and match the plan.
-- [ ] Travis provides or approves: a dedicated ChatGPT test account in the vault (his own login is never swapped), and
-      TensorCash repository access for the acceptance account (or rules it not applicable, with a reason).
+- [x] Plan is active (Travis, 2026-10-14; slot 2).
+- [x] Dependencies are completed (PF-60-S04 archived 2026-10-10).
+- [x] Worktree, branch, and base commit are exact and match the plan.
+- [x] Travis decides the verification paths (2026-10-14): ChatGPT login with a mock sign-in server only (his own login
+      is never swapped); TensorCash not applicable until access is granted; image generation and realtime for real on
+      the OpenAI API key (vault `openai-api-key`, small spend).
 
 ## Done
 
 - [x] Draft sprint created 2026-10-10 from Travis's decision; linked to one plan feature.
+- [x] AC1 ChatGPT login: **PASS (stand-in only)**. Device-code sign-in and turns through the client's built-in ChatGPT
+      routes, redirected to a local stand-in; catalogued, uncatalogued and priority-tier turns all read "Covered by
+      your subscription".
+- [x] AC2 Image generation: **PASS**. A real API-key `gpt-image-2` request recomputes exactly at $5/M input and $30/M
+      output ($0.007110); the ChatGPT-login image path (stand-in) is recorded as subscription.
+- [x] AC3 Realtime: **FAIL, filed as #824**. A real WebSocket session isn't recorded; the WebRTC call is recorded but
+      OpenAI refuses it on an API key; realtime has no token counts to recompute.
+- [x] AC4 TensorCash: not applicable until access is granted (Travis, 2026-10-14).
+- [x] Each driver is documented for the PF-60-S10 executor: [drivers](../../../../qa/portfolio/agent-cost-accounting/pf-60-s09/drivers/README.md);
+      [gate](../../../../qa/portfolio/agent-cost-accounting/pf-60-s09/gate.md).
 
 ## Remaining
 
-- [ ] AC1 ChatGPT login: with the test account in a disposable home, ChatGPT-login turns (including an uncatalogued
-      model and the priority tier) show "Subscription", never spend, "no price" or "check the bill".
-- [ ] AC2 Image generation: a real image request through the TUI on an OpenAI API key is recorded at OpenAI's published
-      image rates and recomputes exactly; the ChatGPT-login image path is recorded as subscription (with AC1's account).
-- [ ] AC3 Realtime: a scripted driver (for example the app-server realtime API with recorded audio) runs a real realtime
-      session; its requests are recorded with their basis and, on an API key, recompute exactly.
-- [ ] AC4 TensorCash: with access resolved, one accounting journey runs against the live repository and its `/cost`
-      totals reconcile; otherwise Travis's not-applicable decision is recorded.
-- [ ] Each driver is documented so the PF-60-S10 executor can rerun it without reading source.
-- [ ] Code-blind functional design frozen before test-result disclosure.
+- [ ] Code-blind functional design frozen before test-result disclosure (PF-60-S10).
+- [ ] Travis accepts S09 (AC3 FAIL tracked in #824); #402 closed on acceptance.
 
 ## Verification
 
-- [ ] Each AC has captures, raw provider usage and a recomputation (or Travis's recorded decision); no NOT VERIFIABLE left.
-- [ ] Key scan of all captures: 0 hits; disposable homes with `CORBANU_TEST_NO_NATIVE_KEYRING=1`.
-- [ ] Integration: `python3 docs/plans/check.py; python3 docs/sprints/check.py`; `git diff --check`.
+- [x] Each AC has captures and a recomputation, an issue, or Travis's recorded decision; no NOT VERIFIABLE left.
+- [x] Key scan of all captures: 0 hits; disposable homes with `CORBANU_TEST_NO_NATIVE_KEYRING=1`.
+- [x] Integration: `python3 docs/plans/check.py; python3 docs/sprints/check.py`; `git diff --check`.
 - [ ] Code-blind cases executed independently (in PF-60-S10 under the enforced gate).
 
 ## Exit evidence
