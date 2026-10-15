@@ -554,10 +554,11 @@ async fn accounting_chat_native_spawned_role_children_and_fork() -> anyhow::Resu
 #[tokio::test]
 async fn accounting_chat_native_invalid_evidence_no_repair() -> anyhow::Result<()> {
     // Invalid usage only. A malformed chunk is a provider stream error, handled
-    // as one whether or not accounting is on.
+    // as one whether or not accounting is on. A reasoning count above the
+    // output count is not invalid evidence: it is recorded as not reported
+    // (#786; `accounting_chat_reasoning_above_output_keeps_the_record`).
     for bad in [json!({"usage":{"prompt_tokens":-1}}).to_string(),
         json!({"usage":{"prompt_tokens":100,"prompt_tokens_details":{"cached_tokens":101}}}).to_string(),
-        json!({"usage":{"completion_tokens":40,"completion_tokens_details":{"reasoning_tokens":41}}}).to_string(),
         json!({"usage":{"prompt_tokens":100,"completion_tokens":40,"total_tokens":139}}).to_string()] {
         let server = MockServer::start().await;
         let mut gate = Gate::start(GateRoutes::ChatOnly).await?;
