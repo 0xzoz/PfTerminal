@@ -222,6 +222,30 @@ fn moderate_marker(home: &Path) -> io::Result<bool> {
     }
 }
 
+/// Core, before an agent command not under Moderate runs where the
+/// protected-file rules apply: an existing marker that cannot be read under
+/// its own permissions is given them back (0644), so it never passes for
+/// Moderate's. Links and folders are left alone (they never count).
+pub fn keep_moderate_marker_readable(codex_home: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let marker = codex_home.join(MODERATE_MARKER);
+        let metadata = match std::fs::symlink_metadata(&marker) {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(err),
+        };
+        if metadata.file_type().is_file() && metadata.permissions().mode() & 0o444 != 0o444 {
+            std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o644))?;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = codex_home;
+    Ok(())
+}
+
 /// Core, before an agent command under Moderate on `codex_home` runs: the
 /// marker, created when it is missing. An error when something other than a
 /// regular file holds its place.

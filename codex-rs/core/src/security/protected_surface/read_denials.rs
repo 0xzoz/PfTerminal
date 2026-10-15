@@ -805,6 +805,20 @@ impl ReadDenials {
         self.mark_moderate_with(codex_home, registry.as_deref());
     }
 
+    /// #766: where the protected-file rules apply but Moderate does not mark
+    /// the home, a marker someone made unreadable is made readable again, so
+    /// it never passes for Moderate's (on Linux an unreadable file is the
+    /// evidence). The file stays: a Moderate session on this home may hold
+    /// it masked for a running command.
+    pub(crate) fn keep_moderate_marker_readable(codex_home: &Path) {
+        if !cfg!(any(target_os = "macos", target_os = "linux")) {
+            return;
+        }
+        if let Err(err) = codex_security_level::nested::keep_moderate_marker_readable(codex_home) {
+            tracing::warn!("could not make the Moderate marker readable: {err}");
+        }
+    }
+
     /// [`Self::mark_moderate`] with the registry folder given. Not when the
     /// home's stored level enforces Aggressive (also when it is unreadable),
     /// or an Aggressive session's rule file is still there: a nested launch
@@ -817,6 +831,7 @@ impl ReadDenials {
         let rules = std::fs::read_to_string(level::rules_path(codex_home))
             .is_ok_and(|contents| level::is_rules_contents(&contents));
         if rules || level::load(codex_home).enforced() == level::ChosenLevel::Aggressive {
+            Self::keep_moderate_marker_readable(codex_home);
             return;
         }
         match nested::prepare_moderate_marker(codex_home) {

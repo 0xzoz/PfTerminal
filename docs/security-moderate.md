@@ -41,8 +41,8 @@ without them Corbanu refuses every model request under Moderate, so
   `secretless_agent_launch` run them in it.
 - **Nested agents.** `corbanu exec` and `review` started by an agent command
   run with Moderate enforced, also when pointed at another Corbanu home. With
-  this Corbanu home, which they can't read or write inside the sandbox, they
-  run in an empty Corbanu home of their own, without your config, sign-in or
+  this Corbanu home, which they can't write inside the sandbox, they run in
+  an empty Corbanu home of their own, without your config, sign-in or
   model keys: the agent passes the model and provider with `-m` and `-c`, and
   they reach the model only if agent commands have network access and a key.
   They run headless, nobody approves their commands, and a run without a
@@ -75,10 +75,11 @@ The kill switch (`/security` → `g`) works under every level.
   settings to keep every command in it.
 - MCP servers, apps, hooks and `!` shell commands run outside the sandbox, as
   under every level.
-- Nested agents are recognised on macOS and Linux only, and on Linux not
-  when they run as root or in a user namespace of their own (#826). Corbanu marks Moderate by denying agent commands a
-  file in the Corbanu home's `tmp` folder, and lists the homes Moderate runs
-  on in `~/Library/Application Support/Corbanu/moderate-homes` (macOS) or
+- Nested agents are recognised on macOS and Linux only, and on Linux not when
+  they run as root or in a user namespace of their own (#826). Corbanu marks
+  Moderate by denying agent commands a file in the Corbanu home's `tmp`
+  folder, and lists the homes Moderate runs on in `~/Library/Application
+  Support/Corbanu/moderate-homes` (macOS) or
   `~/.local/state/corbanu/moderate-homes` (Linux); under Moderate agent
   commands can't change that list. A launch pointed at another Corbanu home
   finds its origin through that list or your default home (`~/.corbanu`); if

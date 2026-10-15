@@ -42,20 +42,23 @@ struct Outcome {
     read: bool,
 }
 
-/// `stale`: a marker an earlier Moderate session left in the home.
+/// `stale`: the mode of a marker left in the home (by an earlier Moderate
+/// session, 0o644, or made unreadable by someone else, 0o000).
 async fn run(
     level: SecurityLevel,
     aggressive_launch: bool,
-    stale: bool,
+    stale: Option<u32>,
 ) -> anyhow::Result<Outcome> {
     let home = Arc::new(TempDir::new()?);
     let marker = home
         .path()
         .canonicalize()?
         .join(codex_security_level::nested::MODERATE_MARKER);
-    if stale {
+    if let Some(mode) = stale {
+        use std::os::unix::fs::PermissionsExt;
         std::fs::create_dir_all(marker.parent().expect("runtime folder"))?;
         std::fs::write(&marker, "")?;
+        std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(mode))?;
     }
     let server = start_mock_server().await;
     let captured = mount_sse_sequence(
@@ -102,10 +105,11 @@ async fn run(
             if aggressive_launch {
                 // What an Aggressive launch puts into every agent command's
                 // environment (`launch_enforces_aggressive`).
-                config.permissions.shell_environment_policy.r#set.insert(
-                    codex_security_level::nested::ORIGIN_ENV.to_string(),
-                    origin.clone(),
-                );
+                config
+                    .permissions
+                    .shell_environment_policy
+                    .r#set
+                    .insert(codex_security_level::nested::ORIGIN_ENV.to_string(), origin);
             }
         })
         // Host-sandbox security test: local executor on purpose.
@@ -144,11 +148,13 @@ async fn issue_766_only_moderate_denies_the_marker() -> anyhow::Result<()> {
     skip_if_sandbox!(Ok(()));
     let mut seen = Vec::new();
     for (level, aggressive_launch, stale) in [
-        (SecurityLevel::Moderate, false, false),
-        (SecurityLevel::Moderate, false, true),
-        (SecurityLevel::Moderate, true, true),
-        (SecurityLevel::Permissive, false, true),
-        (SecurityLevel::Aggressive, false, true),
+        (SecurityLevel::Moderate, false, None),
+        (SecurityLevel::Moderate, false, Some(0o644)),
+        (SecurityLevel::Moderate, true, Some(0o644)),
+        (SecurityLevel::Permissive, false, Some(0o644)),
+        (SecurityLevel::Aggressive, false, Some(0o644)),
+        // Made readable again where the rules apply without Moderate.
+        (SecurityLevel::Aggressive, false, Some(0o000)),
     ] {
         // Boxed: the session future is large for the test thread's stack.
         let outcome = Box::pin(run(level, aggressive_launch, stale)).await?;
@@ -158,12 +164,13 @@ async fn issue_766_only_moderate_denies_the_marker() -> anyhow::Result<()> {
         seen,
         vec![
             // Made and denied.
-            (SecurityLevel::Moderate, false, false, true, false),
-            (SecurityLevel::Moderate, false, true, true, false),
+            (SecurityLevel::Moderate, false, None, true, false),
+            (SecurityLevel::Moderate, false, Some(0o644), true, false),
             // Left readable.
-            (SecurityLevel::Moderate, true, true, true, true),
-            (SecurityLevel::Permissive, false, true, true, true),
-            (SecurityLevel::Aggressive, false, true, true, true),
+            (SecurityLevel::Moderate, true, Some(0o644), true, true),
+            (SecurityLevel::Permissive, false, Some(0o644), true, true),
+            (SecurityLevel::Aggressive, false, Some(0o644), true, true),
+            (SecurityLevel::Aggressive, false, Some(0o000), true, true),
         ]
     );
     Ok(())

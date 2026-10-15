@@ -237,3 +237,21 @@ fn only_moderate_explains_an_unreadable_level() {
     );
     std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
+
+/// A marker made unreadable outside Moderate is given its permissions back.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_marker_is_made_readable_again() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = tempfile::tempdir().unwrap();
+    keep_moderate_marker_readable(home.path()).unwrap();
+    let marker = prepare_moderate_marker(home.path()).unwrap();
+    std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o000)).unwrap();
+    keep_moderate_marker_readable(home.path()).unwrap();
+    assert_eq!(
+        std::fs::metadata(&marker).unwrap().permissions().mode() & 0o777,
+        0o644
+    );
+    assert!(!moderate_marker_denied(home.path()));
+}

@@ -155,7 +155,7 @@ pub(crate) const REMOVED_FROM_AGGRESSIVE: [(&str, &str); 5] = [
 ];
 
 /// The inspector's nested-agents row under Moderate (D5, #749, #766).
-pub(crate) const NESTED: &str = "on macOS and Linux, `corbanu exec` and `review` started by an agent command run with Moderate enforced, also pointed at another Corbanu home; with this Corbanu home, which they cannot read or write inside the sandbox, they run in a Corbanu home of their own, without your config, sign-in or model keys. Interactive sessions, `app-server`, `mcp-server` and credential commands they start are refused";
+pub(crate) const NESTED: &str = "on macOS and Linux, `corbanu exec` and `review` started by an agent command run with Moderate enforced, also pointed at another Corbanu home; with this Corbanu home, which they cannot write inside the sandbox, they run in a Corbanu home of their own, without your config, sign-in or model keys. Interactive sessions, `app-server`, `mcp-server` and credential commands they start are refused";
 
 /// What stays as configured under Moderate.
 pub(crate) const UNCHANGED: &str = "Unchanged: model and provider, your approval, sandbox, network and web search settings, MCP servers, apps and hooks (they run outside the sandbox), and wallet scopes.";

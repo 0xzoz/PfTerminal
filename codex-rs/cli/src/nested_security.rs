@@ -233,7 +233,7 @@ impl EnforcedSecurity for NestedModerate {
                 format!("the Corbanu home {}", protected.display())
             };
             notice.push_str(&format!(
-                " It cannot read or write {which} inside the sandbox, so it runs in a Corbanu home of its own ({}), without that home's config, sign-in or model keys; give the model and provider with -m and -c.",
+                " It cannot write {which} inside the sandbox, so it runs in a Corbanu home of its own ({}), without that home's config, sign-in or model keys; give the model and provider with -m and -c.",
                 self.codex_home.display()
             ));
         }

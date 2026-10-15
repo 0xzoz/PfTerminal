@@ -1350,6 +1350,8 @@ fn post_taint_read_denials(
             .launch_enforces_aggressive()
         {
             denials.mark_moderate(tool_ctx.turn.config.codex_home.as_path());
+        } else {
+            ReadDenials::keep_moderate_marker_readable(tool_ctx.turn.config.codex_home.as_path());
         }
         tracing::info!(
             target: "codex_core::security::tainted_action",
@@ -1434,6 +1436,8 @@ fn post_taint_read_denials(
             .launch_enforces_aggressive()
     {
         denials.mark_moderate(tool_ctx.turn.config.codex_home.as_path());
+    } else {
+        ReadDenials::keep_moderate_marker_readable(tool_ctx.turn.config.codex_home.as_path());
     }
     let (Some(exec_server), Some(materialized)) =
         (denials.apply(exec_server), denials.apply(materialized))

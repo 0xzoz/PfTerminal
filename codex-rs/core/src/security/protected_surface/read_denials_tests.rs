@@ -2647,3 +2647,38 @@ fn issue_766_no_marker_where_aggressive_is_stored() {
         );
     }
 }
+
+/// #766 round 4: where Aggressive is stored, a marker someone made
+/// unreadable is made readable again (it would pass for Moderate's on
+/// Linux), and nothing is marked.
+#[test]
+fn issue_766_unreadable_marker_is_restored_where_aggressive_is_stored() {
+    use codex_security_level::level;
+    use std::os::unix::fs::PermissionsExt;
+    let fx = fixture();
+    std::fs::write(
+        level::state_path(&fx.codex_home),
+        "version = 1\nlevel = \"aggressive\"\n",
+    )
+    .unwrap();
+    let marker = fx
+        .codex_home
+        .join(codex_security_level::nested::MODERATE_MARKER);
+    std::fs::write(&marker, "").unwrap();
+    std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let cwd = fx.user_home.join("project");
+    let mut denials = ReadDenials::collect(
+        &fx.codex_home,
+        Some(&fx.user_home),
+        /*claude_config_dir*/ None,
+        &[abs(&cwd)],
+    );
+    denials.mark_moderate_with(&fx.codex_home, Some(&cwd.join("registry")));
+    assert_eq!(
+        (
+            std::fs::metadata(&marker).unwrap().permissions().mode() & 0o777,
+            denials.moderate_marker.is_some(),
+        ),
+        (0o644, false)
+    );
+}
