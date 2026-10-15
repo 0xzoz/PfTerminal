@@ -2991,7 +2991,6 @@ async fn issue820_custom_official_responses_tools_match_builtin() {
         .await;
         let captured = serde_json::to_value(custom.visible_spec(MULTI_AGENT_V2_NAMESPACE))
             .expect("custom collaboration serialization");
-        println!("Issue820 offline request tools endpoint={base_url}: {captured}");
         assert_eq!(captured, expected, "reserved tools diverged for {base_url}");
     }
 }
