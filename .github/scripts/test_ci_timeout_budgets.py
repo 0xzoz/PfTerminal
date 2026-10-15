@@ -277,6 +277,69 @@ class CacheSavePolicyTest(unittest.TestCase):
         self.assertGreaterEqual(checked, 6)
 
 
+class RunScopedCachePruneTest(unittest.TestCase):
+    """#636: main keeps only the newest copy of each run-ID-keyed cache."""
+
+    WORKFLOWS = REPO_ROOT / ".github" / "workflows"
+
+    @staticmethod
+    def triggers(text: str) -> str:
+        return text.split("\njobs:")[0]
+
+    def runs_on_main_automatically(self, text: str) -> bool:
+        triggers = self.triggers(text)
+        if re.search(r"(?m)^  schedule:", triggers):
+            return True
+        push = re.search(r"(?ms)^  push:\n((?:    .*\n)*)", triggers + "\n")
+        if push is None:
+            return False
+        filters = push.group(1)
+        return "main" in filters or not re.search(r"\b(branches|tags):", filters)
+
+    def prune_workflow_names(self) -> list[str]:
+        prune = (self.WORKFLOWS / "cache-prune.yml").read_text()
+        names = re.search(r"(?m)^    workflows: \[(.*)\]$", prune)
+        self.assertIsNotNone(names)
+        return [name.strip() for name in names.group(1).split(",")]
+
+    def test_every_main_workflow_saving_run_scoped_caches_triggers_prune(self) -> None:
+        texts = {path.name: path.read_text() for path in self.WORKFLOWS.glob("*.yml")}
+        callers: dict[str, set[str]] = {name: set() for name in texts}
+        for name, text in texts.items():
+            for callee in re.findall(r"uses: \./\.github/workflows/([\w.-]+\.yml)", text):
+                callers[callee].add(name)
+
+        def entrypoints(name: str, seen: set[str]) -> set[str]:
+            found = {name} if self.runs_on_main_automatically(texts[name]) else set()
+            for caller in callers[name] - seen:
+                found |= entrypoints(caller, seen | {caller})
+            return found
+
+        prune_names = self.prune_workflow_names()
+        checked = set()
+        for name, text in texts.items():
+            if not re.search(r"(?m)^\s+key: .*\$\{\{ github\.run_id \}\}", text):
+                continue
+            for entry in entrypoints(name, {name}):
+                checked.add(entry)
+                workflow_name = re.search(r"(?m)^name: (.+)$", texts[entry]).group(1)
+                with self.subTest(saver=name, entrypoint=entry):
+                    self.assertIn(workflow_name, prune_names)
+        self.assertGreaterEqual(
+            checked, {"blocking-ci.yml", "postmerge-ci.yml", "nightly-ci.yml", "tmux-smoke.yml"}
+        )
+
+    def test_prune_job_alone_holds_actions_write(self) -> None:
+        prune = (self.WORKFLOWS / "cache-prune.yml").read_text()
+        self.assertRegex(prune, r"(?m)^permissions: \{\}$")
+        self.assertRegex(prune, r"(?m)^      actions: write$")
+        self.assertIn("branches: [main]", self.triggers(prune))
+        self.assertIn("head_repository.full_name == github.repository", prune)
+        self.assertIn("prune_actions_caches.py", prune)
+        # Nothing but the checkout runs third-party code next to the token.
+        self.assertEqual(re.findall(r"uses: ([\w/-]+)@", prune), ["actions/checkout"])
+
+
 class NightlyHeavyJobsTest(unittest.TestCase):
     def workflow(self, name: str) -> str:
         return (REPO_ROOT / ".github" / "workflows" / name).read_text()
