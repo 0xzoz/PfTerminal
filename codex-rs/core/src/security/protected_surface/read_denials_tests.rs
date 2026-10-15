@@ -2113,6 +2113,31 @@ fn issue_838_security_state_and_keys_stay_denied_when_the_rules_are_lifted() {
     // Explanations name them by any spelling of the home.
     let link = fx.user_home.join("home-link");
     std::os::unix::fs::symlink(&fx.codex_home, &link).unwrap();
+    // A home spelled through a link: denied by their real location (which
+    // bubblewrap can deny; it refuses a deny through a writable link).
+    let approved = ReadDenials::collect(
+        &link,
+        Some(&fx.user_home),
+        /*claude_config_dir*/ None,
+        &[abs(&cwd)],
+    )
+    .runtime_only();
+    let denied: Vec<&AbsolutePathBuf> = approved.paths().collect();
+    for name in [
+        "source-origin.key",
+        "security_state.json",
+        "security_level.toml",
+    ] {
+        assert!(
+            denied.contains(&&abs(&fx.codex_home.join(name))),
+            "{name}: {denied:?}"
+        );
+    }
+    assert_eq!(
+        denied.iter().any(|path| path.as_path().starts_with(&link)),
+        cfg!(target_os = "macos"),
+        "{denied:?}"
+    );
     for path in [
         fx.codex_home.join("security_state.json"),
         link.join("source-origin.key"),
