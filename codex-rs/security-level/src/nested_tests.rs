@@ -157,6 +157,15 @@ fn only_an_unreadable_marker_marks_moderate() {
     std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o000)).unwrap();
     let readable_anyway = std::fs::File::open(&marker).is_ok();
     assert_eq!(moderate_marker_denied(home.path()), !readable_anyway);
+    // Nor in a home denied whole, whose runtime folder cannot be listed.
+    let folder = marker.parent().unwrap();
+    std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let listable_anyway = std::fs::read_dir(folder).is_ok();
+    assert_eq!(
+        moderate_marker_denied(home.path()),
+        listable_anyway && !readable_anyway
+    );
+    std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o755)).unwrap();
     std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o644)).unwrap();
     // Made again only when missing; something else in its place is refused.
     assert_eq!(prepare_moderate_marker(home.path()).unwrap(), marker);

@@ -77,12 +77,15 @@ pub fn nested_launch(name: &str, kind: NestedKind) -> NestedLaunch {
     }
 }
 
+/// Aggressive origins with their nested-launch setting.
+type Origins = Vec<(PathBuf, NestedAgents)>;
+
 /// The Aggressive origins and the Moderate origin of this process. With a
 /// Moderate origin only Aggressive origins whose level reads as Aggressive
 /// count: inside the sandbox of an agent command under Moderate every
 /// protected Corbanu home's level is unreadable, which on its own would
 /// read as Aggressive.
-fn detect() -> Result<(Vec<(PathBuf, NestedAgents)>, Option<PathBuf>), String> {
+fn detect() -> Result<(Origins, Option<PathBuf>), String> {
     let homes = candidate_homes()?;
     let moderate = moderate_origin(&homes);
     let mut origins = nested_origins(homes);
@@ -115,12 +118,20 @@ pub fn moderate_origin(homes: &[PathBuf]) -> Option<PathBuf> {
         .cloned()
 }
 
-/// Whether this process may not read `home`'s Moderate marker: Seatbelt
-/// refuses even its metadata; bubblewrap masks it with an unreadable file.
-/// A missing marker, a link or a folder in its place, or one this process
-/// can read is not denied.
+/// Whether this process may not read `home`'s Moderate marker while it may
+/// list the runtime folder that holds it: Seatbelt refuses even the
+/// marker's metadata; bubblewrap masks it with an unreadable file. A
+/// missing marker, a link or a folder in its place, or one this process can
+/// read is not denied, and neither is a marker in a home denied whole (as
+/// the protected-file rules deny other Corbanu homes at every level).
 pub fn moderate_marker_denied(home: &Path) -> bool {
     let marker = home.join(MODERATE_MARKER);
+    let Some(folder) = marker.parent() else {
+        return false;
+    };
+    if std::fs::read_dir(folder).is_err() {
+        return false;
+    }
     match std::fs::symlink_metadata(&marker) {
         Err(err) => err.kind() == io::ErrorKind::PermissionDenied,
         Ok(metadata) if metadata.file_type().is_file() => std::fs::File::open(&marker)
