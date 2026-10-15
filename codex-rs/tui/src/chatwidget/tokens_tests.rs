@@ -1477,7 +1477,7 @@ fn accounting_inspect_basis_only_request_shows_no_price_metadata() {
         let text = attempt_text(&q).join("\n");
         assert!(text.contains(&format!("Billing basis: {shown}")), "{text}");
         // #396: no parentheses inside the sentence's own clause.
-        let clause = shown.replace(" (set in your config)", ", set in your config");
+        let clause = shown.replace(" (set in your config)", "; set in your config");
         assert!(
             text.contains(&format!(
                 "Price: none recorded — this request records only its billing basis: {clause}"
@@ -3384,7 +3384,7 @@ fn accounting_reopen_warmup_is_named_with_its_cost() {
         .collect();
     assert!(
         screen.iter().any(|line| line.as_str()
-            == "Reopen warm-up: 1 request, estimated at least $0.000180 (1 attempt had no price). Sent when this conversation was reopened, to prime the model's cache."),
+            == "Reopen warm-up: 1 request, estimated at least $0.000180 (1 attempt had no price). Sent when this conversation was reopened or forked, to prime the model's cache."),
         "{screen:#?}"
     );
     let labels: Vec<&str> = pages[0]
@@ -3413,8 +3413,9 @@ fn accounting_reopen_warmup_is_named_with_its_cost() {
         .find(|(label, _)| label.contains("Reopen warm-up"))
         .unwrap();
     assert!(
-        pages[*index].text.iter().any(|line| line
-            .starts_with("Kind: Reopen warm-up — sent when this conversation was reopened")),
+        pages[*index].text.iter().any(|line| line.starts_with(
+            "Kind: Reopen warm-up — sent when this conversation was reopened or forked"
+        )),
         "{:#?}",
         pages[*index].text
     );

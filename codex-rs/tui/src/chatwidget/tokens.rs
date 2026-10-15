@@ -794,12 +794,17 @@ fn attempt_text(q: &ObservationQuote) -> Vec<String> {
     }
     // #396: a component with no rate states no money, even when it had no
     // tokens: zero tokens of an unpriced component is not a $0 price.
+    // A long-context tier's rate counts too: pricing may apply it instead.
     let component_rates = q.snapshot.as_ref().map(|s| {
+        let tier = s.long_context.as_ref().map(|tier| &tier.rates);
+        let rated = |base: bool, long: fn(&codex_state::accounting::Rates) -> bool| {
+            base || tier.is_some_and(long)
+        };
         [
-            s.rates.noncached.is_some(),
-            s.rates.read.is_some(),
-            s.rates.write.is_some(),
-            s.rates.output.is_some(),
+            rated(s.rates.noncached.is_some(), |r| r.noncached.is_some()),
+            rated(s.rates.read.is_some(), |r| r.read.is_some()),
+            rated(s.rates.write.is_some(), |r| r.write.is_some()),
+            rated(s.rates.output.is_some(), |r| r.output.is_some()),
         ]
     });
     for (index, (label, bucket)) in BUCKETS.iter().zip(q.buckets).enumerate() {
@@ -1569,13 +1574,14 @@ fn basis_text(quote: &ObservationQuote) -> String {
 }
 
 /// #396: the basis inside a sentence that already ends in it, without a
-/// second pair of parentheses: "pay per use, set in your config".
+/// second pair of parentheses: "pay per use; set in your config".
 fn basis_clause(quote: &ObservationQuote) -> String {
-    basis_text(quote).replace(" (set in your config)", ", set in your config")
+    basis_text(quote).replace(" (set in your config)", "; set in your config")
 }
-/// #403: the turn-label prefix core gives the warm-up a reopened
-/// conversation sends (`codex_core::accounting::REOPEN_PREWARM_LABEL`); a
-/// label can carry an owner prefix before it, such as `side:`.
+/// #403: the turn-label prefix core gives the warm-up a reopened or forked
+/// conversation sends (core `accounting::REOPEN_PREWARM_LABEL`, pinned by
+/// core's `reopen_prewarm_label_is_stable`); a label can carry an owner prefix
+/// before it, such as `side:`.
 const REOPEN_PREWARM_LABEL: &str = "prewarm:reopen:";
 
 /// Whether these attempts are a reopen warm-up request.
@@ -1585,7 +1591,7 @@ fn reopen_warmup(quotes: &[&ObservationQuote]) -> bool {
         .any(|quote| quote.attempt.turn.contains(REOPEN_PREWARM_LABEL))
 }
 
-const REOPEN_WARMUP_KIND: &str = "Kind: Reopen warm-up — sent when this conversation was reopened, to prime the model's cache. Billed like any request; set skip_reopen_warmup = true in config.toml to skip it.";
+const REOPEN_WARMUP_KIND: &str = "Kind: Reopen warm-up — sent when this conversation was reopened or forked, to prime the model's cache. Billed like any request; set skip_reopen_warmup = true in config.toml to skip it.";
 
 /// "Reopen warm-up: 1 request, estimated $0.024812. Sent when …" for the
 /// first screen, or nothing when no request here is one.
@@ -1608,7 +1614,7 @@ fn reopen_warmup_line<'a>(
         "requests"
     };
     Some(format!(
-        "Reopen warm-up: {} {noun}, {}. Sent when this conversation was reopened, to prime the model's cache.",
+        "Reopen warm-up: {} {noun}, {}. Sent when this conversation was reopened or forked, to prime the model's cache.",
         requests.len(),
         short_cost(&warmups)
     ))

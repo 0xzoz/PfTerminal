@@ -730,7 +730,7 @@ async fn metadata_terminal_matrix(
 /// while a new conversation still warms up as before.
 #[tokio::test]
 async fn accounting_reopen_warmup_is_labelled_announced_and_skippable() -> anyhow::Result<()> {
-    const NOTICE: &str = "Reopening this conversation sent a warm-up request";
+    const NOTICE: &str = "Reopening or forking this conversation sent a warm-up request";
     for skip in [false, true] {
         let server = MockServer::start().await;
         let mut gate = Gate::start().await?;

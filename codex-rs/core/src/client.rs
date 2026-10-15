@@ -4626,6 +4626,12 @@ impl ModelClientSession {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Whether this session has sent a request over its WebSocket, such as a
+    /// completed warm-up. A warm-up that fell back to HTTP sent nothing.
+    pub(crate) fn sent_websocket_request(&self) -> bool {
+        self.websocket_session.last_request.is_some()
+    }
+
     pub async fn prewarm_websocket(
         &mut self,
         prompt: &Prompt,

@@ -368,9 +368,10 @@ async fn schedule_startup_prewarm_inner(
         websocket_warmup_started_at.elapsed(),
         /*status*/ None,
     );
-    if reopened {
-        // Said once it was sent, and not written to the conversation: a later
-        // reopen sends, and says, its own.
+    // Said only once a warm-up really went out and completed (a fallback to
+    // HTTP sends none), and not written to the conversation: a later reopen
+    // sends, and says, its own.
+    if reopened && client_session.sent_websocket_request() {
         session
             .send_event_raw_unpersisted(Event {
                 id: String::new(),
@@ -383,9 +384,28 @@ async fn schedule_startup_prewarm_inner(
     Ok(client_session)
 }
 
+/// Whether a session with this history and source is a conversation the user
+/// reopens or forks (#403): resumed or forked history, started by the user's
+/// client. A sub-agent, reviewer or internal worker given copied history is
+/// not: the user opened nothing.
+pub(crate) fn is_reopen(
+    history: &codex_protocol::protocol::InitialHistory,
+    source: &codex_protocol::protocol::SessionSource,
+) -> bool {
+    use codex_protocol::protocol::InitialHistory;
+    matches!(
+        history,
+        InitialHistory::Resumed(_) | InitialHistory::Forked(_)
+    ) && !source.is_non_root_agent()
+}
+
 /// What a reopened conversation says after its warm-up request is sent (#403).
 pub(crate) const REOPEN_WARMUP_NOTICE: &str = if cfg!(feature = "developer-accounting") {
-    "Reopening this conversation sent a warm-up request to prime the model's cache. It is billed like any request; /cost lists it as a reopen warm-up. To skip it, set skip_reopen_warmup = true in config.toml."
+    "Reopening or forking this conversation sent a warm-up request to prime the model's cache. It is billed like any request; /cost lists it as a reopen warm-up. To skip it, set skip_reopen_warmup = true in config.toml."
 } else {
-    "Reopening this conversation sent a warm-up request to prime the model's cache. It is billed like any request. To skip it, set skip_reopen_warmup = true in config.toml."
+    "Reopening or forking this conversation sent a warm-up request to prime the model's cache. It is billed like any request. To skip it, set skip_reopen_warmup = true in config.toml."
 };
+
+#[cfg(test)]
+#[path = "session_startup_prewarm_tests.rs"]
+mod tests;
