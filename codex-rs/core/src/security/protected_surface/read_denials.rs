@@ -227,10 +227,10 @@ pub(crate) struct ReadDenials {
     /// #766: under Moderate, the marker in the Corbanu home that is denied
     /// to the command, so a `corbanu exec` it starts knows Moderate is in
     /// force on this home.
-    moderate_marker: Option<AbsolutePathBuf>,
+    moderate_marker: Vec<AbsolutePathBuf>,
     /// #766: the registry of homes Moderate runs on, read-only to the command
     /// so it cannot drop this home from it.
-    moderate_registry: Option<AbsolutePathBuf>,
+    moderate_registry: Vec<AbsolutePathBuf>,
     /// Denials dropped because they hold the command's folder or a writable
     /// root (denying them would deny the workspace itself).
     pub(crate) skipped: Vec<AbsolutePathBuf>,
@@ -833,7 +833,7 @@ impl ReadDenials {
             return;
         }
         match nested::prepare_moderate_marker(codex_home) {
-            Ok(marker) => self.moderate_marker = AbsolutePathBuf::from_absolute_path(marker).ok(),
+            Ok(marker) => self.moderate_marker = moderate_spellings(&marker),
             Err(err) => tracing::warn!("could not prepare the Moderate marker: {err}"),
         }
         let Some(registry) = registry else {
@@ -847,7 +847,7 @@ impl ReadDenials {
         // Read-only also when this home could not be added (a nested run's
         // own home, inside another command's sandbox).
         if registry.is_dir() {
-            self.moderate_registry = AbsolutePathBuf::from_absolute_path(registry).ok();
+            self.moderate_registry = moderate_spellings(registry);
         }
     }
 
@@ -1011,7 +1011,7 @@ impl ReadDenials {
             && self.read_only.is_empty()
             && self.runtime_read_only.is_empty()
             && self.never_lifted.is_empty()
-            && self.moderate_registry.is_none()
+            && self.moderate_registry.is_empty()
         {
             return Some(profile.clone());
         }
@@ -1358,6 +1358,20 @@ fn kept_within(kept: &Path, real: &Path) -> bool {
 
 /// `path` with its nearest existing folder resolved, or `None` when that
 /// folder is not a folder (nothing can be created below a file).
+/// #766: a marker or registry path by its real location, as the sandboxes
+/// match it (bubblewrap refuses a deny that crosses a writable link, as a
+/// home spelled through a link would), and on macOS also as given.
+fn moderate_spellings(path: &Path) -> Vec<AbsolutePathBuf> {
+    let Ok(path) = AbsolutePathBuf::from_absolute_path(path) else {
+        return Vec::new();
+    };
+    let mut spellings: Vec<AbsolutePathBuf> = real_location(&path).into_iter().collect();
+    if cfg!(target_os = "macos") && !spellings.contains(&path) {
+        spellings.push(path);
+    }
+    spellings
+}
+
 fn real_location(path: &AbsolutePathBuf) -> Option<AbsolutePathBuf> {
     real_location_within(path, /*hops*/ 8)
 }

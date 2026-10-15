@@ -2640,7 +2640,7 @@ fn issue_766_no_marker_where_aggressive_is_stored() {
             (
                 fx.codex_home.join(marker).exists(),
                 registry.exists(),
-                denials.moderate_marker.is_some()
+                !denials.moderate_marker.is_empty()
             ),
             (false, false, false),
             "{stored:?} {rules}"
@@ -2678,7 +2678,7 @@ fn issue_766_unreadable_marker_is_restored_where_aggressive_is_stored() {
     assert_eq!(
         (
             std::fs::metadata(&marker).unwrap().permissions().mode() & 0o777,
-            denials.moderate_marker.is_some(),
+            !denials.moderate_marker.is_empty(),
         ),
         (0o644, false)
     );
