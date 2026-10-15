@@ -302,17 +302,11 @@ impl AppLinkView {
         }
     }
 
-    /// #514/#523: require a deliberate choice before Enter confirms: the
-    /// view opened while the user was typing, over another view, or was
-    /// revealed when the view above it closed. Until they navigate, a number
-    /// key is typed text too.
-    pub(crate) fn require_fresh_choice(&mut self) {
-        self.typing_guard.on_command_key();
-    }
-
-    /// #523: the view opened just after another prompt was answered: a
-    /// double or held Enter must not answer it.
-    pub(crate) fn require_fresh_choice_after_answer(&mut self) {
+    /// #817: the view shows another screen. The bottom pane drops keys until
+    /// it is drawn and for a second after (#787), so a double or held Enter
+    /// answers nothing on it; a later Enter does.
+    fn show_anew(&mut self) {
+        self.shown_generation = next_shown_request_generation();
         self.typing_guard.on_request_changed();
     }
 
@@ -402,7 +396,7 @@ impl AppLinkView {
             self.screen = AppLinkScreen::InstallConfirmation;
             self.selected_action = 0;
             // #514: a double or held Enter must not answer the next screen.
-            self.typing_guard.on_request_changed();
+            self.show_anew();
         }
     }
 
@@ -425,7 +419,7 @@ impl AppLinkView {
     fn back_to_link_screen(&mut self) {
         self.screen = AppLinkScreen::Link;
         self.selected_action = 0;
-        self.typing_guard.on_request_changed();
+        self.show_anew();
     }
 
     fn toggle_enabled(&mut self) {
@@ -713,9 +707,7 @@ impl AppLinkView {
         }
         Some(match self.typing_guard.notice()? {
             Notice::TypedText => super::mcp_server_elicitation::TYPED_TEXT_NOTICE,
-            Notice::ChooseFirst | Notice::NavigateFirst => {
-                super::mcp_server_elicitation::CHOOSE_FIRST_NOTICE
-            }
+            Notice::NavigateFirst => super::mcp_server_elicitation::CHOOSE_FIRST_NOTICE,
             Notice::PersistentNeedsArrows => {
                 super::mcp_server_elicitation::PERSISTENT_OPTION_KEY_ERROR
             }
@@ -923,10 +915,11 @@ impl BottomPaneView for AppLinkView {
         }
     }
 
-    /// #523: back from under another prompt or view, whose double or held
-    /// Enter must not answer this request.
+    /// #523: back from under another prompt or view. #817: the bottom pane
+    /// drops keys until it is drawn again and for a second after (#787), so
+    /// a double or held Enter meant for that view answers nothing.
     fn on_revealed(&mut self) {
-        self.require_fresh_choice();
+        self.typing_guard.on_request_changed();
     }
 
     fn shown_request_generation(&self) -> u64 {
@@ -1420,6 +1413,7 @@ mod tests {
         .expect("expected generic URL app link params");
         let mut view = AppLinkView::new(params, tx);
 
+        let first_screen = view.shown_request_generation();
         view.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         match rx.try_recv() {
             Ok(AppEvent::OpenUrlInBrowser { url }) => {
@@ -1430,8 +1424,9 @@ mod tests {
         }
         assert_eq!(view.screen, AppLinkScreen::InstallConfirmation);
 
-        // #514: a double Enter does not confirm the next screen.
-        view.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        // #514: the next screen is new to the bottom pane, which drops a
+        // double Enter there (#787, #817: `tests/issue_817.rs`).
+        assert_ne!(view.shown_request_generation(), first_screen);
         assert!(rx.try_recv().is_err());
         assert!(!view.is_complete());
         view.handle_key_event(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
@@ -1574,6 +1569,7 @@ mod tests {
             tx,
         );
 
+        let first_screen = view.shown_request_generation();
         view.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         match rx.try_recv() {
             Ok(AppEvent::OpenUrlInBrowser { url }) => {
@@ -1584,8 +1580,9 @@ mod tests {
         }
         assert_eq!(view.screen, AppLinkScreen::InstallConfirmation);
 
-        // #514: a double Enter does not confirm the next screen.
-        view.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        // #514: the next screen is new to the bottom pane, which drops a
+        // double Enter there (#787, #817: `tests/issue_817.rs`).
+        assert_ne!(view.shown_request_generation(), first_screen);
         assert!(rx.try_recv().is_err());
         assert!(!view.is_complete());
         view.handle_key_event(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
@@ -1826,41 +1823,32 @@ mod tests {
         assert!(!acted(&mut rx));
     }
 
-    /// #514/#523: a request view that opened mid-typing or over another
-    /// view, or was revealed, takes neither Enter nor a number key and Enter
-    /// until the user navigates.
+    /// #514/#787: after keys were dropped as the request appeared, it takes
+    /// neither Enter nor a number key and Enter until the user navigates.
+    /// #817: revealed with no key dropped, a later Enter answers it (the
+    /// bottom pane drops keys as it reappears).
     #[test]
-    fn issue_514_fresh_choice_needs_navigation() {
+    fn issue_514_dropped_keys_need_navigation() {
         let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
         let mut view = install_suggestion_view(AppEventSender::new(tx_raw));
-        view.require_fresh_choice();
+        view.on_early_input();
         press(&mut view, KeyCode::Enter);
         press(&mut view, KeyCode::Char('1'));
         press(&mut view, KeyCode::Enter);
         assert!(!acted(&mut rx));
+        assert_eq!(
+            view.notice(),
+            Some(super::super::mcp_server_elicitation::EARLY_KEYS_NOTICE)
+        );
         press(&mut view, KeyCode::Down);
         press(&mut view, KeyCode::Up);
         press(&mut view, KeyCode::Enter);
         assert!(acted(&mut rx));
 
-        // Revealed: the same.
         let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
         let mut view = install_suggestion_view(AppEventSender::new(tx_raw));
         view.on_revealed();
-        press(&mut view, KeyCode::Enter);
-        assert!(!acted(&mut rx));
-
-        // Just after another prompt was answered: a number key is a choice.
-        let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
-        let mut view = install_suggestion_view(AppEventSender::new(tx_raw));
-        view.require_fresh_choice_after_answer();
-        press(&mut view, KeyCode::Enter);
-        assert!(!acted(&mut rx));
-        assert_eq!(
-            view.notice(),
-            Some(super::super::mcp_server_elicitation::CHOOSE_FIRST_NOTICE)
-        );
-        press(&mut view, KeyCode::Char('1'));
+        assert_eq!(view.notice(), None);
         press(&mut view, KeyCode::Enter);
         assert!(acted(&mut rx));
     }

@@ -78,9 +78,9 @@ pub(super) const PERSISTENT_OPTION_KEY_ERROR: &str =
     "That option lasts beyond this request; choose it with ↑/↓, then enter";
 pub(super) const TYPED_TEXT_NOTICE: &str = "Typed text is not sent while this request is open; \
      use ↑/↓ and enter to answer, or esc to cancel";
-pub(super) const CHOOSE_FIRST_NOTICE: &str =
-    "This is a new request; choose an option with ↑/↓, then enter";
-pub(super) const FORM_FIRST_NOTICE: &str = "This is a new request; review it, then press enter";
+/// After a character command key (#523): navigate, then answer.
+pub(super) const CHOOSE_FIRST_NOTICE: &str = "Choose an option with ↑/↓, then enter";
+pub(super) const FORM_FIRST_NOTICE: &str = "Press ↑/↓ first, then answer";
 /// #787: keys reached the request as it appeared and were dropped.
 pub(super) const EARLY_KEYS_NOTICE: &str =
     "Keys pressed as this request appeared were ignored; choose an option with ↑/↓, then enter";
@@ -1169,20 +1169,6 @@ impl McpServerElicitationOverlay {
         self.request.response_mode == McpServerElicitationResponseMode::ApprovalAction
     }
 
-    /// Require a deliberate choice before Enter confirms: the form opened
-    /// while the user was typing, or over another view, so their next keys
-    /// may be meant for that. Until they navigate, a number key is typed text
-    /// too (as after a character command key in the main approval prompt).
-    pub(crate) fn require_fresh_choice(&mut self) {
-        self.typing_guard.on_command_key();
-    }
-
-    /// #523: the form opened just after another view closed: a double or
-    /// held Enter must not answer it.
-    pub(crate) fn require_fresh_choice_after_answer(&mut self) {
-        self.typing_guard.on_request_changed();
-    }
-
     /// #523: deliberate navigation in a form: the arrow, Page, Home and End
     /// keys, and configured list keys that are neither a character nor a
     /// chord.
@@ -1222,14 +1208,14 @@ impl McpServerElicitationOverlay {
         if !self.is_approval() {
             return match notice {
                 Notice::TypedText => Some(FORM_TYPED_NOTICE),
-                Notice::ChooseFirst | Notice::NavigateFirst => Some(FORM_FIRST_NOTICE),
+                Notice::NavigateFirst => Some(FORM_FIRST_NOTICE),
                 Notice::PersistentNeedsArrows => None,
                 Notice::EarlyKeys => Some(FORM_EARLY_KEYS_NOTICE),
             };
         }
         Some(match notice {
             Notice::TypedText => TYPED_TEXT_NOTICE,
-            Notice::ChooseFirst | Notice::NavigateFirst => CHOOSE_FIRST_NOTICE,
+            Notice::NavigateFirst => CHOOSE_FIRST_NOTICE,
             Notice::PersistentNeedsArrows => PERSISTENT_OPTION_KEY_ERROR,
             Notice::EarlyKeys => EARLY_KEYS_NOTICE,
         })
@@ -1375,8 +1361,10 @@ impl McpServerElicitationOverlay {
             self.shown_generation = next_shown_request_generation();
             self.reset_for_request();
             self.restore_current_draft();
-            // A double or held Enter must not answer a request not yet seen.
-            self.typing_guard.on_request_changed();
+            // A double or held Enter must not answer a request not yet seen:
+            // the bottom pane drops it (#787); nothing typed before carries
+            // over (#817).
+            self.typing_guard.on_new_request();
         } else {
             self.done = true;
         }
@@ -1742,10 +1730,11 @@ impl BottomPaneView for McpServerElicitationOverlay {
         true
     }
 
-    /// #192: back from under another prompt or view, whose double or held
-    /// Enter must not answer this request.
+    /// #192: back from under another prompt or view. #817: the bottom pane
+    /// drops keys until it is drawn again and for a second after (#787), so
+    /// a double or held Enter meant for that view answers nothing.
     fn on_revealed(&mut self) {
-        self.require_fresh_choice();
+        self.typing_guard.on_request_changed();
     }
 
     fn shown_request_generation(&self) -> u64 {
@@ -2807,13 +2796,15 @@ mod tests {
         assert_eq!(overlay.approval_notice(), Some(TYPED_TEXT_NOTICE));
     }
 
-    /// #192: a double or held Enter, or a held number key, cannot answer the
-    /// next queued request; it needs a fresh choice first.
+    /// #192: a held Enter or a held number key cannot answer the next
+    /// queued request. #817: it shows anew, so the bottom pane drops a double
+    /// Enter (#787); the prompt asks for nothing more.
     #[test]
     fn issue_192_held_keys_do_not_answer_queued_approvals() {
         let (mut overlay, mut rx) = persist_tool_approval_overlay();
         let (second, _) = persist_tool_approval_overlay();
         overlay.try_consume_mcp_server_elicitation_request(second.request);
+        let first = overlay.shown_request_generation();
 
         press(&mut overlay, KeyCode::Char('1'));
         press(&mut overlay, KeyCode::Enter);
@@ -2822,13 +2813,13 @@ mod tests {
             KeyModifiers::NONE,
             KeyEventKind::Repeat,
         ));
-        press(&mut overlay, KeyCode::Enter);
         assert_eq!(
             resolved_decisions(&mut rx),
             vec![(McpServerElicitationAction::Accept, None)]
         );
         assert!(!overlay.is_complete());
-        assert_eq!(overlay.approval_notice(), Some(CHOOSE_FIRST_NOTICE));
+        assert_ne!(overlay.shown_request_generation(), first);
+        assert_eq!(overlay.approval_notice(), None);
 
         // A number key held from the first answer repeats: typed text.
         let (mut overlay, mut rx) = persist_tool_approval_overlay();
@@ -2847,7 +2838,7 @@ mod tests {
             vec![(McpServerElicitationAction::Accept, None)]
         );
 
-        // A fresh choice answers the next request.
+        // The held key was typed text; navigation then a choice answers.
         press(&mut overlay, KeyCode::Down);
         press(&mut overlay, KeyCode::Up);
         press(&mut overlay, KeyCode::Char('4'));
@@ -2859,22 +2850,22 @@ mod tests {
         assert!(overlay.is_complete());
     }
 
-    /// #192: a prompt opened while the user was typing ignores Enter until a
-    /// fresh choice.
+    /// #192/#787: once keys were dropped as the prompt appeared (the user was
+    /// typing), it ignores Enter until the user navigates.
     #[test]
-    fn issue_192_fresh_choice_blocks_enter_until_a_choice() {
+    fn issue_192_dropped_keys_block_enter_until_navigation() {
         let (mut overlay, mut rx) = persist_tool_approval_overlay();
-        overlay.require_fresh_choice();
+        overlay.on_early_input();
 
         press(&mut overlay, KeyCode::Enter);
         assert_eq!(resolved_decisions(&mut rx), Vec::new());
-        assert_eq!(overlay.approval_notice(), Some(CHOOSE_FIRST_NOTICE));
+        assert_eq!(overlay.approval_notice(), Some(EARLY_KEYS_NOTICE));
 
         // A digit may be the rest of the draft: typed text, not a choice.
         press(&mut overlay, KeyCode::Char('1'));
         press(&mut overlay, KeyCode::Enter);
         assert_eq!(resolved_decisions(&mut rx), Vec::new());
-        assert_eq!(overlay.approval_notice(), Some(TYPED_TEXT_NOTICE));
+        assert_eq!(overlay.approval_notice(), Some(EARLY_KEYS_NOTICE));
 
         press(&mut overlay, KeyCode::End);
         press(&mut overlay, KeyCode::Home);
@@ -2918,28 +2909,34 @@ mod tests {
     }
 
     /// #192: a request resolved elsewhere while an option is highlighted
-    /// leaves the next one needing a fresh choice.
+    /// does not pass that choice on: the next one shows anew (the bottom pane
+    /// drops keys in its first second, #787) with its own highlight.
     #[test]
-    fn issue_192_a_request_resolved_elsewhere_needs_a_fresh_choice_next() {
+    fn issue_192_a_request_resolved_elsewhere_passes_no_choice_on() {
         let (mut overlay, mut rx) = persist_tool_approval_overlay();
         let mut second = persist_tool_approval_overlay().0.request;
         second.request_id = request_id("request-2");
         overlay.try_consume_mcp_server_elicitation_request(second);
+        let first = overlay.shown_request_generation();
 
-        press(&mut overlay, KeyCode::Char('1'));
+        press(&mut overlay, KeyCode::Char('4'));
         overlay.dismiss_app_server_request(&ResolvedAppServerRequest::McpElicitation {
             server_name: "server-1".to_string(),
             request_id: request_id("request-1"),
         });
+        assert_ne!(overlay.shown_request_generation(), first);
+        assert_eq!(overlay.selected_option_index(), Some(0));
         press(&mut overlay, KeyCode::Enter);
-        assert_eq!(resolved_decisions(&mut rx), Vec::new());
-        assert!(!overlay.is_complete());
+        assert_eq!(
+            resolved_decisions(&mut rx),
+            vec![(McpServerElicitationAction::Accept, None)]
+        );
     }
 
-    /// #192: a form reached by answering an approval ignores a double or
-    /// held Enter.
+    /// #192: a form reached by answering an approval ignores a held Enter.
+    /// #817: it shows anew, so the bottom pane drops a double Enter (#787).
     #[test]
-    fn issue_192_a_queued_form_ignores_a_double_enter() {
+    fn issue_192_a_queued_form_ignores_a_held_enter() {
         let (mut overlay, mut rx) = persist_tool_approval_overlay();
         let form = from_form_request(
             ThreadId::default(),
@@ -2957,6 +2954,7 @@ mod tests {
         )
         .expect("expected supported form");
         overlay.try_consume_mcp_server_elicitation_request(form);
+        let first = overlay.shown_request_generation();
 
         press(&mut overlay, KeyCode::Enter);
         overlay.handle_key_event(KeyEvent::new_with_kind(
@@ -2964,24 +2962,23 @@ mod tests {
             KeyModifiers::NONE,
             KeyEventKind::Repeat,
         ));
-        press(&mut overlay, KeyCode::Enter);
         assert_eq!(
             resolved_decisions(&mut rx),
             vec![(McpServerElicitationAction::Accept, None)]
         );
         assert!(!overlay.is_complete());
-        assert_eq!(overlay.approval_notice(), Some(FORM_FIRST_NOTICE));
+        assert_ne!(overlay.shown_request_generation(), first);
+        assert_eq!(overlay.approval_notice(), None);
 
-        press(&mut overlay, KeyCode::Down);
-        press(&mut overlay, KeyCode::Up);
         press(&mut overlay, KeyCode::Enter);
         assert_eq!(resolved_decisions(&mut rx).len(), 1);
         assert!(overlay.is_complete());
     }
 
-    /// #523: a form with a text field that opened while the user typed (or
-    /// over another view) takes none of their text, typed or pasted, and
-    /// Enter submits nothing; after an arrow key it takes text as before.
+    /// #523/#787: a form with a text field whose first keys were dropped as
+    /// it appeared (the user typed on) takes none of their text, typed or
+    /// pasted, and Enter submits nothing; after an arrow key it takes text as
+    /// before.
     #[test]
     fn issue_523_form_opened_mid_typing_takes_no_typed_text() {
         let (tx, mut rx) = test_sender();
@@ -3004,7 +3001,7 @@ mod tests {
             request, tx, /*has_input_focus*/ true, /*enhanced_keys_supported*/ false,
             /*disable_paste_burst*/ true,
         );
-        overlay.require_fresh_choice();
+        overlay.on_early_input();
 
         for ch in "secret".chars() {
             press(&mut overlay, KeyCode::Char(ch));
@@ -3025,7 +3022,7 @@ mod tests {
         };
         assert_eq!(contents(&mut rx), Vec::<Option<Value>>::new());
         assert!(!overlay.is_complete());
-        assert_eq!(overlay.approval_notice(), Some(FORM_TYPED_NOTICE));
+        assert_eq!(overlay.approval_notice(), Some(FORM_EARLY_KEYS_NOTICE));
 
         press(&mut overlay, KeyCode::Down);
         for ch in "ok".chars() {
@@ -3038,11 +3035,11 @@ mod tests {
         );
     }
 
-    /// #523: a select form shown just after another prompt was answered
+    /// #523/#787: a select form whose first keys were dropped as it appeared
     /// takes a letter (and a digit after it) as typed text, not a choice;
-    /// Enter submits only after the arrow keys or a single number key.
+    /// Enter submits only after the arrow keys.
     #[test]
-    fn issue_523_select_form_after_an_answer_takes_no_letter() {
+    fn issue_523_select_form_after_dropped_keys_takes_no_letter() {
         let (tx, mut rx) = test_sender();
         let request = from_form_request(
             ThreadId::default(),
@@ -3063,7 +3060,7 @@ mod tests {
             request, tx, /*has_input_focus*/ true, /*enhanced_keys_supported*/ false,
             /*disable_paste_burst*/ false,
         );
-        overlay.require_fresh_choice_after_answer();
+        overlay.on_early_input();
 
         press(&mut overlay, KeyCode::Char('x'));
         press(&mut overlay, KeyCode::Enter);
@@ -3104,15 +3101,15 @@ mod tests {
     }
 
     /// Review r2 (#523): shortcuts and editing keys are typed text too: on a
-    /// form shown mid-typing or over a view, Ctrl+J (the composer's newline)
-    /// or Ctrl+W does not clear the guard, and after an answer Tab or
-    /// Backspace does not either. Only navigation does.
+    /// form whose first keys were dropped as it appeared (#787), Ctrl+J (the
+    /// composer's newline), Ctrl+W, Tab, Backspace and Delete do not clear
+    /// the guard. Only navigation does.
     #[test]
     fn issue_523_shortcuts_and_editing_keys_never_answer_a_new_form() {
         let ctrl = |ch| KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL);
         let (tx, mut rx) = test_sender();
         let mut overlay = confirm_form(tx);
-        overlay.require_fresh_choice();
+        overlay.on_early_input();
         press(&mut overlay, KeyCode::Char('x'));
         overlay.handle_key_event(ctrl('j'));
         press(&mut overlay, KeyCode::Char('y'));
@@ -3123,7 +3120,7 @@ mod tests {
         for key in [KeyCode::Tab, KeyCode::Backspace, KeyCode::Delete] {
             let (tx, mut rx) = test_sender();
             let mut overlay = confirm_form(tx);
-            overlay.require_fresh_choice_after_answer();
+            overlay.on_early_input();
             press(&mut overlay, key);
             press(&mut overlay, KeyCode::Enter);
             assert_eq!(resolved_decisions(&mut rx), Vec::new(), "{key:?}");
@@ -3132,39 +3129,6 @@ mod tests {
             press(&mut overlay, KeyCode::Enter);
             assert_eq!(resolved_decisions(&mut rx).len(), 1, "{key:?}");
         }
-    }
-
-    /// Review r3 (#523): on a select form shown just after an answer, a
-    /// number key arms its option; a key after it is typed text, so `1x`
-    /// then Enter answers nothing, while `1` then Enter does.
-    #[test]
-    fn issue_523_a_key_after_the_number_is_typed_text() {
-        let (tx, mut rx) = test_sender();
-        let mut overlay = confirm_form(tx);
-        overlay.require_fresh_choice_after_answer();
-        for key in [KeyCode::Char('1'), KeyCode::Char('x'), KeyCode::Enter] {
-            press(&mut overlay, key);
-        }
-        assert_eq!(resolved_decisions(&mut rx), Vec::new());
-
-        // A paste after the number key is typed text too.
-        let (tx, mut rx) = test_sender();
-        let mut overlay = confirm_form(tx);
-        overlay.require_fresh_choice_after_answer();
-        press(&mut overlay, KeyCode::Char('1'));
-        assert!(overlay.handle_paste("x".to_string()));
-        press(&mut overlay, KeyCode::Enter);
-        assert_eq!(resolved_decisions(&mut rx), Vec::new());
-
-        let (tx, mut rx) = test_sender();
-        let mut overlay = confirm_form(tx);
-        overlay.require_fresh_choice_after_answer();
-        press(&mut overlay, KeyCode::Char('1'));
-        press(&mut overlay, KeyCode::Enter);
-        assert_eq!(
-            resolved_decisions(&mut rx),
-            vec![(McpServerElicitationAction::Accept, None)]
-        );
     }
 
     /// #192: in a form, a number key chooses an option without submitting.
