@@ -805,9 +805,20 @@ impl ReadDenials {
         self.mark_moderate_with(codex_home, registry.as_deref());
     }
 
-    /// [`Self::mark_moderate`] with the registry folder given.
+    /// [`Self::mark_moderate`] with the registry folder given. Not when the
+    /// home's stored level enforces Aggressive (also when it is unreadable),
+    /// or an Aggressive session's rule file is still there: a nested launch
+    /// then follows Aggressive's rules, as before, also where this session's
+    /// Core level is only Moderate (a session not started by the TUI, which
+    /// alone applies Aggressive's profile).
     pub(crate) fn mark_moderate_with(&mut self, codex_home: &Path, registry: Option<&Path>) {
+        use codex_security_level::level;
         use codex_security_level::nested;
+        let rules = std::fs::read_to_string(level::rules_path(codex_home))
+            .is_ok_and(|contents| level::is_rules_contents(&contents));
+        if rules || level::load(codex_home).enforced() == level::ChosenLevel::Aggressive {
+            return;
+        }
         match nested::prepare_moderate_marker(codex_home) {
             Ok(marker) => self.moderate_marker = AbsolutePathBuf::from_absolute_path(marker).ok(),
             Err(err) => tracing::warn!("could not prepare the Moderate marker: {err}"),

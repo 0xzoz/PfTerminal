@@ -178,7 +178,8 @@ pub fn moderate_origin(homes: &[PathBuf]) -> Result<Option<PathBuf>, String> {
 
 /// Whether this process may not read `home`'s Moderate marker while it may
 /// list the runtime folder that holds it (see [`moderate_marker`]).
-pub fn moderate_marker_denied(home: &Path) -> bool {
+#[cfg(test)]
+fn moderate_marker_denied(home: &Path) -> bool {
     moderate_marker(home).unwrap_or(false)
 }
 

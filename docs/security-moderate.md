@@ -75,8 +75,8 @@ The kill switch (`/security` → `g`) works under every level.
   settings to keep every command in it.
 - MCP servers, apps, hooks and `!` shell commands run outside the sandbox, as
   under every level.
-- Nested agents are recognised on macOS and Linux only, and not when they
-  run as root on Linux. Corbanu marks Moderate by denying agent commands a
+- Nested agents are recognised on macOS and Linux only, and on Linux not
+  when they run as root or in a user namespace of their own (#826). Corbanu marks Moderate by denying agent commands a
   file in the Corbanu home's `tmp` folder, and lists the homes Moderate runs
   on in `~/Library/Application Support/Corbanu/moderate-homes` (macOS) or
   `~/.local/state/corbanu/moderate-homes` (Linux); under Moderate agent

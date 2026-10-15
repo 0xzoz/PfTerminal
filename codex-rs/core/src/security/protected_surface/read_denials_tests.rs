@@ -2606,3 +2606,44 @@ fn issue_766_moderate_marker_denied_and_registry_read_only() {
         );
     }
 }
+
+/// #766 round 3: a home whose stored level is Aggressive (or unreadable),
+/// or that still holds an Aggressive session's rule file, is not marked,
+/// even where Core's level is only Moderate.
+#[test]
+fn issue_766_no_marker_where_aggressive_is_stored() {
+    use codex_security_level::level;
+    let marker = codex_security_level::nested::MODERATE_MARKER;
+    for (stored, rules) in [
+        (Some("version = 1\nlevel = \"aggressive\"\n"), false),
+        (Some("not a level"), false),
+        (None, true),
+    ] {
+        let fx = fixture();
+        if let Some(contents) = stored {
+            std::fs::write(level::state_path(&fx.codex_home), contents).unwrap();
+        }
+        if rules {
+            std::fs::create_dir_all(fx.codex_home.join(level::RULES_DIR)).unwrap();
+            std::fs::write(level::rules_path(&fx.codex_home), level::rules_contents()).unwrap();
+        }
+        let cwd = fx.user_home.join("project");
+        let registry = cwd.join("registry");
+        let mut denials = ReadDenials::collect(
+            &fx.codex_home,
+            Some(&fx.user_home),
+            /*claude_config_dir*/ None,
+            &[abs(&cwd)],
+        );
+        denials.mark_moderate_with(&fx.codex_home, Some(&registry));
+        assert_eq!(
+            (
+                fx.codex_home.join(marker).exists(),
+                registry.exists(),
+                denials.moderate_marker.is_some()
+            ),
+            (false, false, false),
+            "{stored:?} {rules}"
+        );
+    }
+}

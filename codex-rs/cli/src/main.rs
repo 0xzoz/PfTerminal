@@ -1996,6 +1996,13 @@ async fn cli_main(
 /// (see [`nested_security::prepare_moderate_home`]). Anything else, or a
 /// command line that does not parse, is left alone.
 fn nested_moderate_home() -> Option<tempfile::TempDir> {
+    // Cheap first: most launches (and every sandbox helper) start no agent.
+    if !std::env::args_os()
+        .skip(1)
+        .any(|arg| matches!(arg.to_str(), Some("exec" | "e" | "review")))
+    {
+        return None;
+    }
     let matches = MultitoolCli::command()
         .try_get_matches_from(std::env::args_os())
         .ok()?;

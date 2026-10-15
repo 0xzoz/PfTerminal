@@ -42,26 +42,18 @@ type = "Run exactly this shell command and show me its output: corbanu exec --sk
 [[steps]]
 key = "Enter"
 [[steps]]
-wait = "(?s)runs in a Corbanu home of its own(?:(?!Working).)*\n› "
+wait = "(?s)runs\\s+in\\s+a\\s+Corbanu\\s+home\\s+of\\s+its\\s+own(?:(?!Working).)*\n› "
 timeout = 240
 compress = 3
 [[steps]]
 pause = 3.0
 
 [[steps]]
-type = "Now run exactly this and show its output: mkdir -p other && CODEX_HOME=$PWD/other corbanu exec --skip-git-repo-check -m glm-5.3-flash -c model_provider=zai hi </dev/null 2>&1 | head -1"
+type = "Now run exactly this and show its output: mkdir -p other && env CORBANU_HOME=$PWD/other PFTERMINAL_HOME=$PWD/other CODEX_HOME=$PWD/other HOME=$PWD corbanu exec --skip-git-repo-check -m glm-5.3-flash -c model_provider=zai hi </dev/null 2>&1 | head -1"
 [[steps]]
 key = "Enter"
 [[steps]]
-wait = "Press enter to confirm|Yes, proceed"
-timeout = 240
-compress = 3
-[[steps]]
-pause = 1.5
-[[steps]]
-key = "Enter"
-[[steps]]
-wait = "(?s)Security level Moderate is\\s+enforced because an agent command(?:(?!Working).)*\n› "
+wait = "(?s)Ran mkdir -p other(?:(?!Working).)*Moderate\\s+is\\s+enforced\\s+because\\s+an\\s+agent\\s+command(?:(?!Working).)*\n› "
 timeout = 240
 compress = 3
 [[steps]]

@@ -42,6 +42,9 @@ enum Level {
     /// `[security] level = "aggressive"` in config (Core's level), with a
     /// stored level file that agent commands cannot read.
     AggressiveInCore,
+    /// Moderate in config while `/security` stored Aggressive (Core's level
+    /// was not raised with it), in a run the TUI did not start.
+    ModerateStoredAggressive,
 }
 
 /// What the outer agent's command starts.
@@ -281,6 +284,13 @@ async fn run(setup: Setup) -> Result<Run> {
     let level_config = match level {
         Level::Permissive => "",
         Level::Moderate => "[security]\nversion = 1\nlevel = \"moderate\"\n",
+        Level::ModerateStoredAggressive => {
+            std::fs::write(
+                home.join("security_level.toml"),
+                "version = 1\nlevel = \"aggressive\"\n",
+            )?;
+            "[security]\nversion = 1\nlevel = \"moderate\"\n"
+        }
         Level::AggressiveInCore => {
             std::fs::write(
                 home.join("security_level.toml"),
@@ -504,5 +514,28 @@ async fn issue_766_default_home_beside_another_stored_level_starts_held() -> Res
     })
     .await?;
     assert_held_to_moderate(&run);
+    Ok(())
+}
+
+/// Aggressive stored in `/security` while Core's level is Moderate: Core
+/// leaves the home unmarked, and the nested launch is refused naming
+/// Aggressive, as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_766_stored_aggressive_is_refused_as_before() -> Result<()> {
+    let run = run(Setup::new(
+        Level::ModerateStoredAggressive,
+        Target::SameHome,
+    ))
+    .await?;
+    let output = run.command_output();
+    assert_eq!(
+        (
+            output.contains("while security level Aggressive is enforced"),
+            output.contains("Moderate is enforced"),
+            run.nested_request().is_some(),
+        ),
+        (true, false, false),
+        "{output}"
+    );
     Ok(())
 }
