@@ -3069,11 +3069,11 @@
   }
  ],
  "review_budget": {
-  "used": 3,
+  "used": 4,
   "limit": 5,
   "ledger": {
    "path": "review-ledger.md",
-   "sha256": "8882eb661624dbc366852751670a97a5065a71b99625144927109859eaf9e0e2"
+   "sha256": "d6e908649866c1b7d2d55a2e10a7ac666f53c2530857b28fd591ab1c9c0d2623"
   }
  }
 }

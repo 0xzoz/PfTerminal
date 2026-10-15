@@ -120,7 +120,8 @@ Combined status of all 64 cases (this run where re-run or accepted, the first ta
 After the run, to explain AGG-04 and #816: before the restart, with Aggressive confirmed, an approved `curl` to
 example.com could not resolve the host, which the host itself reaches. An approved write outside the folder was refused
 ([host-checks/](host-checks/)). Both used the candidate package (via `cap/product.sh`) on the host, with a disposable HOME
-and CORBANU_HOME, no native keyring, and GLM 5.3 Flash on zai.
+and CORBANU_HOME, no native keyring, and GLM 5.3 Flash on zai. There was no Permissive control run, and the host's own
+reachability of example.com was checked with one curl in the integrator's shell that is not captured in a file.
 
 ## Evidence check
 
@@ -141,6 +142,11 @@ driver design and the amendment review used 2 of them.
   - The README's broken references and the lane processes are fixed or explained. The line "00:57:48Z clean shutdown
     from inside" in `common/vm-state-end.txt` is a label written before the next step, not a shutdown: the next step
     was the ignored `utmctl stop --request` at 00:57:58Z, then `guest-shutdown-clean.sh` at 01:00:17Z.
+- **r2** (fresh session) failed on one unsupported claim only
+  ([review/evidence-check-r2.md](review/evidence-check-r2.md)). It confirmed every disposition, every r1 correction, the
+  freeze, the drivers and the isolation record. Corrections applied: the lane-process note now cites
+  `common/kill-lane-procs-end.out` and says the counted processes were never identified; as it recommended, the host-check
+  notes say there was no Permissive control and that the host's own reachability check is not captured.
 
 ## Known limits
 
@@ -156,8 +162,9 @@ driver design and the amendment review used 2 of them.
 - The synthetic `.env` token appears in the harness's fixture records (`fixture*.json(l)`, driver logs), never on the
   product's screen.
 - Lane processes: 12 or 13 processes owned by the lane account were still running after each wipe
-  (`runs/*/wipe-after.txt`, a count only), most likely the per-user system daemons macOS starts for an account
-  (distnoted, cfprefsd and similar, as listed during V01's preflight); lane agmx1 was reused for V04.
+  (`runs/*/wipe-after.txt`, a count only; it may include the shell that took it). They were never identified; at the
+  end, `common/kill-lane-procs-end.out` shows one `/usr/sbin/distnoted` per lane uid (610-613). Lane agmx1 was reused
+  for V04.
 - Relay windows: each run's `mediator-window.jsonl` starts 2 minutes before its executor and may hold the end of the
   previous run's requests. No disposition rests on relay traffic.
 - Product logs (`*.log` under `product-logs/`) and product homes are kept out of the record. Each run's test project is
