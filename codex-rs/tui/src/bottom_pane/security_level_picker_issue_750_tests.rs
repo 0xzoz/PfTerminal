@@ -386,3 +386,79 @@ fn issue_750_moderate_kept_by_core_is_the_next_start() {
         );
     }
 }
+
+/// #783 (Travis, 2026-10-14): on Windows without its sandbox set up, Moderate
+/// cannot be chosen either, exactly like Aggressive (#691): the list says so,
+/// Enter explains how to set it up, and nothing is saved. Permissive stays.
+#[test]
+fn issue_783_moderate_waits_for_the_windows_sandbox() {
+    const STEPS: &str = "The Windows sandbox is not set up. Open /permissions, choose Default \
+                         and pick \"Set up default sandbox\" (it needs Administrator permission)";
+    let home = tempfile::tempdir().unwrap();
+    let mut picker = open_picker(home.path(), ChosenLevel::Permissive, ALL_ON);
+    picker.set_windows_sandbox_steps(Some(STEPS.to_string()));
+    choose_moderate(&mut picker);
+    insta::assert_snapshot!(
+        "security_level_picker_moderate_needs_windows_sandbox",
+        render(&picker, /*width*/ 80)
+    );
+    assert_eq!(
+        picker.screen,
+        Screen::List {
+            note: Some(format!(
+                "Moderate needs the default Windows sandbox. {STEPS}, then choose Moderate \
+                 again. Nothing changed."
+            ))
+        }
+    );
+    assert_eq!(level::load(home.path()), StoredLevel::Absent);
+    assert_eq!(confirmed(home.path()), level::ConfirmedLevel::Absent);
+
+    // Permissive is still offered (and already in effect).
+    picker.handle_key_event(key(KeyCode::Up));
+    picker.handle_key_event(key(KeyCode::Enter));
+    assert_eq!(
+        picker.screen,
+        Screen::List {
+            note: Some("Permissive is already in effect. Nothing changed.".to_string())
+        }
+    );
+
+    // Once it is set up, Moderate's review opens as before.
+    picker.set_windows_sandbox_steps(/*steps*/ None);
+    choose_moderate(&mut picker);
+    assert_eq!(picker.screen, Screen::Review(ChosenLevel::Moderate));
+}
+
+/// #783: with Moderate saved and active, its row says it needs the sandbox,
+/// choosing it again changes nothing, and switching to Permissive still works.
+#[test]
+fn issue_783_saved_moderate_waits_for_the_windows_sandbox_and_permissive_stays() {
+    let home = tempfile::tempdir().unwrap();
+    level::save(home.path(), ChosenLevel::Moderate, NestedAgents::Refuse).unwrap();
+    let mut picker = open_picker(home.path(), ChosenLevel::Moderate, ALL_ON);
+    picker.set_windows_sandbox_steps(Some("Run /setup-default-sandbox".to_string()));
+    let list = text(&picker);
+    assert!(
+        list.contains("> Moderate  (active), needs the Windows sandbox set up"),
+        "{list}"
+    );
+    picker.handle_key_event(key(KeyCode::Enter));
+    assert_eq!(
+        picker.screen,
+        Screen::List {
+            note: Some(
+                "Moderate needs the default Windows sandbox. Run /setup-default-sandbox, then \
+                 choose Moderate again. Nothing changed."
+                    .to_string()
+            )
+        }
+    );
+    assert_eq!(
+        level::load(home.path()),
+        StoredLevel::Chosen(ChosenLevel::Moderate)
+    );
+    picker.handle_key_event(key(KeyCode::Up));
+    picker.handle_key_event(key(KeyCode::Enter));
+    assert_eq!(picker.screen, Screen::Review(ChosenLevel::Permissive));
+}
