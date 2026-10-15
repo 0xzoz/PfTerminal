@@ -30,7 +30,8 @@ red status noise without testing the code.
   #636): the nightly native Windows Bazel tests (`test-windows-native-main`),
   limited to those four crates' test targets (`--build_tests_only`). Other PRs
   skip it; a change to its workflow (`rust-ci-windows-native-tests.yml`) also
-  runs it. When it runs it is part of `CI results (required)`. It restores the
+  runs it, but changes to `.bazelrc`, other Bazel files or the crates these
+  four depend on don't (nightly covers those). When it runs it is part of `CI results (required)`. It restores the
   Bazel repository cache that nightly saves on `main` and saves nothing. With
   no build cache it compiles cold: about 43 minutes, about as long as the
   Windows argument comment lint that already runs on PRs (90-minute timeout).

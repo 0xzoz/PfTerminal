@@ -413,12 +413,20 @@ class PrWindowsNativeTestsTest(unittest.TestCase):
             ["codex-rs/core-api/src/lib.rs", "codex-rs/tui-markdown/x.rs"],
             ["codex-rs/cli/src/main.rs", "codex-rs/Cargo.lock", "docs/ci.md"],
             [".github/workflows/rust-ci.yml", ".bazelrc"],
-            # Main pushes and nightly get this forced list (nightly runs every
-            # crate's native Windows tests in bazel.yml).
-            ["codex-rs/force", "tools/argument-comment-lint/force", ".github/force"],
         ):
             with self.subTest(files=files):
                 self.assertFalse(self.detect(files))
+
+    def test_skipped_on_main_pushes_and_nightly(self) -> None:
+        # Non-PR events get the forced file list; nightly runs every crate's
+        # native Windows tests in bazel.yml instead.
+        forced = re.search(
+            r'(?m)^            files=\((.*)\)$', self.job(self.workflow("rust-ci.yml"), "changed")
+        )
+        self.assertIsNotNone(forced)
+        files = re.findall(r'"([^"]+)"', forced.group(1))
+        self.assertIn("codex-rs/force", files)
+        self.assertFalse(self.detect(files))
 
     def test_pr_job_calls_the_reusable_workflow(self) -> None:
         rust_ci = self.workflow("rust-ci.yml")
