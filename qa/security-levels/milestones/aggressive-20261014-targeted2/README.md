@@ -22,11 +22,12 @@ Combined status of all 64 cases (this run where re-run or accepted, the first ta
   - AGG-04, pending an owner ruling (#816); read literally, expected result 3 fails. Corrected from passed after
     evidence check r1. Everything else held before the restart: the vault command and the Corbanu-home read were
     refused with the Aggressive wording and no Grant once; the inspector's Vault row now says the store and sign-in
-    file are unreadable (#792, fixed in #799); an ordinary write asked first and Esc left it unrun. But the inspector
-    also says approved commands stay inside the sandbox and network is off for agent commands, which the amendment
-    lists as starting at the restart. A host check found both already enforced (see "Integrator host checks" below), so
-    the inspector looks accurate and screen 07 understates. Whether the case should follow today's behaviour is for the
-    owner.
+    file are unreadable (#792, fixed in #799); an ordinary write asked first and Esc left it unrun. But the inspector's
+    rows also say approved commands stay inside the sandbox, network is off for agent commands and only allowlisted
+    environment variables reach agent commands, all of which the amendment lists as starting at the restart; its own
+    status lines ("session controls apply after restart") agree with screen 07 instead. A host check found the sandbox
+    and network parts already enforced (see "Integrator host checks" below), so those rows look accurate and screen 07
+    understates. Whether the case should follow today's behaviour is for the owner.
   - AGG-R03 (keystroke driver): pane A was left for pane B before its prompt appeared, but within the 15 s wait pane A's
     approval prompt took over pane B's view (footer: Enter, Esc, "o to open thread"). The driver pressed nothing more
     under its frozen stop rule, so whether `/security` could have been reached from there was not tested. Same block as in every earlier
@@ -125,8 +126,8 @@ reachability of example.com was checked with one curl in the integrator's shell 
 
 ## Evidence check
 
-See [review-ledger.md](review-ledger.md) and [review/](review/). The budget is 5, counted from 0 for this record; the
-driver design and the amendment review used 2 of them.
+See [review-ledger.md](review-ledger.md) and [review/](review/). The budget is 5, counted from 0 for this record: the
+driver design and the amendment review used 2, the evidence checks 3. All 5 are used; no extension was requested.
 
 - **r1** (fresh session) failed ([review/evidence-check-r1.md](review/evidence-check-r1.md)). It confirmed the case
   count, the freeze (all 128 digests; table and drivers equal to the reviewer's and designer's versions), both driver
@@ -147,6 +148,13 @@ driver design and the amendment review used 2 of them.
   freeze, the drivers and the isolation record. Corrections applied: the lane-process note now cites
   `common/kill-lane-procs-end.out` and says the counted processes were never identified; as it recommended, the host-check
   notes say there was no Permissive control and that the host's own reachability check is not captured.
+- **r3** (fresh session) was the last check within the budget of 5 ([review/evidence-check-r3.md](review/evidence-check-r3.md)).
+  It failed on one wording point and confirmed every disposition, count, the freeze, the drivers and the isolation
+  record. Applied afterwards, **not independently verified**: AGG-04's account now says that, read literally, the
+  inspector also shows environment stripping as active, and that its status lines contradict its rows ("rows appear
+  accurate" instead of "the inspector appears accurate"); as it noted, AGG-37 now mentions the single relay request
+  for the vault prompt, and AGG-R14 the Enter's send time (00:48:06.84Z). The budget is spent without a major defect,
+  so under the binding rule of 2026-10-14 there is no further check and no self-authorized extension.
 
 ## Known limits
 
