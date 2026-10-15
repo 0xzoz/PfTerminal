@@ -1216,6 +1216,14 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                         match event_processor.process_server_notification(notification) {
                             CodexStatus::Running => {}
                             CodexStatus::InitiateShutdown => {
+                                // #616: rollout items buffered while the home was
+                                // unreadable are saved at shutdown; let it come back.
+                                if !config.ephemeral {
+                                    codex_core::home_access::wait_until_home_readable(
+                                        config.codex_home.as_path(),
+                                    )
+                                    .await;
+                                }
                                 if let Err(err) = request_shutdown(
                                     &client,
                                     &mut request_ids,

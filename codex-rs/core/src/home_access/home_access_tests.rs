@@ -3,7 +3,8 @@ use pretty_assertions::assert_eq;
 
 const WINDOW: Duration = Duration::from_secs(3600);
 
-fn step(attempt: u32, delay_secs: u64, remaining_secs: u64) -> Option<HomeWaitStep> {
+/// `(attempt, delay, remaining)` in seconds.
+fn step((attempt, delay_secs, remaining_secs): (u32, u64, u64)) -> Option<HomeWaitStep> {
     Some(HomeWaitStep {
         attempt,
         delay: Duration::from_secs(delay_secs),
@@ -25,17 +26,20 @@ fn home_failures_back_off_exponentially_up_to_a_minute() {
     }
     assert_eq!(
         steps,
-        vec![
-            step(1, 1, 3600),
-            step(2, 2, 3599),
-            step(3, 4, 3597),
-            step(4, 8, 3593),
-            step(5, 16, 3585),
-            step(6, 32, 3569),
-            step(7, 60, 3537),
-            step(8, 60, 3477),
-            step(9, 60, 3417),
+        [
+            (1, 1, 3600),
+            (2, 2, 3599),
+            (3, 4, 3597),
+            (4, 8, 3593),
+            (5, 16, 3585),
+            (6, 32, 3569),
+            (7, 60, 3537),
+            (8, 60, 3477),
+            (9, 60, 3417),
         ]
+        .map(step)
+        .into_iter()
+        .collect::<Vec<_>>()
     );
 }
 
@@ -56,7 +60,7 @@ fn the_window_bounds_the_wait_and_other_failures_never_wait() {
     let mut wait = HomeWait::default();
     assert_eq!(
         wait.next_step(/*home_unreadable*/ true, start, window),
-        step(1, 1, 90)
+        step((1, 1, 90))
     );
     assert_eq!(
         wait.next_step(
@@ -64,7 +68,7 @@ fn the_window_bounds_the_wait_and_other_failures_never_wait() {
             start + Duration::from_secs(80),
             window
         ),
-        step(2, 2, 10)
+        step((2, 2, 10))
     );
     assert_eq!(
         wait.next_step(
@@ -72,7 +76,7 @@ fn the_window_bounds_the_wait_and_other_failures_never_wait() {
             start + Duration::from_secs(89),
             window
         ),
-        step(3, 1, 1),
+        step((3, 1, 1)),
         "the last wait ends with the window"
     );
     assert_eq!(
@@ -84,6 +88,62 @@ fn the_window_bounds_the_wait_and_other_failures_never_wait() {
         None,
         "spent: the failure is handled as usual (exec exits 1)"
     );
+}
+
+/// Exec's wait before saving the session: until the home lists again, or the
+/// window is spent; other errors never wait.
+#[tokio::test]
+async fn the_exit_wait_ends_when_the_home_lists_again_or_the_window_is_spent() {
+    let reads = std::sync::atomic::AtomicU32::new(0);
+    let home = Path::new("/Volumes/Drive/home");
+    let mut recorded = Vec::new();
+    let started = Instant::now();
+    wait_until_readable(
+        home,
+        |_| match reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+            0 => Err(std::io::Error::from_raw_os_error(1)),
+            _ => Ok(()),
+        },
+        |operation, path, error| recorded.push(format!("{operation} {} {error}", path.display())),
+        WINDOW,
+    )
+    .await;
+    let waited = started.elapsed();
+    assert_eq!(
+        (reads.into_inner(), recorded),
+        (
+            2,
+            vec![
+                "read_dir (opendir) /Volumes/Drive/home Operation not permitted (os error 1)"
+                    .to_string()
+            ]
+        )
+    );
+    assert!(waited >= FIRST_WAIT && waited < WINDOW, "{waited:?}");
+
+    let started = Instant::now();
+    wait_until_readable(
+        home,
+        |_| Err(std::io::Error::from_raw_os_error(1)),
+        |_, _, _| {},
+        Duration::from_millis(1500),
+    )
+    .await;
+    let waited = started.elapsed();
+    assert!(
+        waited >= Duration::from_millis(1500) && waited < Duration::from_secs(30),
+        "spent after the window: {waited:?}"
+    );
+
+    let started = Instant::now();
+    wait_until_readable(
+        home,
+        |_| Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+        |_, _, _| panic!("only EPERM is recorded"),
+        WINDOW,
+    )
+    .await;
+    assert!(started.elapsed() < FIRST_WAIT);
 }
 
 #[test]

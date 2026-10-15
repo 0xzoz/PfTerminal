@@ -93,16 +93,15 @@ pub(crate) async fn wait_if_home_unreadable(
     turn_context: &TurnContext,
     err: CodexErr,
 ) -> Result<(), CodexErr> {
-    let Some(step) = wait.next_step(err.is_home_unreadable(), Instant::now(), home_wait_window())
-    else {
+    let now = tokio::time::Instant::now().into_std();
+    let Some(step) = wait.next_step(err.is_home_unreadable(), now, home_wait_window()) else {
         return Err(err);
     };
     let message = format!(
-        "{HOME_UNREADABLE_HEADLINE}; waiting {}s for access to return (attempt {}, gives up in \
-         {} min)",
-        step.delay.as_secs(),
+        "{HOME_UNREADABLE_HEADLINE}; waiting {} for access to return (attempt {}, gives up in {})",
+        human_duration(step.delay),
         step.attempt,
-        step.remaining.as_secs().div_ceil(60),
+        human_duration(step.remaining),
     );
     tracing::warn!("{message}: {err}");
     sess.notify_stream_error(turn_context, message, err).await;
@@ -110,42 +109,67 @@ pub(crate) async fn wait_if_home_unreadable(
     Ok(())
 }
 
-/// Runs `operation` again with the same backoff while it fails with EPERM and
-/// the wait window allows it (used where no turn is running, e.g. shutdown).
-pub(crate) async fn retry_while_not_permitted<T, E, Fut>(
-    what: &str,
-    mut operation: impl FnMut() -> Fut,
-) -> Result<T, E>
-where
-    E: std::fmt::Display,
-    Fut: std::future::Future<Output = Result<T, E>>,
-{
+/// Waits, within the window, until `home` can be listed again. `corbanu exec`
+/// calls it before the session is saved at exit, so rollout items buffered
+/// while the home was unreadable are written instead of lost.
+pub async fn wait_until_home_readable(home: &Path) {
+    wait_until_readable(
+        home,
+        |path| std::fs::read_dir(path).map(drop),
+        |operation, path, error| {
+            record_home_access_failure(operation, path, error);
+        },
+        home_wait_window(),
+    )
+    .await;
+}
+
+async fn wait_until_readable(
+    home: &Path,
+    read_dir: impl Fn(&Path) -> std::io::Result<()>,
+    mut record: impl FnMut(&str, &Path, &str),
+    window: Duration,
+) {
+    const EPERM: i32 = 1;
     let mut wait = HomeWait::default();
     loop {
-        let error = match operation().await {
-            Ok(value) => return Ok(value),
+        let error = match read_dir(home) {
+            Ok(()) => return,
             Err(error) => error,
         };
-        let message = error.to_string();
-        let Some(step) = wait.next_step(
-            is_operation_not_permitted(&message),
-            Instant::now(),
-            home_wait_window(),
-        ) else {
-            return Err(error);
+        let not_permitted = error.raw_os_error() == Some(EPERM);
+        let now = tokio::time::Instant::now().into_std();
+        let Some(step) = wait.next_step(not_permitted, now, window) else {
+            return;
         };
-        // Exec shows errors only; each attempt must be visible.
+        if step.attempt == 1 {
+            record("read_dir (opendir)", home, &error.to_string());
+        }
+        // Exec prints errors only; each attempt must be visible.
         tracing::error!(
-            "{HOME_UNREADABLE_HEADLINE}: {what} failed ({message}); retrying in {}s (attempt {})",
-            step.delay.as_secs(),
+            "{HOME_UNREADABLE_HEADLINE}: {}; waiting {} before saving the session (attempt {}, \
+             gives up in {})",
+            home.display(),
+            human_duration(step.delay),
             step.attempt,
+            human_duration(step.remaining),
         );
         tokio::time::sleep(step.delay).await;
     }
 }
 
+/// "45 s" or, from a minute up, whole minutes rounded up ("2 min").
+fn human_duration(duration: Duration) -> String {
+    let secs = duration.as_millis().div_ceil(1000);
+    if secs < 60 {
+        format!("{secs} s")
+    } else {
+        format!("{} min", secs.div_ceil(60))
+    }
+}
+
 /// Whether an error message reports EPERM ("Operation not permitted").
-pub fn is_operation_not_permitted(message: &str) -> bool {
+pub(crate) fn is_operation_not_permitted(message: &str) -> bool {
     message.contains("Operation not permitted")
 }
 
@@ -156,7 +180,7 @@ pub fn sandbox_denies_read(path: &Path) -> bool {
 }
 
 /// The diagnostics log on the internal disk (never under the Corbanu home).
-pub fn diagnostics_log_path() -> Option<PathBuf> {
+pub(crate) fn diagnostics_log_path() -> Option<PathBuf> {
     let user_home = dirs::home_dir()?;
     Some(if cfg!(target_os = "macos") {
         user_home.join("Library/Logs/Corbanu/home-access.log")
@@ -192,7 +216,12 @@ pub fn record_home_access_failure(operation: &str, path: &Path, error: &str) -> 
 
 /// Appends one record to `log`, keeping one previous file when it grows past
 /// 1 MiB.
-pub fn write_record(log: &Path, operation: &str, path: &Path, error: &str) -> std::io::Result<()> {
+pub(crate) fn write_record(
+    log: &Path,
+    operation: &str,
+    path: &Path,
+    error: &str,
+) -> std::io::Result<()> {
     if let Some(parent) = log.parent() {
         std::fs::create_dir_all(parent)?;
     }

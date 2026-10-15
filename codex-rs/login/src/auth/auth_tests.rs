@@ -1514,16 +1514,19 @@ async fn internal_helper_exit_75_marks_an_unreadable_home() {
     };
     let mut marked = Vec::new();
     for args in [&["internal-claude-oauth-token"][..], &[]] {
-        let error = loop {
-            let error = crate::auth::validate_provider_auth_command(&config(args))
+        let mut error = None;
+        for _ in 0..50 {
+            let failure = crate::auth::validate_provider_auth_command(&config(args))
                 .await
                 .expect_err("failing helper");
             // Linux may still report the just-written helper busy.
-            if !error.to_string().contains("Text file busy") {
-                break error;
+            if !failure.to_string().contains("Text file busy") {
+                error = Some(failure);
+                break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        };
+        }
+        let error = error.expect("helper stayed busy");
         marked.push(codex_protocol::home_unreadable::is_home_unreadable(&error));
     }
     assert_eq!(marked, vec![true, false]);

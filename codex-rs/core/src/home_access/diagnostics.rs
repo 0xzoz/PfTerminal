@@ -140,6 +140,11 @@ mod platform {
     pub(super) fn sandbox_denies_read(path: &Path) -> Option<bool> {
         let check = symbol(c"sandbox_check")?;
         let c_path = CString::new(path.as_os_str().as_bytes()).ok()?;
+        // Without it a denied check is reported as a sandbox violation.
+        let no_report = symbol(c"SANDBOX_CHECK_NO_REPORT").map_or(0, |address| {
+            // SAFETY: the symbol is a `const enum sandbox_filter_type` (an int).
+            unsafe { *address.cast::<c_int>() }
+        });
         // SAFETY: sandbox_check(pid, operation, SANDBOX_FILTER_PATH, path).
         let check: SandboxCheck = unsafe { std::mem::transmute(check) };
         // SAFETY: both strings are NUL-terminated and outlive the call.
@@ -147,7 +152,7 @@ mod platform {
             check(
                 libc::getpid(),
                 c"file-read-data".as_ptr(),
-                SANDBOX_FILTER_PATH,
+                SANDBOX_FILTER_PATH | no_report,
                 c_path.as_ptr(),
             )
         };
@@ -173,14 +178,23 @@ mod platform {
     /// The mount holding `path`, from the kernel's mount table (no lookup of
     /// `path` itself, which may be the thing that fails).
     fn mount_facts(path: &Path) -> String {
-        let mut mounts: *mut libc::statfs = std::ptr::null_mut();
-        // SAFETY: getmntinfo stores a pointer to a buffer it owns.
-        let count = unsafe { libc::getmntinfo(&mut mounts, libc::MNT_NOWAIT) };
-        if count <= 0 || mounts.is_null() {
+        // SAFETY: a null buffer only asks for the number of mounts.
+        let count = unsafe { libc::getfsstat(std::ptr::null_mut(), 0, libc::MNT_NOWAIT) };
+        let Ok(count) = usize::try_from(count) else {
             return "mount table unavailable".to_string();
-        }
-        // SAFETY: getmntinfo returned `count` entries at `mounts`.
-        let mounts = unsafe { std::slice::from_raw_parts(mounts, count as usize) };
+        };
+        // Room for mounts added since the first call.
+        // SAFETY: statfs is plain data; all-zero is a valid value.
+        let mut mounts = vec![unsafe { std::mem::zeroed::<libc::statfs>() }; count + 8];
+        let Ok(size) = c_int::try_from(mounts.len() * std::mem::size_of::<libc::statfs>()) else {
+            return "mount table unavailable".to_string();
+        };
+        // SAFETY: the buffer holds `mounts.len()` entries, `size` bytes.
+        let filled = unsafe { libc::getfsstat(mounts.as_mut_ptr(), size, libc::MNT_NOWAIT) };
+        let Ok(filled) = usize::try_from(filled) else {
+            return "mount table unavailable".to_string();
+        };
+        mounts.truncate(filled);
         let field = |chars: &[c_char]| {
             // SAFETY: statfs name fields are NUL-terminated within their arrays.
             unsafe { CStr::from_ptr(chars.as_ptr()) }

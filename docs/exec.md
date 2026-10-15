@@ -4,16 +4,22 @@ For information about non-interactive mode, see [this documentation](https://dev
 
 ## When the Corbanu home cannot be read
 
-If the Corbanu home becomes unreadable ("Operation not permitted"), for
-example while a drive is briefly blocked, `corbanu exec` waits and retries
-with backoff (1 s, doubling to at most 60 s) for up to an hour, printing each
-attempt, and continues the turn once access returns. If access does not return
-in time, it fails and exits 1. Change the window with `--home-wait-secs`
-(`0` fails at once). A denial by the process's own sandbox is not waited out.
+If the Corbanu home becomes unreadable ("Operation not permitted") during a
+run, for example while a drive is briefly blocked, `corbanu exec` waits and
+retries with backoff (1 s, doubling to at most 60 s) for up to an hour,
+printing each attempt, and continues the turn once access returns. Before it
+saves the session at exit it also waits for the home, so session items it
+could not write meanwhile are saved. If access does not return in time, the
+turn fails and exec exits 1. Change the window with `--home-wait-secs` (`0`
+fails at once).
+
+A `corbanu` command started while the home is unreadable stops at once with
+exit status 75 (1 when, on macOS, the process's own sandbox denies the read,
+which waiting cannot fix).
 
 Each failure is recorded, without file contents or credentials, in
 `~/Library/Logs/Corbanu/home-access.log` on macOS
 (`~/.local/state/corbanu/home-access.log` elsewhere): the operation, path and
-error, the permissions, flags, ACL and extended-attribute names of the home and
-its parents, the mount, the sandbox check, the responsible process and the
+error, the permissions, flags, ACL and extended-attribute names of the path
+and its parents, the mount, the sandbox check, the responsible process and the
 working directory.

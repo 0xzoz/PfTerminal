@@ -38,6 +38,12 @@ fn token_helper_reports_an_unreadable_home_with_diagnostics() -> Result<()> {
         .output()?;
 
     let stderr = String::from_utf8_lossy(&output.stderr);
+    if output.status.code() == Some(71)
+        && stderr.contains("sandbox-exec: sandbox_apply: Operation not permitted")
+    {
+        // Already sandboxed (Bazel's darwin-sandbox): nesting is unavailable.
+        return Ok(());
+    }
     assert_eq!(
         (output.status.code(), output.stdout.is_empty()),
         (Some(1), true),
