@@ -724,7 +724,7 @@ async fn accounting_chat_exact_final_endpoint_binding() -> anyhow::Result<()> {
 }
 
 #[test]
-fn accounting_chat_cache_writes_are_read_only_on_openrouter_and_openai() -> anyhow::Result<()> {
+fn accounting_chat_cache_writes_are_read_only_where_their_meaning_is_known() -> anyhow::Result<()> {
     use codex_state::accounting::Presence;
     let usage = |write| ChatUsagePatch {
         input_tokens: ChatTokenPresence::Number(8499),
@@ -735,16 +735,31 @@ fn accounting_chat_cache_writes_are_read_only_on_openrouter_and_openai() -> anyh
     };
     // OpenRouter omits the count for models with no cache-write charge.
     assert_eq!(
-        patch(usage(ChatTokenPresence::Missing), "openrouter")?.write,
+        patch(
+            usage(ChatTokenPresence::Missing),
+            "openrouter",
+            /*route*/ None
+        )?
+        .write,
         Presence::Number(0.try_into()?)
     );
     // A reported count is kept there, and an explicit null stays null.
     assert_eq!(
-        patch(usage(ChatTokenPresence::Number(300)), "openrouter")?.write,
+        patch(
+            usage(ChatTokenPresence::Number(300)),
+            "openrouter",
+            /*route*/ None
+        )?
+        .write,
         Presence::Number(300.try_into()?)
     );
     assert_eq!(
-        patch(usage(ChatTokenPresence::Null), "openrouter")?.write,
+        patch(
+            usage(ChatTokenPresence::Null),
+            "openrouter",
+            /*route*/ None
+        )?
+        .write,
         Presence::Null
     );
     // OpenAI reports writes as a subset of the prompt (#361): kept as reported,
@@ -757,7 +772,10 @@ fn accounting_chat_cache_writes_are_read_only_on_openrouter_and_openai() -> anyh
         (ChatTokenPresence::Null, Presence::Null),
         (ChatTokenPresence::Missing, Presence::Missing),
     ] {
-        assert_eq!(patch(usage(write), "openai")?.write, expected);
+        assert_eq!(
+            patch(usage(write), "openai", /*route*/ None)?.write,
+            expected
+        );
     }
     // Every other route leaves the count unknown, reported or not: DeepSeek
     // bills written tokens as input, and a disjoint report would fail replay.
@@ -773,7 +791,10 @@ fn accounting_chat_cache_writes_are_read_only_on_openrouter_and_openai() -> anyh
             ChatTokenPresence::Null,
             ChatTokenPresence::Number(300),
         ] {
-            assert_eq!(patch(usage(write), provider)?.write, Presence::Missing);
+            assert_eq!(
+                patch(usage(write), provider, /*route*/ None)?.write,
+                Presence::Missing
+            );
         }
     }
     Ok(())
@@ -788,26 +809,139 @@ fn accounting_chat_billed_charge_is_recorded_only_from_openrouter() -> anyhow::R
     };
     let stated = codex_state::accounting::Decimal::try_from("0.0123312".to_string())?;
     assert_eq!(
-        patch(usage(Some("0.0123312")), "openrouter")?.billed_usd,
+        patch(usage(Some("0.0123312")), "openrouter", /*route*/ None)?.billed_usd,
         Some(stated)
     );
-    assert_eq!(patch(usage(None), "openrouter")?.billed_usd, None);
+    assert_eq!(
+        patch(usage(None), "openrouter", /*route*/ None)?.billed_usd,
+        None
+    );
     // Beyond the exact type's 18 decimal places: dropped, never rounded, and
     // the token counts still record.
-    let fine = patch(usage(Some("0.0000000000000000001")), "openrouter")?;
+    let fine = patch(
+        usage(Some("0.0000000000000000001")),
+        "openrouter",
+        /*route*/ None,
+    )?;
     assert_eq!(fine.billed_usd, None);
     assert_eq!(
         fine.input,
         codex_state::accounting::Presence::Number(10.try_into()?)
     );
     assert_eq!(
-        patch(usage(Some("0.000018")), "pfterminal-plan")?.billed_usd,
+        patch(
+            usage(Some("0.000018")),
+            "pfterminal-plan",
+            /*route*/ None
+        )?
+        .billed_usd,
         Some(codex_state::accounting::Decimal::try_from(
             "0.000018".to_string()
         )?)
     );
     for provider in ["deepseek", "zai", "custom-openrouter"] {
-        assert_eq!(patch(usage(Some("0.5")), provider)?.billed_usd, None);
+        assert_eq!(
+            patch(usage(Some("0.5")), provider, /*route*/ None)?.billed_usd,
+            None
+        );
+    }
+    Ok(())
+}
+
+/// #368: Moonshot's Kimi Open Platform documents `cache_write_tokens` as the
+/// written part of the prompt, apart from the cached part, so the count is
+/// kept on that route whatever the provider is named, and nowhere else.
+#[test]
+fn accounting_chat_cache_writes_are_read_on_the_moonshot_route() -> anyhow::Result<()> {
+    use crate::config::PricedRoute;
+    use codex_state::accounting::Presence;
+    let usage = |write| ChatUsagePatch {
+        input_tokens: ChatTokenPresence::Number(8499),
+        cached_tokens: ChatTokenPresence::Number(1152),
+        cache_write_tokens: write,
+        output_tokens: ChatTokenPresence::Number(29),
+        ..Default::default()
+    };
+    for provider in ["kimi", "my-moonshot"] {
+        for (write, expected) in [
+            (
+                ChatTokenPresence::Number(7168),
+                Presence::Number(7168.try_into()?),
+            ),
+            (ChatTokenPresence::Null, Presence::Null),
+            (ChatTokenPresence::Missing, Presence::Missing),
+        ] {
+            assert_eq!(
+                patch(
+                    usage(write),
+                    provider,
+                    Some(PricedRoute::MoonshotOpenPlatform)
+                )?
+                .write,
+                expected
+            );
+        }
+        // The same provider somewhere else keeps the count unknown.
+        assert_eq!(
+            patch(
+                usage(ChatTokenPresence::Number(7168)),
+                provider,
+                /*route*/ None
+            )?
+            .write,
+            Presence::Missing
+        );
+    }
+    Ok(())
+}
+
+/// #786 (Travis, 2026-10-14, option a): a reasoning count above the output
+/// count it is part of is recorded as not reported, and the rest of the
+/// report - the charge included - is kept, so replay accepts the record.
+#[test]
+fn accounting_chat_reasoning_above_output_is_not_reported() -> anyhow::Result<()> {
+    use codex_state::accounting::Presence;
+    let usage = |reasoning, output| ChatUsagePatch {
+        input_tokens: ChatTokenPresence::Number(9098),
+        output_tokens: output,
+        reasoning_tokens: reasoning,
+        total_tokens: ChatTokenPresence::Number(9134),
+        billed_usd: Some("0.00274188".to_string()),
+        ..Default::default()
+    };
+    // The real MiniMax M3 report: 37 reasoning tokens of 36 output.
+    let report = patch(
+        usage(ChatTokenPresence::Number(37), ChatTokenPresence::Number(36)),
+        "openrouter",
+        /*route*/ None,
+    )?;
+    assert_eq!(report.reasoning, Presence::Missing);
+    assert_eq!(report.output, Presence::Number(36.try_into()?));
+    assert_eq!(report.input, Presence::Number(9098.try_into()?));
+    assert_eq!(report.total, Presence::Number(9134.try_into()?));
+    assert_eq!(
+        report.billed_usd,
+        Some(codex_state::accounting::Decimal::try_from(
+            "0.00274188".to_string()
+        )?)
+    );
+    // A count within the output, equal included, is kept as reported; so is
+    // a reasoning count with no output count to compare it with.
+    for (reasoning, output, expected) in [
+        (36, Some(36), Presence::Number(36.try_into()?)),
+        (5, Some(36), Presence::Number(5.try_into()?)),
+        (37, None, Presence::Number(37.try_into()?)),
+    ] {
+        let output = output.map_or(ChatTokenPresence::Missing, ChatTokenPresence::Number);
+        assert_eq!(
+            patch(
+                usage(ChatTokenPresence::Number(reasoning), output),
+                "openrouter",
+                /*route*/ None
+            )?
+            .reasoning,
+            expected
+        );
     }
     Ok(())
 }

@@ -26,6 +26,9 @@ Both pages were read, but a catalogue row cannot price either route without new 
 Pricing these routes needs a route-keyed price lookup (and CNY for BigModel). That is new accounting behaviour, so it is left
 for the PF-60 follow-up sprints with OpenRouter's per-endpoint pricing (item 1).
 
+**Update, later on 2026-10-14 (PF-60-S07, Travis's decision):** Moonshot is now priced by route, with K3 writes at
+the five-minute rate this client's requests get; BigModel stays deferred. See [the S07 gate](../pf-60-s07/gate.md).
+
 ## Checks
 
 - `python3 scripts/check_openai_api_prices.py` against the 2026-10-14 page: every catalogue row matches, `gpt-6.1-sol` included.

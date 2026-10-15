@@ -807,7 +807,7 @@ fn attempt_text(q: &ObservationQuote) -> Vec<String> {
     if charge::reported_charge(q).is_some() {
         lines.push(format!(
             "Published-price estimate (not used — {} reported its charge): {}",
-            charge::charging_provider(),
+            provider_name(&q.attempt.provider),
             charge::published_estimate(q)
         ));
     }
@@ -953,7 +953,7 @@ fn inspection_pages_for(
     result: Result<InspectionDay, String>,
     period: Option<String>,
 ) -> Vec<InspectorPage> {
-    // #368: OpenRouter requests are priced from the charge it reported.
+    // #368: requests on a charge-reporting route are priced from that charge.
     let result = result.and_then(|day| {
         charge::priced_from_charges(day)
             .map_err(|_| "Cost unavailable — exact arithmetic overflow".to_string())
@@ -1565,6 +1565,8 @@ struct EstimateGaps {
 #[derive(Clone, Copy, Default)]
 struct ChargeSplit {
     charged_attempts: i64,
+    /// Whose reported charges those are.
+    charged_by: charge::Chargers,
     charged: Option<Decimal>,
     estimated_attempts: i64,
     estimated: Option<Decimal>,
@@ -1577,12 +1579,13 @@ impl ChargeSplit {
     }
 
     /// "charged by OpenRouter", or "$A charged by OpenRouter + $B estimated
-    /// from published prices"; `None` when no figure is a reported charge.
+    /// from published prices", naming every provider whose charge is counted;
+    /// `None` when no figure is a reported charge.
     fn text(self) -> Option<String> {
         if self.charged_attempts == 0 {
             return None;
         }
-        let provider = charge::charging_provider();
+        let provider = self.charged_by.names();
         if self.estimated_attempts == 0 {
             return Some(format!("charged by {provider}"));
         }
@@ -1617,6 +1620,7 @@ impl EstimateGaps {
             let split = &mut gaps.charges;
             if let Some(charge) = charge::reported_charge(q) {
                 split.charged_attempts = split.charged_attempts.saturating_add(1);
+                split.charged_by = split.charged_by.with(&q.attempt.provider);
                 split.charged = split.charged.and_then(|sum| sum.add(charge).ok());
             } else if q.usage.refused_status.is_none()
                 && (q.all_buckets_priced.is_some() || q.known_subtotal != Decimal::default())
@@ -1850,8 +1854,8 @@ fn billed_figure(quotes: &[&ObservationQuote]) -> Option<String> {
 }
 
 /// The provider's stated charge as a second figure beside the cost, unless
-/// every stated charge here already is the cost (#368: OpenRouter's charges
-/// price its requests), where it would only repeat it.
+/// every stated charge here already is the cost (#368: a charge-reporting
+/// route's charges price its requests), where it would only repeat it.
 fn extra_billed_figure(quotes: &[&ObservationQuote]) -> Option<String> {
     let repeats_cost = quotes
         .iter()
@@ -1868,17 +1872,10 @@ fn billed_detail(figure: &str) -> String {
     format!("Billed cost: {figure} — as stated by the provider with each response")
 }
 
-/// Whether a provider states what it charged with each response. Only these
-/// routes record `billed_usd` (core `accounting_chat.rs`,
-/// `accounting_responses.rs` and `accounting.rs`); keep the lists in step.
+/// Whether a provider states what it charged with each response
+/// ([`charge::CHARGE_REPORTING`]).
 fn states_charges(provider_id: &str) -> bool {
-    matches!(
-        provider_id,
-        codex_model_provider_info::OPENROUTER_PROVIDER_ID
-            | codex_model_provider_info::VERCEL_PROVIDER_ID
-            | codex_model_provider_info::PFTERMINAL_PLAN_PROVIDER_ID
-            | codex_model_provider_info::PFTERMINAL_PLAN_ANTHROPIC_PROVIDER_ID
-    )
+    charge::prices_from_charge(provider_id)
 }
 
 /// Whether an attempt can appear on a provider's bill: not subscription work,
@@ -2309,10 +2306,17 @@ fn plain_overview<'a>(
 /// are charges a provider reported: those are costs, and anything else is an
 /// estimate whose real amount is on the bill it names.
 fn charged_costs_note(quotes: &[&ObservationQuote]) -> String {
-    let provider = charge::charging_provider();
-    let mut note = format!(
-        "Costs marked \"charged by {provider}\" are the charges {provider} reported with those responses"
-    );
+    let chargers = charge::Chargers::of(quotes.iter().copied());
+    let provider = chargers.names();
+    let mut note = if chargers.several() {
+        format!(
+            "Costs marked \"charged by\" a provider ({provider}) are the charges that provider reported with those responses"
+        )
+    } else {
+        format!(
+            "Costs marked \"charged by {provider}\" are the charges {provider} reported with those responses"
+        )
+    };
     let rest: Vec<&ObservationQuote> = quotes
         .iter()
         .copied()
