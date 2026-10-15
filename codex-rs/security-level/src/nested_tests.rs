@@ -238,7 +238,7 @@ fn only_moderate_explains_an_unreadable_level() {
     std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-/// A marker nobody can read is given read permission again (Linux), but a
+/// A marker its owner cannot read is given read permission again (Linux), but a
 /// link, a hard link or a private file at its place is left alone.
 #[cfg(target_os = "linux")]
 #[test]

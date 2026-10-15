@@ -1356,8 +1356,6 @@ fn kept_within(kept: &Path, real: &Path) -> bool {
     }
 }
 
-/// `path` with its nearest existing folder resolved, or `None` when that
-/// folder is not a folder (nothing can be created below a file).
 /// #766: a marker or registry path by its real location, as the sandboxes
 /// match it (bubblewrap refuses a deny that crosses a writable link, as a
 /// home spelled through a link would), and on macOS also as given.
@@ -1372,6 +1370,8 @@ fn moderate_spellings(path: &Path) -> Vec<AbsolutePathBuf> {
     spellings
 }
 
+/// `path` with its nearest existing folder resolved, or `None` when that
+/// folder is not a folder (nothing can be created below a file).
 fn real_location(path: &AbsolutePathBuf) -> Option<AbsolutePathBuf> {
     real_location_within(path, /*hops*/ 8)
 }
