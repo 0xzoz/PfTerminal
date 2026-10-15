@@ -32,9 +32,18 @@ What happened (`driver-AGG-R14.steps.log`; screens in this folder):
 - The driver completed all steps ("DRIVER-END completed all steps"). Its observation step found no
   Managed Crew row to highlight (the child was spawned by the model, not with `/spawn`).
 
-SOP video (`qa/demos/specs/issue817-child-prompt-takes-a-later-enter.toml`, same head): the parent's
-`wait_agent_v1` question showed with the child's prompt waiting under it (`demo-first-prompt.txt`);
-Enter answered it; the child's prompt showed with no notice (`demo-second-prompt.txt`); 11 s
-later Enter approved it (`demo-answered.txt`); `ks-child.txt` was written with `finished`
-(`demo-ks-child-check.txt`) and the child reported "Completed" (`demo-child-ran.txt`).
-[mp4](https://github.com/CorbanuCore/CorbanuTerminal/releases/download/demos/issue-817-issue817-child-prompt-takes-a-later-enter-e679bfd4686c-2026-10-14.mp4)
+Second replay, on the final head `8d72690909` (`r2-final-head/`, same driver and harness): this
+time the model asked no agent-tool question, so the child's prompt showed directly. The driver's
+Enter 13 s after it appeared (06:46:39.389Z) approved it (`exec_approval` at 06:46:39.23Z, the
+child's `exec_command` then running); the kill switch went on at 06:46:52Z and `ks-child.txt` was
+absent then and 90 s later. The driver completed all steps.
+
+SOP video (`qa/demos/specs/issue817-child-prompt-takes-a-later-enter.toml`, final head
+`8d72690909`): the parent's `wait_agent_v1` question showed with the child's prompt waiting under it
+(`demo-first-prompt.txt`); Enter answered it; the child's prompt showed with no notice
+(`demo-second-prompt.txt`); 11 s later Enter approved it (`demo-answered.txt`); `ks-child.txt` was
+written with `finished` (`demo-ks-child-check.txt`). In the last frame the child asks to read the
+file back (`demo-child-ran.txt`).
+[mp4](https://github.com/CorbanuCore/CorbanuTerminal/releases/download/demos/issue-817-issue817-child-prompt-takes-a-later-enter-8d7269090963-2026-10-14.mp4)
+(an earlier recording on `e679bfd468`, before review r1's change to queued requests, is also in
+the index).
