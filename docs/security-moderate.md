@@ -75,16 +75,21 @@ The kill switch (`/security` → `g`) works under every level.
   settings to keep every command in it.
 - MCP servers, apps, hooks and `!` shell commands run outside the sandbox, as
   under every level.
-- Nested agents are recognised on macOS and Linux only. Corbanu marks
-  Moderate by denying agent commands a file in the Corbanu home's `tmp`
-  folder, and lists the homes Moderate runs on in
-  `~/Library/Application Support/Corbanu/moderate-homes` (macOS) or
-  `~/.local/state/corbanu/moderate-homes` (Linux), so a launch pointed at
-  another home finds its origin; under Moderate agent commands can't change
-  that list. A program started outside the sandbox (MCP servers, hooks, `!`
-  commands) isn't an agent command and isn't held to Moderate. A nested run's
-  own Corbanu home is removed when the run ends, but stays in the temporary
-  folder if the run stops on an error (#766).
+- Nested agents are recognised on macOS and Linux only, and not when they
+  run as root on Linux. Corbanu marks Moderate by denying agent commands a
+  file in the Corbanu home's `tmp` folder, and lists the homes Moderate runs
+  on in `~/Library/Application Support/Corbanu/moderate-homes` (macOS) or
+  `~/.local/state/corbanu/moderate-homes` (Linux); under Moderate agent
+  commands can't change that list. A launch pointed at another Corbanu home
+  finds its origin through that list or your default home (`~/.corbanu`); if
+  the list can't be written or your account can't be looked up, such a launch
+  runs at that home's level, as before. With a Corbanu home other than the
+  default, a nested launch is refused, as before, while `~/.corbanu` or
+  `~/.pfterminal` also stores a security level and a vault. A program started
+  outside the sandbox (MCP servers, hooks, `!` commands) isn't an agent
+  command and isn't held to Moderate. A nested run's own Corbanu home is
+  removed when the run ends, but stays in the temporary folder if the run
+  stops on an error (#766).
 - A remote app server can't enforce a level chosen here; Corbanu refuses to
   start against one until you choose Permissive.
 

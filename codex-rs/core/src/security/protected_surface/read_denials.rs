@@ -815,8 +815,10 @@ impl ReadDenials {
         let Some(registry) = registry else {
             return;
         };
+        // Expected inside another command's sandbox (a nested run's own
+        // home), where the registry is read-only.
         if let Err(err) = nested::register_moderate_home(registry, codex_home) {
-            tracing::warn!("could not register the Moderate home: {err}");
+            tracing::debug!("could not register the Moderate home: {err}");
         }
         // Read-only also when this home could not be added (a nested run's
         // own home, inside another command's sandbox).
