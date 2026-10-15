@@ -693,7 +693,11 @@ fn on(provider: &str, charge: Option<&str>, mut quote: ObservationQuote) -> Obse
 fn vercel_and_corbanu_api_requests_are_priced_from_their_charge() {
     for (provider, name, field) in [
         ("vercel", "Vercel", "gatewayCost"),
-        ("pfterminal-plan", "Corbanu API", "usage.corbanu_charge_usd"),
+        (
+            "pfterminal-plan",
+            "Corbanu API",
+            "usage.corbanu_charge_usd or usage.cost",
+        ),
         (
             "pfterminal-plan-anthropic",
             "Corbanu API",

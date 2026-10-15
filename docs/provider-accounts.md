@@ -125,7 +125,8 @@ A provider you configure at Moonshot's Kimi Open Platform
 from Moonshot's published rates for that route, whatever you name the
 provider: `kimi-k3`, `kimi-k2.7-code`, `kimi-k2.7-code-highspeed` and
 `kimi-k2.6`. K3 cache writes are priced at the five-minute rate, the lifetime
-Moonshot applies when a request names none. Other providers' costs are
+Moonshot applies when a request names none. A key sent in a configured header
+or as a bearer token gets no price, as on any route. Other providers' costs are
 estimates from published prices.
 
 ## Amazon Bedrock: AWS profile accounts

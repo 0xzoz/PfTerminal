@@ -671,6 +671,16 @@ fn moonshot_route_is_priced_by_the_route() {
     );
     let mut declared = chat.clone();
     declared.billing = Some(BillingBasis::PayPerUse);
+    let mut declared_plan = chat.clone();
+    declared_plan.billing = Some(BillingBasis::Subscription);
+    let mut env_header_key = chat.clone();
+    env_header_key.env_http_headers = Some(
+        [("api-key".to_string(), "MOONSHOT_API_KEY".to_string())]
+            .into_iter()
+            .collect(),
+    );
+    let mut bearer = chat.clone();
+    bearer.experimental_bearer_token = Some("configured-token".into());
     let moonshot = "https://api.moonshot.ai/v1";
     let cases = [
         (
@@ -700,11 +710,31 @@ fn moonshot_route_is_priced_by_the_route() {
                 BasisSource::UserConfig,
             ),
         ),
-        // A credential in a configured header is not one this client can
-        // attribute to the account the published price is for.
+        // A declared subscription is subscription work, never route rates.
+        (
+            "kimi",
+            &declared_plan,
+            moonshot,
+            (PriceAuthority::PlanBasis, BasisSource::UserConfig),
+        ),
+        // A credential in a configured header or a configured bearer token
+        // is not one this client can attribute to the account the published
+        // price is for.
         (
             "kimi",
             &header_key,
+            moonshot,
+            (PriceAuthority::Unavailable, BasisSource::BuiltIn),
+        ),
+        (
+            "kimi",
+            &env_header_key,
+            moonshot,
+            (PriceAuthority::Unavailable, BasisSource::BuiltIn),
+        ),
+        (
+            "kimi",
+            &bearer,
             moonshot,
             (PriceAuthority::Unavailable, BasisSource::BuiltIn),
         ),

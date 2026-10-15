@@ -7,7 +7,7 @@ plan_feature: "PF-60"
 execution_order: 2
 owner: "Codex worker pf60-next; Travis Good accepts"
 parallel_lane: "accounting"
-write_scope: "codex-rs/core/src/config/mod.rs, codex-rs/core/src/accounting.rs, codex-rs/core/src/accounting_prices.rs, codex-rs/core/src/accounting_chat.rs, codex-rs/core/src/accounting_transport.rs, codex-rs/core/src/accounting_basis_tests.rs, codex-rs/core/src/accounting_chat_tests.rs, codex-rs/core/tests/suite/accounting_chat.rs, codex-rs/tui/src/chatwidget/tokens.rs, codex-rs/tui/src/chatwidget/tokens/charge.rs, codex-rs/tui/src/chatwidget/tokens/charge_tests.rs, docs/provider-accounts.md, docs/sprints/current/portfolio-agent-cost-accounting-followups/pf-60-s07-price-catalogue-refresh.md, docs/sprints/current/portfolio-agent-cost-accounting-followups/pf-60-s06-side-and-fork-attribution.md, docs/plans/active/portfolio-agent-cost-accounting-followups.md, qa/portfolio/agent-cost-accounting/issue-368/, qa/demos/index/PF-60-S07.md, qa/demos/specs/"
+write_scope: "codex-rs/core/src/config/mod.rs, codex-rs/core/src/accounting.rs, codex-rs/core/src/accounting_prices.rs, codex-rs/core/src/accounting_chat.rs, codex-rs/core/src/accounting_transport.rs, codex-rs/core/src/accounting_basis_tests.rs, codex-rs/core/src/accounting_chat_tests.rs, codex-rs/core/tests/suite/accounting_chat.rs, codex-rs/core/tests/suite/accounting_chat_recovery.rs, codex-rs/tui/src/chatwidget/tokens.rs, codex-rs/tui/src/chatwidget/tokens/charge.rs, codex-rs/tui/src/chatwidget/tokens/charge_tests.rs, docs/provider-accounts.md, docs/sprints/current/portfolio-agent-cost-accounting-followups/pf-60-s07-price-catalogue-refresh.md, docs/sprints/current/portfolio-agent-cost-accounting-followups/pf-60-s06-side-and-fork-attribution.md, docs/plans/active/portfolio-agent-cost-accounting-followups.md, qa/portfolio/agent-cost-accounting/issue-368/, qa/portfolio/agent-cost-accounting/pf-60-s07/, qa/demos/index/PF-60-S07.md, qa/demos/specs/"
 integration_gate: "One PR to main: fail-before/pass-after tests, focused just test with and without developer-accounting, macOS and Linux clippy -D warnings, independent Opus 5.5 High review to APPROVE on the exact head, tmux check in a disposable home, SOP video; Travis accepts"
 worktree: "/Volumes/CorbanuDrive/Corbanu/worktrees/pf60-s07"
 branch: "pf60-s07/moonshot-route-pricing"
@@ -22,8 +22,8 @@ updated: 2026-10-14
 ## Execution mandate
 
 - Deliver: item (iii) from Travis's 2026-10-10 decision, the five price items of #368, so that each request is priced
-  from the provider's current published rate or plainly shows "no price". The exception is OpenRouter, which is priced from the
-  charge it reports (AC1).
+  from the provider's current published rate or plainly shows "no price". The exceptions are OpenRouter, Vercel and the Corbanu API,
+  which are priced from the charge they report (AC1).
 - **Deadline:** the Sol promotion item (AC4) must land before 2026-11-21.
 - Excludes: re-pricing history; changing what Corbanu charges; Grok tiers (#127) and OpenRouter caps (#129).
 
@@ -63,7 +63,8 @@ updated: 2026-10-14
       priced from Moonshot's published rates (K3, K2.7 Code, K2.7 Code HighSpeed, K2.6), keyed by the route. K3 cache
       writes by TTL: this client names none, so the five-minute rate (a test pins the body). BigModel deferred by
       Travis; it stays "no price".
-- [x] #786 (Travis, option a): reasoning above output is recorded as not reported; the rest, charge included, is kept.
+- [x] #786 (Travis, option a), Chat routes: reasoning above output in one usage report is recorded as not reported;
+      the rest, charge included, is kept. Responses routes and split reports: #814.
 - [x] AC6: new rates cite source and read date; prices bind at admission and the charge rule is display-only, so
       history is not re-priced. [Gate](../../../../qa/portfolio/agent-cost-accounting/pf-60-s07/gate.md).
 

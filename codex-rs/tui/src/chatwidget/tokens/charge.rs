@@ -58,6 +58,9 @@ pub(super) fn named<'a>(providers: impl IntoIterator<Item = &'a str>) -> String 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct Chargers(u8);
 
+// One bit per charge-reporting route.
+const _: () = assert!(CHARGE_REPORTING.len() <= u8::BITS as usize);
+
 impl Chargers {
     /// This set with `provider` added, if it is a charge-reporting route.
     pub(super) fn with(self, provider: &str) -> Self {
@@ -100,8 +103,12 @@ impl Chargers {
 fn charge_field(provider: &str) -> &'static str {
     match provider {
         codex_model_provider_info::VERCEL_PROVIDER_ID => "gatewayCost",
-        codex_model_provider_info::PFTERMINAL_PLAN_PROVIDER_ID
-        | codex_model_provider_info::PFTERMINAL_PLAN_ANTHROPIC_PROVIDER_ID => {
+        // The Chat route falls back to `usage.cost` without the Corbanu field
+        // (codex-api `chat_accounting.rs`); the Messages route has only it.
+        codex_model_provider_info::PFTERMINAL_PLAN_PROVIDER_ID => {
+            "usage.corbanu_charge_usd or usage.cost"
+        }
+        codex_model_provider_info::PFTERMINAL_PLAN_ANTHROPIC_PROVIDER_ID => {
             "usage.corbanu_charge_usd"
         }
         _ => "usage.cost",

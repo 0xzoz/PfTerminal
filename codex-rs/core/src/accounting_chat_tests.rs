@@ -724,7 +724,7 @@ async fn accounting_chat_exact_final_endpoint_binding() -> anyhow::Result<()> {
 }
 
 #[test]
-fn accounting_chat_cache_writes_are_read_only_on_openrouter_and_openai() -> anyhow::Result<()> {
+fn accounting_chat_cache_writes_are_read_only_where_their_meaning_is_known() -> anyhow::Result<()> {
     use codex_state::accounting::Presence;
     let usage = |write| ChatUsagePatch {
         input_tokens: ChatTokenPresence::Number(8499),

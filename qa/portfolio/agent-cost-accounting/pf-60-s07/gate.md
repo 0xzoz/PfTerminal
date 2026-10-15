@@ -25,7 +25,7 @@ is PF-60-S10's job, under the enforced isolation gate.
   page as an unused estimate. Several charging providers on one screen are each named. The ledger is unchanged.
 - **#786.** A Chat usage report whose reasoning count is above its output count records reasoning as not reported. The
   rest of the report is kept, the charge included. Before, replay refused the whole record. The recovery test that
-  listed that report as invalid evidence was updated.
+  listed that report as invalid evidence was updated. Responses routes and split or cumulative reports are #814.
 
 ## Evidence
 

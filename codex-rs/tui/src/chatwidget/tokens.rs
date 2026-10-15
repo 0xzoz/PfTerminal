@@ -953,7 +953,7 @@ fn inspection_pages_for(
     result: Result<InspectionDay, String>,
     period: Option<String>,
 ) -> Vec<InspectorPage> {
-    // #368: OpenRouter requests are priced from the charge it reported.
+    // #368: requests on a charge-reporting route are priced from that charge.
     let result = result.and_then(|day| {
         charge::priced_from_charges(day)
             .map_err(|_| "Cost unavailable — exact arithmetic overflow".to_string())
@@ -1579,7 +1579,8 @@ impl ChargeSplit {
     }
 
     /// "charged by OpenRouter", or "$A charged by OpenRouter + $B estimated
-    /// from published prices"; `None` when no figure is a reported charge.
+    /// from published prices", naming every provider whose charge is counted;
+    /// `None` when no figure is a reported charge.
     fn text(self) -> Option<String> {
         if self.charged_attempts == 0 {
             return None;
@@ -1853,8 +1854,8 @@ fn billed_figure(quotes: &[&ObservationQuote]) -> Option<String> {
 }
 
 /// The provider's stated charge as a second figure beside the cost, unless
-/// every stated charge here already is the cost (#368: OpenRouter's charges
-/// price its requests), where it would only repeat it.
+/// every stated charge here already is the cost (#368: a charge-reporting
+/// route's charges price its requests), where it would only repeat it.
 fn extra_billed_figure(quotes: &[&ObservationQuote]) -> Option<String> {
     let repeats_cost = quotes
         .iter()
