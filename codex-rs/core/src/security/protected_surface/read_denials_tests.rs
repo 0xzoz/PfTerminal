@@ -1985,12 +1985,25 @@ fn issue_540_runtime_entries_stay_read_only_when_the_rules_are_lifted() {
         );
         assert!(all.read_only_paths().count() > all.runtime_read_only_paths().count());
         let denials = all.runtime_only();
-        assert_eq!(denials.paths().count(), 0);
+        // #838: only Corbanu's security state and keys stay denied.
+        let mut denied: Vec<&str> = denials
+            .paths()
+            .map(|path| path.as_path().file_name().unwrap().to_str().unwrap())
+            .collect();
+        denied.sort_unstable();
+        assert_eq!(
+            denied,
+            [
+                "security_level.toml",
+                "security_state.json",
+                "security_state.lock",
+                "source-origin.key",
+            ]
+        );
         assert_eq!(
             denials.read_only_paths().count(),
             denials.runtime_read_only_paths().count()
         );
-        assert!(denials.matcher().is_none());
         let lifted = denials.apply(&profile).expect("not an external sandbox");
         let policy = lifted.file_system_sandbox_policy();
         assert_eq!(
@@ -2031,6 +2044,95 @@ fn issue_540_runtime_entries_stay_read_only_when_the_rules_are_lifted() {
         lifted.network_sandbox_policy(),
         NetworkSandboxPolicy::Enabled
     );
+}
+
+/// #838 (Travis, 2026-10-15): where a person's approval lifts Moderate's
+/// rules for one command, Corbanu's security state and keys stay denied,
+/// read and write, existing or not, also under full access and for a command
+/// working in the home, while the other stores are lifted (#540). Before the
+/// approval they are denied as before.
+#[test]
+fn issue_838_security_state_and_keys_stay_denied_when_the_rules_are_lifted() {
+    let fx = fixture();
+    let cwd = fx.user_home.join("project");
+    let existing = [
+        "source-origin.key",
+        "security_state.json",
+        "security_preflight.toml",
+        "security_confirm.lock",
+    ];
+    for name in existing {
+        std::fs::write(fx.codex_home.join(name), "x").unwrap();
+    }
+    // Missing: denied before they exist, as before the approval.
+    let missing = [
+        "security_level.toml",
+        "security_state.lock",
+        "security_state.lock/x",
+    ];
+    for (cwd, profile) in [
+        (cwd.clone(), workspace(&cwd)),
+        (cwd.clone(), PermissionProfile::Disabled),
+        (fx.codex_home.clone(), PermissionProfile::Disabled),
+    ] {
+        let all = ReadDenials::collect(
+            &fx.codex_home,
+            Some(&fx.user_home),
+            /*claude_config_dir*/ None,
+            &[abs(&cwd)],
+        );
+        let before = all.apply(&profile).unwrap().file_system_sandbox_policy();
+        let policy = all
+            .runtime_only()
+            .apply(&profile)
+            .unwrap()
+            .file_system_sandbox_policy();
+        for name in existing.iter().chain(&missing) {
+            let path = fx.codex_home.join(name);
+            for policy in [&before, &policy] {
+                assert!(
+                    !policy.can_read_path_with_cwd(&path, &cwd),
+                    "{name}: {cwd:?} {profile:?}"
+                );
+                assert!(
+                    !policy.can_write_path_with_cwd(&path, &cwd),
+                    "{name}: {cwd:?} {profile:?}"
+                );
+            }
+        }
+        // The other stores are lifted for the approved command.
+        assert!(
+            policy.can_read_path_with_cwd(&fx.codex_home.join("auth.json"), &cwd),
+            "{cwd:?} {profile:?}"
+        );
+        assert!(
+            policy.can_read_path_with_cwd(&fx.codex_home.join("config.toml"), &cwd),
+            "{cwd:?} {profile:?}"
+        );
+    }
+    // Explanations name them by any spelling of the home.
+    let link = fx.user_home.join("home-link");
+    std::os::unix::fs::symlink(&fx.codex_home, &link).unwrap();
+    for path in [
+        fx.codex_home.join("security_state.json"),
+        link.join("source-origin.key"),
+        link.join("security_level.toml"),
+    ] {
+        assert!(
+            ReadDenials::is_security_file(&fx.codex_home, &path),
+            "{path:?}"
+        );
+        assert!(ReadDenials::is_security_file(&link, &path), "{path:?}");
+    }
+    for path in [
+        fx.codex_home.join("auth.json"),
+        fx.user_home.join("security_state.json"),
+    ] {
+        assert!(
+            !ReadDenials::is_security_file(&fx.codex_home, &path),
+            "{path:?}"
+        );
+    }
 }
 
 /// A user home reached through a link (`user -> real-user`) holding a

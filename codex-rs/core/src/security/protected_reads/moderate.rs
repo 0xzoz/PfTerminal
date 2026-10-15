@@ -69,6 +69,17 @@ pub(crate) fn read_explanation(path: &str, way: WayForward) -> String {
     )
 }
 
+/// #838: the explanation for a read of Corbanu's security state or keys,
+/// which Moderate keeps from agent commands even when a person approves one.
+pub(crate) fn security_file_explanation(path: &str, way: WayForward) -> String {
+    format!(
+        "Security level Moderate blocked access to `{}`: agent commands can't read or change \
+         Corbanu's security state and keys, even when you approve them. {}",
+        super::shown_path(path),
+        way.text()
+    )
+}
+
 /// The explanation for a write to `path` that Moderate's rules denied.
 pub(crate) fn write_explanation(path: &str, way: WayForward) -> String {
     format!(
@@ -182,12 +193,18 @@ fn explain(
         // #621: a path built at run time that the denial line reports.
         .or_else(|| super::path_in_lines(command, cwd, user_home, codex_home, lines, &read));
     if let Some(word) = read_word {
-        let kept = found
-            .take()
+        let path = found.take();
+        let kept = path
+            .as_ref()
             .zip(contract)
-            .is_some_and(|(path, contract)| contract.keeps_unreadable(&path, cwd));
+            .is_some_and(|(path, contract)| contract.keeps_unreadable(path, cwd));
+        let security = path
+            .as_ref()
+            .is_some_and(|path| ReadDenials::is_security_file(codex_home, path));
         return Some(if kept {
             kept_read_explanation(&word)
+        } else if security {
+            security_file_explanation(&word, way)
         } else {
             read_explanation(&word, way)
         });

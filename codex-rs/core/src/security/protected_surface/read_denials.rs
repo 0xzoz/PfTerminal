@@ -77,6 +77,23 @@ const CORBANU_STORES: &[&str] = &[
     "memories",
 ];
 
+/// #838 (Travis, 2026-10-15): Corbanu's security state and keys. Under
+/// Moderate they stay denied (read and write) even to a command a person
+/// approved, as the secretless launch contract keeps config, history and the
+/// vault: a person's approval lifts every other rule for that command
+/// (#540). Each is among [`CORBANU_STORES`] or the names Corbanu reads later:
+/// what was denied before the approval stays denied, in the same way.
+const CORBANU_SECURITY_FILES: &[&str] = &[
+    "source-origin.key",
+    "security_level.toml",
+    "security_state.json",
+    "security_state.lock",
+    "security_preflight.toml",
+    "security_migration.toml",
+    "security_confirm.lock",
+    "security_level.lock",
+];
+
 /// Corbanu home entries that stay readable but never writable: they run, or
 /// are read as instructions, in later commands and sessions.
 const CORBANU_READ_ONLY: &[&str] = &[
@@ -231,6 +248,10 @@ pub(crate) struct ReadDenials {
     /// #766: the registry of homes Moderate runs on, read-only to the command
     /// so it cannot drop this home from it.
     moderate_registry: Vec<AbsolutePathBuf>,
+    /// #838: where Corbanu's security state and keys are
+    /// ([`CORBANU_SECURITY_FILES`]); their denials stay in
+    /// [`Self::runtime_only`].
+    security_files: Vec<AbsolutePathBuf>,
     /// Denials dropped because they hold the command's folder or a writable
     /// root (denying them would deny the workspace itself).
     pub(crate) skipped: Vec<AbsolutePathBuf>,
@@ -309,6 +330,10 @@ impl ReadDenials {
         for store in CORBANU_STORES {
             denials.push_fixed(codex_home.join(store), keep);
         }
+        denials.security_files = CORBANU_SECURITY_FILES
+            .iter()
+            .map(|file| codex_home.join(file))
+            .collect();
         // #651: the home escaped, should its path hold glob syntax.
         denials.globs.push(
             crate::security::preflight::database_glob(codex_home.as_path())
@@ -772,9 +797,18 @@ impl ReadDenials {
     /// Issue #540: only the rule that keeps the Corbanu home's runtime
     /// entries read-only, for a command whose other rules a person's
     /// approval lifted (Moderate, #239). The home and the folders above it
-    /// stay in place too (#598).
+    /// stay in place too (#598), and Corbanu's security state and keys stay
+    /// denied (#838).
     pub(crate) fn runtime_only(self) -> Self {
+        let security = |paths: Vec<AbsolutePathBuf>| -> Vec<AbsolutePathBuf> {
+            paths
+                .into_iter()
+                .filter(|path| self.security_files.contains(path))
+                .collect()
+        };
         Self {
+            existing: security(self.existing),
+            fixed: security(self.fixed),
             runtime_read_only: self.runtime_read_only,
             unmovable: self.unmovable,
             cwd: self.cwd,
@@ -783,6 +817,24 @@ impl ReadDenials {
             skipped: self.skipped,
             ..Self::default()
         }
+    }
+
+    /// #838: whether `path` (by any spelling) is one of Corbanu's security
+    /// state and key files in `codex_home`, which a person's approval under
+    /// Moderate does not lift. Explanation only.
+    pub(crate) fn is_security_file(codex_home: &Path, path: &Path) -> bool {
+        let real = |path: &Path| std::fs::canonicalize(path).ok();
+        let real_path = real(path).or_else(|| {
+            let name = path.file_name()?;
+            real(path.parent()?).map(|parent| parent.join(name))
+        });
+        let homes = [Some(codex_home.to_path_buf()), real(codex_home)];
+        CORBANU_SECURITY_FILES.iter().any(|file| {
+            homes.iter().flatten().any(|home| {
+                let candidate = home.join(file);
+                candidate == path || real_path.as_ref() == Some(&candidate)
+            })
+        })
     }
 
     /// #766 (Travis, 2026-10-14): under Moderate, deny the command the
