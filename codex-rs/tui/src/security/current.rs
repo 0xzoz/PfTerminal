@@ -26,6 +26,7 @@ use std::path::Path;
 use codex_features::Feature;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::ShellEnvironmentPolicy;
+use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::permissions::FileSystemSandboxKind;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::shell_environment::create_env_from_vars;
@@ -74,11 +75,50 @@ pub(crate) fn level_now(
         .max(config.security_level)
 }
 
+/// #816: what this session enforces once Core's level is Aggressive and
+/// before the restart applies Aggressive's own settings: the facts behind
+/// [`current_values`] for Aggressive, which the inspector's rows show from
+/// confirmation. Each field is true only when that row says so then.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct BeforeRestart {
+    /// Approved and allow-listed commands stay inside this session's
+    /// sandbox; the folders it lets them write to, as the Sandbox row says
+    /// ("commands can write to the current folder, /private/tmp").
+    pub(crate) sandbox_kept: Option<String>,
+    /// The Network row says "off for agent commands".
+    pub(crate) network_off: bool,
+    /// Web search is disabled.
+    pub(crate) web_search_off: bool,
+    /// No secret-like environment variable reaches agent commands (or only
+    /// allowlisted ones do), and login profiles and shell snapshots are not
+    /// used.
+    pub(crate) environment: bool,
+    /// Model keys are held by the isolated credential broker.
+    pub(crate) broker: bool,
+}
+
+/// #816: [`BeforeRestart`] for this session.
+pub(crate) fn before_restart(config: &Config) -> BeforeRestart {
+    evaluate(
+        config,
+        crate::legacy_core::security_level_change::SecurityLevel::Aggressive,
+    )
+    .1
+}
+
 /// `level` is Core's level in force now ([`level_now`]).
 pub(crate) fn current_values(
     config: &Config,
     level: crate::legacy_core::security_level_change::SecurityLevel,
 ) -> CurrentValues {
+    evaluate(config, level).0
+}
+
+/// The rows and, for Aggressive in force, what they say holds (#816).
+fn evaluate(
+    config: &Config,
+    level: crate::legacy_core::security_level_change::SecurityLevel,
+) -> (CurrentValues, BeforeRestart) {
     let cwd = config.cwd.as_path();
     let file_system = config.permissions.file_system_sandbox_policy();
     let restricted = matches!(file_system.kind, FileSystemSandboxKind::Restricted);
@@ -151,6 +191,8 @@ pub(crate) fn current_values(
     {
         sandbox = format!("profile {}: {sandbox}", profile.id);
     }
+    // #816: no command leaves a sandbox Corbanu applies.
+    let sandbox_kept = (restricted && !escapes).then(|| sandbox.clone());
     if escapes {
         sandbox.push_str("; approved or allow-listed commands can run outside the sandbox");
     } else if moderate && restricted {
@@ -192,6 +234,10 @@ pub(crate) fn current_values(
         config.permissions.approval_policy.value()
     );
 
+    let network_off = restricted
+        && !config.permissions.network_sandbox_policy().is_enabled()
+        && !escapes
+        && !widenable;
     let network = if !restricted || config.permissions.network_sandbox_policy().is_enabled() {
         "on for agent commands"
     } else if escapes {
@@ -225,6 +271,9 @@ pub(crate) fn current_values(
         &config.permissions.shell_environment_policy,
         std::env::vars(),
     );
+    let profiles_used = config.features.enabled(Feature::ShellSnapshot)
+        || config.permissions.allow_login_shell
+        || config.permissions.shell_environment_policy.use_profile;
     let vault = format!(
         "the vault store and sign-in file are {} to agent commands{}; {}; {}",
         if store_readable {
@@ -261,17 +310,15 @@ pub(crate) fn current_values(
                 kept.join(", ")
             )
         },
-        if config.features.enabled(Feature::ShellSnapshot)
-            || config.permissions.allow_login_shell
-            || config.permissions.shell_environment_policy.use_profile
-        {
+        if profiles_used {
             "login profiles or shell snapshots are used"
         } else {
             "login profiles and shell snapshots are not used"
         }
     );
 
-    let model_keys = if config.features.enabled(Feature::BrokerModelAuth) {
+    let broker = config.features.enabled(Feature::BrokerModelAuth);
+    let model_keys = if broker {
         "held by the isolated credential broker (broker_model_auth on)"
     } else {
         "Corbanu reads provider keys itself (broker_model_auth off)"
@@ -293,7 +340,17 @@ pub(crate) fn current_values(
         )
     };
 
-    [sandbox, approvals, network, vault, model_keys, children]
+    let facts = BeforeRestart {
+        sandbox_kept,
+        network_off,
+        web_search_off: config.web_search_mode.value() == WebSearchMode::Disabled,
+        environment: (secretless || kept.is_empty()) && !profiles_used,
+        broker,
+    };
+    (
+        [sandbox, approvals, network, vault, model_keys, children],
+        facts,
+    )
 }
 
 /// Secret-like name fragments whose variables reach agent commands: the fixed

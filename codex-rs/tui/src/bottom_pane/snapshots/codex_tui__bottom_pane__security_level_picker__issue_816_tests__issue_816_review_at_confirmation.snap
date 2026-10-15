@@ -1,0 +1,15 @@
+---
+source: tui/src/bottom_pane/security_level_picker_issue_816_tests.rs
+assertion_line: 100
+expression: "lines[first..=last].join(\"\\n\")"
+---
+Core's protections below apply as soon as you confirm, and approval for every
+command from each pane's next turn. From then until the restart this session
+also has: approved and allow-listed commands stay inside this session's sandbox
+(commands can write to the current folder, /private/tmp) and network off for
+agent commands. The rest of the rows above take effect when you restart Corbanu
+Terminal (you can restart right after saving); until then this session keeps its
+current sandbox, network, environment, model-key and child-agent settings, apart
+from Core's protected-path denials and what is listed as in force, and commands
+already running keep the permissions they started with. Your config.toml is
+not modified.

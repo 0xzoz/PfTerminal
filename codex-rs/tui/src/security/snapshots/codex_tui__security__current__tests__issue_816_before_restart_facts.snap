@@ -1,0 +1,11 @@
+---
+source: tui/src/security/current_tests.rs
+assertion_line: 774
+expression: "seen.join(\"\\n\")"
+---
+labels: BeforeRestart { sandbox_kept: Some("commands can write to the current folder"), network_off: true, web_search_off: false, environment: false, broker: false }
+no labels: BeforeRestart { sandbox_kept: None, network_off: false, web_search_off: false, environment: false, broker: false }
+network on: BeforeRestart { sandbox_kept: Some("commands can write to the current folder"), network_off: false, web_search_off: false, environment: false, broker: false }
+permission requests: BeforeRestart { sandbox_kept: Some("commands can write to the current folder"), network_off: false, web_search_off: false, environment: false, broker: false }
+own settings: BeforeRestart { sandbox_kept: Some("commands can write to the current folder"), network_off: true, web_search_off: true, environment: true, broker: true }
+no sandbox: BeforeRestart { sandbox_kept: None, network_off: false, web_search_off: false, environment: false, broker: false }

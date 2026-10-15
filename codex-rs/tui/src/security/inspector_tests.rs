@@ -354,7 +354,7 @@ fn pf_41_s01_conflicting_config_and_saved_level_are_shown_not_hidden() {
         ),
         Badge::Degraded(
             "Aggressive",
-            vec!["Aggressive's session controls apply after restart".to_string()]
+            vec!["the rest of Aggressive's session controls apply after restart".to_string()]
         )
     );
 

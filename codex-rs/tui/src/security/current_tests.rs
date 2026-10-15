@@ -669,3 +669,113 @@ source_envelopes = {labels}
         "{vault}"
     );
 }
+
+/// #816: what screen 07, the review and the level list say holds from
+/// confirming Aggressive until the restart ([`before_restart`]) is what the
+/// inspector's rows say then (`current_values` for Aggressive), for each
+/// kind of session.
+#[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "workspace-write falls back to read-only on Windows without the Windows sandbox (#691)"
+)]
+async fn issue_816_before_restart_facts_match_the_inspector_rows() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let session = |sandbox: &str, network: bool, web: &str, features: &str| {
+        format!(
+            r#"approval_policy = "on-request"
+sandbox_mode = "{sandbox}"
+web_search = "{web}"
+
+[sandbox_workspace_write]
+network_access = {network}
+exclude_tmpdir_env_var = true
+exclude_slash_tmp = true
+
+[features]
+{features}
+"#
+        )
+    };
+    let labels = "source_envelopes = true";
+    let cases = [
+        // The AGG-04 run and the host check.
+        (
+            "labels",
+            session("workspace-write", false, "cached", labels),
+        ),
+        // Without the labels approved commands can leave the sandbox.
+        ("no labels", session("workspace-write", false, "cached", "")),
+        (
+            "network on",
+            session("workspace-write", true, "cached", labels),
+        ),
+        (
+            "permission requests",
+            session(
+                "workspace-write",
+                false,
+                "cached",
+                "source_envelopes = true\nrequest_permissions_tool = true",
+            ),
+        ),
+        (
+            "own settings",
+            session(
+                "workspace-write",
+                false,
+                "disabled",
+                "source_envelopes = true\nsecretless_agent_launch = true\nbroker_model_auth = true\nshell_snapshot = false",
+            ),
+        ),
+        (
+            "no sandbox",
+            session("danger-full-access", false, "cached", labels),
+        ),
+    ];
+    let mut seen = Vec::new();
+    for (name, user_config) in cases {
+        let config = build(
+            home.path(),
+            cwd.path(),
+            &user_config,
+            /*aggressive_level*/ false,
+        )
+        .await;
+        let [sandbox, _, network, vault, model_keys, _] =
+            current_values(&config, SecurityLevel::Aggressive);
+        let facts = before_restart(&config);
+        let kept = !sandbox.starts_with("no sandbox")
+            && !sandbox.starts_with("an external sandbox")
+            && !sandbox.contains("can run outside the sandbox");
+        assert_eq!(facts.sandbox_kept.is_some(), kept, "{name}: {sandbox}");
+        if let Some(writable) = &facts.sandbox_kept {
+            assert!(sandbox.starts_with(writable.as_str()), "{name}: {sandbox}");
+        }
+        assert_eq!(
+            facts.network_off,
+            network.starts_with("off for agent commands;"),
+            "{name}: {network}"
+        );
+        assert_eq!(
+            facts.web_search_off,
+            network.ends_with("web search disabled"),
+            "{name}: {network}"
+        );
+        assert_eq!(
+            facts.environment,
+            (vault.contains("; only allowlisted environment variables reach agent commands")
+                || vault.contains("; secret-like environment variables are removed;"))
+                && vault.ends_with("login profiles and shell snapshots are not used"),
+            "{name}: {vault}"
+        );
+        assert_eq!(
+            facts.broker,
+            model_keys.starts_with("held by the isolated credential broker"),
+            "{name}: {model_keys}"
+        );
+        seen.push(format!("{name}: {facts:?}"));
+    }
+    insta::assert_snapshot!("issue_816_before_restart_facts", seen.join("\n"));
+}

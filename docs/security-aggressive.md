@@ -189,7 +189,11 @@ after a restart. Before the restart, from when you confirm Aggressive in
 session uses a sandbox Corbanu applies (not an external one): Core's
 protected-path rules then deny the vault store and sign-in file to every
 command and keep each run in its sandbox. The inspector's "This session" rows
-say which applies.
+say which applies. The Aggressive review, the saved screen and the level list
+say the same (#816): what holds from confirmation (approved commands kept in
+the session's sandbox, network off when its sandbox has no network, and any of
+Aggressive's environment, web search and model-key settings your own config
+already has), and that the rest starts at the restart.
 
 Under Moderate a command can still ask to run outside it
 (an escalation request): the prompt says it stays in the sandbox, and
