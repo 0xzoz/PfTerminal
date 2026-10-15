@@ -23,7 +23,7 @@ struct Fixture {
 impl Fixture {
     fn new(project_config: &str, trusted: bool, user_security: &str) -> Self {
         let temp = tempfile::tempdir().expect("fixture directory");
-        let root = temp.path().canonicalize().expect("canonical fixture root");
+        let root = dunce::canonicalize(temp.path()).expect("canonical fixture root");
         let home = root.join("profile");
         let project = root.join("project");
         std::fs::create_dir_all(&home).expect("fixture profile");
@@ -113,7 +113,7 @@ async fn incomplete_project_permissive_allows_saved_moderate_restart() {
     for strict in [false, true] {
         let fixture = Fixture::new(
             "[security]\nlevel = \"permissive\"\n\n[features]\nbroker_model_auth = false\n",
-            true,
+            /*trusted*/ true,
             "",
         );
         let state_path = fixture.home.join(recovery::STATE_FILE);
@@ -141,10 +141,10 @@ async fn incomplete_project_permissive_allows_saved_moderate_restart() {
 async fn incomplete_project_security_does_not_inherit_user_version() {
     let fixture = Fixture::new(
         "[security]\nlevel = \"permissive\"\n",
-        true,
+        /*trusted*/ true,
         "[security]\nversion = 1\nlevel = \"moderate\"\n",
     );
-    let stack = fixture.load(false).await.expect("load project");
+    let stack = fixture.load(/*strict*/ false).await.expect("load project");
     let cfg: ConfigToml = stack
         .effective_config()
         .try_into()
@@ -165,10 +165,13 @@ async fn versioned_project_security_preserves_both_floor_directions() {
     ] {
         let fixture = Fixture::new(
             &format!("[security]\nversion = 1\nlevel = \"{project_level}\"\n"),
-            true,
+            /*trusted*/ true,
             "[security]\nversion = 1\nlevel = \"moderate\"\n",
         );
-        let stack = fixture.load(true).await.expect("valid project settings");
+        let stack = fixture
+            .load(/*strict*/ true)
+            .await
+            .expect("valid project settings");
         assert_eq!(layered_security_floor(&stack), expected);
         assert_eq!(fixture.recovered_level(&stack), expected);
         assert!(stack.startup_warnings().unwrap_or_default().is_empty());
@@ -177,8 +180,15 @@ async fn versioned_project_security_preserves_both_floor_directions() {
 
 #[tokio::test]
 async fn untrusted_project_security_stays_disabled() {
-    let fixture = Fixture::new("[security]\nlevel = \"permissive\"\n", false, "");
-    let stack = fixture.load(true).await.expect("disabled project");
+    let fixture = Fixture::new(
+        "[security]\nlevel = \"permissive\"\n",
+        /*trusted*/ false,
+        "",
+    );
+    let stack = fixture
+        .load(/*strict*/ true)
+        .await
+        .expect("disabled project");
     assert!(
         stack
             .layers_high_to_low()
@@ -191,14 +201,18 @@ async fn untrusted_project_security_stays_disabled() {
 
 #[tokio::test]
 async fn trusted_user_missing_security_version_still_errors() {
-    let fixture = Fixture::new("", true, "[security]\nlevel = \"permissive\"\n");
-    let stack = fixture.load(false).await.expect("raw layers");
+    let fixture = Fixture::new(
+        "",
+        /*trusted*/ true,
+        "[security]\nlevel = \"permissive\"\n",
+    );
+    let stack = fixture.load(/*strict*/ false).await.expect("raw layers");
     let error = stack
         .effective_config()
         .try_into::<ConfigToml>()
         .expect_err("user version required");
     assert!(error.to_string().contains("missing field `version`"));
-    assert!(fixture.load(true).await.is_err());
+    assert!(fixture.load(/*strict*/ true).await.is_err());
 }
 
 #[tokio::test]
@@ -209,17 +223,28 @@ async fn other_invalid_project_security_remains_an_error() {
         "version = \"invalid\"\nlevel = \"permissive\"",
         "version = 1\nlevel = \"unknown\"",
     ] {
-        let fixture = Fixture::new(&format!("[security]\n{security}\n"), true, "");
-        let stack = fixture.load(false).await.expect("raw layers");
+        let fixture = Fixture::new(
+            &format!("[security]\n{security}\n"),
+            /*trusted*/ true,
+            "",
+        );
+        let stack = fixture.load(/*strict*/ false).await.expect("raw layers");
         assert!(stack.effective_config().try_into::<ConfigToml>().is_err());
-        assert!(fixture.load(true).await.is_err());
+        assert!(fixture.load(/*strict*/ true).await.is_err());
     }
 }
 
 #[tokio::test]
 async fn malformed_project_toml_keeps_file_specific_error() {
-    let fixture = Fixture::new("[security\nlevel = \"permissive\"", true, "");
-    let error = fixture.load(false).await.expect_err("invalid TOML");
+    let fixture = Fixture::new(
+        "[security\nlevel = \"permissive\"",
+        /*trusted*/ true,
+        "",
+    );
+    let error = fixture
+        .load(/*strict*/ false)
+        .await
+        .expect_err("invalid TOML");
     assert!(error.to_string().contains(&fixture.project_path()));
 }
 
@@ -227,10 +252,13 @@ async fn malformed_project_toml_keeps_file_specific_error() {
 async fn ordinary_project_precedence_and_denied_provider_are_preserved() {
     let fixture = Fixture::new(
         "model = \"fixture-project\"\nmodel_provider = \"untrusted-provider\"\n",
-        true,
+        /*trusted*/ true,
         "",
     );
-    let stack = fixture.load(false).await.expect("ordinary project config");
+    let stack = fixture
+        .load(/*strict*/ false)
+        .await
+        .expect("ordinary project config");
     let cfg: ConfigToml = stack.effective_config().try_into().expect("typed config");
     assert_eq!(cfg.model.as_deref(), Some("fixture-project"));
     assert_eq!(cfg.model_provider.as_deref(), Some("fixture-owner"));
