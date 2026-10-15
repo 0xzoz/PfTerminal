@@ -17,11 +17,11 @@ use crate::legacy_core::protected_preflight::ReadinessFlags;
 use crate::legacy_core::security_level_change::ApprovalsAtConfirmation;
 use crate::legacy_core::security_level_change::LevelChangeReport;
 
-fn key(code: KeyCode) -> KeyEvent {
+pub(super) fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
 
-fn render(picker: &SecurityLevelPicker, width: u16) -> String {
+pub(super) fn render(picker: &SecurityLevelPicker, width: u16) -> String {
     let mut lines = picker.lines(width);
     lines.push(Line::from(picker.footer()));
     let area = Rect::new(0, 0, width, lines.len() as u16);
@@ -40,14 +40,14 @@ fn render(picker: &SecurityLevelPicker, width: u16) -> String {
 }
 
 /// One line per paragraph, so phrases never break across lines.
-fn text(picker: &SecurityLevelPicker) -> String {
+pub(super) fn text(picker: &SecurityLevelPicker) -> String {
     render(picker, /*width*/ 1000)
 }
 
 /// A Permissive session with the activation preflight on. With `live`, its
 /// policy tree runs in this process, as in a running TUI session (the tests
 /// set it directly: building a tree needs Core internals).
-fn picker(root: &tempfile::TempDir, live: bool) -> SecurityLevelPicker {
+pub(super) fn picker(root: &tempfile::TempDir, live: bool) -> SecurityLevelPicker {
     let corbanu = root.path().join("corbanu");
     for dir in ["corbanu", "home", "work"] {
         std::fs::create_dir_all(root.path().join(dir)).unwrap();
@@ -94,7 +94,7 @@ fn picker(root: &tempfile::TempDir, live: bool) -> SecurityLevelPicker {
 }
 
 /// What a live session's tree reports after the commit: Aggressive now.
-fn raised_live(picker: &mut SecurityLevelPicker) {
+pub(super) fn raised_live(picker: &mut SecurityLevelPicker) {
     picker.basis.live = true;
     picker.basis.in_force = SecurityLevel::Aggressive;
     picker.basis.next_start = SecurityLevel::Aggressive;
@@ -175,7 +175,7 @@ fn issue_443_screen_07_names_what_applies_now_and_at_restart() {
 }
 
 /// Screen 07 as a running session's tree reports it after the commit.
-fn saved_live(picker: &mut SecurityLevelPicker) {
+pub(super) fn saved_live(picker: &mut SecurityLevelPicker) {
     saved_live_with(
         picker,
         Some(ApprovalsAtConfirmation {
@@ -186,7 +186,10 @@ fn saved_live(picker: &mut SecurityLevelPicker) {
     );
 }
 
-fn saved_live_with(picker: &mut SecurityLevelPicker, approvals: Option<ApprovalsAtConfirmation>) {
+pub(super) fn saved_live_with(
+    picker: &mut SecurityLevelPicker,
+    approvals: Option<ApprovalsAtConfirmation>,
+) {
     raised_live(picker);
     picker.stored = StoredLevel::Chosen(ChosenLevel::Aggressive);
     picker.screen = Screen::Saved(Ok(TransitionOutcome {

@@ -42,6 +42,7 @@ use crate::security::confirm::Pending;
 use crate::security::confirm::TransitionFailure;
 use crate::security::confirm::TransitionOutcome;
 use crate::security::confirm::TransitionRequest;
+use crate::security::current::BeforeRestart;
 use crate::security::current::CurrentValues;
 use crate::security::level;
 use crate::security::level::ChosenLevel;
@@ -135,6 +136,9 @@ pub(crate) struct SecurityLevelPicker {
     pub(super) open_revocations: bool,
     /// #750: the feature flags the Moderate rows depend on.
     pub(super) moderate: crate::security::moderate::Facts,
+    /// #816: what holds in this session once Core is Aggressive, before
+    /// the restart (the inspector's rows from confirmation).
+    pub(super) before_restart: BeforeRestart,
     /// #691/#783: how to set up the Windows sandbox, which Moderate and
     /// Aggressive need before they can be chosen on this Windows machine;
     /// `None` once it is set up and elsewhere.
@@ -197,8 +201,14 @@ impl SecurityLevelPicker {
             restart_blocked: crate::security::restart::restart_blocker(),
             open_revocations: false,
             moderate: crate::security::moderate::Facts::default(),
+            before_restart: BeforeRestart::default(),
             windows_sandbox_steps: None,
         }
+    }
+
+    /// #816: what confirming Aggressive puts in force before the restart.
+    pub(crate) fn set_before_restart(&mut self, facts: BeforeRestart) {
+        self.before_restart = facts;
     }
 
     /// #750: the flags the Moderate review describes.
@@ -837,21 +847,26 @@ impl SecurityLevelPicker {
                 };
                 // #505: approval for every command is in this session's
                 // stored settings when the confirmation reached it.
-                lines.push(
-                    if self
-                        .core
-                        .thread
-                        .is_some_and(crate::legacy_core::security_level_change::approvals_held)
-                    {
-                        format!(
-                            "Saved: Aggressive. Core's protections ({protections}) apply in this session now, and approval for every command from its next turn; the sandbox, network, environment, model-key and child-agent rows take effect when you restart Corbanu Terminal."
-                        )
+                let approvals = self
+                    .core
+                    .thread
+                    .is_some_and(crate::legacy_core::security_level_change::approvals_held);
+                // #816: what else holds now, as the inspector's rows say.
+                let also = now_items(&self.before_restart, /*short*/ true);
+                lines.push(format!(
+                    "Saved: Aggressive. Core's protections ({protections}) apply in this session now{}{}; {} take effect when you restart Corbanu Terminal.",
+                    if approvals {
+                        ", and approval for every command from its next turn"
                     } else {
-                        format!(
-                            "Saved: Aggressive. Core's protections ({protections}) apply in this session now; the sandbox, approval, network, environment, model-key and child-agent rows take effect when you restart Corbanu Terminal."
-                        )
+                        ""
                     },
-                );
+                    if also.is_empty() {
+                        String::new()
+                    } else {
+                        format!("; also in force now: {}", and_list_oxford(&also))
+                    },
+                    restart_rows(&self.before_restart, approvals),
+                ));
             }
             StoredLevel::Absent | StoredLevel::Chosen(_)
                 if saved == ChosenLevel::Moderate
@@ -1002,14 +1017,12 @@ impl SecurityLevelPicker {
                     lines.extend(wrap(note).into_iter().map(Stylize::cyan));
                 }
                 lines.extend(wrap(aggressive::UNCHANGED));
-                lines.extend(wrap(if self.active == ChosenLevel::Aggressive {
-                    "This session is already Aggressive; saving keeps it after restart. Your config.toml is not modified."
-                } else if self.core_aggressive_on_confirm() && !self.approvals_on_confirm() {
-                    "Core's protections below apply as soon as you confirm. The rest of the rows above take effect when you restart Corbanu Terminal (you can restart right after saving); until then this session keeps its current sandbox, approval, network, environment, model-key and child-agent settings, apart from Core's protected-path denials, and commands already running keep the permissions they started with. Your config.toml is not modified."
+                lines.extend(wrap(&if self.active == ChosenLevel::Aggressive {
+                    "This session is already Aggressive; saving keeps it after restart. Your config.toml is not modified.".to_string()
                 } else if self.core_aggressive_on_confirm() {
-                    "Core's protections below apply as soon as you confirm, and approval for every command from each pane's next turn. The rest of the rows above take effect when you restart Corbanu Terminal (you can restart right after saving); until then this session keeps its current sandbox, network, environment, model-key and child-agent settings, apart from Core's protected-path denials, and commands already running keep the permissions they started with. Your config.toml is not modified."
+                    self.review_at_confirmation()
                 } else {
-                    "The rows above take effect when you restart Corbanu Terminal (you can restart right after saving); this session keeps its current settings until then. Your config.toml is not modified."
+                    "The rows above take effect when you restart Corbanu Terminal (you can restart right after saving); this session keeps its current settings until then. Your config.toml is not modified.".to_string()
                 }));
                 for line in self.core_lines_for_aggressive() {
                     lines.extend(wrap(&line));
@@ -1188,6 +1201,14 @@ impl SecurityLevelPicker {
                         "Active now in this session: {}.",
                         self.core_effects_now()
                     )));
+                    // #816: what else holds now, as the inspector's rows say.
+                    let also = now_items(&self.before_restart, /*short*/ false);
+                    if !also.is_empty() {
+                        lines.extend(wrap(&format!(
+                            "Also in force now in this session: {}.",
+                            and_list_oxford(&also)
+                        )));
+                    }
                     let approvals = outcome
                         .core
                         .as_ref()
@@ -1199,6 +1220,7 @@ impl SecurityLevelPicker {
                     }
                     lines.extend(wrap(&at_restart(
                         approvals.is_some_and(|approvals| approvals.held > 0),
+                        &self.before_restart,
                     )));
                 } else if level == ChosenLevel::Moderate && self.core_moderate_now() {
                     // D4: Core's rules now, the credential broker at restart.
@@ -1429,16 +1451,120 @@ const CORE_EFFECTS: &str = "agent commands cannot run `corbanu vault …` and ca
 
 /// Issue #443: what only the restart applies after Aggressive is saved;
 /// `approvals_now` when the confirmation already required approval for
-/// every command (#505).
-fn at_restart(approvals_now: bool) -> String {
-    format!(
-        "Starts when you restart: the Aggressive sandbox (writes only in the current folder, approved commands stay inside it), {}network and web search off, secret-like environment variables removed and login profiles and shell snapshots unused, model keys held by the credential broker, and the child-agent rules. Until then this session keeps your own settings for these, and commands already running keep the permissions they started with until they end.",
-        if approvals_now {
-            ""
+/// every command (#505). #816: what `now` says holds already is not listed.
+fn at_restart(approvals_now: bool, now: &BeforeRestart) -> String {
+    let mut items = vec![
+        if now.sandbox_kept.is_some() {
+            "the Aggressive sandbox (writes only in the current folder)"
         } else {
-            "approval for every command that is not known read-only, "
+            "the Aggressive sandbox (writes only in the current folder, approved commands stay inside it)"
         }
+        .to_string(),
+    ];
+    if !approvals_now {
+        items.push("approval for every command that is not known read-only".to_string());
+    }
+    match (now.network_off, now.web_search_off) {
+        (false, false) => items.push("network and web search off".to_string()),
+        (true, false) => items.push("web search off".to_string()),
+        (false, true) => items.push("network off".to_string()),
+        (true, true) => {}
+    }
+    if !now.environment {
+        items.push(
+            "secret-like environment variables removed and login profiles and shell snapshots unused"
+                .to_string(),
+        );
+    }
+    if !now.broker {
+        items.push("model keys held by the credential broker".to_string());
+    }
+    items.push("and the child-agent rules".to_string());
+    format!(
+        "Starts when you restart: {}. Until then this session keeps your own settings for these, and commands already running keep the permissions they started with until they end.",
+        items.join(", ")
     )
+}
+
+/// #816: what holds in this session from confirming Aggressive until the
+/// restart besides Core's protections and approvals, as the inspector's
+/// rows say then; `short` leaves out the sandbox's writable folders.
+fn now_items(now: &BeforeRestart, short: bool) -> Vec<String> {
+    let mut items = Vec::new();
+    if let Some(sandbox) = &now.sandbox_kept {
+        items.push(match (short, now.widenable) {
+            (true, _) => {
+                "approved and allow-listed commands stay inside this session's sandbox".to_string()
+            }
+            (false, false) => format!(
+                "approved and allow-listed commands stay inside this session's sandbox ({sandbox})"
+            ),
+            (false, true) => format!(
+                "approved and allow-listed commands stay inside this session's sandbox ({sandbox}; a permission request you approve can widen it)"
+            ),
+        });
+    }
+    match (now.network_off, now.web_search_off) {
+        (true, true) => {
+            items.push("network is off for agent commands and web search is off".to_string())
+        }
+        (true, false) => items.push("network is off for agent commands".to_string()),
+        (false, true) => items.push("web search is off".to_string()),
+        (false, false) => {}
+    }
+    if now.environment {
+        items.push(
+            "secret-like environment variables are removed and login profiles and shell snapshots are not used"
+                .to_string(),
+        );
+    }
+    if now.broker {
+        items.push("model keys are held by the credential broker".to_string());
+    }
+    items
+}
+
+/// #816: the rows of the Aggressive review that wait for the restart, for
+/// the level list's status line.
+fn restart_rows(now: &BeforeRestart, approvals_now: bool) -> String {
+    let mut rows = vec!["Aggressive's sandbox"];
+    if !approvals_now {
+        rows.push("approval");
+    }
+    match (now.network_off, now.web_search_off) {
+        (true, true) => {}
+        (true, false) => rows.push("network (web search)"),
+        (false, _) => rows.push("network"),
+    }
+    if !now.environment {
+        rows.push("environment");
+    }
+    if !now.broker {
+        rows.push("model-key");
+    }
+    rows.push("child-agent");
+    format!(
+        "{} rows",
+        and_list(&rows.into_iter().map(str::to_string).collect::<Vec<_>>())
+    )
+}
+
+/// "a", "a and b", "a, b and c".
+fn and_list(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [only] => only.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// [`and_list`] with a comma before the last of three or more, for items
+/// that contain "and" themselves.
+fn and_list_oxford(items: &[String]) -> String {
+    match items {
+        [] | [_] | [_, _] => and_list(items),
+        [rest @ .., last] => format!("{}, and {last}", rest.join(", ")),
+    }
 }
 
 /// Core's Aggressive effects without the untrusted-content labels
@@ -1574,6 +1700,37 @@ impl SecurityLevelPicker {
         } else {
             CORE_EFFECTS_VAULT_ONLY
         }
+    }
+
+    /// The review's paragraph on what applies at confirmation and what at
+    /// the restart (#443, #505, #816).
+    fn review_at_confirmation(&self) -> String {
+        let approvals = self.approvals_on_confirm();
+        let also = now_items(&self.before_restart, /*short*/ false);
+        format!(
+            "Core's protections below apply as soon as you confirm{}.{} The rest of the rows above take effect when you restart Corbanu Terminal (you can restart right after saving); until then this session keeps its current {}, apart from Core's protected-path denials, and commands already running keep the permissions they started with. Your config.toml is not modified.",
+            if approvals {
+                ", and approval for every command from each pane's next turn"
+            } else {
+                ""
+            },
+            if also.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " From then until the restart, also: {}.",
+                    and_list_oxford(&also)
+                )
+            },
+            match (also.is_empty(), approvals) {
+                // #816: what holds now is said just before.
+                (false, _) => "settings for the rest",
+                (true, true) => "sandbox, network, environment, model-key and child-agent settings",
+                (true, false) => {
+                    "sandbox, approval, network, environment, model-key and child-agent settings"
+                }
+            },
+        )
     }
 
     /// Confirming Aggressive raises Core's level in this session at once.
@@ -1755,3 +1912,7 @@ mod issue_443_tests;
 #[cfg(test)]
 #[path = "security_level_picker_issue_750_tests.rs"]
 mod issue_750_tests;
+
+#[cfg(test)]
+#[path = "security_level_picker_issue_816_tests.rs"]
+mod issue_816_tests;

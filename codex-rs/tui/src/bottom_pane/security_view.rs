@@ -116,6 +116,17 @@ impl SecurityView {
         self
     }
 
+    /// #816: what confirming Aggressive puts in force before the restart.
+    pub(crate) fn with_before_restart(
+        mut self,
+        facts: impl FnOnce() -> crate::security::current::BeforeRestart,
+    ) -> Self {
+        if let Some(picker) = self.picker.as_mut() {
+            picker.set_before_restart(facts());
+        }
+        self
+    }
+
     fn lines(&self, width: u16) -> Vec<Line<'static>> {
         let mut lines = vec!["Security profiles — read only".bold().into()];
         let paragraphs = [

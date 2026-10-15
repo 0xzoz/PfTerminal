@@ -409,6 +409,7 @@ impl ChatWidget {
                     .with_moderate_facts(crate::security::moderate::Facts::from_config(
                         &self.config,
                     ))
+                    .with_before_restart(|| crate::security::current::before_restart(&self.config))
                     .with_windows_sandbox_steps(windows_sandbox_steps)
                     .with_inspector(|| {
                         crate::security::inspector::InspectorInput::from_config(
