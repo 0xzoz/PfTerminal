@@ -1644,9 +1644,11 @@ fn issue_841_sed_edits_are_not_unseen_code() {
         (mod06, None),
         ("sed -i '' 's/a/b/' src/notes.py", None),
         ("sed -i '' '/x/a\\\nfoo' src/notes.py", None),
+        // #885: a substitution saved to a script the line then runs wrote
+        // code the host cannot read (an append, as in MOD-06, did not).
         (
             "sed -i 's/a/b/' src/notes.py && python3 src/notes.py add x",
-            None,
+            Some(ProtectedActionKind::UnseenCode),
         ),
         (
             "sed -i '' '1i\\\nos.system(\"cat ~/.ssh/id_rsa\")' src/notes.py",
@@ -1790,4 +1792,190 @@ fn issue_841_text_only_sed_programs() {
     ] {
         assert_eq!(sed_text_only(program), text_only, "{program:?}");
     }
+}
+
+/// A fixture folder for the #885 tests: an ordinary file, a harmless
+/// script, a sed script that runs a command and one that does not.
+fn issue_885_fixture() -> (tempfile::TempDir, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let work = dir.path().canonicalize().unwrap();
+    std::fs::create_dir_all(work.join("src")).unwrap();
+    std::fs::write(work.join("f"), "a\nx\n").unwrap();
+    std::fs::write(work.join("r.sh"), "echo ok\n").unwrap();
+    std::fs::write(work.join("present.sh"), "echo ok\n").unwrap();
+    std::fs::write(work.join("src/notes.py"), "print('ok')\n").unwrap();
+    std::fs::write(work.join("run.sed"), "s/a/b/\n1e id\n").unwrap();
+    std::fs::write(work.join("ok.sed"), "s/a/b/\n/x/d\n").unwrap();
+    let cwd = work.display().to_string();
+    (dir, cwd)
+}
+
+fn issue_885_wrong(cwd: &str, cases: &[(&str, Option<ProtectedActionKind>)]) -> Vec<String> {
+    cases
+        .iter()
+        .filter_map(|(script, expected)| {
+            let found = classify_fixture(&shell_in(cwd, &["/bin/bash", "-c", script]));
+            (found != *expected).then(|| format!("{script:?}: {found:?}, expected {expected:?}"))
+        })
+        .collect()
+}
+
+/// #885 (1): a GNU sed program that may run a shell command (`e`, `s///e`),
+/// in any spelling the shell and sed accept, or one the classifier cannot
+/// read, is code the host cannot read. Ordinary programs are not.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_885_sed_that_runs_commands_is_unseen_code() {
+    let (_dir, cwd) = issue_885_fixture();
+    let unseen = Some(ProtectedActionKind::UnseenCode);
+    let mut cases: Vec<(&str, Option<ProtectedActionKind>)> = [
+        "sed '1e id' f",
+        "sed 's/x/id/e' f",
+        "sed -n 's#^#id#ep' f",
+        "sed 's/x/id/3e' f",
+        "sed -ne '1e id' f",
+        "sed -nes/^/id/e f",
+        "sed --expression='1e id' f",
+        "sed --expr='1e id' f",
+        "sed --e '1e id' f",
+        "sed -e p -e '1e id' f",
+        "sed -i '' '1e id' f; sed -i'' -e '1e id' f",
+        "sed -f run.sed f",
+        "sed --file=run.sed f",
+        "sed --fi run.sed f",
+        "sed -nfrun.sed f",
+        "sed -f missing.sed f",
+        "sed -f /dev/stdin f <<< '1e id'",
+        "sed '/x/I,+2!e' f",
+        "sed '1~2{s/a/b/;e id\n}' f",
+        "sed '$!N;e' f",
+        "sed ':x;e id' f",
+        "sed 's/[/]/id/e' f",
+        "sed 'me' f",
+        "gsed '1e id' f",
+        "/usr/bin/sed '1e id' f",
+        "env LC_ALL=C sed '1e id' f",
+        "echo f | xargs sed '1e id'",
+        "find . -name f -exec sed '1e id' {} +",
+        "s''ed '1e id' f",
+        "\\sed '1e id' f",
+        "sed $'1\\x65 id' f",
+        "S=sed; $S '1e id' f",
+        "sed${IFS}'1e id' f",
+        "sed \"$P\" f",
+        "sed -e \"${P}\" f",
+        "sed 's/a/b/' $F",
+        "sed -x '1e id' f",
+        "bash -c \"sed '1e id' f\"",
+        "echo $(sed '1e id' f)",
+        "cat <<'EOF'\nx\nEOF\nsed '1e id' f",
+    ]
+    .into_iter()
+    .map(|script| (script, unseen))
+    .collect();
+    cases.extend([
+        ("sed -n '1,120p' f", None),
+        ("sed -i '' 's/a/b/' f", None),
+        ("sed -i 's/e/E/g' f", None),
+        ("sed -n '/error/p' f && sed -n 's/e/x/gp' f", None),
+        ("sed -e 's/a/b/' -e '/x/d' f", None),
+        ("sed -E '/^#/d;/^$/d' f", None),
+        ("sed -f ok.sed f", None),
+        ("sed 's/x/y/w out.txt' f", None),
+        ("sed -n '$p' f && sed \"s/a/b/\" f", None),
+        ("for g in f; do sed -n 1p \"$g\"; done", None),
+        ("cat f | sed 's/^/  /' | head -n 5", None),
+        ("git log --oneline | sed -n '1,5p'", None),
+        ("echo 'use sed to edit' && grep -n sed f", None),
+    ]);
+    assert_eq!(issue_885_wrong(&cwd, &cases), Vec::<String>::new());
+}
+
+/// #885 (2): a nested shell's script is judged like the command line itself,
+/// so a missing script it runs fails closed as `bash ./missing.sh` does.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_885_nested_shell_scripts_are_judged() {
+    let (_dir, cwd) = issue_885_fixture();
+    let unseen = Some(ProtectedActionKind::UnseenCode);
+    let cases = [
+        ("bash ./missing.sh", unseen),
+        ("bash -c './missing.sh'", unseen),
+        ("bash -c \"sh -c './missing.sh'\"", unseen),
+        ("sh -c \"bash -c './missing.sh'\"", unseen),
+        ("zsh -c 'sh -c ./missing.sh'", unseen),
+        ("bash -c \"bash -c \\\"sh -c './missing.sh'\\\"\"", unseen),
+        ("bash -c -e './missing.sh'", unseen),
+        ("sudo -u x bash -lc \"sh -c './missing.sh'\"", unseen),
+        ("timeout 5 bash -c 'cd src && ./missing.sh'", unseen),
+        ("sh <<< './missing.sh'", unseen),
+        (
+            "python3 -c \"import os; os.system(\\\"bash -c './missing.sh'\\\")\"",
+            unseen,
+        ),
+        (
+            "python3 <<'EOF'\nimport os\nos.system(\"bash -c './missing.sh'\")\nEOF",
+            unseen,
+        ),
+        ("eval \"bash -c './missing.sh'\"", unseen),
+        (
+            "bash -c \"sh -c 'cat ~/.ssh/id_rsa'\"",
+            Some(ProtectedActionKind::Credentials),
+        ),
+        // A script that is there is read, not refused.
+        ("bash -c \"sh -c './present.sh'\"", None),
+        ("bash -c 'echo hi; ./present.sh'", None),
+        ("cd src && bash -c 'cat notes.py'", None),
+        // The script runs where the line is, not in a substitution's folder.
+        ("d=$(cd src && pwd); bash -c './present.sh'", None),
+        ("d=$(cd / && pwd); bash -c './present.sh'", None),
+        ("docker run img sh -c './entrypoint.sh'", None),
+        // Text that is printed or searched for is not run.
+        (
+            "echo \"bash -c './missing.sh'\" && grep -rn 'sh -c ./x' .",
+            None,
+        ),
+    ];
+    assert_eq!(issue_885_wrong(&cwd, &cases), Vec::<String>::new());
+}
+
+/// #885 (3): sed that saves what it outputs (in place, redirected, piped or
+/// with `w`) to a file the same command line runs wrote code the host
+/// cannot read, except an in-place edit that only adds, drops or keeps
+/// lines, whose added text is judged as a command line (#841's sed-data
+/// exception no longer covers it).
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_885_sed_writing_a_file_the_line_runs_is_unseen_code() {
+    let (_dir, cwd) = issue_885_fixture();
+    let unseen = Some(ProtectedActionKind::UnseenCode);
+    let cases = [
+        ("sed -i '1a ./p.sh' r.sh; bash r.sh", unseen),
+        ("sed -i '' '1a ./p.sh' r.sh && ./r.sh", unseen),
+        ("sed '1a ./p.sh' r.sh | tee r2.sh; bash r2.sh", unseen),
+        ("sed -i 's#x#./p.sh#' r.sh; bash r.sh", unseen),
+        (
+            "sed -i 's/a/b/' src/notes.py && python3 src/notes.py add x",
+            unseen,
+        ),
+        ("sed -n p f > r.sh; bash r.sh", unseen),
+        ("sed -n '/x/w r.sh' f; bash r.sh", unseen),
+        ("sed -i '1r f' r.sh; source r.sh", unseen),
+        // In place, adding text the line shows, or not run in the line.
+        ("sed -i '1a echo hi' r.sh && bash r.sh", None),
+        ("sed -i '/x/d' r.sh && bash r.sh", None),
+        ("sed -i 's/a/b/' f && bash present.sh", None),
+        ("sed -n '1a ./p.sh' r.sh", None),
+        ("sed -i '' 's/a/b/' src/notes.py", None),
+    ];
+    assert_eq!(issue_885_wrong(&cwd, &cases), Vec::<String>::new());
 }
