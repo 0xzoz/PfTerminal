@@ -5,17 +5,17 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use codex_apply_patch::CODEX_CORE_APPLY_PATCH_ARG1;
-#[cfg(unix)]
-use codex_exec_server::CODEX_ARG0_EXEC_HELPER_ARG1;
-use codex_exec_server::CODEX_FS_HELPER_ARG1;
 use codex_install_context::InstallContext;
 use codex_sandboxing::landlock::CODEX_LINUX_SANDBOX_ARG0;
 use codex_utils_home_dir::find_codex_home;
-#[cfg(target_os = "windows")]
-use codex_windows_sandbox::CODEX_WINDOWS_SANDBOX_ARG1;
+use private_helper::PrivateHelper;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 use tempfile::TempDir;
+
+mod private_helper;
+
+pub use private_helper::is_private_helper_argv1;
 
 const APPLY_PATCH_ARG0: &str = "apply_patch";
 const CORBANU_ARG0: &str = "corbanu";
@@ -101,61 +101,24 @@ pub fn arg0_dispatch() -> Option<Arg0PathEntryGuard> {
     }
 
     let argv1 = args.next().unwrap_or_default();
-    #[cfg(any(unix, windows))]
-    if argv1 == codex_network_proxy::CODEX_CREDENTIAL_BROKER_ARG1 {
-        // PF-27-S04 isolated credential broker; never returns. PF-27-S05:
-        // stored provider keys are decrypted here, never in Core (on Windows
-        // since PF-27-S09, the vault key read from Credential Manager under
-        // the broker's own token).
-        codex_network_proxy::run_credential_broker_main_with(Some(broker_stored_provider_key));
-    }
-    #[cfg(unix)]
-    if argv1 == CODEX_ARG0_EXEC_HELPER_ARG1 {
-        codex_exec_server::run_arg0_exec_helper_main();
-    }
-    if argv1 == CODEX_FS_HELPER_ARG1 {
-        codex_exec_server::run_fs_helper_main();
-    }
-    #[cfg(target_os = "windows")]
-    if argv1 == CODEX_WINDOWS_SANDBOX_ARG1 {
-        codex_windows_sandbox::run_windows_sandbox_wrapper_main();
-    }
-    if argv1 == CODEX_CORE_APPLY_PATCH_ARG1 {
-        let patch_arg = args.next().and_then(|s| s.to_str().map(str::to_owned));
-        let exit_code = match patch_arg {
-            Some(patch_arg) => {
-                let mut stdout = std::io::stdout();
-                let mut stderr = std::io::stderr();
-                let cwd = match codex_utils_absolute_path::AbsolutePathBuf::current_dir() {
-                    Ok(cwd) => cwd,
-                    Err(_) => std::process::exit(1),
-                };
-                let runtime = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(runtime) => runtime,
-                    Err(_) => std::process::exit(1),
-                };
-                let cwd = cwd.into();
-                match runtime.block_on(codex_apply_patch::apply_patch(
-                    &patch_arg,
-                    &cwd,
-                    &mut stdout,
-                    &mut stderr,
-                    codex_exec_server::LOCAL_FS.as_ref(),
-                    /*sandbox*/ None,
-                )) {
-                    Ok(_) => 0,
-                    Err(_) => 1,
-                }
-            }
-            None => {
-                eprintln!("Error: {CODEX_CORE_APPLY_PATCH_ARG1} requires a UTF-8 PATCH argument.");
-                1
-            }
-        };
-        std::process::exit(exit_code);
+    match PrivateHelper::from_argv1(&argv1) {
+        #[cfg(any(unix, windows))]
+        Some(PrivateHelper::CredentialBroker) => {
+            // PF-27-S04 isolated credential broker; never returns. PF-27-S05:
+            // stored provider keys are decrypted here, never in Core (on Windows
+            // since PF-27-S09, the vault key read from Credential Manager under
+            // the broker's own token).
+            codex_network_proxy::run_credential_broker_main_with(Some(broker_stored_provider_key));
+        }
+        #[cfg(unix)]
+        Some(PrivateHelper::Arg0Exec) => codex_exec_server::run_arg0_exec_helper_main(),
+        Some(PrivateHelper::FsHelper) => codex_exec_server::run_fs_helper_main(),
+        #[cfg(target_os = "windows")]
+        Some(PrivateHelper::WindowsSandbox) => {
+            codex_windows_sandbox::run_windows_sandbox_wrapper_main();
+        }
+        Some(PrivateHelper::ApplyPatch) => run_apply_patch_helper(args.next()),
+        None => {}
     }
 
     // This modifies the environment, which is not thread-safe, so do this
@@ -175,6 +138,46 @@ pub fn arg0_dispatch() -> Option<Arg0PathEntryGuard> {
         }
     }
     path_entry_guard
+}
+
+/// `corbanu --codex-run-as-apply-patch PATCH`: applies PATCH in the current
+/// directory and exits.
+fn run_apply_patch_helper(patch_arg: Option<OsString>) -> ! {
+    let patch_arg = patch_arg.and_then(|s| s.to_str().map(str::to_owned));
+    let exit_code = match patch_arg {
+        Some(patch_arg) => {
+            let mut stdout = std::io::stdout();
+            let mut stderr = std::io::stderr();
+            let cwd = match codex_utils_absolute_path::AbsolutePathBuf::current_dir() {
+                Ok(cwd) => cwd,
+                Err(_) => std::process::exit(1),
+            };
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(_) => std::process::exit(1),
+            };
+            let cwd = cwd.into();
+            match runtime.block_on(codex_apply_patch::apply_patch(
+                &patch_arg,
+                &cwd,
+                &mut stdout,
+                &mut stderr,
+                codex_exec_server::LOCAL_FS.as_ref(),
+                /*sandbox*/ None,
+            )) {
+                Ok(_) => 0,
+                Err(_) => 1,
+            }
+        }
+        None => {
+            eprintln!("Error: {CODEX_CORE_APPLY_PATCH_ARG1} requires a UTF-8 PATCH argument.");
+            1
+        }
+    };
+    std::process::exit(exit_code);
 }
 
 fn prepare_path_env_var_with_aliases(

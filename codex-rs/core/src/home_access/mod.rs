@@ -137,8 +137,22 @@ impl HomeFailures {
     }
 
     /// An append wrote to the home: this thread is saved, and once none is
-    /// left unsaved the run of failures is over.
+    /// left unsaved the run of failures is over. (A successful flush or
+    /// persist does not get here; the exit probe then finds the folder
+    /// readable and returns at once.)
     fn written(&mut self, thread: ThreadId) {
+        self.forget(thread);
+    }
+
+    /// The thread's persistence shut down (#872): its items are written or
+    /// lost, as nothing writes them later, so the exit wait has nothing to
+    /// save for it. A stale entry would keep `since` and shorten the exit
+    /// wait of a later, unrelated outage.
+    fn ended(&mut self, thread: ThreadId) {
+        self.forget(thread);
+    }
+
+    fn forget(&mut self, thread: ThreadId) {
         self.unsaved.remove(&thread);
         if self.unsaved.is_empty() {
             self.since = None;
@@ -155,6 +169,23 @@ pub(crate) fn note_rollout_written(thread: ThreadId) {
     if let Some(mut failures) = home_failures() {
         failures.written(thread);
     }
+}
+
+/// The live thread of `thread` shut down, whether or not its last write
+/// succeeded.
+pub(crate) fn note_thread_ended(thread: ThreadId) {
+    if let Some(mut failures) = home_failures() {
+        failures.ended(thread);
+    }
+}
+
+/// Whether `thread` has rollout items the home did not take, and when this
+/// run of home failures started.
+#[cfg(test)]
+pub(crate) fn unsaved_state(thread: ThreadId) -> (bool, Option<Instant>) {
+    home_failures().map_or((false, None), |failures| {
+        (failures.unsaved.contains_key(&thread), failures.since)
+    })
 }
 
 /// A rollout append of `thread` failed with EPERM in `dir`.

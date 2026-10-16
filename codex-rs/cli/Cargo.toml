@@ -146,6 +146,8 @@ windows-sys = { version = "0.52", features = [
 app_test_support = { workspace = true }
 assert_cmd = { workspace = true }
 assert_matches = { workspace = true }
+codex-apply-patch = { workspace = true }
+codex-network-proxy = { workspace = true }
 codex-utils-cargo-bin = { workspace = true }
 futures = { workspace = true }
 insta = { workspace = true }
