@@ -45,6 +45,9 @@ updated: 2026-10-08
 
 - [x] Final integration gate separated from the in-progress component repair record; no historical pass is relabeled.
 - [x] Address issue #239 when Aggressive/Moderate read sandboxing ships — fixed in PR #244 (merged); confirmed by the saved-level route matrix (round 5, 0 leaks under saved Aggressive and Moderate on macOS and Linux).
+- [x] Aggressive milestone: isolated code-blind VM runs done (2026-10-10 to 2026-10-15; last record PR #868) and
+  **signed off by Travis on 2026-10-16** (not this sprint; see the plan's
+  [Aggressive ships row](../../../plans/active/p1-security-hardening.md#carried-forward-from-p0)).
 
 ## Gate record (2026-10-07)
 
@@ -70,17 +73,17 @@ updated: 2026-10-08
 ## Remaining
 
 - [ ] Re-run Linux canary harness on the current candidate when the RTX box is accessible (prior run used commit `e72563e5f7`).
-- [ ] Full isolated code-blind VM run and human sign-off at the Aggressive milestone (not this sprint).
 
 ## Verification
 
 - [x] Fix/format owning crates before freezing the candidate; run final affected policy, Vault, proxy and Core suites without filtering failures.
 - [x] Run the canary harness on all promised platforms with candidate/source identity and complete-output scans.
-- [ ] Full isolated code-blind VM run (milestone only).
+- [x] Full isolated code-blind VM run (milestone only): Aggressive ships, signed off 2026-10-16.
+- [ ] Linux canary harness re-run on the current candidate (Remaining).
 - [x] TUI applicability: component-only here; PF-26-S02 retains the integrated true-TUI and live-repository workflows.
 
 ## Exit evidence
 
 - [x] Record candidate, commands, platform results, reviewer and artifact/source hashes under `qa/security-levels/sprints/PF-13-S07/`.
 - [x] No S01–S05 evidence is relabeled as proof of S06 or composed downstream controls.
-- [ ] Archive after the Aggressive milestone sign-off.
+- [ ] Archive once the Linux canary is re-run (the Aggressive milestone sign-off it waited for came on 2026-10-16).
