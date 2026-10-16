@@ -50,7 +50,7 @@ async fn a_failed_vault_add_stores_nothing_and_shows_the_error() {
         error.starts_with(&format!("failed to open vault lock {}: ", lock.display())),
         "{error}"
     );
-    chat.on_vault_credential_added(label, Err(error.clone()));
+    chat.on_vault_credential_added(label, Err(error));
 
     let shown = drain_insert_history(&mut rx)
         .iter()
