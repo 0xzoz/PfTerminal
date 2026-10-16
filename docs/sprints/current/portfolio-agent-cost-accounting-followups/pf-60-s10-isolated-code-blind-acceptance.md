@@ -47,6 +47,11 @@ updated: 2026-10-10
 ## Done
 
 - [x] Draft sprint created 2026-10-10 from Travis's decision; linked to one plan feature.
+- [x] 2026-10-16 (worker `pf60-s10`; Travis 2026-10-15: run on S06–S09 before they are archived, on "macOS 3"):
+      isolated code-blind run recorded in
+      [followups-acceptance-20261016](../../../../qa/portfolio/agent-cost-accounting/followups-acceptance-20261016/README.md):
+      design frozen before the VM start (`220c99ed59`), 37 cases on `395ac0adcd`'s signed developer build:
+      32 passed, 1 failed (ACC-06, #898), 4 blocked. Realtime (#824) is the tracked known gap. Awaiting Travis.
 
 ## Remaining
 
