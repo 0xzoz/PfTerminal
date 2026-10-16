@@ -360,7 +360,8 @@ pub(crate) fn user_namespaces_denied() -> Option<&'static str> {
     if !cfg!(target_os = "linux") {
         return None;
     }
-    crate::security::level::protected_level_for_panes().map(|level| level.name())
+    crate::security::level::protected_level_for_panes()
+        .map(crate::security::level::ChosenLevel::name)
 }
 
 /// The program and arguments run inside the sandbox for `executable args`.
@@ -397,15 +398,7 @@ pub(crate) fn pane_command(
 /// Code reaches the bridge over plain HTTP with the bridge's token, so it
 /// needs neither TLS nor the keychain. #891: on Linux, under Moderate and
 /// Aggressive, no user namespaces ([`user_namespaces_denied`]). Otherwise
-/// the profile is kept.
-pub(crate) fn level_rules(profile: PermissionProfile) -> PermissionProfile {
-    rules_at(
-        profile,
-        crate::security::level::aggressive_active(),
-        user_namespaces_denied().is_some(),
-    )
-}
-
+/// the profile is kept. [`contain`] applies them.
 fn rules_at(
     profile: PermissionProfile,
     deny_keychain: bool,
@@ -429,6 +422,16 @@ fn rules_at(
             .push(FileSystemSandboxEntry::deny_user_namespaces());
     }
     PermissionProfile::from_runtime_permissions(&file_system, network)
+}
+
+/// The level rules [`contain`] applies, at the current levels.
+#[cfg(test)]
+pub(crate) fn level_rules(profile: PermissionProfile) -> PermissionProfile {
+    rules_at(
+        profile,
+        crate::security::level::aggressive_active(),
+        user_namespaces_denied().is_some(),
+    )
 }
 
 /// `executable args` wrapped in the platform sandbox under `profile`, with
