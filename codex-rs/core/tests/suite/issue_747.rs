@@ -39,6 +39,9 @@ use tempfile::TempDir;
 /// Shown on the prompt of a request to run outside the sandbox under
 /// Moderate.
 const STAYS: &str = "still runs inside the sandbox";
+/// #840: on that prompt, what approving lifts (said in terms of the files,
+/// not as a credential request).
+const LIFTS: &str = "Approving it lifts Moderate's protected-file rules for this one run";
 /// In the model's permissions instructions under Moderate.
 const INSTRUCTED: &str = "a command never leaves the sandbox it runs in";
 
@@ -53,6 +56,11 @@ enum Route {
     Retry,
     /// An exec-policy allow rule saved earlier ("don't ask again").
     Rule,
+    /// #840 (D6): such a rule, for a command that asks to run outside the
+    /// sandbox (as the rule was saved under Permissive).
+    RuleEscalated,
+    /// #840: the same through `exec_command` (unified exec).
+    RuleEscalatedExec,
     /// `exec_command` (unified exec) with `require_escalated`, approved.
     EscalatedExec,
     /// `apply_patch` adding a file outside the writable folder, approved: it
@@ -81,7 +89,7 @@ async fn run(level: SecurityLevel, route: Route) -> anyhow::Result<Run> {
     // parse.
     let command = format!("touch '{}'", target.display());
     let call = match route {
-        Route::Escalated => ev_function_call(
+        Route::Escalated | Route::RuleEscalated => ev_function_call(
             "call-0",
             "shell_command",
             &json!({
@@ -91,7 +99,7 @@ async fn run(level: SecurityLevel, route: Route) -> anyhow::Result<Run> {
             })
             .to_string(),
         ),
-        Route::EscalatedExec => ev_function_call(
+        Route::EscalatedExec | Route::RuleEscalatedExec => ev_function_call(
             "call-0",
             "exec_command",
             &json!({
@@ -115,7 +123,10 @@ async fn run(level: SecurityLevel, route: Route) -> anyhow::Result<Run> {
         ),
     };
     let home = Arc::new(TempDir::new()?);
-    if matches!(route, Route::Rule) {
+    if matches!(
+        route,
+        Route::Rule | Route::RuleEscalated | Route::RuleEscalatedExec
+    ) {
         std::fs::create_dir_all(home.path().join("rules"))?;
         std::fs::write(
             home.path().join("rules/policy.rules"),
@@ -141,9 +152,12 @@ async fn run(level: SecurityLevel, route: Route) -> anyhow::Result<Run> {
     .await;
     let approval = match route {
         Route::Retry => AskForApproval::UnlessTrusted,
-        Route::Escalated | Route::Rule | Route::EscalatedExec | Route::Patch => {
-            AskForApproval::OnRequest
-        }
+        Route::Escalated
+        | Route::Rule
+        | Route::RuleEscalated
+        | Route::RuleEscalatedExec
+        | Route::EscalatedExec
+        | Route::Patch => AskForApproval::OnRequest,
     };
     let test = test_codex()
         .with_home(home)
@@ -168,7 +182,7 @@ async fn run(level: SecurityLevel, route: Route) -> anyhow::Result<Run> {
                 .features
                 .enable(Feature::SourceEnvelopes)
                 .expect("enable source envelopes");
-            if matches!(route, Route::EscalatedExec) {
+            if matches!(route, Route::EscalatedExec | Route::RuleEscalatedExec) {
                 config.use_experimental_unified_exec_tool = true;
                 config
                     .features
@@ -293,6 +307,20 @@ async fn issue_747_moderate_never_runs_a_command_outside_the_sandbox() -> anyhow
         (SecurityLevel::Aggressive, Route::Escalated, 1, false),
         (SecurityLevel::Aggressive, Route::EscalatedExec, 1, false),
         (SecurityLevel::Aggressive, Route::Rule, 0, false),
+        // #840 (D6): a rule saved under Permissive still skips the prompt of
+        // a command that asks to leave the sandbox; it runs inside it.
+        (SecurityLevel::Moderate, Route::RuleEscalated, 0, false),
+        (SecurityLevel::Moderate, Route::RuleEscalatedExec, 0, false),
+        (SecurityLevel::Permissive, Route::RuleEscalated, 0, true),
+        (SecurityLevel::Permissive, Route::RuleEscalatedExec, 0, true),
+        // Aggressive suspends rules not saved under it (#626): it asks.
+        (SecurityLevel::Aggressive, Route::RuleEscalated, 1, false),
+        (
+            SecurityLevel::Aggressive,
+            Route::RuleEscalatedExec,
+            1,
+            false,
+        ),
     ] {
         let run = run(level, route).await?;
         let moderate = level == SecurityLevel::Moderate;
@@ -302,6 +330,11 @@ async fn issue_747_moderate_never_runs_a_command_outside_the_sandbox() -> anyhow
         if run.asked != asks
             || run.wrote != writes
             || run.reasons.iter().any(|reason| reason.contains(STAYS)) != noted
+            || run.reasons.iter().any(|reason| reason.contains(LIFTS)) != noted
+            || run
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("credential protection"))
             || run.instructed != moderate
             || run.output.contains("Protected launch refused")
         {

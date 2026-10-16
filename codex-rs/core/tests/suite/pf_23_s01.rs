@@ -709,7 +709,7 @@ async fn issue_239_moderate_escalation_before_untrusted_content_needs_the_human(
             let reason = approval.reason.clone().unwrap_or_default();
             assert!(reason.contains("read the notes"), "{reason}");
             assert!(
-                reason.contains("Moderate credential protection"),
+                reason.contains("lifts Moderate's protected-file rules for this one run"),
                 "{reason}"
             );
             test.codex

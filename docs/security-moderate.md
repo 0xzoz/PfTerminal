@@ -15,8 +15,11 @@ without them Corbanu refuses every model request under Moderate, so
 
 - **Commands stay in the sandbox.** No agent command runs outside your
   sandbox, even when you approve a request to run outside it. "Retry without
-  sandbox?" isn't offered, and commands you allowed with "don't ask again"
-  skip the prompt but stay in the sandbox.
+  sandbox?" isn't offered. Commands you allowed with "don't ask again"
+  (also under Permissive) skip the prompt but stay in the sandbox, with the
+  protected-file rules below kept, also when they ask to run outside it.
+  After untrusted content they don't count for protected actions.
+  "Revoke all active authority" (`/security` → `g`) doesn't suspend them.
 - **Protected files.** Agent commands can't read the credential files in your
   home folder (such as `.ssh`, `.aws`, `.gnupg`, `.kube`, `.docker`, `.netrc`,
   `.npmrc` and `~/Library/Keychains`) or Corbanu's sign-in, vault, config,
