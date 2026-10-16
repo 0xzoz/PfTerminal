@@ -43,7 +43,9 @@ mod other {
         Vec::new()
     }
 
-    pub(crate) fn begin(_thread: ThreadId, _repos: &[Repo]) {}
+    pub(crate) fn begin(_thread: ThreadId, _repos: &[Repo], _level: &str) -> Option<String> {
+        None
+    }
 
     pub(crate) fn finish(_thread: ThreadId, _repos: &[Repo], _level: &str) -> Option<String> {
         None
@@ -53,11 +55,9 @@ mod other {
         _thread: ThreadId,
         _level: &str,
         _folders: &[&Path],
-    ) -> (Option<String>, bool) {
-        (None, false)
+    ) -> (Option<String>, Vec<String>) {
+        (None, Vec::new())
     }
-
-    pub(crate) fn note_failed() {}
 
     impl Repo {
         pub(crate) fn probes(&self) -> Vec<PathBuf> {

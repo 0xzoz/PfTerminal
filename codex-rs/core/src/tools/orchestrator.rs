@@ -584,6 +584,7 @@ impl ToolOrchestrator {
         let git_held = git_refresh(
             tool_ctx,
             resolution_folders(tool, req, &turn_cwd, &materialized_workspace_roots),
+            approved_by == Some(ApprovalResolutionSource::User),
         )
         .await;
         let denied = post_taint_read_denials(
@@ -1139,8 +1140,9 @@ impl GitCheck {
         use crate::security::git_postcheck;
         let thread = tool_ctx.session.thread_id();
         let cwd = folders.first()?.clone();
+        let level_name = format!("{level:?}");
         // Issue #524: reading folders stays off the async thread.
-        let repos = tokio::task::spawn_blocking(move || {
+        let looked = tokio::task::spawn_blocking(move || {
             let folders: Vec<&std::path::Path> = folders.iter().map(AsRef::as_ref).collect();
             let repos: Vec<_> = git_postcheck::repos(&folders)
                 .into_iter()
@@ -1152,14 +1154,21 @@ impl GitCheck {
                             .any(|probe| policy.can_write_effective_path_with_cwd(probe, &cwd))
                 })
                 .collect();
-            git_postcheck::begin(thread, &repos);
-            repos
+            let message = git_postcheck::begin(thread, &repos, &level_name);
+            (repos, message)
         })
         .await;
-        let Ok(repos) = repos else {
-            git_postcheck::note_failed();
+        // A failed look (its task panicked) leaves nothing to compare with:
+        // the person is told, and the next command looks again.
+        let Ok((repos, message)) = looked else {
+            warn(tool_ctx, GIT_CHECK_FAILED).await;
             return None;
         };
+        // What a session's first look finds there already (planted before,
+        // or by a process left running) is told too.
+        if let Some(message) = message {
+            warn(tool_ctx, &message).await;
+        }
         (!repos.is_empty()).then_some(Self { repos, level })
     }
 
@@ -1172,10 +1181,7 @@ impl GitCheck {
             crate::security::git_postcheck::finish(thread, &repos, &level)
         })
         .await
-        .unwrap_or_else(|_| {
-            crate::security::git_postcheck::note_failed();
-            Some(GIT_CHECK_FAILED.to_string())
-        });
+        .unwrap_or_else(|_| Some(GIT_CHECK_FAILED.to_string()));
         if let Some(message) = message {
             tracing::warn!(
                 target: "codex_core::security::git_postcheck",
@@ -1187,16 +1193,18 @@ impl GitCheck {
     }
 }
 
-const GIT_CHECK_FAILED: &str = "Corbanu couldn't check this project's git folder after an \
-     agent command. Until a later check finishes, approving a command doesn't lift the \
-     protected-file rules.";
+const GIT_CHECK_FAILED: &str = "Corbanu couldn't check this project's git folder for links \
+     and rebase steps an agent command may have left. Look for them before you run git there.";
 
 /// #874 (D6): under Moderate or Aggressive, the git folders this session
-/// watches looked at again; whether the rules stay held (fail closed when
-/// the look fails). The person is told what is new.
+/// watches looked at again; whether the rules stay held for a command in
+/// `folders` (fail closed when the look fails). The person is told what is
+/// new, and, where they approved this command, why the approval doesn't
+/// lift the rules.
 async fn git_refresh(
     tool_ctx: &ToolCtx,
     folders: Vec<codex_utils_absolute_path::AbsolutePathBuf>,
+    approved_by_person: bool,
 ) -> bool {
     let Some(level) = crate::security::protected_additional::protected_level(&tool_ctx.session)
         .filter(|level| *level != codex_security_policy::SecurityLevel::Permissive)
@@ -1210,14 +1218,28 @@ async fn git_refresh(
         crate::security::git_postcheck::recheck(thread, &level, &folders)
     })
     .await
+    // A failed look holds this command (not other sessions: a task ended
+    // by a shutdown fails too).
     .unwrap_or_else(|_| {
-        crate::security::git_postcheck::note_failed();
-        (Some(GIT_CHECK_FAILED.to_string()), true)
+        (
+            Some(GIT_CHECK_FAILED.to_string()),
+            vec!["(the check failed)".to_string()],
+        )
     });
     if let Some(message) = message {
         warn(tool_ctx, &message).await;
+    } else if approved_by_person && !held.is_empty() {
+        warn(
+            tool_ctx,
+            &format!(
+                "Your approval doesn't lift the protected-file rules for this command while the \
+                 project's git folder still holds what Corbanu reported: {}.",
+                held.join(", ")
+            ),
+        )
+        .await;
     }
-    held
+    !held.is_empty()
 }
 
 /// Issue #540: whether the retry after a sandbox denial may run without a
