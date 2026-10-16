@@ -274,7 +274,7 @@ fn policies(layout: &Layout) -> Vec<(&'static str, FileSystemSandboxPolicy)> {
             "special paths",
             FileSystemSandboxPolicy::restricted(vec![
                 special(FileSystemSpecialPath::Minimal, Read),
-                special(FileSystemSpecialPath::project_roots(None), Write),
+                special(FileSystemSpecialPath::project_roots(/*subpath*/ None), Write),
                 special(
                     FileSystemSpecialPath::project_roots(Some(".codex".to_string())),
                     Read,
