@@ -221,10 +221,13 @@ fn map_vault_error(error: VaultError) -> ScopedCredentialError {
         | VaultError::ProgrammaticUseSecurityLevelDenied { .. } => {
             ScopedCredentialError::CredentialTypeDenied
         }
-        VaultError::Storage(_) => ScopedCredentialError::Storage,
+        VaultError::Storage(_) | VaultError::StorageUnavailable { .. } => {
+            ScopedCredentialError::Storage
+        }
         VaultError::CredentialExists { .. }
         | VaultError::InvalidLabel(_)
-        | VaultError::EmptySecret => ScopedCredentialError::InvalidCapability,
+        | VaultError::EmptySecret
+        | VaultError::ErrorTextAsSecret => ScopedCredentialError::InvalidCapability,
     }
 }
 
