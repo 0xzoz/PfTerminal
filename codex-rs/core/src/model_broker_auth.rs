@@ -648,7 +648,7 @@ impl ModelKeyBroker for CoreModelKeyBroker {
             },
         };
         let credential = credential_for(&self.state, binding, &source).map_err(fatal)?;
-        self.note_refused(None);
+        self.note_refused(/*refused*/ None);
         Ok(Arc::new(BrokeredAuth {
             credential,
             extra_headers,

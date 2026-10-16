@@ -172,7 +172,7 @@ pub(super) async fn denial_explanation(
         .await
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn explain(
     inputs: &ReadPolicyInputs,
     contract: Option<&LaunchContract>,

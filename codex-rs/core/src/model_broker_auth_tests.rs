@@ -384,7 +384,7 @@ fn issue_839_unbindable_refusal_is_reported_to_the_inspector() {
     assert_eq!(broker.refused_reason(), None);
     refusal(&broker, "http://localhost:11434/v1", provider_key());
     assert_eq!(broker.refused_reason(), Some(UNBINDABLE_REFUSED));
-    broker.note_refused(None);
+    broker.note_refused(/*refused*/ None);
     // Another kind of failure (here: no broker on this platform) is the
     // broker's own state, reported by `unavailable_reason`.
     refusal(&broker, "https://api.z.ai/api/paas/v4", provider_key());
