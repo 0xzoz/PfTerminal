@@ -95,6 +95,9 @@ pub(crate) enum PtyMasterHandle {
 pub struct PtyHandles {
     pub _slave: Option<Box<dyn SlavePty + Send>>,
     pub(crate) _master: PtyMasterHandle,
+    /// Dropping it stops the output reader (#780, `spawn_pty_reader`).
+    #[cfg(unix)]
+    pub(crate) reader_stop: Option<std::io::PipeWriter>,
 }
 
 impl fmt::Debug for PtyHandles {
@@ -245,6 +248,15 @@ impl ProcessHandle {
     /// Attempts to kill the child and abort helper tasks.
     pub fn terminate(&self) {
         self.request_terminate();
+
+        // #780: a PTY reader runs on a blocking thread, which aborting its
+        // task does not stop; this does.
+        #[cfg(unix)]
+        if let Ok(mut handles) = self._pty_handles.lock()
+            && let Some(handles) = handles.as_mut()
+        {
+            handles.reader_stop.take();
+        }
 
         if let Ok(mut h) = self.reader_handle.lock()
             && let Some(handle) = h.take()
