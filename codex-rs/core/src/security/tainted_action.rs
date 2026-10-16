@@ -355,7 +355,6 @@ pub(super) fn classify_with(
         scripts_read: 0,
         rebuilt: 0,
         not_shell: 0,
-        sed_data: 0,
     };
     match action {
         ApprovalAction::Shell { command, cwd, .. }
@@ -516,8 +515,6 @@ struct Classifier {
     /// Inside a file that is not a shell script (Python, JavaScript, ...):
     /// shell brace expansion does not apply to it.
     not_shell: usize,
-    /// #841: inside a command split out of a single-quoted `sed` program.
-    sed_data: usize,
 }
 
 /// Whether a script the command runs must be read in full (it is what runs)
@@ -601,8 +598,6 @@ impl Classifier {
         for (index, simple) in lexed.commands.iter().enumerate() {
             let (words, unseen) = substitute(simple, &variables);
             let feeds_pipe = pipe_sources.contains(&index);
-            let sed_data = usize::from(simple.in_sed_program);
-            self.sed_data += sed_data;
             self.simple_command(
                 simple,
                 &words,
@@ -612,7 +607,6 @@ impl Classifier {
                 &mut variables,
                 depth,
             );
-            self.sed_data -= sed_data;
         }
         self.path(&folders.cwd);
         // Strings assembled from literals by inline code (`'~/.co' + 'dex'`).
@@ -828,7 +822,16 @@ impl Classifier {
                 // is not a script; an unseen one was already judged.
                 if !word.contains('$') {
                     let file = self.homes.resolve(word, cwd);
-                    self.script_file(&file, cwd, depth, Script::Required);
+                    // #841 (MOD-06): a "command" split out of a single-quoted
+                    // sed program (an address such as `/a`) is sed's data,
+                    // not a command the shell runs: read it if it is a file,
+                    // but a missing one does not fail closed.
+                    let need = if simple.in_sed_program {
+                        Script::IfPresent
+                    } else {
+                        Script::Required
+                    };
+                    self.script_file(&file, cwd, depth, need);
                 }
             }
             return;
@@ -944,18 +947,6 @@ impl Classifier {
     /// closed; an optional one is skipped when it is not there.
     fn script_file(&mut self, file: &str, cwd: &str, depth: usize, need: Script) {
         use std::io::Read;
-        // #841 (MOD-06): text rebuilt from string literals (joined or
-        // escaped literals, such as `sed -i '' 's/a/b/'` or an `a\` append)
-        // and commands split out of a single-quoted sed program are scanned
-        // as command lines in case they hide one; a command word there naming
-        // no file is not evidence of a script that runs, so it does not fail
-        // closed. A file that exists is still read and judged, and an
-        // unreadable one still fails closed.
-        let need = if self.rebuilt > 0 || self.sed_data > 0 {
-            Script::IfPresent
-        } else {
-            need
-        };
         let unreadable = |classifier: &mut Self, missing: bool| {
             if need == Script::Required || !missing {
                 classifier.note(ProtectedActionKind::UnseenCode);

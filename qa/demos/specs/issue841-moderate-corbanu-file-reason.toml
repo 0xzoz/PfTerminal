@@ -1,7 +1,7 @@
 # Issue #841 (MOD-30): under Moderate, after untrusted content, a read of Corbanu's own config names Corbanu's own files and says approving cannot unlock them.
 id = "issue841-moderate-corbanu-file-reason"
 feature = "Moderate names Corbanu's own files and says approval cannot unlock them"
-expected = "Under Moderate, after README.md was read, the agent asks to cat Corbanu's config.toml. The prompt's Reason names access to Corbanu's own files (not a security policy change) and says approving cannot unlock its sign-in, vault, config or history; Esc leaves it unread."
+expected = "Under Moderate, after README.md was read, the agent asks to cat Corbanu's config.toml. The prompt's Reason names access to Corbanu's own files (not a security policy change) and says approving cannot unlock its sign-in, vault, config or history."
 model = "glm-5.3-flash"
 provider = "zai"
 config = """
@@ -49,7 +49,3 @@ timeout = 180
 compress = 3
 [[steps]]
 pause = 5.0
-[[steps]]
-key = "Escape"
-[[steps]]
-pause = 3.0

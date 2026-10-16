@@ -35,10 +35,13 @@ pub(super) struct SimpleCommand {
     /// Indexes of the words its output is redirected to (`> file`, `>> file`).
     pub(super) writes_to: Vec<usize>,
     /// #841: it was split out of a single-quoted `sed` program (`sed -i ''
-    /// '/x/a\ ...'`), which the shell passes to sed as one argument: its
-    /// words are sed's data, scanned for protected paths and commands like
-    /// any others, but a "command" there is not a script the shell runs.
+    /// '/x/a\ ...'`), which the shell passes to sed as one argument: it
+    /// started and ended inside that quote. Its words are sed's data, scanned
+    /// for protected paths and commands like any others, but a "command"
+    /// word there is not a script the shell runs.
     pub(super) in_sed_program: bool,
+    /// #841: it started inside a single-quoted `sed` program.
+    started_in_sed: bool,
 }
 
 /// Lexed simple commands, in the order they finish (a substitution comes
@@ -82,6 +85,7 @@ pub(super) fn simple_commands(command: &[String]) -> Lexed {
         lexer.quote = None;
         lexer.escaped = false;
         lexer.sed_program = false;
+        lexer.comment = false;
         lexer.arg(&expanded);
         lexer.flush();
     }
@@ -265,6 +269,8 @@ struct Lexer {
     escaped: bool,
     /// #841: inside a single-quoted argument of `sed`.
     sed_program: bool,
+    /// #841: inside an unquoted `#` comment (its quotes are text).
+    comment: bool,
 }
 
 impl Lexer {
@@ -308,10 +314,12 @@ impl Lexer {
         let next = SimpleCommand {
             substituted: self.current.substituted,
             reads_outer_output: self.current.reads_outer_output,
-            in_sed_program: self.sed_program,
+            started_in_sed: self.sed_program,
             ..SimpleCommand::default()
         };
-        let finished = std::mem::replace(&mut self.current, next);
+        let mut finished = std::mem::replace(&mut self.current, next);
+        // #841: sed's data only if it began and ends inside the program.
+        finished.in_sed_program = finished.started_in_sed && self.sed_program;
         // A compound command fed by a pipe feeds every command inside it.
         let first = finished.words.first().map(|word| word.to_lowercase());
         match first.as_deref() {
@@ -433,11 +441,19 @@ impl Lexer {
 
     /// #841: follow quotes (they are still removed from the words): a
     /// single-quoted argument of `sed` is a sed program.
-    fn track_quote(&mut self, ch: char) {
+    fn track_quote(&mut self, ch: char, next: Option<char>) {
         if std::mem::take(&mut self.escaped) {
             return;
         }
+        if self.comment {
+            self.comment = ch != '\n';
+            return;
+        }
         match (self.quote, ch) {
+            // A line continuation: the lexer drops both characters.
+            (None | Some('"'), '\\') if next == Some('\n') => {}
+            // A comment starts a word outside quotes and runs to the line's end.
+            (None, '#') if self.word.is_empty() => self.comment = true,
             (Some('\''), '\'') | (Some('"'), '"') => {
                 self.quote = None;
                 self.sed_program = false;
@@ -461,7 +477,7 @@ impl Lexer {
         while index < chars.len() {
             let ch = chars[index];
             let next = chars.get(index + 1).copied();
-            self.track_quote(ch);
+            self.track_quote(ch, next);
             match ch {
                 '$' if next == Some('\'') => {
                     index = self.ansi_c(&chars, index + 2);
