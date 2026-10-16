@@ -559,7 +559,13 @@ pub(crate) async fn denial_explanation(
     }
     // #748: Moderate explains the denials its own rules add.
     if let Some(inputs) = ReadPolicyInputs::capture_at(session, turn, SecurityLevel::Moderate) {
-        return moderate::denial_explanation(inputs, command, cwd, denial_lines).await;
+        // #839: listed under the inspector's recent denials, as under
+        // Aggressive (#622).
+        let (denied, explanation) =
+            moderate::denial_explanation(inputs, command, cwd, denial_lines).await?;
+        let (what, outcome) = denied.inspected();
+        super::inspection::record_refusal(session.thread_id(), what, outcome);
+        return Some(explanation);
     }
     let inputs = ReadPolicyInputs::capture(session, turn)?;
     let (command, cwd) = (command.to_vec(), cwd.to_path_buf());

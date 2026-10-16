@@ -42,7 +42,7 @@ fn inspector(facts: RuntimeFacts, clock: fn() -> i64) -> SecurityInspector {
 /// The whole inspector, in a pane tall enough not to scroll.
 fn render(inspector: &SecurityInspector, width: u16) -> String {
     let (header, body) = inspector.content(width);
-    let footer = inspector.footer(width);
+    let footer = inspector.footer(width, /*below*/ 0);
     let area = Rect::new(
         0,
         0,
@@ -157,11 +157,24 @@ fn pf_41_s01_inspector_scrolls_under_a_pinned_header() {
             })
             .collect::<Vec<_>>()
     };
+    // #839: what the pane hides below is counted, so rows at the end are
+    // not taken for absent.
+    let top = screen(&inspector);
+    assert!(
+        top[top.len() - 1].contains("more lines below · ↑/↓ scroll"),
+        "{}",
+        top[top.len() - 1]
+    );
     for _ in 0..200 {
         inspector.handle_key_event(key(KeyCode::Down));
         screen(&inspector);
     }
     let bottom = screen(&inspector);
+    assert!(
+        !bottom[bottom.len() - 1].contains("below"),
+        "{}",
+        bottom[bottom.len() - 1]
+    );
     assert!(bottom[0].starts_with("Security inspector (read only)"));
     assert!(bottom[1].starts_with("● Protected: Aggressive"));
     assert!(bottom.iter().any(|line| line.contains("Recent denials")));
