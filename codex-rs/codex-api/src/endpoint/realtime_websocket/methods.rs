@@ -914,6 +914,49 @@ fn websocket_config() -> WebSocketConfig {
     WebSocketConfig::default()
 }
 
+/// The URL `RealtimeWebsocketClient::connect` opens for `config`, in its HTTP
+/// form, and the same route relative to the provider's base URL: `path` or
+/// `path?query`, without the provider's configured query parameters, which a
+/// caller pins on its own. The route is `None` when the URL is not under the
+/// base URL.
+///
+/// Accounting pins the route it records a realtime session against (#824);
+/// reading it here keeps one source of truth for the path and query rules.
+pub fn realtime_websocket_route(
+    provider: &Provider,
+    config: &RealtimeSessionConfig,
+) -> Result<(String, Option<String>), ApiError> {
+    let url_for = |query_params| {
+        websocket_url_from_api_url(
+            provider.base_url.as_str(),
+            query_params,
+            config.model.as_deref(),
+            config.event_parser,
+            config.session_mode,
+        )
+    };
+    let url = http_form(url_for(provider.query_params.as_ref())?);
+    let bare = http_form(url_for(/*query_params*/ None)?);
+    let base = Url::parse(provider.base_url.as_str())
+        .map(http_form)
+        .map_err(|err| ApiError::Stream(format!("failed to parse realtime api_url: {err}")))?;
+    let prefix = format!("{}/", base.trim_end_matches('/'));
+    let route = bare.strip_prefix(&prefix).map(str::to_string);
+    Ok((url, route))
+}
+
+fn http_form(mut url: Url) -> String {
+    let scheme = match url.scheme() {
+        "ws" => Some("http"),
+        "wss" => Some("https"),
+        _ => None,
+    };
+    if let Some(scheme) = scheme {
+        let _ = url.set_scheme(scheme);
+    }
+    url.to_string()
+}
+
 fn websocket_url_from_api_url(
     api_url: &str,
     query_params: Option<&HashMap<String, String>>,
@@ -1828,6 +1871,61 @@ mod tests {
             .expect("build ws url");
 
         assert_eq!(url.as_str(), "wss://api.openai.com/v1/live/rtc_test");
+    }
+
+    /// #824: the route accounting pins a WebSocket session to is the URL
+    /// `connect` opens, relative to the base URL and without the provider's
+    /// configured query parameters.
+    #[test]
+    fn realtime_websocket_route_matches_the_connect_url() {
+        let provider = |base_url: &str, query_params| Provider {
+            name: "openai".to_string(),
+            base_url: base_url.to_string(),
+            query_params,
+            headers: HeaderMap::new(),
+            retry: RetryConfig {
+                max_attempts: 0,
+                base_delay: Duration::ZERO,
+                retry_429: false,
+                retry_5xx: false,
+                retry_transport: false,
+            },
+            stream_idle_timeout: Duration::from_secs(5),
+        };
+        let config = RealtimeSessionConfig {
+            instructions: String::new(),
+            initial_items: Vec::new(),
+            model: Some("gpt-realtime-1.5".to_string()),
+            session_id: None,
+            event_parser: RealtimeEventParser::RealtimeV2,
+            session_mode: RealtimeSessionMode::Conversational,
+            output_modality: RealtimeOutputModality::Text,
+            voice: RealtimeVoice::Alloy,
+        };
+        assert_eq!(
+            realtime_websocket_route(&provider("https://api.openai.com/v1", None), &config)
+                .expect("route"),
+            (
+                "https://api.openai.com/v1/realtime?model=gpt-realtime-1.5".to_string(),
+                Some("realtime?model=gpt-realtime-1.5".to_string())
+            )
+        );
+        let query = HashMap::from([("api-version".to_string(), "1".to_string())]);
+        assert_eq!(
+            realtime_websocket_route(&provider("http://127.0.0.1:9/v1/", Some(query)), &config)
+                .expect("route"),
+            (
+                "http://127.0.0.1:9/v1/realtime?model=gpt-realtime-1.5&api-version=1".to_string(),
+                Some("realtime?model=gpt-realtime-1.5".to_string())
+            )
+        );
+        // A base the session URL is not under has no route.
+        assert_eq!(
+            realtime_websocket_route(&provider("https://example.com/custom", None), &config)
+                .expect("route")
+                .1,
+            None
+        );
     }
 
     #[tokio::test]

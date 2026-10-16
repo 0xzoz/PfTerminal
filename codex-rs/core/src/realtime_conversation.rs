@@ -584,7 +584,7 @@ impl RealtimeConversationManager {
             audio_rx,
         };
 
-        let client = RealtimeWebsocketClient::new(api_provider);
+        let client = RealtimeWebsocketClient::new(api_provider.clone());
         let client = match realtime_sideband_base_url {
             Some(base_url) => client.with_webrtc_sideband_base_url(base_url),
             None => client,
@@ -620,6 +620,7 @@ impl RealtimeConversationManager {
             });
             (task, Some(call.sdp))
         } else {
+            let session_config_for_record = session_config.clone();
             let connection = client
                 .connect(
                     session_config,
@@ -628,21 +629,40 @@ impl RealtimeConversationManager {
                 )
                 .await
                 .map_err(map_api_error)?;
-            let task = spawn_realtime_input_task(RealtimeInputTask {
-                model_client,
-                writer: connection.writer(),
-                events: connection.events(),
-                text_rx: input_channels.text_rx,
-                handoff_output_rx: input_channels.handoff_output_rx,
-                audio_rx: input_channels.audio_rx,
-                events_tx,
-                handoff_state: handoff.clone(),
-                session_kind,
-                event_parser,
-                flush_transcript_tail_on_session_end,
-                transcript_tail_tx,
-                stop_token: stop_token.clone(),
-            });
+            // #824: the session is billed but its usage never reaches this
+            // client, so it is recorded as one request with tokens unknown:
+            // admitted now that it is open, its end recorded however the
+            // session ends. A failed connection opened no session.
+            let record = match &accounting {
+                Some((client_session, _scopes)) => {
+                    model_client
+                        .begin_realtime_session_record(
+                            &api_provider,
+                            &session_config_for_record,
+                            &client_session.responses_accounting,
+                        )
+                        .await
+                }
+                None => None,
+            };
+            let task = spawn_realtime_input_task(
+                RealtimeInputTask {
+                    model_client,
+                    writer: connection.writer(),
+                    events: connection.events(),
+                    text_rx: input_channels.text_rx,
+                    handoff_output_rx: input_channels.handoff_output_rx,
+                    audio_rx: input_channels.audio_rx,
+                    events_tx,
+                    handoff_state: handoff.clone(),
+                    session_kind,
+                    event_parser,
+                    flush_transcript_tail_on_session_end,
+                    transcript_tail_tx,
+                    stop_token: stop_token.clone(),
+                },
+                record,
+            );
             (task, None)
         };
 
@@ -1706,8 +1726,19 @@ pub(crate) async fn handle_close(sess: &Arc<Session>, sub_id: String) {
     end_realtime_conversation(sess, sub_id, RealtimeConversationEnd::Requested).await;
 }
 
-fn spawn_realtime_input_task(input: RealtimeInputTask) -> JoinHandle<()> {
-    tokio::spawn(run_realtime_input_task(input))
+/// Runs one WebSocket session. Its record (#824), if any, gets the session's
+/// end time however the session ends: a requested stop, a replacement, a
+/// shutdown, or the transport closing or failing.
+fn spawn_realtime_input_task(
+    input: RealtimeInputTask,
+    record: Option<crate::accounting::realtime::RealtimeSessionRecord>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        run_realtime_input_task(input).await;
+        if let Some(record) = record {
+            record.end().await;
+        }
+    })
 }
 
 struct RealtimeWebrtcSidebandInputTask {

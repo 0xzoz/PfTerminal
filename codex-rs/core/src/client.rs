@@ -1713,6 +1713,51 @@ impl ModelClient {
         })
     }
 
+    /// #824: record a realtime WebSocket session that has just opened on
+    /// `api_provider` as one request. A session is billed but this client
+    /// never sees its token usage, so the record states the route, model,
+    /// provider and start time now, the end time when the session closes
+    /// (`RealtimeSessionRecord::end`), and no token counts. `None` leaves the
+    /// session unrecorded; it is never refused.
+    pub(crate) async fn begin_realtime_session_record(
+        &self,
+        api_provider: &ApiProvider,
+        session_config: &ApiRealtimeSessionConfig,
+        accounting: &crate::accounting::responses::Slot,
+    ) -> Option<crate::accounting::realtime::RealtimeSessionRecord> {
+        // Nothing collects this session: say nothing.
+        let deferred = crate::accounting::responses::read(accounting)
+            .ok()
+            .flatten()?;
+        let model = session_config.model.as_deref().unwrap_or_default();
+        let (url, route) = match codex_api::realtime_websocket_route(api_provider, session_config) {
+            Ok((url, Some(route))) => (url, route),
+            Ok((_, None)) => {
+                deferred.reject();
+                crate::accounting::gap(
+                    "realtime session route",
+                    "the session URL is not under the provider's base URL",
+                );
+                return None;
+            }
+            Err(error) => {
+                deferred.reject();
+                crate::accounting::gap("realtime session route", error);
+                return None;
+            }
+        };
+        let auth = self.state.provider.auth().await;
+        crate::accounting::realtime::RealtimeSessionRecord::begin(
+            accounting,
+            self.state.provider.info(),
+            auth.as_ref(),
+            &url,
+            &route,
+            model,
+        )
+        .await
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     /// Builds memory summaries for each provided normalized raw memory.
     ///

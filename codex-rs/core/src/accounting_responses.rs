@@ -424,6 +424,7 @@ pub(super) fn patch(
             .flatten()
             .and_then(|text| codex_state::accounting::Decimal::try_from(text).ok()),
         refused_status: None,
+        session_ended_at_ms: None,
     })
 }
 

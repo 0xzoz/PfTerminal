@@ -711,6 +711,17 @@ fn attempt_text(q: &ObservationQuote) -> Vec<String> {
                 .into(),
         },
     ];
+    // #824: a realtime session is admitted when it starts; its end is
+    // recorded when it closes, and its usage never is.
+    if is_realtime(q) {
+        lines.push(format!(
+            "Realtime session ended: {}",
+            q.usage
+                .session_ended_at_ms
+                .map_or_else(|| "not recorded".to_string(), utc_instant)
+        ));
+        lines.push(format!("Realtime session: {REALTIME_UNKNOWN}."));
+    }
     // Zero counts quote as zero under a record with no rates; any money at
     // all means a rate applied.
     if per_use(q)
@@ -1126,6 +1137,8 @@ fn inspection_pages_for(
         attempts.sort_by_key(|q| (i64::from(q.attempt.dispatched_at_ms), q.attempt.attempt_id));
         let kind = if reopen_warmup(&attempts) {
             " · Reopen warm-up"
+        } else if realtime_session(&attempts) {
+            " · Realtime session"
         } else {
             ""
         };
@@ -1142,6 +1155,11 @@ fn inspection_pages_for(
             && let Some(divider) = text.iter().position(|line| line == "—— Details ——")
         {
             text.insert(divider, REOPEN_WARMUP_KIND.to_string());
+        }
+        if realtime_session(&attempts)
+            && let Some(divider) = text.iter().position(|line| line == "—— Details ——")
+        {
+            text.insert(divider, realtime_session_kind(&attempts));
         }
         text.push(format!("Request: {request}"));
         pages.push(InspectorPage {
@@ -1592,6 +1610,67 @@ fn reopen_warmup(quotes: &[&ObservationQuote]) -> bool {
 }
 
 const REOPEN_WARMUP_KIND: &str = "Kind: Reopen warm-up — sent when this conversation was reopened or forked, to prime the model's cache. Billed like any request; set skip_reopen_warmup = true in config.toml to skip it.";
+
+/// #824: the turn-label prefix core gives a realtime session or call (core
+/// `accounting::realtime_turn_label`); a label can carry an owner prefix
+/// before it, such as `side:`.
+const REALTIME_LABEL: &str = "realtime:";
+
+/// Whether this attempt is a realtime session or call.
+fn is_realtime(quote: &ObservationQuote) -> bool {
+    let turn = &quote.attempt.turn;
+    turn.starts_with(REALTIME_LABEL) || turn.contains(&format!(":{REALTIME_LABEL}"))
+}
+
+/// Whether these attempts are a realtime session request.
+fn realtime_session(quotes: &[&ObservationQuote]) -> bool {
+    quotes.iter().any(|quote| is_realtime(quote))
+}
+
+/// Why a realtime session has no token counts or cost: they are unknown, not
+/// zero.
+const REALTIME_UNKNOWN: &str = "its token counts and cost are unknown, not zero: a realtime session's usage is not reported to this client";
+
+/// The request page's kind line: when the session started and ended.
+fn realtime_session_kind(quotes: &[&ObservationQuote]) -> String {
+    let started = quotes
+        .iter()
+        .map(|quote| i64::from(quote.attempt.dispatched_at_ms))
+        .min()
+        .map_or_else(|| "unknown".to_string(), utc_instant);
+    let ended = quotes
+        .iter()
+        .filter_map(|quote| quote.usage.session_ended_at_ms)
+        .max()
+        .map_or_else(|| "not recorded".to_string(), utc_instant);
+    format!("Kind: Realtime session — started {started}, ended {ended}; {REALTIME_UNKNOWN}.")
+}
+
+/// "Realtime sessions: 1 session; token counts and cost unknown …" for the
+/// first screen, or nothing when no request here is one.
+fn realtime_session_line<'a>(
+    quotes: impl IntoIterator<Item = &'a ObservationQuote>,
+) -> Option<String> {
+    let mut requests: Vec<Uuid> = quotes
+        .into_iter()
+        .filter(|quote| is_realtime(quote))
+        .map(|quote| quote.attempt.request_id)
+        .collect();
+    if requests.is_empty() {
+        return None;
+    }
+    requests.sort_unstable();
+    requests.dedup();
+    let noun = if requests.len() == 1 {
+        "session"
+    } else {
+        "sessions"
+    };
+    Some(format!(
+        "Realtime: {} {noun}; token counts and cost unknown, not zero — a realtime session's usage is not reported to this client.",
+        requests.len()
+    ))
+}
 
 /// "Reopen warm-up: 1 request, estimated $0.024812. Sent when …" for the
 /// first screen, or nothing when no request here is one.
@@ -2302,6 +2381,7 @@ fn plain_overview<'a>(
     lines.extend(groups.values().map(|quotes| route_line(quotes, named)));
     let all: Vec<&ObservationQuote> = groups.values().flatten().copied().collect();
     lines.extend(reopen_warmup_line(all.iter().copied()));
+    lines.extend(realtime_session_line(all.iter().copied()));
     if let Ok(t) = codex_state::accounting::DayTotals::from_quotes(all.iter().copied()) {
         let billed = t.per_use_attempts();
         if billed > 0 && t.plan_attempts > 0 {

@@ -38,6 +38,8 @@ pub(crate) mod chat;
 mod policy_tests;
 #[path = "accounting_prices.rs"]
 mod prices;
+#[path = "accounting_realtime.rs"]
+pub(crate) mod realtime;
 #[path = "accounting_responses.rs"]
 pub(crate) mod responses;
 #[path = "accounting_transport.rs"]

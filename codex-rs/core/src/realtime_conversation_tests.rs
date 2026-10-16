@@ -619,3 +619,272 @@ fn realtime_sends_the_openai_api_key_env_fallback_only_to_openai() {
         "sk-stored"
     );
 }
+
+/// How the stand-in realtime server ends a session it accepted.
+#[derive(Clone, Copy)]
+enum StandInEnd {
+    /// Keeps the session open until the client closes it.
+    ClientCloses,
+    /// Drops the connection after the client's first message.
+    ServerDrops,
+}
+
+/// A local stand-in for the realtime WebSocket endpoint: accepts sessions at
+/// `http://127.0.0.1:<port>/v1` and answers nothing. No paid session is
+/// opened.
+async fn realtime_stand_in(end: StandInEnd) -> anyhow::Result<String> {
+    use futures::StreamExt;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let endpoint = format!("http://{}/v1", listener.local_addr()?);
+    tokio::spawn(async move {
+        while let Ok((socket, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let Ok(mut ws) = tokio_tungstenite::accept_async(socket).await else {
+                    return;
+                };
+                let _ = ws.next().await;
+                match end {
+                    StandInEnd::ClientCloses => while let Some(Ok(_)) = ws.next().await {},
+                    StandInEnd::ServerDrops => drop(ws),
+                }
+            });
+        }
+    });
+    Ok(endpoint)
+}
+
+/// A persisted session whose OpenAI provider and realtime endpoint are the
+/// stand-in at `endpoint`, recording under `accounting`.
+async fn realtime_ledger_session(
+    home: &std::path::Path,
+    endpoint: &str,
+    accounting: crate::config::AccountingMode,
+) -> anyhow::Result<(
+    Arc<crate::session::session::Session>,
+    Arc<codex_state::StateRuntime>,
+)> {
+    use codex_state::SqliteConfig;
+    use codex_state::StateRuntime;
+    use codex_state::ThreadMetadataBuilder;
+    use codex_utils_absolute_path::AbsolutePathBuf;
+
+    let mut config = crate::session::tests::build_test_config(home).await;
+    config.model_provider = codex_model_provider_info::ModelProviderInfo {
+        request_max_retries: Some(0),
+        stream_max_retries: Some(0),
+        supports_websockets: false,
+        ..codex_model_provider_info::ModelProviderInfo::create_openai_provider(Some(
+            endpoint.to_string(),
+        ))
+    };
+    config.model_provider_id = "openai".into();
+    config.accounting = accounting;
+    config
+        .features
+        .enable(codex_features::Feature::Sqlite)
+        .expect("sqlite for the ledger");
+    let (mut session, _context) =
+        crate::session::tests::make_session_and_context_for_config(config).await;
+    let db = StateRuntime::init(
+        SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(home.to_path_buf())?),
+        "openai".into(),
+    )
+    .await?;
+    session.services.state_db = Some(db.clone());
+    crate::session::tests::open_thread_persistence(&mut session).await;
+    let owner = Arc::new(session);
+    db.upsert_thread(
+        &ThreadMetadataBuilder::new(
+            owner.thread_id,
+            home.join("realtime-fixture.jsonl"),
+            chrono::Utc::now(),
+            codex_protocol::protocol::SessionSource::Cli,
+        )
+        .build("openai"),
+    )
+    .await?;
+    Ok((owner, db))
+}
+
+fn realtime_websocket_params() -> codex_protocol::protocol::ConversationStartParams {
+    codex_protocol::protocol::ConversationStartParams {
+        client_managed_handoffs: false,
+        flush_transcript_tail_on_session_end: false,
+        codex_responses_as_items: false,
+        codex_response_item_prefix: None,
+        codex_response_handoff_mode: CodexResponseHandoffMode::default(),
+        codex_response_handoff_channel_prefixes: None,
+        model: Some("gpt-realtime-1.5".into()),
+        output_modality: codex_protocol::protocol::RealtimeOutputModality::Text,
+        include_startup_context: false,
+        initial_items: Vec::new(),
+        prompt: Some(Some("fixture prompt".into())),
+        realtime_session_id: None,
+        transport: Some(codex_protocol::protocol::ConversationStartTransport::Websocket),
+        version: Some(codex_protocol::protocol::RealtimeConversationVersion::V2),
+        voice: None,
+    }
+}
+
+/// The ledger's attempts and observations, as stored.
+async fn realtime_ledger(
+    db: &codex_state::StateRuntime,
+) -> anyhow::Result<(Vec<serde_json::Value>, Vec<serde_json::Value>)> {
+    let pool = db
+        .sqlite()
+        .open_read_only_pool(&db.sqlite().state_db_path())
+        .await?;
+    let read = |sql: &'static str| {
+        let pool = pool.clone();
+        async move {
+            let rows: Vec<String> = sqlx::query_scalar(sql)
+                .fetch_all(&pool)
+                .await
+                .unwrap_or_default();
+            rows.iter()
+                .map(|row| serde_json::from_str(row))
+                .collect::<Result<Vec<serde_json::Value>, _>>()
+        }
+    };
+    let attempts = read("SELECT payload FROM draft_accounting_attempts ORDER BY rowid").await?;
+    let observations =
+        read("SELECT payload FROM draft_accounting_observations ORDER BY rowid").await?;
+    pool.close().await;
+    Ok((attempts, observations))
+}
+
+/// Wait until the ledger holds an observation, or give up after ten seconds.
+async fn realtime_ledger_settled(
+    db: &codex_state::StateRuntime,
+) -> anyhow::Result<(Vec<serde_json::Value>, Vec<serde_json::Value>)> {
+    let deadline = Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let ledger = realtime_ledger(db).await?;
+        if !ledger.1.is_empty() || Instant::now() > deadline {
+            return Ok(ledger);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// The one recorded realtime session: its route, model and provider, its
+/// start (admission) and end times, and no token count at all.
+fn assert_one_unknown_session(
+    attempts: &[serde_json::Value],
+    observations: &[serde_json::Value],
+    started_after_ms: i64,
+) {
+    let realtime: Vec<&serde_json::Value> = attempts
+        .iter()
+        .filter(|attempt| {
+            attempt["turn"]
+                .as_str()
+                .is_some_and(|turn| turn.starts_with("realtime:"))
+        })
+        .collect();
+    assert_eq!(realtime.len(), 1, "attempts: {attempts:#?}");
+    assert_eq!(attempts.len(), 1, "attempts: {attempts:#?}");
+    let session = realtime[0];
+    assert_eq!(session["model"], "gpt-realtime-1.5");
+    assert_eq!(session["provider"], "openai");
+    assert_eq!(session["retry_of"], serde_json::Value::Null);
+    let started = session["dispatched_at_ms"].as_i64().expect("start time");
+    assert!(started >= started_after_ms, "{session:#?}");
+    assert_eq!(observations.len(), 1, "observations: {observations:#?}");
+    let patch = &observations[0]["patch"];
+    let ended = patch["session_ended_at_ms"].as_i64().expect("end time");
+    assert!(ended >= started, "{patch:#?}");
+    // The end states nothing else: every token count stays unknown.
+    assert_eq!(
+        patch.as_object().map(serde_json::Map::len),
+        Some(1),
+        "{patch:#?}"
+    );
+}
+
+/// #824 (Travis, 2026-10-15, option a): a realtime session over WebSocket is
+/// recorded as one request - route, model, provider, start and end times -
+/// with its tokens unknown, not zero. Before #824 it was not recorded at all.
+#[tokio::test]
+async fn pf_824_websocket_realtime_session_is_one_request_with_tokens_unknown() -> anyhow::Result<()>
+{
+    let endpoint = realtime_stand_in(StandInEnd::ClientCloses).await?;
+    let home = tempfile::tempdir()?;
+    let (owner, db) = realtime_ledger_session(
+        home.path(),
+        &endpoint,
+        crate::config::AccountingMode::DirectOpenAiResponses {
+            scope: uuid::Uuid::new_v4(),
+            approved_endpoint: endpoint.clone(),
+        },
+    )
+    .await?;
+    let before = chrono::Utc::now().timestamp_millis();
+    super::handle_start(&owner, "fixture-sub".into(), realtime_websocket_params()).await?;
+    assert!(
+        owner.conversation.running_state().await.is_some(),
+        "the session started"
+    );
+    super::handle_close(&owner, "fixture-sub".into()).await;
+
+    let (attempts, observations) = realtime_ledger_settled(&db).await?;
+    assert_one_unknown_session(&attempts, &observations, before);
+    Ok(())
+}
+
+/// #824: a session the provider drops (an abnormal close) is recorded the
+/// same way, with the time it ended.
+#[tokio::test]
+async fn pf_824_websocket_realtime_session_dropped_by_the_server_is_recorded() -> anyhow::Result<()>
+{
+    let endpoint = realtime_stand_in(StandInEnd::ServerDrops).await?;
+    let home = tempfile::tempdir()?;
+    // The provider-bound mode a developer-accounting build uses.
+    let (owner, db) = realtime_ledger_session(
+        home.path(),
+        &endpoint,
+        crate::config::AccountingMode::Provider {
+            scope: uuid::Uuid::new_v4(),
+            provider_id: "openai".into(),
+            wire_api: codex_model_provider_info::WireApi::Responses,
+            approved_endpoint: endpoint.clone(),
+            approved_query: None,
+            pricing: crate::config::PriceAuthority::Unavailable,
+            basis_source: Default::default(),
+            account: None,
+        },
+    )
+    .await?;
+    let before = chrono::Utc::now().timestamp_millis();
+    super::handle_start(&owner, "fixture-sub".into(), realtime_websocket_params()).await?;
+
+    let (attempts, observations) = realtime_ledger_settled(&db).await?;
+    assert_one_unknown_session(&attempts, &observations, before);
+    super::handle_close(&owner, "fixture-sub".into()).await;
+    Ok(())
+}
+
+/// #824: with collection off (any build without developer accounting), the
+/// session runs exactly as before and nothing is recorded.
+#[tokio::test]
+async fn pf_824_websocket_realtime_session_is_not_recorded_when_collection_is_off()
+-> anyhow::Result<()> {
+    let endpoint = realtime_stand_in(StandInEnd::ClientCloses).await?;
+    let home = tempfile::tempdir()?;
+    let (owner, db) = realtime_ledger_session(
+        home.path(),
+        &endpoint,
+        crate::config::AccountingMode::Disabled,
+    )
+    .await?;
+    super::handle_start(&owner, "fixture-sub".into(), realtime_websocket_params()).await?;
+    assert!(
+        owner.conversation.running_state().await.is_some(),
+        "the session started"
+    );
+    super::handle_close(&owner, "fixture-sub".into()).await;
+    let (attempts, observations) = realtime_ledger(&db).await?;
+    assert_eq!(attempts, Vec::<serde_json::Value>::new());
+    assert_eq!(observations, Vec::<serde_json::Value>::new());
+    Ok(())
+}
