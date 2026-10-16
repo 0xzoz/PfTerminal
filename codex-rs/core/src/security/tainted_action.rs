@@ -535,6 +535,10 @@ struct SedScope {
 }
 
 impl SedScope {
+    /// `None` (nothing is sed's data) unless the parse is plain, the line's
+    /// other words carry no backslash (the parse keeps them, the word lexer
+    /// drops them), and no sed program may run anything (GNU sed's `e`
+    /// command or `s///e` flag) or comes from a file (`-f`).
     fn of(command: &[String]) -> Option<Self> {
         let commands = codex_shell_command::bash::parse_shell_lc_plain_commands(command)?;
         let mut scope = Self {
@@ -553,7 +557,18 @@ impl SedScope {
                 scope.others.extend(words);
             }
         }
-        (!scope.programs.is_empty()).then_some(scope)
+        let options_read_a_file = |word: &String| {
+            word.starts_with("--file")
+                || (word.starts_with('-') && !word.starts_with("--") && word.contains('f'))
+        };
+        let usable = !scope.programs.is_empty()
+            && !scope.others.iter().any(|word| word.contains('\\'))
+            && !scope.programs.iter().any(options_read_a_file)
+            && !scope
+                .programs
+                .iter()
+                .any(|program| sed_may_execute(program));
+        usable.then_some(scope)
     }
 
     fn is_data(&self, word: &str) -> bool {
@@ -1050,6 +1065,62 @@ impl Classifier {
         let text = String::from_utf8_lossy(&bytes);
         self.script(&text, cwd, depth + 1);
     }
+}
+
+/// #841: whether a sed program may run a command: GNU sed's `e` command or
+/// the `e` flag of an `s` command at a command position (the start, after
+/// `;`, a newline, a brace, `!` or an address). Over-approximates; an `s`
+/// command it cannot read to its flags counts as running one.
+fn sed_may_execute(program: &str) -> bool {
+    let chars: Vec<char> = program.chars().collect();
+    let mut at_command = true;
+    for (index, &ch) in chars.iter().enumerate() {
+        if at_command {
+            if matches!(ch, ' ' | '\t') {
+                continue;
+            }
+            let next = chars.get(index + 1).copied();
+            if ch == 'e'
+                && next.is_none_or(|next| next.is_whitespace() || matches!(next, ';' | '}'))
+            {
+                return true;
+            }
+            if ch == 's'
+                && next.is_some_and(|delimiter| {
+                    !delimiter.is_alphanumeric() && !delimiter.is_whitespace() && delimiter != '\\'
+                })
+                && sed_substitution_runs(&chars[index + 1..])
+            {
+                return true;
+            }
+        }
+        at_command =
+            matches!(ch, ';' | '\n' | '{' | '}' | '!' | '$' | '/' | ',') || ch.is_ascii_digit();
+    }
+    false
+}
+
+/// For `s` followed by `rest` (its delimiter first): whether its flags hold
+/// `e`, or it cannot be read to its flags.
+fn sed_substitution_runs(rest: &[char]) -> bool {
+    let delimiter = rest[0];
+    let mut seen = 0;
+    let mut index = 1;
+    while index < rest.len() && seen < 2 {
+        match rest[index] {
+            '\\' => index += 1,
+            ch if ch == delimiter => seen += 1,
+            _ => {}
+        }
+        index += 1;
+    }
+    if seen < 2 {
+        return true;
+    }
+    rest[index..]
+        .iter()
+        .take_while(|ch| !ch.is_whitespace() && !matches!(ch, ';' | '}'))
+        .any(|ch| *ch == 'e')
 }
 
 /// Shell parameters that stand for the command's own arguments or status,
