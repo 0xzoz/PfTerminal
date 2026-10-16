@@ -235,7 +235,9 @@ async fn run(setup: Setup) -> Result<Run> {
     let bin_word = quote(&bin.to_string_lossy());
     let script = match target {
         Target::SameHome => format!("{nested} 2>&1"),
-        Target::UnshareSameHome => format!("unshare -Ur {nested} 2>&1; echo \"exit=$?\""),
+        Target::UnshareSameHome => format!(
+            "echo marker=${{CODEX_SANDBOX_USER_NAMESPACES_DENIED:-unset}}; unshare -Ur {nested} 2>&1; echo \"exit=$?\""
+        ),
         Target::MadeUpMarker => format!(
             "mkdir -p made-up/tmp && : > made-up/tmp/security-moderate-marker && chmod 000 made-up/tmp/security-moderate-marker && CORBANU_SECURITY_ORIGIN=\"$PWD/made-up\" {nested} 2>&1; echo \"exit=$?\"; env -u CORBANU_HOME -u PFTERMINAL_HOME CODEX_HOME=\"$PWD/made-up\" {nested} 2>&1; echo \"exit=$?\""
         ),
@@ -255,7 +257,7 @@ async fn run(setup: Setup) -> Result<Run> {
                 .with_sandbox_mode("workspace-write")
                 .write(&other)?;
             let unshare = if matches!(target, Target::UnshareOtherHome) {
-                "unshare -Ur "
+                "echo marker=${CODEX_SANDBOX_USER_NAMESPACES_DENIED:-unset}; unshare -Ur "
             } else {
                 ""
             };
@@ -577,11 +579,12 @@ async fn issue_826_user_namespace_does_not_hide_the_origin() -> Result<()> {
         let output = run.command_output();
         eprintln!("{level:?} {target:?}: {output}");
         let seen = (
+            output.contains("marker=1"),
             output.contains("unshare failed: Operation not permitted"),
             output.contains("exit=1"),
             run.nested_request().is_some(),
         );
-        if seen != (true, true, false) {
+        if seen != (true, true, true, false) {
             wrong.push(format!("{level:?} {target:?}: {seen:?}\n{output}"));
         }
     }
@@ -589,8 +592,9 @@ async fn issue_826_user_namespace_does_not_hide_the_origin() -> Result<()> {
     Ok(())
 }
 
-/// #826: Permissive is unchanged: the sandbox does not refuse the namespace,
-/// and a nested run in one starts as before where the host allows it.
+/// #826: Permissive is unchanged: the sandbox neither refuses the namespace
+/// nor marks the command, and a nested run in one starts as before where the
+/// host allows it.
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn issue_826_permissive_user_namespace_is_unchanged() -> Result<()> {
@@ -601,7 +605,7 @@ async fn issue_826_permissive_user_namespace_is_unchanged() -> Result<()> {
         run.nested_request().is_some()
     );
     assert!(
-        !output.contains("unshare failed: Operation not permitted") && !output.contains("Moderate"),
+        output.contains("marker=unset") && !output.contains("Moderate"),
         "{output}"
     );
     Ok(())

@@ -34,6 +34,8 @@ const TIMEOUT_MS: u64 = 10_000;
 const SECRET: &str = "secret-826";
 const DENIED: &str = "Operation not permitted";
 const NESTED_REFUSED: &str = "Corbanu's Linux sandbox cannot start here";
+/// Set in the command's environment where the sandbox denies namespaces.
+const MARKER_ENV: &str = "CODEX_SANDBOX_USER_NAMESPACES_DENIED";
 
 fn helper() -> PathBuf {
     let helper = PathBuf::from(env!("CARGO_BIN_EXE_codex-linux-sandbox"));
@@ -213,9 +215,13 @@ async fn issue_826_denied_user_namespaces_keep_hidden_files_hidden() {
     }
     assert_eq!(wrong, Vec::<String>::new());
 
+    // Permissive: no filter and no marker (the namespace is made where the
+    // host allows a nested one, as before).
     let before = fixture
         .run(
-            read.clone(),
+            sh(&format!(
+                "echo marker=${{{MARKER_ENV}:-unset}}; unshare -Ur cat {denied} && echo OPENED-826"
+            )),
             /*deny_user_namespaces*/ false,
             NetworkSandboxPolicy::Restricted,
         )
@@ -225,9 +231,73 @@ async fn issue_826_denied_user_namespaces_keep_hidden_files_hidden() {
         before.exit_code, before.stdout.text, before.stderr.text
     );
     assert!(
-        !before.stderr.text.contains(DENIED) || !before.stderr.text.contains("unshare failed"),
-        "Permissive changed: the namespace was refused: {}",
-        before.stderr.text
+        before.stdout.text.contains("marker=unset"),
+        "Permissive changed: {before:?}"
+    );
+}
+
+/// Every process in the sandbox is filtered, bubblewrap's own PID 1 included
+/// (it is no descendant of the command, which could otherwise take it over
+/// with `ptrace` or `/proc/1/mem` and make a namespace through it), and a
+/// raw `clone(CLONE_NEWUSER)` is refused like `unshare`. Without the entry
+/// PID 1 gets no filter, as before.
+#[tokio::test]
+async fn issue_826_every_process_in_the_sandbox_is_filtered() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    // Counted against this test process's own filters, which every process
+    // started from it inherits.
+    let filters = |status: &str| {
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix("Seccomp_filters:"))
+            .and_then(|count| count.trim().parse::<u32>().ok())
+    };
+    let Some(own) = filters(&std::fs::read_to_string("/proc/self/status").unwrap()) else {
+        eprintln!("skipped: this kernel does not report Seccomp_filters");
+        return;
+    };
+    let mut seen = Vec::new();
+    for deny_user_namespaces in [true, false] {
+        let output = fixture
+            .run(
+                sh("cat /proc/1/status"),
+                deny_user_namespaces,
+                NetworkSandboxPolicy::Enabled,
+            )
+            .await;
+        seen.push((deny_user_namespaces, filters(&output.stdout.text)));
+    }
+    assert_eq!(seen, vec![(true, Some(own + 2)), (false, Some(own))]);
+    if !Path::new("/usr/bin/python3").exists() {
+        eprintln!("skipped the raw clone check: no /usr/bin/python3");
+        return;
+    }
+    // `clone(CLONE_NEWUSER | SIGCHLD)`; a child that got through exits at once.
+    let script = "import ctypes, os, platform\n\
+        nr = {'x86_64': 56, 'aarch64': 220}[platform.machine()]\n\
+        libc = ctypes.CDLL(None, use_errno=True)\n\
+        rc = libc.syscall(nr, ctypes.c_ulong(0x10000000 | 17), None, None, None, None)\n\
+        if rc == 0: os._exit(0)\n\
+        print('clone', rc, ctypes.get_errno())\n";
+    let output = fixture
+        .run(
+            vec![
+                "/usr/bin/python3".to_string(),
+                "-c".to_string(),
+                script.to_string(),
+            ],
+            /*deny_user_namespaces*/ true,
+            NetworkSandboxPolicy::Enabled,
+        )
+        .await;
+    assert!(
+        output
+            .stdout
+            .text
+            .contains(&format!("clone -1 {}", libc::EPERM)),
+        "{output:?}"
     );
 }
 

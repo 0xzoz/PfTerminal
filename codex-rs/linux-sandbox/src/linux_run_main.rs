@@ -515,8 +515,74 @@ fn run_bwrap_with_proc_fallback(
         options,
     )
     .unwrap_or_else(|err| exit_with_bwrap_build_error(err));
+    if file_system_sandbox_policy.denies_user_namespaces() {
+        add_user_namespace_seccomp_fds(&mut bwrap_args).unwrap_or_else(|err| {
+            eprintln!("error building bubblewrap command: {err}");
+            std::process::exit(1);
+        });
+    }
     apply_inner_command_argv0(&mut bwrap_args.args);
     run_or_exec_bwrap(bwrap_args, credential_watcher);
+}
+
+/// #826: hands bubblewrap the user-namespace seccomp programs
+/// (`--add-seccomp-fd`, bubblewrap 0.5+, as `--perms` that a system copy must
+/// support), which it applies to every process in the sandbox before it runs
+/// anything there. That includes its own PID 1, which is no descendant of the
+/// command, so the inner stage cannot filter it, and which would otherwise
+/// create namespaces for a command that takes it over (`ptrace`,
+/// `/proc/1/mem`).
+fn add_user_namespace_seccomp_fds(bwrap_args: &mut crate::bwrap::BwrapArgs) -> Result<(), String> {
+    let programs = crate::landlock::user_namespace_seccomp_programs()
+        .map_err(|err| format!("cannot build the user-namespace seccomp programs: {err}"))?;
+    let mut args = Vec::new();
+    for program in programs {
+        let bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|instruction| {
+                let mut bytes = Vec::with_capacity(8);
+                bytes.extend_from_slice(&instruction.code.to_ne_bytes());
+                bytes.push(instruction.jt);
+                bytes.push(instruction.jf);
+                bytes.extend_from_slice(&instruction.k.to_ne_bytes());
+                bytes
+            })
+            .collect();
+        let file = seccomp_program_file(&bytes)
+            .map_err(|err| format!("cannot pass a seccomp program to bubblewrap: {err}"))?;
+        args.push("--add-seccomp-fd".to_string());
+        args.push(file.as_raw_fd().to_string());
+        bwrap_args.preserved_files.push(file);
+    }
+    // Right after the program name, before the command.
+    bwrap_args.args.splice(1..1, args);
+    Ok(())
+}
+
+/// An in-memory file holding `bytes`, read from the start, above
+/// the standard streams (so it never becomes the command's stdin, stdout or
+/// stderr where one of them was closed).
+fn seccomp_program_file(bytes: &[u8]) -> std::io::Result<File> {
+    use std::io::Seek;
+    use std::io::Write;
+    // SAFETY: creates a new descriptor from a valid C string.
+    let fd = unsafe { libc::memfd_create(c"codex-userns-seccomp".as_ptr(), libc::MFD_CLOEXEC) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `fd` was just created and is owned here.
+    let created = unsafe { File::from_raw_fd(fd) };
+    // SAFETY: duplicates a descriptor owned here.
+    let raised = unsafe { libc::fcntl(created.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
+    if raised < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    drop(created);
+    // SAFETY: `raised` was just created and is owned here.
+    let mut file = unsafe { File::from_raw_fd(raised) };
+    file.write_all(bytes)?;
+    file.seek(std::io::SeekFrom::Start(0))?;
+    Ok(file)
 }
 
 fn bwrap_network_mode(

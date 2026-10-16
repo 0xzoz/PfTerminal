@@ -93,13 +93,17 @@ The kill switch (`/security` → `g`) works under every level.
 - On Linux agent commands can't create user namespaces (#826): `unshare` and
   `clone` with a new user namespace fail with "Operation not permitted". In
   one of its own a command could open the files the sandbox hides and mount
-  over paths, so a nested `corbanu exec` wouldn't be recognised. What needs
-  one fails under Moderate and Aggressive: a sandbox of its own (so the
-  commands of a nested `corbanu exec` don't run; Corbanu says why), rootless
-  containers (Podman, Buildah, rootless Docker), `bwrap`, Flatpak, Nix's
-  build sandbox, and Chrome or Electron with their sandbox on (Puppeteer's
-  default; pass `--no-sandbox`, as Playwright does). No approval lifts it.
-  Choose Permissive to run them.
+  over paths, so a nested `corbanu exec` wouldn't be recognised. This covers
+  every process in Corbanu's Linux sandbox, but not commands that run
+  without it (your settings turn the sandbox off, or an external sandbox),
+  contained Claude panes, or a remote Linux executor used from macOS or
+  Windows. What needs a user namespace fails under Moderate and Aggressive:
+  a sandbox of its own (so the commands of a nested `corbanu exec` don't
+  run; Corbanu says why), rootless containers (Podman, Buildah, rootless
+  Docker), `bwrap`, Flatpak, Nix's build sandbox, and Chrome or Electron
+  with their sandbox on (Puppeteer's default; pass `--no-sandbox`, as
+  Playwright does). 32-bit programs stop too. No approval lifts it. Choose
+  Permissive to run them.
 - A remote app server can't enforce a level chosen here; Corbanu refuses to
   start against one until you choose Permissive.
 

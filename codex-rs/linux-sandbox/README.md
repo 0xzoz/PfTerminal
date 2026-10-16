@@ -93,7 +93,9 @@ commands that would enter the bubblewrap path.
 - When the policy carries a `:user_namespaces` deny entry (Corbanu adds it
   under the Moderate and Aggressive security levels, #826), seccomp makes
   `unshare`/`clone` with `CLONE_NEWUSER` fail with `EPERM` and `clone3` with
-  `ENOSYS` (libraries fall back to `clone`), and the command's environment
+  `ENOSYS` (libraries fall back to `clone`). Bubblewrap gets the same
+  programs through `--add-seccomp-fd`, so its own PID 1 is filtered too, and
+  the inner stage installs them again. The command's environment
   carries `CODEX_SANDBOX_USER_NAMESPACES_DENIED=1`; a helper started there
   that cannot create the namespace bubblewrap needs says so and exits 1.
 - When bubblewrap is active, it mounts a fresh `/proc` via `--proc /proc` by default, but

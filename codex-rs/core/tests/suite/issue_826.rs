@@ -50,6 +50,8 @@ struct Outcome {
     namespace_made: bool,
     /// `unshare` was refused with `EPERM`.
     refused: bool,
+    /// The sandbox marked the command's environment as denying namespaces.
+    marked: bool,
 }
 
 async fn run(
@@ -67,7 +69,7 @@ async fn run(
     // are what nested-launch detection probes; root in a namespace of its own
     // could open them (their content stays hidden).
     let script = format!(
-        "unshare -Ur ls -a '{}' && echo {VAULT_OPENED}; unshare -Ur cat '{}' && echo {MARKER_READ}; unshare -Ur true && echo {NAMESPACE_MADE}; true",
+        "echo marker=${{CODEX_SANDBOX_USER_NAMESPACES_DENIED:-unset}}; unshare -Ur ls -a '{}' && echo {VAULT_OPENED}; unshare -Ur cat '{}' && echo {MARKER_READ}; unshare -Ur true && echo {NAMESPACE_MADE}; true",
         home_path.join("secrets").display(),
         marker.display()
     );
@@ -160,6 +162,7 @@ async fn run(
             marker_read: output.contains(MARKER_READ),
             namespace_made: output.contains(NAMESPACE_MADE),
             refused: output.contains(REFUSED),
+            marked: output.contains("marker=1"),
         },
         output,
     ))
@@ -170,6 +173,7 @@ const DENIED: Outcome = Outcome {
     marker_read: false,
     namespace_made: false,
     refused: true,
+    marked: true,
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -201,8 +205,9 @@ async fn issue_826_protected_levels_deny_user_namespaces() -> anyhow::Result<()>
     Ok(())
 }
 
-/// Permissive, before and after untrusted content: the sandbox does not
-/// refuse the namespace (where the host allows a nested one, it is made).
+/// Permissive, before and after untrusted content: the sandbox neither
+/// refuses the namespace nor marks the command (where the host allows a
+/// nested namespace, it is made, as before).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn issue_826_permissive_is_unchanged() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
@@ -216,7 +221,7 @@ async fn issue_826_permissive_is_unchanged() -> anyhow::Result<()> {
         .await?;
         eprintln!("Permissive untrusted_first={untrusted_first}: {outcome:?}\n{output}");
         assert!(
-            !outcome.refused,
+            !outcome.marked && output.contains("marker=unset"),
             "untrusted_first={untrusted_first}: {output}"
         );
     }

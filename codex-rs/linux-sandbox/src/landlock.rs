@@ -322,21 +322,26 @@ fn with_x32_alias(nr: i64) -> Vec<i64> {
     }
 }
 
-/// #826: installs the seccomp filters that stop the command creating user
-/// namespaces, so it cannot become root over the files it owns (the
-/// placeholders bubblewrap hides denied files with) or mount over paths in a
-/// namespace of its own.
+/// #826: the seccomp programs that stop a process creating user namespaces,
+/// so a command cannot become root over the files it owns (the placeholders
+/// bubblewrap hides denied files with) or mount over paths in a namespace of
+/// its own:
 ///
 /// - `unshare` and `clone` with `CLONE_NEWUSER` fail with `EPERM`;
 /// - `clone3`, whose flags are in memory a filter cannot read, fails with
 ///   `ENOSYS`, so the C libraries and language runtimes fall back to `clone`
 ///   (as under Docker's and Flatpak's filters).
 ///
-/// Joining an existing user namespace (`setns`) needs `CAP_SYS_ADMIN` in it,
-/// which this process has only in namespaces it created itself. No other
-/// call creates one. The filters are inherited by every child and cannot be
-/// removed.
-fn install_user_namespace_seccomp_filters_on_current_thread() -> std::result::Result<(), SandboxErr>
+/// Bubblewrap applies them to every process in the sandbox, its own PID 1
+/// included (`--add-seccomp-fd`, see `linux_run_main`), and the inner stage
+/// installs them again on the command. They are inherited by every child and
+/// cannot be removed. Joining an existing user namespace (`setns`) needs
+/// `CAP_SYS_ADMIN` in it: inside bubblewrap's namespace a process has that
+/// only in namespaces created below it, which these programs refuse; on the
+/// paths without bubblewrap (legacy Landlock, full write access) the command
+/// could join one its user made elsewhere, where Landlock and seccomp still
+/// apply to it.
+pub(crate) fn user_namespace_seccomp_programs() -> std::result::Result<Vec<BpfProgram>, SandboxErr>
 {
     let new_user = libc::CLONE_NEWUSER as u64;
     let with_new_user = SeccompRule::new(vec![SeccompCondition::new(
@@ -356,14 +361,24 @@ fn install_user_namespace_seccomp_filters_on_current_thread() -> std::result::Re
     for nr in with_x32_alias(libc::SYS_clone3) {
         unavailable.insert(nr, vec![]); // empty rule vec = unconditional match
     }
-    for (rules, errno) in [(denied, libc::EPERM), (unavailable, libc::ENOSYS)] {
-        let filter = SeccompFilter::new(
-            rules,
-            SeccompAction::Allow,
-            SeccompAction::Errno(errno as u32),
-            seccomp_target_arch(),
-        )?;
-        let prog: BpfProgram = filter.try_into()?;
+    [(denied, libc::EPERM), (unavailable, libc::ENOSYS)]
+        .into_iter()
+        .map(|(rules, errno)| {
+            let filter = SeccompFilter::new(
+                rules,
+                SeccompAction::Allow,
+                SeccompAction::Errno(errno as u32),
+                seccomp_target_arch(),
+            )?;
+            Ok(filter.try_into()?)
+        })
+        .collect()
+}
+
+/// Installs [`user_namespace_seccomp_programs`] on this thread.
+fn install_user_namespace_seccomp_filters_on_current_thread() -> std::result::Result<(), SandboxErr>
+{
+    for prog in user_namespace_seccomp_programs()? {
         apply_filter(&prog)?;
     }
     Ok(())
