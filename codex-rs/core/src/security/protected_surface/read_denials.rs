@@ -1817,3 +1817,7 @@ fn real_pattern(pattern: &str) -> Option<String> {
 #[cfg(test)]
 #[path = "read_denials_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "read_denials_907_tests.rs"]
+mod issue_907_tests;
