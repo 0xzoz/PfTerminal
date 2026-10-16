@@ -484,6 +484,9 @@ fn review_text(choice: &Choice, level: SecurityLevel) -> (String, Vec<String>) {
             vec![
                 "Ends now, in every session of this Corbanu Terminal on this Corbanu home: every grant, every \"for this session\" approval, and the credential broker's open channels. Work already running is not stopped.".to_string(),
                 format!("Saved in security_state.json: revoked authority does not come back after a restart. The level stays {level}; the kill switch is unchanged."),
+                // MOD-28 (Travis, 2026-10-15): saved rules are not authority
+                // this revokes.
+                "It does not suspend saved \"don't ask again\" rules: the commands they cover still run without asking, as before (under Moderate, inside the sandbox). They are kept in rules/default.rules in the Corbanu home.".to_string(),
             ],
         ),
         Choice::Core(HumanRevocation::KillSwitchOn) => (

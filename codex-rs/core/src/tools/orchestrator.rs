@@ -256,8 +256,8 @@ impl ToolOrchestrator {
             && let Some(additional) = tool.additional_permissions(req)
         {
             use crate::security::protected_additional;
-            let human_route =
-                post_taint.is_some() || moderate_escalation_before_taint(tool, req, tool_ctx);
+            let human_route = post_taint.is_some()
+                || moderate_escalation_before_taint(tool, req, tool_ctx, &requirement);
             let reads = !(state.moderate_bound() && human_route);
             let person_may_decide = human_route
                 || (matches!(requirement, ExecApprovalRequirement::NeedsApproval { .. })
@@ -415,16 +415,13 @@ impl ToolOrchestrator {
                 AskForApproval::Granular(granular) => granular.allows_sandbox_approval(),
                 AskForApproval::UnlessTrusted | AskForApproval::OnRequest => true,
             }
-            && moderate_escalation_before_taint(tool, req, tool_ctx);
+            && moderate_escalation_before_taint(tool, req, tool_ctx, &requirement);
         let mut escalation_approved_by_human = false;
         match &requirement {
             _ if post_taint.is_some() => {}
             _ if ask_human_to_escalate => {
                 // #747: and it stays inside the sandbox.
-                let note = format!(
-                    "Approving also lifts the Moderate credential protection for this command. {}",
-                    crate::security::protected_additional::MODERATE_STAYS_SANDBOXED
-                );
+                let note = crate::security::protected_additional::moderate_escalation_note();
                 let mut approval_ctx = ApprovalCtx {
                     session: &tool_ctx.session,
                     turn: &tool_ctx.turn,
@@ -1170,11 +1167,26 @@ where
 /// Issue #239: under Moderate before untrusted content, whether this command
 /// asks to run outside the sandbox (a human approval then lifts the
 /// protected-path rules for it, as after untrusted content).
-fn moderate_escalation_before_taint<Rq, Out, T>(tool: &T, req: &Rq, tool_ctx: &ToolCtx) -> bool
+/// #840 (D6): not where a saved "don't ask again" rule allows it: the rule
+/// skips the prompt and the command runs inside the sandbox with the rules
+/// kept, as any command that does not ask to leave it.
+fn moderate_escalation_before_taint<Rq, Out, T>(
+    tool: &T,
+    req: &Rq,
+    tool_ctx: &ToolCtx,
+    requirement: &ExecApprovalRequirement,
+) -> bool
 where
     T: ToolRuntime<Rq, Out>,
 {
-    tool.sandbox_permissions(req)
+    !matches!(
+        requirement,
+        ExecApprovalRequirement::Skip {
+            bypass_sandbox: true,
+            ..
+        }
+    ) && tool
+        .sandbox_permissions(req)
         .requires_escalated_permissions()
         && tool_ctx
             .session
