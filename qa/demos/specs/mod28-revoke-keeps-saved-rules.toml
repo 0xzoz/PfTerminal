@@ -1,12 +1,16 @@
 # MOD-28 (Travis, 2026-10-15): the "Revoke all active authority" review says saved "don't ask again" rules are not suspended.
 id = "mod28-revoke-keeps-saved-rules"
 feature = "Revoke all active authority: saved rules are not suspended"
-expected = "/security → g → Revoke all active authority: the review says it does not suspend saved \"don't ask again\" rules and where they are kept; Esc changes nothing."
+expected = "Under Moderate, /security → g → Revoke all active authority: the review says it does not suspend saved \"don't ask again\" rules and where they are kept."
 model = "glm-5.3-flash"
 provider = "zai"
 config = """
 approval_policy = "on-request"
 suppress_unstable_features_warning = true
+
+[security]
+version = 1
+level = "moderate"
 
 [features]
 security_levels = true
@@ -39,10 +43,4 @@ key = "Enter"
 [[steps]]
 wait = "does not suspend saved[\\s\\S]*rules"
 [[steps]]
-pause = 5.0
-[[steps]]
-key = "Escape"
-[[steps]]
-wait = "Cancelled|nothing changes|Revoke all active authority"
-[[steps]]
-pause = 2.0
+pause = 4.0

@@ -315,6 +315,12 @@ async fn issue_747_moderate_never_runs_a_command_outside_the_sandbox() -> anyhow
         (SecurityLevel::Permissive, Route::RuleEscalatedExec, 0, true),
         // Aggressive suspends rules not saved under it (#626): it asks.
         (SecurityLevel::Aggressive, Route::RuleEscalated, 1, false),
+        (
+            SecurityLevel::Aggressive,
+            Route::RuleEscalatedExec,
+            1,
+            false,
+        ),
     ] {
         let run = run(level, route).await?;
         let moderate = level == SecurityLevel::Moderate;

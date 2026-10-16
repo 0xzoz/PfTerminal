@@ -6,6 +6,7 @@
 //! a protected action: the person is asked afresh (PF-30-S03).
 #![cfg(target_os = "macos")]
 
+use std::path::Path;
 use std::sync::Arc;
 
 use codex_core::config::Constrained;
@@ -47,25 +48,31 @@ fn step(call_id: &str, command: &str, escalate: bool) -> Vec<Value> {
     ]
 }
 
-/// What happened to the read of a protected file in the Corbanu home.
+/// What one escalated command did under a saved rule.
 #[derive(Debug, PartialEq, Eq)]
 struct Outcome {
     asked: usize,
     read: bool,
     denied_by_sandbox: bool,
+    /// The hook written into the project's `.git/hooks`.
+    wrote_hook: bool,
 }
 
-/// Under Moderate, a rule saved for `cat` and a `cat` of a file in the
-/// Corbanu home that asks to run outside the sandbox, optionally after
-/// untrusted content; every prompt is declined.
-async fn read_with_rule(tainted: bool) -> anyhow::Result<Outcome> {
+/// Under Moderate, with a rule saved for `rule` (one command word), runs
+/// `command(corbanu_home)` asking to run outside the sandbox, optionally
+/// after untrusted content; every prompt is declined.
+async fn with_rule(
+    rule: &str,
+    command: impl Fn(&Path) -> String,
+    tainted: bool,
+) -> anyhow::Result<Outcome> {
     let home = Arc::new(TempDir::new()?);
-    let path = home.path().canonicalize()?.join("issue-840-notes.txt");
-    std::fs::write(&path, CANARY)?;
+    let canonical_home = home.path().canonicalize()?;
+    std::fs::write(canonical_home.join("issue-840-notes.txt"), CANARY)?;
     std::fs::create_dir_all(home.path().join("rules"))?;
     std::fs::write(
         home.path().join("rules/default.rules"),
-        "prefix_rule(pattern=[\"cat\"], decision=\"allow\")\n",
+        format!("prefix_rule(pattern=[\"{rule}\"], decision=\"allow\")\n"),
     )?;
     let mut steps = Vec::new();
     if tainted {
@@ -73,8 +80,8 @@ async fn read_with_rule(tainted: bool) -> anyhow::Result<Outcome> {
         steps.push(step("call-first", "printf '%s' 'notes'", false));
     }
     steps.push(step(
-        "call-read",
-        &format!("cat '{}'", path.display()),
+        "call-0",
+        &command(&canonical_home),
         /*escalate*/ true,
     ));
     steps.push(vec![
@@ -94,6 +101,7 @@ async fn read_with_rule(tainted: bool) -> anyhow::Result<Outcome> {
                 .features
                 .enable(Feature::SourceEnvelopes)
                 .expect("enable source envelopes");
+            std::fs::create_dir_all(config.cwd.join(".git/hooks")).expect("the project's hooks");
         })
         // Host-sandbox security test: local executor on purpose (#157).
         .build(&server)
@@ -102,7 +110,7 @@ async fn read_with_rule(tainted: bool) -> anyhow::Result<Outcome> {
     test.codex
         .submit(Op::UserInput {
             items: vec![UserInput::Text {
-                text: "read the notes".into(),
+                text: "go on".into(),
                 text_elements: Vec::new(),
             }],
             final_output_json_schema: None,
@@ -132,13 +140,18 @@ async fn read_with_rule(tainted: bool) -> anyhow::Result<Outcome> {
     let requests = captured.requests();
     let output = requests
         .last()
-        .and_then(|request| request.function_call_output_text("call-read"))
+        .and_then(|request| request.function_call_output_text("call-0"))
         .unwrap_or_default();
     Ok(Outcome {
         asked,
         read: output.contains(CANARY),
         denied_by_sandbox: output.contains("Operation not permitted"),
+        wrote_hook: test.cwd_path().join(".git/hooks/pre-commit").exists(),
     })
+}
+
+fn read_notes(home: &Path) -> String {
+    format!("cat '{}'", home.join("issue-840-notes.txt").display())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -148,15 +161,28 @@ async fn issue_840_saved_rule_skips_the_prompt_but_keeps_moderates_file_rules() 
     skip_if_sandbox!(Ok(()));
     // Before untrusted content: no prompt; the sandbox still denies the read.
     assert_eq!(
-        read_with_rule(/*tainted*/ false).await?,
+        with_rule("cat", read_notes, /*tainted*/ false).await?,
         Outcome {
             asked: 0,
             read: false,
             denied_by_sandbox: true,
+            wrote_hook: false,
         }
     );
+    // Nor does it lift the write protections: a git hook stays unwritten.
+    let hook = with_rule(
+        "touch",
+        |_| "touch .git/hooks/pre-commit".to_string(),
+        /*tainted*/ false,
+    )
+    .await?;
+    assert_eq!(
+        (hook.asked, hook.wrote_hook, hook.denied_by_sandbox),
+        (0, false, true),
+        "{hook:?}"
+    );
     // After untrusted content: the rule does not count; the person is asked.
-    let tainted = read_with_rule(/*tainted*/ true).await?;
+    let tainted = with_rule("cat", read_notes, /*tainted*/ true).await?;
     assert_eq!((tainted.asked, tainted.read), (1, false), "{tainted:?}");
     Ok(())
 }

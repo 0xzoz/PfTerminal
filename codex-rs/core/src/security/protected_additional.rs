@@ -375,9 +375,11 @@ pub(crate) const MODERATE_STAYS_SANDBOXED: &str = "Under security level Moderate
 
 /// #840: what approving a request to run outside the sandbox does under
 /// Moderate before untrusted content (#239): it lifts the protected-file
-/// rules for that one run, which is why the person is asked even where a
-/// saved rule would not apply. Said in terms of the files, so a command that
-/// has nothing to do with credentials does not read as a credential request.
+/// rules for that one run, which is why the person is asked even where the
+/// command would otherwise run unasked (unless a saved allow rule covers it:
+/// then it runs unasked with the rules kept, D6). Said in terms of the
+/// files, so a command that has nothing to do with credentials does not read
+/// as a credential request.
 pub(crate) const MODERATE_ESCALATION_LIFTS: &str = "This command asks to run outside the sandbox. Approving it lifts Moderate's protected-file rules for this one run: it may then read protected files, such as your SSH and cloud credentials, and write files that run code later in your writable folders.";
 
 /// #840: the note on a request to run outside the sandbox under Moderate

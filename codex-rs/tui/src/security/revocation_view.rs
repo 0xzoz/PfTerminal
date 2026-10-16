@@ -486,7 +486,7 @@ fn review_text(choice: &Choice, level: SecurityLevel) -> (String, Vec<String>) {
                 format!("Saved in security_state.json: revoked authority does not come back after a restart. The level stays {level}; the kill switch is unchanged."),
                 // MOD-28 (Travis, 2026-10-15): saved rules are not authority
                 // this revokes.
-                "It does not suspend saved \"don't ask again\" rules: the commands they cover still run without asking, as before (under Moderate, inside the sandbox). They are kept in rules/default.rules in the Corbanu home.".to_string(),
+                "It does not suspend saved \"don't ask again\" rules: the commands they cover still run without asking, as before (under Moderate inside the sandbox; protected actions after untrusted content still ask). They are kept in rules/default.rules in the Corbanu home.".to_string(),
             ],
         ),
         Choice::Core(HumanRevocation::KillSwitchOn) => (

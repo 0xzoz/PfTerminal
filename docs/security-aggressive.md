@@ -198,11 +198,12 @@ starts at the restart.
 
 Under Moderate a command can still ask to run outside it
 (an escalation request): the prompt says it stays in the sandbox, and
-approving it only lifts Moderate's protection of credential and Corbanu files
-for that one command. A write outside your writable folders, or network your
-sandbox blocks, still fails, and "retry without sandbox?" is not offered.
-Commands you allowed with "don't ask again" skip the prompt but stay in the
-sandbox too.
+approving it only lifts Moderate's protected-file rules (credential and
+Corbanu files, files that run code later) for that one command. A write
+outside your writable folders, or network your sandbox blocks, still fails,
+and "retry without sandbox?" is not offered. Commands you allowed with "don't
+ask again" skip the prompt but stay in the sandbox too, with those rules
+kept.
 
 The Corbanu home's runtime files (the sandbox launchers in `tmp`, shell
 snapshots, skills, plugins, packages and `AGENTS.md`) stay read-only to agent
