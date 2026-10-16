@@ -4464,11 +4464,19 @@
   }
  ],
  "review_budget": {
-  "used": 4,
+  "used": 5,
   "limit": 5,
   "ledger": {
    "path": "review-ledger.md",
-   "sha256": "34ddf84a671353f0bb2e390880df4b0de78996b50f5ba6fe7639840064a9c4e3"
+   "sha256": "cf9edee527faabca3cecd46bbc12f02ac47764d3d54e2876ad35e9843580224e"
+  }
+ },
+ "evidence_check": {
+  "agent": "01a143db-ee78-7c93-95d6-e7807ca20735",
+  "verdict": "fail",
+  "artifact": {
+   "path": "review/evidence-check-r3.md",
+   "sha256": "14cf19ff2f3425f95395d0dbddb71072c5609ec4d6c241de41285ec5afaa1e9b"
   }
  }
 }

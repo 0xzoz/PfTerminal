@@ -32,9 +32,10 @@ known gap. **Not accepted: S10 needs Travis's acceptance.**
     (ACC-08, 09); `gpt-6.1-sol` and GPT-5.6 Sol rates (ACC-19, 20); OpenRouter, Vercel and Corbanu API priced from
     their reported charge (ACC-23, 25, 26, 28); reasoning above output kept as not reported (ACC-24); without a charge,
     a labelled estimate, a lower bound or no price, never $0 (ACC-37).
-  - S08: reopen warm-up on a new conversation and an edit, labelled and announced; `skip_reopen_warmup` by flag and
-    by `config.toml`; new conversations still warm up; reviewers and sub-agents are not reopens (ACC-10, 12, 13, 16,
-    17, 36; restart and `/resume` in ACC-11/14 passed everything observed, see Blocked); no warm-up on a non-WebSocket reopen (ACC-29); unpriced and basis-only wording (ACC-27).
+  - S08: a new conversation shows no reopen label or notice but still warms up (ACC-10, 13); editing an earlier
+    message sends a labelled, announced reopen warm-up (ACC-16); `skip_reopen_warmup` works by flag and by
+    `config.toml` (ACC-12, 36); reviewers and sub-agents are not reopens (ACC-17); restart and `/resume` (ACC-11, 14)
+    passed everything observed, see Blocked; no warm-up on a non-WebSocket reopen (ACC-29); unpriced and basis-only wording (ACC-27).
   - S09: ChatGPT sign-in (stand-in) covered by the subscription for catalogued, uncatalogued, priority and image
     (ACC-30–33); a real API-key image priced at `gpt-image-2` rates (ACC-21).
 - No credential was printed (ACC-34, advisory).
@@ -93,6 +94,8 @@ installed at this run's request because the earlier build lacked #859 ([candidat
 
 - `runs/*/executor-events.jsonl` and `runs/*/collected/evidence/screens.jsonl` are gzipped (`.gz`, blob-size policy);
   `pty.raw` files are gzipped; `harness/agms-probe` is stored byte-identical as `harness/agms-probe.txt` (codespell).
+- Not committed (git-ignored): each run's `collected/fixture/workspace/.env` (the fixture's synthetic canary) and
+  `collected/product-logs/codex-tui.log`. The key scan covers the committed tree only.
 - Product homes are not copied: each run keeps its `product-home-config.toml`, a size/SHA-256 manifest of the rest and
   the integrator's ledger extract (`ledger-attempts.txt`). Fixture `.git` folders are kept as `dot-git` without objects.
 
@@ -102,7 +105,9 @@ installed at this run's request because the earlier build lacked #859 ([candidat
   Windows and Linux; `fork:` (no client makes one); Moonshot unlisted models and K2.7 HighSpeed/K2.6 rates; the 5-minute
   cache lifetime; same-conversation `/resume`; a real Moonshot cache hit (D3 not granted).
 - Request-ID stability across reopens was not observed (ACC-11, 14, 18): the executors re-read costs, not IDs.
-- `harness/agms-product` was replaced (harness fix 1, corbanu route only) while group F was running.
+- `harness/agms-product` was replaced (harness fix 1, corbanu route only) while group F's executor was running, before
+  its first product start; packet v2 was installed while group D ran; the fix check used lane agmx0 concurrently with F.
+- Gate attempts 1 and 2 each sent one real Z.AI smoke turn although they failed (see the addendum).
 - The guest's pre-existing Z.AI transport key file stays on the guest, as in earlier campaigns.
 - The same model family (GLM 5.3 Flash) drives the executor and most product turns.
 - The relay logs no tool names, so model-visible tool sets are not inventoried ([common/tool-inventory.json](common/tool-inventory.json)).
@@ -115,4 +120,4 @@ installed at this run's request because the earlier build lacked #859 ([candidat
 
 ## Review budget
 
-See [review-ledger.md](review-ledger.md).
+5 of 5 used ([review-ledger.md](review-ledger.md)): design, design review, evidence checks r1-r3. The last verdict (r3) is **fail** on written statements only; its corrections are applied but not independently re-checked; no extension requested.
