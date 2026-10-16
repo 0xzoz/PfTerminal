@@ -374,21 +374,151 @@ fn sec_391_unbindable_url_names_the_level() {
     }
 }
 
-/// #839: the inspector learns that the broker refused a model request
-/// whose provider URL it cannot serve (MOD-24); a broker that has not
-/// refused one reports nothing.
+/// #839, #878: the inspector learns which session's request the broker
+/// refused, for every kind of refusal: a provider URL it cannot bind (MOD-24)
+/// and a credential it cannot register (here: no broker on this platform).
+/// Another session's inspector does not show it; a refusal outside any
+/// session (the model list, the wallet) shows in every inspector, after the
+/// session's own.
 #[test]
-fn issue_839_unbindable_refusal_is_reported_to_the_inspector() {
+fn issue_878_refusals_belong_to_the_session_that_resolved_them() {
     let broker =
         CoreModelKeyBroker::unsupported().with_origin(BrokerModelAuthOrigin::ModerateLevel);
-    assert_eq!(broker.refused_reason(), None);
-    refusal(&broker, "http://localhost:11434/v1", provider_key());
-    assert_eq!(broker.refused_reason(), Some(UNBINDABLE_REFUSED));
-    broker.note_refused(/*refused*/ None);
-    // Another kind of failure (here: no broker on this platform) is the
-    // broker's own state, reported by `unavailable_reason`.
+    let (session, other) = (
+        codex_protocol::ThreadId::new(),
+        codex_protocol::ThreadId::new(),
+    );
+    assert_eq!(broker.refused_reason(&[session]), None);
+
+    refusals::owned_by_sync(session, || {
+        refusal(&broker, "http://localhost:11434/v1", provider_key())
+    });
+    let unbindable = broker.refused_reason(&[session]).expect("refused");
+    assert!(
+        unbindable.starts_with("the last model request of this session")
+            && unbindable.contains("provider URL cannot be brokered"),
+        "{unbindable}"
+    );
+    assert_eq!(broker.refused_reason(&[other]), None);
+    // The session's tree: a child agent's refusal is the session's.
+    assert_eq!(broker.refused_reason(&[other, session]), Some(unbindable));
+
+    refusals::owned_by_sync(other, || {
+        refusal(&broker, "https://api.z.ai/api/paas/v4", held_value())
+    });
+    let unavailable = broker.refused_reason(&[other]).expect("refused");
+    assert!(
+        unavailable.contains("credential broker is not available"),
+        "{unavailable}"
+    );
+    assert_eq!(broker.refused_reason(&[session]), Some(unbindable));
+
+    let third = codex_protocol::ThreadId::new();
+    assert_eq!(broker.refused_reason(&[third]), None);
     refusal(&broker, "https://api.z.ai/api/paas/v4", provider_key());
-    assert_eq!(broker.refused_reason(), None);
+    let outside = broker.refused_reason(&[third]).expect("refused");
+    assert!(
+        outside.starts_with("the last brokered request outside a session"),
+        "{outside}"
+    );
+    assert_eq!(broker.refused_reason(&[]), Some(outside));
+    assert_eq!(broker.refused_reason(&[session]), Some(unbindable));
+}
+
+/// #878: every kind of registration failure is a refusal the inspector
+/// shows, with a fixed text that names its kind.
+#[test]
+fn issue_878_every_broker_error_is_a_refusal() {
+    use refusals::Refusal;
+    let cases = [
+        (
+            BrokerModelAuthError::Unbindable {
+                url: "http://x".to_string(),
+                origin: BrokerModelAuthOrigin::Config,
+            },
+            Refusal::Unbindable,
+        ),
+        (
+            BrokerModelAuthError::MissingKey {
+                env: "ZAI_API_KEY".to_string(),
+            },
+            Refusal::NoKey,
+        ),
+        (
+            BrokerModelAuthError::MissingAccountKey {
+                provider_id: "zai".to_string(),
+                name: "work".to_string(),
+            },
+            Refusal::NoKey,
+        ),
+        (BrokerModelAuthError::Store("unavailable"), Refusal::NoKey),
+        (
+            BrokerModelAuthError::Unavailable,
+            Refusal::BrokerUnavailable,
+        ),
+        (
+            BrokerModelAuthError::NotStarted {
+                cause: StartFailure::Unavailable,
+                origin: BrokerModelAuthOrigin::Config,
+            },
+            Refusal::BrokerUnavailable,
+        ),
+        (
+            BrokerModelAuthError::Unsupported,
+            Refusal::BrokerUnavailable,
+        ),
+        (
+            BrokerModelAuthError::PipeSquatted,
+            Refusal::BrokerUnavailable,
+        ),
+        (BrokerModelAuthError::Rejected, Refusal::Rejected),
+    ];
+    for (error, expected) in cases {
+        assert_eq!(Refusal::from(&error), expected, "{error:?}");
+    }
+}
+
+/// #878: a request URL the broker cannot serve, refused when the request is
+/// signed ("model request URL cannot be brokered"), is the session's
+/// refusal; a signed request waits for the broker's answer, and only that
+/// answer clears the session's refusal.
+#[test]
+fn issue_878_signing_refusals_and_answers_are_the_sessions() {
+    use codex_http_client::ModelBrokerOutcome;
+    let refusals = Refusals::default();
+    let session = Some(codex_protocol::ThreadId::new());
+    let mut extra = HeaderMap::new();
+    extra.insert("chatgpt-account-id", http::HeaderValue::from_static("acct"));
+
+    let unbindable = BrokerRewrite::for_request_url("http://localhost:11434/v1/responses")
+        .expect_err("plain HTTP is not brokered");
+    let error = signed_for(&refusals, session, &extra, Err(unbindable)).expect_err("refused");
+    assert!(error.to_string().contains("cannot be brokered"), "{error}");
+    let threads: Vec<_> = session.into_iter().collect();
+    let refused = refusals.reason(&threads).expect("refused");
+    assert!(
+        refused.contains("provider URL cannot be brokered"),
+        "{refused}"
+    );
+
+    let request = rewritten_for_broker_in_tests(codex_http_client::Request::new(
+        http::Method::POST,
+        "https://api.z.ai/v4/chat/completions".to_string(),
+    ));
+    let signed = signed_for(&refusals, session, &extra, Ok(request)).expect("signed");
+    assert_eq!(
+        signed.headers.get("chatgpt-account-id"),
+        extra.get("chatgpt-account-id")
+    );
+    // Signed is not served: the broker may still deny it.
+    assert_eq!(refusals.reason(&threads), Some(refused));
+    let frame = signed
+        .headers
+        .get(codex_http_client::MODEL_BROKER_FRAME_HEADER)
+        .expect("frame")
+        .clone();
+    refusals.answered(&frame, ModelBrokerOutcome::Served);
+    assert_eq!(refusals.reason(&threads), None);
 }
 
 /// #391 through config loading: Core's level, the stored `/security` level,

@@ -876,7 +876,13 @@ async fn handle_any_tool(
 ) -> Result<AnyToolResult, FunctionCallError> {
     let call_id = invocation.call_id.clone();
     let payload = invocation.payload.clone();
-    let output = tool.handle(invocation.clone()).await?;
+    // #878: a broker refusal of auth a tool resolves (web search, image
+    // generation) is this session's.
+    let output = crate::model_broker_auth::refusals::owned_by(
+        invocation.session.thread_id,
+        tool.handle(invocation.clone()),
+    )
+    .await?;
     if output.contains_external_context()
         && invocation.turn.config.memories.disable_on_external_context
     {

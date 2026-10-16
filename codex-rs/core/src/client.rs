@@ -2830,15 +2830,16 @@ impl ModelClient {
     async fn current_client_setup(&self) -> Result<CurrentClientSetup> {
         let auth = self.state.provider.auth().await;
         let api_provider = self.state.provider.api_provider().await?;
-        let resolved_auth = self
-            .state
-            .provider
-            .api_auth_for_scope(ProviderAuthScope {
+        // #878: a broker refusal of this auth is this session's.
+        let resolved_auth = crate::model_broker_auth::refusals::owned_by(
+            self.state.thread_id,
+            self.state.provider.api_auth_for_scope(ProviderAuthScope {
                 agent_identity_policy: self.agent_identity_policy,
                 session_source: self.state.session_source.clone(),
                 agent_identity_session_fallback: self.state.agent_identity_session_fallback.clone(),
-            })
-            .await?;
+            }),
+        )
+        .await?;
         // PF-27-S05: with a credential broker installed, `api_auth` signs for
         // it and the transport sends the request only to its socket.
         Ok(CurrentClientSetup {

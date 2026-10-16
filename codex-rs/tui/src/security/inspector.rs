@@ -676,11 +676,12 @@ fn runtime_rows(input: &InspectorInput, facts: &RuntimeFacts) -> Vec<Row> {
         )),
         match facts.model_broker {
             // Installed is not the same as healthy: the broker is not probed.
-            // #839: a model request it refused shows as degraded instead.
+            // #839, #878: a request it refused for this session (or outside
+            // any session) shows as degraded instead.
             ControlFacts::Enforcing => row(
                 "Model key broker",
                 State::Unobserved,
-                "installed; provider keys go through it; its health is not probed (a model request it refused because its provider URL cannot be brokered shows here)",
+                "installed; provider keys go through it; its health is not probed (a request it refused for this session or its agents, or outside a session, shows here)",
                 "installed: this process",
             ),
             // #391, D2: Moderate and Aggressive turn it on where the broker

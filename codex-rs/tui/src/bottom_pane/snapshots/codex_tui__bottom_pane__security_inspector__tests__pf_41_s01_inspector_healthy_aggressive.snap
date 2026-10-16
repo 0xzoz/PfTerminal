@@ -30,8 +30,8 @@ Runtime controls
   [on] Output gate: managed secrets and stored vault credentials are removed from output (values
       added from another terminal: from the next turn) [observed: this process]
   [unobserved] Model key broker: installed; provider keys go through it; its health is not probed (a
-      model request it refused because its provider URL cannot be brokered shows here) [installed:
-      this process]
+      request it refused for this session or its agents, or outside a session, shows here)
+      [installed: this process]
   [off] Network credential broker: off (isolated_credential_broker) [resolved: features]
   [on] Untrusted content: labelled; none in this session yet [observed: session]
   [set] Protected boundary: preflight clean at launch; earlier conversations are not resumed
