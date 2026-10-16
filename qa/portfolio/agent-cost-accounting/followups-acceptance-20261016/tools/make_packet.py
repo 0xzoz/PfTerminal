@@ -18,6 +18,9 @@ shutil.copy2(w2 / "design/answers-final.md", out / "answers.md")
 shutil.copytree(w2 / "design/packet/screens", out / "screens", dirs_exist_ok=True)
 executor_prompt = (w2 / "tools/executor-prompt.md").read_text()
 navigation = (w2 / "tools/navigation.md").read_text()
+import os
+if os.environ.get("NAV_NOTE"):
+    navigation += pathlib.Path(os.environ["NAV_NOTE"]).read_text()
 (out / "executor-prompt.md").write_text(executor_prompt)
 (out / "navigation.md").write_text(navigation)
 sha = {n: hashlib.sha256((out / n).read_bytes()).hexdigest() for n in ("design-cases.md", "amendments.md", "answers.md")}
