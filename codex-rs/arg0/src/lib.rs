@@ -192,8 +192,10 @@ fn prepare_path_env_var_with_aliases(
         Ok((path_entry, updated_path_env_var)) => (Some(path_entry), Some(updated_path_env_var)),
         Err(err) => {
             // Optional aliases can be denied in an otherwise usable protected
-            // home (#843). Keep the error visible without calling that a
-            // startup warning; unexpected failures still get the old warning.
+            // home (#843): EPERM/EACCES on macOS, EROFS under the Linux
+            // bubblewrap read-only mounts. Keep the error visible without
+            // calling that a startup warning; unexpected failures still get
+            // the old warning.
             eprintln!("{}", alias_setup_failure_message(&err));
             (None, package_path)
         }
@@ -201,7 +203,10 @@ fn prepare_path_env_var_with_aliases(
 }
 
 fn alias_setup_failure_message(error: &std::io::Error) -> String {
-    if error.kind() == std::io::ErrorKind::PermissionDenied {
+    if matches!(
+        error.kind(),
+        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+    ) {
         format!("note: temporary PATH aliases could not be created for this process: {error}")
     } else {
         format!("WARNING: proceeding, even though we could not create PATH aliases: {error}")
@@ -651,6 +656,35 @@ mod tests {
         assert_eq!(
             super::alias_setup_failure_message(&error),
             "note: temporary PATH aliases could not be created for this process: synthetic read-only profile"
+        );
+    }
+
+    #[test]
+    fn issue843_read_only_filesystem_alias_keeps_an_informational_diagnostic() {
+        let error = std::io::Error::new(
+            std::io::ErrorKind::ReadOnlyFilesystem,
+            "synthetic read-only mount",
+        );
+        assert_eq!(
+            super::alias_setup_failure_message(&error),
+            "note: temporary PATH aliases could not be created for this process: synthetic read-only mount"
+        );
+    }
+
+    /// The Linux bubblewrap sandbox mounts the home read-only, so creating the
+    /// alias directory fails with the real EROFS errno, not a synthetic kind.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn issue843_linux_erofs_errno_is_informational() {
+        const EROFS: i32 = 30;
+        let error = std::io::Error::from_raw_os_error(EROFS);
+        assert_eq!(error.kind(), std::io::ErrorKind::ReadOnlyFilesystem);
+        assert!(
+            super::alias_setup_failure_message(&error).starts_with(
+                "note: temporary PATH aliases could not be created for this process: "
+            ),
+            "{}",
+            super::alias_setup_failure_message(&error)
         );
     }
 
