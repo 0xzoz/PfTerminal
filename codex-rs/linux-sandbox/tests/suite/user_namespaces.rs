@@ -168,7 +168,7 @@ fn seen(output: &ExecToolCallOutput, marker: &str) -> (bool, bool) {
 
 /// `unshare -Ur cat` of a denied file (bubblewrap's unreadable placeholder,
 /// which root in a namespace of its own can open: the evidence nested-launch
-/// detection relies on) and `unshare -Urm` mounting over it: refused with
+/// detection relies on) and `unshare -Urm` mounting over its folder: refused with
 /// `EPERM` wherever the entry is, with and without network. Without it
 /// (Permissive) the namespace is created as before; where the host allows a
 /// nested one, the placeholder opens (the hole #826 closes).
@@ -179,8 +179,12 @@ async fn issue_826_denied_user_namespaces_keep_hidden_files_hidden() {
     };
     let denied = fixture.denied.to_string_lossy().into_owned();
     let read = sh(&format!("unshare -Ur cat {denied} && echo OPENED-826"));
+    // Mounting over the folder that holds it (as over a Corbanu home's
+    // runtime folder).
+    let folder = fixture.dir.path().canonicalize().unwrap();
     let mount = sh(&format!(
-        "unshare -Urm sh -c 'mount --bind /etc/hostname {denied} && cat {denied} && echo MOUNTED-826'"
+        "unshare -Urm sh -c 'mount -t tmpfs none {} && echo MOUNTED-826'",
+        folder.display()
     ));
     let mut wrong = Vec::new();
     for network in [

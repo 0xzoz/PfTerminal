@@ -1674,6 +1674,37 @@ mod tests {
         }
     }
 
+    /// #826: the rule joins a sandboxed profile once and changes nothing
+    /// else; a profile without Corbanu's sandbox cannot carry it.
+    #[test]
+    fn issue_826_user_namespace_rule_joins_sandboxed_profiles_only() {
+        use codex_protocol::models::PermissionProfile;
+        use codex_protocol::permissions::NetworkSandboxPolicy;
+        let workspace = PermissionProfile::workspace_write_with(
+            &[],
+            NetworkSandboxPolicy::Restricted,
+            /*exclude_tmpdir_env_var*/ true,
+            /*exclude_slash_tmp*/ true,
+        );
+        let denied = deny_user_namespaces(&workspace);
+        let (policy, network) = denied.to_runtime_permissions();
+        let (before, before_network) = workspace.to_runtime_permissions();
+        assert!(policy.denies_user_namespaces());
+        assert!(!before.denies_user_namespaces());
+        assert_eq!(network, before_network);
+        assert_eq!(denied.enforcement(), workspace.enforcement());
+        assert_eq!(policy.entries.len(), before.entries.len() + 1);
+        assert_eq!(deny_user_namespaces(&denied), denied);
+        for profile in [
+            PermissionProfile::Disabled,
+            PermissionProfile::External {
+                network: NetworkSandboxPolicy::Restricted,
+            },
+        ] {
+            assert_eq!(deny_user_namespaces(&profile), profile);
+        }
+    }
+
     fn denied_output(text: &str) -> ExecToolCallOutput {
         output_with_streams("", text)
     }

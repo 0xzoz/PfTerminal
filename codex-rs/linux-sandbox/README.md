@@ -90,6 +90,12 @@ commands that would enter the bubblewrap path.
   endpoints.
 - In managed proxy mode, after the bridge is live, seccomp blocks new
   AF_UNIX/socketpair creation for the user command.
+- When the policy carries a `:user_namespaces` deny entry (Corbanu adds it
+  under the Moderate and Aggressive security levels, #826), seccomp makes
+  `unshare`/`clone` with `CLONE_NEWUSER` fail with `EPERM` and `clone3` with
+  `ENOSYS` (libraries fall back to `clone`), and the command's environment
+  carries `CODEX_SANDBOX_USER_NAMESPACES_DENIED=1`; a helper started there
+  that cannot create the namespace bubblewrap needs says so and exits 1.
 - When bubblewrap is active, it mounts a fresh `/proc` via `--proc /proc` by default, but
   you can skip this in restrictive container environments with `--no-proc`.
 
