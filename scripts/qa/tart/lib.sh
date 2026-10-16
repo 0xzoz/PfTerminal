@@ -22,10 +22,24 @@ die() { log "ERROR: $*"; exit 1; }
 now() { python3 -c 'import time; print(f"{time.time():.3f}")'; }
 
 # Running macOS guests on this host. macOS allows two at once, shared by every tool (UTM, Tart, ...).
-# Tart VMs running anywhere on the host (`tart run` processes, whatever their TART_HOME).
-running_tart_vms() { pgrep -f 'tart\.app/Contents/MacOS/tart run' | grep -c . || true; }
-running_utm_vms() { # informational only; guard_slot counts VM processes
+count_procs() { # ERE -> number of matching processes; fails closed (no number) if pgrep itself errors
+  local out rc=0
+  out="$(pgrep -f "$1")" || rc=$?
+  [ "$rc" -le 1 ] || die "pgrep failed ($rc)"
+  if [ -n "$out" ]; then grep -c . <<< "$out"; else echo 0; fi
+}
+# Tart VMs running on the host: `tart run` processes however tart was started (bundle path, PATH,
+# Homebrew wrapper; any TART_HOME), or this TART_HOME's own list if that says more.
+running_tart_vms() {
+  local procs listed
+  procs="$(count_procs '(^|/)tart run( |$)')"
+  listed="$("$TART" list --source local --format json |
+    python3 -c 'import json,sys; print(sum(1 for v in json.load(sys.stdin) if v.get("Running") or v.get("State") == "running"))')"
+  echo $((procs > listed ? procs : listed))
+}
+running_utm_vms() { # informational only (guard_slot counts VM processes); never launches UTM
   local out
+  pgrep -x UTM > /dev/null || { echo 0; return 0; }
   out="$("$UTMCTL" list 2> /dev/null)" || { echo "?"; return 0; }
   awk 'NR > 1 && $2 == "started"' <<< "$out" | grep -c . || true
 }
@@ -36,7 +50,7 @@ running_utm_vms() { # informational only; guard_slot counts VM processes
 guard_slot() {
   local tart_running total
   tart_running="$(running_tart_vms)"
-  total="$(vm_pids | grep -c . || true)"
+  total="$(count_procs com.apple.Virtualization.VirtualMachine)"
   [ "$tart_running" = 0 ] || die "a Tart VM is already running; these scripts run one at a time"
   [ "$total" -lt 2 ] || die "$total guests already running (UTM: $(running_utm_vms)); no free macOS slot"
   log "slot ok (guests running: $total; UTM: $(running_utm_vms); Tart: $tart_running)"

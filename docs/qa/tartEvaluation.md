@@ -67,7 +67,9 @@ The 3-run median comes from the final base. Eleven earlier cycles on the two ear
 gave the same picture (totals 27.6 to 50.1 s; the slow ones while other workers loaded the host).
 One more cycle's model turn failed: its vault lookup failed while the host's Corbanu was being
 reinstalled mid-run. `cycle.sh` now works from a private copy of the binary and retries the turn.
-Raw rows: [qa/tart-evaluation-20261016/cycles/](../../qa/tart-evaluation-20261016/README.md).
+Raw rows: [qa/tart-evaluation-20261016/cycles/](../../qa/tart-evaluation-20261016/README.md). The
+recorded runs used the scripts as first committed; the review fixes since then (listed in that
+README) are small and were checked separately where they matter.
 
 ## Fidelity
 
