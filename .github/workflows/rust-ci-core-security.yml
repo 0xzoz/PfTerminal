@@ -18,8 +18,10 @@ name: rust-ci core security tests
 # `issue_584`, `issue_620_622`, `issue_736_740`, `issue_747`, `issue_748`).
 # No other job runs them on macOS; on Linux only postmerge rust-ci-full's
 # whole suite did, so a Linux-only break showed up on main. macOS runs them
-# in both TMPDIR steps (its runner TMPDIR is under the `/var` link); Linux
-# has no such link and runs them once. About 20-30 s per step.
+# in both TMPDIR steps (`/var` and `/tmp` are links there). Linux runs them
+# once: this job leaves TMPDIR unset, so `/tmp` is already the default.
+# `issue_506` (and the keychain cases) are macOS-only, so Linux runs 13
+# tests, macOS 18. About 15-30 s per step.
 on:
   workflow_call:
     inputs:
