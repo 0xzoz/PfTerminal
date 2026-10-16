@@ -2180,10 +2180,19 @@ fn issue_885_review_3_routes() {
             "sed '1a ./p.sh' f | sort --co=./r.sh; bash present.sh",
             unseen,
         ),
-        // Round 5: a substitution in single quotes in a double-quoted
-        // `${...}` runs, behind a decoy for the count check.
+        // Rounds 5 and 6: a substitution in single quotes in a `${...}`
+        // that is double-quoted or in arithmetic runs, behind a decoy for
+        // the count check.
         (
             "echo \"$(case x in a) sed -n p f;; esac)\" \"${x:-'$(sed 1e\\ id f)'}\"",
+            unseen,
+        ),
+        (
+            "echo \"$(case x in a) sed -n p f;; esac)\" $(( ${x:-'$(sed 1e\\ id f)'} ))",
+            unseen,
+        ),
+        (
+            "echo \"$(case x in a) sed -n p f;; esac)\" $[ ${x:-'$(sed 1e\\ id f)'} ]",
             unseen,
         ),
         // Still quiet: filters that only print, a comment without code.

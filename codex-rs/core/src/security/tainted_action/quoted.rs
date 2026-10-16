@@ -549,14 +549,15 @@ impl Reader<'_> {
                         }
                         // Even inside double quotes (`"${x:-'}'}"`), where
                         // a substitution in it still runs
-                        // (`"${x:-'$(cmd)'}"`): not read here, so unsure.
+                        // (`"${x:-'$(cmd)'}"`), as in arithmetic
+                        // (`$(( ${x:-'$(cmd)'} ))`) and zsh subscripts: not
+                        // read here, so unsure wherever the `${...}` is.
                         '\'' => {
                             at += 1;
                             while at < chars.len() && chars[at] != '\'' {
-                                if in_double
-                                    && (chars[at] == '`'
-                                        || (chars[at] == '$'
-                                            && matches!(chars.get(at + 1), Some('(' | '{'))))
+                                if chars[at] == '`'
+                                    || (chars[at] == '$'
+                                        && matches!(chars.get(at + 1), Some('(' | '{')))
                                 {
                                     self.unsure = true;
                                 }
@@ -861,6 +862,8 @@ mod tests {
             "echo \"$(echo case)\"",
             "echo \"${x:-'$(sed 1e\\ id f)'}\"",
             "echo \"${x:-'`sed 1e\\ id f`'}\"",
+            "echo $(( ${x:-'$(sed 1e\\ id f)'} )) $[ ${x:-'${y}'} ]",
+            "echo ${a[${y:-'$(sed 1e\\ id f)'}]}",
             // A line break before `in` is valid, but not followed here.
             "echo \"$(case x\nin a) :;; esac)\"",
         ] {
@@ -869,7 +872,7 @@ mod tests {
         for sure in [
             "echo \"$(if case x in a) true;; esac; then :; fi)\"",
             "echo case; case x { a) :;; }",
-            "echo \"${x:-'$HOME'}\" ${x:-'$(a)'}",
+            "echo \"${x:-'$HOME'}\" ${x:-'a'}",
         ] {
             assert!(!commands(sure).unsure, "{sure:?}");
         }
