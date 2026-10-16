@@ -22,19 +22,22 @@ die() { log "ERROR: $*"; exit 1; }
 now() { python3 -c 'import time; print(f"{time.time():.3f}")'; }
 
 # Running macOS guests on this host. macOS allows two at once, shared by every tool (UTM, Tart, ...).
-count_procs() { # ERE -> number of matching processes; fails closed (no number) if pgrep itself errors
+count_procs() { # ERE -> number of matching processes; exits non-zero with no number if pgrep errors
   local out rc=0
   out="$(pgrep -f "$1")" || rc=$?
   [ "$rc" -le 1 ] || die "pgrep failed ($rc)"
   if [ -n "$out" ]; then grep -c . <<< "$out"; else echo 0; fi
 }
 # Tart VMs running on the host: `tart run` processes however tart was started (bundle path, PATH,
-# Homebrew wrapper; any TART_HOME), or this TART_HOME's own list if that says more.
+# Homebrew wrapper; any TART_HOME), or this TART_HOME's own list if that says more. Prints "?" when
+# the process count is unknown, which guard_slot treats as "running".
 running_tart_vms() {
   local procs listed
-  procs="$(count_procs '(^|/)tart run( |$)')"
-  listed="$("$TART" list --source local --format json |
-    python3 -c 'import json,sys; print(sum(1 for v in json.load(sys.stdin) if v.get("Running") or v.get("State") == "running"))')"
+  procs="$(count_procs '(^|/)tart run( |$)')" || procs=""
+  listed="$("$TART" list --source local --format json 2> /dev/null |
+    python3 -c 'import json,sys; print(sum(1 for v in json.load(sys.stdin) if v.get("Running") or v.get("State") == "running"))' 2> /dev/null)" ||
+    { log "tart list failed; using the process count only"; listed=0; }
+  case "$procs" in '' | *[!0-9]*) echo "?"; return 0 ;; esac
   echo $((procs > listed ? procs : listed))
 }
 running_utm_vms() { # informational only (guard_slot counts VM processes); never launches UTM
@@ -92,5 +95,5 @@ stop_vm() { # NAME [TIMEOUT]: shutdown request, power-off after TIMEOUT seconds;
   fi
 }
 
-# PIDs of Virtualization.framework VM processes (one per running guest, UTM's included).
-vm_pids() { pgrep -f com.apple.Virtualization.VirtualMachine | sort; }
+# PIDs of Virtualization.framework VM processes (one per running guest, UTM's included); empty if none.
+vm_pids() { { pgrep -f com.apple.Virtualization.VirtualMachine || [ $? -eq 1 ]; } | sort; }

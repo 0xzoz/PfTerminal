@@ -26,7 +26,9 @@ TART_HOME `/Volumes/CorbanuDrive/Corbanu/.codex-work/tart-home`; one Tart VM at 
   "key file deleted" wording (`erase.txt` still says "erased"). `guard-check.txt`: the final
   `guard_slot` refusing a second Tart VM while one runs, with `TART` as the bundle path and as plain
   `tart` on PATH (UTM "macOS 3" up as well). Not run in any record: the moved prep-VM trap and the
-  `utmctl` failure branch (log text only).
+  `utmctl` failure branch (log text only). Every recorded run had UTM "macOS 3" up; before round 4,
+  `cycle.sh` stopped right after cloning on a host with no other guest running (fixed in `vm_pids`;
+  the stand-in `pgrep` checks are at the end of `guard-check.txt`).
 - `fidelity.txt`: `fidelity.sh` on the final base; `fidelity-final-base-boot1.txt`: an earlier boot of
   the same base. `fidelity-ssh-fda-off.txt`: the same checks on a base built without Full Disk Access
   for SSH. In the two older files the throwaway keychain password is replaced by `<throwaway>`.
