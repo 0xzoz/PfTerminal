@@ -31,6 +31,8 @@
 
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use codex_protocol::models::PermissionProfile;
@@ -62,6 +64,30 @@ const DENIAL_MARKERS: [&str; 3] = [
 
 /// How long the path lookups may take before no explanation is given.
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// #902: the bound in a test process that asks for it (see
+/// [`unhurried_lookups_for_tests`]).
+const TEST_LOOKUP_TIMEOUT: Duration = Duration::from_secs(20);
+
+static UNHURRIED_LOOKUPS: AtomicBool = AtomicBool::new(false);
+
+/// #902: test harnesses call this so the path lookups get
+/// [`TEST_LOOKUP_TIMEOUT`] instead of [`LOOKUP_TIMEOUT`]. Each lookup does
+/// many filesystem calls; on a loaded machine (many test processes, a slow
+/// disk) they took over 2 seconds, so the explanation and the withheld grant
+/// offer the tests check went missing. Process-wide and in memory only; what
+/// a lookup finds is unchanged. Production code must not call it.
+pub(crate) fn unhurried_lookups_for_tests(enabled: bool) {
+    UNHURRIED_LOOKUPS.store(enabled, Ordering::Relaxed);
+}
+
+pub(crate) fn lookup_timeout() -> Duration {
+    if UNHURRIED_LOOKUPS.load(Ordering::Relaxed) {
+        TEST_LOOKUP_TIMEOUT
+    } else {
+        LOOKUP_TIMEOUT
+    }
+}
 
 /// The explanation shown when `path` could not be accessed.
 pub(crate) fn explanation(path: &str) -> String {
@@ -510,7 +536,7 @@ const MAX_LINK_HOPS: usize = 8;
 async fn off_thread<T: Send + 'static>(
     work: impl FnOnce() -> Option<T> + Send + 'static,
 ) -> Option<T> {
-    tokio::time::timeout(LOOKUP_TIMEOUT, tokio::task::spawn_blocking(work))
+    tokio::time::timeout(lookup_timeout(), tokio::task::spawn_blocking(work))
         .await
         .ok()?
         .ok()?

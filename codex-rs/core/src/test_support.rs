@@ -67,6 +67,19 @@ pub fn ignore_user_home_skills(ignore: bool) {
     codex_core_skills::loader::ignore_user_home_skills_for_tests(ignore);
 }
 
+/// #902: the security level's path lookups in this process (which explain
+/// denials and withhold grant offers that could not apply) get a longer
+/// bound, so a loaded machine does not make them give up. What they find is
+/// unchanged.
+pub fn unhurried_security_lookups(enabled: bool) {
+    crate::security::protected_reads::unhurried_lookups_for_tests(enabled);
+}
+
+/// #902: the bound those lookups get in this process.
+pub fn security_lookup_timeout() -> std::time::Duration {
+    crate::security::protected_reads::lookup_timeout()
+}
+
 /// #744: the latest Aggressive link check (#623) refusals in this process,
 /// each with the check that made it, for a test to report when it fails.
 pub fn recent_link_check_refusals() -> Vec<String> {
