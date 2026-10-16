@@ -106,16 +106,21 @@ The kill switch (`/security` → `g`) works under every level.
   hooks folder are left alone (git runs hooks, it doesn't write through
   them). Until you remove what it found, and while it can't look at all of
   `.git` (a folder it can't read, or too many entries), approving a command
-  in that project doesn't lift the protected-file rules, in any session of
-  this Corbanu Terminal; a layout made of links (`git new-workdir`, Android's
-  `repo`) holds them too. It doesn't watch in between: a process a command
+  in that project doesn't lift the protected-file rules (nor run it outside
+  the sandbox), in any session of this Corbanu Terminal. Some setups of your
+  own hold them too until you remove them: a layout made of links
+  (`git new-workdir`, Android's `repo`), a `config.worktree` that
+  `git sparse-checkout` adds, or a hooks folder a hook installer creates
+  where there was none. It doesn't watch in between: a process a command
   left running can change `.git` after the last look, even while an approved
   command runs, and what it changes after a turn ends is found at the next
   command, not before you run git yourself. It watches the repositories of
   the folders agent commands run in: not a repository a command reaches
   elsewhere (`git -C`), and not one a command creates and fills in one go
   (nothing was there to compare with). New config and hooks are checked only
-  in a repository's own git folder, not in its worktrees' or submodules'.
+  in a repository's own git folder, not in its worktrees' or submodules'. A
+  session that works in more than 16 repositories forgets the oldest; its
+  next look there reports only links, steps and hard links.
 - MCP servers, apps, hooks and `!` shell commands run outside the sandbox, as
   under every level.
 - On Linux, where a command you approve can write a Corbanu home's folder
