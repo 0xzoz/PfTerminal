@@ -26,18 +26,20 @@ running_tart_vms() {
   "$TART" list --source local --format json |
     python3 -c 'import json,sys; print(sum(1 for v in json.load(sys.stdin) if v.get("Running") or v.get("State") == "running"))'
 }
-running_utm_vms() {
-  if [ -x "$UTMCTL" ]; then "$UTMCTL" list 2>/dev/null | awk 'NR > 1 && $2 == "started"' | wc -l | tr -d ' '; else echo 0; fi
+running_utm_vms() { # informational only; guard_slot counts VM processes
+  { [ -x "$UTMCTL" ] && "$UTMCTL" list 2> /dev/null | awk 'NR > 1 && $2 == "started"' | wc -l | tr -d ' '; } || echo "?"
 }
 
-# Refuse to start a VM unless it would be the only Tart VM and a macOS slot is free. Never touches other VMs.
+# Refuse to start a VM unless it would be the only Tart VM and a macOS slot is free. Never touches other
+# VMs. The total counts every Virtualization.framework guest process on the host (UTM's, and Tart VMs of
+# any TART_HOME), so a failing `utmctl` or another Tart home can't hide a running guest.
 guard_slot() {
-  local tart_running utm_running
+  local tart_running total
   tart_running="$(running_tart_vms)"
-  utm_running="$(running_utm_vms)"
+  total="$(vm_pids | grep -c . || true)"
   [ "$tart_running" = 0 ] || die "a Tart VM is already running; these scripts run one at a time"
-  [ $((tart_running + utm_running)) -lt 2 ] || die "two macOS guests already running (UTM: $utm_running); no free slot"
-  log "slot ok (UTM running: $utm_running, Tart running: $tart_running)"
+  [ "$total" -lt 2 ] || die "$total guests already running (UTM: $(running_utm_vms)); no free macOS slot"
+  log "slot ok (guests running: $total; UTM: $(running_utm_vms); Tart here: $tart_running)"
 }
 
 SSH_OPTS=(-i "$TART_QA_KEY" -o IdentitiesOnly=yes -o UserKnownHostsFile="$TART_QA_KNOWN_HOSTS"
@@ -70,7 +72,8 @@ stop_vm() { # NAME [TIMEOUT]: shutdown request, power-off after TIMEOUT seconds;
   "$TART" stop --timeout "${2:-30}" "$name" > /dev/null 2>&1 || true
   if [ -f "$LOGS/$name.pid" ]; then
     pid="$(cat "$LOGS/$name.pid")"
-    while kill -0 "$pid" 2> /dev/null; do sleep 0.5; done
+    for _ in $(seq 1 120); do kill -0 "$pid" 2> /dev/null || break; sleep 0.5; done
+    kill -0 "$pid" 2> /dev/null && { log "tart run $pid still up after 60 s; killing it"; kill -9 "$pid" 2> /dev/null || true; }
     rm "$LOGS/$name.pid"
   fi
 }

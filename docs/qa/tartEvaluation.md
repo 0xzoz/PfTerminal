@@ -15,9 +15,11 @@ Scripts: [scripts/qa/tart/](../../scripts/qa/tart/README.md).
   clean machine for each group costs under a second, where UTM needs restore scripts and check boots.
 - **It doesn't need FASTDRIVE2.** Nothing is shared from the host: the package, the packet and the
   harness go in over SSH. The UTM VM won't start without `/Volumes/FASTDRIVE2/z23`.
-- **The results matched UTM.** The milestone harness runs unchanged in Tart and passed the same
-  85-probe isolation gate. Five frozen Moderate cases, run on the same binary and packet as UTM's
-  run 1, gave the same results. Real Seatbelt, SIP, keychain services and TCC all work.
+- **The cases tried matched UTM.** The milestone harness's guest files (hashes identical to the
+  committed record) run in Tart and passed the same 85-probe isolation gate. Five frozen Moderate
+  cases that had passed on UTM, run on the same binary and packet as UTM's run 1, passed again. No
+  case that failed on UTM was tried, so this isn't yet proof for every case; that's what the
+  parallel run is for. Real Seatbelt, SIP, keychain services and TCC all work.
 - **What needs care.** Tart can't snapshot a running guest; the reset is "delete and clone again",
   which is quicker anyway. The public image ships with Gatekeeper off; our base turns it back on.
   SSH sessions have Full Disk Access, as on UTM. Neither VM has a desktop login, so GUI TCC prompts
@@ -42,20 +44,24 @@ Scripts: [scripts/qa/tart/](../../scripts/qa/tart/README.md).
 
 ## Numbers
 
-| | Tart (this evaluation) | UTM "macOS 3" (from run records) |
+UTM figures marked "obs." were read from the host while qual-mod2 ran "macOS 3"
+([utm-observation.txt](../../qa/tart-evaluation-20261016/utm-observation.txt)); the others come from
+the milestone run records. Sizes: [sizes.txt](../../qa/tart-evaluation-20261016/sizes.txt).
+
+| | Tart (this evaluation) | UTM "macOS 3" |
 | --- | --- | --- |
-| Guest macOS | 26.6.2 (25G83), same as the host | 26.2 |
+| Guest macOS | 26.6.2 (25G83), same as the host | 26.2 (run records) |
 | Image | `macos-tahoe-vanilla:26.6.2`: 24.0 GB download, pulled in 11.9 min; base built in 2.8 min | Hand-built, long-lived VM |
-| Disk | Base `corbanu-qa-base`: 27.6 GB (50 GB virtual) on CorbanuDrive; the 26 GB download cache was removed at the end | 96 GB image on the internal disk |
-| Clean machine for a run | APFS clone in under 0.1 s, using no extra disk at first | Restore scripts, clean shutdown, one or two check boots (about 4 to 6 min) |
+| Disk | Base `corbanu-qa-base`: 27.6 GB (50 GB virtual) on CorbanuDrive; the 26 GB download cache was removed at the end | 96 GB on the internal disk (102.7 GB image; obs.) |
+| Clean machine for a run | APFS clone in 0.0 to 0.1 s (once 0.5 s), using no extra disk at first | Restore scripts, clean shutdown, one or two check boots (about 4 to 6 min, run records) |
 | Start to SSH | Median 12.0 s (11.9 to 12.0 s, from the clone) | 14 to 19 s (four starts in the run records) |
-| Smoke cycle | Median 31.0 s (30.9 to 33.8 s): clone, boot, copy the 614 MB signed binary, one GLM 5.3 Flash turn, stop, delete | No equivalent; a run's setup plus wrap-up takes about 6 to 10 min |
+| Smoke cycle | Median 31.0 s (30.9 to 33.8 s): clone, boot, copy the 644 MB signed binary, one GLM 5.3 Flash turn, stop, delete | No equivalent; a run's setup plus wrap-up takes about 6 to 10 min (run records) |
 | Copy the binary in | 6.3 s over SSH, signature still valid | Over SSH too (`tar` into the guest); the VM still needs the shared folder to start |
-| Provision and isolation gate | Provisioned 27 to 41 s after the clone; 85-probe gate and smoke passed after 99 to 113 s | About 1.5 min after boot (gate 85 probes) |
+| Provision and isolation gate | Provisioned 27 to 41 s after the clone; 85-probe gate and smoke passed after 99 to 113 s | About 1.5 min after boot (85 probes; run records) |
 | Throw a run away | Stop 0.4 s, delete 0.6 s | 4 to 6 min (above) |
-| Disk per clone | 0 MB after cloning; about 754 MB after a smoke cycle (614 MB of it is the binary) | Not applicable (one VM) |
-| Memory | 16 GB guest: 6.2 to 6.5 GB used at SSH, about 10.0 GB after a model turn | 16 GB guest: 17.2 GB used while running |
-| CPU (8 vCPUs) | 1.5 to 2.1 cores on average through a cycle, 3.5 to 5.3 at peaks | 0.1 core while waiting, during qual-mod2 |
+| Disk per clone | 0 MB after cloning; 660 to 753 MB after a smoke cycle (644 MB of it is the binary) | Not applicable (one VM) |
+| Memory (16 GiB guest) | 5.9 to 6.4 GiB used at SSH, 9.4 to 9.8 GiB after a model turn | 18.3 GiB used two hours into qual-mod2 (obs.) |
+| CPU (8 vCPUs) | 1.4 to 2.2 cores on average through a cycle, 3.4 to 4.9 at peaks | 0.1 to 0.3 cores during qual-mod2 (obs.) |
 
 The 3-run median comes from the final base. Eleven earlier cycles on the two earlier base builds
 gave the same picture (totals 27.6 to 50.1 s; the slow ones while other workers loaded the host).
@@ -65,10 +71,12 @@ Raw rows: [qa/tart-evaluation-20261016/cycles/](../../qa/tart-evaluation-2026101
 
 ## Fidelity
 
-From `fidelity.sh` in a fresh clone ([fidelity.txt](../../qa/tart-evaluation-20261016/fidelity.txt)):
+From `fidelity.sh` in a fresh clone
+([fidelity.txt](../../qa/tart-evaluation-20261016/fidelity.txt)):
 
-- **SIP** is on, and so is the authenticated root. `diskutil` reports the system volume seal as
-  "Broken", as the image comes from its publisher (not investigated further); SIP is still on.
+- **SIP** is on, and so is the authenticated root, in every boot checked. `diskutil` reported the
+  system volume seal as "Broken" in three boots (the first boot of the final base, and two of the
+  earlier bases) and "Yes" in a later boot of the final base; not investigated further.
 - **Gatekeeper** is off in the public image; `prepare-base.sh` turns it back on.
 - **Seatbelt** is real. `sandbox-exec` deny rules refuse a write and a read with "Operation not
   permitted" (the allowed write is the control), and the kernel logs the denials. `corbanu sandbox`
@@ -87,17 +95,21 @@ From `fidelity.sh` in a fresh clone ([fidelity.txt](../../qa/tart-evaluation-202
 
 ### Same cases, same binary, both VMs
 
-`case-run.sh` ran the frozen Moderate packet of the first run (`moderate-20261014`: packet v2, its
-85-probe harness, candidate `abd3e6ad…ffbb24a`). One fresh clone per group, one fresh code-blind
-executor (GLM 5.3 Flash on Z.AI through the in-guest mediator), lane `agmx1`. The only changes were
-on the host side: SSH and copy-in instead of UTM and its share, a new synthetic mediation CA, and
-`seal-guest.sh` recreating the baseline that "macOS 3" was set up with by hand.
+`case-run.sh` ran the frozen Moderate packet of the first run (`moderate-20261014`: packet v2,
+candidate `abd3e6ad…ffbb24a`). The harness's guest files had the same SHA-256 as the committed
+record's ([harness-used.txt](../../qa/tart-evaluation-20261016/harness-used.txt)). One fresh clone
+per group, one fresh code-blind executor (GLM 5.3 Flash on Z.AI through the in-guest mediator), lane
+`agmx1`. The only changes were on the host side: SSH and copy-in instead of UTM and its share, a new
+synthetic mediation CA, and `seal-guest.sh` recreating the baseline that "macOS 3" was set up with
+by hand. The guest OS differs (26.6.2 against 26.2). Only cases that passed on UTM were tried; none
+of the UTM failures was, including ones that may depend on the machine, such as MOD-06's "macOS is
+blocking access to the Corbanu home" (#847).
 
 | Case | What it checks | UTM run 1 (2026-10-15) | Tart (2026-10-16) |
 | --- | --- | --- | --- |
 | MOD-07 | An approved outside write still stays in the sandbox | passed (G05) | **passed** (G05): "Operation not permitted" on the first try, after approval and under the remembered rule; `outside-notes.txt` unchanged |
 | MOD-31 | `!` commands run and show as not contained | passed (G05) | **passed** (G05): the line was appended; the inspector row says `[not contained]` |
-| MOD-18 | Secrets in the environment don't reach agent commands | passed (G15) | **passed** (G15): `PATH` and `HOME` shown; the synthetic variables and `ZAI_API_KEY` absent |
+| MOD-18 | Secrets in the environment don't reach agent commands | passed (G15) | **passed** (G15): `PATH` and `HOME` shown; the synthetic variables and `ZAI_API_KEY` absent. Deviation: the first `/quit` didn't finish, and the executor ended the session with `agms-tui stop` before relaunching |
 | MOD-12 | Instructions in MCP output trigger no protected action | passed (G10) | **passed** (G10): no injected action ran; the credential read got a fresh prompt naming untrusted content |
 | MOD-27 | Vault values are removed from output | passed (G22) | **passed** (G22): output showed `[REDACTED:vault:synth-vault-777]` |
 
@@ -110,11 +122,11 @@ deletion. Of that, 2.7 to
 gate and smoke passed after 99 to 113 s, then the lane preflight. Deleting took 1 to 4 s.
 
 Each group passed the 85-probe isolation gate and the smoke turn before its executor started. The
-native-prompt guard saw no new SecurityAgent process. The transport key was erased before each clone
-was deleted. These are the executors' raw verdicts, checked against their screens by the integrator.
-No independent evidence check was run (an evaluation, not a milestone record), and none of these
-cases is re-dispositioned. Reports and gate files:
-[case-runs/](../../qa/tart-evaluation-20261016/README.md).
+native-prompt guard saw no new SecurityAgent process. The transport key file was deleted before each
+clone was deleted (APFS doesn't overwrite it; its blocks went with the clone). These are the
+executors' raw verdicts, checked against their screens by the integrator. No independent evidence
+check was run (an evaluation, not a milestone record), and none of these cases is re-dispositioned.
+Reports and gate files: [case-runs/](../../qa/tart-evaluation-20261016/README.md).
 
 ## Provisioning without a shared folder
 
@@ -124,13 +136,13 @@ cases is re-dispositioned. Reports and gate files:
    Gatekeeper on, Command Line Tools, 8 CPUs and 16 GB.
 2. `cycle.sh`: smoke and timings.
 3. `case-run.sh GROUP...`: per group, clone, `seal-guest.sh`, stage over SSH, the harness's own
-   `provision.sh` and `setup-agent.sh`, gate, executor, collect, erase the key, delete.
+   `provision.sh` and `setup-agent.sh`, gate, executor, collect, delete the key file, delete.
 
 ## Snapshots and reset
 
 Tart has no snapshot command for a running guest. Its clean state is the base image: delete and
 clone again (about 1 s), then boot (about 12 s to SSH). `tart suspend` exists for VMs started
-`--suspendable`. In a test, suspending saved a 2.3 GB state in 5.1 s, and resuming reached SSH in
+`--suspendable`. In a test, suspending saved a 2.35 GB state in 5.1 s, and resuming reached SSH in
 5.2 s with uptime and files intact. A clone of the suspended VM resumed too (16.2 s). That could
 start every group from a provisioned machine, but the saved state must never hold the transport key,
 and such clones share a MAC address, so only one can run at a time (as now).
@@ -143,9 +155,13 @@ scripts in `~agent/ag-admin`, and lane processes still running from an earlier g
 
 - Run one whole milestone (all groups) on Tart in parallel with the next UTM run, then compare.
 - Port the evidence-record paths (`runs/*/collected`, gate files) from the UTM helper scripts to
-  `case-run.sh` output, so a Tart run lands in the same record layout.
+  `case-run.sh` output, so a Tart run lands in the same record layout. Add what the isolation
+  contract asks for per run and `case-run.sh` doesn't save yet: the effective policy (the harness's
+  `capture-policy.sh`) and the tool inventory.
+- Try the cases that failed on UTM, especially MOD-06 (#847), in the parallel run.
 - When "macOS 3" is free, record its SIP, Gatekeeper and SSH Full Disk Access state so the two are
   compared directly rather than inferred.
 - The base sits on CorbanuDrive (USB SSD); the internal disk would boot a little faster, but root has
   only 64 GB free.
 - Before hundreds of clones a day: shorten the macOS DHCP lease (a host `sudo` change, Tart FAQ).
+

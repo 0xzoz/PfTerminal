@@ -7,12 +7,13 @@ Findings and the recommendation: [docs/qa/tartEvaluation.md](../../../docs/qa/ta
 ## Rules these scripts enforce
 
 - One Tart VM at a time, and never a third macOS guest: `guard_slot` (in `lib.sh`) refuses to start
-  if a Tart VM is already running or two macOS guests (UTM included) are up. It never touches UTM.
+  if a Tart VM is already running or two Virtualization.framework guests (UTM's included, counted by
+  their VM processes) are up. It never touches UTM.
 - No host share is ever configured (`tart run` is called without `--dir`); the guest gets no
   clipboard or audio either.
 - The model key is read from the Corbanu vault at use time and piped over SSH. `cycle.sh` passes it
   into one command's environment only (never written to disk); `case-run.sh` writes it to the guest
-  coordinator's 0600 key file for the mediator and erases it before the clone is deleted.
+  coordinator's 0600 key file for the mediator and deletes that file before the clone is deleted.
 - Keychain checks use a throwaway keychain file with an explicit path; no login keychain is opened.
 
 ## Setup
@@ -30,10 +31,10 @@ scripts/qa/tart/prepare-base.sh        # once: pull the image, build the local b
 
 | Script | What it does |
 | --- | --- |
-| `prepare-base.sh [IMAGE]` | Pulls `macos-tahoe-vanilla:26.6.2` (default), pins its SSH host key, installs an SSH key, turns password SSH off, replaces the public default password with a random unkept one, turns auto-login off (login window, as on UTM "macOS 3"), turns Gatekeeper back on, installs the Command Line Tools, sets 8 CPUs / 16 GB, saves the base. |
+| `prepare-base.sh [IMAGE]` | On failure deletes its prep VM. Pulls `macos-tahoe-vanilla:26.6.2` (default), pins its SSH host key, installs an SSH key, turns password SSH off, replaces the public default password with a random unkept one, turns auto-login off (login window, as on UTM "macOS 3"), turns Gatekeeper back on, installs the Command Line Tools, sets 8 CPUs / 16 GB, saves the base. |
 | `cycle.sh [RUNS]` | Clone, boot, SSH, copy the signed `corbanu` in, one GLM 5.3 Flash turn on Z.AI ("Reply with exactly: SMOKE-OK"), stop, delete. Writes timings, VM memory/CPU and APFS clone cost to `$TART_QA_WORK/logs/cycle-results.jsonl`. |
 | `fidelity.sh` | In a fresh clone: SIP, Gatekeeper, Seatbelt (`sandbox-exec` and `corbanu sandbox`), keychain services (throwaway keychain), TCC, host shares, network. |
-| `case-run.sh GROUP...` | Frozen code-blind case groups, one fresh clone each: `seal-guest.sh`, then the UTM milestone harness's own guest files (`provision.sh`, `setup-agent.sh`, `agms-*`), isolation gate, executor, collect, key erase, delete. Inputs: `HARNESS`, `PACKAGE`, `PACKET` (see the script header). |
+| `case-run.sh GROUP...` | Frozen code-blind case groups, one fresh clone each: `seal-guest.sh`, then the UTM milestone harness's own guest files (`provision.sh`, `setup-agent.sh`, `agms-*`), isolation gate, executor, collect, key file deletion, clone deletion. Inputs: `HARNESS`, `PACKAGE`, `PACKET` (see the script header). |
 | `seal-guest.sh` | Root, inside a fresh clone: the sealed-guest baseline the harness expects (coordinator account `agent`, stand-in homes, pinned `api.z.ai`, pf allowing only host SSH, DHCP and Z.AI HTTPS, a loopback DNS responder that refuses everything). |
 | `apfs_private_size.py` | Bytes a clone holds on its own (`du` counts shared clone blocks). |
 

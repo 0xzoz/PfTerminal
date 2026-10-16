@@ -12,8 +12,8 @@
 #   TMUX_BIN (default: Corbanu's pinned tmux 3.7c) and its libevent_core-2.1.7.dylib.
 #
 # Per group: clone -> boot -> seal-guest.sh -> stage -> provision.sh (root) -> setup-agent.sh -> isolation
-# gate (probes + smoke on lane agmx0) -> preflight + fresh executor on lane agmx1 -> collect -> erase the
-# transport key -> delete. The model key is read from the vault at use time and written only to the
+# gate (probes + smoke on lane agmx0) -> preflight + fresh executor on lane agmx1 -> collect -> delete the
+# transport key file -> delete the clone. The model key is read from the vault at use time and written only to the
 # guest coordinator's 0600 key file, which the mediator reads; executors never see it.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -21,6 +21,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 . "$here/lib.sh"
 : "${HARNESS:?}" "${PACKAGE:?}" "${PACKET:?}"
 [ $# -ge 1 ] || die "usage: case-run.sh GROUP..."
+# Defaults are this Mac's pinned tmux and Homebrew libevent; set both elsewhere.
 TMUX_BIN="${TMUX_BIN:-/Volumes/CorbanuDrive/Corbanu/.codex-work/corbanu-terminal/tools/tmux-source/3.7c/bin/tmux}"
 LIBEVENT="${LIBEVENT:-/opt/homebrew/opt/libevent/lib/libevent_core-2.1.7.dylib}"
 LABEL="${TART_QA_ZAI_LABEL:-provider/zai_api_key}"
@@ -80,18 +81,19 @@ zai_key() {
 stamp() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$1" >> "$OUT/timeline.txt"; }
 
 CURRENT="" IP=""
-erase_and_delete() {
+delete_key_and_clone() {
   [ -n "$CURRENT" ] || return 0
   if [ -n "$IP" ]; then
-    gssh "$IP" 'sudo rm -P -f /Users/agent/.pf83-auth/zai_api_key; sudo test ! -e /Users/agent/.pf83-auth/zai_api_key && echo "transport key erased"' \
-      >> "$OUT/erase.txt" 2>&1 || echo "erase over SSH failed" >> "$OUT/erase.txt"
+    # Deleting the file (no secure overwrite on APFS); its blocks go with the clone, deleted next.
+    gssh "$IP" 'sudo rm -f /Users/agent/.pf83-auth/zai_api_key; sudo test ! -e /Users/agent/.pf83-auth/zai_api_key && echo "transport key file deleted"' \
+      >> "$OUT/erase.txt" 2>&1 || echo "key file deletion over SSH failed" >> "$OUT/erase.txt"
   fi
   stop_vm "$CURRENT" 10
   "$TART" delete "$CURRENT"
   stamp deleted
   CURRENT="" IP=""
 }
-trap erase_and_delete EXIT
+trap delete_key_and_clone EXIT
 
 run_group() {
   local group="$1" run lane=agmx1 gate
@@ -124,7 +126,7 @@ run_group() {
   stamp "gate $(grep -o '"ok": [a-z]*' "$OUT/gate.summary" | tail -1); smoke $(grep -c AGMS-SMOKE-OK "$OUT/gate-smoke.jsonl")"
   if ! grep -q '"ok": true' "$OUT/gate.summary" || ! grep -q AGMS-SMOKE-OK "$OUT/gate-smoke.jsonl"; then
     echo "isolation gate or smoke failed; group blocked" > "$OUT/BLOCKED"
-    erase_and_delete
+    delete_key_and_clone
     return 0
   fi
 
@@ -143,7 +145,7 @@ run_group() {
   gagent "$IP" 'cat ~/agms/mediator/mediator.jsonl' > "$OUT/mediator.jsonl" 2>&1 || true
   gagent "$IP" 'tail -1 ~/agms/guard.log; grep -c SECURITYAGENT-SEEN ~/agms/guard.log' > "$OUT/guard.txt" 2>&1 || true
   stamp collected
-  erase_and_delete
+  delete_key_and_clone
 }
 
 for group in "$@"; do run_group "$group"; done

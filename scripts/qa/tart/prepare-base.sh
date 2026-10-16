@@ -16,6 +16,8 @@ IMAGE="${1:-ghcr.io/cirruslabs/macos-tahoe-vanilla:26.6.2}"
 CPUS="${TART_QA_CPUS:-8}"
 MEMORY_MB="${TART_QA_MEMORY_MB:-16384}"
 PREP="$TART_QA_BASE-prep"
+FDA="${TART_QA_SSH_FDA:-on}"
+case "$FDA" in on | off) ;; *) die "TART_QA_SSH_FDA must be on or off" ;; esac
 
 "$TART" list --source local --format json | grep -q "\"Name\" *: *\"$TART_QA_BASE\"" &&
   die "$TART_QA_BASE already exists; delete it first to rebuild"
@@ -26,7 +28,8 @@ log "pulling $IMAGE (cached after the first pull)"
 "$TART" pull "$IMAGE"
 "$TART" clone "$IMAGE" "$PREP"
 "$TART" set "$PREP" --cpu "$CPUS" --memory "$MEMORY_MB"
-trap 'stop_vm "$PREP" 10' EXIT
+# On failure, stop and delete the prep VM: it may still accept the public default login.
+trap 'stop_vm "$PREP" 10; "$TART" delete "$PREP" 2> /dev/null || true' EXIT
 start_vm "$PREP"
 ip="$(wait_ip "$PREP" 300)"
 log "prep guest at $ip"
@@ -52,7 +55,7 @@ expect "KEY-INSTALLED" {} timeout { exit 1 }
 expect eof
 EXP
 
-gssh "$ip" 'bash -s' << 'GUEST'
+gssh "$ip" "TART_QA_SSH_FDA=$FDA bash -s" << 'GUEST'
 set -euo pipefail
 sudo -n true || { echo "admin has no passwordless sudo" >&2; exit 1; }
 # Key-only SSH (the first matching sshd option wins, so this file sorts first).
