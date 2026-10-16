@@ -22,7 +22,7 @@
  "ACC-05": {
   "d": "passed",
   "run": "A",
-  "s": "The sub-agent spawned in the main conversation (its own thread) was listed once as a descendant under this conversation, never side:. The conditional agent: label applies only to a sub-agent with no thread of its own, which this one had; executor marked that part inconclusive."
+  "s": "The sub-agent spawned in the main conversation (its own thread) was counted once in this conversation's root total: its request appeared as Request 11 of this conversation, with the sub-agent's thread on its technical page, never side:. The conditional agent: label applies only to a sub-agent with no thread of its own, which this one had; the executor marked that part inconclusive."
  },
  "ACC-06": {
   "d": "failed",
@@ -51,10 +51,10 @@
   "s": "New OpenAI conversation: no Reopen warm-up line or link and no notice; P10 and per-request costs recorded. First attempt C blocked: its executor could not reach the /cost links (navigation), so the group was replayed with packet v2."
  },
  "ACC-11": {
-  "d": "passed",
+  "d": "blocked",
   "run": "C2",
   "first": "C",
-  "s": "Restart with resume --last: the warm-up notice naming skip_reopen_warmup appeared; Reopen warm-up: 1 request; one link and the request page said Reopen warm-up; technical arithmetic exact; earlier costs and IDs unchanged."
+  "s": "Restart with resume --last: the warm-up notice naming skip_reopen_warmup appeared; Reopen warm-up: 1 request; one link and the request page said Reopen warm-up; technical arithmetic exact; earlier request costs unchanged. Not observed: that the earlier Request IDs are unchanged (no earlier request page was re-opened after the restart). Blocked on that one expected result, by the same rule as ACC-15; everything observed passed. First attempt C blocked (navigation)."
  },
  "ACC-12": {
   "d": "passed",
@@ -69,10 +69,10 @@
   "s": "New conversation with skip on: no notice and no Reopen warm-up line; P13 = P10 and the request count after the turn = N10 (the new conversation still warmed up)."
  },
  "ACC-14": {
-  "d": "passed",
+  "d": "blocked",
   "run": "C2",
   "first": "C",
-  "s": "/resume from a new conversation to ALPHA: notice appeared, Reopen warm-up: 2 requests, earlier costs and IDs unchanged. Executor deviation (it reported failed for this reason): it skipped the starting step of typing CHARLIE in the new conversation and created CHARLIE later, before ACC-18; every ACC-14 expected result was observed and passed."
+  "s": "/resume from a new conversation to ALPHA: notice appeared, Reopen warm-up: 2 requests, earlier request costs unchanged. Not observed: that earlier Request IDs are unchanged and appear once (no Request ID was on screen in this case). Blocked on that expected result, by the same rule as ACC-15. Executor deviation (its raw verdict was failed for this reason): it skipped the starting step of typing CHARLIE in the new conversation and created CHARLIE later, before ACC-18, leaving one of ACC-18's residual conversations."
  },
  "ACC-15": {
   "d": "blocked",
@@ -90,7 +90,7 @@
   "d": "passed",
   "run": "C2",
   "first": "C",
-  "s": "Restart with auto-review settings (a reopen; W0 = 2), then a reviewed touch command and a sub-agent: no new notice, warm-up count still 2, reviewer (Codex Auto Review, no price) and sub-agent requests listed once.",
+  "s": "Restart with auto-review settings (a reopen; W0 = 2), then a reviewed touch command and a sub-agent: no new notice and the warm-up count stayed 2. The reviewer (Codex Auto Review, no price; 1 -> 3 requests) and sub-agent requests are counted in the aggregates without any being labelled Reopen warm-up; 'listed once' rests on those aggregate counts only (only Request 1 and 2 were seen as links).",
   "priority": "blocker (reviewer part, amendment 14); sub-agent part advisory"
  },
  "ACC-36": {
@@ -100,10 +100,10 @@
   "s": "skip_reopen_warmup = true written to config.toml (agms-tui config), restart with resume --last: no notice; warm-up count, total and request list unchanged. Deviation: the step 'confirm the conversation is ALPHA' was not met in C2 - resume --last opened the edit branch 01a14389 (executor marked that inconclusive); the expected results were judged on that conversation. Passed in C as well."
  },
  "ACC-18": {
-  "d": "passed",
+  "d": "blocked",
   "run": "C2",
   "first": "C",
-  "s": "With skip on, every openable conversation's /cost: no warm-up rise, earlier costs and IDs identical, per-conversation sums match, totals reconcile within rounding. Two conversations could not be opened from /resume and are residuals, which the amendment allows: 01a14387-6354 (the executor's accidental fork in ACC-16) and 01a14381-44d6 (ACC-14's new conversation, left without its CHARLIE turn by the executor's deviation); each holds only one warm-up request (ledger). So the ACC-14 deviation did reach ACC-18."
+  "s": "With skip on (config.toml): no warm-up rise; ALPHA's request costs (Requests 1-9) unchanged and summing to its total; the first-screen reconciliation holds (this conversation + other conversations = sum of all totals; counts add up). Not observed: Request IDs (no request page was opened), so 'every Request ID identical' and 'no Request ID in two conversations' are unjudged, and per-conversation sums were checked only for ALPHA (BRAVO, CHARLIE and the fork's request lists were not opened). Blocked on those results, by the same rule as ACC-15. Two conversations could not be opened from /resume and are residuals, which the amendment allows: 01a14387-6354 (the executor's accidental fork in ACC-16) and 01a14381-44d6 (ACC-14's new conversation, left without its CHARLIE turn); each holds only one warm-up request (ledger)."
  },
  "ACC-19": {
   "d": "passed",

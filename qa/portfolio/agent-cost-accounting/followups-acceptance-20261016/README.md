@@ -8,34 +8,37 @@ known gap. **Not accepted: S10 needs Travis's acceptance.**
 
 ## Result
 
-37 cases: **32 passed, 1 failed, 4 blocked** ([dispositions.md](dispositions.md), [results.json](results.json)).
+37 cases: **29 passed, 1 failed, 7 blocked** ([dispositions.md](dispositions.md), [results.json](results.json)).
 
 - **Failed (1):** ACC-06 (#898): after `/review`, `/cost` shows no `code-review:` request and no new request anywhere. The
   run's ledger (integrator's read, [runs/A/ledger-attempts.txt](runs/A/ledger-attempts.txt)) holds the review's six
   requests under the review's own thread with plain labels: recorded, but shown nowhere.
-- **Blocked (4):**
+- **Blocked (7):**
   - ACC-35: the optional Moonshot cache-read turn; D3 was not granted, so not checked live (covered by test).
   - ACC-04 (advisory): the product's model declined to start a sub-agent inside `/side`, which the design allows.
   - ACC-15: everything passed except the `side:` label on the side turn, which the executor did not judge. The raw
-    terminal output shows the line `Turn: side:…` rendered while it scrolled past it (it would pass), but it is in no
+    terminal output shows the line `Turn: side:…` rendered while it scrolled past it (it suggests the case would pass), but it is in no
     captured screen, so the case stays blocked on that one result.
+  - ACC-11, ACC-14, ACC-18 (S08 reopen warm-up): every observed result passed (notices, warm-up counts, earlier costs
+    unchanged, totals reconciling), but no earlier Request ID was re-read after the reopen, so "Request IDs unchanged
+    / appear once" is unjudged; ACC-18 also checked per-conversation sums only for ALPHA. Blocked by the same rule.
   - ACC-22 (advisory): the product omits the priority tier for `gpt-6-luna` ("not advertised"), so the no-price branch
     was never reached.
 - **Passed by sprint:**
   - S06: `/side` work and the automatic reviewer inside `/side` are recorded once under the saved conversation as `side:`
-    and `side:review:` (ACC-02, 03); a sub-agent appears once as a descendant (ACC-05); `exec --ephemeral` stays out
+    and `side:review:` (ACC-02, 03); a sub-agent is counted once in the parent's total (ACC-05); `exec --ephemeral` stays out
     (ACC-07); basic `/cost` navigation and an empty day (ACC-01).
   - S07: real Moonshot K3 and K2.7 Code priced completely from Moonshot's rates, whatever the provider is named
     (ACC-08, 09); `gpt-6.1-sol` and GPT-5.6 Sol rates (ACC-19, 20); OpenRouter, Vercel and Corbanu API priced from
     their reported charge (ACC-23, 25, 26, 28); reasoning above output kept as not reported (ACC-24); without a charge,
     a labelled estimate, a lower bound or no price, never $0 (ACC-37).
-  - S08: reopen warm-up on restart, `/resume`, edit, labelled and announced; `skip_reopen_warmup` by flag and by
-    `config.toml`; new conversations still warm up; reviewers and sub-agents are not reopens; history not re-priced
-    (ACC-10–14, 16–18, 36); no warm-up on a non-WebSocket reopen (ACC-29); unpriced and basis-only wording (ACC-27).
+  - S08: reopen warm-up on a new conversation and an edit, labelled and announced; `skip_reopen_warmup` by flag and
+    by `config.toml`; new conversations still warm up; reviewers and sub-agents are not reopens (ACC-10, 12, 13, 16,
+    17, 36; restart and `/resume` in ACC-11/14 passed everything observed, see Blocked); no warm-up on a non-WebSocket reopen (ACC-29); unpriced and basis-only wording (ACC-27).
   - S09: ChatGPT sign-in (stand-in) covered by the subscription for catalogued, uncatalogued, priority and image
     (ACC-30–33); a real API-key image priced at `gpt-image-2` rates (ACC-21).
 - No credential was printed (ACC-34, advisory).
-- Raw executor verdicts differ from five dispositions (ACC-04, 14, 15, 22, 34); reasons in [dispositions.md](dispositions.md).
+- Raw executor verdicts differ from seven dispositions (ACC-04, 11, 14, 15, 18, 22, 34); reasons in [dispositions.md](dispositions.md).
 - `qa/code-blind-functional/check.py` stops at the first unresolved case ([checker-output.txt](checker-output.txt)), as
   expected while ACC-04 is not passed.
 
@@ -98,6 +101,9 @@ installed at this run's request because the earlier build lacked #859 ([candidat
 - Realtime (#824, fix #882 unmerged at the freeze), TensorCash, DeepSeek holiday calendar, BigModel, older records,
   Windows and Linux; `fork:` (no client makes one); Moonshot unlisted models and K2.7 HighSpeed/K2.6 rates; the 5-minute
   cache lifetime; same-conversation `/resume`; a real Moonshot cache hit (D3 not granted).
+- Request-ID stability across reopens was not observed (ACC-11, 14, 18): the executors re-read costs, not IDs.
+- `harness/agms-product` was replaced (harness fix 1, corbanu route only) while group F was running.
+- The guest's pre-existing Z.AI transport key file stays on the guest, as in earlier campaigns.
 - The same model family (GLM 5.3 Flash) drives the executor and most product turns.
 - The relay logs no tool names, so model-visible tool sets are not inventoried ([common/tool-inventory.json](common/tool-inventory.json)).
 - The ledger reads (`runs/*/ledger-attempts.txt`) are the integrator's, after the run; dispositions rest on the

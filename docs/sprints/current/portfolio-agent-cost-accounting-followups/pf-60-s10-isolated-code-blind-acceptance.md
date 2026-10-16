@@ -51,7 +51,7 @@ updated: 2026-10-10
       isolated code-blind run recorded in
       [followups-acceptance-20261016](../../../../qa/portfolio/agent-cost-accounting/followups-acceptance-20261016/README.md):
       design frozen before the VM start (`220c99ed59`), 37 cases on `395ac0adcd`'s signed developer build:
-      32 passed, 1 failed (ACC-06, #898), 4 blocked. Realtime (#824) is the tracked known gap. Awaiting Travis.
+      29 passed, 1 failed (ACC-06, #898), 7 blocked. Realtime (#824) is the tracked known gap. Awaiting Travis.
 
 ## Remaining
 

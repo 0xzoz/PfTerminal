@@ -317,7 +317,7 @@
    "id": "ACC-05",
    "priority": "advisory",
    "disposition": "passed",
-   "summary": "The sub-agent spawned in the main conversation (its own thread) was listed once as a descendant under this conversation, never side:. The conditional agent: label applies only to a sub-agent with no thread of its own, which this one had; executor marked that part inconclusive.",
+   "summary": "The sub-agent spawned in the main conversation (its own thread) was counted once in this conversation's root total: its request appeared as Request 11 of this conversation, with the sub-agent's thread on its technical page, never side:. The conditional agent: label applies only to a sub-agent with no thread of its own, which this one had; the executor marked that part inconclusive.",
    "candidate_sha256": "5b805b9c244e55c12c6f61fc3d31bddd760a415554cbabff8cbcb4c3ba0531a1",
    "method": "tmux",
    "execution": {
@@ -831,8 +831,8 @@
   {
    "id": "ACC-11",
    "priority": "blocker",
-   "disposition": "passed",
-   "summary": "Restart with resume --last: the warm-up notice naming skip_reopen_warmup appeared; Reopen warm-up: 1 request; one link and the request page said Reopen warm-up; technical arithmetic exact; earlier costs and IDs unchanged.",
+   "disposition": "blocked",
+   "summary": "Restart with resume --last: the warm-up notice naming skip_reopen_warmup appeared; Reopen warm-up: 1 request; one link and the request page said Reopen warm-up; technical arithmetic exact; earlier request costs unchanged. Not observed: that the earlier Request IDs are unchanged (no earlier request page was re-opened after the restart). Blocked on that one expected result, by the same rule as ACC-15; everything observed passed. First attempt C blocked (navigation).",
    "candidate_sha256": "5b805b9c244e55c12c6f61fc3d31bddd760a415554cbabff8cbcb4c3ba0531a1",
    "method": "tmux",
    "execution": {
@@ -1266,8 +1266,8 @@
   {
    "id": "ACC-14",
    "priority": "blocker",
-   "disposition": "passed",
-   "summary": "/resume from a new conversation to ALPHA: notice appeared, Reopen warm-up: 2 requests, earlier costs and IDs unchanged. Executor deviation (it reported failed for this reason): it skipped the starting step of typing CHARLIE in the new conversation and created CHARLIE later, before ACC-18; every ACC-14 expected result was observed and passed.",
+   "disposition": "blocked",
+   "summary": "/resume from a new conversation to ALPHA: notice appeared, Reopen warm-up: 2 requests, earlier request costs unchanged. Not observed: that earlier Request IDs are unchanged and appear once (no Request ID was on screen in this case). Blocked on that expected result, by the same rule as ACC-15. Executor deviation (its raw verdict was failed for this reason): it skipped the starting step of typing CHARLIE in the new conversation and created CHARLIE later, before ACC-18, leaving one of ACC-18's residual conversations.",
    "candidate_sha256": "5b805b9c244e55c12c6f61fc3d31bddd760a415554cbabff8cbcb4c3ba0531a1",
    "method": "tmux",
    "execution": {
@@ -1702,7 +1702,7 @@
    "id": "ACC-17",
    "priority": "blocker (reviewer part, amendment 14); sub-agent part advisory",
    "disposition": "passed",
-   "summary": "Restart with auto-review settings (a reopen; W0 = 2), then a reviewed touch command and a sub-agent: no new notice, warm-up count still 2, reviewer (Codex Auto Review, no price) and sub-agent requests listed once.",
+   "summary": "Restart with auto-review settings (a reopen; W0 = 2), then a reviewed touch command and a sub-agent: no new notice and the warm-up count stayed 2. The reviewer (Codex Auto Review, no price; 1 -> 3 requests) and sub-agent requests are counted in the aggregates without any being labelled Reopen warm-up; 'listed once' rests on those aggregate counts only (only Request 1 and 2 were seen as links).",
    "candidate_sha256": "5b805b9c244e55c12c6f61fc3d31bddd760a415554cbabff8cbcb4c3ba0531a1",
    "method": "tmux",
    "execution": {
@@ -1846,8 +1846,8 @@
   {
    "id": "ACC-18",
    "priority": "blocker",
-   "disposition": "passed",
-   "summary": "With skip on, every openable conversation's /cost: no warm-up rise, earlier costs and IDs identical, per-conversation sums match, totals reconcile within rounding. Two conversations could not be opened from /resume and are residuals, which the amendment allows: 01a14387-6354 (the executor's accidental fork in ACC-16) and 01a14381-44d6 (ACC-14's new conversation, left without its CHARLIE turn by the executor's deviation); each holds only one warm-up request (ledger). So the ACC-14 deviation did reach ACC-18.",
+   "disposition": "blocked",
+   "summary": "With skip on (config.toml): no warm-up rise; ALPHA's request costs (Requests 1-9) unchanged and summing to its total; the first-screen reconciliation holds (this conversation + other conversations = sum of all totals; counts add up). Not observed: Request IDs (no request page was opened), so 'every Request ID identical' and 'no Request ID in two conversations' are unjudged, and per-conversation sums were checked only for ALPHA (BRAVO, CHARLIE and the fork's request lists were not opened). Blocked on those results, by the same rule as ACC-15. Two conversations could not be opened from /resume and are residuals, which the amendment allows: 01a14387-6354 (the executor's accidental fork in ACC-16) and 01a14381-44d6 (ACC-14's new conversation, left without its CHARLIE turn); each holds only one warm-up request (ledger).",
    "candidate_sha256": "5b805b9c244e55c12c6f61fc3d31bddd760a415554cbabff8cbcb4c3ba0531a1",
    "method": "tmux",
    "execution": {
@@ -4464,11 +4464,11 @@
   }
  ],
  "review_budget": {
-  "used": 3,
+  "used": 4,
   "limit": 5,
   "ledger": {
    "path": "review-ledger.md",
-   "sha256": "3ff2aeb4e0fc2229a1e0493efb9b5baa64ea67b973cdb64393c10942f327b9b2"
+   "sha256": "34ddf84a671353f0bb2e390880df4b0de78996b50f5ba6fe7639840064a9c4e3"
   }
  }
 }
