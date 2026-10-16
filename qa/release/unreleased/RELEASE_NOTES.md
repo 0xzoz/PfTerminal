@@ -17,8 +17,8 @@ them into `qa/release/<version>/RELEASE_NOTES.md` and empties this file.
   timed out or cancelled). `refused` usually means the command did not run,
   but a network-policy denial can arrive after it started, so don't assume it
   never ran. The refusal reason is in `aggregatedOutput` (`aggregated_output`
-  in `exec --json`); the exit code is a placeholder, not a process exit. File changes (`fileChange`) have no
-  `refused` status.
+  in `exec --json`); the exit code is a placeholder, not a process exit. File
+  changes (`fileChange`) have no `refused` status.
 
 ### Compatibility
 
