@@ -783,11 +783,6 @@ impl Vault {
     }
 }
 
-/// Validate and canonicalize a credential label.
-///
-/// Labels must be 1..=128 chars and may contain ASCII alphanumerics, `-`, `_`,
-/// `.`, and `/` (so provider-scoped labels like `ambient/api-key` work). They
-/// are trimmed for stable lookups; case-distinct labels remain distinct.
 fn open_lock_file(lock_path: &Path) -> std::io::Result<std::fs::File> {
     #[cfg(test)]
     if let Some(errno) = lock_failure_tests::injected_lock_open_errno() {
@@ -866,6 +861,11 @@ pub(crate) fn ensure_not_error_text(secret: &str) -> Result<(), VaultError> {
     }
 }
 
+/// Validate and canonicalize a credential label.
+///
+/// Labels must be 1..=128 chars and may contain ASCII alphanumerics, `-`, `_`,
+/// `.`, and `/` (so provider-scoped labels like `ambient/api-key` work). They
+/// are trimmed for stable lookups; case-distinct labels remain distinct.
 fn normalize_label(raw: &str) -> Result<String, VaultError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
