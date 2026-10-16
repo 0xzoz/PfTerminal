@@ -1979,3 +1979,67 @@ fn issue_885_sed_writing_a_file_the_line_runs_is_unseen_code() {
     ];
     assert_eq!(issue_885_wrong(&cwd, &cases), Vec::<String>::new());
 }
+
+/// #885 review round 1: more spellings of items 1–3, text that is only
+/// data, and limits on nesting and repeated work.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_885_review_1_routes_and_limits() {
+    let (_dir, cwd) = issue_885_fixture();
+    let unseen = Some(ProtectedActionKind::UnseenCode);
+    let cases = [
+        // Item 3: output reaching a run file through a group, a read-write
+        // or descriptor redirection, a rename, or a later pipeline stage.
+        ("{ sed '1a ./p.sh' f; } > r.sh; bash r.sh", unseen),
+        ("sed '1a ./p.sh' f 1<>r.sh; bash r.sh", unseen),
+        ("exec 3>r.sh; sed '1a ./p.sh' f >&3; bash r.sh", unseen),
+        ("sed '1a ./p.sh' f > t && mv t r.sh && bash r.sh", unseen),
+        ("sed p f | sort | tee r2.sh > /dev/null; bash r2.sh", unseen),
+        // Item 1: POSIX option order, a script file the line writes, and a
+        // program supplied at run time.
+        ("POSIXLY_CORRECT=1 sed -n '1e id' -e p f", unseen),
+        ("printf '1e id\\n' > ok.sed; sed -f ok.sed f", unseen),
+        ("printf '1e id\\0f' | xargs -0 sed", unseen),
+        ("parallel sed {} f ::: '1e id'", unseen),
+        // Item 2: options after `-c`, substitutions in here-documents and
+        // parameter expansions, and wrappers that run a shell string.
+        ("bash -c -o pipefail \"sh -c './missing.sh'\"", unseen),
+        ("cat <<E\n$(sh -c './missing.sh')\nE", unseen),
+        ("echo ${x:-$(sh -c './missing.sh')}", unseen),
+        ("watch -n 1 \"sh -c './missing.sh'\"", unseen),
+        ("flock /tmp/l -c './missing.sh'", unseen),
+        ("su -c './missing.sh' root", unseen),
+        ("env -S \"sh -c './missing.sh'\"", unseen),
+        ("script -q -c './missing.sh' /dev/null", unseen),
+        // Not saved, only data, or a program given in the words.
+        ("git log | sed -n 1,5p; ./present.sh", None),
+        ("sed -n 1p f | sort; bash present.sh", None),
+        ("git commit -m \"sed e\" && grep -n 'sed e' f", None),
+        ("rg -l foo | xargs sed -i 's/foo/bar/g'", None),
+        ("cat <<'E'\nbash -c './missing.sh'\nE", None),
+    ];
+    assert_eq!(issue_885_wrong(&cwd, &cases), Vec::<String>::new());
+
+    // Nesting past the reader's limit is refused (the reader alone is
+    // checked against a stack overflow in `quoted::tests`).
+    let deep = format!("echo {}x{}", "$(".repeat(40), ")".repeat(40));
+    let started = std::time::Instant::now();
+    assert_eq!(script(&deep), unseen);
+    // Wrappers that make every word a command start do not multiply work.
+    let envs = "env ".repeat(20);
+    let nested = format!("uv {envs}bash -c \"uv {envs}bash -c './present.sh'\"");
+    assert_eq!(
+        classify_fixture(&shell_in(&cwd, &["/bin/bash", "-c", &nested])),
+        None
+    );
+    let wide = format!("uv {}sed p f", "env ".repeat(10_000));
+    assert_eq!(script(&wide), unseen);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+}

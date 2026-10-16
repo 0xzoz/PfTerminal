@@ -307,7 +307,7 @@ const RECURSIVE_READERS: &[(&str, &[&str])] = &[
 ];
 /// Commands that write the paths they name (PF-23-S02): naming a persistence
 /// file to one of them, or redirecting output to it, is a write.
-const WRITERS: &[&str] = &[
+pub(super) const WRITERS: &[&str] = &[
     "tee", "cp", "mv", "install", "ln", "rsync", "dd", "truncate", "touch", "ditto", "sed", "perl",
     "ed", "ex", "patch", "chmod", "unzip", "tar", "curl", "wget", "rm", "rmdir", "unlink", "mkdir",
 ];
@@ -361,6 +361,7 @@ pub(super) fn classify_with(
         sed_scope: None,
         ran: Vec::new(),
         ran_unknown: false,
+        written: Vec::new(),
     };
     match action {
         ApprovalAction::Shell { command, cwd, .. }
@@ -528,6 +529,9 @@ struct Classifier {
     /// one whose name the classifier cannot see.
     ran: Vec<String>,
     ran_unknown: bool,
+    /// #885: files the action's command lines write (`None`: one the
+    /// classifier cannot name).
+    written: Vec<Option<String>>,
 }
 
 /// #841 (MOD-06): the word classifier splits quoted text into commands on

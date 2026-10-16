@@ -26,8 +26,13 @@ pub(super) struct Command {
     pub(super) words: Vec<Word>,
     /// Words its output is redirected to (`> f`, `>> f`, `&> f`).
     pub(super) writes_to: Vec<Word>,
-    /// Its output feeds a pipe.
+    /// Its output feeds a pipe: the next command of the pipeline, when it
+    /// is in the same list of commands.
     pub(super) piped: bool,
+    pub(super) pipe_to: Option<usize>,
+    /// Its output goes to a descriptor other than 1 or 2 (`>&3`), which
+    /// may be any file.
+    pub(super) writes_descriptor: bool,
     /// Here-strings and here-document bodies fed to its input.
     pub(super) input: Vec<Word>,
     /// It runs inside a substitution, in a shell of its own.
@@ -40,20 +45,54 @@ impl Command {
     }
 }
 
-/// The simple commands of `text`, substitutions included.
-pub(super) fn commands(text: &str) -> Vec<Command> {
+/// Substitutions nested deeper than this are not read (fail closed).
+const MAX_NESTING: usize = 32;
+
+/// The simple commands of `text`, substitutions included; `None` when
+/// substitutions nest too deeply to read.
+pub(super) fn commands(text: &str) -> Option<Vec<Command>> {
+    let (commands, too_deep) = read(text, /*nesting*/ 0, /*body*/ false);
+    (!too_deep).then_some(commands)
+}
+
+/// Read `text` (`body`: the body of an unquoted here-document, where only
+/// substitutions run) inside `nesting` substitutions.
+fn read(text: &str, nesting: usize, body: bool) -> (Vec<Command>, bool) {
     let chars: Vec<char> = text.chars().collect();
     let mut reader = Reader {
         chars: &chars,
         out: Vec::new(),
-        nesting: 0,
+        nesting,
+        too_deep: false,
     };
-    let mut index = 0;
-    while index < chars.len() {
-        index = reader.list(index, /*nested*/ false);
+    if body {
+        reader.substitutions_only();
+    } else {
+        let mut index = 0;
+        while index < chars.len() {
+            index = reader.list(index, /*nested*/ false);
+        }
     }
-    reader.out.retain(|command| !command.is_empty());
-    reader.out
+    // Drop empty commands, keeping pipe links.
+    let mut kept = Vec::with_capacity(reader.out.len());
+    let mut next = 0;
+    for command in &reader.out {
+        kept.push((!command.is_empty()).then(|| {
+            next += 1;
+            next - 1
+        }));
+    }
+    let mut out: Vec<Command> = Vec::with_capacity(next);
+    for mut command in reader.out {
+        if command.is_empty() {
+            continue;
+        }
+        command.pipe_to = command
+            .pipe_to
+            .and_then(|to| kept.get(to).copied().flatten());
+        out.push(command);
+    }
+    (out, reader.too_deep)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -61,6 +100,8 @@ enum Redirect {
     None,
     Stdin,
     Stdout,
+    /// Output to a descriptor other than 1 or 2 (`>&3`).
+    Descriptor,
     HereString,
     /// `<<` or `<<-` (strip leading tabs).
     HereDocument(bool),
@@ -71,6 +112,8 @@ struct Reader<'a> {
     out: Vec<Command>,
     /// Substitutions open around the text being read.
     nesting: usize,
+    /// They nested past `MAX_NESTING`; reading stopped.
+    too_deep: bool,
 }
 
 /// One list of commands being read.
@@ -79,9 +122,17 @@ struct List {
     word: Word,
     has_word: bool,
     redirect: Redirect,
-    /// Here-documents whose bodies start after the next newline:
-    /// delimiter, strip tabs, command.
-    pending: Vec<(String, bool, usize)>,
+    /// Here-documents whose bodies start after the next newline.
+    pending: Vec<HereDocument>,
+}
+
+struct HereDocument {
+    delimiter: String,
+    /// `<<-`: leading tabs are stripped.
+    strip: bool,
+    /// The delimiter was quoted, so the body is not expanded.
+    quoted: bool,
+    command: usize,
 }
 
 impl Reader<'_> {
@@ -101,10 +152,15 @@ impl Reader<'_> {
         let command = &mut self.out[list.command];
         match std::mem::replace(&mut list.redirect, Redirect::None) {
             Redirect::None => command.words.push(word),
-            Redirect::Stdin => {}
+            Redirect::Stdin | Redirect::Descriptor => {}
             Redirect::Stdout => command.writes_to.push(word),
             Redirect::HereString => command.input.push(word),
-            Redirect::HereDocument(strip) => list.pending.push((word.text, strip, list.command)),
+            Redirect::HereDocument(strip) => list.pending.push(HereDocument {
+                quoted: word.quoted,
+                delimiter: word.text,
+                strip,
+                command: list.command,
+            }),
         }
     }
 
@@ -118,10 +174,22 @@ impl Reader<'_> {
     /// Read commands from `index` to the end, or (`nested`) to the `)` that
     /// closes a substitution; returns the index after it.
     fn list(&mut self, index: usize, nested: bool) -> usize {
-        self.nesting += usize::from(nested);
+        if !self.enter(nested) {
+            return self.chars.len();
+        }
         let end = self.read_list(index, nested);
         self.nesting -= usize::from(nested);
         end
+    }
+
+    /// Open one more substitution (when `nested`); `false` past the limit.
+    fn enter(&mut self, nested: bool) -> bool {
+        if self.too_deep || (nested && self.nesting >= MAX_NESTING) {
+            self.too_deep = true;
+            return false;
+        }
+        self.nesting += usize::from(nested);
+        true
     }
 
     fn read_list(&mut self, mut index: usize, nested: bool) -> usize {
@@ -162,10 +230,13 @@ impl Reader<'_> {
                 ';' | '&' => self.finish_command(&mut list),
                 '|' => {
                     self.finish_word(&mut list);
-                    if next != Some('|') && previous != Some('|') {
-                        self.out[list.command].piped = true;
-                    }
+                    let from = list.command;
+                    let pipe = next != Some('|') && previous != Some('|');
                     self.finish_command(&mut list);
+                    if pipe && from != list.command {
+                        self.out[from].piped = true;
+                        self.out[from].pipe_to = Some(list.command);
+                    }
                 }
                 '(' | ')' => {
                     if nested {
@@ -247,7 +318,12 @@ impl Reader<'_> {
                     }
                     self.finish_word(&mut list);
                     let (redirect, used) = redirection(&chars[index..]);
-                    list.redirect = redirect;
+                    if redirect == Redirect::Descriptor {
+                        self.out[list.command].writes_descriptor = true;
+                        list.redirect = Redirect::None;
+                    } else {
+                        list.redirect = redirect;
+                    }
                     index += used;
                     continue;
                 }
@@ -312,11 +388,7 @@ impl Reader<'_> {
                 inner.push(chars[at]);
                 at += 1;
             }
-            self.out
-                .extend(commands(&inner).into_iter().map(|command| Command {
-                    substituted: true,
-                    ..command
-                }));
+            self.nested_text(&inner, /*body*/ false);
             word.text.push_str(UNSEEN_OUTPUT);
             dynamic(word);
             return at + 1;
@@ -328,10 +400,20 @@ impl Reader<'_> {
                 self.list(index + 2, /*nested*/ true)
             }
             Some('{') => {
+                // `${x:-$(...)}`: substitutions inside run too.
+                if !self.enter(/*nested*/ true) {
+                    return chars.len();
+                }
+                let mut scratch = Word::default();
                 let mut at = index + 2;
                 let mut open = 1usize;
                 while at < chars.len() {
                     match chars[at] {
+                        '$' | '`' => {
+                            at = self.expansion(at, &mut scratch, in_double);
+                            continue;
+                        }
+                        '\\' => at += 1,
                         '{' => open += 1,
                         '}' => {
                             open -= 1;
@@ -343,8 +425,9 @@ impl Reader<'_> {
                     }
                     at += 1;
                 }
+                self.nesting -= 1;
                 let end = (at + 1).min(chars.len());
-                word.text.extend(&chars[index..end]);
+                word.text.extend(&chars[index.min(end)..end]);
                 dynamic(word);
                 end
             }
@@ -374,15 +457,48 @@ impl Reader<'_> {
         }
     }
 
+    /// Commands of text inside a substitution (a backtick's text, or an
+    /// unquoted here-document `body`, whose substitutions run).
+    fn nested_text(&mut self, text: &str, body: bool) {
+        if !self.enter(/*nested*/ true) {
+            return;
+        }
+        let (commands, too_deep) = read(text, self.nesting, body);
+        self.nesting -= 1;
+        self.too_deep |= too_deep;
+        let offset = self.out.len();
+        self.out.extend(commands.into_iter().map(|command| Command {
+            substituted: true,
+            pipe_to: command.pipe_to.map(|to| to + offset),
+            ..command
+        }));
+    }
+
+    /// The substitutions in a here-document body.
+    fn substitutions_only(&mut self) {
+        let chars = self.chars;
+        let mut scratch = Word::default();
+        let mut index = 0;
+        while index < chars.len() {
+            match chars[index] {
+                '\\' => index += 2,
+                '$' | '`' => index = self.expansion(index, &mut scratch, /*in_double*/ true),
+                _ => index += 1,
+            }
+        }
+    }
+
     /// Bodies of pending here-documents, from `index` (a line start);
     /// returns the index after the last delimiter line.
-    fn here_documents(
-        &mut self,
-        mut index: usize,
-        pending: &mut Vec<(String, bool, usize)>,
-    ) -> usize {
+    fn here_documents(&mut self, mut index: usize, pending: &mut Vec<HereDocument>) -> usize {
         let chars = self.chars;
-        for (delimiter, strip, command) in std::mem::take(pending) {
+        for HereDocument {
+            delimiter,
+            strip,
+            quoted,
+            command,
+        } in std::mem::take(pending)
+        {
             let mut body = String::new();
             while index < chars.len() {
                 let end = chars[index..]
@@ -402,6 +518,9 @@ impl Reader<'_> {
                 body.push_str(&line);
                 body.push('\n');
             }
+            if !quoted {
+                self.nested_text(&body, /*body*/ true);
+            }
             self.out[command].input.push(Word {
                 text: body,
                 quoted: true,
@@ -419,10 +538,15 @@ fn redirection(chars: &[char]) -> (Redirect, usize) {
         ['<', '<', '<', ..] => (Redirect::HereString, 3),
         ['<', '<', '-', ..] => (Redirect::HereDocument(true), 3),
         ['<', '<', ..] => (Redirect::HereDocument(false), 2),
-        ['<', '&' | '>', ..] => (Redirect::Stdin, 2),
+        // `<>` opens the file for writing too.
+        ['<', '>', ..] => (Redirect::Stdout, 2),
+        ['<', '&', ..] => (Redirect::Stdin, 2),
         ['<', ..] => (Redirect::Stdin, 1),
-        // `>&2`, `2>&1`, `>&-`: a descriptor, not a file.
-        ['>', '&', after, ..] if after.is_ascii_digit() || *after == '-' => (Redirect::None, 3),
+        // `>&2`, `2>&1`, `>&-`: standard output or error, or closed.
+        ['>', '&', '1' | '2', after, ..] if after.is_ascii_digit() => (Redirect::Descriptor, 3),
+        ['>', '&', '1' | '2' | '-', ..] => (Redirect::None, 3),
+        // `>&3`: whatever file descriptor 3 is.
+        ['>', '&', after, ..] if after.is_ascii_digit() => (Redirect::Descriptor, 3),
         ['>', '>' | '|' | '&', ..] => (Redirect::Stdout, 2),
         _ => (Redirect::Stdout, 1),
     }
@@ -433,8 +557,12 @@ mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
 
+    fn all(text: &str) -> Vec<Command> {
+        commands(text).expect("readable")
+    }
+
     fn texts(text: &str) -> Vec<Vec<String>> {
-        commands(text)
+        all(text)
             .into_iter()
             .map(|command| command.words.into_iter().map(|word| word.text).collect())
             .collect()
@@ -459,24 +587,61 @@ mod tests {
                 vec!["gsed", "e"],
             ]
         );
-        let read = commands("sed p f > r.sh 2>&1 | tee x; cat <<-'E' <<< w\n\tsed e\n\tE\nls");
+        let read = all("sed p f > r.sh 2>&1 | tee x; cat <<-'E' <<< w\n\tsed e\n\tE\nls");
         assert_eq!(read[0].writes_to[0].text, "r.sh");
         assert!(read[0].piped);
         assert_eq!(read[2].input[0].text, "w");
         assert_eq!(read[2].input[1].text, "\tsed e\n");
         assert_eq!(read[3].words[0].text, "ls");
-        let substituted: Vec<bool> = commands("cd a; echo $(cd b) `cd c` <(cd d)")
+        let substituted: Vec<bool> = all("cd a; echo $(cd b) `cd c` <(cd d)")
             .iter()
             .map(|command| command.substituted)
             .collect();
         assert_eq!(substituted, vec![false, false, true, true, true]);
-        let dynamic = &commands("sed \"$P\" '$p' ${Q}")[0].words;
+        let dynamic = &all("sed \"$P\" '$p' ${Q}")[0].words;
         assert_eq!(
             dynamic
                 .iter()
                 .map(|word| (word.dynamic, word.splits))
                 .collect::<Vec<_>>(),
             vec![(false, false), (true, false), (false, false), (true, true)]
+        );
+    }
+
+    #[test]
+    fn substitutions_redirections_and_nesting() {
+        // Commands in `${...}` and in an unquoted here-document run; a
+        // quoted one's body is only text.
+        assert_eq!(
+            texts("echo ${x:-$(sh -c a)}; cat <<E\n$(sh -c b)\nE\ncat <<'Q'\n$(sh -c c)\nQ"),
+            vec![
+                vec!["echo", "${x:-$(sh -c a)}"],
+                vec!["sh", "-c", "a"],
+                vec!["cat"],
+                vec!["cat"],
+                vec!["sh", "-c", "b"],
+            ]
+        );
+        let read = all("sed p f | sort | tee r.sh; sed p f 1<>w.sh >&3");
+        assert_eq!(read[0].pipe_to, Some(1));
+        assert_eq!(read[1].pipe_to, Some(2));
+        assert_eq!(read[2].pipe_to, None);
+        assert_eq!(read[3].writes_to[0].text, "w.sh");
+        assert!(read[3].writes_descriptor);
+        assert!(!all("ls 2>&1 >&2")[0].writes_descriptor);
+        // Too deep to read: refused, never a stack overflow.
+        let deep = format!("{}x{}", "$(".repeat(100_000), ")".repeat(100_000));
+        assert!(commands(&deep).is_none());
+        assert!(commands(&"`".repeat(10_000)).is_some());
+        let backticks = format!("{}x", "\\`echo ".repeat(200));
+        let _ = commands(&backticks);
+        assert!(
+            commands(&format!(
+                "{}x{}",
+                "${a:-".repeat(100_000),
+                "}".repeat(100_000)
+            ))
+            .is_none()
         );
     }
 }

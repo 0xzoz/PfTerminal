@@ -9,13 +9,13 @@ use super::outbound;
 use super::quoted::Word;
 
 /// Names GNU sed runs under.
-const NAMES: &[&str] = &["sed", "gsed"];
+pub(super) const NAMES: &[&str] = &["sed", "gsed"];
 
 /// Where sed runs in these words: the command word (after wrappers), any
 /// word after an exec marker (`find -exec sed`), and any word an exec-style
 /// wrapper runs (`uv run sed`).
 pub(super) fn positions(words: &[String]) -> Vec<usize> {
-    let starts = command_starts(words);
+    let (starts, _) = command_starts(words);
     let mut found: Vec<usize> = starts
         .into_iter()
         .filter_map(|start| {
@@ -28,15 +28,21 @@ pub(super) fn positions(words: &[String]) -> Vec<usize> {
     found
 }
 
-/// Where a command may start in these words (see `positions`).
-pub(super) fn command_starts(words: &[String]) -> Vec<usize> {
+/// Where a command may start in these words (see `positions`), at most
+/// `MAX_JUDGED_POSITIONS` of them, and whether there were more (fail
+/// closed; the word lexer's line is refused for it too).
+pub(super) fn command_starts(words: &[String]) -> (Vec<usize>, bool) {
     let wrapped = indirect::command_word(words)
         .is_some_and(|(_, name)| outbound::EXEC_WRAPPERS.contains(&name.as_str()));
-    (0..words.len())
-        .filter(|&index| {
-            index == 0 || wrapped || outbound::EXEC_MARKERS.contains(&words[index - 1].as_str())
-        })
-        .collect()
+    let mut starts = (0..words.len()).filter(|&index| {
+        index == 0 || wrapped || outbound::EXEC_MARKERS.contains(&words[index - 1].as_str())
+    });
+    let capped: Vec<usize> = starts
+        .by_ref()
+        .take(outbound::MAX_JUDGED_POSITIONS)
+        .collect();
+    let more = starts.next().is_some();
+    (capped, more)
 }
 
 /// What one sed invocation is given.
@@ -51,6 +57,8 @@ pub(super) struct Call {
     pub(super) in_place: bool,
     /// An option it does not know, or a word that may split into options.
     pub(super) unknown: bool,
+    /// Read as BSD sed reads it (which has no `e`).
+    pub(super) bsd: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -84,25 +92,33 @@ const LONG: &[(&str, Long)] = &[
     ("zero-terminated", Long::Flag),
 ];
 
-/// The ways sed may read these arguments: as GNU sed does, and, when a
-/// bare `-i` is followed by a word, as BSD (macOS) sed does, which takes
-/// that word as the backup suffix (`sed -i '' 's/a/b/' f`).
+/// The ways sed may read these arguments: as GNU sed does; as it does
+/// with `POSIXLY_CORRECT` set (options end at the first operand), which
+/// the environment may hold; and, when a bare `-i` is followed by a word,
+/// as BSD (macOS) sed does, which takes that word as the backup suffix
+/// (`sed -i '' 's/a/b/' f`).
 pub(super) fn calls(args: &[Word]) -> Vec<Call> {
-    let mut calls = vec![call(args, /*bsd*/ false)];
+    let mut calls = vec![
+        call(args, /*bsd*/ false, /*posix*/ false),
+        call(args, /*bsd*/ false, /*posix*/ true),
+    ];
     let bare_i = args.iter().any(|arg| {
         arg.text.starts_with('-') && !arg.text.starts_with("--") && arg.text.ends_with('i')
     });
     if bare_i {
-        calls.push(call(args, /*bsd*/ true));
+        calls.push(call(args, /*bsd*/ true, /*posix*/ false));
     }
     calls
 }
 
-/// Read sed's arguments as GNU sed does: options anywhere before `--`,
-/// short options grouped, `-i` with an attached suffix only (`bsd`: or
-/// the next word).
-fn call(args: &[Word], bsd: bool) -> Call {
-    let mut call = Call::default();
+/// Read sed's arguments as GNU sed does: options anywhere before `--`
+/// (`posix`: before the first operand), short options grouped, `-i` with
+/// an attached suffix only (`bsd`: or the next word).
+fn call(args: &[Word], bsd: bool, posix: bool) -> Call {
+    let mut call = Call {
+        bsd,
+        ..Call::default()
+    };
     let mut explicit = false;
     let mut operands = Vec::new();
     let mut options_done = false;
@@ -114,6 +130,7 @@ fn call(args: &[Word], bsd: bool) -> Call {
         let text = arg.text.as_str();
         if options_done || !text.starts_with('-') || text == "-" {
             operands.push(arg.clone());
+            options_done |= posix;
             continue;
         }
         if text == "--" {
@@ -559,7 +576,7 @@ mod tests {
 
     fn programs(args: &[&str]) -> (Vec<String>, Vec<String>, bool, bool) {
         let words: Vec<Word> = args.iter().map(|arg| word(arg)).collect();
-        let call = call(&words, /*bsd*/ false);
+        let call = call(&words, /*bsd*/ false, /*posix*/ false);
         (
             call.programs.into_iter().map(|word| word.text).collect(),
             call.files.into_iter().map(|word| word.text).collect(),
@@ -603,13 +620,21 @@ mod tests {
             programs(&["-l", "5", "p", "--", "-e"]).0,
             vec!["p".to_string()]
         );
+        let posix = calls(&[word("-n"), word("1e x"), word("-e"), word("p"), word("f")]);
+        assert_eq!(
+            posix
+                .iter()
+                .map(|call| call.programs[0].text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["p", "1e x"]
+        );
         let macos = calls(&[word("-i"), word(""), word("1a x"), word("f")]);
         assert_eq!(
             macos
                 .iter()
                 .map(|call| (call.programs[0].text.as_str(), call.operands.len()))
                 .collect::<Vec<_>>(),
-            vec![("", 2), ("1a x", 1)]
+            vec![("", 2), ("", 2), ("1a x", 1)]
         );
     }
 

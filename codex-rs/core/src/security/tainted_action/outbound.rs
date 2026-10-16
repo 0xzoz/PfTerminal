@@ -161,7 +161,7 @@ pub(super) const EXEC_WRAPPERS: &[&str] = &[
 ];
 /// Places one command may start (an exec wrapper's words, exec markers);
 /// more fail closed.
-const MAX_JUDGED_POSITIONS: usize = 64;
+pub(super) const MAX_JUDGED_POSITIONS: usize = 64;
 /// Words after which the next word is run as a command (`find -exec curl`).
 pub(super) const EXEC_MARKERS: &[&str] = &["-exec", "-execdir", "-ok", "-okdir", "--"];
 
