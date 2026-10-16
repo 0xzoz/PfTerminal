@@ -7,6 +7,16 @@ use codex_state::ThreadMetadataBuilder;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
 
+/// Waits until the ledger writer has written what it was handed. A slow write
+/// is put off and written later (#865), so read the ledger after this.
+async fn settle(db: &StateRuntime) {
+    assert!(
+        db.flush_accounting(std::time::Duration::from_secs(30))
+            .await,
+        "records still queued"
+    );
+}
+
 struct FixtureAuth;
 impl codex_api::AuthProvider for FixtureAuth {
     fn add_auth_headers(&self, _: &mut http::HeaderMap) {}
@@ -106,6 +116,7 @@ async fn accounting_extension_client_records_its_own_request() -> anyhow::Result
         .await
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
 
+    settle(&db).await;
     let pool = db
         .sqlite()
         .open_read_only_pool(&db.sqlite().state_db_path())
@@ -352,6 +363,7 @@ async fn accounting_extension_client_binds_the_route_it_actually_sends_to() -> a
         .await
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
 
+    settle(&db).await;
     let pool = db
         .sqlite()
         .open_read_only_pool(&db.sqlite().state_db_path())
@@ -426,6 +438,7 @@ async fn accounting_records_a_request_another_client_already_sent() -> anyhow::R
             .await
     );
 
+    settle(&db).await;
     let pool = db
         .sqlite()
         .open_read_only_pool(&db.sqlite().state_db_path())
@@ -467,6 +480,7 @@ async fn accounting_records_a_request_another_client_already_sent() -> anyhow::R
             })
             .await
     );
+    settle(&db).await;
     let bases: Vec<(String, String)> = sqlx::query_as(
         "SELECT json_extract(payload, '$.provider'), json_extract(payload, '$.basis')
             FROM draft_accounting_price_snapshots ORDER BY 1",
@@ -523,11 +537,7 @@ async fn accounting_records_a_request_another_client_already_sent() -> anyhow::R
             })
             .await
     );
-    // A slow write is put off and written later (#865); wait for the writer.
-    assert!(
-        db.flush_accounting(std::time::Duration::from_secs(30))
-            .await
-    );
+    settle(&db).await;
     let overridden_basis: Vec<(String, String)> = sqlx::query_as(
         "SELECT json_extract(payload, '$.basis'), json_extract(payload, '$.basis_source')
             FROM draft_accounting_price_snapshots WHERE json_extract(payload, '$.basis') = 'Local'",
@@ -539,7 +549,9 @@ async fn accounting_records_a_request_another_client_already_sent() -> anyhow::R
         vec![("Local".to_string(), "UserConfig".to_string())]
     );
 
-    // A usage report the ledger rejects is not reported as recorded.
+    // A usage report the ledger rejects is not reported as recorded (when
+    // the ledger refuses it while the caller waits; one it puts off is
+    // refused later and reported by the next turn).
     let writer = db
         .sqlite()
         .open_read_write_pool(&db.sqlite().state_db_path())
@@ -556,6 +568,7 @@ async fn accounting_records_a_request_another_client_already_sent() -> anyhow::R
         .execute(&writer)
         .await?;
     writer.close().await;
+    settle(&db).await;
     let observations: i64 =
         sqlx::query_scalar("SELECT count(*) FROM draft_accounting_observations")
             .fetch_one(&pool)
@@ -579,6 +592,7 @@ async fn accounting_records_a_request_another_client_already_sent() -> anyhow::R
             .record_sent_request(sent())
             .await
     );
+    settle(&db).await;
     let attempts_after: i64 = sqlx::query_scalar("SELECT count(*) FROM draft_accounting_attempts")
         .fetch_one(&pool)
         .await?;
@@ -731,6 +745,7 @@ async fn accounting_store_failure_never_fails_search_or_image() -> anyhow::Resul
                 Ok(expected.to_string()),
                 "{label} with {refused_table} refused"
             );
+            settle(&db).await;
             let attempts: i64 =
                 sqlx::query_scalar("SELECT count(*) FROM draft_accounting_attempts")
                     .fetch_one(&writer)
@@ -878,11 +893,7 @@ async fn accounting_extension_prices_an_api_key_image_generation() -> anyhow::Re
         .await
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
 
-    // A slow write is put off and written later (#865); wait for the writer.
-    assert!(
-        db.flush_accounting(std::time::Duration::from_secs(30))
-            .await
-    );
+    settle(&db).await;
     let day = chrono::Utc::now().timestamp_millis() / 86_400_000;
     let codex_state::accounting::InspectionDay::Ready(view) =
         codex_state::accounting::AccountingStore::inspect_day(
