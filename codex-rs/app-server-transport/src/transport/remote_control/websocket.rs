@@ -346,6 +346,21 @@ impl RemoteControlStatusPublisher {
         self.publish_status_if(connection_status, || desired_state_rx.borrow().is_enabled())
     }
 
+    /// Publishes `Disabled` for a connection cycle that ended because remote
+    /// control was disabled, unless a re-enable has landed since (#857). The
+    /// desired state is read inside the status update, and an enable stores
+    /// its desired state before it publishes `Connecting`, so the cycle can't
+    /// overwrite the enable's status. Returns false, and publishes nothing,
+    /// once remote control is desired again.
+    fn publish_disabled_unless_reenabled(
+        &self,
+        desired_state_rx: &watch::Receiver<RemoteControlDesiredState>,
+    ) -> bool {
+        self.publish_status_if(RemoteControlConnectionStatus::Disabled, || {
+            !desired_state_rx.borrow().is_enabled()
+        })
+    }
+
     fn publish_status_if(
         &self,
         connection_status: RemoteControlConnectionStatus,
@@ -552,7 +567,7 @@ impl RemoteControlWebsocket {
                 ConnectOutcome::Connected(websocket_connection) => *websocket_connection,
                 ConnectOutcome::Disabled => {
                     self.status_publisher
-                        .publish_status(RemoteControlConnectionStatus::Disabled);
+                        .publish_disabled_unless_reenabled(&self.desired_state_rx);
                     continue;
                 }
                 ConnectOutcome::Shutdown => break,
@@ -900,7 +915,7 @@ impl RemoteControlWebsocket {
             changed = desired_state_rx.wait_for(|state| !state.is_enabled()) => {
                 if changed.is_ok() {
                     self.status_publisher
-                        .publish_status(RemoteControlConnectionStatus::Disabled);
+                        .publish_disabled_unless_reenabled(&self.desired_state_rx);
                     ConnectionEndReason::Disabled
                 } else {
                     ConnectionEndReason::EnabledWatchClosed
@@ -2669,6 +2684,38 @@ mod tests {
                 installation_id: TEST_INSTALLATION_ID.to_string(),
                 environment_id: None,
             }
+        );
+    }
+
+    #[test]
+    fn disabled_cycle_keeps_a_racing_reenables_status() {
+        // #857, the mirror of `connect_after_disable_keeps_disabled_status`: a
+        // disable ends the cycle, then an enable lands (it stores `Enabled` and
+        // publishes `Connecting`) before the loop publishes `Disabled`. The loop
+        // must not overwrite the enable's `Connecting`, or the enable RPC can
+        // report `Disabled`.
+        let (status_publisher, status_rx) = remote_control_status_channel();
+        let (desired_state_tx, desired_state_rx) =
+            watch::channel(RemoteControlDesiredState::Disabled);
+        status_publisher.publish_status(RemoteControlConnectionStatus::Disabled);
+        // The enable, in its order: desired state first, then the status.
+        desired_state_tx.send_replace(RemoteControlDesiredState::Enabled {
+            persistence_preference: None,
+        });
+        status_publisher.publish_status(RemoteControlConnectionStatus::Connecting);
+
+        assert!(!status_publisher.publish_disabled_unless_reenabled(&desired_state_rx));
+        assert_eq!(
+            status_rx.borrow().status,
+            RemoteControlConnectionStatus::Connecting
+        );
+
+        // Without a re-enable the cycle's `Disabled` is published.
+        desired_state_tx.send_replace(RemoteControlDesiredState::Disabled);
+        assert!(status_publisher.publish_disabled_unless_reenabled(&desired_state_rx));
+        assert_eq!(
+            status_rx.borrow().status,
+            RemoteControlConnectionStatus::Disabled
         );
     }
 
