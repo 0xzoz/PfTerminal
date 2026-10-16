@@ -857,8 +857,9 @@ pub fn is_vault_error_text(value: &str) -> bool {
 
 /// `value` with ASCII letters lowercased and every run of whitespace (such as
 /// the line breaks of an error copied from a wrapped transcript) made one
-/// space, for matching against error text. The copy is zeroized when dropped
-/// and never reallocated, since it can hold a credential.
+/// space, for matching against error text. A matching helper only: it
+/// neither sanitizes nor redacts. The copy is zeroized when dropped and never
+/// reallocated, since it can hold a credential.
 pub fn normalized_for_matching(value: &str) -> Zeroizing<String> {
     let mut normalized = Zeroizing::new(String::with_capacity(value.len()));
     let mut words = value.split_whitespace();
