@@ -118,3 +118,23 @@ fn issue_878_texts_name_the_owner_and_the_kind() {
         );
     }
 }
+
+/// #878: refusals of sessions that ended do not pile up: past the bound the
+/// oldest goes first, and the newest is kept.
+#[test]
+fn issue_878_refused_owners_are_bounded() {
+    let refusals = Refusals::default();
+    let first = ThreadId::new();
+    refusals.refused(Some(first), Refusal::NoKey);
+    let mut last = first;
+    for _ in 0..MAX_REFUSED {
+        last = ThreadId::new();
+        refusals.refused(Some(last), Refusal::NoKey);
+    }
+    assert_eq!(refusals.state().refused.len(), MAX_REFUSED);
+    assert_eq!(refusals.reason(&[first]), None);
+    assert_eq!(
+        refusals.reason(&[last]),
+        Some(Refusal::NoKey.text(Scope::Session))
+    );
+}

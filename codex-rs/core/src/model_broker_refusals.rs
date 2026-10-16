@@ -7,7 +7,11 @@
 //! credential it cannot register (no key, a store it cannot read, a broker
 //! that is gone or rejects it), a request it cannot sign, and a request the
 //! broker itself denies. Only a later request of the same owner that the
-//! broker serves clears it.
+//! broker serves clears it. A broker that died after a credential was
+//! registered is not reported by the transport (its connection error could
+//! also come mid-response); the next auth finds it gone and records that.
+//! The broker passes a provider's error response on unchanged, so a provider
+//! can make one look like a denial: that only shows the row degraded.
 
 use codex_protocol::ThreadId;
 use http::HeaderValue;
@@ -30,7 +34,7 @@ pub(crate) async fn owned_by<F: Future>(thread: ThreadId, future: F) -> F::Outpu
 }
 
 /// The session resolving auth on this task, or `None` outside one.
-pub(super) fn current_owner() -> Option<ThreadId> {
+pub(crate) fn current_owner() -> Option<ThreadId> {
     REQUEST_OWNER.try_with(|thread| *thread).ok()
 }
 
@@ -52,6 +56,10 @@ pub(crate) enum Refusal {
     /// The broker refused to register the credential.
     Rejected,
     /// The request could not be signed for the broker.
+    #[cfg_attr(
+        not(any(unix, windows)),
+        allow(dead_code, reason = "only the broker signs requests")
+    )]
     Unsigned,
     /// The broker denied the signed request.
     Denied,
@@ -113,6 +121,9 @@ refusal_texts! {
 
 /// Frames awaiting the broker's answer, at most this many.
 const MAX_PENDING: usize = 64;
+/// Owners with a refusal on record, at most this many (the oldest refusal
+/// goes first): sessions end, the process may not.
+const MAX_REFUSED: usize = 256;
 
 /// One broker's refusals, by owner (`None`: outside any session).
 #[derive(Default)]
@@ -126,10 +137,9 @@ struct State {
     /// before a refusal does not clear it.
     clock: u64,
     refused: HashMap<Option<ThreadId>, (Refusal, u64)>,
-    /// When the latest request of each owner the broker served was signed.
-    served: HashMap<Option<ThreadId>, u64>,
     /// The owner of each signed frame whose answer has not arrived yet, and
-    /// when it was signed.
+    /// when it was signed. A served request removes the owner's older ones,
+    /// so a late answer to them cannot bring a refusal back.
     pending: VecDeque<(HeaderValue, Option<ThreadId>, u64)>,
 }
 
@@ -139,25 +149,32 @@ impl State {
         self.clock
     }
 
-    /// Records `refusal` at `at` unless a later refusal is recorded or a
-    /// later request was served.
+    /// Records `refusal` at `at` unless a later refusal is recorded.
     fn refuse(&mut self, owner: Option<ThreadId>, refusal: Refusal, at: u64) {
-        if self.served.get(&owner).is_some_and(|served| *served > at)
-            || self
-                .refused
-                .get(&owner)
-                .is_some_and(|(_, refused)| *refused > at)
+        if self
+            .refused
+            .get(&owner)
+            .is_some_and(|(_, refused)| *refused > at)
         {
             return;
+        }
+        if !self.refused.contains_key(&owner)
+            && self.refused.len() >= MAX_REFUSED
+            && let Some(oldest) = self
+                .refused
+                .iter()
+                .min_by_key(|(_, (_, refused))| *refused)
+                .map(|(oldest, _)| *oldest)
+        {
+            self.refused.remove(&oldest);
         }
         self.refused.insert(owner, (refusal, at));
     }
 
     /// The request `owner` signed at `at` was served: refusals before it are
-    /// over.
+    /// over, and so are its requests signed before it (their answers are
+    /// ignored).
     fn serve(&mut self, owner: Option<ThreadId>, at: u64) {
-        let served = self.served.entry(owner).or_default();
-        *served = (*served).max(at);
         if self
             .refused
             .get(&owner)
@@ -165,6 +182,8 @@ impl State {
         {
             self.refused.remove(&owner);
         }
+        self.pending
+            .retain(|(_, pending_owner, signed)| *pending_owner != owner || *signed > at);
     }
 }
 
