@@ -88,6 +88,20 @@ The kill switch (`/security` → `g`) works under every level.
 - If your own settings turn the sandbox off (full access), commands that the
   protected-file rules don't cover run without one. Choose a sandbox in your
   settings to keep every command in it.
+- With full access in your own settings, commands can also write the
+  project's `.git`, except its hooks and config (with a sandbox setting `.git`
+  stays read-only). A command could leave something there that your own git
+  later follows outside the sandbox (#874): a link such as
+  `.git/COMMIT_EDITMSG` to a file elsewhere, which your next `git commit`
+  writes; a hard link; rebase or cherry-pick steps whose `exec` lines run when
+  you continue; a remote in `.git/remotes`; or a replaced `.git`. Corbanu
+  looks at `.git` before the first such command of a session, then after
+  each one and at the end of each turn (not at `objects` or `refs`, which git
+  replaces rather than writes through), and warns you about anything new,
+  with the command that removes it. It removes nothing itself. Until you remove it, approving a
+  command doesn't lift the protected-file rules in that session. A process a
+  command leaves running can still change `.git` after Corbanu's last look,
+  and nothing is checked between a turn's end and the next command.
 - MCP servers, apps, hooks and `!` shell commands run outside the sandbox, as
   under every level.
 - On Linux, where a command you approve can write a Corbanu home's folder

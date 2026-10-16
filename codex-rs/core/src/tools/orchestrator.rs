@@ -786,6 +786,33 @@ impl ToolOrchestrator {
                     .await;
             }
         }
+        // #874 (D6): under Moderate or Aggressive, where this run (or its
+        // retry outside the sandbox) may write a project's git folder, look
+        // at it before (once per session) and after each attempt.
+        let git_check =
+            match crate::security::protected_additional::protected_level(&tool_ctx.session) {
+                Some(level) if level != codex_security_policy::SecurityLevel::Permissive => {
+                    #[allow(deprecated)]
+                    let mut folders = vec![turn_ctx.cwd.to_path_buf()];
+                    folders.extend(
+                        materialized_workspace_roots
+                            .iter()
+                            .map(codex_utils_absolute_path::AbsolutePathBuf::to_path_buf),
+                    );
+                    if let Ok(policy_cwd) = sandbox_policy_cwd.to_abs_path() {
+                        folders.push(policy_cwd.to_path_buf());
+                    }
+                    let effective =
+                        codex_sandboxing::policy_transforms::effective_file_system_sandbox_policy(
+                            &file_system_sandbox_policy,
+                            tool.additional_permissions(req),
+                        );
+                    let unsandboxed =
+                        initial_sandbox == SandboxType::None || policy_allows_no_sandbox;
+                    GitCheck::begin(tool_ctx, level, folders, effective, unsandboxed).await
+                }
+                _ => None,
+            };
         let initial_attempt_start = Instant::now();
         let (first_result, first_deferred_network_approval) = Self::run_attempt(
             tool,
@@ -795,6 +822,9 @@ impl ToolOrchestrator {
             managed_network_active,
         )
         .await;
+        if let Some(check) = &git_check {
+            check.finish(tool_ctx).await;
+        }
         let initial_duration = initial_attempt_start.elapsed();
         match first_result {
             Ok(out) => {
@@ -1027,6 +1057,9 @@ impl ToolOrchestrator {
                 let (retry_result, retry_deferred_network_approval) =
                     Self::run_attempt(tool, req, tool_ctx, &retry_attempt, managed_network_active)
                         .await;
+                if let Some(check) = &git_check {
+                    check.finish(tool_ctx).await;
+                }
                 let escalated_duration = escalated_attempt_start.elapsed();
                 match retry_result {
                     Ok(output) => {
@@ -1068,6 +1101,70 @@ impl ToolOrchestrator {
                 }
                 Err(err)
             }
+        }
+    }
+}
+
+/// #874, #837 (Travis, 2026-10-16, D6): the repositories whose git folder a
+/// run may write under Moderate or Aggressive (`security::git_postcheck`).
+struct GitCheck {
+    repos: Vec<crate::security::git_postcheck::Repo>,
+    level: codex_security_policy::SecurityLevel,
+}
+
+impl GitCheck {
+    /// The repositories of `folders` whose git folder the run may write
+    /// (through `policy`, or anywhere where it may run unsandboxed), with
+    /// this session's first look at each taken.
+    async fn begin(
+        tool_ctx: &ToolCtx,
+        level: codex_security_policy::SecurityLevel,
+        folders: Vec<std::path::PathBuf>,
+        policy: codex_protocol::permissions::FileSystemSandboxPolicy,
+        unsandboxed: bool,
+    ) -> Option<Self> {
+        use crate::security::git_postcheck;
+        let thread = tool_ctx.session.thread_id();
+        let cwd = folders.first()?.clone();
+        // Issue #524: reading folders stays off the async thread.
+        let repos = tokio::task::spawn_blocking(move || {
+            let folders: Vec<&std::path::Path> = folders.iter().map(AsRef::as_ref).collect();
+            let repos: Vec<_> = git_postcheck::repos(&folders)
+                .into_iter()
+                .filter(|repo| {
+                    unsandboxed
+                        || repo
+                            .probes()
+                            .iter()
+                            .any(|probe| policy.can_write_effective_path_with_cwd(probe, &cwd))
+                })
+                .collect();
+            git_postcheck::begin(thread, &repos);
+            repos
+        })
+        .await
+        .ok()?;
+        (!repos.is_empty()).then_some(Self { repos, level })
+    }
+
+    /// After an attempt: tell the person what is new there.
+    async fn finish(&self, tool_ctx: &ToolCtx) {
+        let thread = tool_ctx.session.thread_id();
+        let level = format!("{:?}", self.level);
+        let repos = self.repos.clone();
+        let message = tokio::task::spawn_blocking(move || {
+            crate::security::git_postcheck::finish(thread, &repos, &level)
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some(message) = message {
+            tracing::warn!(
+                target: "codex_core::security::git_postcheck",
+                call_id = %tool_ctx.call_id,
+                "{message}"
+            );
+            warn(tool_ctx, &message).await;
         }
     }
 }
@@ -1422,7 +1519,21 @@ fn post_taint_read_denials(
         .model_client()
         .post_taint_state()
         .filter(crate::security::tainted_action::PostTaintState::protected_paths_apply)?;
-    if state.human_approval_lifts_rules(human_approved_at) {
+    // #874 (D6): while something the post-command check found in a git
+    // folder is still there, no approval or grant lifts the rules: an
+    // approved `git commit` could write through a planted link into a
+    // protected file.
+    let git_held = crate::security::git_postcheck::held(thread);
+    if !git_held.is_empty() {
+        tracing::info!(
+            target: "codex_core::security::tainted_action",
+            call_id = %tool_ctx.call_id,
+            held = ?git_held,
+            "protected-path rules kept: the git check's findings are still there"
+        );
+    }
+    let git_held = !git_held.is_empty();
+    if !git_held && state.human_approval_lifts_rules(human_approved_at) {
         // Issue #540: except the Corbanu home's runtime entries, which stay
         // read-only in the command's sandbox (under Moderate every command
         // keeps one, #747).
@@ -1459,7 +1570,8 @@ fn post_taint_read_denials(
     // #442: a grant lifts the write protections only. Reads of credential
     // files and the Corbanu home are never granted under Aggressive.
     let mut granted = false;
-    if let (Some(operation), Some(confirmed)) = (grant_operation, confirmed_grant) {
+    if let (false, Some(operation), Some(confirmed)) = (git_held, grant_operation, confirmed_grant)
+    {
         match crate::security::grant_offer::apply(
             thread,
             &state,
@@ -1485,6 +1597,7 @@ fn post_taint_read_denials(
         }
     }
     if !granted
+        && !git_held
         && let Some(operation) = grant_operation
         && let Some(grant_id) = aggressive::admit(
             thread,

@@ -933,6 +933,26 @@ impl Session {
                 turn_id: turn_context.sub_id.clone(),
                 profile,
             });
+        // #874 (D6): a process an agent command left running may have
+        // changed a git folder this session watches since its last look;
+        // the person is told before the turn ends.
+        if let Some(level) = crate::security::protected_additional::protected_level(self)
+            .filter(|level| *level != codex_security_policy::SecurityLevel::Permissive)
+        {
+            let thread = self.thread_id;
+            let level = format!("{level:?}");
+            if let Ok(Some(message)) = tokio::task::spawn_blocking(move || {
+                crate::security::git_postcheck::recheck(thread, &level)
+            })
+            .await
+            {
+                self.send_event(
+                    turn_context.as_ref(),
+                    EventMsg::Warning(codex_protocol::protocol::WarningEvent { message }),
+                )
+                .await;
+            }
+        }
         let event = if let Some(reason) = abort_reason {
             self.emit_turn_abort_lifecycle(reason.clone(), turn_context.extension_data.as_ref())
                 .await;
