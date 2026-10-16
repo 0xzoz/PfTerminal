@@ -13,6 +13,11 @@ name: rust-ci core security tests
 # sandboxed home reads, grants). They need the code-mode host and the test MCP
 # server, which `cargo test -p codex-core` does not build; without the host,
 # code mode is unavailable and its taint test would check nothing.
+#
+# #902: on macOS also the Aggressive/Moderate approval and denial suites
+# (`issue_506`, `issue_584`, `issue_620_622`, `issue_736_740`, `issue_747`,
+# `issue_748`), which no other job runs there; Linux runs them in
+# rust-ci-full's whole suite. About 20-30 s per TMPDIR step.
 on:
   workflow_call:
     inputs:
@@ -144,6 +149,20 @@ jobs:
           TMPDIR: /tmp
         run: |
           cargo test --locked --target ${{ inputs.target }} -p codex-core --test all -- suite::pf_23_s01 suite::pf_25_s01
+
+      - name: "cargo test codex-core Aggressive/Moderate suites (macOS, #902)"
+        if: ${{ runner.os == 'macOS' }}
+        run: |
+          cargo test --locked --target ${{ inputs.target }} -p codex-core --test all -- \
+            suite::issue_506:: suite::issue_584:: suite::issue_620_622:: suite::issue_736_740:: suite::issue_747:: suite::issue_748::
+
+      - name: "cargo test codex-core Aggressive/Moderate suites (macOS, #902, TMPDIR=/tmp)"
+        if: ${{ runner.os == 'macOS' }}
+        env:
+          TMPDIR: /tmp
+        run: |
+          cargo test --locked --target ${{ inputs.target }} -p codex-core --test all -- \
+            suite::issue_506:: suite::issue_584:: suite::issue_620_622:: suite::issue_736_740:: suite::issue_747:: suite::issue_748::
 
       # Only main saves caches; PRs and branch runs restore main's (#636).
       - name: Save sccache cache

@@ -9,7 +9,7 @@ const DEFAULT_COOLDOWN_CAP_MS: i64 = 5 * 60 * 1000;
 /// before the turn goes on with this process's in-memory throttle. These steps
 /// run on the short-wait pool (`StateRuntime::quick`): an attempt waits at most
 /// `QUICK_BUSY_TIMEOUT`, so this allows a second one and no more.
-const PROVIDER_REQUEST_BUSY_WAIT: Duration = Duration::from_secs(1);
+pub(super) const PROVIDER_REQUEST_BUSY_WAIT: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ProviderRequestKey {
