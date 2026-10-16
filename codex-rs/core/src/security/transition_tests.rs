@@ -980,3 +980,72 @@ fn security_transition_kill_switch_watch_signals_only_other_processes() {
     assert!(!*watched.borrow_and_update());
     assert!(!here.now().4);
 }
+
+/// #842 (Travis, 2026-10-15): Moderate confirmed in another Corbanu Terminal
+/// process on the home raises this process's trees below it while they run,
+/// as a confirmation raises the other sessions of its own process: Core's
+/// level now (the next start stays Moderate), grants and "for session"
+/// approvals end (the epoch moves) and the sinks revoke; subscribers are
+/// told. A tree already at Moderate or above is left alone, and Aggressive
+/// or a lower level saved elsewhere is not taken while running.
+#[test]
+#[serial_test::serial(aggressive_grants)]
+fn issue_842_moderate_from_another_process_raises_running_trees() {
+    let latency = std::time::Duration::from_secs(2);
+    let home = tempfile::TempDir::new().unwrap();
+    let here = fixture(SecurityLevel::Permissive);
+    here.view.register_home(home.path());
+    let already = fixture(SecurityLevel::Aggressive);
+    already.view.register_home(home.path());
+    let mut raised = kill_switch_watch::subscribe_level_raised(home.path());
+    assert_eq!(*raised.borrow_and_update(), None);
+    let (_, _, epoch, _, _) = here.now();
+    let other = fixture(SecurityLevel::Permissive);
+    let store = OtherProcessStore(crate::security::recovery::HomeTransitionStore::new(
+        home.path(),
+    ));
+
+    let committed = other
+        .commit_with(other.set_level(SecurityLevel::Moderate), &store)
+        .unwrap();
+    assert!(!committed.reached_other_trees);
+    assert!(
+        within(latency, || here.now().0 == SecurityLevel::Moderate),
+        "Moderate did not arrive"
+    );
+    let (level, next_start, after, _, kill_switch) = here.now();
+    assert_eq!(
+        (level, next_start, kill_switch),
+        (SecurityLevel::Moderate, SecurityLevel::Moderate, false)
+    );
+    assert!(after > epoch, "grants and approvals did not end");
+    assert_eq!(here.revocations(), 1);
+    assert!(within(latency, || raised.has_changed().unwrap_or(false)));
+    assert_eq!(*raised.borrow_and_update(), Some(SecurityLevel::Moderate));
+    // Above it: unchanged.
+    assert_eq!(already.now().0, SecurityLevel::Aggressive);
+    assert_eq!(already.revocations(), 0);
+    // Seen once: nothing more to take.
+    assert_eq!(kill_switch_watch::apply_saved(home.path()).raised, None);
+
+    // A downgrade saved elsewhere (Permissive) raises nothing.
+    let lower = fixture(SecurityLevel::Permissive);
+    lower.view.register_home(home.path());
+    let downgrading = fixture(SecurityLevel::Moderate);
+    downgrading
+        .commit_with(downgrading.set_level(SecurityLevel::Permissive), &store)
+        .unwrap();
+    assert_eq!(kill_switch_watch::apply_saved(home.path()).raised, None);
+    assert_eq!(lower.now().0, SecurityLevel::Permissive);
+
+    // Aggressive saved elsewhere is not taken while running.
+    let below = fixture(SecurityLevel::Permissive);
+    below.view.register_home(home.path());
+    other
+        .controller
+        .commit_transition(other.set_level(SecurityLevel::Aggressive), &store, NOW + 1)
+        .unwrap();
+    assert_eq!(kill_switch_watch::apply_saved(home.path()).raised, None);
+    assert_eq!(below.now().0, SecurityLevel::Permissive);
+    assert_eq!(here.now().0, SecurityLevel::Moderate);
+}

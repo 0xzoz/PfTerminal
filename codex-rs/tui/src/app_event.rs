@@ -422,6 +422,12 @@ pub(crate) enum AppEvent {
     KillSwitchChangedElsewhere {
         on: bool,
     },
+    /// #842 (Travis, 2026-10-15): Moderate confirmed in another Corbanu
+    /// Terminal process on this home; Core already raised this process's
+    /// sessions to it.
+    SecurityLevelRaisedElsewhere {
+        level: crate::legacy_core::security_revocation::SecurityLevel,
+    },
     /// Open the `/spawn` role picker.
     OpenSpawnRolePicker,
     /// Open the `/spawn` Nazgul pane-binding picker.
