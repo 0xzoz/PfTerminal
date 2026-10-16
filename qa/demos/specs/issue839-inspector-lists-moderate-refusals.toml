@@ -55,7 +55,7 @@ wait = "Security inspector \\(read only\\)[\\s\\S]*more lines below"
 pause = 3.0
 [[steps]]
 key = "Down"
-repeat = 120
+repeat = 60
 [[steps]]
 wait = "Recent denials[\\s\\S]*reading Corbanu's own files"
 [[steps]]

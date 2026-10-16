@@ -670,7 +670,7 @@ fn runtime_rows(input: &InspectorInput, facts: &RuntimeFacts) -> Vec<Row> {
             ControlFacts::Enforcing => row(
                 "Model key broker",
                 State::Unobserved,
-                "installed and holding provider keys; its health is not probed (a model request it refuses shows here)",
+                "installed; provider keys go through it; its health is not probed (a model request it refused because its provider URL cannot be brokered shows here)",
                 "installed: this process",
             ),
             // #391, D2: Moderate and Aggressive turn it on where the broker
