@@ -58,8 +58,10 @@ detectors and Agent Sweep.
 
 When you confirm Moderate, Core's rules (the sandbox, protected files and
 untrusted content) apply at once in every session of this Corbanu Terminal,
-and grants and "for session" approvals end. The credential broker starts at
-the next start; press `r` to restart right away. Your `config.toml` isn't
+and grants and "for session" approvals end. Other Corbanu Terminals running
+on the same Corbanu home take them within about a second and say so, as they
+do with the kill switch. The credential broker starts at the next start
+(in each of them); press `r` to restart right away. Your `config.toml` isn't
 changed.
 
 Choosing Permissive or Aggressive from Moderate shows what changes first.

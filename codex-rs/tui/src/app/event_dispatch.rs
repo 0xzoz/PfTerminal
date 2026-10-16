@@ -1375,6 +1375,9 @@ impl App {
             AppEvent::KillSwitchChangedElsewhere { on } => {
                 self.on_kill_switch_changed(on, /*elsewhere*/ true);
             }
+            AppEvent::SecurityLevelRaisedElsewhere { level } => {
+                self.on_level_raised_elsewhere(level);
+            }
             AppEvent::FatalExitRequest(message) => {
                 return Ok(AppRunControl::Exit(ExitReason::Fatal(message)));
             }

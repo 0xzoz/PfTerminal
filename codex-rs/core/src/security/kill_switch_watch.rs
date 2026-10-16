@@ -18,10 +18,16 @@
 //! the tree's sinks stop its running work (#522, `kill_switch_stop`); turned
 //! off, its turns are allowed again, but only in a tree whose switch the
 //! other process had seen (a release never ends a switch it did not know,
-//! e.g. one this process could not save). Levels are not taken from the file
-//! while running: a level saved elsewhere applies at the next session start.
-//! An unreadable file changes nothing while running (a transient read error
-//! must not flip the switch); the next start enforces it as before.
+//! e.g. one this process could not save). #842 (Travis, 2026-10-15): Moderate
+//! confirmed in another process reaches this one too: a tree below it rises
+//! to Moderate (Core's rules apply now, its grants and "for session"
+//! approvals end), as the other sessions of the confirming process do; the
+//! launch-time controls (the credential broker) wait for the next start, as
+//! there. Other levels are not taken from the file while running: a lower
+//! one never applies before a restart, and Aggressive saved elsewhere applies
+//! at the next session start. An unreadable file changes nothing while
+//! running (a transient read error must not flip the switch); the next start
+//! enforces it as before.
 //!
 //! Limits: latency is within [`POLL`] (1 s) of the save, usually at once,
 //! plus the stop itself ("within about a second" in the user-facing text);
@@ -41,6 +47,7 @@ use std::sync::PoisonError;
 use std::sync::mpsc;
 use std::time::Duration;
 
+use codex_security_policy::SecurityLevel;
 use notify::RecursiveMode;
 use notify::Watcher;
 
@@ -68,6 +75,15 @@ struct HomeWatch {
     /// stops and resumes Claude panes with it). They are told only of a
     /// change another process made.
     on: tokio::sync::watch::Sender<bool>,
+    /// #842: the level another process confirmed that this process's trees
+    /// rose to, for subscribers (the TUI says so); signalled per rise.
+    raised: tokio::sync::watch::Sender<Option<SecurityLevel>>,
+}
+
+impl HomeWatch {
+    fn subscribed(&self) -> bool {
+        self.on.receiver_count() > 0 || self.raised.receiver_count() > 0
+    }
 }
 
 /// Start watching `home` unless this process already does.
@@ -84,6 +100,14 @@ pub(super) fn ensure(home: &Path) {
 /// process runs; a change another process on the home made is signalled.
 pub(crate) fn subscribe(home: &Path) -> tokio::sync::watch::Receiver<bool> {
     watch(home, |watch| watch.on.subscribe())
+}
+
+/// #842: signalled when Moderate confirmed in another process on `home` was
+/// taken by this process's sessions (Core's level rose to it here).
+pub(crate) fn subscribe_level_raised(
+    home: &Path,
+) -> tokio::sync::watch::Receiver<Option<SecurityLevel>> {
+    watch(home, |watch| watch.raised.subscribe())
 }
 
 /// A kill-switch event this process saved (see [`SAVED_HERE`]).
@@ -104,7 +128,8 @@ fn watch<T>(home: &Path, with: impl FnOnce(&HomeWatch) -> T) -> T {
     }
     let (on, _) =
         tokio::sync::watch::channel(crate::security::revocation_change::kill_switch_on(&home));
-    let watch = Arc::new(HomeWatch { on });
+    let (raised, _) = tokio::sync::watch::channel(None);
+    let watch = Arc::new(HomeWatch { on, raised });
     let result = with(&watch);
     let thread_watch = Arc::clone(&watch);
     let thread_home = home.clone();
@@ -164,7 +189,7 @@ fn run(home: &Path, watch: &HomeWatch) {
     loop {
         {
             let mut watches = WATCHES.lock().unwrap_or_else(PoisonError::into_inner);
-            if trees_on(home).is_empty() && watch.on.receiver_count() == 0 {
+            if trees_on(home).is_empty() && !watch.subscribed() {
                 watches.remove(home);
                 return;
             }
@@ -172,7 +197,9 @@ fn run(home: &Path, watch: &HomeWatch) {
         let contents = std::fs::read(home.join(STATE_FILE)).ok();
         if last.as_ref() != Some(&contents) {
             last = Some(contents);
-            apply(home);
+            if let Some(level) = apply_saved(home).raised {
+                watch.raised.send_replace(Some(level));
+            }
             watch.on.send_if_modified(|on| {
                 let now = crate::security::revocation_change::kill_switch_on(home);
                 std::mem::replace(on, now) != now && !changed_here(home)
@@ -210,15 +237,30 @@ fn trees_on(home: &Path) -> Vec<Arc<SharedEffectivePolicy>> {
         .collect()
 }
 
+/// What the saved state brought to this process's trees.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct Applied {
+    /// Trees that took a kill-switch change.
+    pub(super) reached: usize,
+    /// #842: the level trees rose to, if any did.
+    pub(super) raised: Option<SecurityLevel>,
+}
+
 /// The saved kill switch reaches this process's trees on `home`. Returns how
 /// many took a change.
 pub(super) fn apply(home: &Path) -> usize {
+    apply_saved(home).reached
+}
+
+/// The saved kill switch and a Moderate confirmed elsewhere (#842) reach
+/// this process's trees on `home`.
+pub(super) fn apply_saved(home: &Path) -> Applied {
     let home = canonical(home);
     // Never between a commit of this process saving the file and applying
     // it: the commit's own trees take it then, under its epoch.
     let _commit = COMMITS.lock().unwrap_or_else(PoisonError::into_inner);
     let Ok(Some(stored)) = crate::security::recovery::load(&home) else {
-        return 0;
+        return Applied::default();
     };
     let mut reached = 0;
     for tree in trees_on(&home) {
@@ -282,7 +324,57 @@ pub(super) fn apply(home: &Path) -> usize {
             notify_sinks(&tree);
         }
     }
-    reached
+    Applied {
+        reached,
+        raised: raise_to_moderate(&home, &stored),
+    }
+}
+
+/// #842: Moderate saved by another process raises this process's trees on
+/// `home` that are below it, as a confirmation raises the other sessions of
+/// its own process: Core's level, so its rules apply now; the epoch moves,
+/// so grants and "for session" approvals end; and the sinks revoke. Only
+/// the level is taken here (the revocations stay with the kill-switch rules
+/// above). Returns the level when a tree rose.
+fn raise_to_moderate(
+    home: &Path,
+    stored: &crate::security::recovery::DurableSecurityState,
+) -> Option<SecurityLevel> {
+    if stored.level != SecurityLevel::Moderate {
+        return None;
+    }
+    let mut raised = None;
+    for tree in trees_on(home) {
+        let rose = {
+            let mut guard = tree.state.write().unwrap_or_else(PoisonError::into_inner);
+            let Some(state) = guard.as_mut() else {
+                continue;
+            };
+            if state.persisted.settings.level >= SecurityLevel::Moderate {
+                continue;
+            }
+            let revocations = state.persisted.revocations.clone();
+            if let Err(error) = adopt(state, SecurityLevel::Moderate, revocations) {
+                tracing::warn!(
+                    target: "codex_core::security::transition",
+                    %error,
+                    "cannot take Moderate confirmed by another process"
+                );
+                continue;
+            }
+            state.next_start_level = state.next_start_level.max(SecurityLevel::Moderate);
+            true
+        };
+        if rose {
+            tracing::info!(
+                target: "codex_core::security::transition",
+                "Moderate confirmed by another process on this home applies here now"
+            );
+            notify_sinks(&tree);
+            raised = Some(SecurityLevel::Moderate);
+        }
+    }
+    raised
 }
 
 #[cfg(test)]

@@ -1231,6 +1231,8 @@ impl SecurityLevelPicker {
                     lines.extend(wrap(
                         "Starts when you restart: model keys held by the credential broker (unless your own config turns broker_model_auth off), and Moderate shown as the active level. Commands already running keep the permissions they started with until they end.",
                     ));
+                    // #842: other processes on the home take it too.
+                    lines.extend(wrap(MODERATE_REACHES_OTHER_TERMINALS));
                 } else {
                     lines.extend(wrap(&format!(
                         "Restart Corbanu Terminal to activate {}. Until then this session stays {}.",
@@ -1662,7 +1664,7 @@ impl SecurityLevelPicker {
             "Core's level is already Moderate in this session; confirming saves Moderate for every start. Model keys through the credential broker start when you restart Corbanu Terminal.".to_string()
         } else if self.basis.live {
             format!(
-                "Core's level becomes Moderate as soon as you confirm, in this session and the others of this Corbanu Terminal: {effects}; grants and \"for session\" approvals end. Model keys through the credential broker start when you restart Corbanu Terminal (you can restart right after saving); commands already running keep the permissions they started with."
+                "Core's level becomes Moderate as soon as you confirm, in this session and the others of this Corbanu Terminal, and within about a second in other Corbanu Terminals running on this Corbanu home (each says so): {effects}; grants and \"for session\" approvals end. Model keys through the credential broker start when you restart Corbanu Terminal (you can restart right after saving); commands already running keep the permissions they started with."
             )
         } else {
             format!(
@@ -1843,6 +1845,9 @@ const PERMISSIVE_UNDER_PROTECTED_LAUNCH: &str = "Your approval, sandbox, network
 
 /// #739: on the Permissive review while protected launch is on.
 const PROTECTED_LAUNCH_KEEPS_SANDBOX: &str = "Protected launch (secretless_agent_launch) stays on: agent commands never run outside the sandbox, even when you approve, so no approval to run outside it is offered.";
+
+/// #842 (Travis, 2026-10-15): on the Saved screen after Moderate applied now.
+const MODERATE_REACHES_OTHER_TERMINALS: &str = "Other Corbanu Terminals running on this Corbanu home take Core's Moderate rules within about a second and say so; their model keys move to the credential broker when they restart.";
 
 fn name(level: SecurityLevel) -> &'static str {
     crate::security::view::profile_name(level)

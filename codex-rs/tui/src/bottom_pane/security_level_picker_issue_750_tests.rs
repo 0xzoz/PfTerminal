@@ -182,6 +182,13 @@ fn issue_750_a_live_session_takes_cores_rules_now_and_the_broker_at_restart() {
         review.contains("Model keys through the credential broker start when you restart"),
         "{review}"
     );
+    // #842: other Corbanu Terminals on the home take it too.
+    assert!(
+        review.contains(
+            "within about a second in other Corbanu Terminals running on this Corbanu home"
+        ),
+        "{review}"
+    );
     // What the live tree reports after the commit.
     picker.screen = Screen::Saved(Ok(TransitionOutcome {
         level: ChosenLevel::Moderate,
@@ -193,6 +200,12 @@ fn issue_750_a_live_session_takes_cores_rules_now_and_the_broker_at_restart() {
     let saved = text(&picker);
     assert!(
         saved.contains("Active now in this session: agent commands always stay in the sandbox"),
+        "{saved}"
+    );
+    assert!(
+        saved.contains(
+            "Other Corbanu Terminals running on this Corbanu home take Core's Moderate rules"
+        ),
         "{saved}"
     );
     assert!(

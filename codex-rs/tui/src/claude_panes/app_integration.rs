@@ -1005,6 +1005,36 @@ impl App {
         });
     }
 
+    /// #842 (Travis, 2026-10-15): Moderate confirmed in another Corbanu
+    /// Terminal process on this home reaches this one while it runs; Core
+    /// has already raised this process's sessions, and the person is told.
+    pub(crate) fn watch_level_raised_elsewhere(&mut self) {
+        let mut watched = crate::legacy_core::security_revocation::watch_level_raised_elsewhere(
+            self.config.codex_home.as_ref(),
+        );
+        let _ = watched.borrow_and_update();
+        let tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            while watched.changed().await.is_ok() {
+                if let Some(level) = *watched.borrow_and_update() {
+                    tx.send(AppEvent::SecurityLevelRaisedElsewhere { level });
+                }
+            }
+        });
+    }
+
+    /// #842: says that Moderate confirmed in another Corbanu Terminal on this
+    /// home now applies here.
+    pub(crate) fn on_level_raised_elsewhere(
+        &mut self,
+        level: crate::legacy_core::security_revocation::SecurityLevel,
+    ) {
+        if level == crate::legacy_core::security_revocation::SecurityLevel::Moderate {
+            self.chat_widget
+                .add_info_message(MODERATE_CONFIRMED_ELSEWHERE.to_string(), /*hint*/ None);
+        }
+    }
+
     /// #507: the kill switch was turned on (here, or in another Corbanu
     /// Terminal on this home): running
     /// Claude pane turns stop, and assignments and whips pause at once (not
@@ -1776,6 +1806,10 @@ fn rename_claude_pane_shortcut(pane_id: String) -> SelectionShortcutAction {
 /// #507: shown when another Corbanu Terminal on this home turned the kill
 /// switch on.
 pub(crate) const KILL_SWITCH_ON_ELSEWHERE: &str = "The security kill switch was turned on in another Corbanu Terminal on this home. Work running here was stopped (Claude panes included), and nothing is sent to the model until it is turned off in /security (here or there). Messages and tasks from other agents wait until then.";
+
+/// #842: shown when Moderate confirmed in another Corbanu Terminal on this
+/// home raised this one's sessions.
+pub(crate) const MODERATE_CONFIRMED_ELSEWHERE: &str = "Moderate was confirmed in another Corbanu Terminal on this home, so Core's Moderate rules apply here now: agent commands always stay in the sandbox, credential and Corbanu files are protected from them, and after untrusted content protected actions need your fresh approval. Grants and \"for session\" approvals here ended. This session is shown as Permissive until you restart Corbanu Terminal; model keys through the credential broker start then. Commands already running keep the permissions they started with.";
 
 /// #507: shown when another Corbanu Terminal on this home turned it off.
 pub(crate) const KILL_SWITCH_OFF_ELSEWHERE: &str = "The security kill switch was turned off in another Corbanu Terminal on this home. Turns are sent to the model again. Nothing restarts by itself here: stopped replies and commands do not restart, and a task that waited for a Claude pane goes with that pane's next turn.";
