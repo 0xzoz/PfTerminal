@@ -414,6 +414,7 @@ fn issue814_responses_excess_reasoning_retains_valid_usage_and_vercel_charge() -
             total: Presence::Number(110.try_into()?),
             billed_usd: Some(Decimal::try_from("0.012345".to_string())?),
             refused_status: None,
+            session_ended_at_ms: None,
         }
     );
     Ok(())
@@ -451,6 +452,7 @@ fn issue814_responses_valid_absent_and_null_reasoning_are_preserved() -> anyhow:
                 total: Presence::Missing,
                 billed_usd: None,
                 refused_status: None,
+                session_ended_at_ms: None,
             }
         );
     }
@@ -476,6 +478,7 @@ fn issue814_responses_does_not_guess_output_from_separate_reasoning_chunk() -> a
             total: Presence::Missing,
             billed_usd: None,
             refused_status: None,
+            session_ended_at_ms: None,
         }
     );
     Ok(())
@@ -595,6 +598,7 @@ async fn issue814_replay_rejection_is_atomic_and_normalized_report_retains_charg
             total: Some(110),
             billed_usd: Some(Decimal::try_from("0.012345".to_string())?),
             refused_status: None,
+            session_ended_at_ms: None,
         }
     );
     assert_eq!(

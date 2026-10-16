@@ -1110,3 +1110,17 @@ fn reopen_prewarm_label_is_stable() {
     assert!(prewarm_turn_label().starts_with("prewarm:"));
     assert!(!prewarm_turn_label().starts_with(REOPEN_PREWARM_LABEL));
 }
+
+/// #824: `/cost` names a realtime WebSocket session by this label prefix
+/// (the TUI's `REALTIME_SESSION_LABEL`). It stays a `realtime:` label, and a
+/// WebRTC call's label is not one.
+#[test]
+fn realtime_session_label_is_stable() {
+    use crate::accounting::REALTIME_SESSION_LABEL;
+    use crate::accounting::realtime_session_turn_label;
+    use crate::accounting::realtime_turn_label;
+    assert_eq!(REALTIME_SESSION_LABEL, "realtime:ws:");
+    assert_eq!(realtime_session_turn_label("sub"), "realtime:ws:sub");
+    assert!(realtime_session_turn_label("sub").starts_with("realtime:"));
+    assert!(!realtime_turn_label("sub").starts_with(REALTIME_SESSION_LABEL));
+}

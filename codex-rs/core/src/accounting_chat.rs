@@ -460,6 +460,7 @@ pub(super) fn patch(
         reasoning,
         total: presence(usage.total_tokens)?,
         refused_status: None,
+        session_ended_at_ms: None,
     })
 }
 
