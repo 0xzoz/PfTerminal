@@ -440,8 +440,10 @@ pub(crate) fn sections(
         // the restart (Core's rules hold from confirmation).
         let value = if launch_level(input) == SecurityLevel::Aggressive {
             PROTECTED_READS
-        } else {
+        } else if saved.level.enforced() == ChosenLevel::Aggressive {
             PROTECTED_READS_BEFORE_RESTART
+        } else {
+            PROTECTED_READS_NOT_LAUNCHED
         };
         grants.rows.push(row(
             "Protected reads",
@@ -782,6 +784,10 @@ const PROTECTED_READS: &str = "never granted under Aggressive, not even once: cr
 
 /// #846: the same row after Aggressive is confirmed and before the restart.
 const PROTECTED_READS_BEFORE_RESTART: &str = "never granted under Aggressive, not even once: credential files in your home folder (SSH, cloud and CLI tokens) and Corbanu's sign-in, vault, config and history stay unreadable to agent commands; switch to Permissive in /security to allow them. The project's credential files (.env, .env.* and .envrc files) are denied to agent commands only after you restart Corbanu Terminal";
+
+/// #846: the same row where the next start is not Aggressive either (Core
+/// is Aggressive only until the restart, or from a config setting).
+const PROTECTED_READS_NOT_LAUNCHED: &str = "never granted under Aggressive, not even once: credential files in your home folder (SSH, cloud and CLI tokens) and Corbanu's sign-in, vault, config and history stay unreadable to agent commands; switch to Permissive in /security to allow them. The project's credential files (.env, .env.* and .envrc files) are not denied in this session: Aggressive's sandbox is not on";
 
 fn launch_level(input: &InspectorInput) -> SecurityLevel {
     match input.active {

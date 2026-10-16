@@ -619,10 +619,6 @@ fn issue_749_moderate_rows_match_what_is_enforced() {
     );
 }
 
-fn input_aggressive() -> InspectorInput {
-    input(ChosenLevel::Aggressive)
-}
-
 /// #846 (MOD-29): launched under Moderate, Aggressive confirmed and Core
 /// already Aggressive, before the restart: the project's `.env` files are
 /// not denied yet (Aggressive's sandbox starts at the restart), and the
@@ -653,16 +649,30 @@ fn issue_846_protected_reads_before_the_restart_leave_out_project_env_files() {
         "{}",
         reads.value
     );
+    // The next start is not Aggressive (another level saved since, or Core
+    // Aggressive from config only): no protection is promised after it.
+    let not_launched = sections(&input, &saved(ChosenLevel::Permissive), &facts, NOW);
+    let reads = find(&not_launched, "Protected reads");
+    assert!(
+        reads.value.ends_with(
+            "The project's credential files (.env, .env.* and .envrc files) are not denied in this session: Aggressive's sandbox is not on"
+        ),
+        "{}",
+        reads.value
+    );
     // Launched under Aggressive: as before.
     let launched = sections(
-        &input_aggressive(),
+        &super::tests::input(ChosenLevel::Aggressive),
         &saved(ChosenLevel::Aggressive),
         &facts,
         NOW,
     );
+    let reads = find(&launched, "Protected reads");
     assert!(
-        find(&launched, "Protected reads")
-            .value
-            .starts_with("never granted under Aggressive, not even once: credential files (.env, .env.* and .envrc files, also ones created later;")
+        reads.value.starts_with(
+            "never granted under Aggressive, not even once: credential files (.env, .env.* and .envrc files, also ones created later;"
+        ),
+        "{}",
+        reads.value
     );
 }
