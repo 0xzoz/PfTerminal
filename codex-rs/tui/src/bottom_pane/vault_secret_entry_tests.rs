@@ -350,7 +350,9 @@ fn vault_error_text_is_refused_without_a_shown_error() {
         "MOONSHOT_API_KEY".to_string(),
         capture.clone().callback(),
     );
-    assert!(view.handle_paste(format!("■ {SHOWN_LOCK_ERROR}\n")));
+    // As copied from a narrow terminal: with the bullet and line breaks.
+    let wrapped = SHOWN_LOCK_ERROR.replace(" vault ", "\nvault\n");
+    assert!(view.handle_paste(format!("■ {wrapped}\n")));
     view.handle_key_event(enter_event());
 
     assert!(capture.taken().is_none());
@@ -365,16 +367,24 @@ fn vault_error_text_is_refused_without_a_shown_error() {
 #[test]
 fn shown_error_text_is_refused_whole_or_in_part() {
     let shown =
-        "Provider request failed: 401 Invalid Authentication from api.example.com".to_string();
+        "Provider request failed: 401 Invalid Authentication from https://api.example.com/v1/models"
+            .to_string();
     for (value, refused) in [
         (shown.as_str(), true),
-        ("401 Invalid Authentication from api", true),
+        ("401 Invalid Authentication from https://api", true),
         (
-            "Provider request failed: 401 Invalid Authentication from api.example.com and more",
+            "Provider request failed: 401 Invalid Authentication from https://api.example.com/v1/models and more",
+            true,
+        ),
+        // Copied from a narrow terminal: the line breaks of the wrapped error.
+        (
+            "provider request failed: 401 Invalid\nAuthentication from https://api.example.com/v1/models",
             true,
         ),
         ("401", false),
         ("sk-lock-test-value-0001", false),
+        // A token the error happened to quote is not refused.
+        ("https://api.example.com/v1/models", false),
     ] {
         let capture = Capture::default();
         let mut view = VaultSecretEntryView::new(capture.clone().callback())

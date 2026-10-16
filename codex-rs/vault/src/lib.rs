@@ -144,12 +144,12 @@ pub enum VaultError {
     ErrorTextAsSecret,
     /// #855: the vault's storage could not be reached (for example the
     /// Corbanu home became unreadable). Nothing was read or written.
-    #[error("failed to {operation} {}: {source}", path.display())]
+    #[error("failed to {operation} {}: {error}", path.display())]
     StorageUnavailable {
         operation: &'static str,
         path: PathBuf,
-        #[source]
-        source: std::io::Error,
+        /// Shown in the message, so not also reported as the error's source.
+        error: std::io::Error,
     },
     /// A provider-managed credential is available only to its scoped integration.
     #[error("credential labeled {label:?} can only be used by its provider integration")]
@@ -804,7 +804,8 @@ static STORAGE_FAILURE_REPORTER: OnceLock<StorageFailureReporter> = OnceLock::ne
 
 /// #855: installs the process-wide reporter for vault storage failures caused
 /// by missing permission (the `corbanu` binary records them in the #616
-/// home-access log). Only the first call takes effect.
+/// home-access log). Only the first call takes effect; without one, they are
+/// only logged.
 pub fn set_storage_failure_reporter(reporter: StorageFailureReporter) {
     let _ = STORAGE_FAILURE_REPORTER.set(reporter);
 }
@@ -825,7 +826,7 @@ fn storage_unavailable(operation: &'static str, path: &Path, source: std::io::Er
     VaultError::StorageUnavailable {
         operation,
         path: path.to_path_buf(),
-        source,
+        error: source,
     }
 }
 
@@ -845,12 +846,30 @@ const ERROR_TEXT_MARKERS: &[&str] = &[
 ];
 
 /// Whether `value` is (or contains) the text of a vault error message rather
-/// than a credential. See [`ERROR_TEXT_MARKERS`].
+/// than a credential, ignoring ASCII case and line wrapping. See
+/// [`ERROR_TEXT_MARKERS`].
 pub fn is_vault_error_text(value: &str) -> bool {
-    let value = Zeroizing::new(value.to_lowercase());
+    let value = normalized_for_matching(value);
     ERROR_TEXT_MARKERS
         .iter()
         .any(|marker| value.contains(marker))
+}
+
+/// `value` with ASCII letters lowercased and every run of whitespace (such as
+/// the line breaks of an error copied from a wrapped transcript) made one
+/// space, for matching against error text. The copy is zeroized when dropped
+/// and never reallocated, since it can hold a credential.
+pub fn normalized_for_matching(value: &str) -> Zeroizing<String> {
+    let mut normalized = Zeroizing::new(String::with_capacity(value.len()));
+    let mut words = value.split_whitespace();
+    if let Some(first) = words.next() {
+        normalized.extend(first.chars().map(|c| c.to_ascii_lowercase()));
+        for word in words {
+            normalized.push(' ');
+            normalized.extend(word.chars().map(|c| c.to_ascii_lowercase()));
+        }
+    }
+    normalized
 }
 
 pub(crate) fn ensure_not_error_text(secret: &str) -> Result<(), VaultError> {

@@ -96,6 +96,8 @@ fn the_text_of_a_vault_error_is_never_stored_as_a_value() {
     for value in [
         shown.clone(),
         format!("■ {shown}\n"),
+        // Copied from a narrow terminal: wrapped onto several lines.
+        shown.replace(" vault ", "\nvault\n"),
         format!("{shown}: Operation not permitted (os error 1)"),
         format!("FAILED TO OPEN VAULT LOCK {}", lock.display()),
         "Failed to replace vault credential \"existing\": failed to lock vault".to_string(),

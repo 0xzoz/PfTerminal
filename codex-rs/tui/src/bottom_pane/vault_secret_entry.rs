@@ -216,16 +216,23 @@ impl VaultSecretEntryView {
         self
     }
 
+    /// Matching ignores ASCII case and line wrapping (a copy from a narrow
+    /// terminal has line breaks). A value that is only part of a shown error
+    /// is refused only if it has a space in it: a credential has none, so a
+    /// token that an error happened to quote is still accepted.
     fn is_error_text(&self, raw: &str) -> bool {
-        let value = raw.trim();
-        codex_vault::is_vault_error_text(value)
-            || self.shown_errors.iter().any(|shown| {
-                let shown = shown.trim();
-                shown.chars().count() >= MIN_SHOWN_ERROR_MATCH_CHARS
-                    && (value.contains(shown)
-                        || (value.chars().count() >= MIN_SHOWN_ERROR_MATCH_CHARS
-                            && shown.contains(value)))
-            })
+        if codex_vault::is_vault_error_text(raw) {
+            return true;
+        }
+        let value = codex_vault::normalized_for_matching(raw);
+        self.shown_errors.iter().any(|shown| {
+            let shown = codex_vault::normalized_for_matching(shown);
+            shown.chars().count() >= MIN_SHOWN_ERROR_MATCH_CHARS
+                && (value.contains(shown.as_str())
+                    || (value.chars().count() >= MIN_SHOWN_ERROR_MATCH_CHARS
+                        && value.contains(' ')
+                        && shown.contains(value.as_str())))
+        })
     }
 
     fn handle_key_event_at(&mut self, key_event: KeyEvent, now: Instant) {

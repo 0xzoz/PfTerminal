@@ -39,6 +39,9 @@ async fn a_failed_vault_add_stores_nothing_and_shows_the_error() {
     let lock = home.path().join("secrets").join(".vault.lock");
     std::fs::create_dir_all(&lock).expect("a directory where the lock file belongs");
 
+    // `add_vault_credential` uses the default (OS keyring) vault. It cannot
+    // reach the keyring here: the lock open fails before any key is read, and
+    // `just test` also sets CORBANU_TEST_NO_NATIVE_KEYRING.
     chat.add_vault_credential(
         "moonshot_api_key".to_string(),
         crate::app_event::VaultSecret::new(VALUE.to_string()),
