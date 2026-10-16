@@ -18,7 +18,6 @@ fn issue941_approvals_off_names_the_actual_level() {
     let mut output = Vec::new();
     for level in [SecurityLevel::Moderate, SecurityLevel::Aggressive] {
         let reason = action(level, ProtectedActionKind::Credentials).approvals_off_rejection();
-        eprintln!("ISSUE941_REFUSAL={reason}");
         assert!(
             reason.contains(&format!("Security level {level}:")),
             "{reason}"

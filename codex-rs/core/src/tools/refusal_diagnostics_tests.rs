@@ -220,6 +220,5 @@ async fn issue941_actual_approvals_off_reason_survives_command_events() {
         assert_eq!(item.aggregated_output.as_deref(), Some(reason.as_str()));
         assert_eq!(item.exit_code, Some(-1));
         assert_eq!(item.duration, Some(Duration::ZERO));
-        eprintln!("ISSUE941_EVENT unified={unified} status=refused reason={reason}");
     }
 }
