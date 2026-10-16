@@ -3459,7 +3459,7 @@ fn accounting_realtime_session_reads_unknown_not_zero() {
     let InspectionDay::Ready(mut view) = packet() else {
         unreachable!()
     };
-    let session = realtime_quote(1_000, Some(61_000));
+    let session = realtime_quote(/*started*/ 1_000, Some(61_000));
     view.requests =
         std::collections::BTreeMap::from([(session.attempt.request_id, vec![session.clone()])]);
     view.totals = DayTotals::from_quotes(view.requests.values().flatten()).unwrap();
@@ -3521,7 +3521,7 @@ fn accounting_realtime_session_reads_unknown_not_zero() {
 /// mid-session) says so rather than inventing a time.
 #[test]
 fn accounting_realtime_session_without_an_end_says_so() {
-    let session = realtime_quote(1_000, /*ended*/ None);
+    let session = realtime_quote(/*started*/ 1_000, /*ended*/ None);
     let attempt = attempt_text(&session);
     assert!(
         attempt
