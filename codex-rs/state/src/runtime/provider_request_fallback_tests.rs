@@ -39,6 +39,19 @@ async fn hold_write_lock(path: &Path) -> anyhow::Result<sqlx::Transaction<'stati
     Ok(pool.begin_with("BEGIN IMMEDIATE").await?)
 }
 
+/// That a step that met the held lock waited on the short-wait pool
+/// (`QUICK_BUSY_TIMEOUT` per attempt, at most two), not the main pool: there
+/// a held lock costs SQLite's whole busy timeout, `sqlite::BUSY_TIMEOUT`, per
+/// attempt. The upper bound is a fifth below that timeout, so it still rules
+/// out any main-pool wait while leaving several times the short waits for a
+/// loaded runner (one took 2.04 s on Windows CI, #914).
+fn assert_short_wait(waited: Duration) {
+    assert!(
+        waited >= crate::QUICK_BUSY_TIMEOUT / 2 && waited < crate::sqlite::BUSY_TIMEOUT * 4 / 5,
+        "{waited:?}"
+    );
+}
+
 async fn acquire(
     runtime: &StateRuntime,
     owner: &str,
@@ -92,6 +105,8 @@ async fn a_lock_held_past_the_wait_falls_back_to_this_process() -> anyhow::Resul
     );
 
     let held = hold_write_lock(&runtime.sqlite().state_db_path()).await?;
+    // Otherwise the steps run on the main pool.
+    assert!(runtime.quick.is_some(), "the short-wait pool is open");
     let started = Instant::now();
     let check = runtime
         .check_provider_request_throttle(&key(), &preflight(), /*now_ms*/ 3_000)
@@ -109,10 +124,7 @@ async fn a_lock_held_past_the_wait_falls_back_to_this_process() -> anyhow::Resul
     );
     // A step on the turn's path waits about a second (two short-wait
     // attempts), not SQLite's 5 s busy timeout.
-    assert!(
-        first_wait >= crate::QUICK_BUSY_TIMEOUT / 2 && first_wait < Duration::from_secs(2),
-        "{first_wait:?}"
-    );
+    assert_short_wait(first_wait);
 
     // While paused, later steps don't wait the lock out again.
     let started = Instant::now();
@@ -720,6 +732,7 @@ async fn adoption_waits_out_a_busy_db_once() -> anyhow::Result<()> {
     let home = unique_temp_dir();
     let runtime = StateRuntime::init_for_testing(home.clone(), "zai".into()).await?;
     let held = hold_write_lock(&runtime.sqlite().state_db_path()).await?;
+    assert!(runtime.quick.is_some(), "the short-wait pool is open");
     let adopt = || {
         runtime.adopt_legacy_provider_request_key(
             "env:ZAI_API_KEY:aaaaaaaaaaaaaaaa",
@@ -729,12 +742,8 @@ async fn adoption_waits_out_a_busy_db_once() -> anyhow::Result<()> {
     };
     let started = Instant::now();
     adopt().await;
-    assert!(
-        started.elapsed() >= crate::QUICK_BUSY_TIMEOUT / 2
-            && started.elapsed() < Duration::from_secs(2),
-        "{:?}",
-        started.elapsed()
-    );
+    // One short-wait attempt, not SQLite's 5 s busy timeout.
+    assert_short_wait(started.elapsed());
     assert_eq!(
         runtime.provider_request_memory.paused(),
         Some(StateDbFallback::Busy)

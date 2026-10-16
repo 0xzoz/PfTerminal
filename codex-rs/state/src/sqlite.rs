@@ -61,6 +61,9 @@ const QUICK_POOL_CONNECTIONS: u32 = 2;
 /// normally, as one has just been opened).
 const QUICK_POOL_OPEN_WAIT: Duration = Duration::from_secs(5);
 const QUICK_POOL_OPEN_POLL: Duration = Duration::from_millis(5);
+/// How long a connection of a main pool ([`SqliteConfig::open_read_write_pool`])
+/// waits for another connection's write lock before SQLITE_BUSY.
+pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy)]
 struct RuntimeDbSpec {
@@ -464,7 +467,7 @@ impl SqliteConfig {
             .create_if_missing(true)
             .journal_mode(SqliteJournalMode::Wal)
             .synchronous(SqliteSynchronous::Normal)
-            .busy_timeout(Duration::from_secs(5))
+            .busy_timeout(BUSY_TIMEOUT)
             .log_statements(LevelFilter::Off);
         // Setting `auto_vacuum` takes the write lock even when the value is
         // unchanged, so it must not be a per-connection option: every pooled
