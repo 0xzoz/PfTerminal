@@ -524,21 +524,21 @@ struct Classifier {
 /// #841 (MOD-06): the word classifier splits quoted text into commands on
 /// purpose (it over-approximates the shell), so a sed program such as
 /// `'/f.write(...)/a\ ...'` yields "commands" like `/a` that name no file.
-/// When a real shell parse shows the command line is plain commands with
-/// literal words, a word is sed's data, not a command the shell runs, if it
-/// occurs in a sed program and nowhere else in the command line.
+/// A word is sed's data, not a command the shell runs, when a real shell
+/// parse shows the line is plain commands with literal words, the word occurs
+/// in a sed program that only appends, inserts or changes text (text sed
+/// never runs), and it occurs in no other word of the line.
 struct SedScope {
-    /// The arguments of the line's `sed` commands.
+    /// The line's text-only sed programs.
     programs: Vec<String>,
     /// Every other word of the line, command words included.
     others: Vec<String>,
 }
 
 impl SedScope {
-    /// `None` (nothing is sed's data) unless the parse is plain, the line's
-    /// other words carry no backslash (the parse keeps them, the word lexer
-    /// drops them), and no sed program may run anything (GNU sed's `e`
-    /// command or `s///e` flag) or comes from a file (`-f`).
+    /// `None` (nothing is sed's data) unless the parse is plain, a sed
+    /// command there has a text-only program, and the line's other words
+    /// carry no backslash or brace.
     fn of(command: &[String]) -> Option<Self> {
         let commands = codex_shell_command::bash::parse_shell_lc_plain_commands(command)?;
         let mut scope = Self {
@@ -549,25 +549,48 @@ impl SedScope {
             let sed = words
                 .first()
                 .is_some_and(|word| matches!(basename(word), "sed" | "gsed"));
-            let mut words = words.into_iter();
-            if sed {
-                scope.others.extend(words.next());
-                scope.programs.extend(words);
+            // Only plain flags: no attached or long-form program (`-es…`,
+            // `--expression=`) and no script file (`-f`, `--file`).
+            let plain_flags = words.iter().skip(1).all(|word| {
+                !word.starts_with('-')
+                    || (word.len() > 1 && word[1..].chars().all(|flag| "nEirsuze".contains(flag)))
+            });
+            if sed && plain_flags {
+                // The programs: each word after `-e`, or else the first word
+                // that is not a flag; the rest are files.
+                let with_e = words
+                    .iter()
+                    .any(|word| word.starts_with('-') && word.contains('e'));
+                // macOS `sed -i ''`: the empty word after `-i` is its suffix.
+                let mut program_next = false;
+                let mut suffix_next = false;
+                let mut positional_taken = false;
+                for (index, word) in words.into_iter().enumerate() {
+                    let suffix = std::mem::take(&mut suffix_next) && word.is_empty();
+                    let program = index > 0
+                        && !suffix
+                        && !word.starts_with('-')
+                        && if with_e {
+                            program_next
+                        } else {
+                            !std::mem::replace(&mut positional_taken, true)
+                        };
+                    program_next = word.starts_with('-') && word.ends_with('e');
+                    suffix_next = word.starts_with('-') && word.ends_with('i');
+                    if program && sed_text_only(&word) {
+                        scope.programs.push(word);
+                    } else {
+                        scope.others.push(word);
+                    }
+                }
             } else {
                 scope.others.extend(words);
             }
         }
-        let options_read_a_file = |word: &String| {
-            word.starts_with("--file")
-                || (word.starts_with('-') && !word.starts_with("--") && word.contains('f'))
-        };
+        // The word lexer drops backslashes and expands braces; the parse
+        // keeps both, so such a word could hide a run of a data word.
         let usable = !scope.programs.is_empty()
-            && !scope.others.iter().any(|word| word.contains('\\'))
-            && !scope.programs.iter().any(options_read_a_file)
-            && !scope
-                .programs
-                .iter()
-                .any(|program| sed_may_execute(program));
+            && !scope.others.iter().any(|word| word.contains(['\\', '{']));
         usable.then_some(scope)
     }
 
@@ -576,6 +599,57 @@ impl SedScope {
             && self.programs.iter().any(|program| program.contains(word))
             && !self.others.iter().any(|other| other.contains(word))
     }
+}
+
+/// #841: whether a sed program is one `a`, `i` or `c` command (append,
+/// insert or change text) after at most one address or range of line
+/// numbers, `$` or `/regex/`: its text runs to the first newline not
+/// escaped by a backslash, and only blank space may follow it. Sed never
+/// runs such text; anything else (`s`, `e`, several commands) is not
+/// text-only.
+fn sed_text_only(program: &str) -> bool {
+    fn address(rest: &str) -> Option<&str> {
+        if let Some(regex) = rest.strip_prefix('/') {
+            let mut escaped = false;
+            for (index, ch) in regex.char_indices() {
+                match ch {
+                    _ if escaped => escaped = false,
+                    '\\' => escaped = true,
+                    '\n' => return None,
+                    '/' => return Some(&regex[index + 1..]),
+                    _ => {}
+                }
+            }
+            return None;
+        }
+        if let Some(rest) = rest.strip_prefix('$') {
+            return Some(rest);
+        }
+        Some(rest.trim_start_matches(|ch: char| ch.is_ascii_digit()))
+    }
+    let Some(mut rest) = address(program.trim_start_matches([' ', '\t'])) else {
+        return false;
+    };
+    if let Some(second) = rest.strip_prefix(',') {
+        match address(second) {
+            Some(after) if after.len() < second.len() => rest = after,
+            _ => return false,
+        }
+    }
+    let rest = rest.trim_start_matches([' ', '\t']);
+    let Some(text) = rest.strip_prefix(['a', 'i', 'c']) else {
+        return false;
+    };
+    let mut escaped = false;
+    for (index, ch) in text.char_indices() {
+        match ch {
+            _ if escaped => escaped = false,
+            '\\' => escaped = true,
+            '\n' => return text[index + 1..].trim().is_empty(),
+            _ => {}
+        }
+    }
+    true
 }
 
 /// Whether a script the command runs must be read in full (it is what runs)
@@ -1065,62 +1139,6 @@ impl Classifier {
         let text = String::from_utf8_lossy(&bytes);
         self.script(&text, cwd, depth + 1);
     }
-}
-
-/// #841: whether a sed program may run a command: GNU sed's `e` command or
-/// the `e` flag of an `s` command at a command position (the start, after
-/// `;`, a newline, a brace, `!` or an address). Over-approximates; an `s`
-/// command it cannot read to its flags counts as running one.
-fn sed_may_execute(program: &str) -> bool {
-    let chars: Vec<char> = program.chars().collect();
-    let mut at_command = true;
-    for (index, &ch) in chars.iter().enumerate() {
-        if at_command {
-            if matches!(ch, ' ' | '\t') {
-                continue;
-            }
-            let next = chars.get(index + 1).copied();
-            if ch == 'e'
-                && next.is_none_or(|next| next.is_whitespace() || matches!(next, ';' | '}'))
-            {
-                return true;
-            }
-            if ch == 's'
-                && next.is_some_and(|delimiter| {
-                    !delimiter.is_alphanumeric() && !delimiter.is_whitespace() && delimiter != '\\'
-                })
-                && sed_substitution_runs(&chars[index + 1..])
-            {
-                return true;
-            }
-        }
-        at_command =
-            matches!(ch, ';' | '\n' | '{' | '}' | '!' | '$' | '/' | ',') || ch.is_ascii_digit();
-    }
-    false
-}
-
-/// For `s` followed by `rest` (its delimiter first): whether its flags hold
-/// `e`, or it cannot be read to its flags.
-fn sed_substitution_runs(rest: &[char]) -> bool {
-    let delimiter = rest[0];
-    let mut seen = 0;
-    let mut index = 1;
-    while index < rest.len() && seen < 2 {
-        match rest[index] {
-            '\\' => index += 1,
-            ch if ch == delimiter => seen += 1,
-            _ => {}
-        }
-        index += 1;
-    }
-    if seen < 2 {
-        return true;
-    }
-    rest[index..]
-        .iter()
-        .take_while(|ch| !ch.is_whitespace() && !matches!(ch, ';' | '}'))
-        .any(|ch| *ch == 'e')
 }
 
 /// Shell parameters that stand for the command's own arguments or status,
