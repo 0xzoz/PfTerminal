@@ -90,13 +90,16 @@ fn the_window_bounds_the_wait_and_other_failures_never_wait() {
     );
 }
 
+#[cfg(unix)]
 fn eperm() -> std::future::Ready<std::io::Result<()>> {
     std::future::ready(Err(std::io::Error::from_raw_os_error(1)))
 }
 
 /// Exec's wait before saving the session: until every folder lists again,
 /// or what is left of the window since the first failure is spent; other
-/// errors never wait.
+/// errors never wait. Unix only: EPERM (os error 1) is a Unix error, and
+/// nothing marks a rollout unsaved on Windows.
+#[cfg(unix)]
 #[tokio::test]
 async fn the_exit_wait_ends_when_the_folders_list_again_or_the_window_is_spent() {
     let reads = std::sync::atomic::AtomicU32::new(0);
