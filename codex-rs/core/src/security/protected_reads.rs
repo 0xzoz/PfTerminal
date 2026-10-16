@@ -47,6 +47,7 @@ use super::tainted_action::PolicyBinding;
 use super::tainted_action::USER_PERSISTENCE;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
+use codex_protocol::permissions::EffectiveWrites;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use writes::keychain_command;
 use writes::write_targets;
@@ -321,7 +322,9 @@ impl ReadPolicyInputs {
         if !spellings.iter().any(is_startup) {
             return false;
         }
-        !self.base_writable(&self.base_policy(), &path)
+        let policy = self.base_policy();
+        let effective = policy.effective_writes_with_cwd(self.turn_cwd.as_path());
+        !self.base_writable(&policy, &effective, &path)
     }
 
     /// The project roots as the orchestrator runs the profile: the
@@ -356,11 +359,17 @@ impl ReadPolicyInputs {
     /// Whether `policy` writes where a write to `path` lands (a link's final
     /// target), also through a root spelled by an alias of its location
     /// (`/tmp` for `/private/tmp`), as the sandboxes match it (#619).
-    fn base_writable(&self, policy: &FileSystemSandboxPolicy, path: &AbsolutePathBuf) -> bool {
+    /// `effective` is `policy`'s write checks in the turn's folder, built
+    /// once for many paths (#907).
+    fn base_writable(
+        &self,
+        policy: &FileSystemSandboxPolicy,
+        effective: &EffectiveWrites<'_>,
+        path: &AbsolutePathBuf,
+    ) -> bool {
         let target = ReadDenials::real_location(path).unwrap_or_else(|| path.clone());
-        let cwd = self.turn_cwd.as_path();
-        policy.can_write_path_with_cwd(target.as_path(), cwd)
-            || policy.can_write_effective_path_with_cwd(target.as_path(), cwd)
+        policy.can_write_path_with_cwd(target.as_path(), self.turn_cwd.as_path())
+            || effective.can_write_effective_path(target.as_path())
     }
 
     /// #740: whether a write to `path` lands inside one of `policy`'s
@@ -389,6 +398,7 @@ impl ReadPolicyInputs {
         let writes = writes::writes(command);
         let denials = self.denials();
         let policy = self.base_policy();
+        let effective = policy.effective_writes_with_cwd(self.turn_cwd.as_path());
         let mut understood = writes.understood;
         let mut first = None;
         for word in writes.targets {
@@ -402,7 +412,7 @@ impl ReadPolicyInputs {
             if path.as_path().starts_with("/dev") {
                 continue;
             }
-            if self.base_writable(&policy, &path) {
+            if self.base_writable(&policy, &effective, &path) {
                 if lands_in(path.as_path(), denials.liftable_read_only_paths(), &[]) {
                     return None;
                 }
@@ -424,7 +434,8 @@ impl ReadPolicyInputs {
     fn unliftable_write(&self, path: &Path) -> Option<bool> {
         let path = AbsolutePathBuf::from_absolute_path(path).ok()?;
         let policy = self.base_policy();
-        if path.as_path().starts_with("/dev") || self.base_writable(&policy, &path) {
+        let effective = policy.effective_writes_with_cwd(self.turn_cwd.as_path());
+        if path.as_path().starts_with("/dev") || self.base_writable(&policy, &effective, &path) {
             return None;
         }
         Some(self.in_writable_folder(&policy, &path))
