@@ -1,7 +1,9 @@
 use super::layered_security_floor;
+use super::load_config_toml_with_layer_stack;
 use crate::security::recovery;
 use codex_config::ConfigLayerSource;
 use codex_config::ConfigLayerStack;
+use codex_config::ConfigLoadError;
 use codex_config::ConfigLoadOptions;
 use codex_config::LoaderOverrides;
 use codex_config::NoopThreadConfigLoader;
@@ -59,8 +61,8 @@ impl Fixture {
         }
     }
 
-    async fn load(&self, strict: bool) -> std::io::Result<ConfigLayerStack> {
-        let overrides = LoaderOverrides {
+    fn loader_overrides(&self) -> LoaderOverrides {
+        LoaderOverrides {
             managed_config_path: Some(self.root.join("managed/legacy.toml")),
             system_config_path: Some(self.root.join("managed/config.toml")),
             system_requirements_path: Some(self.root.join("managed/requirements.toml")),
@@ -69,7 +71,11 @@ impl Fixture {
             managed_preferences_base64: Some(String::new()),
             macos_managed_config_requirements_base64: Some(String::new()),
             ..Default::default()
-        };
+        }
+    }
+
+    async fn load(&self, strict: bool) -> std::io::Result<ConfigLayerStack> {
+        let overrides = self.loader_overrides();
         load_config_layers_state(
             LOCAL_FS.as_ref(),
             &self.home,
@@ -83,6 +89,22 @@ impl Fixture {
             &NoopThreadConfigLoader,
         )
         .await
+    }
+
+    /// The bootstrap load the TUI and `corbanu exec` run first at startup.
+    async fn load_bootstrap(&self, strict: bool) -> std::io::Result<()> {
+        load_config_toml_with_layer_stack(
+            &self.home,
+            Some(&AbsolutePathBuf::from_absolute_path(&self.project)?),
+            Vec::new(),
+            ConfigLoadOptions {
+                loader_overrides: self.loader_overrides(),
+                strict_config: strict,
+                ..Default::default()
+            },
+        )
+        .await
+        .map(|_| ())
     }
 
     // Exercise the native config preflight and durable recovery without starting
@@ -265,4 +287,57 @@ async fn ordinary_project_precedence_and_denied_provider_are_preserved() {
     assert_eq!(cfg.model_provider.as_deref(), Some("fixture-owner"));
     assert_eq!(fixture.recovered_level(&stack), SecurityLevel::Moderate);
     assert!(stack.startup_warnings().expect("warning")[0].contains("model_provider"));
+}
+
+#[tokio::test]
+async fn unversioned_project_security_startup_error_names_the_project_file() {
+    // #845 option (a): these tables are still refused, but the startup error
+    // must point at the project file so the person can fix it.
+    for (security, message) in [
+        ("level = \"aggressive\"", "missing field `version`"),
+        ("level = \"moderate\"", "missing field `version`"),
+        (
+            "level = \"permissive\"\nunknown = true",
+            "unknown field `unknown`",
+        ),
+    ] {
+        let fixture = Fixture::new(
+            &format!("[security]\n{security}\n"),
+            /*trusted*/ true,
+            "",
+        );
+        let error = fixture
+            .load_bootstrap(/*strict*/ false)
+            .await
+            .expect_err("unversioned project security is refused");
+        let config_error = error
+            .get_ref()
+            .and_then(|error| error.downcast_ref::<ConfigLoadError>())
+            .map(ConfigLoadError::config_error)
+            .unwrap_or_else(|| panic!("no file-specific error for {security:?}: {error}"));
+        assert_eq!(
+            config_error.path.display().to_string(),
+            fixture.project_path(),
+            "{security:?}"
+        );
+        assert!(config_error.message.contains(message), "{config_error:?}");
+        assert!(
+            error.to_string().contains(&fixture.project_path()),
+            "{error}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn bootstrap_load_still_accepts_versioned_and_dropped_project_security() {
+    for project in [
+        "[security]\nversion = 1\nlevel = \"aggressive\"\n",
+        "[security]\nlevel = \"permissive\"\n",
+    ] {
+        let fixture = Fixture::new(project, /*trusted*/ true, "");
+        fixture
+            .load_bootstrap(/*strict*/ false)
+            .await
+            .unwrap_or_else(|error| panic!("{project:?}: {error}"));
+    }
 }
