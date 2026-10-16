@@ -128,7 +128,7 @@ fn watch<T>(home: &Path, with: impl FnOnce(&HomeWatch) -> T) -> T {
     }
     let (on, _) =
         tokio::sync::watch::channel(crate::security::revocation_change::kill_switch_on(&home));
-    let (raised, _) = tokio::sync::watch::channel(None);
+    let (raised, _) = tokio::sync::watch::channel(/*init*/ None);
     let watch = Arc::new(HomeWatch { on, raised });
     let result = with(&watch);
     let thread_watch = Arc::clone(&watch);
@@ -351,6 +351,9 @@ fn raise_to_moderate(
                 continue;
             };
             if state.persisted.settings.level >= SecurityLevel::Moderate {
+                // Its next start reads Moderate at least (a restart of a
+                // window waiting for a downgrade starts at the saved level).
+                state.next_start_level = state.next_start_level.max(SecurityLevel::Moderate);
                 continue;
             }
             let revocations = state.persisted.revocations.clone();

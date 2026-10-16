@@ -1028,6 +1028,16 @@ fn issue_842_moderate_from_another_process_raises_running_trees() {
     // Seen once: nothing more to take.
     assert_eq!(kill_switch_watch::apply_saved(home.path()).raised, None);
 
+    // A downgrade saved elsewhere (Permissive) raises nothing.
+    let lower = fixture(SecurityLevel::Permissive);
+    lower.view.register_home(home.path());
+    let downgrading = fixture(SecurityLevel::Moderate);
+    downgrading
+        .commit_with(downgrading.set_level(SecurityLevel::Permissive), &store)
+        .unwrap();
+    assert_eq!(kill_switch_watch::apply_saved(home.path()).raised, None);
+    assert_eq!(lower.now().0, SecurityLevel::Permissive);
+
     // Aggressive saved elsewhere is not taken while running.
     let below = fixture(SecurityLevel::Permissive);
     below.view.register_home(home.path());

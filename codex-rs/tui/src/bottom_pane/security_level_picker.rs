@@ -1231,8 +1231,15 @@ impl SecurityLevelPicker {
                     lines.extend(wrap(
                         "Starts when you restart: model keys held by the credential broker (unless your own config turns broker_model_auth off), and Moderate shown as the active level. Commands already running keep the permissions they started with until they end.",
                     ));
-                    // #842: other processes on the home take it too.
-                    lines.extend(wrap(MODERATE_REACHES_OTHER_TERMINALS));
+                    // #842: other processes on the home take it too, from
+                    // the saved state (not when it could not be saved).
+                    let saved = outcome
+                        .core
+                        .as_ref()
+                        .is_none_or(|report| report.not_saved.is_none());
+                    if saved {
+                        lines.extend(wrap(MODERATE_REACHES_OTHER_TERMINALS));
+                    }
                 } else {
                     lines.extend(wrap(&format!(
                         "Restart Corbanu Terminal to activate {}. Until then this session stays {}.",

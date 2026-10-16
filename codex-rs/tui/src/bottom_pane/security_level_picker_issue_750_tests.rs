@@ -212,6 +212,23 @@ fn issue_750_a_live_session_takes_cores_rules_now_and_the_broker_at_restart() {
         saved.contains("Starts when you restart: model keys held by the credential broker"),
         "{saved}"
     );
+    // #842 review: not saved, other Corbanu Terminals cannot take it.
+    picker.screen = Screen::Saved(Ok(TransitionOutcome {
+        level: ChosenLevel::Moderate,
+        core: Some(
+            crate::legacy_core::security_level_change::LevelChangeReport {
+                kind: crate::legacy_core::security_level_change::LevelChangeKind::Stricter,
+                in_force: SecurityLevel::Moderate,
+                next_start: SecurityLevel::Moderate,
+                live: true,
+                not_saved: Some("disk full".to_string()),
+                approvals: None,
+            },
+        ),
+    }));
+    let unsaved = text(&picker);
+    assert!(unsaved.contains("could not be saved"), "{unsaved}");
+    assert!(!unsaved.contains("Other Corbanu Terminals"), "{unsaved}");
     picker.screen = Screen::List { note: None };
     let list = text(&picker);
     assert!(
