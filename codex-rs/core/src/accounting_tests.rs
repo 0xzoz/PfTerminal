@@ -24,6 +24,16 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use uuid::Uuid;
 
+/// Waits until the ledger writer has written what it was handed. A slow write
+/// is put off and written later (#865), so read the ledger after this.
+async fn settle(db: &StateRuntime) {
+    assert!(
+        db.flush_accounting(std::time::Duration::from_secs(30))
+            .await,
+        "records still queued"
+    );
+}
+
 const ENDPOINT: &str = "http://127.0.0.1:1/v1";
 
 #[tokio::test]
@@ -230,6 +240,7 @@ async fn accounting_developer_activation_samples_http_and_installs_inspectable_d
     while let Some(event) = stream.next().await {
         event?;
     }
+    settle(&db).await;
     let now = chrono::Utc::now().timestamp_millis();
     let day = AccountingStore::inspect_day(&db, owner, now / 86_400_000, now).await?;
     let InspectionDay::Ready(view) = day else {
@@ -620,6 +631,7 @@ async fn accounting_actual_transport_retries_and_old_response_keep_distinct_owne
     first
         .observe(/*position*/ 2, Ok(usage(/*value*/ 8)))
         .await?;
+    settle(&fixture.db).await;
     let attempts = fixture.attempts().await?;
     assert_eq!(attempts.len(), 3);
     assert_eq!(
@@ -653,28 +665,30 @@ async fn accounting_actual_transport_retries_and_old_response_keep_distinct_owne
             )
         ]
     );
-    let rows: Vec<(String, i64, String)> = sqlx::query_as("SELECT attempt_id, revision, json_extract(payload, '$.patch') FROM draft_accounting_observations ORDER BY rowid")
+    // Sorted: the writer merges records queued for the same attempt, so a
+    // record it put off changes the order rows are written in.
+    let mut rows: Vec<(String, i64, String)> = sqlx::query_as("SELECT attempt_id, revision, json_extract(payload, '$.patch') FROM draft_accounting_observations")
         .fetch_all(&mut fixture.connection().await?).await?;
-    assert_eq!(
-        rows,
-        vec![
-            (
-                attempts[1].attempt_id.to_string(),
-                1,
-                r#"{"input":7}"#.into()
-            ),
-            (
-                attempts[2].attempt_id.to_string(),
-                1,
-                r#"{"input":11}"#.into()
-            ),
-            (
-                attempts[1].attempt_id.to_string(),
-                2,
-                r#"{"input":8}"#.into()
-            ),
-        ]
-    );
+    rows.sort();
+    let mut expected: Vec<(String, i64, String)> = vec![
+        (
+            attempts[1].attempt_id.to_string(),
+            1,
+            r#"{"input":7}"#.into(),
+        ),
+        (
+            attempts[2].attempt_id.to_string(),
+            1,
+            r#"{"input":11}"#.into(),
+        ),
+        (
+            attempts[1].attempt_id.to_string(),
+            2,
+            r#"{"input":8}"#.into(),
+        ),
+    ];
+    expected.sort();
+    assert_eq!(rows, expected);
     assert_eq!(sends.load(Ordering::SeqCst), 3);
     Ok(())
 }
@@ -868,6 +882,7 @@ async fn issue_654_brokered_requests_are_all_recorded() -> anyhow::Result<()> {
         .stream(brokered)
         .await?;
     }
+    settle(&fixture.db).await;
     assert_eq!(
         (
             sends.load(Ordering::SeqCst),
@@ -896,6 +911,7 @@ async fn issue_654_brokered_requests_are_all_recorded() -> anyhow::Result<()> {
             },
         ))
         .await?;
+    settle(&other.db).await;
     assert_eq!(other.attempts().await?.len(), 0);
     assert!(other.sampling.is_closed());
     Ok(())
@@ -925,6 +941,7 @@ async fn accounting_scope_drop_clears_cancelled_sampling_and_observation_failure
     evidence
         .observe(/*position*/ 1, Ok(usage(/*value*/ 7)))
         .await?;
+    settle(&fixture.db).await;
     sqlx::query("CREATE TRIGGER reject_observation BEFORE INSERT ON draft_accounting_observations BEGIN SELECT RAISE(ABORT, 'fixture-observation'); END")
         .execute(&mut fixture.connection().await?).await?;
     // The stream carries on; only recording stops.
@@ -932,6 +949,7 @@ async fn accounting_scope_drop_clears_cancelled_sampling_and_observation_failure
         .observe(/*position*/ 2, Ok(usage(/*value*/ 9)))
         .await?;
     assert!(fixture.sampling.is_closed());
+    settle(&fixture.db).await;
     let rows: Vec<String> = sqlx::query_scalar(
         "SELECT json_extract(payload, '$.patch') FROM draft_accounting_observations",
     )
@@ -1031,6 +1049,7 @@ async fn accounting_clock_behind_the_checkpoint_still_records_and_sends() -> any
         evidence
             .observe(/*position*/ 1, Ok(usage(/*value*/ 7)))
             .await?;
+        settle(&fixture.db).await;
         let attempts = fixture.attempts().await?;
         assert_eq!((attempts.len(), sends.load(Ordering::SeqCst)), (1, 1));
         assert!(i64::from(attempts[0].dispatched_at_ms) < ahead);
