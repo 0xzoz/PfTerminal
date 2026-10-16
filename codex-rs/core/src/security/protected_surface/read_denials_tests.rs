@@ -2181,23 +2181,33 @@ fn issue_838_security_state_and_keys_stay_denied_when_the_rules_are_lifted() {
         link.join("security_level.toml"),
     ] {
         assert!(
-            ReadDenials::is_security_file(&fx.codex_home, &path),
+            ReadDenials::is_security_file(&fx.codex_home, Some(&fx.user_home), &path),
             "{path:?}"
         );
-        assert!(ReadDenials::is_security_file(&link, &path), "{path:?}");
+        assert!(
+            ReadDenials::is_security_file(&link, Some(&fx.user_home), &path),
+            "{path:?}"
+        );
     }
     for path in [
         fx.codex_home.join("auth.json"),
         fx.user_home.join("security_state.json"),
     ] {
         assert!(
-            !ReadDenials::is_security_file(&fx.codex_home, &path),
+            !ReadDenials::is_security_file(&fx.codex_home, Some(&fx.user_home), &path),
             "{path:?}"
         );
     }
     assert!(ReadDenials::is_security_file(
         &fx.codex_home,
+        Some(&fx.user_home),
         &other.join("source-origin.key")
+    ));
+    // A project's own `.codex` is not a Corbanu home.
+    assert!(!ReadDenials::is_security_file(
+        &fx.codex_home,
+        Some(&fx.user_home),
+        &cwd.join(".codex/security_level.toml")
     ));
 }
 
@@ -2244,14 +2254,22 @@ fn issue_838_missing_security_files_where_the_home_is_writable() {
         }
         assert!(denied_here(lock), "{lock}: {denied:?}");
     }
-    // Where the home is not writable (a workspace elsewhere), every one stays
-    // denied before it exists, also on Linux.
+    // Where the home is not writable (the project only: no temporary
+    // folders, which hold the fixture), every one stays denied before it
+    // exists, also on Linux.
+    let project_only = PermissionProfile::workspace_write_with(
+        &[],
+        NetworkSandboxPolicy::Restricted,
+        /*exclude_tmpdir_env_var*/ true,
+        /*exclude_slash_tmp*/ true,
+    )
+    .materialize_project_roots_with_workspace_roots(std::slice::from_ref(&cwd));
     let denials = ReadDenials::for_turn(
         &fx.codex_home,
         &fx.codex_home,
         &cwd,
         std::slice::from_ref(&cwd),
-        &workspace(cwd.as_path()),
+        &project_only,
     )
     .runtime_only();
     assert!(

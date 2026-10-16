@@ -869,9 +869,14 @@ impl ReadDenials {
     }
 
     /// #838: whether `path` (by any spelling) is one of Corbanu's security
-    /// state and key files in `codex_home`, which a person's approval under
-    /// Moderate does not lift. Explanation only.
-    pub(crate) fn is_security_file(codex_home: &Path, path: &Path) -> bool {
+    /// state and key files in `codex_home` or another Corbanu home in
+    /// `user_home`, which a person's approval under Moderate does not lift.
+    /// Explanation only.
+    pub(crate) fn is_security_file(
+        codex_home: &Path,
+        user_home: Option<&Path>,
+        path: &Path,
+    ) -> bool {
         let real = |path: &Path| std::fs::canonicalize(path).ok();
         let real_path = real(path).or_else(|| {
             let name = path.file_name()?;
@@ -880,12 +885,15 @@ impl ReadDenials {
         let homes = [Some(codex_home.to_path_buf()), real(codex_home)];
         // Also another Corbanu home's (`~/.codex` and the like).
         let in_other_home = |path: &Path| {
-            path.parent()
-                .and_then(Path::file_name)
-                .is_some_and(|name| OTHER_CORBANU_HOMES.iter().any(|other| name == *other))
-                && path
-                    .file_name()
-                    .is_some_and(|name| CORBANU_SECURITY_FILES.iter().any(|file| name == *file))
+            path.parent().is_some_and(|parent| {
+                user_home.is_some_and(|home| {
+                    OTHER_CORBANU_HOMES
+                        .iter()
+                        .any(|other| parent == home.join(other))
+                })
+            }) && path
+                .file_name()
+                .is_some_and(|name| CORBANU_SECURITY_FILES.iter().any(|file| name == *file))
         };
         in_other_home(path)
             || real_path.as_deref().is_some_and(in_other_home)

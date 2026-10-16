@@ -202,7 +202,7 @@ fn explain(
             .is_some_and(|(path, contract)| contract.keeps_unreadable(path, cwd));
         let security = path
             .as_ref()
-            .is_some_and(|path| ReadDenials::is_security_file(codex_home, path));
+            .is_some_and(|path| ReadDenials::is_security_file(codex_home, user_home, path));
         return Some(if kept {
             kept_read_explanation(&word)
         } else if security {
