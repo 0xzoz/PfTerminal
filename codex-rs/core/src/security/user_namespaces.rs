@@ -63,7 +63,7 @@ pub(crate) fn denial_explanation(
         super::inspection::record_command_denial(
             session.thread_id(),
             INSPECTED,
-            "blocked on Linux under Moderate and Aggressive; no approval or grant lifts it",
+            "reported refused by the command; Moderate and Aggressive block it on Linux, and no approval or grant lifts it",
         );
     })
 }

@@ -324,8 +324,8 @@ pub(crate) fn record_refusal(thread: ThreadId, what: &'static str, outcome: &'st
     record(Some(thread), what, outcome);
 }
 
-/// #826 follow-up: a command failed because its sandbox refused `what`, and
-/// the refusal was explained where it failed (fixed text only).
+/// #826 follow-up: a command failed reporting that its sandbox refused
+/// `what`, and the refusal was explained where it failed (fixed text only).
 pub(crate) fn record_command_denial(thread: ThreadId, what: &'static str, outcome: &'static str) {
     record(Some(thread), what, outcome);
 }

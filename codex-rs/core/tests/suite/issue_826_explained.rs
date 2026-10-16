@@ -51,7 +51,15 @@ const INSPECTED: &str = "creating a user namespace";
 enum Tool {
     ShellCommand,
     ExecCommand,
+    /// `shell_command` with the model's justification.
+    Justified,
+    /// `shell_command` asking to run outside the sandbox
+    /// (`require_escalated`), with a justification.
+    Escalated,
 }
+
+/// The model's justification in [`Tool::Justified`] and [`Tool::Escalated`].
+const JUSTIFICATION: &str = "a container needs a namespace";
 
 #[derive(Debug)]
 struct Outcome {
@@ -76,6 +84,18 @@ async fn run(
         Tool::ExecCommand => (
             "exec_command",
             json!({ "cmd": SCRIPT, "yield_time_ms": 5_000 }),
+        ),
+        Tool::Justified => (
+            "shell_command",
+            json!({ "command": SCRIPT, "justification": JUSTIFICATION }),
+        ),
+        Tool::Escalated => (
+            "shell_command",
+            json!({
+                "command": SCRIPT,
+                "sandbox_permissions": "require_escalated",
+                "justification": JUSTIFICATION,
+            }),
         ),
     };
     let server = start_mock_server().await;
@@ -227,30 +247,40 @@ async fn issue_826_refused_user_namespace_is_explained() -> anyhow::Result<()> {
 }
 
 /// A person asked to approve `unshare` under the rule is told it will fail
-/// and why; approving does not lift the rule.
+/// and why, after the model's justification, in the ordinary prompt and in
+/// Moderate's prompt for a request to run outside the sandbox; approving
+/// does not lift the rule.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn issue_826_approval_prompt_names_the_rule() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
-    let outcome = Box::pin(run(
-        SecurityLevel::Moderate,
-        /*aggressive_launch*/ false,
-        Tool::ShellCommand,
-        AskForApproval::UnlessTrusted,
-    ))
-    .await?;
-    assert!(
-        outcome
-            .asked
-            .iter()
-            .any(|reason| reason
-                .contains(&format!("{NOTE} Moderate blocks creating user namespaces"))),
-        "{outcome:?}"
-    );
-    assert!(
-        outcome.output.contains(REFUSED) && !outcome.output.contains(NAMESPACE_MADE),
-        "{outcome:?}"
-    );
+    let note = format!("{NOTE} Moderate blocks creating user namespaces");
+    let mut wrong = Vec::new();
+    for (tool, approval, justified) in [
+        (Tool::ShellCommand, AskForApproval::UnlessTrusted, false),
+        (Tool::Justified, AskForApproval::UnlessTrusted, true),
+        (Tool::Escalated, AskForApproval::OnRequest, true),
+    ] {
+        let outcome = Box::pin(run(
+            SecurityLevel::Moderate,
+            /*aggressive_launch*/ false,
+            tool,
+            approval,
+        ))
+        .await?;
+        let asked_ok = outcome.asked.iter().any(|reason| {
+            reason.contains(&note)
+                && (!justified
+                    || reason
+                        .find(JUSTIFICATION)
+                        .is_some_and(|at| reason.find(&note).is_some_and(|note| at < note)))
+        });
+        if !asked_ok || !outcome.output.contains(REFUSED) || outcome.output.contains(NAMESPACE_MADE)
+        {
+            wrong.push(format!("{tool:?} {approval:?}: {outcome:?}"));
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
     Ok(())
 }
 
