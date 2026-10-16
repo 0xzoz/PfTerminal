@@ -27,9 +27,9 @@ mkdir -p "$(dirname "$TART_QA_KEY")" && chmod 700 "$(dirname "$TART_QA_KEY")"
 log "pulling $IMAGE (cached after the first pull)"
 "$TART" pull "$IMAGE"
 "$TART" clone "$IMAGE" "$PREP"
-"$TART" set "$PREP" --cpu "$CPUS" --memory "$MEMORY_MB"
 # On failure, stop and delete the prep VM: it may still accept the public default login.
 trap 'stop_vm "$PREP" 10; "$TART" delete "$PREP" 2> /dev/null || true' EXIT
+"$TART" set "$PREP" --cpu "$CPUS" --memory "$MEMORY_MB"
 start_vm "$PREP"
 ip="$(wait_ip "$PREP" 300)"
 log "prep guest at $ip"

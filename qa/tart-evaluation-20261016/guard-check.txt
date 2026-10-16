@@ -1,0 +1,6 @@
+# guard_slot check after review round 2 (2026-10-16): one Tart clone started, then guard_slot called again.
+2026-10-16T12:35:00Z slot ok (guests running: 1; UTM: 1; Tart: 0)
+tart running: 1
+2026-10-16T12:35:08Z ERROR: a Tart VM is already running; these scripts run one at a time
+guard refused as expected
+cleaned

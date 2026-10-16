@@ -6,7 +6,8 @@ TART_HOME `/Volumes/CorbanuDrive/Corbanu/.codex-work/tart-home`; one Tart VM at 
 
 - `pull.txt`: image pull start, duration in seconds, end.
 - `prepare-base.out`: the final base build (`corbanu-qa-base`).
-- `cycles/`: one JSON row per `cycle.sh` run (memory in MiB, CPU in % of one core). `final-base.jsonl`
+- `cycles/`: one JSON row per `cycle.sh` run (memory and `clone_private_mb_*` in MiB, CPU in % of
+  one core). `final-base.jsonl`
   holds the reported median. The others come from the two earlier base builds: `base1-*` (Gatekeeper
   still off) and `base2-ssh-fda-off`. `base1-a-trial` and `base1-b` come from an earlier `cycle.sh`
   that recorded free-space deltas (`disk_mb_after_*`, noisy) instead of the APFS clone cost. In
@@ -17,7 +18,13 @@ TART_HOME `/Volumes/CorbanuDrive/Corbanu/.codex-work/tart-home`; one Tart VM at 
   installed at 10:53Z) in the rest.
 - `base2-ssh-fda-off` and `fidelity-ssh-fda-off.txt` come from a base built by an earlier revision of
   `prepare-base.sh` that always removed SSH's Full Disk Access; the committed script does that only
-  with `TART_QA_SSH_FDA=off` (the variable reaching the guest was checked separately).
+  with `TART_QA_SSH_FDA=off` (the variable reaching the guest: `fda-env-check.txt`).
+- All runs recorded here used the scripts as first committed (`c650e22b38`, plus the fidelity
+  password display change). The round-1 review fixes came after them and have not run in these
+  records: the process-count `guard_slot`, the bounded wait in `stop_vm`, the prep-VM deletion on a
+  failed base build, `TART_QA_SSH_FDA` reaching the guest (checked on its own, above), and the
+  "key file deleted" wording (`erase.txt` still says "erased"). `guard-check.txt`: the round-2
+  `guard_slot` refusing a second Tart VM while one runs (UTM "macOS 3" up as well).
 - `fidelity.txt`: `fidelity.sh` on the final base; `fidelity-final-base-boot1.txt`: an earlier boot of
   the same base. `fidelity-ssh-fda-off.txt`: the same checks on a base built without Full Disk Access
   for SSH. In the two older files the throwaway keychain password is replaced by `<throwaway>`.

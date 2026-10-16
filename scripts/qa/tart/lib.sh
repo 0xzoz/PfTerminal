@@ -22,12 +22,12 @@ die() { log "ERROR: $*"; exit 1; }
 now() { python3 -c 'import time; print(f"{time.time():.3f}")'; }
 
 # Running macOS guests on this host. macOS allows two at once, shared by every tool (UTM, Tart, ...).
-running_tart_vms() {
-  "$TART" list --source local --format json |
-    python3 -c 'import json,sys; print(sum(1 for v in json.load(sys.stdin) if v.get("Running") or v.get("State") == "running"))'
-}
+# Tart VMs running anywhere on the host (`tart run` processes, whatever their TART_HOME).
+running_tart_vms() { pgrep -f 'tart\.app/Contents/MacOS/tart run' | grep -c . || true; }
 running_utm_vms() { # informational only; guard_slot counts VM processes
-  { [ -x "$UTMCTL" ] && "$UTMCTL" list 2> /dev/null | awk 'NR > 1 && $2 == "started"' | wc -l | tr -d ' '; } || echo "?"
+  local out
+  out="$("$UTMCTL" list 2> /dev/null)" || { echo "?"; return 0; }
+  awk 'NR > 1 && $2 == "started"' <<< "$out" | grep -c . || true
 }
 
 # Refuse to start a VM unless it would be the only Tart VM and a macOS slot is free. Never touches other
@@ -39,7 +39,7 @@ guard_slot() {
   total="$(vm_pids | grep -c . || true)"
   [ "$tart_running" = 0 ] || die "a Tart VM is already running; these scripts run one at a time"
   [ "$total" -lt 2 ] || die "$total guests already running (UTM: $(running_utm_vms)); no free macOS slot"
-  log "slot ok (guests running: $total; UTM: $(running_utm_vms); Tart here: $tart_running)"
+  log "slot ok (guests running: $total; UTM: $(running_utm_vms); Tart: $tart_running)"
 }
 
 SSH_OPTS=(-i "$TART_QA_KEY" -o IdentitiesOnly=yes -o UserKnownHostsFile="$TART_QA_KNOWN_HOSTS"

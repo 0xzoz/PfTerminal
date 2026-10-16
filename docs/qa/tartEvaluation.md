@@ -51,15 +51,15 @@ the milestone run records. Sizes: [sizes.txt](../../qa/tart-evaluation-20261016/
 | | Tart (this evaluation) | UTM "macOS 3" |
 | --- | --- | --- |
 | Guest macOS | 26.6.2 (25G83), same as the host | 26.2 (run records) |
-| Image | `macos-tahoe-vanilla:26.6.2`: 24.0 GB download, pulled in 11.9 min; base built in 2.8 min | Hand-built, long-lived VM |
+| Image | `macos-tahoe-vanilla:26.6.2`: 24.0 GB download, pulled in 11.9 min; base built in 2.9 min (171 s) | Hand-built, long-lived VM |
 | Disk | Base `corbanu-qa-base`: 27.6 GB (50 GB virtual) on CorbanuDrive; the 26 GB download cache was removed at the end | 96 GB on the internal disk (102.7 GB image; obs.) |
 | Clean machine for a run | APFS clone in 0.0 to 0.1 s (once 0.5 s), using no extra disk at first | Restore scripts, clean shutdown, one or two check boots (about 4 to 6 min, run records) |
 | Start to SSH | Median 12.0 s (11.9 to 12.0 s, from the clone) | 14 to 19 s (four starts in the run records) |
-| Smoke cycle | Median 31.0 s (30.9 to 33.8 s): clone, boot, copy the 644 MB signed binary, one GLM 5.3 Flash turn, stop, delete | No equivalent; a run's setup plus wrap-up takes about 6 to 10 min (run records) |
+| Smoke cycle | Median 31.0 s (30.9 to 33.8 s): clone, boot, copy the 614 MiB signed binary, one GLM 5.3 Flash turn, stop, delete | No equivalent; a run's setup plus wrap-up takes about 6 to 10 min (run records) |
 | Copy the binary in | 6.3 s over SSH, signature still valid | Over SSH too (`tar` into the guest); the VM still needs the shared folder to start |
 | Provision and isolation gate | Provisioned 27 to 41 s after the clone; 85-probe gate and smoke passed after 99 to 113 s | About 1.5 min after boot (85 probes; run records) |
 | Throw a run away | Stop 0.4 s, delete 0.6 s | 4 to 6 min (above) |
-| Disk per clone | 0 MB after cloning; 660 to 753 MB after a smoke cycle (644 MB of it is the binary) | Not applicable (one VM) |
+| Disk per clone | 0 MiB after cloning; 660 to 753 MiB after a smoke cycle (614 MiB of it is the binary) | Not applicable (one VM) |
 | Memory (16 GiB guest) | 5.9 to 6.4 GiB used at SSH, 9.4 to 9.8 GiB after a model turn | 18.3 GiB used two hours into qual-mod2 (obs.) |
 | CPU (8 vCPUs) | 1.4 to 2.2 cores on average through a cycle, 3.4 to 4.9 at peaks | 0.1 to 0.3 cores during qual-mod2 (obs.) |
 
@@ -75,8 +75,9 @@ From `fidelity.sh` in a fresh clone
 ([fidelity.txt](../../qa/tart-evaluation-20261016/fidelity.txt)):
 
 - **SIP** is on, and so is the authenticated root, in every boot checked. `diskutil` reported the
-  system volume seal as "Broken" in three boots (the first boot of the final base, and two of the
-  earlier bases) and "Yes" in a later boot of the final base; not investigated further.
+  system volume seal as "Broken" in two recorded boots (the first boot of the final base, and the base
+  built without SSH Full Disk Access) and "Yes" in a later boot of the final base; not investigated
+  further.
 - **Gatekeeper** is off in the public image; `prepare-base.sh` turns it back on.
 - **Seatbelt** is real. `sandbox-exec` deny rules refuse a write and a read with "Operation not
   permitted" (the allowed write is the control), and the kernel logs the denials. `corbanu sandbox`
