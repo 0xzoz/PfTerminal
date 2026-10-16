@@ -140,5 +140,7 @@ Combined status of all 64 cases (this run where re-run or re-judged, the second 
 
 ## Review budget
 
-[review-ledger.md](review-ledger.md): the driver design and the amendment review used 2 of 5; the independent evidence
-checks are recorded there.
+[review-ledger.md](review-ledger.md): 5 of 5 used, no extension requested: the driver design, the amendment review and
+three independent evidence checks. r1 and r2 failed on points that were corrected and confirmed by the next check; r3,
+the last within budget, confirmed every disposition and asked for one mechanical fix (the record's copy of
+`harness/expected.json` was the pre-correction file), which was made but not independently re-checked.
