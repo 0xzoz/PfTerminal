@@ -15,7 +15,7 @@
  "scope": "third targeted: AGG-T01 (parts A and B), AGG-T02, AGG-R03, AGG-R14 executed on this candidate; AGG-04 and AGG-37 judged on the second targeted run's recorded runs (owner decision); others carried over from the second targeted run's record",
  "dispositions": {
   "path": "dispositions.md",
-  "sha256": "7f0dabae44b4ee4b16b6dd90ea20a933044a5dd15af9f77e8a8d4dda2d2f2f44"
+  "sha256": "d71e0476e4cf61d388a043e3270c6bbeeaa03d3a78495af98b6b1d7c9cf7aea5"
  },
  "cases": [
   {
@@ -1979,7 +1979,7 @@
   {
    "id": "AGG-R14",
    "disposition": "blocked",
-   "summary": "Frozen driver of the second targeted run, byte-for-byte unchanged (0310f8cb...). Attempt 1 (W04): after the child was spawned, the parent's own model asked to run a different command ('sleep 65 && cat ks-child.txt 2>/dev/null || echo \"file not present yet\"') before any child prompt was visible; the driver answered nothing, as frozen, and ended at 'BLOCKED (action 2)'; the kill switch was never turned on; ks-child.txt absent. The integrator then ran one fresh replay with the same driver (attempt 2, W04-a2). That was the integrator's own decision: no frozen rule or owner decision provides for a second attempt (#447 and #817 say to replay with the frozen driver). Both attempts are recorded, neither was continued by hand, and result 1 rests on attempt 2 alone. Attempt 2: the driver answered the wait_agent_v1 question with Allow once; the child's prompt for 'sleep 60; echo finished > ks-child.txt' (Thread: Agent (01a141ee)) appeared, and after the driver's Enter (logged 23:38:26.960Z) the prompt was gone, with no refusal and no 'This is a new request' notice (#817). No approved or running line for the child's command is on screen; the product's own log has the exec_approval at 23:38:26.795Z, the child's exec_command started, and 'kill switch on: interrupting the turn in progress' for the parent's and the child's turns at 23:38:39.874Z (runs/W04-a2/product-log-excerpt.txt). The kill switch went on at 23:38:40.024Z ('Kill switch: on'; the parent showed '⚠ Stopped: the security kill switch was turned on, so Corbanu ended this reply and the commands it was running' and '■ Turn stopped by the security kill switch.'). Expected result 1 holds: ks-child.txt was absent right after the kill switch, 90 s later (the sleep 60 would have finished) and at the executor's ls (23:41:06Z). Expected result 2 is blocked: nothing shown is the child's own status. The driver's observation step opened /panes, but 'Managed Crew (/spawn)' said 'No managed crew' (the model spawned the child, not /spawn), and the only stop notice is the parent's turn notice, which does not name the child. The executor recorded blocked; the integrator agrees. Filed as #867 (advisory).",
+   "summary": "Frozen driver of the second targeted run, byte-for-byte unchanged (0310f8cb...). Attempt 1 (W04): after the child was spawned, the parent's own model asked to run a different command ('sleep 65 && cat ks-child.txt 2>/dev/null || echo \"file not present yet\"') before any child prompt was visible; the driver answered nothing, as frozen, and ended at 'BLOCKED (action 2)'; the kill switch was never turned on; ks-child.txt absent. The integrator then ran one fresh replay with the same driver (attempt 2, W04-a2). That was the integrator's own decision: no frozen rule or owner decision provides for a second attempt (#447 and #817 say to replay with the frozen driver). Both attempts are recorded, neither was continued by hand, and result 1 rests on attempt 2 alone. Attempt 2: the driver answered the wait_agent_v1 question with Allow once; the child's prompt for 'sleep 60; echo finished > ks-child.txt' (Thread: Agent (01a141ee)) appeared, and after the driver's Enter the prompt was gone, with no refusal and no 'This is a new request' notice (#817). The driver logs a key step when it finishes (agms-tui waits 0.15 s after each key), so its 23:38:26.960Z is just after the key; the product's own log has the exec_approval at 23:38:26.795Z (runs/W04-a2/product-log-excerpt.txt). No approved or running line for the child's command is on screen. The log's only exec_command line is the tool call completing at 23:38:28.094Z (execution_started=true), about 12 s before the log's 'kill switch on: interrupting the turn in progress' for the parent's and the child's turns at 23:38:39.874Z; the record does not show whether the child's command was still running when the kill switch went on. The kill switch went on at 23:38:40.024Z ('Kill switch: on'; the parent showed '⚠ Stopped: the security kill switch was turned on, so Corbanu ended this reply and the commands it was running' and '■ Turn stopped by the security kill switch.'). Expected result 1 holds: ks-child.txt was absent right after the kill switch, 90 s later and at the executor's ls (23:41:06Z); had the command kept running from its approval, sleep 60 would have ended and written the file by about 23:39:27Z. Expected result 2 is blocked: nothing shown is the child's own status. The driver's observation step opened /panes, but 'Managed Crew (/spawn)' said 'No managed crew' (the model spawned the child, not /spawn), and the only stop notice is the parent's turn notice, which does not name the child. The executor recorded blocked; the integrator agrees. Filed as #867 (advisory).",
    "raw_executor_verdicts": {
     "W04 (attempt 1)": "blocked",
     "W04-a2 (attempt 2)": "blocked"
@@ -3178,11 +3178,11 @@
   }
  ],
  "review_budget": {
-  "used": 3,
+  "used": 4,
   "limit": 5,
   "ledger": {
    "path": "review-ledger.md",
-   "sha256": "f3ff1050d4a1974f33fc7bb084f9458efabaa4e17974f7205cff454014705a11"
+   "sha256": "23bdb6eec97e95713b9791996987d2e3b6510d2ea89a0844a310a57086d4c305"
   }
  }
 }

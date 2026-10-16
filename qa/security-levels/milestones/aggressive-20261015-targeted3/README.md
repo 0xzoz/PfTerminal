@@ -38,10 +38,11 @@ Combined status of all 64 cases (this run where re-run or re-judged, the second 
     before the child's prompt appeared, and the frozen driver answered nothing, as written. The integrator then ran one fresh
     replay with the same driver; that was the integrator's own decision, not one a frozen rule or the owner provides for. Both attempts are
     recorded and result 1 rests on the second alone. In it, the driver's Enter on the child's prompt drew no refusal and
-    no "new request" notice (#817); the screen shows no approved line, but the product's log has the approval, the
-    child's command starting and the kill switch interrupting the child's turn
-    ([runs/W04-a2/product-log-excerpt.txt](runs/W04-a2/product-log-excerpt.txt)). ks-child.txt was absent 90 s after
-    the kill switch (result 1 passed). Result 2, "the child shows it was stopped", is blocked: only the parent's turn
+    no "new request" notice (#817). The screen shows no approved line; the product's log has the approval, the
+    child's exec_command tool call returning about 12 s before the kill switch, and the kill switch interrupting the
+    child's turn ([runs/W04-a2/product-log-excerpt.txt](runs/W04-a2/product-log-excerpt.txt)). The record does not show
+    whether the command was still running when the switch went on. ks-child.txt was absent 90 s after the kill switch,
+    well after a running sleep 60 would have written it (result 1 passed). Result 2, "the child shows it was stopped", is blocked: only the parent's turn
     notice is shown, and `/panes` lists no child, because the model spawned it rather than `/spawn` (#867).
   - AGG-R06: no Claude Code in the guest (a named limit, unchanged).
 - Accepted by the owner, not passed (#447, unchanged): AGG-18, AGG-R07, AGG-R10, AGG-20 (AGG-20 also a named limit).
@@ -123,16 +124,19 @@ Combined status of all 64 cases (this run where re-run or re-judged, the second 
 - The guard only monitors for a system prompt; it cannot prevent one.
 - The synthetic `.env` token appears in the harness's fixture records (`fixture.jsonl`, driver logs), never on the
   product's screen.
-- Lane processes: 12 to 14 processes owned by the lane account were still running after each wipe
-  (`runs/*/wipe-after.txt`, a count only; it may include the shell that took it); they were not identified. Lanes were
-  reused: agmx1 for W01 and W04, agmx2 for W02 and W04-a2 (wiped before and after each run).
+- Lane processes (counts only; they may include the shell that took them; not identified): 6 processes owned by the
+  lane account at the start of W01, W02 and W03 (`runs/*/wipe-before.txt`), 12 to 14 after each run
+  (`wipe-after.txt`), and 13 at the start of W04 and W04-a2, which reused lanes agmx1 (from W01) and agmx2 (from W02):
+  processes from an earlier run on the same lane were still running when the next executor started. At the end the
+  processes found for the removed accounts were `/usr/sbin/distnoted` (`common/kill-lane-procs-end.out`).
 - Relay windows: each run's `mediator-window.jsonl` starts 2 minutes before its executor and may hold the end of the
   previous run's requests. No disposition rests on relay traffic.
 - The AGG-R14 driver leaves the product running when it ends; W04-a2's executor did not stop it, and the run's cleanup
   ended it.
 - Product logs and product homes are kept out of the record, except the W04-a2 excerpt above. Each run's test project
   is under `runs/<label>/collected/fixture/`, with its git directory renamed `dot-git/`. PTY logs are gzipped. Driver
-  logs and the host's run log (`runs/seq.log`) are in the record.
+  logs and the host's run log (`runs/seq.log`) are in the record. As in earlier records, `harness/` leaves out the
+  synthetic mediation CA certificate, the fixture archive and the capture lane's settings file.
 
 ## Review budget
 
