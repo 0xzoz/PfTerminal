@@ -551,6 +551,18 @@ pub(crate) struct RuntimeDbInitLock {
     _file: Option<std::fs::File>,
 }
 
+impl Drop for RuntimeDbInitLock {
+    /// #756: unlock explicitly. Closing the file releases the lock only once
+    /// every copy of its descriptor is closed, and a child process forked
+    /// meanwhile (any spawn in this process) keeps a copy until it starts its
+    /// program, so the next launch would wait on a lock nobody holds.
+    fn drop(&mut self) {
+        if let Some(file) = &self._file {
+            let _ = file.unlock();
+        }
+    }
+}
+
 fn lock_file_options() -> std::fs::OpenOptions {
     let mut options = std::fs::OpenOptions::new();
     options.read(true).write(true).create(true).truncate(false);
