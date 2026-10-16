@@ -86,6 +86,13 @@ installed at this run's request because the earlier build lacked #859 ([candidat
   unpriced auto-reviewer); Z.AI about $3.2 at the catalogue's GLM 5.3 Flash rates, almost all of it the executors' own
   long contexts (95.4 M input tokens, 94.1 M cached, over 1,132 requests; [common/mediator-final.jsonl.gz](common/mediator-final.jsonl.gz)).
 
+## Record format
+
+- `runs/*/executor-events.jsonl` and `runs/*/collected/evidence/screens.jsonl` are gzipped (`.gz`, blob-size policy);
+  `pty.raw` files are gzipped; `harness/agms-probe` is stored byte-identical as `harness/agms-probe.txt` (codespell).
+- Product homes are not copied: each run keeps its `product-home-config.toml`, a size/SHA-256 manifest of the rest and
+  the integrator's ledger extract (`ledger-attempts.txt`). Fixture `.git` folders are kept as `dot-git` without objects.
+
 ## Named limits
 
 - Realtime (#824, fix #882 unmerged at the freeze), TensorCash, DeepSeek holiday calendar, BigModel, older records,

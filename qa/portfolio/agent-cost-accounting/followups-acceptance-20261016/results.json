@@ -39,8 +39,8 @@
      "sha256": "601f1e3292f74aa43342a2e0c19969ca3a2b63eb28cfa36f671f31990194af07"
     },
     "access_record": {
-     "path": "runs/A/executor-events.jsonl",
-     "sha256": "d4bce06437df69bcefb8aca13039a962f116f28f4afc161b3955af3a2fb3d478"
+     "path": "runs/A/executor-events.jsonl.gz",
+     "sha256": "4aaeb564a134a686b759774af303c7ded45b2d623f90ade68c8b244ef90d212d"
     },
     "actions": {
      "path": "runs/A/collected/evidence/actions.jsonl",
@@ -58,8 +58,8 @@
      "sha256": "8bb4ea38ae4d9364daf5f3a5add59efbed8e7de8659093ff914588e8550609a5"
     },
     {
-     "path": "runs/A/collected/evidence/screens.jsonl",
-     "sha256": "5a8540d05a5173420162c5878ccf0aa4c8df0a7b0ea662f6af4fa1ffe72b1759"
+     "path": "runs/A/collected/evidence/screens.jsonl.gz",
+     "sha256": "27862938cf5232d69a7971b79e87662d24d927d5108cef01f3d28705ced793cd"
     },
     {
      "path": "runs/A/collected/evidence/fixture.jsonl",
@@ -113,8 +113,8 @@
      "sha256": "601f1e3292f74aa43342a2e0c19969ca3a2b63eb28cfa36f671f31990194af07"
     },
     "access_record": {
-     "path": "runs/A/executor-events.jsonl",
-     "sha256": "d4bce06437df69bcefb8aca13039a962f116f28f4afc161b3955af3a2fb3d478"
+     "path": "runs/A/executor-events.jsonl.gz",
+     "sha256": "4aaeb564a134a686b759774af303c7ded45b2d623f90ade68c8b244ef90d212d"
     },
     "actions": {
      "path": "runs/A/collected/evidence/actions.jsonl",
@@ -132,8 +132,8 @@
      "sha256": "8bb4ea38ae4d9364daf5f3a5add59efbed8e7de8659093ff914588e8550609a5"
     },
     {
-     "path": "runs/A/collected/evidence/screens.jsonl",
-     "sha256": "5a8540d05a5173420162c5878ccf0aa4c8df0a7b0ea662f6af4fa1ffe72b1759"
+     "path": "runs/A/collected/evidence/screens.jsonl.gz",
+     "sha256": "27862938cf5232d69a7971b79e87662d24d927d5108cef01f3d28705ced793cd"
     },
     {
      "path": "runs/A/collected/evidence/fixture.jsonl",
@@ -187,8 +187,8 @@
      "sha256": "601f1e3292f74aa43342a2e0c19969ca3a2b63eb28cfa36f671f31990194af07"
     },
     "access_record": {
-     "path": "runs/A/executor-events.jsonl",
-     "sha256": "d4bce06437df69bcefb8aca13039a962f116f28f4afc161b3955af3a2fb3d478"
+     "path": "runs/A/executor-events.jsonl.gz",
+     "sha256": "4aaeb564a134a686b759774af303c7ded45b2d623f90ade68c8b244ef90d212d"
     },
     "actions": {
      "path": "runs/A/collected/evidence/actions.jsonl",
@@ -206,8 +206,8 @@
      "sha256": "8bb4ea38ae4d9364daf5f3a5add59efbed8e7de8659093ff914588e8550609a5"
     },
     {
-     "path": "runs/A/collected/evidence/screens.jsonl",
-     "sha256": "5a8540d05a5173420162c5878ccf0aa4c8df0a7b0ea662f6af4fa1ffe72b1759"
+     "path": "runs/A/collected/evidence/screens.jsonl.gz",
+     "sha256": "27862938cf5232d69a7971b79e87662d24d927d5108cef01f3d28705ced793cd"
     },
     {
      "path": "runs/A/collected/evidence/fixture.jsonl",
@@ -261,8 +261,8 @@
      "sha256": "601f1e3292f74aa43342a2e0c19969ca3a2b63eb28cfa36f671f31990194af07"
     },
     "access_record": {
-     "path": "runs/A/executor-events.jsonl",
-     "sha256": "d4bce06437df69bcefb8aca13039a962f116f28f4afc161b3955af3a2fb3d478"
+     "path": "runs/A/executor-events.jsonl.gz",
+     "sha256": "4aaeb564a134a686b759774af303c7ded45b2d623f90ade68c8b244ef90d212d"
     },
     "actions": {
      "path": "runs/A/collected/evidence/actions.jsonl",
@@ -280,8 +280,8 @@
      "sha256": "8bb4ea38ae4d9364daf5f3a5add59efbed8e7de8659093ff914588e8550609a5"
     },
     {
-     "path": "runs/A/collected/evidence/screens.jsonl",
-     "sha256": "5a8540d05a5173420162c5878ccf0aa4c8df0a7b0ea662f6af4fa1ffe72b1759"
+     "path": "runs/A/collected/evidence/screens.jsonl.gz",
+     "sha256": "27862938cf5232d69a7971b79e87662d24d927d5108cef01f3d28705ced793cd"
     },
     {
      "path": "runs/A/collected/evidence/fixture.jsonl",
@@ -335,8 +335,8 @@
      "sha256": "601f1e3292f74aa43342a2e0c19969ca3a2b63eb28cfa36f671f31990194af07"
     },
     "access_record": {
-     "path": "runs/A/executor-events.jsonl",
-     "sha256": "d4bce06437df69bcefb8aca13039a962f116f28f4afc161b3955af3a2fb3d478"
+     "path": "runs/A/executor-events.jsonl.gz",
+     "sha256": "4aaeb564a134a686b759774af303c7ded45b2d623f90ade68c8b244ef90d212d"
     },
     "actions": {
      "path": "runs/A/collected/evidence/actions.jsonl",
@@ -354,8 +354,8 @@
      "sha256": "8bb4ea38ae4d9364daf5f3a5add59efbed8e7de8659093ff914588e8550609a5"
     },
     {
-     "path": "runs/A/collected/evidence/screens.jsonl",
-     "sha256": "5a8540d05a5173420162c5878ccf0aa4c8df0a7b0ea662f6af4fa1ffe72b1759"
+     "path": "runs/A/collected/evidence/screens.jsonl.gz",
+     "sha256": "27862938cf5232d69a7971b79e87662d24d927d5108cef01f3d28705ced793cd"
     },
     {
      "path": "runs/A/collected/evidence/fixture.jsonl",
@@ -409,8 +409,8 @@
      "sha256": "601f1e3292f74aa43342a2e0c19969ca3a2b63eb28cfa36f671f31990194af07"
     },
     "access_record": {
-     "path": "runs/A/executor-events.jsonl",
-     "sha256": "d4bce06437df69bcefb8aca13039a962f116f28f4afc161b3955af3a2fb3d478"
+     "path": "runs/A/executor-events.jsonl.gz",
+     "sha256": "4aaeb564a134a686b759774af303c7ded45b2d623f90ade68c8b244ef90d212d"
     },
     "actions": {
      "path": "runs/A/collected/evidence/actions.jsonl",
@@ -428,8 +428,8 @@
      "sha256": "8bb4ea38ae4d9364daf5f3a5add59efbed8e7de8659093ff914588e8550609a5"
     },
     {
-     "path": "runs/A/collected/evidence/screens.jsonl",
-     "sha256": "5a8540d05a5173420162c5878ccf0aa4c8df0a7b0ea662f6af4fa1ffe72b1759"
+     "path": "runs/A/collected/evidence/screens.jsonl.gz",
+     "sha256": "27862938cf5232d69a7971b79e87662d24d927d5108cef01f3d28705ced793cd"
     },
     {
      "path": "runs/A/collected/evidence/fixture.jsonl",
@@ -483,8 +483,8 @@
      "sha256": "601f1e3292f74aa43342a2e0c19969ca3a2b63eb28cfa36f671f31990194af07"
     },
     "access_record": {
-     "path": "runs/A/executor-events.jsonl",
-     "sha256": "d4bce06437df69bcefb8aca13039a962f116f28f4afc161b3955af3a2fb3d478"
+     "path": "runs/A/executor-events.jsonl.gz",
+     "sha256": "4aaeb564a134a686b759774af303c7ded45b2d623f90ade68c8b244ef90d212d"
     },
     "actions": {
      "path": "runs/A/collected/evidence/actions.jsonl",
@@ -502,8 +502,8 @@
      "sha256": "8bb4ea38ae4d9364daf5f3a5add59efbed8e7de8659093ff914588e8550609a5"
     },
     {
-     "path": "runs/A/collected/evidence/screens.jsonl",
-     "sha256": "5a8540d05a5173420162c5878ccf0aa4c8df0a7b0ea662f6af4fa1ffe72b1759"
+     "path": "runs/A/collected/evidence/screens.jsonl.gz",
+     "sha256": "27862938cf5232d69a7971b79e87662d24d927d5108cef01f3d28705ced793cd"
     },
     {
      "path": "runs/A/collected/evidence/fixture.jsonl",
@@ -557,8 +557,8 @@
      "sha256": "870181e0d01e4c880725d65214572b5a533d5658ac559fdf627bd071258b713f"
     },
     "access_record": {
-     "path": "runs/B/executor-events.jsonl",
-     "sha256": "cc83f2e60ee9d85b1d7ecae7e37a8c06b0ea7a31d0cbb979897a93c146c95cef"
+     "path": "runs/B/executor-events.jsonl.gz",
+     "sha256": "dd74383e4048e9a910f2afb050fcf50b692056b0a994c38e8c856cbfa4e7006d"
     },
     "actions": {
      "path": "runs/B/collected/evidence/actions.jsonl",
@@ -576,8 +576,8 @@
      "sha256": "648c6ea7190255f6d35efc5a51e550241465af5248ae1d170f7a90b00cd81676"
     },
     {
-     "path": "runs/B/collected/evidence/screens.jsonl",
-     "sha256": "8c12c361a318fdfb6d06cff35015b5dec23c42b8bd28a606239f81bb26f3f643"
+     "path": "runs/B/collected/evidence/screens.jsonl.gz",
+     "sha256": "71a983b1c5052315d115d140c4d60a2ac2690262a82acff3c53b84e8135a5a13"
     },
     {
      "path": "runs/B/collected/evidence/fixture.jsonl",
@@ -631,8 +631,8 @@
      "sha256": "870181e0d01e4c880725d65214572b5a533d5658ac559fdf627bd071258b713f"
     },
     "access_record": {
-     "path": "runs/B/executor-events.jsonl",
-     "sha256": "cc83f2e60ee9d85b1d7ecae7e37a8c06b0ea7a31d0cbb979897a93c146c95cef"
+     "path": "runs/B/executor-events.jsonl.gz",
+     "sha256": "dd74383e4048e9a910f2afb050fcf50b692056b0a994c38e8c856cbfa4e7006d"
     },
     "actions": {
      "path": "runs/B/collected/evidence/actions.jsonl",
@@ -650,8 +650,8 @@
      "sha256": "648c6ea7190255f6d35efc5a51e550241465af5248ae1d170f7a90b00cd81676"
     },
     {
-     "path": "runs/B/collected/evidence/screens.jsonl",
-     "sha256": "8c12c361a318fdfb6d06cff35015b5dec23c42b8bd28a606239f81bb26f3f643"
+     "path": "runs/B/collected/evidence/screens.jsonl.gz",
+     "sha256": "71a983b1c5052315d115d140c4d60a2ac2690262a82acff3c53b84e8135a5a13"
     },
     {
      "path": "runs/B/collected/evidence/fixture.jsonl",
@@ -705,8 +705,8 @@
      "sha256": "d261537b9c159fd7111ef46e0312456daa0785a994d63765bbd76bcdfb0fe5c9"
     },
     "access_record": {
-     "path": "runs/C2/executor-events.jsonl",
-     "sha256": "35b10ab83a41aaaea1adc0d074c704293869f268c1dec79df95c94f26651904a"
+     "path": "runs/C2/executor-events.jsonl.gz",
+     "sha256": "e8f3989fbe6495b87a640692cac30df32523be8a32758d56bcf8a0589d065d34"
     },
     "actions": {
      "path": "runs/C2/collected/evidence/actions.jsonl",
@@ -724,8 +724,8 @@
      "sha256": "00f27fd809c94d859205dbd86f6e46a3172dd8138642f54e5189be7ef7275d16"
     },
     {
-     "path": "runs/C2/collected/evidence/screens.jsonl",
-     "sha256": "866d154ec1fde03bc9bc73db8c8f81385ceaa6a8c7103d245084b8455966ca19"
+     "path": "runs/C2/collected/evidence/screens.jsonl.gz",
+     "sha256": "6bcb77df24fb8d34931a241984937db38affe37686609e5bf17aad065dc81b66"
     },
     {
      "path": "runs/C2/collected/evidence/fixture.jsonl",
@@ -774,8 +774,8 @@
        "sha256": "3195c39b776bdbdf228249638b0ea20abe818ae8907042fa31a6c1094be2c71e"
       },
       "access_record": {
-       "path": "runs/C/executor-events.jsonl",
-       "sha256": "ee96b4fbc7a1358710de02277b990a777fa158374b8a7c035156d89c8bdab183"
+       "path": "runs/C/executor-events.jsonl.gz",
+       "sha256": "1baef6762f3fa082356ced0535b680ac46d82de5526f005044dd9fe429126d04"
       },
       "actions": {
        "path": "runs/C/collected/evidence/actions.jsonl",
@@ -793,8 +793,8 @@
        "sha256": "34c642c1820a5658ddc74ed0d5e7e7c206a27f3c9e1de8b231f3edf794c63b97"
       },
       {
-       "path": "runs/C/collected/evidence/screens.jsonl",
-       "sha256": "2003bf01036409a9d57bc73d0d8c8fdf24896761a3e38665d26a4f142aea150c"
+       "path": "runs/C/collected/evidence/screens.jsonl.gz",
+       "sha256": "915dba37e07234531d1bdc7121e9f1dd1f2ee0ca99097580787b08adaced2e2e"
       },
       {
        "path": "runs/C/collected/evidence/fixture.jsonl",
@@ -850,8 +850,8 @@
      "sha256": "d261537b9c159fd7111ef46e0312456daa0785a994d63765bbd76bcdfb0fe5c9"
     },
     "access_record": {
-     "path": "runs/C2/executor-events.jsonl",
-     "sha256": "35b10ab83a41aaaea1adc0d074c704293869f268c1dec79df95c94f26651904a"
+     "path": "runs/C2/executor-events.jsonl.gz",
+     "sha256": "e8f3989fbe6495b87a640692cac30df32523be8a32758d56bcf8a0589d065d34"
     },
     "actions": {
      "path": "runs/C2/collected/evidence/actions.jsonl",
@@ -869,8 +869,8 @@
      "sha256": "00f27fd809c94d859205dbd86f6e46a3172dd8138642f54e5189be7ef7275d16"
     },
     {
-     "path": "runs/C2/collected/evidence/screens.jsonl",
-     "sha256": "866d154ec1fde03bc9bc73db8c8f81385ceaa6a8c7103d245084b8455966ca19"
+     "path": "runs/C2/collected/evidence/screens.jsonl.gz",
+     "sha256": "6bcb77df24fb8d34931a241984937db38affe37686609e5bf17aad065dc81b66"
     },
     {
      "path": "runs/C2/collected/evidence/fixture.jsonl",
@@ -919,8 +919,8 @@
        "sha256": "3195c39b776bdbdf228249638b0ea20abe818ae8907042fa31a6c1094be2c71e"
       },
       "access_record": {
-       "path": "runs/C/executor-events.jsonl",
-       "sha256": "ee96b4fbc7a1358710de02277b990a777fa158374b8a7c035156d89c8bdab183"
+       "path": "runs/C/executor-events.jsonl.gz",
+       "sha256": "1baef6762f3fa082356ced0535b680ac46d82de5526f005044dd9fe429126d04"
       },
       "actions": {
        "path": "runs/C/collected/evidence/actions.jsonl",
@@ -938,8 +938,8 @@
        "sha256": "34c642c1820a5658ddc74ed0d5e7e7c206a27f3c9e1de8b231f3edf794c63b97"
       },
       {
-       "path": "runs/C/collected/evidence/screens.jsonl",
-       "sha256": "2003bf01036409a9d57bc73d0d8c8fdf24896761a3e38665d26a4f142aea150c"
+       "path": "runs/C/collected/evidence/screens.jsonl.gz",
+       "sha256": "915dba37e07234531d1bdc7121e9f1dd1f2ee0ca99097580787b08adaced2e2e"
       },
       {
        "path": "runs/C/collected/evidence/fixture.jsonl",
@@ -995,8 +995,8 @@
      "sha256": "d261537b9c159fd7111ef46e0312456daa0785a994d63765bbd76bcdfb0fe5c9"
     },
     "access_record": {
-     "path": "runs/C2/executor-events.jsonl",
-     "sha256": "35b10ab83a41aaaea1adc0d074c704293869f268c1dec79df95c94f26651904a"
+     "path": "runs/C2/executor-events.jsonl.gz",
+     "sha256": "e8f3989fbe6495b87a640692cac30df32523be8a32758d56bcf8a0589d065d34"
     },
     "actions": {
      "path": "runs/C2/collected/evidence/actions.jsonl",
@@ -1014,8 +1014,8 @@
      "sha256": "00f27fd809c94d859205dbd86f6e46a3172dd8138642f54e5189be7ef7275d16"
     },
     {
-     "path": "runs/C2/collected/evidence/screens.jsonl",
-     "sha256": "866d154ec1fde03bc9bc73db8c8f81385ceaa6a8c7103d245084b8455966ca19"
+     "path": "runs/C2/collected/evidence/screens.jsonl.gz",
+     "sha256": "6bcb77df24fb8d34931a241984937db38affe37686609e5bf17aad065dc81b66"
     },
     {
      "path": "runs/C2/collected/evidence/fixture.jsonl",
@@ -1064,8 +1064,8 @@
        "sha256": "3195c39b776bdbdf228249638b0ea20abe818ae8907042fa31a6c1094be2c71e"
       },
       "access_record": {
-       "path": "runs/C/executor-events.jsonl",
-       "sha256": "ee96b4fbc7a1358710de02277b990a777fa158374b8a7c035156d89c8bdab183"
+       "path": "runs/C/executor-events.jsonl.gz",
+       "sha256": "1baef6762f3fa082356ced0535b680ac46d82de5526f005044dd9fe429126d04"
       },
       "actions": {
        "path": "runs/C/collected/evidence/actions.jsonl",
@@ -1083,8 +1083,8 @@
        "sha256": "34c642c1820a5658ddc74ed0d5e7e7c206a27f3c9e1de8b231f3edf794c63b97"
       },
       {
-       "path": "runs/C/collected/evidence/screens.jsonl",
-       "sha256": "2003bf01036409a9d57bc73d0d8c8fdf24896761a3e38665d26a4f142aea150c"
+       "path": "runs/C/collected/evidence/screens.jsonl.gz",
+       "sha256": "915dba37e07234531d1bdc7121e9f1dd1f2ee0ca99097580787b08adaced2e2e"
       },
       {
        "path": "runs/C/collected/evidence/fixture.jsonl",
@@ -1140,8 +1140,8 @@
      "sha256": "d261537b9c159fd7111ef46e0312456daa0785a994d63765bbd76bcdfb0fe5c9"
     },
     "access_record": {
-     "path": "runs/C2/executor-events.jsonl",
-     "sha256": "35b10ab83a41aaaea1adc0d074c704293869f268c1dec79df95c94f26651904a"
+     "path": "runs/C2/executor-events.jsonl.gz",
+     "sha256": "e8f3989fbe6495b87a640692cac30df32523be8a32758d56bcf8a0589d065d34"
     },
     "actions": {
      "path": "runs/C2/collected/evidence/actions.jsonl",
@@ -1159,8 +1159,8 @@
      "sha256": "00f27fd809c94d859205dbd86f6e46a3172dd8138642f54e5189be7ef7275d16"
     },
     {
-     "path": "runs/C2/collected/evidence/screens.jsonl",
-     "sha256": "866d154ec1fde03bc9bc73db8c8f81385ceaa6a8c7103d245084b8455966ca19"
+     "path": "runs/C2/collected/evidence/screens.jsonl.gz",
+     "sha256": "6bcb77df24fb8d34931a241984937db38affe37686609e5bf17aad065dc81b66"
     },
     {
      "path": "runs/C2/collected/evidence/fixture.jsonl",
@@ -1209,8 +1209,8 @@
        "sha256": "3195c39b776bdbdf228249638b0ea20abe818ae8907042fa31a6c1094be2c71e"
       },
       "access_record": {
-       "path": "runs/C/executor-events.jsonl",
-       "sha256": "ee96b4fbc7a1358710de02277b990a777fa158374b8a7c035156d89c8bdab183"
+       "path": "runs/C/executor-events.jsonl.gz",
+       "sha256": "1baef6762f3fa082356ced0535b680ac46d82de5526f005044dd9fe429126d04"
       },
       "actions": {
        "path": "runs/C/collected/evidence/actions.jsonl",
@@ -1228,8 +1228,8 @@
        "sha256": "34c642c1820a5658ddc74ed0d5e7e7c206a27f3c9e1de8b231f3edf794c63b97"
       },
       {
-       "path": "runs/C/collected/evidence/screens.jsonl",
-       "sha256": "2003bf01036409a9d57bc73d0d8c8fdf24896761a3e38665d26a4f142aea150c"
+       "path": "runs/C/collected/evidence/screens.jsonl.gz",
+       "sha256": "915dba37e07234531d1bdc7121e9f1dd1f2ee0ca99097580787b08adaced2e2e"
       },
       {
        "path": "runs/C/collected/evidence/fixture.jsonl",
@@ -1285,8 +1285,8 @@
      "sha256": "d261537b9c159fd7111ef46e0312456daa0785a994d63765bbd76bcdfb0fe5c9"
     },
     "access_record": {
-     "path": "runs/C2/executor-events.jsonl",
-     "sha256": "35b10ab83a41aaaea1adc0d074c704293869f268c1dec79df95c94f26651904a"
+     "path": "runs/C2/executor-events.jsonl.gz",
+     "sha256": "e8f3989fbe6495b87a640692cac30df32523be8a32758d56bcf8a0589d065d34"
     },
     "actions": {
      "path": "runs/C2/collected/evidence/actions.jsonl",
@@ -1304,8 +1304,8 @@
      "sha256": "00f27fd809c94d859205dbd86f6e46a3172dd8138642f54e5189be7ef7275d16"
     },
     {
-     "path": "runs/C2/collected/evidence/screens.jsonl",
-     "sha256": "866d154ec1fde03bc9bc73db8c8f81385ceaa6a8c7103d245084b8455966ca19"
+     "path": "runs/C2/collected/evidence/screens.jsonl.gz",
+     "sha256": "6bcb77df24fb8d34931a241984937db38affe37686609e5bf17aad065dc81b66"
     },
     {
      "path": "runs/C2/collected/evidence/fixture.jsonl",
@@ -1354,8 +1354,8 @@
        "sha256": "3195c39b776bdbdf228249638b0ea20abe818ae8907042fa31a6c1094be2c71e"
       },
       "access_record": {
-       "path": "runs/C/executor-events.jsonl",
-       "sha256": "ee96b4fbc7a1358710de02277b990a777fa158374b8a7c035156d89c8bdab183"
+       "path": "runs/C/executor-events.jsonl.gz",
+       "sha256": "1baef6762f3fa082356ced0535b680ac46d82de5526f005044dd9fe429126d04"
       },
       "actions": {
        "path": "runs/C/collected/evidence/actions.jsonl",
@@ -1373,8 +1373,8 @@
        "sha256": "34c642c1820a5658ddc74ed0d5e7e7c206a27f3c9e1de8b231f3edf794c63b97"
       },
       {
-       "path": "runs/C/collected/evidence/screens.jsonl",
-       "sha256": "2003bf01036409a9d57bc73d0d8c8fdf24896761a3e38665d26a4f142aea150c"
+       "path": "runs/C/collected/evidence/screens.jsonl.gz",
+       "sha256": "915dba37e07234531d1bdc7121e9f1dd1f2ee0ca99097580787b08adaced2e2e"
       },
       {
        "path": "runs/C/collected/evidence/fixture.jsonl",
@@ -1430,8 +1430,8 @@
      "sha256": "d261537b9c159fd7111ef46e0312456daa0785a994d63765bbd76bcdfb0fe5c9"
     },
     "access_record": {
-     "path": "runs/C2/executor-events.jsonl",
-     "sha256": "35b10ab83a41aaaea1adc0d074c704293869f268c1dec79df95c94f26651904a"
+     "path": "runs/C2/executor-events.jsonl.gz",
+     "sha256": "e8f3989fbe6495b87a640692cac30df32523be8a32758d56bcf8a0589d065d34"
     },
     "actions": {
      "path": "runs/C2/collected/evidence/actions.jsonl",
@@ -1449,8 +1449,8 @@
      "sha256": "00f27fd809c94d859205dbd86f6e46a3172dd8138642f54e5189be7ef7275d16"
     },
     {
-     "path": "runs/C2/collected/evidence/screens.jsonl",
-     "sha256": "866d154ec1fde03bc9bc73db8c8f81385ceaa6a8c7103d245084b8455966ca19"
+     "path": "runs/C2/collected/evidence/screens.jsonl.gz",
+     "sha256": "6bcb77df24fb8d34931a241984937db38affe37686609e5bf17aad065dc81b66"
     },
     {
      "path": "runs/C2/collected/evidence/fixture.jsonl",
@@ -1499,8 +1499,8 @@
        "sha256": "3195c39b776bdbdf228249638b0ea20abe818ae8907042fa31a6c1094be2c71e"
       },
       "access_record": {
-       "path": "runs/C/executor-events.jsonl",
-       "sha256": "ee96b4fbc7a1358710de02277b990a777fa158374b8a7c035156d89c8bdab183"
+       "path": "runs/C/executor-events.jsonl.gz",
+       "sha256": "1baef6762f3fa082356ced0535b680ac46d82de5526f005044dd9fe429126d04"
       },
       "actions": {
        "path": "runs/C/collected/evidence/actions.jsonl",
@@ -1518,8 +1518,8 @@
        "sha256": "34c642c1820a5658ddc74ed0d5e7e7c206a27f3c9e1de8b231f3edf794c63b97"
       },
       {
-       "path": "runs/C/collected/evidence/screens.jsonl",
-       "sha256": "2003bf01036409a9d57bc73d0d8c8fdf24896761a3e38665d26a4f142aea150c"
+       "path": "runs/C/collected/evidence/screens.jsonl.gz",
+       "sha256": "915dba37e07234531d1bdc7121e9f1dd1f2ee0ca99097580787b08adaced2e2e"
       },
       {
        "path": "runs/C/collected/evidence/fixture.jsonl",
@@ -1575,8 +1575,8 @@
      "sha256": "d261537b9c159fd7111ef46e0312456daa0785a994d63765bbd76bcdfb0fe5c9"
     },
     "access_record": {
-     "path": "runs/C2/executor-events.jsonl",
-     "sha256": "35b10ab83a41aaaea1adc0d074c704293869f268c1dec79df95c94f26651904a"
+     "path": "runs/C2/executor-events.jsonl.gz",
+     "sha256": "e8f3989fbe6495b87a640692cac30df32523be8a32758d56bcf8a0589d065d34"
     },
     "actions": {
      "path": "runs/C2/collected/evidence/actions.jsonl",
@@ -1594,8 +1594,8 @@
      "sha256": "00f27fd809c94d859205dbd86f6e46a3172dd8138642f54e5189be7ef7275d16"
     },
     {
-     "path": "runs/C2/collected/evidence/screens.jsonl",
-     "sha256": "866d154ec1fde03bc9bc73db8c8f81385ceaa6a8c7103d245084b8455966ca19"
+     "path": "runs/C2/collected/evidence/screens.jsonl.gz",
+     "sha256": "6bcb77df24fb8d34931a241984937db38affe37686609e5bf17aad065dc81b66"
     },
     {
      "path": "runs/C2/collected/evidence/fixture.jsonl",
@@ -1644,8 +1644,8 @@
        "sha256": "3195c39b776bdbdf228249638b0ea20abe818ae8907042fa31a6c1094be2c71e"
       },
       "access_record": {
-       "path": "runs/C/executor-events.jsonl",
-       "sha256": "ee96b4fbc7a1358710de02277b990a777fa158374b8a7c035156d89c8bdab183"
+       "path": "runs/C/executor-events.jsonl.gz",
+       "sha256": "1baef6762f3fa082356ced0535b680ac46d82de5526f005044dd9fe429126d04"
       },
       "actions": {
        "path": "runs/C/collected/evidence/actions.jsonl",
@@ -1663,8 +1663,8 @@
        "sha256": "34c642c1820a5658ddc74ed0d5e7e7c206a27f3c9e1de8b231f3edf794c63b97"
       },
       {
-       "path": "runs/C/collected/evidence/screens.jsonl",
-       "sha256": "2003bf01036409a9d57bc73d0d8c8fdf24896761a3e38665d26a4f142aea150c"
+       "path": "runs/C/collected/evidence/screens.jsonl.gz",
+       "sha256": "915dba37e07234531d1bdc7121e9f1dd1f2ee0ca99097580787b08adaced2e2e"
       },
       {
        "path": "runs/C/collected/evidence/fixture.jsonl",
@@ -1720,8 +1720,8 @@
      "sha256": "d261537b9c159fd7111ef46e0312456daa0785a994d63765bbd76bcdfb0fe5c9"
     },
     "access_record": {
-     "path": "runs/C2/executor-events.jsonl",
-     "sha256": "35b10ab83a41aaaea1adc0d074c704293869f268c1dec79df95c94f26651904a"
+     "path": "runs/C2/executor-events.jsonl.gz",
+     "sha256": "e8f3989fbe6495b87a640692cac30df32523be8a32758d56bcf8a0589d065d34"
     },
     "actions": {
      "path": "runs/C2/collected/evidence/actions.jsonl",
@@ -1739,8 +1739,8 @@
      "sha256": "00f27fd809c94d859205dbd86f6e46a3172dd8138642f54e5189be7ef7275d16"
     },
     {
-     "path": "runs/C2/collected/evidence/screens.jsonl",
-     "sha256": "866d154ec1fde03bc9bc73db8c8f81385ceaa6a8c7103d245084b8455966ca19"
+     "path": "runs/C2/collected/evidence/screens.jsonl.gz",
+     "sha256": "6bcb77df24fb8d34931a241984937db38affe37686609e5bf17aad065dc81b66"
     },
     {
      "path": "runs/C2/collected/evidence/fixture.jsonl",
@@ -1789,8 +1789,8 @@
        "sha256": "3195c39b776bdbdf228249638b0ea20abe818ae8907042fa31a6c1094be2c71e"
       },
       "access_record": {
-       "path": "runs/C/executor-events.jsonl",
-       "sha256": "ee96b4fbc7a1358710de02277b990a777fa158374b8a7c035156d89c8bdab183"
+       "path": "runs/C/executor-events.jsonl.gz",
+       "sha256": "1baef6762f3fa082356ced0535b680ac46d82de5526f005044dd9fe429126d04"
       },
       "actions": {
        "path": "runs/C/collected/evidence/actions.jsonl",
@@ -1808,8 +1808,8 @@
        "sha256": "34c642c1820a5658ddc74ed0d5e7e7c206a27f3c9e1de8b231f3edf794c63b97"
       },
       {
-       "path": "runs/C/collected/evidence/screens.jsonl",
-       "sha256": "2003bf01036409a9d57bc73d0d8c8fdf24896761a3e38665d26a4f142aea150c"
+       "path": "runs/C/collected/evidence/screens.jsonl.gz",
+       "sha256": "915dba37e07234531d1bdc7121e9f1dd1f2ee0ca99097580787b08adaced2e2e"
       },
       {
        "path": "runs/C/collected/evidence/fixture.jsonl",
@@ -1865,8 +1865,8 @@
      "sha256": "d261537b9c159fd7111ef46e0312456daa0785a994d63765bbd76bcdfb0fe5c9"
     },
     "access_record": {
-     "path": "runs/C2/executor-events.jsonl",
-     "sha256": "35b10ab83a41aaaea1adc0d074c704293869f268c1dec79df95c94f26651904a"
+     "path": "runs/C2/executor-events.jsonl.gz",
+     "sha256": "e8f3989fbe6495b87a640692cac30df32523be8a32758d56bcf8a0589d065d34"
     },
     "actions": {
      "path": "runs/C2/collected/evidence/actions.jsonl",
@@ -1884,8 +1884,8 @@
      "sha256": "00f27fd809c94d859205dbd86f6e46a3172dd8138642f54e5189be7ef7275d16"
     },
     {
-     "path": "runs/C2/collected/evidence/screens.jsonl",
-     "sha256": "866d154ec1fde03bc9bc73db8c8f81385ceaa6a8c7103d245084b8455966ca19"
+     "path": "runs/C2/collected/evidence/screens.jsonl.gz",
+     "sha256": "6bcb77df24fb8d34931a241984937db38affe37686609e5bf17aad065dc81b66"
     },
     {
      "path": "runs/C2/collected/evidence/fixture.jsonl",
@@ -1934,8 +1934,8 @@
        "sha256": "3195c39b776bdbdf228249638b0ea20abe818ae8907042fa31a6c1094be2c71e"
       },
       "access_record": {
-       "path": "runs/C/executor-events.jsonl",
-       "sha256": "ee96b4fbc7a1358710de02277b990a777fa158374b8a7c035156d89c8bdab183"
+       "path": "runs/C/executor-events.jsonl.gz",
+       "sha256": "1baef6762f3fa082356ced0535b680ac46d82de5526f005044dd9fe429126d04"
       },
       "actions": {
        "path": "runs/C/collected/evidence/actions.jsonl",
@@ -1953,8 +1953,8 @@
        "sha256": "34c642c1820a5658ddc74ed0d5e7e7c206a27f3c9e1de8b231f3edf794c63b97"
       },
       {
-       "path": "runs/C/collected/evidence/screens.jsonl",
-       "sha256": "2003bf01036409a9d57bc73d0d8c8fdf24896761a3e38665d26a4f142aea150c"
+       "path": "runs/C/collected/evidence/screens.jsonl.gz",
+       "sha256": "915dba37e07234531d1bdc7121e9f1dd1f2ee0ca99097580787b08adaced2e2e"
       },
       {
        "path": "runs/C/collected/evidence/fixture.jsonl",
@@ -2010,8 +2010,8 @@
      "sha256": "9fbc4cfe0efd3d0746932193776e27102ba3593e492c014cb970c190ec422157"
     },
     "access_record": {
-     "path": "runs/D/executor-events.jsonl",
-     "sha256": "034c2553c1569d3c2324e34c9f74e0cd2ab8e044567dc205609728e498bcc6cf"
+     "path": "runs/D/executor-events.jsonl.gz",
+     "sha256": "615d23b61525e4fd7428963f95476211edcf967499ae2f347b77165c9999267b"
     },
     "actions": {
      "path": "runs/D/collected/evidence/actions.jsonl",
@@ -2029,8 +2029,8 @@
      "sha256": "e0bb51cddd0d6608f1fddc5e855d3a1cc4e32d336a9b783ac5fa5499d92d3ec6"
     },
     {
-     "path": "runs/D/collected/evidence/screens.jsonl",
-     "sha256": "11c36a293869044006e6afb058f1270c2c629add975c39edc67a38592b44b82a"
+     "path": "runs/D/collected/evidence/screens.jsonl.gz",
+     "sha256": "bc7be09822467d8d9f2207957781b28ad06e0ae3704236396f936cb9041f7920"
     },
     {
      "path": "runs/D/collected/evidence/fixture.jsonl",
@@ -2084,8 +2084,8 @@
      "sha256": "9fbc4cfe0efd3d0746932193776e27102ba3593e492c014cb970c190ec422157"
     },
     "access_record": {
-     "path": "runs/D/executor-events.jsonl",
-     "sha256": "034c2553c1569d3c2324e34c9f74e0cd2ab8e044567dc205609728e498bcc6cf"
+     "path": "runs/D/executor-events.jsonl.gz",
+     "sha256": "615d23b61525e4fd7428963f95476211edcf967499ae2f347b77165c9999267b"
     },
     "actions": {
      "path": "runs/D/collected/evidence/actions.jsonl",
@@ -2103,8 +2103,8 @@
      "sha256": "e0bb51cddd0d6608f1fddc5e855d3a1cc4e32d336a9b783ac5fa5499d92d3ec6"
     },
     {
-     "path": "runs/D/collected/evidence/screens.jsonl",
-     "sha256": "11c36a293869044006e6afb058f1270c2c629add975c39edc67a38592b44b82a"
+     "path": "runs/D/collected/evidence/screens.jsonl.gz",
+     "sha256": "bc7be09822467d8d9f2207957781b28ad06e0ae3704236396f936cb9041f7920"
     },
     {
      "path": "runs/D/collected/evidence/fixture.jsonl",
@@ -2158,8 +2158,8 @@
      "sha256": "9fbc4cfe0efd3d0746932193776e27102ba3593e492c014cb970c190ec422157"
     },
     "access_record": {
-     "path": "runs/D/executor-events.jsonl",
-     "sha256": "034c2553c1569d3c2324e34c9f74e0cd2ab8e044567dc205609728e498bcc6cf"
+     "path": "runs/D/executor-events.jsonl.gz",
+     "sha256": "615d23b61525e4fd7428963f95476211edcf967499ae2f347b77165c9999267b"
     },
     "actions": {
      "path": "runs/D/collected/evidence/actions.jsonl",
@@ -2177,8 +2177,8 @@
      "sha256": "e0bb51cddd0d6608f1fddc5e855d3a1cc4e32d336a9b783ac5fa5499d92d3ec6"
     },
     {
-     "path": "runs/D/collected/evidence/screens.jsonl",
-     "sha256": "11c36a293869044006e6afb058f1270c2c629add975c39edc67a38592b44b82a"
+     "path": "runs/D/collected/evidence/screens.jsonl.gz",
+     "sha256": "bc7be09822467d8d9f2207957781b28ad06e0ae3704236396f936cb9041f7920"
     },
     {
      "path": "runs/D/collected/evidence/fixture.jsonl",
@@ -2232,8 +2232,8 @@
      "sha256": "9fbc4cfe0efd3d0746932193776e27102ba3593e492c014cb970c190ec422157"
     },
     "access_record": {
-     "path": "runs/D/executor-events.jsonl",
-     "sha256": "034c2553c1569d3c2324e34c9f74e0cd2ab8e044567dc205609728e498bcc6cf"
+     "path": "runs/D/executor-events.jsonl.gz",
+     "sha256": "615d23b61525e4fd7428963f95476211edcf967499ae2f347b77165c9999267b"
     },
     "actions": {
      "path": "runs/D/collected/evidence/actions.jsonl",
@@ -2251,8 +2251,8 @@
      "sha256": "e0bb51cddd0d6608f1fddc5e855d3a1cc4e32d336a9b783ac5fa5499d92d3ec6"
     },
     {
-     "path": "runs/D/collected/evidence/screens.jsonl",
-     "sha256": "11c36a293869044006e6afb058f1270c2c629add975c39edc67a38592b44b82a"
+     "path": "runs/D/collected/evidence/screens.jsonl.gz",
+     "sha256": "bc7be09822467d8d9f2207957781b28ad06e0ae3704236396f936cb9041f7920"
     },
     {
      "path": "runs/D/collected/evidence/fixture.jsonl",
@@ -2306,8 +2306,8 @@
      "sha256": "727a0433eb61c29a1f8ed5b38b4a0a5c2ebbdf80107677f1897cd303caebf6e4"
     },
     "access_record": {
-     "path": "runs/E2/executor-events.jsonl",
-     "sha256": "128314737e5002dab3af3c659f7b6210351e671c486cddfaba285b6d03ca67fc"
+     "path": "runs/E2/executor-events.jsonl.gz",
+     "sha256": "56d0f637804f62cf23d01eff6078f4c9a42ec21eeb5c7f145e37716a8c3d3742"
     },
     "actions": {
      "path": "runs/E2/collected/evidence/actions.jsonl",
@@ -2325,8 +2325,8 @@
      "sha256": "e22ed2bdc9539f2487694064c41301e0223a1438b5dae62f7968710478136295"
     },
     {
-     "path": "runs/E2/collected/evidence/screens.jsonl",
-     "sha256": "38ec52f5547a4ac2c453cfe144b09b4c21c73b91523105271ed0e0c78bdcdaf1"
+     "path": "runs/E2/collected/evidence/screens.jsonl.gz",
+     "sha256": "bb748265b0d2590c1c02cbfb002859a7d1ab55868144ee44ac381186749f309b"
     },
     {
      "path": "runs/E2/collected/evidence/fixture.jsonl",
@@ -2375,8 +2375,8 @@
        "sha256": "649c13f00da1c8b8355c0616b2dbd8115ea57eb975a0dedc992586c9ca2b2caa"
       },
       "access_record": {
-       "path": "runs/E/executor-events.jsonl",
-       "sha256": "798e3fdb9f6e91e6e6d4b26916a4cb6ed5e1707eb0bdaafce364a65a7f2abb6d"
+       "path": "runs/E/executor-events.jsonl.gz",
+       "sha256": "91f857ec0f03be7668aa3446c088d60bcf05559bcd1bcf9d17ce667798f60743"
       },
       "actions": {
        "path": "runs/E/collected/evidence/actions.jsonl",
@@ -2394,8 +2394,8 @@
        "sha256": "f1f2b46bb51aee207470375fdf211aee9537247c5f3ef06a4f3f78e3fe912975"
       },
       {
-       "path": "runs/E/collected/evidence/screens.jsonl",
-       "sha256": "c8124030e2c6ae6f8322e4508f29f67e3d72f69115a1b48cde2848c6f1efd411"
+       "path": "runs/E/collected/evidence/screens.jsonl.gz",
+       "sha256": "67f0d9111a214b4c23f612fbbf0a36a4053569fd1dde12f14a51ccc9b00bc858"
       },
       {
        "path": "runs/E/collected/evidence/pty.raw.gz",
@@ -2447,8 +2447,8 @@
      "sha256": "727a0433eb61c29a1f8ed5b38b4a0a5c2ebbdf80107677f1897cd303caebf6e4"
     },
     "access_record": {
-     "path": "runs/E2/executor-events.jsonl",
-     "sha256": "128314737e5002dab3af3c659f7b6210351e671c486cddfaba285b6d03ca67fc"
+     "path": "runs/E2/executor-events.jsonl.gz",
+     "sha256": "56d0f637804f62cf23d01eff6078f4c9a42ec21eeb5c7f145e37716a8c3d3742"
     },
     "actions": {
      "path": "runs/E2/collected/evidence/actions.jsonl",
@@ -2466,8 +2466,8 @@
      "sha256": "e22ed2bdc9539f2487694064c41301e0223a1438b5dae62f7968710478136295"
     },
     {
-     "path": "runs/E2/collected/evidence/screens.jsonl",
-     "sha256": "38ec52f5547a4ac2c453cfe144b09b4c21c73b91523105271ed0e0c78bdcdaf1"
+     "path": "runs/E2/collected/evidence/screens.jsonl.gz",
+     "sha256": "bb748265b0d2590c1c02cbfb002859a7d1ab55868144ee44ac381186749f309b"
     },
     {
      "path": "runs/E2/collected/evidence/fixture.jsonl",
@@ -2516,8 +2516,8 @@
        "sha256": "649c13f00da1c8b8355c0616b2dbd8115ea57eb975a0dedc992586c9ca2b2caa"
       },
       "access_record": {
-       "path": "runs/E/executor-events.jsonl",
-       "sha256": "798e3fdb9f6e91e6e6d4b26916a4cb6ed5e1707eb0bdaafce364a65a7f2abb6d"
+       "path": "runs/E/executor-events.jsonl.gz",
+       "sha256": "91f857ec0f03be7668aa3446c088d60bcf05559bcd1bcf9d17ce667798f60743"
       },
       "actions": {
        "path": "runs/E/collected/evidence/actions.jsonl",
@@ -2535,8 +2535,8 @@
        "sha256": "f1f2b46bb51aee207470375fdf211aee9537247c5f3ef06a4f3f78e3fe912975"
       },
       {
-       "path": "runs/E/collected/evidence/screens.jsonl",
-       "sha256": "c8124030e2c6ae6f8322e4508f29f67e3d72f69115a1b48cde2848c6f1efd411"
+       "path": "runs/E/collected/evidence/screens.jsonl.gz",
+       "sha256": "67f0d9111a214b4c23f612fbbf0a36a4053569fd1dde12f14a51ccc9b00bc858"
       },
       {
        "path": "runs/E/collected/evidence/pty.raw.gz",
@@ -2588,8 +2588,8 @@
      "sha256": "727a0433eb61c29a1f8ed5b38b4a0a5c2ebbdf80107677f1897cd303caebf6e4"
     },
     "access_record": {
-     "path": "runs/E2/executor-events.jsonl",
-     "sha256": "128314737e5002dab3af3c659f7b6210351e671c486cddfaba285b6d03ca67fc"
+     "path": "runs/E2/executor-events.jsonl.gz",
+     "sha256": "56d0f637804f62cf23d01eff6078f4c9a42ec21eeb5c7f145e37716a8c3d3742"
     },
     "actions": {
      "path": "runs/E2/collected/evidence/actions.jsonl",
@@ -2607,8 +2607,8 @@
      "sha256": "e22ed2bdc9539f2487694064c41301e0223a1438b5dae62f7968710478136295"
     },
     {
-     "path": "runs/E2/collected/evidence/screens.jsonl",
-     "sha256": "38ec52f5547a4ac2c453cfe144b09b4c21c73b91523105271ed0e0c78bdcdaf1"
+     "path": "runs/E2/collected/evidence/screens.jsonl.gz",
+     "sha256": "bb748265b0d2590c1c02cbfb002859a7d1ab55868144ee44ac381186749f309b"
     },
     {
      "path": "runs/E2/collected/evidence/fixture.jsonl",
@@ -2657,8 +2657,8 @@
        "sha256": "649c13f00da1c8b8355c0616b2dbd8115ea57eb975a0dedc992586c9ca2b2caa"
       },
       "access_record": {
-       "path": "runs/E/executor-events.jsonl",
-       "sha256": "798e3fdb9f6e91e6e6d4b26916a4cb6ed5e1707eb0bdaafce364a65a7f2abb6d"
+       "path": "runs/E/executor-events.jsonl.gz",
+       "sha256": "91f857ec0f03be7668aa3446c088d60bcf05559bcd1bcf9d17ce667798f60743"
       },
       "actions": {
        "path": "runs/E/collected/evidence/actions.jsonl",
@@ -2676,8 +2676,8 @@
        "sha256": "f1f2b46bb51aee207470375fdf211aee9537247c5f3ef06a4f3f78e3fe912975"
       },
       {
-       "path": "runs/E/collected/evidence/screens.jsonl",
-       "sha256": "c8124030e2c6ae6f8322e4508f29f67e3d72f69115a1b48cde2848c6f1efd411"
+       "path": "runs/E/collected/evidence/screens.jsonl.gz",
+       "sha256": "67f0d9111a214b4c23f612fbbf0a36a4053569fd1dde12f14a51ccc9b00bc858"
       },
       {
        "path": "runs/E/collected/evidence/pty.raw.gz",
@@ -2729,8 +2729,8 @@
      "sha256": "727a0433eb61c29a1f8ed5b38b4a0a5c2ebbdf80107677f1897cd303caebf6e4"
     },
     "access_record": {
-     "path": "runs/E2/executor-events.jsonl",
-     "sha256": "128314737e5002dab3af3c659f7b6210351e671c486cddfaba285b6d03ca67fc"
+     "path": "runs/E2/executor-events.jsonl.gz",
+     "sha256": "56d0f637804f62cf23d01eff6078f4c9a42ec21eeb5c7f145e37716a8c3d3742"
     },
     "actions": {
      "path": "runs/E2/collected/evidence/actions.jsonl",
@@ -2748,8 +2748,8 @@
      "sha256": "e22ed2bdc9539f2487694064c41301e0223a1438b5dae62f7968710478136295"
     },
     {
-     "path": "runs/E2/collected/evidence/screens.jsonl",
-     "sha256": "38ec52f5547a4ac2c453cfe144b09b4c21c73b91523105271ed0e0c78bdcdaf1"
+     "path": "runs/E2/collected/evidence/screens.jsonl.gz",
+     "sha256": "bb748265b0d2590c1c02cbfb002859a7d1ab55868144ee44ac381186749f309b"
     },
     {
      "path": "runs/E2/collected/evidence/fixture.jsonl",
@@ -2798,8 +2798,8 @@
        "sha256": "649c13f00da1c8b8355c0616b2dbd8115ea57eb975a0dedc992586c9ca2b2caa"
       },
       "access_record": {
-       "path": "runs/E/executor-events.jsonl",
-       "sha256": "798e3fdb9f6e91e6e6d4b26916a4cb6ed5e1707eb0bdaafce364a65a7f2abb6d"
+       "path": "runs/E/executor-events.jsonl.gz",
+       "sha256": "91f857ec0f03be7668aa3446c088d60bcf05559bcd1bcf9d17ce667798f60743"
       },
       "actions": {
        "path": "runs/E/collected/evidence/actions.jsonl",
@@ -2817,8 +2817,8 @@
        "sha256": "f1f2b46bb51aee207470375fdf211aee9537247c5f3ef06a4f3f78e3fe912975"
       },
       {
-       "path": "runs/E/collected/evidence/screens.jsonl",
-       "sha256": "c8124030e2c6ae6f8322e4508f29f67e3d72f69115a1b48cde2848c6f1efd411"
+       "path": "runs/E/collected/evidence/screens.jsonl.gz",
+       "sha256": "67f0d9111a214b4c23f612fbbf0a36a4053569fd1dde12f14a51ccc9b00bc858"
       },
       {
        "path": "runs/E/collected/evidence/pty.raw.gz",
@@ -2870,8 +2870,8 @@
      "sha256": "727a0433eb61c29a1f8ed5b38b4a0a5c2ebbdf80107677f1897cd303caebf6e4"
     },
     "access_record": {
-     "path": "runs/E2/executor-events.jsonl",
-     "sha256": "128314737e5002dab3af3c659f7b6210351e671c486cddfaba285b6d03ca67fc"
+     "path": "runs/E2/executor-events.jsonl.gz",
+     "sha256": "56d0f637804f62cf23d01eff6078f4c9a42ec21eeb5c7f145e37716a8c3d3742"
     },
     "actions": {
      "path": "runs/E2/collected/evidence/actions.jsonl",
@@ -2889,8 +2889,8 @@
      "sha256": "e22ed2bdc9539f2487694064c41301e0223a1438b5dae62f7968710478136295"
     },
     {
-     "path": "runs/E2/collected/evidence/screens.jsonl",
-     "sha256": "38ec52f5547a4ac2c453cfe144b09b4c21c73b91523105271ed0e0c78bdcdaf1"
+     "path": "runs/E2/collected/evidence/screens.jsonl.gz",
+     "sha256": "bb748265b0d2590c1c02cbfb002859a7d1ab55868144ee44ac381186749f309b"
     },
     {
      "path": "runs/E2/collected/evidence/fixture.jsonl",
@@ -2939,8 +2939,8 @@
        "sha256": "649c13f00da1c8b8355c0616b2dbd8115ea57eb975a0dedc992586c9ca2b2caa"
       },
       "access_record": {
-       "path": "runs/E/executor-events.jsonl",
-       "sha256": "798e3fdb9f6e91e6e6d4b26916a4cb6ed5e1707eb0bdaafce364a65a7f2abb6d"
+       "path": "runs/E/executor-events.jsonl.gz",
+       "sha256": "91f857ec0f03be7668aa3446c088d60bcf05559bcd1bcf9d17ce667798f60743"
       },
       "actions": {
        "path": "runs/E/collected/evidence/actions.jsonl",
@@ -2958,8 +2958,8 @@
        "sha256": "f1f2b46bb51aee207470375fdf211aee9537247c5f3ef06a4f3f78e3fe912975"
       },
       {
-       "path": "runs/E/collected/evidence/screens.jsonl",
-       "sha256": "c8124030e2c6ae6f8322e4508f29f67e3d72f69115a1b48cde2848c6f1efd411"
+       "path": "runs/E/collected/evidence/screens.jsonl.gz",
+       "sha256": "67f0d9111a214b4c23f612fbbf0a36a4053569fd1dde12f14a51ccc9b00bc858"
       },
       {
        "path": "runs/E/collected/evidence/pty.raw.gz",
@@ -3011,8 +3011,8 @@
      "sha256": "727a0433eb61c29a1f8ed5b38b4a0a5c2ebbdf80107677f1897cd303caebf6e4"
     },
     "access_record": {
-     "path": "runs/E2/executor-events.jsonl",
-     "sha256": "128314737e5002dab3af3c659f7b6210351e671c486cddfaba285b6d03ca67fc"
+     "path": "runs/E2/executor-events.jsonl.gz",
+     "sha256": "56d0f637804f62cf23d01eff6078f4c9a42ec21eeb5c7f145e37716a8c3d3742"
     },
     "actions": {
      "path": "runs/E2/collected/evidence/actions.jsonl",
@@ -3030,8 +3030,8 @@
      "sha256": "e22ed2bdc9539f2487694064c41301e0223a1438b5dae62f7968710478136295"
     },
     {
-     "path": "runs/E2/collected/evidence/screens.jsonl",
-     "sha256": "38ec52f5547a4ac2c453cfe144b09b4c21c73b91523105271ed0e0c78bdcdaf1"
+     "path": "runs/E2/collected/evidence/screens.jsonl.gz",
+     "sha256": "bb748265b0d2590c1c02cbfb002859a7d1ab55868144ee44ac381186749f309b"
     },
     {
      "path": "runs/E2/collected/evidence/fixture.jsonl",
@@ -3080,8 +3080,8 @@
        "sha256": "649c13f00da1c8b8355c0616b2dbd8115ea57eb975a0dedc992586c9ca2b2caa"
       },
       "access_record": {
-       "path": "runs/E/executor-events.jsonl",
-       "sha256": "798e3fdb9f6e91e6e6d4b26916a4cb6ed5e1707eb0bdaafce364a65a7f2abb6d"
+       "path": "runs/E/executor-events.jsonl.gz",
+       "sha256": "91f857ec0f03be7668aa3446c088d60bcf05559bcd1bcf9d17ce667798f60743"
       },
       "actions": {
        "path": "runs/E/collected/evidence/actions.jsonl",
@@ -3099,8 +3099,8 @@
        "sha256": "f1f2b46bb51aee207470375fdf211aee9537247c5f3ef06a4f3f78e3fe912975"
       },
       {
-       "path": "runs/E/collected/evidence/screens.jsonl",
-       "sha256": "c8124030e2c6ae6f8322e4508f29f67e3d72f69115a1b48cde2848c6f1efd411"
+       "path": "runs/E/collected/evidence/screens.jsonl.gz",
+       "sha256": "67f0d9111a214b4c23f612fbbf0a36a4053569fd1dde12f14a51ccc9b00bc858"
       },
       {
        "path": "runs/E/collected/evidence/pty.raw.gz",
@@ -3152,8 +3152,8 @@
      "sha256": "727a0433eb61c29a1f8ed5b38b4a0a5c2ebbdf80107677f1897cd303caebf6e4"
     },
     "access_record": {
-     "path": "runs/E2/executor-events.jsonl",
-     "sha256": "128314737e5002dab3af3c659f7b6210351e671c486cddfaba285b6d03ca67fc"
+     "path": "runs/E2/executor-events.jsonl.gz",
+     "sha256": "56d0f637804f62cf23d01eff6078f4c9a42ec21eeb5c7f145e37716a8c3d3742"
     },
     "actions": {
      "path": "runs/E2/collected/evidence/actions.jsonl",
@@ -3171,8 +3171,8 @@
      "sha256": "e22ed2bdc9539f2487694064c41301e0223a1438b5dae62f7968710478136295"
     },
     {
-     "path": "runs/E2/collected/evidence/screens.jsonl",
-     "sha256": "38ec52f5547a4ac2c453cfe144b09b4c21c73b91523105271ed0e0c78bdcdaf1"
+     "path": "runs/E2/collected/evidence/screens.jsonl.gz",
+     "sha256": "bb748265b0d2590c1c02cbfb002859a7d1ab55868144ee44ac381186749f309b"
     },
     {
      "path": "runs/E2/collected/evidence/fixture.jsonl",
@@ -3221,8 +3221,8 @@
        "sha256": "649c13f00da1c8b8355c0616b2dbd8115ea57eb975a0dedc992586c9ca2b2caa"
       },
       "access_record": {
-       "path": "runs/E/executor-events.jsonl",
-       "sha256": "798e3fdb9f6e91e6e6d4b26916a4cb6ed5e1707eb0bdaafce364a65a7f2abb6d"
+       "path": "runs/E/executor-events.jsonl.gz",
+       "sha256": "91f857ec0f03be7668aa3446c088d60bcf05559bcd1bcf9d17ce667798f60743"
       },
       "actions": {
        "path": "runs/E/collected/evidence/actions.jsonl",
@@ -3240,8 +3240,8 @@
        "sha256": "f1f2b46bb51aee207470375fdf211aee9537247c5f3ef06a4f3f78e3fe912975"
       },
       {
-       "path": "runs/E/collected/evidence/screens.jsonl",
-       "sha256": "c8124030e2c6ae6f8322e4508f29f67e3d72f69115a1b48cde2848c6f1efd411"
+       "path": "runs/E/collected/evidence/screens.jsonl.gz",
+       "sha256": "67f0d9111a214b4c23f612fbbf0a36a4053569fd1dde12f14a51ccc9b00bc858"
       },
       {
        "path": "runs/E/collected/evidence/pty.raw.gz",
@@ -3293,8 +3293,8 @@
      "sha256": "c58b4028cadc70ef8f191d52b4626b866c62c95888ee2a5ae5bcfed43e809c14"
     },
     "access_record": {
-     "path": "runs/F/executor-events.jsonl",
-     "sha256": "0d5878e73ce520a77f75d654177de7f5802e6f9d97032460ccfb1d21d4e2484e"
+     "path": "runs/F/executor-events.jsonl.gz",
+     "sha256": "87519d1928fd7241ea20a17ee61966427cd62a5827bc9e268f7f8d741281d0a1"
     },
     "actions": {
      "path": "runs/F/collected/evidence/actions.jsonl",
@@ -3312,8 +3312,8 @@
      "sha256": "b1168e03c6acf6f0d95bc15fa684bbaa87b5e3b55d3daccdbc4eb6ef0538fecf"
     },
     {
-     "path": "runs/F/collected/evidence/screens.jsonl",
-     "sha256": "5dda575a15a48fce214aa55d57a9cab90a3df8285870c7fd7c90107da3014894"
+     "path": "runs/F/collected/evidence/screens.jsonl.gz",
+     "sha256": "778965f1a6d817841add074a69e6578250150aafe5b72eb455401a2adca89d10"
     },
     {
      "path": "runs/F/collected/evidence/pty.raw.gz",
@@ -3363,8 +3363,8 @@
      "sha256": "c58b4028cadc70ef8f191d52b4626b866c62c95888ee2a5ae5bcfed43e809c14"
     },
     "access_record": {
-     "path": "runs/F/executor-events.jsonl",
-     "sha256": "0d5878e73ce520a77f75d654177de7f5802e6f9d97032460ccfb1d21d4e2484e"
+     "path": "runs/F/executor-events.jsonl.gz",
+     "sha256": "87519d1928fd7241ea20a17ee61966427cd62a5827bc9e268f7f8d741281d0a1"
     },
     "actions": {
      "path": "runs/F/collected/evidence/actions.jsonl",
@@ -3382,8 +3382,8 @@
      "sha256": "b1168e03c6acf6f0d95bc15fa684bbaa87b5e3b55d3daccdbc4eb6ef0538fecf"
     },
     {
-     "path": "runs/F/collected/evidence/screens.jsonl",
-     "sha256": "5dda575a15a48fce214aa55d57a9cab90a3df8285870c7fd7c90107da3014894"
+     "path": "runs/F/collected/evidence/screens.jsonl.gz",
+     "sha256": "778965f1a6d817841add074a69e6578250150aafe5b72eb455401a2adca89d10"
     },
     {
      "path": "runs/F/collected/evidence/pty.raw.gz",
@@ -3433,8 +3433,8 @@
      "sha256": "c58b4028cadc70ef8f191d52b4626b866c62c95888ee2a5ae5bcfed43e809c14"
     },
     "access_record": {
-     "path": "runs/F/executor-events.jsonl",
-     "sha256": "0d5878e73ce520a77f75d654177de7f5802e6f9d97032460ccfb1d21d4e2484e"
+     "path": "runs/F/executor-events.jsonl.gz",
+     "sha256": "87519d1928fd7241ea20a17ee61966427cd62a5827bc9e268f7f8d741281d0a1"
     },
     "actions": {
      "path": "runs/F/collected/evidence/actions.jsonl",
@@ -3452,8 +3452,8 @@
      "sha256": "b1168e03c6acf6f0d95bc15fa684bbaa87b5e3b55d3daccdbc4eb6ef0538fecf"
     },
     {
-     "path": "runs/F/collected/evidence/screens.jsonl",
-     "sha256": "5dda575a15a48fce214aa55d57a9cab90a3df8285870c7fd7c90107da3014894"
+     "path": "runs/F/collected/evidence/screens.jsonl.gz",
+     "sha256": "778965f1a6d817841add074a69e6578250150aafe5b72eb455401a2adca89d10"
     },
     {
      "path": "runs/F/collected/evidence/pty.raw.gz",
@@ -3503,8 +3503,8 @@
      "sha256": "c58b4028cadc70ef8f191d52b4626b866c62c95888ee2a5ae5bcfed43e809c14"
     },
     "access_record": {
-     "path": "runs/F/executor-events.jsonl",
-     "sha256": "0d5878e73ce520a77f75d654177de7f5802e6f9d97032460ccfb1d21d4e2484e"
+     "path": "runs/F/executor-events.jsonl.gz",
+     "sha256": "87519d1928fd7241ea20a17ee61966427cd62a5827bc9e268f7f8d741281d0a1"
     },
     "actions": {
      "path": "runs/F/collected/evidence/actions.jsonl",
@@ -3522,8 +3522,8 @@
      "sha256": "b1168e03c6acf6f0d95bc15fa684bbaa87b5e3b55d3daccdbc4eb6ef0538fecf"
     },
     {
-     "path": "runs/F/collected/evidence/screens.jsonl",
-     "sha256": "5dda575a15a48fce214aa55d57a9cab90a3df8285870c7fd7c90107da3014894"
+     "path": "runs/F/collected/evidence/screens.jsonl.gz",
+     "sha256": "778965f1a6d817841add074a69e6578250150aafe5b72eb455401a2adca89d10"
     },
     {
      "path": "runs/F/collected/evidence/pty.raw.gz",
@@ -3573,8 +3573,8 @@
      "sha256": "c58b4028cadc70ef8f191d52b4626b866c62c95888ee2a5ae5bcfed43e809c14"
     },
     "access_record": {
-     "path": "runs/F/executor-events.jsonl",
-     "sha256": "0d5878e73ce520a77f75d654177de7f5802e6f9d97032460ccfb1d21d4e2484e"
+     "path": "runs/F/executor-events.jsonl.gz",
+     "sha256": "87519d1928fd7241ea20a17ee61966427cd62a5827bc9e268f7f8d741281d0a1"
     },
     "actions": {
      "path": "runs/F/collected/evidence/actions.jsonl",
@@ -3592,8 +3592,8 @@
      "sha256": "b1168e03c6acf6f0d95bc15fa684bbaa87b5e3b55d3daccdbc4eb6ef0538fecf"
     },
     {
-     "path": "runs/F/collected/evidence/screens.jsonl",
-     "sha256": "5dda575a15a48fce214aa55d57a9cab90a3df8285870c7fd7c90107da3014894"
+     "path": "runs/F/collected/evidence/screens.jsonl.gz",
+     "sha256": "778965f1a6d817841add074a69e6578250150aafe5b72eb455401a2adca89d10"
     },
     {
      "path": "runs/F/collected/evidence/pty.raw.gz",
@@ -3638,8 +3638,8 @@
        "sha256": "601f1e3292f74aa43342a2e0c19969ca3a2b63eb28cfa36f671f31990194af07"
       },
       "access_record": {
-       "path": "runs/A/executor-events.jsonl",
-       "sha256": "d4bce06437df69bcefb8aca13039a962f116f28f4afc161b3955af3a2fb3d478"
+       "path": "runs/A/executor-events.jsonl.gz",
+       "sha256": "4aaeb564a134a686b759774af303c7ded45b2d623f90ade68c8b244ef90d212d"
       },
       "actions": {
        "path": "runs/A/collected/evidence/actions.jsonl",
@@ -3657,8 +3657,8 @@
        "sha256": "8bb4ea38ae4d9364daf5f3a5add59efbed8e7de8659093ff914588e8550609a5"
       },
       {
-       "path": "runs/A/collected/evidence/screens.jsonl",
-       "sha256": "5a8540d05a5173420162c5878ccf0aa4c8df0a7b0ea662f6af4fa1ffe72b1759"
+       "path": "runs/A/collected/evidence/screens.jsonl.gz",
+       "sha256": "27862938cf5232d69a7971b79e87662d24d927d5108cef01f3d28705ced793cd"
       },
       {
        "path": "runs/A/collected/evidence/fixture.jsonl",
@@ -3707,8 +3707,8 @@
        "sha256": "870181e0d01e4c880725d65214572b5a533d5658ac559fdf627bd071258b713f"
       },
       "access_record": {
-       "path": "runs/B/executor-events.jsonl",
-       "sha256": "cc83f2e60ee9d85b1d7ecae7e37a8c06b0ea7a31d0cbb979897a93c146c95cef"
+       "path": "runs/B/executor-events.jsonl.gz",
+       "sha256": "dd74383e4048e9a910f2afb050fcf50b692056b0a994c38e8c856cbfa4e7006d"
       },
       "actions": {
        "path": "runs/B/collected/evidence/actions.jsonl",
@@ -3726,8 +3726,8 @@
        "sha256": "648c6ea7190255f6d35efc5a51e550241465af5248ae1d170f7a90b00cd81676"
       },
       {
-       "path": "runs/B/collected/evidence/screens.jsonl",
-       "sha256": "8c12c361a318fdfb6d06cff35015b5dec23c42b8bd28a606239f81bb26f3f643"
+       "path": "runs/B/collected/evidence/screens.jsonl.gz",
+       "sha256": "71a983b1c5052315d115d140c4d60a2ac2690262a82acff3c53b84e8135a5a13"
       },
       {
        "path": "runs/B/collected/evidence/fixture.jsonl",
@@ -3776,8 +3776,8 @@
        "sha256": "3195c39b776bdbdf228249638b0ea20abe818ae8907042fa31a6c1094be2c71e"
       },
       "access_record": {
-       "path": "runs/C/executor-events.jsonl",
-       "sha256": "ee96b4fbc7a1358710de02277b990a777fa158374b8a7c035156d89c8bdab183"
+       "path": "runs/C/executor-events.jsonl.gz",
+       "sha256": "1baef6762f3fa082356ced0535b680ac46d82de5526f005044dd9fe429126d04"
       },
       "actions": {
        "path": "runs/C/collected/evidence/actions.jsonl",
@@ -3795,8 +3795,8 @@
        "sha256": "34c642c1820a5658ddc74ed0d5e7e7c206a27f3c9e1de8b231f3edf794c63b97"
       },
       {
-       "path": "runs/C/collected/evidence/screens.jsonl",
-       "sha256": "2003bf01036409a9d57bc73d0d8c8fdf24896761a3e38665d26a4f142aea150c"
+       "path": "runs/C/collected/evidence/screens.jsonl.gz",
+       "sha256": "915dba37e07234531d1bdc7121e9f1dd1f2ee0ca99097580787b08adaced2e2e"
       },
       {
        "path": "runs/C/collected/evidence/fixture.jsonl",
@@ -3845,8 +3845,8 @@
        "sha256": "9fbc4cfe0efd3d0746932193776e27102ba3593e492c014cb970c190ec422157"
       },
       "access_record": {
-       "path": "runs/D/executor-events.jsonl",
-       "sha256": "034c2553c1569d3c2324e34c9f74e0cd2ab8e044567dc205609728e498bcc6cf"
+       "path": "runs/D/executor-events.jsonl.gz",
+       "sha256": "615d23b61525e4fd7428963f95476211edcf967499ae2f347b77165c9999267b"
       },
       "actions": {
        "path": "runs/D/collected/evidence/actions.jsonl",
@@ -3864,8 +3864,8 @@
        "sha256": "e0bb51cddd0d6608f1fddc5e855d3a1cc4e32d336a9b783ac5fa5499d92d3ec6"
       },
       {
-       "path": "runs/D/collected/evidence/screens.jsonl",
-       "sha256": "11c36a293869044006e6afb058f1270c2c629add975c39edc67a38592b44b82a"
+       "path": "runs/D/collected/evidence/screens.jsonl.gz",
+       "sha256": "bc7be09822467d8d9f2207957781b28ad06e0ae3704236396f936cb9041f7920"
       },
       {
        "path": "runs/D/collected/evidence/fixture.jsonl",
@@ -3914,8 +3914,8 @@
        "sha256": "649c13f00da1c8b8355c0616b2dbd8115ea57eb975a0dedc992586c9ca2b2caa"
       },
       "access_record": {
-       "path": "runs/E/executor-events.jsonl",
-       "sha256": "798e3fdb9f6e91e6e6d4b26916a4cb6ed5e1707eb0bdaafce364a65a7f2abb6d"
+       "path": "runs/E/executor-events.jsonl.gz",
+       "sha256": "91f857ec0f03be7668aa3446c088d60bcf05559bcd1bcf9d17ce667798f60743"
       },
       "actions": {
        "path": "runs/E/collected/evidence/actions.jsonl",
@@ -3933,8 +3933,8 @@
        "sha256": "f1f2b46bb51aee207470375fdf211aee9537247c5f3ef06a4f3f78e3fe912975"
       },
       {
-       "path": "runs/E/collected/evidence/screens.jsonl",
-       "sha256": "c8124030e2c6ae6f8322e4508f29f67e3d72f69115a1b48cde2848c6f1efd411"
+       "path": "runs/E/collected/evidence/screens.jsonl.gz",
+       "sha256": "67f0d9111a214b4c23f612fbbf0a36a4053569fd1dde12f14a51ccc9b00bc858"
       },
       {
        "path": "runs/E/collected/evidence/pty.raw.gz",
@@ -3979,8 +3979,8 @@
        "sha256": "d261537b9c159fd7111ef46e0312456daa0785a994d63765bbd76bcdfb0fe5c9"
       },
       "access_record": {
-       "path": "runs/C2/executor-events.jsonl",
-       "sha256": "35b10ab83a41aaaea1adc0d074c704293869f268c1dec79df95c94f26651904a"
+       "path": "runs/C2/executor-events.jsonl.gz",
+       "sha256": "e8f3989fbe6495b87a640692cac30df32523be8a32758d56bcf8a0589d065d34"
       },
       "actions": {
        "path": "runs/C2/collected/evidence/actions.jsonl",
@@ -3998,8 +3998,8 @@
        "sha256": "00f27fd809c94d859205dbd86f6e46a3172dd8138642f54e5189be7ef7275d16"
       },
       {
-       "path": "runs/C2/collected/evidence/screens.jsonl",
-       "sha256": "866d154ec1fde03bc9bc73db8c8f81385ceaa6a8c7103d245084b8455966ca19"
+       "path": "runs/C2/collected/evidence/screens.jsonl.gz",
+       "sha256": "6bcb77df24fb8d34931a241984937db38affe37686609e5bf17aad065dc81b66"
       },
       {
        "path": "runs/C2/collected/evidence/fixture.jsonl",
@@ -4048,8 +4048,8 @@
        "sha256": "727a0433eb61c29a1f8ed5b38b4a0a5c2ebbdf80107677f1897cd303caebf6e4"
       },
       "access_record": {
-       "path": "runs/E2/executor-events.jsonl",
-       "sha256": "128314737e5002dab3af3c659f7b6210351e671c486cddfaba285b6d03ca67fc"
+       "path": "runs/E2/executor-events.jsonl.gz",
+       "sha256": "56d0f637804f62cf23d01eff6078f4c9a42ec21eeb5c7f145e37716a8c3d3742"
       },
       "actions": {
        "path": "runs/E2/collected/evidence/actions.jsonl",
@@ -4067,8 +4067,8 @@
        "sha256": "e22ed2bdc9539f2487694064c41301e0223a1438b5dae62f7968710478136295"
       },
       {
-       "path": "runs/E2/collected/evidence/screens.jsonl",
-       "sha256": "38ec52f5547a4ac2c453cfe144b09b4c21c73b91523105271ed0e0c78bdcdaf1"
+       "path": "runs/E2/collected/evidence/screens.jsonl.gz",
+       "sha256": "bb748265b0d2590c1c02cbfb002859a7d1ab55868144ee44ac381186749f309b"
       },
       {
        "path": "runs/E2/collected/evidence/fixture.jsonl",
@@ -4124,8 +4124,8 @@
      "sha256": "870181e0d01e4c880725d65214572b5a533d5658ac559fdf627bd071258b713f"
     },
     "access_record": {
-     "path": "runs/B/executor-events.jsonl",
-     "sha256": "cc83f2e60ee9d85b1d7ecae7e37a8c06b0ea7a31d0cbb979897a93c146c95cef"
+     "path": "runs/B/executor-events.jsonl.gz",
+     "sha256": "dd74383e4048e9a910f2afb050fcf50b692056b0a994c38e8c856cbfa4e7006d"
     },
     "actions": {
      "path": "runs/B/collected/evidence/actions.jsonl",
@@ -4143,8 +4143,8 @@
      "sha256": "648c6ea7190255f6d35efc5a51e550241465af5248ae1d170f7a90b00cd81676"
     },
     {
-     "path": "runs/B/collected/evidence/screens.jsonl",
-     "sha256": "8c12c361a318fdfb6d06cff35015b5dec23c42b8bd28a606239f81bb26f3f643"
+     "path": "runs/B/collected/evidence/screens.jsonl.gz",
+     "sha256": "71a983b1c5052315d115d140c4d60a2ac2690262a82acff3c53b84e8135a5a13"
     },
     {
      "path": "runs/B/collected/evidence/fixture.jsonl",
@@ -4198,8 +4198,8 @@
      "sha256": "d261537b9c159fd7111ef46e0312456daa0785a994d63765bbd76bcdfb0fe5c9"
     },
     "access_record": {
-     "path": "runs/C2/executor-events.jsonl",
-     "sha256": "35b10ab83a41aaaea1adc0d074c704293869f268c1dec79df95c94f26651904a"
+     "path": "runs/C2/executor-events.jsonl.gz",
+     "sha256": "e8f3989fbe6495b87a640692cac30df32523be8a32758d56bcf8a0589d065d34"
     },
     "actions": {
      "path": "runs/C2/collected/evidence/actions.jsonl",
@@ -4217,8 +4217,8 @@
      "sha256": "00f27fd809c94d859205dbd86f6e46a3172dd8138642f54e5189be7ef7275d16"
     },
     {
-     "path": "runs/C2/collected/evidence/screens.jsonl",
-     "sha256": "866d154ec1fde03bc9bc73db8c8f81385ceaa6a8c7103d245084b8455966ca19"
+     "path": "runs/C2/collected/evidence/screens.jsonl.gz",
+     "sha256": "6bcb77df24fb8d34931a241984937db38affe37686609e5bf17aad065dc81b66"
     },
     {
      "path": "runs/C2/collected/evidence/fixture.jsonl",
@@ -4267,8 +4267,8 @@
        "sha256": "3195c39b776bdbdf228249638b0ea20abe818ae8907042fa31a6c1094be2c71e"
       },
       "access_record": {
-       "path": "runs/C/executor-events.jsonl",
-       "sha256": "ee96b4fbc7a1358710de02277b990a777fa158374b8a7c035156d89c8bdab183"
+       "path": "runs/C/executor-events.jsonl.gz",
+       "sha256": "1baef6762f3fa082356ced0535b680ac46d82de5526f005044dd9fe429126d04"
       },
       "actions": {
        "path": "runs/C/collected/evidence/actions.jsonl",
@@ -4286,8 +4286,8 @@
        "sha256": "34c642c1820a5658ddc74ed0d5e7e7c206a27f3c9e1de8b231f3edf794c63b97"
       },
       {
-       "path": "runs/C/collected/evidence/screens.jsonl",
-       "sha256": "2003bf01036409a9d57bc73d0d8c8fdf24896761a3e38665d26a4f142aea150c"
+       "path": "runs/C/collected/evidence/screens.jsonl.gz",
+       "sha256": "915dba37e07234531d1bdc7121e9f1dd1f2ee0ca99097580787b08adaced2e2e"
       },
       {
        "path": "runs/C/collected/evidence/fixture.jsonl",
@@ -4343,8 +4343,8 @@
      "sha256": "727a0433eb61c29a1f8ed5b38b4a0a5c2ebbdf80107677f1897cd303caebf6e4"
     },
     "access_record": {
-     "path": "runs/E2/executor-events.jsonl",
-     "sha256": "128314737e5002dab3af3c659f7b6210351e671c486cddfaba285b6d03ca67fc"
+     "path": "runs/E2/executor-events.jsonl.gz",
+     "sha256": "56d0f637804f62cf23d01eff6078f4c9a42ec21eeb5c7f145e37716a8c3d3742"
     },
     "actions": {
      "path": "runs/E2/collected/evidence/actions.jsonl",
@@ -4362,8 +4362,8 @@
      "sha256": "e22ed2bdc9539f2487694064c41301e0223a1438b5dae62f7968710478136295"
     },
     {
-     "path": "runs/E2/collected/evidence/screens.jsonl",
-     "sha256": "38ec52f5547a4ac2c453cfe144b09b4c21c73b91523105271ed0e0c78bdcdaf1"
+     "path": "runs/E2/collected/evidence/screens.jsonl.gz",
+     "sha256": "bb748265b0d2590c1c02cbfb002859a7d1ab55868144ee44ac381186749f309b"
     },
     {
      "path": "runs/E2/collected/evidence/fixture.jsonl",
@@ -4412,8 +4412,8 @@
        "sha256": "649c13f00da1c8b8355c0616b2dbd8115ea57eb975a0dedc992586c9ca2b2caa"
       },
       "access_record": {
-       "path": "runs/E/executor-events.jsonl",
-       "sha256": "798e3fdb9f6e91e6e6d4b26916a4cb6ed5e1707eb0bdaafce364a65a7f2abb6d"
+       "path": "runs/E/executor-events.jsonl.gz",
+       "sha256": "91f857ec0f03be7668aa3446c088d60bcf05559bcd1bcf9d17ce667798f60743"
       },
       "actions": {
        "path": "runs/E/collected/evidence/actions.jsonl",
@@ -4431,8 +4431,8 @@
        "sha256": "f1f2b46bb51aee207470375fdf211aee9537247c5f3ef06a4f3f78e3fe912975"
       },
       {
-       "path": "runs/E/collected/evidence/screens.jsonl",
-       "sha256": "c8124030e2c6ae6f8322e4508f29f67e3d72f69115a1b48cde2848c6f1efd411"
+       "path": "runs/E/collected/evidence/screens.jsonl.gz",
+       "sha256": "67f0d9111a214b4c23f612fbbf0a36a4053569fd1dde12f14a51ccc9b00bc858"
       },
       {
        "path": "runs/E/collected/evidence/pty.raw.gz",

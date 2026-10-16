@@ -17,7 +17,8 @@ for g in PACKET:
 
 
 def thread(run):
-    for line in (run / "executor-events.jsonl").read_text().splitlines():
+    import gzip
+    for line in gzip.open(run / "executor-events.jsonl.gz", "rt").read().splitlines():
         if line.startswith('{"type":"thread.started"'):
             return json.loads(line)["thread_id"]
 
@@ -39,7 +40,7 @@ def attempt(label, case):
         "launcher": "sudo -u LANE /opt/agms/bin/agms-launch executor RUN GROUP -> /opt/agms/pkg/bin/corbanu exec; product via agms-tui -> agms-product -> /opt/agms/pkg/bin/corbanu",
         "fresh_context": True, "code_blind": True, "results_blind": True,
         "packet": ref(root / PACKET[label] / "prompts" / f"{label}.md"),
-        "access_record": ref(run / "executor-events.jsonl"),
+        "access_record": ref(run / "executor-events.jsonl.gz"),
         "actions": ref(run / "collected/evidence/actions.jsonl"),
         "isolation_record": ref(run / f"isolation-{case}.json"),
         "raw_executor_verdict": raw(label, case),
@@ -48,7 +49,7 @@ def attempt(label, case):
 
 def evidence(label):
     run = root / "runs" / label
-    names = ["collected/evidence/result.md", "collected/evidence/screens.jsonl", "collected/evidence/fixture.jsonl",
+    names = ["collected/evidence/result.md", "collected/evidence/screens.jsonl.gz", "collected/evidence/fixture.jsonl",
              "collected/evidence/pty.raw.gz", "mediator-window.jsonl", "ledger-attempts.txt", "guard-after.txt",
              "executor-start.txt", "executor-end.txt"]
     return [ref(run / n) for n in names if (run / n).exists()]
