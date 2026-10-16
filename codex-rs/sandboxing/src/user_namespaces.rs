@@ -88,7 +88,7 @@ pub fn claude_pane_note(level: &str) -> String {
         "Corbanu Terminal: a command in this turn needed a user namespace, which security level \
          {level} blocks in contained Claude panes on Linux. Claude Code's own Bash sandbox \
          (bubblewrap) and tools such as {TOOLS} cannot start here and fail with \"Operation not \
-         permitted\" (bubblewrap says \"No permissions to create a new namespace\"); Corbanu's \
+         permitted\" (bubblewrap says \"No permissions to create new namespace\"); Corbanu's \
          sandbox still applies to every command. No approval lifts this. To use them, choose \
          Permissive in /security (it applies after a restart)."
     )

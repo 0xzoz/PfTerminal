@@ -125,7 +125,7 @@ The kill switch (`/security` → `g`) works under every level.
   Electron with their sandbox on (Puppeteer's default; pass `--no-sandbox`,
   as Playwright does). 32-bit programs stop too. In a contained Claude pane,
   Claude Code's own Bash sandbox (bubblewrap) can't start, so commands it
-  sandboxes fail (bubblewrap reports "No permissions to create a new
+  sandboxes fail (bubblewrap reports "No permissions to create new
   namespace"); Corbanu's sandbox still applies to the pane. No approval
   lifts it. Choose Permissive to run them.
 - A command that fails this way says why instead of a bare "Operation not

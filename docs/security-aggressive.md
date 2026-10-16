@@ -146,7 +146,7 @@ and Chrome or Electron with their sandbox on (Puppeteer's default; pass
 `--no-sandbox`, as Playwright does). 32-bit programs stop too. In a
 contained Claude pane, Claude Code's own Bash sandbox (bubblewrap) can't
 start, so commands it sandboxes fail (bubblewrap reports "No permissions to
-create a new namespace"); Corbanu's sandbox still applies to the pane.
+create new namespace"); Corbanu's sandbox still applies to the pane.
 Choose Permissive to run them.
 
 Such a failure is named, not left as a bare "Operation not permitted": the

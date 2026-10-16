@@ -10,6 +10,8 @@ fn issue_826_namespace_refusals_are_recognised_and_other_failures_are_not() {
         "unshare: unshare failed: Operation not permitted",
         "bwrap: No permissions to creating new namespace, likely because the kernel does not allow non-privileged user namespaces.",
         "bwrap: No permissions to create a new namespace, likely because the kernel does not allow non-privileged user namespaces.",
+        // Ubuntu 24.04's bubblewrap 0.9 in a contained pane on glitch (#891).
+        "bwrap: No permissions to create new namespace, likely because the kernel does not allow non-privileged user namespaces. See <https://deb.li/bubblewrap> or <file:///usr/share/doc/bubblewrap/README.Debian.gz>.",
         "bwrap: setting up uid map: Permission denied",
         "cannot clone: Operation not permitted\nError: cannot re-exec process",
         "error: cloning builder process: Operation not permitted",
