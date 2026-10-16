@@ -169,6 +169,7 @@ impl ChatWidget {
             tasknode_response_generations: HashMap::new(),
             tasknode_active_chat_stream_id: None,
             clipboard_lease: None,
+            shown_error_texts: std::collections::VecDeque::new(),
             wallet_capability: None,
             wallet_capability_policy: None,
             wallet_status_generation: 0,

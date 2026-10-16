@@ -26,8 +26,10 @@
 
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -101,6 +103,8 @@ pub use provider_accounts::validate_aws_profile_name;
 pub use provider_accounts::validate_provider_account_provider_id;
 
 #[cfg(test)]
+mod lock_failure_tests;
+#[cfg(test)]
 mod tests;
 
 /// Stable secret name holding the vault metadata index.
@@ -132,6 +136,21 @@ pub enum VaultError {
     /// The raw secret value was empty.
     #[error("secret value must not be empty")]
     EmptySecret,
+    /// #855: the value is the text of a vault error message (copied from the
+    /// transcript and pasted in place of the credential), not a credential.
+    #[error(
+        "the value entered is the text of a vault error message, not a credential; nothing was stored (copy the credential again and paste it)"
+    )]
+    ErrorTextAsSecret,
+    /// #855: the vault's storage could not be reached (for example the
+    /// Corbanu home became unreadable). Nothing was read or written.
+    #[error("failed to {operation} {}: {source}", path.display())]
+    StorageUnavailable {
+        operation: &'static str,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     /// A provider-managed credential is available only to its scoped integration.
     #[error("credential labeled {label:?} can only be used by its provider integration")]
     ProviderManagedCredential { label: String },
@@ -395,6 +414,7 @@ impl Vault {
         if secret.trim().is_empty() {
             return Err(VaultError::EmptySecret);
         }
+        ensure_not_error_text(&secret)?;
         self.with_storage_lock(|| {
             let mut index = self.load_index()?;
             if index.credentials.contains_key(&label) {
@@ -458,6 +478,7 @@ impl Vault {
                 if secret.trim().is_empty() {
                     return Err(VaultError::EmptySecret);
                 }
+                ensure_not_error_text(&secret)?;
                 protect_stored(&label, meta.credential_type, &secret)?;
                 Some((
                     VAULT_SCOPE.clone(),
@@ -711,16 +732,11 @@ impl Vault {
         operation: impl FnOnce() -> Result<T, VaultError>,
     ) -> Result<T, VaultError> {
         let secrets_dir = self.codex_home.join("secrets");
-        std::fs::create_dir_all(&secrets_dir)
-            .context("failed to create vault secrets directory")?;
+        std::fs::create_dir_all(&secrets_dir).map_err(|source| {
+            storage_unavailable("create vault secrets directory", &secrets_dir, source)
+        })?;
         let lock_path = secrets_dir.join(VAULT_LOCK_FILE_NAME);
-        let lock_file = match OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&lock_path)
-        {
+        let lock_file = match open_lock_file(&lock_path) {
             // PF-27-S09: the Windows credential broker's token cannot write
             // the user's files. A read-only handle locks the existing lock
             // file just as exclusively; writes to the vault itself still fail.
@@ -730,10 +746,10 @@ impl Vault {
             }
             opened => opened,
         }
-        .with_context(|| format!("failed to open vault lock {}", lock_path.display()))?;
+        .map_err(|source| storage_unavailable("open vault lock", &lock_path, source))?;
         lock_file
             .lock()
-            .with_context(|| format!("failed to lock vault {}", lock_path.display()))?;
+            .map_err(|source| storage_unavailable("lock vault", &lock_path, source))?;
         operation()
     }
 
@@ -772,6 +788,84 @@ impl Vault {
 /// Labels must be 1..=128 chars and may contain ASCII alphanumerics, `-`, `_`,
 /// `.`, and `/` (so provider-scoped labels like `ambient/api-key` work). They
 /// are trimmed for stable lookups; case-distinct labels remain distinct.
+fn open_lock_file(lock_path: &Path) -> std::io::Result<std::fs::File> {
+    #[cfg(test)]
+    if let Some(errno) = lock_failure_tests::injected_lock_open_errno() {
+        return Err(std::io::Error::from_raw_os_error(errno));
+    }
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)
+}
+
+/// Receives a vault storage failure caused by missing permission (EPERM or
+/// EACCES): the operation, the path and the error. Never a credential.
+pub type StorageFailureReporter = fn(operation: &str, path: &Path, error: &std::io::Error);
+
+static STORAGE_FAILURE_REPORTER: OnceLock<StorageFailureReporter> = OnceLock::new();
+
+/// #855: installs the process-wide reporter for vault storage failures caused
+/// by missing permission (the `corbanu` binary records them in the #616
+/// home-access log). Only the first call takes effect.
+pub fn set_storage_failure_reporter(reporter: StorageFailureReporter) {
+    let _ = STORAGE_FAILURE_REPORTER.set(reporter);
+}
+
+fn storage_unavailable(operation: &'static str, path: &Path, source: std::io::Error) -> VaultError {
+    tracing::warn!(
+        operation,
+        path = %path.display(),
+        errno = source.raw_os_error(),
+        error = %source,
+        "vault storage unavailable"
+    );
+    if source.kind() == std::io::ErrorKind::PermissionDenied
+        && let Some(report) = STORAGE_FAILURE_REPORTER.get()
+    {
+        report(operation, path, &source);
+    }
+    VaultError::StorageUnavailable {
+        operation,
+        path: path.to_path_buf(),
+        source,
+    }
+}
+
+/// #855: phrases from the vault's own error messages, as shown in the
+/// transcript. A value containing one is the text of an error that was copied
+/// and pasted in place of the credential (the entry field is masked, so the
+/// person cannot see it); stored, it would fail much later, far from the
+/// cause.
+const ERROR_TEXT_MARKERS: &[&str] = &[
+    "failed to add vault credential",
+    "failed to replace vault credential",
+    "failed to open vault lock",
+    "failed to lock vault",
+    "failed to create vault secrets directory",
+    "vault add task failed",
+    "vault replacement task failed",
+];
+
+/// Whether `value` is (or contains) the text of a vault error message rather
+/// than a credential. See [`ERROR_TEXT_MARKERS`].
+pub fn is_vault_error_text(value: &str) -> bool {
+    let value = Zeroizing::new(value.to_lowercase());
+    ERROR_TEXT_MARKERS
+        .iter()
+        .any(|marker| value.contains(marker))
+}
+
+pub(crate) fn ensure_not_error_text(secret: &str) -> Result<(), VaultError> {
+    if is_vault_error_text(secret) {
+        Err(VaultError::ErrorTextAsSecret)
+    } else {
+        Ok(())
+    }
+}
+
 fn normalize_label(raw: &str) -> Result<String, VaultError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
