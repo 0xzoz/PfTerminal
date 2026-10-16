@@ -1,0 +1,18 @@
+# Addendum to effective-policy.txt (after evidence check r1; effective-policy.txt is left unchanged because the
+# isolation receipts are bound to its hash)
+
+- Provisioning runs: provision-1 (initial); provision-2 (Moonshot's two addresses added to the guest's 443 allowlist and
+  /etc/hosts); provision-3 (agms-launch restaged after gate attempt 1: profile chmod 600); provision-4 (agms-probe
+  restaged after gate attempt 2: keychain-off switch excluded). Each re-copies the read-only package and packet.
+- The widened :443 rule is the guest's own rule ("pass out ... from (en0) to $inference port 443"), not scoped to one
+  user: with the Moonshot addresses added it applied to every guest account except the executor accounts, which the
+  per-uid rules block first. restore.sh put the original anchor back (restore-end.out: "anchor matches original: yes").
+- vm-state-end.txt: the final unlabelled "0" of the verification boot is the count of "104.18.29" in
+  /etc/pf.anchors/corbanu.pf83 (the Moonshot address gone).
+- harness/agms-product.v1-as-used-by-A-to-E was also used for group F's product starts before harness fix 1 was
+  installed during F (06:2xZ); the fix changes only the corbanu route, which F did not use.
+- tools/make_packet.py differs from the copy in design/FROZEN.sha256: a NAV_NOTE hook was added after the freeze to build
+  packet v2 (and v3). Packet v1 was built before that change, with the frozen script; v2 and v3 differ from v1 only as
+  tools/packet-v2-diff.txt and tools/packet-v3-diff.txt show.
+- Z.AI requests: 1,132 (1,131 GLM 5.3 Flash, 1 GLM 5.2 automatic review). The OpenAI spend estimate excludes the
+  unpriced Codex Auto Review requests.

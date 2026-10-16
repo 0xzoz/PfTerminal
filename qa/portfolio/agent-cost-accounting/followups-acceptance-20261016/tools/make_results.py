@@ -57,7 +57,7 @@ def evidence(label):
 cases = []
 for c in design["cases"]:
     f = final[c["id"]]
-    row = {"id": c["id"], "priority": c["priority"], "disposition": f["d"], "summary": f["s"],
+    row = {"id": c["id"], "priority": f.get("priority", c["priority"]), "disposition": f["d"], "summary": f["s"],
            "candidate_sha256": CANDIDATE, "method": "tmux", "execution": attempt(f["run"], c["id"]),
            "evidence": evidence(f["run"])}
     others = [g for g, ids in GROUP_CASES.items() if c["id"] in ids and g != f["run"]]
