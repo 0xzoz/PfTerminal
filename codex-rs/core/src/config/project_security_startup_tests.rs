@@ -93,10 +93,18 @@ impl Fixture {
 
     /// The bootstrap load the TUI and `corbanu exec` run first at startup.
     async fn load_bootstrap(&self, strict: bool) -> std::io::Result<()> {
+        self.load_bootstrap_with(strict, Vec::new()).await
+    }
+
+    async fn load_bootstrap_with(
+        &self,
+        strict: bool,
+        cli_overrides: Vec<(String, toml::Value)>,
+    ) -> std::io::Result<()> {
         load_config_toml_with_layer_stack(
             &self.home,
             Some(&AbsolutePathBuf::from_absolute_path(&self.project)?),
-            Vec::new(),
+            cli_overrides,
             ConfigLoadOptions {
                 loader_overrides: self.loader_overrides(),
                 strict_config: strict,
@@ -340,4 +348,66 @@ async fn bootstrap_load_still_accepts_versioned_and_dropped_project_security() {
             .await
             .unwrap_or_else(|error| panic!("{project:?}: {error}"));
     }
+}
+
+fn file_error(error: &std::io::Error) -> Option<&codex_config::ConfigError> {
+    error
+        .get_ref()
+        .and_then(|error| error.downcast_ref::<ConfigLoadError>())
+        .map(ConfigLoadError::config_error)
+}
+
+#[tokio::test]
+async fn dropped_project_security_is_not_blamed_for_another_failure() {
+    // #850 drops this table with a warning; a failure elsewhere must keep
+    // its own message instead of a "missing field `version`" for it.
+    let fixture = Fixture::new(
+        "[security]\nlevel = \"permissive\"\n",
+        /*trusted*/ true,
+        "",
+    );
+    let error = fixture
+        .load_bootstrap_with(
+            /*strict*/ false,
+            vec![(
+                "model_context_window".to_string(),
+                toml::Value::String("bogus".to_string()),
+            )],
+        )
+        .await
+        .expect_err("bad override");
+    assert!(!error.to_string().contains("version"), "{error}");
+    assert!(error.to_string().contains("bogus"), "{error}");
+    assert!(file_error(&error).is_none(), "{error}");
+
+    // A real error in the same project file is the one reported.
+    let fixture = Fixture::new(
+        "model_context_window = \"bogus\"\n\n[security]\nlevel = \"permissive\"\n",
+        /*trusted*/ true,
+        "",
+    );
+    let error = fixture
+        .load_bootstrap(/*strict*/ false)
+        .await
+        .expect_err("bad project value");
+    let config_error = file_error(&error).expect("file-specific error");
+    assert_eq!(
+        config_error.path.display().to_string(),
+        fixture.project_path()
+    );
+    assert!(config_error.message.contains("bogus"), "{config_error:?}");
+    assert_eq!(config_error.range.start.line, 1, "{config_error:?}");
+}
+
+#[tokio::test]
+async fn untrusted_unversioned_project_security_is_neither_loaded_nor_blamed() {
+    let fixture = Fixture::new(
+        "[security]\nlevel = \"aggressive\"\n",
+        /*trusted*/ false,
+        "",
+    );
+    fixture
+        .load_bootstrap(/*strict*/ false)
+        .await
+        .expect("an untrusted project layer is disabled");
 }
