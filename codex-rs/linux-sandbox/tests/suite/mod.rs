@@ -2,3 +2,4 @@
 mod landlock;
 mod managed_proxy;
 mod missing_bwrap;
+mod user_namespaces;

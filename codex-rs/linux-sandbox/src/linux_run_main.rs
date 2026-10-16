@@ -232,6 +232,9 @@ pub fn run_main() -> ! {
         ) {
             panic!("error applying Linux sandbox restrictions: {e:?}");
         }
+        if file_system_sandbox_policy.denies_user_namespaces() {
+            mark_user_namespaces_denied();
+        }
         exec_or_panic(command);
     }
 
@@ -245,6 +248,9 @@ pub fn run_main() -> ! {
         ) {
             panic!("error applying Linux sandbox restrictions: {e:?}");
         }
+        if file_system_sandbox_policy.denies_user_namespaces() {
+            mark_user_namespaces_denied();
+        }
         exec_or_panic(command);
     }
 
@@ -255,6 +261,10 @@ pub fn run_main() -> ! {
     }
 
     if !use_legacy_landlock {
+        // #826: bubblewrap needs a user namespace, which a command run in a
+        // sandbox that denies them cannot create; say so instead of leaving
+        // it to bubblewrap's message.
+        refuse_when_user_namespaces_denied();
         // Outer stage: bubblewrap first, then re-enter this binary in the
         // sandboxed environment to apply seccomp. This path never falls back
         // to legacy Landlock on failure.
@@ -299,7 +309,74 @@ pub fn run_main() -> ! {
     ) {
         panic!("error applying legacy Linux sandbox restrictions: {e:?}");
     }
+    if file_system_sandbox_policy.denies_user_namespaces() {
+        mark_user_namespaces_denied();
+    }
     exec_or_panic(command);
+}
+
+/// #826: set in the environment of a command whose sandbox denies user
+/// namespaces. It only selects the message below; whether a namespace can
+/// be created is always tried.
+const USER_NAMESPACES_DENIED_ENV: &str = "CODEX_SANDBOX_USER_NAMESPACES_DENIED";
+
+/// Shown when this helper runs inside a sandbox that denies user namespaces.
+const USER_NAMESPACES_DENIED_MESSAGE: &str = "Corbanu's Linux sandbox cannot start here: this command runs inside an agent command's sandbox under security level Moderate or Aggressive, where creating user namespaces is denied (Operation not permitted), and the sandbox needs one. Run it outside the agent's sandbox, or choose Permissive in /security.";
+
+fn mark_user_namespaces_denied() {
+    // SAFETY: this helper process is single-threaded here (the proxy bridges
+    // run in forked processes), and the environment changes just before the
+    // command is executed.
+    unsafe {
+        std::env::set_var(USER_NAMESPACES_DENIED_ENV, "1");
+    }
+}
+
+/// #826: inside a sandbox that denies user namespaces, stops with
+/// [`USER_NAMESPACES_DENIED_MESSAGE`] when one really cannot be created.
+fn refuse_when_user_namespaces_denied() {
+    if std::env::var_os(USER_NAMESPACES_DENIED_ENV).is_none() {
+        return;
+    }
+    if user_namespace_creation_error() == Some(libc::EPERM) {
+        eprintln!("{USER_NAMESPACES_DENIED_MESSAGE}");
+        std::process::exit(1);
+    }
+}
+
+/// The error creating a user namespace fails with in a child of this
+/// process, `None` when it succeeds or cannot be tried.
+fn user_namespace_creation_error() -> Option<i32> {
+    // SAFETY: the child calls only async-signal-safe functions, then exits.
+    let pid = unsafe { libc::fork() };
+    match pid {
+        -1 => None,
+        0 => unsafe {
+            let code = if libc::unshare(libc::CLONE_NEWUSER) == 0 {
+                0
+            } else {
+                *libc::__errno_location()
+            };
+            libc::_exit(code.clamp(0, 255));
+        },
+        pid => {
+            let mut status = 0;
+            loop {
+                // SAFETY: waits for the child forked above.
+                let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
+                if waited == pid {
+                    break;
+                }
+                if waited == -1
+                    && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR)
+                {
+                    return None;
+                }
+            }
+            (libc::WIFEXITED(status) && libc::WEXITSTATUS(status) != 0)
+                .then(|| libc::WEXITSTATUS(status))
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

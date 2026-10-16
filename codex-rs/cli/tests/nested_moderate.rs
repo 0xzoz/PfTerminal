@@ -60,6 +60,12 @@ enum Target {
     /// `corbanu exec` with `CORBANU_SECURITY_ORIGIN` naming a home the agent
     /// made, with an unreadable marker file in it.
     MadeUpMarker,
+    /// #826: [`Target::OtherHome`] in a user namespace of the command's own
+    /// (`unshare -Ur`), where the marker bubblewrap hides would be readable.
+    UnshareOtherHome,
+    /// #826: [`Target::SameHome`] in a user namespace of the command's own,
+    /// where the vault store bubblewrap hides would be readable.
+    UnshareSameHome,
 }
 
 /// How the outer run is set up.
@@ -227,6 +233,7 @@ async fn run(setup: Setup) -> Result<Run> {
     let bin_word = quote(&bin.to_string_lossy());
     let script = match target {
         Target::SameHome => format!("{nested} 2>&1"),
+        Target::UnshareSameHome => format!("unshare -Ur {nested} 2>&1; echo \"exit=$?\""),
         Target::MadeUpMarker => format!(
             "mkdir -p made-up/tmp && : > made-up/tmp/security-moderate-marker && chmod 000 made-up/tmp/security-moderate-marker && CORBANU_SECURITY_ORIGIN=\"$PWD/made-up\" {nested} 2>&1; echo \"exit=$?\"; env -u CORBANU_HOME -u PFTERMINAL_HOME CODEX_HOME=\"$PWD/made-up\" {nested} 2>&1; echo \"exit=$?\""
         ),
@@ -239,14 +246,19 @@ async fn run(setup: Setup) -> Result<Run> {
         .map(|args| format!("{bin_word} {args} </dev/null 2>&1; echo \"exit=$?\""))
         .collect::<Vec<_>>()
         .join("; "),
-        Target::OtherHome => {
+        Target::OtherHome | Target::UnshareOtherHome => {
             let other = cwd.join("other-home");
             std::fs::create_dir_all(&other)?;
             MockResponsesConfig::new(&server.uri())
                 .with_sandbox_mode("workspace-write")
                 .write(&other)?;
+            let unshare = if matches!(target, Target::UnshareOtherHome) {
+                "unshare -Ur "
+            } else {
+                ""
+            };
             format!(
-                "env -u CORBANU_HOME -u PFTERMINAL_HOME CODEX_HOME={} HOME={} {nested} 2>&1",
+                "{unshare}env -u CORBANU_HOME -u PFTERMINAL_HOME CODEX_HOME={} HOME={} {nested} 2>&1; echo \"exit=$?\"",
                 quote(&other.to_string_lossy()),
                 quote(&cwd.to_string_lossy()),
             )
@@ -267,7 +279,10 @@ async fn run(setup: Setup) -> Result<Run> {
         Some(120_000),
         "nested",
     )?);
-    if matches!(target, Target::SameHome | Target::OtherHome) {
+    if matches!(
+        target,
+        Target::SameHome | Target::OtherHome | Target::UnshareOtherHome | Target::UnshareSameHome
+    ) {
         responses.push(create_final_assistant_message_sse_response(NESTED_REPLY)?);
     }
     responses.push(create_final_assistant_message_sse_response("outer done")?);
@@ -535,6 +550,56 @@ async fn issue_766_stored_aggressive_is_refused_as_before() -> Result<()> {
             run.nested_request().is_some(),
         ),
         (true, false, false),
+        "{output}"
+    );
+    Ok(())
+}
+
+/// #826 (Travis, 2026-10-15): an agent command cannot get round nested-launch
+/// detection in a user namespace of its own (`unshare -Ur`), where the files
+/// bubblewrap hides (the Moderate marker, the vault store) would be readable:
+/// under Moderate and Aggressive the sandbox refuses the namespace, so the
+/// nested run never starts outside the level's rules. Before #826, pointed at
+/// another home under Moderate it ran at that home's level (Permissive), and
+/// in the same home under Aggressive it was no longer refused. Linux only.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_826_user_namespace_does_not_hide_the_origin() -> Result<()> {
+    let mut wrong = Vec::new();
+    for (level, target) in [
+        (Level::Moderate, Target::UnshareOtherHome),
+        (Level::Moderate, Target::UnshareSameHome),
+        (Level::AggressiveInCore, Target::UnshareSameHome),
+    ] {
+        let run = run(Setup::new(level, target)).await?;
+        let output = run.command_output();
+        eprintln!("{level:?} {target:?}: {output}");
+        let seen = (
+            output.contains("unshare failed: Operation not permitted"),
+            output.contains("exit=1"),
+            run.nested_request().is_some(),
+        );
+        if seen != (true, true, false) {
+            wrong.push(format!("{level:?} {target:?}: {seen:?}\n{output}"));
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
+/// #826: Permissive is unchanged: the sandbox does not refuse the namespace,
+/// and a nested run in one starts as before where the host allows it.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_826_permissive_user_namespace_is_unchanged() -> Result<()> {
+    let run = run(Setup::new(Level::Permissive, Target::UnshareOtherHome)).await?;
+    let output = run.command_output();
+    eprintln!(
+        "Permissive: nested={} {output}",
+        run.nested_request().is_some()
+    );
+    assert!(
+        !output.contains("unshare failed: Operation not permitted") && !output.contains("Moderate"),
         "{output}"
     );
     Ok(())

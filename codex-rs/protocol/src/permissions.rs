@@ -453,6 +453,7 @@ struct FileSystemSemanticSignature {
     unlistable_directories: Vec<AbsolutePathBuf>,
     unmovable_paths: Vec<AbsolutePathBuf>,
     keychain_services_denied: bool,
+    user_namespaces_denied: bool,
 }
 
 /// #652: the writable roots of a policy, each as written, normalized and at
@@ -808,6 +809,42 @@ impl FileSystemSandboxEntry {
     }
 }
 
+/// Special-path token of a `deny` entry that stops agent commands creating
+/// user namespaces (issue #826): the Linux sandbox refuses `unshare` and
+/// `clone` with `CLONE_NEWUSER` (`EPERM`) and `clone3` (`ENOSYS`, so C
+/// libraries fall back to `clone`). Inside a user namespace of its own a
+/// command could open the placeholders bubblewrap hides denied files with
+/// and mount over paths. It changes no file access. Carried as
+/// [`FileSystemSpecialPath::Unknown`], like
+/// [`KEYCHAIN_SERVICES_SPECIAL_PATH`]; other sandboxes ignore it.
+pub const USER_NAMESPACES_SPECIAL_PATH: &str = ":user_namespaces";
+
+impl FileSystemSandboxEntry {
+    /// A `deny` entry that stops agent commands creating user namespaces.
+    pub fn deny_user_namespaces() -> Self {
+        Self::new(
+            FileSystemPath::Special {
+                value: FileSystemSpecialPath::unknown(
+                    USER_NAMESPACES_SPECIAL_PATH,
+                    /*subpath*/ None,
+                ),
+            },
+            FileSystemAccessMode::Deny,
+        )
+    }
+
+    /// Whether this is a [`Self::deny_user_namespaces`] entry.
+    pub fn denies_user_namespaces(&self) -> bool {
+        self.access == FileSystemAccessMode::Deny
+            && matches!(
+                &self.path,
+                FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Unknown { path, subpath: None },
+                } if path == USER_NAMESPACES_SPECIAL_PATH
+            )
+    }
+}
+
 fn read_only_file_system_entries() -> Vec<FileSystemSandboxEntry> {
     vec![FileSystemSandboxEntry::new(
         FileSystemPath::Special {
@@ -892,6 +929,8 @@ impl FileSystemSandboxPolicy {
                     && entry.unmovable_path().is_none()
                     // #758: neither does a keychain-services entry.
                     && !entry.denies_keychain_services()
+                    // #826: nor a user-namespaces entry.
+                    && !entry.denies_user_namespaces()
                     && !matches!(
                         &entry.path,
                         FileSystemPath::Special {
@@ -1889,6 +1928,17 @@ impl FileSystemSandboxPolicy {
                 .any(FileSystemSandboxEntry::denies_keychain_services)
     }
 
+    /// Whether agent commands may not create user namespaces (issue #826),
+    /// from a [`FileSystemSandboxEntry::deny_user_namespaces`] entry. Only a
+    /// restricted policy carries it.
+    pub fn denies_user_namespaces(&self) -> bool {
+        matches!(self.kind, FileSystemSandboxKind::Restricted)
+            && self
+                .entries
+                .iter()
+                .any(FileSystemSandboxEntry::denies_user_namespaces)
+    }
+
     pub fn to_legacy_sandbox_policy(
         &self,
         network_policy: NetworkSandboxPolicy,
@@ -2031,6 +2081,7 @@ impl FileSystemSandboxPolicy {
             unlistable_directories: sorted_absolute_paths(self.get_unlistable_directories()),
             unmovable_paths: sorted_absolute_paths(self.get_unmovable_paths()),
             keychain_services_denied: self.denies_keychain_services(),
+            user_namespaces_denied: self.denies_user_namespaces(),
         }
     }
 }
@@ -4955,6 +5006,44 @@ mod tests {
         let mut unrestricted = FileSystemSandboxPolicy::unrestricted();
         unrestricted.entries.push(entry);
         assert!(!unrestricted.denies_keychain_services());
+    }
+
+    /// #826: a user-namespaces entry changes no file access, is no read
+    /// denial, and needs the sandbox that enforces it.
+    #[test]
+    fn issue_826_user_namespaces_entry_changes_no_file_access() {
+        let temp = TempDir::new().expect("tempdir");
+        let cwd = temp.path();
+        let entry = FileSystemSandboxEntry::deny_user_namespaces();
+        assert!(entry.denies_user_namespaces());
+        assert!(!entry.denies_keychain_services());
+        assert!(!FileSystemSandboxEntry::deny_keychain_services().denies_user_namespaces());
+        assert_eq!(entry.unlistable_directory(), None);
+        assert_eq!(entry.unmovable_path(), None);
+        let mut read = entry.clone();
+        read.access = FileSystemAccessMode::Read;
+        assert!(!read.denies_user_namespaces());
+
+        let full = FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry::new(
+            FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            },
+            FileSystemAccessMode::Write,
+        )]);
+        let mut policy = full.clone();
+        policy.entries.push(entry.clone());
+        assert!(policy.denies_user_namespaces());
+        assert!(!full.denies_user_namespaces());
+        assert!(policy.has_full_disk_write_access());
+        assert!(policy.has_full_disk_read_access());
+        assert!(!policy.has_denied_read_restrictions());
+        assert!(policy.get_unreadable_roots_with_cwd(cwd).is_empty());
+        assert!(policy.get_unreadable_globs_with_cwd(cwd).is_empty());
+        assert!(policy.needs_direct_runtime_enforcement(NetworkSandboxPolicy::Restricted, cwd));
+        assert!(!policy.is_semantically_equivalent_to(&full, cwd));
+        let mut unrestricted = FileSystemSandboxPolicy::unrestricted();
+        unrestricted.entries.push(entry);
+        assert!(!unrestricted.denies_user_namespaces());
     }
 
     /// #535: a writable link whose real location is, or lies inside, another
