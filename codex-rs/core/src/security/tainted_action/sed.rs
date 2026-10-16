@@ -591,7 +591,7 @@ mod tests {
         assert_eq!(
             programs(&["--fi=s.sed", "-nf", "t.sed", "-fu.sed", "f", "-e"]),
             (
-                none.clone(),
+                none,
                 vec!["s.sed".into(), "t.sed".into(), "u.sed".into()],
                 false,
                 false
