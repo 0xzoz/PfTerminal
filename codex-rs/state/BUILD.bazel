@@ -13,6 +13,13 @@ codex_rust_crate(
     crate_name = "codex_state",
     # Several integration tests share this helper through `#[path]`.
     integration_compile_data_extra = ["src/runtime/accounting_late_import_test_support.rs"],
+    # libtest runs the unit tests on one thread per core (four on CI
+    # runners), but Bazel reserves one core per test unless told otherwise
+    # and ran compiles beside them. Several tests bound how long a request
+    # waits on the state DB; on the oversubscribed 4-core Windows runner
+    # `ten_sessions_on_one_home_wait_briefly_and_lose_no_record` went past its
+    # bound (#905). Reserve the cores they use.
+    unit_test_tags = ["cpu:4"],
     # The accounting suites take ~210s on a 4-core Windows runner on their
     # own, so the default 300s budget times out when Bazel runs tests in parallel.
     unit_test_timeout = "long",
