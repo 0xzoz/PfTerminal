@@ -128,7 +128,11 @@ impl Fixture {
         let probe = run(
             sh("echo ready"),
             fixture.dir.path(),
-            &profile(&fixture.denied, false, NetworkSandboxPolicy::Restricted),
+            &profile(
+                &fixture.denied,
+                /*deny_user_namespaces*/ false,
+                NetworkSandboxPolicy::Restricted,
+            ),
         )
         .await;
         if probe.exit_code != 0 || !probe.stdout.text.contains("ready") {
@@ -195,7 +199,9 @@ async fn issue_826_denied_user_namespaces_keep_hidden_files_hidden() {
             ("read", &read, "OPENED-826"),
             ("mount", &mount, "MOUNTED-826"),
         ] {
-            let output = fixture.run(command.clone(), true, network).await;
+            let output = fixture
+                .run(command.clone(), /*deny_user_namespaces*/ true, network)
+                .await;
             let outcome = seen(&output, marker);
             if outcome != (false, true) {
                 wrong.push(format!(
@@ -208,7 +214,11 @@ async fn issue_826_denied_user_namespaces_keep_hidden_files_hidden() {
     assert_eq!(wrong, Vec::<String>::new());
 
     let before = fixture
-        .run(read.clone(), false, NetworkSandboxPolicy::Restricted)
+        .run(
+            read.clone(),
+            /*deny_user_namespaces*/ false,
+            NetworkSandboxPolicy::Restricted,
+        )
         .await;
     eprintln!(
         "without the entry: exit={} stdout={:?} stderr={:?}",
@@ -231,7 +241,7 @@ async fn issue_826_everyday_programs_still_run() {
     let shell = fixture
         .run(
             sh("(echo child) & wait; echo shell-ok"),
-            true,
+            /*deny_user_namespaces*/ true,
             NetworkSandboxPolicy::Restricted,
         )
         .await;
@@ -251,18 +261,18 @@ async fn issue_826_everyday_programs_still_run() {
         t = threading.Thread(target=lambda: None); t.start(); t.join()\n\
         subprocess.run(['true'], check=True)\n\
         print('python-ok')\n";
-    let python = |deny| {
+    let python = |deny_user_namespaces| {
         fixture.run(
             vec![
                 "/usr/bin/python3".to_string(),
                 "-c".to_string(),
                 script.to_string(),
             ],
-            deny,
+            deny_user_namespaces,
             NetworkSandboxPolicy::Restricted,
         )
     };
-    let denied = python(true).await;
+    let denied = python(/*deny_user_namespaces*/ true).await;
     assert_eq!(
         (
             denied.exit_code,
@@ -276,7 +286,7 @@ async fn issue_826_everyday_programs_still_run() {
         "{denied:?}"
     );
     // Permissive: `clone3` reaches the kernel as before (bad arguments).
-    let allowed = python(false).await;
+    let allowed = python(/*deny_user_namespaces*/ false).await;
     assert!(
         allowed.stdout.text.contains("python-ok")
             && !allowed
@@ -307,7 +317,11 @@ async fn issue_826_a_sandbox_inside_says_why_it_cannot_start() {
         "nested-ran".to_string(),
     ];
     let output = fixture
-        .run(nested.clone(), true, NetworkSandboxPolicy::Restricted)
+        .run(
+            nested.clone(),
+            /*deny_user_namespaces*/ true,
+            NetworkSandboxPolicy::Restricted,
+        )
         .await;
     assert_eq!(
         (
@@ -321,7 +335,11 @@ async fn issue_826_a_sandbox_inside_says_why_it_cannot_start() {
     // Permissive: no such message (the nested sandbox runs where the host
     // allows it, as before).
     let before = fixture
-        .run(nested, false, NetworkSandboxPolicy::Restricted)
+        .run(
+            nested,
+            /*deny_user_namespaces*/ false,
+            NetworkSandboxPolicy::Restricted,
+        )
         .await;
     eprintln!(
         "without the entry: exit={} stdout={:?} stderr={:?}",

@@ -185,7 +185,12 @@ async fn issue_826_protected_levels_deny_user_namespaces() -> anyhow::Result<()>
         (SecurityLevel::Moderate, true),
     ] {
         // Boxed: the session future is large for the test thread's stack.
-        let (outcome, output) = Box::pin(run(level, aggressive_launch, false)).await?;
+        let (outcome, output) = Box::pin(run(
+            level,
+            aggressive_launch,
+            /*untrusted_first*/ false,
+        ))
+        .await?;
         if outcome != DENIED {
             wrong.push(format!(
                 "{level:?} aggressive_launch={aggressive_launch}: {outcome:?}\n{output}"
@@ -203,8 +208,12 @@ async fn issue_826_permissive_is_unchanged() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
     for untrusted_first in [false, true] {
-        let (outcome, output) =
-            Box::pin(run(SecurityLevel::Permissive, false, untrusted_first)).await?;
+        let (outcome, output) = Box::pin(run(
+            SecurityLevel::Permissive,
+            /*aggressive_launch*/ false,
+            untrusted_first,
+        ))
+        .await?;
         eprintln!("Permissive untrusted_first={untrusted_first}: {outcome:?}\n{output}");
         assert!(
             !outcome.refused,

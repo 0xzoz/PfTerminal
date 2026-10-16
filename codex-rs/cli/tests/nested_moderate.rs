@@ -62,9 +62,11 @@ enum Target {
     MadeUpMarker,
     /// #826: [`Target::OtherHome`] in a user namespace of the command's own
     /// (`unshare -Ur`), where the marker bubblewrap hides would be readable.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     UnshareOtherHome,
     /// #826: [`Target::SameHome`] in a user namespace of the command's own,
     /// where the vault store bubblewrap hides would be readable.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     UnshareSameHome,
 }
 
