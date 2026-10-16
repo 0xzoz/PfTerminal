@@ -39,9 +39,10 @@ const PIPE_WRITERS: &[&str] = &["tee", "dd", "sponge", "cp", "install"];
 
 /// Pipeline stages that only print a transform of their input. Any other
 /// stage (`awk`, `sh -c`, `python3`, `while read`) may write it to a file.
+/// `sort` and `uniq` may also save it (`sort -o f`, `uniq - f`).
 const PURE_FILTERS: &[&str] = &[
-    "cat", "column", "cut", "fmt", "fold", "grep", "egrep", "fgrep", "head", "jq", "less", "more",
-    "nl", "rg", "sed", "gsed", "sort", "tac", "tail", "tr", "uniq", "wc",
+    "cat", "column", "cut", "fmt", "fold", "grep", "egrep", "fgrep", "head", "jq", "nl", "rg",
+    "sed", "gsed", "sort", "tac", "tail", "tr", "uniq", "wc",
 ];
 
 /// What the pass found in one command line.
@@ -344,12 +345,22 @@ impl Classifier {
             if level >= MAX_QUOTED_LEVEL {
                 continue;
             }
+            // Also redirection files, comments and other text the shell
+            // does not pass on as words.
             let quoted = command
                 .words
                 .iter()
                 .zip(roles)
                 .filter(|(word, _)| word.quoted)
-                .chain(command.input.iter().map(|input| (input, input_role)));
+                .chain(command.input.iter().map(|input| (input, input_role)))
+                .chain(
+                    command
+                        .writes_to
+                        .iter()
+                        .filter(|word| word.quoted)
+                        .chain(&command.other_text)
+                        .map(|word| (word, Role::Code)),
+                );
             for (word, role) in quoted {
                 // Quoted text runs in a shell of its own, if at all: its
                 // `cd` does not move this line.
@@ -361,15 +372,23 @@ impl Classifier {
                 let reading = quoted::commands(&word.text);
                 found.unreadable |= reading.too_deep;
                 if role == Role::Code {
+                    let counts = (found.sed_commands, found.shell_commands);
                     self.walk(&reading.commands, &mut inner, level + 1, found);
+                    // What the word lexer keeps as one word does not count
+                    // (a decoy must not make up for a command missed).
+                    if word.uncounted {
+                        (found.sed_commands, found.shell_commands) = counts;
+                    }
                     continue;
                 }
                 // A nested shell's script is judged when `script` reads
                 // it: here its commands are only counted.
                 let mut counted = Found::default();
                 self.walk(&reading.commands, &mut inner, level + 1, &mut counted);
-                found.sed_commands += counted.sed_commands;
-                found.shell_commands += counted.shell_commands;
+                if !word.uncounted {
+                    found.sed_commands += counted.sed_commands;
+                    found.shell_commands += counted.shell_commands;
+                }
                 found.unreadable |= counted.unreadable;
             }
         }
@@ -563,13 +582,44 @@ fn pipeline_targets(commands: &[Command], command: &Command) -> Vec<Option<Strin
                         }),
                 );
             }
-            Some((_, consumer_name)) if PURE_FILTERS.contains(&consumer_name.as_str()) => {}
+            Some((at, consumer_name)) if PURE_FILTERS.contains(&consumer_name.as_str()) => {
+                if filter_saves(&consumer_name, &texts[at + 1..]) {
+                    targets.push(None);
+                }
+            }
             // A stage that may write what it reads anywhere.
             _ => targets.push(None),
         }
         stage = consumer.pipe_to;
     }
     targets
+}
+
+/// Whether a pure filter's arguments may save its output to a file:
+/// `sort -o f` (also in a group of short options, or `--output`, or a
+/// `--compress-program` it runs), or `uniq`'s second operand. Option values
+/// may be read as operands here (fail closed).
+fn filter_saves(filter: &str, args: &[String]) -> bool {
+    match filter {
+        "sort" => args.iter().take_while(|arg| *arg != "--").any(|arg| {
+            arg.starts_with("--o")
+                || arg.starts_with("--com")
+                || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('o'))
+        }),
+        "uniq" => {
+            let mut operands = 0;
+            let mut options_ended = false;
+            for arg in args {
+                if !options_ended && arg == "--" {
+                    options_ended = true;
+                } else if options_ended || arg == "-" || !arg.starts_with('-') {
+                    operands += 1;
+                }
+            }
+            operands > 1
+        }
+        _ => false,
+    }
 }
 
 /// The word from `from` on that ends with `inline` (an attached `-c$X`

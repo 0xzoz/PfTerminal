@@ -2122,3 +2122,43 @@ fn issue_885_review_2_routes_and_limits() {
         started.elapsed()
     );
 }
+
+/// #885 review round 3: a `case` in brackets in a substitution, text read
+/// as a comment, a `$'...'` decoy for the count check, and pipeline stages
+/// that save their input (`sort -o`, `uniq IN OUT`, `less -o`).
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_885_review_3_routes() {
+    let (_dir, cwd) = issue_885_fixture();
+    let unseen = Some(ProtectedActionKind::UnseenCode);
+    let cases = [
+        (
+            "echo $'bash -c :'; echo \"$( (case x in a) :;; esac) \" #$(bash -c \"sh -c './missing.sh'\") \" )\"",
+            unseen,
+        ),
+        (
+            "echo $'sed p'; echo \"$( (case x in a) :;; esac) \" #$(sed '1e id' f) \" )\"",
+            unseen,
+        ),
+        (
+            "echo $'bash -c :'; echo \"$(for i in a; do case $i in a) :;; esac; done) \" #$(bash -c \"sh -c './missing.sh'\") \" )\"",
+            unseen,
+        ),
+        (
+            "echo $'sed p'; echo \"$(for i in a; do case $i in a) :;; esac; done) \" #$(sed '1e id' f) \" )\"",
+            unseen,
+        ),
+        ("sed '1a ./p.sh' f | sort -o r.sh; bash r.sh", unseen),
+        ("sed '1a ./p.sh' f | sort -uo r.sh; bash r.sh", unseen),
+        ("sed '1a ./p.sh' f | sort --output=r.sh; bash r.sh", unseen),
+        ("sed '1a ./p.sh' f | uniq - r.sh; bash r.sh", unseen),
+        ("sed '1a ./p.sh' f | less -o r.sh; bash r.sh", unseen),
+        // Still quiet: filters that only print, a comment without code.
+        ("sed -n 1,5p f | sort -u | uniq -c; bash present.sh", None),
+        ("sed -n 1,5p f # show the first lines", None),
+    ];
+    assert_eq!(issue_885_wrong(&cwd, &cases), Vec::<String>::new());
+}
