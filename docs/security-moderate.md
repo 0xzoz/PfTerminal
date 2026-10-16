@@ -15,17 +15,22 @@ without them Corbanu refuses every model request under Moderate, so
 
 - **Commands stay in the sandbox.** No agent command runs outside your
   sandbox, even when you approve a request to run outside it. "Retry without
-  sandbox?" isn't offered, and commands you allowed with "don't ask again"
-  skip the prompt but stay in the sandbox.
+  sandbox?" isn't offered. Commands you allowed with "don't ask again"
+  (also under Permissive) skip the prompt but stay in the sandbox, with the
+  protected-file rules below kept, also when they ask to run outside it.
+  After untrusted content they don't count for protected actions.
+  "Revoke all active authority" (`/security` → `g`) doesn't suspend them.
 - **Protected files.** Agent commands can't read the credential files in your
   home folder (such as `.ssh`, `.aws`, `.gnupg`, `.kube`, `.docker`, `.netrc`,
   `.npmrc` and `~/Library/Keychains`) or Corbanu's sign-in, vault, config,
   history and state. They can't write files that run code later: your shell
   and git start-up files, git hooks and config, the project's `.codex` and
   `.agents`, and Corbanu's own files. Your fresh approval of one command
-  lifts this for that command, except for Corbanu's runtime files and what
-  `secretless_agent_launch` keeps; a remembered or automatic approval never
-  does. A project's `.env` files aren't covered; Aggressive covers them.
+  lifts this for that command, except for Corbanu's runtime files, its
+  security state and keys (such as `security_state.json` and
+  `source-origin.key`) and what `secretless_agent_launch` keeps; a remembered
+  or automatic approval never does. A project's `.env` files aren't covered;
+  Aggressive covers them.
 - **Untrusted content.** Tool, MCP, web, agent and memory output reaches the
   model labelled untrusted. After it, protected actions need your fresh
   approval: the vault, credentials, security settings, disclosure, value
@@ -75,6 +80,12 @@ The kill switch (`/security` → `g`) works under every level.
   settings to keep every command in it.
 - MCP servers, apps, hooks and `!` shell commands run outside the sandbox, as
   under every level.
+- On Linux, where a command you approve can write a Corbanu home's folder
+  (another Corbanu home such as `~/.codex`, or this one without
+  `secretless_agent_launch`), it can create those of Corbanu's security files
+  there that don't exist yet (such as `security_state.json` before a level is
+  first confirmed); it can't read or change the ones that exist. On macOS it
+  can't create them either.
 - Nested agents are recognised on macOS and Linux only, and on Linux not when
   they run as root or in a user namespace of their own (#826). Corbanu marks
   Moderate by denying agent commands a file in the Corbanu home's `tmp`

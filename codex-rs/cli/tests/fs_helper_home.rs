@@ -189,7 +189,7 @@ fn malformed_private_request_reaches_the_helper_protocol_error() -> Result<()> {
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8(output.stderr)?;
     assert!(stderr.contains("fs sandbox helper failed:"));
-    assert!(!stderr.contains("macOS is blocking access"));
+    assert!(!stderr.contains("Corbanu could not read its home"));
     Ok(())
 }
 
@@ -200,7 +200,7 @@ fn ordinary_corbanu_invocation_keeps_the_home_privacy_preflight() -> Result<()> 
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8(output.stderr)?;
-    assert!(stderr.contains("macOS is blocking access to the Corbanu home"));
+    assert!(stderr.contains("Corbanu could not read its home (Operation not permitted)"));
     assert!(
         stderr.contains(
             &fixture

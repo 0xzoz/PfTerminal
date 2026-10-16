@@ -4710,10 +4710,32 @@ impl Session {
             items,
         );
         let items = gated.as_deref().unwrap_or(items);
-        if let Some(live_thread) = self.live_thread()
-            && let Err(e) = live_thread.append_items(items).await
+        let Some(live_thread) = self.live_thread() else {
+            return;
+        };
+        let Err(e) = live_thread.append_items(items).await else {
+            // #616: only an append that wrote something shows the home works.
+            if items.iter().any(|item| {
+                codex_rollout::is_persisted_rollout_item(item, live_thread.history_mode())
+            }) {
+                crate::home_access::note_rollout_written(self.thread_id());
+            }
+            return;
+        };
+        error!("failed to record rollout items: {e:#}");
+        // #616: the writer keeps unwritten items for its next flush; exec
+        // waits for their folder before it saves the session at exit. Record
+        // why the rollout could not be written.
+        let message = format!("{e:#}");
+        if crate::home_access::is_operation_not_permitted(&message)
+            && let Ok(Some(rollout)) = live_thread.local_rollout_path().await
         {
-            error!("failed to record rollout items: {e:#}");
+            if let Some(dir) = rollout.parent() {
+                crate::home_access::note_rollout_unwritten(self.thread_id(), dir.to_path_buf());
+            }
+            tokio::task::spawn_blocking(move || {
+                crate::home_access::record_home_access_failure("rollout write", &rollout, &message)
+            });
         }
     }
 

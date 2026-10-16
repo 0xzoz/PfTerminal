@@ -1120,7 +1120,7 @@ fn main() -> anyhow::Result<()> {
     // #766: before any thread, as it may change the Corbanu home variables.
     // Held until the run ends, when its folder is removed.
     let _nested_moderate_home = nested_moderate_home();
-    pfterminal_home::exit_if_home_blocked_by_macos_privacy();
+    pfterminal_home::exit_if_home_unreadable();
     let remote_control_disabled = codex_app_server::take_remote_control_disabled_env();
     arg0_dispatch_or_else(move |arg0_paths: Arg0DispatchPaths| async move {
         cli_main(arg0_paths, remote_control_disabled).await?;

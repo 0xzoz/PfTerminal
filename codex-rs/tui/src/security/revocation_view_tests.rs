@@ -97,6 +97,13 @@ fn pf_25_s02_revoke_all_is_reviewed_and_saved() {
     let mut view = view(&home, /*app_event_tx*/ None);
     key(&mut view, KeyCode::Enter);
     assert!(text(&view).contains("Revoke all active authority?"));
+    // MOD-28: the review says saved "don't ask again" rules are kept.
+    assert!(
+        text(&view).contains("It does not suspend saved \"don't ask again\" rules"),
+        "{}",
+        text(&view)
+    );
+    assert_snapshot!("mod_28_revoke_all_review", text(&view));
     key(&mut view, KeyCode::Enter);
     assert!(
         text(&view).contains("All active authority revoked for the next start."),

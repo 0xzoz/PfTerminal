@@ -54,6 +54,7 @@ mod exec_policy;
 #[cfg(test)]
 mod git_info_tests;
 mod guardian;
+pub mod home_access;
 mod hook_runtime;
 mod image_preparation;
 mod installation_id;
