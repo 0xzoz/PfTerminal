@@ -9,6 +9,7 @@ use codex_protocol::config_types::Settings;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::ExecCommandStatus;
 use codex_protocol::protocol::GranularApprovalConfig;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ReviewDecision;
@@ -509,10 +510,35 @@ async fn unified_exec_forbidden_command_reads_as_the_rule_justification() -> Res
         /*collaboration_mode*/ None,
     )
     .await?;
-    wait_for_event(&test.codex, |event| {
-        matches!(event, EventMsg::TurnComplete(_))
+    // #873 (item 4): the refused command is shown once, and ends as refused
+    // with the rule's reason (it never started).
+    let mut began = 0;
+    let mut ended = Vec::new();
+    wait_for_event(&test.codex, |event| match event {
+        EventMsg::ExecCommandBegin(begin) if begin.call_id == call_id => {
+            began += 1;
+            false
+        }
+        EventMsg::ExecCommandEnd(end) if end.call_id == call_id => {
+            ended.push(end.clone());
+            false
+        }
+        EventMsg::TurnComplete(_) => true,
+        _ => false,
     })
     .await;
+    assert_eq!(began, 1, "the refused command is shown once");
+    let [ended] = ended.as_slice() else {
+        panic!("the refused command ends once: {ended:?}");
+    };
+    assert_eq!(ended.status, ExecCommandStatus::Refused);
+    assert!(
+        ended
+            .aggregated_output
+            .contains("Security level Aggressive: no echo."),
+        "{}",
+        ended.aggregated_output
+    );
 
     let output_item = results_mock.single_request().function_call_output(call_id);
     let output = output_item

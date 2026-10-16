@@ -225,8 +225,10 @@ impl HistoryCell for ExecCell {
                 continue;
             }
 
+            // #873: neutral, since a network-policy refusal can come after
+            // the command ran; the reason below says what happened.
             if call.is_refused() {
-                lines.push(Line::from("✗ Did not run (Refused)".red()));
+                lines.push(Line::from("✗ Refused".red()));
             }
             if let Some(output) = call.output.as_ref() {
                 if !call.is_unified_exec_interaction() || call.is_refused() {
@@ -399,7 +401,11 @@ impl ExecCell {
             && !call.is_declined()
             && !call.is_refused()
             && !call.is_unknown();
-        let title = if call.is_declined() || call.is_refused() {
+        // #873: a refused command gets no verb (it may or may not have run:
+        // a network-policy refusal can arrive after it ran); its detail line
+        // says "Refused: <reason>".
+        let untitled = is_interaction || call.is_refused();
+        let title = if call.is_declined() {
             "Did not run"
         } else if call.is_unknown() {
             "Execution unconfirmed"
@@ -413,7 +419,7 @@ impl ExecCell {
             "Ran"
         };
 
-        let mut header_line = if is_interaction {
+        let mut header_line = if untitled {
             Line::from(vec![bullet.clone(), " ".into()])
         } else {
             Line::from(vec![bullet.clone(), " ".into(), title.bold(), " ".into()])
@@ -472,9 +478,6 @@ impl ExecCell {
             lines.push(Line::from("  └ Approval declined".dim()));
             return lines;
         }
-        if call.is_refused() {
-            lines.push(Line::from("  └ Refused".dim()));
-        }
         if call.is_unknown() {
             lines.push(Line::from("  └ No exit status received".dim()));
         }
@@ -485,7 +488,7 @@ impl ExecCell {
             } else {
                 TOOL_CALL_MAX_LINES
             };
-            let raw_output = output_lines(
+            let mut raw_output = output_lines(
                 Some(output),
                 OutputLinesParams {
                     line_limit,
@@ -494,6 +497,18 @@ impl ExecCell {
                     include_prefix: false,
                 },
             );
+            // #873: one detail line, "└ Refused: <reason>".
+            if call.is_refused() {
+                let label = if raw_output.lines.is_empty() {
+                    "Refused"
+                } else {
+                    "Refused: "
+                };
+                match raw_output.lines.first_mut() {
+                    Some(first) => first.spans.insert(0, label.dim()),
+                    None => raw_output.lines.push(Line::from(label.dim())),
+                }
+            }
             let display_limit = if call.is_user_shell_command() {
                 USER_SHELL_TOOL_CALL_MAX_LINES
             } else {

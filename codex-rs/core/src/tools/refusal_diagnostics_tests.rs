@@ -117,6 +117,24 @@ async fn issue822_other_approval_resolutions_stay_denied() {
     }
 }
 
+/// #873: an approval that timed out or was aborted was still an approval
+/// request, so the command reads as declined, never as refused by policy.
+#[tokio::test]
+async fn issue873_timed_out_and_aborted_approvals_stay_declined() {
+    for decision in [ReviewDecision::TimedOut, ReviewDecision::Abort] {
+        for unified in [false, true] {
+            let error = ApprovalResolution {
+                decision: decision.clone(),
+                source: ApprovalResolutionSource::Guardian,
+            }
+            .into_tool_result()
+            .expect_err("no permission to proceed");
+            assert!(matches!(error, ToolError::Declined(_)), "{error:?}");
+            assert_command_status(Err(error), "declined", unified).await;
+        }
+    }
+}
+
 #[tokio::test]
 async fn issue822_exit_success_and_failure_controls() {
     for unified in [false, true] {

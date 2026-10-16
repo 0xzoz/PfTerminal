@@ -9,6 +9,7 @@ use codex_features::Feature;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ExecCommandEndEvent;
+use codex_protocol::protocol::ExecCommandStatus;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::user_input::UserInput;
@@ -134,6 +135,8 @@ async fn issue_466_an_approved_command_that_cannot_start_ends() -> anyhow::Resul
         panic!("the approved command that could not start ends once: {ended:?}");
     };
     assert_ne!(ended.exit_code, 0);
+    // #873: a spawn error is a failure, not a policy refusal.
+    assert_eq!(ended.status, ExecCommandStatus::Failed);
     assert!(!ended.aggregated_output.is_empty(), "the reason is shown");
     Ok(())
 }
