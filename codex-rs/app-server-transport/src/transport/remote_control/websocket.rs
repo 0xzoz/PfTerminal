@@ -328,6 +328,9 @@ impl RemoteControlStatusPublisher {
         self.tx.borrow().clone()
     }
 
+    /// Publishes `connection_status` whatever the desired state (tests only:
+    /// the loop's own statuses check it, see below).
+    #[cfg(test)]
     fn publish_status(&self, connection_status: RemoteControlConnectionStatus) {
         self.publish_status_if(connection_status, || true);
     }
