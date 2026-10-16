@@ -1094,9 +1094,7 @@ async fn pf_824_websocket_session_under_chatgpt_sign_in_is_api_key_work() -> any
             .await
             .expect("realtime accounting attaches");
             match scopes.responses.as_ref().map(|deferred| deferred.mode()) {
-                Some(crate::config::AccountingMode::Provider { pricing, .. }) => {
-                    Some(*pricing)
-                }
+                Some(crate::config::AccountingMode::Provider { pricing, .. }) => Some(*pricing),
                 _ => None,
             }
         }
@@ -1109,5 +1107,40 @@ async fn pf_824_websocket_session_under_chatgpt_sign_in_is_api_key_work() -> any
         pricing(/*auth_mode*/ None).await,
         Some(crate::config::PriceAuthority::ApiKeyRates)
     );
+    Ok(())
+}
+
+/// #824 (review round 2): end to end, a WebSocket session started under a
+/// ChatGPT sign-in is admitted with the API key it sends. The API-key-only
+/// mode admits nothing else, so a session resolved with the sign-in would
+/// go unrecorded.
+#[tokio::test]
+async fn pf_824_websocket_session_under_chatgpt_sign_in_is_recorded_with_its_key()
+-> anyhow::Result<()> {
+    let endpoint = realtime_stand_in(StandInEnd::ClientCloses).await?;
+    let home = tempfile::tempdir()?;
+    let (owner, db) = realtime_ledger_session(
+        home.path(),
+        &endpoint,
+        crate::config::AccountingMode::DirectOpenAiResponses {
+            scope: uuid::Uuid::new_v4(),
+            approved_endpoint: endpoint.clone(),
+        },
+    )
+    .await?;
+    // The session signs in with ChatGPT; the realtime key comes from the
+    // model client's API-key sign-in, as the environment key would.
+    owner
+        .services
+        .active_auth
+        .replace_for_testing(crate::test_support::auth_manager_from_auth(
+            codex_login::CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+        ));
+    let before = chrono::Utc::now().timestamp_millis();
+    super::handle_start(&owner, "fixture-sub".into(), realtime_websocket_params()).await?;
+    super::handle_close(&owner, "fixture-sub".into()).await;
+
+    let (attempts, observations) = realtime_ledger_settled(&db, /*count*/ 1).await?;
+    assert_one_unknown_session(&attempts, &observations, before);
     Ok(())
 }
