@@ -2225,10 +2225,23 @@ impl Session {
                     return Err(Uncollected::Excluded("parent_not_persisted"));
                 };
                 match Box::pin(parent_session.accounting_owner_at(depth + 1)).await {
-                    Ok(owner) => Ok(crate::accounting::AccountingOwner {
-                        label_prefix: format!("{}{label}", owner.label_prefix),
-                        ..owner
-                    }),
+                    Ok(owner) => {
+                        // A saved conversation whose file is not written yet
+                        // (`/review` as its first action) records under its
+                        // own thread; write it now, as its own first request
+                        // would, so the ledger has the thread to record under
+                        // (#898).
+                        if owner.thread == parent {
+                            parent_session
+                                .try_ensure_rollout_materialized()
+                                .await
+                                .map_err(|_| Uncollected::Failed("parent thread not saved"))?;
+                        }
+                        Ok(crate::accounting::AccountingOwner {
+                            label_prefix: format!("{}{label}", owner.label_prefix),
+                            ..owner
+                        })
+                    }
                     Err(Uncollected::Excluded(_)) => {
                         Err(Uncollected::Excluded("parent_not_persisted"))
                     }
