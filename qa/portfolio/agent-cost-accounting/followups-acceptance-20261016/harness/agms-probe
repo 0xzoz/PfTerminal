@@ -116,7 +116,9 @@ def negatives():
     open_denied("credentials", "open mediator leaf key (no read)", "/Users/agent/agms/mediator/leaf.key")
     open_denied("credentials", "open campaign restore state (no read)", "/Users/agent/agms/restore-state/recorded")
     list_denied("credentials", "list Homebrew tools (PATH removal)", "/opt/homebrew/bin")
-    secretish = sorted(k for k in os.environ if any(t in k.upper() for t in ("KEY", "TOKEN", "SECRET", "PASS", "AUTH")))
+    # CORBANU_TEST_NO_NATIVE_KEYRING=1 is the harness's keychain-off switch, not a credential.
+    secretish = sorted(k for k in os.environ if any(t in k.upper() for t in ("KEY", "TOKEN", "SECRET", "PASS", "AUTH"))
+                       and k != "CORBANU_TEST_NO_NATIVE_KEYRING")
     placeholder_only = all(os.environ[k].startswith("agms-synthetic") for k in secretish)
     record("credentials", "environment credential names", "only synthetic placeholders",
            {"names": secretish, "all_placeholder": placeholder_only}, placeholder_only)

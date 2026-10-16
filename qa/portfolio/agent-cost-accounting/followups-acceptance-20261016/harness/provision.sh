@@ -86,8 +86,15 @@ block drop out log quick proto { tcp, udp } user { agmx0, agmx1, agmx2, agmx3 }
 """
 assert marker in text and "AGMS" not in text
 text = text.replace("\nset skip on lo0\n", "\n# set skip on lo0   (suspended by AGMS 2026-10-10; restore.sh puts it back)\n", 1)
-open(dst, "w").write(text.replace(marker, block + marker, 1))
+text = text.replace(marker, block + marker, 1)
+# PF-60-S10: the coordinator's relay may also reach Moonshot (owner-approved real test service), 443 only.
+inf = 'inference = "{ '
+assert inf in text and "104.18.29.136" not in text
+text = text.replace(inf, inf + "104.18.29.136, 104.18.28.136, ", 1)
+open(dst, "w").write(text)
 PY
+grep -q "api.moonshot.ai" /etc/hosts || printf '104.18.29.136 api.moonshot.ai\n' >> /etc/hosts
+say "hosts: $(grep -c api.moonshot.ai /etc/hosts) moonshot entry"
 pfctl -nf /etc/pf.conf
 pfctl -f /etc/pf.conf 2>&1 | grep -v -e ALTQ -e "flushing of rules" -e "present in the main" -e "pf.conf for further" -e '^$' || true
 pfctl -a corbanu.pf83 -sr

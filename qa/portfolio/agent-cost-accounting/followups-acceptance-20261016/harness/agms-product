@@ -62,7 +62,7 @@ if [ "$route" = chatgpt ] && ! grep -q '"tokens"' "$RUN/product-home/auth.json" 
     >> "$RUN/evidence/chatgpt-sign-in.txt" 2>&1 < /dev/null
   echo "[agms] signed in to the ChatGPT stand-in (exit $?); output in evidence/chatgpt-sign-in.txt"
 fi
-common=(-m "$model" "${provider[@]}" -c 'cli_auth_credentials_store="file"' -c "log_dir=\"$RUN/product-logs\"")
+common=(-m "$model" ${provider[@]+"${provider[@]}"} -c 'cli_auth_credentials_store="file"' -c "log_dir=\"$RUN/product-logs\"")
 if [ "$mode" = exec ]; then
   exec env "${env_args[@]}" "$BIN" exec --skip-git-repo-check "${common[@]}" -C "$RUN/fixture/workspace" "$@"
 fi

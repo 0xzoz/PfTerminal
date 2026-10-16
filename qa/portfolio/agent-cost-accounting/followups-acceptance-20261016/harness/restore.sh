@@ -46,7 +46,8 @@ say "virtiofs mounted: $(mount | grep -ci virtiofs)"
 if [ -f "$ST/etc-codex/config.toml" ] && [ ! -e /etc/codex/config.toml ]; then
   mkdir -p /etc/codex; cp -p "$ST/etc-codex/config.toml" /etc/codex/config.toml; fi
 say "/etc/codex/config.toml restored: $(test -f /etc/codex/config.toml && echo yes || echo no)"
-say "/etc/hosts unchanged: $(cmp -s "$ST/hosts.orig" /etc/hosts && echo yes || echo NO)"
+cp -p "$ST/hosts.orig" /etc/hosts
+say "/etc/hosts restored to the original: $(cmp -s "$ST/hosts.orig" /etc/hosts && echo yes || echo NO)"
 
 # 5. Canaries and campaign files (logs were copied to the host first).
 find /Users/agent/agms-canary /private/tmp/agms-canary-ipc /Users/Shared/agms-canary-ipc.pid -delete 2>/dev/null
