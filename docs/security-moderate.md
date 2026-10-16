@@ -5,7 +5,9 @@ output and web or MCP content, and keeps secrets away from agent commands,
 while normal work continues. It keeps your own approval, sandbox, network and
 web search settings and adds the protections below. The review in
 `/security` lists the same rows before you confirm, and the inspector (`i`)
-shows what is in force.
+shows what is in force: its recent denials include what Moderate's sandbox
+refused, and a model request the credential broker refused (such as one to a
+provider URL it can't serve) shows the broker as degraded.
 
 Moderate needs the untrusted-content labels (the `source_envelopes` feature):
 without them Corbanu refuses every model request under Moderate, so

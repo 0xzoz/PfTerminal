@@ -202,7 +202,9 @@ pub fn observe(
             codex_model_provider::model_key_broker_installed(),
         ) {
             // #391: installed, but every model request is refused.
+            // #839: or it refused the last model request.
             (_, true) => codex_model_provider::model_key_broker_unavailable()
+                .or_else(codex_model_provider::model_key_broker_refused)
                 .map_or(ControlFacts::Enforcing, ControlFacts::Degraded),
             (true, false) => {
                 ControlFacts::Degraded("no broker is running; provider keys are not sent")

@@ -104,20 +104,55 @@ pub(crate) fn kept_write_explanation(path: &str) -> String {
     )
 }
 
+/// What an explained denial was, for the inspector's recent denials (#839).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Denied {
+    /// A read Moderate's rules denied.
+    Read,
+    /// A write Moderate's rules denied.
+    Write,
+    /// A read the secretless launch contract keeps at every level.
+    KeptRead,
+    /// A write the secretless launch contract keeps at every level.
+    KeptWrite,
+}
+
+impl Denied {
+    /// What was refused and how, in the inspector's fixed text.
+    pub(super) fn inspected(self) -> (&'static str, &'static str) {
+        const MODERATE: &str = "denied by the sandbox under Moderate";
+        const KEPT: &str = "denied by the sandbox; secretless agent launch keeps it at every level, even when you approve";
+        match self {
+            Self::Read => ("reading a protected file", MODERATE),
+            Self::Write => (
+                "writing a file that runs code later, or Corbanu's own files",
+                MODERATE,
+            ),
+            Self::KeptRead => ("reading Corbanu's own files or CLI tokens", KEPT),
+            Self::KeptWrite => (
+                "writing Corbanu's home or a protected credential file",
+                KEPT,
+            ),
+        }
+    }
+}
+
 /// The explanation for a command that failed with `denial_lines`, when
 /// Moderate's rules denied a path it names (or reports) and the person's
-/// own permissions would have allowed it.
+/// own permissions would have allowed it, and what was denied.
 pub(super) async fn denial_explanation(
     inputs: ReadPolicyInputs,
     command: &[String],
     cwd: &Path,
     denial_lines: Vec<String>,
-) -> Option<String> {
+) -> Option<(Denied, String)> {
     let contract = crate::security::launch_contract::active();
     let (command, cwd) = (command.to_vec(), cwd.to_path_buf());
-    super::off_thread(move || explain(&inputs, contract, &command, &cwd, &denial_lines)).await
+    super::off_thread(move || explain_denied(&inputs, contract, &command, &cwd, &denial_lines))
+        .await
 }
 
+#[cfg(test)]
 fn explain(
     inputs: &ReadPolicyInputs,
     contract: Option<&LaunchContract>,
@@ -125,6 +160,16 @@ fn explain(
     cwd: &Path,
     denial_lines: &[String],
 ) -> Option<String> {
+    explain_denied(inputs, contract, command, cwd, denial_lines).map(|(_, text)| text)
+}
+
+fn explain_denied(
+    inputs: &ReadPolicyInputs,
+    contract: Option<&LaunchContract>,
+    command: &[String],
+    cwd: &Path,
+    denial_lines: &[String],
+) -> Option<(Denied, String)> {
     let own_profile = own_profile(inputs);
     let base = own_profile.file_system_sandbox_policy();
     let denials = inputs.denials();
@@ -187,9 +232,9 @@ fn explain(
             .zip(contract)
             .is_some_and(|(path, contract)| contract.keeps_unreadable(&path, cwd));
         return Some(if kept {
-            kept_read_explanation(&word)
+            (Denied::KeptRead, kept_read_explanation(&word))
         } else {
-            read_explanation(&word, way)
+            (Denied::Read, read_explanation(&word, way))
         });
     }
 
@@ -220,9 +265,9 @@ fn explain(
         .zip(contract)
         .is_some_and(|(path, contract)| contract.keeps_read_only(&launched, &path, cwd));
     Some(if kept {
-        kept_write_explanation(&word)
+        (Denied::KeptWrite, kept_write_explanation(&word))
     } else {
-        write_explanation(&word, way)
+        (Denied::Write, write_explanation(&word, way))
     })
 }
 

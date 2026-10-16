@@ -444,7 +444,14 @@ pub(crate) struct CoreModelKeyBroker {
     state: Arc<Mutex<BrokerState>>,
     /// What turned the broker on, for refusal messages.
     origin: BrokerModelAuthOrigin,
+    /// #839: why the last model request was refused although the broker
+    /// runs, for the inspector; cleared when a later one is authorized.
+    refused: Mutex<Option<&'static str>>,
 }
+
+/// #839: what the inspector shows after a model request whose provider URL
+/// the broker cannot serve (fixed text: the URL itself is not shown there).
+pub(crate) const UNBINDABLE_REFUSED: &str = "the last model request was refused: its provider URL cannot be brokered (it needs HTTPS with a DNS name or IPv4 address); nothing was sent";
 
 impl CoreModelKeyBroker {
     fn new(handle: BrokerHandle) -> Self {
@@ -457,7 +464,15 @@ impl CoreModelKeyBroker {
                 fingerprint_salt: salt,
             })),
             origin: BrokerModelAuthOrigin::Config,
+            refused: Mutex::new(None),
         }
+    }
+
+    fn note_refused(&self, refused: Option<&'static str>) {
+        *self
+            .refused
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = refused;
     }
 
     fn with_origin(mut self, origin: BrokerModelAuthOrigin) -> Self {
@@ -590,6 +605,13 @@ impl ModelKeyBroker for CoreModelKeyBroker {
         }
     }
 
+    fn refused_reason(&self) -> Option<&'static str> {
+        *self
+            .refused
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Registers the credential now (a blocking control-channel call, like the
     /// stored-key read it replaces) so a failure ends the turn at once.
     fn auth(
@@ -604,6 +626,7 @@ impl ModelKeyBroker for CoreModelKeyBroker {
         } = request;
         let fatal = |error: BrokerModelAuthError| CodexErr::Fatal(error.to_string());
         let binding = binding_for_base_url(&base_url, header).ok_or_else(|| {
+            self.note_refused(Some(UNBINDABLE_REFUSED));
             fatal(BrokerModelAuthError::Unbindable {
                 url: base_url.clone(),
                 origin: self.origin,
@@ -625,6 +648,7 @@ impl ModelKeyBroker for CoreModelKeyBroker {
             },
         };
         let credential = credential_for(&self.state, binding, &source).map_err(fatal)?;
+        self.note_refused(None);
         Ok(Arc::new(BrokeredAuth {
             credential,
             extra_headers,

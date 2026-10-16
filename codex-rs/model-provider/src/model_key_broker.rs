@@ -102,6 +102,13 @@ pub trait ModelKeyBroker: Send + Sync {
     fn unavailable_reason(&self) -> Option<&'static str> {
         None
     }
+
+    /// Why the broker, although it runs, refused the last model request
+    /// (its provider URL cannot be brokered), until a later one is
+    /// authorized, or `None` (#839).
+    fn refused_reason(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 static MODEL_KEY_BROKER: OnceLock<Arc<dyn ModelKeyBroker>> = OnceLock::new();
@@ -168,6 +175,12 @@ pub fn model_key_broker_installed() -> bool {
 /// or `None`.
 pub fn model_key_broker_unavailable() -> Option<&'static str> {
     model_key_broker().and_then(|broker| broker.unavailable_reason())
+}
+
+/// Why this process's installed broker refused the last model request
+/// although it runs (#839), or `None`.
+pub fn model_key_broker_refused() -> Option<&'static str> {
+    model_key_broker().and_then(|broker| broker.refused_reason())
 }
 
 pub(crate) fn model_key_broker() -> Option<Arc<dyn ModelKeyBroker>> {

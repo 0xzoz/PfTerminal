@@ -153,15 +153,22 @@ impl SecurityInspector {
         (lines, body)
     }
 
-    fn footer(&self, width: u16) -> Vec<Line<'static>> {
+    /// #839: `below` says how many lines the pane hides under the last one
+    /// shown, so rows at the end (recent denials) are not taken for absent.
+    fn footer(&self, width: u16, below: u16) -> Vec<Line<'static>> {
         let label = |bindings: &[key_hint::KeyBinding]| {
             bindings
                 .first()
                 .map(key_hint::KeyBinding::display_label)
                 .unwrap_or_else(|| "unbound".into())
         };
+        let more = match below {
+            0 => String::new(),
+            1 => "1 more line below · ".to_string(),
+            below => format!("{below} more lines below · "),
+        };
         let text = format!(
-            "{}/{} scroll · r refresh · esc back to /security",
+            "{more}{}/{} scroll · r refresh · esc back to /security",
             label(&self.keymap.move_up),
             label(&self.keymap.move_down)
         );
@@ -174,21 +181,27 @@ impl SecurityInspector {
     /// The sections scroll inside a bounded pane, under a pinned header.
     pub(crate) fn desired_height(&self, width: u16) -> u16 {
         let (header, body) = self.content(width);
+        let body_len = u16::try_from(body.len()).unwrap_or(u16::MAX);
+        // As `render` lays it out: room for the longest count.
         header.len() as u16
-            + (body.len() as u16).min(MAX_BODY_ROWS)
-            + self.footer(width).len() as u16
+            + body_len.min(MAX_BODY_ROWS)
+            + self.footer(width, body_len).len() as u16
     }
 
     pub(crate) fn render(&self, area: Rect, buf: &mut Buffer) {
         let (header, body) = self.content(area.width);
-        let footer = self.footer(area.width);
+        let body_len = u16::try_from(body.len()).unwrap_or(u16::MAX);
         let header_height = (header.len() as u16).min(area.height);
-        let footer_height = (footer.len() as u16).min(area.height - header_height);
+        // The footer's height with the longest count it can show, so the
+        // count never changes the layout it counts.
+        let footer_height =
+            (self.footer(area.width, body_len).len() as u16).min(area.height - header_height);
         let body_height = area.height - header_height - footer_height;
-        let max = u16::try_from(body.len())
-            .unwrap_or(u16::MAX)
-            .saturating_sub(body_height);
+        let max = body_len.saturating_sub(body_height);
         self.max_scroll.set(max);
+        let below = max - self.scroll.min(max);
+        let mut footer = self.footer(area.width, below);
+        footer.truncate(usize::from(footer_height));
         Paragraph::new(header).render(
             Rect {
                 height: header_height,
