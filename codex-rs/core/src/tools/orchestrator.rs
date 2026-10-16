@@ -349,6 +349,9 @@ impl ToolOrchestrator {
             }
             let protected_read_note =
                 protected_read_note(grant_operation.as_ref(), tool_ctx, turn_ctx).await;
+            // #841: what approving cannot unlock under Moderate.
+            let kept_read_note =
+                moderate_kept_read_note(tool, req, tool_ctx, turn_ctx, action).await;
             // #747: and that it stays in the sandbox under Moderate.
             let stays_sandboxed = moderate_sandbox_note(tool, req, moderate_keeps_sandbox);
             let approval_ctx = ApprovalCtx {
@@ -359,6 +362,7 @@ impl ToolOrchestrator {
                     [
                         Some(action.approval_reason()),
                         protected_read_note.clone(),
+                        kept_read_note.map(str::to_string),
                         stays_sandboxed.map(str::to_string),
                     ]
                     .into_iter()
@@ -1302,6 +1306,55 @@ async fn protected_read_note(
     )
     .await
     .map(|found| found.explanation())
+}
+
+/// #841: under Moderate, for a protected action after untrusted content that
+/// reads files the secretless launch contract keeps unreadable at every
+/// level (Corbanu's sign-in, vault, config, history): approving cannot
+/// unlock them, and the person is told so before answering.
+async fn moderate_kept_read_note<Rq, Out, T>(
+    tool: &T,
+    req: &Rq,
+    tool_ctx: &ToolCtx,
+    turn_ctx: &crate::session::turn_context::TurnContext,
+    action: &crate::security::tainted_action::PostTaintAction,
+) -> Option<&'static str>
+where
+    T: ToolRuntime<Rq, Out>,
+{
+    use crate::security::tainted_action::ProtectedActionKind;
+    if !action.state.moderate_bound()
+        || !matches!(
+            action.kind,
+            ProtectedActionKind::SecurityPolicy
+                | ProtectedActionKind::Vault
+                | ProtectedActionKind::Credentials
+        )
+    {
+        return None;
+    }
+    let ctx = ApprovalCtx {
+        session: &tool_ctx.session,
+        turn: &tool_ctx.turn,
+        call_id: &tool_ctx.call_id,
+        retry_reason: None,
+        network_approval_context: None,
+        fresh_human_authority: true,
+    };
+    let (command, cwd) = match tool.approval_action(req, &ctx).ok()? {
+        ApprovalAction::Shell { command, cwd, .. }
+        | ApprovalAction::ExecCommand { command, cwd, .. } => (command, cwd),
+        _ => return None,
+    };
+    let cwd = cwd.to_abs_path().ok()?;
+    crate::security::protected_reads::moderate_kept_read_in_command(
+        &tool_ctx.session,
+        turn_ctx,
+        &command,
+        cwd.as_path(),
+    )
+    .await
+    .then_some(crate::security::protected_reads::MODERATE_KEPT_READ_NOTE)
 }
 
 /// PF-25-S01: offer the human a grant for this exact command while its

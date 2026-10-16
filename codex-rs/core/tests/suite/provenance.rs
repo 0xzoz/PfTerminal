@@ -1003,7 +1003,10 @@ async fn pf_30_s03_escalation_retry_is_not_offered_under_moderate() -> anyhow::R
     assert_eq!(protected.len(), 1, "{reasons:?}");
     for reason in protected {
         assert!(
-            reason.contains("a security policy change after untrusted content"),
+            reason.contains(
+                "access to Corbanu's own files or security settings (its config, rules, hooks, \
+                 skills, history or sign-in state) after untrusted content"
+            ),
             "{reason}"
         );
     }

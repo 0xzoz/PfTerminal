@@ -231,6 +231,30 @@ fn issue_748_denials_moderate_did_not_add_are_not_attributed() {
     );
 }
 
+/// #841 (MOD-30): a command naming Corbanu's own files that the secretless
+/// launch contract keeps unreadable at every level is recognised, so the
+/// prompt can say approving cannot unlock them; a project file is not.
+#[test]
+fn issue_841_reads_kept_by_the_launch_contract_are_recognised() {
+    let fixture = Fixture::new();
+    let contract = fixture.contract();
+    let inputs = fixture.inputs(Fixture::profile());
+    let named = |script: String| {
+        super::super::kept_read_named(
+            &inputs,
+            &contract,
+            &["/bin/bash".to_string(), "-c".to_string(), script],
+            &fixture.project,
+        )
+    };
+    assert!(named(format!(
+        "cat '{}/config.toml'",
+        fixture.home.display()
+    )));
+    assert!(named(format!("cat '{}/auth.json'", fixture.home.display())));
+    assert!(!named("cat README.md".to_string()));
+}
+
 /// #839: what an explained denial was, for the inspector's recent denials:
 /// Moderate's own, or kept by the secretless launch contract.
 #[test]
