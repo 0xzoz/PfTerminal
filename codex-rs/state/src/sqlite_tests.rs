@@ -102,6 +102,24 @@ async fn a_slow_connection_open_keeps_the_short_wait_pool() -> anyhow::Result<()
     Ok(())
 }
 
+/// A short-wait pool on a database that can't be opened is an error (the
+/// runtime then uses the main pool), though the pool opens its own
+/// connections in the background.
+#[tokio::test]
+async fn the_short_wait_pool_reports_a_database_it_cannot_open() {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(sqlite_home.join("missing.sqlite"))
+        .create_if_missing(false);
+    let opened = open_quick_pool(
+        options,
+        sqlx::sqlite::SqlitePoolOptions::new(),
+        Duration::from_millis(100),
+    )
+    .await;
+    assert!(opened.is_err(), "opened a missing database");
+}
+
 /// Set for the child processes of
 /// [`concurrent_first_launches_on_a_new_home_all_get_a_state_db`].
 const RACE_HOME_ENV: &str = "CODEX_STATE_TEST_RACE_HOME";
@@ -179,8 +197,8 @@ fn concurrent_first_launches_on_a_new_home_all_get_a_state_db() {
         // Launches open the databases one at a time (the init lock), so all
         // of them take as long as that many in a row: on a loaded runner, more
         // than a fixed total allows (#865). A launch that stops the others -
-        // none finishes for `STALL` - still fails readably, before nextest's
-        // 60 s kill.
+        // none finishes for `STALL` - fails readably here rather than at the
+        // runner's own timeout.
         const STALL: Duration = Duration::from_secs(20);
         let mut statuses = vec![None; LAUNCHES];
         let mut progressed = Instant::now();
@@ -200,10 +218,11 @@ fn concurrent_first_launches_on_a_new_home_all_get_a_state_db() {
             .zip(statuses)
             .enumerate()
             .filter_map(|(index, (mut child, status))| {
-                if status.is_none() {
+                // A launch that exited after the last poll keeps its status.
+                let status = status.or_else(|| {
                     let _ = child.kill();
-                    let _ = child.wait();
-                }
+                    child.wait().ok()
+                });
                 let stdout =
                     std::fs::read_to_string(home.join(format!("out-{index}"))).unwrap_or_default();
                 let stderr =
