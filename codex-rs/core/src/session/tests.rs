@@ -10833,6 +10833,31 @@ async fn abort_gracefully_emits_marker_before_turn_aborted() {
     assert!(rx.try_recv().is_err());
 }
 
+/// The next event after a finished turn that is not an MCP startup report,
+/// waiting about 2 s in all.
+///
+/// The follow-up turn refreshes the MCP runtime this test session left dirty,
+/// and that refresh reports `McpStartupUpdate`/`McpStartupComplete` from its
+/// own task, unordered with the turn's events: on a slow runner the report can
+/// come before the follow-up `TurnStarted` (#905). Every other event is
+/// returned, so the caller still sees anything else that comes first.
+async fn recv_skipping_mcp_startup(rx: &async_channel::Receiver<Event>, expected: &str) -> Event {
+    let deadline = tokio::time::Instant::now() + StdDuration::from_secs(2);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let event = tokio::time::timeout(remaining, rx.recv())
+            .await
+            .unwrap_or_else(|_| panic!("timed out: {expected}"))
+            .expect("channel open");
+        if !matches!(
+            event.msg,
+            EventMsg::McpStartupUpdate(_) | EventMsg::McpStartupComplete(_)
+        ) {
+            return event;
+        }
+    }
+}
+
 async fn expect_user_message_item_started(
     rx: &async_channel::Receiver<Event>,
     expected_content: &[UserInput],
@@ -10914,10 +10939,7 @@ async fn task_finish_starts_follow_up_turn_for_leftover_pending_user_input() {
         }) if turn_id == tc.sub_id
     ));
 
-    let second = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
-        .await
-        .expect("expected follow-up turn started event")
-        .expect("channel open");
+    let second = recv_skipping_mcp_startup(&rx, "expected follow-up turn started event").await;
     let follow_up_turn_id = match second.msg {
         EventMsg::TurnStarted(TurnStartedEvent { turn_id, .. }) => turn_id,
         other => panic!("expected follow-up turn started event, got {other:?}"),
@@ -11002,14 +11024,15 @@ async fn task_finish_submits_follow_up_when_active_turn_was_replaced() {
     drop(guardian_guard);
     finish.await.expect("finish task should not panic");
 
-    let second = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
-        .await
-        .expect("expected follow-up turn started event")
-        .expect("channel open");
-    assert!(matches!(
-        second.msg,
-        EventMsg::TurnStarted(TurnStartedEvent { turn_id, .. }) if turn_id != tc.sub_id
-    ));
+    let second = recv_skipping_mcp_startup(&rx, "expected follow-up turn started event").await;
+    assert!(
+        matches!(
+            &second.msg,
+            EventMsg::TurnStarted(TurnStartedEvent { turn_id, .. }) if *turn_id != tc.sub_id
+        ),
+        "expected a follow-up turn started event, got {:?}",
+        second.msg
+    );
 
     expect_user_message_item_started(&rx, &pending_user_input).await;
 
@@ -11122,14 +11145,17 @@ async fn non_steerable_turn_defers_user_input_until_completion() {
         EventMsg::TurnComplete(TurnCompleteEvent { turn_id, .. }) if turn_id == tc.sub_id
     ));
 
-    let second = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
-        .await
-        .expect("expected deferred-input follow-up turn started event")
-        .expect("channel open");
-    assert!(matches!(
-        second.msg,
-        EventMsg::TurnStarted(TurnStartedEvent { turn_id, .. }) if turn_id != tc.sub_id
-    ));
+    let second =
+        recv_skipping_mcp_startup(&rx, "expected deferred-input follow-up turn started event")
+            .await;
+    assert!(
+        matches!(
+            &second.msg,
+            EventMsg::TurnStarted(TurnStartedEvent { turn_id, .. }) if *turn_id != tc.sub_id
+        ),
+        "expected a follow-up turn started event, got {:?}",
+        second.msg
+    );
 
     expect_user_message_item_started(&rx, &deferred_input).await;
 

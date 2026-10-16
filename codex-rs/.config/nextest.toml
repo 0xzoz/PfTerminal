@@ -67,6 +67,13 @@ filter = 'package(codex-core) & test(a_turn_completes_while_another_process_hold
 slow-timeout = { period = "1m", terminate-after = 3 }
 
 [[profile.default.overrides]]
+# Ten sessions on a 4-worker runtime, timing how long each request waits on
+# the state DB: it needs the cores it uses, not one slot among busy tests
+# (#905; Bazel reserves them with state's `cpu:4` unit-test tag).
+filter = 'package(codex-state) & test(ten_sessions_on_one_home_wait_briefly_and_lose_no_record)'
+threads-required = 4
+
+[[profile.default.overrides]]
 filter = 'test(approval_matrix_covers_all_modes)'
 slow-timeout = { period = "30s", terminate-after = 2 }
 
