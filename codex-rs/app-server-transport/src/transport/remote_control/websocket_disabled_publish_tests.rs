@@ -14,6 +14,7 @@ use super::tests::test_current_enrollment;
 use super::*;
 use pretty_assertions::assert_eq;
 use std::sync::Mutex as StdMutex;
+use tokio::sync::Notify;
 use tokio::time::Duration;
 use tokio::time::timeout;
 
@@ -23,13 +24,15 @@ use tokio::time::timeout;
 const ENABLE_WAIT: Duration = Duration::from_secs(5);
 
 struct Race {
-    websocket: RemoteControlWebsocket,
+    /// Taken by `run()`.
+    websocket: Option<RemoteControlWebsocket>,
     desired_state_tx: Arc<watch::Sender<RemoteControlDesiredState>>,
     status_publisher: RemoteControlStatusPublisher,
     status_rx: watch::Receiver<RemoteControlStatusChangedNotification>,
     shutdown_token: CancellationToken,
     /// The status right after the cycle's publish.
     published: Arc<StdMutex<Option<RemoteControlConnectionStatus>>>,
+    published_notify: Arc<Notify>,
 }
 
 /// A loop for `remote_control_url`, enabled, whose disabled cycles race an
@@ -64,12 +67,18 @@ fn race(remote_control_url: &str, racing_enable: bool) -> Race {
         desired_state_tx.clone(),
     );
     let published = Arc::new(StdMutex::new(None));
+    let published_notify = Arc::new(Notify::new());
+    let hook_published_notify = published_notify.clone();
     let hook_desired_state_tx = desired_state_tx.clone();
     let hook_status_publisher = status_publisher.clone();
     let hook_status_rx = status_rx.clone();
     let hook_published = published.clone();
     websocket.disabled_publish_hook = Some(Arc::new(move |phase| match phase {
         DisabledPublish::Before if racing_enable => {
+            // The disable that woke the loop publishes `Disabled` after
+            // storing its desired state; the enable comes after both (the
+            // handle serializes them).
+            wait_for_status(&hook_status_rx, RemoteControlConnectionStatus::Disabled);
             // The enable, in its order (desired state, then `Connecting`), on
             // another thread: it must not wait for the loop.
             let desired_state_tx = hook_desired_state_tx.clone();
@@ -89,25 +98,55 @@ fn race(remote_control_url: &str, racing_enable: bool) -> Race {
         DisabledPublish::Before => {}
         DisabledPublish::After => {
             *hook_published.lock().expect("published") = Some(hook_status_rx.borrow().status);
+            hook_published_notify.notify_one();
         }
     }));
     Race {
-        websocket,
+        websocket: Some(websocket),
         desired_state_tx,
         status_publisher,
         status_rx,
         shutdown_token,
         published,
+        published_notify,
     }
 }
 
+/// Waits (bounded) until `status_rx` shows `status`; for the hook, which runs
+/// synchronously in the loop.
+fn wait_for_status(
+    status_rx: &watch::Receiver<RemoteControlStatusChangedNotification>,
+    status: RemoteControlConnectionStatus,
+) {
+    let deadline = std::time::Instant::now() + ENABLE_WAIT;
+    while status_rx.borrow().status != status {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "status never became {status:?}"
+        );
+        std::thread::yield_now();
+    }
+}
+
+/// A disable, as `transition_disabled` does it.
+fn disable(
+    desired_state_tx: &watch::Sender<RemoteControlDesiredState>,
+    status_publisher: &RemoteControlStatusPublisher,
+) {
+    desired_state_tx.send_replace(RemoteControlDesiredState::Disabled);
+    status_publisher.publish_status(RemoteControlConnectionStatus::Disabled);
+}
+
 impl Race {
-    /// A disable, as `transition_disabled` does it.
-    fn disable(&self) {
-        self.desired_state_tx
-            .send_replace(RemoteControlDesiredState::Disabled);
-        self.status_publisher
-            .publish_status(RemoteControlConnectionStatus::Disabled);
+    /// The status right after the cycle's publish, once it happened.
+    async fn published(&self) -> RemoteControlConnectionStatus {
+        timeout(ENABLE_WAIT, self.published_notify.notified())
+            .await
+            .expect("the cycle publishes");
+        self.published
+            .lock()
+            .expect("published")
+            .expect("recorded with the notification")
     }
 }
 
@@ -115,38 +154,20 @@ impl Race {
 /// `connect()` publish `Errored` and wait for a disable, before any network
 /// or authentication step.
 async fn connect_returned_disabled(racing_enable: bool) -> RemoteControlConnectionStatus {
-    let race = race("not a remote-control URL", racing_enable);
-    let mut status_rx = race.status_rx.clone();
-    let shutdown_token = race.shutdown_token.clone();
-    let published = race.published.clone();
-    let Race {
-        websocket,
-        desired_state_tx,
-        status_publisher,
-        ..
-    } = race;
+    let mut race = race("not a remote-control URL", racing_enable);
+    let websocket = race.websocket.take().expect("the loop");
     let task = tokio::spawn(websocket.run(/*app_server_client_name_rx*/ None));
     timeout(
         ENABLE_WAIT,
-        status_rx.wait_for(|status| status.status == RemoteControlConnectionStatus::Errored),
+        race.status_rx
+            .wait_for(|status| status.status == RemoteControlConnectionStatus::Errored),
     )
     .await
     .expect("connect() reaches its wait for a disable")
     .expect("status channel stays open");
-    // A disable, as `transition_disabled` does it.
-    desired_state_tx.send_replace(RemoteControlDesiredState::Disabled);
-    status_publisher.publish_status(RemoteControlConnectionStatus::Disabled);
-    let published = timeout(ENABLE_WAIT, async {
-        loop {
-            if let Some(status) = *published.lock().expect("published") {
-                return status;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("the cycle publishes");
-    shutdown_token.cancel();
+    disable(&race.desired_state_tx, &race.status_publisher);
+    let published = race.published().await;
+    race.shutdown_token.cancel();
     timeout(ENABLE_WAIT, task)
         .await
         .expect("the loop stops")
@@ -158,17 +179,16 @@ async fn connect_returned_disabled(racing_enable: bool) -> RemoteControlConnecti
 async fn connection_ended_by_disable(racing_enable: bool) -> RemoteControlConnectionStatus {
     let race = race("http://127.0.0.1:1/", racing_enable);
     let (client, _server) = connected_websocket_pair().await;
+    let websocket = race.websocket.as_ref().expect("the loop");
     let (reason, ()) = tokio::join!(
-        race.websocket
-            .run_connection(client, race.shutdown_token.child_token()),
-        async { race.disable() },
+        websocket.run_connection(client, race.shutdown_token.child_token()),
+        async { disable(&race.desired_state_tx, &race.status_publisher) },
     );
     assert!(
         matches!(reason, ConnectionEndReason::Disabled),
         "{reason:?}"
     );
-    let published = race.published.lock().expect("published").take();
-    published.expect("the cycle publishes")
+    race.published().await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
