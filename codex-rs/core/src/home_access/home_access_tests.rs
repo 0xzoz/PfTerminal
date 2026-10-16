@@ -212,6 +212,11 @@ fn a_thread_that_ends_unsaved_leaves_no_run_behind() {
         (after_a, failures.since, failures.unsaved.len()),
         ((Some(start), 1), None, 0)
     );
+
+    // A thread that was never unsaved ending does not end a turn's wait.
+    failures.failed(start);
+    failures.ended(ThreadId::new());
+    assert_eq!(failures.since, Some(start));
 }
 
 #[test]

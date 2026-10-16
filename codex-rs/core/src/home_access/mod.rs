@@ -141,20 +141,20 @@ impl HomeFailures {
     /// persist does not get here; the exit probe then finds the folder
     /// readable and returns at once.)
     fn written(&mut self, thread: ThreadId) {
-        self.forget(thread);
-    }
-
-    /// The thread's persistence shut down (#872): its items are written or
-    /// lost, as nothing writes them later, so the exit wait has nothing to
-    /// save for it. A stale entry would keep `since` and shorten the exit
-    /// wait of a later, unrelated outage.
-    fn ended(&mut self, thread: ThreadId) {
-        self.forget(thread);
-    }
-
-    fn forget(&mut self, thread: ThreadId) {
         self.unsaved.remove(&thread);
         if self.unsaved.is_empty() {
+            self.since = None;
+        }
+    }
+
+    /// The thread's persistence shut down or was discarded (#872): its items
+    /// are written or lost, as nothing writes them later, so the exit wait
+    /// has nothing to save for it. A stale entry would keep `since` and
+    /// shorten the exit wait of a later, unrelated outage. A thread that
+    /// ends shows nothing about the home, so the run ends only when this
+    /// thread was the last one unsaved (a waiting turn keeps its start).
+    fn ended(&mut self, thread: ThreadId) {
+        if self.unsaved.remove(&thread).is_some() && self.unsaved.is_empty() {
             self.since = None;
         }
     }
@@ -172,7 +172,7 @@ pub(crate) fn note_rollout_written(thread: ThreadId) {
 }
 
 /// The live thread of `thread` shut down, whether or not its last write
-/// succeeded.
+/// succeeded, or was discarded after a failed session start.
 pub(crate) fn note_thread_ended(thread: ThreadId) {
     if let Some(mut failures) = home_failures() {
         failures.ended(thread);
@@ -290,7 +290,12 @@ pub fn sandbox_denies_read(path: &Path) -> bool {
 }
 
 /// The diagnostics log on the internal disk (never under the Corbanu home).
+/// Unit tests never write it: their failures are simulated, and `HOME` is
+/// the operator's.
 pub(crate) fn diagnostics_log_path() -> Option<PathBuf> {
+    if cfg!(test) {
+        return None;
+    }
     let user_home = dirs::home_dir()?;
     Some(if cfg!(target_os = "macos") {
         user_home.join("Library/Logs/Corbanu/home-access.log")

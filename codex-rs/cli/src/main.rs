@@ -1997,9 +1997,12 @@ async fn cli_main(
 /// command line that does not parse, is left alone.
 fn nested_moderate_home() -> Option<tempfile::TempDir> {
     // Cheap first: most launches (and every sandbox helper) start no agent.
-    if !std::env::args_os()
-        .skip(1)
-        .any(|arg| matches!(arg.to_str(), Some("exec" | "e" | "review")))
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|argv1| codex_arg0::is_private_helper_argv1(&argv1))
+        || !std::env::args_os()
+            .skip(1)
+            .any(|arg| matches!(arg.to_str(), Some("exec" | "e" | "review")))
     {
         return None;
     }
