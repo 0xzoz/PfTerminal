@@ -91,6 +91,6 @@ impl<'a> EffectiveWrites<'a> {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 #[path = "effective_writes_tests.rs"]
 mod tests;

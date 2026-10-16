@@ -1,4 +1,6 @@
 #![cfg(unix)]
+// The measurements print what they find.
+#![allow(clippy::print_stderr)]
 
 //! #907: what [`ReadDenials::apply`] costs in filesystem walks.
 

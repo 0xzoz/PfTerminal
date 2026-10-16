@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! #907: [`EffectiveWrites`] answers exactly as the per-path checks did
 //! before it (a verbatim copy of them is kept here as the reference), for
 //! one build reused across many paths.
@@ -102,7 +104,7 @@ mod reference {
 }
 
 fn abs(path: &Path) -> AbsolutePathBuf {
-    AbsolutePathBuf::from_absolute_path(path).unwrap()
+    AbsolutePathBuf::from_absolute_path(path).expect("absolute path")
 }
 
 fn entry(path: &Path, access: FileSystemAccessMode) -> FileSystemSandboxEntry {
@@ -125,9 +127,9 @@ struct Layout {
 }
 
 fn layout() -> Layout {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("temporary folder");
     let base = dir.path().to_path_buf();
-    let real = base.canonicalize().unwrap();
+    let real = base.canonicalize().expect("real location");
     for folder in [
         "ws/.git/hooks",
         "ws/.codex",
@@ -138,16 +140,16 @@ fn layout() -> Layout {
         "outside/inner",
         "home",
     ] {
-        std::fs::create_dir_all(real.join(folder)).unwrap();
+        std::fs::create_dir_all(real.join(folder)).expect("folder");
     }
-    std::fs::write(real.join("outside/secret"), "x").unwrap();
-    std::fs::write(real.join("ws/src/main.rs"), "x").unwrap();
-    symlink(real.join("ws"), real.join("ws_link")).unwrap();
-    symlink(real.join("ws"), real.join("home/ws_via_home")).unwrap();
-    symlink(real.join("outside"), real.join("ws/nested_link")).unwrap();
-    symlink(real.join("ws/.git"), real.join("ws/sub/linked_git")).unwrap();
-    symlink(real.join("missing_target"), real.join("dangling")).unwrap();
-    symlink(real.join("missing_target"), real.join("ws/dangling")).unwrap();
+    std::fs::write(real.join("outside/secret"), "x").expect("file");
+    std::fs::write(real.join("ws/src/main.rs"), "x").expect("file");
+    symlink(real.join("ws"), real.join("ws_link")).expect("link");
+    symlink(real.join("ws"), real.join("home/ws_via_home")).expect("link");
+    symlink(real.join("outside"), real.join("ws/nested_link")).expect("link");
+    symlink(real.join("ws/.git"), real.join("ws/sub/linked_git")).expect("link");
+    symlink(real.join("missing_target"), real.join("dangling")).expect("link");
+    symlink(real.join("missing_target"), real.join("ws/dangling")).expect("link");
     Layout {
         _dir: dir,
         base,
@@ -274,7 +276,10 @@ fn policies(layout: &Layout) -> Vec<(&'static str, FileSystemSandboxPolicy)> {
             "special paths",
             FileSystemSandboxPolicy::restricted(vec![
                 special(FileSystemSpecialPath::Minimal, Read),
-                special(FileSystemSpecialPath::project_roots(/*subpath*/ None), Write),
+                special(
+                    FileSystemSpecialPath::project_roots(/*subpath*/ None),
+                    Write,
+                ),
                 special(
                     FileSystemSpecialPath::project_roots(Some(".codex".to_string())),
                     Read,
