@@ -2045,8 +2045,11 @@ fn issue_885_review_1_routes_and_limits() {
     );
     let wide = format!("uv {}sed p f", "env ".repeat(10_000));
     assert_eq!(script(&wide), unseen);
+    // Linear work takes about 1 s here in a debug build on a dev Mac, and
+    // over 5 s on a loaded macOS CI runner; the bound only catches work
+    // that grows faster than the line.
     assert!(
-        started.elapsed() < std::time::Duration::from_secs(5),
+        started.elapsed() < std::time::Duration::from_secs(20),
         "{:?}",
         started.elapsed()
     );
@@ -2193,6 +2196,19 @@ fn issue_885_review_3_routes() {
         ),
         (
             "echo \"$(case x in a) sed -n p f;; esac)\" $[ ${x:-'$(sed 1e\\ id f)'} ]",
+            unseen,
+        ),
+        // Round 7: the same in arithmetic or a subscript with no `${...}`.
+        (
+            "echo \"$(case x in a) sed -n p f;; esac)\" $(( '$(sed 1e\\ id f)' ))",
+            unseen,
+        ),
+        (
+            "echo \"$(case x in a) sed -n p f;; esac)\" $[ $'$(sed 1e\\ id f)' ]",
+            unseen,
+        ),
+        (
+            "echo \"$(case x in a) sed -n p f;; esac)\"; a['$(sed 1e\\ id f)']=1",
             unseen,
         ),
         // Still quiet: filters that only print, a comment without code.

@@ -82,12 +82,15 @@ pub(super) struct Reading {
 
 /// Read `text`, substitutions included.
 pub(super) fn commands(text: &str) -> Reading {
-    read(text, /*nesting*/ 0, /*body*/ false)
+    read(
+        text, /*nesting*/ 0, /*body*/ false, /*arithmetic*/ false,
+    )
 }
 
 /// Read `text` (`body`: the body of an unquoted here-document, where only
-/// substitutions run) inside `nesting` substitutions.
-fn read(text: &str, nesting: usize, body: bool) -> Reading {
+/// substitutions run) inside `nesting` substitutions (`arithmetic`: in text
+/// that may hold arithmetic or a subscript).
+fn read(text: &str, nesting: usize, body: bool, arithmetic: bool) -> Reading {
     let chars: Vec<char> = text.chars().collect();
     let mut reader = Reader {
         chars: &chars,
@@ -96,6 +99,7 @@ fn read(text: &str, nesting: usize, body: bool) -> Reading {
         too_deep: false,
         unterminated: false,
         unsure: false,
+        arithmetic: arithmetic || text.contains("((") || text.contains('['),
     };
     if body {
         reader.substitutions_only();
@@ -155,6 +159,9 @@ struct Reader<'a> {
     unterminated: bool,
     /// See `Reading::unsure`.
     unsure: bool,
+    /// The text may hold arithmetic (`$((`, `((`, `$[`) or a subscript
+    /// (`a[...]`), where single quotes do not stop a substitution.
+    arithmetic: bool,
 }
 
 /// One list of commands being read.
@@ -381,10 +388,12 @@ impl Reader<'_> {
                     list.has_word = true;
                     list.word.quoted = true;
                     index += 1;
+                    let from = index;
                     while index < chars.len() && chars[index] != '\'' {
                         list.word.text.push(chars[index]);
                         index += 1;
                     }
+                    self.quoted_span(from, index);
                     self.unterminated |= index >= chars.len();
                 }
                 '"' => {
@@ -411,7 +420,9 @@ impl Reader<'_> {
                     list.has_word = true;
                     list.word.quoted = true;
                     list.word.whole = true;
-                    index = ansi_c(chars, index + 2, &mut list.word.text);
+                    let from = index + 2;
+                    index = ansi_c(chars, from, &mut list.word.text);
+                    self.quoted_span(from, index);
                     continue;
                 }
                 '$' | '`' => {
@@ -489,6 +500,21 @@ impl Reader<'_> {
         index
     }
 
+    /// A quoted span `from..to`: bash, dash and zsh run a substitution in
+    /// it in arithmetic (`$(( '$(cmd)' ))`, `$[ $'$(cmd)' ]`, zsh `(( ))`)
+    /// and subscripts (`a['$(cmd)']=1`). Where such text may be, a span
+    /// that holds one is not read here, so unsure.
+    fn quoted_span(&mut self, from: usize, to: usize) {
+        let span = &self.chars[from.min(to)..to.min(self.chars.len())];
+        if self.arithmetic
+            && span.iter().enumerate().any(|(at, ch)| {
+                *ch == '`' || (*ch == '$' && matches!(span.get(at + 1), Some('(' | '{')))
+            })
+        {
+            self.unsure = true;
+        }
+    }
+
     /// `$name`, `${...}`, `$(...)`, `$((...))` or a backtick substitution
     /// at `index`; returns the index after it.
     fn expansion(&mut self, index: usize, word: &mut Word, in_double: bool) -> usize {
@@ -550,8 +576,9 @@ impl Reader<'_> {
                         // Even inside double quotes (`"${x:-'}'}"`), where
                         // a substitution in it still runs
                         // (`"${x:-'$(cmd)'}"`), as in arithmetic
-                        // (`$(( ${x:-'$(cmd)'} ))`) and zsh subscripts: not
-                        // read here, so unsure wherever the `${...}` is.
+                        // (`$(( ${x:-'$(cmd)'} ))`, zsh `(( ))` and
+                        // `for ((...))`) and zsh subscripts: not read here,
+                        // so unsure wherever the `${...}` is.
                         '\'' => {
                             at += 1;
                             while at < chars.len() && chars[at] != '\'' {
@@ -615,7 +642,7 @@ impl Reader<'_> {
         if !self.enter(/*nested*/ true) {
             return;
         }
-        let reading = read(text, self.nesting, body);
+        let reading = read(text, self.nesting, body, self.arithmetic);
         self.nesting -= 1;
         self.too_deep |= reading.too_deep;
         self.unterminated |= reading.unterminated;
@@ -864,6 +891,13 @@ mod tests {
             "echo \"${x:-'`sed 1e\\ id f`'}\"",
             "echo $(( ${x:-'$(sed 1e\\ id f)'} )) $[ ${x:-'${y}'} ]",
             "echo ${a[${y:-'$(sed 1e\\ id f)'}]}",
+            // Single quotes do not stop a substitution in arithmetic or
+            // a subscript.
+            "echo $(( '$(sed 1e\\ id f)' )) \"$(( '`id`' ))\"",
+            "echo $[ $'${y}' ]",
+            "(( '$(sed 1e\\ id f)' )); for (( ; '$(id)' ; )); do :; done",
+            "a['$(sed 1e\\ id f)']=1",
+            "[[ 1 -eq 'a[$(id)]' ]]",
             // A line break before `in` is valid, but not followed here.
             "echo \"$(case x\nin a) :;; esac)\"",
         ] {
@@ -873,6 +907,8 @@ mod tests {
             "echo \"$(if case x in a) true;; esac; then :; fi)\"",
             "echo case; case x { a) :;; }",
             "echo \"${x:-'$HOME'}\" ${x:-'a'}",
+            // No arithmetic or subscript in the line: the quotes quote.
+            "grep -n '$(x)' f; echo $'`y`' \"$(echo '${z}')\"",
         ] {
             assert!(!commands(sure).unsure, "{sure:?}");
         }
