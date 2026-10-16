@@ -50,6 +50,8 @@ def evidence(label):
         if (run / name).exists():
             refs.append(ref(run / name))
     refs += [ref(p) for p in sorted((run / "collected/evidence").glob("driver-*.log"))]
+    if (run / "product-log-excerpt.txt").exists():
+        refs.append(ref(run / "product-log-excerpt.txt"))
     return refs
 
 
@@ -74,6 +76,8 @@ for c in design["cases"]:
             row.update({"candidate_sha256": CANDIDATE, "method": "tmux", "execution": attempt(spec["final"], case),
                         "evidence": evidence(spec["final"]),
                         "attempts": [{"label": a, "execution": attempt(a, case), "evidence": evidence(a)} for a in spec["attempts"]]})
+            if spec.get("parts"):
+                row["parts"] = {k: {"label": v, "execution": attempt(v, case), "evidence": evidence(v)} for k, v in spec["parts"].items()}
         cases.append(row)
     else:
         o = dict(old[case])

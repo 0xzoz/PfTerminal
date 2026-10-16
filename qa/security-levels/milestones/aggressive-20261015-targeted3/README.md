@@ -34,11 +34,15 @@ Combined status of all 64 cases (this run where re-run or re-judged, the second 
     understates (lists the sandbox and network-off under the restart), which amendment 6 allows for screens before #834.
   - AGG-37: its pass stands under amended result 1.
 - Blocked:
-  - AGG-R14 (advisory): #817's fix held (the Enter on the child's prompt approved it) and ks-child.txt was absent 90 s
-    after the kill switch (result 1 passed). Result 2, "the child shows it was stopped", is blocked: only the parent's
-    turn notice is shown, and `/panes` lists no child, because the model spawned it rather than `/spawn` (#867).
-    The first attempt was blocked earlier: the parent's model asked to run its own polling command before the child's
-    prompt appeared, and the frozen driver answered nothing. One fresh replay was run; both attempts are recorded.
+  - AGG-R14 (advisory): the first attempt was blocked early: the parent's model asked to run its own polling command
+    before the child's prompt appeared, and the frozen driver answered nothing, as written. The integrator then ran one fresh
+    replay with the same driver; that was the integrator's own decision, not one a frozen rule or the owner provides for. Both attempts are
+    recorded and result 1 rests on the second alone. In it, the driver's Enter on the child's prompt drew no refusal and
+    no "new request" notice (#817); the screen shows no approved line, but the product's log has the approval, the
+    child's command starting and the kill switch interrupting the child's turn
+    ([runs/W04-a2/product-log-excerpt.txt](runs/W04-a2/product-log-excerpt.txt)). ks-child.txt was absent 90 s after
+    the kill switch (result 1 passed). Result 2, "the child shows it was stopped", is blocked: only the parent's turn
+    notice is shown, and `/panes` lists no child, because the model spawned it rather than `/spawn` (#867).
   - AGG-R06: no Claude Code in the guest (a named limit, unchanged).
 - Accepted by the owner, not passed (#447, unchanged): AGG-18, AGG-R07, AGG-R10, AGG-20 (AGG-20 also a named limit).
 - Issue filed (advisory): #867, the AGG-R14 result 2 question above.
@@ -110,6 +114,25 @@ Combined status of all 64 cases (this run where re-run or re-judged, the second 
   [configured: /security]"; amendment 6 does not list the nested-agent refusal among the restart-only items.
 - The packet says a part 7 amendment governs and that what it "does not mention stays as before"; W01's executor read
   that as keeping part A's old advisory result. The amended table replaces part A's expected results as a whole.
+- macOS only; this is a targeted run, so 58 cases rest on earlier candidates. Entries carried in `results.json`
+  (`carried_from`) keep the earlier records' paths, which resolve against those records (for example AGG-18's
+  `design/decisions/issue-447.json` is the second targeted run's snapshot, not this record's newer one).
+- Isolation of the designer, reviewer and checkers is instruction-only (read-only sandbox, no OS read restriction).
+  Executors run the candidate's `corbanu exec` with `--dangerously-bypass-approvals-and-sandbox`, confined by the OS
+  account, per-uid pf and file modes, verified by the probes.
+- The guard only monitors for a system prompt; it cannot prevent one.
+- The synthetic `.env` token appears in the harness's fixture records (`fixture.jsonl`, driver logs), never on the
+  product's screen.
+- Lane processes: 12 to 14 processes owned by the lane account were still running after each wipe
+  (`runs/*/wipe-after.txt`, a count only; it may include the shell that took it); they were not identified. Lanes were
+  reused: agmx1 for W01 and W04, agmx2 for W02 and W04-a2 (wiped before and after each run).
+- Relay windows: each run's `mediator-window.jsonl` starts 2 minutes before its executor and may hold the end of the
+  previous run's requests. No disposition rests on relay traffic.
+- The AGG-R14 driver leaves the product running when it ends; W04-a2's executor did not stop it, and the run's cleanup
+  ended it.
+- Product logs and product homes are kept out of the record, except the W04-a2 excerpt above. Each run's test project
+  is under `runs/<label>/collected/fixture/`, with its git directory renamed `dot-git/`. PTY logs are gzipped. Driver
+  logs and the host's run log (`runs/seq.log`) are in the record.
 
 ## Review budget
 
