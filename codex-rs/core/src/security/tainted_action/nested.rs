@@ -177,7 +177,8 @@ impl Classifier {
         let strict = self.not_shell == 0 && self.rebuilt == 0;
         for script in scripts {
             let reading = quoted::commands(script);
-            found.unreadable |= reading.too_deep || (strict && reading.unterminated);
+            found.unreadable |=
+                reading.too_deep || reading.unsure || (strict && reading.unterminated);
             self.walk(
                 &reading.commands,
                 &mut folders,
@@ -370,22 +371,24 @@ impl Classifier {
                     stack: folders.stack.clone(),
                 };
                 let reading = quoted::commands(&word.text);
-                found.unreadable |= reading.too_deep;
+                found.unreadable |= reading.too_deep || reading.unsure;
                 if role == Role::Code {
+                    // Commands in data the word lexer does not read as
+                    // command lines do not count: a decoy (`echo 'sed p'`)
+                    // must not make up for a command this reading missed.
                     let counts = (found.sed_commands, found.shell_commands);
                     self.walk(&reading.commands, &mut inner, level + 1, found);
-                    // What the word lexer keeps as one word does not count
-                    // (a decoy must not make up for a command missed).
-                    if word.uncounted {
+                    if !word.lines {
                         (found.sed_commands, found.shell_commands) = counts;
                     }
                     continue;
                 }
                 // A nested shell's script is judged when `script` reads
-                // it: here its commands are only counted.
+                // it: here its commands are only counted (unless the word
+                // lexer keeps it as one word, `bash -c $'...'`).
                 let mut counted = Found::default();
                 self.walk(&reading.commands, &mut inner, level + 1, &mut counted);
-                if !word.uncounted {
+                if !word.whole {
                     found.sed_commands += counted.sed_commands;
                     found.shell_commands += counted.shell_commands;
                 }
@@ -597,13 +600,13 @@ fn pipeline_targets(commands: &[Command], command: &Command) -> Vec<Option<Strin
 
 /// Whether a pure filter's arguments may save its output to a file:
 /// `sort -o f` (also in a group of short options, or `--output`, or a
-/// `--compress-program` it runs), or `uniq`'s second operand. Option values
+/// `--compress-program` it runs, or any `--c` abbreviation but `--check`), or `uniq`'s second operand. Option values
 /// may be read as operands here (fail closed).
 fn filter_saves(filter: &str, args: &[String]) -> bool {
     match filter {
         "sort" => args.iter().take_while(|arg| *arg != "--").any(|arg| {
             arg.starts_with("--o")
-                || arg.starts_with("--com")
+                || (arg.starts_with("--c") && !arg.starts_with("--check"))
                 || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('o'))
         }),
         "uniq" => {

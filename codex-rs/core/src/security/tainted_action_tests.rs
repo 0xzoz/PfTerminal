@@ -2123,9 +2123,10 @@ fn issue_885_review_2_routes_and_limits() {
     );
 }
 
-/// #885 review round 3: a `case` in brackets in a substitution, text read
-/// as a comment, a `$'...'` decoy for the count check, and pipeline stages
-/// that save their input (`sort -o`, `uniq IN OUT`, `less -o`).
+/// #885 review rounds 3 and 4: a `case` in brackets, after other reserved
+/// words or in zsh's form in a substitution, text read as a comment, quoted
+/// decoys for the count check, and pipeline stages that save their input
+/// (`sort -o`, `uniq IN OUT`, `less -o`) or run a program (`sort --co`).
 #[test]
 #[cfg_attr(
     windows,
@@ -2156,9 +2157,34 @@ fn issue_885_review_3_routes() {
         ("sed '1a ./p.sh' f | sort --output=r.sh; bash r.sh", unseen),
         ("sed '1a ./p.sh' f | uniq - r.sh; bash r.sh", unseen),
         ("sed '1a ./p.sh' f | less -o r.sh; bash r.sh", unseen),
+        // Round 4: other prefixes of `case`, zsh's `case x { ... }`, plain
+        // quoted decoys, comments re-read, `sort --co`.
+        (
+            "echo 'sed p'; echo \"$(repeat 1 case x in a) :;; esac; echo \" #$(sed '1e id' f) \" )\"",
+            unseen,
+        ),
+        (
+            "echo 'sed p'; echo \"$(coproc case x in a) :;; esac; echo \" #$(sed '1e id' f) \" )\"",
+            unseen,
+        ),
+        (
+            "echo 'bash -c :'; echo \"$(repeat 1 case x in a) :;; esac; echo \" #$(bash -c \"sh -c './missing.sh'\") \" )\"",
+            unseen,
+        ),
+        (
+            "echo 'sed p'; echo \"$(case x { a) :;; }) #$(sed '1e id' f)\"",
+            unseen,
+        ),
+        (
+            "sed '1a ./p.sh' f | sort --co=./r.sh; bash present.sh",
+            unseen,
+        ),
         // Still quiet: filters that only print, a comment without code.
         ("sed -n 1,5p f | sort -u | uniq -c; bash present.sh", None),
         ("sed -n 1,5p f # show the first lines", None),
+        ("echo 'sed p'; git log -n 1 # sed -n p", None),
+        ("echo a; git log -n 1 # sed -n p", None),
+        ("echo \"bash -c ./present.sh\"", None),
     ];
     assert_eq!(issue_885_wrong(&cwd, &cases), Vec::<String>::new());
 }

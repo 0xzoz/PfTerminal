@@ -20,9 +20,12 @@ pub(super) struct Word {
     /// An expansion outside double quotes: it may split into several words.
     pub(super) splits: bool,
     /// The word lexer keeps it as one word (a `$'...'` string, a
-    /// redirection's file or here-string), so commands in it are judged
-    /// but not counted against the lexer's.
-    pub(super) uncounted: bool,
+    /// here-string), so commands in it do not count against the lexer's
+    /// even when it is a shell's script.
+    pub(super) whole: bool,
+    /// A here-document body, which the word lexer reads as command lines:
+    /// commands in it count against the lexer's.
+    pub(super) lines: bool,
 }
 
 #[derive(Debug, Default)]
@@ -72,6 +75,9 @@ pub(super) struct Reading {
     /// A quote, substitution or `${...}` was not closed: a shell would
     /// refuse the line, and this reading may not match how it splits.
     pub(super) unterminated: bool,
+    /// A `case` this reading does not follow (not as a keyword, or not
+    /// `case WORD in`) is in a substitution: where it ends is unknown.
+    pub(super) unsure: bool,
 }
 
 /// Read `text`, substitutions included.
@@ -89,6 +95,7 @@ fn read(text: &str, nesting: usize, body: bool) -> Reading {
         nesting,
         too_deep: false,
         unterminated: false,
+        unsure: false,
     };
     if body {
         reader.substitutions_only();
@@ -121,6 +128,7 @@ fn read(text: &str, nesting: usize, body: bool) -> Reading {
         commands: out,
         too_deep: reader.too_deep,
         unterminated: reader.unterminated,
+        unsure: reader.unsure,
     }
 }
 
@@ -145,6 +153,8 @@ struct Reader<'a> {
     too_deep: bool,
     /// Something was left open at the end.
     unterminated: bool,
+    /// See `Reading::unsure`.
+    unsure: bool,
 }
 
 /// One list of commands being read.
@@ -158,8 +168,14 @@ struct List {
     /// `case` commands open in this list at the current bracket depth:
     /// their patterns end with `)`.
     cases: usize,
-    /// The command has a redirection, so `case` is not its first word.
-    redirected: bool,
+    /// The next word is in a command's first position (after reserved
+    /// words such as `do`; not after a word or redirection).
+    keyword: bool,
+    /// Where a `case` keyword is in the command's words: `in` must follow
+    /// its subject.
+    case_at: Option<usize>,
+    /// The list is a substitution's, which a `)` closes.
+    nested: bool,
 }
 
 /// Reserved words after which `case` is still a command's first word.
@@ -191,39 +207,34 @@ impl Reader<'_> {
         }
         let word = std::mem::take(&mut list.word);
         let command = &mut self.out[list.command];
-        let first = list.redirect == Redirect::None
-            && !list.redirected
-            && !word.quoted
-            && command
-                .words
-                .iter()
-                .all(|word| !word.quoted && BEFORE_CASE.contains(&word.text.as_str()));
-        if first {
+        let redirect = std::mem::replace(&mut list.redirect, Redirect::None);
+        if redirect == Redirect::None && !word.quoted {
+            let keyword = std::mem::replace(&mut list.keyword, false);
             match word.text.as_str() {
-                "case" => list.cases += 1,
-                "esac" => list.cases = list.cases.saturating_sub(1),
-                _ => {}
+                "case" if keyword => {
+                    list.cases += 1;
+                    list.case_at = Some(command.words.len());
+                }
+                "esac" if keyword => list.cases = list.cases.saturating_sub(1),
+                // `case`/`esac` this reading does not take as a keyword (a
+                // shell may: `repeat 1 case`, `coproc case`) could end a
+                // substitution elsewhere than the shell does.
+                "case" | "esac" if list.nested => self.unsure = true,
+                text => list.keyword = keyword && BEFORE_CASE.contains(&text),
             }
+        } else if redirect == Redirect::None {
+            list.keyword = false;
         }
-        match std::mem::replace(&mut list.redirect, Redirect::None) {
+        match redirect {
             Redirect::None => command.words.push(word),
-            Redirect::Stdin | Redirect::Descriptor => command.other_text.push(Word {
-                uncounted: true,
-                ..word
-            }),
-            Redirect::Stdout => command.writes_to.push(Word {
-                uncounted: true,
-                ..word
-            }),
+            Redirect::Stdin | Redirect::Descriptor => command.other_text.push(word),
+            Redirect::Stdout => command.writes_to.push(word),
             Redirect::HereString => command.input.push(Word {
-                uncounted: true,
+                whole: true,
                 ..word
             }),
             Redirect::HereDocument(strip) => {
-                command.other_text.push(Word {
-                    uncounted: true,
-                    ..word.clone()
-                });
+                command.other_text.push(word.clone());
                 list.pending.push(HereDocument {
                     quoted: word.quoted,
                     delimiter: word.text,
@@ -236,7 +247,18 @@ impl Reader<'_> {
 
     fn finish_command(&mut self, list: &mut List) {
         self.finish_word(list);
-        list.redirected = false;
+        list.keyword = true;
+        // `case WORD in`; in a substitution, another form (zsh's
+        // `case x { ... }`) is not read.
+        if let Some(at) = list.case_at.take()
+            && list.nested
+            && !self.out[list.command]
+                .words
+                .get(at + 2)
+                .is_some_and(|word| !word.quoted && word.text == "in")
+        {
+            self.unsure = true;
+        }
         if !self.out[list.command].is_empty() {
             list.command = self.new_command();
         }
@@ -272,7 +294,9 @@ impl Reader<'_> {
             redirect: Redirect::None,
             pending: Vec::new(),
             cases: 0,
-            redirected: false,
+            keyword: true,
+            case_at: None,
+            nested,
         };
         // The `case` counts of the brackets around the text being read.
         let mut opened: Vec<usize> = Vec::new();
@@ -307,7 +331,7 @@ impl Reader<'_> {
                 '&' if next == Some('>') => {
                     self.finish_word(&mut list);
                     list.redirect = Redirect::Stdout;
-                    list.redirected = true;
+                    list.keyword = false;
                     index += if chars.get(index + 2) == Some(&'>') {
                         3
                     } else {
@@ -345,6 +369,7 @@ impl Reader<'_> {
                         quoted: true,
                         ..Word::default()
                     };
+                    index += 1;
                     while index < chars.len() && chars[index] != '\n' {
                         comment.text.push(chars[index]);
                         index += 1;
@@ -385,7 +410,7 @@ impl Reader<'_> {
                 '$' if next == Some('\'') => {
                     list.has_word = true;
                     list.word.quoted = true;
-                    list.word.uncounted = true;
+                    list.word.whole = true;
                     index = ansi_c(chars, index + 2, &mut list.word.text);
                     continue;
                 }
@@ -413,7 +438,7 @@ impl Reader<'_> {
                         list.word = Word::default();
                     }
                     self.finish_word(&mut list);
-                    list.redirected = true;
+                    list.keyword = false;
                     let (redirect, used) = redirection(&chars[index..]);
                     if redirect == Redirect::Descriptor {
                         self.out[list.command].writes_descriptor = true;
@@ -584,6 +609,7 @@ impl Reader<'_> {
         self.nesting -= 1;
         self.too_deep |= reading.too_deep;
         self.unterminated |= reading.unterminated;
+        self.unsure |= reading.unsure;
         let offset = self.out.len();
         self.out
             .extend(reading.commands.into_iter().map(|command| Command {
@@ -643,6 +669,7 @@ impl Reader<'_> {
             self.out[command].input.push(Word {
                 text: body,
                 quoted: true,
+                lines: true,
                 ..Word::default()
             });
         }
@@ -806,17 +833,43 @@ mod tests {
             ]
         );
         // Comments and the files a command reads from are kept to be
-        // judged; `$'...'` and redirection text is not counted.
-        let read = all("cat < \"$x b\" <<E # sh -c y\nz\nE\necho $'a' >\"o p\"");
-        let other: Vec<(&str, bool)> = read[0]
+        // judged; `$'...'` and here-strings are kept whole, a here-document
+        // body is read as lines.
+        let read = all("cat < \"$x b\" <<E # sh -c y\nz\nE\necho $'a' <<< b");
+        let other: Vec<&str> = read[0]
             .other_text
             .iter()
-            .map(|word| (word.text.as_str(), word.uncounted))
+            .map(|word| word.text.as_str())
             .collect();
-        assert_eq!(
-            other,
-            vec![("$x b", true), ("E", true), ("# sh -c y", false)]
+        assert_eq!(other, vec!["$x b", "E", " sh -c y"]);
+        assert!(read[0].input[0].lines);
+        assert!(read[1].words[1].whole && read[1].input[0].whole);
+        // A `case` this reading cannot follow in a substitution.
+        for unsure in [
+            "echo \"$(repeat 1 case x in a) :;; esac)\"",
+            "echo \"$(coproc case x in a) :;; esac)\"",
+            "echo \"$(case x { a) :;; })\"",
+            "echo \"$(echo case)\"",
+            // A line break before `in` is valid, but not followed here.
+            "echo \"$(case x\nin a) :;; esac)\"",
+        ] {
+            assert!(commands(unsure).unsure, "{unsure:?}");
+        }
+        for sure in [
+            "echo \"$(if case x in a) true;; esac; then :; fi)\"",
+            "echo case; case x { a) :;; }",
+        ] {
+            assert!(!commands(sure).unsure, "{sure:?}");
+        }
+        // Reserved words before a `case` are tracked as they come: a line
+        // of them takes linear time.
+        let started = std::time::Instant::now();
+        let keywords = format!("echo \"$({}case x in a) :;; esac)\"", "! ".repeat(200_000));
+        assert!(!commands(&keywords).unsure);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
         );
-        assert!(read[1].words[1].uncounted && read[1].writes_to[0].uncounted);
     }
 }
