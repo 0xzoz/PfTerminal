@@ -585,6 +585,8 @@ impl ToolOrchestrator {
             permission_profile,
             &permissions,
         );
+        // #826: Core's level, where the protected-path rules apply.
+        let protected_level = denied.as_ref().map(|(_, _, _, level)| *level);
         let (denied_exec_server_permissions, permissions) = match denied {
             Some((exec_server, materialized, denials, level)) => {
                 // Issue #245: the rules apply to this run, so its additional
@@ -619,6 +621,31 @@ impl ToolOrchestrator {
                 (Some(exec_server), materialized)
             }
             None => (None, permissions),
+        };
+        // #826 (Travis, 2026-10-15): under Moderate and Aggressive (also
+        // where only the launch enforces Aggressive) agent commands may not
+        // create user namespaces, in which they could open what the Linux
+        // sandbox hides and defeat nested-launch detection. No approval or
+        // grant lifts it. Permissive is unchanged.
+        let (denied_exec_server_permissions, permissions) = if cfg!(target_os = "linux")
+            && (matches!(
+                protected_level,
+                Some(
+                    codex_security_policy::SecurityLevel::Moderate
+                        | codex_security_policy::SecurityLevel::Aggressive
+                )
+            ) || turn_ctx.config.permissions.launch_enforces_aggressive())
+        {
+            (
+                Some(deny_user_namespaces(
+                    denied_exec_server_permissions
+                        .as_ref()
+                        .unwrap_or(permission_profile),
+                )),
+                deny_user_namespaces(&permissions),
+            )
+        } else {
+            (denied_exec_server_permissions, permissions)
         };
         let permission_profile = denied_exec_server_permissions
             .as_ref()
@@ -1473,6 +1500,29 @@ fn post_taint_read_denials(
     Some((exec_server, materialized, denials, state.level))
 }
 
+/// #826: `profile` with user namespaces denied to its commands. A profile
+/// without a restricted filesystem policy (no sandbox, or an external one)
+/// cannot carry the rule and is returned as it is.
+fn deny_user_namespaces(
+    profile: &codex_protocol::models::PermissionProfile,
+) -> codex_protocol::models::PermissionProfile {
+    use codex_protocol::permissions::FileSystemSandboxEntry;
+    use codex_protocol::permissions::FileSystemSandboxKind;
+    let (mut file_system, network) = profile.to_runtime_permissions();
+    if file_system.kind != FileSystemSandboxKind::Restricted || file_system.denies_user_namespaces()
+    {
+        return profile.clone();
+    }
+    file_system
+        .entries
+        .push(FileSystemSandboxEntry::deny_user_namespaces());
+    codex_protocol::models::PermissionProfile::from_runtime_permissions_with_enforcement(
+        profile.enforcement(),
+        &file_system,
+        network,
+    )
+}
+
 /// Issue #245: every folder the sandbox may resolve a relative or
 /// project-root additional permission against: the run's own folder, the
 /// turn's folder and the workspace roots.
@@ -1633,6 +1683,37 @@ mod tests {
                 leaves,
                 "{policy} {keeps} {protected} {network}"
             );
+        }
+    }
+
+    /// #826: the rule joins a sandboxed profile once and changes nothing
+    /// else; a profile without Corbanu's sandbox cannot carry it.
+    #[test]
+    fn issue_826_user_namespace_rule_joins_sandboxed_profiles_only() {
+        use codex_protocol::models::PermissionProfile;
+        use codex_protocol::permissions::NetworkSandboxPolicy;
+        let workspace = PermissionProfile::workspace_write_with(
+            &[],
+            NetworkSandboxPolicy::Restricted,
+            /*exclude_tmpdir_env_var*/ true,
+            /*exclude_slash_tmp*/ true,
+        );
+        let denied = deny_user_namespaces(&workspace);
+        let (policy, network) = denied.to_runtime_permissions();
+        let (before, before_network) = workspace.to_runtime_permissions();
+        assert!(policy.denies_user_namespaces());
+        assert!(!before.denies_user_namespaces());
+        assert_eq!(network, before_network);
+        assert_eq!(denied.enforcement(), workspace.enforcement());
+        assert_eq!(policy.entries.len(), before.entries.len() + 1);
+        assert_eq!(deny_user_namespaces(&denied), denied);
+        for profile in [
+            PermissionProfile::Disabled,
+            PermissionProfile::External {
+                network: NetworkSandboxPolicy::Restricted,
+            },
+        ] {
+            assert_eq!(deny_user_namespaces(&profile), profile);
         }
     }
 

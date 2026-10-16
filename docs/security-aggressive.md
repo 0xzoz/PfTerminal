@@ -124,6 +124,27 @@ all its other rules (#758). Contained Claude panes get the same rule under
 Aggressive. Certificate checks for secure connections use a different
 service (`trustd`) and keep working.
 
+## User namespaces on Linux
+
+On Linux agent commands can't create user namespaces under Aggressive and
+Moderate (#826): `unshare` and `clone` with a new user namespace fail with
+"Operation not permitted", and `clone3` reports itself as unavailable, so
+programs fall back to `clone` and keep working. In a user namespace of its
+own a command is root over its own files: it could open the placeholders the
+sandbox hides the vault store and other denied files with, and mount over
+paths, so a nested `corbanu exec` wouldn't be recognised as nested. The rule
+covers every process in Corbanu's Linux sandbox, bubblewrap's own included.
+No grant or approval lifts it; Permissive is unchanged. Commands that run
+without Corbanu's sandbox (an external sandbox), contained Claude panes and
+a remote Linux executor used from macOS or Windows aren't covered.
+
+What needs a user namespace fails: a sandbox of its own (the commands of a
+nested `corbanu exec`, which Corbanu explains), rootless containers (Podman,
+Buildah, rootless Docker), `bwrap`, Flatpak, Nix's build sandbox, `unshare`,
+and Chrome or Electron with their sandbox on (Puppeteer's default; pass
+`--no-sandbox`, as Playwright does). 32-bit programs stop too. Choose
+Permissive to run them.
+
 ## A managed network proxy
 
 Aggressive turns the network off for agent commands, with one known limit:

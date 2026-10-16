@@ -89,7 +89,7 @@ The kill switch (`/security` → `g`) works under every level.
   first confirmed); it can't read or change the ones that exist. On macOS it
   can't create them either.
 - Nested agents are recognised on macOS and Linux only, and on Linux not when
-  they run as root or in a user namespace of their own (#826). Corbanu marks
+  they run as root. Corbanu marks
   Moderate by denying agent commands a file in the Corbanu home's `tmp`
   folder, and lists the homes Moderate runs on in the `moderate-homes` folder
   under `~/Library/Application Support/Corbanu` (macOS) or
@@ -103,6 +103,20 @@ The kill switch (`/security` → `g`) works under every level.
   servers, hooks, `!` commands) isn't an agent command and isn't held to
   Moderate. A nested run's own Corbanu home is removed when the run ends, but
   stays in the temporary folder if the run stops on an error (#766).
+- On Linux agent commands can't create user namespaces (#826): `unshare` and
+  `clone` with a new user namespace fail with "Operation not permitted". In
+  one of its own a command could open the files the sandbox hides and mount
+  over paths, so a nested `corbanu exec` wouldn't be recognised. This covers
+  every process in Corbanu's Linux sandbox, but not commands that run
+  without it (your settings turn the sandbox off, or an external sandbox),
+  contained Claude panes, or a remote Linux executor used from macOS or
+  Windows. What needs a user namespace fails under Moderate and Aggressive:
+  a sandbox of its own (so the commands of a nested `corbanu exec` don't
+  run; Corbanu says why), rootless containers (Podman, Buildah, rootless
+  Docker), `bwrap`, Flatpak, Nix's build sandbox, and Chrome or Electron
+  with their sandbox on (Puppeteer's default; pass `--no-sandbox`, as
+  Playwright does). 32-bit programs stop too. No approval lifts it. Choose
+  Permissive to run them.
 - A remote app server can't enforce a level chosen here; Corbanu refuses to
   start against one until you choose Permissive.
 
