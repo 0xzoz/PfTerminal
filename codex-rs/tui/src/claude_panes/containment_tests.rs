@@ -512,6 +512,12 @@ fn issue_891_linux_pane_commands_cannot_create_user_namespaces() {
             cwd.path().to_string_lossy().into_owned(),
         ),
         ("TMPDIR".to_string(), "/tmp".to_string()),
+        // The bridge, as a pane's plan sets it (the sandbox routes the
+        // pane's network to it).
+        (
+            "HTTP_PROXY".to_string(),
+            "http://127.0.0.1:4242".to_string(),
+        ),
     ]);
     let run = |script: &str| {
         let command = sandboxed(
@@ -535,16 +541,16 @@ fn issue_891_linux_pane_commands_cannot_create_user_namespaces() {
         }
         let output = process.output().unwrap();
         (
-            output.status.success(),
+            output.status,
             String::from_utf8_lossy(&output.stdout).into_owned(),
             String::from_utf8_lossy(&output.stderr).into_owned(),
         )
     };
     {
         let _levels = test_levels::set(ChosenLevel::Permissive, ChosenLevel::Permissive);
-        let (ok, stdout, stderr) = run("echo ready");
-        if !ok || !stdout.contains("ready") {
-            eprintln!("skipped: the Linux sandbox cannot run here: {stderr}");
+        let (status, stdout, stderr) = run("echo ready");
+        if !status.success() || !stdout.contains("ready") {
+            eprintln!("skipped: the Linux sandbox cannot run here: {status}: {stderr}");
             return;
         }
     }

@@ -5195,6 +5195,7 @@ async fn claude_plan_pane_passes_its_named_account_to_the_helper() {
 /// result reporting the refusal (bubblewrap's message from Claude Code's own
 /// Bash sandbox, or `unshare`) ends the turn's text with a note naming the
 /// rule. Nothing is added without the rule, or for other failures.
+#[cfg(unix)]
 #[test]
 fn issue_891_pane_names_the_user_namespace_rule_when_a_command_hits_it() {
     use super::execution::add_user_namespaces_note;

@@ -119,9 +119,9 @@ The kill switch (`/security` → `g`) works under every level.
   (#891), but not commands that run without it (your settings turn the
   sandbox off, or an external sandbox) or a remote Linux executor used from
   macOS or Windows. What needs a user namespace fails under Moderate and
-  Aggressive: a sandbox of its own (so the commands of a nested `corbanu
-  exec` don't run; Corbanu says why), rootless containers (Podman, Buildah,
-  rootless Docker), `bwrap`, Flatpak, Nix's build sandbox, and Chrome or
+  Aggressive: a sandbox of its own (so the commands of a nested
+  `corbanu exec` don't run; Corbanu says why), rootless containers (Podman,
+  Buildah, rootless Docker), `bwrap`, Flatpak, Nix's build sandbox, and Chrome or
   Electron with their sandbox on (Puppeteer's default; pass `--no-sandbox`,
   as Playwright does). 32-bit programs stop too. In a contained Claude pane,
   Claude Code's own Bash sandbox (bubblewrap) can't start, so commands it

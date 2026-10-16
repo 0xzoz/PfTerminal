@@ -37,7 +37,10 @@ fn issue_826_only_a_refused_namespace_under_the_rule_is_explained() {
         "{explanation}"
     );
     assert_eq!(explained(Some("Aggressive"), Some(0), REFUSED), None);
-    assert_eq!(explained(Some("Aggressive"), None, REFUSED), None);
+    assert_eq!(
+        explained(Some("Aggressive"), /*exit_code*/ None, REFUSED),
+        None
+    );
     assert_eq!(
         explained(
             Some("Aggressive"),
@@ -46,5 +49,5 @@ fn issue_826_only_a_refused_namespace_under_the_rule_is_explained() {
         ),
         None
     );
-    assert_eq!(explained(None, Some(1), REFUSED), None);
+    assert_eq!(explained(/*level*/ None, Some(1), REFUSED), None);
 }
