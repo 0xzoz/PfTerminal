@@ -423,7 +423,7 @@ impl Lexer {
             let next = chars.get(index + 1).copied();
             match ch {
                 '$' if next == Some('\'') => {
-                    index = self.ansi_c(&chars, index + 2);
+                    index = ansi_c(&chars, index + 2, &mut self.word);
                     continue;
                 }
                 '$' | '<' | '>' if next == Some('(') => {
@@ -500,62 +500,62 @@ impl Lexer {
             index += 1;
         }
     }
+}
 
-    /// Decode a bash `$'...'` string starting at `index` (after the quote)
-    /// into the current word; returns the index after the closing quote.
-    fn ansi_c(&mut self, chars: &[char], mut index: usize) -> usize {
-        let digits = |chars: &[char], start: usize, radix: u32, max: usize| {
-            let text: String = chars[start..]
-                .iter()
-                .take(max)
-                .take_while(|ch| ch.is_digit(radix))
-                .collect();
-            let value = u32::from_str_radix(&text, radix).ok();
-            (value.and_then(char::from_u32), text.len())
-        };
-        while index < chars.len() {
-            match chars[index] {
-                '\'' => return index + 1,
-                '\\' if index + 1 < chars.len() => {
-                    let escape = chars[index + 1];
-                    index += 2;
-                    let simple = match escape {
-                        'n' => Some('\n'),
-                        't' => Some('\t'),
-                        'r' => Some('\r'),
-                        'a' => Some('\u{7}'),
-                        'b' => Some('\u{8}'),
-                        'e' | 'E' => Some('\u{1b}'),
-                        'f' => Some('\u{c}'),
-                        'v' => Some('\u{b}'),
-                        'x' | 'u' | 'U' | '0'..='7' => None,
-                        other => Some(other),
-                    };
-                    if let Some(ch) = simple {
-                        self.word.push(ch);
-                        continue;
+/// Decode a bash `$'...'` string starting at `index` (after the quote)
+/// into `word`; returns the index after the closing quote.
+pub(super) fn ansi_c(chars: &[char], mut index: usize, word: &mut String) -> usize {
+    let digits = |chars: &[char], start: usize, radix: u32, max: usize| {
+        let text: String = chars[start..]
+            .iter()
+            .take(max)
+            .take_while(|ch| ch.is_digit(radix))
+            .collect();
+        let value = u32::from_str_radix(&text, radix).ok();
+        (value.and_then(char::from_u32), text.len())
+    };
+    while index < chars.len() {
+        match chars[index] {
+            '\'' => return index + 1,
+            '\\' if index + 1 < chars.len() => {
+                let escape = chars[index + 1];
+                index += 2;
+                let simple = match escape {
+                    'n' => Some('\n'),
+                    't' => Some('\t'),
+                    'r' => Some('\r'),
+                    'a' => Some('\u{7}'),
+                    'b' => Some('\u{8}'),
+                    'e' | 'E' => Some('\u{1b}'),
+                    'f' => Some('\u{c}'),
+                    'v' => Some('\u{b}'),
+                    'x' | 'u' | 'U' | '0'..='7' => None,
+                    other => Some(other),
+                };
+                if let Some(ch) = simple {
+                    word.push(ch);
+                    continue;
+                }
+                let (decoded, used) = match escape {
+                    'x' => digits(chars, index, 16, 2),
+                    'u' => digits(chars, index, 16, 4),
+                    'U' => digits(chars, index, 16, 8),
+                    _ => {
+                        // Octal: the escape character is the first digit.
+                        index -= 1;
+                        digits(chars, index, 8, 3)
                     }
-                    let (decoded, used) = match escape {
-                        'x' => digits(chars, index, 16, 2),
-                        'u' => digits(chars, index, 16, 4),
-                        'U' => digits(chars, index, 16, 8),
-                        _ => {
-                            // Octal: the escape character is the first digit.
-                            index -= 1;
-                            digits(chars, index, 8, 3)
-                        }
-                    };
-                    index += used;
-                    self.word.extend(decoded);
-                }
-                ch => {
-                    self.word.push(ch);
-                    index += 1;
-                }
+                };
+                index += used;
+                word.extend(decoded);
+            }
+            ch => {
+                word.push(ch);
+                index += 1;
             }
         }
-        index
     }
+    index
 }
 
 /// What a substitution prints when the classifier can tell: `echo`/`printf`
