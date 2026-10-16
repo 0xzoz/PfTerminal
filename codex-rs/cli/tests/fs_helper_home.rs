@@ -1,4 +1,6 @@
-//! #847: private file helpers must not run the interactive Corbanu-home preflight.
+//! #847, #858: private helpers that run sandboxed (the file helper, the arg0
+//! exec helper, apply-patch) must not run the Corbanu-home preflight, and
+//! record nothing in the home-access log; the credential broker keeps it.
 //! Synthetic profiles only. The real macOS sandbox still rejects protected paths.
 #![cfg(target_os = "macos")]
 
@@ -88,6 +90,24 @@ impl Fixture {
         Ok(child.wait_with_output()?)
     }
 
+    /// The #616 diagnostics log under the synthetic `HOME`.
+    fn diagnostics_log(&self) -> std::path::PathBuf {
+        self.path("account/Library/Logs/Corbanu/home-access.log")
+    }
+
+    /// A sandboxed helper ran its job: no home report, no log record.
+    fn assert_no_home_report(&self, output: &Output) {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains("Corbanu could not read its home"),
+            "{stderr}"
+        );
+        assert!(
+            !self.diagnostics_log().exists(),
+            "a helper recorded a deliberate sandbox denial"
+        );
+    }
+
     fn helper(&self, request: Value) -> Result<Value> {
         let output = self.run(
             &[codex_exec_server::CODEX_FS_HELPER_ARG1],
@@ -98,6 +118,7 @@ impl Fixture {
             "private file helper failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+        self.assert_no_home_report(&output);
         Ok(serde_json::from_slice(&output.stdout)?)
     }
 }
@@ -190,6 +211,104 @@ fn malformed_private_request_reaches_the_helper_protocol_error() -> Result<()> {
     let stderr = String::from_utf8(output.stderr)?;
     assert!(stderr.contains("fs sandbox helper failed:"));
     assert!(!stderr.contains("Corbanu could not read its home"));
+    assert!(!fixture.diagnostics_log().exists());
+    Ok(())
+}
+
+#[test]
+fn arg0_exec_helper_runs_with_a_denied_default_profile() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let output = fixture.run(
+        &[
+            codex_exec_server::CODEX_ARG0_EXEC_HELPER_ARG1,
+            "custom-arg0",
+            "/bin/echo",
+            "helper ran",
+        ],
+        b"",
+    )?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"helper ran\n");
+    fixture.assert_no_home_report(&output);
+
+    // The program it runs keeps the sandbox: the profile stays denied.
+    for relative in ["account/.corbanu/private.txt", "denied/private.txt"] {
+        let target = fixture.path(relative);
+        let target = target.to_string_lossy();
+        let output = fixture.run(
+            &[
+                codex_exec_server::CODEX_ARG0_EXEC_HELPER_ARG1,
+                "cat",
+                "/bin/cat",
+                &target,
+            ],
+            b"",
+        )?;
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        fixture.assert_no_home_report(&output);
+    }
+    Ok(())
+}
+
+#[test]
+fn apply_patch_helper_edits_the_project_with_a_denied_default_profile() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let output = fixture.run(
+        &[
+            codex_apply_patch::CODEX_CORE_APPLY_PATCH_ARG1,
+            "*** Begin Patch\n*** Add File: added.txt\n+patched\n*** End Patch",
+        ],
+        b"",
+    )?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.path("project/added.txt"))?,
+        "patched\n"
+    );
+    fixture.assert_no_home_report(&output);
+
+    // A patch into the denied profile still fails and writes nothing there.
+    let denied = fixture.path("account/.corbanu/added.txt");
+    let output = fixture.run(
+        &[
+            codex_apply_patch::CODEX_CORE_APPLY_PATCH_ARG1,
+            &format!(
+                "*** Begin Patch\n*** Add File: {}\n+forbidden\n*** End Patch",
+                denied.display()
+            ),
+        ],
+        b"",
+    )?;
+    assert!(!output.status.success());
+    assert!(!denied.exists());
+    fixture.assert_no_home_report(&output);
+    Ok(())
+}
+
+/// The broker runs outside any sandbox its parent does not run in, so an
+/// unreadable home there is reported and recorded like for `corbanu` itself.
+#[test]
+fn credential_broker_keeps_the_home_preflight() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let output = fixture.run(&[codex_network_proxy::CODEX_CREDENTIAL_BROKER_ARG1], b"")?;
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(
+        stderr.contains("Corbanu could not read its home (Operation not permitted)"),
+        "{stderr}"
+    );
+    let record = std::fs::read_to_string(fixture.diagnostics_log())?;
+    assert!(record.contains("operation: read_dir (opendir)"), "{record}");
     Ok(())
 }
 
@@ -209,6 +328,7 @@ fn ordinary_corbanu_invocation_keeps_the_home_privacy_preflight() -> Result<()> 
                 .to_string()
         )
     );
+    assert!(fixture.diagnostics_log().exists());
     Ok(())
 }
 

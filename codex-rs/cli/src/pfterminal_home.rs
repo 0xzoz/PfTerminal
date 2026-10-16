@@ -104,20 +104,21 @@ fn debug_home(
 /// Denials (macOS privacy protection for external volumes, a drive being
 /// remounted, a sandbox) surface as EPERM from arbitrary later reads, which
 /// reads as an unexplained "Operation not permitted". Only the `corbanu`
-/// entrypoints are checked: sandboxed helper aliases can see EPERM from the
-/// sandbox instead. Unless this process's own sandbox denies the read, the
-/// exit status tells a waiting parent (`corbanu exec` running this as its
-/// auth helper) that the failure may be temporary.
+/// entrypoints are checked, and not when argv[1] selects a private helper
+/// that runs sandboxed ([`codex_arg0::is_private_helper_argv1`]: the file
+/// helper, the arg0 exec helper, apply-patch): helper argv0 aliases and those
+/// helpers inherit a sandbox that may deny the home on purpose (#847, #858),
+/// so they skip the check and record nothing. Unless this process's own
+/// sandbox denies the read, the exit status tells a waiting parent
+/// (`corbanu exec` running this as its auth helper) that the failure may be
+/// temporary.
 pub(crate) fn exit_if_home_unreadable() {
     #[cfg(unix)]
     {
-        // Private file helpers inherit a sandbox that deliberately denies the
-        // profile. Their file request must run without an interactive home probe.
         if !current_entrypoint_is_corbanu()
-            || std::env::args_os().nth(1).as_deref()
-                == Some(std::ffi::OsStr::new(
-                    codex_exec_server::CODEX_FS_HELPER_ARG1,
-                ))
+            || std::env::args_os()
+                .nth(1)
+                .is_some_and(|argv1| codex_arg0::is_private_helper_argv1(&argv1))
         {
             return;
         }

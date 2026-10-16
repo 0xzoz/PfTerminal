@@ -11,13 +11,16 @@ printing each attempt, and continues the turn once access returns. If session
 items could not be written meanwhile (they are kept in memory), exec waits for
 their folder before it saves the session at exit, within what is left of the
 same window since the first failure (an interrupted run does not wait, and
-Ctrl-C stops the wait). If access does not return in time, the turn
-fails and exec exits 1. Change the window with `--home-wait-secs` (`0` fails at
-once).
+Ctrl-C stops the wait). Items of a thread that has already ended, such as a
+finished subagent, are not waited for: nothing writes them after it ends. If
+access does not return in time, the turn fails and exec exits 1. Change the
+window with `--home-wait-secs` (`0` fails at once).
 
 A `corbanu` command started while the home is unreadable stops at once with
 exit status 75 (1 when, on macOS, the process's own sandbox denies the read,
-which waiting cannot fix).
+which waiting cannot fix). Private helpers that Corbanu runs inside a sandbox
+(file access, apply-patch, the arg0 exec helper) skip this check and record
+nothing, since that sandbox may deny the home on purpose.
 
 Each failure is recorded, without file contents or credentials, in
 `~/Library/Logs/Corbanu/home-access.log` on macOS

@@ -5463,3 +5463,7 @@ pub(crate) mod tests;
 #[cfg(test)]
 #[path = "account_switch_tests.rs"]
 mod account_switch_tests;
+
+#[cfg(test)]
+#[path = "home_access_session_tests.rs"]
+mod home_access_session_tests;
