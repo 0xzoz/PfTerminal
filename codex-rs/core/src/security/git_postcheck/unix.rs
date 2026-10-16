@@ -1,5 +1,7 @@
 use codex_protocol::ThreadId;
 use std::collections::HashMap;
+use std::collections::VecDeque;
+use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::io::Read;
 use std::os::unix::fs::DirEntryExt;
@@ -14,20 +16,29 @@ use std::sync::PoisonError;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
-/// Entries looked at per repository at most; past it the check says it
-/// could not look everywhere.
+/// Entries looked at per repository at most; past it the look is
+/// incomplete (and holds, see `held`).
 const MAX_ENTRIES: usize = 50_000;
 const MAX_DEPTH: usize = 16;
 const MAX_REPOS: usize = 8;
 const MAX_REPOS_PER_THREAD: usize = 16;
+const MAX_THREADS: usize = 64;
+/// Findings kept per look; past it the look is incomplete.
+const MAX_FINDINGS: usize = 1_000;
+const SHOWN_FINDINGS: usize = 20;
+/// Links followed per chain, like the kernel's limit.
+const MAX_LINK_HOPS: usize = 40;
 const MAX_TODO_BYTES: u64 = 4 << 20;
 /// A `.git` file or `commondir` longer than this is not read.
 const SMALL_FILE_BYTES: u64 = 64 << 10;
-/// A folder changed this recently is listed again next time: a change in the
-/// same clock tick would not move its modification time.
+/// A folder or todo whose status changed this recently is read again next
+/// time: a change in the same clock tick would not move its change time.
 const RACY_NANOS: i128 = 2_000_000_000;
-/// Not visited below a git folder: git replaces these files by renaming.
-const SKIPPED: [&str; 3] = ["objects", "refs", "lfs"];
+/// Stores below a git folder. Only their own entries are looked at (and
+/// `objects/info`, `objects/pack`): git reads the objects below and writes
+/// new ones by renaming, it does not write through them.
+const STORES: [&str; 3] = ["objects", "lfs", "annex"];
+const OBJECT_FOLDERS_LOOKED_AT: [&str; 2] = ["info", "pack"];
 /// The steps a later `git rebase --continue` (or `cherry-pick`/`revert
 /// --continue`) runs, in each git folder.
 const TODOS: [&str; 3] = [
@@ -96,11 +107,11 @@ fn repo_at(dot_git: PathBuf) -> Option<Repo> {
     if meta.is_dir() {
         git_dirs.push(std::fs::canonicalize(&dot_git).ok()?);
     } else {
-        let text = read_small(&dot_git, SMALL_FILE_BYTES)?;
+        let text = read_small(&dot_git)?;
         let work_tree = dot_git.parent()?;
         let dir = text.lines().find_map(|line| line.strip_prefix("gitdir:"))?;
         let git_dir = std::fs::canonicalize(work_tree.join(dir.trim())).ok()?;
-        if let Some(common) = read_small(&git_dir.join("commondir"), SMALL_FILE_BYTES)
+        if let Some(common) = read_small(&git_dir.join("commondir"))
             .and_then(|common| std::fs::canonicalize(git_dir.join(common.trim())).ok())
         {
             git_dirs.push(common);
@@ -112,9 +123,9 @@ fn repo_at(dot_git: PathBuf) -> Option<Repo> {
 }
 
 /// Reads a small regular file without blocking on a FIFO or device.
-fn read_small(path: &Path, max: u64) -> Option<String> {
+fn read_small(path: &Path) -> Option<String> {
     let mut bytes = Vec::new();
-    let complete = read_regular(path, max, &mut bytes)?;
+    let complete = read_regular(path, SMALL_FILE_BYTES, &mut bytes)?;
     complete.then(|| String::from_utf8_lossy(&bytes).into_owned())
 }
 
@@ -157,8 +168,13 @@ impl Kind {
     }
 }
 
-fn nanos(meta: &std::fs::Metadata) -> i128 {
-    i128::from(meta.mtime()) * 1_000_000_000 + i128::from(meta.mtime_nsec())
+/// Modification and status-change times. A command can set the first back,
+/// not the second.
+fn times(meta: &std::fs::Metadata) -> (i128, i128) {
+    (
+        i128::from(meta.mtime()) * 1_000_000_000 + i128::from(meta.mtime_nsec()),
+        i128::from(meta.ctime()) * 1_000_000_000 + i128::from(meta.ctime_nsec()),
+    )
 }
 
 fn now_nanos() -> i128 {
@@ -167,43 +183,32 @@ fn now_nanos() -> i128 {
         .map_or(/*default*/ 0, |since| since.as_nanos() as i128)
 }
 
-/// Where a link inside a git folder leads.
+/// Whether a status changed at `ctime` is old enough to trust.
+fn settled(ctime: i128) -> bool {
+    now_nanos() - ctime > RACY_NANOS
+}
+
+/// Where a link inside a git folder leads, followed hop by hop.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Link {
     raw: PathBuf,
     resolved: Option<PathBuf>,
-    /// Outside the repository's git folders, to a folder, to a hard-linked
-    /// file, or unknown: git would write elsewhere through it.
+    /// Ends outside the repository's git folders, at a folder, at a
+    /// hard-linked file, or somewhere unknown: git would write elsewhere
+    /// through it.
     escapes: bool,
 }
 
 impl Link {
     fn read(path: &Path, git_dirs: &[PathBuf]) -> Self {
-        let Ok(raw) = std::fs::read_link(path) else {
-            return Link {
-                raw: PathBuf::new(),
-                resolved: None,
-                escapes: true,
-            };
-        };
-        let full = match path.parent() {
-            Some(parent) if raw.is_relative() => parent.join(&raw),
-            _ => raw.clone(),
-        };
-        // A missing target is resolved through its folder: git would create
-        // it there.
-        let resolved = std::fs::canonicalize(&full).ok().or_else(|| {
-            let name = full.file_name()?;
-            std::fs::canonicalize(full.parent()?)
-                .ok()
-                .map(|parent| parent.join(name))
-        });
-        let escapes = match &resolved {
-            None => true,
-            Some(target) => {
-                !git_dirs.iter().any(|dir| target.starts_with(dir))
-                    || std::fs::metadata(target).is_ok_and(|meta| meta.is_dir() || meta.nlink() > 1)
+        let raw = std::fs::read_link(path).unwrap_or_default();
+        let (resolved, escapes) = match follow(path) {
+            Some((end, meta)) => {
+                let outside = !git_dirs.iter().any(|dir| end.starts_with(dir));
+                let odd = meta.is_some_and(|meta| meta.is_dir() || meta.nlink() > 1);
+                (Some(end), outside || odd)
             }
+            None => (None, true),
         };
         Link {
             raw,
@@ -213,14 +218,40 @@ impl Link {
     }
 }
 
+/// The path a chain of links starting at `path` ends at (folders on the way
+/// resolved), and its status if it exists. A missing end is where git would
+/// create the file. `None` if the chain can't be followed.
+fn follow(path: &Path) -> Option<(PathBuf, Option<std::fs::Metadata>)> {
+    let mut current = path.to_path_buf();
+    for _ in 0..MAX_LINK_HOPS {
+        let raw = std::fs::read_link(&current).ok()?;
+        let full = match current.parent() {
+            Some(parent) if raw.is_relative() => parent.join(&raw),
+            _ => raw,
+        };
+        let name = full.file_name()?.to_os_string();
+        if name == OsStr::new("..") || name == OsStr::new(".") {
+            return None;
+        }
+        current = std::fs::canonicalize(full.parent()?).ok()?.join(name);
+        match std::fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => continue,
+            Ok(meta) => return Some((current, Some(meta))),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Some((current, None)),
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Entry {
     kind: Kind,
     dev: u64,
     ino: u64,
     nlink: u64,
-    /// Length and modification time, kept current for legacy remote files.
-    stamp: (u64, i128),
+    /// Length and times, kept current for legacy remote files.
+    stamp: (u64, i128, i128),
     link: Option<Link>,
 }
 
@@ -232,23 +263,43 @@ impl Entry {
             dev: meta.as_ref().map_or(/*default*/ 0, MetadataExt::dev),
             ino: meta.as_ref().map_or(ino, MetadataExt::ino),
             nlink: meta.as_ref().map_or(/*default*/ 1, MetadataExt::nlink),
-            stamp: meta
-                .as_ref()
-                .map_or(/*default*/ (0, 0), |meta| (meta.len(), nanos(meta))),
+            stamp: meta.as_ref().map_or(/*default*/ (0, 0, 0), |meta| {
+                let (mtime, ctime) = times(meta);
+                (meta.len(), mtime, ctime)
+            }),
             link: None,
         }
     }
+}
+
+/// What a folder is to git, from where it sits (never from what it holds:
+/// a command could make any folder look like a git folder).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Role {
+    /// A git folder: a repository's, a linked worktree's or a submodule's.
+    GitDir,
+    /// `objects`, `lfs` or `annex` of a git folder.
+    Store {
+        objects: bool,
+    },
+    /// `remotes` or `branches` of a git folder.
+    Legacy,
+    /// `worktrees` of a git folder: its folders are git folders.
+    Worktrees,
+    /// Below `modules` of a git folder: a git folder where it has `HEAD` and
+    /// `objects` or `commondir` (submodule names may hold slashes).
+    Modules,
+    Plain,
 }
 
 #[derive(Clone, Debug)]
 struct Folder {
     dev: u64,
     ino: u64,
-    mtime: i128,
-    /// Listed long enough after its last change to trust its time.
+    ctime: i128,
+    /// Listed long enough after its last change to trust its change time.
     settled: bool,
-    /// A legacy remote folder of a git folder.
-    legacy: bool,
+    role: Role,
     entries: HashMap<OsString, Entry>,
 }
 
@@ -257,7 +308,7 @@ struct Todo {
     dev: u64,
     ino: u64,
     len: u64,
-    mtime: i128,
+    times: (i128, i128),
     exec: Vec<String>,
 }
 
@@ -292,7 +343,7 @@ impl DotGit {
             Kind::File => DotGit::File {
                 dev: meta.dev(),
                 ino: meta.ino(),
-                text: read_small(path, SMALL_FILE_BYTES),
+                text: read_small(path),
             },
             Kind::Link => DotGit::Link {
                 target: std::fs::read_link(path).ok(),
@@ -307,7 +358,8 @@ struct Snapshot {
     folders: HashMap<PathBuf, Folder>,
     todos: HashMap<PathBuf, Todo>,
     dot_git: DotGit,
-    complete: bool,
+    /// Why the look is incomplete, if it is.
+    incomplete: Option<String>,
 }
 
 fn walk(repo: &Repo, prev: Option<&Snapshot>) -> Snapshot {
@@ -315,16 +367,28 @@ fn walk(repo: &Repo, prev: Option<&Snapshot>) -> Snapshot {
         folders: HashMap::new(),
         todos: HashMap::new(),
         dot_git: DotGit::read(&repo.dot_git),
-        complete: true,
+        incomplete: None,
     };
-    let mut roots = repo.git_dirs.clone();
-    let mut count = 0;
-    let mut stack: Vec<(PathBuf, usize, bool)> = repo
+    let home = dirs::home_dir().and_then(|home| std::fs::canonicalize(home).ok());
+    if repo
         .git_dirs
         .iter()
-        .map(|dir| (dir.clone(), 0, false))
+        .any(|dir| dir.parent().is_none() || Some(dir) == home.as_ref())
+    {
+        snapshot.incomplete =
+            Some("its git folder is your home folder or the file system root".to_string());
+        return snapshot;
+    }
+    let mut roots = repo.git_dirs.clone();
+    let mut count = 0;
+    // Breadth first: a git folder's own entries are looked at before a cap
+    // can stop the look.
+    let mut queue: VecDeque<(PathBuf, usize, Role)> = repo
+        .git_dirs
+        .iter()
+        .map(|dir| (dir.clone(), 0, Role::GitDir))
         .collect();
-    while let Some((dir, depth, legacy)) = stack.pop() {
+    while let Some((dir, depth, role)) = queue.pop_front() {
         if snapshot.folders.contains_key(&dir) {
             continue;
         }
@@ -335,28 +399,31 @@ fn walk(repo: &Repo, prev: Option<&Snapshot>) -> Snapshot {
             continue;
         }
         let old = prev.and_then(|prev| prev.folders.get(&dir));
+        let (_, ctime) = times(&meta);
         let mut folder = match old.filter(|old| {
-            old.settled
-                && old.dev == meta.dev()
-                && old.ino == meta.ino()
-                && old.mtime == nanos(&meta)
+            old.settled && old.dev == meta.dev() && old.ino == meta.ino() && old.ctime == ctime
         }) {
             Some(old) => old.clone(),
             None => match list(&dir, &meta, old) {
                 Some(folder) => folder,
                 None => {
-                    snapshot.complete = false;
+                    snapshot.incomplete = Some(format!("{} can't be read", shown_path(&dir).0));
                     continue;
                 }
             },
         };
-        folder.legacy = legacy;
+        let has = |name: &str| folder.entries.contains_key(OsStr::new(name));
+        let role = match role {
+            Role::Modules if has("HEAD") && (has("objects") || has("commondir")) => Role::GitDir,
+            role => role,
+        };
+        folder.role = role;
         for (name, entry) in &mut folder.entries {
             let path = dir.join(name);
             if entry.kind == Kind::Link {
                 entry.link = Some(Link::read(&path, &repo.git_dirs));
             }
-            if legacy && entry.kind != Kind::Dir {
+            if role == Role::Legacy && entry.kind != Kind::Dir {
                 *entry = Entry {
                     link: entry.link.take(),
                     ..Entry::stat(&path, entry.kind, entry.ino)
@@ -365,28 +432,35 @@ fn walk(repo: &Repo, prev: Option<&Snapshot>) -> Snapshot {
         }
         count += folder.entries.len();
         if count > MAX_ENTRIES {
-            snapshot.complete = false;
+            snapshot.incomplete = Some("it has too many entries".to_string());
             break;
         }
-        // A git folder: `HEAD` and objects or a common folder (a linked
-        // worktree's). `logs` has a `HEAD` too, but neither.
-        let has = |name: &str| folder.entries.contains_key(&OsString::from(name));
-        let root = has("HEAD") && (has("objects") || has("commondir"));
-        if root && !roots.contains(&dir) {
+        if role == Role::GitDir && !roots.contains(&dir) {
             roots.push(dir.clone());
         }
         for (name, entry) in &folder.entries {
-            if entry.kind != Kind::Dir
-                || (root && SKIPPED.iter().any(|skipped| name.as_os_str() == *skipped))
-            {
+            if entry.kind != Kind::Dir {
                 continue;
             }
+            let is = |names: &[&str]| names.iter().any(|kept| name.as_os_str() == *kept);
+            let child = match role {
+                Role::GitDir if is(&STORES) => Role::Store {
+                    objects: name.as_os_str() == "objects",
+                },
+                Role::GitDir if is(&LEGACY_REMOTES) => Role::Legacy,
+                Role::GitDir if name.as_os_str() == "worktrees" => Role::Worktrees,
+                Role::GitDir if name.as_os_str() == "modules" => Role::Modules,
+                Role::Worktrees => Role::GitDir,
+                Role::Modules => Role::Modules,
+                Role::Store { objects: true } if is(&OBJECT_FOLDERS_LOOKED_AT) => Role::Plain,
+                Role::Store { .. } => continue,
+                _ => Role::Plain,
+            };
             if depth >= MAX_DEPTH {
-                snapshot.complete = false;
+                snapshot.incomplete = Some("its folders are nested too deep".to_string());
                 continue;
             }
-            let legacy = root && LEGACY_REMOTES.iter().any(|kept| name.as_os_str() == *kept);
-            stack.push((dir.join(name), depth + 1, legacy));
+            queue.push_back((dir.join(name), depth + 1, child));
         }
         snapshot.folders.insert(dir, folder);
     }
@@ -396,21 +470,22 @@ fn walk(repo: &Repo, prev: Option<&Snapshot>) -> Snapshot {
             let Ok(meta) = std::fs::metadata(&path) else {
                 continue;
             };
+            let now = times(&meta);
             let old = prev
                 .and_then(|prev| prev.todos.get(&path))
                 .filter(|old| {
                     old.dev == meta.dev()
                         && old.ino == meta.ino()
                         && old.len == meta.len()
-                        && old.mtime == nanos(&meta)
-                        && now_nanos() - old.mtime > RACY_NANOS
+                        && old.times == now
+                        && settled(now.1)
                 })
                 .cloned();
             let todo = old.unwrap_or_else(|| Todo {
                 dev: meta.dev(),
                 ino: meta.ino(),
                 len: meta.len(),
-                mtime: nanos(&meta),
+                times: now,
                 exec: todo_exec_lines(&path),
             });
             snapshot.todos.insert(path, todo);
@@ -423,12 +498,8 @@ fn list(dir: &Path, meta: &std::fs::Metadata, old: Option<&Folder>) -> Option<Fo
     let mut entries = HashMap::new();
     // An unreadable folder fails the look (it can hide what git follows).
     for item in std::fs::read_dir(dir).ok()? {
-        let Ok(item) = item else {
-            continue;
-        };
-        let Ok(file_type) = item.file_type() else {
-            continue;
-        };
+        let item = item.ok()?;
+        let file_type = item.file_type().ok()?;
         let (name, kind, ino) = (item.file_name(), Kind::of(file_type), item.ino());
         let entry = old
             .and_then(|old| old.entries.get(&name))
@@ -438,19 +509,19 @@ fn list(dir: &Path, meta: &std::fs::Metadata, old: Option<&Folder>) -> Option<Fo
         entries.insert(name, entry);
     }
     let after = std::fs::symlink_metadata(dir).ok()?;
-    let mtime = nanos(meta);
+    let (_, ctime) = times(meta);
     Some(Folder {
         dev: meta.dev(),
         ino: meta.ino(),
-        mtime,
-        settled: nanos(&after) == mtime && now_nanos() - mtime > RACY_NANOS,
-        legacy: false,
+        ctime,
+        settled: times(&after).1 == ctime && settled(ctime),
+        role: Role::Plain,
         entries,
     })
 }
 
 /// The `exec` lines of a rebase or sequencer todo file, as git reads them
-/// (`exec` or `x`, after spaces or tabs). Fails closed: a file that cannot
+/// (`exec` or `x`, after spaces or tabs). Fails closed: a file that can't
 /// be read or is too long counts as holding one.
 fn todo_exec_lines(path: &Path) -> Vec<String> {
     let mut bytes = Vec::new();
@@ -464,14 +535,19 @@ fn todo_exec_lines(path: &Path) -> Vec<String> {
     lines
 }
 
+/// Git's sequencer takes a command name followed by a space, tab, carriage
+/// return or the line's end; `exec` runs the rest through the shell.
 pub(super) fn exec_lines(text: &str) -> Vec<String> {
-    text.lines()
-        .map(|line| line.trim_start_matches([' ', '\t']).trim_end())
+    text.split('\n')
+        .map(|line| line.trim_start_matches([' ', '\t']))
         .filter(|line| {
-            let command = line.split([' ', '\t']).next().unwrap_or_default();
-            (command == "exec" || command == "x") && line.len() > command.len()
+            let command = line.split([' ', '\t', '\r']).next().unwrap_or_default();
+            (command == "exec" || command == "x")
+                && !line[command.len()..]
+                    .trim_matches([' ', '\t', '\r'])
+                    .is_empty()
         })
-        .map(str::to_string)
+        .map(|line| line.trim_end().to_string())
         .collect()
 }
 
@@ -496,21 +572,8 @@ pub(super) enum Finding {
     },
     Incomplete {
         dot_git: PathBuf,
+        why: String,
     },
-}
-
-impl Finding {
-    /// What stays held until removed: the path and how to recognize it.
-    fn held(&self) -> Option<Held> {
-        let (path, follow) = match self {
-            Finding::Link { path, .. } | Finding::HardLink { path } | Finding::Remote { path } => {
-                (path, false)
-            }
-            Finding::Exec { todo, .. } => (todo, true),
-            Finding::Replaced { .. } | Finding::Incomplete { .. } => return None,
-        };
-        Held::of(path, follow)
-    }
 }
 
 fn compare(repo: &Repo, prev: &Snapshot, cur: &Snapshot) -> Vec<Finding> {
@@ -545,7 +608,7 @@ fn compare(repo: &Repo, prev: &Snapshot, cur: &Snapshot) -> Vec<Finding> {
             if new && entry.kind == Kind::File && entry.nlink > 1 {
                 findings.push(Finding::HardLink { path: path.clone() });
             }
-            if folder.legacy
+            if folder.role == Role::Legacy
                 && entry.kind != Kind::Dir
                 && (new || old.is_some_and(|old| old.stamp != entry.stamp))
             {
@@ -566,87 +629,161 @@ fn compare(repo: &Repo, prev: &Snapshot, cur: &Snapshot) -> Vec<Finding> {
     findings
 }
 
+/// A finding that stands until the person removes it: while any does, a
+/// person's approval doesn't lift the protected-file rules (in any session
+/// of this process: a sub-agent's findings count for its parent too).
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Held {
-    path: PathBuf,
-    follow: bool,
-    dev: u64,
-    ino: u64,
+    /// The repository's `.git`, as found.
+    repo: PathBuf,
+    what: HeldWhat,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum HeldWhat {
+    Link {
+        path: PathBuf,
+        git_dirs: Vec<PathBuf>,
+    },
+    HardLink {
+        path: PathBuf,
+    },
+    Exec {
+        todo: PathBuf,
+    },
+    Remote {
+        path: PathBuf,
+    },
+    Replaced {
+        dot_git: PathBuf,
+        now: DotGit,
+    },
 }
 
 impl Held {
-    fn of(path: &Path, follow: bool) -> Option<Self> {
-        let meta = if follow {
-            std::fs::metadata(path)
-        } else {
-            std::fs::symlink_metadata(path)
-        }
-        .ok()?;
-        Some(Held {
-            path: path.to_path_buf(),
-            follow,
-            dev: meta.dev(),
-            ino: meta.ino(),
+    fn of(finding: &Finding, repo: &Repo, snapshot: &Snapshot) -> Option<Self> {
+        HeldWhat::of(finding, repo, snapshot).map(|what| Held {
+            repo: repo.dot_git.clone(),
+            what,
+        })
+    }
+}
+
+impl HeldWhat {
+    fn of(finding: &Finding, repo: &Repo, snapshot: &Snapshot) -> Option<Self> {
+        Some(match finding {
+            Finding::Link { path, .. } => HeldWhat::Link {
+                path: path.clone(),
+                git_dirs: repo.git_dirs.clone(),
+            },
+            Finding::HardLink { path } => HeldWhat::HardLink { path: path.clone() },
+            Finding::Exec { todo, .. } => HeldWhat::Exec { todo: todo.clone() },
+            Finding::Remote { path } => HeldWhat::Remote { path: path.clone() },
+            Finding::Replaced { dot_git } => HeldWhat::Replaced {
+                dot_git: dot_git.clone(),
+                now: snapshot.dot_git.clone(),
+            },
+            Finding::Incomplete { .. } => return None,
         })
     }
 
+    fn path(&self) -> &Path {
+        match self {
+            HeldWhat::Link { path, .. }
+            | HeldWhat::HardLink { path }
+            | HeldWhat::Remote { path } => path,
+            HeldWhat::Exec { todo } => todo,
+            HeldWhat::Replaced { dot_git, .. } => dot_git,
+        }
+    }
+
+    /// Whether what was found is still there (looked at again, not by
+    /// identity: a freed inode may be reused).
     fn stands(&self) -> bool {
-        Held::of(&self.path, self.follow).is_some_and(|now| now == *self)
+        match self {
+            HeldWhat::Link { path, git_dirs } => {
+                std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
+                    && Link::read(path, git_dirs).escapes
+            }
+            HeldWhat::HardLink { path } => std::fs::symlink_metadata(path)
+                .is_ok_and(|meta| meta.file_type().is_file() && meta.nlink() > 1),
+            HeldWhat::Exec { todo } => {
+                std::fs::metadata(todo).is_ok() && !todo_exec_lines(todo).is_empty()
+            }
+            HeldWhat::Remote { path } => std::fs::symlink_metadata(path).is_ok(),
+            HeldWhat::Replaced { dot_git, now } => DotGit::read(dot_git) == *now,
+        }
     }
 }
 
 struct RepoState {
     repo: Repo,
     snapshot: Option<Snapshot>,
-    incomplete_told: bool,
-    used: u64,
 }
 
 #[derive(Default)]
 struct ThreadState {
     repos: HashMap<PathBuf, Arc<Mutex<RepoState>>>,
+    /// When each repository was last used, for forgetting the oldest.
+    used: HashMap<PathBuf, u64>,
+    last_used: u64,
+}
+
+#[derive(Default)]
+struct Global {
+    threads: HashMap<ThreadId, ThreadState>,
     held: Vec<Held>,
+    /// Repositories whose latest look was incomplete, and why.
+    incomplete: HashMap<PathBuf, String>,
+    /// A check failed (its task panicked) and none has finished since.
+    failed: bool,
     uses: u64,
 }
 
-static THREADS: LazyLock<Mutex<HashMap<ThreadId, ThreadState>>> = LazyLock::new(Default::default);
+static GLOBAL: LazyLock<Mutex<Global>> = LazyLock::new(Default::default);
 
-fn with_threads<T>(f: impl FnOnce(&mut HashMap<ThreadId, ThreadState>) -> T) -> T {
-    f(&mut THREADS.lock().unwrap_or_else(PoisonError::into_inner))
+fn with_global<T>(f: impl FnOnce(&mut Global) -> T) -> T {
+    f(&mut GLOBAL.lock().unwrap_or_else(PoisonError::into_inner))
 }
 
 fn state_of(thread: ThreadId, repo: &Repo) -> Arc<Mutex<RepoState>> {
-    with_threads(|threads| {
-        let state = threads.entry(thread).or_default();
-        state.uses += 1;
-        let used = state.uses;
+    with_global(|global| {
+        global.uses += 1;
+        let uses = global.uses;
+        if !global.threads.contains_key(&thread)
+            && global.threads.len() >= MAX_THREADS
+            && let Some(oldest) = global
+                .threads
+                .iter()
+                .min_by_key(|(_, state)| state.last_used)
+                .map(|(thread, _)| *thread)
+        {
+            global.threads.remove(&oldest);
+        }
+        let state = global.threads.entry(thread).or_default();
+        state.last_used = uses;
         if !state.repos.contains_key(&repo.dot_git)
             && state.repos.len() >= MAX_REPOS_PER_THREAD
             && let Some(oldest) = state
-                .repos
+                .used
                 .iter()
-                .min_by_key(|(_, repo)| repo.lock().unwrap_or_else(PoisonError::into_inner).used)
+                .min_by_key(|(_, used)| **used)
                 .map(|(path, _)| path.clone())
         {
             state.repos.remove(&oldest);
+            state.used.remove(&oldest);
         }
-        let entry = state
+        state.used.insert(repo.dot_git.clone(), uses);
+        state
             .repos
             .entry(repo.dot_git.clone())
             .or_insert_with(|| {
                 Arc::new(Mutex::new(RepoState {
                     repo: repo.clone(),
                     snapshot: None,
-                    incomplete_told: false,
-                    used,
                 }))
             })
-            .clone();
-        let mut locked = entry.lock().unwrap_or_else(PoisonError::into_inner);
-        locked.used = used;
-        locked.repo = repo.clone();
-        drop(locked);
-        entry
+            .clone()
     })
 }
 
@@ -657,7 +794,9 @@ pub(crate) fn begin(thread: ThreadId, repos: &[Repo]) {
         let state = state_of(thread, repo);
         let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
         if state.snapshot.is_none() {
-            state.snapshot = Some(walk(repo, /*prev*/ None));
+            let snapshot = walk(repo, /*prev*/ None);
+            note_incomplete(repo, &snapshot);
+            state.snapshot = Some(snapshot);
         }
     }
 }
@@ -665,14 +804,15 @@ pub(crate) fn begin(thread: ThreadId, repos: &[Repo]) {
 /// After such a command: what is new since the last look, as a message for
 /// the person (`None` if nothing).
 pub(crate) fn finish(thread: ThreadId, repos: &[Repo], level: &str) -> Option<String> {
-    let findings = check(thread, repos);
-    report(&findings, level)
+    report(&check(thread, repos), level)
 }
 
-/// At the end of a turn: the repositories this session looked at before.
-pub(crate) fn recheck(thread: ThreadId, level: &str) -> Option<String> {
-    let repos: Vec<Repo> = with_threads(|threads| {
-        threads.get(&thread).map_or_else(Vec::new, |state| {
+/// The repositories this session looked at before: looked at again (before
+/// a command is decided, and at the end of a turn), with the message for
+/// the person and whether the rules stay held.
+pub(crate) fn recheck(thread: ThreadId, level: &str, folders: &[&Path]) -> (Option<String>, bool) {
+    let repos: Vec<Repo> = with_global(|global| {
+        global.threads.get(&thread).map_or_else(Vec::new, |state| {
             state
                 .repos
                 .values()
@@ -685,84 +825,167 @@ pub(crate) fn recheck(thread: ThreadId, level: &str) -> Option<String> {
                 .collect()
         })
     });
-    if repos.is_empty() {
-        return None;
-    }
-    finish(thread, &repos, level)
+    let message = report(&check(thread, &repos), level);
+    let mut watched: Vec<PathBuf> = repos.into_iter().map(|repo| repo.dot_git).collect();
+    watched.extend(self::repos(folders).into_iter().map(|repo| repo.dot_git));
+    (message, !held_for(&watched).is_empty())
+}
+
+fn note_incomplete(repo: &Repo, snapshot: &Snapshot) {
+    with_global(|global| match &snapshot.incomplete {
+        Some(why) => {
+            global.incomplete.insert(repo.dot_git.clone(), why.clone());
+        }
+        None => {
+            global.incomplete.remove(&repo.dot_git);
+        }
+    });
 }
 
 pub(super) fn check(thread: ThreadId, repos: &[Repo]) -> Vec<Finding> {
     let mut findings = Vec::new();
+    let mut held = Vec::new();
     for repo in repos {
         let state = state_of(thread, repo);
         let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
         let prev = state.snapshot.take();
-        let cur = walk(repo, prev.as_ref());
-        if let Some(prev) = &prev {
-            findings.extend(compare(repo, prev, &cur));
+        let mut cur = walk(repo, prev.as_ref());
+        let mut found = prev
+            .as_ref()
+            .map(|prev| compare(repo, prev, &cur))
+            .unwrap_or_default();
+        if found.len() > MAX_FINDINGS {
+            found.truncate(MAX_FINDINGS);
+            cur.incomplete = Some("too many things were found".to_string());
         }
-        if !cur.complete && !state.incomplete_told {
-            state.incomplete_told = true;
-            findings.push(Finding::Incomplete {
+        held.extend(
+            found
+                .iter()
+                .filter_map(|finding| Held::of(finding, repo, &cur)),
+        );
+        // Told each time a look becomes incomplete; held while it is.
+        if let Some(why) = &cur.incomplete
+            && prev
+                .as_ref()
+                .is_none_or(|prev| prev.incomplete.as_ref() != Some(why))
+        {
+            found.push(Finding::Incomplete {
                 dot_git: repo.dot_git.clone(),
+                why: why.clone(),
             });
         }
+        note_incomplete(repo, &cur);
+        findings.extend(found);
         state.snapshot = Some(cur);
     }
-    let held: Vec<Held> = findings.iter().filter_map(Finding::held).collect();
-    if !held.is_empty() {
-        with_threads(|threads| {
-            let state = threads.entry(thread).or_default();
-            for held in held {
-                if !state.held.contains(&held) {
-                    state.held.push(held);
-                }
+    with_global(|global| {
+        if !repos.is_empty() {
+            global.failed = false;
+        }
+        for held in held {
+            if !global.held.contains(&held) {
+                global.held.push(held);
             }
-        });
-    }
+        }
+    });
     findings
 }
 
-/// What this session found in a git folder that is still there: while any
-/// is, a person's approval does not lift the protected-file rules.
-pub(crate) fn held(thread: ThreadId) -> Vec<PathBuf> {
-    let held: Vec<Held> = with_threads(|threads| {
-        threads
-            .get(&thread)
-            .map_or_else(Vec::new, |state| state.held.clone())
-    });
-    if held.is_empty() {
-        return Vec::new();
-    }
-    let standing: Vec<Held> = held.into_iter().filter(Held::stands).collect();
-    with_threads(|threads| {
-        if let Some(state) = threads.get_mut(&thread) {
-            state.held.retain(|held| standing.contains(held));
-        }
-    });
-    standing.into_iter().map(|held| held.path).collect()
+/// A check's task failed: hold until one finishes.
+pub(crate) fn note_failed() {
+    with_global(|global| global.failed = true);
 }
 
-/// Shown text: control characters replaced, long text cut.
-fn shown(text: &str) -> String {
-    let mut out: String = text
-        .chars()
-        .map(|c| if c.is_control() { '?' } else { c })
-        .take(SHOWN_CHARS)
+/// What any session (a sub-agent's too) found in these repositories' git
+/// folders that is still there, their incomplete looks, and a failed check:
+/// while there is any, a person's approval doesn't lift the protected-file
+/// rules.
+pub(super) fn held_for(dot_gits: &[PathBuf]) -> Vec<String> {
+    let (held, incomplete, failed) = with_global(|global| {
+        (
+            global
+                .held
+                .iter()
+                .filter(|held| dot_gits.contains(&held.repo))
+                .cloned()
+                .collect::<Vec<_>>(),
+            global
+                .incomplete
+                .keys()
+                .filter(|dot_git| dot_gits.contains(dot_git))
+                .cloned()
+                .collect::<Vec<_>>(),
+            global.failed,
+        )
+    });
+    let gone: Vec<Held> = held
+        .iter()
+        .filter(|held| !held.what.stands())
+        .cloned()
         .collect();
-    if text.chars().count() > SHOWN_CHARS {
-        out.push('…');
+    with_global(|global| global.held.retain(|held| !gone.contains(held)));
+    let mut out: Vec<String> = held
+        .iter()
+        .filter(|held| !gone.contains(held))
+        .map(|held| held.what.path().display().to_string())
+        .collect();
+    out.extend(
+        incomplete
+            .iter()
+            .map(|dot_git| format!("{} (not checked fully)", dot_git.display())),
+    );
+    if failed {
+        out.push("(a git folder check failed)".to_string());
     }
     out
 }
 
-fn shown_path(path: &Path) -> String {
-    shown(&path.display().to_string())
+/// Characters that could disguise shown text: controls and bidirectional
+/// overrides.
+fn disguising(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{200e}' | '\u{200f}' | '\u{061c}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+        )
 }
 
-/// `path` quoted for a POSIX shell.
-fn quoted(path: &Path) -> String {
-    format!("'{}'", shown_path(path).replace('\'', r"'\''"))
+/// Shown text, and whether it is exactly the original.
+fn shown(text: &str) -> (String, bool) {
+    let mut exact = true;
+    let mut out: String = text
+        .chars()
+        .map(|c| {
+            if disguising(c) {
+                exact = false;
+                '?'
+            } else {
+                c
+            }
+        })
+        .take(SHOWN_CHARS)
+        .collect();
+    if text.chars().count() > SHOWN_CHARS {
+        exact = false;
+        out.push('…');
+    }
+    (out, exact)
+}
+
+fn shown_path(path: &Path) -> (String, bool) {
+    match path.to_str() {
+        Some(text) => shown(text),
+        None => (shown(&path.to_string_lossy()).0, false),
+    }
+}
+
+/// How to remove `path` (`rm` plus `flags`), or what to do where its name
+/// can't be shown exactly.
+fn removal(flags: &str, path: &Path) -> String {
+    match shown_path(path) {
+        (text, true) => format!("rm {flags}'{}'", text.replace('\'', r"'\''")),
+        (_, false) => "remove it by hand (its name has characters that aren't shown)".to_string(),
+    }
 }
 
 pub(super) fn report(findings: &[Finding], level: &str) -> Option<String> {
@@ -774,22 +997,23 @@ pub(super) fn report(findings: &[Finding], level: &str) -> Option<String> {
          Corbanu found new things there that your own git would follow outside the sandbox. \
          Nothing was removed. Check them, and remove what you didn't make:"
     )];
-    for finding in findings {
+    for finding in findings.iter().take(SHOWN_FINDINGS) {
         lines.push(match finding {
             Finding::Link { path, target } => format!(
                 "- {} is a link to {}: git writes through it (for example on your next commit, \
-                 fetch or pull). Remove the link (its target stays): rm {}",
-                shown_path(path),
-                target
-                    .as_deref()
-                    .map_or_else(|| "a place that can't be resolved".to_string(), shown_path),
-                quoted(path)
+                 fetch or pull). Remove the link (its target stays): {}",
+                shown_path(path).0,
+                target.as_deref().map_or_else(
+                    || "a place that can't be resolved".to_string(),
+                    |target| shown_path(target).0
+                ),
+                removal("", path)
             ),
             Finding::HardLink { path } => format!(
                 "- {} is a hard link: the same file has another name, maybe outside the project, \
-                 and git writes into it. Remove this name: rm {}",
-                shown_path(path),
-                quoted(path)
+                 and git writes into it. Remove this name: {}",
+                shown_path(path).0,
+                removal("", path)
             ),
             Finding::Exec { todo, lines } => {
                 let state = todo.parent().unwrap_or(todo);
@@ -801,7 +1025,7 @@ pub(super) fn report(findings: &[Finding], level: &str) -> Option<String> {
                 let mut shown_lines: Vec<String> = lines
                     .iter()
                     .take(SHOWN_EXEC_LINES)
-                    .map(|line| format!("\"{}\"", shown(line)))
+                    .map(|line| format!("\"{}\"", shown(line).0))
                     .collect();
                 if lines.len() > SHOWN_EXEC_LINES {
                     shown_lines.push(format!("and {} more", lines.len() - SHOWN_EXEC_LINES));
@@ -809,35 +1033,37 @@ pub(super) fn report(findings: &[Finding], level: &str) -> Option<String> {
                 format!(
                     "- {} holds steps that run commands outside the sandbox if you continue \
                      ({continues}): {}. If you didn't start this yourself, remove it without \
-                     continuing: rm -r {}",
-                    shown_path(state),
+                     continuing: {}",
+                    shown_path(state).0,
                     shown_lines.join(", "),
-                    quoted(state)
+                    removal("-r ", state)
                 )
             }
             Finding::Remote { path } => format!(
                 "- {} defines a git remote, which git fetch, pull and push use for a remote with \
-                 no URL in your git config. Remove it: rm {}",
-                shown_path(path),
-                quoted(path)
+                 no URL in your git config. Remove it: {}",
+                shown_path(path).0,
+                removal("", path)
             ),
             Finding::Replaced { dot_git } => format!(
                 "- {} was replaced. If you didn't do this, check its hooks folder and config \
                  before you run git in this project.",
-                shown_path(dot_git)
+                shown_path(dot_git).0
             ),
-            Finding::Incomplete { dot_git } => format!(
-                "- {} couldn't be checked fully (too many entries, or a folder can't be read). \
-                 Look for links in it before you run git in this project.",
-                shown_path(dot_git)
+            Finding::Incomplete { dot_git, why } => format!(
+                "- {} couldn't be checked fully: {}. Look for links in it before you run git in \
+                 this project.",
+                shown_path(dot_git).0,
+                shown(why).0
             ),
         });
     }
-    if findings.iter().any(|finding| finding.held().is_some()) {
-        lines.push(format!(
-            "Until these are removed, approving a command doesn't lift {level}'s protected-file \
-             rules in this session."
-        ));
+    if findings.len() > SHOWN_FINDINGS {
+        lines.push(format!("- and {} more.", findings.len() - SHOWN_FINDINGS));
     }
+    lines.push(format!(
+        "Until these are removed (a replaced git folder: until it changes again or Corbanu \
+         restarts), approving a command doesn't lift {level}'s protected-file rules."
+    ));
     Some(lines.join("\n"))
 }

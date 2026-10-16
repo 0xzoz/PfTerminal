@@ -577,8 +577,18 @@ impl ToolOrchestrator {
             Some(action) => Some(action.state.taint_generation),
             None => escalation_approved_by_human.then_some(0),
         };
+        // #874 (D6): the git folders this session watches, looked at again
+        // before deciding whether an approval lifts the rules (text typed
+        // into a running shell or a process left running may have changed
+        // them).
+        let git_held = git_refresh(
+            tool_ctx,
+            resolution_folders(tool, req, &turn_cwd, &materialized_workspace_roots),
+        )
+        .await;
         let denied = post_taint_read_denials(
             tool_ctx,
+            git_held,
             human_approved_at,
             grant_operation
                 .as_ref()
@@ -792,16 +802,19 @@ impl ToolOrchestrator {
         let git_check =
             match crate::security::protected_additional::protected_level(&tool_ctx.session) {
                 Some(level) if level != codex_security_policy::SecurityLevel::Permissive => {
+                    // The sandbox's working folder first: the probes resolve
+                    // against it, as the sandbox does.
+                    let mut folders = Vec::new();
+                    if let Ok(policy_cwd) = sandbox_policy_cwd.to_abs_path() {
+                        folders.push(policy_cwd.to_path_buf());
+                    }
                     #[allow(deprecated)]
-                    let mut folders = vec![turn_ctx.cwd.to_path_buf()];
+                    folders.push(turn_ctx.cwd.to_path_buf());
                     folders.extend(
                         materialized_workspace_roots
                             .iter()
                             .map(codex_utils_absolute_path::AbsolutePathBuf::to_path_buf),
                     );
-                    if let Ok(policy_cwd) = sandbox_policy_cwd.to_abs_path() {
-                        folders.push(policy_cwd.to_path_buf());
-                    }
                     let effective =
                         codex_sandboxing::policy_transforms::effective_file_system_sandbox_policy(
                             &file_system_sandbox_policy,
@@ -1142,8 +1155,11 @@ impl GitCheck {
             git_postcheck::begin(thread, &repos);
             repos
         })
-        .await
-        .ok()?;
+        .await;
+        let Ok(repos) = repos else {
+            git_postcheck::note_failed();
+            return None;
+        };
         (!repos.is_empty()).then_some(Self { repos, level })
     }
 
@@ -1156,8 +1172,10 @@ impl GitCheck {
             crate::security::git_postcheck::finish(thread, &repos, &level)
         })
         .await
-        .ok()
-        .flatten();
+        .unwrap_or_else(|_| {
+            crate::security::git_postcheck::note_failed();
+            Some(GIT_CHECK_FAILED.to_string())
+        });
         if let Some(message) = message {
             tracing::warn!(
                 target: "codex_core::security::git_postcheck",
@@ -1167,6 +1185,39 @@ impl GitCheck {
             warn(tool_ctx, &message).await;
         }
     }
+}
+
+const GIT_CHECK_FAILED: &str = "Corbanu couldn't check this project's git folder after an \
+     agent command. Until a later check finishes, approving a command doesn't lift the \
+     protected-file rules.";
+
+/// #874 (D6): under Moderate or Aggressive, the git folders this session
+/// watches looked at again; whether the rules stay held (fail closed when
+/// the look fails). The person is told what is new.
+async fn git_refresh(
+    tool_ctx: &ToolCtx,
+    folders: Vec<codex_utils_absolute_path::AbsolutePathBuf>,
+) -> bool {
+    let Some(level) = crate::security::protected_additional::protected_level(&tool_ctx.session)
+        .filter(|level| *level != codex_security_policy::SecurityLevel::Permissive)
+    else {
+        return false;
+    };
+    let thread = tool_ctx.session.thread_id();
+    let level = format!("{level:?}");
+    let (message, held) = tokio::task::spawn_blocking(move || {
+        let folders: Vec<&std::path::Path> = folders.iter().map(AsRef::as_ref).collect();
+        crate::security::git_postcheck::recheck(thread, &level, &folders)
+    })
+    .await
+    .unwrap_or_else(|_| {
+        crate::security::git_postcheck::note_failed();
+        (Some(GIT_CHECK_FAILED.to_string()), true)
+    });
+    if let Some(message) = message {
+        warn(tool_ctx, &message).await;
+    }
+    held
 }
 
 /// Issue #540: whether the retry after a sandbox denial may run without a
@@ -1497,6 +1548,7 @@ fn aggressive_grant_offer(
 #[allow(clippy::too_many_arguments)]
 fn post_taint_read_denials(
     tool_ctx: &ToolCtx,
+    git_held: bool,
     human_approved_at: Option<u64>,
     grant_operation: Option<&str>,
     confirmed_grant: Option<crate::security::grant_offer::Confirmed>,
@@ -1520,19 +1572,16 @@ fn post_taint_read_denials(
         .post_taint_state()
         .filter(crate::security::tainted_action::PostTaintState::protected_paths_apply)?;
     // #874 (D6): while something the post-command check found in a git
-    // folder is still there, no approval or grant lifts the rules: an
-    // approved `git commit` could write through a planted link into a
-    // protected file.
-    let git_held = crate::security::git_postcheck::held(thread);
-    if !git_held.is_empty() {
+    // folder is still there (`git_refresh`), no approval or grant lifts the
+    // rules: an approved `git commit` could write through a planted link
+    // into a protected file.
+    if git_held {
         tracing::info!(
             target: "codex_core::security::tainted_action",
             call_id = %tool_ctx.call_id,
-            held = ?git_held,
             "protected-path rules kept: the git check's findings are still there"
         );
     }
-    let git_held = !git_held.is_empty();
     if !git_held && state.human_approval_lifts_rules(human_approved_at) {
         // Issue #540: except the Corbanu home's runtime entries, which stay
         // read-only in the command's sandbox (under Moderate every command

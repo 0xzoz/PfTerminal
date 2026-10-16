@@ -941,8 +941,8 @@ impl Session {
         {
             let thread = self.thread_id;
             let level = format!("{level:?}");
-            if let Ok(Some(message)) = tokio::task::spawn_blocking(move || {
-                crate::security::git_postcheck::recheck(thread, &level)
+            if let Ok((Some(message), _)) = tokio::task::spawn_blocking(move || {
+                crate::security::git_postcheck::recheck(thread, &level, &[])
             })
             .await
             {

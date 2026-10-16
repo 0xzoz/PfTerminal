@@ -94,14 +94,20 @@ The kill switch (`/security` → `g`) works under every level.
   later follows outside the sandbox (#874): a link such as
   `.git/COMMIT_EDITMSG` to a file elsewhere, which your next `git commit`
   writes; a hard link; rebase or cherry-pick steps whose `exec` lines run when
-  you continue; a remote in `.git/remotes`; or a replaced `.git`. Corbanu
-  looks at `.git` before the first such command of a session, then after
-  each one and at the end of each turn (not at `objects` or `refs`, which git
-  replaces rather than writes through), and warns you about anything new,
-  with the command that removes it. It removes nothing itself. Until you remove it, approving a
-  command doesn't lift the protected-file rules in that session. A process a
-  command leaves running can still change `.git` after Corbanu's last look,
-  and nothing is checked between a turn's end and the next command.
+  you continue; a remote in `.git/remotes`; or a replaced `.git`. On macOS and
+  Linux, Corbanu looks at `.git` before a session's first such command, after
+  each one, before each later command and at the end of each turn, and warns
+  you about anything new, with the command that removes it. It removes
+  nothing itself. Below `objects`, `lfs` and `annex` it looks only at their
+  own entries, because git reads the files below and doesn't write through
+  them. Until you remove what it found, and while it can't look at all of
+  `.git` (a folder it can't read, or too many entries), approving a command
+  doesn't lift the protected-file rules for that project, in any session of
+  this Corbanu Terminal. It doesn't watch between those times: what a
+  process left running changes there after the end of a turn is found at
+  the next command, not before you run git yourself. It watches only the
+  repositories of the folders agent commands run in, not other repositories
+  on disk.
 - MCP servers, apps, hooks and `!` shell commands run outside the sandbox, as
   under every level.
 - On Linux, where a command you approve can write a Corbanu home's folder
