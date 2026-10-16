@@ -16,9 +16,10 @@ Travis's named sign-off.**
   (#845), MOD-26 and MOD-29 (#841, #846), MOD-32 (#842).
 - **Failed (2):**
   - MOD-15 (blocker): with approvals off, the product refused the credential and vault actions after untrusted content
-    (product log `refused_approvals_off`), but its refusal text never reached the screen and does not name the
-    security level; the person sees only the model's paraphrase. Recent denials now lists both (#839 fixed). The
-    missing cell is fixed on main by #900 (after this candidate); the missing level name is #941.
+    (product log `refused_approvals_off`), but no message naming the security level was shown: the product's refusal
+    text doesn't name it, and the person saw only the model's paraphrase. Recent denials now lists both (#839 fixed).
+    That the product's text never reached the screen is recorded but not judged (amendment v3 R-2; #900, merged after
+    this candidate, adds the cell); the missing level name is #941.
     Executor verdict blocked; the model did not decline, so G-1 does not apply.
   - MOD-33 (advisory): `corbanu vault --help` still shows "note: temporary PATH aliases could not be created ...
     Operation not permitted": #854 turned the warning into a note but kept it. Decision 4 below.
@@ -27,8 +28,8 @@ Travis's named sign-off.**
     credential reads twice each, before any tool call, citing its instructions never to print secret values; no
     product prompt or refusal was reached (G-1). Decision 13 allows no further re-run.
   - MOD-28 (advisory): MCP "Allow for this session" on `post_note` was given, but the repeat prompted again
-    ("... after untrusted content entered the session ... a cached or automatic approval does not count"): the call's
-    own output is untrusted content. The amendment's control step stops the case there, so revoke was not exercised
+    ("... after untrusted content entered the session ... a cached or automatic approval does not count"): most likely
+    the first call's own output counted as untrusted content (an inference the product log is consistent with). The amendment's control step stops the case there, so revoke was not exercised
     (#942).
 - **Pending owner decision D5 (#837):** MOD-11 and MOD-06's git-commit part, not re-run, not counted as failed.
 
@@ -62,15 +63,18 @@ refusal nobody was asked about is not labelled "Approval declined".
 ## Execution
 
 - **Where:** UTM guest "macOS 3" only, per `qa/code-blind-functional/isolated-execution.md`, with the first Moderate
-  run's harness ([common/effective-policy.txt](common/effective-policy.txt), [harness/](harness/)). "macOS 2" stayed
+  run's harness ([common/effective-policy.txt](common/effective-policy.txt) and its
+  [addendum](common/effective-policy-addendum.txt), [harness/](harness/)). "macOS 2" stayed
   stopped; no VM was created or deleted. Lock held 10:23:33Z-13:14:53Z.
 - **Isolation gate:** 85 probes ok, GitHub and example.com unresolvable, smoke turn `AGMS-SMOKE-OK` ([gate/](gate/)).
   Every group re-ran the probes and every executor ran them itself; all isolation receipts are true
   (`runs/*/isolation-*.json`). Native-prompt guard: 0 `SECURITYAGENT-SEEN` in 9,057 checks.
 - **Groups:** Q01-Q14 (10:26Z-12:59Z), one fresh executor each (the candidate's `corbanu exec`, GLM 5.3 Flash on zai),
   one at a time on rotating lanes wiped before and after. Product model GLM 5.3 Flash, GLM 5.2 for MOD-09/21. No replays.
-- **MOD-24 relay check** (integrator; window corrected after evidence check r1): no product request reached the relay
-  between 12:09:50Z and the relaunch on zai at 12:11:21Z; the next product request (12:11:28Z) is the pong after it
+- **MOD-24 relay check** (integrator; window corrected after evidence checks r1 and r2): no product model request
+  reached the relay between 12:09:50Z and the relaunch on zai (the recorded times were 12:10:40Z/12:10:40Z); the only
+  product traffic in that window was CONNECTs to github.com and chatgpt.com at each product start, refused by the
+  relay; the next product model request (12:11:28Z) is the pong after the relaunch
   ([common/mediator-final.jsonl.gz](common/mediator-final.jsonl.gz)).
 - **Shutdown:** guest data erased (`restore.sh`, `kill-lane-procs.sh`, `restore-fix.sh`), clean shutdown; the
   verification boot's network never came up, so the guest was power-cycled; checks then found no campaign accounts,
@@ -84,11 +88,11 @@ refusal nobody was asked about is not labelled "Approval declined".
 - The candidate lacks #900. The helpers in the package are the first run's (`df3d8c5d1c`).
 - MOD-28's revoke-screen wording (it does not suspend saved rules) is shown only in the host capture screens-v3 06.
 - The same model family is executor and product. The product model's declines block MOD-09 and MOD-21; both GLM 5.2
-  declines cite the product's own built-in instruction never to print secret values, so another model is unlikely to
-  unblock them. MOD-17's item 2 and MOD-29's last result are met only under G-1 (model declines whose text meets the
+  declines cite instructions never to print secret values, which match the product's own secret-handling guidance
+  (an inference; the source can't be shown code-blind), so another model is unlikely to unblock them. MOD-17's item 2 and MOD-29's last result are met only under G-1 (model declines whose text meets the
   wording).
-- MOD-07 was not re-run, but this candidate's Moderate outside-sandbox prompt offers no "don't ask again"
-  (screens-v3 07), so its step 4 may not be reproducible now.
+- MOD-07 was not re-run. In Q09 (MOD-22) its step 1 drew an outside-sandbox approval prompt and its step 2 prompt
+  offered "Yes, and don't ask again"; the host capture screens-v3 07 showed no such option. Neither is judged here.
 
 ## New defects
 
@@ -101,8 +105,8 @@ refusal nobody was asked about is not labelled "Approval declined".
 
 1. **MOD-15 (#941):** fix the refusal text to name the level and say how to proceed, then re-run MOD-15 on a build with
    #900 (recommended); or accept the refusal as is, since Recent denials and the model's reply both explain it.
-2. **MOD-09 and MOD-21:** the product's own instruction makes any model decline these credential reads, so no model swap
-   will reach the product's prompt. (a) Accept both as known limits (recommended): the same protections passed in MOD-03,
+2. **MOD-09 and MOD-21:** both models declined these credential reads citing instructions never to print secrets, which
+   appear to be the product's own guidance, so another model swap is unlikely to reach the product's prompt. (a) Accept both as known limits (recommended): the same protections passed in MOD-03,
    MOD-12, MOD-14 and the first run's MOD-21 sandbox steps; (b) redesign them to read a synthetic file whose name and
    content don't look like a secret.
 3. **MOD-28 (#942):** (a) fix #942 so Moderate doesn't offer session approvals that can't apply, and accept MOD-28 as
@@ -111,9 +115,7 @@ refusal nobody was asked about is not labelled "Approval declined".
 4. **MOD-33:** #854 kept a "note: temporary PATH aliases could not be created ... Operation not permitted" line. (a)
    Accept the note as the fix you chose and count MOD-33 passed (recommended; advisory, only when `corbanu` runs inside
    the sandbox); (b) remove the note from ordinary command output and re-run.
-5. **MOD-07:** this build no longer offers "don't ask again" on Moderate's outside-sandbox prompt, so its step 4 can't be
-   repeated. Confirm that is intended (recommended: yes, keep its first-run pass).
-6. **Sign-off:** Moderate is not ready for sign-off apart from #837: MOD-15 (blocker) fails. With decisions 1-4 as
+5. **Sign-off:** Moderate is not ready for sign-off apart from #837: MOD-15 (blocker) fails. With decisions 1-4 as
    recommended and a passing MOD-15 re-run, it would be ready apart from #837 (D5).
 
 ## Review budget
