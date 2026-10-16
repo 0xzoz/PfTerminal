@@ -941,11 +941,16 @@ impl Session {
         {
             let thread = self.thread_id;
             let level = format!("{level:?}");
-            if let Ok((Some(message), _)) = tokio::task::spawn_blocking(move || {
+            // A failed look is told too.
+            let message = tokio::task::spawn_blocking(move || {
                 crate::security::git_postcheck::recheck(thread, &level, &[])
             })
             .await
-            {
+            .map_or_else(
+                |_| Some(crate::security::git_postcheck::CHECK_FAILED.to_string()),
+                |(message, _)| message,
+            );
+            if let Some(message) = message {
                 self.send_event(
                     turn_context.as_ref(),
                     EventMsg::Warning(codex_protocol::protocol::WarningEvent { message }),

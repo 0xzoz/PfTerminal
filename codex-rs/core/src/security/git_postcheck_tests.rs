@@ -125,7 +125,6 @@ fn issue_874_links_planted_in_the_git_folder_are_found_and_held() {
             format!("link {}", git.join("FETCH_HEAD").display()),
             format!("link {}", git.join("SQUASH_MSG").display()),
             format!("link {}", git.join("TAG_EDITMSG").display()),
-            format!("config {}", git.join("hooks/pre-commit").display()),
             format!("link {}", git.join("logs/refs/heads/feature").display()),
         ]
     );
@@ -139,7 +138,7 @@ fn issue_874_links_planted_in_the_git_folder_are_found_and_held() {
     // Told once, nothing removed, held until removed.
     assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
     assert!(git.join("COMMIT_EDITMSG").symlink_metadata().is_ok());
-    assert_eq!(project.held().len(), 6);
+    assert_eq!(project.held().len(), 5);
     for name in [
         "COMMIT_EDITMSG",
         "FETCH_HEAD",
@@ -334,12 +333,15 @@ fn issue_874_hard_links_and_legacy_remotes_are_found() {
     std::fs::create_dir_all(git.join("remotes/team")).expect("remotes");
     std::fs::write(git.join("remotes/team/origin"), "URL: x\n").expect("remote");
     std::fs::write(git.join("commondir"), "../elsewhere\n").expect("commondir");
+    // Review r3 (B1): a hook added to the existing (protected) folder, and
+    // config git rewrites by renaming, are the person's.
     std::fs::write(git.join("hooks/post-checkout"), "#!/bin/sh\n").expect("hook");
+    std::fs::write(git.join("config.lock"), "[core]\n\tbare = false\n").expect("lock");
+    std::fs::rename(git.join("config.lock"), git.join("config")).expect("rename");
     assert_eq!(
         kinds(&check(thread, &repos)),
         vec![
             format!("config {}", git.join("commondir").display()),
-            format!("config {}", git.join("hooks/post-checkout").display()),
             format!("remote {}", git.join("remotes/team/origin").display()),
         ]
     );
@@ -515,7 +517,7 @@ fn issue_874_the_next_command_looks_again_first() {
     let git = project.git();
     let (thread, _) = baseline(&project);
     symlink(project.outside.join("zshrc"), git.join("COMMIT_EDITMSG")).expect("link");
-    let (message, held) = recheck(thread, "Moderate", &[]);
+    let (message, held) = recheck(thread, "Moderate", &[project.root.as_path()]);
     assert!(!held.is_empty());
     assert!(
         message.is_some_and(|message| message.contains("COMMIT_EDITMSG")),
@@ -531,4 +533,83 @@ fn issue_874_the_next_command_looks_again_first() {
     let other = Project::new();
     let (_, held) = recheck(ThreadId::new(), "Moderate", &[other.root.as_path()]);
     assert_eq!(held, Vec::<String>::new());
+}
+
+/// Review r3 (S1, B1): a hooks folder made where there was none, hidden
+/// behind an unreadable look, is reported once it can be read.
+#[test]
+fn issue_874_a_new_hooks_folder_behind_an_unreadable_look_is_reported() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let project = Project::new();
+    let git = project.git();
+    std::fs::remove_dir_all(git.join("hooks")).expect("no hooks");
+    let (thread, repos) = baseline(&project);
+    std::fs::create_dir_all(git.join("hooks")).expect("hooks");
+    std::fs::write(git.join("hooks/pre-commit"), "#!/bin/sh\n").expect("hook");
+    std::fs::set_permissions(git.join("hooks"), std::fs::Permissions::from_mode(0o000))
+        .expect("chmod");
+    let first = check(thread, &repos);
+    std::fs::set_permissions(git.join("hooks"), std::fs::Permissions::from_mode(0o755))
+        .expect("chmod");
+    assert_eq!(
+        kinds(&first),
+        vec![
+            format!("config {}", git.join("hooks").display()),
+            format!("incomplete {}", git.display()),
+        ]
+    );
+    assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
+    assert_eq!(project.held(), shown(&[git.join("hooks")]));
+}
+
+/// Review r3 (S2, S4): a removed worktree or clone isn't "replaced" and
+/// holds nothing; links in a hooks folder (the person's hook setup) aren't
+/// reported, not even at a first look.
+#[test]
+fn issue_874_removed_repositories_and_hook_links_hold_nothing() {
+    let project = Project::new();
+    let git = project.git();
+    std::fs::write(project.root.join("pre-commit.sh"), "#!/bin/sh\n").expect("script");
+    symlink("../../pre-commit.sh", git.join("hooks/pre-commit")).expect("hook link");
+    let (thread, repos) = baseline(&project);
+    std::fs::rename(&git, project.base.join("moved-git")).expect("remove .git");
+    assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
+    assert_eq!(project.held(), Vec::<String>::new());
+    std::fs::rename(project.base.join("moved-git"), &git).expect("restore .git");
+    assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
+}
+
+/// Review r3 (S3): git reads `[options] strategy` in any case and on the
+/// section's own line.
+#[test]
+fn issue_874_strategy_spellings() {
+    let project = Project::new();
+    let git = project.git();
+    let (thread, repos) = baseline(&project);
+    std::fs::create_dir_all(git.join("sequencer")).expect("sequencer");
+    for opts in [
+        "[OPTIONS]\n\tSTRATEGY = x/../evil\n",
+        "[options] strategy = \"y/../evil\"\n",
+    ] {
+        std::fs::write(git.join("sequencer/opts"), opts).expect("options");
+        let findings = check(thread, &repos);
+        assert!(
+            matches!(&findings[..], [Finding::Exec { lines, .. }] if lines[0].contains("/../evil")),
+            "{opts:?}: {findings:?}"
+        );
+    }
+}
+
+#[test]
+fn issue_874_long_reports_are_cut() {
+    let findings: Vec<Finding> = (0..25)
+        .map(|n| Finding::Remote {
+            path: PathBuf::from(format!("/p/.git/remotes/r{n}")),
+        })
+        .collect();
+    let message = report(&findings, "Moderate").expect("message");
+    assert!(message.contains("and 5 more"), "{message}");
+    assert!(!message.contains("remotes/r24"), "{message}");
 }

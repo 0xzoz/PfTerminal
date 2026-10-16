@@ -24,6 +24,11 @@
 #[cfg(unix)]
 mod unix;
 
+/// Told where a look fails (its task panicked or was ended).
+pub(crate) const CHECK_FAILED: &str = "Corbanu couldn't check this project's git folder for \
+     links and rebase steps an agent command may have left. Look for them before you run git \
+     there.";
+
 #[cfg(unix)]
 pub(crate) use unix::*;
 

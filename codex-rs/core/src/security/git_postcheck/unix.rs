@@ -299,6 +299,8 @@ enum Role {
     StorePart,
     /// `remotes` or `branches` of a git folder, and folders below them.
     Legacy,
+    /// `hooks` of a git folder, and folders below it.
+    Hooks,
     /// `worktrees` of a git folder: its folders are git folders.
     Worktrees,
     /// Below `modules` of a git folder: a git folder where it has `HEAD` and
@@ -377,6 +379,8 @@ struct Snapshot {
     dot_git: DotGit,
     /// Why the look is incomplete, if it is.
     incomplete: Option<String>,
+    /// When the look started.
+    started: i128,
 }
 
 impl Snapshot {
@@ -388,6 +392,7 @@ impl Snapshot {
             states: HashMap::new(),
             dot_git: dot_git.clone(),
             incomplete: None,
+            started: now_nanos(),
         }
     }
 }
@@ -483,6 +488,8 @@ fn walk(repo: &Repo, prev: Option<&Snapshot>) -> Snapshot {
                 Role::GitDir if is(&LEGACY_REMOTES) => Role::Legacy,
                 Role::GitDir if name.as_os_str() == "worktrees" => Role::Worktrees,
                 Role::GitDir if name.as_os_str() == "modules" => Role::Modules,
+                Role::GitDir if name.as_os_str() == "hooks" => Role::Hooks,
+                Role::Hooks => Role::Hooks,
                 Role::Worktrees => Role::GitDir,
                 Role::Modules => Role::Modules,
                 Role::Store { objects: true } if is(&OBJECT_FOLDERS_LOOKED_AT) => Role::StorePart,
@@ -547,7 +554,12 @@ fn list(dir: &Path, meta: &std::fs::Metadata, old: Option<&Folder>) -> Option<Fo
     // An unreadable folder fails the look (it can hide what git follows).
     for item in std::fs::read_dir(dir).ok()? {
         let item = item.ok()?;
-        let file_type = item.file_type().ok()?;
+        // Gone meanwhile (git renamed it into place): skipped.
+        let file_type = match item.file_type() {
+            Ok(file_type) => file_type,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return None,
+        };
         let (name, kind, ino) = (item.file_name(), Kind::of(file_type), item.ino());
         let entry = old
             .and_then(|old| old.entries.get(&name))
@@ -581,8 +593,15 @@ fn state_lines(path: &Path) -> Vec<String> {
         Some("strategy") => strategy_lines([text.trim()]),
         // Git config syntax: `strategy = <name>` in `[options]`.
         Some("opts") => strategy_lines(text.lines().filter_map(|line| {
+            // Git takes `[options] strategy = x` on one line, any case.
+            let line = match line.trim_start().strip_prefix('[') {
+                Some(rest) => rest.split_once(']')?.1,
+                None => line,
+            };
             let (key, value) = line.split_once('=')?;
-            (key.trim() == "strategy").then(|| value.trim().trim_matches('"'))
+            key.trim()
+                .eq_ignore_ascii_case("strategy")
+                .then(|| value.trim().trim_matches('"'))
         })),
         _ => exec_lines(&text),
     };
@@ -647,9 +666,9 @@ pub(super) enum Finding {
 }
 
 /// What has changed from `prev` to `cur`. A first look (`prev` empty)
-/// reports only what git would follow out of the sandbox (links and
-/// commands in state files): an ordinary repository has hard links, legacy
-/// remotes, config and hooks of its own.
+/// reports what git would follow out of the sandbox (links, commands in
+/// state files) and hard links: an ordinary repository has legacy remotes,
+/// config and hooks of its own, and hard-links only its objects.
 fn compare(repo: &Repo, prev: &Snapshot, cur: &Snapshot, first: bool) -> Vec<Finding> {
     let mut findings = Vec::new();
     if prev.dot_git != cur.dot_git {
@@ -660,35 +679,34 @@ fn compare(repo: &Repo, prev: &Snapshot, cur: &Snapshot, first: bool) -> Vec<Fin
     let mut folders: Vec<_> = cur.folders.iter().collect();
     folders.sort_by(|a, b| a.0.cmp(b.0));
     for (dir, folder) in folders {
-        // Never seen (the last look couldn't read it): only what a first
-        // look reports.
-        let first = first || (prev.incomplete.is_some() && !prev.folders.contains_key(dir));
+        let prev_folder = prev.folders.get(dir);
+        // Never seen because the last look couldn't read it, and unchanged
+        // since before that look (a command can't set a change time back):
+        // only what a first look reports.
+        let first = first
+            || (prev_folder.is_none() && prev.incomplete.is_some() && folder.ctime < prev.started);
         let own = repo.git_dirs.contains(dir);
-        let in_hooks = repo
-            .git_dirs
-            .iter()
-            .any(|git_dir| dir.starts_with(git_dir.join("hooks")));
         let mut names: Vec<_> = folder.entries.iter().collect();
         names.sort_by(|a, b| a.0.cmp(b.0));
         for (name, entry) in names {
             let path = dir.join(name);
-            let old = prev
-                .folders
-                .get(dir)
-                .and_then(|folder| folder.entries.get(name));
+            let old = prev_folder.and_then(|folder| folder.entries.get(name));
             let new = old.is_none_or(|old| {
                 old.kind != entry.kind || old.ino != entry.ino || old.dev != entry.dev
             });
+            // Git runs hooks, it doesn't write through them; links in an
+            // existing hooks folder are the person's (the folder is
+            // protected), a new one is reported below.
+            let hooks = folder.role == Role::Hooks
+                || (folder.role == Role::GitDir && name.as_os_str() == "hooks");
             if let Some(link) = entry.link.as_ref().filter(|link| link.escapes)
+                && !hooks
                 && (new || old.and_then(|old| old.link.as_ref()) != Some(link))
             {
                 findings.push(Finding::Link {
                     path: path.clone(),
                     target: link.resolved.clone().or_else(|| Some(link.raw.clone())),
                 });
-            }
-            if first {
-                continue;
             }
             // Git links packs into place, then removes the temporary name.
             if new
@@ -698,15 +716,23 @@ fn compare(repo: &Repo, prev: &Snapshot, cur: &Snapshot, first: bool) -> Vec<Fin
             {
                 findings.push(Finding::HardLink { path: path.clone() });
             }
+            if first {
+                continue;
+            }
             if folder.role == Role::Legacy
                 && entry.kind != Kind::Dir
                 && (new || old.is_some_and(|old| old.stamp != entry.stamp))
             {
                 findings.push(Finding::Remote { path: path.clone() });
             }
-            if new
-                && entry.kind != Kind::Dir
-                && (in_hooks || (own && CONFIG_NAMES.iter().any(|kept| name.as_os_str() == *kept)))
+            // What the protected-file rules can't hold: config or hooks of
+            // the repository's own git folder that didn't exist (on Linux a
+            // missing one isn't held read-only). Git rewrites existing ones
+            // by renaming; that isn't reported.
+            if own
+                && old.is_none()
+                && (name.as_os_str() == "hooks"
+                    || CONFIG_NAMES.iter().any(|kept| name.as_os_str() == *kept))
             {
                 findings.push(Finding::Config { path });
             }
@@ -715,7 +741,11 @@ fn compare(repo: &Repo, prev: &Snapshot, cur: &Snapshot, first: bool) -> Vec<Fin
     let mut states: Vec<_> = cur.states.iter().collect();
     states.sort_by(|a, b| a.0.cmp(b.0));
     for (path, read) in states {
-        if !read.lines.is_empty() && prev.states.get(path) != Some(read) {
+        // Reported when what runs changes (a rebase with `-x` rewrites its
+        // todo at every step).
+        if !read.lines.is_empty()
+            && prev.states.get(path).map(|old| &old.lines) != Some(&read.lines)
+        {
             findings.push(Finding::Exec {
                 todo: path.clone(),
                 lines: read.lines.clone(),
@@ -824,9 +854,10 @@ fn with_global<T>(f: impl FnOnce(&mut Global) -> T) -> T {
     f(&mut GLOBAL.lock().unwrap_or_else(PoisonError::into_inner))
 }
 
-/// `repo`'s slot in this session. A forgotten repository (past the limits)
-/// gets a first look again, which reports what is there.
-fn slot_of(thread: ThreadId, repo: &Repo) -> Slot {
+/// `repo`'s slot in this session, counted as used now where `used` (a
+/// command runs there). A forgotten repository (past the limits) gets a
+/// first look again, which reports links, steps and hard links there.
+fn slot_of(thread: ThreadId, repo: &Repo, used: bool) -> Slot {
     with_global(|global| {
         global.uses += 1;
         let uses = global.uses;
@@ -853,7 +884,9 @@ fn slot_of(thread: ThreadId, repo: &Repo) -> Slot {
             state.repos.remove(&oldest);
             state.used.remove(&oldest);
         }
-        state.used.insert(repo.dot_git.clone(), uses);
+        if used || !state.used.contains_key(&repo.dot_git) {
+            state.used.insert(repo.dot_git.clone(), uses);
+        }
         state
             .repos
             .entry(repo.dot_git.clone())
@@ -867,18 +900,25 @@ fn slot_of(thread: ThreadId, repo: &Repo) -> Slot {
 /// first look, where this session has none yet, with what it found there
 /// already for the person.
 pub(crate) fn begin(thread: ThreadId, repos: &[Repo], level: &str) -> Option<String> {
-    report(&look(thread, repos, /*first_only*/ true), level)
+    report(
+        &look(thread, repos, /*first_only*/ true, /*used*/ true),
+        level,
+    )
 }
 
 /// After such a command: what is new since the last look, as a message for
 /// the person (`None` if nothing).
 pub(crate) fn finish(thread: ThreadId, repos: &[Repo], level: &str) -> Option<String> {
-    report(&look(thread, repos, /*first_only*/ false), level)
+    report(
+        &look(thread, repos, /*first_only*/ false, /*used*/ true),
+        level,
+    )
 }
 
 /// Before a command is decided, and at the end of a turn: the repositories
 /// this session looked at before, looked at again. Returns the message for
-/// the person and what holds the rules for a command in `folders`.
+/// the person and what holds the rules for a command in `folders` (found in
+/// its repository by any session, a sub-agent's too).
 pub(crate) fn recheck(
     thread: ThreadId,
     level: &str,
@@ -889,35 +929,46 @@ pub(crate) fn recheck(
             state.repos.values().map(|(repo, _)| repo.clone()).collect()
         })
     });
-    let message = report(&look(thread, &repos, /*first_only*/ false), level);
-    let mut watched: Vec<PathBuf> = repos.into_iter().flat_map(|repo| repo.git_dirs).collect();
-    watched.extend(
-        self::repos(folders)
-            .into_iter()
-            .flat_map(|repo| repo.git_dirs),
+    let message = report(
+        &look(
+            thread, &repos, /*first_only*/ false, /*used*/ false,
+        ),
+        level,
     );
+    // Held for a command in the project it runs in.
+    let watched: Vec<PathBuf> = self::repos(folders)
+        .into_iter()
+        .flat_map(|repo| repo.git_dirs)
+        .collect();
     (message, held_for(&watched))
 }
 
 #[cfg(test)]
 pub(super) fn check(thread: ThreadId, repos: &[Repo]) -> Vec<Finding> {
-    look(thread, repos, /*first_only*/ false)
+    look(thread, repos, /*first_only*/ false, /*used*/ true)
 }
 
 /// Looks at `repos` (only those without a look yet, where `first_only`).
-fn look(thread: ThreadId, repos: &[Repo], first_only: bool) -> Vec<Finding> {
+fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<Finding> {
     let mut findings = Vec::new();
     let mut held = Vec::new();
     let mut incomplete = Vec::new();
     for repo in repos {
-        let slot = slot_of(thread, repo);
+        let slot = slot_of(thread, repo, used);
         let mut snapshot = slot.lock().unwrap_or_else(PoisonError::into_inner);
         if first_only && snapshot.is_some() {
             continue;
         }
-        let prev = snapshot.take();
-        let cur = walk(repo, prev.as_ref());
-        let mut found = match &prev {
+        // The last look stays until this one is done (a panic keeps it).
+        let prev = snapshot.as_ref();
+        let cur = walk(repo, prev);
+        // Gone (a worktree removed, a scratch clone deleted): nothing to
+        // follow; should it come back, it is compared with the last look.
+        if cur.dot_git == DotGit::Missing {
+            incomplete.push((repo.git_dirs.clone(), None));
+            continue;
+        }
+        let mut found = match prev {
             Some(prev) => compare(repo, prev, &cur, /*first*/ false),
             None => compare(
                 repo,
@@ -936,9 +987,7 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool) -> Vec<Finding> {
         );
         // Told each time a look becomes incomplete; held while it is.
         if let Some(why) = &cur.incomplete
-            && prev
-                .as_ref()
-                .is_none_or(|prev| prev.incomplete.as_ref() != Some(why))
+            && prev.is_none_or(|prev| prev.incomplete.as_ref() != Some(why))
         {
             found.push(Finding::Incomplete {
                 dot_git: repo.dot_git.clone(),

@@ -584,12 +584,13 @@ impl ToolOrchestrator {
         let git_held = git_refresh(
             tool_ctx,
             resolution_folders(tool, req, &turn_cwd, &materialized_workspace_roots),
-            approved_by == Some(ApprovalResolutionSource::User),
         )
         .await;
+        let mut git_held_back = false;
         let denied = post_taint_read_denials(
             tool_ctx,
-            git_held,
+            !git_held.is_empty(),
+            &mut git_held_back,
             human_approved_at,
             grant_operation
                 .as_ref()
@@ -600,6 +601,9 @@ impl ToolOrchestrator {
             permission_profile,
             &permissions,
         );
+        if git_held_back {
+            warn(tool_ctx, &git_held_note(&git_held)).await;
+        }
         // #826: Core's level, where the protected-path rules apply.
         let protected_level = denied.as_ref().map(|(_, _, _, level)| *level);
         let (denied_exec_server_permissions, permissions) = match denied {
@@ -895,12 +899,14 @@ impl ToolOrchestrator {
                 }
                 let sandbox_startup_failure =
                     is_sandbox_startup_failure(initial_sandbox, output.as_ref());
+                // #874: nor while the git check's findings are still there
+                // (an approval doesn't lift the rules then).
                 let unsandboxed_allowed = retry_may_leave_sandbox(
                     policy_allows_no_sandbox,
                     keeps_sandbox,
                     post_taint.is_some(),
                     network_approval_context.is_some(),
-                );
+                ) && git_held.is_empty();
                 // Under `Never` or `OnRequest`, do not retry without sandbox;
                 // surface a concise sandbox denial that preserves the original
                 // output. Exception: if the platform sandbox itself failed to
@@ -1193,23 +1199,19 @@ impl GitCheck {
     }
 }
 
-const GIT_CHECK_FAILED: &str = "Corbanu couldn't check this project's git folder for links \
-     and rebase steps an agent command may have left. Look for them before you run git there.";
+use crate::security::git_postcheck::CHECK_FAILED as GIT_CHECK_FAILED;
 
 /// #874 (D6): under Moderate or Aggressive, the git folders this session
-/// watches looked at again; whether the rules stay held for a command in
-/// `folders` (fail closed when the look fails). The person is told what is
-/// new, and, where they approved this command, why the approval doesn't
-/// lift the rules.
+/// watches looked at again; what holds the rules for a command in `folders`
+/// (fail closed when the look fails). The person is told what is new.
 async fn git_refresh(
     tool_ctx: &ToolCtx,
     folders: Vec<codex_utils_absolute_path::AbsolutePathBuf>,
-    approved_by_person: bool,
-) -> bool {
+) -> Vec<String> {
     let Some(level) = crate::security::protected_additional::protected_level(&tool_ctx.session)
         .filter(|level| *level != codex_security_policy::SecurityLevel::Permissive)
     else {
-        return false;
+        return Vec::new();
     };
     let thread = tool_ctx.session.thread_id();
     let level = format!("{level:?}");
@@ -1228,18 +1230,26 @@ async fn git_refresh(
     });
     if let Some(message) = message {
         warn(tool_ctx, &message).await;
-    } else if approved_by_person && !held.is_empty() {
-        warn(
-            tool_ctx,
-            &format!(
-                "Your approval doesn't lift the protected-file rules for this command while the \
-                 project's git folder still holds what Corbanu reported: {}.",
-                held.join(", ")
-            ),
-        )
-        .await;
     }
-    !held.is_empty()
+    held
+}
+
+/// Why an approval or grant didn't lift the protected-file rules (#874).
+fn git_held_note(held: &[String]) -> String {
+    const SHOWN: usize = 20;
+    let mut shown = held
+        .iter()
+        .take(SHOWN)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if held.len() > SHOWN {
+        shown.push_str(&format!(" and {} more", held.len() - SHOWN));
+    }
+    format!(
+        "The approval doesn't lift the protected-file rules for this command while the \
+         project's git folder still holds what Corbanu reported: {shown}."
+    )
 }
 
 /// Issue #540: whether the retry after a sandbox denial may run without a
@@ -1571,6 +1581,7 @@ fn aggressive_grant_offer(
 fn post_taint_read_denials(
     tool_ctx: &ToolCtx,
     git_held: bool,
+    git_held_back: &mut bool,
     human_approved_at: Option<u64>,
     grant_operation: Option<&str>,
     confirmed_grant: Option<crate::security::grant_offer::Confirmed>,
@@ -1597,7 +1608,9 @@ fn post_taint_read_denials(
     // folder is still there (`git_refresh`), no approval or grant lifts the
     // rules: an approved `git commit` could write through a planted link
     // into a protected file.
-    if git_held {
+    *git_held_back = git_held
+        && (state.human_approval_lifts_rules(human_approved_at) || confirmed_grant.is_some());
+    if *git_held_back {
         tracing::info!(
             target: "codex_core::security::tainted_action",
             call_id = %tool_ctx.call_id,
