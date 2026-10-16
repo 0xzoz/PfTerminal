@@ -3,6 +3,11 @@
 //! line of its own, and a sed program is judged whole: one that may run a
 //! shell command, or that saves what it outputs to a file the same line
 //! runs, is code the host cannot read.
+//!
+//! Quoted text is judged wherever it is (as the word lexer does), so a
+//! misreading of which text is data cannot hide anything; and a shell or
+//! sed command the word lexer finds that this reading does not fails
+//! closed.
 
 use super::Classifier;
 use super::FileText;
@@ -23,11 +28,21 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 /// Levels of quoted text read for nested commands. Deeper text is still
-/// split by the word lexer, and a sed only it sees fails closed.
+/// split by the word lexer, and a command only it sees fails closed.
 const MAX_QUOTED_LEVEL: usize = 4;
+
+/// Nested scripts judged for one action; more fail closed.
+const MAX_NESTED_SCRIPTS: usize = 256;
 
 /// Pipeline stages that save their input to the files they are given.
 const PIPE_WRITERS: &[&str] = &["tee", "dd", "sponge", "cp", "install"];
+
+/// Pipeline stages that only print a transform of their input. Any other
+/// stage (`awk`, `sh -c`, `python3`, `while read`) may write it to a file.
+const PURE_FILTERS: &[&str] = &[
+    "cat", "column", "cut", "fmt", "fold", "grep", "egrep", "fgrep", "head", "jq", "less", "more",
+    "nl", "rg", "sed", "gsed", "sort", "tac", "tail", "tr", "uniq", "wc",
+];
 
 /// What the pass found in one command line.
 #[derive(Default)]
@@ -37,17 +52,22 @@ struct Found {
     seds: Vec<Sed>,
     /// sed commands found (each may be read more than one way).
     sed_commands: usize,
-    /// Text it could not read in full: substitutions nested too deeply, or
-    /// too many places a command may start.
+    /// Shells given a `-c` script.
+    shell_commands: usize,
+    /// Text it could not read in full: substitutions nested too deeply, a
+    /// quote left open, or too many places a command may start.
     unreadable: bool,
     /// Files the line writes (`None`: one it cannot name).
     written: Vec<Option<String>>,
     /// A command other than sed writes a file (a copy, move, download or
     /// redirection), which may carry what sed output.
     other_writes: bool,
-    /// Redirections of compound commands (`{ ...; } > f`, `done > f`,
-    /// `exec 3> f`): any command's output may go there.
+    /// Redirections and pipes of compound commands (`{ ...; } > f`,
+    /// `done | tee f`, `exec 3> f`): any command's output may go there.
     shared_targets: Vec<Option<String>>,
+    /// An interpreter runs code that may write files the classifier does
+    /// not see (`python3 -c "open('x','w')..."`).
+    runs_code: bool,
 }
 
 /// One reading of a sed invocation and where it runs.
@@ -57,20 +77,21 @@ struct Sed {
     /// Where its output is saved besides in place: its redirections and
     /// the files later pipeline stages write.
     saved_to: Vec<Option<String>>,
+    /// It runs inside a substitution: its output is part of another
+    /// command's words.
+    substituted: bool,
     /// It gets more arguments at run time (`xargs sed`, `parallel sed`)...
     fed: bool,
-    /// ...that go into its words (`xargs -I{}`, `{}`).
+    /// ...that may go into its words (`xargs -I{}`, `{}`).
     replaced: bool,
 }
 
 /// What quoted text is to the command that gets it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Role {
-    /// Text the command does not run.
-    Data,
-    /// Code an interpreter runs.
+    /// Text that may be code (or data, which is judged the same way).
     Code,
-    /// A nested shell's script.
+    /// A nested shell's script, judged as a line by `script`.
     Script,
 }
 
@@ -83,14 +104,40 @@ fn known(word: &Word) -> Option<String> {
     (!word.dynamic).then(|| word.text.clone())
 }
 
+/// A file a command names, when the classifier can name it: not an
+/// expansion and not a pattern (`*.sh`, `r.{a,b}`).
+fn target(text: Option<String>) -> Option<String> {
+    text.filter(|text| !text.contains(['*', '?', '[', '{']))
+}
+
+/// How many shells the word lexer's command runs with a `-c` script.
+pub(super) fn shell_commands(words: &[String]) -> usize {
+    let (starts, _) = sed::command_starts(words);
+    let mut resolved = HashSet::new();
+    starts
+        .into_iter()
+        .filter_map(|start| {
+            let (index, shell) = indirect::command_word(&words[start..])?;
+            let at = start + index;
+            let inline = SHELLS.contains(&shell.as_str())
+                && matches!(
+                    invocation::parse(&shell, &words[at + 1..]).map(|invocation| invocation.code),
+                    Some(Code::Inline(_))
+                );
+            (inline && resolved.insert(at)).then_some(())
+        })
+        .count()
+}
+
 impl Classifier {
-    /// `lexed_seds`: how many sed commands the word lexer found in the line.
+    /// `lexed`: how many sed commands and shells with a `-c` script the
+    /// word lexer found in the line.
     pub(super) fn quoted_pass(
         &mut self,
         command: &[String],
         cwd: &str,
         depth: usize,
-        lexed_seds: usize,
+        lexed: (usize, usize),
     ) {
         // The words as given, and a shell's `-c` script as a line of its
         // own, as the word lexer reads them.
@@ -123,24 +170,19 @@ impl Classifier {
             stack: Vec::new(),
         };
         let mut found = Found::default();
-        self.walk(
-            &[argv],
-            &mut folders,
-            /*level*/ 0,
-            /*code*/ false,
-            &mut found,
-        );
+        self.walk(&[argv], &mut folders, /*level*/ 0, &mut found);
+        // Shell text a shell would refuse may split differently from this
+        // reading (text of other languages is read loosely).
+        let strict = self.not_shell == 0 && self.rebuilt == 0;
         for script in scripts {
-            match quoted::commands(script) {
-                Some(commands) => self.walk(
-                    &commands,
-                    &mut folders,
-                    /*level*/ 0,
-                    /*code*/ false,
-                    &mut found,
-                ),
-                None => found.unreadable = true,
-            }
+            let reading = quoted::commands(script);
+            found.unreadable |= reading.too_deep || (strict && reading.unterminated);
+            self.walk(
+                &reading.commands,
+                &mut folders,
+                /*level*/ 0,
+                &mut found,
+            );
         }
         if found.unreadable {
             self.note(ProtectedActionKind::UnseenCode);
@@ -148,33 +190,30 @@ impl Classifier {
         self.written.extend(found.written.iter().cloned());
         let mut judged = HashSet::new();
         for (script, cwd) in std::mem::take(&mut found.scripts) {
-            if judged.insert((script.clone(), cwd.clone())) {
-                self.script(&script, &cwd, depth + 1);
+            if !judged.insert((script.clone(), cwd.clone())) {
+                continue;
             }
+            self.nested_scripts += 1;
+            if self.nested_scripts > MAX_NESTED_SCRIPTS {
+                self.note(ProtectedActionKind::UnseenCode);
+                break;
+            }
+            self.script(&script, &cwd, depth + 1);
         }
         for sed in std::mem::take(&mut found.seds) {
             self.judge_sed(sed, &found, depth);
         }
-        // A sed the word lexer finds that this reading does not (spelled
-        // through a variable, braces or `$IFS`) fails closed.
-        if lexed_seds > found.sed_commands {
+        // A command the word lexer finds that this reading does not
+        // (spelled through a variable, braces or `$IFS`) fails closed.
+        let (lexed_seds, lexed_shells) = lexed;
+        if lexed_seds > found.sed_commands || lexed_shells > found.shell_commands {
             self.note(ProtectedActionKind::UnseenCode);
         }
     }
 
     /// Collect nested scripts, sed invocations and written files from
-    /// `commands` and the quoted text in them, following `cd`. `code`: the
-    /// commands are code an interpreter runs (`python3 -c "..."`), whose
-    /// string literals may be shell lines; elsewhere quoted text is data
-    /// unless a command runs it.
-    fn walk(
-        &self,
-        commands: &[Command],
-        folders: &mut Folders,
-        level: usize,
-        code: bool,
-        found: &mut Found,
-    ) {
+    /// `commands` and the quoted text in them, following `cd`.
+    fn walk(&self, commands: &[Command], folders: &mut Folders, level: usize, found: &mut Found) {
         for command in commands {
             let texts: Vec<String> = command.words.iter().map(|word| word.text.clone()).collect();
             // A substitution's `cd` does not move this line.
@@ -187,22 +226,29 @@ impl Classifier {
             let compound = first
                 .as_deref()
                 .is_none_or(|first| matches!(first, "done" | "fi" | "esac" | "exec"));
-            let mut targets: Vec<Option<String>> = command.writes_to.iter().map(known).collect();
+            let mut targets: Vec<Option<String>> = command
+                .writes_to
+                .iter()
+                .map(|word| target(known(word)))
+                .collect();
             if command.writes_descriptor {
                 targets.push(None);
             }
             if compound {
                 found.shared_targets.extend(targets.iter().cloned());
+                found
+                    .shared_targets
+                    .extend(pipeline_targets(commands, command));
             }
             found.written.extend(targets);
             let (starts, overflow) = sed::command_starts(&texts);
             found.unreadable |= overflow;
-            let fallback = if code { Role::Code } else { Role::Data };
-            let mut roles = vec![fallback; texts.len()];
-            let mut input_role = fallback;
+            let mut roles = vec![Role::Code; texts.len()];
+            let mut input_role = Role::Code;
             let mut resolved = HashSet::new();
             let mut wrappers_checked = HashSet::new();
             let mut runners = 0;
+            let mut watched = false;
             let mut sed_command = false;
             for start in starts {
                 let Some((index, resolved_name)) = indirect::command_word(&texts[start..]) else {
@@ -210,9 +256,14 @@ impl Classifier {
                 };
                 let at = start + index;
                 // Wrappers that run a string as a shell line (`watch`,
-                // `su -c`, `flock f -c`, `env -S`).
+                // `su -c`, `flock f -c`, `env -S`). Only the outermost
+                // `watch` counts: an inner one is part of its line.
                 for wrapper in start..=at {
                     if !wrappers_checked.insert(wrapper) {
+                        continue;
+                    }
+                    let is_watch = name(&texts[wrapper]) == "watch";
+                    if is_watch && std::mem::replace(&mut watched, true) {
                         continue;
                     }
                     for (word, script) in runner_scripts(&texts, wrapper) {
@@ -238,32 +289,25 @@ impl Classifier {
                         texts[at + 1..]
                             .iter()
                             .filter(|word| !word.starts_with('-'))
-                            .map(|word| Some(file_operand(word).to_string())),
+                            .map(|word| target(Some(file_operand(word).to_string()))),
                     );
                 }
                 if resolved_name == "eval" {
-                    for role in &mut roles[at + 1..] {
-                        *role = Role::Code;
-                    }
                     continue;
                 }
                 let shell = SHELLS.contains(&resolved_name.as_str());
-                match invocation::parse(&resolved_name, &texts[at + 1..])
-                    .map(|invocation| invocation.code)
-                {
-                    Some(Code::Inline(Some(inline))) => {
-                        // Attached code (`-c$X`) ends its option word.
-                        let Some(first) = (at + 1..texts.len()).find(|&index| {
-                            let word = texts[index].as_str();
-                            word.ends_with(inline)
-                                && std::ptr::eq(&word[word.len() - inline.len()..], inline)
-                        }) else {
+                let code = invocation::parse(&resolved_name, &texts[at + 1..])
+                    .map(|invocation| invocation.code);
+                found.runs_code |= code.is_some() && !shell;
+                match code {
+                    Some(Code::Inline(inline)) if shell => {
+                        found.shell_commands += 1;
+                        let Some(inline) = inline else {
                             continue;
                         };
-                        if !shell {
-                            roles[first] = Role::Code;
+                        let Some(first) = word_holding(&texts, at + 1, inline) else {
                             continue;
-                        }
+                        };
                         // After `-c`, bash reads further options (`-o
                         // pipefail`) and runs the first operand; other
                         // shells run the word after `-c`. Every word that
@@ -291,12 +335,11 @@ impl Classifier {
                                 .push((input.text.clone(), folders.cwd.clone()));
                         }
                     }
-                    Some(Code::Stdin) => input_role = Role::Code,
                     _ => {}
                 }
             }
             if sed_command {
-                self.collect_seds(commands, command, &texts, folders, found);
+                collect_seds(commands, command, &texts, folders, found);
             }
             if level >= MAX_QUOTED_LEVEL {
                 continue;
@@ -315,104 +358,21 @@ impl Classifier {
                     previous: folders.previous.clone(),
                     stack: folders.stack.clone(),
                 };
-                self.walk_inner(&word.text, &mut inner, level + 1, role, found);
+                let reading = quoted::commands(&word.text);
+                found.unreadable |= reading.too_deep;
+                if role == Role::Code {
+                    self.walk(&reading.commands, &mut inner, level + 1, found);
+                    continue;
+                }
+                // A nested shell's script is judged when `script` reads
+                // it: here its commands are only counted.
+                let mut counted = Found::default();
+                self.walk(&reading.commands, &mut inner, level + 1, &mut counted);
+                found.sed_commands += counted.sed_commands;
+                found.shell_commands += counted.shell_commands;
+                found.unreadable |= counted.unreadable;
             }
         }
-    }
-
-    fn collect_seds(
-        &self,
-        commands: &[Command],
-        command: &Command,
-        texts: &[String],
-        folders: &Folders,
-        found: &mut Found,
-    ) {
-        // Where its output goes: its redirections, then every later stage
-        // of its pipeline that writes files.
-        let mut saved_to: Vec<Option<String>> = command.writes_to.iter().map(known).collect();
-        if command.writes_descriptor {
-            saved_to.push(None);
-        }
-        if command.piped && command.pipe_to.is_none() {
-            saved_to.push(None);
-        }
-        let mut stage = command.pipe_to;
-        let mut steps = 0;
-        while let Some(index) = stage
-            && steps < commands.len()
-        {
-            steps += 1;
-            let Some(consumer) = commands.get(index) else {
-                saved_to.push(None);
-                break;
-            };
-            saved_to.extend(consumer.writes_to.iter().map(known));
-            if consumer.writes_descriptor {
-                saved_to.push(None);
-            }
-            let consumer_texts: Vec<String> = consumer
-                .words
-                .iter()
-                .map(|word| word.text.clone())
-                .collect();
-            if let Some((at, consumer_name)) = indirect::command_word(&consumer_texts)
-                && PIPE_WRITERS.contains(&consumer_name.as_str())
-            {
-                saved_to.extend(
-                    consumer.words[at + 1..]
-                        .iter()
-                        .filter(|word| !word.text.starts_with('-'))
-                        .map(|word| known(word).map(|text| file_operand(&text).to_string())),
-                );
-            }
-            stage = consumer.pipe_to;
-        }
-        for at in sed::positions(texts) {
-            found.sed_commands += 1;
-            let fed = texts[..at]
-                .iter()
-                .any(|word| matches!(name(word).as_str(), "xargs" | "parallel"));
-            let replaced = fed
-                && (texts[..at].iter().any(|word| {
-                    ["-I", "-i", "-J", "--replace"]
-                        .iter()
-                        .any(|flag| word.starts_with(flag))
-                }) || texts[at + 1..].iter().any(|word| word.contains("{}")));
-            for call in sed::calls(&command.words[at + 1..]) {
-                found.seds.push(Sed {
-                    call,
-                    cwd: folders.cwd.clone(),
-                    saved_to: saved_to.clone(),
-                    fed,
-                    replaced,
-                });
-            }
-        }
-    }
-
-    fn walk_inner(
-        &self,
-        text: &str,
-        folders: &mut Folders,
-        level: usize,
-        role: Role,
-        found: &mut Found,
-    ) {
-        let Some(commands) = quoted::commands(text) else {
-            found.unreadable = true;
-            return;
-        };
-        if role == Role::Code {
-            self.walk(&commands, folders, level, /*code*/ true, found);
-            return;
-        }
-        // Data is not run, and a nested shell's script is judged when
-        // `script` reads it: here only its sed commands are counted.
-        let mut ignored = Found::default();
-        self.walk(&commands, folders, level, /*code*/ false, &mut ignored);
-        found.sed_commands += ignored.sed_commands;
-        found.unreadable |= ignored.unreadable;
     }
 
     /// A sed that may run a shell command, whose program or options the
@@ -426,22 +386,28 @@ impl Classifier {
             .iter()
             .chain(&call.files)
             .any(|word| word.dynamic);
-        // Arguments added at run time may be the program or options.
+        // Arguments added at run time may be the program or options
+        // (GNU sed reads options anywhere before `--`).
         let fed = sed.fed
             && !call.bsd
-            && (sed.replaced || (call.programs.is_empty() && call.files.is_empty()));
+            && (sed.replaced
+                || !call.options_ended
+                || (call.programs.is_empty() && call.files.is_empty()));
         if call.unknown || fed || (dynamic && self.rebuilt == 0) {
             self.note(ProtectedActionKind::UnseenCode);
             return;
         }
         let mut chunks: Vec<String> = call.programs.iter().map(|word| word.text.clone()).collect();
         for file in &call.files {
-            // A script file the action writes may differ when sed runs.
-            let rewritten = self.written.iter().any(|written| {
-                written
-                    .as_deref()
-                    .is_none_or(|written| name(written) == name(&file.text))
-            });
+            // A script file the action writes, or that code the classifier
+            // cannot follow may write, may differ when sed runs.
+            let rewritten = line.runs_code
+                || !self.ran.is_empty()
+                || self.written.iter().any(|written| {
+                    written
+                        .as_deref()
+                        .is_none_or(|written| name(written) == name(&file.text))
+                });
             let path = self.homes.resolve(&file.text, &sed.cwd);
             match (rewritten, self.read_file(&path)) {
                 (false, FileText::Text(text)) => chunks.push(text),
@@ -462,11 +428,17 @@ impl Classifier {
         }
         let mut targets = sed.saved_to.clone();
         targets.extend(line.shared_targets.iter().cloned());
-        targets.extend(
-            readings
+        targets.extend(readings.iter().flat_map(|reading| {
+            reading
+                .writes
                 .iter()
-                .flat_map(|reading| reading.writes.iter().cloned().map(Some)),
-        );
+                .cloned()
+                .map(|file| target(Some(file)))
+        }));
+        // Output captured into another command's words.
+        if sed.substituted && line.other_writes {
+            targets.push(None);
+        }
         let elsewhere = !targets.is_empty();
         if !elsewhere && !call.in_place {
             return;
@@ -476,7 +448,7 @@ impl Classifier {
             targets.push(None);
         }
         if call.in_place {
-            targets.extend(call.operands.iter().map(known));
+            targets.extend(call.operands.iter().map(|word| target(known(word))));
         }
         if !targets.iter().any(|target| self.may_run(target.as_deref())) {
             return;
@@ -512,6 +484,103 @@ impl Classifier {
     }
 }
 
+fn collect_seds(
+    commands: &[Command],
+    command: &Command,
+    texts: &[String],
+    folders: &Folders,
+    found: &mut Found,
+) {
+    // Where its output goes: its redirections, then the later stages of
+    // its pipeline.
+    let mut saved_to: Vec<Option<String>> = command
+        .writes_to
+        .iter()
+        .map(|word| target(known(word)))
+        .collect();
+    if command.writes_descriptor {
+        saved_to.push(None);
+    }
+    saved_to.extend(pipeline_targets(commands, command));
+    for at in sed::positions(texts) {
+        found.sed_commands += 1;
+        let fed = texts[..at]
+            .iter()
+            .any(|word| matches!(name(word).as_str(), "xargs" | "parallel"));
+        let replaced = fed
+            && (texts[..at].iter().any(|word| {
+                ["-I", "-i", "-J", "--replace"]
+                    .iter()
+                    .any(|flag| word.starts_with(flag))
+            }) || texts[at + 1..].iter().any(|word| word.contains("{}")));
+        for call in sed::calls(&command.words[at + 1..]) {
+            found.seds.push(Sed {
+                call,
+                cwd: folders.cwd.clone(),
+                saved_to: saved_to.clone(),
+                substituted: command.substituted,
+                fed,
+                replaced,
+            });
+        }
+    }
+}
+
+/// Files the later stages of `command`'s pipeline may write what it
+/// outputs to (`None`: ones the classifier cannot name).
+fn pipeline_targets(commands: &[Command], command: &Command) -> Vec<Option<String>> {
+    let mut targets = Vec::new();
+    if command.piped && command.pipe_to.is_none() {
+        targets.push(None);
+    }
+    let mut stage = command.pipe_to;
+    let mut steps = 0;
+    while let Some(index) = stage
+        && steps < commands.len()
+    {
+        steps += 1;
+        let Some(consumer) = commands.get(index) else {
+            targets.push(None);
+            break;
+        };
+        targets.extend(consumer.writes_to.iter().map(|word| target(known(word))));
+        if consumer.writes_descriptor {
+            targets.push(None);
+        }
+        let texts: Vec<String> = consumer
+            .words
+            .iter()
+            .map(|word| word.text.clone())
+            .collect();
+        match indirect::command_word(&texts) {
+            Some((at, consumer_name)) if PIPE_WRITERS.contains(&consumer_name.as_str()) => {
+                targets.extend(
+                    consumer.words[at + 1..]
+                        .iter()
+                        .filter(|word| !word.text.starts_with('-'))
+                        .map(|word| {
+                            target(known(word).map(|text| file_operand(&text).to_string()))
+                        }),
+                );
+            }
+            Some((_, consumer_name)) if PURE_FILTERS.contains(&consumer_name.as_str()) => {}
+            // A stage that may write what it reads anywhere.
+            _ => targets.push(None),
+        }
+        stage = consumer.pipe_to;
+    }
+    targets
+}
+
+/// The word from `from` on that ends with `inline` (an attached `-c$X`
+/// ends its option word).
+fn word_holding(texts: &[String], from: usize, inline: &str) -> Option<usize> {
+    (from..texts.len()).find(|&index| {
+        let word = texts[index].as_str();
+        word.len() >= inline.len() && std::ptr::eq(&word[word.len() - inline.len()..], inline)
+    })
+}
+
 /// The file in an operand such as `of=r.sh`.
 fn file_operand(word: &str) -> &str {
     word.rsplit_once('=').map_or(word, |(_, file)| file)
@@ -519,7 +588,8 @@ fn file_operand(word: &str) -> &str {
 
 /// Scripts a wrapper at `at` runs as a shell line, with the word that
 /// holds each: `watch CMD...`, `su -c CMD`, `runuser -c`, `flock F -c`,
-/// `script -c`, `env -S STRING`. Options are looked for among the next
+/// `script -c`, `env -S STRING`, also in a group of short options
+/// (`su -lc`, `script -qc`). Options are looked for among the next
 /// `MAX_JUDGED_POSITIONS` words.
 fn runner_scripts(texts: &[String], at: usize) -> Vec<(usize, String)> {
     let wrapper = name(&texts[at]);
@@ -540,23 +610,32 @@ fn runner_scripts(texts: &[String], at: usize) -> Vec<(usize, String)> {
             vec![(index, texts[index..].join(" "))]
         }
         "su" | "runuser" | "flock" | "script" | "env" => {
-            let (short, long) = if wrapper == "env" {
-                ("-S", "--split-string")
+            let (letter, long) = if wrapper == "env" {
+                ('S', "--split-string")
             } else {
-                ("-c", "--command")
+                ('c', "--command")
             };
             let mut scripts = Vec::new();
             for index in args {
                 let word = &texts[index];
-                if word == short || word == long {
-                    if let Some(next) = texts.get(index + 1) {
-                        scripts.push((index + 1, next.clone()));
-                    }
-                } else if let Some(attached) = word
-                    .strip_prefix(&format!("{long}="))
-                    .or_else(|| word.strip_prefix(short).filter(|rest| !rest.is_empty()))
-                {
+                let next = || texts.get(index + 1).map(|next| (index + 1, next.clone()));
+                if word == long {
+                    scripts.extend(next());
+                } else if let Some(attached) = word.strip_prefix(&format!("{long}=")) {
                     scripts.push((index, attached.to_string()));
+                } else if let Some(cluster) = word.strip_prefix('-')
+                    && !cluster.starts_with('-')
+                    && let Some((at_letter, _)) =
+                        cluster.char_indices().find(|(_, ch)| *ch == letter)
+                {
+                    // The letter's value is the rest of the group, or the
+                    // next word.
+                    let rest = &cluster[at_letter + 1..];
+                    if rest.is_empty() {
+                        scripts.extend(next());
+                    } else {
+                        scripts.push((index, rest.to_string()));
+                    }
                 }
             }
             scripts

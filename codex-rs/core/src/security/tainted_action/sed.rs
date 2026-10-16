@@ -59,6 +59,9 @@ pub(super) struct Call {
     pub(super) unknown: bool,
     /// Read as BSD sed reads it (which has no `e`).
     pub(super) bsd: bool,
+    /// Its options ended (`--`, or an operand under `POSIXLY_CORRECT`):
+    /// words added after them are operands.
+    pub(super) options_ended: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -216,6 +219,7 @@ fn call(args: &[Word], bsd: bool, posix: bool) -> Call {
             break;
         }
     }
+    call.options_ended = options_done;
     if !explicit && !operands.is_empty() {
         call.programs.push(operands.remove(0));
     }

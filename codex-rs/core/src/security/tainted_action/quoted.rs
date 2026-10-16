@@ -41,29 +41,41 @@ pub(super) struct Command {
 
 impl Command {
     fn is_empty(&self) -> bool {
-        self.words.is_empty() && self.writes_to.is_empty() && self.input.is_empty()
+        self.words.is_empty() && self.writes_to.is_empty() && self.input.is_empty() && !self.piped
     }
 }
 
 /// Substitutions nested deeper than this are not read (fail closed).
 const MAX_NESTING: usize = 32;
 
-/// The simple commands of `text`, substitutions included; `None` when
-/// substitutions nest too deeply to read.
-pub(super) fn commands(text: &str) -> Option<Vec<Command>> {
-    let (commands, too_deep) = read(text, /*nesting*/ 0, /*body*/ false);
-    (!too_deep).then_some(commands)
+/// The simple commands of some shell text.
+pub(super) struct Reading {
+    /// Substitutions included. A command inside a group (`( ... )`,
+    /// `{ ...; }`) is not linked to the group's pipe or redirections; the
+    /// group's own (empty) command holds them.
+    pub(super) commands: Vec<Command>,
+    /// Substitutions nested too deeply to read: the rest was not read.
+    pub(super) too_deep: bool,
+    /// A quote, substitution or `${...}` was not closed: a shell would
+    /// refuse the line, and this reading may not match how it splits.
+    pub(super) unterminated: bool,
+}
+
+/// Read `text`, substitutions included.
+pub(super) fn commands(text: &str) -> Reading {
+    read(text, /*nesting*/ 0, /*body*/ false)
 }
 
 /// Read `text` (`body`: the body of an unquoted here-document, where only
 /// substitutions run) inside `nesting` substitutions.
-fn read(text: &str, nesting: usize, body: bool) -> (Vec<Command>, bool) {
+fn read(text: &str, nesting: usize, body: bool) -> Reading {
     let chars: Vec<char> = text.chars().collect();
     let mut reader = Reader {
         chars: &chars,
         out: Vec::new(),
         nesting,
         too_deep: false,
+        unterminated: false,
     };
     if body {
         reader.substitutions_only();
@@ -92,7 +104,11 @@ fn read(text: &str, nesting: usize, body: bool) -> (Vec<Command>, bool) {
             .and_then(|to| kept.get(to).copied().flatten());
         out.push(command);
     }
-    (out, reader.too_deep)
+    Reading {
+        commands: out,
+        too_deep: reader.too_deep,
+        unterminated: reader.unterminated,
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -114,6 +130,8 @@ struct Reader<'a> {
     nesting: usize,
     /// They nested past `MAX_NESTING`; reading stopped.
     too_deep: bool,
+    /// Something was left open at the end.
+    unterminated: bool,
 }
 
 /// One list of commands being read.
@@ -124,6 +142,8 @@ struct List {
     redirect: Redirect,
     /// Here-documents whose bodies start after the next newline.
     pending: Vec<HereDocument>,
+    /// `case` commands open in this list: their patterns end with `)`.
+    cases: usize,
 }
 
 struct HereDocument {
@@ -150,6 +170,13 @@ impl Reader<'_> {
         }
         let word = std::mem::take(&mut list.word);
         let command = &mut self.out[list.command];
+        if list.redirect == Redirect::None && command.words.is_empty() && !word.quoted {
+            match word.text.as_str() {
+                "case" => list.cases += 1,
+                "esac" => list.cases = list.cases.saturating_sub(1),
+                _ => {}
+            }
+        }
         match std::mem::replace(&mut list.redirect, Redirect::None) {
             Redirect::None => command.words.push(word),
             Redirect::Stdin | Redirect::Descriptor => {}
@@ -200,6 +227,7 @@ impl Reader<'_> {
             has_word: false,
             redirect: Redirect::None,
             pending: Vec::new(),
+            cases: 0,
         };
         let mut depth = 0usize;
         while index < chars.len() {
@@ -207,8 +235,13 @@ impl Reader<'_> {
             let next = chars.get(index + 1).copied();
             let previous = index.checked_sub(1).map(|at| chars[at]);
             match ch {
-                ')' if nested && depth == 0 => {
+                // A `case` pattern's `)` does not close the substitution
+                // (`esac)` closes the case first).
+                ')' if nested && depth == 0 && {
                     self.finish_word(&mut list);
+                    list.cases == 0
+                } =>
+                {
                     return index + 1;
                 }
                 ' ' | '\t' => self.finish_word(&mut list),
@@ -233,14 +266,23 @@ impl Reader<'_> {
                     let from = list.command;
                     let pipe = next != Some('|') && previous != Some('|');
                     self.finish_command(&mut list);
-                    if pipe && from != list.command {
+                    if pipe {
+                        // After a group (`( ... ) | tee f`) the piped
+                        // command is the group's empty one.
+                        if from == list.command {
+                            list.command = self.new_command();
+                        }
                         self.out[from].piped = true;
                         self.out[from].pipe_to = Some(list.command);
                     }
                 }
                 '(' | ')' => {
                     if nested {
-                        depth = if ch == '(' { depth + 1 } else { depth - 1 };
+                        depth = if ch == '(' {
+                            depth + 1
+                        } else {
+                            depth.saturating_sub(1)
+                        };
                     }
                     self.finish_command(&mut list);
                 }
@@ -266,6 +308,7 @@ impl Reader<'_> {
                         list.word.text.push(chars[index]);
                         index += 1;
                     }
+                    self.unterminated |= index >= chars.len();
                 }
                 '"' => {
                     list.has_word = true;
@@ -335,6 +378,7 @@ impl Reader<'_> {
             index += 1;
         }
         self.finish_word(&mut list);
+        self.unterminated |= nested;
         index
     }
 
@@ -362,6 +406,7 @@ impl Reader<'_> {
                 }
             }
         }
+        self.unterminated = true;
         index
     }
 
@@ -388,6 +433,7 @@ impl Reader<'_> {
                 inner.push(chars[at]);
                 at += 1;
             }
+            self.unterminated |= at >= chars.len();
             self.nested_text(&inner, /*body*/ false);
             word.text.push_str(UNSEEN_OUTPUT);
             dynamic(word);
@@ -404,14 +450,30 @@ impl Reader<'_> {
                 if !self.enter(/*nested*/ true) {
                     return chars.len();
                 }
+                // Quotes inside it are honoured, as bash does.
                 let mut scratch = Word::default();
                 let mut at = index + 2;
                 let mut open = 1usize;
                 while at < chars.len() {
                     match chars[at] {
+                        '$' if !in_double && chars.get(at + 1) == Some(&'\'') => {
+                            at = ansi_c(chars, at + 2, &mut scratch.text);
+                            continue;
+                        }
                         '$' | '`' => {
                             at = self.expansion(at, &mut scratch, in_double);
                             continue;
+                        }
+                        '"' => {
+                            at = self.double_quoted(at + 1, &mut scratch);
+                            continue;
+                        }
+                        // Even inside double quotes (`"${x:-'}'}"`).
+                        '\'' => {
+                            at += 1;
+                            while at < chars.len() && chars[at] != '\'' {
+                                at += 1;
+                            }
                         }
                         '\\' => at += 1,
                         '{' => open += 1,
@@ -425,6 +487,7 @@ impl Reader<'_> {
                     }
                     at += 1;
                 }
+                self.unterminated |= at >= chars.len();
                 self.nesting -= 1;
                 let end = (at + 1).min(chars.len());
                 word.text.extend(&chars[index.min(end)..end]);
@@ -463,15 +526,17 @@ impl Reader<'_> {
         if !self.enter(/*nested*/ true) {
             return;
         }
-        let (commands, too_deep) = read(text, self.nesting, body);
+        let reading = read(text, self.nesting, body);
         self.nesting -= 1;
-        self.too_deep |= too_deep;
+        self.too_deep |= reading.too_deep;
+        self.unterminated |= reading.unterminated;
         let offset = self.out.len();
-        self.out.extend(commands.into_iter().map(|command| Command {
-            substituted: true,
-            pipe_to: command.pipe_to.map(|to| to + offset),
-            ..command
-        }));
+        self.out
+            .extend(reading.commands.into_iter().map(|command| Command {
+                substituted: true,
+                pipe_to: command.pipe_to.map(|to| to + offset),
+                ..command
+            }));
     }
 
     /// The substitutions in a here-document body.
@@ -558,7 +623,9 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     fn all(text: &str) -> Vec<Command> {
-        commands(text).expect("readable")
+        let reading = commands(text);
+        assert!(!reading.too_deep && !reading.unterminated, "{text:?}");
+        reading.commands
     }
 
     fn texts(text: &str) -> Vec<Vec<String>> {
@@ -631,17 +698,31 @@ mod tests {
         assert!(!all("ls 2>&1 >&2")[0].writes_descriptor);
         // Too deep to read: refused, never a stack overflow.
         let deep = format!("{}x{}", "$(".repeat(100_000), ")".repeat(100_000));
-        assert!(commands(&deep).is_none());
-        assert!(commands(&"`".repeat(10_000)).is_some());
+        assert!(commands(&deep).too_deep);
+        assert!(!commands(&"`".repeat(10_000)).too_deep);
         let backticks = format!("{}x", "\\`echo ".repeat(200));
         let _ = commands(&backticks);
-        assert!(
-            commands(&format!(
-                "{}x{}",
-                "${a:-".repeat(100_000),
-                "}".repeat(100_000)
-            ))
-            .is_none()
+        let braces = format!("{}x{}", "${a:-".repeat(100_000), "}".repeat(100_000));
+        assert!(commands(&braces).too_deep);
+        // Quotes in `${...}` and a `case` in a substitution keep the reading
+        // in step with bash; what is left open is reported.
+        assert_eq!(
+            texts("echo ${x:-'}'}; bash -c x; echo \"$(case a in a) echo '\"' ;; esac)\"; sh -c y"),
+            vec![
+                vec!["echo", "${x:-'}'}"],
+                vec!["bash", "-c", "x"],
+                vec!["echo", UNSEEN_OUTPUT],
+                vec!["case", "a", "in", "a"],
+                vec!["echo", "\""],
+                vec!["esac"],
+                vec!["sh", "-c", "y"],
+            ]
         );
+        for open in ["echo 'a", "echo \"a", "echo $(a", "echo `a", "echo ${a"] {
+            assert!(commands(open).unterminated, "{open:?}");
+        }
+        let group = all("(sed p f) | tee r.sh");
+        assert_eq!(group[1].pipe_to, Some(2));
+        assert!(group[1].words.is_empty());
     }
 }

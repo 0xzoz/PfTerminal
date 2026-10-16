@@ -1936,10 +1936,11 @@ fn issue_885_nested_shell_scripts_are_judged() {
         ("d=$(cd src && pwd); bash -c './present.sh'", None),
         ("d=$(cd / && pwd); bash -c './present.sh'", None),
         ("docker run img sh -c './entrypoint.sh'", None),
-        // Text that is printed or searched for is not run.
+        // Quoted text is judged like code wherever it is (as the word
+        // lexer does), so printed text naming a missing script asks.
         (
             "echo \"bash -c './missing.sh'\" && grep -rn 'sh -c ./x' .",
-            None,
+            unseen,
         ),
     ];
     assert_eq!(issue_885_wrong(&cwd, &cases), Vec::<String>::new());
@@ -2017,9 +2018,16 @@ fn issue_885_review_1_routes_and_limits() {
         // Not saved, only data, or a program given in the words.
         ("git log | sed -n 1,5p; ./present.sh", None),
         ("sed -n 1p f | sort; bash present.sh", None),
-        ("git commit -m \"sed e\" && grep -n 'sed e' f", None),
-        ("rg -l foo | xargs sed -i 's/foo/bar/g'", None),
-        ("cat <<'E'\nbash -c './missing.sh'\nE", None),
+        // Quoted text is judged like code wherever it is.
+        ("git commit -m \"sed e\" && grep -n 'sed e' f", unseen),
+        ("git commit -m \"fix sed\" && grep -n 'sed p' f", None),
+        // #885 round 2: file names xargs adds may be options (`-e`) unless
+        // sed's options end first.
+        ("rg -l foo | xargs sed -i 's/foo/bar/g'", unseen),
+        ("rg -l foo | xargs sed -i 's/foo/bar/g' --", None),
+        // A quoted delimiter's body is not run, but text is judged
+        // wherever it is.
+        ("cat <<'E'\nbash -c './missing.sh'\nE", unseen),
     ];
     assert_eq!(issue_885_wrong(&cwd, &cases), Vec::<String>::new());
 
@@ -2037,6 +2045,77 @@ fn issue_885_review_1_routes_and_limits() {
     );
     let wide = format!("uv {}sed p f", "env ".repeat(10_000));
     assert_eq!(script(&wide), unseen);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+/// #885 review round 2: a reading kept in step with bash, routes of items
+/// 1–3 found in round 2, and a bound on nested scripts.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_885_review_2_routes_and_limits() {
+    let (_dir, cwd) = issue_885_fixture();
+    let unseen = Some(ProtectedActionKind::UnseenCode);
+    let cases = [
+        // Quotes in `${...}`, a `case` in a substitution, a quote left open.
+        ("echo ${x:-'}'}; bash -c \"sh -c ./missing.sh\"", unseen),
+        ("echo ${x:-'}'} ' ; sed -n p f; ' ; sed '1e id' f", unseen),
+        (
+            "echo \"$(case a in a) echo '\"' ;; esac)\"; bash -c \"sh -c ./missing.sh\"",
+            unseen,
+        ),
+        ("echo 'open; sed '1e id' f", unseen),
+        // Item 3: globs, pipes from groups and loops, captured output, and
+        // stages that write through their own code.
+        ("sed -i '1a ./p.sh' *.sh; bash r.sh", unseen),
+        ("sed -i '1a ./p.sh' r.s?; bash r.sh", unseen),
+        ("(sed '1a ./p.sh' f) | tee r.sh; bash r.sh", unseen),
+        ("{ sed '1a ./p.sh' f; } | tee r.sh; bash r.sh", unseen),
+        (
+            "for i in 1; do sed '1a ./p.sh' f; done | tee r.sh; bash r.sh",
+            unseen,
+        ),
+        ("echo \"$(sed '1a ./p.sh' f)\" > r.sh; bash r.sh", unseen),
+        ("tee r.sh < <(sed '1a ./p.sh' f); bash r.sh", unseen),
+        (
+            "sed '1a ./p.sh' f | awk '{print > \"r.sh\"}'; bash r.sh",
+            unseen,
+        ),
+        ("sed '1a ./p.sh' f | sh -c 'cat > r.sh'; bash r.sh", unseen),
+        // Item 2: shells spelled through a variable or `$IFS`; grouped
+        // runner options.
+        ("S=bash; $S -c \"sh -c ./missing.sh\"", unseen),
+        ("bash${IFS}-c${IFS}\"sh -c ./missing.sh\"", unseen),
+        ("su -lc './missing.sh' root", unseen),
+        ("script -qc './missing.sh' /dev/null", unseen),
+        // Item 1: a script file code in the line may write.
+        (
+            "python3 -c \"open('ok.sed','w').write('1e id')\"; sed -f ok.sed f",
+            unseen,
+        ),
+        // Still quiet: a pure filter after sed, a quoted delimiter's body.
+        ("sed -n 1,5p f | sort | head -n 3; bash present.sh", None),
+        ("sed -f ok.sed f && sed -n p f | grep x", None),
+    ];
+    assert_eq!(issue_885_wrong(&cwd, &cases), Vec::<String>::new());
+    // Nested `watch` does not multiply work: each is a level of nesting,
+    // and too many levels fail closed.
+    let started = std::time::Instant::now();
+    let watches = format!("bash -c \"{}true\"", "watch ".repeat(300));
+    assert_eq!(
+        classify_fixture(&shell_in(&cwd, &["/bin/bash", "-c", &watches])),
+        unseen
+    );
+    assert_eq!(
+        classify_fixture(&shell_in(&cwd, &["/bin/bash", "-c", "watch -n 1 true"])),
+        None
+    );
     assert!(
         started.elapsed() < std::time::Duration::from_secs(5),
         "{:?}",

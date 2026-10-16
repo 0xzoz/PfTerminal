@@ -362,6 +362,7 @@ pub(super) fn classify_with(
         ran: Vec::new(),
         ran_unknown: false,
         written: Vec::new(),
+        nested_scripts: 0,
     };
     match action {
         ApprovalAction::Shell { command, cwd, .. }
@@ -532,6 +533,8 @@ struct Classifier {
     /// #885: files the action's command lines write (`None`: one the
     /// classifier cannot name).
     written: Vec<Option<String>>,
+    /// #885: nested shell scripts judged so far.
+    nested_scripts: usize,
 }
 
 /// #841 (MOD-06): the word classifier splits quoted text into commands on
@@ -807,9 +810,11 @@ impl Classifier {
             }
         }
         let mut lexed_seds = 0;
+        let mut lexed_shells = 0;
         for (index, simple) in lexed.commands.iter().enumerate() {
             let (words, unseen) = substitute(simple, &variables);
             lexed_seds += sed::positions(&words).len();
+            lexed_shells += nested::shell_commands(&words);
             let feeds_pipe = pipe_sources.contains(&index);
             self.simple_command(
                 simple,
@@ -833,7 +838,7 @@ impl Classifier {
             }
         }
         // #885: nested shells' scripts and sed programs, read with quotes.
-        self.quoted_pass(command, cwd, depth, lexed_seds);
+        self.quoted_pass(command, cwd, depth, (lexed_seds, lexed_shells));
         self.sed_scope = outer_scope;
     }
 
