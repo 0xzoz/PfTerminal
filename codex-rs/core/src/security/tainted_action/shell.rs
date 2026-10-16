@@ -34,6 +34,11 @@ pub(super) struct SimpleCommand {
     pub(super) here_string: Option<usize>,
     /// Indexes of the words its output is redirected to (`> file`, `>> file`).
     pub(super) writes_to: Vec<usize>,
+    /// #841: it was split out of a single-quoted `sed` program (`sed -i ''
+    /// '/x/a\ ...'`), which the shell passes to sed as one argument: its
+    /// words are sed's data, scanned for protected paths and commands like
+    /// any others, but a "command" there is not a script the shell runs.
+    pub(super) in_sed_program: bool,
 }
 
 /// Lexed simple commands, in the order they finish (a substitution comes
@@ -73,6 +78,10 @@ pub(super) fn simple_commands(command: &[String]) -> Lexed {
         previous = Some(arg.as_str());
         let (expanded, complete) = expand_braces(&replace_ifs(arg));
         incomplete |= !complete;
+        // Quotes do not span argv elements.
+        lexer.quote = None;
+        lexer.escaped = false;
+        lexer.sed_program = false;
         lexer.arg(&expanded);
         lexer.flush();
     }
@@ -250,6 +259,12 @@ struct Lexer {
     /// Open groups and the pipe that feeds every command inside them.
     groups: Vec<(Group, Option<usize>)>,
     redirect: Redirect,
+    /// The open quote character, if any (`'` or `"`), for #841.
+    quote: Option<char>,
+    /// The next character is escaped by a backslash (outside single quotes).
+    escaped: bool,
+    /// #841: inside a single-quoted argument of `sed`.
+    sed_program: bool,
 }
 
 impl Lexer {
@@ -293,6 +308,7 @@ impl Lexer {
         let next = SimpleCommand {
             substituted: self.current.substituted,
             reads_outer_output: self.current.reads_outer_output,
+            in_sed_program: self.sed_program,
             ..SimpleCommand::default()
         };
         let finished = std::mem::replace(&mut self.current, next);
@@ -415,12 +431,37 @@ impl Lexer {
         self.done
     }
 
+    /// #841: follow quotes (they are still removed from the words): a
+    /// single-quoted argument of `sed` is a sed program.
+    fn track_quote(&mut self, ch: char) {
+        if std::mem::take(&mut self.escaped) {
+            return;
+        }
+        match (self.quote, ch) {
+            (Some('\''), '\'') | (Some('"'), '"') => {
+                self.quote = None;
+                self.sed_program = false;
+            }
+            (Some('\''), _) => {}
+            (_, '\\') => self.escaped = true,
+            (None, '\'') => {
+                self.quote = Some('\'');
+                self.sed_program = self.open.is_empty()
+                    && super::indirect::command_word(&self.current.words)
+                        .is_some_and(|(_, name)| matches!(name.as_str(), "sed" | "gsed"));
+            }
+            (None, '"') => self.quote = Some('"'),
+            _ => {}
+        }
+    }
+
     fn arg(&mut self, arg: &str) {
         let chars: Vec<char> = arg.chars().collect();
         let mut index = 0;
         while index < chars.len() {
             let ch = chars[index];
             let next = chars.get(index + 1).copied();
+            self.track_quote(ch);
             match ch {
                 '$' if next == Some('\'') => {
                     index = self.ansi_c(&chars, index + 2);

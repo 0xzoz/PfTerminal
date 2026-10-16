@@ -28,10 +28,14 @@ without them Corbanu refuses every model request under Moderate, so
   does. A project's `.env` files aren't covered; Aggressive covers them.
 - **Untrusted content.** Tool, MCP, web, agent and memory output reaches the
   model labelled untrusted. After it, protected actions need your fresh
-  approval: the vault, credentials, security settings, disclosure, value
-  transfer, code you haven't seen, MCP calls that change or send data, and
-  tools Corbanu hasn't classified. Cached, remembered or automatic approvals
-  don't count, and with approvals off these actions are refused.
+  approval: the vault, credentials (a project's `.env` files included),
+  Corbanu's own files and security settings, disclosure, value transfer, code
+  you haven't seen, MCP calls that change or send data, and tools Corbanu
+  hasn't classified. Where approving can't unlock a file (Corbanu's sign-in,
+  vault, config and history stay closed to agent commands under
+  `secretless_agent_launch`), the prompt says so. Cached, remembered or
+  automatic approvals don't count, and with approvals off these actions are
+  refused.
 - **Model keys.** From the next start, provider API keys are held by the
   credential broker, as under Aggressive. `broker_model_auth = false` in your
   own config keeps it off.

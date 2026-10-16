@@ -933,6 +933,50 @@ pub(crate) async fn protected_note_in_command(
     .await
 }
 
+/// #841: under Moderate with the secretless launch contract, what a person
+/// is told before approving a protected action that reads files the
+/// contract keeps unreadable at every level (Corbanu's sign-in, vault,
+/// config, history): approving runs the command but cannot unlock them.
+pub(crate) const MODERATE_KEPT_READ_NOTE: &str = "Corbanu's own files this command reads (its sign-in, vault, config or history) stay unreadable to agent commands even if you approve (secretless agent launch), so approving cannot unlock them.";
+
+/// #841: whether, under Moderate with the secretless launch contract,
+/// `command` names a path the contract keeps unreadable at every level.
+pub(crate) async fn moderate_kept_read_in_command(
+    session: &Session,
+    turn: &TurnContext,
+    command: &[String],
+    cwd: &Path,
+) -> bool {
+    let Some(contract) = super::launch_contract::active() else {
+        return false;
+    };
+    let Some(inputs) = ReadPolicyInputs::capture_at(session, turn, SecurityLevel::Moderate) else {
+        return false;
+    };
+    let (command, cwd) = (command.to_vec(), cwd.to_path_buf());
+    off_thread(move || Some(kept_read_named(&inputs, contract, &command, &cwd)))
+        .await
+        .is_some_and(|named| named)
+}
+
+/// See [`moderate_kept_read_in_command`].
+fn kept_read_named(
+    inputs: &ReadPolicyInputs,
+    contract: &super::launch_contract::LaunchContract,
+    command: &[String],
+    cwd: &Path,
+) -> bool {
+    denied_word(
+        command,
+        cwd,
+        inputs.user_home.as_deref(),
+        &inputs.codex_home,
+        |path| contract.keeps_unreadable(path, cwd),
+        /*denial_lines*/ None,
+    )
+    .is_some()
+}
+
 /// Issue #245: under Aggressive, the explanation for a request whose own
 /// additional permissions would open a protected path. Checked before the
 /// request is validated, so it is refused with this explanation even where
