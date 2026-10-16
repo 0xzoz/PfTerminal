@@ -10833,7 +10833,8 @@ async fn abort_gracefully_emits_marker_before_turn_aborted() {
     assert!(rx.try_recv().is_err());
 }
 
-/// The next event after a finished turn that is not an MCP startup report.
+/// The next event after a finished turn that is not an MCP startup report,
+/// waiting about 2 s in all.
 ///
 /// The follow-up turn refreshes the MCP runtime this test session left dirty,
 /// and that refresh reports `McpStartupUpdate`/`McpStartupComplete` from its
@@ -10846,7 +10847,7 @@ async fn recv_skipping_mcp_startup(rx: &async_channel::Receiver<Event>, expected
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         let event = tokio::time::timeout(remaining, rx.recv())
             .await
-            .unwrap_or_else(|_| panic!("{expected}"))
+            .unwrap_or_else(|_| panic!("timed out: {expected}"))
             .expect("channel open");
         if !matches!(
             event.msg,

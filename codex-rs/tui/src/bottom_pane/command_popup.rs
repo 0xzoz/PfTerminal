@@ -440,6 +440,8 @@ mod tests {
                 command.command()
             );
         }
+        // /usage is always shown; only its description depends on the build,
+        // so both wordings are spelled out here on purpose.
         assert_eq!(
             SlashCommand::Usage.description(),
             if cfg!(feature = "developer-accounting") {

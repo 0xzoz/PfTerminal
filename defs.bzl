@@ -247,9 +247,9 @@ def codex_rust_crate(
             them Bazel's default three attempts.
         test_tags: Tags applied to unit + integration test targets.
             Typically used to disable the sandbox, but see https://bazel.build/reference/be/common-definitions#common.tags
-        unit_test_tags: Extra tags for the unit-test target generated from
-            `src/**/*.rs` only, e.g. `cpu:4` so Bazel reserves the cores its
-            libtest threads use instead of the default one.
+        unit_test_tags: Extra tags for the library's unit-test target only
+            (not binary unit tests or integration tests), e.g. `cpu:4` so
+            Bazel reserves the cores its tests use instead of the default one.
         unit_test_timeout: Optional Bazel timeout for the unit-test target
             generated from `src/**/*.rs`.
         extra_binaries: Additional binary labels to surface as test data and
