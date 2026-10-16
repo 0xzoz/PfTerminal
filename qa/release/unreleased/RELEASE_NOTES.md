@@ -16,8 +16,8 @@ them into `qa/release/<version>/RELEASE_NOTES.md` and empties this file.
   now means only that an approval request ended without permission (denied,
   timed out or cancelled). `refused` usually means the command did not run,
   but a network-policy denial can arrive after it started, so don't assume it
-  never ran. The refusal reason is in `aggregatedOutput`; the exit code is a
-  placeholder, not a process exit. File changes (`fileChange`) have no
+  never ran. The refusal reason is in `aggregatedOutput` (`aggregated_output`
+  in `exec --json`); the exit code is a placeholder, not a process exit. File changes (`fileChange`) have no
   `refused` status.
 
 ### Compatibility
@@ -35,6 +35,6 @@ them into `qa/release/<version>/RELEASE_NOTES.md` and empties this file.
   builds resume them as before. Threads started with the experimental
   app-server `historyMode: "paginated"` (and their subagents) do: an older
   build can't read the history of such a thread once it has a refused command
-  (`thread/resume`, `thread/read` with turns, `thread/turns/list` and history
-  search fail with "failed to deserialize stored thread item"). Newer builds
-  read older history unchanged.
+  (`thread/resume` with turns, `thread/turns/list` with full items,
+  `thread/items/list` and `thread/turns/items/list` fail with "failed to
+  deserialize stored thread item"). Newer builds read older history unchanged.
