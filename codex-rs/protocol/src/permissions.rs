@@ -2571,6 +2571,7 @@ thread_local! {
 /// #907: how many paths this thread has normalized with filesystem calls
 /// (each walks the path's ancestors, then resolves the first that exists),
 /// so tests can bound what a policy check costs. Instrumentation only.
+#[doc(hidden)]
 pub fn effective_path_normalizations_on_this_thread() -> u64 {
     EFFECTIVE_PATH_NORMALIZATIONS.with(std::cell::Cell::get)
 }

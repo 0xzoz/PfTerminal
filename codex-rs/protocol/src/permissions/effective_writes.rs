@@ -64,9 +64,11 @@ impl<'a> EffectiveWrites<'a> {
     }
 
     fn can_write_normalized(&self, path: &Path, read_only_wins: bool) -> bool {
-        // An unrestricted policy (or an external sandbox) writes anywhere.
-        if !matches!(self.policy.kind, FileSystemSandboxKind::Restricted) {
-            return true;
+        match self.policy.kind {
+            FileSystemSandboxKind::Unrestricted | FileSystemSandboxKind::ExternalSandbox => {
+                return true;
+            }
+            FileSystemSandboxKind::Restricted => {}
         }
         let Some(path) = resolve_candidate_path(path, &self.cwd) else {
             return false;

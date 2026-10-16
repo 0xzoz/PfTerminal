@@ -74,7 +74,8 @@ fn issue_907_measure_apply_latency() {
     let runs: u32 = std::env::var("ISSUE_907_RUNS")
         .ok()
         .and_then(|runs| runs.parse().ok())
-        .unwrap_or(50);
+        .unwrap_or(50)
+        .max(1);
     let mut times: Vec<Duration> = Vec::new();
     for _ in 0..runs {
         let start = Instant::now();
@@ -122,7 +123,8 @@ async fn issue_907_measure_lookup_latency() {
     let runs: u32 = std::env::var("ISSUE_907_RUNS")
         .ok()
         .and_then(|runs| runs.parse().ok())
-        .unwrap_or(30);
+        .unwrap_or(30)
+        .max(1);
     let mut times: Vec<Duration> = Vec::new();
     for _ in 0..runs {
         let start = Instant::now();
@@ -169,12 +171,19 @@ fn issue_907_dump_applied_policies() {
     ) else {
         panic!("set ISSUE_907_BASE and ISSUE_907_DUMP");
     };
+    // Only a folder this test made is replaced.
+    let marker = base.join(".issue-907-dump");
     if base.exists() {
+        assert!(
+            marker.exists(),
+            "{base:?} exists and was not made by this test"
+        );
         std::fs::remove_dir_all(&base).unwrap();
     }
     std::fs::create_dir_all(&dump).unwrap();
     let real = {
         std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(&marker, "").unwrap();
         base.canonicalize().unwrap()
     };
     let home = real.join(".corbanu");
