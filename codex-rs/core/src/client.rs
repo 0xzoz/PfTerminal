@@ -1761,6 +1761,22 @@ impl ModelClient {
         .await
     }
 
+    /// Leave a realtime WebSocket session that opened unrecorded, with the
+    /// `cause` logged as a gap (#889). Nothing is said when nothing collects.
+    pub(crate) fn leave_realtime_session_unrecorded(
+        &self,
+        accounting: &crate::accounting::responses::Slot,
+        cause: &'static str,
+    ) {
+        if let Some(deferred) = crate::accounting::responses::read(accounting)
+            .ok()
+            .flatten()
+        {
+            deferred.reject();
+            crate::accounting::gap("realtime session account", cause);
+        }
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     /// Builds memory summaries for each provided normalized raw memory.
     ///
