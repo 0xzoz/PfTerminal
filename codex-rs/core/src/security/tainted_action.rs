@@ -355,6 +355,7 @@ pub(super) fn classify_with(
         scripts_read: 0,
         rebuilt: 0,
         not_shell: 0,
+        sed_scope: None,
     };
     match action {
         ApprovalAction::Shell { command, cwd, .. }
@@ -515,6 +516,51 @@ struct Classifier {
     /// Inside a file that is not a shell script (Python, JavaScript, ...):
     /// shell brace expansion does not apply to it.
     not_shell: usize,
+    /// #841: the sed programs of the command line being judged, when a real
+    /// shell parse of it is available.
+    sed_scope: Option<SedScope>,
+}
+
+/// #841 (MOD-06): the word classifier splits quoted text into commands on
+/// purpose (it over-approximates the shell), so a sed program such as
+/// `'/f.write(...)/a\ ...'` yields "commands" like `/a` that name no file.
+/// When a real shell parse shows the command line is plain commands with
+/// literal words, a word is sed's data, not a command the shell runs, if it
+/// occurs in a sed program and nowhere else in the command line.
+struct SedScope {
+    /// The arguments of the line's `sed` commands.
+    programs: Vec<String>,
+    /// Every other word of the line, command words included.
+    others: Vec<String>,
+}
+
+impl SedScope {
+    fn of(command: &[String]) -> Option<Self> {
+        let commands = codex_shell_command::bash::parse_shell_lc_plain_commands(command)?;
+        let mut scope = Self {
+            programs: Vec::new(),
+            others: Vec::new(),
+        };
+        for words in commands {
+            let sed = words
+                .first()
+                .is_some_and(|word| matches!(basename(word), "sed" | "gsed"));
+            let mut words = words.into_iter();
+            if sed {
+                scope.others.extend(words.next());
+                scope.programs.extend(words);
+            } else {
+                scope.others.extend(words);
+            }
+        }
+        (!scope.programs.is_empty()).then_some(scope)
+    }
+
+    fn is_data(&self, word: &str) -> bool {
+        !word.is_empty()
+            && self.programs.iter().any(|program| program.contains(word))
+            && !self.others.iter().any(|other| other.contains(word))
+    }
 }
 
 /// Whether a script the command runs must be read in full (it is what runs)
@@ -566,6 +612,8 @@ impl Classifier {
             self.note(ProtectedActionKind::UnseenCode);
             return;
         }
+        // #841: this line's own sed programs (nested lines have theirs).
+        let outer_scope = std::mem::replace(&mut self.sed_scope, SedScope::of(command));
         let lexed = shell::simple_commands(command);
         let pipe_sources: std::collections::HashSet<usize> = lexed
             .commands
@@ -619,6 +667,7 @@ impl Classifier {
                 self.rebuilt -= 1;
             }
         }
+        self.sed_scope = outer_scope;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -822,11 +871,15 @@ impl Classifier {
                 // is not a script; an unseen one was already judged.
                 if !word.contains('$') {
                     let file = self.homes.resolve(word, cwd);
-                    // #841 (MOD-06): a "command" split out of a single-quoted
-                    // sed program (an address such as `/a`) is sed's data,
-                    // not a command the shell runs: read it if it is a file,
-                    // but a missing one does not fail closed.
-                    let need = if simple.in_sed_program {
+                    // #841 (MOD-06): a "command" split out of a quoted sed
+                    // program (an address such as `/a`) is sed's data, not a
+                    // command the shell runs: read it if it is a file, but a
+                    // missing one does not fail closed.
+                    let need = if self
+                        .sed_scope
+                        .as_ref()
+                        .is_some_and(|scope| scope.is_data(word))
+                    {
                         Script::IfPresent
                     } else {
                         Script::Required
