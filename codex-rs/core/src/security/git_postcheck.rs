@@ -33,8 +33,9 @@ mod other {
     use std::path::Path;
     use std::path::PathBuf;
 
+    /// None are found here.
     #[derive(Clone, Debug)]
-    pub(crate) struct Repo;
+    pub(crate) enum Repo {}
 
     pub(crate) fn repos(_folders: &[&Path]) -> Vec<Repo> {
         Vec::new()
@@ -56,7 +57,7 @@ mod other {
 
     impl Repo {
         pub(crate) fn probes(&self) -> Vec<PathBuf> {
-            Vec::new()
+            match *self {}
         }
     }
 }
