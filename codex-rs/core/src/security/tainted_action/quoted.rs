@@ -547,10 +547,19 @@ impl Reader<'_> {
                             at = self.double_quoted(at + 1, &mut scratch);
                             continue;
                         }
-                        // Even inside double quotes (`"${x:-'}'}"`).
+                        // Even inside double quotes (`"${x:-'}'}"`), where
+                        // a substitution in it still runs
+                        // (`"${x:-'$(cmd)'}"`): not read here, so unsure.
                         '\'' => {
                             at += 1;
                             while at < chars.len() && chars[at] != '\'' {
+                                if in_double
+                                    && (chars[at] == '`'
+                                        || (chars[at] == '$'
+                                            && matches!(chars.get(at + 1), Some('(' | '{'))))
+                                {
+                                    self.unsure = true;
+                                }
                                 at += 1;
                             }
                         }
@@ -850,6 +859,8 @@ mod tests {
             "echo \"$(coproc case x in a) :;; esac)\"",
             "echo \"$(case x { a) :;; })\"",
             "echo \"$(echo case)\"",
+            "echo \"${x:-'$(sed 1e\\ id f)'}\"",
+            "echo \"${x:-'`sed 1e\\ id f`'}\"",
             // A line break before `in` is valid, but not followed here.
             "echo \"$(case x\nin a) :;; esac)\"",
         ] {
@@ -858,6 +869,7 @@ mod tests {
         for sure in [
             "echo \"$(if case x in a) true;; esac; then :; fi)\"",
             "echo case; case x { a) :;; }",
+            "echo \"${x:-'$HOME'}\" ${x:-'$(a)'}",
         ] {
             assert!(!commands(sure).unsure, "{sure:?}");
         }

@@ -2123,10 +2123,11 @@ fn issue_885_review_2_routes_and_limits() {
     );
 }
 
-/// #885 review rounds 3 and 4: a `case` in brackets, after other reserved
-/// words or in zsh's form in a substitution, text read as a comment, quoted
-/// decoys for the count check, and pipeline stages that save their input
-/// (`sort -o`, `uniq IN OUT`, `less -o`) or run a program (`sort --co`).
+/// #885 review rounds 3 to 5: a `case` in brackets, after other reserved
+/// words or in zsh's form in a substitution, text read as a comment, a
+/// substitution in quotes in a double-quoted `${...}`, quoted decoys for the
+/// count check, and pipeline stages that save their input (`sort -o`, `uniq
+/// IN OUT`, `less -o`) or run a program (`sort --co`).
 #[test]
 #[cfg_attr(
     windows,
@@ -2177,6 +2178,12 @@ fn issue_885_review_3_routes() {
         ),
         (
             "sed '1a ./p.sh' f | sort --co=./r.sh; bash present.sh",
+            unseen,
+        ),
+        // Round 5: a substitution in single quotes in a double-quoted
+        // `${...}` runs, behind a decoy for the count check.
+        (
+            "echo \"$(case x in a) sed -n p f;; esac)\" \"${x:-'$(sed 1e\\ id f)'}\"",
             unseen,
         ),
         // Still quiet: filters that only print, a comment without code.
