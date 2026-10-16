@@ -926,7 +926,7 @@ async fn persist_thread(
 /// started it, labelled `consolidation:`. Neither records when that
 /// conversation is not persisted, and an ephemeral session that is neither
 /// stays excluded. A guardian reviewer stays `review:`, and a persisted
-/// session always records under its own thread.
+/// session records under its own thread, except a `/review` task (#898).
 #[tokio::test]
 async fn accounting_owner_of_side_and_consolidation_sessions() -> anyhow::Result<()> {
     use crate::accounting::Uncollected;
@@ -1089,6 +1089,24 @@ async fn accounting_owner_of_side_and_consolidation_sessions() -> anyhow::Result
     assert_eq!(
         (owner.thread, owner.label_prefix.as_str()),
         (persisted.thread_id, "")
+    );
+
+    // #898: a `/review` task is persisted as a thread of its own, but that
+    // thread names no parent the ledger can resolve; it records under the
+    // conversation that started it, as `code-review:`.
+    {
+        let mut state = persisted.state.lock().await;
+        state.session_configuration.session_source =
+            SessionSource::SubAgent(SubAgentSource::Review);
+        state.session_configuration.parent_thread_id = Some(starter);
+    }
+    let owner = persisted
+        .accounting_owner()
+        .await
+        .map_err(|why| anyhow::anyhow!("{why:?}"))?;
+    assert_eq!(
+        (owner.thread, owner.label_prefix.as_str()),
+        (starter, "code-review:")
     );
     Ok(())
 }

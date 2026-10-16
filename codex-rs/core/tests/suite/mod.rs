@@ -39,6 +39,7 @@ mod accounting_anthropic;
 mod accounting_anthropic_recovery;
 mod accounting_chat;
 mod accounting_chat_recovery;
+mod accounting_code_review;
 mod accounting_responses;
 mod accounting_responses_recovery;
 #[path = "accounting_responses_ws.rs"]
