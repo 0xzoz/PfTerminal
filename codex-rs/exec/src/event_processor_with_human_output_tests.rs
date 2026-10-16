@@ -656,7 +656,6 @@ fn command_status_header_for_a_refusal_is_neutral() {
         /*duration_ms*/ Some(0),
     );
     assert_eq!(refused, " refused:");
-    assert!(!refused.contains("before execution"));
     assert_eq!(
         command_status_header(
             &CommandExecutionStatus::Declined,

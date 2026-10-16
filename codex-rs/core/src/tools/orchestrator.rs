@@ -206,8 +206,8 @@ impl ToolOrchestrator {
                 .sandbox_permissions(req)
                 .requires_escalated_permissions()
         {
-            // The person sees it too, not only the model (with its command
-            // cell, which says only "Refused", #873).
+            // The person sees it too, not only the model (an exec_command
+            // also gets a "Refused: <this reason>" cell since #873).
             warn(
                 tool_ctx,
                 crate::security::protected_additional::PROTECTED_LAUNCH_NO_ESCALATION,

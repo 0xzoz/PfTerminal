@@ -405,12 +405,12 @@ impl ExecCell {
         // a network-policy refusal can arrive after it ran); its detail line
         // says "Refused: <reason>".
         let untitled = is_interaction || call.is_refused();
-        let title = if call.is_declined() {
+        let title = if untitled {
+            ""
+        } else if call.is_declined() {
             "Did not run"
         } else if call.is_unknown() {
             "Execution unconfirmed"
-        } else if is_interaction {
-            ""
         } else if !call.is_complete() {
             "Running"
         } else if call.is_user_shell_command() {
@@ -815,6 +815,45 @@ mod tests {
                   └ Approval declined
                 $ echo refused
                 ✗ Did not run (approval declined)
+                "
+                );
+            }
+        }
+    }
+
+    /// #873: a refusal without a reason still gets one detail line, and the
+    /// UnifiedExecInteraction source still shows the command, not a verb.
+    #[test]
+    fn refused_command_without_reason_shows_one_detail_line() {
+        for source in [
+            ExecCommandSource::Agent,
+            ExecCommandSource::UnifiedExecInteraction,
+        ] {
+            let mut cell = new_active_exec_command(
+                "refused".into(),
+                vec!["echo".into(), "refused".into()],
+                Vec::new(),
+                source,
+                /*interaction_input*/ None,
+                /*animations_enabled*/ false,
+            );
+            assert!(cell.complete_call(
+                "refused",
+                CommandOutput::refused(String::new()),
+                std::time::Duration::ZERO,
+            ));
+            let preview = cell.display_lines(/*width*/ 80);
+            let transcript = cell.transcript_lines(/*width*/ 80);
+            insta::allow_duplicates! {
+                insta::assert_snapshot!(
+                    preview.iter().map(render_line_text).chain(
+                        transcript.iter().map(render_line_text)
+                    ).join("\n"),
+                    @"
+                ✗ echo refused
+                  └ Refused
+                $ echo refused
+                ✗ Refused
                 "
                 );
             }
