@@ -12,6 +12,7 @@ mod protocol_v2;
 pub use methods::RealtimeWebsocketClient;
 pub use methods::RealtimeWebsocketConnection;
 pub use methods::RealtimeWebsocketEvents;
+pub use methods::RealtimeWebsocketRoute;
 pub use methods::RealtimeWebsocketWriter;
 pub use methods::realtime_websocket_route;
 pub use methods_common::session_update_session_json;

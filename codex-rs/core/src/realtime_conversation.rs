@@ -479,6 +479,8 @@ struct RealtimeStart {
         crate::client::ModelClientSession,
         crate::accounting::TurnScopes,
     )>,
+    /// The API key a WebSocket session sends, for its record (#824).
+    websocket_credential: Option<CodexAuth>,
 }
 
 struct RealtimeStartOutput {
@@ -541,6 +543,7 @@ impl RealtimeConversationManager {
             model_client,
             sdp,
             accounting,
+            websocket_credential,
         } = start;
         // Neither realtime transport has a screened native projection yet.
         // Check the effective policy before session instructions or initial items
@@ -637,9 +640,10 @@ impl RealtimeConversationManager {
                 Some((client_session, _scopes)) => {
                     model_client
                         .begin_realtime_session_record(
-                            &api_provider,
+                            &api_provider.base_url,
                             &session_config_for_record,
                             &client_session.responses_accounting,
+                            websocket_credential.as_ref(),
                         )
                         .await
                 }
@@ -1149,6 +1153,9 @@ struct PreparedRealtimeConversationStart {
     version: RealtimeWsVersion,
     session_config: RealtimeSessionConfig,
     transport: ConversationStartTransport,
+    /// The API key a WebSocket session sends (#824), as the credential its
+    /// record is attributed to. `None` for WebRTC.
+    websocket_credential: Option<CodexAuth>,
 }
 
 #[derive(Clone, Copy)]
@@ -1211,9 +1218,13 @@ async fn prepare_realtime_start(
     let requested_realtime_session_id = session_config.session_id.clone();
     let event_parser = session_config.event_parser;
     let originator = sess.originator().await;
+    // #824: a WebSocket session always sends an API key, whatever the
+    // session's sign-in, so it is recorded as the API-key work it is.
+    let mut websocket_credential = None;
     let mut extra_headers = match transport {
         ConversationStartTransport::Websocket => {
             let realtime_api_key = realtime_api_key(auth.as_ref(), &provider)?;
+            websocket_credential = Some(CodexAuth::from_api_key(&realtime_api_key));
             realtime_request_headers(
                 requested_realtime_session_id.as_deref(),
                 Some(realtime_api_key.as_str()),
@@ -1250,6 +1261,7 @@ async fn prepare_realtime_start(
         version,
         session_config,
         transport,
+        websocket_credential,
     })
 }
 
@@ -1450,13 +1462,16 @@ async fn handle_start_inner(
         version,
         session_config,
         transport,
+        websocket_credential,
     } = prepared_start;
     info!("starting realtime conversation");
-    let accounting_endpoint = realtime_call_api_provider
-        .as_ref()
-        .unwrap_or(&api_provider)
-        .base_url
-        .clone();
+    let (accounting_endpoint, accounting_auth_mode, turn_label) = realtime_accounting_route(
+        &transport,
+        &api_provider,
+        realtime_call_api_provider.as_ref(),
+        &session_config,
+        sub_id,
+    );
     let sdp = match transport {
         ConversationStartTransport::Websocket => None,
         ConversationStartTransport::Webrtc { sdp } => Some(sdp),
@@ -1475,7 +1490,14 @@ async fn handle_start_inner(
         session_config,
         model_client: sess.services.model_client().as_ref().clone(),
         sdp,
-        accounting: realtime_accounting(sess, sub_id, &accounting_endpoint).await,
+        accounting: realtime_accounting(
+            sess,
+            &accounting_endpoint,
+            accounting_auth_mode,
+            turn_label,
+        )
+        .await,
+        websocket_credential,
     };
     let start_output = sess.conversation.start(start).await?;
 
@@ -1728,15 +1750,17 @@ pub(crate) async fn handle_close(sess: &Arc<Session>, sub_id: String) {
 
 /// Runs one WebSocket session. Its record (#824), if any, gets the session's
 /// end time however the session ends: a requested stop, a replacement, a
-/// shutdown, or the transport closing or failing.
+/// shutdown, or the transport closing or failing. Each of those waits for this
+/// task, so the end is written before the stop returns; the write waits only
+/// while another connection holds the state DB lock.
 fn spawn_realtime_input_task(
     input: RealtimeInputTask,
     record: Option<crate::accounting::realtime::RealtimeSessionRecord>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        run_realtime_input_task(input).await;
+        let ended_at_ms = run_realtime_input_task(input).await;
         if let Some(record) = record {
-            record.end().await;
+            record.end(ended_at_ms).await;
         }
     })
 }
@@ -1833,7 +1857,9 @@ fn spawn_webrtc_sideband_input_task(input: RealtimeWebrtcSidebandInputTask) -> J
     })
 }
 
-async fn run_realtime_input_task(input: RealtimeInputTask) {
+/// Runs a session until it ends, and returns when it ended (Unix ms): when
+/// its loop stopped, before any transcript tail is flushed.
+async fn run_realtime_input_task(input: RealtimeInputTask) -> i64 {
     let RealtimeInputTask {
         model_client,
         writer,
@@ -1904,6 +1930,7 @@ async fn run_realtime_input_task(input: RealtimeInputTask) {
             break;
         }
     }
+    let ended_at_ms = chrono::Utc::now().timestamp_millis();
 
     if flush_transcript_tail_on_session_end
         && model_client
@@ -1920,6 +1947,7 @@ async fn run_realtime_input_task(input: RealtimeInputTask) {
             ))
             .await;
     }
+    ended_at_ms
 }
 
 // Re-check after receiving each input/event, not before waiting on the queue:
@@ -2513,6 +2541,38 @@ async fn send_realtime_conversation_closed(
     .await;
 }
 
+/// Where and how a realtime start is recorded: the endpoint, the sign-in mode
+/// (`None` for the session's own) and the turn label.
+///
+/// A WebSocket session is recorded against the base URL it connects under, in
+/// HTTP form, as the API-key work it is: it always sends an API key, whatever
+/// the session's sign-in (#824). A WebRTC call keeps the endpoint and sign-in
+/// it is created with.
+fn realtime_accounting_route(
+    transport: &ConversationStartTransport,
+    api_provider: &ApiProvider,
+    realtime_call_api_provider: Option<&ApiProvider>,
+    session_config: &RealtimeSessionConfig,
+    sub_id: &str,
+) -> (String, Option<AuthMode>, String) {
+    match transport {
+        ConversationStartTransport::Websocket => (
+            codex_api::realtime_websocket_route(&api_provider.base_url, session_config)
+                .map_or_else(|_| api_provider.base_url.clone(), |route| route.base_url),
+            Some(AuthMode::ApiKey),
+            crate::accounting::realtime_session_turn_label(sub_id),
+        ),
+        ConversationStartTransport::Webrtc { .. } => (
+            realtime_call_api_provider
+                .unwrap_or(api_provider)
+                .base_url
+                .clone(),
+            /*auth_mode*/ None,
+            crate::accounting::realtime_turn_label(sub_id),
+        ),
+    }
+}
+
 #[cfg(test)]
 #[path = "realtime_conversation_tests.rs"]
 mod tests;
@@ -2525,8 +2585,9 @@ mod tests;
 /// this client parses never reports any.
 pub(crate) async fn realtime_accounting(
     sess: &Arc<Session>,
-    sub_id: &str,
     endpoint: &str,
+    auth_mode: Option<AuthMode>,
+    turn_label: String,
 ) -> Option<(
     crate::client::ModelClientSession,
     crate::accounting::TurnScopes,
@@ -2534,16 +2595,25 @@ pub(crate) async fn realtime_accounting(
     let client_session = sess.services.new_model_client_session();
     let (accounting, provider_id) = sess.accounting_binding().await;
     let provider = sess.provider().await;
-    let auth = sess.services.auth_manager().auth().await;
+    let auth_mode = match auth_mode {
+        Some(auth_mode) => Some(auth_mode),
+        None => sess
+            .services
+            .auth_manager()
+            .auth()
+            .await
+            .as_ref()
+            .map(codex_login::CodexAuth::auth_mode),
+    };
     match crate::accounting::attach_scopes(
         sess,
         &accounting,
         &provider_id,
         &provider,
-        auth.as_ref().map(codex_login::CodexAuth::auth_mode),
+        auth_mode,
         endpoint,
         &client_session,
-        crate::accounting::realtime_turn_label(sub_id),
+        turn_label,
     )
     .await
     {

@@ -5,7 +5,7 @@
 //! tokens are never reported to this client - the realtime events it parses
 //! carry none - so they stay unknown, never zero.
 use super::Sampling;
-use super::responses::Slot;
+use super::responses::DeferredResponsesSampling;
 use codex_login::CodexAuth;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_state::accounting::Attempt;
@@ -21,18 +21,17 @@ pub(crate) struct RealtimeSessionRecord {
 
 impl RealtimeSessionRecord {
     /// Admit the session that opened at `url` (`route` under the approved
-    /// endpoint) on `slot`'s collector. `None` when it goes unrecorded: no
-    /// collector, a route the accounting does not approve, or a ledger
-    /// failure. Never refuses the session.
+    /// endpoint) on `deferred`, signed in with `auth`. `None` when it goes
+    /// unrecorded: a route or credential the accounting does not approve, or
+    /// a ledger failure, each logged as a gap. Never refuses the session.
     pub(crate) async fn begin(
-        slot: &Slot,
+        deferred: &DeferredResponsesSampling,
         provider: &ModelProviderInfo,
         auth: Option<&CodexAuth>,
         url: &str,
         route: &str,
         model: &str,
     ) -> Option<Self> {
-        let deferred = super::responses::read(slot).ok().flatten()?;
         let sampling = deferred
             .resolve_path(provider, auth, url, route)
             .await
@@ -52,9 +51,11 @@ impl RealtimeSessionRecord {
         }
     }
 
-    /// Record when the session ended. Its tokens stay unknown.
-    pub(crate) async fn end(self) {
-        let ended = match super::now().try_into() {
+    /// Record that the session ended at `ended_at_ms` (Unix ms). Its tokens
+    /// stay unknown. The write waits only while the state DB lock is held by
+    /// another connection; a busy DB defers it and the close goes ahead.
+    pub(crate) async fn end(self, ended_at_ms: i64) {
+        let ended = match ended_at_ms.try_into() {
             Ok(ended) => ended,
             Err(error) => {
                 super::gap("record realtime session end", error);

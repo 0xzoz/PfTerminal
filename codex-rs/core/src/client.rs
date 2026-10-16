@@ -1713,47 +1713,50 @@ impl ModelClient {
         })
     }
 
-    /// #824: record a realtime WebSocket session that has just opened on
-    /// `api_provider` as one request. A session is billed but this client
-    /// never sees its token usage, so the record states the route, model,
-    /// provider and start time now, the end time when the session closes
-    /// (`RealtimeSessionRecord::end`), and no token counts. `None` leaves the
-    /// session unrecorded; it is never refused.
+    /// #824: record a realtime WebSocket session that has just opened under
+    /// `base_url` as one request. A session is billed but this client never
+    /// sees its token usage, so the record states the route, model, provider
+    /// and start time now, the end time when the session closes
+    /// (`RealtimeSessionRecord::end`), and no token counts. `credential` is
+    /// the API key the session sends. `None` leaves the session unrecorded; it
+    /// is never refused.
     pub(crate) async fn begin_realtime_session_record(
         &self,
-        api_provider: &ApiProvider,
+        base_url: &str,
         session_config: &ApiRealtimeSessionConfig,
         accounting: &crate::accounting::responses::Slot,
+        credential: Option<&codex_login::CodexAuth>,
     ) -> Option<crate::accounting::realtime::RealtimeSessionRecord> {
         // Nothing collects this session: say nothing.
         let deferred = crate::accounting::responses::read(accounting)
             .ok()
             .flatten()?;
-        let model = session_config.model.as_deref().unwrap_or_default();
-        let (url, route) = match codex_api::realtime_websocket_route(api_provider, session_config) {
-            Ok((url, Some(route))) => (url, route),
-            Ok((_, None)) => {
-                deferred.reject();
-                crate::accounting::gap(
-                    "realtime session route",
-                    "the session URL is not under the provider's base URL",
-                );
-                return None;
-            }
+        let unrecorded = |cause: &dyn std::fmt::Display| {
+            deferred.reject();
+            crate::accounting::gap("realtime session route", cause);
+        };
+        let route = match codex_api::realtime_websocket_route(base_url, session_config) {
+            Ok(route) => route,
             Err(error) => {
-                deferred.reject();
-                crate::accounting::gap("realtime session route", error);
+                unrecorded(&error);
                 return None;
             }
         };
-        let auth = self.state.provider.auth().await;
+        let Some(path) = route.route else {
+            unrecorded(&"the session URL is not under its base URL");
+            return None;
+        };
+        // The provider's configured query parameters ride on the session URL
+        // as on every other request; the pin adds them the same way.
+        let provider = self.state.provider.info();
+        let url = match crate::accounting::canonical_query(provider) {
+            Some(query) if route.url.contains('?') => format!("{}&{query}", route.url),
+            Some(query) => format!("{}?{query}", route.url),
+            None => route.url,
+        };
+        let model = session_config.model.as_deref().unwrap_or_default();
         crate::accounting::realtime::RealtimeSessionRecord::begin(
-            accounting,
-            self.state.provider.info(),
-            auth.as_ref(),
-            &url,
-            &route,
-            model,
+            &deferred, provider, credential, &url, &path, model,
         )
         .await
     }

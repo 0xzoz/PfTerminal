@@ -1611,15 +1611,19 @@ fn reopen_warmup(quotes: &[&ObservationQuote]) -> bool {
 
 const REOPEN_WARMUP_KIND: &str = "Kind: Reopen warm-up — sent when this conversation was reopened or forked, to prime the model's cache. Billed like any request; set skip_reopen_warmup = true in config.toml to skip it.";
 
-/// #824: the turn-label prefix core gives a realtime session or call (core
-/// `accounting::realtime_turn_label`); a label can carry an owner prefix
-/// before it, such as `side:`.
-const REALTIME_LABEL: &str = "realtime:";
+/// #824: the turn-label prefix core gives a realtime WebSocket session (core
+/// `accounting::REALTIME_SESSION_LABEL`, pinned by core's
+/// `realtime_session_label_is_stable`); a label can carry an owner prefix
+/// before it, such as `side:`. A WebRTC call (`realtime:` alone) is recorded
+/// at its creation and is not named a session here.
+const REALTIME_SESSION_LABEL: &str = "realtime:ws:";
 
-/// Whether this attempt is a realtime session or call.
+/// Whether this attempt is a realtime WebSocket session.
 fn is_realtime(quote: &ObservationQuote) -> bool {
     let turn = &quote.attempt.turn;
-    turn.starts_with(REALTIME_LABEL) || turn.contains(&format!(":{REALTIME_LABEL}"))
+    quote.usage.refused_status.is_none()
+        && (turn.starts_with(REALTIME_SESSION_LABEL)
+            || turn.contains(&format!(":{REALTIME_SESSION_LABEL}")))
 }
 
 /// Whether these attempts are a realtime session request.

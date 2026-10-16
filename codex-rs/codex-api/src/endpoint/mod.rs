@@ -31,6 +31,7 @@ pub use realtime_websocket::RealtimeSessionMode;
 pub use realtime_websocket::RealtimeWebsocketClient;
 pub use realtime_websocket::RealtimeWebsocketConnection;
 pub use realtime_websocket::RealtimeWebsocketEvents;
+pub use realtime_websocket::RealtimeWebsocketRoute;
 pub use realtime_websocket::RealtimeWebsocketWriter;
 pub use realtime_websocket::realtime_websocket_route;
 pub use realtime_websocket::session_update_session_json;

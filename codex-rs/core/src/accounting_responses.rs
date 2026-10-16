@@ -164,6 +164,12 @@ impl DeferredResponsesSampling {
         Ok(())
     }
 
+    /// The accounting mode this collector was attached with.
+    #[cfg(test)]
+    pub(crate) fn mode(&self) -> &AccountingMode {
+        &self.mode
+    }
+
     pub(super) fn provider_mode(&self) -> bool {
         matches!(self.mode, AccountingMode::Provider { .. })
     }

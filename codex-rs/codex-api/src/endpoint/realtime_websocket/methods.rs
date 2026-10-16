@@ -914,35 +914,52 @@ fn websocket_config() -> WebSocketConfig {
     WebSocketConfig::default()
 }
 
-/// The URL `RealtimeWebsocketClient::connect` opens for `config`, in its HTTP
-/// form, and the same route relative to the provider's base URL: `path` or
-/// `path?query`, without the provider's configured query parameters, which a
-/// caller pins on its own. The route is `None` when the URL is not under the
-/// base URL.
-///
-/// Accounting pins the route it records a realtime session against (#824);
-/// reading it here keeps one source of truth for the path and query rules.
+/// Where a realtime WebSocket session connects, in HTTP form, for callers that
+/// pin the route they record a session against (accounting, #824). Reading it
+/// here keeps one source of truth for the path and query rules `connect`
+/// applies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RealtimeWebsocketRoute {
+    /// The base URL, with no trailing `/`.
+    pub base_url: String,
+    /// The URL `RealtimeWebsocketClient::connect` opens for this session,
+    /// without the provider's configured query parameters: a caller pins those
+    /// on its own.
+    pub url: String,
+    /// `url` relative to `base_url`: `path`, `path?query` or `?query` (the
+    /// session URL is the base URL itself). `None` when `url` is not under
+    /// `base_url`.
+    pub route: Option<String>,
+}
+
+/// The `RealtimeWebsocketRoute` of a session `config` opens on `base_url`.
 pub fn realtime_websocket_route(
-    provider: &Provider,
+    base_url: &str,
     config: &RealtimeSessionConfig,
-) -> Result<(String, Option<String>), ApiError> {
-    let url_for = |query_params| {
-        websocket_url_from_api_url(
-            provider.base_url.as_str(),
-            query_params,
-            config.model.as_deref(),
-            config.event_parser,
-            config.session_mode,
-        )
-    };
-    let url = http_form(url_for(provider.query_params.as_ref())?);
-    let bare = http_form(url_for(/*query_params*/ None)?);
-    let base = Url::parse(provider.base_url.as_str())
+) -> Result<RealtimeWebsocketRoute, ApiError> {
+    let url = http_form(websocket_url_from_api_url(
+        base_url,
+        /*query_params*/ None,
+        config.model.as_deref(),
+        config.event_parser,
+        config.session_mode,
+    )?);
+    let base = Url::parse(base_url)
         .map(http_form)
         .map_err(|err| ApiError::Stream(format!("failed to parse realtime api_url: {err}")))?;
-    let prefix = format!("{}/", base.trim_end_matches('/'));
-    let route = bare.strip_prefix(&prefix).map(str::to_string);
-    Ok((url, route))
+    let base_url = base.trim_end_matches('/').to_string();
+    let route = url.strip_prefix(&base_url).and_then(|rest| {
+        if rest.is_empty() || rest.starts_with('?') {
+            Some(rest.to_string())
+        } else {
+            rest.strip_prefix('/').map(str::to_string)
+        }
+    });
+    Ok(RealtimeWebsocketRoute {
+        base_url,
+        url,
+        route,
+    })
 }
 
 fn http_form(mut url: Url) -> String {
@@ -1874,24 +1891,10 @@ mod tests {
     }
 
     /// #824: the route accounting pins a WebSocket session to is the URL
-    /// `connect` opens, relative to the base URL and without the provider's
-    /// configured query parameters.
+    /// `connect` opens, in HTTP form and relative to the base URL, for every
+    /// base shape `connect` normalises.
     #[test]
     fn realtime_websocket_route_matches_the_connect_url() {
-        let provider = |base_url: &str, query_params| Provider {
-            name: "openai".to_string(),
-            base_url: base_url.to_string(),
-            query_params,
-            headers: HeaderMap::new(),
-            retry: RetryConfig {
-                max_attempts: 0,
-                base_delay: Duration::ZERO,
-                retry_429: false,
-                retry_5xx: false,
-                retry_transport: false,
-            },
-            stream_idle_timeout: Duration::from_secs(5),
-        };
         let config = RealtimeSessionConfig {
             instructions: String::new(),
             initial_items: Vec::new(),
@@ -1902,29 +1905,55 @@ mod tests {
             output_modality: RealtimeOutputModality::Text,
             voice: RealtimeVoice::Alloy,
         };
+        let route = |base: &str| realtime_websocket_route(base, &config).expect("route");
+        let expect = |base: &str, url: &str, route: Option<&str>| RealtimeWebsocketRoute {
+            base_url: base.to_string(),
+            url: url.to_string(),
+            route: route.map(str::to_string),
+        };
         assert_eq!(
-            realtime_websocket_route(&provider("https://api.openai.com/v1", None), &config)
-                .expect("route"),
-            (
-                "https://api.openai.com/v1/realtime?model=gpt-realtime-1.5".to_string(),
-                Some("realtime?model=gpt-realtime-1.5".to_string())
+            route("https://api.openai.com/v1"),
+            expect(
+                "https://api.openai.com/v1",
+                "https://api.openai.com/v1/realtime?model=gpt-realtime-1.5",
+                Some("realtime?model=gpt-realtime-1.5"),
             )
         );
-        let query = HashMap::from([("api-version".to_string(), "1".to_string())]);
+        // A WebSocket base (`experimental_realtime_ws_base_url`) in HTTP form.
         assert_eq!(
-            realtime_websocket_route(&provider("http://127.0.0.1:9/v1/", Some(query)), &config)
-                .expect("route"),
-            (
-                "http://127.0.0.1:9/v1/realtime?model=gpt-realtime-1.5&api-version=1".to_string(),
-                Some("realtime?model=gpt-realtime-1.5".to_string())
+            route("wss://proxy.example/v1/"),
+            expect(
+                "https://proxy.example/v1",
+                "https://proxy.example/v1/realtime?model=gpt-realtime-1.5",
+                Some("realtime?model=gpt-realtime-1.5"),
             )
         );
-        // A base the session URL is not under has no route.
+        // A base that already names the realtime path is the session URL.
         assert_eq!(
-            realtime_websocket_route(&provider("https://example.com/custom", None), &config)
-                .expect("route")
-                .1,
-            None
+            route("ws://127.0.0.1:9/proxy/realtime"),
+            expect(
+                "http://127.0.0.1:9/proxy/realtime",
+                "http://127.0.0.1:9/proxy/realtime?model=gpt-realtime-1.5",
+                Some("?model=gpt-realtime-1.5"),
+            )
+        );
+        // A bare host gets the default path.
+        assert_eq!(
+            route("https://host.example"),
+            expect(
+                "https://host.example",
+                "https://host.example/v1/realtime?model=gpt-realtime-1.5",
+                Some("v1/realtime?model=gpt-realtime-1.5"),
+            )
+        );
+        // A custom path is kept as it is.
+        assert_eq!(
+            route("https://example.com/custom"),
+            expect(
+                "https://example.com/custom",
+                "https://example.com/custom?model=gpt-realtime-1.5",
+                Some("?model=gpt-realtime-1.5"),
+            )
         );
     }
 

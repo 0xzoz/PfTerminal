@@ -3430,7 +3430,7 @@ fn realtime_quote(started: i64, ended: Option<i64>) -> ObservationQuote {
     q.attempt.attempt_id = Uuid::from_u128(21);
     q.attempt.request_id = Uuid::from_u128(22);
     q.attempt.retry_of = None;
-    q.attempt.turn = format!("realtime:{}", Uuid::from_u128(23));
+    q.attempt.turn = format!("realtime:ws:{}", Uuid::from_u128(23));
     q.attempt.provider = "openai".into();
     q.attempt.model = "gpt-realtime-1.5".into();
     q.attempt.dispatched_at_ms = started.try_into().unwrap();
@@ -3536,9 +3536,18 @@ fn accounting_realtime_session_without_an_end_says_so() {
         ),
         "{kind}"
     );
-    // An owner prefix keeps it a realtime session; an ordinary turn is not one.
-    let mut side = session;
-    side.attempt.turn = format!("side:realtime:{}", Uuid::from_u128(24));
+    // An owner prefix keeps it a realtime session; an ordinary turn and a
+    // WebRTC call (recorded at its creation, with no session end) are not.
+    let mut side = session.clone();
+    side.attempt.turn = format!("side:realtime:ws:{}", Uuid::from_u128(24));
     assert!(realtime_session(&[&side]));
     assert!(!realtime_session(&[&quote()]));
+    let mut call = session;
+    call.attempt.turn = format!("realtime:{}", Uuid::from_u128(25));
+    assert!(!realtime_session(&[&call]));
+    assert!(
+        !attempt_text(&call)
+            .iter()
+            .any(|line| line.starts_with("Realtime session")),
+    );
 }

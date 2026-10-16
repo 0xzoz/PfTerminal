@@ -138,6 +138,20 @@ pub(crate) fn realtime_turn_label(sub_id: &str) -> String {
     scoped_turn_label("realtime:", sub_id)
 }
 
+/// The turn-label prefix of one realtime WebSocket session (#824): a
+/// `realtime:` label, so anything that reads realtime work reads it, told
+/// apart from a WebRTC call so `/cost` can name it a session with a start and
+/// an end. The TUI's `/cost` matches it by value;
+/// `realtime_session_label_is_stable` pins it.
+pub(crate) const REALTIME_SESSION_LABEL: &str = "realtime:ws:";
+
+/// A turn label for one realtime WebSocket session (#824). The session is
+/// one request, recorded with its tokens unknown: its usage never reaches
+/// this client.
+pub(crate) fn realtime_session_turn_label(sub_id: &str) -> String {
+    scoped_turn_label(REALTIME_SESSION_LABEL, sub_id)
+}
+
 /// A turn label for one stage-one memory extraction.
 ///
 /// Extraction is a model call the operator paid for, on a client session of its
@@ -654,7 +668,14 @@ pub(crate) fn pinned_route(approved_endpoint: &str, query: Option<&str>, path: &
         Some((path, query)) => (path, Some(query)),
         None => (path, None),
     };
-    let route = format!("{}/{path}", approved_endpoint.trim_end_matches('/'));
+    // An empty path is the approved endpoint itself: a realtime session whose
+    // base URL already names its path (#824).
+    let base = approved_endpoint.trim_end_matches('/');
+    let route = if path.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}/{path}")
+    };
     let query: Vec<&str> = [query, path_query]
         .into_iter()
         .flatten()
