@@ -215,15 +215,19 @@ say the same (#816): what holds from confirmation (approved commands kept in
 the session's sandbox, network off when its sandbox has no network and its
 permission-request tools are off, and any of Aggressive's environment, web
 search and model-key settings your own config already has), and that the rest
-starts at the restart.
+starts at the restart. That includes the project's credential files (`.env`,
+`.env.*` and `.envrc`): Aggressive's sandbox denies them, so before the
+restart agent commands can still read them (#846); Core's rules from
+confirmation cover the credential files in your home folder.
 
 Under Moderate a command can still ask to run outside it
 (an escalation request): the prompt says it stays in the sandbox, and
-approving it only lifts Moderate's protection of credential and Corbanu files
-for that one command. A write outside your writable folders, or network your
-sandbox blocks, still fails, and "retry without sandbox?" is not offered.
-Commands you allowed with "don't ask again" skip the prompt but stay in the
-sandbox too.
+approving it only lifts Moderate's protected-file rules (credential and
+Corbanu files, files that run code later) for that one command. A write
+outside your writable folders, or network your sandbox blocks, still fails,
+and "retry without sandbox?" is not offered. Commands you allowed with "don't
+ask again" skip the prompt but stay in the sandbox too, with those rules
+kept.
 
 The Corbanu home's runtime files (the sandbox launchers in `tmp`, shell
 snapshots, skills, plugins, packages and `AGENTS.md`) stay read-only to agent

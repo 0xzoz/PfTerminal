@@ -373,6 +373,22 @@ pub(crate) fn moderate_keeps_sandbox(session: &crate::session::session::Session)
 /// run outside the sandbox under Moderate.
 pub(crate) const MODERATE_STAYS_SANDBOXED: &str = "Under security level Moderate it still runs inside the sandbox, even if you approve: writes outside your writable folders and network your sandbox blocks still fail.";
 
+/// #840: what approving a request to run outside the sandbox does under
+/// Moderate before untrusted content (#239): it lifts the protected-file
+/// rules for that one run, which is why the person is asked even where the
+/// command would otherwise run unasked (unless a saved allow rule covers it:
+/// then it runs unasked with the rules kept, D6). Said in terms of the
+/// files, so a command that has nothing to do with credentials does not read
+/// as a credential request.
+pub(crate) const MODERATE_ESCALATION_LIFTS: &str = "This command asks to run outside the sandbox. Approving it lifts Moderate's protected-file rules for this one run: it may then read protected files, such as your SSH and cloud credentials, and write files that run code later in your writable folders.";
+
+/// #840: the note on a request to run outside the sandbox under Moderate
+/// before untrusted content: what approving lifts, and that it stays in the
+/// sandbox (#747).
+pub(crate) fn moderate_escalation_note() -> String {
+    format!("{MODERATE_ESCALATION_LIFTS} {MODERATE_STAYS_SANDBOXED}")
+}
+
 /// #739 (Travis, 2026-10-14, option B, security sign-off): under security
 /// level Permissive with protected launch armed (`secretless_agent_launch`),
 /// whose launch contract refuses every command outside the OS sandbox, no
@@ -535,7 +551,8 @@ pub(crate) fn refusal(level: SecurityLevel, path: &str) -> String {
             format!(
                 "Security level Moderate blocked access to `{path}`: an additional permission \
                  can never open protected files (credential files such as .env, SSH, cloud and \
-                 CLI tokens, and Corbanu's sign-in, vault, config and history). To allow it, a \
+                 CLI tokens, and Corbanu's sign-in, vault, config, history, security state and \
+                 keys). To allow it, a \
                  person can switch to Permissive in /security (it applies after a restart)."
             )
         }

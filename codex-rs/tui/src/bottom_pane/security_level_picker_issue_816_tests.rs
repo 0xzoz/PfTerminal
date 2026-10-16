@@ -49,7 +49,7 @@ fn issue_816_screen_07_says_the_sandbox_and_network_hold_now() {
     );
     assert_eq!(
         line_with(&saved, "Starts when you restart"),
-        "Starts when you restart: the Aggressive sandbox (writes only in the current folder), web search off, secret-like environment variables removed and login profiles and shell snapshots unused, model keys held by the credential broker, and the child-agent rules. Until then this session keeps your own settings for these, and commands already running keep the permissions they started with until they end."
+        "Starts when you restart: the Aggressive sandbox (writes only in the current folder), the project's credential files (.env, .env.* and .envrc) denied to agent commands, web search off, secret-like environment variables removed and login profiles and shell snapshots unused, model keys held by the credential broker, and the child-agent rules. Until then this session keeps your own settings for these, and commands already running keep the permissions they started with until they end."
     );
     insta::assert_snapshot!(
         "issue_816_saved_aggressive_before_restart",
@@ -115,7 +115,7 @@ fn issue_816_nothing_more_is_claimed_when_the_session_does_not_hold_it() {
     assert!(!saved.contains("Also in force now"), "{saved}");
     assert_eq!(
         line_with(&saved, "Starts when you restart"),
-        "Starts when you restart: the Aggressive sandbox (writes only in the current folder, approved commands stay inside it), network and web search off, secret-like environment variables removed and login profiles and shell snapshots unused, model keys held by the credential broker, and the child-agent rules. Until then this session keeps your own settings for these, and commands already running keep the permissions they started with until they end."
+        "Starts when you restart: the Aggressive sandbox (writes only in the current folder, approved commands stay inside it), the project's credential files (.env, .env.* and .envrc) denied to agent commands, network and web search off, secret-like environment variables removed and login profiles and shell snapshots unused, model keys held by the credential broker, and the child-agent rules. Until then this session keeps your own settings for these, and commands already running keep the permissions they started with until they end."
     );
     picker.screen = Screen::List { note: None };
     let list = text(&picker);
@@ -150,7 +150,7 @@ fn issue_816_everything_held_now_is_not_listed_for_the_restart() {
     );
     assert!(
         saved.contains(
-            "Starts when you restart: the Aggressive sandbox (writes only in the current folder), and the child-agent rules."
+            "Starts when you restart: the Aggressive sandbox (writes only in the current folder), the project's credential files (.env, .env.* and .envrc) denied to agent commands, and the child-agent rules."
         ),
         "{saved}"
     );
@@ -187,7 +187,56 @@ fn issue_816_permission_requests_qualify_the_sandbox() {
     );
     assert!(
         line_with(&saved, "Starts when you restart")
-            .starts_with("Starts when you restart: the Aggressive sandbox (writes only in the current folder), network and web search off,"),
+            .starts_with("Starts when you restart: the Aggressive sandbox (writes only in the current folder), the project's credential files (.env, .env.* and .envrc) denied to agent commands, network and web search off,"),
         "{saved}"
     );
+}
+
+/// #846 (MOD-29): the project's `.env` files are denied by Aggressive's
+/// sandbox profile, which starts at the restart, not by Core's rules that
+/// apply at confirmation (a host check read `.env` before the restart). The
+/// saved screen says so: "now" names only the credential files in the home
+/// folder, and the restart list names the project's.
+#[test]
+fn issue_846_saved_screen_says_project_env_files_wait_for_the_restart() {
+    let root = tempfile::tempdir().unwrap();
+    // MOD-29 started from Moderate.
+    for (active, before_restart) in [
+        (ChosenLevel::Moderate, Some(agg_04_session())),
+        (ChosenLevel::Moderate, None),
+        (ChosenLevel::Permissive, None),
+    ] {
+        let mut picker = picker(&root, /*live*/ true);
+        picker.active = active;
+        if let Some(before_restart) = before_restart {
+            picker.set_before_restart(before_restart);
+        }
+        saved_live(&mut picker);
+        let saved = text(&picker);
+        let now = line_with(&saved, "Active now in this session");
+        assert!(!now.contains("sign-in and credential files"), "{now}");
+        assert!(
+            now.contains(
+                "sign-in files, credential files in your home folder such as .ssh, .aws and .netrc,"
+            ),
+            "{now}"
+        );
+        assert!(
+            line_with(&saved, "Starts when you restart").contains(
+                "the project's credential files (.env, .env.* and .envrc) denied to agent commands"
+            ),
+            "{saved}"
+        );
+    }
+    // The review uses the same words for what applies at confirmation.
+    let mut picker = picker(&root, /*live*/ true);
+    picker.active = ChosenLevel::Moderate;
+    picker.basis.live = true;
+    picker.screen = Screen::Review(ChosenLevel::Aggressive);
+    let review = text(&picker);
+    assert!(
+        review.contains("credential files in your home folder such as .ssh, .aws and .netrc"),
+        "{review}"
+    );
+    assert!(!review.contains("sign-in and credential files"), "{review}");
 }

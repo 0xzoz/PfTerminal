@@ -1780,6 +1780,7 @@ async fn run_sampling_request(
     let mut retries = 0;
     let mut same_request_idle_failures = 0;
     let mut unresolvable_item_retries = 0;
+    let mut home_wait = crate::home_access::HomeWait::default();
     let mut initial_input = Some(input);
     let mut original_input = None;
     let mut executed_tool_calls_by_output = HashMap::new();
@@ -1868,6 +1869,23 @@ async fn run_sampling_request(
             .await;
             continue;
         }
+
+        // #616: an unreadable Corbanu home (e.g. the auth helper could not
+        // read it) is waited out within exec's window, without using retries.
+        let err = match crate::home_access::wait_if_home_unreadable(
+            &mut home_wait,
+            &sess,
+            &turn_context,
+            err,
+        )
+        .await
+        {
+            Ok(()) => {
+                turn_context.turn_timing_state.record_sampling_retry();
+                continue;
+            }
+            Err(err) => err,
+        };
 
         if !err.is_retryable() {
             return Err(err);
