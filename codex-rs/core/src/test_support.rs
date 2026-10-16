@@ -61,6 +61,12 @@ pub fn set_thread_manager_test_mode(enabled: bool) {
     thread_manager::set_thread_manager_test_mode_for_tests(enabled);
 }
 
+/// #888: skill discovery in this process skips the user-home skills root
+/// (`$HOME/.agents/skills`), so a developer's own skills never reach a test.
+pub fn ignore_user_home_skills(ignore: bool) {
+    codex_core_skills::loader::ignore_user_home_skills_for_tests(ignore);
+}
+
 /// #744: the latest Aggressive link check (#623) refusals in this process,
 /// each with the check that made it, for a test to report when it fails.
 pub fn recent_link_check_refusals() -> Vec<String> {
