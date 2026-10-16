@@ -1,4 +1,5 @@
 use super::*;
+use crate::runtime::busy_retry::count_attempts;
 use crate::runtime::test_support::unique_temp_dir;
 use pretty_assertions::assert_eq;
 use std::path::Path;
@@ -40,11 +41,12 @@ async fn hold_write_lock(path: &Path) -> anyhow::Result<sqlx::Transaction<'stati
 }
 
 /// That a step that met the held lock waited on the short-wait pool
-/// (`QUICK_BUSY_TIMEOUT` per attempt, at most two), not the main pool: there
-/// a held lock costs SQLite's whole busy timeout, `sqlite::BUSY_TIMEOUT`, per
-/// attempt. The upper bound is a fifth below that timeout, so it still rules
-/// out any main-pool wait while leaving several times the short waits for a
-/// loaded runner (one took 2.04 s on Windows CI, #914).
+/// (`QUICK_BUSY_TIMEOUT` per attempt), not the main pool: there a held lock
+/// costs SQLite's whole busy timeout, `sqlite::BUSY_TIMEOUT`, per attempt. The
+/// upper bound is a fifth below that timeout, so it still rules out any
+/// main-pool wait while leaving room for a loaded runner (one short wait took
+/// 2.04 s on Windows CI, #914). The number of attempts is counted separately
+/// (`count_attempts`), not inferred from the time.
 fn assert_short_wait(waited: Duration) {
     assert!(
         waited >= crate::QUICK_BUSY_TIMEOUT / 2 && waited < crate::sqlite::BUSY_TIMEOUT * 4 / 5,
@@ -108,9 +110,12 @@ async fn a_lock_held_past_the_wait_falls_back_to_this_process() -> anyhow::Resul
     // Otherwise the steps run on the main pool.
     assert!(runtime.quick.is_some(), "the short-wait pool is open");
     let started = Instant::now();
-    let check = runtime
-        .check_provider_request_throttle(&key(), &preflight(), /*now_ms*/ 3_000)
-        .await;
+    let (check, attempts) = count_attempts(runtime.check_provider_request_throttle(
+        &key(),
+        &preflight(),
+        /*now_ms*/ 3_000,
+    ))
+    .await;
     let first_wait = started.elapsed();
     assert_eq!(check.state_db_fallback, Some(StateDbFallback::Busy));
     let block = check.decision.expect("the cooldown still holds");
@@ -122,18 +127,26 @@ async fn a_lock_held_past_the_wait_falls_back_to_this_process() -> anyhow::Resul
             Some("req-1".to_string())
         )
     );
-    // A step on the turn's path waits about a second (two short-wait
-    // attempts), not SQLite's 5 s busy timeout.
+    // A step on the turn's path makes a second short-wait attempt and no
+    // more (one only if the first ran past `PROVIDER_REQUEST_BUSY_WAIT`), and
+    // never waits SQLite's 5 s busy timeout.
+    assert!((1..=2).contains(&attempts), "{attempts} attempts");
     assert_short_wait(first_wait);
 
     // While paused, later steps don't wait the lock out again.
     let started = Instant::now();
     let after_cooldown = 70_000;
-    let worker_b = acquire(&runtime, "worker-b", after_cooldown).await;
+    let ((worker_b, worker_c), attempts) = count_attempts(async {
+        (
+            acquire(&runtime, "worker-b", after_cooldown).await,
+            acquire(&runtime, "worker-c", after_cooldown + 1).await,
+        )
+    })
+    .await;
+    assert_eq!(attempts, 0);
     assert_eq!(worker_b.state_db_fallback, Some(StateDbFallback::Busy));
     let worker_b = acquired(worker_b);
     assert_eq!(worker_b.in_state_db, false);
-    let worker_c = acquire(&runtime, "worker-c", after_cooldown + 1).await;
     assert_eq!(
         blocked_reason(&worker_c),
         Some(ProviderRequestBlockReason::Lease)
@@ -741,18 +754,23 @@ async fn adoption_waits_out_a_busy_db_once() -> anyhow::Result<()> {
         )
     };
     let started = Instant::now();
-    adopt().await;
+    let ((), attempts) = count_attempts(adopt()).await;
     // One short-wait attempt, not SQLite's 5 s busy timeout.
+    assert_eq!(attempts, 1);
     assert_short_wait(started.elapsed());
     assert_eq!(
         runtime.provider_request_memory.paused(),
         Some(StateDbFallback::Busy)
     );
     let started = Instant::now();
-    adopt().await;
-    let check = runtime
-        .check_provider_request_throttle(&key(), &preflight(), /*now_ms*/ 2_000)
-        .await;
+    let (check, attempts) = count_attempts(async {
+        adopt().await;
+        runtime
+            .check_provider_request_throttle(&key(), &preflight(), /*now_ms*/ 2_000)
+            .await
+    })
+    .await;
+    assert_eq!(attempts, 0);
     assert_eq!(check.state_db_fallback, Some(StateDbFallback::Busy));
     assert!(
         started.elapsed() < Duration::from_secs(1),

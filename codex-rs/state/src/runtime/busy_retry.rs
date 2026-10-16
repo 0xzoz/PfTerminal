@@ -21,6 +21,25 @@ const SQLITE_IOERR: i32 = 10;
 const SQLITE_FULL: i32 = 13;
 const SQLITE_CANTOPEN: i32 = 14;
 
+#[cfg(test)]
+tokio::task_local! {
+    /// Writes `retry_busy_within` attempted in this task, for tests that
+    /// count them (`count_attempts`).
+    static ATTEMPTS: std::cell::Cell<u32>;
+}
+
+/// Run `future`, returning its output and how many writes `retry_busy_within`
+/// attempted in it.
+#[cfg(test)]
+pub(crate) async fn count_attempts<F: Future>(future: F) -> (F::Output, u32) {
+    ATTEMPTS
+        .scope(std::cell::Cell::new(0), async {
+            let output = future.await;
+            (output, ATTEMPTS.with(std::cell::Cell::get))
+        })
+        .await
+}
+
 /// Whether `error` is SQLITE_BUSY, in any of its extended codes: another
 /// connection held the lock past the busy timeout. Nothing else is retried; a
 /// pool timeout means this process's own connections are all in use, which
@@ -83,6 +102,8 @@ where
     let mut pause = FIRST_PAUSE;
     let mut retries = 0u32;
     loop {
+        #[cfg(test)]
+        let _ = ATTEMPTS.try_with(|attempts| attempts.set(attempts.get() + 1));
         match write().await {
             Ok(value) => {
                 if retries > 0 {
