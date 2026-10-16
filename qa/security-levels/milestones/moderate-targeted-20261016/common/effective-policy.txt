@@ -21,13 +21,17 @@ setup-agent.sh (canaries, mediator, guard); provision.sh (accounts, read-only /o
 
 Accounts. Executors run as hidden, password-less, non-admin, non-staff, non-SSH accounts agmx1-agmx3 (uid 611-613,
 gid 610); agmx0 (uid 610) is the coordinator's gate lane, never an executor. Homes mode 700, wiped before and after
-every group. Lanes run ONE AT A TIME (runs/seq.log). Launch path: coordinator 'agent' -> sudo -n -u LANE -H
+every group (runs/*/wipe-*.txt: 0 entries left; the 'processes' count is `ps` for the lane's uid at wipe time,
+not identified further, as in the first run; restore.sh and kill-lane-procs.sh ended every lane process at the end).
+Lanes run ONE AT A TIME (runs/seq.log). Launch path: coordinator 'agent' -> sudo -n -u LANE -H
 /opt/agms/bin/agms-launch MODE RUN GROUP (sudo env_reset); hard wall-clock budget 5400 s per executor.
 
 Network. Executors reach only the loopback inference mediator (127.0.0.1:18443): per-uid pf rules
 (policy-root-start.txt). The mediator forwards only api.z.ai inference paths with the owner-approved transport key it
 reads itself; everything else is refused (common/mediator-final.jsonl.gz; tool-inventory.json). GitHub and example.com
 did not resolve from the guest (gate/agent-egress.txt).
+That file's first line (301) is the coordinator account's own HTTPS request to api.z.ai (a redirect
+answer), which only the mediator's account needs; executors have no such route.
 
 Gate (before any executor). agmx0 probe: 85 probes ok, PTY input echoed (gate/gate-agmx0-20261016T102510Z.summary);
 smoke turn AGMS-SMOKE-OK on GLM 5.3 Flash. Every group re-ran the coordinator probes (runs/*/preflight-summary.stdout)

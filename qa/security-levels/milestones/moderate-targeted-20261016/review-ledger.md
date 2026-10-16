@@ -6,4 +6,5 @@ Budget: 5 review/evidence rounds in total (brief). Extensions only via qual-mod2
 | --- | --- | --- | --- | --- |
 | 1 | Amendment v3 design (fresh read-only designer) | Opus 5.5 High, `corbanu exec -s read-only` | 2026-10-16T10:06:56Z (ended 10:14:44Z) | DESIGN: COMPLETE |
 | 2 | Amendment v3 review (fresh read-only reviewer) | Opus 5.5 High, `corbanu exec -s read-only` | 2026-10-16T10:16:43Z (ended 10:21:24Z) | VERDICT: CHANGES (its final v3 frozen word for word; its Q09 note change applied; not re-reviewed) |
-| 3 | Evidence check r1 (independent read-only) | Opus 5.5 High, `corbanu exec -s read-only`, on a copy of the record (check-r1) | 2026-10-16T13:19:20Z | (pending) |
+| 3 | Evidence check r1 (independent read-only) | Opus 5.5 High, `corbanu exec -s read-only`, on a copy of the record (check-r1) | 2026-10-16T13:19:20Z (ended 13:30:11Z) | VERDICT: fail (5 corrections, applied) |
+| 4 | Evidence check r2 (independent read-only, fresh) | Opus 5.5 High, `corbanu exec -s read-only`, on a copy of the record (check-r2) | (start) | (pending) |
