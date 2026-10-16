@@ -354,6 +354,8 @@ impl ToolOrchestrator {
                 moderate_kept_read_note(tool, req, tool_ctx, turn_ctx, action).await;
             // #747: and that it stays in the sandbox under Moderate.
             let stays_sandboxed = moderate_sandbox_note(tool, req, moderate_keeps_sandbox);
+            // #826: that what needs a user namespace fails on Linux.
+            let user_namespaces_note = user_namespaces_note(tool, req, tool_ctx, turn_ctx);
             let approval_ctx = ApprovalCtx {
                 session: &tool_ctx.session,
                 turn: &tool_ctx.turn,
@@ -364,6 +366,7 @@ impl ToolOrchestrator {
                         protected_read_note.clone(),
                         kept_read_note.map(str::to_string),
                         stays_sandboxed.map(str::to_string),
+                        user_namespaces_note,
                     ]
                     .into_iter()
                     .flatten()
@@ -520,6 +523,12 @@ impl ToolOrchestrator {
                 // under Moderate; the person is told before approving.
                 let stays_sandboxed =
                     moderate_sandbox_note(tool, req, moderate_keeps_sandbox).map(str::to_string);
+                // #826: that what needs a user namespace fails on Linux.
+                let user_namespaces_note = if reviewer == ApprovalReviewer::User {
+                    user_namespaces_note(tool, req, tool_ctx, turn_ctx)
+                } else {
+                    None
+                };
                 let approval_ctx = ApprovalCtx {
                     session: &tool_ctx.session,
                     turn: &tool_ctx.turn,
@@ -531,6 +540,7 @@ impl ToolOrchestrator {
                             .as_ref()
                             .filter(|_| reviewer == ApprovalReviewer::User),
                         stays_sandboxed.as_ref(),
+                        user_namespaces_note.as_ref(),
                     ]
                     .into_iter()
                     .flatten()
@@ -631,26 +641,22 @@ impl ToolOrchestrator {
         // create user namespaces, in which they could open what the Linux
         // sandbox hides and defeat nested-launch detection. No approval or
         // grant lifts it. Permissive is unchanged.
-        let (denied_exec_server_permissions, permissions) = if cfg!(target_os = "linux")
-            && (matches!(
+        let (denied_exec_server_permissions, permissions) =
+            if crate::security::user_namespaces::rule_applies(
                 protected_level,
-                Some(
-                    codex_security_policy::SecurityLevel::Moderate
-                        | codex_security_policy::SecurityLevel::Aggressive
+                turn_ctx.config.permissions.launch_enforces_aggressive(),
+            ) {
+                (
+                    Some(deny_user_namespaces(
+                        denied_exec_server_permissions
+                            .as_ref()
+                            .unwrap_or(permission_profile),
+                    )),
+                    deny_user_namespaces(&permissions),
                 )
-            ) || turn_ctx.config.permissions.launch_enforces_aggressive())
-        {
-            (
-                Some(deny_user_namespaces(
-                    denied_exec_server_permissions
-                        .as_ref()
-                        .unwrap_or(permission_profile),
-                )),
-                deny_user_namespaces(&permissions),
-            )
-        } else {
-            (denied_exec_server_permissions, permissions)
-        };
+            } else {
+                (denied_exec_server_permissions, permissions)
+            };
         let permission_profile = denied_exec_server_permissions
             .as_ref()
             .unwrap_or(permission_profile);
@@ -1306,6 +1312,39 @@ async fn protected_read_note(
     )
     .await
     .map(|found| found.explanation())
+}
+
+/// #826 follow-up: for a person asked to approve a command that runs a
+/// program needing a user namespace (`unshare`, `bwrap`, rootless Podman,
+/// …) where agent commands cannot create one, the note that it fails and
+/// that no approval lifts the rule.
+fn user_namespaces_note<Rq, Out, T>(
+    tool: &T,
+    req: &Rq,
+    tool_ctx: &ToolCtx,
+    turn_ctx: &crate::session::turn_context::TurnContext,
+) -> Option<String>
+where
+    T: ToolRuntime<Rq, Out>,
+{
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    let ctx = ApprovalCtx {
+        session: &tool_ctx.session,
+        turn: &tool_ctx.turn,
+        call_id: &tool_ctx.call_id,
+        retry_reason: None,
+        network_approval_context: None,
+        fresh_human_authority: false,
+    };
+    let command = match tool.approval_action(req, &ctx).ok()? {
+        ApprovalAction::Shell { command, .. } | ApprovalAction::ExecCommand { command, .. } => {
+            command
+        }
+        _ => return None,
+    };
+    crate::security::user_namespaces::approval_note(&tool_ctx.session, turn_ctx, &command)
 }
 
 /// #841: under Moderate, for a protected action after untrusted content that

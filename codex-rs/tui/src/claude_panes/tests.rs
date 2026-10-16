@@ -5190,3 +5190,91 @@ async fn claude_plan_pane_passes_its_named_account_to_the_helper() {
     );
     assert!(token(deferred(&outdated, Some("work"))).await.is_err());
 }
+
+/// #891: where a contained pane's launch denied user namespaces, a tool
+/// result reporting the refusal (bubblewrap's message from Claude Code's own
+/// Bash sandbox, or `unshare`) ends the turn's text with a note naming the
+/// rule. Nothing is added without the rule, or for other failures.
+#[test]
+fn issue_891_pane_names_the_user_namespace_rule_when_a_command_hits_it() {
+    use super::execution::add_user_namespaces_note;
+    use super::output_parse::tool_results_report_user_namespace_denial;
+
+    let bwrap = json!({
+        "type": "user",
+        "message": { "role": "user", "content": [{
+            "type": "tool_result",
+            "tool_use_id": "toolu_1",
+            "is_error": true,
+            "content": "bwrap: No permissions to create a new namespace, likely because the kernel does not allow non-privileged user namespaces.",
+        }]},
+    })
+    .to_string();
+    let unshare = json!({
+        "type": "user",
+        "message": { "role": "user", "content": [{
+            "type": "tool_result",
+            "tool_use_id": "toolu_2",
+            "content": [{ "type": "text", "text": "unshare: unshare failed: Operation not permitted" }],
+        }]},
+        "tool_use_result": { "stdout": "", "stderr": "unshare: unshare failed: Operation not permitted" },
+    })
+    .to_string();
+    let other = json!({
+        "type": "user",
+        "message": { "role": "user", "content": [{
+            "type": "tool_result",
+            "tool_use_id": "toolu_3",
+            "content": "cat: /etc/shadow: Permission denied",
+        }]},
+    })
+    .to_string();
+    // The assistant only quoting the words is not a tool result.
+    let quoted = json!({
+        "type": "assistant",
+        "message": { "role": "assistant", "content": [{
+            "type": "text",
+            "text": "unshare failed: Operation not permitted",
+        }]},
+    })
+    .to_string();
+    for (stdout, reported) in [
+        (bwrap.as_str(), true),
+        (unshare.as_str(), true),
+        (other.as_str(), false),
+        (quoted.as_str(), false),
+        ("not json", false),
+    ] {
+        assert_eq!(
+            tool_results_report_user_namespace_denial(stdout),
+            reported,
+            "{stdout}"
+        );
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plan = bridge_redaction_plan(&dir, String::new(), "secret-891");
+    let turn = |text: &str, level: Option<&str>, stdout: &str| {
+        let mut output = failed_turn_output(
+            &plan,
+            /*duration_ms*/ 0,
+            ClaudePaneTurnStatus::Success,
+            /*terminal_reason*/ None,
+            String::new(),
+        );
+        output.text = text.to_string();
+        add_user_namespaces_note(&mut output, level, stdout);
+        output.text
+    };
+    let noted = turn("It failed.", Some("Moderate"), &bwrap);
+    assert!(
+        noted.starts_with("It failed.\n\nCorbanu Terminal: a command in this turn needed a user namespace, which security level Moderate blocks"),
+        "{noted}"
+    );
+    assert!(
+        turn("", Some("Aggressive"), &unshare).starts_with("Corbanu Terminal:"),
+        "empty text gets the note alone"
+    );
+    assert_eq!(turn("It failed.", None, &bwrap), "It failed.");
+    assert_eq!(turn("It failed.", Some("Moderate"), &other), "It failed.");
+}

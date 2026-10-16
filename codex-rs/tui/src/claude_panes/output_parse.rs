@@ -331,3 +331,43 @@ pub(crate) fn collect_tool_events(value: &Value, tool_events: &mut Vec<ClaudePan
         }
     }
 }
+
+/// #891: whether a tool result in Claude Code's stream-json `stdout` (the
+/// content of a `tool_result` block, or a Bash result's `stdout`/`stderr`)
+/// reports that creating a user namespace was refused.
+pub(crate) fn tool_results_report_user_namespace_denial(stdout: &str) -> bool {
+    let mut texts = Vec::new();
+    for line in stdout.lines() {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if let Some(result) = value.get("tool_use_result") {
+            for field in ["stdout", "stderr"] {
+                if let Some(text) = result.get(field).and_then(Value::as_str) {
+                    texts.push(text.to_string());
+                }
+            }
+        }
+        let Some(content) = value.pointer("/message/content").and_then(Value::as_array) else {
+            continue;
+        };
+        for item in content {
+            if item.get("type").and_then(Value::as_str) != Some("tool_result") {
+                continue;
+            }
+            match item.get("content") {
+                Some(Value::String(text)) => texts.push(text.clone()),
+                Some(Value::Array(parts)) => texts.extend(
+                    parts
+                        .iter()
+                        .filter_map(|part| part.get("text").and_then(Value::as_str))
+                        .map(str::to_string),
+                ),
+                _ => {}
+            }
+        }
+    }
+    texts
+        .iter()
+        .any(|text| codex_sandboxing::user_namespaces::reports_user_namespace_denial(text))
+}
