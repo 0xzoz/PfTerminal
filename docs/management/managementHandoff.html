@@ -23,7 +23,7 @@ Previous updates: PR #706 (to 2026-10-13 18:46Z), PR #754 (to 2026-10-14 05:40Z)
 addenda at 20:50Z and 21:25Z; those addenda are folded into the sections below).</small></p>
 
 <div class="warn"><b>Where things stand.</b> The program is <b>running</b> (not paused). After the 2026-10-12 orderly pause (credits), Travis said resume on
-2026-10-13; the new coordinator has run “wave 2” since: <b>70 workers finished and 151 PRs merged</b> (127 by 10-15 07:09Z, 24 since; section 8.0).
+2026-10-13; the new coordinator has run “wave 2” since: <b>70 workers finished and 150 PRs merged</b> (127 by 10-15 07:09Z, 23 since; section 8.0).
 Since the last update (#836):
 <ul>
 <li><b>Aggressive:</b> third targeted re-run (qual-aggr6, record #868): <b>58 passed / 0 failed / 2 blocked / 4 accepted of 64</b> — nothing failing; the
@@ -74,7 +74,7 @@ qual-aggr6 because “macOS 3” needs FASTDRIVE2 (section 6). Travis replugged 
 a victim, not the cause; a forced token refresh in a throwaway home changed no permissions.</li>
 <li>Checked without a match: the Mac hasn't slept since 10-08; the disk manager logged nothing; Backblaze's scan runs every 10 minutes; a launchd job at :55 runs
 <code>~/.hourlywake.sh</code>. <code>fs_usage</code> needs root, and there is no sudo.</li>
-<li><b>The trigger is still unknown.</b> #616 was closed by #861's merge; reopen it (or file a new issue) if an episode recurs.</li>
+<li><b>The trigger is still unknown.</b> #616 has been closed since 10-13 (by #638's fix for the hang); resil-616 only commented on it. Reopen it (or file a new issue) if an episode recurs.</li>
 </ul>
 <b>Mitigations in place:</b>
 <ul>
@@ -242,7 +242,7 @@ D3 is not granted (a later “D3 GRANTED” line would allow it).</li>
 (04:41Z) granted a merge-only re-review of PR #892's conflict merge; no further extensions.</li>
 </ul></li>
 <li><b>Helper scripts</b> (coordinator tools, not used by workers). Use the copies in <code>$HOME/.corbanu-workers</code> for current workers; they read
-<code>$L/&lt;name&gt;.log</code>, and <code>$L/wait-event.sh</code> reports a stall after 900 s. The <code>$W</code> copies read <code>$W</code> logs (older workers).
+<code>$L/&lt;name&gt;.log</code>, and <code>$L/wait-event.sh</code> reports a stall after 3600 s (its header comment says 900 s; the code uses 3600). The <code>$W</code> copies read <code>$W</code> logs (older workers).
 <code>coord-merge.sh</code> stays in <code>$W</code>.
 <ul>
 <li><code>mon.sh &lt;names…&gt;</code> — one line per worker: log line count, seconds since the log last changed, count of
@@ -392,7 +392,7 @@ ones go to <code>.codex-work/integration-build-20260922a/old-binaries/</code> (n
 
 <h2>8. Workstreams and where they stand</h2>
 <h3>8.0 What landed in wave 2 (2026-10-13/15)</h3>
-<p>151 PRs merged between 2026-10-13 04:26Z and 2026-10-16 04:33Z (55 by 10-13 18:37Z, 22 more by 10-14 05:19Z, 26 more by 14:08Z, 24 more by 10-15 07:09Z, and 24
+<p>150 PRs merged between 2026-10-13 04:26Z and 2026-10-16 04:33Z (55 by 10-13 18:37Z, 22 more by 10-14 05:19Z, 26 more by 14:08Z, 24 more by 10-15 07:09Z, and 23
 since, 6 of those from the outside contributor <code>citadelculture</code>). Every worker PR had all checks green, an
 independent Opus 5.5 High APPROVE on its exact head and <code>--match-head-commit</code>. Per worker (details and evidence in
 <code>$W/&lt;name&gt;.result.md</code>):</p>
@@ -476,7 +476,7 @@ independent Opus 5.5 High APPROVE on its exact head and <code>--match-head-commi
 <tr><td>pf60-moonshot</td><td>#859 (Moonshot leaves out zero cache counts; <code>/cost</code> had under-reported K3 and K2), #862 (real-request evidence, committed stand-in script); spend ~$0.048, rates unchanged</td><td>—</td><td>—</td></tr>
 <tr><td>mod-fix1</td><td>#869 (#838: Corbanu's security state and keys stay denied after a fresh approval under Moderate), #870 (#846 wording: <code>.env</code> denied only after the restart); #875 left as draft “needs security sign-off” (#837, D5)</td><td>#838, #846</td><td>#874</td></tr>
 <tr><td>qual-aggr6 (code-blind)</td><td>#868 (third targeted re-run record: 58 passed / 0 failed / 2 blocked + 4 accepted of 64, not passed; sign-off requested)</td><td>—</td><td>#867</td></tr>
-<tr><td>resil-616</td><td>#861 (exec waits out an unreadable home, helper exit 75, <code>home-access.log</code>); review round 6 by grant</td><td>#616 (closed by the merge; trigger still unknown)</td><td>#866, #872</td></tr>
+<tr><td>resil-616</td><td>#861 (exec waits out an unreadable home, helper exit 75, <code>home-access.log</code>); review round 6 by grant</td><td>— (#616 stays closed since 10-13; trigger still unknown)</td><td>#866, #872</td></tr>
 <tr><td>sec-826</td><td>#876 (Linux: agent commands under Moderate/Aggressive can't create user namespaces, incl. bubblewrap's PID 1; signed off 10-15 20:55Z)</td><td>#826</td><td>#891</td></tr>
 <tr><td>acct-824</td><td>#882 (a realtime WebSocket session is one ledger request, tokens/cost unknown; ledger format 6)</td><td>— (#824 reopened for WebRTC on an API key)</td><td>#889</td></tr>
 <tr><td>mod-fix2 (running)</td><td>#877 (#840 + MOD-28 revoke wording), #883 (#842), #881 (#839); #892 (#841) open</td><td>#840, #842, #839</td><td>#878, #885</td></tr>
@@ -743,8 +743,8 @@ refused);</li>
 run 38646928235 (dispatch on <code>df3d8c5d1c</code>, 10-14 22:20Z) with one re-run of the native Windows job for an intermittent login test (#691).
 Fixed along the way: Windows test races, three batches of uncommented test literals (argument-comment lint), the <code>issue_505</code> test that
 turned postmerge red after #662 (#765), cargo-deny (#795), Linux proxy/placeholder races (#805), a Windows proxy-timeout label (#806), and a real
-Windows DB-open race (#755). The late scheduled run 38581569301 on <code>a7a9867483</code> (10-14 14:33Z) failed for reasons those PRs fixed. No
-scheduled nightly has run since the green one; #636 stays open until the next scheduled nightly also passes (then close it). Filed #756 and #796
+Windows DB-open race (#755). The late scheduled run 38581569301 on <code>a7a9867483</code> (10-14 14:33Z) failed for reasons those PRs fixed. The next
+scheduled nightly (10-15 14:13Z, on <code>7666bdf3d4</code>) failed too (below), so #636 stays open until a scheduled nightly passes (then close it). Filed #756 and #796
 (intermittents). Travis 10-15 (on #636/#691): run the native Windows tests on PRs that touch tui, core, state or login (<code>ci-win-tests</code>,
 PR #828); the Windows login test gets one re-run, skipped on Windows only if it fails again; #800's looser Windows writer timing accepted as info.
 <code>ci-cache</code> (#815, #823): older copies of main's caches are pruned (section 4). ci-pr2 shipped Travis's decisions 9 and 10 (#771: PR
@@ -916,7 +916,7 @@ started, “macOS 2” stopped). Mac load ~10–13.</p>
 “macOS 3” with the signed <code>395ac0adcd</code> build (GLM 5.3 Flash executor; real keys only through the mediated path). Work folder
 <code>.codex-work/pf60-s10-20261016/</code>.</td>
 <td>VM run in progress. Then evidence checks (5 rounds), a record PR under <code>qa/</code>, erase the guest, stop the VM and delete the lock. The result will ask Travis to
-accept S10; the sprints are not archived until he does. D3, D15 and D16 affect this run: add lines to <code>$W/pf60-s10.grant.md</code> if Travis says yes while it runs.
+accept S10; the sprints are not archived until he does. D3 and D16 affect this run (D15 is a small code fix to do alongside it): add lines to <code>$W/pf60-s10.grant.md</code> if Travis says yes while it runs.
 #882 merged after the freeze, so realtime is recorded as the tracked known gap unless D16 is granted.</td></tr>
 <tr><td>mod-fix2</td><td>10-15 23:55</td><td>Moderate fixes per Travis's 22:06Z decisions: #840, #841, #839, #842, plus the MOD-28 revoke-screen wording.</td>
 <td>Merged: #877 (#840 + MOD-28), #883 (#842), #881 (#839). <b>#892 (#841)</b>: round 6 APPROVED <code>b6c9b4dae7</code>. After a merge of main
@@ -1054,7 +1054,7 @@ prerequisite for PF-84 flag removal (S09's ChatGPT path was verified on a stand-
 <li>End every status note with D1–D16 (section 11), repeated until Travis answers.</li>
 </ul>
 The overnight window starts at 08:30Z (01:30 Pacific). Until 16:30Z, launch only work that needs no decision from Travis.</li>
-<li><b>Get D3, D15 and D16 to Travis first:</b> they change what S10 does while it runs. If he says yes, append the line to <code>$W/pf60-s10.grant.md</code>
+<li><b>Get D3 and D16 to Travis first:</b> they change what S10 does while it runs (D15 is a code fix alongside S10). If he says yes, append the line to <code>$W/pf60-s10.grant.md</code>
 (e.g. “D3 GRANTED”) before S10's VM steps finish. Then D10, the Aggressive sign-off: if he signs off by name, record it on #447 and in the P1 plan's milestone row,
 and close #818 (AGG-R03 passed in targeted3).</li>
 <li><b>When each running worker finishes</b>, read its result and bring its Decisions to Travis:
