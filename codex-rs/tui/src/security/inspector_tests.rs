@@ -657,7 +657,7 @@ fn issue_839_moderate_top_line_matches_the_model_key_broker() {
     );
     let refused = RuntimeFacts {
         model_broker: ControlFacts::Degraded(
-            "the last model request was refused: its provider URL cannot be brokered",
+            "the last model request of this session or one of its agents was refused: its provider URL cannot be brokered",
         ),
         ..moderate
     };

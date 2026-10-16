@@ -76,6 +76,12 @@ impl ReqwestTransport {
             && !self.client.is_broker_socket()
         {
             match crate::model_broker_route::model_broker_route().ok_or_else(|| {
+                if let Some(frame) = crate::model_broker_route::broker_frame(&prepared.headers) {
+                    crate::model_broker_route::report(
+                        &frame,
+                        crate::ModelBrokerOutcome::NotRunning,
+                    );
+                }
                 TransportError::Build("the credential broker is not running".to_string())
             })? {
                 ModelBrokerRoute::Client(client) => {
@@ -149,6 +155,23 @@ fn request_body_for_trace(req: &Request) -> String {
 
 impl HttpTransport for ReqwestTransport {
     async fn execute(&self, req: Request) -> Result<Response, TransportError> {
+        // #878: whoever signed a frame-bearing request learns the broker's answer.
+        let frame = crate::model_broker_route::broker_frame(&req.headers);
+        let result = self.execute_unreported(req).await;
+        crate::model_broker_route::report_result(frame.as_ref(), &result);
+        result
+    }
+
+    async fn stream(&self, req: Request) -> Result<StreamResponse, TransportError> {
+        let frame = crate::model_broker_route::broker_frame(&req.headers);
+        let result = self.stream_unreported(req).await;
+        crate::model_broker_route::report_result(frame.as_ref(), &result);
+        result
+    }
+}
+
+impl ReqwestTransport {
+    async fn execute_unreported(&self, req: Request) -> Result<Response, TransportError> {
         self.trace_request(&req);
 
         let url = req.url.clone();
@@ -182,7 +205,7 @@ impl HttpTransport for ReqwestTransport {
         })
     }
 
-    async fn stream(&self, req: Request) -> Result<StreamResponse, TransportError> {
+    async fn stream_unreported(&self, req: Request) -> Result<StreamResponse, TransportError> {
         self.trace_request(&req);
 
         let url = req.url.clone();
