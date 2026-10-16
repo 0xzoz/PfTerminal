@@ -3,7 +3,8 @@
 Third targeted code-blind functional re-run of the P1 security milestone, after the second targeted run
 ([../aggressive-20261014-targeted2](../aggressive-20261014-targeted2), #819: 54 passed, 2 failed, 4 blocked, 4 accepted
 of 64). Owner decisions of 2026-10-15 on #447, #816, #817 and #818 ([design/decisions/](design/decisions/)).
-**Not passed: the milestone needs Travis's named sign-off.**
+**Not passed: the milestone needs Travis's named sign-off.** *Signed off by Travis on 2026-10-16: see
+[Sign-off (2026-10-16)](#sign-off-2026-10-16) at the end; the record itself is unchanged.*
 
 ## Result
 
@@ -144,3 +145,28 @@ Combined status of all 64 cases (this run where re-run or re-judged, the second 
 three independent evidence checks. r1 and r2 failed on points that were corrected and confirmed by the next check; r3,
 the last within budget, confirmed every disposition and asked for one mechanical fix (the record's copy of
 `harness/expected.json` was the pre-correction file), which was made but not independently re-checked.
+
+## Sign-off (2026-10-16)
+
+Dated addendum; the record above is unchanged.
+
+- **Signed off:** Travis Good signed off the milestone "Aggressive ships" on 2026-10-16 ("all as recommended", decision
+  D10; recorded on [#867](https://github.com/CorbanuCore/CorbanuTerminal/issues/867) and in the
+  [P1 security plan](../../../../docs/plans/active/p1-security-hardening.md#human-acceptance)).
+- **Basis:** this record (PR #868, merged `469bcac286`): all 64 cases 58 passed, 0 failed, 2 blocked, 4 accepted by the
+  owner, resting on the earlier records for the cases not re-run:
+  [second targeted run](../aggressive-20261014-targeted2/README.md) (#819),
+  [targeted run](../aggressive-20261014-targeted/README.md) (#788),
+  [third run](../aggressive-20261013-third/README.md) (#741),
+  [re-run](../aggressive-20261011-rerun/README.md) (#628) and [first run](../aggressive-20261010/README.md) (#447).
+- **Known limits accepted with it:**
+  - #867, AGG-R14 result 2: no screen shows that the kill switch stopped a child agent the model started; the file
+    check shows the protection worked (D8 option (a)). The second AGG-R14 attempt is accepted (D9).
+  - AGG-R06: no Claude Code in the guest, so contained Claude panes were not exercised in the VM.
+  - #838's Linux limit (accepted as D7): where an approved command can write another Corbanu home's folder, it can
+    create security files that don't exist yet (not read or change existing ones).
+  - The Linux user-namespace block of #876 and its breakage list under Moderate and Aggressive (accepted as D13):
+    rootless containers, `bwrap`/`unshare`, Flatpak, Chrome/Electron with their own sandbox on, Nix's build sandbox
+    and 32-bit programs; the way out is Permissive.
+  - Unchanged from the runs: macOS only; AGG-18, AGG-R07, AGG-R10 and AGG-20 accepted by the owner, not passed
+    (AGG-20 also a named limit); the review budget's last corrections not independently re-checked.

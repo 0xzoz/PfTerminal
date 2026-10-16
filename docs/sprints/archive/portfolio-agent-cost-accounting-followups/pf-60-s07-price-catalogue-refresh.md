@@ -1,7 +1,7 @@
 ---
 sprint_id: "PF-60-S07"
 title: "Price catalogue refresh (#368)"
-status: ready
+status: completed
 plan_file: "docs/plans/active/portfolio-agent-cost-accounting-followups.md"
 plan_feature: "PF-60"
 execution_order: 2
@@ -14,10 +14,32 @@ branch: "pf60-s07/moonshot-route-pricing"
 base_commit: "df3d8c5d1c521228a8dbb1035831af572afe1284"
 depends_on: "PF-60-S04"
 created: 2026-10-10
-updated: 2026-10-14
+updated: 2026-10-16
 ---
 
 # PF-60-S07 — Price catalogue refresh (#368)
+
+**Status: completed** (accepted by Travis 2026-10-15; code-blind run in PF-60-S10 accepted 2026-10-16; see Closure).
+
+## Closure — 2026-10-16
+
+Completed. Travis accepted S07 on 2026-10-15 (20:55Z, "1-6 as recommended"; comment on #400). PF-60-S10's isolated code-blind run ([record](../../../../qa/portfolio/agent-cost-accounting/followups-acceptance-20261016/README.md), PR #909, merged `223927bc26`) was accepted by Travis on 2026-10-16 as recorded, 29 passed, 1 failed, 7 blocked of 37 (decision D24, "all as recommended"; comment on [#898](https://github.com/CorbanuCore/CorbanuTerminal/issues/898)). With it he decided D25 (the S10 gaps are re-checked in #898's acceptance run, not a full S10 re-run) and D26 (the record's last evidence check, r3, failed on wording only; accepted without another round).
+
+- **Real Moonshot requests** (after the sprint, key in the vault): one real turn each on `kimi-k3` and `kimi-k2.7-code`
+  showed that Moonshot leaves out zero cache counts, so `/cost` showed only a lower bound. Fixed by PR #859 (merged
+  `3ba6c460c5`); evidence and the committed stand-in script in PR #862 (merged `762d3956e9`,
+  [readings](../../../../qa/portfolio/agent-cost-accounting/issue-368/moonshot-real-20261015/README.md)). Spend about $0.048; rates re-read and unchanged.
+- **S10 results** ([dispositions](../../../../qa/portfolio/agent-cost-accounting/followups-acceptance-20261016/dispositions.md)): passed ACC-08 and ACC-09 (real Moonshot K3 and K2.7 Code priced from
+  Moonshot's rates), ACC-19 and ACC-20 (`gpt-6.1-sol`, GPT-5.6 Sol), ACC-23, 25, 26 and 28 (OpenRouter, Vercel and the
+  Corbanu API priced from their reported charge), ACC-24 (reasoning above output kept as not reported) and ACC-37 (no
+  charge: a labelled estimate, a lower bound or no price, never $0). Blocked: ACC-22 (advisory; the product doesn't
+  advertise a priority tier for `gpt-6-luna`, so the no-price branch was never reached) and ACC-35 (the optional
+  Moonshot cache read; D3 was not granted during the run).
+- **Carried:** a real Moonshot cache hit is checked in the next isolated live run (Travis 2026-10-16, D3, under
+  $0.01). #368 stays open for BigModel (deferred by Travis 2026-10-14) and DeepSeek's 2027 holiday dates (nightly-ci
+  fails from 2026-12-01 until they are added); the Sol re-read is due before 2026-11-21. #786 (reasoning above output)
+  closes with this archive: Chat routes are fixed here (#812) and Responses routes by #853; its two remaining rare cases
+  (split and cumulative reports) stay tracked in #814.
 
 ## Execution mandate
 
@@ -71,27 +93,30 @@ updated: 2026-10-14
 
 ## Remaining
 
-- [ ] A real Moonshot request recomputed from provider-reported usage: needs a Kimi Open Platform key in the vault
-      (none exists; the route was shown against a local stand-in, see the gate).
-- [ ] DeepSeek's 2027 holiday dates, once the State Council publishes them (nightly-ci fails from 2026-12-01 until then).
-- [ ] Code-blind functional design frozen before test-result disclosure (PF-60-S10).
+- [x] A real Moonshot request recomputed from provider-reported usage: done 2026-10-15/16 with a key in the vault
+      (#859, #862; Closure), and again in PF-60-S10 (ACC-08, ACC-09). A real cache hit is carried (D3).
+- [x] DeepSeek's 2027 holiday dates: carried on #368 until the State Council publishes them (nightly-ci fails from
+      2026-12-01 until then).
+- [x] Code-blind functional design frozen before test-result disclosure: PF-60-S10 froze it at `220c99ed59`
+      ([S10](pf-60-s10-isolated-code-blind-acceptance.md)).
 
 ## Verification
 
 - [x] Focused: `just test -p codex-core -E 'test(accounting) | test(spawn)'` 357/357 with `developer-accounting`,
       352/352 without; `just test -p codex-tui --features developer-accounting -E 'test(charge) | test(tokens) | test(cost)'`
       131/132 (the local-only `cost_scope` tmux test; see the gate).
-- [ ] Real requests recomputed from provider-reported usage at the cited prices: Corbanu API and Vercel charges read
-      back exactly; Moonshot only against the stand-in (no key).
+- [x] Real requests recomputed from provider-reported usage at the cited prices: Corbanu API and Vercel charges read
+      back exactly; Moonshot first against the stand-in, then for real (#859, #862; Closure).
 - [x] TUI: `/cost` pages for each changed route captured in a tmux run
       ([captures](../../../../qa/portfolio/agent-cost-accounting/pf-60-s07/tmux-20261014/)); two demo videos.
-- [ ] Code-blind cases executed independently (in PF-60-S10 under the enforced gate).
+- [x] Code-blind cases executed independently in PF-60-S10 under the enforced gate (Closure).
 
 ## Exit evidence
 
-- [ ] Implementation commit recorded.
-- [ ] Final-tree test output and dated price readings linked.
-- [ ] Code-blind handoff checker passes, or explicit limited-testing agreement/blocker recorded; no automatic human acceptance.
-- [ ] Parallel handoff, if applicable: commit, contract versions, scope audit and combined-tree test evidence recorded.
-- [ ] `Done` and `Remaining` ledgers reflect reality; #368 closed.
-- [ ] Completed record moved to `docs/sprints/archive/portfolio-agent-cost-accounting-followups/`.
+- [x] Implementation commits recorded: PR #812 (`b519fb088d`), with #762 and #784 before it and #859/#862 after it.
+- [x] Final-tree test output and dated price readings linked (gate; `qa/portfolio/agent-cost-accounting/issue-368/`).
+- [x] Code-blind handoff checker: it stops at S10's first unresolved case, as expected; Travis's acceptance of S10 as
+      recorded (2026-10-16, D24) is the recorded agreement. No automatic human acceptance.
+- [x] Parallel handoff: not applicable (the plan ran one sprint at a time).
+- [x] `Done` and `Remaining` ledgers reflect reality; #368 kept open for the carried items (Closure).
+- [x] Completed record moved to `docs/sprints/archive/portfolio-agent-cost-accounting-followups/` (2026-10-16).
