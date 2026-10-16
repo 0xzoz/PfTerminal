@@ -37,7 +37,9 @@ Completed. Travis accepted S07 on 2026-10-15 (20:55Z, "1-6 as recommended"; comm
   Moonshot cache read; D3 was not granted during the run).
 - **Carried:** a real Moonshot cache hit is checked in the next isolated live run (Travis 2026-10-16, D3, under
   $0.01). #368 stays open for BigModel (deferred by Travis 2026-10-14) and DeepSeek's 2027 holiday dates (nightly-ci
-  fails from 2026-12-01 until they are added); the Sol re-read is due before 2026-11-21.
+  fails from 2026-12-01 until they are added); the Sol re-read is due before 2026-11-21. #786 (reasoning above output)
+  closes with this archive: Chat routes are fixed here (#812) and Responses routes by #853; its two remaining rare cases
+  (split and cumulative reports) stay tracked in #814.
 
 ## Execution mandate
 

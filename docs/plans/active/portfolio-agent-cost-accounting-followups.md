@@ -215,6 +215,8 @@ None yet. Carried from PF-60: collection is developer-only; a release needs Trav
 - [x] Every item (i)–(viii) is closed by an accepted sprint or by Travis's recorded decision (2026-10-14 to 2026-10-16).
 - [x] S10's isolated acceptance: Travis accepted it as recorded on 2026-10-16 (D24). The checker stops at the first
       unresolved case (ACC-04), as expected; the gaps go to one follow-up live run (D25).
-- [ ] Linked issues are closed or re-filed with a reason: #396, #400–#404 closed with the archive; #368 kept open for
-      BigModel and DeepSeek's 2027 dates; #824 for WebRTC.
+- [ ] Linked issues are closed or re-filed with a reason: #396, #400–#404 and #786 closed with the archive (#786's two
+      remaining rare cases are tracked in #814); #368 kept open for BigModel and DeepSeek's 2027 dates; #824 for WebRTC.
+- [x] PF-60-S05's waiver (b) is discharged by S10's isolated run (Travis's acceptance, D24; dated addendum in the
+      archived S05 record).
 - [ ] The follow-up isolated live run (D25, D3, D16) is recorded; then the plan moves to `completed/`.
