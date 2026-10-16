@@ -203,6 +203,12 @@ impl Fixture {
             .unwrap())
     }
     async fn rows<T: serde::de::DeserializeOwned>(&self, table: &str) -> anyhow::Result<Vec<T>> {
+        // A slow write is put off and written later (#865); wait for the writer.
+        assert!(
+            self.db
+                .flush_accounting(std::time::Duration::from_secs(30))
+                .await
+        );
         let pool = self
             .db
             .sqlite()

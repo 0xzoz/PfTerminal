@@ -853,6 +853,11 @@ async fn moonshot_route_admission_binds_published_rates() -> anyhow::Result<()> 
                 chat::patch(usage, provider, sampling.route)?,
             )
             .await?;
+        // A slow write is put off and written later (#865); wait for the writer.
+        assert!(
+            db.flush_accounting(std::time::Duration::from_secs(30))
+                .await
+        );
         let codex_state::accounting::InspectionDay::Ready(view) =
             codex_state::accounting::AccountingStore::inspect_day(
                 &db,

@@ -523,6 +523,11 @@ async fn accounting_records_a_request_another_client_already_sent() -> anyhow::R
             })
             .await
     );
+    // A slow write is put off and written later (#865); wait for the writer.
+    assert!(
+        db.flush_accounting(std::time::Duration::from_secs(30))
+            .await
+    );
     let overridden_basis: Vec<(String, String)> = sqlx::query_as(
         "SELECT json_extract(payload, '$.basis'), json_extract(payload, '$.basis_source')
             FROM draft_accounting_price_snapshots WHERE json_extract(payload, '$.basis') = 'Local'",
@@ -873,6 +878,11 @@ async fn accounting_extension_prices_an_api_key_image_generation() -> anyhow::Re
         .await
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
 
+    // A slow write is put off and written later (#865); wait for the writer.
+    assert!(
+        db.flush_accounting(std::time::Duration::from_secs(30))
+            .await
+    );
     let day = chrono::Utc::now().timestamp_millis() / 86_400_000;
     let codex_state::accounting::InspectionDay::Ready(view) =
         codex_state::accounting::AccountingStore::inspect_day(

@@ -620,6 +620,13 @@ async fn accounting_actual_transport_retries_and_old_response_keep_distinct_owne
     first
         .observe(/*position*/ 2, Ok(usage(/*value*/ 8)))
         .await?;
+    // A slow write is put off and written later (#865); wait for the writer.
+    assert!(
+        fixture
+            .db
+            .flush_accounting(std::time::Duration::from_secs(30))
+            .await
+    );
     let attempts = fixture.attempts().await?;
     assert_eq!(attempts.len(), 3);
     assert_eq!(
@@ -653,28 +660,30 @@ async fn accounting_actual_transport_retries_and_old_response_keep_distinct_owne
             )
         ]
     );
-    let rows: Vec<(String, i64, String)> = sqlx::query_as("SELECT attempt_id, revision, json_extract(payload, '$.patch') FROM draft_accounting_observations ORDER BY rowid")
+    // Sorted: the order they were written in depends on whether the writer
+    // put any off.
+    let mut rows: Vec<(String, i64, String)> = sqlx::query_as("SELECT attempt_id, revision, json_extract(payload, '$.patch') FROM draft_accounting_observations")
         .fetch_all(&mut fixture.connection().await?).await?;
-    assert_eq!(
-        rows,
-        vec![
-            (
-                attempts[1].attempt_id.to_string(),
-                1,
-                r#"{"input":7}"#.into()
-            ),
-            (
-                attempts[2].attempt_id.to_string(),
-                1,
-                r#"{"input":11}"#.into()
-            ),
-            (
-                attempts[1].attempt_id.to_string(),
-                2,
-                r#"{"input":8}"#.into()
-            ),
-        ]
-    );
+    rows.sort();
+    let mut expected: Vec<(String, i64, String)> = vec![
+        (
+            attempts[1].attempt_id.to_string(),
+            1,
+            r#"{"input":7}"#.into(),
+        ),
+        (
+            attempts[2].attempt_id.to_string(),
+            1,
+            r#"{"input":11}"#.into(),
+        ),
+        (
+            attempts[1].attempt_id.to_string(),
+            2,
+            r#"{"input":8}"#.into(),
+        ),
+    ];
+    expected.sort();
+    assert_eq!(rows, expected);
     assert_eq!(sends.load(Ordering::SeqCst), 3);
     Ok(())
 }
@@ -1031,6 +1040,13 @@ async fn accounting_clock_behind_the_checkpoint_still_records_and_sends() -> any
         evidence
             .observe(/*position*/ 1, Ok(usage(/*value*/ 7)))
             .await?;
+        // A slow write is put off and written later (#865); wait for the writer.
+        assert!(
+            fixture
+                .db
+                .flush_accounting(std::time::Duration::from_secs(30))
+                .await
+        );
         let attempts = fixture.attempts().await?;
         assert_eq!((attempts.len(), sends.load(Ordering::SeqCst)), (1, 1));
         assert!(i64::from(attempts[0].dispatched_at_ms) < ahead);
