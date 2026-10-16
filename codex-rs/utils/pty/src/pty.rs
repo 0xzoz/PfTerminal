@@ -258,7 +258,7 @@ async fn spawn_process_portable(
         },
         _master: PtyMasterHandle::Resizable(pair.master),
         #[cfg(unix)]
-        reader_stop: Some(reader_stop),
+        _reader_stop: reader_stop,
     };
 
     let handle = ProcessHandle::new(
@@ -400,7 +400,7 @@ async fn spawn_process_preserving_fds(
             raw_fd: master.as_raw_fd(),
             _handle: Box::new(master),
         },
-        reader_stop: Some(reader_stop),
+        _reader_stop: reader_stop,
     };
 
     let handle = ProcessHandle::new(
@@ -433,8 +433,9 @@ async fn spawn_process_preserving_fds(
 /// (bubblewrap's `--new-session`), and one left behind when bubblewrap died
 /// early lives on. A reader waiting for it kept its blocking thread, and a
 /// runtime shutting down waits for those, for as long as that process lived.
-/// Stopping the reader also lets the master close, which hangs up the
-/// terminal for such a process.
+/// `terminate()` also closes the master, which hangs up the terminal for
+/// such a process. Output not yet read by then is discarded, as the pipe
+/// backend's aborted readers do.
 #[cfg(unix)]
 fn spawn_pty_reader(
     reader: File,

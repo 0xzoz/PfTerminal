@@ -905,9 +905,17 @@ fn pty_terminate_stops_the_reader_while_an_escaped_process_holds_the_terminal() 
         .await?;
         let (session, mut output_rx, _exit_rx) = combine_spawned_output(spawned);
         let escaped = wait_for_marker_pid(&mut output_rx, marker, /*timeout_ms*/ 5_000).await;
+        // Its own process group, outside the one `terminate()` kills.
+        let own_group = escaped
+            .as_ref()
+            .is_ok_and(|pid| unsafe { libc::getpgid(*pid) } == *pid);
         session.terminate();
         drop(session);
         let escaped = escaped?;
+        anyhow::ensure!(
+            own_group,
+            "pid {escaped} is not in its own process group, so this test checks nothing"
+        );
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
         anyhow::ensure!(
             process_exists(escaped)?,
