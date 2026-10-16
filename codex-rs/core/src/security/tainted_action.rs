@@ -545,15 +545,46 @@ impl SedScope {
             programs: Vec::new(),
             others: Vec::new(),
         };
+        // A line that could change what `sed` means (an assignment such as
+        // `PATH=…`, `export`, `alias`, `hash`, `enable`, sourcing) gives
+        // nothing up.
+        let redefines = commands.iter().any(|words| {
+            words.first().is_some_and(|word| {
+                word.contains('=')
+                    || matches!(
+                        word.as_str(),
+                        "export"
+                            | "alias"
+                            | "hash"
+                            | "enable"
+                            | "set"
+                            | "declare"
+                            | "typeset"
+                            | "readonly"
+                            | "source"
+                            | "."
+                            | "builtin"
+                            | "command"
+                    )
+            })
+        });
+        if redefines {
+            return None;
+        }
         for words in commands {
+            // Only `sed` or `gsed` as written, not a path to another program.
             let sed = words
                 .first()
-                .is_some_and(|word| matches!(basename(word), "sed" | "gsed"));
+                .is_some_and(|word| matches!(word.as_str(), "sed" | "gsed"));
             // Only plain flags: no attached or long-form program (`-es…`,
-            // `--expression=`) and no script file (`-f`, `--file`).
+            // `-ee`, `--expression=`) and no script file (`-f`, `--file`);
+            // `e` only ends a cluster.
             let plain_flags = words.iter().skip(1).all(|word| {
-                !word.starts_with('-')
-                    || (word.len() > 1 && word[1..].chars().all(|flag| "nEirsuze".contains(flag)))
+                let Some(cluster) = word.strip_prefix('-') else {
+                    return true;
+                };
+                let flags = cluster.strip_suffix('e').unwrap_or(cluster);
+                !cluster.is_empty() && flags.chars().all(|flag| "nEirsuz".contains(flag))
             });
             if sed && plain_flags {
                 // The programs: each word after `-e`, or else the first word
