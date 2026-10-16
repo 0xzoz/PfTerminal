@@ -41,7 +41,7 @@ const SCRIPT: &str = "unshare -Ur true && echo NAMESPACE-MADE-826";
 /// What `unshare` prints when the sandbox refuses the namespace.
 const REFUSED: &str = "unshare failed: Operation not permitted";
 /// The start of the explanation, after the level's name.
-const EXPLAINED: &str = "blocked creating a user namespace";
+const EXPLAINED: &str = "blocks creating user namespaces for agent commands on Linux, and this command's output reports";
 /// The start of the approval prompt's note.
 const NOTE: &str = "On Linux, security level";
 /// The inspector's recent denial.

@@ -60,7 +60,7 @@ pub(crate) fn denial_explanation(
     output: &str,
 ) -> Option<String> {
     explained(turn_level(session, turn), exit_code, output).inspect(|_| {
-        super::inspection::record_refusal(
+        super::inspection::record_command_denial(
             session.thread_id(),
             INSPECTED,
             "blocked on Linux under Moderate and Aggressive; no approval or grant lifts it",

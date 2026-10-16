@@ -520,14 +520,18 @@ pub(crate) async fn run_claude_command_plan(
             // A transcript this client cannot parse is still a turn that
             // spent money, and the line stating what it spent may be sitting
             // in that same stdout. Salvage it rather than drop the turn.
-            Err(err) => partial_failed_turn_output(
-                &plan,
-                duration_ms,
-                ClaudePaneTurnStatus::ParseFailure,
-                Some("parse_failure".to_string()),
-                format!("{err:#}"),
-                &stdout_text,
-            ),
+            Err(err) => {
+                let mut output = partial_failed_turn_output(
+                    &plan,
+                    duration_ms,
+                    ClaudePaneTurnStatus::ParseFailure,
+                    Some("parse_failure".to_string()),
+                    format!("{err:#}"),
+                    &stdout_text,
+                );
+                add_user_namespaces_note(&mut output, user_namespaces_denied, &stdout_text);
+                output
+            }
         };
         report_direct_turn(progress_tx.as_ref(), &output);
         write_turn_audit(

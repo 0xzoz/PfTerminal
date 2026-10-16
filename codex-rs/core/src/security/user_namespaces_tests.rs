@@ -33,7 +33,7 @@ fn issue_826_the_rule_follows_the_protected_levels() {
 fn issue_826_only_a_refused_namespace_under_the_rule_is_explained() {
     let explanation = explained(Some("Moderate"), Some(1), REFUSED).unwrap();
     assert!(
-        explanation.starts_with("Security level Moderate blocked creating a user namespace"),
+        explanation.starts_with("Security level Moderate blocks creating user namespaces"),
         "{explanation}"
     );
     assert_eq!(explained(Some("Aggressive"), Some(0), REFUSED), None);

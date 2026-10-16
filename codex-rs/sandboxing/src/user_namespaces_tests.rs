@@ -17,6 +17,8 @@ fn issue_826_namespace_refusals_are_recognised_and_other_failures_are_not() {
         "error: cloning builder process: Operation not permitted",
         "[1016:1016:FATAL:zygote_host_impl_linux.cc(127)] Failed to move to new namespace: PID namespaces supported, Network namespace supported, but failed: errno = Operation not permitted",
         "Corbanu's Linux sandbox cannot start here: ... where creating user namespaces is denied (Operation not permitted)",
+        "unshare: write failed /proc/self/uid_map: Operation not permitted",
+        "[rootlesskit:parent] error: failed to start the child: fork/exec /proc/self/exe: operation not permitted",
     ];
     let others = [
         "cat: /home/someone/.ssh/id_ed25519: Operation not permitted",
@@ -25,6 +27,9 @@ fn issue_826_namespace_refusals_are_recognised_and_other_failures_are_not() {
         "Cloning into 'project'...\nfatal: could not create work tree dir 'project': Permission denied",
         "unshare: invalid option -- 'z'",
         "error: namespace 'default' not found",
+        // A path that only contains the words (review round 1).
+        "cat: namespaces/prod.yaml: Permission denied",
+        "touch: cannot touch 'userns/unshare.txt': Permission denied",
         "",
     ];
     let recognised = |outputs: &[&str]| {
@@ -67,6 +72,9 @@ fn issue_826_explanations_name_the_rule() {
             assert!(text.contains(expected), "{expected:?} missing: {text}");
         }
     }
-    assert!(denial_explanation("Aggressive").starts_with("Security level Aggressive blocked"));
+    assert!(
+        denial_explanation("Aggressive")
+            .starts_with("Security level Aggressive blocks creating user namespaces")
+    );
     assert!(claude_pane_note("Aggressive").contains("Claude Code's own Bash sandbox"));
 }

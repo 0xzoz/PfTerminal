@@ -355,7 +355,8 @@ impl ToolOrchestrator {
             // #747: and that it stays in the sandbox under Moderate.
             let stays_sandboxed = moderate_sandbox_note(tool, req, moderate_keeps_sandbox);
             // #826: that what needs a user namespace fails on Linux.
-            let user_namespaces_note = user_namespaces_note(tool, req, tool_ctx, turn_ctx);
+            let user_namespaces_note =
+                user_namespaces_note(tool, req, tool_ctx, turn_ctx).map(|(note, _)| note);
             let approval_ctx = ApprovalCtx {
                 session: &tool_ctx.session,
                 turn: &tool_ctx.turn,
@@ -452,6 +453,11 @@ impl ToolOrchestrator {
                         _ => None,
                     },
                 };
+                // #826: and that what needs a user namespace fails on Linux.
+                let note = match user_namespaces_note(tool, req, tool_ctx, turn_ctx) {
+                    Some((user_namespaces, _)) => format!("{note} {user_namespaces}"),
+                    None => note,
+                };
                 approval_ctx.retry_reason = Some(match why {
                     Some(why) => format!("{why} {note}"),
                     None => note,
@@ -524,17 +530,24 @@ impl ToolOrchestrator {
                 let stays_sandboxed =
                     moderate_sandbox_note(tool, req, moderate_keeps_sandbox).map(str::to_string);
                 // #826: that what needs a user namespace fails on Linux.
-                let user_namespaces_note = if reviewer == ApprovalReviewer::User {
-                    user_namespaces_note(tool, req, tool_ctx, turn_ctx)
-                } else {
-                    None
-                };
+                let (user_namespaces_note, why) =
+                    match user_namespaces_note(tool, req, tool_ctx, turn_ctx)
+                        .filter(|_| reviewer == ApprovalReviewer::User)
+                    {
+                        // Keep why the command runs (the model's justification)
+                        // ahead of the note when there is no other reason.
+                        Some((note, justification)) => {
+                            (Some(note), justification.filter(|_| reason.is_none()))
+                        }
+                        None => (None, None),
+                    };
                 let approval_ctx = ApprovalCtx {
                     session: &tool_ctx.session,
                     turn: &tool_ctx.turn,
                     call_id: &tool_ctx.call_id,
                     retry_reason: [
                         reason.as_ref(),
+                        why.as_ref(),
                         protected_read_note.as_ref(),
                         persistence_note
                             .as_ref()
@@ -1317,13 +1330,14 @@ async fn protected_read_note(
 /// #826 follow-up: for a person asked to approve a command that runs a
 /// program needing a user namespace (`unshare`, `bwrap`, rootless Podman,
 /// …) where agent commands cannot create one, the note that it fails and
-/// that no approval lifts the rule.
+/// that no approval lifts the rule, with the model's justification for the
+/// command (a prompt's reason replaces the justification).
 fn user_namespaces_note<Rq, Out, T>(
     tool: &T,
     req: &Rq,
     tool_ctx: &ToolCtx,
     turn_ctx: &crate::session::turn_context::TurnContext,
-) -> Option<String>
+) -> Option<(String, Option<String>)>
 where
     T: ToolRuntime<Rq, Out>,
 {
@@ -1338,13 +1352,21 @@ where
         network_approval_context: None,
         fresh_human_authority: false,
     };
-    let command = match tool.approval_action(req, &ctx).ok()? {
-        ApprovalAction::Shell { command, .. } | ApprovalAction::ExecCommand { command, .. } => {
-            command
+    let (command, justification) = match tool.approval_action(req, &ctx).ok()? {
+        ApprovalAction::Shell {
+            command,
+            justification,
+            ..
         }
+        | ApprovalAction::ExecCommand {
+            command,
+            justification,
+            ..
+        } => (command, justification),
         _ => return None,
     };
     crate::security::user_namespaces::approval_note(&tool_ctx.session, turn_ctx, &command)
+        .map(|note| (note, justification))
 }
 
 /// #841: under Moderate, for a protected action after untrusted content that

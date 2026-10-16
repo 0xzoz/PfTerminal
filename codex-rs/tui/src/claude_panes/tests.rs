@@ -5201,41 +5201,61 @@ fn issue_891_pane_names_the_user_namespace_rule_when_a_command_hits_it() {
     use super::execution::add_user_namespaces_note;
     use super::output_parse::tool_results_report_user_namespace_denial;
 
-    let bwrap = json!({
-        "type": "user",
-        "message": { "role": "user", "content": [{
-            "type": "tool_result",
-            "tool_use_id": "toolu_1",
-            "is_error": true,
-            "content": "bwrap: No permissions to create a new namespace, likely because the kernel does not allow non-privileged user namespaces.",
-        }]},
-    })
-    .to_string();
-    let unshare = json!({
-        "type": "user",
-        "message": { "role": "user", "content": [{
-            "type": "tool_result",
-            "tool_use_id": "toolu_2",
-            "content": [{ "type": "text", "text": "unshare: unshare failed: Operation not permitted" }],
-        }]},
-        "tool_use_result": { "stdout": "", "stderr": "unshare: unshare failed: Operation not permitted" },
-    })
-    .to_string();
-    let other = json!({
-        "type": "user",
-        "message": { "role": "user", "content": [{
-            "type": "tool_result",
-            "tool_use_id": "toolu_3",
-            "content": "cat: /etc/shadow: Permission denied",
-        }]},
-    })
-    .to_string();
-    // The assistant only quoting the words is not a tool result.
+    let call = |id: &str, name: &str| {
+        json!({
+            "type": "assistant",
+            "message": { "role": "assistant", "content": [{
+                "type": "tool_use", "id": id, "name": name, "input": {},
+            }]},
+        })
+        .to_string()
+    };
+    let result = |id: &str, content: Value| {
+        json!({
+            "type": "user",
+            "message": { "role": "user", "content": [{
+                "type": "tool_result", "tool_use_id": id, "content": content,
+            }]},
+        })
+    };
+    // Claude Code's own Bash sandbox, as bubblewrap reports it in a pane.
+    let bwrap = format!(
+        "{}\n{}",
+        call("toolu_1", "Bash"),
+        result(
+            "toolu_1",
+            json!(
+                "bwrap: No permissions to create new namespace, likely because the kernel does not allow non-privileged user namespaces."
+            ),
+        )
+    );
+    let mut unshare_result = result(
+        "toolu_2",
+        json!([{ "type": "text", "text": "unshare: unshare failed: Operation not permitted" }]),
+    );
+    unshare_result["tool_use_result"] =
+        json!({ "stdout": "", "stderr": "unshare: unshare failed: Operation not permitted" });
+    let unshare = format!("{}\n{unshare_result}", call("toolu_2", "Bash"));
+    let other = format!(
+        "{}\n{}",
+        call("toolu_3", "Bash"),
+        result("toolu_3", json!("cat: /etc/shadow: Permission denied"))
+    );
+    // A file Claude Code read, or the assistant quoting the words: no
+    // command ran.
+    let read = format!(
+        "{}\n{}",
+        call("toolu_4", "Read"),
+        result(
+            "toolu_4",
+            json!("unshare: unshare failed: Operation not permitted")
+        )
+    );
     let quoted = json!({
         "type": "assistant",
         "message": { "role": "assistant", "content": [{
             "type": "text",
-            "text": "unshare failed: Operation not permitted",
+            "text": "unshare: unshare failed: Operation not permitted",
         }]},
     })
     .to_string();
@@ -5243,6 +5263,7 @@ fn issue_891_pane_names_the_user_namespace_rule_when_a_command_hits_it() {
         (bwrap.as_str(), true),
         (unshare.as_str(), true),
         (other.as_str(), false),
+        (read.as_str(), false),
         (quoted.as_str(), false),
         ("not json", false),
     ] {
@@ -5269,7 +5290,7 @@ fn issue_891_pane_names_the_user_namespace_rule_when_a_command_hits_it() {
     };
     let noted = turn("It failed.", Some("Moderate"), &bwrap);
     assert!(
-        noted.starts_with("It failed.\n\nCorbanu Terminal: a command in this turn needed a user namespace, which security level Moderate blocks"),
+        noted.starts_with("It failed.\n\nCorbanu Terminal: a command in this turn reported a refused user namespace. Security level Moderate blocks"),
         "{noted}"
     );
     assert!(

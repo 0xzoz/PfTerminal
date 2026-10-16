@@ -332,29 +332,44 @@ pub(crate) fn collect_tool_events(value: &Value, tool_events: &mut Vec<ClaudePan
     }
 }
 
-/// #891: whether a tool result in Claude Code's stream-json `stdout` (the
-/// content of a `tool_result` block, or a Bash result's `stdout`/`stderr`)
-/// reports that creating a user namespace was refused.
+/// #891: whether a Bash tool result in Claude Code's stream-json `stdout`
+/// (a `tool_result` block answering a `Bash` `tool_use`, or a Bash result's
+/// `stdout`/`stderr`) reports that creating a user namespace was refused.
+/// Other tools' results (a file read, a web page) are not commands that ran.
 pub(crate) fn tool_results_report_user_namespace_denial(stdout: &str) -> bool {
+    let values: Vec<Value> = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .collect();
+    let content = |value: &Value| {
+        value
+            .pointer("/message/content")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let bash_calls: std::collections::HashSet<String> = values
+        .iter()
+        .flat_map(content)
+        .filter(|item| {
+            item.get("type").and_then(Value::as_str) == Some("tool_use")
+                && item.get("name").and_then(Value::as_str) == Some("Bash")
+        })
+        .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_string))
+        .collect();
     let mut texts = Vec::new();
-    for line in stdout.lines() {
-        let Ok(value) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        if let Some(result) = value.get("tool_use_result") {
-            for field in ["stdout", "stderr"] {
-                if let Some(text) = result.get(field).and_then(Value::as_str) {
-                    texts.push(text.to_string());
-                }
-            }
-        }
-        let Some(content) = value.pointer("/message/content").and_then(Value::as_array) else {
-            continue;
-        };
-        for item in content {
-            if item.get("type").and_then(Value::as_str) != Some("tool_result") {
+    for value in &values {
+        let mut bash_result = false;
+        for item in content(value) {
+            if item.get("type").and_then(Value::as_str) != Some("tool_result")
+                || !item
+                    .get("tool_use_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| bash_calls.contains(id))
+            {
                 continue;
             }
+            bash_result = true;
             match item.get("content") {
                 Some(Value::String(text)) => texts.push(text.clone()),
                 Some(Value::Array(parts)) => texts.extend(
@@ -364,6 +379,15 @@ pub(crate) fn tool_results_report_user_namespace_denial(stdout: &str) -> bool {
                         .map(str::to_string),
                 ),
                 _ => {}
+            }
+        }
+        // The Bash result's own fields, on the message that answers a Bash
+        // call.
+        if bash_result && let Some(result) = value.get("tool_use_result") {
+            for field in ["stdout", "stderr"] {
+                if let Some(text) = result.get(field).and_then(Value::as_str) {
+                    texts.push(text.to_string());
+                }
             }
         }
     }
