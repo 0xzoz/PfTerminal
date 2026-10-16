@@ -182,6 +182,13 @@ fn issue_750_a_live_session_takes_cores_rules_now_and_the_broker_at_restart() {
         review.contains("Model keys through the credential broker start when you restart"),
         "{review}"
     );
+    // #842: other Corbanu Terminals on the home take it too.
+    assert!(
+        review.contains(
+            "within about a second in other Corbanu Terminals running on this Corbanu home"
+        ),
+        "{review}"
+    );
     // What the live tree reports after the commit.
     picker.screen = Screen::Saved(Ok(TransitionOutcome {
         level: ChosenLevel::Moderate,
@@ -196,9 +203,32 @@ fn issue_750_a_live_session_takes_cores_rules_now_and_the_broker_at_restart() {
         "{saved}"
     );
     assert!(
+        saved.contains(
+            "Other Corbanu Terminals running on this Corbanu home take Core's Moderate rules"
+        ),
+        "{saved}"
+    );
+    assert!(
         saved.contains("Starts when you restart: model keys held by the credential broker"),
         "{saved}"
     );
+    // #842 review: not saved, other Corbanu Terminals cannot take it.
+    picker.screen = Screen::Saved(Ok(TransitionOutcome {
+        level: ChosenLevel::Moderate,
+        core: Some(
+            crate::legacy_core::security_level_change::LevelChangeReport {
+                kind: crate::legacy_core::security_level_change::LevelChangeKind::Stricter,
+                in_force: SecurityLevel::Moderate,
+                next_start: SecurityLevel::Moderate,
+                live: true,
+                not_saved: Some("disk full".to_string()),
+                approvals: None,
+            },
+        ),
+    }));
+    let unsaved = text(&picker);
+    assert!(unsaved.contains("could not be saved"), "{unsaved}");
+    assert!(!unsaved.contains("Other Corbanu Terminals"), "{unsaved}");
     picker.screen = Screen::List { note: None };
     let list = text(&picker);
     assert!(

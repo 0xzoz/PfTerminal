@@ -7039,6 +7039,29 @@ async fn issue_507_kill_switch_from_another_process_stops_claude_panes_once() {
     // It goes with that pane's next turn (#602's delivery, tested there).
 }
 
+/// #842 (Travis, 2026-10-15): Moderate confirmed in another Corbanu Terminal
+/// on this home (Core already raised this process's sessions) is announced
+/// here, saying what applies now and what waits for the restart.
+#[tokio::test]
+async fn issue_842_moderate_from_another_terminal_is_announced() {
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    while app_event_rx.try_recv().is_ok() {}
+    app.on_level_raised_elsewhere(crate::legacy_core::security_revocation::SecurityLevel::Moderate);
+    let mut text = String::new();
+    while let Ok(event) = app_event_rx.try_recv() {
+        if let AppEvent::InsertHistoryCell(cell) = event {
+            text.push_str(&lines_to_single_string(&cell.display_lines(/*width*/ 400)));
+        }
+    }
+    for expected in [
+        "Moderate was confirmed in another Corbanu Terminal on this home",
+        "Core's Moderate rules apply here now",
+        "shown as Permissive until you restart",
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+}
+
 fn interrupted_claude_turn(app: &App) -> crate::claude_panes::ClaudePaneTurnOutput {
     crate::claude_panes::ClaudePaneTurnOutput {
         text: String::new(),

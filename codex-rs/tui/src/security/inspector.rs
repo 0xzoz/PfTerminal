@@ -435,10 +435,20 @@ pub(crate) fn sections(
     };
     // #442: what a grant can never lift, at the point grants are reviewed.
     if in_force(input, facts) == SecurityLevel::Aggressive {
+        // #846: the project's credential files are denied by Aggressive's
+        // sandbox, which a session launched at another level gets only at
+        // the restart (Core's rules hold from confirmation).
+        let value = if launch_level(input) == SecurityLevel::Aggressive {
+            PROTECTED_READS
+        } else if saved.level.enforced() == ChosenLevel::Aggressive {
+            PROTECTED_READS_BEFORE_RESTART
+        } else {
+            PROTECTED_READS_NOT_LAUNCHED
+        };
         grants.rows.push(row(
             "Protected reads",
             State::Enforcing,
-            "never granted under Aggressive, not even once: credential files (.env, .env.* and .envrc files, also ones created later; not .env.example, .env.sample or .env.template; SSH, cloud and CLI tokens) and Corbanu's sign-in, vault, config and history stay unreadable to agent commands; switch to Permissive in /security to allow them. On Linux and Windows a command is stopped when such a file appears while it runs; a process already waiting for that file can read it in the moment before the stop",
+            value,
             "resolved: level",
         ));
         grants.rows.push(row(
@@ -666,10 +676,11 @@ fn runtime_rows(input: &InspectorInput, facts: &RuntimeFacts) -> Vec<Row> {
         )),
         match facts.model_broker {
             // Installed is not the same as healthy: the broker is not probed.
+            // #839: a model request it refused shows as degraded instead.
             ControlFacts::Enforcing => row(
                 "Model key broker",
                 State::Unobserved,
-                "installed; its health is not probed",
+                "installed; provider keys go through it; its health is not probed (a model request it refused because its provider URL cannot be brokered shows here)",
                 "installed: this process",
             ),
             // #391, D2: Moderate and Aggressive turn it on where the broker
@@ -688,16 +699,24 @@ fn runtime_rows(input: &InspectorInput, facts: &RuntimeFacts) -> Vec<Row> {
                 "off: Core reads provider keys itself (broker_model_auth)",
             ),
         },
+        // #839: the network proxy's broker for agent commands, not the one
+        // holding model keys (the row above). Moderate does not turn it on,
+        // so under Moderate its state does not decide the badge.
         if input.network_broker {
-            required(row(
-                "Credential broker",
+            let row = row(
+                "Network credential broker",
                 State::Unobserved,
-                "on in config; its health is not observed here",
+                "on in config (isolated_credential_broker): the network proxy adds brokered credentials to agent commands' requests; its health is not observed here",
                 "resolved: features",
-            ))
+            );
+            if in_force(input, facts) == SecurityLevel::Moderate {
+                row
+            } else {
+                required(row)
+            }
         } else {
             row(
-                "Credential broker",
+                "Network credential broker",
                 State::Off,
                 "off (isolated_credential_broker)",
                 "resolved: features",
@@ -768,6 +787,16 @@ fn runtime_rows(input: &InspectorInput, facts: &RuntimeFacts) -> Vec<Row> {
     });
     rows
 }
+
+/// #442: the "Protected reads" row in a session launched under Aggressive.
+const PROTECTED_READS: &str = "never granted under Aggressive, not even once: credential files (.env, .env.* and .envrc files, also ones created later; not .env.example, .env.sample or .env.template; SSH, cloud and CLI tokens) and Corbanu's sign-in, vault, config and history stay unreadable to agent commands; switch to Permissive in /security to allow them. On Linux and Windows a command is stopped when such a file appears while it runs; a process already waiting for that file can read it in the moment before the stop";
+
+/// #846: the same row after Aggressive is confirmed and before the restart.
+const PROTECTED_READS_BEFORE_RESTART: &str = "never granted under Aggressive, not even once: credential files in your home folder (SSH, cloud and CLI tokens) and Corbanu's sign-in, vault, config and history stay unreadable to agent commands; switch to Permissive in /security to allow them. The project's credential files (.env, .env.* and .envrc files) are denied to agent commands only after you restart Corbanu Terminal";
+
+/// #846: the same row where the next start is not Aggressive either (Core
+/// is Aggressive only until the restart, or from a config setting).
+const PROTECTED_READS_NOT_LAUNCHED: &str = "never granted under Aggressive, not even once: credential files in your home folder (SSH, cloud and CLI tokens) and Corbanu's sign-in, vault, config and history stay unreadable to agent commands; switch to Permissive in /security to allow them. The project's credential files (.env, .env.* and .envrc files) are not denied in this session: Aggressive's sandbox is not on";
 
 fn launch_level(input: &InspectorInput) -> SecurityLevel {
     match input.active {

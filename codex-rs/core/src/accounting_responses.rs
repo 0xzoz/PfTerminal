@@ -164,6 +164,12 @@ impl DeferredResponsesSampling {
         Ok(())
     }
 
+    /// The accounting mode this collector was attached with.
+    #[cfg(test)]
+    pub(crate) fn mode(&self) -> &AccountingMode {
+        &self.mode
+    }
+
     pub(super) fn provider_mode(&self) -> bool {
         matches!(self.mode, AccountingMode::Provider { .. })
     }
@@ -424,6 +430,7 @@ pub(super) fn patch(
             .flatten()
             .and_then(|text| codex_state::accounting::Decimal::try_from(text).ok()),
         refused_status: None,
+        session_ended_at_ms: None,
     })
 }
 

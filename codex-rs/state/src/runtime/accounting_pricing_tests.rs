@@ -116,6 +116,7 @@ fn inclusive_revisions_replace_and_reasoning_is_not_charged_twice() {
                 total: None,
                 billed_usd: None,
                 refused_status: None,
+                session_ended_at_ms: None,
             },
             snapshot: Some(s),
             buckets: [

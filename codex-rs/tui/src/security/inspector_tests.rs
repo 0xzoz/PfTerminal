@@ -618,3 +618,122 @@ fn issue_749_moderate_rows_match_what_is_enforced() {
         )
     );
 }
+
+/// #839 (MOD-20, MOD-24): under Moderate the top line follows what Moderate
+/// enforces. The network proxy's credential broker, which Moderate does not
+/// turn on, no longer makes a healthy Moderate "off or not observed" next to
+/// a Model keys row saying the broker holds the keys; a model request the
+/// model-key broker refused makes it degraded. Aggressive is unchanged.
+#[test]
+fn issue_839_moderate_top_line_matches_the_model_key_broker() {
+    let root = ThreadId::new();
+    let moderate = RuntimeFacts {
+        policy: PolicyFacts::Live(tree(
+            SecurityLevel::Moderate,
+            vec![AgentFacts {
+                thread: root,
+                depth: 0,
+                level: SecurityLevel::Moderate,
+                stricter_than_session: false,
+                stopped: false,
+            }],
+        )),
+        ..healthy(root)
+    };
+    let mut input = input(ChosenLevel::Moderate);
+    input.network_broker = true;
+    let saved = saved(ChosenLevel::Moderate);
+    let rows = sections(&input, &saved, &moderate, NOW);
+    let network = find(&rows, "Network credential broker");
+    assert!(!network.required, "{network:?}");
+    assert!(
+        network.value.contains("agent commands' requests"),
+        "{}",
+        network.value
+    );
+    assert_eq!(
+        verdict(&input, &saved, &moderate, NOW),
+        Badge::Protected("Moderate")
+    );
+    let refused = RuntimeFacts {
+        model_broker: ControlFacts::Degraded(
+            "the last model request was refused: its provider URL cannot be brokered",
+        ),
+        ..moderate
+    };
+    assert_eq!(
+        verdict(&input, &saved, &refused, NOW),
+        Badge::Degraded("Moderate", vec!["Model key broker".to_string()])
+    );
+
+    // Aggressive still needs it observed when it is on.
+    let mut aggressive = self::input(ChosenLevel::Aggressive);
+    aggressive.network_broker = true;
+    assert_eq!(
+        verdict(
+            &aggressive,
+            &self::saved(ChosenLevel::Aggressive),
+            &healthy(root),
+            NOW
+        ),
+        Badge::Partial("Aggressive", vec!["Network credential broker".to_string()])
+    );
+}
+
+/// #846 (MOD-29): launched under Moderate, Aggressive confirmed and Core
+/// already Aggressive, before the restart: the project's `.env` files are
+/// not denied yet (Aggressive's sandbox starts at the restart), and the
+/// "Protected reads" row says so instead of claiming they are unreadable.
+#[test]
+fn issue_846_protected_reads_before_the_restart_leave_out_project_env_files() {
+    let root = ThreadId::new();
+    let facts = healthy(root);
+    let input = input(ChosenLevel::Moderate);
+    let before_restart = sections(&input, &saved(ChosenLevel::Aggressive), &facts, NOW);
+    let reads = find(&before_restart, "Protected reads");
+    assert!(
+        reads
+            .value
+            .contains("credential files in your home folder (SSH, cloud and CLI tokens)"),
+        "{}",
+        reads.value
+    );
+    assert!(
+        reads.value.ends_with(
+            "The project's credential files (.env, .env.* and .envrc files) are denied to agent commands only after you restart Corbanu Terminal"
+        ),
+        "{}",
+        reads.value
+    );
+    assert!(
+        !reads.value.contains("also ones created later"),
+        "{}",
+        reads.value
+    );
+    // The next start is not Aggressive (another level saved since, or Core
+    // Aggressive from config only): no protection is promised after it.
+    let not_launched = sections(&input, &saved(ChosenLevel::Permissive), &facts, NOW);
+    let reads = find(&not_launched, "Protected reads");
+    assert!(
+        reads.value.ends_with(
+            "The project's credential files (.env, .env.* and .envrc files) are not denied in this session: Aggressive's sandbox is not on"
+        ),
+        "{}",
+        reads.value
+    );
+    // Launched under Aggressive: as before.
+    let launched = sections(
+        &super::tests::input(ChosenLevel::Aggressive),
+        &saved(ChosenLevel::Aggressive),
+        &facts,
+        NOW,
+    );
+    let reads = find(&launched, "Protected reads");
+    assert!(
+        reads.value.starts_with(
+            "never granted under Aggressive, not even once: credential files (.env, .env.* and .envrc files, also ones created later;"
+        ),
+        "{}",
+        reads.value
+    );
+}

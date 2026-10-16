@@ -254,3 +254,37 @@ fn issue_841_reads_kept_by_the_launch_contract_are_recognised() {
     assert!(named(format!("cat '{}/auth.json'", fixture.home.display())));
     assert!(!named("cat README.md".to_string()));
 }
+
+/// #839: what an explained denial was, for the inspector's recent denials:
+/// Moderate's own, or kept by the secretless launch contract.
+#[test]
+fn issue_839_explained_denials_say_what_was_denied() {
+    let fixture = Fixture::new();
+    let auth = format!("{}/auth.json", fixture.home.display());
+    let command = [
+        "/bin/bash".to_string(),
+        "-c".to_string(),
+        format!("cat '{auth}'"),
+    ];
+    let lines = [format!("cat: {auth}: Operation not permitted")];
+    let denied = |contract: Option<&LaunchContract>| {
+        explain_denied(
+            &fixture.inputs(Fixture::profile()),
+            contract,
+            &command,
+            &fixture.project,
+            &lines,
+        )
+        .map(|(denied, _)| denied)
+    };
+    assert_eq!(denied(None), Some(Denied::Read));
+    let contract = fixture.contract();
+    assert_eq!(denied(Some(&contract)), Some(Denied::KeptRead));
+    assert_eq!(
+        Denied::Read.inspected(),
+        (
+            "reading a protected file",
+            "denied by the sandbox under Moderate"
+        )
+    );
+}

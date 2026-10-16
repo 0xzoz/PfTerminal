@@ -32,7 +32,7 @@ Runtime controls
   [off] Output gate: off (secret_output_gate) [observed: this process]
   [degraded] Model key broker: no broker is running; provider keys are not sent [observed: this
       process]
-  [off] Credential broker: off (isolated_credential_broker) [resolved: features]
+  [off] Network credential broker: off (isolated_credential_broker) [resolved: features]
   [on] Untrusted content: labelled; session tainted (2 batches): protected actions need your fresh
       approval. Taint is kept with the conversation and stays on resume [observed: session]
   [set] Protected boundary: preflight clean at launch; earlier conversations are not resumed

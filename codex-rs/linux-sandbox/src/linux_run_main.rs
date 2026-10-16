@@ -232,6 +232,9 @@ pub fn run_main() -> ! {
         ) {
             panic!("error applying Linux sandbox restrictions: {e:?}");
         }
+        if file_system_sandbox_policy.denies_user_namespaces() {
+            mark_user_namespaces_denied();
+        }
         exec_or_panic(command);
     }
 
@@ -245,6 +248,9 @@ pub fn run_main() -> ! {
         ) {
             panic!("error applying Linux sandbox restrictions: {e:?}");
         }
+        if file_system_sandbox_policy.denies_user_namespaces() {
+            mark_user_namespaces_denied();
+        }
         exec_or_panic(command);
     }
 
@@ -255,6 +261,10 @@ pub fn run_main() -> ! {
     }
 
     if !use_legacy_landlock {
+        // #826: bubblewrap needs a user namespace, which a command run in a
+        // sandbox that denies them cannot create; say so instead of leaving
+        // it to bubblewrap's message.
+        refuse_when_user_namespaces_denied();
         // Outer stage: bubblewrap first, then re-enter this binary in the
         // sandboxed environment to apply seccomp. This path never falls back
         // to legacy Landlock on failure.
@@ -299,7 +309,74 @@ pub fn run_main() -> ! {
     ) {
         panic!("error applying legacy Linux sandbox restrictions: {e:?}");
     }
+    if file_system_sandbox_policy.denies_user_namespaces() {
+        mark_user_namespaces_denied();
+    }
     exec_or_panic(command);
+}
+
+/// #826: set in the environment of a command whose sandbox denies user
+/// namespaces. It only selects the message below; whether a namespace can
+/// be created is always tried.
+const USER_NAMESPACES_DENIED_ENV: &str = "CODEX_SANDBOX_USER_NAMESPACES_DENIED";
+
+/// Shown when this helper runs inside a sandbox that denies user namespaces.
+const USER_NAMESPACES_DENIED_MESSAGE: &str = "Corbanu's Linux sandbox cannot start here: this command runs inside an agent command's sandbox under security level Moderate or Aggressive, where creating user namespaces is denied (Operation not permitted), and the sandbox needs one. Run it outside the agent's sandbox, or choose Permissive in /security.";
+
+fn mark_user_namespaces_denied() {
+    // SAFETY: this helper process is single-threaded here (the proxy bridges
+    // run in forked processes), and the environment changes just before the
+    // command is executed.
+    unsafe {
+        std::env::set_var(USER_NAMESPACES_DENIED_ENV, "1");
+    }
+}
+
+/// #826: inside a sandbox that denies user namespaces, stops with
+/// [`USER_NAMESPACES_DENIED_MESSAGE`] when one really cannot be created.
+fn refuse_when_user_namespaces_denied() {
+    if std::env::var_os(USER_NAMESPACES_DENIED_ENV).is_none() {
+        return;
+    }
+    if user_namespace_creation_error() == Some(libc::EPERM) {
+        eprintln!("{USER_NAMESPACES_DENIED_MESSAGE}");
+        std::process::exit(1);
+    }
+}
+
+/// The error creating a user namespace fails with in a child of this
+/// process, `None` when it succeeds or cannot be tried.
+fn user_namespace_creation_error() -> Option<i32> {
+    // SAFETY: the child calls only async-signal-safe functions, then exits.
+    let pid = unsafe { libc::fork() };
+    match pid {
+        -1 => None,
+        0 => unsafe {
+            let code = if libc::unshare(libc::CLONE_NEWUSER) == 0 {
+                0
+            } else {
+                *libc::__errno_location()
+            };
+            libc::_exit(code.clamp(0, 255));
+        },
+        pid => {
+            let mut status = 0;
+            loop {
+                // SAFETY: waits for the child forked above.
+                let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
+                if waited == pid {
+                    break;
+                }
+                if waited == -1
+                    && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR)
+                {
+                    return None;
+                }
+            }
+            (libc::WIFEXITED(status) && libc::WEXITSTATUS(status) != 0)
+                .then(|| libc::WEXITSTATUS(status))
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -438,8 +515,74 @@ fn run_bwrap_with_proc_fallback(
         options,
     )
     .unwrap_or_else(|err| exit_with_bwrap_build_error(err));
+    if file_system_sandbox_policy.denies_user_namespaces() {
+        add_user_namespace_seccomp_fds(&mut bwrap_args).unwrap_or_else(|err| {
+            eprintln!("error building bubblewrap command: {err}");
+            std::process::exit(1);
+        });
+    }
     apply_inner_command_argv0(&mut bwrap_args.args);
     run_or_exec_bwrap(bwrap_args, credential_watcher);
+}
+
+/// #826: hands bubblewrap the user-namespace seccomp programs
+/// (`--add-seccomp-fd`, bubblewrap 0.5+, as `--perms` that a system copy must
+/// support), which it applies to every process in the sandbox before it runs
+/// anything there. That includes its own PID 1, which is no descendant of the
+/// command, so the inner stage cannot filter it, and which would otherwise
+/// create namespaces for a command that takes it over (`ptrace`,
+/// `/proc/1/mem`).
+fn add_user_namespace_seccomp_fds(bwrap_args: &mut crate::bwrap::BwrapArgs) -> Result<(), String> {
+    let programs = crate::landlock::user_namespace_seccomp_programs()
+        .map_err(|err| format!("cannot build the user-namespace seccomp programs: {err}"))?;
+    let mut args = Vec::new();
+    for program in programs {
+        let bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|instruction| {
+                let mut bytes = Vec::with_capacity(8);
+                bytes.extend_from_slice(&instruction.code.to_ne_bytes());
+                bytes.push(instruction.jt);
+                bytes.push(instruction.jf);
+                bytes.extend_from_slice(&instruction.k.to_ne_bytes());
+                bytes
+            })
+            .collect();
+        let file = seccomp_program_file(&bytes)
+            .map_err(|err| format!("cannot pass a seccomp program to bubblewrap: {err}"))?;
+        args.push("--add-seccomp-fd".to_string());
+        args.push(file.as_raw_fd().to_string());
+        bwrap_args.preserved_files.push(file);
+    }
+    // Right after the program name, before the command.
+    bwrap_args.args.splice(1..1, args);
+    Ok(())
+}
+
+/// An in-memory file holding `bytes`, read from the start, above
+/// the standard streams (so it never becomes the command's stdin, stdout or
+/// stderr where one of them was closed).
+fn seccomp_program_file(bytes: &[u8]) -> std::io::Result<File> {
+    use std::io::Seek;
+    use std::io::Write;
+    // SAFETY: creates a new descriptor from a valid C string.
+    let fd = unsafe { libc::memfd_create(c"codex-userns-seccomp".as_ptr(), libc::MFD_CLOEXEC) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `fd` was just created and is owned here.
+    let created = unsafe { File::from_raw_fd(fd) };
+    // SAFETY: duplicates a descriptor owned here.
+    let raised = unsafe { libc::fcntl(created.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
+    if raised < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    drop(created);
+    // SAFETY: `raised` was just created and is owned here.
+    let mut file = unsafe { File::from_raw_fd(raised) };
+    file.write_all(bytes)?;
+    file.seek(std::io::SeekFrom::Start(0))?;
+    Ok(file)
 }
 
 fn bwrap_network_mode(

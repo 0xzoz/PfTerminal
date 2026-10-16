@@ -363,6 +363,7 @@ fn native_anthropic_partial_input_and_unknown_dialect_remain_distinct() -> anyho
             reasoning: None,
             billed_usd: None,
             refused_status: None,
+            session_ended_at_ms: None,
         }
     );
     Ok(())
@@ -410,6 +411,7 @@ fn inclusive_subsets_totals_and_arithmetic_overflow_are_validated() {
             total: Some(12),
             billed_usd: None,
             refused_status: None,
+            session_ended_at_ms: None,
         }
     );
 }
@@ -508,6 +510,7 @@ fn a_refusal_replays_to_zero_usage() {
                 total: Some(0),
                 billed_usd: None,
                 refused_status: Some(403),
+                session_ended_at_ms: None,
             }
         );
     }
