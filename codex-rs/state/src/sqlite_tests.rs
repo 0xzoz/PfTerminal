@@ -349,6 +349,62 @@ async fn a_leftover_read_only_placeholder_becomes_the_lock() -> anyhow::Result<(
     Ok(())
 }
 
+/// #756: dropping a launch's init lock releases it at once, also while a
+/// child process forked meanwhile (by any spawn in this process) still holds
+/// a copy of the lock's descriptor because it has not started its program
+/// yet. Closing the file alone released the lock only when that copy closed:
+/// on macOS a concurrent spawn made `a_leftover_read_only_placeholder_becomes_the_lock`
+/// find the lock still held after its holder was dropped.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_init_lock_is_released_while_a_forked_child_holds_its_descriptor() -> anyhow::Result<()>
+{
+    use std::io::Read;
+    use std::io::Write;
+    use std::os::unix::process::CommandExt;
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home).await?;
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let held = sqlite.lock_runtime_db_init().await;
+    assert!(held._file.is_some(), "the lock is held");
+
+    // A child forked now has a copy of every descriptor, the lock's too, until
+    // it starts its program; this one waits 2 s first and reports the fork.
+    let (mut forked, mut forked_tx) = std::io::pipe()?;
+    let spawner = std::thread::spawn(move || {
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", "exit 0"]);
+        // SAFETY: the hook only writes to a pipe and sleeps, both safe after fork.
+        unsafe {
+            command.pre_exec(move || {
+                forked_tx.write_all(b"f")?;
+                std::thread::sleep(Duration::from_secs(2));
+                Ok(())
+            });
+        }
+        command.status()
+    });
+    let mut byte = [0; 1];
+    forked.read_exact(&mut byte)?;
+
+    let other = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(sqlite_home.join(DB_INIT_LOCK_FILENAME))?;
+    assert!(other.try_lock().is_err(), "the lock is held");
+    drop(held);
+    assert!(
+        other.try_lock().is_ok(),
+        "the dropped lock is still held through the forked child's copy"
+    );
+    let status = spawner.join().expect("spawner thread")?;
+    assert!(status.success(), "{status:?}");
+    Ok(())
+}
+
 /// #586: a link at the lock path is never repaired through: its target keeps
 /// its mode, and the launch opens the databases unlocked.
 #[cfg(unix)]
