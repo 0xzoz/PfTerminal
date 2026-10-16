@@ -207,7 +207,7 @@ impl ToolOrchestrator {
                 .requires_escalated_permissions()
         {
             // The person sees it too, not only the model (an exec_command
-            // refused before it starts shows no command cell).
+            // also gets a "Refused: <this reason>" cell since #873).
             warn(
                 tool_ctx,
                 crate::security::protected_additional::PROTECTED_LAUNCH_NO_ESCALATION,

@@ -150,39 +150,18 @@ impl EventProcessorWithHumanOutput {
                 duration_ms,
                 ..
             } => {
-                let duration_suffix = duration_ms
-                    .map(|duration_ms| format!(" in {duration_ms}ms"))
-                    .unwrap_or_default();
-                match status {
-                    CommandExecutionStatus::Completed => {
-                        eprintln!(
-                            "{}",
-                            format!(" succeeded{duration_suffix}:").style(self.green)
-                        );
+                let style = match status {
+                    CommandExecutionStatus::Completed => self.green,
+                    CommandExecutionStatus::Failed => self.red,
+                    CommandExecutionStatus::Declined | CommandExecutionStatus::Refused => {
+                        self.yellow
                     }
-                    CommandExecutionStatus::Failed => {
-                        let exit_code = exit_code.unwrap_or(1);
-                        eprintln!(
-                            "{}",
-                            format!(" exited {exit_code}{duration_suffix}:").style(self.red)
-                        );
-                    }
-                    CommandExecutionStatus::Declined => {
-                        eprintln!(
-                            "{}",
-                            format!(" declined{duration_suffix}:").style(self.yellow)
-                        );
-                    }
-                    CommandExecutionStatus::Refused => {
-                        eprintln!("{}", " refused before execution:".style(self.yellow));
-                    }
-                    CommandExecutionStatus::InProgress => {
-                        eprintln!(
-                            "{}",
-                            format!(" in progress{duration_suffix}:").style(self.dimmed)
-                        );
-                    }
-                }
+                    CommandExecutionStatus::InProgress => self.dimmed,
+                };
+                eprintln!(
+                    "{}",
+                    command_status_header(&status, exit_code, duration_ms).style(style)
+                );
                 if let Some(output) = aggregated_output
                     && !output.trim().is_empty()
                 {
@@ -587,6 +566,30 @@ fn should_print_final_message_to_tty(
     stderr_is_terminal: bool,
 ) -> bool {
     final_message.is_some() && !final_message_rendered && stdout_is_terminal && stderr_is_terminal
+}
+
+/// The status line printed before a finished command's output. A refusal
+/// says only that the command was refused: a network-policy refusal can
+/// arrive after the command ran (#873), and the reason that follows says
+/// what happened.
+fn command_status_header(
+    status: &CommandExecutionStatus,
+    exit_code: Option<i32>,
+    duration_ms: Option<i64>,
+) -> String {
+    let duration_suffix = duration_ms
+        .map(|duration_ms| format!(" in {duration_ms}ms"))
+        .unwrap_or_default();
+    match status {
+        CommandExecutionStatus::Completed => format!(" succeeded{duration_suffix}:"),
+        CommandExecutionStatus::Failed => {
+            let exit_code = exit_code.unwrap_or(1);
+            format!(" exited {exit_code}{duration_suffix}:")
+        }
+        CommandExecutionStatus::Declined => format!(" declined{duration_suffix}:"),
+        CommandExecutionStatus::Refused => " refused:".to_string(),
+        CommandExecutionStatus::InProgress => format!(" in progress{duration_suffix}:"),
+    }
 }
 
 #[cfg(test)]
