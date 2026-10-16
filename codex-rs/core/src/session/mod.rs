@@ -2226,11 +2226,12 @@ impl Session {
                 };
                 match Box::pin(parent_session.accounting_owner_at(depth + 1)).await {
                     Ok(owner) => {
-                        // A saved conversation whose file is not written yet
-                        // (`/review` as its first action) records under its
-                        // own thread; write it now, as its own first request
-                        // would, so the ledger has the thread to record under
-                        // (#898).
+                        // A saved conversation whose thread row is not
+                        // written yet (work started before its first saved
+                        // item, such as `/review` racing the item that opens
+                        // it) records under its own thread; save it now, as
+                        // its own first request would, so the ledger has the
+                        // thread to record under (#898).
                         if owner.thread == parent {
                             parent_session
                                 .try_ensure_rollout_materialized()

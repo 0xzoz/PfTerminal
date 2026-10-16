@@ -41,9 +41,9 @@ async fn accounting_code_review_is_recorded_under_the_conversation() -> anyhow::
     code_review_is_recorded_under_the_conversation(/*turn_first*/ true).await
 }
 
-/// `/review` as a new conversation's first action: the conversation is not
-/// saved yet when the review sends its first request; it is saved then, so the
-/// review's requests are recorded rather than refused.
+/// `/review` as a new conversation's first action, before any turn has saved
+/// the conversation: the review's requests are still recorded under it, with
+/// no refusal or accounting warning.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn accounting_code_review_as_the_first_action_is_recorded() -> anyhow::Result<()> {
     code_review_is_recorded_under_the_conversation(/*turn_first*/ false).await
