@@ -84,8 +84,6 @@ fn assert_explained(lines: &[String]) {
 async fn issue_912_own_warmup_cost_explains_missing_saved_turns() {
     assert!(!saved_turn_control(quote().attempt.thread_id, /*append_turn*/ false).await);
     let pages = inspection_pages(Ok(InspectionDay::Ready(warmup_packet())));
-    println!("issue912-own-cost-pages={:#?}", pages[0].text);
-    println!("issue912-own-resume-reader=not-discoverable-without-saved-turn");
     assert!(
         pages[0]
             .text
@@ -111,8 +109,6 @@ async fn issue_912_other_warmup_cost_qualifies_resume_advice() {
         ..OtherConversations::default()
     });
     let pages = inspection_pages(Ok(InspectionDay::Ready(view)));
-    println!("issue912-other-cost-pages={:#?}", pages[0].text);
-    println!("issue912-other-resume-reader=not-discoverable-without-saved-turn");
     assert!(pages[0].text.iter().any(|line| line.contains(
         "Other conversations on this day, not included above: 1 request in 1 conversation."
     )));
