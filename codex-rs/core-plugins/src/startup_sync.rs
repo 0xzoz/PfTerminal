@@ -1120,10 +1120,17 @@ fn extract_zipball_to_dir(bytes: &[u8], destination: &Path) -> Result<(), String
         let mut entry = archive
             .by_index(index)
             .map_err(|err| format!("failed to read curated plugins zip entry: {err}"))?;
+        let name = entry
+            .name()
+            .map_err(|error| format!("failed to decode curated plugins zip entry name: {error}"))?;
+        if Path::new(name.as_ref()).is_absolute() {
+            return Err(format!(
+                "curated plugins zip entry `{name}` escapes extraction root"
+            ));
+        }
         let Some(relative_path) = entry.enclosed_name() else {
             return Err(format!(
-                "curated plugins zip entry `{}` escapes extraction root",
-                entry.name()
+                "curated plugins zip entry `{name}` escapes extraction root"
             ));
         };
 
@@ -1142,7 +1149,7 @@ fn extract_zipball_to_dir(bytes: &[u8], destination: &Path) -> Result<(), String
             continue;
         }
 
-        let output_path = destination.join(&output_relative);
+        let output_path = checked_zip_path(destination, &output_relative)?;
         if entry.is_dir() {
             std::fs::create_dir_all(&output_path).map_err(|err| {
                 format!(
@@ -1173,35 +1180,58 @@ fn extract_zipball_to_dir(bytes: &[u8], destination: &Path) -> Result<(), String
                 output_path.display()
             )
         })?;
-        apply_zip_permissions(&entry, &output_path)?;
+        apply_zip_permissions(entry.unix_mode(), &output_path)?;
     }
 
     Ok(())
 }
 
+// The caller validates archive components before this check. Existing symlinks
+// must not redirect archive writes or permission changes outside its destination.
+fn checked_zip_path(destination: &Path, relative: &Path) -> Result<PathBuf, String> {
+    let mut output = PathBuf::new();
+    for part in std::iter::once(destination.as_os_str())
+        .chain(relative.components().map(std::path::Component::as_os_str))
+    {
+        output.push(part);
+        match std::fs::symlink_metadata(&output) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err("curated plugins zip path contains an existing symlink".to_owned());
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("failed to check curated plugins zip path: {error}")),
+        }
+    }
+    Ok(output)
+}
+
 #[cfg(unix)]
-fn apply_zip_permissions(entry: &zip::read::ZipFile<'_>, output_path: &Path) -> Result<(), String> {
+fn apply_zip_permissions(mode: Option<u32>, output_path: &Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
 
-    let Some(mode) = entry.unix_mode() else {
+    let Some(mode) = mode else {
         return Ok(());
     };
-    std::fs::set_permissions(output_path, std::fs::Permissions::from_mode(mode)).map_err(|err| {
-        format!(
-            "failed to set permissions on curated plugins file {}: {err}",
-            output_path.display()
-        )
-    })
+    std::fs::set_permissions(output_path, std::fs::Permissions::from_mode(mode & 0o777)).map_err(
+        |err| {
+            format!(
+                "failed to set permissions on curated plugins file {}: {err}",
+                output_path.display()
+            )
+        },
+    )
 }
 
 #[cfg(not(unix))]
-fn apply_zip_permissions(
-    _entry: &zip::read::ZipFile<'_>,
-    _output_path: &Path,
-) -> Result<(), String> {
+fn apply_zip_permissions(_mode: Option<u32>, _output_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
 #[cfg(test)]
 #[path = "startup_sync_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "archive_migration_tests.rs"]
+mod archive_migration_tests;
