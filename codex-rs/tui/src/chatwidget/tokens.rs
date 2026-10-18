@@ -2554,7 +2554,7 @@ fn interval(start: i64, end: i64) -> String {
 /// Calendar progress and complete accounting through the ledger checkpoint
 /// are separate. Request/retention clipping and unverified detail stay partial.
 #[derive(Clone, Copy)]
-enum Progress {
+enum BucketProgress {
     /// Still running: everything recorded up to this coverage end.
     InProgress(i64),
     /// A whole requested bucket has all its recorded detail through this
@@ -2570,9 +2570,9 @@ fn progress(
     read_at: i64,
     completed_as_of_ms: Option<i64>,
     bucket: &codex_state::accounting::InspectionBucket,
-) -> Option<Progress> {
+) -> Option<BucketProgress> {
     if bucket.start_ms > read_at {
-        return Some(Progress::NotStarted);
+        return Some(BucketProgress::NotStarted);
     }
     if let Some((start, end)) = bucket.effective
         && bucket.partial
@@ -2589,7 +2589,7 @@ fn progress(
                 _ => false,
             })
     {
-        return Some(Progress::InProgress(end));
+        return Some(BucketProgress::InProgress(end));
     }
     let checkpoint = completed_as_of_ms?;
     let end = bucket.end_ms.min(checkpoint.saturating_add(1));
@@ -2614,7 +2614,7 @@ fn progress(
                 InspectionDay::CheckpointLag => day * 86_400_000 > checkpoint,
                 _ => false,
             }))
-    .then_some(Progress::RecordedThrough(checkpoint))
+    .then_some(BucketProgress::RecordedThrough(checkpoint))
 }
 
 const NOT_STARTED: &str = "Not started yet — it starts after this view was read.";
@@ -2672,10 +2672,10 @@ fn range_pages(
         .flat_map(|(b, progress)| {
             b.days.iter().filter(move |d| match progress {
                 None => true,
-                Some(Progress::InProgress(_) | Progress::RecordedThrough(_)) => {
+                Some(BucketProgress::InProgress(_) | BucketProgress::RecordedThrough(_)) => {
                     !matches!(d, InspectionDay::CheckpointLag)
                 }
-                Some(Progress::NotStarted) => false,
+                Some(BucketProgress::NotStarted) => false,
             })
         })
         .collect::<Vec<_>>();
@@ -2684,7 +2684,7 @@ fn range_pages(
     let checkpoint_limited = progress.iter().any(|p| {
         matches!(
             p,
-            Some(Progress::InProgress(_) | Progress::RecordedThrough(_))
+            Some(BucketProgress::InProgress(_) | BucketProgress::RecordedThrough(_))
         )
     });
     if states
@@ -2747,15 +2747,17 @@ fn range_pages(
         if let Some(end) = progress
             .iter()
             .filter_map(|p| match p {
-                Some(Progress::InProgress(end)) => Some(*end),
-                Some(Progress::RecordedThrough(_)) | Some(Progress::NotStarted) | None => None,
+                Some(BucketProgress::InProgress(end)) => Some(*end),
+                Some(BucketProgress::RecordedThrough(_))
+                | Some(BucketProgress::NotStarted)
+                | None => None,
             })
             .max()
         {
             pages[0].text.push(in_progress_line(end));
         } else if let Some(checkpoint) = progress.iter().find_map(|p| match p {
-            Some(Progress::RecordedThrough(checkpoint)) => Some(*checkpoint),
-            Some(Progress::InProgress(_)) | Some(Progress::NotStarted) | None => None,
+            Some(BucketProgress::RecordedThrough(checkpoint)) => Some(*checkpoint),
+            Some(BucketProgress::InProgress(_)) | Some(BucketProgress::NotStarted) | None => None,
         }) {
             pages[0].text.push(recorded_through_line(checkpoint));
         }
@@ -2796,8 +2798,8 @@ fn range_pages(
         let bounds = interval(bucket.start_ms, bucket.end_ms);
         let effective = match (bucket.effective, progress) {
             (Some((s, e)), _) => interval(s, e),
-            (None, Some(Progress::NotStarted)) => "not started".into(),
-            (None, Some(Progress::RecordedThrough(_))) => {
+            (None, Some(BucketProgress::NotStarted)) => "not started".into(),
+            (None, Some(BucketProgress::RecordedThrough(_))) => {
                 "no recorded interval through the ledger checkpoint".into()
             }
             (None, _) => "unavailable".into(),
@@ -2807,9 +2809,9 @@ fn range_pages(
             "Bucket: {bounds}; effective coverage (requested ∩ aggregate retention ∩ snapshot): {effective}"
         ));
         header.push(match progress {
-            Some(Progress::InProgress(end)) => in_progress_line(end),
-            Some(Progress::RecordedThrough(checkpoint)) => recorded_through_line(checkpoint),
-            Some(Progress::NotStarted) => NOT_STARTED.into(),
+            Some(BucketProgress::InProgress(end)) => in_progress_line(end),
+            Some(BucketProgress::RecordedThrough(checkpoint)) => recorded_through_line(checkpoint),
+            Some(BucketProgress::NotStarted) => NOT_STARTED.into(),
             None if bucket.partial => "Partial bucket — excluded from totals".into(),
             None => "Whole bucket within aggregate retention coverage; detail availability checked separately".into(),
         });
@@ -2858,15 +2860,15 @@ fn range_pages(
                 "{:?} {bounds}{}",
                 requested.grouping,
                 match progress {
-                    Some(Progress::InProgress(_)) => " (in progress)",
-                    Some(Progress::RecordedThrough(_)) => " (recorded through checkpoint)",
-                    Some(Progress::NotStarted) => " (not started)",
+                    Some(BucketProgress::InProgress(_)) => " (in progress)",
+                    Some(BucketProgress::RecordedThrough(_)) => " (recorded through checkpoint)",
+                    Some(BucketProgress::NotStarted) => " (not started)",
                     None => "",
                 }
             ),
             offset,
         ));
-        let mut children = if matches!(progress, Some(Progress::NotStarted)) {
+        let mut children = if matches!(progress, Some(BucketProgress::NotStarted)) {
             vec![InspectorPage {
                 title: "Not started yet".into(),
                 text: vec![],
@@ -2874,7 +2876,7 @@ fn range_pages(
                 parent: None,
                 selected: Arc::default(),
             }]
-        } else if matches!(progress, Some(Progress::RecordedThrough(checkpoint)) if checkpoint < bucket.start_ms)
+        } else if matches!(progress, Some(BucketProgress::RecordedThrough(checkpoint)) if checkpoint < bucket.start_ms)
         {
             vec![InspectorPage {
                 title: "Recorded requests through checkpoint".into(),
@@ -2910,14 +2912,14 @@ fn range_pages(
                     // The merged view keeps its first day's `utc_day`;
                     // the heading names the whole bucket instead.
                     Ok(()) if progress.is_some() => {
-                        let period = if matches!(progress, Some(Progress::InProgress(_))) {
+                        let period = if matches!(progress, Some(BucketProgress::InProgress(_))) {
                             format!("so far in {bounds}")
                         } else {
                             bounds.clone()
                         };
                         let mut pages =
                             inspection_pages_for(Ok(InspectionDay::Ready(view)), Some(period));
-                        if matches!(progress, Some(Progress::InProgress(_))) {
+                        if matches!(progress, Some(BucketProgress::InProgress(_))) {
                             pages[0].title = "Cost so far — this conversation".into();
                         }
                         for page in &mut pages {
