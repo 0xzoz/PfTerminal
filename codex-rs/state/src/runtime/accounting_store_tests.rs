@@ -368,6 +368,19 @@ async fn accounting_inspect_checkpoint_and_stale_estimate() -> anyhow::Result<()
         inspected(&runtime, /*day*/ 1, /*time*/ 86_400_000).await?,
         InspectionDay::CheckpointLag
     );
+    let range = range_read(
+        &runtime,
+        /*start*/ 86_400_000,
+        /*end*/ 90_000_000,
+        InspectionGrouping::Hour,
+        /*now*/ 88_200_000,
+    )
+    .await?;
+    assert!(matches!(
+        range,
+        InspectionDay::Range { completed_as_of_ms: Some(0), buckets, .. }
+            if buckets[0].days == vec![InspectionDay::CheckpointLag]
+    ));
     assert_eq!(rows(&runtime).await?, before);
     store
         .observe(a.thread_id, &a, &[row(/*revision*/ 1)], /*as_of*/ 0)
@@ -409,6 +422,19 @@ async fn accounting_inspect_never_maintained_is_checkpoint_lag() -> anyhow::Resu
         inspected(&runtime, /*day*/ 0, /*time*/ 0).await?,
         InspectionDay::CheckpointLag
     );
+    let range = range_read(
+        &runtime,
+        /*start*/ 0,
+        /*end*/ 3_600_000,
+        InspectionGrouping::Hour,
+        /*now*/ 0,
+    )
+    .await?;
+    assert!(matches!(
+        range,
+        InspectionDay::Range { completed_as_of_ms: None, buckets, .. }
+            if buckets[0].days == vec![InspectionDay::CheckpointLag]
+    ));
     assert_eq!(rows(&runtime).await?, before);
     runtime.close().await;
     Ok(())
