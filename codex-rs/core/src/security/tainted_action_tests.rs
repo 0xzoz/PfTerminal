@@ -2350,3 +2350,108 @@ fn issue_937_counters_and_plain_uses_are_not_unseen_code() {
     }
     assert_eq!(wrong, Vec::<String>::new());
 }
+
+/// #937 review 1: placeholders text cannot fake, variables the shell fills
+/// by default, lists in parentheses, `${a:=...}`, missed arithmetic
+/// regions, lookup output, variable command names and sourced files.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_937_review_1_routes() {
+    use ProtectedActionKind::UnseenCode;
+    let both = [
+        // B1: text spelling the arithmetic placeholder.
+        "v=$(cat notes)$'\\x02\\x01unseen-output\\x01\\x02]'; echo $((v))",
+        "v=$(cat notes)$'arithmetic\\x01]'; echo $((v))",
+        "v=$(cat notes)\u{2}\u{1}unseen-output\u{1}\u{2}; echo $((v))",
+        "v=$(cat notes)arithmetic$((1))]; echo $((v))",
+        // B2: default variables.
+        "read -r < notes; echo $((REPLY))",
+        "mapfile < notes; echo $((MAPFILE[0]))",
+        "select x in a b; do echo $((REPLY)); done < notes",
+        "v=$(cat notes); [[ $v =~ (a.*) ]]; echo $((BASH_REMATCH[1]))",
+        "v=$(cat notes); [[ $v =~ (a.*) ]]; echo $((match[1]))",
+        // B3: lists in parentheses.
+        "a=(x $(cat notes)); echo $((a[1]))",
+        "a=([0]=$(cat notes)); echo $((a[0]))",
+        "a+=(`cat notes`); echo $((a[0]))",
+        "v=$(cat notes); a=([v]=1)",
+        "v=$(cat notes); a=(x [v]=1)",
+        // B4: assignment through a default.
+        ": ${a:=$(cat notes)}; echo $((a))",
+        ": ${a=$(cat notes)}; echo $((a))",
+        ": ${a:=\"}\"$(cat notes)}; echo $((a))",
+        // B5: offsets after a subscript or special parameter.
+        "v=$(cat notes); b=(1 2); echo \"${b[@]:v}\"",
+        "v=$(cat notes); set -- a b; echo \"${@:v}\"",
+        "v=$(cat notes); echo \"${1:v}\"",
+        // B5: line continuations.
+        "v=$(cat notes); (\\\n(v))",
+        "v=$(cat notes); echo $(\\\n(v))",
+        "v=$(cat notes); echo $\\\n[v]",
+        "v=$(cat notes); a\\\n[v]=1",
+        // B5: a quoted `]]` inside the condition.
+        "v=$(cat notes); [[ \"]]\" && 1 -eq $v ]]",
+        "v=$(cat notes); [[ \"$(echo \" ]] \")\" && 1 -eq $v ]]",
+        "v=$(cat notes); [[ $'\\']]' && 1 -eq $v ]]",
+        // B6: what a lookup printed.
+        "v=$(readlink link); echo $((v))",
+        "v=$(realpath link); echo $((v))",
+        "v=$(basename *); echo $((v))",
+        "for v in $(which x); do echo $((v)); done",
+        // Should-fix: a command named by a variable, a sourced file.
+        "c='let v'; v=$(cat notes); $c",
+        "v=$(cat notes); . ./lib.sh",
+        "v=$(cat notes); source ./lib.sh",
+    ];
+    let zsh = [
+        "set -A a x $(cat notes); echo $((a[2]))",
+        "for x (0 $(cat notes)) echo $((x))",
+        "foreach x (0 $(cat notes)) echo $((x)); end",
+        ": ${a::=$(cat notes)}; echo $((a))",
+    ];
+    let mut wrong = Vec::new();
+    for shell in ["bash", "zsh"] {
+        for line in both
+            .iter()
+            .chain(if shell == "zsh" { &zsh[..] } else { &[] })
+        {
+            let found = kind(&[shell, "-c", line]);
+            if found != Some(UnseenCode) {
+                wrong.push(format!("{shell}: {line:?} -> {found:?}"));
+            }
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+}
+
+/// #937 review 1: everyday lines near the new routes still run.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_937_review_1_everyday_lines_still_run() {
+    let mut wrong = Vec::new();
+    for shell in ["bash", "zsh"] {
+        for line in [
+            ": ${PORT:=8080}; echo $((PORT + 1))",
+            "a=(1 2 3); echo $((a[1] + 1)); a+=(4)",
+            "x=12; [[ $x =~ ^([0-9]+)$ ]] && echo yes",
+            "b=(1 2); echo \"${b[@]:1}\" \"${@:2}\"",
+            "i=0; (( \\\ni++ ))",
+            "[[ \"]]\" == x ]] && echo $((1 + 2))",
+            "d=$(dirname \"$0\"); cd \"$d\" && ls",
+            "v=$(cat notes); echo \"[$v]\"",
+            "workshop=1; echo $((workshop))",
+        ] {
+            let found = kind(&[shell, "-c", line]);
+            if found.is_some() {
+                wrong.push(format!("{shell}: {line:?} -> {found:?}"));
+            }
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+}

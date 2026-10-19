@@ -16,8 +16,20 @@ const MAX_BRACE_EXPANSION: usize = 64;
 pub(super) const UNSEEN_OUTPUT: &str = "\u{1}unseen-output\u{1}";
 /// Placeholder for an arithmetic expansion's number (`$((i + 1))`). It holds
 /// [`UNSEEN_OUTPUT`], so every check for unseen output treats it the same;
-/// only the arithmetic check (#937) tells it apart from command output.
-pub(super) const ARITHMETIC_OUTPUT: &str = "\u{1}unseen-output\u{1}arithmetic\u{1}";
+/// only the arithmetic check (#937) tells it apart from command output. Its
+/// own control character brackets it, so no neighbouring text can complete
+/// or absorb it.
+pub(super) const ARITHMETIC_OUTPUT: &str = "\u{2}\u{1}unseen-output\u{1}\u{2}";
+
+/// A character of the command text as a word holds it: the placeholders'
+/// control characters are replaced, so text can never spell a placeholder.
+pub(super) fn literal_char(ch: char) -> char {
+    if matches!(ch, '\u{1}' | '\u{2}') {
+        char::REPLACEMENT_CHARACTER
+    } else {
+        ch
+    }
+}
 
 #[derive(Debug, Default)]
 pub(super) struct SimpleCommand {
@@ -38,6 +50,9 @@ pub(super) struct SimpleCommand {
     pub(super) here_string: Option<usize>,
     /// Indexes of the words its output is redirected to (`> file`, `>> file`).
     pub(super) writes_to: Vec<usize>,
+    /// Indexes of the words holding what a lookup printed (`$(readlink x)`
+    /// stands for `x`, but prints whatever the link holds).
+    pub(super) looked_up: Vec<usize>,
 }
 
 /// Lexed simple commands, in the order they finish (a substitution comes
@@ -219,6 +234,8 @@ enum Start {
 struct Open {
     outer: SimpleCommand,
     outer_word: String,
+    /// The outer word already holds a lookup's output.
+    outer_looked_up: bool,
     first: usize,
     backtick: bool,
     /// `>(...)`: the substitution reads the outer command's output.
@@ -252,6 +269,8 @@ struct Lexer {
     done: Vec<SimpleCommand>,
     current: SimpleCommand,
     word: String,
+    /// The word being built holds a lookup's output.
+    looked_up: bool,
     open: Vec<Open>,
     /// Open groups and the pipe that feeds every command inside them.
     groups: Vec<(Group, Option<usize>)>,
@@ -267,6 +286,9 @@ impl Lexer {
                 Redirect::HereString => self.current.here_string = index,
                 Redirect::Stdout => self.current.writes_to.extend(index),
                 Redirect::None => {}
+            }
+            if std::mem::take(&mut self.looked_up) {
+                self.current.looked_up.push(self.current.words.len());
             }
             let word = std::mem::take(&mut self.word);
             self.current.words.push(word);
@@ -358,9 +380,11 @@ impl Lexer {
             },
         );
         let outer_word = std::mem::take(&mut self.word);
+        let outer_looked_up = std::mem::take(&mut self.looked_up);
         self.open.push(Open {
             outer,
             outer_word,
+            outer_looked_up,
             first: self.done.len(),
             backtick,
             output,
@@ -409,7 +433,11 @@ impl Lexer {
             self.current.fed_by.extend(inner);
         }
         self.word = open.outer_word;
+        self.looked_up = open.outer_looked_up;
         if !open.output {
+            // Not literal text: the output of a lookup or of `cd X && pwd`.
+            self.looked_up |= spliced.is_some()
+                && !matches!(top.as_slice(), [only] if fact_output(&self.done[*only].words));
             let unseen = if open.arithmetic && arithmetic_close {
                 ARITHMETIC_OUTPUT
             } else {
@@ -512,7 +540,7 @@ impl Lexer {
                 }
                 ';' | '&' | '\n' => self.start(Start::Plain),
                 ch if ch.is_whitespace() || matches!(ch, '<' | '>' | ',') => self.flush(),
-                ch => self.word.push(ch),
+                ch => self.word.push(literal_char(ch)),
             }
             index += 1;
         }
@@ -568,7 +596,7 @@ pub(super) fn ansi_c(chars: &[char], mut index: usize, word: &mut String) -> usi
                     other => Some(other),
                 };
                 if let Some(ch) = simple {
-                    word.push(ch);
+                    word.push(literal_char(ch));
                     continue;
                 }
                 let (decoded, used) = match escape {
@@ -582,10 +610,10 @@ pub(super) fn ansi_c(chars: &[char], mut index: usize, word: &mut String) -> usi
                     }
                 };
                 index += used;
-                word.extend(decoded);
+                word.extend(decoded.map(literal_char));
             }
             ch => {
-                word.push(ch);
+                word.push(literal_char(ch));
                 index += 1;
             }
         }
@@ -620,6 +648,26 @@ pub(super) fn substitution_output(words: &[String]) -> Option<String> {
         ),
         _ => None,
     }
+}
+
+/// Whether the substitution's spliced output is literal text or a neutral
+/// fact (`echo x`, `date`, `pwd`), not something a lookup found.
+fn fact_output(words: &[String]) -> bool {
+    literal_output(words).is_some()
+        || words.first().is_some_and(|first| {
+            matches!(
+                basename(&first.to_lowercase()),
+                "pwd"
+                    | "date"
+                    | "uname"
+                    | "whoami"
+                    | "hostname"
+                    | "id"
+                    | "nproc"
+                    | "getconf"
+                    | "git"
+            )
+        })
 }
 
 /// What `echo`/`printf` with these words prints, if that is all they are.

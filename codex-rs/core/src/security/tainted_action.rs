@@ -815,7 +815,7 @@ impl Classifier {
         let mut arithmetic = arithmetic::Arithmetic::new(command);
         for (index, simple) in lexed.commands.iter().enumerate() {
             let (words, unseen) = substitute(simple, &variables);
-            arithmetic.note(&simple.words, &words);
+            arithmetic.note(simple, &words);
             lexed_seds += sed::positions(&words).len();
             lexed_shells += nested::shell_commands(&words);
             let feeds_pipe = pipe_sources.contains(&index);

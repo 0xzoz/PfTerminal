@@ -12,7 +12,7 @@ fn runs_unseen_in(shell: &str, line: &str) -> bool {
     let variables = HashMap::new();
     for simple in &shell::simple_commands(&argv).commands {
         let (words, _) = super::super::substitute(simple, &variables);
-        arithmetic.note(&simple.words, &words);
+        arithmetic.note(simple, &words);
     }
     arithmetic.runs_unseen(&argv)
 }
@@ -202,4 +202,53 @@ fn counters_and_plain_uses_still_run() {
     ] {
         assert!(!runs_unseen(line), "{line}");
     }
+}
+
+#[test]
+fn review_1_regions_and_lists() {
+    assert_eq!(
+        region_texts("echo ${b[@]:v} ${@:w}"),
+        vec!["[@]", ":v}", ":w}"]
+    );
+    assert_eq!(region_texts("a=([v]=1 x)"), vec!["[v]"]);
+    assert_eq!(region_texts("[[ \"]]\" && 1 -eq $v ]]").len(), 1);
+    let (found, deep) = lists("a=(x $(cat f)) b+=(y); for x y (1 2) :");
+    let names: Vec<Vec<String>> = found.into_iter().map(|list| list.names).collect();
+    assert_eq!(
+        names,
+        vec![
+            vec!["a".to_string()],
+            vec!["b".to_string()],
+            vec!["y".to_string(), "x".to_string()]
+        ]
+    );
+    assert!(!deep);
+    assert!(lists(&"a=(".repeat(MAX_LIST_DEPTH + 1)).1);
+    assert_eq!(
+        defaults("${a:=x}${b=y}${c::=z}${d:-w}"),
+        vec!["a", "b", "c"]
+    );
+}
+
+/// Attacker text cannot make the check super-linear (scripts of up to
+/// 256 KiB are classified this way).
+#[test]
+fn review_1_stays_linear() {
+    let big = |unit: &str| unit.repeat(256 * 1024 / unit.len());
+    let lines = [
+        format!("for {} in {}; do :; done", big("a ").trim(), big("1 ")),
+        format!("printf {} x", big("-v x ")),
+        format!("eval(){{ :;}}; {} v", big("eval ")),
+        format!("alias eval=let; {} v", big("eval ")),
+        format!("echo {}", big("${")),
+        format!("echo {}", big("${a[")),
+        big("[[ "),
+        big("a=("),
+        big("x x ("),
+    ];
+    let started = std::time::Instant::now();
+    for line in &lines {
+        runs_unseen(line);
+    }
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
 }
