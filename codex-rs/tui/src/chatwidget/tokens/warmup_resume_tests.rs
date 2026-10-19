@@ -238,7 +238,10 @@ async fn issue_912_warmup_resume_explanation_snapshots() {
                 }
                 chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
             }
-            assert!(visible, "explanation unreachable at {label}/{width}:\n{explanation}");
+            assert!(
+                visible,
+                "explanation unreachable at {label}/{width}:\n{explanation}"
+            );
             insta::assert_snapshot!(
                 format!("issue912_{label}_{width}_explanation_visible"),
                 explanation
