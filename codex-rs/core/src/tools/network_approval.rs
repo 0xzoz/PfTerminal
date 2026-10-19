@@ -231,7 +231,7 @@ impl SessionApprovedHosts {
         current: AuthorityMarker,
     ) -> bool {
         self.fence(current);
-        if self.policy != shown_under {
+        if shown_under.is_some() && self.policy != shown_under {
             return false;
         }
         self.hosts.insert(key);
@@ -782,8 +782,6 @@ impl NetworkApprovalService {
             return deny();
         }
         let turn_context = Self::active_turn_context(session.as_ref()).await;
-        // The policy this request is decided under (#945).
-        let current_policy = session.services.authority_marker();
         let Some(environment_id) = active_environment_id.or_else(|| {
             turn_context
                 .as_ref()
@@ -803,8 +801,9 @@ impl NetworkApprovalService {
                 }
             }
 
+            // #945: under the policy in force now, read under the lock.
             let mut approved_hosts = self.session_approved_hosts.lock().await;
-            if approved_hosts.contains(&key, current_policy) {
+            if approved_hosts.contains(&key, session.services.authority_marker()) {
                 return InlineRound::Decided(NetworkDecision::Allow);
             }
         }
@@ -1020,7 +1019,7 @@ impl NetworkApprovalService {
                 false
             }
         };
-        if approves && session.services.authority_marker() != shown_under {
+        if approves && session.services.transition_since(shown_under) {
             if !last_round {
                 pending_owner.complete(PendingApprovalDecision::Stale);
                 return InlineRound::Stale;
@@ -1080,6 +1079,7 @@ impl NetworkApprovalService {
                         .persist_network_policy_amendment(
                             &network_policy_amendment,
                             &network_approval_context,
+                            Some(shown_under),
                             || {
                                 pending_owner
                                     .set_decision_on_drop(PendingApprovalDecision::AllowForSession);
@@ -1138,6 +1138,7 @@ impl NetworkApprovalService {
                         .persist_network_policy_amendment(
                             &network_policy_amendment,
                             &network_approval_context,
+                            /*shown_under*/ None,
                             || {
                                 pending_owner.set_decision_on_drop(PendingApprovalDecision::Deny);
                             },

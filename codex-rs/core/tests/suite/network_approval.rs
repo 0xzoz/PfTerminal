@@ -595,8 +595,8 @@ async fn user_network_approval_once_session_and_denial_semantics() -> Result<()>
 }
 
 /// #945: a network prompt answered after the security level rose is for a
-/// stale prompt. The host is not approved "for session"; the request is
-/// asked again under the new level, and the next turn asks again too.
+/// stale prompt: through the real proxy, the request is asked again under
+/// the new level, and that answer decides it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[cfg_attr(
     not(target_os = "linux"),
@@ -618,13 +618,30 @@ async fn issue_945_network_answer_after_a_level_change_is_asked_again() -> Resul
     let test = managed_network_unified_exec_test(&server).await?;
     let environments = vec![local(test.config.cwd.clone())];
 
-    let responses = mount_exec_network_turn(
+    // What the model is asked after the command is up to Moderate's own
+    // rules, so the follow-up is not counted.
+    mount_sse_once(
         &server,
-        "resp-issue-945-stale",
-        "issue-945-stale",
-        network_fetch_args(LOCAL_ENVIRONMENT_ID),
+        sse(vec![
+            ev_response_created("resp-issue-945-stale-1"),
+            ev_function_call(
+                "issue-945-stale",
+                "exec_command",
+                &serde_json::to_string(&network_fetch_args(LOCAL_ENVIRONMENT_ID))?,
+            ),
+            ev_completed("resp-issue-945-stale-1"),
+        ]),
     )
-    .await?;
+    .await;
+    let follow_up = core_test_support::responses::mount_sse_repeating(
+        &server,
+        sse(vec![
+            ev_response_created("resp-issue-945-stale-2"),
+            ev_assistant_message("resp-issue-945-stale-msg", "done"),
+            ev_completed("resp-issue-945-stale-2"),
+        ]),
+    )
+    .await;
     submit_managed_network_turn(
         &test,
         "answer this network prompt after the level rose",
@@ -652,7 +669,9 @@ async fn issue_945_network_answer_after_a_level_change_is_asked_again() -> Resul
             /*now_unix_seconds*/ 1_000,
         )
     })
-    .await??;
+    .await
+    .expect("level change task")
+    .expect("the level change commits");
     assert_eq!(report.kind, LevelChangeKind::Stricter);
     assert!(report.live, "Moderate applies in this session now");
 
@@ -663,7 +682,9 @@ async fn issue_945_network_answer_after_a_level_change_is_asked_again() -> Resul
             decision: ReviewDecision::ApprovedForSession,
         })
         .await?;
-    let again = expect_network_approval(&test, LOCAL_ENVIRONMENT_ID).await?;
+    let again = expect_network_approval(&test, LOCAL_ENVIRONMENT_ID)
+        .await
+        .expect("the stale answer is asked again");
     assert_ne!(again.call_id, shown.call_id);
     assert!(
         again
@@ -681,38 +702,12 @@ async fn issue_945_network_answer_after_a_level_change_is_asked_again() -> Resul
         })
         .await?;
     wait_for_turn_complete(&test).await;
-    let output = responses
-        .requests()
-        .iter()
-        .find_map(|request| request.function_call_output_text("issue-945-stale"))
-        .context("expected network output")?;
-    assert!(!output.contains("OK:"), "{output}");
-
-    // The stale "for session" answer stored nothing: the next turn asks.
-    mount_exec_network_turn(
-        &server,
-        "resp-issue-945-next",
-        "issue-945-next",
-        network_fetch_args(LOCAL_ENVIRONMENT_ID),
-    )
-    .await?;
-    submit_managed_network_turn(
-        &test,
-        "the host was not approved for the session",
-        environments,
-        ApprovalsReviewer::User,
-        AskForApproval::OnRequest,
-    )
-    .await?;
-    let next = expect_network_approval(&test, LOCAL_ENVIRONMENT_ID).await?;
-    test.codex
-        .submit(Op::ExecApproval {
-            id: next.effective_approval_id(),
-            turn_id: Some(next.turn_id),
-            decision: ReviewDecision::denied("rejected by user"),
-        })
-        .await?;
-    wait_for_turn_complete(&test).await;
+    // The fetch was denied: it never printed its marker.
+    for request in follow_up.requests() {
+        if let Some(output) = request.function_call_output_text("issue-945-stale") {
+            assert!(!output.contains("OK:"), "{output}");
+        }
+    }
 
     Ok(())
 }

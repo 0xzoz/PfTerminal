@@ -1,7 +1,7 @@
-//! #945: a "don't ask again" answer to a command prompt shown before a
-//! security transition is for a stale prompt: the rule is not saved (it
-//! would be marked as approved under the new level, #626), and the answer
-//! approves the command once.
+//! #945: answers to prompts shown before a security transition are for a
+//! stale prompt. A "don't ask again" command rule is not saved (it would be
+//! marked as approved under the new level, #626) and the answer approves the
+//! command once; a permission request grants nothing.
 
 use super::*;
 use crate::session::tests::make_session_and_context_with_rx;
@@ -15,6 +15,29 @@ use pretty_assertions::assert_eq;
 use std::time::Duration;
 
 const TOOL: &str = "issue-945-tool";
+
+fn initialize_policy(session: &Session) -> crate::security::TrustedSecurityController {
+    crate::security::TrustedSecurityController::initialize(
+        &session.services.agent_control.effective_security_policy(),
+        crate::security::PersistedHumanSecurityState::new(
+            SecuritySettings::new(SecurityLevel::Permissive),
+            PolicyPrincipal::new(PrincipalKind::Human, "human:issue-945").unwrap(),
+            RevocationState::new(),
+        )
+        .unwrap(),
+        session.thread_id,
+        codex_protocol::SessionId::from(session.thread_id),
+        crate::security::EffectivePolicyInitialization::Root,
+    )
+    .expect("initialize the session's policy tree")
+}
+
+fn raise_level(controller: &crate::security::TrustedSecurityController, level: SecurityLevel) {
+    let change = controller
+        .confirm_level_change(level, RevocationState::new())
+        .unwrap();
+    controller.apply_confirmed_change(change).unwrap();
+}
 
 async fn prompt_shown(events: &async_channel::Receiver<Event>) -> String {
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -36,19 +59,7 @@ fn saved_rules(codex_home: &std::path::Path) -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn issue_945_dont_ask_again_after_a_level_change_is_not_saved() {
     let (session, turn_context, events) = make_session_and_context_with_rx().await;
-    let controller = crate::security::TrustedSecurityController::initialize(
-        &session.services.agent_control.effective_security_policy(),
-        crate::security::PersistedHumanSecurityState::new(
-            SecuritySettings::new(SecurityLevel::Permissive),
-            PolicyPrincipal::new(PrincipalKind::Human, "human:issue-945").unwrap(),
-            RevocationState::new(),
-        )
-        .unwrap(),
-        session.thread_id,
-        codex_protocol::SessionId::from(session.thread_id),
-        crate::security::EffectivePolicyInitialization::Root,
-    )
-    .expect("initialize the session's policy tree");
+    let controller = initialize_policy(&session);
     *session.active_turn.lock().await = Some(ActiveTurn::default());
     let codex_home = session.codex_home().await.to_path_buf();
     // The test home may be gone; the rules file must be writable here.
@@ -88,11 +99,8 @@ async fn issue_945_dont_ask_again_after_a_level_change_is_not_saved() {
     // Shown under Permissive, answered after the level rose.
     let approval = ask("call-945-stale");
     let id = prompt_shown(&events).await;
-    let change = controller
-        .confirm_level_change(SecurityLevel::Aggressive, RevocationState::new())
-        .unwrap();
-    controller.apply_confirmed_change(change).unwrap();
-    handlers::exec_approval(&session, id, None, dont_ask_again.clone()).await;
+    raise_level(&controller, SecurityLevel::Aggressive);
+    handlers::exec_approval(&session, id, /*turn_id*/ None, dont_ask_again.clone()).await;
     assert_eq!(approval.await.unwrap(), ReviewDecision::Approved);
     assert!(
         !saved_rules(&codex_home).contains(TOOL),
@@ -109,7 +117,7 @@ async fn issue_945_dont_ask_again_after_a_level_change_is_not_saved() {
     // Shown and answered under the level in force: saved as before.
     let approval = ask("call-945-current");
     let id = prompt_shown(&events).await;
-    handlers::exec_approval(&session, id, None, dont_ask_again.clone()).await;
+    handlers::exec_approval(&session, id, /*turn_id*/ None, dont_ask_again.clone()).await;
     assert_eq!(approval.await.unwrap(), dont_ask_again);
     let warnings: Vec<String> = std::iter::from_fn(|| events.try_recv().ok())
         .filter_map(|event| match event.msg {
@@ -118,4 +126,122 @@ async fn issue_945_dont_ask_again_after_a_level_change_is_not_saved() {
         })
         .collect();
     assert!(saved_rules(&codex_home).contains(TOOL), "{warnings:?}");
+}
+
+/// #945: a "don't ask again" answer with no open prompt (its turn ended)
+/// saves nothing.
+#[tokio::test]
+async fn issue_945_dont_ask_again_without_an_open_prompt_is_not_saved() {
+    let (session, _turn_context, _events) = make_session_and_context_with_rx().await;
+    initialize_policy(&session);
+    *session.active_turn.lock().await = Some(ActiveTurn::default());
+    let codex_home = session.codex_home().await.to_path_buf();
+    std::fs::create_dir_all(&codex_home).unwrap();
+    handlers::exec_approval(
+        &session,
+        "call-945-gone".to_string(),
+        /*turn_id*/ None,
+        ReviewDecision::ApprovedExecpolicyAmendment {
+            proposed_execpolicy_amendment: ExecPolicyAmendment::new(vec![TOOL.to_string()]),
+        },
+    )
+    .await;
+    assert!(!saved_rules(&codex_home).contains(TOOL));
+}
+
+/// #945: a permission request answered after the level rose grants nothing,
+/// for the session or the turn; one answered under the level in force does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_945_permission_grant_after_a_level_change_grants_nothing() {
+    use codex_protocol::request_permissions::PermissionGrantScope;
+    use codex_protocol::request_permissions::RequestPermissionProfile;
+    use codex_protocol::request_permissions::RequestPermissionsArgs;
+    use codex_protocol::request_permissions::RequestPermissionsResponse;
+
+    let (session, turn_context, events) = make_session_and_context_with_rx().await;
+    let controller = initialize_policy(&session);
+    *session.active_turn.lock().await = Some(ActiveTurn::default());
+    let environment = turn_context
+        .environments
+        .primary()
+        .expect("a primary environment")
+        .selection();
+    let environment_id = environment.environment_id.clone();
+    let network = RequestPermissionProfile {
+        network: Some(codex_protocol::models::NetworkPermissions {
+            enabled: Some(true),
+        }),
+        ..RequestPermissionProfile::default()
+    };
+    let ask = |call_id: &'static str| {
+        let session = Arc::clone(&session);
+        let turn_context = Arc::clone(&turn_context);
+        let environment = environment.clone();
+        let network = network.clone();
+        tokio::spawn(async move {
+            session
+                .request_permissions_for_environment(
+                    &turn_context,
+                    call_id.to_string(),
+                    RequestPermissionsArgs {
+                        environment_id: None,
+                        reason: Some("issue 945".to_string()),
+                        permissions: network,
+                    },
+                    environment,
+                    CancellationToken::new(),
+                )
+                .await
+        })
+    };
+    let request_shown = async || {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let event = events.recv().await.expect("event channel open");
+                if let EventMsg::RequestPermissions(request) = event.msg {
+                    return request.call_id;
+                }
+            }
+        })
+        .await
+        .expect("the request was shown")
+    };
+    let grant = |permissions: RequestPermissionProfile| RequestPermissionsResponse {
+        permissions,
+        scope: PermissionGrantScope::Session,
+        strict_auto_review: false,
+    };
+
+    // Shown under Permissive, answered after the level rose.
+    let request = ask("call-945-grant-stale");
+    let call_id = request_shown().await;
+    raise_level(&controller, SecurityLevel::Moderate);
+    session
+        .notify_request_permissions_response(&call_id, grant(network.clone()))
+        .await;
+    let response = request.await.unwrap().expect("a response");
+    assert!(response.permissions.is_empty(), "{response:?}");
+    assert_eq!(
+        session.granted_session_permissions(&environment_id).await,
+        None
+    );
+    assert_eq!(
+        session.granted_turn_permissions(&environment_id).await,
+        None
+    );
+
+    // Shown and answered under the level in force: granted as before.
+    let request = ask("call-945-grant-current");
+    let call_id = request_shown().await;
+    session
+        .notify_request_permissions_response(&call_id, grant(network.clone()))
+        .await;
+    let response = request.await.unwrap().expect("a response");
+    assert_eq!(response, grant(network.clone()));
+    assert!(
+        session
+            .granted_session_permissions(&environment_id)
+            .await
+            .is_some()
+    );
 }

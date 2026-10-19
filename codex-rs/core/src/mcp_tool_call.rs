@@ -2082,7 +2082,9 @@ async fn remember_mcp_tool_approval(
     key: McpToolApprovalKey,
     shown_under: Option<(u64, u64)>,
 ) {
-    sess.services.remember_approvals([key], shown_under).await;
+    // No marker then: the tree was initialized since, without a transition.
+    let decided_under = shown_under.or_else(|| sess.services.authority_marker());
+    sess.services.remember_approvals([key], decided_under).await;
 }
 
 async fn apply_mcp_tool_approval_decision(
@@ -2099,7 +2101,7 @@ async fn apply_mcp_tool_approval_decision(
     );
     // #945: answered after a security transition, for a stale prompt: it
     // approves this call once and stores nothing.
-    if lasting && sess.services.authority_marker() != shown_under {
+    if lasting && sess.services.transition_since(shown_under) {
         tracing::info!(
             target: "codex_core::security::transition",
             "MCP tool approval answered after a security transition; not stored"

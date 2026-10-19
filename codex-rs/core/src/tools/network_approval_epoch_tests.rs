@@ -237,6 +237,38 @@ async fn issue_945_for_session_answer_after_a_level_change_is_asked_again() {
     assert!(!fixture.host_approved_for_session().await);
 }
 
+/// A second request for the same host waits on the first one's prompt; when
+/// that answer is stale, both are decided again, under one new prompt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_945_waiters_on_a_stale_prompt_are_decided_again() {
+    let fixture = Fixture::new().await;
+    let mut first = fixture.request();
+    let shown = fixture.prompt(&mut first).await;
+    let mut second = fixture.request();
+    // The second request joins the open prompt: no prompt of its own.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), fixture.events.recv())
+            .await
+            .is_err()
+    );
+    assert!(!second.is_finished());
+
+    fixture.raise_level();
+    fixture
+        .answer(&shown, ReviewDecision::ApprovedForSession)
+        .await;
+    let again = fixture.prompt(&mut first).await;
+    assert_ne!(again.call_id, shown.call_id);
+    fixture.answer(&again, ReviewDecision::denied("no")).await;
+    assert_eq!(decided(first).await, denied());
+    assert_eq!(
+        fixture.prompt_or_decision(&mut second).await.err(),
+        Some(denied()),
+        "the waiter was decided under the new prompt"
+    );
+    assert!(!fixture.host_approved_for_session().await);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn issue_945_answer_under_the_new_level_counts() {
     let fixture = Fixture::new().await;

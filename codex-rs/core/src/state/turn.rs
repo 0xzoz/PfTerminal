@@ -119,6 +119,8 @@ pub(crate) struct PendingRequestPermissions {
     pub(crate) tx_response: oneshot::Sender<RequestPermissionsResponse>,
     pub(crate) requested_permissions: RequestPermissionProfile,
     pub(crate) environment: TurnEnvironmentSelection,
+    /// #945: the policy marker the request was shown under.
+    pub(crate) shown_under: Option<(u64, u64)>,
 }
 
 impl TurnState {
