@@ -75,14 +75,15 @@ fn assert_explained(lines: &[String]) {
         "warm-up-only resume explanation missing:\n{text}"
     );
     assert!(
-        !text.contains("This conversation cannot be resumed"),
-        "A day's accounting cannot prove there are no older saved turns"
+        !text.contains("open that conversation with /resume"),
+        "the unconditional resume step is replaced by the qualified one"
     );
 }
 
+// The current conversation is already open, so the /resume note would not help
+// there; the #403 warm-up line still names and counts the charge.
 #[tokio::test]
-async fn issue_912_own_warmup_cost_explains_missing_saved_turns() {
-    assert!(!saved_turn_control(quote().attempt.thread_id, /*append_turn*/ false).await);
+async fn issue_912_own_warmup_cost_names_the_warmup_without_a_resume_note() {
     let pages = inspection_pages(Ok(InspectionDay::Ready(warmup_packet())));
     assert!(
         pages[0]
@@ -90,7 +91,7 @@ async fn issue_912_own_warmup_cost_explains_missing_saved_turns() {
             .iter()
             .any(|line| line.contains("Reopen warm-up: 1 request, estimated at least $0.000180"))
     );
-    assert_explained(&pages[0].text);
+    assert!(!pages[0].text.join("\n").contains("no saved turns"));
 }
 
 #[tokio::test]
@@ -176,11 +177,10 @@ async fn issue_912_mixed_saved_turn_and_warmup_does_not_assert_unresumable() {
 #[tokio::test]
 async fn issue_912_warmup_resume_explanation_snapshots() {
     use crate::app_event::AppEvent;
-    for label in ["own", "other"] {
+    let label = "other";
+    {
         for width in [100, 40] {
-            let mut view = if label == "own" {
-                warmup_packet()
-            } else {
+            let mut view = {
                 let InspectionDay::Ready(mut view) = packet() else {
                     unreachable!()
                 };
@@ -232,7 +232,9 @@ async fn issue_912_warmup_resume_explanation_snapshots() {
             for _ in 0..40 {
                 explanation = render_bottom_popup_with_height(&chat, width, /*height*/ 60);
                 let words = explanation.split_whitespace().collect::<Vec<_>>().join(" ");
-                if words.contains("no saved turns") && words.contains("still billed") {
+                if words.contains("no saved turns")
+                    && words.contains("included in the recorded cost")
+                {
                     visible = true;
                     break;
                 }

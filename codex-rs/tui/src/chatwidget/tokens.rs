@@ -2386,7 +2386,6 @@ fn plain_overview<'a>(
     lines.extend(groups.values().map(|quotes| route_line(quotes, named)));
     let all: Vec<&ObservationQuote> = groups.values().flatten().copied().collect();
     lines.extend(reopen_warmup_line(all.iter().copied()));
-    lines.extend(warmup_resume::note(&all));
     lines.extend(realtime_session_line(all.iter().copied()));
     if let Ok(t) = codex_state::accounting::DayTotals::from_quotes(all.iter().copied()) {
         let billed = t.per_use_attempts();

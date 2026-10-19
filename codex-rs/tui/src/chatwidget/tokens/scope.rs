@@ -27,6 +27,9 @@ use super::route_line;
 
 const RESUME_STEP: &str =
     "To see those requests, open that conversation with /resume and run /cost there.";
+/// #912: a conversation holding only a reopen warm-up has no saved turns to resume.
+const RESUME_STEP_SAVED_TURNS: &str =
+    "For conversations with saved turns, open them with /resume and run /cost there.";
 
 fn counted(n: usize, noun: &str) -> String {
     format!("{n} {noun}{}", if n == 1 { "" } else { "s" })
@@ -85,10 +88,7 @@ pub(super) fn other_conversations_lines(
         ));
     }
     if let Some(note) = super::warmup_resume::note(&quotes) {
-        lines.push(
-            "For conversations with saved turns, open them with /resume and run /cost there."
-                .into(),
-        );
+        lines.push(RESUME_STEP_SAVED_TURNS.into());
         lines.push(note);
     } else {
         lines.push(RESUME_STEP.into());
