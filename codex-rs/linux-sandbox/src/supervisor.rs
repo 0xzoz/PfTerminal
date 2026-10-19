@@ -130,7 +130,7 @@ impl ParentWatch {
 /// Runs in the helper's fork, single-threaded: the supervisor. Never
 /// returns. `start_bubblewrap` runs in the supervisor's child, gets the
 /// supervisor's pid and must exec bubblewrap (the child exits 127 if it
-/// returns). `close_after_fork` are
+/// returns; a panic ends it as a panic ends the helper). `close_after_fork` are
 /// descriptors the supervisor itself must not keep. Signals the helper
 /// forwards (`forwarded_signals`) stay blocked here: they reach bubblewrap
 /// through the process group. `SIGCHLD` is blocked too, so

@@ -114,8 +114,10 @@ commands that would enter the bubblewrap path.
     `PR_SET_PDEATHSIG`, which the helper forwards as `SIGTERM`);
   - a credential file appears (the credential watcher cuts the lifeline).
   This applies on every security level that runs bubblewrap, Permissive
-  included. Commands run without bubblewrap (full disk access, legacy
-  Landlock) are unchanged.
+  included. The supervisor lists its children through `/proc`; without
+  `/proc` an orphaned PID 1 is not found. Commands run without bubblewrap
+  (full disk and network access, legacy Landlock) are unchanged, and so is
+  the short `/proc` mount probe, which runs only `true`.
 - When bubblewrap is active, it mounts a fresh `/proc` via `--proc /proc` by default, but
   you can skip this in restrictive container environments with `--no-proc`.
 

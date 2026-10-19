@@ -60,7 +60,7 @@ fn marker() -> String {
     )
 }
 
-/// Pids of processes whose command line contains `marker`.
+/// Pids of processes with `marker` as a whole argument.
 fn processes_with(marker: &str) -> Vec<i32> {
     let mut pids = Vec::new();
     for entry in std::fs::read_dir("/proc").unwrap().flatten() {
@@ -70,7 +70,10 @@ fn processes_with(marker: &str) -> Vec<i32> {
         let Ok(cmdline) = std::fs::read(entry.path().join("cmdline")) else {
             continue;
         };
-        if String::from_utf8_lossy(&cmdline).contains(marker) {
+        if cmdline
+            .split(|byte| *byte == 0)
+            .any(|arg| arg == marker.as_bytes())
+        {
             pids.push(pid);
         }
     }
@@ -206,13 +209,25 @@ impl Fixture {
             eprintln!("skipping: no system bubblewrap");
             return false;
         }
-        let output = self
+        let mut probe = self
             .command(bwrap, &helper(), &self.helper_args("echo ok"))
-            .output()
+            .spawn()
             .unwrap();
-        let runs = output.status.success() && String::from_utf8_lossy(&output.stdout) == "ok\n";
-        if !runs {
-            eprintln!("skipping: the sandbox does not run here ({output:?})");
+        let mut stdout = probe.stdout.take().unwrap();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            let _ = std::io::Read::read_to_string(&mut stdout, &mut text);
+            let _ = tx.send(text);
+        });
+        let Ok(text) = rx.recv_timeout(BOUND) else {
+            let _ = probe.kill();
+            reap(&mut probe);
+            panic!("the sandbox probe did not finish");
+        };
+        let status = reap(&mut probe);
+        if !status.success() || text != "ok\n" {
+            eprintln!("skipping: the sandbox does not run here ({status}, {text:?})");
             return false;
         }
         // Otherwise the case would test nothing.
@@ -223,11 +238,8 @@ impl Fixture {
         true
     }
 
-    /// Fails unless every process holding `stdout` is gone within
-    /// [`BOUND`] and no marked process is left; kills what is left either
-    /// way.
-    fn assert_all_gone(&self, ended: &mpsc::Receiver<()>, what: &str) {
-        let gone = ended.recv_timeout(BOUND).is_ok();
+    /// Kills what is left of the command's processes.
+    fn kill_marked(&self) -> Vec<i32> {
         let mut left: Vec<i32> = [&self.daemon, &self.foreground]
             .iter()
             .flat_map(|marker| processes_with(marker))
@@ -237,10 +249,26 @@ impl Fixture {
         for pid in &left {
             kill(*pid);
         }
+        left
+    }
+
+    /// Fails unless every process holding `stdout` is gone within
+    /// [`BOUND`] and no marked process is left; kills what is left either
+    /// way.
+    fn assert_all_gone(&self, ended: &mpsc::Receiver<()>, what: &str) {
+        let gone = ended.recv_timeout(BOUND).is_ok();
+        let left = self.kill_marked();
         assert!(
             gone && left.is_empty(),
             "{what}: sandboxed processes outlived it (stdout closed: {gone}, marked processes left: {left:?})"
         );
+    }
+}
+
+impl Drop for Fixture {
+    /// A failed test leaves nothing running either.
+    fn drop(&mut self) {
+        self.kill_marked();
     }
 }
 

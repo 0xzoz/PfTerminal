@@ -730,6 +730,12 @@ fn run_bwrap_in_child_with_synthetic_mount_cleanup(
         protected_create_targets,
         registry_lock,
     } = bwrap_args;
+    // #935: the supervisor is waited for; an ignored SIGCHLD (inherited
+    // across exec) would reap it unseen.
+    // SAFETY: plain syscall on this process.
+    unsafe {
+        libc::signal(libc::SIGCHLD, libc::SIG_DFL);
+    }
     let setup_signal_mask = ForwardedSignalMask::block();
     let (synthetic_mount_registrations, protected_create_registrations) = register_mount_targets(
         &synthetic_mount_targets,
@@ -800,9 +806,12 @@ fn run_bwrap_in_child_with_synthetic_mount_cleanup(
         wait_for_bwrap_child_exit_without_reaping(pid);
         monitor.stop()
     });
+    // Stop forwarding before the pid can be reused (forwarded signals are
+    // handled on this thread only: the others started with them blocked).
+    wait_for_bwrap_child_exit_without_reaping(pid);
+    BWRAP_CHILD_PID.store(0, Ordering::SeqCst);
     let status = wait_for_bwrap_child(pid);
     let cleanup_signal_mask = ForwardedSignalMask::block();
-    BWRAP_CHILD_PID.store(0, Ordering::SeqCst);
     let protected_create_monitor_violation = protected_create_monitor
         .map(ProtectedCreateMonitor::stop)
         .unwrap_or(false);
@@ -975,18 +984,24 @@ fn wait_for_parent_exec_start(read_fd: libc::c_int, write_fd: libc::c_int) {
     }
 
     let mut byte = [0_u8; 1];
-    loop {
+    let started = loop {
         let read = unsafe { libc::read(read_fd, byte.as_mut_ptr().cast(), byte.len()) };
         if read >= 0 {
-            break;
+            break read == 1;
         }
         let err = std::io::Error::last_os_error();
         if err.kind() != std::io::ErrorKind::Interrupted {
-            break;
+            break false;
         }
-    }
+    };
     unsafe {
         libc::close(read_fd);
+    }
+    if !started {
+        // #935: the helper died before its watchers ran; never start the
+        // command unwatched.
+        // SAFETY: ends this forked child without unwinding.
+        unsafe { libc::_exit(127) }
     }
 }
 
