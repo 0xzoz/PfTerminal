@@ -1,11 +1,11 @@
 //! Native HTTP/sideband/SQLite regressions for #889 item 2. No media or live provider.
-use super::super as realtime;
 use super::provider_bound;
 use super::realtime_ledger;
 use super::realtime_ledger_exists;
 use super::realtime_ledger_session_with;
 use super::realtime_ledger_settled;
 use super::realtime_websocket_params;
+use crate::realtime_conversation as realtime;
 use async_channel::Receiver;
 use async_channel::Sender;
 use codex_protocol::protocol::ConversationStartTransport;
