@@ -994,9 +994,14 @@ fn remove_unversioned_project_permissive_security(config: &mut TomlValue) -> boo
     true
 }
 
+/// Start of the startup warning for a refused unversioned project
+/// `[security] level = "permissive"` table (#850); the inspector matches it (#939).
+pub const IGNORED_INCOMPLETE_PROJECT_SECURITY_PREFIX: &str =
+    "Ignored incomplete project [security] table in ";
+
 fn ignored_incomplete_project_security_warning(config_file: &Path) -> String {
     format!(
-        "Ignored incomplete project [security] table in {}: \
+        "{IGNORED_INCOMPLETE_PROJECT_SECURITY_PREFIX}{}: \
          level = \"permissive\" without version cannot override trusted security settings.",
         config_file.display()
     )

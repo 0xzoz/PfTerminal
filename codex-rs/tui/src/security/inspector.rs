@@ -99,8 +99,6 @@ pub(crate) struct InspectorInput {
     pub(crate) thread: Option<ThreadId>,
     pub(crate) configured: SecurityLevel,
     pub(crate) outside_user_config: SecurityLevel,
-    /// Project security settings intentionally refused by the config loader.
-    pub(crate) refused_project_security_files: Vec<String>,
     pub(crate) active: ChosenLevel,
     pub(crate) boundary: Option<Boundary>,
     pub(crate) current: super::current::CurrentValues,
@@ -133,9 +131,6 @@ impl InspectorInput {
             thread,
             configured,
             outside_user_config,
-            refused_project_security_files: refused_project_security_files(
-                &config.startup_warnings,
-            ),
             active: context.map_or(ChosenLevel::Permissive, |context| context.active),
             boundary: context.and_then(|context| context.boundary.clone()),
             current: super::current::current_values(
@@ -151,7 +146,9 @@ impl InspectorInput {
                 .startup_warnings
                 .iter()
                 .filter(|warning| {
-                    warning.starts_with("Ignored incomplete project [security] table in ")
+                    warning.starts_with(
+                        codex_config::loader::IGNORED_INCOMPLETE_PROJECT_SECURITY_PREFIX,
+                    )
                 })
                 .cloned()
                 .collect(),
@@ -166,19 +163,6 @@ impl InspectorInput {
             now,
         )
     }
-}
-
-fn refused_project_security_files(startup_warnings: &[String]) -> Vec<String> {
-    const PREFIX: &str = "Ignored incomplete project [security] table in ";
-    startup_warnings
-        .iter()
-        .filter_map(|warning| {
-            warning
-                .strip_prefix(PREFIX)
-                .and_then(|remainder| remainder.split_once(": level ="))
-                .map(|(path, _)| path.to_string())
-        })
-        .collect()
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
@@ -282,12 +266,6 @@ pub(crate) fn sections(
         configured.push_str(&format!(
             "; a project, profile, -c or managed layer sets {}",
             level_name(input.outside_user_config)
-        ));
-    }
-    if !input.refused_project_security_files.is_empty() {
-        configured.push_str(&format!(
-            "; refused unversioned project [security] table in {}",
-            input.refused_project_security_files.join(", ")
         ));
     }
     let live = match &facts.policy {
