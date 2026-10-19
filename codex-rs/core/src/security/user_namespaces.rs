@@ -65,10 +65,13 @@ fn turn_rule(session: &Session, turn: &TurnContext) -> Option<user_namespaces::R
         turn.config.permissions.launch_enforces_aggressive(),
     )? {
         "Aggressive" => Some(user_namespaces::Rule::Aggressive),
-        _ if state.is_some_and(|state| one_command_way(&state)) => {
-            Some(user_namespaces::Rule::ModerateOneCommand)
-        }
-        _ => Some(user_namespaces::Rule::ModerateAfterUntrusted),
+        _ => Some(match state {
+            Some(state) if one_command_way(&state) => user_namespaces::Rule::ModerateOneCommand,
+            Some(state) if !kill_switch_on(&state) && state.moderate_bound() => {
+                user_namespaces::Rule::ModerateAfterUntrusted
+            }
+            _ => user_namespaces::Rule::ModerateNotInForce,
+        }),
     }
 }
 
@@ -78,14 +81,17 @@ fn turn_rule(session: &Session, turn: &TurnContext) -> Option<user_namespaces::R
 /// which that approval lifts Moderate's protected-file rules, #239), and the
 /// kill switch off.
 fn one_command_way(state: &crate::security::tainted_action::PostTaintState) -> bool {
-    state.human_approval_lifts_rules(Some(0))
-        && !matches!(
-            state.policy,
-            crate::security::tainted_action::PolicyBinding::Bound {
-                kill_switch_active: true,
-                ..
-            }
-        )
+    state.human_approval_lifts_rules(Some(0)) && !kill_switch_on(state)
+}
+
+fn kill_switch_on(state: &crate::security::tainted_action::PostTaintState) -> bool {
+    matches!(
+        state.policy,
+        crate::security::tainted_action::PolicyBinding::Bound {
+            kill_switch_active: true,
+            ..
+        }
+    )
 }
 
 /// D27 (a): whether a person's approval of this command lets its run create
@@ -187,6 +193,9 @@ pub(crate) fn denial_explanation(
                     | user_namespaces::Rule::ModerateAfterUntrusted,
                 ) => {
                     "reported refused by the command; Moderate blocks it on Linux, but for one command whose request to run outside the sandbox a person approves before untrusted content (in practice, a new session's first command)"
+                }
+                Some(user_namespaces::Rule::ModerateNotInForce) => {
+                    "reported refused by the command; Moderate blocks it on Linux, and with the kill switch on (or Moderate not fully in force) no approval lifts it"
                 }
                 _ => {
                     "reported refused by the command; Aggressive blocks it on Linux, and no approval or grant lifts it"

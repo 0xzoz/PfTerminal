@@ -84,9 +84,12 @@ pub enum Rule {
     /// Moderate before untrusted content: a person may allow it for one
     /// command (D27).
     ModerateOneCommand,
-    /// Moderate after untrusted content (or with the kill switch on, or
-    /// Moderate not fully in force): no approval lifts it in this session.
+    /// Moderate after untrusted content: no approval lifts it in this
+    /// session.
     ModerateAfterUntrusted,
+    /// Moderate while the security kill switch is on or Moderate is not
+    /// fully in force (configured and live): no approval lifts it now.
+    ModerateNotInForce,
     /// Aggressive, also where only the launch enforces it.
     Aggressive,
 }
@@ -94,7 +97,9 @@ pub enum Rule {
 impl Rule {
     fn level(self) -> &'static str {
         match self {
-            Rule::ModerateOneCommand | Rule::ModerateAfterUntrusted => "Moderate",
+            Rule::ModerateOneCommand | Rule::ModerateAfterUntrusted | Rule::ModerateNotInForce => {
+                "Moderate"
+            }
             Rule::Aggressive => "Aggressive",
         }
     }
@@ -111,6 +116,12 @@ impl Rule {
                  the person approves it when asked, that one run may create user namespaces; \
                  nothing remembers it. Otherwise choose Permissive in /security (it applies after \
                  a restart)."
+            }
+            Rule::ModerateNotInForce => {
+                "Under Moderate a person can allow it for one command only while the security \
+                 kill switch is off and Moderate is fully in force, which isn't the case now, so \
+                 no approval lifts it. To use them, a person can choose Permissive in /security \
+                 (it applies after a restart)."
             }
             Rule::Aggressive => {
                 "No approval or grant lifts this. To use them, a person can choose Permissive in \
@@ -148,6 +159,11 @@ pub fn approval_note(rule: Rule) -> String {
              command's output counts). In a new session, a first command that asks to run \
              outside the sandbox may be allowed when you approve it. Otherwise a person can \
              choose Permissive in /security (it applies after a restart)."
+        }
+        Rule::ModerateNotInForce => {
+            "no approval lifts this now (the security kill switch is on, or Moderate isn't fully \
+             in force). To use them, a person can choose Permissive in /security (it applies \
+             after a restart)."
         }
         Rule::Aggressive => {
             "no approval or grant lifts this. To use them, a person can choose Permissive in \

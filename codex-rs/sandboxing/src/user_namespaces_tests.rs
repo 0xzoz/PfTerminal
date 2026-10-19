@@ -117,6 +117,23 @@ fn d27_moderate_names_the_one_command_way_and_aggressive_does_not() {
     let note = approval_note(Rule::ModerateAfterUntrusted);
     assert!(note.contains("no approval lifts this now"), "{note}");
     assert!(note.contains("In a new session"), "{note}");
+    // Kill switch on, or Moderate not fully in force: no new-session advice.
+    for text in [
+        denial_explanation(Rule::ModerateNotInForce),
+        approval_note(Rule::ModerateNotInForce),
+    ] {
+        for expected in [
+            "Security level Moderate",
+            "kill switch",
+            "Permissive in /security",
+        ] {
+            assert!(
+                text.to_lowercase().contains(&expected.to_lowercase()),
+                "{expected:?} missing: {text}"
+            );
+        }
+        assert!(!text.to_lowercase().contains("new session"), "{text}");
+    }
     for text in [
         denial_explanation(Rule::Aggressive),
         approval_note(Rule::Aggressive),

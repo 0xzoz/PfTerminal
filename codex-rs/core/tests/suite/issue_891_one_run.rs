@@ -339,7 +339,7 @@ async fn d27_moderate_one_approved_command_may_create_user_namespaces() -> anyho
 /// Aggressive launch, and Moderate after untrusted content keep the #826
 /// rule however the person answers, and their prompts carry no warning.
 /// With the sandbox turned off in the person's settings no warning is shown,
-/// so a run the rules put in a sandbox keeps the rule.
+/// so the run, which Moderate's rules put in a sandbox, keeps the rule.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn d27_no_fresh_moderate_approval_keeps_the_rule() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
@@ -388,9 +388,9 @@ async fn d27_no_fresh_moderate_approval_keeps_the_rule() -> anyhow::Result<()> {
         eprintln!("{name}: {call:#?}");
         let unwarned = !call.asked.iter().any(|reason| reason.contains(WARNING));
         let ok = if setup.full_access {
-            // Without a sandbox nothing denies namespaces, as on main; where
-            // the rules put the run in one, it keeps the rule.
-            unwarned && (!call.marked || (call.refused && !call.made))
+            // Asked, without the warning; Moderate's rules put the run in a
+            // sandbox, which keeps the rule.
+            !call.asked.is_empty() && unwarned && call.marked && call.refused && !call.made
         } else {
             unwarned
                 && call.refused
