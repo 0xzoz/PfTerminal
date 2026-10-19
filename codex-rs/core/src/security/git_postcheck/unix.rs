@@ -685,7 +685,16 @@ fn compare(
 ) -> (Vec<Finding>, EmptyNew) {
     let mut findings = Vec::new();
     let mut empty = EmptyNew::default();
-    if prev.dot_git != cur.dot_git {
+    // A `.git` replaced by an empty folder (the Linux sandbox's mount point
+    // where there was none) holds nothing git follows; what is put in it
+    // later is compared with that.
+    let empty_folder = matches!(cur.dot_git, DotGit::Folder { .. })
+        && repo.git_dirs.iter().all(|dir| {
+            cur.folders
+                .get(dir)
+                .is_some_and(|folder| folder.entries.is_empty())
+        });
+    if prev.dot_git != cur.dot_git && !empty_folder {
         findings.push(Finding::Replaced {
             dot_git: repo.dot_git.clone(),
         });
@@ -891,8 +900,8 @@ impl Held {
 }
 
 /// A repository's last look, locked while one is taken. Lock order: a
-/// repository's lock may be taken without `GLOBAL`, and `GLOBAL` while
-/// holding it is never needed (it is released first).
+/// repository's lock is never taken while holding `GLOBAL`; `GLOBAL` may be
+/// taken briefly while holding a repository's lock.
 type Slot = Arc<Mutex<Option<Snapshot>>>;
 
 #[derive(Default)]
