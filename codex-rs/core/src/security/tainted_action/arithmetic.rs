@@ -228,6 +228,18 @@ impl Arithmetic {
                 }
             })
             .collect();
+        // Redirect targets (`read x < "$f"`) are files, not operands.
+        let mut redirect = vec![false; raw.len()];
+        for index in simple
+            .stdin_from
+            .iter()
+            .chain(&simple.here_string)
+            .chain(&simple.writes_to)
+        {
+            if let Some(slot) = redirect.get_mut(*index) {
+                *slot = true;
+            }
+        }
         let mut start = 0;
         // `eval let v`, zsh `noglob let v`: the rest is a command too. Each
         // level notes only what precedes its command, so this is linear.
@@ -240,18 +252,18 @@ impl Arithmetic {
                         && !self.functions.contains(&name)
                         && !self.aliases.contains_key(&name) =>
                 {
-                    self.note_one(&raw[..index], None);
+                    self.note_one(&raw[..index], &redirect[start..], None);
                     start += index + 1;
                 }
                 command => {
-                    self.note_one(raw, command.as_ref());
+                    self.note_one(raw, &redirect[start..], command.as_ref());
                     break;
                 }
             }
         }
     }
 
-    fn note_one(&mut self, words: &[String], command: Option<&(usize, String)>) {
+    fn note_one(&mut self, words: &[String], redirect: &[bool], command: Option<&(usize, String)>) {
         let end = command.map_or(words.len(), |(index, _)| *index);
         // Assignments before the command (`IFS= read`, `X=1 cmd`), and all
         // words when there is no command.
@@ -276,6 +288,7 @@ impl Arithmetic {
             return;
         };
         let args = &words[index + 1..];
+        let operand = |at: usize| !redirect.get(index + 1 + at).copied().unwrap_or(false);
         // `alias L='let v'`: the definition is judged as the command it
         // stands for, and later `L` commands as that command.
         if name == "alias" {
@@ -293,7 +306,7 @@ impl Arithmetic {
                 if let Some((first, target)) = indirect::command_word(&aliased)
                     && target != "alias"
                 {
-                    self.note_one(&aliased, Some(&(first, target.clone())));
+                    self.note_one(&aliased, &[], Some(&(first, target.clone())));
                     // Command names are compared lowercased.
                     self.aliases.insert(alias.to_lowercase(), target);
                 }
@@ -346,14 +359,16 @@ impl Arithmetic {
         if NAMING_BUILTINS.contains(&name) {
             self.named.extend(
                 args.iter()
-                    .filter(|word| !word.starts_with(['-', '+']))
+                    .enumerate()
+                    .filter(|(at, word)| operand(*at) && !word.starts_with(['-', '+']))
+                    .map(|(_, word)| word)
                     .map(|word| word.split_once('=').map_or(word.as_str(), |(name, _)| name))
                     .map(str::to_string),
             );
         }
         if FILLING_BUILTINS.contains(&name) {
             // zsh/ksh `read 'v?prompt'`, zparseopts `a:=arr`.
-            for word in args {
+            for (_, word) in args.iter().enumerate().filter(|(at, _)| operand(*at)) {
                 let prompted = word.split_once('?').map_or(word.as_str(), |(name, _)| name);
                 let spec = word.rsplit_once('=').map(|(_, name)| name);
                 for candidate in std::iter::once(prompted).chain(spec) {
@@ -527,7 +542,9 @@ impl Arithmetic {
         // Who receives each name's value: a graph walk keeps this linear.
         let mut receivers: HashMap<String, Vec<&str>> = HashMap::new();
         for (name, value) in &self.assigned {
-            if command_output(value) {
+            // A lexed value still holding `$(` or a backtick was quoted or
+            // decoded (`$'\x24\x28'`): arithmetic would run it.
+            if command_output(value) || value.contains("$(") || value.contains('`') {
                 tainted.insert(name.clone());
             }
             for source in names(&visible(value)) {

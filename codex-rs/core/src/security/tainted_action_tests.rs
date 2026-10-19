@@ -2455,3 +2455,85 @@ fn issue_937_review_1_everyday_lines_still_run() {
     }
     assert_eq!(wrong, Vec::<String>::new());
 }
+
+/// #937 review 2: built names, integer specials, `for x;`, more fill
+/// sources and decoding `printf`, end to end.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_937_review_2_routes() {
+    use ProtectedActionKind::UnseenCode;
+    let both = [
+        // N3: names built by quote removal or expansion.
+        "var=$(cat notes); ((va\"\"r)); :",
+        "var=$(cat notes); a[va''r]=1",
+        "var=$(cat notes); x=va; echo $(( 1 + ${x}r ))",
+        "var=$(cat notes); x=va; y=${x}r; echo $(( 1 + y ))",
+        "var=$(cat notes); x=v; x+=ar; echo $(( 1 + $x ))",
+        "var=$(cat notes); x=zvar; echo $(( 1 + ${x#z} ))",
+        "var=$(cat notes); x=va; let \"1+${x}r\"",
+        // N4: special parameters that evaluate on assignment.
+        "v=$(cat notes); OPTIND=$v",
+        "v=$(cat notes); SECONDS=$v",
+        // N5: `for x;` takes `"$@"`.
+        "set -- \"$(cat notes)\"; for x; do echo $((x)); done",
+        "f(){ for x; do echo $((x)); done; }; f \"$(cat notes)\"",
+        // N6: more fill sources.
+        ": ${b[0]:=$(cat notes)}; echo $((b[0]))",
+        // N7: output that `printf`/`echo` decode.
+        "v=$(printf 'a[\\x24\\x28cmd\\x290]'); echo $((v))",
+        "v=$(printf '%s%s' a b); echo $((v))",
+        // Should-fix: a decoded value holding a substitution.
+        "v=$'a[\\x24\\x28cmd\\x290]'; echo $((v))",
+    ];
+    let zsh = [
+        "x=VAR; var=$(cat notes); echo $(( 1 + ${(L)x} ))",
+        "read 'v?prompt' < notes; echo $((v))",
+        "zmodload zsh/system; sysread < notes; echo $((REPLY))",
+        "v=$(cat notes); [[ $v = (#b)(*) ]]; echo $((match[1]))",
+        "v=$(cat notes); KEYTIMEOUT=$v",
+    ];
+    let mut wrong = Vec::new();
+    for shell in ["bash", "zsh"] {
+        for line in both
+            .iter()
+            .chain(if shell == "zsh" { &zsh[..] } else { &[] })
+        {
+            let found = kind(&[shell, "-c", line]);
+            if found != Some(UnseenCode) {
+                wrong.push(format!("{shell}: {line:?} -> {found:?}"));
+            }
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+}
+
+/// #937 review 2: everyday lines near the new routes still run.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_937_review_2_everyday_lines_still_run() {
+    let mut wrong = Vec::new();
+    for shell in ["bash", "zsh"] {
+        for line in [
+            "git commit -m \"Fix café (v2)\"",
+            "echo \"done ✓ (ok)\"",
+            "python3 -c \"print('✓ (x)')\"",
+            "x=va; echo \"${x}r\"; echo $(( 1 + ${#x} ))",
+            "while getopts ab: opt; do :; done; shift $((OPTIND-1))",
+            "OPTIND=1; for x in 1 2; do echo $((x)); done",
+            "f=$(mktemp); read -r x < \"$f\"",
+            "v=$(echo 5); echo $((v+1))",
+        ] {
+            let found = kind(&[shell, "-c", line]);
+            if found.is_some() {
+                wrong.push(format!("{shell}: {line:?} -> {found:?}"));
+            }
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+}

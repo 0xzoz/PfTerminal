@@ -348,3 +348,21 @@ fn review_2_specials_fills_and_printf() {
         assert!(!runs_unseen(line), "{line}");
     }
 }
+
+/// Review 2 should-fix: redirect targets are not operands, and a value
+/// that still holds a substitution after decoding runs it.
+#[test]
+fn review_2_redirects_and_decoded_values() {
+    for line in [
+        "f=$(mktemp); read -r x < \"$f\"",
+        "while read -r l; do IFS=: read -r a b <<< \"$l\"; done",
+    ] {
+        assert!(!runs_unseen(line), "{line}");
+    }
+    for (shell, line) in [
+        ("bash", "v=$'a[\\x24\\x28cmd\\x290]'; echo $((v))"),
+        ("zsh", "v=$'a[\\x24\\x28cmd\\x290]'; echo $((v))"),
+    ] {
+        assert!(runs_unseen_in(shell, line), "{shell}: {line}");
+    }
+}
