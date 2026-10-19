@@ -84,7 +84,8 @@ pub enum Rule {
     /// Moderate before untrusted content: a person may allow it for one
     /// command (D27).
     ModerateOneCommand,
-    /// Moderate after untrusted content.
+    /// Moderate after untrusted content (or with the kill switch on, or
+    /// Moderate not fully in force): no approval lifts it in this session.
     ModerateAfterUntrusted,
     /// Aggressive, also where only the launch enforces it.
     Aggressive,
@@ -98,20 +99,17 @@ impl Rule {
         }
     }
 
-    /// How a person can still run what needs a user namespace.
+    /// How a person can still run what needs a user namespace, said after a
+    /// command failed. Its output is untrusted content, so under Moderate
+    /// the one-command way is open only in a new session.
     fn way_out(self) -> &'static str {
         match self {
-            Rule::ModerateOneCommand => {
-                "Under Moderate a person can allow it for one command: when the agent asks to run \
-                 that command outside the sandbox (before untrusted content enters the session) \
-                 and the person approves it when asked, that one run may create user namespaces; \
+            Rule::ModerateOneCommand | Rule::ModerateAfterUntrusted => {
+                "Under Moderate a person can allow it for one command, but only before untrusted \
+                 content enters the session, and any command's output counts (this one's too): in \
+                 a new session, when the agent's first command asks to run outside the sandbox and \
+                 the person approves it when asked, that one run may create user namespaces; \
                  nothing remembers it. Otherwise choose Permissive in /security (it applies after \
-                 a restart)."
-            }
-            Rule::ModerateAfterUntrusted => {
-                "Under Moderate a person can allow it for one command only before untrusted \
-                 content enters the session, and it has entered this one, so no approval lifts it \
-                 here. To use them, a person can choose Permissive in /security (it applies after \
                  a restart)."
             }
             Rule::Aggressive => {
@@ -146,8 +144,10 @@ pub fn approval_note(rule: Rule) -> String {
              /security (it applies after a restart)."
         }
         Rule::ModerateAfterUntrusted => {
-            "no approval lifts this after untrusted content entered the session. To use them, a \
-             person can choose Permissive in /security (it applies after a restart)."
+            "no approval lifts this now that untrusted content has entered the session (any \
+             command's output counts). In a new session, a first command that asks to run \
+             outside the sandbox may be allowed when you approve it. Otherwise a person can \
+             choose Permissive in /security (it applies after a restart)."
         }
         Rule::Aggressive => {
             "no approval or grant lifts this. To use them, a person can choose Permissive in \

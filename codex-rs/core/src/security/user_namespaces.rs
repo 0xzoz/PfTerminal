@@ -182,11 +182,11 @@ pub(crate) fn denial_explanation(
             session.thread_id(),
             INSPECTED,
             match rule {
-                Some(user_namespaces::Rule::ModerateOneCommand) => {
-                    "reported refused by the command; Moderate blocks it on Linux, but for one command whose request to run outside the sandbox a person approves before untrusted content"
-                }
-                Some(user_namespaces::Rule::ModerateAfterUntrusted) => {
-                    "reported refused by the command; Moderate blocks it on Linux, and after untrusted content no approval lifts it"
+                Some(
+                    user_namespaces::Rule::ModerateOneCommand
+                    | user_namespaces::Rule::ModerateAfterUntrusted,
+                ) => {
+                    "reported refused by the command; Moderate blocks it on Linux, but for one command whose request to run outside the sandbox a person approves before untrusted content (in practice, a new session's first command)"
                 }
                 _ => {
                     "reported refused by the command; Aggressive blocks it on Linux, and no approval or grant lifts it"

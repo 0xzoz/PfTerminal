@@ -153,9 +153,10 @@ The kill switch (`/security` → `g`) works under every level.
   Aggressive, and a launch that enforces Aggressive, never allow it.
 - A command that fails this way says why instead of a bare "Operation not
   permitted": its output (what the agent sees) and a warning in your
-  transcript name the rule and the level and, under Moderate before
-  untrusted content, how to allow it for one command, and the `/security`
-  inspector lists "creating a user namespace" under recent denials. Before you approve a command that runs
+  transcript name the rule and the level and, under Moderate, how to allow
+  it for one command (in a new session, since the failed command's output
+  is untrusted content), and the `/security` inspector lists "creating a
+  user namespace" under recent denials. Before you approve a command that runs
   `unshare`, `bwrap`, Podman, Buildah or Flatpak and stays in the sandbox,
   the approval prompt says it will fail. A contained Claude pane ends such a
   turn with a note naming the rule. The explanation only reads the

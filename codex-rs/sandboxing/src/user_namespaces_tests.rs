@@ -81,46 +81,42 @@ fn issue_826_explanations_name_the_rule() {
     assert!(claude_pane_note("Aggressive").contains("Claude Code's own Bash sandbox"));
 }
 
-/// D27 (a): under Moderate before untrusted content the explanations say
-/// how a person allows it for one command; after untrusted content and under
-/// Aggressive that nothing does here. The prompt's warning says what
-/// approving allows, that it can get past the file protections, and what
-/// "one run" covers.
+/// D27 (a): under Moderate the explanations say how a person allows it for
+/// one command (after a failure, whose output is untrusted content, only in
+/// a new session); under Aggressive that nothing does. The prompt's warning
+/// says what approving allows, that it can get past the file protections,
+/// and what "one run" covers.
 #[test]
 fn d27_moderate_names_the_one_command_way_and_aggressive_does_not() {
-    let one = [
+    for text in [
         denial_explanation(Rule::ModerateOneCommand),
+        denial_explanation(Rule::ModerateAfterUntrusted),
         approval_note(Rule::ModerateOneCommand),
-    ];
-    for text in &one {
+        approval_note(Rule::ModerateAfterUntrusted),
+    ] {
+        for expected in ["outside the sandbox", "untrusted content", "Moderate"] {
+            assert!(text.contains(expected), "{expected:?} missing: {text}");
+        }
+    }
+    // After a failure the session already has untrusted content: a new one.
+    for rule in [Rule::ModerateOneCommand, Rule::ModerateAfterUntrusted] {
+        let text = denial_explanation(rule);
         for expected in [
-            "outside the sandbox",
-            "before untrusted content",
-            "Moderate",
+            "a person can allow it for one command",
+            "this one's too",
+            "in a new session",
         ] {
             assert!(text.contains(expected), "{expected:?} missing: {text}");
         }
-        assert!(!text.to_lowercase().contains("no approval"), "{text}");
     }
+    let note = approval_note(Rule::ModerateOneCommand);
     assert!(
-        one[0].contains("a person can allow it for one command:"),
-        "{}",
-        one[0]
+        note.contains("approving this prompt doesn't lift it"),
+        "{note}"
     );
-    assert!(
-        one[1].contains("approving this prompt doesn't lift it"),
-        "{}",
-        one[1]
-    );
-    for text in [
-        denial_explanation(Rule::ModerateAfterUntrusted),
-        approval_note(Rule::ModerateAfterUntrusted),
-    ] {
-        assert!(text.contains("Moderate"), "{text}");
-        assert!(text.contains("untrusted content"), "{text}");
-        assert!(text.to_lowercase().contains("no approval lifts"), "{text}");
-        assert!(!text.contains("allow it for one command:"), "{text}");
-    }
+    let note = approval_note(Rule::ModerateAfterUntrusted);
+    assert!(note.contains("no approval lifts this now"), "{note}");
+    assert!(note.contains("In a new session"), "{note}");
     for text in [
         denial_explanation(Rule::Aggressive),
         approval_note(Rule::Aggressive),
