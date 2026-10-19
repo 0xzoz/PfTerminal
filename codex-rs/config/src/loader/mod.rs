@@ -994,6 +994,14 @@ fn remove_unversioned_project_permissive_security(config: &mut TomlValue) -> boo
     true
 }
 
+fn ignored_incomplete_project_security_warning(config_file: &Path) -> String {
+    format!(
+        "Ignored incomplete project [security] table in {}: \
+         level = \"permissive\" without version cannot override trusted security settings.",
+        config_file.display()
+    )
+}
+
 fn project_ignored_config_keys_warning(
     dot_codex_folder: &AbsolutePathBuf,
     ignored_keys: &[String],
@@ -1354,10 +1362,8 @@ async fn load_project_layers(
                 if disabled_reason.is_none()
                     && remove_unversioned_project_permissive_security(&mut config)
                 {
-                    startup_warnings.push(format!(
-                        "Ignored incomplete project [security] table in {}: \
-                         level = \"permissive\" without version cannot override trusted security settings.",
-                        config_file.display()
+                    startup_warnings.push(ignored_incomplete_project_security_warning(
+                        config_file.as_path(),
                     ));
                 }
                 if disabled_reason.is_none() && strict_config {

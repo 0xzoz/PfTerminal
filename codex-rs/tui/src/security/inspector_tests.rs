@@ -15,6 +15,7 @@ pub(crate) fn input(active: ChosenLevel) -> InspectorInput {
         thread: None,
         configured: SecurityLevel::Permissive,
         outside_user_config: SecurityLevel::Permissive,
+        refused_project_security_files: Vec::new(),
         active,
         boundary: (active == ChosenLevel::Aggressive)
             .then_some(Boundary::Clean { activated_at: 0 }),
@@ -86,6 +87,56 @@ fn find<'a>(sections: &'a [Section], label: &str) -> &'a Row {
         .flat_map(|section| &section.rows)
         .find(|row| row.label == label)
         .unwrap_or_else(|| panic!("no row {label}"))
+}
+
+#[test]
+fn issue_939_refused_project_security_file_is_named_in_core_config_row() {
+    let path = "/tmp/fixture/project/.codex/config.toml";
+    let warning = format!(
+        "Ignored incomplete project [security] table in {path}: level = \"permissive\" without version cannot override trusted security settings."
+    );
+    let mut input = input(ChosenLevel::Permissive);
+    input.refused_project_security_files = refused_project_security_files(&[warning]);
+    let sections = sections(
+        &input,
+        &saved(ChosenLevel::Permissive),
+        &RuntimeFacts {
+            policy: PolicyFacts::Unreadable,
+            ..healthy(ThreadId::new())
+        },
+        NOW,
+    );
+    assert_eq!(
+        find(&sections, "Core config").value,
+        "Permissive; refused unversioned project [security] table in /tmp/fixture/project/.codex/config.toml"
+    );
+}
+
+#[test]
+fn issue_939_lists_each_refused_project_security_file_without_other_warnings() {
+    let warnings = [
+        "unrelated startup warning".to_string(),
+        "Ignored incomplete project [security] table in /tmp/first/.codex/config.toml: level = \"permissive\" without version cannot override trusted security settings.".to_string(),
+        "Ignored incomplete project [security] table in /tmp/second/.codex/config.toml: level = \"permissive\" without version cannot override trusted security settings.".to_string(),
+    ];
+
+    assert_eq!(
+        refused_project_security_files(&warnings),
+        [
+            "/tmp/first/.codex/config.toml".to_string(),
+            "/tmp/second/.codex/config.toml".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn issue_939_ignores_malformed_refusal_warning_when_extracting_file_names() {
+    let warnings = [
+        "Ignored incomplete project [security] table in /tmp/project/.codex/config.toml without the expected warning details"
+            .to_string(),
+    ];
+
+    assert!(refused_project_security_files(&warnings).is_empty());
 }
 
 #[test]
