@@ -51,3 +51,22 @@ fn issue_826_only_a_refused_namespace_under_the_rule_is_explained() {
     );
     assert_eq!(explained(/*level*/ None, Some(1), REFUSED), None);
 }
+
+/// D27 (a): a run a person let create user namespaces is remembered by
+/// thread and call only, so a refusal its host reports isn't put down to the
+/// rule; another call, or the same call in another thread, still is.
+#[test]
+fn d27_allowed_runs_are_known_by_thread_and_call() {
+    let thread = ThreadId::new();
+    let other = ThreadId::new();
+    note_allowed_run(thread, "call-d27-allowed");
+    assert!(run_was_allowed(thread, "call-d27-allowed"));
+    assert!(!run_was_allowed(thread, "call-d27-other"));
+    assert!(!run_was_allowed(other, "call-d27-allowed"));
+    // Bounded: older runs are forgotten once enough newer ones are noted.
+    for n in 0..ALLOWED_RUNS_KEPT {
+        note_allowed_run(other, &format!("call-d27-{n}"));
+    }
+    assert!(!run_was_allowed(thread, "call-d27-allowed"));
+    assert!(run_was_allowed(other, "call-d27-0"));
+}

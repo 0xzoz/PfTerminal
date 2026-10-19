@@ -53,7 +53,7 @@ fn issue_826_namespace_programs_by_file_name() {
 }
 
 /// The rule is named in plain language, with the level, the tools that need
-/// it and the way forward; nothing offers a way to allow it.
+/// it and the way forward.
 #[test]
 fn issue_826_explanations_name_the_rule() {
     for text in [
@@ -77,4 +77,52 @@ fn issue_826_explanations_name_the_rule() {
             .starts_with("Security level Aggressive blocks creating user namespaces")
     );
     assert!(claude_pane_note("Aggressive").contains("Claude Code's own Bash sandbox"));
+}
+
+/// D27 (a): under Moderate the explanations say how a person allows it for
+/// one command; under Aggressive that nothing does. The prompt's warning
+/// says what approving allows, that it can get past the file protections,
+/// and that it covers this one run only.
+#[test]
+fn d27_moderate_names_the_one_command_way_and_aggressive_does_not() {
+    for text in [denial_explanation("Moderate"), approval_note("Moderate")] {
+        for expected in ["outside the sandbox", "before untrusted content"] {
+            assert!(text.contains(expected), "{expected:?} missing: {text}");
+        }
+        assert!(!text.contains("No approval or grant lifts this"), "{text}");
+    }
+    assert!(
+        denial_explanation("Moderate").contains("a person can allow it for one command"),
+        "{}",
+        denial_explanation("Moderate")
+    );
+    assert!(
+        approval_note("Moderate").contains("approving this prompt doesn't lift it"),
+        "{}",
+        approval_note("Moderate")
+    );
+    for text in [
+        denial_explanation("Aggressive"),
+        approval_note("Aggressive"),
+    ] {
+        assert!(
+            text.to_lowercase()
+                .contains("no approval or grant lifts this"),
+            "{text}"
+        );
+        assert!(!text.contains("outside the sandbox"), "{text}");
+    }
+    let warning = moderate_one_run_warning();
+    for expected in [
+        "Warning (Linux): approving also lets this one run create user namespaces",
+        "rootless Podman, bwrap, unshare, Flatpak, Nix's build sandbox and Chrome's sandbox",
+        "this command can get past the file protections",
+        "may not run at Moderate",
+        "never remembered",
+    ] {
+        assert!(
+            warning.contains(expected),
+            "{expected:?} missing: {warning}"
+        );
+    }
 }

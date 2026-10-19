@@ -5,6 +5,12 @@
 //!
 //! Text only: nothing here decides what runs. A match adds an explanation to
 //! a command that already failed under the rule.
+//!
+//! D27 (a) (Travis, 2026-10-19, security sign-off): under Moderate a person
+//! may allow it for one command, by approving that command's request to run
+//! outside the sandbox before untrusted content enters the session
+//! ([`moderate_one_run_warning`] is what they are told). Aggressive, and a
+//! launch that enforces Aggressive, never allow it.
 
 /// Tools that need a user namespace, as the explanations list them.
 const TOOLS: &str =
@@ -70,26 +76,63 @@ pub fn needs_user_namespace(program: &str) -> bool {
     NAMESPACE_PROGRAMS.contains(&name)
 }
 
+/// How a person can still run what needs a user namespace at security
+/// level `level`: under Moderate, for one command (D27); otherwise only by
+/// choosing Permissive.
+fn way_out(level: &str) -> &'static str {
+    if level == "Moderate" {
+        "Under Moderate a person can allow it for one command: when the agent asks to run that \
+         command outside the sandbox (before untrusted content enters the session) and the \
+         person approves it when asked, that one run may create user namespaces; nothing \
+         remembers it. Otherwise choose Permissive in /security (it applies after a restart)."
+    } else {
+        "No approval or grant lifts this. To use them, a person can choose Permissive in \
+         /security (it applies after a restart)."
+    }
+}
+
 /// Where a command failed under the rule, at security level `level`
 /// ("Moderate" or "Aggressive").
 pub fn denial_explanation(level: &str) -> String {
     format!(
         "Security level {level} blocks creating user namespaces for agent commands on Linux, \
          and this command's output reports that one was refused: tools such as {TOOLS} need \
-         one, so under Moderate and Aggressive they fail with \"Operation not permitted\". No \
-         approval or grant lifts this. To use them, a person can choose Permissive in /security \
-         (it applies after a restart)."
+         one, so under Moderate and Aggressive they fail with \"Operation not permitted\". {}",
+        way_out(level)
     )
 }
 
 /// Before a person approves a command that runs a [`NAMESPACE_PROGRAMS`]
-/// program at security level `level`.
+/// program at security level `level`, where approving does not lift the
+/// rule (an ordinary prompt; under Moderate not a request to run outside the
+/// sandbox, which gets [`moderate_one_run_warning`] instead).
 pub fn approval_note(level: &str) -> String {
+    let lifted = if level == "Moderate" {
+        "approving this prompt doesn't lift it. Under Moderate it is allowed only for a command \
+         that asks to run outside the sandbox before untrusted content enters the session, \
+         when you approve that request. Otherwise a person can choose Permissive in /security \
+         (it applies after a restart)."
+    } else {
+        "no approval or grant lifts this. To use them, a person can choose Permissive in \
+         /security (it applies after a restart)."
+    };
     format!(
         "On Linux, security level {level} blocks creating user namespaces for agent commands: \
          if you approve, the command runs, but what needs a user namespace ({TOOLS}) fails with \
-         \"Operation not permitted\", and no approval or grant lifts this. To use them, a person \
-         can choose Permissive in /security (it applies after a restart)."
+         \"Operation not permitted\", and {lifted}"
+    )
+}
+
+/// D27 (a): the warning in Moderate's prompt for a request to run outside
+/// the sandbox on Linux, whose approval also lets that one run create user
+/// namespaces.
+pub fn moderate_one_run_warning() -> String {
+    format!(
+        "Warning (Linux): approving also lets this one run create user namespaces, which {TOOLS} \
+         need. Inside one, this command can get past the file protections that still apply to \
+         it (it is root over its own files there and can mount over paths), and a Corbanu it \
+         starts may not run at Moderate. Approve only a command you trust; this is for this one \
+         run and is never remembered."
     )
 }
 
