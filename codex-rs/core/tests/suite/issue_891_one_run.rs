@@ -37,6 +37,9 @@ use serde_json::json;
 use tempfile::TempDir;
 
 const SCRIPT: &str = "echo marker=${CODEX_SANDBOX_USER_NAMESPACES_DENIED:-unset}; unshare -Ur true && echo NAMESPACE-MADE-D27";
+/// One plain command, which a saved rule can match (the script above is too
+/// complex for exec-policy rules, so it is always asked about).
+const PLAIN: &str = "unshare -Ur echo NAMESPACE-MADE-D27";
 const NAMESPACE_MADE: &str = "NAMESPACE-MADE-D27";
 /// What `unshare` prints when the sandbox refuses the namespace.
 const REFUSED: &str = "unshare failed: Operation not permitted";
@@ -46,10 +49,10 @@ const WARNING: &str = "Warning (Linux): approving also lets this one run create 
 /// What the warning must say (the owner's wording).
 const PAST_THE_PROTECTIONS: &str = "this command can get past the file protections";
 
-/// One model step: a `shell_command` running [`SCRIPT`], asking to run
+/// One model step: a `shell_command` running `command`, asking to run
 /// outside the sandbox or not.
-fn step(call_id: &str, escalate: bool) -> Vec<Value> {
-    let mut arguments = json!({ "command": SCRIPT });
+fn step(call_id: &str, command: &str, escalate: bool) -> Vec<Value> {
+    let mut arguments = json!({ "command": command });
     if escalate {
         arguments["sandbox_permissions"] = json!("require_escalated");
         arguments["justification"] = json!(JUSTIFICATION);
@@ -67,7 +70,8 @@ struct Setup {
     aggressive_launch: bool,
     /// A tool output (untrusted content) before the calls.
     untrusted_first: bool,
-    /// "Don't ask again" rules saved earlier for [`SCRIPT`]'s commands.
+    /// A "don't ask again" rule saved earlier for `unshare`; the calls run
+    /// [`PLAIN`] instead of [`SCRIPT`].
     saved_rule: bool,
     approval: AskForApproval,
 }
@@ -103,9 +107,7 @@ async fn run(
         std::fs::create_dir_all(home.path().join("rules"))?;
         std::fs::write(
             home.path().join("rules/default.rules"),
-            // Every command of [`SCRIPT`].
-            "prefix_rule(pattern=[\"echo\"], decision=\"allow\")\n\
-             prefix_rule(pattern=[\"unshare\"], decision=\"allow\")\n",
+            "prefix_rule(pattern=[\"unshare\"], decision=\"allow\")\n",
         )?;
     }
     let mut steps = Vec::new();
@@ -122,7 +124,8 @@ async fn run(
     }
     let ids: Vec<String> = (0..calls.len()).map(|n| format!("call-d27-{n}")).collect();
     for (id, (escalate, _)) in ids.iter().zip(calls) {
-        steps.push(step(id, *escalate));
+        let command = if setup.saved_rule { PLAIN } else { SCRIPT };
+        steps.push(step(id, command, *escalate));
     }
     steps.push(vec![
         ev_response_created("done"),
@@ -327,7 +330,7 @@ async fn d27_no_fresh_moderate_approval_keeps_the_rule() -> anyhow::Result<()> {
             Box::pin(run(setup, &[(/*escalate*/ true, ReviewDecision::Approved)])).await?;
         let call = &calls[0];
         let ok = call.refused
-            && call.marked
+            && (call.marked || setup.saved_rule)
             && !call.made
             && !call.asked.iter().any(|reason| reason.contains(WARNING))
             && (name != "saved rule" || call.asked.is_empty());
