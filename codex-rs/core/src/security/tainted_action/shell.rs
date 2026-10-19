@@ -53,6 +53,9 @@ pub(super) struct SimpleCommand {
     /// Indexes of the words holding what a lookup printed (`$(readlink x)`
     /// stands for `x`, but prints whatever the link holds).
     pub(super) looked_up: Vec<usize>,
+    /// Its text held a backslash, which the words no longer show
+    /// (`printf 'a\x24'` decodes it).
+    pub(super) escaped: bool,
 }
 
 /// Lexed simple commands, in the order they finish (a substitution comes
@@ -437,7 +440,7 @@ impl Lexer {
         if !open.output {
             // Not literal text: the output of a lookup or of `cd X && pwd`.
             self.looked_up |= spliced.is_some()
-                && !matches!(top.as_slice(), [only] if fact_output(&self.done[*only].words));
+                && !matches!(top.as_slice(), [only] if fact_output(&self.done[*only]));
             let unseen = if open.arithmetic && arithmetic_close {
                 ARITHMETIC_OUTPUT
             } else {
@@ -498,7 +501,8 @@ impl Lexer {
                     self.open_bracket();
                 }
                 '}' if self.word.is_empty() => self.close_bracket(),
-                '\'' | '"' | '\\' | '{' | '}' => {}
+                '\\' => self.current.escaped = true,
+                '\'' | '"' | '{' | '}' => {}
                 '<' if next == Some('<') && chars.get(index + 2) == Some(&'<') => {
                     self.flush();
                     self.redirect = Redirect::HereString;
@@ -652,8 +656,16 @@ pub(super) fn substitution_output(words: &[String]) -> Option<String> {
 
 /// Whether the substitution's spliced output is literal text or a neutral
 /// fact (`echo x`, `date`, `pwd`), not something a lookup found.
-fn fact_output(words: &[String]) -> bool {
-    literal_output(words).is_some()
+fn fact_output(command: &SimpleCommand) -> bool {
+    let words = &command.words;
+    // `printf`/`echo -e`/zsh `echo` decode escapes (`\x24`) and `printf`
+    // joins operands (`%s%s`), so what they print is not the text shown.
+    let decodes = command.escaped
+        || words.first().is_some_and(|first| {
+            basename(&first.to_lowercase()) == "printf"
+                && words[1..].iter().any(|word| word.contains('%'))
+        });
+    (literal_output(words).is_some() && !decodes)
         || words.first().is_some_and(|first| {
             matches!(
                 basename(&first.to_lowercase()),

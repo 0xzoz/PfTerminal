@@ -43,7 +43,15 @@ const NAMING_BUILTINS: &[&str] = &[
     "getopts",
 ];
 /// Builtins that fill their named variables from their input.
-const FILLING_BUILTINS: &[&str] = &["read", "vared", "mapfile", "readarray", "getopts"];
+const FILLING_BUILTINS: &[&str] = &[
+    "read",
+    "vared",
+    "mapfile",
+    "readarray",
+    "getopts",
+    "sysread",
+    "zparseopts",
+];
 /// Variables the shell fills from input or a match when no name is given:
 /// `read`/`select` fill `REPLY`, `mapfile` fills `MAPFILE`, `=~` fills
 /// `BASH_REMATCH` (bash) and `match`/`MATCH` (zsh).
@@ -58,6 +66,24 @@ const GROUP: &str = "__corbanu_arithmetic_group_";
 const MAX_LIST_DEPTH: usize = 4;
 /// Longest `$NAME` prefix compared with the variables names are built from.
 const MAX_BUILDER_PREFIX: usize = 64;
+/// Longest `${NAME[...]` subscript `defaults` looks through.
+const MAX_SUBSCRIPT: usize = 256;
+/// Variables shells fill from input or matches (`sysread`, zsh `(#b)`,
+/// `getopts`): once the line holds command output or input, they may hold
+/// it too.
+const FILLED_DEFAULTS: &[&str] = &[
+    "REPLY",
+    "reply",
+    "MAPFILE",
+    "BASH_REMATCH",
+    "match",
+    "MATCH",
+    "mbegin",
+    "mend",
+    "MBEGIN",
+    "MEND",
+    "OPTARG",
+];
 /// Builtins that declare variables (and may give them the integer attribute).
 const DECLARING_BUILTINS: &[&str] = &[
     "declare", "typeset", "local", "export", "readonly", "integer", "float", "private",
@@ -65,6 +91,30 @@ const DECLARING_BUILTINS: &[&str] = &[
 /// `read` options whose value is a number (evaluated as arithmetic in ksh).
 const READ_NUMERIC_OPTIONS: &[char] = &['t', 'n', 'N', 'k', 'u'];
 /// Positional parameters, which `set --` or a function call can fill.
+/// Special parameters that evaluate a value assigned to them as arithmetic
+/// (in bash, zsh or ksh).
+const INTEGER_SPECIALS: &[&str] = &[
+    "BAUD",
+    "COLUMNS",
+    "DIRSTACKSIZE",
+    "ERRNO",
+    "HISTCMD",
+    "HISTSIZE",
+    "KEYTIMEOUT",
+    "LINENO",
+    "LINES",
+    "LISTMAX",
+    "MAILCHECK",
+    "OPTIND",
+    "RANDOM",
+    "SAVEHIST",
+    "SECONDS",
+    "SHLVL",
+    "TMOUT",
+    "TRY_BLOCK_ERROR",
+    "TRY_BLOCK_INTERRUPT",
+    "ZLE_RPROMPT_INDENT",
+];
 const POSITIONAL: &[&str] = &["1", "2", "3", "4", "5", "6", "7", "8", "9", "@", "*"];
 
 /// What one command line does with variables, gathered command by command.
@@ -116,6 +166,10 @@ impl Arithmetic {
                 arg.split(|ch: char| !(is_name_char(ch) || ch == '/'))
                     .any(|word| KSH.contains(&shell::basename(word)))
             }),
+            integers: INTEGER_SPECIALS
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect(),
             ..Self::default()
         };
         for arg in &text {
@@ -257,7 +311,10 @@ impl Arithmetic {
         if matches!(name, "source" | ".") {
             self.sources = true;
         }
-        if matches!(name, "read" | "select" | "mapfile" | "readarray" | "vared") {
+        if matches!(
+            name,
+            "read" | "select" | "mapfile" | "readarray" | "vared" | "sysread"
+        ) {
             self.filled
                 .extend(READ_DEFAULTS.iter().map(|name| (*name).to_string()));
         }
@@ -295,8 +352,16 @@ impl Arithmetic {
             );
         }
         if FILLING_BUILTINS.contains(&name) {
-            self.filled
-                .extend(args.iter().filter(|word| is_identifier(word)).cloned());
+            // zsh/ksh `read 'v?prompt'`, zparseopts `a:=arr`.
+            for word in args {
+                let prompted = word.split_once('?').map_or(word.as_str(), |(name, _)| name);
+                let spec = word.rsplit_once('=').map(|(_, name)| name);
+                for candidate in std::iter::once(prompted).chain(spec) {
+                    if is_identifier(candidate) {
+                        self.filled.insert(candidate.to_string());
+                    }
+                }
+            }
         }
         if DECLARING_BUILTINS.contains(&name) {
             let integer = matches!(name, "integer" | "float")
@@ -324,12 +389,21 @@ impl Arithmetic {
         }
         if matches!(name, "for" | "select" | "foreach") {
             // `for a b in ...` (zsh) fills each name from the values.
-            let variables: Vec<String> = args
+            let mut variables: Vec<String> = args
                 .iter()
                 .take_while(|word| word.as_str() != "in" && is_identifier(word))
                 .cloned()
                 .collect();
-            let node = self.group(args[variables.len()..].iter().cloned());
+            let values = &args[variables.len()..];
+            // `for x; do`, `for x do`: the values are `"$@"`.
+            let node = if let Some(at) = variables.iter().position(|word| word == "do") {
+                variables.truncate(at);
+                self.group(std::iter::once("$@".to_string()))
+            } else if values.is_empty() {
+                self.group(std::iter::once("$@".to_string()))
+            } else {
+                self.group(values.iter().cloned())
+            };
             for variable in variables {
                 self.assigned.push((variable, node.clone()));
             }
@@ -464,6 +538,7 @@ impl Arithmetic {
         // name it.
         if !tainted.is_empty() {
             tainted.extend(self.appended.iter().cloned());
+            tainted.extend(FILLED_DEFAULTS.iter().map(|name| (*name).to_string()));
             for (name, value) in &self.assigned {
                 if self.builds(value) {
                     tainted.insert(name.clone());
@@ -660,7 +735,16 @@ fn defaults(word: &str) -> Vec<String> {
             let len = body
                 .find(|ch: char| !is_name_char(ch))
                 .unwrap_or(body.len());
-            let rest = &body[len..];
+            let mut rest = &body[len..];
+            // `${b[0]:=...}`: skip a subscript (a bounded look, so this
+            // stays linear; an unclosed one counts as assigning).
+            if rest.starts_with('[') {
+                let window = &rest[..rest.len().min(MAX_SUBSCRIPT)];
+                rest = match window.find(']') {
+                    Some(close) => &rest[close + 1..],
+                    None => "=",
+                };
+            }
             (len > 0
                 && is_identifier(&body[..len])
                 && (rest.starts_with('=') || rest.starts_with(":=") || rest.starts_with("::=")))

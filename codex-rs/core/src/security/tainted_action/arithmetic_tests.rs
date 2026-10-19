@@ -299,3 +299,52 @@ fn review_2_built_names_run_unseen() {
         assert!(!runs_unseen(line), "{line}");
     }
 }
+
+/// Review 2 N4-N7: integer specials, `for x;`, more fill sources, and
+/// `printf` output that decodes escapes.
+#[test]
+fn review_2_specials_fills_and_printf() {
+    for (shell, line) in [
+        ("zsh", "v=$(cat notes); SECONDS=$v"),
+        ("bash", "v=$(cat notes); OPTIND=$v"),
+        ("ksh", "v=$(cat notes); LINENO=$v"),
+        ("zsh", "read v; KEYTIMEOUT=$v"),
+        (
+            "bash",
+            "set -- \"$(cat notes)\"; for x; do echo $((x)); done",
+        ),
+        (
+            "zsh",
+            "f(){ for x; do echo $((x)); done; }; f \"$(cat notes)\"",
+        ),
+        (
+            "bash",
+            "set -- \"$(cat notes)\"; for x do echo $((x)); done",
+        ),
+        ("zsh", "read 'v?prompt' < notes; echo $((v))"),
+        (
+            "zsh",
+            "zmodload zsh/system; sysread < notes; echo $((REPLY))",
+        ),
+        ("zsh", "v=$(cat notes); zparseopts -A o a:; echo $((o[a]))"),
+        (
+            "zsh",
+            "v=$(cat notes); [[ $v = (#b)(*) ]]; echo $((match[1]))",
+        ),
+        ("zsh", "v=$(cat notes); : ${v/(#m)*/x}; echo $((MATCH))"),
+        ("bash", ": ${b[0]:=$(cat notes)}; echo $((b[0]))"),
+        ("bash", "v=$(printf 'a[\\x24\\x28cmd\\x290]'); echo $((v))"),
+        ("bash", "v=$(printf '%s%s' a b); echo $((v))"),
+        ("bash", "v=$(echo -e '\\x61'); echo $((v))"),
+    ] {
+        assert!(runs_unseen_in(shell, line), "{shell}: {line}");
+    }
+    for line in [
+        "while getopts ab: opt; do :; done; shift $((OPTIND-1))",
+        "OPTIND=1; SECONDS=0; echo $((SECONDS))",
+        "for x in 1 2; do echo $((x)); done",
+        "v=$(echo 5); echo $((v+1))",
+    ] {
+        assert!(!runs_unseen(line), "{line}");
+    }
+}
