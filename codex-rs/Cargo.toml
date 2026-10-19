@@ -543,16 +543,14 @@ which = "8"
 whoami = "1.6.1"
 wildmatch = "2.6.1"
 winapi-util = "0.1.11"
+# Only the methods GitHub zipballs and skill exports use (stored, deflate,
+# deflate64, bzip2). Fewer decoders for untrusted archives, and fewer crates on
+# the Windows Bazel lint command line (#968).
 zip = { version = "9.0.5", default-features = false, features = [
-    "aes-crypto",
     "bzip2-rs",
     "deflate64",
     "deflate",
-    "lzma",
-    "ppmd",
     "time",
-    "zstd",
-    "xz",
 ] }
 zstd = "0.13"
 
