@@ -116,8 +116,9 @@ commands that would enter the bubblewrap path.
   This applies on every security level that runs bubblewrap, Permissive
   included. The supervisor lists its children through `/proc`; without
   `/proc` an orphaned PID 1 is not found. Commands run without bubblewrap
-  (full disk and network access, legacy Landlock) are unchanged, and so is
-  the short `/proc` mount probe, which runs only `true`.
+  (full disk write access without managed-proxy routing, legacy Landlock)
+  are unchanged, and so is the short `/proc` mount probe, which runs only
+  `true`.
 - When bubblewrap is active, it mounts a fresh `/proc` via `--proc /proc` by default, but
   you can skip this in restrictive container environments with `--no-proc`.
 
