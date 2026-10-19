@@ -1123,7 +1123,7 @@ fn extract_zipball_to_dir(bytes: &[u8], destination: &Path) -> Result<(), String
         let name = entry
             .name()
             .map_err(|error| format!("failed to decode curated plugins zip entry name: {error}"))?;
-        if Path::new(name.as_ref()).is_absolute() {
+        if zip_name_is_rooted(&name) {
             return Err(format!(
                 "curated plugins zip entry `{name}` escapes extraction root"
             ));
@@ -1184,6 +1184,14 @@ fn extract_zipball_to_dir(bytes: &[u8], destination: &Path) -> Result<(), String
     }
 
     Ok(())
+}
+
+// zip 9's `enclosed_name` strips a leading root, drive or UNC prefix and returns a
+// relative path. Refuse such names on every platform, as zip 2 did.
+fn zip_name_is_rooted(name: &str) -> bool {
+    name.starts_with(['/', '\\'])
+        || (name.as_bytes().get(1) == Some(&b':')
+            && name.as_bytes().first().is_some_and(u8::is_ascii_alphabetic))
 }
 
 // The caller validates archive components before this check. Existing symlinks

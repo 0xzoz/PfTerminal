@@ -1,9 +1,10 @@
+// Independent stored-ZIP encoder driving the actual consumer entry point.
+use pretty_assertions::assert_eq;
+
 fn extract(bytes: &[u8], destination: &std::path::Path) -> Result<(), String> {
     super::extract_zip_to_dir(bytes.to_vec(), destination, &["bundle".to_owned()])
         .map_err(|error| format!("{error:#}"))
 }
-// Frozen before migration: independent stored-ZIP encoder, actual consumer entry.
-use pretty_assertions::assert_eq;
 
 fn archive(entries: &[(&str, &[u8], u32)]) -> Vec<u8> {
     let mut bytes = Vec::new();

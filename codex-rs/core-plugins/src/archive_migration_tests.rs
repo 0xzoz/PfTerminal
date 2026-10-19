@@ -1,8 +1,9 @@
+// Independent stored-ZIP encoder driving the actual consumer entry point.
+use pretty_assertions::assert_eq;
+
 fn extract(bytes: &[u8], destination: &std::path::Path) -> Result<(), String> {
     super::extract_zipball_to_dir(bytes, destination)
 }
-// Frozen before migration: independent stored-ZIP encoder, actual consumer entry.
-use pretty_assertions::assert_eq;
 
 fn archive(entries: &[(&str, &[u8], u32)]) -> Vec<u8> {
     let mut bytes = Vec::new();
@@ -112,6 +113,21 @@ fn archive_migration_unsafe_member_names() {
     );
     assert_eq!(std::fs::read(&outside).unwrap(), b"unchanged");
     println!("ZIP_CASE=absolute_owned_path; rejected; outside unchanged");
+    for rooted in [
+        "/abs/x",
+        "\\abs\\x",
+        "C:\\abs\\x",
+        "C:abs\\x",
+        "\\\\server\\share\\x",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let dest = temp.path().join("destination");
+        std::fs::create_dir(&dest).unwrap();
+        assert!(
+            extract(&archive(&[(rooted, b"bad", 0o100644)]), &dest).is_err(),
+            "{rooted}"
+        );
+    }
 }
 
 #[test]
