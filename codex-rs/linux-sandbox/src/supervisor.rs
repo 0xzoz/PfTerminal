@@ -128,14 +128,15 @@ impl ParentWatch {
 
 /// Runs in the helper's fork, single-threaded: the supervisor. Never
 /// returns. `start_bubblewrap` runs in the supervisor's child, gets the
-/// supervisor's pid and must exec bubblewrap. `close_after_fork` are
+/// supervisor's pid and must exec bubblewrap (the child exits 127 if it
+/// returns). `close_after_fork` are
 /// descriptors the supervisor itself must not keep. Signals the helper
 /// forwards stay blocked here (they reach bubblewrap through the process
 /// group), as does `SIGCHLD`: `start_bubblewrap` must set its signal mask.
 pub(crate) fn run(
     lifeline: OwnedFd,
     close_after_fork: &[RawFd],
-    start_bubblewrap: impl FnOnce(libc::pid_t) -> !,
+    start_bubblewrap: impl FnOnce(libc::pid_t),
 ) -> ! {
     // SAFETY: plain syscalls on this process.
     unsafe {
@@ -156,6 +157,8 @@ pub(crate) fn run(
     }
     if bubblewrap == 0 {
         start_bubblewrap(supervisor);
+        // SAFETY: ends the child, which failed to exec bubblewrap.
+        unsafe { libc::_exit(127) }
     }
     // What bubblewrap inherits (its arguments' descriptors) is not kept here.
     drop(start_bubblewrap);
@@ -308,8 +311,13 @@ fn exit_like(status: libc::c_int) -> ! {
         libc::SIGKILL
     };
     // SAFETY: plain syscalls on this process; the signal is delivered on
-    // unblocking it.
+    // unblocking it. The helper re-raises it too; one core dump at most.
     unsafe {
+        let no_core = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        libc::setrlimit(libc::RLIMIT_CORE, &no_core);
         libc::signal(signal, libc::SIG_DFL);
         let mut set: libc::sigset_t = std::mem::zeroed();
         libc::sigemptyset(&mut set);
