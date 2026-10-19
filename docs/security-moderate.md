@@ -133,7 +133,9 @@ The kill switch (`/security` → `g`) works under every level.
   or allow it for one command (next point).
 - You can allow user namespaces for one command (D27, Linux, Moderate only).
   When the agent asks to run a command outside the sandbox before untrusted
-  content enters the session, the approval prompt says that approving it
+  content enters the session (every command's output counts, so in practice
+  this is the first command of a new session, before the agent has read
+  anything from outside), the approval prompt says that approving it
   lifts Moderate's protected-file rules for that run and, with a warning,
   that it also lets that one run create user namespaces: inside one, the
   command can get past the file protections that remain for that run (it is

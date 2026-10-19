@@ -36,10 +36,12 @@ use serde_json::Value;
 use serde_json::json;
 use tempfile::TempDir;
 
-const SCRIPT: &str = "echo marker=${CODEX_SANDBOX_USER_NAMESPACES_DENIED:-unset}; unshare -Ur true && echo NAMESPACE-MADE-D27";
+/// Prints [`NAMESPACE_MADE`] only when it runs: the command's own text
+/// doesn't contain it (a refusal can quote the command).
+const SCRIPT: &str = "echo marker=${CODEX_SANDBOX_USER_NAMESPACES_DENIED:-unset}; unshare -Ur true && echo NAMESPACE-MADE-D$((20+7))";
 /// One plain command, which a saved rule can match (the script above is too
 /// complex for exec-policy rules, so it is always asked about).
-const PLAIN: &str = "unshare -Ur echo NAMESPACE-MADE-D27";
+const PLAIN: &str = "unshare -Ur printf NAMESPACE-MADE-%s D27";
 const NAMESPACE_MADE: &str = "NAMESPACE-MADE-D27";
 /// What `unshare` prints when the sandbox refuses the namespace.
 const REFUSED: &str = "unshare failed: Operation not permitted";
@@ -278,8 +280,9 @@ fn warned(call: &Call) -> bool {
 /// user namespace (no deny marker; the namespace is made where the host
 /// allows a nested one), after the warning, behind the model's
 /// justification. The next request is asked afresh, also after "for the
-/// session" (declined here, so it doesn't run), and a command that stays in
-/// the sandbox keeps the rule.
+/// session" (declined here, so it doesn't run; it comes after the first
+/// command's output, untrusted content, so it couldn't be allowed anyway),
+/// and a command that stays in the sandbox keeps the rule.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn d27_moderate_one_approved_command_may_create_user_namespaces() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
