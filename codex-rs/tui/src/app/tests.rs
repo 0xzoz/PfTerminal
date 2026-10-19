@@ -7108,9 +7108,19 @@ fn issue_919_aggressive_notice_follows_labels_and_the_shown_level() {
         aggressive_confirmed_elsewhere(/*untrusted_content*/ true, ChosenLevel::Moderate);
     assert!(labelled.contains("protected paths"), "{labelled}");
     assert!(labelled.contains("shown as Moderate"), "{labelled}");
+    // Moderate's credential broker already holds the model keys.
+    assert!(!labelled.contains("credential broker"), "{labelled}");
     let vault_only =
         aggressive_confirmed_elsewhere(/*untrusted_content*/ false, ChosenLevel::Permissive);
     assert!(!vault_only.contains("protected paths"), "{vault_only}");
+    assert!(
+        vault_only.contains("model keys held by the credential broker, and the child-agent rules"),
+        "{vault_only}"
+    );
+    assert!(
+        vault_only.contains("in every Corbanu pane and child agent of this Corbanu Terminal"),
+        "{vault_only}"
+    );
 }
 
 fn interrupted_claude_turn(app: &App) -> crate::claude_panes::ClaudePaneTurnOutput {

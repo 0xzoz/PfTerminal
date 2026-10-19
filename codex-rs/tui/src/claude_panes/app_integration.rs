@@ -1836,8 +1836,15 @@ pub(crate) fn aggressive_confirmed_elsewhere(
     } else {
         crate::bottom_pane::security_level_picker::CORE_EFFECTS_VAULT_ONLY
     };
+    // A session shown as Moderate started with Moderate's credential broker
+    // (D2), so the model keys are not among what waits for the restart.
+    let broker = if active == crate::security::level::ChosenLevel::Moderate {
+        ""
+    } else {
+        " model keys held by the credential broker,"
+    };
     format!(
-        "Aggressive was confirmed in another Corbanu Terminal on this home, so Core's Aggressive protections apply here now: {effects}. From each pane's next turn you approve every command that is not known read-only (reviewer: you), here and in the panes you start before you restart; a pane whose managed configuration rules this out keeps its own approval settings and says so. Grants and \"for session\" approvals here ended. The rest of Aggressive starts when you restart Corbanu Terminal: its sandbox (writes only in the current folder), the project's credential files (.env, .env.* and .envrc) denied to agent commands, network and web search off, secret-like environment variables removed and login profiles and shell snapshots unused, model keys held by the credential broker, and the child-agent rules. Until then this session is shown as {} and keeps your own settings for these, and commands already running keep the permissions they started with.",
+        "Aggressive was confirmed in another Corbanu Terminal on this home, so Core's Aggressive protections apply here now: {effects}. From each pane's next turn you approve every command that is not known read-only (reviewer: you), in every Corbanu pane and child agent of this Corbanu Terminal, and in those you start before you restart; a pane whose managed configuration rules this out keeps its own approval settings and says so. Grants and \"for session\" approvals here ended. The rest of Aggressive starts when you restart Corbanu Terminal: its sandbox (writes only in the current folder), the project's credential files (.env, .env.* and .envrc) denied to agent commands, network and web search off, secret-like environment variables removed and login profiles and shell snapshots unused,{broker} and the child-agent rules. Until then this session is shown as {} and keeps your own settings for these, and commands already running keep the permissions they started with.",
         active.name()
     )
 }

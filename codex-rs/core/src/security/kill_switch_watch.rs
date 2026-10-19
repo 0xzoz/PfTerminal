@@ -154,7 +154,7 @@ fn watch<T>(home: &Path, with: impl FnOnce(&HomeWatch) -> T) -> T {
     result
 }
 
-fn run(home: &Path, watch: &HomeWatch) {
+fn run(home: &Path, watch: &Arc<HomeWatch>) {
     let (tx, rx) = mpsc::channel::<()>();
     // The file is replaced by a rename, so its folder is watched.
     let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
@@ -202,13 +202,18 @@ fn run(home: &Path, watch: &HomeWatch) {
         let contents = std::fs::read(home.join(STATE_FILE)).ok();
         if last.as_ref() != Some(&contents) {
             last = Some(contents);
-            if let Some(level) = take_saved(home) {
-                watch.raised.send_replace(Some(level));
-            }
+            let raised = apply_saved(home).raised;
             watch.on.send_if_modified(|on| {
                 let now = crate::security::revocation_change::kill_switch_on(home);
                 std::mem::replace(on, now) != now && !changed_here(home)
             });
+            match raised {
+                Some(SecurityLevel::Aggressive) => approve_every_command(home, watch),
+                Some(level) => {
+                    watch.raised.send_replace(Some(level));
+                }
+                None => {}
+            }
         }
         match rx.recv_timeout(POLL) {
             Ok(()) | Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -257,14 +262,14 @@ pub(super) fn apply(home: &Path) -> usize {
     apply_saved(home).reached
 }
 
-/// [`apply_saved`], then #919: when trees rose to Aggressive, the sessions
-/// of this process on `home` take approval for every command from their
-/// next turn (#505), and sessions it starts later start with it. Blocking
-/// (up to `confirmed_approvals`' wait): the watch thread calls it, outside
-/// the commit lock. Returns the level trees rose to.
-fn take_saved(home: &Path) -> Option<SecurityLevel> {
-    let raised = apply_saved(home).raised;
-    if raised == Some(SecurityLevel::Aggressive) {
+/// #919: after this process's trees rose to Aggressive saved by another
+/// process, its sessions on `home` take approval for every command from
+/// their next turn (#505), and sessions it starts later start with it; then
+/// subscribers are told of the rise. Off the watch thread, which keeps
+/// reading the saved state (a kill switch saved meanwhile is not held up by
+/// `confirmed_approvals`' wait); on it only if no thread can start.
+fn approve_every_command(home: &Path, watch: &Arc<HomeWatch>) {
+    fn approve(home: &Path, watch: &HomeWatch) {
         let approvals = crate::security::confirmed_approvals::confirm(home);
         tracing::info!(
             target: "codex_core::security::transition",
@@ -273,8 +278,21 @@ fn take_saved(home: &Path) -> Option<SecurityLevel> {
             pending = approvals.pending,
             "Aggressive confirmed by another process: approval for every command"
         );
+        watch.raised.send_replace(Some(SecurityLevel::Aggressive));
     }
-    raised
+    let thread_home = home.to_path_buf();
+    let thread_watch = Arc::clone(watch);
+    let spawned = std::thread::Builder::new()
+        .name("corbanu-aggressive-approvals".to_string())
+        .spawn(move || approve(&thread_home, &thread_watch));
+    if let Err(error) = spawned {
+        tracing::warn!(
+            target: "codex_core::security::transition",
+            %error,
+            "approval for every command on the watch thread"
+        );
+        approve(home, watch);
+    }
 }
 
 /// The saved kill switch and a Moderate (#842) or Aggressive (#919)

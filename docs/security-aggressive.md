@@ -264,6 +264,9 @@ then on, these apply there:
 - approval for every command, from each pane's next turn;
 - the end of its grants and "for session" approvals.
 
+A running `corbanu exec` can't ask you for approval, so from then on it
+refuses every command that isn't known read-only.
+
 The rest of Aggressive starts in each of them when it restarts: its
 sandbox, `.env` protection, network off and the model-key rules. Until then
 it is shown at its own level. This only ever raises a level: a lower level
