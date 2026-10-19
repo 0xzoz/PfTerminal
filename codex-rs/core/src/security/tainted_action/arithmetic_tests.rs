@@ -245,10 +245,57 @@ fn review_1_stays_linear() {
         big("[[ "),
         big("a=("),
         big("x x ("),
+        format!("set {}", big("-A x ")),
+        format!("alias s='set {}'; s", big("-A a ")),
     ];
     let started = std::time::Instant::now();
     for line in &lines {
         runs_unseen(line);
     }
     assert!(started.elapsed() < std::time::Duration::from_secs(20));
+}
+
+/// Review 2 N1: non-ASCII text before `(` must not split a character.
+#[test]
+fn review_2_non_ascii_before_parenthesis() {
+    for line in [
+        "git commit -m \"Fix café (v2)\"",
+        "echo \"done ✓ (ok)\"",
+        "python3 -c \"print('✓ (x)')\"",
+        "x é=(1)",
+        "é=(1)",
+    ] {
+        assert!(!runs_unseen(line), "{line}");
+    }
+}
+
+/// Review 2 N3: names built by quote removal or expansion.
+#[test]
+fn review_2_built_names_run_unseen() {
+    for (shell, tail) in [
+        ("bash", "((va\"\"r))"),
+        ("bash", "((va''r))"),
+        ("bash", "((va\\r))"),
+        ("bash", "a[va\"\"r]=1"),
+        ("bash", "echo ${a[1+va\"\"r]}"),
+        ("bash", "x=va; echo $(( 1 + ${x}r ))"),
+        ("zsh", "x=va; y=${x}r; echo $(( 1 + y ))"),
+        ("bash", "x=v; x+=ar; echo $(( 1 + $x ))"),
+        ("bash", "x=zvar; echo $(( 1 + ${x#z} ))"),
+        ("zsh", "x=VAR; echo $(( 1 + ${(L)x} ))"),
+        ("bash", "x=va; let \"1+${x}r\""),
+        ("bash", "x=var; echo $(( ${!x} ))"),
+        ("bash", "x=va; y=r; echo $(( $x$y ))"),
+    ] {
+        let line = format!("var=$(cat notes); {tail}");
+        assert!(runs_unseen_in(shell, &line), "{shell}: {line}");
+        // Nothing tainted: built names alone are fine.
+        assert!(!runs_unseen_in(shell, tail), "{shell}: {tail}");
+    }
+    for line in [
+        "v=$(cat f); echo $(( ${#v} + 1 )) $(( ${n:-0} + 1 )) $(( 0x$h ))",
+        "v=$(cat f); n=${#v}; echo $(( n + 1 ))",
+    ] {
+        assert!(!runs_unseen(line), "{line}");
+    }
 }

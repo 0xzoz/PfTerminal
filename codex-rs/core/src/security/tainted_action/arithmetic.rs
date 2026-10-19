@@ -56,6 +56,8 @@ const KSH: &[&str] = &["ksh", "ksh93", "mksh", "pdksh", "oksh", "lksh"];
 const GROUP: &str = "__corbanu_arithmetic_group_";
 /// Compound lists nested deeper than this are not followed (fails closed).
 const MAX_LIST_DEPTH: usize = 4;
+/// Longest `$NAME` prefix compared with the variables names are built from.
+const MAX_BUILDER_PREFIX: usize = 64;
 /// Builtins that declare variables (and may give them the integer attribute).
 const DECLARING_BUILTINS: &[&str] = &[
     "declare", "typeset", "local", "export", "readonly", "integer", "float", "private",
@@ -93,6 +95,14 @@ pub(super) struct Arithmetic {
     sources: bool,
     /// The line is too nested to follow.
     unfollowed: bool,
+    /// Variables whose value a parameter expansion transforms or joins to
+    /// other name text (`${x}r`, `${x#z}`, `va$x`): the result may name any
+    /// variable, so a value built this way may stand for a tainted one.
+    builders: HashSet<String>,
+    /// A building expansion whose variable could not be read (`${(L)x}`).
+    unknown_builder: bool,
+    /// Variables appended to (`x+=ar`), which may now name any variable.
+    appended: HashSet<String>,
 }
 
 impl Arithmetic {
@@ -108,6 +118,11 @@ impl Arithmetic {
             }),
             ..Self::default()
         };
+        for arg in &text {
+            let (builders, unknown) = building(&unquoted(arg));
+            arithmetic.builders.extend(builders);
+            arithmetic.unknown_builder |= unknown;
+        }
         // Lists in parentheses, which the lexer splits at `(`:
         // `a=(x $(cat f))`, zsh `for x (0 $(cat f))`.
         for arg in &text {
@@ -189,6 +204,9 @@ impl Arithmetic {
         for word in &words[..end] {
             if let Some((name, value)) = assignment(word) {
                 self.assigned.push((name.to_string(), value.to_string()));
+                if appends(word) {
+                    self.appended.insert(name.to_string());
+                }
             }
         }
         // `: ${a:=$(cat f)}`, `${a=...}`, zsh `${a::=...}` assign `a`; the
@@ -295,6 +313,9 @@ impl Arithmetic {
                     continue;
                 };
                 self.assigned.push((name.to_string(), value.to_string()));
+                if appends(word) {
+                    self.appended.insert(name.to_string());
+                }
                 if integer {
                     self.integers.insert(name.to_string());
                     self.evaluated.push(value.to_string());
@@ -314,10 +335,14 @@ impl Arithmetic {
             }
         }
         if name == "set" {
-            // zsh/ksh `set -A a values...`.
-            for (at, pair) in args.windows(2).enumerate() {
+            // zsh/ksh `set -A a values...`: every array named gets one
+            // group of all the words, so repeated `-A` stays linear.
+            let mut node = None;
+            for pair in args.windows(2) {
                 if matches!(pair[0].as_str(), "-A" | "+A") && is_identifier(&pair[1]) {
-                    let node = self.group(args[at + 2..].iter().cloned());
+                    let node = node
+                        .get_or_insert_with(|| self.group(args.iter().cloned()))
+                        .clone();
                     self.assigned.push((pair[1].clone(), node));
                 }
             }
@@ -388,13 +413,17 @@ impl Arithmetic {
         if (self.opaque || self.sources) && !tainted.is_empty() {
             return true;
         }
+        let builds = |value: &str| !tainted.is_empty() && self.builds(value);
         let tainted_value = |value: &str| {
-            command_output(value) || names(&visible(value)).any(|name| tainted.contains(name))
+            command_output(value)
+                || builds(value)
+                || names(&visible(value)).any(|name| tainted.contains(name))
         };
         if self.integers.iter().any(|name| tainted.contains(name))
             || self.evaluated.iter().any(|word| tainted_value(word))
             || self.named.iter().any(|word| {
                 command_output(word)
+                    || builds(word)
                     || references(word).any(|name| tainted.contains(name))
                     || word.find('[').is_some_and(|at| tainted_value(&word[at..]))
             })
@@ -405,7 +434,14 @@ impl Arithmetic {
             let arg = joined(arg);
             regions(&arg).into_iter().any(|range| {
                 let region = &arg[range];
-                names(region).any(|name| tainted.contains(name)) || unseen_substitution(region)
+                // Quote removal joins names (`va""r`).
+                let bare = unquoted(region);
+                names(&bare).any(|name| tainted.contains(name))
+                    || unseen_substitution(region)
+                    || (!tainted.is_empty() && {
+                        let (builders, unknown) = building(&bare);
+                        unknown || !builders.is_empty()
+                    })
             })
         })
     }
@@ -424,6 +460,16 @@ impl Arithmetic {
                 receivers.entry(source.to_string()).or_default().push(name);
             }
         }
+        // Once anything is tainted, a value built from name fragments may
+        // name it.
+        if !tainted.is_empty() {
+            tainted.extend(self.appended.iter().cloned());
+            for (name, value) in &self.assigned {
+                if self.builds(value) {
+                    tainted.insert(name.clone());
+                }
+            }
+        }
         let mut queue: Vec<String> = tainted.iter().cloned().collect();
         while let Some(source) = queue.pop() {
             for receiver in receivers.get(&source).into_iter().flatten() {
@@ -434,6 +480,158 @@ impl Arithmetic {
         }
         tainted
     }
+}
+
+impl Arithmetic {
+    /// Whether lexed text (where `${x}r` reads `$xr`) expands a variable
+    /// that the line builds names from, or joins an expansion to name text.
+    fn builds(&self, lexed: &str) -> bool {
+        let (joined, unknown) = building(lexed);
+        unknown
+            || !joined.is_empty()
+            || lexed.match_indices('$').any(|(at, _)| {
+                let rest = &lexed[at + 1..];
+                let rest = rest.strip_prefix('{').unwrap_or(rest);
+                let len = rest
+                    .find(|ch: char| !is_name_char(ch))
+                    .unwrap_or(rest.len());
+                // Long names are not split up (that would be quadratic).
+                len > 0
+                    && (self.unknown_builder
+                        || (len > MAX_BUILDER_PREFIX && !self.builders.is_empty())
+                        || (1..=len.min(MAX_BUILDER_PREFIX))
+                            .any(|end| self.builders.contains(&rest[..end])))
+            })
+    }
+}
+
+/// `NAME+=value` or `NAME[sub]+=value`: the assignment appends.
+fn appends(word: &str) -> bool {
+    word.split_once('=')
+        .is_some_and(|(left, _)| left.ends_with('+'))
+}
+
+/// Text after quote removal, which can join names (`va""r`, `va\r`).
+fn unquoted(text: &str) -> String {
+    text.chars()
+        .filter(|ch| !matches!(ch, '"' | '\'' | '\\'))
+        .collect()
+}
+
+/// Parameter expansions in `text` whose result can form a new name: one
+/// that transforms its value (`${x#z}`, `${x/a/b}`, zsh `${(L)x}`), or
+/// that touches name text or another expansion (`${x}r`, `va$x`, `$x$y`).
+/// Returns their variables, and whether one could not be read.
+/// `$NAME`, `${NAME}`, `${#NAME}`, `${NAME[...]}` and `${NAME:-0}` alone
+/// do not build names.
+fn building(text: &str) -> (Vec<String>, bool) {
+    let bytes = text.as_bytes();
+    let mut builders = Vec::new();
+    let mut unknown = false;
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] != b'$' {
+            at += 1;
+            continue;
+        }
+        let Some(&next) = bytes.get(at + 1) else {
+            break;
+        };
+        let (end, name, transforms) = match next {
+            b'(' | b'[' => {
+                at += 1;
+                continue;
+            }
+            b'{' => {
+                let mut depth = 0;
+                let Some(close) = text[at + 1..].char_indices().find_map(|(offset, ch)| {
+                    match ch {
+                        '{' => depth += 1,
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                return Some(at + 1 + offset);
+                            }
+                        }
+                        _ => {}
+                    }
+                    None
+                }) else {
+                    return (builders, true);
+                };
+                let content = &text[at + 2..close];
+                let (name, transforms) = braced(content);
+                (close + 1, name, transforms)
+            }
+            ch if ch.is_ascii_alphabetic() || ch == b'_' => {
+                let len = text[at + 1..]
+                    .find(|ch: char| !is_name_char(ch))
+                    .unwrap_or(text.len() - at - 1);
+                (at + 1 + len, Some(&text[at + 1..at + 1 + len]), false)
+            }
+            ch if ch.is_ascii_digit() || matches!(ch, b'@' | b'*') => {
+                (at + 2, Some(&text[at + 1..at + 2]), false)
+            }
+            b'#' | b'?' | b'$' | b'!' | b'-' => {
+                at += 2;
+                continue;
+            }
+            _ => {
+                at += 1;
+                continue;
+            }
+        };
+        // A name run before `$` that is not a number (`0x$h` is).
+        let run = text[..at]
+            .bytes()
+            .rev()
+            .take_while(|&byte| is_name_char(byte as char))
+            .count();
+        let touches_before = run > 0 && !bytes[at - run].is_ascii_digit();
+        let touches_after = bytes
+            .get(end)
+            .is_some_and(|&byte| is_name_char(byte as char) || byte == b'$');
+        if transforms || touches_before || touches_after {
+            match name {
+                Some(name) => builders.push(name.to_string()),
+                None => unknown = true,
+            }
+        }
+        at = end;
+    }
+    (builders, unknown)
+}
+
+/// The variable a `${...}` body expands, and whether it transforms the
+/// value into something that may be a new name.
+fn braced(content: &str) -> (Option<&str>, bool) {
+    let body = content.strip_prefix(['#', '!']).unwrap_or(content);
+    let len = body
+        .find(|ch: char| !is_name_char(ch))
+        .unwrap_or(body.len());
+    if len == 0 {
+        // Positional or special (`${1}`, `${@}`), or zsh flags `${(L)x}`.
+        let plain = !body.is_empty()
+            && body
+                .chars()
+                .all(|ch| ch.is_ascii_digit() || matches!(ch, '@' | '*' | '#' | '?'));
+        return (plain.then_some(body), !plain);
+    }
+    let name = &body[..len];
+    let rest = &body[len..];
+    // `${!x}` expands the variable `x` names.
+    let plain = !content.starts_with('!')
+        && (rest.is_empty()
+            || (rest.starts_with('[') && rest.ends_with(']'))
+            || (!content.starts_with(['#', '!'])
+                && [":-", "-", ":=", "="].iter().any(|operator| {
+                    rest.strip_prefix(operator).is_some_and(|default| {
+                        default
+                            .chars()
+                            .all(|ch| ch.is_ascii_digit() || matches!(ch, ' ' | '+' | '-'))
+                    })
+                })));
+    (Some(name), !plain)
 }
 
 /// Text as the shell parses it: a backslash-newline joins the lines.
@@ -521,23 +719,26 @@ fn lists(text: &str) -> (Vec<List>, bool) {
     (found, false)
 }
 
+/// Byte offset where the trailing run of name characters in `text` starts.
+fn name_tail_start(text: &str) -> usize {
+    text.char_indices()
+        .rev()
+        .find(|&(_, ch)| !is_name_char(ch))
+        .map_or(0, |(at, ch)| at + ch.len_utf8())
+}
+
 /// The names a `(` after this text fills: `NAME=` or `NAME+=` right before
 /// it, or zsh `for NAME...` (`foreach`).
 fn list_names(before: &str) -> Option<Vec<String>> {
     if let Some(left) = before.strip_suffix('=') {
         let left = left.strip_suffix('+').unwrap_or(left);
-        let start = left
-            .rfind(|ch: char| !is_name_char(ch))
-            .map_or(0, |at| at + 1);
-        let name = &left[start..];
+        let name = &left[name_tail_start(left)..];
         return is_identifier(name).then(|| vec![name.to_string()]);
     }
     let mut names = Vec::new();
     let mut rest = before.trim_end_matches([' ', '\t']);
     loop {
-        let start = rest
-            .rfind(|ch: char| !is_name_char(ch))
-            .map_or(0, |at| at + 1);
+        let start = name_tail_start(rest);
         let word = &rest[start..];
         if matches!(word, "for" | "foreach") {
             let before_keyword = rest[..start].trim_end_matches([' ', '\t']);
