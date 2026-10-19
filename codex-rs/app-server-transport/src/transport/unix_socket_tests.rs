@@ -163,6 +163,54 @@ async fn app_server_startup_lock_serializes_waiters() {
         .expect("second startup lock should succeed");
 }
 
+/// #928: a dropped startup lock is free at once, even while a child that
+/// another thread forked still holds a copy of its descriptor.
+#[cfg(unix)]
+#[tokio::test]
+async fn app_server_startup_lock_is_released_while_a_forked_child_holds_its_descriptor()
+-> anyhow::Result<()> {
+    use std::io::Read;
+    use std::io::Write;
+    use std::os::unix::process::CommandExt;
+
+    let temp_dir = tempfile::TempDir::new()?;
+    let lock_path = test_startup_lock_path(temp_dir.path());
+    let held = acquire_app_server_startup_lock(lock_path.clone()).await?;
+
+    // A child forked now has a copy of every descriptor, the lock's too, until
+    // it starts its program; this one waits 2 s first and reports the fork.
+    let (mut forked, mut forked_tx) = std::io::pipe()?;
+    let spawner = std::thread::spawn(move || {
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", "exit 0"]);
+        // SAFETY: the hook only writes to a pipe and sleeps, both safe after fork.
+        unsafe {
+            command.pre_exec(move || {
+                forked_tx.write_all(b"f")?;
+                std::thread::sleep(Duration::from_secs(2));
+                Ok(())
+            });
+        }
+        command.status()
+    });
+    let mut byte = [0; 1];
+    forked.read_exact(&mut byte)?;
+
+    let other = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(lock_path.as_path())?;
+    assert!(other.try_lock().is_err(), "the lock is held");
+    drop(held);
+    assert!(
+        other.try_lock().is_ok(),
+        "the dropped startup lock is still held through the forked child's copy"
+    );
+    let status = spawner.join().expect("spawner thread")?;
+    assert!(status.success(), "{status:?}");
+    Ok(())
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn control_socket_file_is_private_after_bind() {
