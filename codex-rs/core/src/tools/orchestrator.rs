@@ -425,6 +425,9 @@ impl ToolOrchestrator {
             }
             && moderate_escalation_before_taint(tool, req, tool_ctx, &requirement);
         let mut escalation_approved_by_human = false;
+        // D27 (a): the person was warned in that prompt that approving lets
+        // the run create user namespaces.
+        let mut user_namespaces_warned = false;
         match &requirement {
             _ if post_taint.is_some() => {}
             _ if ask_human_to_escalate => {
@@ -454,13 +457,13 @@ impl ToolOrchestrator {
                     },
                 };
                 // D27 (a): on Linux, approving also lets this one run create
-                // user namespaces, and the person is warned; elsewhere (#826),
-                // that what needs one fails.
-                let note = match crate::security::user_namespaces::one_run_warning(
-                    &tool_ctx.session,
-                    turn_ctx,
-                )
-                .or_else(|| {
+                // user namespaces, and the person is warned (only a run whose
+                // prompt showed it may); elsewhere (#826), that what needs one
+                // fails.
+                let warning =
+                    crate::security::user_namespaces::one_run_warning(&tool_ctx.session, turn_ctx);
+                user_namespaces_warned = warning.is_some();
+                let note = match warning.or_else(|| {
                     user_namespaces_note(tool, req, tool_ctx, turn_ctx).map(|(note, _)| note)
                 }) {
                     Some(user_namespaces) => format!("{note} {user_namespaces}"),
@@ -664,18 +667,22 @@ impl ToolOrchestrator {
         // it. Permissive is unchanged.
         // D27 (a) (Travis, 2026-10-19, security sign-off): but for one run
         // under Moderate whose request to run outside the sandbox a person
-        // approved when asked now, before untrusted content (warned in the
-        // prompt). Never a remembered answer; never under Aggressive.
+        // approved when asked now, before untrusted content, after the
+        // prompt warned them. Never a remembered answer; never under
+        // Aggressive.
         let launch_enforces_aggressive = turn_ctx.config.permissions.launch_enforces_aggressive();
         let user_namespaces_allowed = crate::security::user_namespaces::allows_one_run(
             &tool_ctx.session,
             protected_level,
             launch_enforces_aggressive,
-            escalation_approved_by_human && approved_by == Some(ApprovalResolutionSource::User),
+            escalation_approved_by_human
+                && user_namespaces_warned
+                && approved_by == Some(ApprovalResolutionSource::User),
         );
         if user_namespaces_allowed {
             crate::security::user_namespaces::note_allowed_run(
                 tool_ctx.session.thread_id(),
+                &turn_ctx.sub_id,
                 &tool_ctx.call_id,
             );
             tracing::info!(

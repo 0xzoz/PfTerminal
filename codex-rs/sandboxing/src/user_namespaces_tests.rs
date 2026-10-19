@@ -57,8 +57,10 @@ fn issue_826_namespace_programs_by_file_name() {
 #[test]
 fn issue_826_explanations_name_the_rule() {
     for text in [
-        denial_explanation("Moderate"),
-        approval_note("Moderate"),
+        denial_explanation(Rule::ModerateOneCommand),
+        denial_explanation(Rule::ModerateAfterUntrusted),
+        approval_note(Rule::ModerateOneCommand),
+        approval_note(Rule::ModerateAfterUntrusted),
         claude_pane_note("Moderate"),
     ] {
         for expected in [
@@ -73,37 +75,55 @@ fn issue_826_explanations_name_the_rule() {
         }
     }
     assert!(
-        denial_explanation("Aggressive")
+        denial_explanation(Rule::Aggressive)
             .starts_with("Security level Aggressive blocks creating user namespaces")
     );
     assert!(claude_pane_note("Aggressive").contains("Claude Code's own Bash sandbox"));
 }
 
-/// D27 (a): under Moderate the explanations say how a person allows it for
-/// one command; under Aggressive that nothing does. The prompt's warning
-/// says what approving allows, that it can get past the file protections,
-/// and that it covers this one run only.
+/// D27 (a): under Moderate before untrusted content the explanations say
+/// how a person allows it for one command; after untrusted content and under
+/// Aggressive that nothing does here. The prompt's warning says what
+/// approving allows, that it can get past the file protections, and what
+/// "one run" covers.
 #[test]
 fn d27_moderate_names_the_one_command_way_and_aggressive_does_not() {
-    for text in [denial_explanation("Moderate"), approval_note("Moderate")] {
-        for expected in ["outside the sandbox", "before untrusted content"] {
+    let one = [
+        denial_explanation(Rule::ModerateOneCommand),
+        approval_note(Rule::ModerateOneCommand),
+    ];
+    for text in &one {
+        for expected in [
+            "outside the sandbox",
+            "before untrusted content",
+            "Moderate",
+        ] {
             assert!(text.contains(expected), "{expected:?} missing: {text}");
         }
-        assert!(!text.contains("No approval or grant lifts this"), "{text}");
+        assert!(!text.to_lowercase().contains("no approval"), "{text}");
     }
     assert!(
-        denial_explanation("Moderate").contains("a person can allow it for one command"),
+        one[0].contains("a person can allow it for one command:"),
         "{}",
-        denial_explanation("Moderate")
+        one[0]
     );
     assert!(
-        approval_note("Moderate").contains("approving this prompt doesn't lift it"),
+        one[1].contains("approving this prompt doesn't lift it"),
         "{}",
-        approval_note("Moderate")
+        one[1]
     );
     for text in [
-        denial_explanation("Aggressive"),
-        approval_note("Aggressive"),
+        denial_explanation(Rule::ModerateAfterUntrusted),
+        approval_note(Rule::ModerateAfterUntrusted),
+    ] {
+        assert!(text.contains("Moderate"), "{text}");
+        assert!(text.contains("untrusted content"), "{text}");
+        assert!(text.to_lowercase().contains("no approval lifts"), "{text}");
+        assert!(!text.contains("allow it for one command:"), "{text}");
+    }
+    for text in [
+        denial_explanation(Rule::Aggressive),
+        approval_note(Rule::Aggressive),
     ] {
         assert!(
             text.to_lowercase()
@@ -118,6 +138,8 @@ fn d27_moderate_names_the_one_command_way_and_aggressive_does_not() {
         "rootless Podman, bwrap, unshare, Flatpak, Nix's build sandbox and Chrome's sandbox",
         "this command can get past the file protections",
         "may not run at Moderate",
+        "kernel",
+        "what it starts or is given while it runs",
         "never remembered",
     ] {
         assert!(

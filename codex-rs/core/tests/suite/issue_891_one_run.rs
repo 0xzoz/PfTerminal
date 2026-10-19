@@ -49,17 +49,39 @@ const WARNING: &str = "Warning (Linux): approving also lets this one run create 
 /// What the warning must say (the owner's wording).
 const PAST_THE_PROTECTIONS: &str = "this command can get past the file protections";
 
-/// One model step: a `shell_command` running `command`, asking to run
-/// outside the sandbox or not.
-fn step(call_id: &str, command: &str, escalate: bool) -> Vec<Value> {
-    let mut arguments = json!({ "command": command });
-    if escalate {
-        arguments["sandbox_permissions"] = json!("require_escalated");
-        arguments["justification"] = json!(JUSTIFICATION);
+/// How a call runs its command.
+#[derive(Clone, Copy, Debug)]
+enum Kind {
+    /// `shell_command` asking to run outside the sandbox
+    /// (`require_escalated`), with a justification.
+    Escalated,
+    /// The same through `exec_command`.
+    EscalatedExec,
+    /// `shell_command` in the sandbox.
+    Sandboxed,
+}
+
+/// One model step running `command`.
+fn step(call_id: &str, command: &str, kind: Kind) -> Vec<Value> {
+    let escalated = json!({
+        "sandbox_permissions": "require_escalated",
+        "justification": JUSTIFICATION,
+    });
+    let (tool, mut arguments) = match kind {
+        Kind::Escalated | Kind::Sandboxed => ("shell_command", json!({ "command": command })),
+        Kind::EscalatedExec => (
+            "exec_command",
+            json!({ "cmd": command, "yield_time_ms": 5_000 }),
+        ),
+    };
+    if !matches!(kind, Kind::Sandboxed) {
+        for key in ["sandbox_permissions", "justification"] {
+            arguments[key] = escalated[key].clone();
+        }
     }
     vec![
         ev_response_created(call_id),
-        ev_function_call(call_id, "shell_command", &arguments.to_string()),
+        ev_function_call(call_id, tool, &arguments.to_string()),
         ev_completed(call_id),
     ]
 }
@@ -73,6 +95,8 @@ struct Setup {
     /// A "don't ask again" rule saved earlier for `unshare`; the calls run
     /// [`PLAIN`] instead of [`SCRIPT`].
     saved_rule: bool,
+    /// The person's settings turn the sandbox off (full access).
+    full_access: bool,
     approval: AskForApproval,
 }
 
@@ -81,6 +105,7 @@ const MODERATE: Setup = Setup {
     aggressive_launch: false,
     untrusted_first: false,
     saved_rule: false,
+    full_access: false,
     approval: AskForApproval::OnRequest,
 };
 
@@ -93,13 +118,16 @@ struct Call {
     refused: bool,
     /// The sandbox marked the command as denying user namespaces.
     marked: bool,
+    /// The command ran and was not marked.
+    unmarked: bool,
+    output: String,
 }
 
-/// Runs one call per entry of `calls` (escalated or not), answering every
-/// prompt of call `n` with `answers[n]`.
+/// Runs one call per entry of `calls`, answering every prompt of call `n`
+/// with `calls[n].1`.
 async fn run(
     setup: Setup,
-    calls: &[(bool, ReviewDecision)],
+    calls: &[(Kind, ReviewDecision)],
 ) -> anyhow::Result<(Vec<Call>, Vec<String>)> {
     let home = Arc::new(TempDir::new()?);
     let origin = home.path().canonicalize()?.to_string_lossy().into_owned();
@@ -123,9 +151,9 @@ async fn run(
         ]);
     }
     let ids: Vec<String> = (0..calls.len()).map(|n| format!("call-d27-{n}")).collect();
-    for (id, (escalate, _)) in ids.iter().zip(calls) {
+    for (id, (kind, _)) in ids.iter().zip(calls) {
         let command = if setup.saved_rule { PLAIN } else { SCRIPT };
-        steps.push(step(id, command, *escalate));
+        steps.push(step(id, command, *kind));
     }
     steps.push(vec![
         ev_response_created("done"),
@@ -140,19 +168,26 @@ async fn run(
         .with_config(move |config| {
             config.security_level = setup.level;
             config.permissions.approval_policy = Constrained::allow_any(setup.approval);
-            config
-                .features
-                .enable(Feature::SourceEnvelopes)
-                .expect("enable source envelopes");
-            config
-                .permissions
-                .set_permission_profile(PermissionProfile::workspace_write_with(
+            for feature in [Feature::SourceEnvelopes, Feature::UnifiedExec] {
+                config
+                    .features
+                    .enable(feature)
+                    .expect("test config should allow feature update");
+            }
+            let profile = if setup.full_access {
+                PermissionProfile::Disabled
+            } else {
+                PermissionProfile::workspace_write_with(
                     &[],
                     NetworkSandboxPolicy::Restricted,
                     /*exclude_tmpdir_env_var*/ true,
                     /*exclude_slash_tmp*/ true,
-                ))
-                .expect("workspace write");
+                )
+            };
+            config
+                .permissions
+                .set_permission_profile(profile)
+                .expect("permission profile");
             if setup.aggressive_launch {
                 // What an Aggressive launch puts into every agent command's
                 // environment (`launch_enforces_aggressive`).
@@ -221,6 +256,8 @@ async fn run(
                 made: output.contains(NAMESPACE_MADE),
                 refused: output.contains(REFUSED),
                 marked: output.contains("marker=1"),
+                unmarked: output.contains("marker=unset"),
+                output,
             }
         })
         .collect();
@@ -237,7 +274,8 @@ fn warned(call: &Call) -> bool {
     })
 }
 
-/// Approved when asked: that run may create a user namespace (where the host
+/// Approved when asked, through both shell tools: that run may create a
+/// user namespace (no deny marker; the namespace is made where the host
 /// allows a nested one), after the warning, behind the model's
 /// justification. The next request is asked afresh, also after "for the
 /// session" (declined here, so it doesn't run), and a command that stays in
@@ -247,23 +285,27 @@ async fn d27_moderate_one_approved_command_may_create_user_namespaces() -> anyho
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
     let mut wrong = Vec::new();
-    for first in [ReviewDecision::Approved, ReviewDecision::ApprovedForSession] {
+    for (kind, first) in [
+        (Kind::Escalated, ReviewDecision::Approved),
+        (Kind::Escalated, ReviewDecision::ApprovedForSession),
+        (Kind::EscalatedExec, ReviewDecision::Approved),
+    ] {
         // Boxed: the session future is large for the test thread's stack.
         let (calls, warnings) = Box::pin(run(
             MODERATE,
             &[
-                (/*escalate*/ true, first.clone()),
-                (/*escalate*/ true, ReviewDecision::denied("no")),
-                (/*escalate*/ false, ReviewDecision::Approved),
+                (kind, first.clone()),
+                (kind, ReviewDecision::denied("no")),
+                (Kind::Sandboxed, ReviewDecision::Approved),
             ],
         ))
         .await?;
         let allowed = &calls[0];
+        eprintln!("{kind:?} {first:?}: namespace made: {}", allowed.made);
         let ok = warned(allowed)
             && allowed.asked.len() == 1
-            && allowed.made
-            && !allowed.refused
-            && !allowed.marked
+            && allowed.unmarked
+            && (allowed.made || allowed.refused)
             // Asked again, and declined: nothing ran.
             && calls[1].asked.len() == 1
             && !calls[1].made
@@ -273,24 +315,28 @@ async fn d27_moderate_one_approved_command_may_create_user_namespaces() -> anyho
             && calls[2].refused
             && calls[2].marked
             && !calls[2].made
-            // The allowed run's success is never put down to the rule.
+            // Only that refusal is put down to the rule.
             && warnings
                 .iter()
                 .filter(|warning| warning.contains("blocks creating user namespaces"))
                 .count()
                 == 1;
         if !ok {
-            wrong.push(format!("{first:?}: {calls:#?}\nwarnings: {warnings:#?}"));
+            wrong.push(format!(
+                "{kind:?} {first:?}: {calls:#?}\nwarnings: {warnings:#?}"
+            ));
         }
     }
     assert_eq!(wrong, Vec::<String>::new());
     Ok(())
 }
 
-/// No fresh approval, no namespace: a saved "don't ask again" rule skips the
-/// prompt and keeps Moderate's rules (#840); Aggressive, an Aggressive
-/// launch, and Moderate after untrusted content keep the #826 rule however
-/// the person answers, and their prompts carry no warning.
+/// No warned, fresh approval, no namespace: a saved "don't ask again" rule
+/// skips the prompt and keeps Moderate's rules (#840); Aggressive, an
+/// Aggressive launch, and Moderate after untrusted content keep the #826
+/// rule however the person answers, and their prompts carry no warning.
+/// With the sandbox turned off in the person's settings no warning is shown,
+/// so a run the rules put in a sandbox keeps the rule.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn d27_no_fresh_moderate_approval_keeps_the_rule() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
@@ -325,15 +371,30 @@ async fn d27_no_fresh_moderate_approval_keeps_the_rule() -> anyhow::Result<()> {
                 ..MODERATE
             },
         ),
+        (
+            "full access",
+            Setup {
+                full_access: true,
+                ..MODERATE
+            },
+        ),
     ] {
         let (calls, _) =
-            Box::pin(run(setup, &[(/*escalate*/ true, ReviewDecision::Approved)])).await?;
+            Box::pin(run(setup, &[(Kind::Escalated, ReviewDecision::Approved)])).await?;
         let call = &calls[0];
-        let ok = call.refused
-            && (call.marked || setup.saved_rule)
-            && !call.made
-            && !call.asked.iter().any(|reason| reason.contains(WARNING))
-            && (name != "saved rule" || call.asked.is_empty());
+        eprintln!("{name}: {call:#?}");
+        let unwarned = !call.asked.iter().any(|reason| reason.contains(WARNING));
+        let ok = if setup.full_access {
+            // Without a sandbox nothing denies namespaces, as on main; where
+            // the rules put the run in one, it keeps the rule.
+            unwarned && (!call.marked || (call.refused && !call.made))
+        } else {
+            unwarned
+                && call.refused
+                && (call.marked || setup.saved_rule)
+                && !call.made
+                && (!setup.saved_rule || call.asked.is_empty())
+        };
         if !ok {
             wrong.push(format!("{name}: {call:#?}"));
         }

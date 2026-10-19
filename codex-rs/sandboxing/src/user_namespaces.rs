@@ -76,50 +76,89 @@ pub fn needs_user_namespace(program: &str) -> bool {
     NAMESPACE_PROGRAMS.contains(&name)
 }
 
-/// How a person can still run what needs a user namespace at security
-/// level `level`: under Moderate, for one command (D27); otherwise only by
-/// choosing Permissive.
-fn way_out(level: &str) -> &'static str {
-    if level == "Moderate" {
-        "Under Moderate a person can allow it for one command: when the agent asks to run that \
-         command outside the sandbox (before untrusted content enters the session) and the \
-         person approves it when asked, that one run may create user namespaces; nothing \
-         remembers it. Otherwise choose Permissive in /security (it applies after a restart)."
-    } else {
-        "No approval or grant lifts this. To use them, a person can choose Permissive in \
-         /security (it applies after a restart)."
+/// Where the explanations stand: the level whose rule applies, and under
+/// Moderate whether untrusted content has entered the session (after which
+/// no approval lifts it in that session).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rule {
+    /// Moderate before untrusted content: a person may allow it for one
+    /// command (D27).
+    ModerateOneCommand,
+    /// Moderate after untrusted content.
+    ModerateAfterUntrusted,
+    /// Aggressive, also where only the launch enforces it.
+    Aggressive,
+}
+
+impl Rule {
+    fn level(self) -> &'static str {
+        match self {
+            Rule::ModerateOneCommand | Rule::ModerateAfterUntrusted => "Moderate",
+            Rule::Aggressive => "Aggressive",
+        }
+    }
+
+    /// How a person can still run what needs a user namespace.
+    fn way_out(self) -> &'static str {
+        match self {
+            Rule::ModerateOneCommand => {
+                "Under Moderate a person can allow it for one command: when the agent asks to run \
+                 that command outside the sandbox (before untrusted content enters the session) \
+                 and the person approves it when asked, that one run may create user namespaces; \
+                 nothing remembers it. Otherwise choose Permissive in /security (it applies after \
+                 a restart)."
+            }
+            Rule::ModerateAfterUntrusted => {
+                "Under Moderate a person can allow it for one command only before untrusted \
+                 content enters the session, and it has entered this one, so no approval lifts it \
+                 here. To use them, a person can choose Permissive in /security (it applies after \
+                 a restart)."
+            }
+            Rule::Aggressive => {
+                "No approval or grant lifts this. To use them, a person can choose Permissive in \
+                 /security (it applies after a restart)."
+            }
+        }
     }
 }
 
-/// Where a command failed under the rule, at security level `level`
-/// ("Moderate" or "Aggressive").
-pub fn denial_explanation(level: &str) -> String {
+/// Where a command failed under `rule`.
+pub fn denial_explanation(rule: Rule) -> String {
     format!(
-        "Security level {level} blocks creating user namespaces for agent commands on Linux, \
-         and this command's output reports that one was refused: tools such as {TOOLS} need \
-         one, so under Moderate and Aggressive they fail with \"Operation not permitted\". {}",
-        way_out(level)
+        "Security level {} blocks creating user namespaces for agent commands on Linux, and \
+         this command's output reports that one was refused: tools such as {TOOLS} need one, so \
+         under Moderate and Aggressive they fail with \"Operation not permitted\". {}",
+        rule.level(),
+        rule.way_out()
     )
 }
 
 /// Before a person approves a command that runs a [`NAMESPACE_PROGRAMS`]
-/// program at security level `level`, where approving does not lift the
-/// rule (an ordinary prompt; under Moderate not a request to run outside the
-/// sandbox, which gets [`moderate_one_run_warning`] instead).
-pub fn approval_note(level: &str) -> String {
-    let lifted = if level == "Moderate" {
-        "approving this prompt doesn't lift it. Under Moderate it is allowed only for a command \
-         that asks to run outside the sandbox before untrusted content enters the session, \
-         when you approve that request. Otherwise a person can choose Permissive in /security \
-         (it applies after a restart)."
-    } else {
-        "no approval or grant lifts this. To use them, a person can choose Permissive in \
-         /security (it applies after a restart)."
+/// program under `rule`, where approving does not lift it (an ordinary
+/// prompt; under Moderate not a request to run outside the sandbox before
+/// untrusted content, which gets [`moderate_one_run_warning`] instead).
+pub fn approval_note(rule: Rule) -> String {
+    let lifted = match rule {
+        Rule::ModerateOneCommand => {
+            "approving this prompt doesn't lift it. Under Moderate it is allowed only for a \
+             command that asks to run outside the sandbox before untrusted content enters the \
+             session, when you approve that request. Otherwise a person can choose Permissive in \
+             /security (it applies after a restart)."
+        }
+        Rule::ModerateAfterUntrusted => {
+            "no approval lifts this after untrusted content entered the session. To use them, a \
+             person can choose Permissive in /security (it applies after a restart)."
+        }
+        Rule::Aggressive => {
+            "no approval or grant lifts this. To use them, a person can choose Permissive in \
+             /security (it applies after a restart)."
+        }
     };
     format!(
-        "On Linux, security level {level} blocks creating user namespaces for agent commands: \
-         if you approve, the command runs, but what needs a user namespace ({TOOLS}) fails with \
-         \"Operation not permitted\", and {lifted}"
+        "On Linux, security level {} blocks creating user namespaces for agent commands: if you \
+         approve, the command runs, but what needs a user namespace ({TOOLS}) fails with \
+         \"Operation not permitted\", and {lifted}",
+        rule.level()
     )
 }
 
@@ -129,10 +168,11 @@ pub fn approval_note(level: &str) -> String {
 pub fn moderate_one_run_warning() -> String {
     format!(
         "Warning (Linux): approving also lets this one run create user namespaces, which {TOOLS} \
-         need. Inside one, this command can get past the file protections that still apply to \
-         it (it is root over its own files there and can mount over paths), and a Corbanu it \
-         starts may not run at Moderate. Approve only a command you trust; this is for this one \
-         run and is never remembered."
+         need. Inside one, this command can get past the file protections that remain for this \
+         run (it is root over its own files there and can mount over paths), so a Corbanu it \
+         starts may not run at Moderate, and more of the kernel is exposed to it. Approve only a \
+         command you trust. It covers this run and what it starts or is given while it runs \
+         (also after untrusted content arrives); it is never remembered for another command."
     )
 }
 

@@ -44,30 +44,57 @@ fn denying_level(
     }
 }
 
-/// The level whose rule denies user namespaces to this turn's agent
-/// commands, if it does: the orchestrator's decision for a profile that
-/// takes Corbanu's sandbox rules (not an external or disabled sandbox).
-fn turn_level(session: &Session, turn: &TurnContext) -> Option<&'static str> {
+/// The rule that denies user namespaces to this turn's agent commands, if
+/// one does: the orchestrator's decision for a profile that takes Corbanu's
+/// sandbox rules (not an external or disabled sandbox), and under Moderate
+/// whether a person may still allow it for one command ([`allows_one_run`]).
+fn turn_rule(session: &Session, turn: &TurnContext) -> Option<user_namespaces::Rule> {
     if !cfg!(target_os = "linux")
         || turn.config.permissions.file_system_sandbox_policy().kind
             != FileSystemSandboxKind::Restricted
     {
         return None;
     }
-    denying_level(
-        super::protected_additional::protected_level(session),
+    let state = session
+        .services
+        .model_client()
+        .post_taint_state()
+        .filter(crate::security::tainted_action::PostTaintState::protected_paths_apply);
+    match denying_level(
+        state.as_ref().map(|state| state.level),
         turn.config.permissions.launch_enforces_aggressive(),
-    )
+    )? {
+        "Aggressive" => Some(user_namespaces::Rule::Aggressive),
+        _ if state.is_some_and(|state| one_command_way(&state)) => {
+            Some(user_namespaces::Rule::ModerateOneCommand)
+        }
+        _ => Some(user_namespaces::Rule::ModerateAfterUntrusted),
+    }
+}
+
+/// Under Moderate, whether a person's approval of a command's request to
+/// run outside the sandbox may still let it create user namespaces: Moderate
+/// configured and live, no untrusted content in the session (the state under
+/// which that approval lifts Moderate's protected-file rules, #239), and the
+/// kill switch off.
+fn one_command_way(state: &crate::security::tainted_action::PostTaintState) -> bool {
+    state.human_approval_lifts_rules(Some(0))
+        && !matches!(
+            state.policy,
+            crate::security::tainted_action::PolicyBinding::Bound {
+                kill_switch_active: true,
+                ..
+            }
+        )
 }
 
 /// D27 (a): whether a person's approval of this command lets its run create
-/// user namespaces: on Linux, `approved_now` (a person approved this
-/// command's request to run outside the sandbox when asked about it now:
-/// not a hook, the automatic reviewer, the approval cache or a saved rule),
-/// Core's protected-path level (`level`) is Moderate, the launch does not
-/// enforce Aggressive, and still, when it is about to run, Moderate is
-/// configured and live with no untrusted content in the session (the state
-/// under which that approval lifts Moderate's protected-file rules, #239).
+/// user namespaces: on Linux, `approved_now` (a person was shown
+/// [`one_run_warning`] and approved this command's request to run outside
+/// the sandbox when asked about it now: not a hook, the automatic reviewer,
+/// the approval cache or a saved rule), Core's protected-path level
+/// (`level`) is Moderate, the launch does not enforce Aggressive, and still,
+/// when it is about to run, [`one_command_way`].
 pub(crate) fn allows_one_run(
     session: &Session,
     level: Option<SecurityLevel>,
@@ -82,49 +109,65 @@ pub(crate) fn allows_one_run(
             .services
             .model_client()
             .post_taint_state()
-            .is_some_and(|state| state.human_approval_lifts_rules(Some(0)))
+            .is_some_and(|state| one_command_way(&state))
 }
 
 /// D27 (a): the warning for Moderate's prompt on a command's request to run
 /// outside the sandbox, where approving it lets that run create user
-/// namespaces ([`allows_one_run`]): on Linux, Core's level Moderate, a
-/// launch that does not enforce Aggressive, and a profile that takes
-/// Corbanu's sandbox rules.
+/// namespaces ([`allows_one_run`]); the orchestrator allows it only where
+/// this was shown.
 pub(crate) fn one_run_warning(session: &Session, turn: &TurnContext) -> Option<String> {
-    (turn_level(session, turn) == Some("Moderate")).then(user_namespaces::moderate_one_run_warning)
+    (turn_rule(session, turn) == Some(user_namespaces::Rule::ModerateOneCommand))
+        .then(user_namespaces::moderate_one_run_warning)
 }
 
-/// The commands (thread and call) whose run a person let create user
+/// The commands (thread, turn and call) whose run a person let create user
 /// namespaces ([`allows_one_run`]), so that a refusal reported there (by the
-/// host, not the rule) is not put down to the rule. A few recent ones are
-/// enough: the explanation comes when the command finishes.
-static ALLOWED_RUNS: LazyLock<Mutex<VecDeque<(ThreadId, String)>>> =
-    LazyLock::new(Default::default);
+/// host, not the rule) is not put down to the rule. Taken when the command's
+/// explanation is decided; a few recent ones are enough.
+static ALLOWED_RUNS: LazyLock<Mutex<VecDeque<AllowedRun>>> = LazyLock::new(Default::default);
 const ALLOWED_RUNS_KEPT: usize = 64;
 
-/// Notes that the run of `call_id` may create user namespaces.
-pub(crate) fn note_allowed_run(thread: ThreadId, call_id: &str) {
+#[derive(Debug, PartialEq, Eq)]
+struct AllowedRun {
+    thread: ThreadId,
+    turn: String,
+    call: String,
+}
+
+/// Notes that the run of `call_id` in `turn_id` may create user namespaces.
+pub(crate) fn note_allowed_run(thread: ThreadId, turn_id: &str, call_id: &str) {
     let mut runs = ALLOWED_RUNS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if runs.len() >= ALLOWED_RUNS_KEPT {
         runs.pop_front();
     }
-    runs.push_back((thread, call_id.to_string()));
+    runs.push_back(AllowedRun {
+        thread,
+        turn: turn_id.to_string(),
+        call: call_id.to_string(),
+    });
 }
 
-fn run_was_allowed(thread: ThreadId, call_id: &str) -> bool {
-    ALLOWED_RUNS
+/// Whether the run was noted by [`note_allowed_run`]; forgets it.
+fn take_allowed_run(thread: ThreadId, turn_id: &str, call_id: &str) -> bool {
+    let mut runs = ALLOWED_RUNS
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match runs
         .iter()
-        .any(|(allowed, call)| *allowed == thread && call == call_id)
+        .position(|run| run.thread == thread && run.turn == turn_id && run.call == call_id)
+    {
+        Some(at) => runs.remove(at).is_some(),
+        None => false,
+    }
 }
 
-/// The explanation for a command that just failed (`exit_code` known and
-/// not zero) where its output reports a refused user namespace and the rule
-/// applied to its run (`call_id`); listed under the inspector's recent
-/// denials too (#622).
+/// The explanation for a command that just finished (`call_id`) where it
+/// failed (`exit_code` known and not zero), its output reports a refused
+/// user namespace and the rule applied to its run; listed under the
+/// inspector's recent denials too (#622).
 pub(crate) fn denial_explanation(
     session: &Session,
     turn: &TurnContext,
@@ -132,16 +175,22 @@ pub(crate) fn denial_explanation(
     exit_code: Option<i32>,
     output: &str,
 ) -> Option<String> {
-    let level =
-        turn_level(session, turn).filter(|_| !run_was_allowed(session.thread_id(), call_id));
-    explained(level, exit_code, output).inspect(|_| {
+    let allowed = take_allowed_run(session.thread_id(), &turn.sub_id, call_id);
+    let rule = turn_rule(session, turn).filter(|_| !allowed);
+    explained(rule, exit_code, output).inspect(|_| {
         super::inspection::record_command_denial(
             session.thread_id(),
             INSPECTED,
-            if level == Some("Moderate") {
-                "reported refused by the command; Moderate blocks it on Linux, but for one command whose request to run outside the sandbox a person approves"
-            } else {
-                "reported refused by the command; Aggressive blocks it on Linux, and no approval or grant lifts it"
+            match rule {
+                Some(user_namespaces::Rule::ModerateOneCommand) => {
+                    "reported refused by the command; Moderate blocks it on Linux, but for one command whose request to run outside the sandbox a person approves before untrusted content"
+                }
+                Some(user_namespaces::Rule::ModerateAfterUntrusted) => {
+                    "reported refused by the command; Moderate blocks it on Linux, and after untrusted content no approval lifts it"
+                }
+                _ => {
+                    "reported refused by the command; Aggressive blocks it on Linux, and no approval or grant lifts it"
+                }
             },
         );
     })
@@ -150,11 +199,15 @@ pub(crate) fn denial_explanation(
 /// What the inspector's recent denials say was refused.
 pub(crate) const INSPECTED: &str = "creating a user namespace";
 
-fn explained(level: Option<&'static str>, exit_code: Option<i32>, output: &str) -> Option<String> {
-    let level = level?;
+fn explained(
+    rule: Option<user_namespaces::Rule>,
+    exit_code: Option<i32>,
+    output: &str,
+) -> Option<String> {
+    let rule = rule?;
     (matches!(exit_code, Some(code) if code != 0)
         && user_namespaces::reports_user_namespace_denial(output))
-    .then(|| user_namespaces::denial_explanation(level))
+    .then(|| user_namespaces::denial_explanation(rule))
 }
 
 /// The approval prompt's note for `command` when it runs a program that
@@ -165,9 +218,9 @@ pub(crate) fn approval_note(
     turn: &TurnContext,
     command: &[String],
 ) -> Option<String> {
-    let level = turn_level(session, turn)?;
+    let rule = turn_rule(session, turn)?;
     super::protected_reads::runs_user_namespace_program(command)
-        .then(|| user_namespaces::approval_note(level))
+        .then(|| user_namespaces::approval_note(rule))
 }
 
 #[cfg(test)]

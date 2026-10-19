@@ -1,4 +1,5 @@
 use super::*;
+use codex_sandboxing::user_namespaces::Rule;
 use pretty_assertions::assert_eq;
 
 const REFUSED: &str = "unshare: unshare failed: Operation not permitted";
@@ -31,42 +32,44 @@ fn issue_826_the_rule_follows_the_protected_levels() {
 /// namespace, and any command where the rule does not apply are not.
 #[test]
 fn issue_826_only_a_refused_namespace_under_the_rule_is_explained() {
-    let explanation = explained(Some("Moderate"), Some(1), REFUSED).unwrap();
+    let explanation = explained(Some(Rule::ModerateOneCommand), Some(1), REFUSED).unwrap();
     assert!(
         explanation.starts_with("Security level Moderate blocks creating user namespaces"),
         "{explanation}"
     );
-    assert_eq!(explained(Some("Aggressive"), Some(0), REFUSED), None);
+    assert_eq!(explained(Some(Rule::Aggressive), Some(0), REFUSED), None);
     assert_eq!(
-        explained(Some("Aggressive"), /*exit_code*/ None, REFUSED),
+        explained(Some(Rule::Aggressive), /*exit_code*/ None, REFUSED),
         None
     );
     assert_eq!(
         explained(
-            Some("Aggressive"),
+            Some(Rule::Aggressive),
             Some(1),
             "cat: /home/someone/.ssh/id_ed25519: Operation not permitted"
         ),
         None
     );
-    assert_eq!(explained(/*level*/ None, Some(1), REFUSED), None);
+    assert_eq!(explained(/*rule*/ None, Some(1), REFUSED), None);
 }
 
-/// D27 (a): a run a person let create user namespaces is remembered by
-/// thread and call only, so a refusal its host reports isn't put down to the
-/// rule; another call, or the same call in another thread, still is.
+/// D27 (a): a run a person let create user namespaces is known by thread,
+/// turn and call, once: so a refusal its host reports isn't put down to the
+/// rule, and a reused call ID later is explained again.
 #[test]
-fn d27_allowed_runs_are_known_by_thread_and_call() {
+fn d27_allowed_runs_are_known_by_thread_turn_and_call_once() {
     let thread = ThreadId::new();
     let other = ThreadId::new();
-    note_allowed_run(thread, "call-d27-allowed");
-    assert!(run_was_allowed(thread, "call-d27-allowed"));
-    assert!(!run_was_allowed(thread, "call-d27-other"));
-    assert!(!run_was_allowed(other, "call-d27-allowed"));
+    note_allowed_run(thread, "turn-d27", "call-d27");
+    assert!(!take_allowed_run(thread, "turn-d27", "call-d27-other"));
+    assert!(!take_allowed_run(thread, "turn-d27-other", "call-d27"));
+    assert!(!take_allowed_run(other, "turn-d27", "call-d27"));
+    assert!(take_allowed_run(thread, "turn-d27", "call-d27"));
+    assert!(!take_allowed_run(thread, "turn-d27", "call-d27"));
     // Bounded: older runs are forgotten once enough newer ones are noted.
+    note_allowed_run(thread, "turn-d27", "call-d27-old");
     for n in 0..ALLOWED_RUNS_KEPT {
-        note_allowed_run(other, &format!("call-d27-{n}"));
+        note_allowed_run(other, "turn-d27", &format!("call-d27-{n}"));
     }
-    assert!(!run_was_allowed(thread, "call-d27-allowed"));
-    assert!(run_was_allowed(other, "call-d27-0"));
+    assert!(!take_allowed_run(thread, "turn-d27", "call-d27-old"));
 }
