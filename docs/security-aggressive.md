@@ -251,3 +251,20 @@ Moderate's rules don't cover run without one; choose a sandbox in your
 settings to keep every command in it. Where the sandbox can't start (for
 example Linux without user namespaces), commands fail under Moderate instead
 of running outside it.
+
+## Other Corbanu Terminals on the same home
+
+When you confirm Aggressive, other Corbanu Terminals running on the same
+Corbanu home move up to it within about a second (#919), as they do with
+the kill switch and Moderate. Each says so in its history. Other Corbanu
+processes on the home, such as a running `corbanu exec`, move up too. From
+then on, these apply there:
+
+- Core's protections;
+- approval for every command, from each pane's next turn;
+- the end of its grants and "for session" approvals.
+
+The rest of Aggressive starts in each of them when it restarts: its
+sandbox, `.env` protection, network off and the model-key rules. Until then
+it is shown at its own level. This only ever raises a level: a lower level
+saved in another window applies only after a restart.
