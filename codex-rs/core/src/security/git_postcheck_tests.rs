@@ -678,3 +678,48 @@ fn issue_874_a_rebase_is_reported_when_a_command_appears() {
         vec![format!("exec {}", todo.display())]
     );
 }
+
+/// CI (#926): the Linux sandbox leaves empty config files and an empty
+/// hooks folder in place as mount points while a command runs, where
+/// another session's look sees them. Git runs nothing from them; they are
+/// reported once something is put in them.
+#[test]
+fn issue_874_empty_config_and_hooks_are_reported_once_filled() {
+    let project = Project::new();
+    let git = project.git();
+    std::fs::remove_dir_all(git.join("hooks")).expect("no hooks");
+    let (thread, repos) = baseline(&project);
+    std::fs::create_dir(git.join("hooks")).expect("empty hooks");
+    std::fs::write(git.join("config.worktree"), "").expect("empty config");
+    std::fs::write(git.join("commondir"), "").expect("empty commondir");
+    assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
+    assert_eq!(project.held(), Vec::<String>::new());
+    // Still empty: still nothing.
+    assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
+    // Filled in place: the git folder itself doesn't change.
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(git.join("config.worktree"))
+        .and_then(|mut file| std::io::Write::write_all(&mut file, b"[core]\n"))
+        .expect("filled");
+    std::fs::write(git.join("hooks/pre-commit"), "#!/bin/sh\n").expect("hook");
+    // Replaced by a renamed file.
+    std::fs::write(git.join("commondir.new"), "../elsewhere\n").expect("commondir");
+    std::fs::rename(git.join("commondir.new"), git.join("commondir")).expect("rename");
+    assert_eq!(
+        kinds(&check(thread, &repos)),
+        vec![
+            format!("config {}", git.join("commondir").display()),
+            format!("config {}", git.join("config.worktree").display()),
+            format!("config {}", git.join("hooks").display()),
+        ]
+    );
+    assert_eq!(
+        project.held(),
+        shown(&[
+            git.join("commondir"),
+            git.join("config.worktree"),
+            git.join("hooks")
+        ])
+    );
+}

@@ -111,7 +111,9 @@ The kill switch (`/security` → `g`) works under every level.
   own hold them too until you remove them: a layout made of links
   (`git new-workdir`, Android's `repo`), a `config.worktree` that
   `git sparse-checkout` adds, or a hooks folder a hook installer creates
-  where there was none. It doesn't watch in between: a process a command
+  where there was none. An empty config file or hooks folder is reported
+  once something is put in it (on Linux the sandbox leaves empty ones in
+  place while a command runs). It doesn't watch in between: a process a command
   left running can change `.git` after the last look, even while an approved
   command runs, and what it changes after a turn ends is found at the next
   command, not before you run git yourself. It watches the repositories of

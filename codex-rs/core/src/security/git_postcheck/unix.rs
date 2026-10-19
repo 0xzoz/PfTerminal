@@ -51,7 +51,7 @@ const STATE_FILES: [&str; 5] = [
 const BUILTIN_STRATEGIES: [&str; 6] = ["ort", "recursive", "resolve", "octopus", "ours", "subtree"];
 /// Entries of a repository's own git folder that git reads for config or
 /// hooks: a new one is reported (on Linux a missing one isn't held
-/// read-only), as is anything new below `hooks`.
+/// read-only) once it isn't empty, as is anything new below `hooks`.
 const CONFIG_NAMES: [&str; 3] = ["config", "config.worktree", "commondir"];
 /// Legacy remote definitions git still reads for a remote with no URL in
 /// its config.
@@ -382,6 +382,9 @@ struct Snapshot {
     /// `.git` was missing at a later look (a worktree removed, a clone
     /// deleted).
     went_missing: bool,
+    /// New config files and hooks folders that were empty when looked at
+    /// (`is_empty_stub`): reported once something is put in them.
+    empty_new: HashSet<PathBuf>,
 }
 
 impl Snapshot {
@@ -394,6 +397,7 @@ impl Snapshot {
             dot_git: dot_git.clone(),
             incomplete: None,
             went_missing: false,
+            empty_new: HashSet::new(),
         }
     }
 }
@@ -460,7 +464,11 @@ fn walk(repo: &Repo, prev: Option<&Snapshot>) -> Snapshot {
             if entry.kind == Kind::Link {
                 entry.link = Some(Link::read(&path, &repo.git_dirs));
             }
-            if role == Role::Legacy && entry.kind != Kind::Dir {
+            // Config files' lengths too: an empty one may be filled later
+            // (`is_empty_stub`).
+            if (role == Role::Legacy && entry.kind != Kind::Dir)
+                || (role == Role::GitDir && entry.kind == Kind::File && is_config_name(name))
+            {
                 *entry = Entry {
                     link: entry.link.take(),
                     ..Entry::stat(&path, entry.kind, entry.ino)
@@ -670,13 +678,14 @@ pub(super) enum Finding {
 /// reports what git would follow out of the sandbox (links, commands in
 /// state files) and hard links: an ordinary repository has legacy remotes,
 /// config and hooks of its own, and hard-links only its objects.
-fn compare(repo: &Repo, prev: &Snapshot, cur: &Snapshot, first: bool) -> Vec<Finding> {
+fn compare(repo: &Repo, prev: &Snapshot, cur: &mut Snapshot, first: bool) -> Vec<Finding> {
     let mut findings = Vec::new();
     if prev.dot_git != cur.dot_git {
         findings.push(Finding::Replaced {
             dot_git: repo.dot_git.clone(),
         });
     }
+    let mut empty_new = HashSet::new();
     let mut folders: Vec<_> = cur.folders.iter().collect();
     folders.sort_by(|a, b| a.0.cmp(b.0));
     for (dir, folder) in folders {
@@ -726,14 +735,18 @@ fn compare(repo: &Repo, prev: &Snapshot, cur: &Snapshot, first: bool) -> Vec<Fin
             // What the protected-file rules can't hold: config or hooks of
             // the repository's own git folder that didn't exist (on Linux a
             // missing one isn't held read-only). Git rewrites existing ones
-            // by renaming; that isn't reported.
+            // by renaming; that isn't reported. A new one that is empty
+            // (`is_empty_stub`) is reported once something is put in it.
             if own
                 && prev_folder.is_some()
-                && old.is_none()
-                && (name.as_os_str() == "hooks"
-                    || CONFIG_NAMES.iter().any(|kept| name.as_os_str() == *kept))
+                && (name.as_os_str() == "hooks" || is_config_name(name))
+                && (old.is_none() || prev.empty_new.contains(&path))
             {
-                findings.push(Finding::Config { path });
+                if is_empty_stub(cur, &path, entry) {
+                    empty_new.insert(path);
+                } else {
+                    findings.push(Finding::Config { path });
+                }
             }
         }
     }
@@ -754,7 +767,27 @@ fn compare(repo: &Repo, prev: &Snapshot, cur: &Snapshot, first: bool) -> Vec<Fin
             });
         }
     }
+    cur.empty_new = empty_new;
     findings
+}
+
+fn is_config_name(name: &OsStr) -> bool {
+    CONFIG_NAMES.iter().any(|kept| name == *kept)
+}
+
+/// An empty file, or a listed folder with nothing in it: git runs nothing
+/// from it. The Linux sandbox leaves such entries in place while a command
+/// runs (mount points for protected paths that didn't exist), where another
+/// session's look can see them.
+fn is_empty_stub(snapshot: &Snapshot, path: &Path, entry: &Entry) -> bool {
+    match entry.kind {
+        Kind::File => entry.stamp.0 == 0,
+        Kind::Dir => snapshot
+            .folders
+            .get(path)
+            .is_some_and(|folder| folder.entries.is_empty()),
+        Kind::Link | Kind::Other => false,
+    }
 }
 
 /// A finding that stands until the person removes it: while any does, a
@@ -973,14 +1006,14 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
         }
         // The last look stays until this one is done (a panic keeps it).
         let prev = snapshot.as_ref();
-        let cur = walk(repo, prev);
+        let mut cur = walk(repo, prev);
         let prev = prev.filter(|prev| !(prev.went_missing && prev.dot_git != cur.dot_git));
         let mut found = match prev {
-            Some(prev) => compare(repo, prev, &cur, /*first*/ false),
+            Some(prev) => compare(repo, prev, &mut cur, /*first*/ false),
             None => compare(
                 repo,
                 &Snapshot::empty(&cur.dot_git),
-                &cur,
+                &mut cur,
                 /*first*/ true,
             ),
         };
