@@ -764,14 +764,24 @@ fn run_bwrap_in_child_with_synthetic_mount_cleanup(
             let err = std::io::Error::last_os_error();
             panic!("failed to place bubblewrap child in its own process group: {err}");
         }
-        crate::supervisor::run(lifeline_read, &exec_start_pipe, |supervisor_pid| {
-            setup_signal_mask.restore();
-            terminate_with_parent(supervisor_pid);
-            wait_for_parent_exec_start(exec_start_pipe[0], exec_start_pipe[1]);
-            exec_bwrap(args, preserved_files);
-        });
+        crate::supervisor::run(
+            lifeline_read,
+            FORWARDED_SIGNALS,
+            &exec_start_pipe,
+            |supervisor_pid| {
+                setup_signal_mask.restore();
+                terminate_with_parent(supervisor_pid);
+                wait_for_parent_exec_start(exec_start_pipe[0], exec_start_pipe[1]);
+                exec_bwrap(args, preserved_files);
+            },
+        );
     }
 
+    // Also here, so the group exists before any signal is forwarded to it.
+    // SAFETY: plain syscall on this process's child, which never execs.
+    unsafe {
+        libc::setpgid(pid, pid);
+    }
     drop(lifeline_read);
     let lifeline = Arc::new(lifeline);
     parent_watch.cut_when_gone(Arc::clone(&lifeline));

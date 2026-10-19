@@ -228,10 +228,12 @@ impl Fixture {
     /// way.
     fn assert_all_gone(&self, ended: &mpsc::Receiver<()>, what: &str) {
         let gone = ended.recv_timeout(BOUND).is_ok();
-        let left: Vec<i32> = [&self.daemon, &self.foreground]
+        let mut left: Vec<i32> = [&self.daemon, &self.foreground]
             .iter()
             .flat_map(|marker| processes_with(marker))
             .collect();
+        left.sort_unstable();
+        left.dedup();
         for pid in &left {
             kill(*pid);
         }
@@ -354,7 +356,11 @@ fn a_daemon_left_by_a_finished_command_is_stopped() {
             .spawn()
             .unwrap();
         let ended = watch(helper.stdout.take().unwrap());
-        fixture.assert_all_gone(&ended, "the command exited");
+        let what = match bwrap {
+            Bwrap::Real => "the command exited",
+            Bwrap::Unbound => "the command exited (unbound sandbox)",
+        };
+        fixture.assert_all_gone(&ended, what);
         assert_eq!(reap(&mut helper).code(), Some(7));
     }
 }

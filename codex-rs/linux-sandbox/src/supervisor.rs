@@ -132,10 +132,12 @@ impl ParentWatch {
 /// supervisor's pid and must exec bubblewrap (the child exits 127 if it
 /// returns). `close_after_fork` are
 /// descriptors the supervisor itself must not keep. Signals the helper
-/// forwards stay blocked here (they reach bubblewrap through the process
-/// group), as does `SIGCHLD`: `start_bubblewrap` must set its signal mask.
+/// forwards (`forwarded_signals`) stay blocked here: they reach bubblewrap
+/// through the process group. `SIGCHLD` is blocked too, so
+/// `start_bubblewrap` must set its signal mask.
 pub(crate) fn run(
     lifeline: OwnedFd,
+    forwarded_signals: &[libc::c_int],
     close_after_fork: &[RawFd],
     start_bubblewrap: impl FnOnce(libc::pid_t),
 ) -> ! {
@@ -163,6 +165,7 @@ pub(crate) fn run(
     }
     // What bubblewrap inherits (its arguments' descriptors) is not kept here.
     drop(start_bubblewrap);
+    relay_pending(bubblewrap, forwarded_signals);
     for fd in close_after_fork.iter().copied().filter(|fd| *fd >= 0) {
         // SAFETY: closes this process's copy of a descriptor it does not use.
         unsafe {
@@ -210,29 +213,41 @@ pub(crate) fn run(
             libc::kill(bubblewrap, libc::SIGKILL);
         }
     }
-    kill_and_reap_children(bubblewrap, &mut status);
+    kill_and_reap_children(bubblewrap, &mut status, &child_signals);
     exit_like(status.unwrap_or(libc::SIGKILL))
 }
 
-/// Reaps every exited child; records bubblewrap's status.
-fn reap_exited(bubblewrap: libc::pid_t, status: &mut Option<libc::c_int>) {
+/// Reaps every exited child and records bubblewrap's status; whether any
+/// child is left.
+fn reap_exited(bubblewrap: libc::pid_t, status: &mut Option<libc::c_int>) -> bool {
     loop {
         let mut wait_status = 0;
         // SAFETY: valid out pointer.
         let pid = unsafe { libc::waitpid(-1, &mut wait_status, libc::WNOHANG | libc::__WALL) };
-        if pid <= 0 {
-            return;
-        }
         if pid == bubblewrap {
             *status = Some(wait_status);
+        } else if pid == 0 {
+            return true;
+        } else if pid < 0 {
+            match std::io::Error::last_os_error().raw_os_error() {
+                Some(libc::EINTR) => {}
+                // ECHILD: none left.
+                _ => return false,
+            }
         }
     }
 }
 
 /// Kills and reaps every remaining child: bubblewrap if still running, and
 /// any sandbox PID 1 it left behind. A child's pid cannot be reused before
-/// it is reaped here, so the kill never reaches another process.
-fn kill_and_reap_children(bubblewrap: libc::pid_t, status: &mut Option<libc::c_int>) {
+/// it is reaped here, so the kill never reaches another process. Lists the
+/// children again at least every 100 ms, so one that became a child after
+/// a listing is not waited for without being killed.
+fn kill_and_reap_children(
+    bubblewrap: libc::pid_t,
+    status: &mut Option<libc::c_int>,
+    child_signals: &SignalFd,
+) {
     loop {
         let Some(children) = children() else {
             // Cannot list them (no /proc): reap what has exited rather than
@@ -246,15 +261,19 @@ fn kill_and_reap_children(bubblewrap: libc::pid_t, status: &mut Option<libc::c_i
                 libc::kill(child, libc::SIGKILL);
             }
         }
-        let mut wait_status = 0;
-        // SAFETY: valid out pointer.
-        let pid = unsafe { libc::waitpid(-1, &mut wait_status, libc::__WALL) };
-        if pid == bubblewrap {
-            *status = Some(wait_status);
-        } else if pid < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
-            // ECHILD: none left.
+        if !reap_exited(bubblewrap, status) {
             return;
         }
+        let mut poll_fd = libc::pollfd {
+            fd: child_signals.0.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one valid pollfd.
+        unsafe {
+            libc::poll(&mut poll_fd, 1, 100);
+        }
+        child_signals.drain();
     }
 }
 
@@ -294,6 +313,24 @@ fn children() -> Option<Vec<libc::pid_t>> {
         }
     }
     Some(children)
+}
+
+/// Sends bubblewrap the forwarded signals that reached the process group
+/// before it existed (pending here). One that arrived since reaches it
+/// twice, which changes nothing for these signals.
+fn relay_pending(bubblewrap: libc::pid_t, forwarded_signals: &[libc::c_int]) {
+    // SAFETY: valid out set; plain syscalls on this process's child.
+    unsafe {
+        let mut pending: libc::sigset_t = std::mem::zeroed();
+        if libc::sigpending(&mut pending) < 0 {
+            return;
+        }
+        for signal in forwarded_signals {
+            if libc::sigismember(&pending, *signal) == 1 {
+                libc::kill(bubblewrap, *signal);
+            }
+        }
+    }
 }
 
 /// Exits the way `status` says bubblewrap did.
