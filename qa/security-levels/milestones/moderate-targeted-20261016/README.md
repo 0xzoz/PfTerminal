@@ -71,10 +71,10 @@ refusal nobody was asked about is not labelled "Approval declined".
   (`runs/*/isolation-*.json`). Native-prompt guard: 0 `SECURITYAGENT-SEEN` in 9,057 checks.
 - **Groups:** Q01-Q14 (10:26Z-12:59Z), one fresh executor each (the candidate's `corbanu exec`, GLM 5.3 Flash on zai),
   one at a time on rotating lanes wiped before and after. Product model GLM 5.3 Flash, GLM 5.2 for MOD-09/21. No replays.
-- **MOD-24 relay check** (integrator; window corrected after evidence checks r1 and r2): no product model request
+- **MOD-24 relay check** (integrator; window corrected after evidence checks r1, r2 and r3): no product model request
   reached the relay between 12:09:50Z and the relaunch on zai (the recorded times were 12:10:40Z/12:10:40Z); the only
-  product traffic in that window was CONNECTs to github.com and chatgpt.com at each product start, refused by the
-  relay; the next product model request (12:11:28Z) is the pong after the relaunch
+  other product traffic in that window was CONNECTs to github.com, chatgpt.com and api.github.com at each product start
+  (12:10:20-21Z, 12:10:32Z, 12:11:21Z), all refused by the relay; the next product model request (12:11:28Z) is the pong after the relaunch
   ([common/mediator-final.jsonl.gz](common/mediator-final.jsonl.gz)).
 - **Shutdown:** guest data erased (`restore.sh`, `kill-lane-procs.sh`, `restore-fix.sh`), clean shutdown; the
   verification boot's network never came up, so the guest was power-cycled; checks then found no campaign accounts,
@@ -91,25 +91,38 @@ refusal nobody was asked about is not labelled "Approval declined".
   declines cite instructions never to print secret values, which match the product's own secret-handling guidance
   (an inference; the source can't be shown code-blind), so another model is unlikely to unblock them. MOD-17's item 2 and MOD-29's last result are met only under G-1 (model declines whose text meets the
   wording).
+- The candidate is a developer build (`developer_marker: true`, [candidate/candidate-manifest.md](candidate/candidate-manifest.md)).
+- MOD-09 sent only item 1 (disclosed in its result). The first run's MOD-09 item 6 (Keychains), which ran with no prompt
+  or refusal, is not re-checked here.
+- MOD-29: during setup the executor opened the Aggressive review by mistake, escaped it, and started a fresh profile.
+- Frozen-file errata (not edited, to keep the freeze): the screens README in `design/designer-packet/screens/` and
+  `executor-packet/v3/screens-v3/` says the screens were captured "between 10:05Z and 10:20Z"; host file times show
+  09:59:59Z-10:05:16Z, before the designer started (10:06:56Z). `design.json` `named_limits` still lists "D4 reading
+  (open)", which amendment v3 removed.
+- Asserted, not shown by the record: the 301 in `gate/agent-egress.txt`, the freeze push `18225584ec` and the VM lock
+  times (from the integrator's log).
 - MOD-07 was not re-run. In Q09 (MOD-22) its step 1 drew an outside-sandbox approval prompt and its step 2 prompt
   offered "Yes, and don't ask again"; the host capture screens-v3 07 showed no such option. Neither is judged here.
 
 ## New defects
 
-- #941: under Moderate with approvals off, the refusal after untrusted content isn't shown and doesn't name the level
-  (MOD-15, blocker).
-- #942: Moderate offers MCP "Allow for this session"/"Always allow" on a data-sending tool, but its own output makes the
-  next call need fresh approval, so the option never applies (MOD-28, advisory).
+- #941: under Moderate with approvals off, the product's refusal after untrusted content doesn't name the level
+  (MOD-15, blocker). That the refusal text was not shown at all is not judged here (amendment v3 R-2); #900 adds it.
+- #942: Moderate offered MCP "Allow for this session" on a data-sending tool, but the repeat call needed fresh approval
+  anyway, so the session approval did not apply. Observed once (MOD-28, advisory); the cause is most likely the first
+  call's own output counting as untrusted content (an inference the product log is consistent with).
 
 ## Decisions for Travis
 
 1. **MOD-15 (#941):** fix the refusal text to name the level and say how to proceed, then re-run MOD-15 on a build with
    #900 (recommended); or accept the refusal as is, since Recent denials and the model's reply both explain it.
-2. **MOD-09 and MOD-21:** both models declined these credential reads citing instructions never to print secrets, which
-   appear to be the product's own guidance, so another model swap is unlikely to reach the product's prompt. (a) Accept both as known limits (recommended): the same protections passed in MOD-03,
+2. **MOD-09 and MOD-21:** in this run GLM 5.2 declined these credential reads twice each, citing instructions never to
+   print secrets, which appear to be the product's own guidance (an inference); in the first run the product's
+   model (in MOD-21 the child's) also declined, in words that don't meet the expected wording (its reasons are not
+   analysed here). Another model swap is therefore unlikely to reach the product's prompt. (a) Accept both as known limits (recommended): the same protections passed in MOD-03,
    MOD-12, MOD-14 and the first run's MOD-21 sandbox steps; (b) redesign them to read a synthetic file whose name and
    content don't look like a secret.
-3. **MOD-28 (#942):** (a) fix #942 so Moderate doesn't offer session approvals that can't apply, and accept MOD-28 as
+3. **MOD-28 (#942, observed once):** (a) fix #942 so Moderate doesn't offer session approvals that can't apply, and accept MOD-28 as
    "no session approval exists to revoke" with the revoke wording judged on screens-v3 06 (recommended); (b) keep it
    blocked.
 4. **MOD-33:** #854 kept a "note: temporary PATH aliases could not be created ... Operation not permitted" line. (a)
@@ -120,4 +133,5 @@ refusal nobody was asked about is not labelled "Approval declined".
 
 ## Review budget
 
-See [review-ledger.md](review-ledger.md): design 1, design review 2, evidence checks 3-5.
+See [review-ledger.md](review-ledger.md): design 1, design review 2, evidence checks 3-5. All three evidence checks
+failed the record on wording; their corrections are applied. The budget is spent, so the r3 corrections are not re-checked.
