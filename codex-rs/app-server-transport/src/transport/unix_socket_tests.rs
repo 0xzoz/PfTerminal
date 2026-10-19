@@ -173,21 +173,33 @@ async fn app_server_startup_lock_is_released_while_a_forked_child_holds_its_desc
     use std::io::Write;
     use std::os::unix::process::CommandExt;
 
+    /// Lets the forked child start its program when dropped, on every path.
+    struct ReleaseChild(std::io::PipeWriter);
+
+    impl Drop for ReleaseChild {
+        fn drop(&mut self) {
+            let _ = self.0.write_all(b"r");
+        }
+    }
+
     let temp_dir = tempfile::TempDir::new()?;
     let lock_path = test_startup_lock_path(temp_dir.path());
     let held = acquire_app_server_startup_lock(lock_path.clone()).await?;
 
     // A child forked now has a copy of every descriptor, the lock's too, until
-    // it starts its program; this one waits 2 s first and reports the fork.
+    // it starts its program; this one reports the fork, then waits for the
+    // release byte, so its copy stays open until the checks below have run.
     let (mut forked, mut forked_tx) = std::io::pipe()?;
+    let (mut release_rx, release_tx) = std::io::pipe()?;
+    let release = ReleaseChild(release_tx);
     let spawner = std::thread::spawn(move || {
         let mut command = std::process::Command::new("/bin/sh");
         command.args(["-c", "exit 0"]);
-        // SAFETY: the hook only writes to a pipe and sleeps, both safe after fork.
+        // SAFETY: the hook only writes to and reads from pipes, both safe after fork.
         unsafe {
             command.pre_exec(move || {
                 forked_tx.write_all(b"f")?;
-                std::thread::sleep(Duration::from_secs(2));
+                release_rx.read_exact(&mut [0; 1])?;
                 Ok(())
             });
         }
@@ -206,6 +218,7 @@ async fn app_server_startup_lock_is_released_while_a_forked_child_holds_its_desc
         other.try_lock().is_ok(),
         "the dropped startup lock is still held through the forked child's copy"
     );
+    drop(release);
     let status = spawner.join().expect("spawner thread")?;
     assert!(status.success(), "{status:?}");
     Ok(())
