@@ -807,6 +807,36 @@ fn custom_mcp_tool_question_offers_session_remember_and_always_allow() {
     );
 }
 
+/// #942: a call whose later calls need a fresh approval offers neither
+/// "Allow for this session" nor "Allow and don't ask me again".
+#[test]
+fn once_only_prompt_offers_no_lasting_approval() {
+    let question = build_mcp_tool_approval_question(
+        "q".to_string(),
+        "custom_server",
+        "post_note",
+        /*connector_name*/ None,
+        prompt_options(
+            /*allow_session_remember*/ true, /*allow_persistent_approval*/ true,
+        )
+        .once_only(),
+        /*question_override*/ None,
+    );
+
+    assert_eq!(
+        question
+            .options
+            .expect("options")
+            .into_iter()
+            .map(|option| option.label)
+            .collect::<Vec<_>>(),
+        vec![
+            MCP_TOOL_APPROVAL_ACCEPT.to_string(),
+            MCP_TOOL_APPROVAL_CANCEL.to_string(),
+        ]
+    );
+}
+
 #[test]
 fn custom_servers_support_session_and_persistent_approval() {
     let invocation = McpInvocation {
