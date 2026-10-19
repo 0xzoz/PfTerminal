@@ -696,30 +696,79 @@ fn issue_874_empty_config_and_hooks_are_reported_once_filled() {
     assert_eq!(project.held(), Vec::<String>::new());
     // Still empty: still nothing.
     assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
-    // Filled in place: the git folder itself doesn't change.
-    std::fs::OpenOptions::new()
-        .append(true)
-        .open(git.join("config.worktree"))
-        .and_then(|mut file| std::io::Write::write_all(&mut file, b"[core]\n"))
-        .expect("filled");
+    // Filled in place, nothing else changed (the git folder itself doesn't).
+    fill(&git.join("config.worktree"));
+    assert_eq!(
+        kinds(&check(thread, &repos)),
+        vec![format!("config {}", git.join("config.worktree").display())]
+    );
+    // A hook put in the folder, and a file renamed over the other one.
     std::fs::write(git.join("hooks/pre-commit"), "#!/bin/sh\n").expect("hook");
-    // Replaced by a renamed file.
     std::fs::write(git.join("commondir.new"), "../elsewhere\n").expect("commondir");
     std::fs::rename(git.join("commondir.new"), git.join("commondir")).expect("rename");
     assert_eq!(
         kinds(&check(thread, &repos)),
         vec![
             format!("config {}", git.join("commondir").display()),
-            format!("config {}", git.join("config.worktree").display()),
             format!("config {}", git.join("hooks").display()),
         ]
     );
+    let mut held = project.held();
+    held.sort();
     assert_eq!(
-        project.held(),
+        held,
         shown(&[
             git.join("commondir"),
             git.join("config.worktree"),
             git.join("hooks")
         ])
     );
+}
+
+/// Review r6 (B1): an empty one is remembered for every session, also after
+/// a session forgets the repository: filled later, it is reported at a
+/// first look too.
+#[test]
+fn issue_874_an_empty_config_is_remembered_across_sessions_and_forgetting() {
+    let project = Project::new();
+    let git = project.git();
+    let (thread, repos) = baseline(&project);
+    std::fs::write(git.join("config.worktree"), "").expect("empty config");
+    std::fs::write(git.join("commondir"), "").expect("empty commondir");
+    assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
+    // Another session (a parent after its sub-agent) looks first, then a
+    // command there fills it.
+    let other = ThreadId::new();
+    assert_eq!(begin(other, &repos, "Moderate"), None);
+    fill(&git.join("config.worktree"));
+    assert_eq!(
+        kinds(&check(other, &repos)),
+        vec![format!("config {}", git.join("config.worktree").display())]
+    );
+    // The first session works in more repositories than it keeps, forgets
+    // this one, and a command fills the other file.
+    let scratch: Vec<Project> = (0..17).map(|_| Project::new()).collect();
+    for project in &scratch {
+        check(thread, &project.repos());
+    }
+    fill(&git.join("commondir"));
+    assert_eq!(
+        kinds(&check(thread, &repos)),
+        vec![format!("config {}", git.join("commondir").display())]
+    );
+    let mut held = project.held();
+    held.sort();
+    assert_eq!(
+        held,
+        shown(&[git.join("commondir"), git.join("config.worktree")])
+    );
+}
+
+/// Appends to `path` in place (its inode unchanged).
+fn fill(path: &Path) {
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, b"x\n"))
+        .expect("filled");
 }

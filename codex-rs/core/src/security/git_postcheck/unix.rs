@@ -24,6 +24,8 @@ const MAX_DEPTH: usize = 16;
 const MAX_REPOS: usize = 8;
 const MAX_REPOS_PER_THREAD: usize = 16;
 const MAX_THREADS: usize = 64;
+/// New, empty config files and hooks folders remembered (`Global::empty_new`).
+const MAX_EMPTY_NEW: usize = 1024;
 const SHOWN_FINDINGS: usize = 20;
 /// Links followed per chain, like the kernel's limit.
 const MAX_LINK_HOPS: usize = 40;
@@ -382,9 +384,6 @@ struct Snapshot {
     /// `.git` was missing at a later look (a worktree removed, a clone
     /// deleted).
     went_missing: bool,
-    /// New config files and hooks folders that were empty when looked at
-    /// (`is_empty_stub`): reported once something is put in them.
-    empty_new: HashSet<PathBuf>,
 }
 
 impl Snapshot {
@@ -397,7 +396,6 @@ impl Snapshot {
             dot_git: dot_git.clone(),
             incomplete: None,
             went_missing: false,
-            empty_new: HashSet::new(),
         }
     }
 }
@@ -678,14 +676,20 @@ pub(super) enum Finding {
 /// reports what git would follow out of the sandbox (links, commands in
 /// state files) and hard links: an ordinary repository has legacy remotes,
 /// config and hooks of its own, and hard-links only its objects.
-fn compare(repo: &Repo, prev: &Snapshot, cur: &mut Snapshot, first: bool) -> Vec<Finding> {
+fn compare(
+    repo: &Repo,
+    prev: &Snapshot,
+    cur: &Snapshot,
+    first: bool,
+    remembered: &HashSet<PathBuf>,
+) -> (Vec<Finding>, EmptyNew) {
     let mut findings = Vec::new();
+    let mut empty = EmptyNew::default();
     if prev.dot_git != cur.dot_git {
         findings.push(Finding::Replaced {
             dot_git: repo.dot_git.clone(),
         });
     }
-    let mut empty_new = HashSet::new();
     let mut folders: Vec<_> = cur.folders.iter().collect();
     folders.sort_by(|a, b| a.0.cmp(b.0));
     for (dir, folder) in folders {
@@ -723,6 +727,17 @@ fn compare(repo: &Repo, prev: &Snapshot, cur: &mut Snapshot, first: bool) -> Vec
             {
                 findings.push(Finding::HardLink { path: path.clone() });
             }
+            // Config or hooks of the repository's own git folder.
+            let config = own && (name.as_os_str() == "hooks" || is_config_name(name));
+            // One that was new and empty (in any session's look, first
+            // looks too): reported once something is in it.
+            if config && remembered.contains(&path) {
+                if !is_empty_stub(cur, &path, entry) {
+                    findings.push(Finding::Config { path: path.clone() });
+                    empty.forget.push(path);
+                }
+                continue;
+            }
             if first {
                 continue;
             }
@@ -736,14 +751,10 @@ fn compare(repo: &Repo, prev: &Snapshot, cur: &mut Snapshot, first: bool) -> Vec
             // the repository's own git folder that didn't exist (on Linux a
             // missing one isn't held read-only). Git rewrites existing ones
             // by renaming; that isn't reported. A new one that is empty
-            // (`is_empty_stub`) is reported once something is put in it.
-            if own
-                && prev_folder.is_some()
-                && (name.as_os_str() == "hooks" || is_config_name(name))
-                && (old.is_none() || prev.empty_new.contains(&path))
-            {
+            // (`is_empty_stub`) is remembered instead.
+            if config && prev_folder.is_some() && old.is_none() {
                 if is_empty_stub(cur, &path, entry) {
-                    empty_new.insert(path);
+                    empty.remember.push(path);
                 } else {
                     findings.push(Finding::Config { path });
                 }
@@ -767,8 +778,27 @@ fn compare(repo: &Repo, prev: &Snapshot, cur: &mut Snapshot, first: bool) -> Vec
             });
         }
     }
-    cur.empty_new = empty_new;
-    findings
+    // Remembered ones that are gone from a git folder this look listed.
+    empty.forget.extend(
+        remembered
+            .iter()
+            .filter(|path| {
+                path.parent()
+                    .and_then(|dir| cur.folders.get(dir))
+                    .zip(path.file_name())
+                    .is_some_and(|(folder, name)| !folder.entries.contains_key(name))
+            })
+            .cloned(),
+    );
+    (findings, empty)
+}
+
+/// New config files and hooks folders found empty (`is_empty_stub`), to
+/// remember, and remembered ones that are filled or gone, to forget.
+#[derive(Default)]
+struct EmptyNew {
+    remember: Vec<PathBuf>,
+    forget: Vec<PathBuf>,
 }
 
 fn is_config_name(name: &OsStr) -> bool {
@@ -877,6 +907,10 @@ struct ThreadState {
 struct Global {
     threads: HashMap<ThreadId, ThreadState>,
     held: HashSet<Held>,
+    /// New config files and hooks folders that were empty when a session
+    /// looked (`is_empty_stub`): any session's later look reports one once
+    /// something is in it. Kept when a session forgets the repository.
+    empty_new: HashSet<PathBuf>,
     /// Repositories (by their git folders) whose latest look was
     /// incomplete, and why.
     incomplete: HashMap<Vec<PathBuf>, String>,
@@ -1006,17 +1040,55 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
         }
         // The last look stays until this one is done (a panic keeps it).
         let prev = snapshot.as_ref();
-        let mut cur = walk(repo, prev);
+        let cur = walk(repo, prev);
         let prev = prev.filter(|prev| !(prev.went_missing && prev.dot_git != cur.dot_git));
-        let mut found = match prev {
-            Some(prev) => compare(repo, prev, &mut cur, /*first*/ false),
+        let remembered: HashSet<PathBuf> = with_global(|global| {
+            global
+                .empty_new
+                .iter()
+                .filter(|path| {
+                    path.parent()
+                        .is_some_and(|dir| repo.git_dirs.iter().any(|git_dir| git_dir == dir))
+                })
+                .cloned()
+                .collect()
+        });
+        let (mut found, empty) = match prev {
+            Some(prev) => compare(repo, prev, &cur, /*first*/ false, &remembered),
             None => compare(
                 repo,
                 &Snapshot::empty(&cur.dot_git),
-                &mut cur,
+                &cur,
                 /*first*/ true,
+                &remembered,
             ),
         };
+        // Past the limit, one is reported instead of remembered.
+        let unremembered = with_global(|global| {
+            for path in &empty.forget {
+                global.empty_new.remove(path);
+            }
+            // Full: those gone meanwhile (a deleted scratch repository) go.
+            if global.empty_new.len() + empty.remember.len() > MAX_EMPTY_NEW {
+                global
+                    .empty_new
+                    .retain(|path| std::fs::symlink_metadata(path).is_ok());
+            }
+            let mut unremembered = Vec::new();
+            for path in empty.remember {
+                if global.empty_new.len() < MAX_EMPTY_NEW || global.empty_new.contains(&path) {
+                    global.empty_new.insert(path);
+                } else {
+                    unremembered.push(path);
+                }
+            }
+            unremembered
+        });
+        found.extend(
+            unremembered
+                .into_iter()
+                .map(|path| Finding::Config { path }),
+        );
         // What went again meanwhile (a pack git linked into place) isn't
         // reported.
         found.retain(|finding| Held::of(finding, repo, &cur).is_none_or(|held| held.stands()));
