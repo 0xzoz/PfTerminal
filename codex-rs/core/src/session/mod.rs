@@ -2796,10 +2796,15 @@ impl Session {
     /// commands can use the newly approved prefix. #626: one approved while
     /// Aggressive is active is recorded as such, so it applies under
     /// Aggressive too (the others are suspended there).
+    /// Saves a "don't ask again" answer. #945: `shown_under` is the policy
+    /// marker its prompt was shown under, if one is known; when a security
+    /// transition was committed since, the answer was for a stale prompt and
+    /// nothing is saved (`Ok(None)`).
     pub(crate) async fn persist_execpolicy_amendment(
         &self,
         amendment: &ExecPolicyAmendment,
-    ) -> Result<crate::exec_policy::AmendmentScope, ExecPolicyUpdateError> {
+        shown_under: Option<Option<(u64, u64)>>,
+    ) -> Result<Option<crate::exec_policy::AmendmentScope>, ExecPolicyUpdateError> {
         let codex_home = self
             .state
             .lock()
@@ -2808,21 +2813,41 @@ impl Session {
             .codex_home()
             .clone();
 
+        // Aggressive in force now (an unreadable live level counts as
+        // Aggressive, as it is enforced): the person approved it under
+        // Aggressive. Read before the marker: the marker only moves forward,
+        // so an unchanged marker means this was the level at the prompt.
+        let approved_under = if self.services.model_client().live_level_is_aggressive() {
+            crate::exec_policy::ApprovedUnder::Aggressive
+        } else {
+            crate::exec_policy::ApprovedUnder::LessStrict
+        };
+        if let Some(shown_under) = shown_under
+            && self.services.authority_marker() != shown_under
+        {
+            return Ok(None);
+        }
         self.services
             .exec_policy
-            .append_amendment_and_update(
-                &codex_home,
-                amendment,
-                // Aggressive in force now (an unreadable live level counts
-                // as Aggressive, as it is enforced): the person approved it
-                // under Aggressive.
-                if self.services.model_client().live_level_is_aggressive() {
-                    crate::exec_policy::ApprovedUnder::Aggressive
-                } else {
-                    crate::exec_policy::ApprovedUnder::LessStrict
-                },
-            )
+            .append_amendment_and_update(&codex_home, amendment, approved_under)
             .await
+            .map(Some)
+    }
+
+    /// #945: the policy marker the open approval prompt `approval_id` was
+    /// shown under; `None` when no such prompt is open.
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "active turn reads must stay consistent with the matching turn state"
+    )]
+    pub(crate) async fn pending_approval_shown_under(
+        &self,
+        approval_id: &str,
+    ) -> Option<Option<(u64, u64)>> {
+        let active = self.active_turn.lock().await;
+        let active = active.as_ref()?;
+        let ts = active.turn_state.lock().await;
+        ts.pending_approval_shown_under(approval_id)
     }
 
     pub(crate) async fn turn_context_for_sub_id(&self, sub_id: &str) -> Option<Arc<TurnContext>> {
@@ -2994,7 +3019,11 @@ impl Session {
             match active.as_mut() {
                 Some(at) => {
                     let mut ts = at.turn_state.lock().await;
-                    ts.insert_pending_approval(effective_approval_id.clone(), tx_approve)
+                    ts.insert_pending_approval(
+                        effective_approval_id.clone(),
+                        tx_approve,
+                        self.services.authority_marker(),
+                    )
                 }
                 None => None,
             }
@@ -3073,7 +3102,11 @@ impl Session {
             match active.as_mut() {
                 Some(at) => {
                     let mut ts = at.turn_state.lock().await;
-                    ts.insert_pending_approval(approval_id.clone(), tx_approve)
+                    ts.insert_pending_approval(
+                        approval_id.clone(),
+                        tx_approve,
+                        self.services.authority_marker(),
+                    )
                 }
                 None => None,
             }
@@ -5490,3 +5523,7 @@ mod account_switch_tests;
 #[cfg(test)]
 #[path = "home_access_session_tests.rs"]
 mod home_access_session_tests;
+
+#[cfg(test)]
+#[path = "stale_approval_tests.rs"]
+mod stale_approval_tests;

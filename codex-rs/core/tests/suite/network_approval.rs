@@ -594,6 +594,129 @@ async fn user_network_approval_once_session_and_denial_semantics() -> Result<()>
     Ok(())
 }
 
+/// #945: a network prompt answered after the security level rose is for a
+/// stale prompt. The host is not approved "for session"; the request is
+/// asked again under the new level, and the next turn asks again too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "requires the trusted Linux proxy bridge"
+)]
+async fn issue_945_network_answer_after_a_level_change_is_asked_again() -> Result<()> {
+    use codex_core::security_level_change::LevelBasis;
+    use codex_core::security_level_change::LevelChangeKind;
+    use codex_core::security_level_change::Probes;
+    use codex_core::security_level_change::commit_human_level_change;
+    use codex_security_policy::SecurityLevel;
+
+    skip_if_target_windows!(Ok(()), "uses the POSIX/Python network fixture");
+    skip_if_host_windows!(Ok(()));
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+
+    let server = start_mock_server().await;
+    let test = managed_network_unified_exec_test(&server).await?;
+    let environments = vec![local(test.config.cwd.clone())];
+
+    let responses = mount_exec_network_turn(
+        &server,
+        "resp-issue-945-stale",
+        "issue-945-stale",
+        network_fetch_args(LOCAL_ENVIRONMENT_ID),
+    )
+    .await?;
+    submit_managed_network_turn(
+        &test,
+        "answer this network prompt after the level rose",
+        environments.clone(),
+        ApprovalsReviewer::User,
+        AskForApproval::OnRequest,
+    )
+    .await?;
+    let shown = expect_network_approval(&test, LOCAL_ENVIRONMENT_ID).await?;
+
+    // The person raises the level while the prompt is open (off the async
+    // runtime, as the TUI commits).
+    let home = test.codex_home_path().to_path_buf();
+    let thread = Some(test.session_configured.thread_id);
+    let report = tokio::task::spawn_blocking(move || {
+        let home = home.as_path();
+        let basis = LevelBasis::read(home, SecurityLevel::Permissive, thread);
+        commit_human_level_change(
+            home,
+            SecurityLevel::Permissive,
+            thread,
+            &basis,
+            SecurityLevel::Moderate,
+            Probes::Passed,
+            /*now_unix_seconds*/ 1_000,
+        )
+    })
+    .await??;
+    assert_eq!(report.kind, LevelChangeKind::Stricter);
+    assert!(report.live, "Moderate applies in this session now");
+
+    test.codex
+        .submit(Op::ExecApproval {
+            id: shown.effective_approval_id(),
+            turn_id: Some(shown.turn_id.clone()),
+            decision: ReviewDecision::ApprovedForSession,
+        })
+        .await?;
+    let again = expect_network_approval(&test, LOCAL_ENVIRONMENT_ID).await?;
+    assert_ne!(again.call_id, shown.call_id);
+    assert!(
+        again
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("security level changed")),
+        "{:?}",
+        again.reason
+    );
+    test.codex
+        .submit(Op::ExecApproval {
+            id: again.effective_approval_id(),
+            turn_id: Some(again.turn_id),
+            decision: ReviewDecision::denied("rejected by user"),
+        })
+        .await?;
+    wait_for_turn_complete(&test).await;
+    let output = responses
+        .requests()
+        .iter()
+        .find_map(|request| request.function_call_output_text("issue-945-stale"))
+        .context("expected network output")?;
+    assert!(!output.contains("OK:"), "{output}");
+
+    // The stale "for session" answer stored nothing: the next turn asks.
+    mount_exec_network_turn(
+        &server,
+        "resp-issue-945-next",
+        "issue-945-next",
+        network_fetch_args(LOCAL_ENVIRONMENT_ID),
+    )
+    .await?;
+    submit_managed_network_turn(
+        &test,
+        "the host was not approved for the session",
+        environments,
+        ApprovalsReviewer::User,
+        AskForApproval::OnRequest,
+    )
+    .await?;
+    let next = expect_network_approval(&test, LOCAL_ENVIRONMENT_ID).await?;
+    test.codex
+        .submit(Op::ExecApproval {
+            id: next.effective_approval_id(),
+            turn_id: Some(next.turn_id),
+            decision: ReviewDecision::denied("rejected by user"),
+        })
+        .await?;
+    wait_for_turn_complete(&test).await;
+
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[cfg_attr(
     not(target_os = "linux"),

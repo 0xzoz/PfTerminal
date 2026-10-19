@@ -91,7 +91,7 @@ pub(crate) struct RunningTask {
 /// Mutable state for a single turn.
 #[derive(Default)]
 pub(crate) struct TurnState {
-    pending_approvals: HashMap<String, oneshot::Sender<ReviewDecision>>,
+    pending_approvals: HashMap<String, PendingApproval>,
     pending_request_permissions: HashMap<String, PendingRequestPermissions>,
     pending_user_input: HashMap<String, oneshot::Sender<RequestUserInputResponse>>,
     pending_elicitations: HashMap<(String, RequestId), oneshot::Sender<ElicitationResponse>>,
@@ -105,6 +105,14 @@ pub(crate) struct TurnState {
     pub(crate) has_memory_citation: bool,
     pub(crate) token_usage_at_turn_start: TokenUsage,
     mailbox_message_ids: HashSet<String>,
+}
+
+/// An open approval prompt. #945: it remembers the policy marker (epoch
+/// and revocation generation) it was shown under, so an answer that comes
+/// after a security transition can be told apart.
+struct PendingApproval {
+    tx: oneshot::Sender<ReviewDecision>,
+    shown_under: Option<(u64, u64)>,
 }
 
 pub(crate) struct PendingRequestPermissions {
@@ -126,15 +134,25 @@ impl TurnState {
         &mut self,
         key: String,
         tx: oneshot::Sender<ReviewDecision>,
+        shown_under: Option<(u64, u64)>,
     ) -> Option<oneshot::Sender<ReviewDecision>> {
-        self.pending_approvals.insert(key, tx)
+        self.pending_approvals
+            .insert(key, PendingApproval { tx, shown_under })
+            .map(|previous| previous.tx)
     }
 
     pub(crate) fn remove_pending_approval(
         &mut self,
         key: &str,
     ) -> Option<oneshot::Sender<ReviewDecision>> {
-        self.pending_approvals.remove(key)
+        self.pending_approvals.remove(key).map(|pending| pending.tx)
+    }
+
+    /// #945: the policy marker the open prompt `key` was shown under.
+    pub(crate) fn pending_approval_shown_under(&self, key: &str) -> Option<Option<(u64, u64)>> {
+        self.pending_approvals
+            .get(key)
+            .map(|pending| pending.shown_under)
     }
 
     pub(crate) fn clear_pending_waiters(&mut self) {

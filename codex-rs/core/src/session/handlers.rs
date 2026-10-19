@@ -514,22 +514,39 @@ pub async fn exec_approval(
     decision: ReviewDecision,
 ) {
     let event_turn_id = turn_id.unwrap_or_else(|| approval_id.clone());
+    let mut stale_amendment = false;
     if let ReviewDecision::ApprovedExecpolicyAmendment {
         proposed_execpolicy_amendment,
     } = &decision
     {
+        let shown_under = sess.pending_approval_shown_under(&approval_id).await;
         match sess
-            .persist_execpolicy_amendment(proposed_execpolicy_amendment)
+            .persist_execpolicy_amendment(proposed_execpolicy_amendment, shown_under)
             .await
         {
-            Ok(crate::exec_policy::AmendmentScope::Saved) => {
+            // #945: the prompt was shown before a security transition. The
+            // rule is not saved; the answer approves this command once, as a
+            // stale "for session" answer does.
+            Ok(None) => {
+                let message = "The security level changed while this approval was open, so \
+                               \"don't ask again\" was not saved. The command was approved this \
+                               once."
+                    .to_string();
+                sess.send_event_raw(Event {
+                    id: event_turn_id.clone(),
+                    msg: EventMsg::Warning(WarningEvent { message }),
+                })
+                .await;
+                stale_amendment = true;
+            }
+            Ok(Some(crate::exec_policy::AmendmentScope::Saved)) => {
                 sess.record_execpolicy_amendment_message(
                     &event_turn_id,
                     proposed_execpolicy_amendment,
                 )
                 .await;
             }
-            Ok(crate::exec_policy::AmendmentScope::Session) => {
+            Ok(Some(crate::exec_policy::AmendmentScope::Session)) => {
                 let message = "This command contains a credential, so the approval applies to \
                                this session only and was not saved to your rules."
                     .to_string();
@@ -552,6 +569,11 @@ pub async fn exec_approval(
             }
         }
     }
+    let decision = if stale_amendment {
+        ReviewDecision::Approved
+    } else {
+        decision
+    };
     match decision {
         ReviewDecision::Abort => {
             sess.interrupt_task().await;

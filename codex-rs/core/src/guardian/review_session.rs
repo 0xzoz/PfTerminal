@@ -757,7 +757,11 @@ async fn run_review_on_session(
                 .parent_session
                 .services
                 .network_approval
-                .sync_session_approved_hosts_to(&review_session.session.services.network_approval)
+                .sync_session_approved_hosts_to(
+                    &review_session.session.services.network_approval,
+                    params.parent_session.services.authority_marker(),
+                    review_session.session.services.authority_marker(),
+                )
                 .await;
 
             build_guardian_prompt_items_with_parent_turn(
