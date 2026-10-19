@@ -2220,3 +2220,133 @@ fn issue_885_review_3_routes() {
     ];
     assert_eq!(issue_885_wrong(&cwd, &cases), Vec::<String>::new());
 }
+
+/// #937 (D33 option B): arithmetic that uses a variable filled from command
+/// output or `read` evaluates the substitutions in its value, like `eval`.
+/// Every case runs `touch hit` in that shell when `notes` holds
+/// `a[$(touch hit)0]` (zsh: `path[...]`): checked with bash 3.2 and 5.2
+/// (`mapfile`), zsh 5.9 and ksh93.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_937_arithmetic_on_filled_variables_is_unseen_code() {
+    use ProtectedActionKind::UnseenCode;
+    let bash = [
+        "v=$(cat notes); echo $((v))",
+        "v=$(cat notes); let v",
+        "v=$(cat notes); let \"x=v+1\"",
+        "v=$(cat notes); (( v )); :",
+        "v=$(cat notes); echo $[v]",
+        "v=$(cat notes); s=x; echo ${s:v}",
+        "v=$(cat notes); a=(1); echo ${a[v]}",
+        "v=$(cat notes); a[v]=1",
+        "v=$(cat notes); echo ${!v}",
+        "v=$(cat notes); [[ v -eq 1 ]]; :",
+        "v=$(cat notes); [[ -n x && $v -gt 1 ]]",
+        "v=$(cat notes); declare -i n; n=v",
+        "v=$(cat notes); declare -i n=v",
+        "declare -i n; n=$(cat notes)",
+        "declare -i n; read n < notes",
+        "v=$(cat notes); declare \"$v\"=1",
+        "v=$(cat notes); read \"$v\" <<< 1",
+        "a=(1); v=$(cat notes); unset \"$v\"",
+        "v=$(cat notes); r=v; echo $((r))",
+        "v=$(cat notes); for ((i=v; i<0; i++)); do :; done",
+        "v=$(cat notes); set -- \"$v\"; echo $(( $1 ))",
+        "f() { echo $(( $1 )); }; v=$(cat notes); f \"$v\"",
+        "v=`cat notes`; echo $((v))",
+        "export v=$(cat notes); echo $((v + 1))",
+        "c=let; v=$(cat notes); $c v",
+        "read v < notes; echo $((v))",
+        "while read -r v; do echo $((v)); done < notes",
+        "cat notes | while IFS= read -r line; do ((line)); done",
+        "mapfile -t lines < notes; echo $(( lines[0] ))",
+        "for v in \"$(cat notes)\"; do echo $((v)); done",
+        "echo $(( $(cat notes) + 1 ))",
+        // A command substitution that starts `$((` is not arithmetic.
+        "v=$(((1));cat notes); echo $((v))",
+        "v=$(cat notes); eval let v",
+        "v=$(cat notes); printf -v n '%s' \"$v\"; echo $((n))",
+        "shopt -s expand_aliases; v=$(cat notes); alias L=let\nL v",
+    ];
+    let zsh = [
+        "v=$(cat notes); echo $((v))",
+        "v=$(cat notes); a=(1); echo $a[v]",
+        "v=$(cat notes); print -f '%d' \"$v\"",
+        "v=$(cat notes); printf '%*s' v x",
+        "v=$(cat notes); repeat v; do :; done",
+        "v=$(cat notes); for i in 1; do break v; done",
+        "v=$(cat notes); exit v",
+        "v=$(cat notes); echo ${(l:v:)s}",
+        "v=$(cat notes); vared \"$v\"",
+        "v=$(cat notes); [[ -v $v ]]",
+        "v=$(cat notes); test -v \"$v\"",
+        "v=$(cat notes); export \"$v\"=1",
+        "v=$(cat notes); printf -v \"$v\" x",
+        "v=$(cat notes); local \"$v\"",
+        "v=$(cat notes); integer n; n=v",
+        "read v < notes; set -- \"$v\"; shift \"$1\"",
+        "v=$(cat notes); noglob let v",
+        "for a b in \"$(cat notes)\" x; do echo $((a)); done",
+    ];
+    let ksh = [
+        "v=$(cat notes); [ \"$v\" -eq 1 ]",
+        "v=$(cat notes); read -t v x <<< 1",
+        "v=$(cat notes); ulimit -n \"$v\"",
+    ];
+    // Nested in another shell's script, too.
+    let nested = [
+        "bash -c 'v=$(cat notes); echo $((v))'",
+        "zsh -c \"v=\\$(cat notes); echo \\$((v))\"",
+    ];
+    let mut wrong = Vec::new();
+    for line in nested {
+        let found = kind(&["bash", "-lc", line]);
+        if found != Some(UnseenCode) {
+            wrong.push(format!("nested: {line} -> {found:?}"));
+        }
+    }
+    for (shell, lines) in [("bash", &bash[..]), ("zsh", &zsh[..]), ("ksh", &ksh[..])] {
+        for line in lines {
+            let found = kind(&[shell, "-c", line]);
+            if found != Some(UnseenCode) {
+                wrong.push(format!("{shell}: {line} -> {found:?}"));
+            }
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+}
+
+/// #937: loop counters, values from literals or from commands the
+/// classifier can read, and filled variables used as plain text still run.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_937_counters_and_plain_uses_are_not_unseen_code() {
+    let mut wrong = Vec::new();
+    for shell in ["bash", "zsh"] {
+        for line in [
+            "i=0; ((i++)); echo $((i+1))",
+            "i=0; while [ $i -lt 3 ]; do i=$((i+1)); done",
+            "for ((i=0; i<10; i++)); do echo $i; done",
+            "n=$((2*3)); echo $((n+1)); a[n]=1; echo ${a[n]}",
+            "start=$(date +%s); echo $(( $(date +%s) - start ))",
+            "v=$(cat notes); echo \"$v\" ${v:-x} ${#v} ${v:0:3}",
+            "line=$(head -1 notes); echo $(( ${#line} + 1 ))",
+            "while read -r line; do printf '%s\\n' \"$line\"; done < notes",
+            "count=$(grep -c x notes); [ \"$count\" -gt 0 ] && echo yes",
+            "v=$(cat notes); grep '[[:digit:]]' notes",
+            "echo $((LINES + COLUMNS))",
+        ] {
+            let found = kind(&[shell, "-c", line]);
+            if found.is_some() {
+                wrong.push(format!("{shell}: {line} -> {found:?}"));
+            }
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+}

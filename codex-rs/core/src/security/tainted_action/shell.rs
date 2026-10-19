@@ -14,6 +14,10 @@ const MAX_BRACE_EXPANSION: usize = 64;
 /// Placeholder for the output of a substitution the classifier cannot see.
 /// Holds a control character, so no variable or word can spell it.
 pub(super) const UNSEEN_OUTPUT: &str = "\u{1}unseen-output\u{1}";
+/// Placeholder for an arithmetic expansion's number (`$((i + 1))`). It holds
+/// [`UNSEEN_OUTPUT`], so every check for unseen output treats it the same;
+/// only the arithmetic check (#937) tells it apart from command output.
+pub(super) const ARITHMETIC_OUTPUT: &str = "\u{1}unseen-output\u{1}arithmetic\u{1}";
 
 #[derive(Debug, Default)]
 pub(super) struct SimpleCommand {
@@ -221,6 +225,8 @@ struct Open {
     output: bool,
     /// `<(...)`: the outer command gets a file name, not the text.
     process: bool,
+    /// Opened by `$((`: arithmetic when it also closes with `))`.
+    arithmetic: bool,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -342,7 +348,7 @@ impl Lexer {
         self.current.pipe_from = self.group_pipe();
     }
 
-    fn open_substitution(&mut self, backtick: bool, output: bool, process: bool) {
+    fn open_substitution(&mut self, backtick: bool, output: bool, process: bool, arithmetic: bool) {
         let outer = std::mem::replace(
             &mut self.current,
             SimpleCommand {
@@ -359,13 +365,15 @@ impl Lexer {
             backtick,
             output,
             process,
+            arithmetic,
         });
     }
 
     /// Close the innermost substitution and continue the command it
     /// interrupted. `echo`/`printf` output is spliced into the word; any
     /// other output is a placeholder the classifier cannot see through.
-    fn close_substitution(&mut self) {
+    /// `arithmetic_close`: this `)` is followed by another (`$((...))`).
+    fn close_substitution(&mut self, arithmetic_close: bool) {
         self.finish_current();
         let Some(open) = self.open.pop() else {
             return;
@@ -402,14 +410,18 @@ impl Lexer {
         }
         self.word = open.outer_word;
         if !open.output {
-            self.word
-                .push_str(spliced.as_deref().unwrap_or(UNSEEN_OUTPUT));
+            let unseen = if open.arithmetic && arithmetic_close {
+                ARITHMETIC_OUTPUT
+            } else {
+                UNSEEN_OUTPUT
+            };
+            self.word.push_str(spliced.as_deref().unwrap_or(unseen));
         }
     }
 
     fn finish(mut self) -> Vec<SimpleCommand> {
         while !self.open.is_empty() {
-            self.close_substitution();
+            self.close_substitution(/*arithmetic_close*/ false);
         }
         self.finish_current();
         self.done
@@ -431,6 +443,10 @@ impl Lexer {
                         /*backtick*/ false,
                         /*output*/ ch == '>',
                         /*process*/ ch == '<',
+                        /*arithmetic*/
+                        ch == '$'
+                            && chars.get(index + 2) == Some(&'(')
+                            && arithmetic_expansion(&chars, index + 3),
                     );
                     index += 2;
                     continue;
@@ -439,15 +455,16 @@ impl Lexer {
                 '\\' if next == Some('\n') => index += 1,
                 '`' => {
                     if self.open.last().is_some_and(|open| open.backtick) {
-                        self.close_substitution();
+                        self.close_substitution(/*arithmetic_close*/ false);
                     } else {
                         self.open_substitution(
                             /*backtick*/ true, /*output*/ false, /*process*/ false,
+                            /*arithmetic*/ false,
                         );
                     }
                 }
                 ')' if self.open.last().is_some_and(|open| !open.backtick) => {
-                    self.close_substitution();
+                    self.close_substitution(/*arithmetic_close*/ next == Some(')'));
                 }
                 '{' if self.word.is_empty() && next.is_none_or(char::is_whitespace) => {
                     self.open_bracket();
@@ -500,6 +517,24 @@ impl Lexer {
             index += 1;
         }
     }
+}
+
+/// Whether the `$((` before `start` is certainly an arithmetic expansion:
+/// it closes with `))` and holds nothing that could make bash or zsh read it
+/// as a command substitution instead (`$(((1));cat f)`, `$((echo '))';cat f) )`).
+/// When unsure, `false`: its value then counts as command output.
+fn arithmetic_expansion(chars: &[char], start: usize) -> bool {
+    let mut braces = 0_usize;
+    for (at, ch) in chars.iter().enumerate().skip(start) {
+        match ch {
+            '\'' | '"' | '`' | '\\' | '(' => return false,
+            '{' => braces += 1,
+            '}' => braces = braces.saturating_sub(1),
+            ')' => return braces == 0 && chars.get(at + 1) == Some(&')'),
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Decode a bash `$'...'` string starting at `index` (after the quote)
