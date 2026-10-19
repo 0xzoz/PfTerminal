@@ -187,13 +187,13 @@ fn check_preexisting_link(parent_link: bool) {
 #[cfg(unix)]
 #[test]
 fn archive_migration_preexisting_parent_symlink_does_not_escape() {
-    check_preexisting_link(true);
+    check_preexisting_link(/*parent_link*/ true);
 }
 
 #[cfg(unix)]
 #[test]
 fn archive_migration_preexisting_file_symlink_does_not_escape() {
-    check_preexisting_link(false);
+    check_preexisting_link(/*parent_link*/ false);
 }
 
 #[cfg(unix)]
