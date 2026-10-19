@@ -206,7 +206,7 @@ impl PostTaintAction {
              so it needs your approval, and approvals are off (approval_policy = never). \
              Review the action and turn approval prompts on before asking again. \
              Other security protections still apply.",
-            self.state.level,
+            level_name(self.state.level),
             self.kind.describe()
         )
     }
@@ -1288,6 +1288,15 @@ fn substitute(
             (out, unseen)
         })
         .unzip()
+}
+
+/// The level as other product messages name it ("security level Moderate").
+fn level_name(level: SecurityLevel) -> &'static str {
+    match level {
+        SecurityLevel::Permissive => "Permissive",
+        SecurityLevel::Moderate => "Moderate",
+        SecurityLevel::Aggressive => "Aggressive",
+    }
 }
 
 #[cfg(test)]

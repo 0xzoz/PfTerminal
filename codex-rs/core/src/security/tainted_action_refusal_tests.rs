@@ -19,7 +19,7 @@ fn issue941_approvals_off_names_the_actual_level() {
     for level in [SecurityLevel::Moderate, SecurityLevel::Aggressive] {
         let reason = action(level, ProtectedActionKind::Credentials).approvals_off_rejection();
         assert!(
-            reason.contains(&format!("Security level {level}:")),
+            reason.contains(&format!("Security level {}:", level_name(level))),
             "{reason}"
         );
         assert!(reason.contains("approval_policy = never"), "{reason}");
