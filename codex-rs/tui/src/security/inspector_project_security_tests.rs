@@ -36,7 +36,7 @@ impl Fixture {
             ),
         )
         .unwrap();
-        std::fs::write(project.join(".codex/config.toml"), project_config).unwrap();
+        std::fs::write(project.join(".codex").join("config.toml"), project_config).unwrap();
         Self {
             _temp: temp,
             home,
@@ -131,7 +131,9 @@ async fn ignored_permissive_project_table_is_attributed_without_changing_authori
     let before = std::fs::read(fixture.home.join("config.toml")).unwrap();
     let config = fixture.load().await.unwrap();
     assert_eq!(config.security_level, SecurityLevel::Moderate);
-    let expected = vec![ignored_row(&fixture.project.join(".codex/config.toml"))];
+    let expected = vec![ignored_row(
+        &fixture.project.join(".codex").join("config.toml"),
+    )];
     assert!(config.startup_warnings.contains(&expected[0].value));
     assert_eq!(project_rows(&config), expected);
     assert_eq!(
@@ -176,7 +178,8 @@ async fn invalid_project_table_still_fails_with_its_original_file_error() {
         error.to_string().contains(
             &fixture
                 .project
-                .join(".codex/config.toml")
+                .join(".codex")
+                .join("config.toml")
                 .display()
                 .to_string()
         ),
@@ -195,10 +198,10 @@ async fn untrusted_project_table_keeps_existing_disabled_handling() {
 #[tokio::test]
 async fn multiple_ignored_project_tables_keep_distinct_file_attribution() {
     let mut fixture = Fixture::new("[security]\nlevel = \"permissive\"\n", "trusted");
-    let outer = fixture.project.join(".codex/config.toml");
+    let outer = fixture.project.join(".codex").join("config.toml");
     fixture.project = fixture.project.join("nested");
     std::fs::create_dir_all(fixture.project.join(".codex")).unwrap();
-    let inner = fixture.project.join(".codex/config.toml");
+    let inner = fixture.project.join(".codex").join("config.toml");
     std::fs::write(&inner, "[security]\nlevel = \"permissive\"\n").unwrap();
     let config = fixture.load().await.unwrap();
     assert_eq!(config.security_level, SecurityLevel::Moderate);
@@ -215,11 +218,11 @@ async fn multiple_ignored_project_tables_keep_distinct_file_attribution() {
 #[tokio::test]
 async fn ignored_parent_and_valid_inner_remain_distinct() {
     let mut fixture = Fixture::new("[security]\nlevel = \"permissive\"\n", "trusted");
-    let outer = fixture.project.join(".codex/config.toml");
+    let outer = fixture.project.join(".codex").join("config.toml");
     fixture.project = fixture.project.join("nested");
     std::fs::create_dir_all(fixture.project.join(".codex")).unwrap();
     std::fs::write(
-        fixture.project.join(".codex/config.toml"),
+        fixture.project.join(".codex").join("config.toml"),
         "[security]\nversion = 1\nlevel = \"moderate\"\n",
     )
     .unwrap();
@@ -235,7 +238,7 @@ async fn normal_projects_have_no_ignored_security_diagnostic() {
     for project_config in [Some(""), None] {
         let fixture = Fixture::new(project_config.unwrap_or_default(), "trusted");
         if project_config.is_none() {
-            std::fs::remove_file(fixture.project.join(".codex/config.toml")).unwrap();
+            std::fs::remove_file(fixture.project.join(".codex").join("config.toml")).unwrap();
         }
         let config = fixture.load().await.unwrap();
         assert_eq!(config.security_level, SecurityLevel::Moderate);
