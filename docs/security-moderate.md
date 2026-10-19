@@ -121,12 +121,13 @@ The kill switch (`/security` → `g`) works under every level.
   run git yourself. It watches the repositories of the folders agent
   commands run in: not a repository a command reaches elsewhere (`git -C`),
   not one a command creates and fills in one go (nothing was there to
-  compare with), and not a `.git` removed in one command and made again in a
-  later one (it gets a first look, which reports only links, steps and hard
-  links). New config and hooks are checked only
-  in a repository's own git folder, not in its worktrees' or submodules'. A
-  session that works in more than 16 repositories forgets the oldest; its
-  next look there reports only links, steps and hard links.
+  compare with). A `.git` removed in one command and made again in a later
+  one is looked at in full: its config, hooks and remotes are reported as
+  new, also after `git init` or a fresh clone there. New config and hooks
+  are checked only in a repository's own git folder, not in its worktrees'
+  or submodules'. A session that works in more than 16 repositories
+  forgets the oldest; its next look there reports only links, steps and
+  hard links.
 - MCP servers, apps, hooks and `!` shell commands run outside the sandbox, as
   under every level.
 - On Linux, where a command you approve can write a Corbanu home's folder

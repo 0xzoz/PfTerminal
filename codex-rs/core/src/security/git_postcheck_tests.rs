@@ -644,7 +644,8 @@ fn issue_874_a_remote_behind_an_unreadable_git_folder_is_reported() {
 }
 
 /// Review r4 (nit 3): a repository deleted and cloned again in the same
-/// place gets a first look, not "replaced".
+/// place isn't reported as "replaced" (its config and hooks would be as
+/// new, #943).
 #[test]
 fn issue_874_a_recloned_repository_gets_a_first_look() {
     let project = Project::new();
@@ -831,5 +832,94 @@ fn issue_874_an_empty_config_forgotten_by_another_session() {
     assert_eq!(
         kinds(&check(thread, &repos)),
         vec![format!("config {}", git.join("config.worktree").display())]
+    );
+}
+
+/// #943 (1): a `.git` that went missing at a look and is made again, a
+/// different one, by a later command gets a full look (compared with an
+/// empty git folder), not a first look: its config, hooks and remotes are
+/// reported.
+#[test]
+fn issue_943_a_git_folder_made_again_later_gets_a_full_look() {
+    let project = Project::new();
+    let git = project.git();
+    let (thread, repos) = baseline(&project);
+    std::fs::rename(&git, project.base.join("moved-git")).expect("moved away");
+    assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
+    for folder in ["objects", "refs/heads", "hooks", "remotes"] {
+        std::fs::create_dir_all(git.join(folder)).expect("git folder");
+    }
+    std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").expect("HEAD");
+    std::fs::write(git.join("config"), "[core]\n\tfsmonitor = /tmp/run-me\n").expect("config");
+    std::fs::write(git.join("hooks/pre-commit"), "#!/bin/sh\n").expect("hook");
+    std::fs::write(git.join("remotes/x"), "URL: /tmp/elsewhere\n").expect("remote");
+    assert_eq!(
+        kinds(&check(thread, &repos)),
+        vec![
+            format!("config {}", git.join("config").display()),
+            format!("config {}", git.join("hooks").display()),
+            format!("remote {}", git.join("remotes/x").display()),
+        ]
+    );
+    let mut held = project.held();
+    held.sort();
+    assert_eq!(
+        held,
+        shown(&[git.join("config"), git.join("hooks"), git.join("remotes/x")])
+    );
+    // Told once.
+    assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
+}
+
+/// #943 (1): made again empty (the Linux sandbox's mount point where `.git`
+/// was missing), nothing is reported until something is put in it.
+#[test]
+fn issue_943_an_empty_git_folder_made_again_is_reported_once_filled() {
+    let project = Project::new();
+    let git = project.git();
+    let (thread, repos) = baseline(&project);
+    std::fs::rename(&git, project.base.join("moved-git")).expect("moved away");
+    assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
+    std::fs::create_dir(&git).expect("empty .git");
+    std::fs::write(git.join("config"), "").expect("empty config");
+    std::fs::create_dir(git.join("hooks")).expect("empty hooks");
+    assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
+    assert_eq!(project.held(), Vec::<String>::new());
+    fill(&git.join("config"));
+    assert_eq!(
+        kinds(&check(thread, &repos)),
+        vec![format!("config {}", git.join("config").display())]
+    );
+}
+
+/// #943 (1): a worktree's `.git` file made again for the same git folders
+/// is compared with the last look there (its common folder's config and
+/// hooks aren't new).
+#[test]
+fn issue_943_a_worktree_git_file_made_again_compares_with_the_last_look() {
+    let project = Project::new();
+    let worktree_git = project.git().join("worktrees/feature");
+    std::fs::create_dir_all(&worktree_git).expect("worktree git folder");
+    std::fs::write(worktree_git.join("HEAD"), "ref: refs/heads/feature\n").expect("HEAD");
+    std::fs::write(worktree_git.join("commondir"), "../..\n").expect("commondir");
+    let worktree = project.base.join("feature");
+    std::fs::create_dir_all(&worktree).expect("worktree");
+    let text = format!("gitdir: {}\n", worktree_git.display());
+    std::fs::write(worktree.join(".git"), &text).expect("git file");
+    let thread = ThreadId::new();
+    let repos = repos(&[worktree.as_path()]);
+    assert_eq!(begin(thread, &repos, "Moderate"), None);
+    std::fs::remove_file(worktree.join(".git")).expect("removed");
+    assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
+    std::fs::write(worktree.join(".git"), &text).expect("made again");
+    assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
+    // What is new there since the last look still is.
+    std::fs::write(worktree_git.join("config.worktree"), "[core]\n").expect("config");
+    assert_eq!(
+        kinds(&check(thread, &repos)),
+        vec![format!(
+            "config {}",
+            worktree_git.join("config.worktree").display()
+        )]
     );
 }

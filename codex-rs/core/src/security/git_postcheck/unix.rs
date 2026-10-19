@@ -1073,7 +1073,12 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
         // The last look stays until this one is done (a panic keeps it).
         let prev = snapshot.as_ref();
         let mut cur = walk(repo, prev);
-        let prev = prev.filter(|prev| !(prev.went_missing && prev.dot_git != cur.dot_git));
+        // Missing at the last look and back as a different one: a full
+        // look, not a first look (#943).
+        let remade = prev
+            .filter(|prev| prev.went_missing && prev.dot_git != cur.dot_git)
+            .map(|prev| remade_baseline(repo, prev, &cur));
+        let prev = remade.as_ref().or(prev);
         let remembered: HashSet<PathBuf> = with_global(|global| {
             global
                 .empty_new
@@ -1164,6 +1169,48 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
         global.held.extend(held);
     });
     findings
+}
+
+/// What a `.git` made again (missing at the last look, now a different one)
+/// is compared with: the last look's folders that are still the same ones,
+/// and empty ones for its own git folders that aren't, so that config,
+/// hooks, remotes and steps there are reported as new (empty ones once
+/// filled).
+fn remade_baseline(repo: &Repo, prev: &Snapshot, cur: &Snapshot) -> Snapshot {
+    let mut baseline = Snapshot::empty(&cur.dot_git);
+    baseline.empty_new = prev.empty_new.clone();
+    for (dir, folder) in &cur.folders {
+        if let Some(old) = prev
+            .folders
+            .get(dir)
+            .filter(|old| old.dev == folder.dev && old.ino == folder.ino)
+        {
+            baseline.folders.insert(dir.clone(), old.clone());
+        }
+    }
+    baseline.states = prev
+        .states
+        .iter()
+        .filter(|(path, _)| {
+            path.parent()
+                .is_some_and(|dir| baseline.folders.contains_key(dir))
+        })
+        .map(|(path, read)| (path.clone(), read.clone()))
+        .collect();
+    for dir in &repo.git_dirs {
+        baseline
+            .folders
+            .entry(dir.clone())
+            .or_insert_with(|| Folder {
+                dev: 0,
+                ino: 0,
+                ctime: 0,
+                settled: false,
+                role: Role::GitDir,
+                entries: HashMap::new(),
+            });
+    }
+    baseline
 }
 
 /// What any session (a sub-agent's too) found in the git folders `watched`
