@@ -773,21 +773,63 @@ fn fill(path: &Path) {
         .expect("filled");
 }
 
-/// CI (#926): a `.git` replaced by an empty folder (the Linux sandbox's
-/// mount point, removed and made again by other commands) isn't reported;
-/// what is put in it later is.
+/// CI (#926): an empty `.git` folder replaced by another (the Linux
+/// sandbox's mount point, removed and made again by other commands, with
+/// empty mount points of its own in it) isn't reported; what is put in it
+/// later is.
 #[test]
-fn issue_874_a_git_folder_replaced_by_an_empty_one() {
+fn issue_874_an_empty_git_folder_replaced_by_another() {
+    let project = Project::new();
+    let git = project.git();
+    std::fs::rename(&git, project.base.join("saved-git")).expect("moved");
+    std::fs::create_dir(&git).expect("empty .git");
+    let (thread, repos) = baseline(&project);
+    std::fs::remove_dir(&git).expect("removed");
+    std::fs::create_dir(&git).expect("empty .git again");
+    std::fs::write(git.join("config"), "").expect("empty config");
+    std::fs::create_dir(git.join("hooks")).expect("empty hooks");
+    assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
+    assert_eq!(project.held(), Vec::<String>::new());
+    std::fs::write(git.join("config.worktree"), "[core]\n").expect("config");
+    assert_eq!(
+        kinds(&check(thread, &repos)),
+        vec![format!("config {}", git.join("config.worktree").display())]
+    );
+}
+
+/// Review r7 (B1): a full `.git` replaced by an empty folder is reported
+/// and held (filled later, a submodule's config there wouldn't be).
+#[test]
+fn issue_874_a_full_git_folder_replaced_by_an_empty_one() {
     let project = Project::new();
     let git = project.git();
     let (thread, repos) = baseline(&project);
-    std::fs::rename(&git, project.base.join("moved-git")).expect("moved");
+    std::fs::rename(&git, project.base.join("saved-git")).expect("moved");
     std::fs::create_dir(&git).expect("empty .git");
-    assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
-    assert_eq!(project.held(), Vec::<String>::new());
-    std::fs::write(git.join("config"), "[core]\n").expect("config");
     assert_eq!(
         kinds(&check(thread, &repos)),
-        vec![format!("config {}", git.join("config").display())]
+        vec![format!("replaced {}", git.display())]
+    );
+    assert!(project.held().contains(&git.display().to_string()));
+}
+
+/// Review r7 (B2): another session forgetting an empty one that went (its
+/// look saw it gone) doesn't make this session miss what is put there
+/// next.
+#[test]
+fn issue_874_an_empty_config_forgotten_by_another_session() {
+    let project = Project::new();
+    let git = project.git();
+    let (thread, repos) = baseline(&project);
+    std::fs::write(git.join("config.worktree"), "").expect("empty config");
+    assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
+    let other = ThreadId::new();
+    assert_eq!(begin(other, &repos, "Moderate"), None);
+    std::fs::remove_file(git.join("config.worktree")).expect("removed");
+    assert_eq!(kinds(&check(other, &repos)), Vec::<String>::new());
+    std::fs::write(git.join("config.worktree"), "[core]\n").expect("config");
+    assert_eq!(
+        kinds(&check(thread, &repos)),
+        vec![format!("config {}", git.join("config.worktree").display())]
     );
 }

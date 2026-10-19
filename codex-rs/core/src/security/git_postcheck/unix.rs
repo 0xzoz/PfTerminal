@@ -384,6 +384,10 @@ struct Snapshot {
     /// `.git` was missing at a later look (a worktree removed, a clone
     /// deleted).
     went_missing: bool,
+    /// New config files and hooks folders this session found empty
+    /// (`is_empty_stub`), still there and empty: reported once something
+    /// is in them, whatever `Global::empty_new` holds meanwhile.
+    empty_new: HashSet<PathBuf>,
 }
 
 impl Snapshot {
@@ -396,6 +400,7 @@ impl Snapshot {
             dot_git: dot_git.clone(),
             incomplete: None,
             went_missing: false,
+            empty_new: HashSet::new(),
         }
     }
 }
@@ -685,16 +690,12 @@ fn compare(
 ) -> (Vec<Finding>, EmptyNew) {
     let mut findings = Vec::new();
     let mut empty = EmptyNew::default();
-    // A `.git` replaced by an empty folder (the Linux sandbox's mount point
-    // where there was none) holds nothing git follows; what is put in it
-    // later is compared with that.
-    let empty_folder = matches!(cur.dot_git, DotGit::Folder { .. })
-        && repo.git_dirs.iter().all(|dir| {
-            cur.folders
-                .get(dir)
-                .is_some_and(|folder| folder.entries.is_empty())
-        });
-    if prev.dot_git != cur.dot_git && !empty_folder {
+    // An empty `.git` folder replaced by another (the Linux sandbox's mount
+    // point where there was none, removed and made again by other commands)
+    // holds nothing git follows; what is put in it later is compared with
+    // that.
+    if prev.dot_git != cur.dot_git && !(empty_git_folder(repo, prev) && empty_git_folder(repo, cur))
+    {
         findings.push(Finding::Replaced {
             dot_git: repo.dot_git.clone(),
         });
@@ -740,8 +741,11 @@ fn compare(
             let config = own && (name.as_os_str() == "hooks" || is_config_name(name));
             // One that was new and empty (in any session's look, first
             // looks too): reported once something is in it.
-            if config && remembered.contains(&path) {
-                if !is_empty_stub(cur, &path, entry) {
+            if config && (remembered.contains(&path) || prev.empty_new.contains(&path)) {
+                if is_empty_stub(cur, &path, entry) {
+                    empty.keep.push(path.clone());
+                    empty.remember.push(path);
+                } else {
                     findings.push(Finding::Config { path: path.clone() });
                     empty.forget.push(path);
                 }
@@ -763,6 +767,7 @@ fn compare(
             // (`is_empty_stub`) is remembered instead.
             if config && prev_folder.is_some() && old.is_none() {
                 if is_empty_stub(cur, &path, entry) {
+                    empty.keep.push(path.clone());
                     empty.remember.push(path);
                 } else {
                     findings.push(Finding::Config { path });
@@ -787,10 +792,12 @@ fn compare(
             });
         }
     }
-    // Remembered ones that are gone from a git folder this look listed.
+    // Remembered ones that are gone from a git folder this look listed
+    // (not after an incomplete look).
     empty.forget.extend(
         remembered
             .iter()
+            .filter(|_| cur.incomplete.is_none())
             .filter(|path| {
                 path.parent()
                     .and_then(|dir| cur.folders.get(dir))
@@ -802,12 +809,28 @@ fn compare(
     (findings, empty)
 }
 
-/// New config files and hooks folders found empty (`is_empty_stub`), to
-/// remember, and remembered ones that are filled or gone, to forget.
+/// New config files and hooks folders found empty (`is_empty_stub`): to
+/// remember for every session, to keep in this session's look, and
+/// remembered ones that are filled or gone, to forget.
 #[derive(Default)]
 struct EmptyNew {
     remember: Vec<PathBuf>,
+    keep: Vec<PathBuf>,
     forget: Vec<PathBuf>,
+}
+
+/// A `.git` folder whose git folder holds only empty entries
+/// (`is_empty_stub`), as the Linux sandbox's mount points leave it.
+fn empty_git_folder(repo: &Repo, snapshot: &Snapshot) -> bool {
+    matches!(snapshot.dot_git, DotGit::Folder { .. })
+        && repo.git_dirs.iter().all(|dir| {
+            snapshot.folders.get(dir).is_some_and(|folder| {
+                folder
+                    .entries
+                    .iter()
+                    .all(|(name, entry)| is_empty_stub(snapshot, &dir.join(name), entry))
+            })
+        })
 }
 
 fn is_config_name(name: &OsStr) -> bool {
@@ -1049,7 +1072,7 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
         }
         // The last look stays until this one is done (a panic keeps it).
         let prev = snapshot.as_ref();
-        let cur = walk(repo, prev);
+        let mut cur = walk(repo, prev);
         let prev = prev.filter(|prev| !(prev.went_missing && prev.dot_git != cur.dot_git));
         let remembered: HashSet<PathBuf> = with_global(|global| {
             global
@@ -1072,16 +1095,24 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
                 &remembered,
             ),
         };
+        cur.empty_new = empty.keep.iter().cloned().collect();
+        // Full: those gone meanwhile (a deleted scratch repository) go,
+        // looked at without holding `GLOBAL`.
+        let candidates = with_global(|global| {
+            if global.empty_new.len() + empty.remember.len() > MAX_EMPTY_NEW {
+                global.empty_new.iter().cloned().collect()
+            } else {
+                Vec::new()
+            }
+        });
+        let gone: Vec<PathBuf> = candidates
+            .into_iter()
+            .filter(|path| std::fs::symlink_metadata(path).is_err())
+            .collect();
         // Past the limit, one is reported instead of remembered.
         let unremembered = with_global(|global| {
-            for path in &empty.forget {
+            for path in empty.forget.iter().chain(&gone) {
                 global.empty_new.remove(path);
-            }
-            // Full: those gone meanwhile (a deleted scratch repository) go.
-            if global.empty_new.len() + empty.remember.len() > MAX_EMPTY_NEW {
-                global
-                    .empty_new
-                    .retain(|path| std::fs::symlink_metadata(path).is_ok());
             }
             let mut unremembered = Vec::new();
             for path in empty.remember {

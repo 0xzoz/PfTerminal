@@ -111,16 +111,19 @@ The kill switch (`/security` → `g`) works under every level.
   own hold them too until you remove them: a layout made of links
   (`git new-workdir`, Android's `repo`), a `config.worktree` that
   `git sparse-checkout` adds, or a hooks folder a hook installer creates
-  where there was none. A new config file or hooks folder that is empty, or
-  a `.git` replaced by an empty folder, is reported once something is put
-  in it, in any session for config and hooks (on Linux the sandbox leaves
-  empty ones in place while a command runs). It doesn't watch in between: a process a command
-  left running can change `.git` after the last look, even while an approved
-  command runs, and what it changes after a turn ends is found at the next
-  command, not before you run git yourself. It watches the repositories of
-  the folders agent commands run in: not a repository a command reaches
-  elsewhere (`git -C`), and not one a command creates and fills in one go
-  (nothing was there to compare with). New config and hooks are checked only
+  where there was none. On Linux the sandbox leaves empty files and folders
+  in place while a command runs: a new config file or hooks folder that is
+  empty is reported (in any session) once something is put in it, and an
+  empty `.git` folder replaced by another empty one isn't reported. It
+  doesn't watch in between: a process a command left running can change
+  `.git` after the last look, even while an approved command runs, and what
+  it changes after a turn ends is found at the next command, not before you
+  run git yourself. It watches the repositories of the folders agent
+  commands run in: not a repository a command reaches elsewhere (`git -C`),
+  not one a command creates and fills in one go (nothing was there to
+  compare with), and not a `.git` removed in one command and made again in a
+  later one (it gets a first look, which reports only links, steps and hard
+  links). New config and hooks are checked only
   in a repository's own git folder, not in its worktrees' or submodules'. A
   session that works in more than 16 repositories forgets the oldest; its
   next look there reports only links, steps and hard links.
