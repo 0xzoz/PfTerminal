@@ -118,7 +118,8 @@ impl ParentWatch {
                     // SAFETY: one valid pollfd.
                     while unsafe { libc::poll(&mut poll_fd, 1, -1) } < 0
                         && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR)
-                    {}
+                    {
+                    }
                     lifeline.cut();
                 });
             }
@@ -218,8 +219,7 @@ fn reap_exited(bubblewrap: libc::pid_t, status: &mut Option<libc::c_int>) {
     loop {
         let mut wait_status = 0;
         // SAFETY: valid out pointer.
-        let pid =
-            unsafe { libc::waitpid(-1, &mut wait_status, libc::WNOHANG | libc::__WALL) };
+        let pid = unsafe { libc::waitpid(-1, &mut wait_status, libc::WNOHANG | libc::__WALL) };
         if pid <= 0 {
             return;
         }
@@ -251,9 +251,7 @@ fn kill_and_reap_children(bubblewrap: libc::pid_t, status: &mut Option<libc::c_i
         let pid = unsafe { libc::waitpid(-1, &mut wait_status, libc::__WALL) };
         if pid == bubblewrap {
             *status = Some(wait_status);
-        } else if pid < 0
-            && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR)
-        {
+        } else if pid < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
             // ECHILD: none left.
             return;
         }

@@ -23,7 +23,6 @@ use codex_sandboxing::landlock::create_linux_sandbox_command_args_for_permission
 use codex_utils_absolute_path::AbsolutePathBuf;
 use std::io::BufRead;
 use std::io::BufReader;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Child;
@@ -83,6 +82,23 @@ fn kill(pid: i32) {
     unsafe {
         libc::kill(pid, libc::SIGKILL);
     }
+}
+
+/// Writes an executable file from another process (#635): a descriptor
+/// open for writing here would leak into other tests' forks and make
+/// executing the file fail with `ETXTBSY`.
+fn write_executable(path: &Path, contents: &str) {
+    let status = Command::new("/bin/sh")
+        .args([
+            "-c",
+            "printf '%s' \"$1\" > \"$2\" && chmod 755 \"$2\"",
+            "sh",
+        ])
+        .arg(contents)
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "write {}", path.display());
 }
 
 /// How bubblewrap runs.
@@ -158,16 +174,14 @@ impl Fixture {
         if bwrap == Bwrap::Unbound {
             let real = system_bwrap().unwrap();
             let wrapper = self.wrapper_dir.path().join("bwrap");
-            std::fs::write(
+            write_executable(
                 &wrapper,
-                format!(
+                &format!(
                     "#!/bin/sh\necho $$ >> '{}'\nfor arg do\n  shift\n  [ \"$arg\" = --die-with-parent ] && continue\n  set -- \"$@\" \"$arg\"\ndone\nexec '{}' \"$@\"\n",
                     self.pid_file().display(),
                     real.display()
                 ),
-            )
-            .unwrap();
-            std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+            );
             let path = std::env::var_os("PATH").unwrap_or_default();
             let mut dirs = vec![self.wrapper_dir.path().to_path_buf()];
             dirs.extend(std::env::split_paths(&path));
@@ -199,8 +213,14 @@ impl Fixture {
         let runs = output.status.success() && String::from_utf8_lossy(&output.stdout) == "ok\n";
         if !runs {
             eprintln!("skipping: the sandbox does not run here ({output:?})");
+            return false;
         }
-        runs
+        // Otherwise the case would test nothing.
+        assert!(
+            bwrap == Bwrap::Real || self.pid_file().is_file(),
+            "the helper did not run bubblewrap through the wrapper"
+        );
+        true
     }
 
     /// Fails unless every process holding `stdout` is gone within
