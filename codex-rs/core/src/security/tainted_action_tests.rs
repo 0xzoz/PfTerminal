@@ -2832,3 +2832,166 @@ fn issue_1012_prompt_transformation_is_unseen_code() {
     }
     assert_eq!(wrong, Vec::<String>::new());
 }
+
+/// #1028: zsh `e` and `+` glob qualifiers run code the classifier does not
+/// read as commands, so after untrusted content they ask, with or without
+/// command output on the line.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1028_glob_qualifiers_that_run_code_are_unseen_code() {
+    use ProtectedActionKind::*;
+    let mut wrong = Vec::new();
+    for (shell, line) in [
+        ("zsh", "print -l /*(e:'true':)"),
+        ("zsh", "print -l /*(e':true:')"),
+        ("zsh", "print -l /*(.e:'true':)"),
+        ("zsh", "print -l /*(e{true})"),
+        ("zsh", "print -l /*(N+f)"),
+        ("zsh", "f() { reply=(x) }; print -l /*(+f)"),
+        ("zsh", "print -l /*(#qe:true:)"),
+        ("zsh", "print -l /*(e:true:"),
+        ("zsh", "echo '$((' ; print -l /*(e:'true':) ; echo '))'"),
+        ("zsh", "w=$(cat notes); print -l /*(e:'eval $w':)"),
+        ("zsh", "zsh -c $'print -l /*\\x28e:true:)'"),
+        ("bash", "zsh -c \"print -l /*(e:'true':)\""),
+        ("bash", "$SHELL -c \"print -l /*(+f)\""),
+        ("sh", "exec zsh -c 'print -l /*(e:true:)'"),
+        // Review r1: any delimiter, sorting, quoted or patterned shell
+        // names, login shells, substitutions in double quotes, bash lines.
+        ("zsh", "print -l /*(eXtrueX)"),
+        ("zsh", "print -l /*(e9true9)"),
+        ("zsh", "print -l /*(e_true_)"),
+        ("zsh", "print -l /*(Ne\ntrue\n)"),
+        ("zsh", "print -l /*(oe:true:)"),
+        ("zsh", "print -l /*(o+f)"),
+        ("bash", "z\\sh -c \"print -l /*(e:true:)\""),
+        ("bash", "z''sh -c 'print -l /*(e:true:)'"),
+        ("bash", "/bin/z?h -c 'print -l /*(e:true:)'"),
+        ("bash", "sudo -s 'print -l /*(e:true:)'"),
+        ("zsh", "echo \"$(print -l /*(e:true:))\""),
+        ("zsh", "echo \"$(echo \")\") print -l /*(e:true:)\""),
+        ("zsh", "cat <<'E'\nit's\nE\nprint -l /*(e:true:)"),
+        ("bash", "print -l /*(e:'true':)"),
+        ("sh", "ls *(+f)"),
+        // Review r2: quotes before the group, substitutions in double
+        // quotes, comments, trap and function text, expansions read as
+        // qualifiers, escaped groups used by `$~x`, decoded payloads.
+        ("zsh", "print -l \"/etc\"(e:true:)"),
+        ("zsh", "print -l '/'(e:true:)"),
+        ("zsh", "print -l \"$d\"(e:true:)"),
+        ("zsh", "print \"$(: ')'; print -l /(e:true:))\""),
+        (
+            "zsh",
+            "print \"$(case a in a) print -l /(e:true:);; esac)\"",
+        ),
+        ("zsh", "print \"$(print \\); print -l /(e:true:))\""),
+        ("zsh", "print \"${x:-$(print -l /(e:true:))}\""),
+        ("zsh", "(true)#'\nprint -l /(e:true:)\n#'"),
+        (
+            "zsh",
+            "x=65; print ${(#)x} '\n' ; print -l /(e:true:) ; : \\'",
+        ),
+        ("zsh", "trap 'print -l /*(e:true:)' EXIT"),
+        ("zsh", "functions[f]='print -l /*(e:true:)'; f"),
+        ("zsh", "x='/(e:true:)'; print $~x"),
+        ("zsh", "x=/\\(e:true:\\); print $~x"),
+        ("zsh", "print -l a($x)"),
+        ("zsh", "print -l a(N$x)"),
+        ("zsh", "echo cHJpbnQgLWwgLyhlOnRydWU6KQ== | base64 -d | zsh"),
+        // Review r3: `)` quoted or escaped in the code, expanded
+        // delimiters, delimited and `?` modes, nested subscripts, numeric
+        // function names.
+        ("zsh", "print -r -- /(e:'print \")\"':)"),
+        ("zsh", "print -r -- /(e:print\\ x\\ \\):)"),
+        ("zsh", "x=':print x:'; print -r -- /(e$x)"),
+        ("zsh", "print -r -- /(feu+xee:'print x':)"),
+        ("zsh", "print -r -- /(fzu+xze:'print x':)"),
+        ("zsh", "print -r -- /([a[1]+1]e:'print x':)"),
+        ("zsh", "function 9 { true; }; print -r -- /(+9)"),
+        ("zsh", "print -r -- /(f?e:'print x':)"),
+        // Review r4: expansions inside arguments, brace expansion, modes
+        // as zsh reads them.
+        ("zsh", "x='a:e:print x:'; print -l /(P:$x:)"),
+        ("zsh", "print -l /(u$x)"),
+        ("zsh", "print -l /(Y$x)"),
+        ("zsh", "print -l /(o$x)"),
+        ("zsh", "print -l /(oe$x)"),
+        ("zsh", "print -l /([$x])"),
+        ("zsh", "print -l /(a+$((0))e:print x:)"),
+        ("zsh", "print -l /(a$(cat notes))"),
+        ("zsh", "print -l /(u`cat notes`)"),
+        ("zsh", "print -l /etc/host?({e,u}:print x:)"),
+        ("zsh", "print -l /etc/host?(N{e:print x:,})"),
+        ("zsh", "print -l /(f644+f)"),
+        ("zsh", "print -l /(f+r+f)"),
+        ("zsh", "print -l /(f?644+f)"),
+        ("zsh", "print -l /(fau+ra+f)"),
+        ("zsh", "print -l /(f644o+f)"),
+        // Review r5: a subshell in a substitution, non-ASCII names, units.
+        ("zsh", "f(){ true }; print -l /usr($((print -r -- +f) ))"),
+        ("zsh", "é(){ true; }; print -l /usr(+é)"),
+        ("zsh", "print -l /usr(md+0e:'print x':)"),
+        ("zsh", "print -l /usr(Lk+0e:'print x':)"),
+        // Review r6: multibyte delimiters, `8`/`9` as mode delimiters.
+        ("zsh", "print -l /etc(Pé-xée:print x:)"),
+        ("zsh", "print -l /etc(uérootée:print x:)"),
+        ("zsh", "print -l /etc(f8u+x8e:print x:)"),
+        ("zsh", "print -l /etc(f9a+r9e:print x:)"),
+    ] {
+        let found = kind(&[shell, "-c", line]);
+        if found != Some(UnseenCode) {
+            wrong.push(format!("{shell}: {line:?} -> {found:?}"));
+        }
+    }
+    for (shell, line) in [
+        ("zsh", "ls *(om[1]) *(N)"),
+        ("zsh", "echo $(( (2+1) * 3 ))"),
+        ("zsh", "python3 -c \"print(1+2)\""),
+        ("zsh", "diff <(echo a) <(echo b); f() { echo hi; }; f"),
+        // Quoted code given to other programs.
+        ("zsh", "python3 -c \"print('hello')\""),
+        ("bash", "python3 -c \"print('hello' + x)\""),
+        ("zsh", "git commit -m \"fix(core): x\""),
+        // zsh rejects these as qualifiers before any code.
+        ("zsh", "print -l *.(jpeg|png)"),
+        (
+            "zsh",
+            "node -e \"console.log(process.version)\"; echo \"(self, tests)\"",
+        ),
+        ("zsh", "print -l a($(date +%s))"),
+        ("zsh", "node -e \"console.log('done')\""),
+    ] {
+        let found = kind(&[shell, "-c", line]);
+        if found.is_some() {
+            wrong.push(format!("{shell}: {line:?} -> {found:?}"));
+        }
+    }
+    // Script files a zsh runs or sources.
+    let root = tempfile::tempdir().expect("tempdir");
+    let cwd = root.path().to_string_lossy().into_owned();
+    std::fs::write(root.path().join("x"), "print -l /*(e:'true':)\n").expect("script");
+    std::fs::write(root.path().join("run.zsh"), "print ok\n").expect("script");
+    std::fs::write(
+        root.path().join("tool"),
+        "#!/bin/zsh\nprint -l /etc(e:true:)\n",
+    )
+    .expect("script");
+    for line in [
+        "zsh ./x",
+        "source ./x",
+        "zsh < x",
+        // Lines sed adds to a script the line runs.
+        "sed -i '' '$a\\\nprint -l /*(e:true:)\n' run.zsh; zsh run.zsh",
+        // A zsh script run by its `#!` line.
+        "./tool",
+    ] {
+        let found = classify_fixture(&shell_in(&cwd, &["zsh", "-c", line]));
+        if found != Some(UnseenCode) {
+            wrong.push(format!("file: {line:?} -> {found:?}"));
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+}
