@@ -2004,8 +2004,8 @@ impl Config {
     }
 
     /// PF-84 (#1085): whether this home uses named OpenAI sign-in accounts
-    /// (one is enrolled, or `[provider_accounts]` selects one). Blocking: it
-    /// reads the vault index; no credential value is read.
+    /// (one is enrolled, or `[provider_accounts]` selects one). Blocking: an
+    /// initialised vault is decrypted to read its account metadata.
     pub fn uses_named_sign_in_accounts(&self) -> bool {
         provider_accounts::uses_named_sign_in_accounts(&self.codex_home, &self.model_providers)
     }

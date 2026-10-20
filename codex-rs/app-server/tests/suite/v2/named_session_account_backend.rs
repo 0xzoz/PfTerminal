@@ -369,3 +369,72 @@ async fn a_home_with_only_the_default_login_serves_requests_before_a_conversatio
     );
     Ok(())
 }
+
+/// #1085: an account enrolled while the server runs (only the default login
+/// at startup) holds requests outside a conversation from its first thread
+/// on: after leaving that thread they are refused, never sent with the
+/// default login.
+#[tokio::test]
+async fn an_account_enrolled_while_the_server_runs_holds_after_its_thread() -> Result<()> {
+    let server = MockServer::start().await;
+    mount_usage(&server).await;
+    let home = TempDir::new()?;
+    write_default_login_home(home.path(), &server, "")?;
+
+    let mut app = TestAppServer::builder()
+        .with_codex_home(home.path())
+        .without_auto_env()
+        .with_env_overrides(&[("OPENAI_API_KEY", None)])
+        .build_initialized_with_timeout(DEFAULT_TIMEOUT)
+        .await?;
+    write_named_chatgpt_auth(
+        home.path(),
+        "openai",
+        "work",
+        ChatGptAuthFixture::new(WORK_TOKEN)
+            .account_id("acct-work")
+            .plan_type("pro"),
+    )?;
+    let work = start_thread(&mut app, Some("work")).await?;
+    read_rate_limits(&mut app).await?;
+
+    let request = app
+        .send_thread_unsubscribe_request(ThreadUnsubscribeParams { thread_id: work })
+        .await?;
+    let _: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        app.read_stream_until_response_message(RequestId::Integer(request)),
+    )
+    .await??;
+    // The registration follows the subscription after a short grace.
+    let mut held = false;
+    for _ in 0..150 {
+        let request = app.send_get_account_rate_limits_request().await?;
+        if let Err(error) = timeout(
+            DEFAULT_TIMEOUT,
+            app.read_stream_until_result(RequestId::Integer(request)),
+        )
+        .await??
+        {
+            assert!(
+                error
+                    .error
+                    .message
+                    .contains("not known until its conversation starts"),
+                "{}",
+                error.error.message
+            );
+            held = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(held, "requests outside a conversation were never held");
+    // (Startup requests, before `work` existed, used the default login.)
+    let usage = tokens_for(&server, "/api/codex/usage").await;
+    assert!(
+        !usage.is_empty() && usage.iter().all(|token| token == WORK_TOKEN),
+        "{usage:?}"
+    );
+    Ok(())
+}

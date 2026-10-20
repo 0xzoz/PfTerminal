@@ -439,9 +439,10 @@ pub(crate) fn configured_account_names(codex_home: &Path, provider_id: &str) -> 
 
 /// PF-84 (#1085): whether this home uses named OpenAI sign-in accounts: a
 /// named account holding a sign-in is enrolled in the vault, or the
-/// configuration (`[provider_accounts]`) puts a provider on one. Vault
-/// metadata only; no credential value is read. An unreadable vault counts as
-/// yes, so a home that may hold such accounts keeps their protections.
+/// configuration (`[provider_accounts]`) puts a provider on one. Uses only
+/// account metadata, but an initialised vault is decrypted to read it (an
+/// uninitialised one is not touched). An unreadable vault counts as yes, so a
+/// home that may hold such accounts keeps their protections.
 pub(crate) fn uses_named_sign_in_accounts(
     codex_home: &Path,
     model_providers: &HashMap<String, ModelProviderInfo>,
@@ -531,6 +532,18 @@ mod tests {
             .create_provider_account("openai", &work, ProviderAccountKind::ChatgptAuth, "{}")
             .expect("add openai account");
         assert!(uses_named_sign_in_accounts(home.path(), &model_providers));
+
+        // An unreadable vault counts as holding such accounts (fail closed).
+        let unreadable = tempfile::tempdir().expect("tempdir");
+        Vault::new(unreadable.path().to_path_buf())
+            .create_provider_account("zai", &work, ProviderAccountKind::ApiKey, "test-zai-key")
+            .expect("add zai account");
+        std::fs::write(
+            unreadable.path().join("secrets").join("local.age"),
+            b"not an age file",
+        )
+        .expect("corrupt the vault");
+        assert!(uses_named_sign_in_accounts(unreadable.path(), &providers()));
     }
 
     fn accounts(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {

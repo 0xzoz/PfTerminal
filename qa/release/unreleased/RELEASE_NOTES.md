@@ -45,3 +45,14 @@ them into `qa/release/<version>/RELEASE_NOTES.md` and empties this file.
   from the automatic approval reviewer still show `no price available` (no
   estimate, never $0), and the next step now adds "OpenAI doesn't publish a
   price for Codex Auto Review." (#913).
+
+## Named accounts (behind `named_accounts`)
+
+- **App servers in homes with only the default login no longer wait for a
+  conversation.** With named accounts on, a standalone app server or daemon
+  held back its own ChatGPT requests (apps, plugins, rate limits, the model
+  catalog) until a conversation started, even in homes without named
+  accounts. It now does that only when the home has a named OpenAI sign-in
+  account or `[provider_accounts]` selects one. A server started without one
+  starts holding them from the first conversation on an account added while it
+  runs, and never goes back to the default login (#1085).

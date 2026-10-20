@@ -1396,20 +1396,30 @@ fn loader_overrides_with_test_user_config_file(
 /// fork launch with named accounts on (which leaves the default login in
 /// place), and a standalone server or daemon with named accounts on whose
 /// home uses named sign-in accounts, so its clients may choose another
-/// account per thread. A home with only the default login keeps it (#1085).
+/// account per thread. In a home with only the default login (#1085) such a
+/// server uses it until a session on a named account (one enrolled while it
+/// runs) registers, and never again after that.
 pub(crate) fn follow_configured_session_account(
     auth_manager: &Arc<AuthManager>,
     config: &Config,
     embedded: bool,
 ) {
-    let account_known_later = if embedded {
-        codex_login::default_login_left_unenforced()
-    } else {
-        config.named_accounts_enabled() && config.uses_named_sign_in_accounts()
-    };
     let sign_in = match codex_model_provider::session_sign_in(&config.model_provider) {
-        codex_login::SessionSignIn::Default if account_known_later => {
-            codex_login::SessionSignIn::Unknown
+        codex_login::SessionSignIn::Default if embedded => {
+            if codex_login::default_login_left_unenforced() {
+                codex_login::SessionSignIn::Unknown
+            } else {
+                codex_login::SessionSignIn::Default
+            }
+        }
+        codex_login::SessionSignIn::Default if config.named_accounts_enabled() => {
+            // Blocking: reads the vault index once, at startup.
+            if config.uses_named_sign_in_accounts() {
+                codex_login::SessionSignIn::Unknown
+            } else {
+                auth_manager.hold_configured_sign_in_once_named();
+                codex_login::SessionSignIn::Default
+            }
         }
         sign_in => sign_in,
     };
