@@ -1236,6 +1236,9 @@ async fn process_exec_tool_call_cancellation_allows_sigterm_cleanup() -> Result<
     let descendant_pid_marker = temp_dir.path().join("descendant-pid");
     // The parent handles TERM and records cleanup, while a TERM-ignoring child
     // proves cancellation still escalates any survivors in the process group.
+    // The parent waits on its sleep with `wait`, which a trapped TERM interrupts at
+    // once. Waiting on a foreground sleep would defer the trap until that sleep
+    // exits, and a sleep forked as TERM arrives may never receive it.
     let command = vec![
         "/bin/sh".to_string(),
         "-c".to_string(),
@@ -1243,7 +1246,7 @@ async fn process_exec_tool_call_cancellation_allows_sigterm_cleanup() -> Result<
 printf '%s' "$!" > "$DESCENDANT_PID_MARKER"
 trap 'printf cleaned > "$CLEANUP_MARKER"; exit 0' TERM
 printf ready > "$READY_MARKER"
-while :; do sleep 1; done"#
+while :; do sleep 1 & wait $!; done"#
             .to_string(),
     ];
     let cwd = codex_utils_absolute_path::AbsolutePathBuf::current_dir()?;

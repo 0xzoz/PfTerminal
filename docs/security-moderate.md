@@ -67,11 +67,46 @@ Not available yet: financial preview and approvals, isolated retrieval,
 screened search, brokered browser login, quarantine, the untrusted-content
 detectors and Agent Sweep.
 
+## Command output in shell arithmetic
+
+Shell arithmetic runs code hidden in a variable's value (`a[$(cmd)]`), so
+after untrusted content a command line that puts command output or input
+into arithmetic counts as code you haven't seen and asks first, for example
+`v=$(cat notes); echo $((v))` (#937). Corbanu can't follow every way a value
+reaches arithmetic, so on a line that holds command output (`$(...)`,
+backquotes, `read`) it also asks when arithmetic reads anything not shown
+to be a number on that line. These lines ask, although most are harmless:
+
+- variables from the environment or positional parameters:
+  `out=$(cmd); echo $((HOME_COUNT + $1))`
+- `eval` or `alias` anywhere on the line: `out=$(cmd); eval "echo hi"`
+- text operands of a numeric `printf`: `v=$(cmd); printf '%d' "$v"`
+- `${!arr[@]}` loops and associative-array literal keys:
+  `out=$(cmd); for k in "${!m[@]}"; do echo $k; done`
+- a parenthesised group attached to a word with a name or command output in
+  it, because zsh reads such a group as glob qualifiers, whose subscripts are
+  arithmetic and whose `e` and `+` qualifiers run code (D57). Quoted text
+  counts too, since a nested shell may run it:
+  `w=$(cmd); print -l /*(.[w])`, `out=$(cmd); grep -E '(foo|bar)' f`,
+  `out=$(cmd); git commit -m "fix(core): x"`,
+  `out=$(cmd); python3 -c "print('hi')"`, and regular expressions such as
+  `'([a-z]+)'`
+
+Counters and plain uses still run without asking:
+`out=$(cmd); for ((i=0; i<3; i++)); do echo $i; done`,
+`out=$(cmd); n=$(date +%s); echo $((n + 1))`, `out=$(cmd); ls *(/)`,
+`out=$(cmd); arr=(1 2); diff <(echo a) <(echo b)`. Splitting such a line
+in two (the output on one, the arithmetic or pattern on the next) avoids
+the prompt.
+
 ## Choosing, restarting and going back
 
 When you confirm Moderate, Core's rules (the sandbox, protected files and
 untrusted content) apply at once in every session of this Corbanu Terminal,
-and grants and "for session" approvals end. Other Corbanu Terminals running
+and grants and "for session" approvals end. A command or file edit whose
+approval prompt was still open is asked about again under the new level; an
+answer to the old prompt isn't used, and a retry outside the sandbox that was
+being approved (or was due) isn't run (#1001). Other Corbanu Terminals running
 on the same Corbanu home take them within about a second and say so, as they
 do with the kill switch. The credential broker starts at the next start
 (in each of them); press `r` to restart right away. Your `config.toml` isn't
@@ -80,7 +115,8 @@ changed.
 Choosing Permissive or Aggressive from Moderate shows what changes first.
 Back to Permissive takes effect when you restart; until then Moderate stays
 on. Aggressive applies Core's stricter rules at once when its preflight
-passes (the `protected_mode_preflight` feature), and the rest at the restart.
+passes (the `protected_mode_preflight` feature), also in the other Corbanu
+Terminals running on the home (#919), and the rest at the restart.
 The kill switch (`/security` → `g`) works under every level.
 
 ## Limits
@@ -88,6 +124,45 @@ The kill switch (`/security` → `g`) works under every level.
 - If your own settings turn the sandbox off (full access), commands that the
   protected-file rules don't cover run without one. Choose a sandbox in your
   settings to keep every command in it.
+- With full access in your own settings, commands can also write the
+  project's `.git`, except its hooks and config (with a sandbox setting `.git`
+  stays read-only). A command could leave something there that your own git
+  later follows outside the sandbox (#874): a link such as
+  `.git/COMMIT_EDITMSG` to a file elsewhere (or to `.git/config`), which your
+  next `git commit` writes; a hard link; rebase or cherry-pick steps whose
+  `exec` lines, or a merge strategy that isn't git's own, run when you
+  continue; a remote in `.git/remotes`; config or a hooks folder where there
+  was none; or a replaced `.git`. On macOS and Linux, Corbanu looks at `.git`
+  before a session's first such command (and reports links, steps and hard
+  links already there), after each one, before each later command and at
+  the end of each turn, and warns you about anything new, with the command
+  that removes it. It removes nothing itself. Below `objects`, `lfs` and
+  `annex` it looks only at their own entries: git reads the files below and
+  puts new ones in place, it doesn't write through them. Links inside a
+  hooks folder are left alone (git runs hooks, it doesn't write through
+  them). Until you remove what it found, and while it can't look at all of
+  `.git` (a folder it can't read, or too many entries), approving a command
+  in that project doesn't lift the protected-file rules (nor run it outside
+  the sandbox), in any session of this Corbanu Terminal. Some setups of your
+  own hold them too until you remove them: a layout made of links
+  (`git new-workdir`, Android's `repo`), a `config.worktree` that
+  `git sparse-checkout` adds, or a hooks folder a hook installer creates
+  where there was none. On Linux the sandbox leaves empty files and folders
+  in place while a command runs: a new config file or hooks folder that is
+  empty is reported (in any session) once something is put in it, and an
+  empty `.git` folder replaced by another empty one isn't reported. It
+  doesn't watch in between: a process a command left running can change
+  `.git` after the last look, even while an approved command runs, and what
+  it changes after a turn ends is found at the next command, not before you
+  run git yourself. It watches the repositories of the folders agent
+  commands run in: not a repository a command reaches elsewhere (`git -C`),
+  not one a command creates and fills in one go (nothing was there to
+  compare with), and not a `.git` removed in one command and made again in a
+  later one (it gets a first look, which reports only links, steps and hard
+  links). New config and hooks are checked only
+  in a repository's own git folder, not in its worktrees' or submodules'. A
+  session that works in more than 16 repositories forgets the oldest; its
+  next look there reports only links, steps and hard links.
 - MCP servers, apps, hooks and `!` shell commands run outside the sandbox, as
   under every level.
 - On Linux, where a command you approve can write a Corbanu home's folder
@@ -128,14 +203,70 @@ The kill switch (`/security` → `g`) works under every level.
   reports "No permissions to create new namespace"); depending on its
   version and settings, Claude Code then fails the command or offers to run
   it outside its own sandbox, which, like every pane command, asks you
-  first and still runs in Corbanu's sandbox. No approval lifts it. Choose
-  Permissive to run them.
+  first and still runs in Corbanu's sandbox. No approval lifts the rule
+  inside a contained Claude pane. Elsewhere, choose Permissive to run them,
+  or allow it for one command (next point).
+- You can allow user namespaces for one command (D27, Linux, Moderate only).
+  When the agent asks to run a command outside the sandbox before untrusted
+  content enters the session (every command's output counts, so in practice
+  this is the first command of a new session, before the agent has read
+  anything from outside), the approval prompt says that approving it
+  lifts Moderate's protected-file rules for that run and, with a warning,
+  that it also lets that one run create user namespaces: inside one, the
+  command can get past the file protections that remain for that run (it is
+  root over its own files there and can mount over paths), so a Corbanu it
+  starts may not run at Moderate, and more of the kernel is exposed to it.
+  Approve only a command you trust. Only your answer to that prompt counts:
+  not "for the session" for the next request, a saved "don't ask again"
+  rule (the command then stays in the sandbox with the rules kept), a
+  permission hook or the automatic reviewer. After untrusted content (D48,
+  Linux, Moderate only) it is offered only for a command whose program is a
+  known tool: `unshare`, `bwrap`, `podman`, `buildah`, `flatpak` or `nix`.
+  The command must be one plain command (directly, or as the whole script
+  of a system `bash`, `sh` or `zsh`), optionally after `env`, `sudo` or
+  `nohup` (or, first in the script, `exec` or `command`) with simple
+  options. Each program it runs (the shell, the wrappers, the tool) must
+  come from a system folder (`/usr/bin`, `/bin`, `/usr/sbin`, `/sbin`,
+  `/usr/local/bin`, `/run/current-system/sw/bin`,
+  `/nix/var/nix/profiles/default/bin`) the agent can't write: named by that
+  path, or by name and found there first through the command's `PATH`, with
+  no relative folder or folder the agent can write searched before it (a
+  remote run's `PATH` isn't checked, so there only the full system path
+  counts). Anything else isn't offered and keeps the rule: other programs,
+  more than one command (`;`, `&&`, `|`), variables, substitutions,
+  redirections, `NAME=value` settings, a copy of the tool or of the shell
+  elsewhere (`./podman`, a shell the agent names), other wrappers
+  (`timeout`, `bash -c`), and aliases or functions the command defines
+  (your own shell's functions and aliases still apply, and so does a
+  `PATH` your shell's start-up files or saved snapshot set: Corbanu checks
+  the `PATH` it gives the command). You are asked every
+  time, by you only, with the same warning: not "for the session", a saved
+  rule, a hook or the automatic reviewer, and also where the automatic
+  reviewer would otherwise answer, so approving that request always allows
+  user namespaces for it (decline, and ask the agent to run it without
+  leaving the sandbox, to run it without them). Approving lifts nothing
+  else: the protected-file rules stay, unless the command is also a
+  protected action, whose fresh approval (asked also under a saved rule)
+  lifts them for that run as before. If more untrusted content arrives
+  before it starts, it isn't allowed. A known tool can itself run any
+  program inside the namespace (`unshare -r sh -c '…'`, `podman run`),
+  so read the whole command. Nor is it given while Corbanu's check of the
+  project's `.git` holds the protected-file rules (see above), even where
+  the prompt warned of it. The allowance covers the approved process and
+  everything it starts or is given while it runs, also after untrusted
+  content arrives: an interactive program such as a shell keeps it for
+  every command typed into it later. The run still stays in the sandbox
+  (writes outside your writable folders and blocked network still fail).
+  Aggressive, and a launch that enforces Aggressive, never allow it.
 - A command that fails this way says why instead of a bare "Operation not
   permitted": its output (what the agent sees) and a warning in your
-  transcript name the rule and the level, and the `/security` inspector
-  lists "creating a user namespace" under recent denials. Before you approve
-  a command that runs `unshare`, `bwrap`, Podman, Buildah or Flatpak, the
-  approval prompt says it will fail. A contained Claude pane ends such a
+  transcript name the rule and the level and, under Moderate, how to allow
+  it for one command (only for a known tool's command, or in a new session,
+  since the failed command's output is untrusted content), and the
+  `/security` inspector lists "creating a
+  user namespace" under recent denials. Before you approve a command that runs
+  `unshare`, `bwrap`, Podman, Buildah or Flatpak and stays in the sandbox,
+  the approval prompt says it will fail. A contained Claude pane ends such a
   turn with a note naming the rule. The explanation only reads the
   command's output; it never changes what runs.
 - A remote app server can't enforce a level chosen here; Corbanu refuses to

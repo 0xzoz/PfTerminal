@@ -118,7 +118,9 @@ Vercel's `gatewayCost`, the Corbanu API's `usage.corbanu_charge_usd`), shown as
 reported (for example with your own upstream key on OpenRouter), the published
 price is shown as `Estimated cost` (a lower bound if only part of it is known);
 with neither, the request shows `no price available`. Request and attempt pages
-say which was used on their `Price basis` line.
+say which was used on their `Price basis` line. Codex Auto Review, the
+automatic approval reviewer, is one of these on an OpenAI API key: OpenAI
+doesn't publish a price for it, and `/cost` says so.
 
 A provider you configure at Moonshot's Kimi Open Platform
 (`base_url = "https://api.moonshot.ai/v1"`, Chat Completions, API key) is priced

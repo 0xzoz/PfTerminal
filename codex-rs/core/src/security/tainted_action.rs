@@ -27,6 +27,7 @@ use shell::basename;
 use std::collections::HashMap;
 use std::path::Path;
 
+mod arithmetic;
 mod indirect;
 mod invocation;
 mod nested;
@@ -169,6 +170,13 @@ pub(crate) struct PostTaintAction {
     pub(crate) state: PostTaintState,
 }
 
+/// Appended to the prompt and the approvals-off refusal when
+/// [`PostTaintAction::reads_stay_denied`] holds.
+const AGGRESSIVE_READS_STAY_DENIED: &str = " Under security level Aggressive, credential files, \
+     the vault and the Corbanu home stay unreadable to agent commands even if you approve, and \
+     that is never granted, not even once; to allow it, switch to Permissive in /security (it \
+     applies after a restart).";
+
 impl PostTaintAction {
     /// Shown in the approval prompt so the human sees why it was asked again.
     pub(crate) fn approval_reason(&self) -> String {
@@ -178,12 +186,7 @@ impl PostTaintAction {
             self.kind.describe()
         );
         if self.reads_stay_denied() {
-            reason.push_str(
-                " Under security level Aggressive, credential files, the vault and the Corbanu \
-                 home stay unreadable to agent commands even if you approve, and that is never \
-                 granted, not even once; to allow it, switch to Permissive in /security (it \
-                 applies after a restart).",
-            );
+            reason.push_str(AGGRESSIVE_READS_STAY_DENIED);
         }
         reason
     }
@@ -201,11 +204,19 @@ impl PostTaintAction {
     }
 
     pub(crate) fn approvals_off_rejection(&self) -> String {
-        format!(
-            "Not run: this is {} after untrusted content entered the session, so it needs your \
-             approval, and approvals are off (approval_policy = never).",
+        let mut reason = format!(
+            "Not run: Security level {}: this is {} after untrusted content entered the session, \
+             so it needs your approval, and approvals are off (approval_policy = never). \
+             Review the action and turn approval prompts on (/permissions, or approval_policy \
+             in config.toml) before asking again. Other security protections still apply.",
+            level_name(self.state.level),
             self.kind.describe()
-        )
+        );
+        // #941 review: approving would not make these reads work under Aggressive.
+        if self.reads_stay_denied() {
+            reason.push_str(AGGRESSIVE_READS_STAY_DENIED);
+        }
+        reason
     }
 
     /// Refusal before any prompt: the kill switch denies protected actions.
@@ -811,8 +822,10 @@ impl Classifier {
         }
         let mut lexed_seds = 0;
         let mut lexed_shells = 0;
+        let mut arithmetic = arithmetic::Arithmetic::new(command);
         for (index, simple) in lexed.commands.iter().enumerate() {
             let (words, unseen) = substitute(simple, &variables);
+            arithmetic.note(simple, &words);
             lexed_seds += sed::positions(&words).len();
             lexed_shells += nested::shell_commands(&words);
             let feeds_pipe = pipe_sources.contains(&index);
@@ -825,6 +838,11 @@ impl Classifier {
                 &mut variables,
                 depth,
             );
+        }
+        // #937: arithmetic on a variable filled from command output or
+        // `read` runs the substitutions in its value, like `eval`.
+        if self.rebuilt == 0 && self.not_shell == 0 && arithmetic.runs_unseen(command) {
+            self.note(ProtectedActionKind::UnseenCode);
         }
         self.path(&folders.cwd);
         // Strings assembled from literals by inline code (`'~/.co' + 'dex'`).
@@ -1287,6 +1305,19 @@ fn substitute(
         .unzip()
 }
 
+/// The level as other product messages name it ("security level Moderate").
+fn level_name(level: SecurityLevel) -> &'static str {
+    match level {
+        SecurityLevel::Permissive => "Permissive",
+        SecurityLevel::Moderate => "Moderate",
+        SecurityLevel::Aggressive => "Aggressive",
+    }
+}
+
 #[cfg(test)]
 #[path = "tainted_action_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tainted_action_refusal_tests.rs"]
+mod tainted_action_refusal_tests;

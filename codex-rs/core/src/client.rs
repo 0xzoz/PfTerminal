@@ -768,6 +768,7 @@ pub(crate) struct RealtimeWebrtcCallStart {
     pub(crate) sdp: String,
     pub(crate) call_id: String,
     pub(crate) sideband_headers: ApiHeaderMap,
+    pub(crate) record: Option<crate::accounting::realtime::RealtimeSessionRecord>,
 }
 
 /// Reuses the API-auth material that created the WebRTC call for the sideband WebSocket join.
@@ -913,15 +914,11 @@ impl ModelClient {
     /// A bound policy that cannot be read counts as Aggressive. Unlike the
     /// post-taint state, this does not depend on `source_envelopes`.
     pub(crate) fn live_level(&self) -> codex_security_policy::SecurityLevel {
-        use codex_security_policy::SecurityLevel;
-        let live = match &self.ingress_policy {
-            None => SecurityLevel::Permissive,
-            Some(policy) => policy
-                .0
-                .snapshot_for_agent(self.state.thread_id)
-                .map_or(SecurityLevel::Aggressive, |snapshot| snapshot.level),
-        };
-        self.ingress_level.max(live)
+        live_level_of(
+            self.ingress_level,
+            self.ingress_policy.as_ref().map(|policy| &policy.0),
+            self.state.thread_id,
+        )
     }
 
     /// Issue #445: whether the security kill switch a person turned on in
@@ -1710,6 +1707,9 @@ impl ModelClient {
             sdp: response.sdp,
             call_id: response.call_id,
             sideband_headers,
+            record: evidence
+                .as_deref()
+                .and_then(crate::accounting::transport::ResponseEvidence::realtime_session_record),
         })
     }
 
@@ -5011,7 +5011,8 @@ fn chat_replay_function_arguments(arguments: String) -> String {
 /// call recorded on the Responses wire (before a provider switch or in forked
 /// history) replays under the flat name this request offers for that exact
 /// tool (`flat_tool_names`, the request's own mapping), such as an MCP tool's
-/// `mcp__server__tool`; otherwise under its bare name, as before. A tool whose
+/// `mcp__server__tool`, or the offered `*_v1` alias for a V1 agent tool;
+/// otherwise under its bare name, as before. A tool whose
 /// preferred flat name a plain tool already takes is offered under a hashed
 /// name, so its earlier calls never appear as calls of the plain tool (#688).
 fn flatten_namespaced_history(
@@ -5038,10 +5039,28 @@ fn flatten_namespaced_history(
             continue;
         };
         let tool_name = codex_tools::ToolName::namespaced(namespace, name.clone());
-        if let Some(flat) = flat_tool_names
+        let flat = flat_tool_names
             .flat_name_for(&tool_name)
             .filter(|flat| offered.contains(flat))
-        {
+            .or_else(|| {
+                // V1 tools use explicit plain aliases on these wires, so they
+                // are not present in the namespaced-tools flat-name mapping.
+                if tool_name.namespace.as_deref()
+                    != Some(crate::tools::handlers::multi_agents_spec::MULTI_AGENT_V1_NAMESPACE)
+                {
+                    return None;
+                }
+                let alias = match tool_name.name.as_str() {
+                    "spawn_agent" => "spawn_agent_v1",
+                    "send_input" => "send_input_v1",
+                    "wait_agent" => "wait_agent_v1",
+                    "close_agent" => "close_agent_v1",
+                    "resume_agent" => "resume_agent_v1",
+                    _ => return None,
+                };
+                offered.contains(alias).then_some(alias)
+            });
+        if let Some(flat) = flat {
             *name = flat.to_string();
         }
     }
@@ -7087,3 +7106,21 @@ impl WebsocketTelemetry for ApiTelemetry {
 #[cfg(test)]
 #[path = "client_tests.rs"]
 mod tests;
+
+/// The level in force for `thread_id`: the session's own level or the
+/// stricter one its policy tree holds (Aggressive when that is unreadable).
+/// See [`ModelClient::live_level`].
+pub(crate) fn live_level_of(
+    ingress_level: codex_security_policy::SecurityLevel,
+    policy: Option<&crate::security::EffectivePolicyView>,
+    thread_id: ThreadId,
+) -> codex_security_policy::SecurityLevel {
+    use codex_security_policy::SecurityLevel;
+    let live = match policy {
+        None => SecurityLevel::Permissive,
+        Some(policy) => policy
+            .snapshot_for_agent(thread_id)
+            .map_or(SecurityLevel::Aggressive, |snapshot| snapshot.level),
+    };
+    ingress_level.max(live)
+}
