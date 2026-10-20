@@ -9,6 +9,7 @@ use std::path::Path;
 use codex_model_provider::selected_account_error;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::NamedProviderAccount;
+use codex_vault::ProviderAccountKind;
 use codex_vault::Vault;
 use codex_vault::VaultKeyStorage;
 use codex_vault::parse_provider_account_selection;
@@ -481,6 +482,37 @@ pub(crate) fn configured_account_names(codex_home: &Path, provider_id: &str) -> 
         .collect()
 }
 
+/// PF-84 (#1085): whether this home uses named OpenAI sign-in accounts: a
+/// named account holding a sign-in is enrolled in the vault, or the
+/// configuration (`[provider_accounts]`) puts a provider on one. Uses only
+/// account metadata, but an initialised vault is decrypted to read it (an
+/// uninitialised one is not touched). An unreadable vault counts as yes, so a
+/// home that may hold such accounts keeps their protections.
+pub(crate) fn uses_named_sign_in_accounts(
+    codex_home: &Path,
+    model_providers: &HashMap<String, ModelProviderInfo>,
+) -> bool {
+    if model_providers
+        .values()
+        .any(|provider| codex_model_provider::named_sign_in_account(provider).is_some())
+    {
+        return true;
+    }
+    let vault = Vault::new(codex_home.to_path_buf());
+    if vault.key_storage() == VaultKeyStorage::NotInitialized {
+        return false;
+    }
+    match vault.list_provider_accounts() {
+        Ok(accounts) => accounts
+            .iter()
+            .any(|account| account.kinds.contains(&ProviderAccountKind::ChatgptAuth)),
+        Err(error) => {
+            tracing::warn!(%error, "could not list named accounts; treating the home as using them");
+            true
+        }
+    }
+}
+
 /// API-key providers, `auth.command` providers (including Claude Plan),
 /// Amazon Bedrock without command auth (an AWS profile per account) and
 /// OpenAI sign-in providers (a ChatGPT or OpenAI API-key sign-in per account,
@@ -511,6 +543,52 @@ mod tests {
             ),
             ("plain".to_string(), ModelProviderInfo::default()),
         ])
+    }
+
+    /// #1085: only an enrolled named sign-in account, or a provider the
+    /// configuration puts on one, counts; another provider's named account
+    /// (a Z.AI key) does not.
+    #[test]
+    fn a_home_uses_named_sign_in_accounts_only_when_it_holds_or_selects_one() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let mut model_providers = providers();
+        assert!(!uses_named_sign_in_accounts(home.path(), &model_providers));
+
+        let vault = Vault::new(home.path().to_path_buf());
+        let work = codex_vault::ProviderAccountName::parse("work").expect("name");
+        vault
+            .create_provider_account("zai", &work, ProviderAccountKind::ApiKey, "test-zai-key")
+            .expect("add zai account");
+        assert!(!uses_named_sign_in_accounts(home.path(), &model_providers));
+        stamp_provider_account("zai", model_providers.get_mut("zai").expect("zai"), "work")
+            .expect("stamp zai");
+        assert!(!uses_named_sign_in_accounts(home.path(), &model_providers));
+
+        let mut selected = model_providers.clone();
+        stamp_provider_account(
+            "openai",
+            selected.get_mut("openai").expect("openai"),
+            "work",
+        )
+        .expect("stamp openai");
+        assert!(uses_named_sign_in_accounts(home.path(), &selected));
+
+        vault
+            .create_provider_account("openai", &work, ProviderAccountKind::ChatgptAuth, "{}")
+            .expect("add openai account");
+        assert!(uses_named_sign_in_accounts(home.path(), &model_providers));
+
+        // An unreadable vault counts as holding such accounts (fail closed).
+        let unreadable = tempfile::tempdir().expect("tempdir");
+        Vault::new(unreadable.path().to_path_buf())
+            .create_provider_account("zai", &work, ProviderAccountKind::ApiKey, "test-zai-key")
+            .expect("add zai account");
+        std::fs::write(
+            unreadable.path().join("secrets").join("local.age"),
+            b"not an age file",
+        )
+        .expect("corrupt the vault");
+        assert!(uses_named_sign_in_accounts(unreadable.path(), &providers()));
     }
 
     fn accounts(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {

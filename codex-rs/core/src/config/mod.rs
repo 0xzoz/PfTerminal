@@ -2004,6 +2004,13 @@ impl Config {
         self.features.enabled(Feature::NamedAccounts)
     }
 
+    /// PF-84 (#1085): whether this home uses named OpenAI sign-in accounts
+    /// (one is enrolled, or `[provider_accounts]` selects one). Blocking: an
+    /// initialised vault is decrypted to read its account metadata.
+    pub fn uses_named_sign_in_accounts(&self) -> bool {
+        provider_accounts::uses_named_sign_in_accounts(&self.codex_home, &self.model_providers)
+    }
+
     /// Creates the HTTP client factory resolved from the effective feature configuration.
     pub fn http_client_factory(&self) -> HttpClientFactory {
         let outbound_proxy_policy = if self.respect_system_proxy {
