@@ -110,6 +110,7 @@ mod issue_766;
 mod issue_826;
 mod issue_826_explained;
 mod issue_840;
+mod issue_874;
 mod issue_891_d48_known_tools;
 mod issue_891_one_run;
 mod items;

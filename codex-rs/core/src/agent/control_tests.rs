@@ -1023,6 +1023,27 @@ async fn wait_for_subagent_notification(parent_thread: &Arc<CodexThread>) -> boo
     timeout(Duration::from_secs(10), wait).await.is_ok()
 }
 
+/// Waits until a spawned child's initial turn has fully ended (status settled, active turn
+/// cleared). A still-running turn drains queued mailbox mail and applies it concurrently with
+/// a test that drives mailbox phases by hand.
+async fn wait_for_initial_turn_to_finish(thread: &Arc<CodexThread>) {
+    let wait = async {
+        loop {
+            let settled = !matches!(
+                thread.agent_status().await,
+                AgentStatus::PendingInit | AgentStatus::Running
+            );
+            if settled && thread.session.active_turn.lock().await.is_none() {
+                return;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    };
+    timeout(Duration::from_secs(10), wait)
+        .await
+        .expect("child's initial turn should finish");
+}
+
 async fn persist_thread_for_tree_resume(thread: &Arc<CodexThread>, message: &str) {
     thread
         .inject_user_message_without_turn(message.to_string())
@@ -1505,6 +1526,8 @@ async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
         .get_thread(spawned_agent.thread_id)
         .await
         .expect("child thread should exist");
+    // Below, only this test may apply the applied-crash message and set its mailbox phase.
+    wait_for_initial_turn_to_finish(&child_thread).await;
     child_thread
         .inject_response_items(vec![assistant_message(
             "child persisted",
