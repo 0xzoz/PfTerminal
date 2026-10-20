@@ -43,6 +43,11 @@ class ArchiveKeyTest(unittest.TestCase):
                 "2025-09-18/rustc-dev-nightly-x86_64-pc-windows-gnullvm.tar.xz",
             },
         )
+        bare = {**repo, "rustfmt_version": "nightly"}
+        self.assertIn(
+            "2025-09-18/rustfmt-nightly-x86_64-pc-windows-msvc.tar.xz",
+            pins.archives(bare),
+        )
         stable = {**repo, "version": "1.99.1", "dev_components": False}
         self.assertNotIn(
             "rustc-dev-1.99.1-x86_64-pc-windows-gnullvm.tar.xz", pins.archives(stable)
@@ -90,8 +95,9 @@ class ArchiveKeyTest(unittest.TestCase):
 
     def test_every_declared_release_is_pinned(self) -> None:
         # A cheap pull-request guard: a Rust version changed in MODULE.bazel
-        # without rerunning the script has no pins. The nightly Bazel job runs
-        # the full `--check`.
+        # without rerunning the script has no pins. It can't see a new exec or
+        # target triple, or a new rules_rust default rustfmt nightly after a
+        # rules_rs bump; the nightly Bazel job's full `--check` catches those.
         text = pins.MODULE.read_text()
         declared = set()
         for call in re.findall(

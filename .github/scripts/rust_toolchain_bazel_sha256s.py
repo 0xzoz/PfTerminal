@@ -27,10 +27,12 @@ pinned. Needs Python 3.11+ and bazel.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import subprocess
 import sys
+import time
 import urllib.request
 from pathlib import Path
 
@@ -50,11 +52,20 @@ END = "# END RUST_TOOLCHAIN_SHA256S"
 
 
 def bazel(*args: str) -> str:
+    # `--lockfile_mode=error`: never rewrite a stale MODULE.bazel.lock (the
+    # default `update` would, hiding it from the lockfile check). Bazel's
+    # stderr goes to ours, so a failure shows why.
+    command, *rest = args
     return subprocess.run(
-        [os.environ.get("CODEX_BAZEL_BIN", "bazel"), *args],
+        [
+            os.environ.get("CODEX_BAZEL_BIN", "bazel"),
+            command,
+            *rest,
+            "--lockfile_mode=error",
+        ],
         cwd=REPO_ROOT,
         check=True,
-        capture_output=True,
+        stdout=subprocess.PIPE,
         text=True,
     ).stdout
 
@@ -105,13 +116,19 @@ def archives(repo: dict[str, object]) -> set[str]:
     version = str(repo.get("version", ""))
     if rule == "rust_toolchain_tools_repository":
         target = str(repo["target_triple"])
+        # rules_rust skips llvm-tools only for releases older than 1.45 or
+        # nightly 2020-05-22, which this script does not support.
         keys = {
             archive(tool, version, exec_triple)
             for tool in ("rustc", "clippy", "cargo", "llvm-tools")
         }
         keys.add(archive("rust-std", version, target))
-        if repo.get("rustfmt_version"):
-            keys.add(archive("rustfmt", str(repo["rustfmt_version"]), exec_triple))
+        rustfmt_version = str(repo.get("rustfmt_version", ""))
+        if rustfmt_version in ("nightly", "beta"):
+            # A bare channel takes the toolchain's own date.
+            rustfmt_version += "/" + version.partition("/")[2]
+        if rustfmt_version:
+            keys.add(archive("rustfmt", rustfmt_version, exec_triple))
         if repo["dev_components"]:
             keys.add(archive("rustc-dev", version, target))
         return keys
@@ -136,8 +153,27 @@ def release(key: str) -> str:
     return match.group(1)
 
 
+def download(url: str) -> bytes:
+    for attempt in range(1, 4):
+        try:
+            with urllib.request.urlopen(url, timeout=60) as response:
+                return response.read()
+        except OSError as error:
+            if attempt == 3:
+                sys.exit(f"cannot download {url}: {error}")
+            print(f"retrying {url} after {error}", file=sys.stderr)
+            time.sleep(5 * attempt)
+    raise AssertionError("unreachable")
+
+
 def manifest_hashes(version: str) -> dict[str, str]:
-    """Archive key -> sha256 from the release manifest of `version`."""
+    """Archive key -> sha256 from the release manifest of `version`.
+
+    The manifest comes over HTTPS from static.rust-lang.org and is checked
+    against its published `.sha256`, as rustup does by default; its GPG
+    signature is not checked. Committing the result means later downloads
+    must match what was seen here.
+    """
     channel, _, iso_date = version.partition("/")
     nightly = channel in ("nightly", "beta")
     url = (
@@ -145,8 +181,11 @@ def manifest_hashes(version: str) -> dict[str, str]:
         if nightly
         else f"{DIST}channel-rust-{version}.toml"
     )
-    with urllib.request.urlopen(url, timeout=60) as response:
-        manifest = tomllib.loads(response.read().decode())
+    data = download(url)
+    published = download(url + ".sha256").decode().split()[0]
+    if hashlib.sha256(data).hexdigest() != published:
+        sys.exit(f"{url} does not match its .sha256")
+    manifest = tomllib.loads(data.decode())
     hashes = {}
     for package in manifest["pkg"].values():
         for target in package.get("target", {}).values():
