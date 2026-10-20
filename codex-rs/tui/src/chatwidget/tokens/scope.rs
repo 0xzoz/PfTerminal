@@ -25,6 +25,11 @@ use super::provider_name;
 use super::request_count;
 use super::route_line;
 
+/// #913 (D31): the OpenAI route's automatic reviewer has no published API
+/// price, so its requests stay unpriced; the page names the model so the
+/// gap is not read as a missing catalogue row.
+const AUTO_REVIEW_NO_PRICE: &str = "OpenAI doesn't publish a price for Codex Auto Review.";
+
 const RESUME_STEP: &str =
     "To see those requests, open that conversation with /resume and run /cost there.";
 /// #912: a conversation holding only a reopen warm-up has no saved turns to resume.
@@ -131,6 +136,7 @@ pub(super) fn no_price_next_step<'a>(
     let mut in_part: Vec<String> = Vec::new();
     let mut incomplete: Vec<String> = Vec::new();
     let mut undeclared: Vec<String> = Vec::new();
+    let mut auto_review = false;
     for quote in quotes {
         if quote.basis() == codex_state::accounting::Basis::Undeclared {
             if !undeclared.contains(&quote.attempt.provider) {
@@ -161,6 +167,8 @@ pub(super) fn no_price_next_step<'a>(
         } else if priced_any {
             &mut in_part
         } else if has_no_price(quote) || unreported {
+            auto_review |=
+                quote.attempt.provider == "openai" && quote.attempt.model == "codex-auto-review";
             &mut no_price
         } else {
             // Only zero counts, which cost nothing whatever the rate.
@@ -188,7 +196,12 @@ pub(super) fn no_price_next_step<'a>(
         .collect();
     if let Some(providers) = joined(&no_price) {
         steps.push(format!(
-            "Next step for requests with no price: check the bill from {providers}. No published price covers them, so no cost is shown for them here."
+            "Next step for requests with no price: check the bill from {providers}. No published price covers them, so no cost is shown for them here.{}",
+            if auto_review {
+                format!(" {AUTO_REVIEW_NO_PRICE}")
+            } else {
+                String::new()
+            }
         ));
     }
     if let Some(providers) = joined(&in_part) {

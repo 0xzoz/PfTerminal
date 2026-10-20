@@ -407,6 +407,59 @@ fn missing_price_pages_state_the_next_step_and_never_zero() {
     insta::assert_snapshot!("cost_missing_price_request_page", pages[1].text.join("\n"));
 }
 
+// #913 (D31): the OpenAI route's automatic reviewer stays "no price
+// available", and the next step names the model whose price is unpublished.
+#[test]
+fn codex_auto_review_stays_unpriced_and_names_the_model() {
+    const AUTO_REVIEW_STEP: &str = "Next step for requests with no price: check the bill from OpenAI. No published price covers them, so no cost is shown for them here. OpenAI doesn't publish a price for Codex Auto Review.";
+    let own = vec![unpriced(
+        /*id*/ 2,
+        thread(/*n*/ 1),
+        "openai",
+        "codex-auto-review",
+    )];
+    let pages = inspection_pages(Ok(day(own, Some(OtherConversations::default()))));
+    let titles: Vec<&str> = pages
+        .iter()
+        .filter(|page| page.text.iter().any(|line| line == AUTO_REVIEW_STEP))
+        .map(|page| page.title.as_str())
+        .collect();
+    assert_eq!(
+        titles,
+        vec![
+            "Cost — this conversation",
+            "Request",
+            "Attempt, components and original price",
+            "Provider: openai; Model: codex-auto-review",
+        ]
+    );
+    assert!(
+        pages[1]
+            .text
+            .iter()
+            .any(|line| line == "Estimated cost: no price available")
+    );
+    assert_never_zero(&pages);
+    insta::assert_snapshot!(
+        "cost_codex_auto_review_request_page",
+        pages[1].text.join("\n")
+    );
+
+    // Another unpriced OpenAI model gets the plain step, without the sentence.
+    let other = own_day(vec![unpriced(
+        /*id*/ 2,
+        thread(/*n*/ 1),
+        "openai",
+        "gpt-5.4",
+    )]);
+    assert!(
+        !other
+            .iter()
+            .flat_map(|page| &page.text)
+            .any(|line| line.contains("Codex Auto Review"))
+    );
+}
+
 /// Each page, in order, and the monetary statements it must carry.
 const AUDIT: [(&str, &[&str]); 11] = [
     (
