@@ -20,7 +20,7 @@ use std::time::UNIX_EPOCH;
 
 /// Entries looked at per repository at most; past it the look is
 /// incomplete (and holds, see `held_for`).
-const MAX_ENTRIES: usize = 50_000;
+pub(super) const MAX_ENTRIES: usize = 50_000;
 const MAX_DEPTH: usize = 16;
 pub(super) const MAX_REPOS: usize = 8;
 const MAX_REPOS_PER_THREAD: usize = 16;
@@ -1266,7 +1266,7 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
                 // Where git folders overlap in other roles, only its own
                 // entry (as before #943 item 13).
                 None if cur.overlapping => Walked::Exact(repo.git_dirs.clone()),
-                None => Walked::Complete(seen_in_full(&cur)),
+                None => Walked::Complete(repo.git_dirs.clone(), seen_in_full(&cur)),
             },
             started,
         ));
@@ -1285,15 +1285,29 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
                         *entry = (why, started);
                     }
                 }
-                // #943 item 13: the folders it saw in full are out of every
-                // entry recorded before it started, also one recorded under
-                // other git folders with them (before the `.git` was
-                // replaced, or by a look that walked the old and new ones).
-                Walked::Complete(seen) => {
+                // Its own entry goes, if recorded before it started. #943
+                // item 13: so do the folders it saw in full from an entry no
+                // session's repository has now (left by a `.git` replaced or
+                // made again naming other git folders, or by a look that
+                // walked the old and new ones). A repository's current entry
+                // goes only by a complete look of its own: looks of its git
+                // folders one by one may each stay below `MAX_ENTRIES`.
+                Walked::Complete(own, seen) => {
+                    let current: HashSet<Vec<PathBuf>> = global
+                        .threads
+                        .values()
+                        .flat_map(|state| state.repos.values())
+                        .map(|(repo, _)| repo.git_dirs.clone())
+                        .collect();
                     let mut kept: HashMap<Vec<PathBuf>, (String, u64)> = HashMap::new();
                     for (mut dirs, (why, at)) in std::mem::take(&mut global.incomplete) {
                         if at < started {
-                            dirs.retain(|dir| !seen.contains(dir));
+                            if dirs == own {
+                                continue;
+                            }
+                            if !current.contains(&dirs) {
+                                dirs.retain(|dir| !seen.contains(dir));
+                            }
                         }
                         if dirs.is_empty() {
                             continue;
@@ -1335,26 +1349,30 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
 /// reached a folder again in another role, none (`Snapshot::overlapping`).
 fn seen_in_full(cur: &Snapshot) -> Vec<PathBuf> {
     let home = dirs::home_dir().and_then(|home| std::fs::canonicalize(home).ok());
-    let depth = |dir: &Path| dir.components().count();
-    cur.folders
+    let git_dirs: HashSet<&Path> = cur
+        .folders
         .iter()
         .filter(|(dir, folder)| {
-            folder.role == Role::GitDir
-                && dir.parent().is_some()
-                && Some(*dir) != home.as_ref()
-                && cur
-                    .folders
-                    .keys()
-                    .all(|below| !below.starts_with(dir) || depth(below) - depth(dir) < MAX_DEPTH)
+            folder.role == Role::GitDir && dir.parent().is_some() && Some(*dir) != home.as_ref()
         })
-        .map(|(dir, _)| dir.clone())
+        .map(|(dir, _)| dir.as_path())
+        .collect();
+    let too_deep: HashSet<&Path> = cur
+        .folders
+        .keys()
+        .flat_map(|below| below.ancestors().skip(MAX_DEPTH))
+        .filter(|dir| git_dirs.contains(dir))
+        .collect();
+    git_dirs
+        .difference(&too_deep)
+        .map(|dir| dir.to_path_buf())
         .collect()
 }
 
 /// How a look at a repository went, for `Global::incomplete`.
 enum Walked {
-    /// These git folders were seen in full.
-    Complete(Vec<PathBuf>),
+    /// Its git folders, and those it saw in full (`seen_in_full`).
+    Complete(Vec<PathBuf>, Vec<PathBuf>),
     /// Its git folders weren't, and why.
     Incomplete(Vec<PathBuf>, String),
     /// Only its own entry goes: its `.git` is gone (nothing to follow

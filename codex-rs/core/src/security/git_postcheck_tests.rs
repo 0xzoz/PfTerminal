@@ -1301,3 +1301,54 @@ fn issue_943_a_worktree_look_does_not_clear_a_too_deep_project() {
         "{held:?}"
     );
 }
+
+/// #943 item 13 review r3: a repository whose `.git` names two git folders
+/// (a `gitdir:` and a `commondir` an agent can write) can be incomplete for
+/// too many entries while a look of each folder alone is complete: those
+/// looks don't clear its entry, only a complete look of its own does.
+#[test]
+fn issue_943_looks_of_its_git_folders_one_by_one_do_not_clear_a_repository() {
+    const NOT_FULLY: &str = "(not checked fully)";
+    // Over half the cap in each.
+    let fill = |git: &Path| {
+        let tags = git.join("refs/tags");
+        std::fs::create_dir_all(&tags).expect("tags");
+        for n in 0..unix::MAX_ENTRIES / 2 + 1 {
+            std::fs::write(tags.join(format!("t{n}")), "").expect("tag");
+        }
+    };
+    let common = Project::new();
+    fill(&common.git());
+    let other = common.base.join("other/.git");
+    for folder in ["objects", "refs/heads"] {
+        std::fs::create_dir_all(other.join(folder)).expect("git folder");
+    }
+    std::fs::write(other.join("HEAD"), "ref: refs/heads/main\n").expect("HEAD");
+    std::fs::write(
+        other.join("commondir"),
+        format!("{}\n", common.git().display()),
+    )
+    .expect("commondir");
+    fill(&other);
+    let both = common.base.join("both");
+    std::fs::create_dir_all(&both).expect("both");
+    std::fs::write(both.join(".git"), format!("gitdir: {}\n", other.display())).expect("git file");
+    let thread = ThreadId::new();
+    let both_repos = repos(&[both.as_path()]);
+    let found = kinds(&check(thread, &both_repos));
+    assert_eq!(
+        found,
+        vec![format!("incomplete {}", both.join(".git").display())]
+    );
+    for folder in [common.root.clone(), common.base.join("other")] {
+        assert_eq!(
+            kinds(&check(thread, &repos(&[folder.as_path()]))),
+            Vec::<String>::new()
+        );
+    }
+    let held = held_for(&[common.git(), other]);
+    assert!(
+        held.iter().any(|held| held.ends_with(NOT_FULLY)),
+        "{held:?}"
+    );
+}
