@@ -24,6 +24,7 @@ use super::quoted::Word;
 use super::sed;
 use super::shell::SHELLS;
 use super::shell::basename;
+use super::work;
 use std::collections::HashMap;
 use std::collections::HashSet;
 
@@ -146,6 +147,7 @@ impl Classifier {
         let mut scripts = Vec::new();
         let mut previous: Option<&str> = None;
         for arg in command {
+            work::step();
             let in_shell = argv
                 .words
                 .iter()
@@ -176,6 +178,7 @@ impl Classifier {
         // reading (text of other languages is read loosely).
         let strict = self.not_shell == 0 && self.rebuilt == 0;
         for script in scripts {
+            work::step();
             let reading = quoted::commands(script);
             found.unreadable |=
                 reading.too_deep || reading.unsure || (strict && reading.unterminated);
@@ -192,6 +195,7 @@ impl Classifier {
         self.written.extend(found.written.iter().cloned());
         let mut judged = HashSet::new();
         for (script, cwd) in std::mem::take(&mut found.scripts) {
+            work::step();
             if !judged.insert((script.clone(), cwd.clone())) {
                 continue;
             }
@@ -203,6 +207,7 @@ impl Classifier {
             self.script(&script, &cwd, depth + 1);
         }
         for sed in std::mem::take(&mut found.seds) {
+            work::step();
             self.judge_sed(sed, &found, depth);
         }
         // A command the word lexer finds that this reading does not
@@ -217,6 +222,7 @@ impl Classifier {
     /// `commands` and the quoted text in them, following `cd`.
     fn walk(&self, commands: &[Command], folders: &mut Folders, level: usize, found: &mut Found) {
         for command in commands {
+            work::step();
             let texts: Vec<String> = command.words.iter().map(|word| word.text.clone()).collect();
             // A substitution's `cd` does not move this line.
             if !command.substituted
@@ -253,6 +259,7 @@ impl Classifier {
             let mut watched = false;
             let mut sed_command = false;
             for start in starts {
+                work::step();
                 let Some((index, resolved_name)) = indirect::command_word(&texts[start..]) else {
                     continue;
                 };
@@ -261,6 +268,7 @@ impl Classifier {
                 // `su -c`, `flock f -c`, `env -S`). Only the outermost
                 // `watch` counts: an inner one is part of its line.
                 for wrapper in start..=at {
+                    work::step();
                     if !wrappers_checked.insert(wrapper) {
                         continue;
                     }
@@ -269,6 +277,7 @@ impl Classifier {
                         continue;
                     }
                     for (word, script) in runner_scripts(&texts, wrapper) {
+                        work::step();
                         roles[word] = Role::Script;
                         found.scripts.push((script, folders.cwd.clone()));
                         runners += 1;
@@ -322,6 +331,7 @@ impl Classifier {
                             vec![first]
                         };
                         for candidate in candidates {
+                            work::step();
                             roles[candidate] = Role::Script;
                             found
                                 .scripts
@@ -332,6 +342,7 @@ impl Classifier {
                     Some(Code::Stdin) if shell => {
                         input_role = Role::Script;
                         for input in &command.input {
+                            work::step();
                             found
                                 .scripts
                                 .push((input.text.clone(), folders.cwd.clone()));
@@ -363,6 +374,7 @@ impl Classifier {
                         .map(|word| (word, Role::Code)),
                 );
             for (word, role) in quoted {
+                work::step();
                 // Quoted text runs in a shell of its own, if at all: its
                 // `cd` does not move this line.
                 let mut inner = Folders {
@@ -421,6 +433,7 @@ impl Classifier {
         }
         let mut chunks: Vec<String> = call.programs.iter().map(|word| word.text.clone()).collect();
         for file in &call.files {
+            work::step();
             // A script file the action writes, or that code the classifier
             // cannot follow may write, may differ when sed runs.
             let rewritten = line.runs_code
@@ -486,6 +499,7 @@ impl Classifier {
             .flat_map(|reading| reading.texts.iter().cloned())
             .collect();
         for text in texts {
+            work::step();
             self.script(&text, &sed.cwd, depth + 1);
         }
     }
@@ -525,6 +539,7 @@ fn collect_seds(
     }
     saved_to.extend(pipeline_targets(commands, command));
     for at in sed::positions(texts) {
+        work::step();
         found.sed_commands += 1;
         let fed = texts[..at]
             .iter()
@@ -536,6 +551,7 @@ fn collect_seds(
                     .any(|flag| word.starts_with(flag))
             }) || texts[at + 1..].iter().any(|word| word.contains("{}")));
         for call in sed::calls(&command.words[at + 1..]) {
+            work::step();
             found.seds.push(Sed {
                 call,
                 cwd: folders.cwd.clone(),
@@ -560,6 +576,7 @@ fn pipeline_targets(commands: &[Command], command: &Command) -> Vec<Option<Strin
     while let Some(index) = stage
         && steps < commands.len()
     {
+        work::step();
         steps += 1;
         let Some(consumer) = commands.get(index) else {
             targets.push(None);
@@ -613,6 +630,7 @@ fn filter_saves(filter: &str, args: &[String]) -> bool {
             let mut operands = 0;
             let mut options_ended = false;
             for arg in args {
+                work::step();
                 if !options_ended && arg == "--" {
                     options_ended = true;
                 } else if options_ended || arg == "-" || !arg.starts_with('-') {
@@ -654,6 +672,7 @@ fn runner_scripts(texts: &[String], at: usize) -> Vec<(usize, String)> {
             while let Some(word) = texts.get(index)
                 && word.starts_with('-')
             {
+                work::step();
                 let valued = matches!(word.as_str(), "-n" | "--interval" | "-q" | "--equexit");
                 index += 1 + usize::from(valued);
             }
@@ -670,6 +689,7 @@ fn runner_scripts(texts: &[String], at: usize) -> Vec<(usize, String)> {
             };
             let mut scripts = Vec::new();
             for index in args {
+                work::step();
                 let word = &texts[index];
                 let next = || texts.get(index + 1).map(|next| (index + 1, next.clone()));
                 if word == long {
