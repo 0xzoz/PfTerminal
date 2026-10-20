@@ -230,3 +230,61 @@ fn issue_748_denials_moderate_did_not_add_are_not_attributed() {
         None
     );
 }
+
+/// #841 (MOD-30): a command naming Corbanu's own files that the secretless
+/// launch contract keeps unreadable at every level is recognised, so the
+/// prompt can say approving cannot unlock them; a project file is not.
+#[test]
+fn issue_841_reads_kept_by_the_launch_contract_are_recognised() {
+    let fixture = Fixture::new();
+    let contract = fixture.contract();
+    let inputs = fixture.inputs(Fixture::profile());
+    let named = |script: String| {
+        super::super::kept_read_named(
+            &inputs,
+            &contract,
+            &["/bin/bash".to_string(), "-c".to_string(), script],
+            &fixture.project,
+        )
+    };
+    assert!(named(format!(
+        "cat '{}/config.toml'",
+        fixture.home.display()
+    )));
+    assert!(named(format!("cat '{}/auth.json'", fixture.home.display())));
+    assert!(!named("cat README.md".to_string()));
+}
+
+/// #839: what an explained denial was, for the inspector's recent denials:
+/// Moderate's own, or kept by the secretless launch contract.
+#[test]
+fn issue_839_explained_denials_say_what_was_denied() {
+    let fixture = Fixture::new();
+    let auth = format!("{}/auth.json", fixture.home.display());
+    let command = [
+        "/bin/bash".to_string(),
+        "-c".to_string(),
+        format!("cat '{auth}'"),
+    ];
+    let lines = [format!("cat: {auth}: Operation not permitted")];
+    let denied = |contract: Option<&LaunchContract>| {
+        explain_denied(
+            &fixture.inputs(Fixture::profile()),
+            contract,
+            &command,
+            &fixture.project,
+            &lines,
+        )
+        .map(|(denied, _)| denied)
+    };
+    assert_eq!(denied(None), Some(Denied::Read));
+    let contract = fixture.contract();
+    assert_eq!(denied(Some(&contract)), Some(Denied::KeptRead));
+    assert_eq!(
+        Denied::Read.inspected(),
+        (
+            "reading a protected file",
+            "denied by the sandbox under Moderate"
+        )
+    );
+}

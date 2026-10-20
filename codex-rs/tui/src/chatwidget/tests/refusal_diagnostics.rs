@@ -34,7 +34,9 @@ async fn issue822_refused_command_preserves_reason_and_never_claims_execution() 
         let transcript = cell.transcript_lines(/*width*/ 80);
         for lines in [&display, &transcript] {
             let text = lines_to_single_string(lines);
-            assert!(text.contains("Did not run"), "{text}");
+            // #873: neutral (a network-policy refusal can come after the
+            // command ran), so it never says whether the command ran.
+            assert!(!text.contains("Did not run"), "{text}");
             assert!(text.contains("Refused"), "{text}");
             assert!(text.contains("Synthetic policy refused"), "{text}");
             for false_claim in [
@@ -51,6 +53,13 @@ async fn issue822_refused_command_preserves_reason_and_never_claims_execution() 
                     && span.style.fg == Some(ratatui::style::Color::Green)
             }));
         }
+        // #873: one detail line carries the label and the reason.
+        let display_text = lines_to_single_string(&display);
+        assert_eq!(display_text.matches('└').count(), 1, "{display_text}");
+        assert!(
+            display_text.contains("  └ Refused: Synthetic policy refused"),
+            "{display_text}"
+        );
         insta::assert_snapshot!(
             format!("issue822_refused_{name}"),
             format!(

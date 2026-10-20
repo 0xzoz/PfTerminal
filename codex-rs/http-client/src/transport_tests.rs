@@ -385,3 +385,98 @@ async fn pf_27_s09_broker_frame_requests_go_only_to_the_broker_sender() {
     ));
     assert!(network.accept().is_err(), "nothing may reach the network");
 }
+
+/// #878: a sender answering with a fixed status and headers.
+struct AnsweringSender {
+    status: http::StatusCode,
+    headers: http::HeaderMap,
+}
+
+impl crate::ModelBrokerSender for AnsweringSender {
+    fn send(&self, _request: crate::ModelBrokerRequest) -> crate::ModelBrokerFuture {
+        let status = self.status;
+        let headers = self.headers.clone();
+        Box::pin(async move {
+            Ok(crate::ModelBrokerResponse {
+                status,
+                headers,
+                bytes: futures::stream::empty().boxed(),
+            })
+        })
+    }
+}
+
+/// #878: whoever signed a frame-bearing request learns the broker's answer
+/// with its frame, on execute and stream: served (the provider's own error
+/// status included), denied by the broker (its deny code), or not sent
+/// because no broker runs. A provider the broker could not reach, and
+/// requests without a frame, report nothing.
+#[tokio::test]
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "the broker route is process-wide; tests that install one run one at a time"
+)]
+async fn issue_878_the_signer_learns_the_brokers_answer() {
+    let _route = crate::model_broker_route::ROUTE_TEST_LOCK.lock().await;
+    let _uninstall = UninstallRoute;
+    let seen: Arc<Mutex<Vec<(String, String)>>> = Arc::default();
+    let recorded = seen.clone();
+    crate::install_model_broker_observer(Arc::new(move |frame, outcome| {
+        recorded.lock().expect("seen").push((
+            frame.to_str().expect("frame").to_string(),
+            format!("{outcome:?}"),
+        ));
+    }));
+    let transport = ReqwestTransport::new(test_reqwest_client());
+    let mut framed = Request::new(Method::POST, "http://127.0.0.1:9/v1/responses".to_string());
+    framed.headers.insert(
+        crate::MODEL_BROKER_FRAME_HEADER,
+        http::HeaderValue::from_static("signed-frame"),
+    );
+    let take = || std::mem::take(&mut *seen.lock().expect("seen"));
+
+    let _ = transport.execute(framed.clone()).await;
+    assert_eq!(
+        take(),
+        vec![("signed-frame".to_string(), "NotRunning".to_string())]
+    );
+
+    let answer = |status, code: Option<&'static str>| {
+        let mut headers = http::HeaderMap::new();
+        if let Some(code) = code {
+            headers.insert(
+                crate::MODEL_BROKER_ERROR_HEADER,
+                http::HeaderValue::from_static(code),
+            );
+        }
+        crate::install_model_broker_sender(Arc::new(AnsweringSender { status, headers }));
+    };
+    for (status, code, expected) in [
+        (http::StatusCode::OK, None, Some("Served")),
+        (http::StatusCode::TOO_MANY_REQUESTS, None, Some("Served")),
+        (
+            http::StatusCode::FORBIDDEN,
+            Some("replay"),
+            Some("Denied(\"replay\")"),
+        ),
+        (http::StatusCode::BAD_GATEWAY, Some("upstream_failed"), None),
+    ] {
+        answer(status, code);
+        let _ = transport.execute(framed.clone()).await;
+        let _ = transport.stream(framed.clone()).await;
+        let expected: Vec<_> = expected
+            .into_iter()
+            .flat_map(|outcome| {
+                [
+                    ("signed-frame".to_string(), outcome.to_string()),
+                    ("signed-frame".to_string(), outcome.to_string()),
+                ]
+            })
+            .collect();
+        assert_eq!(take(), expected, "{status} {code:?}");
+    }
+
+    let unframed = Request::new(Method::GET, "http://127.0.0.1:9/v1/models".to_string());
+    let _ = transport.execute(unframed).await;
+    assert_eq!(take(), Vec::new());
+}

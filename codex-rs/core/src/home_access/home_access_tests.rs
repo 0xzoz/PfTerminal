@@ -195,6 +195,30 @@ fn a_run_of_home_failures_ends_when_every_thread_is_saved() {
     );
 }
 
+/// #872: a thread that ends while unsaved leaves no stale run behind, which
+/// would shorten the exit wait of a later outage.
+#[test]
+fn a_thread_that_ends_unsaved_leaves_no_run_behind() {
+    let start = Instant::now();
+    let (a, b) = (ThreadId::new(), ThreadId::new());
+    let dir = PathBuf::from("/home/sessions");
+    let mut failures = HomeFailures::default();
+    failures.unwritten(a, dir.clone(), start);
+    failures.unwritten(b, dir, start);
+    failures.ended(a);
+    let after_a = (failures.since, failures.unsaved.len());
+    failures.ended(b);
+    assert_eq!(
+        (after_a, failures.since, failures.unsaved.len()),
+        ((Some(start), 1), None, 0)
+    );
+
+    // A thread that was never unsaved ending does not end a turn's wait.
+    failures.failed(start);
+    failures.ended(ThreadId::new());
+    assert_eq!(failures.since, Some(start));
+}
+
 #[test]
 fn only_marked_home_failures_count() {
     let marked = CodexErr::Io(codex_protocol::home_unreadable::home_unreadable_io_error(

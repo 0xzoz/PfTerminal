@@ -1909,6 +1909,132 @@ async fn a_refused_attempt_is_an_exact_zero_through_format_5() -> anyhow::Result
     Ok(())
 }
 
+/// #824: a realtime session is one attempt admitted when it starts; its end
+/// is recorded through ledger format 6 and changes no count, so the session
+/// reads as unknown usage with no price claim of $0. A session end states
+/// nothing else, and a session ends once. Earlier records keep their bytes.
+#[tokio::test]
+async fn a_realtime_session_end_keeps_usage_unknown_through_format_6() -> anyhow::Result<()> {
+    let path = home();
+    let runtime = open(&path).await?;
+    let price = snapshot()?;
+    let ok = attempt(/*id*/ 1, /*time*/ 0)?;
+    native(&runtime, ok.thread_id).await?;
+    let store = AccountingStore::open(&runtime, /*as_of*/ 0).await?;
+    store
+        .admit(
+            ok.thread_id,
+            &ok,
+            std::slice::from_ref(&price),
+            /*as_of*/ 0,
+        )
+        .await?;
+    store
+        .observe(
+            ok.thread_id,
+            &ok,
+            &[observation(&ok, /*revision*/ 1, /*input*/ 10)?],
+            /*as_of*/ 0,
+        )
+        .await?;
+    let formats = |runtime: Arc<StateRuntime>| async move {
+        let mut conn = connection(&runtime).await?;
+        let format: Vec<i64> =
+            sqlx::query_scalar("SELECT version FROM _accounting_migrations ORDER BY version")
+                .fetch_all(&mut conn)
+                .await?;
+        let observations: Vec<String> =
+            sqlx::query_scalar("SELECT payload FROM draft_accounting_observations")
+                .fetch_all(&mut conn)
+                .await?;
+        conn.close().await?;
+        anyhow::Ok((format, observations))
+    };
+    let (before, earlier) = formats(runtime.clone()).await?;
+    assert_eq!(before, vec![1]);
+
+    let session = attempt(/*id*/ 2, /*time*/ 1)?;
+    store
+        .admit(
+            session.thread_id,
+            &session,
+            std::slice::from_ref(&price),
+            /*as_of*/ 1,
+        )
+        .await?;
+    let end = Observation {
+        revision: 1.try_into()?,
+        source: session.attempt_id,
+        sequence: 1.try_into()?,
+        patch: Patch {
+            session_ended_at_ms: Some(5.try_into()?),
+            ..Patch::default()
+        },
+    };
+    let quote = store
+        .observe(
+            session.thread_id,
+            &session,
+            std::slice::from_ref(&end),
+            /*as_of*/ 1,
+        )
+        .await?;
+    assert_eq!(quote.usage.session_ended_at_ms, Some(5));
+    assert_eq!(quote.usage.input, None);
+    assert_eq!(quote.usage.output, None);
+    assert_eq!(quote.all_buckets_priced, None);
+    let (after, observations) = formats(runtime.clone()).await?;
+    assert_eq!(after, vec![1, 2, 3, 4, 5, 6]);
+    assert!(observations.iter().any(|payload| payload == &earlier[0]));
+
+    let view = ready(
+        AccountingStore::inspect_day(
+            &runtime,
+            ok.thread_id,
+            /*utc_day*/ 0,
+            /*read_at_ms*/ 2,
+        )
+        .await?,
+    );
+    assert_eq!(view.totals.attempts, 2);
+    // Both are incomplete: the first reported input alone, and the session
+    // reported nothing. Neither is a $0 claim.
+    assert_eq!(view.totals.per_use_unknown(), 2);
+
+    // A session end states nothing else.
+    let other = attempt(/*id*/ 3, /*time*/ 2)?;
+    store
+        .admit(
+            other.thread_id,
+            &other,
+            std::slice::from_ref(&price),
+            /*as_of*/ 2,
+        )
+        .await?;
+    let mut bad = end.clone();
+    bad.source = other.attempt_id;
+    bad.patch.output = Presence::Number(1.try_into()?);
+    assert!(
+        store
+            .observe(other.thread_id, &other, &[bad], /*as_of*/ 2)
+            .await
+            .is_err()
+    );
+    // A session ends once.
+    let mut again = end.clone();
+    again.revision = 2.try_into()?;
+    again.sequence = 2.try_into()?;
+    again.patch.session_ended_at_ms = Some(6.try_into()?);
+    assert!(
+        store
+            .observe(session.thread_id, &session, &[again], /*as_of*/ 2)
+            .await
+            .is_err()
+    );
+    runtime.close().await;
+    Ok(())
+}
+
 /// A ledger in a format newer than this build's is refused by name, for reads
 /// and writes alike, and left untouched.
 #[tokio::test]

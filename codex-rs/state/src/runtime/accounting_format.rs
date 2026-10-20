@@ -8,6 +8,7 @@
 //! Format 4 lets an attempt name the provider account it was sent on (PF-84).
 //! Format 5 lets an observation record that the provider refused the attempt
 //! (HTTP 401 or 403) before any response (#475).
+//! Format 6 lets an observation record when a realtime session ended (#824).
 //! A build reads every format up to its own, and
 //! upgrades a ledger only when it first writes a record the ledger's format
 //! cannot express (so an older build sharing the state DB keeps working until

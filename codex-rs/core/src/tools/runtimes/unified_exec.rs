@@ -110,6 +110,10 @@ pub struct UnifiedExecRuntime<'a> {
     /// a refusal ends it there. An approved one must end even when the
     /// command then fails to start.
     shown_by_review: bool,
+    /// #873: whether the last start attempt itself (not a policy check
+    /// before it) failed with `ToolError::Rejected`: a setup or spawn
+    /// failure, shown as failed rather than as refused by policy.
+    start_rejected: bool,
 }
 
 fn unified_exec_options(
@@ -152,6 +156,7 @@ impl<'a> UnifiedExecRuntime<'a> {
             manager,
             shell_mode,
             shown_by_review: false,
+            start_rejected: false,
         }
     }
 
@@ -162,6 +167,13 @@ impl<'a> UnifiedExecRuntime<'a> {
     /// even if no prompt showed it).
     pub(crate) fn shown_by_review(&self) -> bool {
         self.shown_by_review
+    }
+
+    /// #873: whether a `ToolError::Rejected` from the orchestrator came from
+    /// the start attempt (setup or spawn failure) rather than from a policy
+    /// refusal before it.
+    pub(crate) fn start_rejected(&self) -> bool {
+        self.start_rejected
     }
 }
 
@@ -356,6 +368,19 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecProcess> for UnifiedExecRunt
     }
 
     async fn run(
+        &mut self,
+        req: &UnifiedExecRequest,
+        attempt: &SandboxAttempt<'_>,
+        ctx: &ToolCtx,
+    ) -> Result<UnifiedExecProcess, ToolError> {
+        let result = self.start_process(req, attempt, ctx).await;
+        self.start_rejected = matches!(result, Err(ToolError::Rejected(_)));
+        result
+    }
+}
+
+impl UnifiedExecRuntime<'_> {
+    async fn start_process(
         &mut self,
         req: &UnifiedExecRequest,
         attempt: &SandboxAttempt<'_>,

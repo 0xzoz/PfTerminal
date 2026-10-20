@@ -61,6 +61,10 @@ static LINUX_SANDBOX_SKIP_REASON: OnceLock<Option<String>> = OnceLock::new();
 fn enable_deterministic_unified_exec_process_ids_for_tests() {
     codex_core::test_support::set_thread_manager_test_mode(/*enabled*/ true);
     codex_core::test_support::set_deterministic_process_ids(/*enabled*/ true);
+    // #888: never read the developer's own `$HOME/.agents/skills`.
+    codex_core::test_support::ignore_user_home_skills(/*ignore*/ true);
+    // #902: a loaded machine must not make the security path lookups give up.
+    codex_core::test_support::unhurried_security_lookups(/*enabled*/ true);
 }
 
 #[cfg_attr(

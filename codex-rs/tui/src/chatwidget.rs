@@ -184,6 +184,8 @@ use tracing::debug;
 use tracing::warn;
 
 const DEFAULT_MODEL_DISPLAY_NAME: &str = "loading";
+/// #855: how many recent error messages a masked credential entry checks.
+const SHOWN_ERROR_TEXTS_KEPT: usize = 16;
 const MULTI_AGENT_ENABLE_TITLE: &str = "Enable subagents?";
 const MULTI_AGENT_ENABLE_YES: &str = "Yes, enable";
 const MULTI_AGENT_ENABLE_NO: &str = "Not now";
@@ -638,6 +640,9 @@ pub(crate) struct ChatWidget {
     tasknode_active_chat_stream_id: Option<String>,
     /// Holds the platform clipboard lease so copied text remains available while supported.
     clipboard_lease: Option<crate::clipboard_copy::ClipboardLease>,
+    /// #855: the latest error messages shown in the transcript, so a masked
+    /// credential entry can refuse one pasted in place of the credential.
+    shown_error_texts: std::collections::VecDeque<String>,
     wallet_capability: Option<zeroize::Zeroizing<String>>,
     wallet_capability_policy: Option<codex_wallet_daemon::UnlockPolicy>,
     wallet_status_generation: u64,
@@ -1577,8 +1582,20 @@ impl ChatWidget {
     pub(crate) fn add_error_message(&mut self, message: String) {
         // A session that fails to start must not swallow its config warnings.
         self.show_deferred_config_warnings();
+        if self.shown_error_texts.len() == SHOWN_ERROR_TEXTS_KEPT {
+            self.shown_error_texts.pop_front();
+        }
+        self.shown_error_texts.push_back(message.clone());
         self.add_to_history(history_cell::new_error_event(message));
         self.request_redraw();
+    }
+
+    /// #855: error messages recently shown in the transcript (see
+    /// [`VaultSecretEntryView::rejecting_shown_errors`]).
+    ///
+    /// [`VaultSecretEntryView::rejecting_shown_errors`]: crate::bottom_pane::vault_secret_entry::VaultSecretEntryView::rejecting_shown_errors
+    pub(crate) fn shown_error_texts(&self) -> Vec<String> {
+        self.shown_error_texts.iter().cloned().collect()
     }
 
     fn add_app_server_stub_message(&mut self, feature: &str) {

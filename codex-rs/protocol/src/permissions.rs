@@ -19,6 +19,9 @@ use crate::protocol::NetworkAccess;
 use crate::protocol::SandboxPolicy;
 use crate::protocol::WritableRoot;
 
+mod effective_writes;
+pub use effective_writes::EffectiveWrites;
+
 const PROTECTED_METADATA_GIT_PATH_NAME: &str = ".git";
 const PROTECTED_METADATA_AGENTS_PATH_NAME: &str = ".agents";
 const PROTECTED_METADATA_CODEX_PATH_NAME: &str = ".codex";
@@ -453,6 +456,7 @@ struct FileSystemSemanticSignature {
     unlistable_directories: Vec<AbsolutePathBuf>,
     unmovable_paths: Vec<AbsolutePathBuf>,
     keychain_services_denied: bool,
+    user_namespaces_denied: bool,
 }
 
 /// #652: the writable roots of a policy, each as written, normalized and at
@@ -808,6 +812,42 @@ impl FileSystemSandboxEntry {
     }
 }
 
+/// Special-path token of a `deny` entry that stops agent commands creating
+/// user namespaces (issue #826): the Linux sandbox refuses `unshare` and
+/// `clone` with `CLONE_NEWUSER` (`EPERM`) and `clone3` (`ENOSYS`, so C
+/// libraries fall back to `clone`). Inside a user namespace of its own a
+/// command could open the placeholders bubblewrap hides denied files with
+/// and mount over paths. It changes no file access. Carried as
+/// [`FileSystemSpecialPath::Unknown`], like
+/// [`KEYCHAIN_SERVICES_SPECIAL_PATH`]; other sandboxes ignore it.
+pub const USER_NAMESPACES_SPECIAL_PATH: &str = ":user_namespaces";
+
+impl FileSystemSandboxEntry {
+    /// A `deny` entry that stops agent commands creating user namespaces.
+    pub fn deny_user_namespaces() -> Self {
+        Self::new(
+            FileSystemPath::Special {
+                value: FileSystemSpecialPath::unknown(
+                    USER_NAMESPACES_SPECIAL_PATH,
+                    /*subpath*/ None,
+                ),
+            },
+            FileSystemAccessMode::Deny,
+        )
+    }
+
+    /// Whether this is a [`Self::deny_user_namespaces`] entry.
+    pub fn denies_user_namespaces(&self) -> bool {
+        self.access == FileSystemAccessMode::Deny
+            && matches!(
+                &self.path,
+                FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Unknown { path, subpath: None },
+                } if path == USER_NAMESPACES_SPECIAL_PATH
+            )
+    }
+}
+
 fn read_only_file_system_entries() -> Vec<FileSystemSandboxEntry> {
     vec![FileSystemSandboxEntry::new(
         FileSystemPath::Special {
@@ -892,6 +932,8 @@ impl FileSystemSandboxPolicy {
                     && entry.unmovable_path().is_none()
                     // #758: neither does a keychain-services entry.
                     && !entry.denies_keychain_services()
+                    // #826: nor a user-namespaces entry.
+                    && !entry.denies_user_namespaces()
                     && !matches!(
                         &entry.path,
                         FileSystemPath::Special {
@@ -1193,28 +1235,8 @@ impl FileSystemSandboxPolicy {
     /// becomes read-only; a write carve-out uses
     /// [`Self::can_grant_write_effective_path_with_cwd`].
     pub fn can_write_effective_path_with_cwd(&self, path: &Path, cwd: &Path) -> bool {
-        self.can_write_normalized(path, cwd, /*read_only_wins*/ false)
-            || self.can_write_through_links(path, cwd, &self.writable_root_links_with_cwd(cwd))
-    }
-
-    /// [`Self::can_write_effective_path_with_cwd`] with the roots reached
-    /// through a nested link computed once
-    /// ([`Self::writable_root_links_with_cwd`]), for many paths.
-    pub fn can_write_effective_path_with_links(
-        &self,
-        path: &Path,
-        cwd: &Path,
-        links: &WritableRootLinks,
-    ) -> bool {
-        self.can_write_normalized(path, cwd, /*read_only_wins*/ false)
-            || self.can_write_through_links(path, cwd, links)
-    }
-
-    fn can_write_through_links(&self, path: &Path, cwd: &Path, links: &WritableRootLinks) -> bool {
-        links
-            .spellings(path, cwd)
-            .iter()
-            .any(|spelled| self.can_write_path_with_cwd(spelled.as_path(), cwd))
+        self.effective_writes_with_cwd(cwd)
+            .can_write_effective_path(path)
     }
 
     /// #652: [`Self::can_write_effective_path_with_cwd`] for adding a write
@@ -1223,23 +1245,16 @@ impl FileSystemSandboxPolicy {
     /// (`/tmp/p` writable, `/private/tmp/p` read-only), the read-only entry
     /// wins, and roots reached through a nested link are not followed.
     pub fn can_grant_write_effective_path_with_cwd(&self, path: &Path, cwd: &Path) -> bool {
-        self.can_write_normalized(path, cwd, /*read_only_wins*/ true)
+        self.effective_writes_with_cwd(cwd)
+            .can_grant_write_effective_path(path)
     }
 
-    fn can_write_normalized(&self, path: &Path, cwd: &Path, read_only_wins: bool) -> bool {
-        match self.kind {
-            FileSystemSandboxKind::Unrestricted | FileSystemSandboxKind::ExternalSandbox => {
-                return true;
-            }
-            FileSystemSandboxKind::Restricted => {}
-        }
-        let Some(path) = resolve_candidate_path(path, cwd) else {
-            return false;
-        };
-        // Each entry naming a folder, by its normalized path; the others
-        // (the filesystem root, patterns) as they are.
+    /// This policy with each entry naming a folder by its normalized path
+    /// (one filesystem walk per entry); the others (the filesystem root,
+    /// patterns) as they are.
+    fn with_normalized_entries(&self, cwd: &Path) -> Self {
         let cwd_absolute = AbsolutePathBuf::from_absolute_path(cwd).ok();
-        let mut entries: Vec<FileSystemSandboxEntry> = self
+        let entries = self
             .entries
             .iter()
             .map(|entry| match &entry.path {
@@ -1257,31 +1272,41 @@ impl FileSystemSandboxPolicy {
                 },
             })
             .collect();
-        if read_only_wins {
-            // A writable entry tied with a read-only one for the same
-            // normalized path becomes read-only (a denial wins already).
-            let read_only: Vec<AbsolutePathBuf> = entries
-                .iter()
-                .filter(|entry| entry.access == FileSystemAccessMode::Read)
-                .filter_map(|entry| match &entry.path {
-                    FileSystemPath::Path { path } => Some(path.clone()),
-                    _ => None,
-                })
-                .collect();
-            for entry in &mut entries {
-                if entry.access == FileSystemAccessMode::Write
-                    && matches!(&entry.path, FileSystemPath::Path { path } if read_only.contains(path))
-                {
-                    entry.access = FileSystemAccessMode::Read;
-                }
-            }
-        }
-        let normalized = Self {
+        Self {
             kind: self.kind,
             glob_scan_max_depth: self.glob_scan_max_depth,
             entries,
-        };
-        normalized.can_write_path_with_cwd(normalize_effective_absolute_path(path).as_path(), cwd)
+        }
+    }
+
+    /// A writable entry tied with a read-only one for the same path becomes
+    /// read-only (a denial wins already); in memory only.
+    fn with_read_only_ties(mut self) -> Self {
+        let read_only: Vec<AbsolutePathBuf> = self
+            .entries
+            .iter()
+            .filter(|entry| entry.access == FileSystemAccessMode::Read)
+            .filter_map(|entry| match &entry.path {
+                FileSystemPath::Path { path } => Some(path.clone()),
+                _ => None,
+            })
+            .collect();
+        for entry in &mut self.entries {
+            if entry.access == FileSystemAccessMode::Write
+                && matches!(&entry.path, FileSystemPath::Path { path } if read_only.contains(path))
+            {
+                entry.access = FileSystemAccessMode::Read;
+            }
+        }
+        self
+    }
+
+    /// #907: [`Self::can_write_effective_path_with_cwd`] and
+    /// [`Self::can_grant_write_effective_path_with_cwd`] for many paths in
+    /// `cwd`, with the entries normalized and the roots reached through a
+    /// nested link computed once instead of once per path.
+    pub fn effective_writes_with_cwd(&self, cwd: &Path) -> EffectiveWrites<'_> {
+        EffectiveWrites::new(self, cwd)
     }
 
     /// #652: the writable roots with their normalized spellings and real
@@ -1889,6 +1914,17 @@ impl FileSystemSandboxPolicy {
                 .any(FileSystemSandboxEntry::denies_keychain_services)
     }
 
+    /// Whether agent commands may not create user namespaces (issue #826),
+    /// from a [`FileSystemSandboxEntry::deny_user_namespaces`] entry. Only a
+    /// restricted policy carries it.
+    pub fn denies_user_namespaces(&self) -> bool {
+        matches!(self.kind, FileSystemSandboxKind::Restricted)
+            && self
+                .entries
+                .iter()
+                .any(FileSystemSandboxEntry::denies_user_namespaces)
+    }
+
     pub fn to_legacy_sandbox_policy(
         &self,
         network_policy: NetworkSandboxPolicy,
@@ -2031,6 +2067,7 @@ impl FileSystemSandboxPolicy {
             unlistable_directories: sorted_absolute_paths(self.get_unlistable_directories()),
             unmovable_paths: sorted_absolute_paths(self.get_unmovable_paths()),
             keychain_services_denied: self.denies_keychain_services(),
+            user_namespaces_denied: self.denies_user_namespaces(),
         }
     }
 }
@@ -2527,7 +2564,20 @@ fn sorted_writable_roots(mut roots: Vec<WritableRoot>) -> Vec<WritableRoot> {
     roots
 }
 
+thread_local! {
+    static EFFECTIVE_PATH_NORMALIZATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// #907: how many paths this thread has normalized with filesystem calls
+/// (each walks the path's ancestors, then resolves the first that exists),
+/// so tests can bound what a policy check costs. Instrumentation only.
+#[doc(hidden)]
+pub fn effective_path_normalizations_on_this_thread() -> u64 {
+    EFFECTIVE_PATH_NORMALIZATIONS.with(std::cell::Cell::get)
+}
+
 fn normalize_effective_absolute_path(path: AbsolutePathBuf) -> AbsolutePathBuf {
+    EFFECTIVE_PATH_NORMALIZATIONS.with(|count| count.set(count.get() + 1));
     let raw_path = path.to_path_buf();
     for ancestor in raw_path.ancestors() {
         if std::fs::symlink_metadata(ancestor).is_err() {
@@ -4955,6 +5005,44 @@ mod tests {
         let mut unrestricted = FileSystemSandboxPolicy::unrestricted();
         unrestricted.entries.push(entry);
         assert!(!unrestricted.denies_keychain_services());
+    }
+
+    /// #826: a user-namespaces entry changes no file access, is no read
+    /// denial, and needs the sandbox that enforces it.
+    #[test]
+    fn issue_826_user_namespaces_entry_changes_no_file_access() {
+        let temp = TempDir::new().expect("tempdir");
+        let cwd = temp.path();
+        let entry = FileSystemSandboxEntry::deny_user_namespaces();
+        assert!(entry.denies_user_namespaces());
+        assert!(!entry.denies_keychain_services());
+        assert!(!FileSystemSandboxEntry::deny_keychain_services().denies_user_namespaces());
+        assert_eq!(entry.unlistable_directory(), None);
+        assert_eq!(entry.unmovable_path(), None);
+        let mut read = entry.clone();
+        read.access = FileSystemAccessMode::Read;
+        assert!(!read.denies_user_namespaces());
+
+        let full = FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry::new(
+            FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            },
+            FileSystemAccessMode::Write,
+        )]);
+        let mut policy = full.clone();
+        policy.entries.push(entry.clone());
+        assert!(policy.denies_user_namespaces());
+        assert!(!full.denies_user_namespaces());
+        assert!(policy.has_full_disk_write_access());
+        assert!(policy.has_full_disk_read_access());
+        assert!(!policy.has_denied_read_restrictions());
+        assert!(policy.get_unreadable_roots_with_cwd(cwd).is_empty());
+        assert!(policy.get_unreadable_globs_with_cwd(cwd).is_empty());
+        assert!(policy.needs_direct_runtime_enforcement(NetworkSandboxPolicy::Restricted, cwd));
+        assert!(!policy.is_semantically_equivalent_to(&full, cwd));
+        let mut unrestricted = FileSystemSandboxPolicy::unrestricted();
+        unrestricted.entries.push(entry);
+        assert!(!unrestricted.denies_user_namespaces());
     }
 
     /// #535: a writable link whose real location is, or lies inside, another

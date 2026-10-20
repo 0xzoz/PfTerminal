@@ -77,7 +77,11 @@ async fn with_rule(
     let mut steps = Vec::new();
     if tainted {
         // Tool output: untrusted content.
-        steps.push(step("call-first", "printf '%s' 'notes'", false));
+        steps.push(step(
+            "call-first",
+            "printf '%s' 'notes'",
+            /*escalate*/ false,
+        ));
     }
     steps.push(step(
         "call-0",

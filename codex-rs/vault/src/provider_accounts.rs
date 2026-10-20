@@ -514,6 +514,9 @@ impl Vault {
         if value.trim().is_empty() {
             return Err(VaultError::EmptySecret);
         }
+        if kind.is_secret() {
+            crate::ensure_not_error_text(value)?;
+        }
         crate::protect_stored(&label, kind.credential_type(), value)?;
         self.with_storage_lock(|| {
             let mut index = self.load_index()?;

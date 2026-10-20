@@ -1839,6 +1839,7 @@ See the Corbanu Terminal keymap documentation for supported actions and examples
         // exits immediately when there is no potentially billable work.
         app.start_gpu_controller();
         app.watch_kill_switch_elsewhere();
+        app.watch_level_raised_elsewhere();
         let telegram_home = app.config.codex_home.clone().to_path_buf();
         tokio::spawn(async move {
             let result = tokio::task::spawn_blocking(move || {

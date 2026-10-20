@@ -792,3 +792,16 @@ fn issue_584_only_never_writable_words() {
         }
     }
 }
+
+/// #902: a test harness can only lengthen the lookups' bound; it is 2 s
+/// otherwise.
+#[test]
+fn issue_902_unhurried_lookups_only_lengthen_the_bound() {
+    assert_eq!(lookup_timeout(), LOOKUP_TIMEOUT);
+    unhurried_lookups_for_tests(/*enabled*/ true);
+    let unhurried = lookup_timeout();
+    unhurried_lookups_for_tests(/*enabled*/ false);
+    assert_eq!(unhurried, TEST_LOOKUP_TIMEOUT);
+    assert!(TEST_LOOKUP_TIMEOUT > LOOKUP_TIMEOUT);
+    assert_eq!(lookup_timeout(), LOOKUP_TIMEOUT);
+}

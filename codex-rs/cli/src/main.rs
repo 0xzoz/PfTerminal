@@ -1116,6 +1116,9 @@ fn stage_str(stage: Stage) -> &'static str {
 
 fn main() -> anyhow::Result<()> {
     codex_tui::take_restart_marker();
+    // #855: a vault folder or lock this process may not open is recorded in
+    // the #616 home-access log, like an unreadable home.
+    codex_vault::set_storage_failure_reporter(record_vault_storage_failure);
     pfterminal_home::configure_for_current_process()?;
     // #766: before any thread, as it may change the Corbanu home variables.
     // Held until the run ends, when its folder is removed.
@@ -1126,6 +1129,11 @@ fn main() -> anyhow::Result<()> {
         cli_main(arg0_paths, remote_control_disabled).await?;
         Ok(())
     })
+}
+
+fn record_vault_storage_failure(operation: &str, path: &std::path::Path, error: &std::io::Error) {
+    let _ =
+        codex_core::home_access::record_home_access_failure(operation, path, &error.to_string());
 }
 
 async fn cli_main(
@@ -1997,9 +2005,12 @@ async fn cli_main(
 /// command line that does not parse, is left alone.
 fn nested_moderate_home() -> Option<tempfile::TempDir> {
     // Cheap first: most launches (and every sandbox helper) start no agent.
-    if !std::env::args_os()
-        .skip(1)
-        .any(|arg| matches!(arg.to_str(), Some("exec" | "e" | "review")))
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|argv1| codex_arg0::is_private_helper_argv1(&argv1))
+        || !std::env::args_os()
+            .skip(1)
+            .any(|arg| matches!(arg.to_str(), Some("exec" | "e" | "review")))
     {
         return None;
     }

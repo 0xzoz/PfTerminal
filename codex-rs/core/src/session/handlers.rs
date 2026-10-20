@@ -811,6 +811,8 @@ pub async fn shutdown(sess: &Arc<Session>, sub_id: String) -> bool {
         };
         sess.send_event_raw(event).await;
     }
+    // #872: nothing writes this thread's items after its shutdown.
+    crate::home_access::note_thread_ended(sess.thread_id());
 
     let event = Event {
         id: sub_id,
@@ -1067,6 +1069,7 @@ pub(super) async fn submission_loop(
         {
             warn!("failed to shutdown thread persistence after submission channel closed: {err}");
         }
+        crate::home_access::note_thread_ended(sess.thread_id());
     }
     debug!("Agent loop exited");
 }

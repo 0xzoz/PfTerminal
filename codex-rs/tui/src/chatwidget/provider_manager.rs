@@ -43,7 +43,8 @@ impl ChatWidget {
             Box::new(move || cancel_tx.send(AppEvent::ProviderManagerApiKeyCancelled {
                 attempt_id, provider_id: cancelled_provider.clone(),
             })),
-        );
+        )
+        .rejecting_shown_errors(self.shown_error_texts());
         self.bottom_pane.show_view(Box::new(view));
     }
 
@@ -313,7 +314,8 @@ impl ChatWidget {
                     value: AccountValue::new(secret),
                 }));
             }),
-        );
+        )
+        .rejecting_shown_errors(self.shown_error_texts());
         self.bottom_pane.show_view(Box::new(view));
     }
 

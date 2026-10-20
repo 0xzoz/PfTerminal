@@ -3273,6 +3273,7 @@ fn accounting_inspect_refused_request_reads_as_failed_with_no_charge() {
             total: Some(0),
             billed_usd: None,
             refused_status: Some(401),
+            session_ended_at_ms: None,
         };
         q.buckets = [BucketQuote::Priced(Decimal::default()); 4];
         q.known_subtotal = Decimal::default();
@@ -3420,3 +3421,136 @@ fn accounting_reopen_warmup_is_named_with_its_cost() {
         pages[*index].text
     );
 }
+
+/// A recorded realtime WebSocket session (#824): one request, admitted at
+/// `started` and ended at `ended`, with no token count and only a billing
+/// basis (no catalogue price for realtime models).
+fn realtime_quote(started: i64, ended: Option<i64>) -> ObservationQuote {
+    let mut q = quote();
+    q.attempt.attempt_id = Uuid::from_u128(21);
+    q.attempt.request_id = Uuid::from_u128(22);
+    q.attempt.retry_of = None;
+    q.attempt.turn = format!("realtime:ws:{}", Uuid::from_u128(23));
+    q.attempt.provider = "openai".into();
+    q.attempt.model = "gpt-realtime-1.5".into();
+    q.attempt.dispatched_at_ms = started.try_into().unwrap();
+    q.usage = Usage {
+        session_ended_at_ms: ended,
+        ..Usage::default()
+    };
+    q.buckets = [BucketQuote::MissingUsage; 4];
+    q.known_subtotal = Decimal::default();
+    q.all_buckets_priced = None;
+    q.subtotal_display = Decimal::default().display();
+    q.snapshot = Some(native_snapshot(
+        serde_json::json!({"noncached":null,"read":null,"write":null,"output":null}),
+        "Billed",
+        /*basis_source*/ None,
+        /*plan_burn_millis*/ None,
+    ));
+    q
+}
+
+/// #824 (Travis, 2026-10-15, option a): `/cost` names a realtime session on
+/// the first screen, in its request's link and on its pages, with its start
+/// and end times and its tokens and cost unknown - never a $0 figure.
+#[test]
+fn accounting_realtime_session_reads_unknown_not_zero() {
+    let InspectionDay::Ready(mut view) = packet() else {
+        unreachable!()
+    };
+    let session = realtime_quote(/*started*/ 1_000, Some(61_000));
+    view.requests =
+        std::collections::BTreeMap::from([(session.attempt.request_id, vec![session.clone()])]);
+    view.totals = DayTotals::from_quotes(view.requests.values().flatten()).unwrap();
+    view.own_totals = view.totals.clone();
+    let pages = inspection_pages(Ok(InspectionDay::Ready(view)));
+    let screen: Vec<&String> = pages[0]
+        .text
+        .iter()
+        .take_while(|line| line.as_str() != "—— Details ——")
+        .collect();
+    assert!(
+        screen.iter().any(|line| line.as_str()
+            == "Realtime: 1 session; token counts and cost unknown, not zero — a realtime session's usage is not reported to this client."),
+        "{screen:#?}"
+    );
+    let (label, index) = pages[0]
+        .links
+        .iter()
+        .find(|(label, _)| label.contains("Realtime session"))
+        .expect("a realtime request link");
+    assert!(
+        label.starts_with("Request 1 · Realtime session · "),
+        "{label}"
+    );
+    let request = &pages[*index].text;
+    assert!(
+        request.iter().any(|line| line
+            == "Kind: Realtime session — started 1970-01-01T00:00:01.000Z, ended 1970-01-01T00:01:01.000Z; its token counts and cost are unknown, not zero: a realtime session's usage is not reported to this client."),
+        "{request:#?}"
+    );
+    let attempt = attempt_text(&session);
+    assert!(
+        attempt
+            .iter()
+            .any(|line| line == "Admission time: 1970-01-01T00:00:01.000Z"),
+        "{attempt:#?}"
+    );
+    assert!(
+        attempt
+            .iter()
+            .any(|line| line == "Realtime session ended: 1970-01-01T00:01:01.000Z"),
+        "{attempt:#?}"
+    );
+    // Nothing anywhere states a money figure for it.
+    for text in pages
+        .iter()
+        .flat_map(|page| {
+            page.text
+                .iter()
+                .chain(page.links.iter().map(|(label, _)| label))
+        })
+        .chain(attempt.iter())
+    {
+        assert!(!text.contains('$'), "{text}");
+    }
+}
+
+/// #824: a session whose end was never recorded (the process stopped
+/// mid-session) says so rather than inventing a time.
+#[test]
+fn accounting_realtime_session_without_an_end_says_so() {
+    let session = realtime_quote(/*started*/ 1_000, /*ended*/ None);
+    let attempt = attempt_text(&session);
+    assert!(
+        attempt
+            .iter()
+            .any(|line| line == "Realtime session ended: not recorded"),
+        "{attempt:#?}"
+    );
+    let kind = realtime_session_kind(&[&session]);
+    assert!(
+        kind.starts_with(
+            "Kind: Realtime session — started 1970-01-01T00:00:01.000Z, ended not recorded;"
+        ),
+        "{kind}"
+    );
+    // An owner prefix keeps it a realtime session; an ordinary turn and a
+    // WebRTC call (recorded at its creation, with no session end) are not.
+    let mut side = session.clone();
+    side.attempt.turn = format!("side:realtime:ws:{}", Uuid::from_u128(24));
+    assert!(realtime_session(&[&side]));
+    assert!(!realtime_session(&[&quote()]));
+    let mut call = session;
+    call.attempt.turn = format!("realtime:{}", Uuid::from_u128(25));
+    assert!(!realtime_session(&[&call]));
+    assert!(
+        !attempt_text(&call)
+            .iter()
+            .any(|line| line.starts_with("Realtime session")),
+    );
+}
+
+#[path = "tokens/warmup_resume_tests.rs"]
+mod warmup_resume_tests;

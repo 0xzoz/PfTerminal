@@ -6,6 +6,7 @@ use std::time::Instant;
 use super::DB_INIT_LOCK_FILENAME;
 use super::SHM_RESET_RETRIES;
 use super::database_has_content;
+use super::open_quick_pool;
 use super::retry_shm_reset_race;
 
 #[tokio::test]
@@ -59,6 +60,66 @@ async fn connecting_to_an_existing_database_does_not_wait_for_its_writer() -> an
     Ok(())
 }
 
+/// #865: on a loaded machine (Windows CI runners) opening a connection can
+/// take longer than the short-wait pool's wait. The pool still opens, with
+/// all its connections, and keeps them: a write then waits only for a free
+/// one, never for an open. It used to fail to open (and the process used the
+/// main pool), or a write failed as busy while a second connection opened.
+#[tokio::test]
+async fn a_slow_connection_open_keeps_the_short_wait_pool() -> anyhow::Result<()> {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home).await?;
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let path = sqlite.state_db_path();
+    let writer = sqlite.open_read_write_pool(&path).await?;
+    let short_wait = Duration::from_millis(100);
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(&path)
+        .create_if_missing(false)
+        .busy_timeout(short_wait);
+    let slow_opens = sqlx::sqlite::SqlitePoolOptions::new().after_connect(move |_, _| {
+        Box::pin(async move {
+            tokio::time::sleep(short_wait * 3).await;
+            Ok(())
+        })
+    });
+    let pool = open_quick_pool(options, slow_opens, short_wait).await?;
+    let first = pool.acquire().await?;
+    let second = pool.acquire().await?;
+    drop((first, second));
+    assert_eq!(
+        (
+            pool.options().get_idle_timeout(),
+            pool.options().get_max_lifetime()
+        ),
+        (None, None)
+    );
+    pool.close().await;
+    writer.close().await;
+    Ok(())
+}
+
+/// A short-wait pool on a database that can't be opened is an error (the
+/// runtime then uses the main pool), though the pool opens its own
+/// connections in the background.
+#[tokio::test]
+async fn the_short_wait_pool_reports_a_database_it_cannot_open() {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(sqlite_home.join("missing.sqlite"))
+        .create_if_missing(false);
+    let opened = open_quick_pool(
+        options,
+        sqlx::sqlite::SqlitePoolOptions::new(),
+        Duration::from_millis(100),
+    )
+    .await;
+    assert!(opened.is_err(), "opened a missing database");
+}
+
 /// Set for the child processes of
 /// [`concurrent_first_launches_on_a_new_home_all_get_a_state_db`].
 const RACE_HOME_ENV: &str = "CODEX_STATE_TEST_RACE_HOME";
@@ -83,6 +144,7 @@ fn concurrent_launch_child() {
         .enable_all()
         .build()
         .expect("tokio runtime");
+    let started = Instant::now();
     runtime.block_on(async {
         let sqlite = crate::SqliteConfig::new_for_testing(std::path::Path::new(&home).abs());
         crate::StateRuntime::init(sqlite, "test-provider".to_string())
@@ -90,6 +152,7 @@ fn concurrent_launch_child() {
             .map(drop)
             .unwrap_or_else(|err| panic!("state runtime failed to open: {err:#}"));
     });
+    println!("opened the state DB in {:?}", started.elapsed());
 }
 
 /// #549: processes started at the same moment on a brand-new home race to
@@ -121,7 +184,7 @@ fn concurrent_first_launches_on_a_new_home_all_get_a_state_db() {
         for index in 0..LAUNCHES {
             children.push(
                 std::process::Command::new(&exe)
-                    .args(["--exact", &child_test, "--test-threads=1"])
+                    .args(["--exact", &child_test, "--test-threads=1", "--nocapture"])
                     .env(RACE_HOME_ENV, &home)
                     .env(RACE_START_ENV, start.as_millis().to_string())
                     // Files, not pipes: a child that fails loudly never blocks.
@@ -131,23 +194,35 @@ fn concurrent_first_launches_on_a_new_home_all_get_a_state_db() {
                     .expect("spawn launch"),
             );
         }
-        // Under nextest's 60 s kill, a stuck launch still fails readably.
-        let deadline = Instant::now() + Duration::from_secs(20);
+        // Launches open the databases one at a time (the init lock), so all
+        // of them take as long as that many in a row: on a loaded runner, more
+        // than a fixed total allows (#865). A launch that stops the others -
+        // none finishes for `STALL` - fails readably here rather than at the
+        // runner's own timeout.
+        const STALL: Duration = Duration::from_secs(20);
+        let mut statuses = vec![None; LAUNCHES];
+        let mut progressed = Instant::now();
+        while statuses.iter().any(Option::is_none) && progressed.elapsed() < STALL {
+            for (child, status) in children.iter_mut().zip(statuses.iter_mut()) {
+                if status.is_none()
+                    && let Some(exited) = child.try_wait().expect("poll launch")
+                {
+                    *status = Some(exited);
+                    progressed = Instant::now();
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
         let failures: Vec<String> = children
             .into_iter()
+            .zip(statuses)
             .enumerate()
-            .filter_map(|(index, mut child)| {
-                let status = loop {
-                    if let Some(status) = child.try_wait().expect("poll launch") {
-                        break Some(status);
-                    }
-                    if Instant::now() > deadline {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        break None;
-                    }
-                    std::thread::sleep(Duration::from_millis(20));
-                };
+            .filter_map(|(index, (mut child, status))| {
+                // A launch that exited after the last poll keeps its status.
+                let status = status.or_else(|| {
+                    let _ = child.kill();
+                    child.wait().ok()
+                });
                 let stdout =
                     std::fs::read_to_string(home.join(format!("out-{index}"))).unwrap_or_default();
                 let stderr =
@@ -271,6 +346,62 @@ async fn a_leftover_read_only_placeholder_becomes_the_lock() -> anyhow::Result<(
     assert!(other.try_lock().is_err());
     drop(held);
     assert!(other.try_lock().is_ok());
+    Ok(())
+}
+
+/// #756: dropping a launch's init lock releases it at once, also while a
+/// child process forked meanwhile (by any spawn in this process) still holds
+/// a copy of the lock's descriptor because it has not started its program
+/// yet. Closing the file alone released the lock only when that copy closed:
+/// on macOS a concurrent spawn made `a_leftover_read_only_placeholder_becomes_the_lock`
+/// find the lock still held after its holder was dropped.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_init_lock_is_released_while_a_forked_child_holds_its_descriptor() -> anyhow::Result<()>
+{
+    use std::io::Read;
+    use std::io::Write;
+    use std::os::unix::process::CommandExt;
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home).await?;
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let held = sqlite.lock_runtime_db_init().await;
+    assert!(held._file.is_some(), "the lock is held");
+
+    // A child forked now has a copy of every descriptor, the lock's too, until
+    // it starts its program; this one waits 2 s first and reports the fork.
+    let (mut forked, mut forked_tx) = std::io::pipe()?;
+    let spawner = std::thread::spawn(move || {
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", "exit 0"]);
+        // SAFETY: the hook only writes to a pipe and sleeps, both safe after fork.
+        unsafe {
+            command.pre_exec(move || {
+                forked_tx.write_all(b"f")?;
+                std::thread::sleep(Duration::from_secs(2));
+                Ok(())
+            });
+        }
+        command.status()
+    });
+    let mut byte = [0; 1];
+    forked.read_exact(&mut byte)?;
+
+    let other = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(sqlite_home.join(DB_INIT_LOCK_FILENAME))?;
+    assert!(other.try_lock().is_err(), "the lock is held");
+    drop(held);
+    assert!(
+        other.try_lock().is_ok(),
+        "the dropped lock is still held through the forked child's copy"
+    );
+    let status = spawner.join().expect("spawner thread")?;
+    assert!(status.success(), "{status:?}");
     Ok(())
 }
 

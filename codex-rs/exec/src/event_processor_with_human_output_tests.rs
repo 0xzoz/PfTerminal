@@ -642,3 +642,42 @@ async fn a_rejected_turn_prints_the_account_line() {
     processor.set_provider_account(&config, "zai:default");
     assert_eq!(processor.failed_turn_lines(&unauthorized).len(), 1);
 }
+
+/// #873: a refusal never claims the command did not run (a network-policy
+/// refusal can come after it ran); approval declines and runs keep theirs.
+#[test]
+fn command_status_header_for_a_refusal_is_neutral() {
+    use super::command_status_header;
+    use codex_app_server_protocol::CommandExecutionStatus;
+
+    let refused = command_status_header(
+        &CommandExecutionStatus::Refused,
+        /*exit_code*/ Some(-1),
+        /*duration_ms*/ Some(0),
+    );
+    assert_eq!(refused, " refused:");
+    assert_eq!(
+        command_status_header(
+            &CommandExecutionStatus::Declined,
+            /*exit_code*/ Some(-1),
+            /*duration_ms*/ Some(0),
+        ),
+        " declined in 0ms:"
+    );
+    assert_eq!(
+        command_status_header(
+            &CommandExecutionStatus::Failed,
+            /*exit_code*/ Some(7),
+            /*duration_ms*/ Some(3),
+        ),
+        " exited 7 in 3ms:"
+    );
+    assert_eq!(
+        command_status_header(
+            &CommandExecutionStatus::Completed,
+            /*exit_code*/ Some(0),
+            /*duration_ms*/ None,
+        ),
+        " succeeded:"
+    );
+}

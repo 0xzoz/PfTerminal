@@ -24,6 +24,7 @@ pub(crate) fn input(active: ChosenLevel) -> InspectorInput {
         network_broker: false,
         mcp_servers: vec!["docs".to_string()],
         hooks: false,
+        project_security_warnings: Vec::new(),
     }
 }
 
@@ -616,6 +617,67 @@ fn issue_749_moderate_rows_match_what_is_enforced() {
             "Permissive",
             vec!["Moderate is saved but not active until restart".to_string()]
         )
+    );
+}
+
+/// #839 (MOD-20, MOD-24): under Moderate the top line follows what Moderate
+/// enforces. The network proxy's credential broker, which Moderate does not
+/// turn on, no longer makes a healthy Moderate "off or not observed" next to
+/// a Model keys row saying the broker holds the keys; a model request the
+/// model-key broker refused makes it degraded. Aggressive is unchanged.
+#[test]
+fn issue_839_moderate_top_line_matches_the_model_key_broker() {
+    let root = ThreadId::new();
+    let moderate = RuntimeFacts {
+        policy: PolicyFacts::Live(tree(
+            SecurityLevel::Moderate,
+            vec![AgentFacts {
+                thread: root,
+                depth: 0,
+                level: SecurityLevel::Moderate,
+                stricter_than_session: false,
+                stopped: false,
+            }],
+        )),
+        ..healthy(root)
+    };
+    let mut input = input(ChosenLevel::Moderate);
+    input.network_broker = true;
+    let saved = saved(ChosenLevel::Moderate);
+    let rows = sections(&input, &saved, &moderate, NOW);
+    let network = find(&rows, "Network credential broker");
+    assert!(!network.required, "{network:?}");
+    assert!(
+        network.value.contains("agent commands' requests"),
+        "{}",
+        network.value
+    );
+    assert_eq!(
+        verdict(&input, &saved, &moderate, NOW),
+        Badge::Protected("Moderate")
+    );
+    let refused = RuntimeFacts {
+        model_broker: ControlFacts::Degraded(
+            "the last model request of this session or one of its agents was refused: its provider URL cannot be brokered",
+        ),
+        ..moderate
+    };
+    assert_eq!(
+        verdict(&input, &saved, &refused, NOW),
+        Badge::Degraded("Moderate", vec!["Model key broker".to_string()])
+    );
+
+    // Aggressive still needs it observed when it is on.
+    let mut aggressive = self::input(ChosenLevel::Aggressive);
+    aggressive.network_broker = true;
+    assert_eq!(
+        verdict(
+            &aggressive,
+            &self::saved(ChosenLevel::Aggressive),
+            &healthy(root),
+            NOW
+        ),
+        Badge::Partial("Aggressive", vec!["Network credential broker".to_string()])
     );
 }
 

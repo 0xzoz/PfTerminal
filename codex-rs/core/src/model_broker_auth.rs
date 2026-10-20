@@ -41,6 +41,12 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use zeroize::Zeroizing;
 
+#[path = "model_broker_refusals.rs"]
+pub(crate) mod refusals;
+
+use refusals::Refusal;
+use refusals::Refusals;
+
 #[cfg(any(unix, windows))]
 type Credential = codex_network_proxy::model_auth::ModelCredential;
 #[cfg(not(any(unix, windows)))]
@@ -444,6 +450,8 @@ pub(crate) struct CoreModelKeyBroker {
     state: Arc<Mutex<BrokerState>>,
     /// What turned the broker on, for refusal messages.
     origin: BrokerModelAuthOrigin,
+    /// #839, #878: the requests it refused, per session, for the inspector.
+    refusals: Arc<Refusals>,
 }
 
 impl CoreModelKeyBroker {
@@ -457,6 +465,7 @@ impl CoreModelKeyBroker {
                 fingerprint_salt: salt,
             })),
             origin: BrokerModelAuthOrigin::Config,
+            refusals: Arc::default(),
         }
     }
 
@@ -568,7 +577,13 @@ impl CoreModelKeyBroker {
             broker: broker.clone(),
             default_headers: codex_login::default_client::default_headers(),
         }));
-        Self::new(BrokerHandle::Running(broker)).with_origin(settings.origin)
+        let running = Self::new(BrokerHandle::Running(broker)).with_origin(settings.origin);
+        // #878: the broker's answer to each request it signed.
+        let refusals = running.refusals.clone();
+        codex_http_client::install_model_broker_observer(Arc::new(move |frame, outcome| {
+            refusals.answered(frame, outcome);
+        }));
+        running
     }
 }
 
@@ -590,6 +605,10 @@ impl ModelKeyBroker for CoreModelKeyBroker {
         }
     }
 
+    fn refused_reason(&self, threads: &[codex_protocol::ThreadId]) -> Option<&'static str> {
+        self.refusals.reason(threads)
+    }
+
     /// Registers the credential now (a blocking control-channel call, like the
     /// stored-key read it replaces) so a failure ends the turn at once.
     fn auth(
@@ -602,7 +621,12 @@ impl ModelKeyBroker for CoreModelKeyBroker {
             source,
             extra_headers,
         } = request;
-        let fatal = |error: BrokerModelAuthError| CodexErr::Fatal(error.to_string());
+        // #878: every refusal is the inspector's, for the session resolving it.
+        let owner = refusals::current_owner();
+        let fatal = |error: BrokerModelAuthError| {
+            self.refusals.refused(owner, Refusal::from(&error));
+            CodexErr::Fatal(error.to_string())
+        };
         let binding = binding_for_base_url(&base_url, header).ok_or_else(|| {
             fatal(BrokerModelAuthError::Unbindable {
                 url: base_url.clone(),
@@ -628,6 +652,8 @@ impl ModelKeyBroker for CoreModelKeyBroker {
         Ok(Arc::new(BrokeredAuth {
             credential,
             extra_headers,
+            owner,
+            refusals: self.refusals.clone(),
         }))
     }
 }
@@ -652,6 +678,9 @@ enum Source {
 struct BrokeredAuth {
     credential: Credential,
     extra_headers: HeaderMap,
+    /// #878: the session whose requests these are (`None`: outside one).
+    owner: Option<codex_protocol::ThreadId>,
+    refusals: Arc<Refusals>,
 }
 
 impl AuthProvider for BrokeredAuth {
@@ -660,13 +689,35 @@ impl AuthProvider for BrokeredAuth {
 
     fn apply_auth(&self, request: Request) -> AuthProviderFuture<'_> {
         Box::pin(async move {
-            let mut request = broker_request(&self.credential, request)?;
-            for (name, value) in &self.extra_headers {
-                request.headers.insert(name.clone(), value.clone());
-            }
-            Ok(request)
+            let signed = broker_request(&self.credential, request);
+            signed_for(&self.refusals, self.owner, &self.extra_headers, signed)
         })
     }
+}
+
+/// #878: records what became of signing a request of `owner`: a refusal, or
+/// the frame whose answer from the broker decides. Adds `extra_headers` to a
+/// signed request.
+fn signed_for(
+    refusals: &Refusals,
+    owner: Option<codex_protocol::ThreadId>,
+    extra_headers: &HeaderMap,
+    signed: Result<Request, (Refusal, AuthError)>,
+) -> Result<Request, AuthError> {
+    let mut request = signed.map_err(|(refusal, error)| {
+        refusals.refused(owner, refusal);
+        error
+    })?;
+    for (name, value) in extra_headers {
+        request.headers.insert(name.clone(), value.clone());
+    }
+    if let Some(frame) = request
+        .headers
+        .get(codex_http_client::MODEL_BROKER_FRAME_HEADER)
+    {
+        refusals.signed(owner, frame.clone());
+    }
+    Ok(request)
 }
 
 /// The registered credential for `binding` and `source`, registering it (or
@@ -900,12 +951,16 @@ fn hex(bytes: &[u8]) -> String {
 
 /// Signs `request` for the broker and points it at the broker (the HTTP
 /// transport sends a frame-bearing request only to the broker's socket).
+/// A refusal says why, for the inspector (#878).
 #[cfg(any(unix, windows))]
-fn broker_request(credential: &Credential, mut request: Request) -> Result<Request, AuthError> {
+fn broker_request(
+    credential: &Credential,
+    mut request: Request,
+) -> Result<Request, (Refusal, AuthError)> {
     use codex_http_client::MODEL_BROKER_FRAME_HEADER;
     use http::HeaderValue;
-    let rewrite = BrokerRewrite::for_url(&request.url)
-        .ok_or_else(|| AuthError::Build("model request URL cannot be brokered".to_string()))?;
+    let rewrite = BrokerRewrite::for_request_url(&request.url)?;
+    let unsigned = |message: String| (Refusal::Unsigned, AuthError::Build(message));
     let frame = credential
         .sign(
             request.method.as_str(),
@@ -913,9 +968,9 @@ fn broker_request(credential: &Credential, mut request: Request) -> Result<Reque
             rewrite.port,
             &rewrite.path_and_query,
         )
-        .map_err(|error| AuthError::Build(format!("credential broker: {error}")))?;
+        .map_err(|error| unsigned(format!("credential broker: {error}")))?;
     let frame = HeaderValue::from_str(&frame)
-        .map_err(|_| AuthError::Build("credential broker frame".to_string()))?;
+        .map_err(|_| unsigned("credential broker frame".to_string()))?;
     request.headers.remove(http::header::AUTHORIZATION);
     request.headers.remove("x-api-key");
     request.headers.insert(MODEL_BROKER_FRAME_HEADER, frame);
@@ -924,7 +979,10 @@ fn broker_request(credential: &Credential, mut request: Request) -> Result<Reque
 }
 
 #[cfg(not(any(unix, windows)))]
-fn broker_request(credential: &Credential, _request: Request) -> Result<Request, AuthError> {
+fn broker_request(
+    credential: &Credential,
+    _request: Request,
+) -> Result<Request, (Refusal, AuthError)> {
     match *credential {}
 }
 
@@ -940,6 +998,17 @@ struct BrokerRewrite {
 
 #[cfg(any(unix, windows, test))]
 impl BrokerRewrite {
+    /// [`Self::for_url`], or the refusal of a request URL the broker cannot
+    /// serve (#878).
+    fn for_request_url(url: &str) -> Result<Self, (Refusal, AuthError)> {
+        Self::for_url(url).ok_or_else(|| {
+            (
+                Refusal::Unbindable,
+                AuthError::Build("model request URL cannot be brokered".to_string()),
+            )
+        })
+    }
+
     fn for_url(url: &str) -> Option<Self> {
         let mut url = url::Url::parse(url).ok()?;
         if url.scheme() != "https" || url.fragment().is_some() {

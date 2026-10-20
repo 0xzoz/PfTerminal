@@ -15,6 +15,16 @@ use codex_state::accounting::Snapshot;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
 
+/// Waits until the ledger writer has written what it was handed. A slow write
+/// is put off and written later (#865), so read the ledger after this.
+async fn settle(db: &StateRuntime) {
+    assert!(
+        db.flush_accounting(std::time::Duration::from_secs(30))
+            .await,
+        "records still queued"
+    );
+}
+
 fn bound(
     id: &str,
     provider: &ModelProviderInfo,
@@ -272,6 +282,7 @@ async fn admission_binds_the_basis_to_every_attempt() -> anyhow::Result<()> {
         sampling
             .admit("some-model", "https://llm.example.com/v1/chat/completions")
             .await?;
+        settle(&db).await;
         let quote = codex_state::accounting::AccountingStore::inspect_day(
             &db,
             owner,
@@ -297,6 +308,7 @@ async fn admission_binds_the_basis_to_every_attempt() -> anyhow::Result<()> {
     // A changed declaration (each case above is a new one for the same
     // provider) applies to new attempts only: every earlier attempt still
     // reads with the basis it was admitted under (AC3).
+    settle(&db).await;
     let codex_state::accounting::InspectionDay::Ready(view) =
         codex_state::accounting::AccountingStore::inspect_day(
             &db,
@@ -402,6 +414,7 @@ async fn image_generation_rates_apply_only_to_openai_api_key_rates() -> anyhow::
                 /*tier*/ None,
             )
             .await?;
+        settle(&db).await;
         let codex_state::accounting::InspectionDay::Ready(view) =
             codex_state::accounting::AccountingStore::inspect_day(
                 &db,
@@ -562,6 +575,7 @@ async fn admission_records_the_named_account() -> anyhow::Result<()> {
     assert!(!named_sampling.same_account(&default_mode));
     let named_attempt = named_sampling.admit("some-model", &route).await?;
     assert_eq!(named_attempt.account, Some(expected.clone()));
+    settle(&db).await;
     // A format-1 ledger goes straight to format 4 with the named attempt.
     assert_eq!(formats().await?, vec![1, 2, 3, 4]);
     let default_attempt = Sampling::start(db.clone(), owner, "default".into(), &default_mode)
@@ -570,6 +584,7 @@ async fn admission_records_the_named_account() -> anyhow::Result<()> {
         .await?;
     assert_eq!(default_attempt.account, None);
     let day = chrono::Utc::now().timestamp_millis() / 86_400_000;
+    settle(&db).await;
     let codex_state::accounting::InspectionDay::Ready(view) =
         codex_state::accounting::AccountingStore::inspect_day(
             &db,
@@ -853,6 +868,7 @@ async fn moonshot_route_admission_binds_published_rates() -> anyhow::Result<()> 
                 chat::patch(usage, provider, sampling.route)?,
             )
             .await?;
+        settle(&db).await;
         let codex_state::accounting::InspectionDay::Ready(view) =
             codex_state::accounting::AccountingStore::inspect_day(
                 &db,
@@ -974,6 +990,7 @@ async fn moonshot_route_prices_reports_that_leave_out_zero_counts() -> anyhow::R
                 chat::patch(usage, "kimi", sampling.route)?,
             )
             .await?;
+        settle(&db).await;
         let codex_state::accounting::InspectionDay::Ready(view) =
             codex_state::accounting::AccountingStore::inspect_day(
                 &db,

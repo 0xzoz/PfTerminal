@@ -54,12 +54,32 @@ use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use tokio::sync::Semaphore;
 use toml::Value as TomlValue;
 use tracing::error;
 
 // TODO(anp): Tune this eight-scan limit after revisiting byte-based backpressure.
 pub const MAX_CONCURRENT_ROOT_SCANS: usize = 8;
+
+/// When set, discovery skips the user-home root (`$HOME/.agents/skills`).
+static IGNORE_USER_HOME_SKILLS: AtomicBool = AtomicBool::new(false);
+
+/// Test harnesses call this so the developer's own `$HOME/.agents/skills` never
+/// reaches a test (#888), as this crate's unit tests already do by passing no
+/// home folder. It is process-wide and in memory only: nothing changes `HOME`,
+/// and child processes are unaffected. Production code must not call it.
+pub fn ignore_user_home_skills_for_tests(ignore: bool) {
+    IGNORE_USER_HOME_SKILLS.store(ignore, Ordering::Relaxed);
+}
+
+fn user_home_dir() -> Option<AbsolutePathBuf> {
+    if IGNORE_USER_HOME_SKILLS.load(Ordering::Relaxed) {
+        return None;
+    }
+    home_dir().and_then(|path| AbsolutePathBuf::from_absolute_path_checked(path).ok())
+}
 
 #[derive(Debug, Deserialize)]
 struct SkillFrontmatter {
@@ -244,8 +264,7 @@ pub(crate) async fn skill_roots(
     plugin_skill_roots: Vec<PluginSkillRoot>,
     extra_skill_roots: Vec<AbsolutePathBuf>,
 ) -> Vec<SkillRoot> {
-    let home_dir =
-        home_dir().and_then(|path| AbsolutePathBuf::from_absolute_path_checked(path).ok());
+    let home_dir = user_home_dir();
     skill_roots_with_home_dir(
         fs,
         config_layer_stack,
