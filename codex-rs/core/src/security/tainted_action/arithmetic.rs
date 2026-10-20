@@ -66,6 +66,8 @@ const GROUP: &str = "__corbanu_arithmetic_group_";
 const MAX_LIST_DEPTH: usize = 4;
 /// Longest `$NAME` prefix compared with the variables names are built from.
 const MAX_BUILDER_PREFIX: usize = 64;
+/// Stands for the unseen output of a function substitution (`${ cmd; }`).
+const FUNCTION_SUBSTITUTION: &str = "__corbanu_function_substitution";
 /// Longest `${NAME[...]` subscript `defaults` looks through.
 const MAX_SUBSCRIPT: usize = 256;
 /// Variables shells fill from input or matches (`sysread`, zsh `(#b)`,
@@ -151,8 +153,12 @@ pub(super) struct Arithmetic {
     builders: HashSet<String>,
     /// A building expansion whose variable could not be read (`${(L)x}`).
     unknown_builder: bool,
-    /// Variables appended to (`x+=ar`), which may now name any variable.
+    /// Variables appended to (`x+=ar`) or printed into (`printf -v`),
+    /// which may now name any variable.
     appended: HashSet<String>,
+    /// The line uses a ksh/bash 5.3 function substitution (`${ cmd; }`,
+    /// `${| cmd; }`), whose output the lexer cannot see.
+    function_substitution: bool,
 }
 
 impl Arithmetic {
@@ -173,9 +179,16 @@ impl Arithmetic {
             ..Self::default()
         };
         for arg in &text {
-            let (builders, unknown) = building(&unquoted(arg));
+            let (builders, unknown) = building(arg);
             arithmetic.builders.extend(builders);
             arithmetic.unknown_builder |= unknown;
+            arithmetic.function_substitution |= arg
+                .match_indices("${")
+                .any(|(at, _)| arg[at + 2..].starts_with([' ', '\t', '\n', '|']));
+            // zsh/mapfile: `$mapfile[file]` reads the file.
+            if arg.contains("$mapfile") || arg.contains("${mapfile") {
+                arithmetic.filled.insert("mapfile".to_string());
+            }
         }
         // Lists in parentheses, which the lexer splits at `(`:
         // `a=(x $(cat f))`, zsh `for x (0 $(cat f))`.
@@ -385,6 +398,9 @@ impl Arithmetic {
                         && word.starts_with(['-', '+'])
                         && word[1..].contains(['i', 'F', 'E'])
                 });
+            let nameref = args.iter().any(|word| {
+                word.len() > 1 && word.starts_with(['-', '+']) && word[1..].contains('n')
+            });
             for word in args {
                 let Some((name, value)) = assignment(word) else {
                     if integer && is_identifier(word) {
@@ -395,6 +411,11 @@ impl Arithmetic {
                 self.assigned.push((name.to_string(), value.to_string()));
                 if appends(word) {
                     self.appended.insert(name.to_string());
+                }
+                // bash `declare -n r=$v`: expanding `$r` evaluates the
+                // subscript in the name it refers to, like `${!v}`.
+                if nameref {
+                    self.named.push(value.to_string());
                 }
                 if integer {
                     self.integers.insert(name.to_string());
@@ -462,6 +483,8 @@ impl Arithmetic {
                         .get_or_insert_with(|| self.group(args.iter().cloned()))
                         .clone();
                     self.assigned.push((name.to_string(), node));
+                    // The format joins operands (`%s%s va r` prints `var`).
+                    self.appended.insert(name.to_string());
                 }
             }
         }
@@ -528,7 +551,7 @@ impl Arithmetic {
                 names(&bare).any(|name| tainted.contains(name))
                     || unseen_substitution(region)
                     || (!tainted.is_empty() && {
-                        let (builders, unknown) = building(&bare);
+                        let (builders, unknown) = building(region);
                         unknown || !builders.is_empty()
                     })
             })
@@ -539,6 +562,9 @@ impl Arithmetic {
     /// from input, or assigned a value that mentions such a variable.
     fn tainted(&self) -> HashSet<String> {
         let mut tainted: HashSet<String> = self.filled.clone();
+        if self.function_substitution {
+            tainted.insert(FUNCTION_SUBSTITUTION.to_string());
+        }
         // Who receives each name's value: a graph walk keeps this linear.
         let mut receivers: HashMap<String, Vec<&str>> = HashMap::new();
         for (name, value) in &self.assigned {
@@ -556,8 +582,18 @@ impl Arithmetic {
         if !tainted.is_empty() {
             tainted.extend(self.appended.iter().cloned());
             tainted.extend(FILLED_DEFAULTS.iter().map(|name| (*name).to_string()));
+            // Allow-list: a value is clean only if it is made of numbers,
+            // operators, bare names, arithmetic results and whole `$NAME`s
+            // of variables the line assigns (whose cleanliness the graph
+            // walk below decides).
+            let known: HashSet<&str> = self
+                .assigned
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .chain(self.filled.iter().map(String::as_str))
+                .collect();
             for (name, value) in &self.assigned {
-                if self.builds(value) {
+                if self.builds(value) || !clean_form(value, &known) {
                     tainted.insert(name.clone());
                 }
             }
@@ -608,6 +644,102 @@ fn unquoted(text: &str) -> String {
     text.chars()
         .filter(|ch| !matches!(ch, '"' | '\'' | '\\'))
         .collect()
+}
+
+/// Whether a lexed value is made only of what arithmetic reads without
+/// building a new name: digits, blanks, operators, bare names, arithmetic
+/// results (`$((...))`), `$#NAME`, special numbers (`$?`), and `$NAME`
+/// for a variable in `known` (the lexer drops braces and quotes, so
+/// `${x}r` and `$x"r"` read `$xr`, which the line does not assign).
+/// `$@`, `$*`, `$a[*]`, `$a[@]` and other characters are not clean.
+fn clean_form(value: &str, known: &HashSet<&str>) -> bool {
+    let bytes = value.as_bytes();
+    let name_at = |at: usize| {
+        bytes
+            .get(at)
+            .is_some_and(|&byte| is_name_char(byte as char))
+    };
+    let mut at = 0;
+    while at < bytes.len() {
+        if value[at..].starts_with(shell::ARITHMETIC_OUTPUT) {
+            let end = at + shell::ARITHMETIC_OUTPUT.len();
+            if (at > 0 && name_at(at - 1)) || name_at(end) {
+                return false;
+            }
+            at = end;
+            continue;
+        }
+        let byte = bytes[at];
+        match byte {
+            b' '
+            | b'\t'
+            | b'\n'
+            | b'0'..=b'9'
+            | b'+'
+            | b'-'
+            | b'*'
+            | b'/'
+            | b'%'
+            | b'('
+            | b')'
+            | b'<'
+            | b'>'
+            | b'='
+            | b'!'
+            | b'&'
+            | b'|'
+            | b'^'
+            | b'~'
+            | b'?'
+            | b':'
+            | b','
+            | b'.'
+            | b'['
+            | b']'
+            | b'#' => at += 1,
+            b'a'..=b'z' | b'A'..=b'Z' | b'_' => {
+                while name_at(at) {
+                    at += 1;
+                }
+            }
+            b'$' => {
+                let next = bytes.get(at + 1).copied();
+                match next {
+                    Some(b'?' | b'$' | b'!' | b'#') => {
+                        at += 2;
+                        // `$#NAME` (`${#NAME}`): a length.
+                        while name_at(at) {
+                            at += 1;
+                        }
+                    }
+                    Some(ch) if ch.is_ascii_alphanumeric() || ch == b'_' => {
+                        let start = at + 1;
+                        let mut end = start;
+                        if ch.is_ascii_digit() {
+                            end += 1;
+                        } else {
+                            while name_at(end) {
+                                end += 1;
+                            }
+                        }
+                        // `$a[*]`/`$a[@]` join elements with IFS.
+                        let joins =
+                            value[end..].starts_with("[*]") || value[end..].starts_with("[@]");
+                        if !known.contains(&value[start..end])
+                            || joins
+                            || bytes.get(end) == Some(&b'$')
+                        {
+                            return false;
+                        }
+                        at = end;
+                    }
+                    _ => return false,
+                }
+            }
+            _ => return false,
+        }
+    }
+    true
 }
 
 /// Parameter expansions in `text` whose result can form a new name: one
@@ -673,15 +805,19 @@ fn building(text: &str) -> (Vec<String>, bool) {
                 continue;
             }
         };
-        // A name run before `$` that is not a number (`0x$h` is).
-        let run = text[..at]
+        // A name run before `$` that is not a number (`0x$h` is). Quotes
+        // join what they separate (`va"$x"`, `$x"r"`), so they are skipped.
+        let quote = |byte: &u8| matches!(byte, b'"' | b'\'' | b'\\');
+        let before: Vec<u8> = text[..at]
             .bytes()
             .rev()
+            .filter(|byte| !quote(byte))
             .take_while(|&byte| is_name_char(byte as char))
-            .count();
-        let touches_before = run > 0 && !bytes[at - run].is_ascii_digit();
-        let touches_after = bytes
-            .get(end)
+            .collect();
+        let touches_before = before.last().is_some_and(|byte| !byte.is_ascii_digit());
+        let touches_after = bytes[end.min(bytes.len())..]
+            .iter()
+            .find(|byte| !quote(byte))
             .is_some_and(|&byte| is_name_char(byte as char) || byte == b'$');
         if transforms || touches_before || touches_after {
             match name {
@@ -756,8 +892,9 @@ fn defaults(word: &str) -> Vec<String> {
             // `${b[0]:=...}`: skip a subscript (a bounded look, so this
             // stays linear; an unclosed one counts as assigning).
             if rest.starts_with('[') {
-                let window = &rest[..rest.len().min(MAX_SUBSCRIPT)];
-                rest = match window.find(']') {
+                let window = &rest.as_bytes()[..rest.len().min(MAX_SUBSCRIPT)];
+                // `]` is ASCII, so the byte after it is a char boundary.
+                rest = match window.iter().position(|&byte| byte == b']') {
                     Some(close) => &rest[close + 1..],
                     None => "=",
                 };

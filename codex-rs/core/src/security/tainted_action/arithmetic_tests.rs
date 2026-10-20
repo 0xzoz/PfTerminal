@@ -264,6 +264,8 @@ fn review_2_non_ascii_before_parenthesis() {
         "python3 -c \"print('✓ (x)')\"",
         "x é=(1)",
         "é=(1)",
+        &format!("echo \"${{a[{}é]}}\"", "x".repeat(254)),
+        &format!("echo \"${{a[{}é]}}\"", "x".repeat(253)),
     ] {
         assert!(!runs_unseen(line), "{line}");
     }
