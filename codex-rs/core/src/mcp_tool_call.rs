@@ -1362,6 +1362,53 @@ struct McpToolApprovalPromptOptions {
     allow_persistent_approval: bool,
 }
 
+impl McpToolApprovalPromptOptions {
+    /// Only "Allow" and "Cancel": no approval that outlives this call.
+    fn once_only(self) -> Self {
+        Self {
+            allow_session_remember: false,
+            allow_persistent_approval: false,
+        }
+    }
+}
+
+/// #942: under a protected level, once the session holds untrusted content,
+/// every call to a tool that may change or send data (or move value) needs a
+/// fresh human approval, and no remembered approval stands in (PF-23-S01).
+/// The call's own output is untrusted content, so a "for this session" or
+/// "always" approval for such a tool could never apply after this call, and
+/// none is offered. Judged on the tool alone, without its arguments: the
+/// remembered approval would cover every later call of the tool.
+fn mcp_tool_needs_fresh_approval_after_taint(
+    sess: &Session,
+    step_context: &StepContext,
+    invocation: &McpInvocation,
+    metadata: &McpToolApprovalMetadata,
+) -> bool {
+    use crate::security::protected_surface;
+    let Some(state) = sess.services.model_client().post_taint_state() else {
+        return false;
+    };
+    if !state.protected_paths_apply() {
+        return false;
+    }
+    let turn_context = step_context.turn.as_ref();
+    #[allow(deprecated)]
+    let cwd = step_context.environments.primary().map_or_else(
+        || PathUri::from_abs_path(&turn_context.cwd),
+        |environment| environment.cwd().clone(),
+    );
+    let call = protected_surface::McpCall {
+        server: &invocation.server,
+        tool: &invocation.tool,
+        title: metadata.tool_title.as_deref(),
+        acts_outside: requires_mcp_tool_approval(metadata.annotations.as_ref()),
+        arguments: None,
+        cwd: &cwd,
+    };
+    protected_surface::classify_mcp(&call, turn_context.config.codex_home.as_path()).is_some()
+}
+
 struct McpToolApprovalElicitationRequest<'a> {
     server: &'a str,
     metadata: Option<&'a McpToolApprovalMetadata>,
@@ -1502,11 +1549,14 @@ async fn maybe_request_mcp_tool_approval(
         return Some(decision);
     }
 
-    let prompt_options = mcp_tool_approval_prompt_options(
+    let mut prompt_options = mcp_tool_approval_prompt_options(
         session_approval_key.as_ref(),
         persistent_approval_key.as_ref(),
         tool_call_mcp_elicitation_enabled,
     );
+    if mcp_tool_needs_fresh_approval_after_taint(sess, step_context, invocation, metadata) {
+        prompt_options = prompt_options.once_only();
+    }
     let question_id = format!("{MCP_TOOL_APPROVAL_QUESTION_ID_PREFIX}_{call_id}");
     let rendered_template = render_mcp_tool_approval_template(
         &invocation.server,
