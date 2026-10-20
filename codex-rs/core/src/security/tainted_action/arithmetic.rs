@@ -562,11 +562,13 @@ impl Arithmetic {
         }
         if NUMERIC_BUILTINS.contains(&name) {
             self.evaluated.extend(args.iter().cloned());
-            // Not options (`ulimit -n 1024`).
+            // Not options (`ulimit -n 1024`); `let -x` and `exit -x` negate `x`.
+            let options = matches!(name, "ulimit" | "limit" | "unlimit");
             self.strict_words.extend(
                 args.iter()
                     .filter(|word| {
-                        !(word.len() > 1
+                        !(options
+                            && word.len() > 1
                             && word.starts_with('-')
                             && word[1..].bytes().all(|byte| byte.is_ascii_alphabetic()))
                     })
@@ -713,7 +715,11 @@ impl Arithmetic {
             // group of all the words, so repeated `-A` stays linear.
             let mut node = None;
             for pair in args.windows(2) {
-                if matches!(pair[0].as_str(), "-A" | "+A") && is_identifier(&pair[1]) {
+                // `-A`, `+A`, or in a cluster (`-sA`).
+                let array = pair[0].len() > 1
+                    && pair[0].starts_with(['-', '+'])
+                    && pair[0][1..].contains('A');
+                if array && is_identifier(&pair[1]) {
                     let node = node
                         .get_or_insert_with(|| self.group(args.iter().cloned()))
                         .clone();
@@ -899,33 +905,105 @@ impl Arithmetic {
     /// the output.
     fn strict_unseen(&self, text: &[String], tainted: &HashSet<String>) -> bool {
         // Quote removal can form a region (`(""(v))` reads `((v))`).
-        let mut texts: Vec<String> = Vec::new();
-        for arg in text {
-            let arg = joined(arg);
-            let bare = unquoted(&arg);
-            if bare != arg {
+        // The argv texts, then those that quote removal changes.
+        let mut texts: Vec<String> = text.iter().map(|arg| joined(arg)).collect();
+        let originals = texts.len();
+        for at in 0..originals {
+            let bare = unquoted(&texts[at]);
+            if bare != texts[at] {
                 texts.push(bare);
             }
-            texts.push(arg);
         }
         let found: Vec<(usize, Range<usize>)> = texts
             .iter()
             .enumerate()
             .flat_map(|(at, text)| regions(text).into_iter().map(move |range| (at, range)))
             .collect();
-        // Variables assigned inside arithmetic (`for ((i=0; ...; i++))`)
-        // hold its results.
+        // Where each name is first assigned and first read, in line order: a
+        // variable read before the line assigns it (`echo $((i)); i=0`), or
+        // whose first assignment reads it (`i=$((i+1))`, `((i++))`), holds a
+        // value from outside the line.
         let mut results: HashSet<String> = HashSet::new();
-        for (at, range) in &found {
-            let region = &texts[*at][range.clone()];
-            if pure_arithmetic(region) {
-                arithmetic_targets(&unquoted(region), &mut results);
+        let mut first_assigned: HashMap<&str, (usize, usize)> = HashMap::new();
+        let mut first_read: HashMap<&str, (usize, usize)> = HashMap::new();
+        let mut self_reads: HashSet<&str> = HashSet::new();
+        for (at, text) in texts[..originals].iter().enumerate() {
+            let bytes = text.as_bytes();
+            // How many regions cover each byte, and where each one ends.
+            let mut depth = vec![0_i32; bytes.len() + 1];
+            let mut ends: HashMap<usize, usize> = HashMap::new();
+            let mut plain: HashSet<usize> = HashSet::new();
+            for (_, range) in found.iter().filter(|(text_at, _)| *text_at == at) {
+                depth[range.start] += 1;
+                depth[range.end] -= 1;
+                ends.entry(range.start).or_insert(range.end);
+                let region = &text[range.clone()];
+                if pure_arithmetic(region) {
+                    for (offset, name) in arithmetic_assignments(region) {
+                        plain.insert(range.start + offset);
+                        results.insert(name.to_string());
+                    }
+                }
+            }
+            let mut inside = Vec::with_capacity(bytes.len());
+            let mut open = 0;
+            for delta in &depth[..bytes.len()] {
+                open += delta;
+                inside.push(open > 0);
+            }
+            for name in names(text) {
+                let start = name.as_ptr() as usize - text.as_ptr() as usize;
+                let end = start + name.len();
+                let before = &text[..start];
+                let after = &text[end..];
+                let reference = before.ends_with('$')
+                    || before.ends_with("${")
+                    || before.ends_with("${#")
+                    || before.ends_with("${!")
+                    || before.ends_with("$#");
+                let assignment = !reference
+                    && ((after.starts_with('=') && !after.starts_with("=="))
+                        || before.trim_end().ends_with("for")
+                        || before.trim_end().ends_with("select"));
+                let position = (at, start);
+                if plain.contains(&start) || (assignment && !inside[start]) {
+                    if !first_assigned.contains_key(name) {
+                        first_assigned.insert(name, position);
+                        // The value it is given, up to a blank, or a whole
+                        // region (`i=$(( i + 1 ))`), looking a bounded way.
+                        let value = after.strip_prefix('=').unwrap_or("");
+                        let value_at = end + (after.len() - value.len());
+                        let window = match ends.get(&value_at) {
+                            Some(region_end) => &text[value_at..*region_end],
+                            None => match value.bytes().take(MAX_SUBSCRIPT).position(|byte| {
+                                byte.is_ascii_whitespace() || b";&|".contains(&byte)
+                            }) {
+                                Some(stop) => &value[..stop],
+                                None if value.len() <= MAX_SUBSCRIPT => value,
+                                None => name,
+                            },
+                        };
+                        if names(window).any(|read| read == name) {
+                            self_reads.insert(name);
+                        }
+                    }
+                } else if reference || inside[start] {
+                    first_read.entry(name).or_insert(position);
+                }
             }
         }
-        for word in &self.strict_words {
-            arithmetic_targets(&visible(word), &mut results);
-        }
-        let safe = self.numeric_names(tainted, &results);
+        let read_first: HashSet<String> = first_read
+            .iter()
+            .filter(|(name, read)| {
+                self_reads.contains(*name)
+                    || first_assigned
+                        .get(*name)
+                        .is_none_or(|assigned| *read < assigned)
+            })
+            .map(|(name, _)| (*name).to_string())
+            .chain(self_reads.iter().map(|name| (*name).to_string()))
+            .collect();
+        let safe = self.numeric_names(tainted, &results, &read_first);
         // Substitutions are judged on their own (`unseen_substitution`): a
         // readable one (`$(date +%s)`) prints a fact, not a name.
         let unsafe_in =
@@ -974,11 +1052,14 @@ impl Arithmetic {
     /// result, a length, or a copy of such a variable (a greatest fixed
     /// point, computed by walking from the variables that fail, so linear),
     /// plus special parameters that always hold numbers when the line does
-    /// not assign them.
+    /// not assign them. Variables in `read_first` (read before the line
+    /// assigns them, or reading themselves in their first assignment) are
+    /// not numeric.
     fn numeric_names(
         &self,
         tainted: &HashSet<String>,
         results: &HashSet<String>,
+        read_first: &HashSet<String>,
     ) -> HashSet<String> {
         let assigned: HashSet<&str> = self
             .assigned
@@ -994,8 +1075,8 @@ impl Arithmetic {
         };
         let candidate = |name: &str| {
             !excluded(name)
-                && (assigned.contains(name)
-                    || results.contains(name)
+                && (((assigned.contains(name) || results.contains(name))
+                    && !read_first.contains(name))
                     || (NUMERIC_SPECIALS.contains(&name) && !assigned.contains(name)))
         };
         let mut failed: HashSet<String> = HashSet::new();
@@ -1178,25 +1259,28 @@ fn without_substitutions(text: &str) -> String {
     kept
 }
 
-/// Names that arithmetic text assigns (`i=0`, `i += 2`, `i++`, `--i`).
-fn arithmetic_targets(text: &str, targets: &mut HashSet<String>) {
-    let bytes = text.as_bytes();
-    for name in names(text) {
+/// Plain assignments in arithmetic text (`i=0`, `i = 2`, not `i == 2`,
+/// `i += 2` or `i = i + 1`): each name and its offset in the text.
+fn arithmetic_assignments(text: &str) -> impl Iterator<Item = (usize, &str)> {
+    names(text).filter_map(move |name| {
         let start = name.as_ptr() as usize - text.as_ptr() as usize;
-        let end = start + name.len();
-        let after = text[end..].trim_start();
-        let assigns = after.starts_with("++")
-            || after.starts_with("--")
-            || (after.starts_with('=') && !after.starts_with("=="))
-            || ["+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>="]
-                .iter()
-                .any(|operator| after.starts_with(operator));
-        let before = &bytes[..start];
-        let increments = before.ends_with(b"++") || before.ends_with(b"--");
-        if assigns || increments {
-            targets.insert(name.to_string());
-        }
-    }
+        let rest = text[start + name.len()..].trim_start();
+        let value = rest
+            .strip_prefix('=')
+            .filter(|value| !value.starts_with('='))?;
+        // Up to the end of this expression, looking a bounded distance
+        // (longer values are not counted, which is stricter).
+        let end = match value
+            .bytes()
+            .take(MAX_SUBSCRIPT)
+            .position(|byte| matches!(byte, b',' | b';' | b')'))
+        {
+            Some(end) => end,
+            None if value.len() <= MAX_SUBSCRIPT => value.len(),
+            None => return None,
+        };
+        (!names(&value[..end]).any(|read| read == name)).then_some((start, name))
+    })
 }
 
 /// The variables a lexed value reads if it is only numbers, operators,
@@ -2135,8 +2219,9 @@ fn regions(text: &str) -> Vec<Range<usize>> {
                 || index.checked_sub(1).is_some_and(|before| {
                     let before = bytes[before] as char;
                     is_name_char(before)
-                        // `a=([k]=v)`.
-                        || (lists_open > 0 && (before == '(' || before.is_whitespace()))
+                        // `a=([k]=v)`, zsh glob qualifiers `*([n])`.
+                        || before == '('
+                        || (lists_open > 0 && before.is_whitespace())
                 }) =>
             {
                 push(Frame::Bracket, &mut stack, &mut open);

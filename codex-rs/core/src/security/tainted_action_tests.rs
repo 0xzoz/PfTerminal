@@ -2611,6 +2611,17 @@ fn issue_937_review_6_fallback_routes() {
         ("bash", "out=$(cat notes); x=$1; echo $((x))"),
         ("zsh", "fmt=%d; v=$(cat notes); printf \"$fmt\" \"$v\""),
         ("bash", "out=$(cat notes); bash -c '(''(m))'"),
+        // Review of the fallback (round 7).
+        ("zsh", "set -sA i \"$(cat notes)\"; (( i++ ))"),
+        ("zsh", "set -sA i \"$(cat notes)\"; echo $(( i = i + 1 ))"),
+        ("zsh", "v=$(cat notes); f g () { (( argv++ )); }; f \"$v\""),
+        ("zsh", "set -sA foo \"$(cat notes)\"; let -foo"),
+        ("zsh", "w=$(cat notes); print -l /*([w])"),
+        ("bash", "v=$(cat notes); n=$(date +\"$v\"); echo $((n))"),
+        (
+            "bash",
+            "v=$(cat notes); n=$(git rev-parse --no-revs \"$v\"); echo $((n))",
+        ),
     ] {
         let found = kind(&[shell, "-c", line]);
         if found != Some(UnseenCode) {

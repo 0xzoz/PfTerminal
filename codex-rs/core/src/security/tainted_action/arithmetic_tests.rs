@@ -611,6 +611,47 @@ fn review_6_fallback_routes() {
     }
 }
 
+/// Review of the fallback (round 7): arithmetic that reads a name before
+/// assigning it, `let -x`, zsh glob qualifiers, and facts printing their
+/// arguments.
+#[test]
+fn review_7_fallback_routes() {
+    for (shell, line) in [
+        ("zsh", "set -sA i \"$(cat notes)\"; (( i++ ))"),
+        ("ksh", "set -sA i \"$(cat notes)\"; (( i++ ))"),
+        ("zsh", "set -sA i \"$(cat notes)\"; echo $(( i = i + 1 ))"),
+        ("zsh", "v=$(cat notes); f g () { (( argv++ )); }; f \"$v\""),
+        ("bash", "out=$(cat notes); echo $((i)); ((i=0))"),
+        ("bash", "out=$(cat notes); echo $((i)); i=0"),
+        ("bash", "out=$(cat notes); i=$(( i + 1 )); echo $((i))"),
+        ("bash", "out=$(cat notes); echo \"$n\"; n=0; echo $((n))"),
+        ("bash", "out=$(cat notes); (( i += 1 ))"),
+        ("zsh", "set -sA foo \"$(cat notes)\"; let -foo"),
+        ("zsh", "v=$(cat notes); f g () { let -argv; }; f \"$v\""),
+        ("zsh", "w=$(cat notes); print -l /*([w])"),
+        ("zsh", "w=$(cat notes); print -l /*([1,w])"),
+        ("bash", "v=$(cat notes); n=$(date +\"$v\"); echo $((n))"),
+        (
+            "bash",
+            "v=$(cat notes); n=$(git rev-parse --no-revs \"$v\"); echo $((n))",
+        ),
+        ("bash", "n=$(date +\"$(cat notes)\"); echo $((n))"),
+    ] {
+        assert!(runs_unseen_in(shell, line), "{shell}: {line}");
+    }
+    for line in [
+        "out=$(cmd); for ((i=0; i<3; i++)); do echo $i; done",
+        "out=$(cmd); for ((i=0, j=1; i<3; i++)); do echo $((i+j)); done",
+        "out=$(cmd); ((total = 0)); ((total += 2)); echo $total",
+        "out=$(cmd); ulimit -n 1024",
+        "out=$(cmd); n=$(date +%s); echo $((n + 1))",
+        "out=$(cmd); i=0; i=$(( i + 1 )); echo $((i))",
+        "out=$(cmd); echo count; count=0; count=$((count+1))",
+    ] {
+        assert!(!runs_unseen(line), "{line}");
+    }
+}
+
 /// The fallback stays linear on long chains of copies and long regions.
 #[test]
 fn review_6_fallback_stays_linear() {
@@ -627,9 +668,12 @@ fn review_6_fallback_stays_linear() {
     assert_eq!(without_substitutions(&deep).trim(), "");
     let ticks = "`".repeat(200_001);
     let _ = without_substitutions(&ticks);
-    let mut targets = HashSet::new();
-    arithmetic_targets(&"i++ ".repeat(100_000), &mut targets);
-    assert_eq!(targets.len(), 1);
+    assert_eq!(
+        arithmetic_assignments(&"i=1, ".repeat(100_000)).count(),
+        100_000
+    );
+    // Without separators each value runs on: only the last one is read.
+    assert_eq!(arithmetic_assignments(&"i=1 ".repeat(100_000)).count(), 1);
     assert!(numeric_references(&"$x + ".repeat(100_000)).is_some());
     let condition = format!("[[ {} ]]", "m -eq 1 && ".repeat(50_000));
     assert!(condition_unsafe(&condition, &|text: &str| names(text)

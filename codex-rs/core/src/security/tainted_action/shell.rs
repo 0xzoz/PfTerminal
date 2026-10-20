@@ -634,15 +634,20 @@ pub(super) fn substitution_output(words: &[String]) -> Option<String> {
     }
     let (first, rest) = words.split_first()?;
     let operand = rest.iter().rev().find(|word| !word.starts_with('-'));
+    // A fact's arguments must be literal: `date +"$v"` and
+    // `git rev-parse --no-revs "$v"` print them back.
+    let literal = rest
+        .iter()
+        .all(|word| !word.contains('$') && !word.contains('`') && !word.contains(UNSEEN_OUTPUT));
     match basename(&first.to_lowercase()) {
         "which" | "dirname" | "basename" | "realpath" | "readlink" => operand.cloned(),
         "command" if rest.first().is_some_and(|word| word == "-v") => operand.cloned(),
         "pwd" => Some("$PWD".to_string()),
-        "date" | "uname" | "whoami" | "hostname" | "id" | "nproc" | "getconf" => {
+        "date" | "uname" | "whoami" | "hostname" | "id" | "nproc" | "getconf" if literal => {
             Some("value".to_string())
         }
         // The repository root is at or above the working folder.
-        "git" if rest.first().is_some_and(|word| word == "rev-parse") => Some(
+        "git" if literal && rest.first().is_some_and(|word| word == "rev-parse") => Some(
             if rest.iter().any(|word| word == "--show-toplevel") {
                 "$PWD"
             } else {
