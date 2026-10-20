@@ -606,17 +606,23 @@ async fn admission_records_the_named_account() -> anyhow::Result<()> {
     );
     db.close().await;
     // No file in the home (state DB, its WAL, the encrypted vault) holds the key.
-    // SQLite's `-shm` file is skipped: it is the WAL's shared-memory index (page
-    // numbers and checksums, never row data), and SQLite holds its WAL locks as
-    // byte ranges in it while a connection is open, which Windows enforces
-    // against reads (os error 33, #694).
+    // A `.lock` file is checked by its size instead of read: the accounting
+    // spool's writer still holds `accounting-pending/<process>.lock` (the
+    // runtime is alive), and Windows enforces that exclusive lock against reads
+    // from any other handle (os error 33, #694). An empty file cannot hold the
+    // key.
     let mut pending = vec![home.path().to_path_buf()];
     while let Some(dir) = pending.pop() {
         for entry in std::fs::read_dir(dir)? {
             let path = entry?.path();
             if path.is_dir() {
                 pending.push(path);
-            } else if !path.to_string_lossy().ends_with("-shm") {
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension == "lock")
+            {
+                assert_eq!(std::fs::metadata(&path)?.len(), 0, "{}", path.display());
+            } else {
                 let bytes = std::fs::read(&path)
                     .map_err(|error| anyhow::anyhow!("read {}: {error}", path.display()))?;
                 assert!(
