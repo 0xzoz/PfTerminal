@@ -11,6 +11,7 @@
 
 use super::indirect;
 use super::shell;
+use super::work;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::ops::Range;
@@ -349,6 +350,7 @@ impl Arithmetic {
             ..Self::default()
         };
         for arg in &text {
+            work::step();
             let (builders, unknown) = building(arg);
             arithmetic.builders.extend(builders);
             arithmetic.unknown_builder |= unknown;
@@ -365,9 +367,11 @@ impl Arithmetic {
         // Lists in parentheses, which the lexer splits at `(`:
         // `a=(x $(cat f))`, zsh `for x (0 $(cat f))`.
         for arg in &text {
+            work::step();
             let (lists, deep) = lists(arg);
             arithmetic.unfollowed |= deep;
             for list in lists {
+                work::step();
                 let body = &arg[list.body];
                 // Raw text: any substitution in it counts as command output.
                 let value = if body.contains("$(") || body.contains("<(") || body.contains('`') {
@@ -377,6 +381,7 @@ impl Arithmetic {
                 };
                 let node = arithmetic.group(std::iter::once(value));
                 for name in list.names {
+                    work::step();
                     arithmetic.assigned.push((name, node.clone()));
                 }
             }
@@ -389,6 +394,7 @@ impl Arithmetic {
         let node = format!("{GROUP}{}", self.groups);
         self.groups += 1;
         for value in values {
+            work::step();
             self.assigned.push((node.clone(), value));
         }
         node
@@ -433,6 +439,7 @@ impl Arithmetic {
             .chain(&simple.here_string)
             .chain(&simple.writes_to)
         {
+            work::step();
             if let Some(slot) = redirect.get_mut(*index) {
                 *slot = true;
             }
@@ -441,6 +448,7 @@ impl Arithmetic {
         // `eval let v`, zsh `noglob let v`: the rest is a command too. Each
         // level notes only what precedes its command, so this is linear.
         while start < raw.len().min(words.len()) {
+            work::step();
             let raw = &raw[start..];
             let command = indirect::command_word(&words[start..]);
             match command {
@@ -473,6 +481,7 @@ impl Arithmetic {
         // Assignments before the command (`IFS= read`, `X=1 cmd`), and all
         // words when there is no command.
         for word in &words[..end] {
+            work::step();
             if let Some((name, value)) = assignment(word) {
                 self.assigned.push((name.to_string(), value.to_string()));
                 if appends(word) {
@@ -486,6 +495,7 @@ impl Arithmetic {
         if !defaulted.is_empty() {
             let node = self.group(words.iter().cloned());
             for name in defaulted {
+                work::step();
                 self.assigned.push((name, node.clone()));
             }
         }
@@ -536,6 +546,7 @@ impl Arithmetic {
         if name == "alias" {
             self.evaluates_text = true;
             for (at, word) in args.iter().enumerate() {
+                work::step();
                 let Some((alias, value)) = word.split_once('=') else {
                     continue;
                 };
@@ -584,6 +595,7 @@ impl Arithmetic {
         if matches!(name, "[[" | "test" | "[") && args.iter().any(|word| word == "=~") {
             let node = self.group(args.iter().cloned());
             for name in MATCH_DEFAULTS {
+                work::step();
                 self.assigned.push(((*name).to_string(), node.clone()));
             }
         }
@@ -608,6 +620,7 @@ impl Arithmetic {
         if matches!(name, "test" | "[" | "[[") && args.iter().any(operator) {
             self.evaluated.extend(args.iter().cloned());
             for (at, word) in args.iter().enumerate() {
+                work::step();
                 if word == "-v" {
                     // `-v a[sub]` evaluates the subscript.
                     if let Some(next) = args.get(at + 1)
@@ -646,6 +659,7 @@ impl Arithmetic {
             // zsh/ksh `read 'v?prompt'`, zparseopts `a:=arr`, and an
             // array name attached to its option (`read -raarr`, `-Aarr`).
             for (_, word) in args.iter().enumerate().filter(|(at, _)| operand(*at)) {
+                work::step();
                 if let Some(cluster) = word.strip_prefix('-')
                     && let Some(at) = cluster.find(['a', 'A'])
                     && is_identifier(&cluster[at + 1..])
@@ -655,6 +669,7 @@ impl Arithmetic {
                 let prompted = word.split_once('?').map_or(word.as_str(), |(name, _)| name);
                 let spec = word.rsplit_once('=').map(|(_, name)| name);
                 for candidate in std::iter::once(prompted).chain(spec) {
+                    work::step();
                     if is_identifier(candidate) {
                         self.filled.insert(candidate.to_string());
                     }
@@ -678,6 +693,7 @@ impl Arithmetic {
             // `-Z`) and zsh `-T` (joined with a separator) rebuild values.
             let rebuilt = flagged(&['l', 'u', 'L', 'R', 'Z', 'T']);
             for word in args {
+                work::step();
                 let declared = assignment(word)
                     .map(|(name, _)| name)
                     .or_else(|| is_identifier(word).then_some(word.as_str()));
@@ -734,6 +750,7 @@ impl Arithmetic {
                 self.group(values.iter().cloned())
             };
             for variable in variables {
+                work::step();
                 self.assigned.push((variable, node.clone()));
             }
         }
@@ -742,6 +759,7 @@ impl Arithmetic {
             // group of all the words, so repeated `-A` stays linear.
             let mut node = None;
             for pair in args.windows(2) {
+                work::step();
                 // `-A`, `+A`, or in a cluster (`-sA`).
                 let array = pair[0].len() > 1
                     && pair[0].starts_with(['-', '+'])
@@ -756,7 +774,9 @@ impl Arithmetic {
         }
         if name == "set" || self.functions.contains(name) {
             for value in args {
+                work::step();
                 for positional in POSITIONAL {
+                    work::step();
                     self.assigned
                         .push(((*positional).to_string(), value.clone()));
                 }
@@ -779,6 +799,7 @@ impl Arithmetic {
         let mut format: Option<usize> = None;
         let mut at = 0;
         while at < args.len() {
+            work::step();
             let word = &args[at];
             let cluster = word
                 .strip_prefix('-')
@@ -832,6 +853,7 @@ impl Arithmetic {
                 .extend(args[first + 1..].iter().map(|word| format_text(word)));
         }
         for target in &targets {
+            work::step();
             self.named.push(target.clone());
             if let Some((name, _)) = assignment(&format!("{target}=")) {
                 let node = node
@@ -848,6 +870,7 @@ impl Arithmetic {
     fn read_options(&mut self, args: &[String]) {
         let mut take_next = false;
         for word in args {
+            work::step();
             if take_next {
                 self.evaluated.push(word.clone());
                 self.strict_words.push(word.clone());
@@ -994,6 +1017,7 @@ impl Arithmetic {
         let mut texts: Vec<String> = text.iter().map(|arg| joined(arg)).collect();
         let originals = texts.len();
         for at in 0..originals {
+            work::step();
             let bare = unquoted(&texts[at]);
             if bare != texts[at] {
                 texts.push(bare);
@@ -1013,18 +1037,21 @@ impl Arithmetic {
         let mut first_read: HashMap<&str, (usize, usize)> = HashMap::new();
         let mut self_reads: HashSet<&str> = HashSet::new();
         for (at, text) in texts[..originals].iter().enumerate() {
+            work::step();
             let bytes = text.as_bytes();
             // How many regions cover each byte, and where each one ends.
             let mut depth = vec![0_i32; bytes.len() + 1];
             let mut ends: HashMap<usize, usize> = HashMap::new();
             let mut plain: HashSet<usize> = HashSet::new();
             for (_, range) in found.iter().filter(|(text_at, _)| *text_at == at) {
+                work::step();
                 depth[range.start] += 1;
                 depth[range.end] -= 1;
                 ends.entry(range.start).or_insert(range.end);
                 let region = &text[range.clone()];
                 if pure_arithmetic(region) {
                     for (offset, name) in arithmetic_assignments(region) {
+                        work::step();
                         plain.insert(range.start + offset);
                         results.insert(name.to_string());
                     }
@@ -1033,10 +1060,12 @@ impl Arithmetic {
             let mut inside = Vec::with_capacity(bytes.len());
             let mut open = 0;
             for delta in &depth[..bytes.len()] {
+                work::step();
                 open += delta;
                 inside.push(open > 0);
             }
             for name in names(text) {
+                work::step();
                 let start = name.as_ptr() as usize - text.as_ptr() as usize;
                 let end = start + name.len();
                 let before = &text[..start];
@@ -1183,9 +1212,11 @@ impl Arithmetic {
         let mut failed: HashSet<String> = HashSet::new();
         let mut receivers: HashMap<&str, Vec<&str>> = HashMap::new();
         for (name, value) in &self.assigned {
+            work::step();
             match numeric_references(value) {
                 Some(sources) => {
                     for source in sources {
+                        work::step();
                         if candidate(source) {
                             receivers.entry(source).or_default().push(name);
                         } else {
@@ -1200,7 +1231,9 @@ impl Arithmetic {
         }
         let mut queue: Vec<String> = failed.iter().cloned().collect();
         while let Some(source) = queue.pop() {
+            work::step();
             for receiver in receivers.get(source.as_str()).into_iter().flatten() {
+                work::step();
                 if failed.insert((*receiver).to_string()) {
                     queue.push((*receiver).to_string());
                 }
@@ -1228,12 +1261,14 @@ impl Arithmetic {
         // Who receives each name's value: a graph walk keeps this linear.
         let mut receivers: HashMap<String, Vec<&str>> = HashMap::new();
         for (name, value) in &self.assigned {
+            work::step();
             // A lexed value still holding `$(` or a backtick was quoted or
             // decoded (`$'\x24\x28'`): arithmetic would run it.
             if command_output(value) || value.contains("$(") || value.contains('`') {
                 tainted.insert(name.clone());
             }
             for source in names(&visible(value)) {
+                work::step();
                 receivers.entry(source.to_string()).or_default().push(name);
             }
         }
@@ -1264,6 +1299,7 @@ impl Arithmetic {
                 .chain(self.filled.iter().map(String::as_str))
                 .collect();
             for (name, value) in &self.assigned {
+                work::step();
                 if self.builds(value) || !clean_form(value, &known) {
                     tainted.insert(name.clone());
                 }
@@ -1271,7 +1307,9 @@ impl Arithmetic {
         }
         let mut queue: Vec<String> = tainted.iter().cloned().collect();
         while let Some(source) = queue.pop() {
+            work::step();
             for receiver in receivers.get(&source).into_iter().flatten() {
+                work::step();
                 if tainted.insert((*receiver).to_string()) {
                     queue.push((*receiver).to_string());
                 }
@@ -1322,6 +1360,7 @@ fn without_substitutions(text: &str) -> String {
     let mut at = 0;
     let mut from = 0;
     while at < bytes.len() {
+        work::step();
         let substitution = bytes[at] == b'`'
             || (bytes[at] == b'$'
                 && bytes.get(at + 1) == Some(&b'(')
@@ -1340,6 +1379,7 @@ fn without_substitutions(text: &str) -> String {
             let mut depth = 0_usize;
             let mut end = bytes.len();
             for (offset, &byte) in bytes[at + 1..].iter().enumerate() {
+                work::step();
                 match byte {
                     b'(' => depth += 1,
                     b')' => {
@@ -1367,6 +1407,7 @@ fn only_facts(text: &str) -> bool {
     let bytes = text.as_bytes();
     let mut at = 0;
     while at < bytes.len() {
+        work::step();
         let (body, end) = if bytes[at] == b'`' {
             let end = text[at + 1..]
                 .find('`')
@@ -1379,6 +1420,7 @@ fn only_facts(text: &str) -> bool {
             let mut depth = 0_usize;
             let mut end = bytes.len();
             for (offset, &byte) in bytes[at + 1..].iter().enumerate() {
+                work::step();
                 match byte {
                     b'(' => depth += 1,
                     b')' => {
@@ -1449,6 +1491,7 @@ fn numeric_references(value: &str) -> Option<Vec<&str>> {
             .get(end)
             .is_some_and(|&byte| is_name_char(byte as char))
         {
+            work::step();
             end += 1;
         }
         end
@@ -1456,6 +1499,7 @@ fn numeric_references(value: &str) -> Option<Vec<&str>> {
     let mut sources = Vec::new();
     let mut at = 0;
     while at < bytes.len() {
+        work::step();
         if value[at..].starts_with(shell::ARITHMETIC_OUTPUT) {
             at += shell::ARITHMETIC_OUTPUT.len();
             continue;
@@ -1470,6 +1514,7 @@ fn numeric_references(value: &str) -> Option<Vec<&str>> {
                     .get(at)
                     .is_some_and(|&byte| is_name_char(byte as char) || matches!(byte, b'#' | b'.'))
                 {
+                    work::step();
                     at += 1;
                 }
             }
@@ -1501,6 +1546,7 @@ fn numeric_references(value: &str) -> Option<Vec<&str>> {
                     // a count.
                     at = name_end(at + 2);
                     for listed in ["[@]", "[*]"] {
+                        work::step();
                         if value[at..].starts_with(listed) {
                             at += listed.len();
                         }
@@ -1560,6 +1606,7 @@ fn numeric_references(value: &str) -> Option<Vec<&str>> {
 fn condition_unsafe(region: &str, unsafe_in: &impl Fn(&str) -> bool) -> bool {
     let words: Vec<&str> = region.split_whitespace().collect();
     words.iter().enumerate().any(|(at, word)| {
+        work::step();
         if *word == "-v" {
             words
                 .get(at + 1)
@@ -1589,6 +1636,7 @@ fn subscript_context(text: &str, range: &Range<usize>) -> bool {
     // `${#a[i]}`, zsh `${=a[i]}`, `$^a[i]`.
     let mut sigils = stem;
     for _ in 0..2 {
+        work::step();
         sigils = sigils
             .strip_suffix(['#', '=', '^', '~', '!', '+'])
             .unwrap_or(sigils);
@@ -1633,6 +1681,7 @@ fn flags_unsafe(region: &str, unsafe_in: &impl Fn(&str) -> bool) -> bool {
         return true;
     }
     flags.char_indices().any(|(at, flag)| {
+        work::step();
         if !matches!(flag, 'l' | 'r' | 'I') {
             return false;
         }
@@ -1658,6 +1707,7 @@ fn format_text(word: &str) -> String {
     let mut chars = word.chars().peekable();
     let mut previous = ' ';
     while let Some(ch) = chars.next() {
+        work::step();
         match ch {
             '\\' => {
                 chars.next();
@@ -1667,12 +1717,16 @@ fn format_text(word: &str) -> String {
                 while chars
                     .next_if(|ch| "-+ #0123456789.'*hlLqjzt".contains(*ch))
                     .is_some()
-                {}
+                {
+                    work::step();
+                }
                 if chars
                     .next_if(|ch| "diouxXeEfFgGaAcsbqQ%".contains(*ch))
                     .is_some()
                 {
-                    while chars.next_if(|ch| is_name_char(*ch)).is_some() {}
+                    while chars.next_if(|ch| is_name_char(*ch)).is_some() {
+                        work::step();
+                    }
                 }
                 kept.push(' ');
             }
@@ -1728,6 +1782,7 @@ fn clean_form(value: &str, known: &HashSet<&str>) -> bool {
     };
     let mut at = 0;
     while at < bytes.len() {
+        work::step();
         if value[at..].starts_with(shell::ARITHMETIC_OUTPUT) {
             let end = at + shell::ARITHMETIC_OUTPUT.len();
             if (at > 0 && name_at(at - 1)) || name_at(end) {
@@ -1766,6 +1821,7 @@ fn clean_form(value: &str, known: &HashSet<&str>) -> bool {
             | b'#' => at += 1,
             b'a'..=b'z' | b'A'..=b'Z' | b'_' => {
                 while name_at(at) {
+                    work::step();
                     at += 1;
                 }
             }
@@ -1776,9 +1832,11 @@ fn clean_form(value: &str, known: &HashSet<&str>) -> bool {
                         at += 2;
                         // `$#NAME` (`${#NAME}`, `${#a[@]}`): a length.
                         while name_at(at) {
+                            work::step();
                             at += 1;
                         }
                         for subscript in ["[@]", "[*]"] {
+                            work::step();
                             if value[at..].starts_with(subscript) {
                                 at += subscript.len();
                             }
@@ -1791,6 +1849,7 @@ fn clean_form(value: &str, known: &HashSet<&str>) -> bool {
                             end += 1;
                         } else {
                             while name_at(end) {
+                                work::step();
                                 end += 1;
                             }
                         }
@@ -1838,6 +1897,7 @@ fn building(text: &str) -> (Vec<String>, bool) {
     let mut unknown = false;
     let mut at = 0;
     while at < bytes.len() {
+        work::step();
         if bytes[at] != b'$' {
             at += 1;
             continue;
@@ -1983,6 +2043,7 @@ fn sets_unnamed_options(name: &str, args: &[String]) -> bool {
     if matches!(name, "zmv" | "zcp" | "zln") {
         let mut words = args.iter();
         while let Some(word) = words.next() {
+            work::step();
             if expanded(word) {
                 return true;
             }
@@ -2011,6 +2072,7 @@ fn sets_unnamed_options(name: &str, args: &[String]) -> bool {
     let mut script_next = false;
     let mut words = args.iter();
     while let Some(word) = words.next() {
+        work::step();
         if word == "--" {
             break;
         }
@@ -2064,6 +2126,7 @@ fn sets_unnamed_options(name: &str, args: &[String]) -> bool {
 fn renames_shell(words: &[String]) -> bool {
     let (mut launcher, mut renamed, mut shell) = (false, false, false);
     for word in words {
+        work::step();
         if launcher {
             renamed |= word.starts_with('-') && !word.starts_with("--") && word.contains('a');
             shell |= shell::basename(word).contains("zsh")
@@ -2137,6 +2200,7 @@ fn lists(text: &str) -> (Vec<List>, bool) {
     let mut stack: Vec<Option<(Vec<String>, usize)>> = Vec::new();
     let mut depth = 0;
     for (at, &byte) in bytes.iter().enumerate() {
+        work::step();
         match byte {
             b'(' => {
                 let names = list_names(&text[..at]);
@@ -2162,6 +2226,7 @@ fn lists(text: &str) -> (Vec<List>, bool) {
     }
     // Unclosed lists run to the end of the text.
     for (names, start) in stack.into_iter().flatten() {
+        work::step();
         found.push(List {
             names,
             body: start..bytes.len(),
@@ -2189,6 +2254,7 @@ fn list_names(before: &str) -> Option<Vec<String>> {
     let mut names = Vec::new();
     let mut rest = before.trim_end_matches([' ', '\t']);
     loop {
+        work::step();
         let start = name_tail_start(rest);
         let word = &rest[start..];
         if matches!(word, "for" | "foreach") {
@@ -2265,6 +2331,7 @@ fn names(text: &str) -> impl Iterator<Item = &str> {
     let mut index = 0;
     std::iter::from_fn(move || {
         while index < bytes.len() {
+            work::step();
             let start = index;
             let ch = bytes[index] as char;
             let previous = start.checked_sub(1).map(|at| bytes[at] as char);
@@ -2276,6 +2343,7 @@ fn names(text: &str) -> impl Iterator<Item = &str> {
             }
             if ch.is_ascii_alphabetic() || ch == '_' {
                 while index < bytes.len() && is_name_char(bytes[index] as char) {
+                    work::step();
                     index += 1;
                 }
                 let number_part = previous.is_some_and(|ch| ch.is_ascii_digit() || ch == '#');
@@ -2322,6 +2390,7 @@ fn functions(text: &str) -> Vec<String> {
     let mut found = Vec::new();
     let bytes = text.as_bytes();
     for (at, _) in text.match_indices('(') {
+        work::step();
         let after = text[at + 1..].trim_start_matches([' ', '\t']);
         if !after.starts_with(')') {
             continue;
@@ -2338,6 +2407,7 @@ fn functions(text: &str) -> Vec<String> {
     }
     let words: Vec<&str> = text.split_whitespace().collect();
     for pair in words.windows(2) {
+        work::step();
         if pair[0] == "function" {
             let name = pair[1].trim_end_matches(['(', ')', '{']);
             if !name.is_empty() {
@@ -2412,6 +2482,7 @@ fn regions(text: &str) -> Vec<Range<usize>> {
     // subscript.
     let mut in_list = vec![0_i32; bytes.len() + 1];
     for list in lists(text).0 {
+        work::step();
         in_list[list.body.start] += 1;
         in_list[list.body.end] -= 1;
     }
@@ -2425,6 +2496,7 @@ fn regions(text: &str) -> Vec<Range<usize>> {
     // The next `]` at or after each byte, for subscripts in `${a[i]:v}`.
     let mut next_close = vec![bytes.len(); bytes.len() + 1];
     for at in (0..bytes.len()).rev() {
+        work::step();
         next_close[at] = if bytes[at] == b']' {
             at
         } else {
@@ -2433,7 +2505,9 @@ fn regions(text: &str) -> Vec<Range<usize>> {
     }
     let mut counted = 0;
     while index < bytes.len() {
+        work::step();
         while counted <= index {
+            work::step();
             lists_open += in_list[counted];
             counted += 1;
         }
@@ -2558,6 +2632,7 @@ fn lists_attached(text: &str, skip_arithmetic: bool) -> Vec<Range<usize>> {
         Vec::new()
     };
     for range in skipped {
+        work::step();
         let region = &text[range.clone()];
         if ["$((", "((", "$[", ":"]
             .iter()
@@ -2571,6 +2646,7 @@ fn lists_attached(text: &str, skip_arithmetic: bool) -> Vec<Range<usize>> {
     let mut close = vec![bytes.len(); bytes.len()];
     let mut open = Vec::new();
     for (at, byte) in bytes.iter().enumerate() {
+        work::step();
         match byte {
             b'(' => open.push(at),
             b')' => {
@@ -2627,6 +2703,7 @@ fn lists_attached(text: &str, skip_arithmetic: bool) -> Vec<Range<usize>> {
     let mut masked = 0;
     let mut after = 0;
     for at in 0..bytes.len() {
+        work::step();
         masked += depth[at];
         if at < after
             || bytes[at] != b'('
@@ -2655,6 +2732,7 @@ fn neutral_expansions(list: &[u8]) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(list.len());
     let mut at = 0;
     while at < list.len() {
+        work::step();
         let arithmetic = list[at..].starts_with(b"$((");
         let substitution =
             list[at] == b'`' || (list[at] == b'$' && list.get(at + 1) == Some(&b'('));
@@ -2672,6 +2750,7 @@ fn neutral_expansions(list: &[u8]) -> Option<Vec<u8>> {
             let mut depth = 0_usize;
             let mut end = None;
             for (offset, byte) in list[at + 1..].iter().enumerate() {
+                work::step();
                 match byte {
                     b'(' => depth += 1,
                     b')' => {
@@ -2718,6 +2797,7 @@ fn quoted_group_end(text: &str, start: usize) -> Option<usize> {
     let mut depth = 0_usize;
     let mut at = start;
     while at < bytes.len() {
+        work::step();
         match bytes[at] {
             b'\\' => at += 1,
             b'\'' => {
@@ -2729,6 +2809,7 @@ fn quoted_group_end(text: &str, start: usize) -> Option<usize> {
             b'"' => {
                 at += 1;
                 while at < bytes.len() && bytes[at] != b'"' {
+                    work::step();
                     at += if bytes[at] == b'\\' { 2 } else { 1 };
                 }
             }
@@ -2755,6 +2836,7 @@ fn qualifier_runs_code(list: &str) -> bool {
         let mut bare = Vec::with_capacity(list.len());
         let mut bytes = list.bytes();
         while let Some(byte) = bytes.next() {
+            work::step();
             match byte {
                 b'\'' | b'"' => {}
                 b'\\' => bare.extend(bytes.next()),
@@ -2805,6 +2887,7 @@ fn qualifier_runs_code(list: &str) -> bool {
     let digits = |mut at: usize| {
         let start = at;
         while list.get(at).is_some_and(u8::is_ascii_digit) {
+            work::step();
             at += 1;
         }
         (at > start).then_some(at)
@@ -2815,6 +2898,7 @@ fn qualifier_runs_code(list: &str) -> bool {
         at = 2;
     }
     while at < list.len() {
+        work::step();
         let byte = list[at];
         at = match byte {
             // Code between delimiters: zsh rejects it left open, and empty
@@ -2896,6 +2980,7 @@ fn qualifier_runs_code(list: &str) -> bool {
                         .get(next)
                         .is_some_and(|byte| (b'0'..=b'7').contains(byte))
                     {
+                        work::step();
                         next += 1;
                     }
                     next
@@ -2905,6 +2990,7 @@ fn qualifier_runs_code(list: &str) -> bool {
                     None => {
                         let mut next = at + 2;
                         while list.get(next).is_some_and(|byte| b"rwxXst".contains(byte)) {
+                            work::step();
                             next += 1;
                         }
                         next
@@ -2920,6 +3006,7 @@ fn qualifier_runs_code(list: &str) -> bool {
                 let mut depth = 0_usize;
                 let mut end = None;
                 for (offset, byte) in list[at..].iter().enumerate() {
+                    work::step();
                     match byte {
                         b'[' => depth += 1,
                         b']' => {
@@ -2967,6 +3054,7 @@ fn assignment_position(text: &str, at: usize) -> bool {
     let mut rest = before[..start].trim_end();
     // A bounded walk: past that the group counts as a qualifier list.
     for _ in 0..MAX_ASSIGNMENT_WALK {
+        work::step();
         if rest.is_empty() || rest.ends_with([';', '&', '|', '(', '{', '!']) {
             return true;
         }
@@ -3056,6 +3144,7 @@ fn condition_end(text: &str, start: usize) -> usize {
     let mut stack: Vec<Context> = Vec::new();
     let mut index = start;
     while index < bytes.len() {
+        work::step();
         let byte = bytes[index];
         let next = bytes.get(index + 1).copied();
         let mut step = 1;
@@ -3107,6 +3196,7 @@ fn conditions(text: &str) -> Vec<Range<usize>> {
     let mut found = Vec::new();
     let mut from = 0;
     while let Some(open) = text[from..].find("[[").map(|at| from + at) {
+        work::step();
         let close = condition_end(text, open + 2);
         let span = &text[open..close];
         if span

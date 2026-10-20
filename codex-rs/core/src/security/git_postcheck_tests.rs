@@ -1152,3 +1152,223 @@ fn issue_943_the_command_folder_is_not_left_out_by_the_cap() {
         vec![last.git().join("COMMIT_EDITMSG").display().to_string()]
     );
 }
+
+/// #943 item 13: after a worktree's `.git` file is replaced by a `.git`
+/// folder in one command while its old git folder can't be read, that look
+/// is incomplete; once the new git folder is seen in full the project is no
+/// longer held as "not checked fully" (it stayed so until a restart), while
+/// the main project, whose folders hold the unreadable one, still is until
+/// it can be read.
+#[test]
+fn issue_943_a_replaced_git_seen_in_full_is_no_longer_held_as_incomplete() {
+    // Root reads any folder.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    const NOT_FULLY: &str = "(not checked fully)";
+    let project = Project::new();
+    let worktree_git = project.git().join("worktrees/feature");
+    std::fs::create_dir_all(&worktree_git).expect("worktree git folder");
+    std::fs::write(worktree_git.join("HEAD"), "ref: refs/heads/feature\n").expect("HEAD");
+    std::fs::write(worktree_git.join("commondir"), "../..\n").expect("commondir");
+    let worktree = project.base.join("feature");
+    std::fs::create_dir_all(&worktree).expect("worktree");
+    let text = format!("gitdir: {}\n", worktree_git.display());
+    std::fs::write(worktree.join(".git"), &text).expect("git file");
+    let thread = ThreadId::new();
+    let old = repos(&[worktree.as_path()]);
+    assert_eq!(begin(thread, &old, "Moderate"), None);
+    // One command: `rm .git && git init`, and the old git folder made
+    // unreadable.
+    std::fs::remove_file(worktree.join(".git")).expect("removed");
+    let git = worktree.join(".git");
+    for folder in ["objects", "refs/heads"] {
+        std::fs::create_dir_all(git.join(folder)).expect("git folder");
+    }
+    std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").expect("HEAD");
+    let git = git.canonicalize().expect("canonical");
+    std::fs::set_permissions(&worktree_git, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    let found = kinds(&check(thread, &old));
+    let held_then = held_for(std::slice::from_ref(&git));
+    // The next look walks only the new git folder, in full.
+    let (_, held_now) = recheck(thread, "Moderate", &[worktree.as_path()]);
+    let main_held = project.held();
+    std::fs::set_permissions(&worktree_git, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    assert!(
+        found.contains(&format!("incomplete {}", worktree.join(".git").display())),
+        "{found:?}"
+    );
+    assert!(
+        held_then.iter().any(|held| held.ends_with(NOT_FULLY)),
+        "{held_then:?}"
+    );
+    assert!(
+        !held_now.iter().any(|held| held.ends_with(NOT_FULLY)),
+        "{held_now:?}"
+    );
+    assert!(
+        main_held.iter().any(|held| held.ends_with(NOT_FULLY)),
+        "{main_held:?}"
+    );
+    // Readable again and seen in full by a look at the main project (the
+    // replaced `.git` still holds it).
+    let (main_thread, main_repos) = (ThreadId::new(), project.repos());
+    assert_eq!(begin(main_thread, &main_repos, "Moderate"), None);
+    let main_held = project.held();
+    assert!(
+        !main_held.iter().any(|held| held.ends_with(NOT_FULLY)),
+        "{main_held:?}"
+    );
+}
+
+/// #943 item 13 review r1: a look whose git folders overlap in other roles
+/// (a `.git` file naming a folder inside the project's git folder, with a
+/// `commondir` back to it) sees less of the project's git folder than a
+/// look of it alone: complete, it doesn't clear the project's incomplete
+/// entry.
+#[test]
+fn issue_943_an_overlapping_look_does_not_clear_another_incomplete_one() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    const NOT_FULLY: &str = "(not checked fully)";
+    let project = Project::new();
+    let git = project.git();
+    let hidden = git.join("info/objects/y");
+    std::fs::create_dir_all(&hidden).expect("hidden folder");
+    std::fs::set_permissions(&hidden, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    let thread = ThreadId::new();
+    let found = kinds(&check(thread, &project.repos()));
+    let elsewhere = project.base.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).expect("elsewhere");
+    std::fs::write(git.join("info/commondir"), "..\n").expect("commondir");
+    std::fs::write(
+        elsewhere.join(".git"),
+        format!("gitdir: {}\n", git.join("info").display()),
+    )
+    .expect("git file");
+    let overlapping = repos(&[elsewhere.as_path()]);
+    let other_found = kinds(&check(ThreadId::new(), &overlapping));
+    let held = project.held();
+    std::fs::set_permissions(&hidden, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    assert_eq!(found, vec![format!("incomplete {}", git.display())]);
+    assert_eq!(
+        overlapping.first().map(|repo| repo.probes().len()),
+        Some(1 + 2 * 4),
+        "{overlapping:?}"
+    );
+    assert!(
+        !other_found
+            .iter()
+            .any(|kind| kind.starts_with("incomplete")),
+        "{other_found:?}"
+    );
+    assert!(
+        held.iter().any(|held| held.ends_with(NOT_FULLY)),
+        "{held:?}"
+    );
+}
+
+/// #943 item 13 review r2: a worktree's look walks its git folder from its
+/// own depth; where the project's git folder alone is nested too deep below
+/// it, that look doesn't clear the project's incomplete entry.
+#[test]
+fn issue_943_a_worktree_look_does_not_clear_a_too_deep_project() {
+    const NOT_FULLY: &str = "(not checked fully)";
+    let project = Project::new();
+    let git = project.git();
+    let worktree_git = git.join("worktrees/feature");
+    std::fs::create_dir_all(&worktree_git).expect("worktree git folder");
+    std::fs::write(worktree_git.join("HEAD"), "ref: refs/heads/feature\n").expect("HEAD");
+    std::fs::write(worktree_git.join("commondir"), "../..\n").expect("commondir");
+    // 17 levels below the project's git folder, 15 below the worktree's.
+    let deep = (0..13).fold(worktree_git.join("logs/refs"), |dir, _| dir.join("x"));
+    std::fs::create_dir_all(&deep).expect("deep folders");
+    let worktree = project.base.join("feature");
+    std::fs::create_dir_all(&worktree).expect("worktree");
+    std::fs::write(
+        worktree.join(".git"),
+        format!("gitdir: {}\n", worktree_git.display()),
+    )
+    .expect("git file");
+    let found = kinds(&check(ThreadId::new(), &project.repos()));
+    assert_eq!(found, vec![format!("incomplete {}", git.display())]);
+    let worktree_found = kinds(&check(ThreadId::new(), &repos(&[worktree.as_path()])));
+    assert_eq!(worktree_found, Vec::<String>::new());
+    let held = project.held();
+    assert!(
+        held.iter().any(|held| held.ends_with(NOT_FULLY)),
+        "{held:?}"
+    );
+}
+
+/// #943 item 13 review r3: a repository whose `.git` names two git folders
+/// (a `gitdir:` and a `commondir` an agent can write) can be incomplete for
+/// too many entries while a look of each folder alone is complete: those
+/// looks don't clear its entry, only a complete look of its own does.
+#[test]
+fn issue_943_looks_of_its_git_folders_one_by_one_do_not_clear_a_repository() {
+    const NOT_FULLY: &str = "(not checked fully)";
+    // Over half the cap in each.
+    let fill = |git: &Path| {
+        let tags = git.join("refs/tags");
+        std::fs::create_dir_all(&tags).expect("tags");
+        for n in 0..unix::MAX_ENTRIES / 2 + 1 {
+            std::fs::write(tags.join(format!("t{n}")), "").expect("tag");
+        }
+    };
+    let common = Project::new();
+    fill(&common.git());
+    let other = common.base.join("other/.git");
+    for folder in ["objects", "refs/heads"] {
+        std::fs::create_dir_all(other.join(folder)).expect("git folder");
+    }
+    std::fs::write(other.join("HEAD"), "ref: refs/heads/main\n").expect("HEAD");
+    std::fs::write(
+        other.join("commondir"),
+        format!("{}\n", common.git().display()),
+    )
+    .expect("commondir");
+    fill(&other);
+    let both = common.base.join("both");
+    std::fs::create_dir_all(&both).expect("both");
+    std::fs::write(both.join(".git"), format!("gitdir: {}\n", other.display())).expect("git file");
+    let thread = ThreadId::new();
+    let both_repos = repos(&[both.as_path()]);
+    let found = kinds(&check(thread, &both_repos));
+    assert_eq!(
+        found,
+        vec![format!("incomplete {}", both.join(".git").display())]
+    );
+    for folder in [common.root.clone(), common.base.join("other")] {
+        assert_eq!(
+            kinds(&check(thread, &repos(&[folder.as_path()]))),
+            Vec::<String>::new()
+        );
+    }
+    let held = held_for(&[common.git(), other.clone()]);
+    assert!(
+        held.iter().any(|held| held.ends_with(NOT_FULLY)),
+        "{held:?}"
+    );
+    // Review r4: nor once the session forgot it (past its repository
+    // limit): its entry wasn't left behind by a swap.
+    let others: Vec<Project> = (0..16).map(|_| Project::new()).collect();
+    for project in &others {
+        assert_eq!(
+            kinds(&check(thread, &project.repos())),
+            Vec::<String>::new()
+        );
+    }
+    for folder in [common.root.clone(), common.base.join("other")] {
+        assert_eq!(
+            kinds(&check(thread, &repos(&[folder.as_path()]))),
+            Vec::<String>::new()
+        );
+    }
+    let held = held_for(&[common.git(), other]);
+    assert!(
+        held.iter().any(|held| held.ends_with(NOT_FULLY)),
+        "{held:?}"
+    );
+}
