@@ -944,18 +944,16 @@ fn issue_943_a_worktree_added_again_later() {
     let thread = ThreadId::new();
     let repos = repos(&[worktree.as_path()]);
     assert_eq!(begin(thread, &repos, "Moderate"), None);
-    // Moved aside, not deleted: a deleted folder's inode number can come
-    // back for the next one (Linux), which the look would take for the same
-    // folder (recorded on #943).
+    // Moved aside, not deleted: a deleted file's or folder's inode number
+    // can come back for the next one (Linux), which the look would take for
+    // the same one moved back (recorded on #943).
     let removed = std::cell::Cell::new(0);
     let remove = || {
-        std::fs::remove_file(worktree.join(".git")).expect("removed");
         removed.set(removed.get() + 1);
-        std::fs::rename(
-            &worktree_git,
-            project.base.join(format!("removed-{}", removed.get())),
-        )
-        .expect("removed");
+        let aside = project.base.join(format!("removed-{}", removed.get()));
+        std::fs::create_dir(&aside).expect("aside");
+        std::fs::rename(worktree.join(".git"), aside.join("git-file")).expect("removed");
+        std::fs::rename(&worktree_git, aside.join("git-folder")).expect("removed");
         assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
     };
     remove();
