@@ -21,6 +21,7 @@
 //!   one whose identity was never recorded) is left in place and reported
 //!   once. Nothing but a recorded path is ever removed.
 
+use std::collections::HashSet;
 use std::ffi::CString;
 use std::fs::File;
 use std::io;
@@ -49,7 +50,12 @@ const REPORT_LIMIT: u64 = 1 << 20;
 /// A temporary record file older than this is a crashed write.
 const TEMPORARY_STALE_AFTER: Duration = Duration::from_secs(10 * 60);
 /// The largest record file read.
-const RECORD_LIMIT: u64 = 1 << 20;
+const RECORD_LIMIT: u64 = 16 << 20;
+/// How long a run waits for the record folder's lock. A command can hold
+/// it (the folder is readable where a writable root exposes it): the run
+/// then goes on without the record, as before (nothing recorded, made or
+/// removed).
+const LOCK_WAIT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
@@ -133,6 +139,9 @@ impl Entry {
 /// The run a record belongs to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Owner {
+    /// The machine (`/etc/machine-id`, else the host name): a home shared
+    /// between machines holds records of runs this one cannot see.
+    host: Option<String>,
     /// `/proc/sys/kernel/random/boot_id`.
     boot: Option<String>,
     pid: libc::pid_t,
@@ -196,6 +205,9 @@ struct Journal {
     written: bool,
     /// The folder's lock while held across steps ([`hold`]).
     held: Option<File>,
+    /// Set when the lock could not be taken in time: from then on this run
+    /// records nothing and removes nothing.
+    unavailable: bool,
 }
 
 static JOURNAL: Mutex<Option<Journal>> = Mutex::new(None);
@@ -221,7 +233,7 @@ fn open_journal(dir: &Path) -> io::Result<Journal> {
         libc::AT_FDCWD,
         home.as_os_str().as_bytes(),
         libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
-        0,
+        /*mode*/ 0,
     )?;
     let name = CString::new(name.as_bytes()).map_err(io::Error::other)?;
     // SAFETY: the folder descriptor is open and the name a C string.
@@ -235,7 +247,7 @@ fn open_journal(dir: &Path) -> io::Result<Journal> {
         home.as_raw_fd(),
         name.as_bytes(),
         libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        0,
+        /*mode*/ 0,
     )?;
     let status = fstat(&dir)?;
     // SAFETY: `geteuid` has no preconditions.
@@ -264,16 +276,35 @@ fn open_journal(dir: &Path) -> io::Result<Journal> {
         },
         written: false,
         held: None,
+        unavailable: false,
     })
 }
 
-/// The record folder's real location, when records are kept: bubblewrap
-/// binds it read-only where a writable root exposes it, so the command
-/// cannot forge a record a later run would act on.
-pub(crate) fn record_dir() -> Option<PathBuf> {
+/// Where the writable root bound at `mount_root` exposes the record folder,
+/// when records are kept: the folder's path below it (found by device and
+/// inode, so also through another path to the same folder), or the root
+/// itself when it is inside the folder. bubblewrap binds that read-only, so
+/// the command cannot forge a record a later run would act on.
+pub(crate) fn record_dir_mount(mount_root: &Path) -> Option<PathBuf> {
     let mut dir = None;
     with_journal(|journal| dir = Some(journal.path.clone()));
-    dir
+    let dir = dir?;
+    let identity = |path: &Path| {
+        std::fs::metadata(path)
+            .ok()
+            .map(|metadata| (metadata.dev(), metadata.ino()))
+    };
+    let root = identity(mount_root)?;
+    for above in dir.ancestors() {
+        if identity(above) == Some(root) {
+            return Some(mount_root.join(dir.strip_prefix(above).ok()?));
+        }
+    }
+    let dir = identity(&dir)?;
+    mount_root
+        .ancestors()
+        .any(|above| identity(above) == Some(dir))
+        .then(|| mount_root.to_path_buf())
 }
 
 /// Records the paths a run uses (`planned`, and `mounted`: each path as
@@ -333,13 +364,17 @@ pub(crate) fn sweep(used_by_registry: &dyn Fn(&Path, &Path) -> bool) {
 pub(crate) fn used_by_live_run(path: &Path, real: &Path) -> bool {
     let mut used = false;
     with_journal(|journal| {
-        if let Ok(_lock) = journal.lock() {
-            used = journal
-                .other_records()
+        // Without the record, as if it were used: left for a later sweep.
+        let Ok(_lock) = journal.lock() else {
+            used = true;
+            return;
+        };
+        let (records, unreadable_live) = journal.other_records();
+        used = unreadable_live
+            || records
                 .iter()
                 .filter(|(_, record)| owner_is_live(&record.owner))
                 .any(|(_, record)| uses(record, path, real));
-        }
     });
     used
 }
@@ -375,13 +410,14 @@ enum Removal {
     Removed,
     Missing,
     Kept(Kept),
-    /// Not removed for another reason (no permission): tried again later.
+    /// Not removed for another reason (no permission, or a process mounts
+    /// over it): tried again later.
     Failed,
 }
 
 /// Removes the placeholder at `real` (reached without following a link)
-/// when it is still exactly what was made.
-fn remove_if_made(real: &Path, kind: Kind, identity: &Identity) -> Removal {
+/// when it is still exactly what was made and no process mounts over it.
+fn remove_if_made(path: &Path, real: &Path, kind: Kind, identity: &Identity) -> Removal {
     let found = match crate::placeholder_registry::find_without_links(real) {
         Ok(Some(found)) => found,
         Ok(None) => return Removal::Missing,
@@ -389,6 +425,11 @@ fn remove_if_made(real: &Path, kind: Kind, identity: &Identity) -> Removal {
     };
     if !matches_made(&found, kind, identity) {
         return Removal::Kept(Kept::Changed);
+    }
+    // A live run that left no record (an older helper, a record it could
+    // not write, another Corbanu home) may mount over it.
+    if mounted_anywhere(&[path, real]) {
+        return Removal::Failed;
     }
     match found.remove() {
         Ok(()) => Removal::Removed,
@@ -398,6 +439,74 @@ fn remove_if_made(real: &Path, kind: Kind, identity: &Identity) -> Removal {
         }
         Err(_) => Removal::Failed,
     }
+}
+
+/// Whether any of `paths` is a mount point in the mount namespace of any of
+/// this user's processes (a sandbox's mounts are at the paths they have on
+/// the host). When that cannot be told, as if it were.
+fn mounted_anywhere(paths: &[&Path]) -> bool {
+    let Ok(processes) = std::fs::read_dir("/proc") else {
+        return true;
+    };
+    // SAFETY: `geteuid` has no preconditions.
+    let euid = unsafe { libc::geteuid() };
+    let mut seen = HashSet::new();
+    for process in processes.flatten() {
+        if !process
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.bytes().all(|byte| byte.is_ascii_digit()))
+        {
+            continue;
+        }
+        let dir = process.path();
+        if !std::fs::metadata(&dir).is_ok_and(|metadata| metadata.uid() == euid) {
+            continue;
+        }
+        if let Ok(namespace) = std::fs::read_link(dir.join("ns/mnt"))
+            && !seen.insert(namespace)
+        {
+            continue;
+        }
+        let Ok(mounts) = std::fs::read(dir.join("mountinfo")) else {
+            continue;
+        };
+        if mounts
+            .split(|byte| *byte == b'\n')
+            .filter_map(|line| line.split(|byte| *byte == b' ').nth(4))
+            .any(|point| {
+                let point = unescape_mount_point(point);
+                paths
+                    .iter()
+                    .any(|path| path.as_os_str().as_bytes() == point.as_slice())
+            })
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// A mount point as `mountinfo` writes it (space, tab, newline and
+/// backslash as three octal digits after a backslash).
+fn unescape_mount_point(point: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(point.len());
+    let mut index = 0;
+    while index < point.len() {
+        if point[index] == b'\\'
+            && let Some(code) = point
+                .get(index + 1..index + 4)
+                .and_then(|digits| std::str::from_utf8(digits).ok())
+                .and_then(|digits| u8::from_str_radix(digits, 8).ok())
+        {
+            out.push(code);
+            index += 4;
+        } else {
+            out.push(point[index]);
+            index += 1;
+        }
+    }
+    out
 }
 
 fn is_still_made(real: &Path, kind: Kind, identity: &Identity) -> bool {
@@ -421,8 +530,7 @@ fn matches_made(
 
 /// Makes the placeholder at `real` (its folder reached without following a
 /// link), only where nothing is: `O_EXCL` for a file, `mkdirat` for a
-/// folder. A read-only file, as bubblewrap makes it; a private folder (it
-/// is under bubblewrap's read-only mount while the command runs).
+/// folder, with bubblewrap's modes (`0444`, `0755`, less the umask).
 fn make_placeholder(real: &Path, kind: Kind) -> io::Result<Identity> {
     let (folder, name) = crate::placeholder_registry::open_parent_without_links(real)?;
     match kind {
@@ -431,20 +539,20 @@ fn make_placeholder(real: &Path, kind: Kind) -> io::Result<Identity> {
                 folder.as_raw_fd(),
                 name.as_bytes(),
                 libc::O_RDONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                0o444,
+                /*mode*/ 0o444,
             )?;
             Ok(Identity::of(&fstat(&file)?))
         }
         Kind::Directory => {
             // SAFETY: the folder descriptor is open and the name a C string.
-            if unsafe { libc::mkdirat(folder.as_raw_fd(), name.as_ptr(), 0o700) } < 0 {
+            if unsafe { libc::mkdirat(folder.as_raw_fd(), name.as_ptr(), 0o755) } < 0 {
                 return Err(io::Error::last_os_error());
             }
             let made = open_raw(
                 folder.as_raw_fd(),
                 name.as_bytes(),
                 libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                0,
+                /*mode*/ 0,
             )?;
             Ok(Identity::of(&fstat(&made)?))
         }
@@ -453,19 +561,27 @@ fn make_placeholder(real: &Path, kind: Kind) -> io::Result<Identity> {
 
 /// Whether the run that wrote a record may still be running.
 fn owner_is_live(owner: &Owner) -> bool {
+    // A run on another machine (a home shared over the network) is taken
+    // as running: its machine sweeps its records.
+    if let (Some(recorded), Some(now)) = (&owner.host, own_host())
+        && recorded != now
+    {
+        return true;
+    }
     if let (Some(recorded), Some(now)) = (&owner.boot, own_boot())
         && recorded != now
     {
         return false;
     }
     // A run in another PID namespace (a container sharing the home) is
-    // taken as running: its pid names another process here, or none.
-    if let (Some(recorded), Some(now)) = (
+    // taken as running: its pid names another process here, or none. So is
+    // one whose namespace is not known on either side.
+    match (
         owner.pidns,
         crate::placeholder_registry::own_pid_namespace(),
-    ) && recorded != now
-    {
-        return true;
+    ) {
+        (Some(recorded), Some(now)) if recorded == now => {}
+        _ => return true,
     }
     match process_start(owner.pid) {
         Ok(Some(start)) => owner.start.is_none_or(|recorded| recorded == start),
@@ -474,14 +590,44 @@ fn owner_is_live(owner: &Owner) -> bool {
     }
 }
 
+/// Whether the run a record file is named for (`<pid>-<start>-<nanos>`)
+/// may be running; one named otherwise may be.
+fn named_run_is_live(stem: &str) -> bool {
+    let mut parts = stem.split('-');
+    let (Some(Ok(pid)), Some(Ok(start))) = (
+        parts.next().map(str::parse::<libc::pid_t>),
+        parts.next().map(str::parse::<u64>),
+    ) else {
+        return true;
+    };
+    match process_start(pid) {
+        Ok(Some(now)) => start == 0 || now == start,
+        Ok(None) => false,
+        Err(_) => crate::placeholder_registry::process_is_active(pid),
+    }
+}
+
 fn own_owner() -> Owner {
     let pid = std::process::id() as libc::pid_t;
     Owner {
+        host: own_host().cloned(),
         boot: own_boot().cloned(),
         pid,
         start: process_start(pid).ok().flatten(),
         pidns: crate::placeholder_registry::own_pid_namespace(),
     }
+}
+
+fn own_host() -> Option<&'static String> {
+    static HOST: OnceLock<Option<String>> = OnceLock::new();
+    HOST.get_or_init(|| {
+        ["/etc/machine-id", "/proc/sys/kernel/hostname"]
+            .iter()
+            .filter_map(|path| std::fs::read_to_string(path).ok())
+            .map(|host| host.trim().to_string())
+            .find(|host| is_word(host))
+    })
+    .as_ref()
 }
 
 fn own_boot() -> Option<&'static String> {
@@ -495,8 +641,9 @@ fn own_boot() -> Option<&'static String> {
     .as_ref()
 }
 
-/// The start time of process `pid` (`Ok(None)`: there is none, or it has
-/// exited and not been reaped yet).
+/// The start time of process `pid` (`Ok(None)`: there is none). One that
+/// has exited and not been reaped yet still counts, as for the temporary
+/// folder's registry (`kill(pid, 0)`).
 fn process_start(pid: libc::pid_t) -> io::Result<Option<u64>> {
     let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
         Ok(stat) => stat,
@@ -509,12 +656,8 @@ fn process_start(pid: libc::pid_t) -> io::Result<Option<u64>> {
         .rfind(')')
         .map(|end| &stat[end + 1..])
         .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
-    let fields: Vec<&str> = rest.split_whitespace().collect();
-    if matches!(fields.first(), Some(&("Z" | "X" | "x"))) {
-        return Ok(None);
-    }
-    fields
-        .get(19)
+    rest.split_whitespace()
+        .nth(19)
         .and_then(|start| start.parse().ok())
         .map(Some)
         .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))
@@ -629,8 +772,13 @@ impl Journal {
             return;
         };
         self.remove_stale_temporaries();
-        let (live, ended): (Vec<_>, Vec<_>) = self
-            .other_records()
+        let (records, unreadable_live) = self.other_records();
+        // A live run's record this version cannot read (a newer version's)
+        // may use any placeholder: nothing is removed while it runs.
+        if unreadable_live {
+            return;
+        }
+        let (live, ended): (Vec<_>, Vec<_>) = records
             .into_iter()
             .partition(|(_, record)| owner_is_live(&record.owner));
         // At it or below it (a live run's placeholder in a placeholder
@@ -662,10 +810,10 @@ impl Journal {
                     }
                     Entry::Made {
                         kind,
+                        path,
                         real,
                         identity,
-                        ..
-                    } => match remove_if_made(real, *kind, identity) {
+                    } => match remove_if_made(path, real, *kind, identity) {
                         Removal::Removed | Removal::Missing => {}
                         Removal::Kept(why) => self.report(real, why),
                         Removal::Failed => kept.push(entry.clone()),
@@ -689,43 +837,66 @@ impl Journal {
     /// The record folder's lock, held while records are read or written:
     /// `None` when it is held already ([`hold`]; a second descriptor would
     /// wait for it forever).
-    fn lock(&self) -> io::Result<Option<File>> {
+    fn lock(&mut self) -> io::Result<Option<File>> {
         if self.held.is_some() {
             return Ok(None);
         }
         self.lock_file().map(Some)
     }
 
-    fn lock_file(&self) -> io::Result<File> {
+    /// Waits at most [`LOCK_WAIT`]; after that, the record is unavailable
+    /// for the rest of this run.
+    fn lock_file(&mut self) -> io::Result<File> {
+        if self.unavailable {
+            return Err(io::Error::from(io::ErrorKind::WouldBlock));
+        }
         let file = File::from(open_raw(
             self.dir.as_raw_fd(),
             LOCK_NAME.as_bytes(),
             libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            0o600,
+            /*mode*/ 0o600,
         )?);
-        // SAFETY: locks a descriptor owned here; released when it closes.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } < 0 {
-            return Err(io::Error::last_os_error());
+        let deadline = std::time::Instant::now() + LOCK_WAIT;
+        loop {
+            // SAFETY: locks a descriptor owned here; released when it closes.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                return Ok(file);
+            }
+            let err = io::Error::last_os_error();
+            if !matches!(err.raw_os_error(), Some(libc::EWOULDBLOCK | libc::EINTR)) {
+                return Err(err);
+            }
+            if std::time::Instant::now() >= deadline {
+                self.unavailable = true;
+                return Err(err);
+            }
+            std::thread::sleep(Duration::from_millis(10));
         }
-        Ok(file)
     }
 
     /// The other runs' records (by name, without the extension) that this
-    /// version wrote and no other user may have written.
-    fn other_records(&self) -> Vec<(String, Record)> {
+    /// version wrote and no other user may have written, and whether there
+    /// is one it cannot read whose run (named in the file name) is running.
+    /// Without a listing, as if there were.
+    fn other_records(&self) -> (Vec<(String, Record)>, bool) {
         let Ok(names) = self.list() else {
-            return Vec::new();
+            return (Vec::new(), true);
         };
-        names
-            .iter()
-            .filter_map(|name| {
-                let stem = name.strip_suffix(&format!(".{RECORD_EXTENSION}"))?;
-                if stem == self.name {
-                    return None;
-                }
-                Some((stem.to_string(), self.read(name)?))
-            })
-            .collect()
+        let mut records = Vec::new();
+        let mut unreadable_live = false;
+        for name in &names {
+            let Some(stem) = name.strip_suffix(&format!(".{RECORD_EXTENSION}")) else {
+                continue;
+            };
+            if stem == self.name {
+                continue;
+            }
+            match self.read(name) {
+                Some(record) => records.push((stem.to_string(), record)),
+                None => unreadable_live |= named_run_is_live(stem),
+            }
+        }
+        (records, unreadable_live)
     }
 
     /// Removes the temporary record files left by crashed writes.
@@ -773,7 +944,7 @@ impl Journal {
             self.dir.as_raw_fd(),
             temporary.as_bytes(),
             libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            0o600,
+            /*mode*/ 0o600,
         )?);
         file.write_all(serialize(record).as_bytes())?;
         file.sync_all()?;
@@ -828,7 +999,7 @@ impl Journal {
                 self.dir.as_raw_fd(),
                 name.as_bytes(),
                 libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
-                0,
+                /*mode*/ 0,
             )
             .ok()?,
         );
@@ -849,7 +1020,7 @@ impl Journal {
             self.dir.as_raw_fd(),
             name.as_bytes(),
             libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            0,
+            /*mode*/ 0,
         ) else {
             return;
         };
@@ -878,7 +1049,7 @@ impl Journal {
             self.dir.as_raw_fd(),
             REPORT_NAME.as_bytes(),
             libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            0o600,
+            /*mode*/ 0o600,
         ) else {
             return;
         };
@@ -959,7 +1130,8 @@ fn optional<T: std::fmt::Display>(value: Option<T>) -> String {
 fn serialize(record: &Record) -> String {
     let owner = &record.owner;
     let mut text = format!(
-        "{HEADER}\nboot {}\npid {}\nstart {}\npidns {}\n",
+        "{HEADER}\nhost {}\nboot {}\npid {}\nstart {}\npidns {}\n",
+        optional(owner.host.as_deref()),
         optional(owner.boot.as_deref()),
         owner.pid,
         optional(owner.start),
@@ -1010,6 +1182,7 @@ fn parse(text: &str) -> Option<Record> {
         let (key, value) = lines.next()?.split_once(' ')?;
         (key == name && is_word(value)).then(|| (value != "-").then(|| value.to_string()))
     };
+    let host = field("host")?;
     let boot = field("boot")?;
     let pid = field("pid")??.parse().ok()?;
     let start = match field("start")? {
@@ -1079,6 +1252,7 @@ fn parse(text: &str) -> Option<Record> {
     }
     ended.then_some(Record {
         owner: Owner {
+            host,
             boot,
             pid,
             start,

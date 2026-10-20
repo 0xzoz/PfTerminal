@@ -130,7 +130,11 @@ commands that would enter the bubblewrap path.
   mounts at). At the start of each sandboxed run, the records of runs that
   have ended (another boot, or a pid that is gone or was reused) are swept:
   a recorded placeholder is removed only when it is still exactly what was
-  made, reached without following a link, and no live run uses it.
+  made, reached without following a link, no live run's record uses it,
+  and it is not a mount point in any of the user's processes (a run that
+  left no record). A live run's record this version cannot read keeps
+  every placeholder; a run on another machine sharing the home, or in
+  another PID namespace, counts as live.
   Anything else (filled, replaced or changed since, or a placeholder whose
   identity was never recorded) is left in place and reported once, on the
   command's standard error and in `kept.log` in that folder. This removes a
@@ -138,7 +142,10 @@ commands that would enter the bubblewrap path.
   was lost (a reboot); nothing but a recorded path is ever removed. The
   record folder is bound read-only where a writable root exposes it (as the
   temporary folder's registry is), so the command cannot forge a record;
-  under Moderate and Aggressive it is denied outright. Without
+  under Moderate and Aggressive it is denied outright. A run waits at
+  most 10 seconds for the folder's lock, then goes on without the record.
+  A placeholder made by a run that then fails before bubblewrap starts is
+  recorded and swept like any other. Without
   a usable record folder (a read-only home, as in a nested sandbox) nothing
   is recorded, as before.
 - When bubblewrap is active, it mounts a fresh `/proc` via `--proc /proc` by default, but

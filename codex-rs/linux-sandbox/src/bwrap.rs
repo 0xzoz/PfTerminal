@@ -1073,19 +1073,10 @@ fn create_filesystem_args_with_pins(
         }
         // #348: the same for the placeholder record kept in the Corbanu
         // home, so the command cannot forge a record a later run acts on.
-        if let Some(record_dir) = crate::placeholder_journal::record_dir() {
-            let record_mount = if record_dir.starts_with(mount_root) {
-                Some(record_dir.as_path())
-            } else if mount_root.starts_with(&record_dir) {
-                Some(mount_root)
-            } else {
-                None
-            };
-            if let Some(record_mount) = record_mount {
-                bwrap_args.args.push("--ro-bind".to_string());
-                bwrap_args.args.push(path_to_string(record_mount));
-                bwrap_args.args.push(path_to_string(record_mount));
-            }
+        if let Some(record_mount) = crate::placeholder_journal::record_dir_mount(mount_root) {
+            bwrap_args.args.push("--ro-bind".to_string());
+            bwrap_args.args.push(path_to_string(&record_mount));
+            bwrap_args.args.push(path_to_string(&record_mount));
         }
         for unreadable_root in nested_unreadable_roots {
             if snapshot_covered.contains(&unreadable_root) {

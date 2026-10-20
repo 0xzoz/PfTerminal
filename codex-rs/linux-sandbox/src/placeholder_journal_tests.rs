@@ -72,6 +72,7 @@ fn ended() -> Owner {
     let mut child = std::process::Command::new("true").spawn().expect("spawn");
     child.wait().expect("wait");
     Owner {
+        host: own_host().cloned(),
         boot: own_boot().cloned(),
         pid: child.id() as libc::pid_t,
         start: Some(1),
@@ -93,6 +94,7 @@ fn tick() {
 fn a_record_round_trips_and_one_not_written_by_this_version_is_not_read() {
     let record = Record {
         owner: Owner {
+            host: Some("h1".to_string()),
             boot: Some("b1".to_string()),
             pid: 42,
             start: Some(7),
@@ -172,18 +174,19 @@ fn a_run_is_live_until_it_ends_its_boot_ends_or_its_pid_is_reused() {
         ..this_run()
     };
     assert!(!owner_is_live(&reused_pid));
-    // One that has exited, not yet reaped, has ended.
-    let mut zombie = std::process::Command::new("true").spawn().expect("spawn");
-    let zombie_pid = zombie.id() as libc::pid_t;
-    while process_start(zombie_pid).expect("stat").is_some() {
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    assert!(!owner_is_live(&Owner {
-        pid: zombie_pid,
-        start: None,
-        ..this_run()
-    }));
-    zombie.wait().expect("reap");
+    // A run on another machine sharing the home is taken as running.
+    let other_machine = Owner {
+        host: Some("another-machine".to_string()),
+        boot: Some("another-boot".to_string()),
+        ..ended()
+    };
+    assert!(owner_is_live(&other_machine));
+    // One whose PID namespace is not known is taken as running.
+    let unknown_namespace = Owner {
+        pidns: None,
+        ..ended()
+    };
+    assert!(owner_is_live(&unknown_namespace));
     // A run in another PID namespace is taken as running.
     let other_namespace = Owner {
         pidns: Some(1),
@@ -504,4 +507,58 @@ fn a_record_folder_of_another_kind_is_not_used() {
             & 0o777,
         0o700
     );
+}
+
+#[test]
+fn an_unreadable_record_of_a_live_run_keeps_every_placeholder() {
+    let mut setup = Setup::new();
+    let path = setup.base.join("home/.pfterminal");
+    setup.made_by(ended(), &path, Kind::File);
+    // A newer version's record of a run that is running.
+    let live = this_run();
+    let unreadable = setup.base.join(format!(
+        "corbanu/sandbox-placeholders/{}-{}-9.rec",
+        live.pid,
+        live.start.unwrap_or(0)
+    ));
+    std::fs::write(&unreadable, "corbanu-sandbox-placeholders 2\n").expect("record");
+    std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o600)).expect("mode");
+
+    setup.sweep();
+    assert!(path.is_file(), "kept while that run runs");
+    assert!(used_by_live_run_in(&mut setup.journal, &path));
+
+    // Once that run has ended, it no longer counts.
+    let ended = ended();
+    std::fs::rename(
+        &unreadable,
+        setup.base.join(format!(
+            "corbanu/sandbox-placeholders/{}-1-9.rec",
+            ended.pid
+        )),
+    )
+    .expect("rename");
+    assert!(!used_by_live_run_in(&mut setup.journal, &path));
+    setup.sweep();
+    assert!(std::fs::symlink_metadata(&path).is_err());
+}
+
+fn used_by_live_run_in(journal: &mut Journal, path: &Path) -> bool {
+    let _lock = journal.lock().expect("lock");
+    let (records, unreadable_live) = journal.other_records();
+    unreadable_live
+        || records
+            .iter()
+            .filter(|(_, record)| owner_is_live(&record.owner))
+            .any(|(_, record)| uses(record, path, path))
+}
+
+#[test]
+fn a_mount_point_in_any_of_this_users_namespaces_is_found() {
+    assert_eq!(unescape_mount_point(br"/a\040b\134c"), b"/a b\\c".to_vec());
+    assert_eq!(unescape_mount_point(br"/plain\x"), br"/plain\x".to_vec());
+    // This process's own `/proc` is a mount point; a fresh folder is not.
+    assert!(mounted_anywhere(&[Path::new("/proc")]));
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    assert!(!mounted_anywhere(&[dir.path()]));
 }
