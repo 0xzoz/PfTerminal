@@ -136,13 +136,13 @@ commands that would enter the bubblewrap path.
     the terminal reaches the command directly; the helper ignores it;
   - `SIGHUP`, `SIGINT`, `SIGQUIT` and `SIGTERM` that reach the helper are
     relayed to the command once it has moved to a process group of its own
-    (an interactive shell does; one arriving while it moves may reach it
-    twice), and so is a terminal hangup's `SIGHUP`, which goes to the
-    session leader (now the helper) alone; ones sent before the command
-    started are sent to it as it starts;
+    (an interactive shell does; one arriving shortly before or while it
+    moves may reach it twice), and so is a terminal hangup's `SIGHUP`,
+    which goes to the session leader (now the helper) alone; ones sent
+    before the command started are sent to it as it starts;
   - a catchable signal sent to the helper's pid alone no longer reaches the
-    command (one of these four does once the command has left the group);
-    `SIGKILL` to the helper stops it.
+    command (one of these four does if sent before the command started or
+    once it has left the group); `SIGKILL` to the helper stops it.
 
   The command's parent is now the supervisor, and the command no longer
   leads its session or group (`setsid()` now succeeds). The terminal's stop
@@ -151,8 +151,10 @@ commands that would enter the bubblewrap path.
   hostile one (it runs as the same user, outside a PID namespace, and could
   kill the supervisor); a process that changed its real user (`sudo`, which
   needs `no_new_privs` unset: possible on the full disk path only, without
-  network or user-namespace restrictions) cannot be killed, and it and what
-  it starts are left running; processes started through a service manager
+  network or user-namespace restrictions) cannot be killed, and it and the
+  processes still under it are left running (the orphans it leaves are
+  stopped, and while it keeps leaving them the helper keeps stopping them
+  and does not exit); processes started through a service manager
   outside the command's process tree (`systemd --user`, an existing tmux
   server) are not its descendants; a process stuck in the kernel delays the
   helper's exit until it dies, as on the bubblewrap path; and without

@@ -334,8 +334,9 @@ pub fn run_main() -> ! {
 /// forwarded ones, which the supervisor relays once the command has left
 /// the group ([`crate::supervisor::Relay`]). A catchable signal sent to this
 /// helper's pid alone no longer reaches the command, except a forwarded one
-/// once the command has left the group (Corbanu signals the group, or kills
-/// this helper with `SIGKILL`, which stops the command).
+/// sent before the command starts or once it has left the group (Corbanu
+/// signals the group, or kills this helper with `SIGKILL`, which stops the
+/// command).
 fn run_supervised_without_bwrap(exec_command: impl FnOnce()) -> ! {
     // SAFETY: plain syscall on this process, still single-threaded.
     let group = unsafe { libc::getpgrp() };

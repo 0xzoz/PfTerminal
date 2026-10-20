@@ -145,11 +145,12 @@ impl ParentWatch {
 /// (`signals`) it receives to `requests` (as an `i32`), and the supervisor
 /// relays it only once the command has left `group` (an interactive shell
 /// moves to a group of its own): the command then gets every signal sent to
-/// the group once (twice at most if it arrives while the command is
-/// leaving the group). A terminal hangup's `SIGHUP` goes to the session
-/// leader alone, which the command was before #1006; the helper asks for
-/// that one to be relayed in any case. Forwarded signals sent before the
-/// command existed (`pending`) are sent to it before it starts.
+/// the group once (twice at most if it arrives shortly before or while the
+/// command leaves the group). A terminal hangup's `SIGHUP` goes to the
+/// session leader alone, which the command was before #1006; the helper asks
+/// for that one to be relayed in any case. Forwarded signals sent before the
+/// command existed (`pending`) are sent to it before it starts (except in a
+/// window of a few instructions just before the helper forks).
 pub(crate) struct Relay {
     requests: OwnedFd,
     group: libc::pid_t,
