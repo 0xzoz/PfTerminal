@@ -1649,9 +1649,11 @@ fn issue_943_a_git_folder_copied_up_on_overlay_isnt_replaced() {
     assert!(upper.join("project/.git/index").exists(), "copied up");
     assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
     // What made it noise on main: the creation time moved.
-    if let (Ok(before), Ok(after)) = (before.created(), after.created()) {
-        assert_ne!(before, after, "copy-up keeps the creation time");
-    }
+    assert_ne!(
+        before.created().expect("creation time"),
+        after.created().expect("creation time"),
+        "copy-up keeps the creation time"
+    );
     assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
     assert_eq!(held_for(&[git]), Vec::<String>::new());
     drop(mounts);
