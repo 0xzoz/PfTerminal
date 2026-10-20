@@ -328,6 +328,7 @@ pub struct TestCodexBuilder {
     history_mode: Option<ThreadHistoryMode>,
     auth_in_home: bool,
     config_folder: Option<PathBuf>,
+    session_cwd_is_workspace_root: bool,
 }
 
 impl TestCodexBuilder {
@@ -337,6 +338,14 @@ impl TestCodexBuilder {
     /// working folder).
     pub fn with_config_folder(mut self, folder: impl Into<PathBuf>) -> Self {
         self.config_folder = Some(folder.into());
+        self
+    }
+
+    /// Build the config for the session's own working folder, which becomes
+    /// its workspace root, as in a real session (#1098). By default the
+    /// session runs outside its workspace roots.
+    pub fn with_session_cwd_as_workspace_root(mut self) -> Self {
+        self.session_cwd_is_workspace_root = true;
         self
     }
 
@@ -815,10 +824,13 @@ impl TestCodexBuilder {
         // folder, not the test process's own working folder (the crate's
         // source tree, e.g. `codex-rs/core`). The session still runs in
         // `cwd_override`, which stays outside the workspace roots as before.
-        let config_folder = self
-            .config_folder
-            .clone()
-            .unwrap_or_else(|| cwd.path().to_path_buf());
+        let config_folder = if self.session_cwd_is_workspace_root {
+            cwd_override.to_path_buf()
+        } else {
+            self.config_folder
+                .clone()
+                .unwrap_or_else(|| cwd.path().to_path_buf())
+        };
         let mut config = load_default_config_for_test_in(
             home,
             self.cloud_config_bundle.take().unwrap_or_default(),
@@ -1330,6 +1342,7 @@ pub fn test_codex() -> TestCodexBuilder {
         history_mode: None,
         auth_in_home: false,
         config_folder: None,
+        session_cwd_is_workspace_root: false,
     }
 }
 
