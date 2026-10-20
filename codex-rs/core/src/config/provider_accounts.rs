@@ -86,8 +86,8 @@ pub(crate) fn apply_explicit_provider_account(
         let message = if recorded {
             format!(
                 "named accounts need the `named_accounts` feature (`--enable named_accounts`); \
-                 resume with `--account {provider_id}:default` to use the default credentials \
-                 instead"
+                 `--account {provider_id}:default` (on a resume or fork) uses the default \
+                 credentials instead"
             )
         } else {
             "named accounts need the `named_accounts` feature (`--enable named_accounts`); \
@@ -690,8 +690,8 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "the thread's recorded account zai:main: named accounts need the `named_accounts` \
-             feature (`--enable named_accounts`); resume with `--account zai:default` to use the \
-             default credentials instead"
+             feature (`--enable named_accounts`); `--account zai:default` (on a resume or fork) \
+             uses the default credentials instead"
         );
     }
 }
