@@ -3035,3 +3035,56 @@ fn issue_1065_substituted_values_are_capped() {
     // Everyday lines stay quiet.
     assert_eq!(script("p=$HOME/bin; PATH=$p:$PATH; echo $p $p"), None);
 }
+
+/// #1065 review 1: the budget holds for the whole classification, a line
+/// past it still names what it reaches, and folders and nested text are
+/// bounded too. Inputs stay small (at most about 6 MB of words).
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1065_review_1_limits() {
+    use ProtectedActionKind::*;
+    use base64::Engine as _;
+    let exhaust = format!("p=x;{}", " p=$p$p;".repeat(20));
+    let long = format!("{USER_HOME}/.codex/{}/../auth.json", "k".repeat(80));
+    let pushes = |count: usize| format!("pushd /tmp;{} echo ok", " pushd .;".repeat(count));
+    let decoded = " ZWNobyBoZWxsbyB3b3JsZA=="; // "echo hello world"
+    let payload = base64::engine::general_purpose::STANDARD
+        .encode(format!("echo {}", "a".repeat(600 * 1024)));
+    let cases = [
+        // Small values are still substituted past the budget, and a large
+        // one is judged on its own.
+        (format!("v=vault; {exhaust} corbanu $v get k"), Some(Vault)),
+        (
+            format!("x=.co; y=dex; {exhaust} cat ~/$x$y/auth.json"),
+            Some(Credentials),
+        ),
+        (format!("c={long}; cat $c"), Some(Credentials)),
+        (format!("c={long}; {exhaust} cat $c"), Some(Credentials)),
+        // The folder stack and folder names.
+        (pushes(63), None),
+        (pushes(64), Some(UnseenCode)),
+        (
+            format!("cd /{}; echo ok", "a".repeat(5000)),
+            Some(UnseenCode),
+        ),
+        ("cd /tmp/x && pushd /tmp && popd; echo ok".to_string(), None),
+        // Command lines lexed in all: decoded payloads.
+        (format!("echo{}", decoded.repeat(5000)), Some(UnseenCode)),
+        (format!("echo{}", decoded.repeat(50)), None),
+        // Bytes lexed in all: seven copies of a 600 KiB payload through
+        // braces.
+        (format!("echo {payload}{{,,,,,,}}"), Some(UnseenCode)),
+    ];
+    let mut wrong = Vec::new();
+    for (line, expected) in cases {
+        let found = script(&line);
+        if found != expected {
+            let shown: String = line.chars().take(60).collect();
+            wrong.push(format!("{shown:?}... -> {found:?}, want {expected:?}"));
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+}

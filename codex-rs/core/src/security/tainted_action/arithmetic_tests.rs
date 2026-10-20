@@ -12,7 +12,7 @@ fn runs_unseen_in(shell: &str, line: &str) -> bool {
     let variables = HashMap::new();
     let mut budget = usize::MAX;
     for simple in &shell::simple_commands(&argv).commands {
-        let (words, _) = super::super::substitute(simple, &variables, &mut budget);
+        let (words, _, _) = super::super::substitute(simple, &variables, &mut budget);
         arithmetic.note(simple, &words);
     }
     arithmetic.runs_unseen(&argv)

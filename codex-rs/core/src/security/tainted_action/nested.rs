@@ -169,6 +169,7 @@ impl Classifier {
             cwd: cwd.to_string(),
             previous: cwd.to_string(),
             stack: Vec::new(),
+            unfollowed: false,
         };
         let mut found = Found::default();
         self.walk(&[argv], &mut folders, /*level*/ 0, &mut found);
@@ -369,6 +370,7 @@ impl Classifier {
                     cwd: folders.cwd.clone(),
                     previous: folders.previous.clone(),
                     stack: folders.stack.clone(),
+                    unfollowed: false,
                 };
                 let reading = quoted::commands(&word.text);
                 found.unreadable |= reading.too_deep || reading.unsure;

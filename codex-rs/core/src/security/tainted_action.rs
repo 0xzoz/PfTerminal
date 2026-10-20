@@ -341,10 +341,23 @@ const MAX_DEPTH: usize = 4;
 const MAX_COMMAND_BYTES: usize = 1024 * 1024;
 /// Script files one classification reads; more fail closed.
 const MAX_SCRIPT_FILES: usize = 16;
-/// Bytes of variable values one command line substitutes (#1065): a value
-/// doubled on each step (`a=$a$a`) or used many times would otherwise grow
-/// without bound. More fail closed.
+/// Bytes of variable values one classification substitutes (#1065): a
+/// value doubled on each step (`a=$a$a`) or used many times would otherwise
+/// grow without bound. Past it the line asks, and only values up to
+/// `MAX_SMALL_VALUE` bytes are still substituted (each `$x` costs at least
+/// two bytes of text, so this stays linear); a larger value is judged once
+/// on its own.
 const MAX_SUBSTITUTED_BYTES: usize = 1024 * 1024;
+const MAX_SMALL_VALUE: usize = 64;
+/// Bytes of command text, and command lines, one classification lexes in
+/// all, nested scripts, decoded payloads and script files included (#1065);
+/// more fail closed.
+const MAX_CLASSIFIED_BYTES: usize = 4 * 1024 * 1024;
+const MAX_CLASSIFIED_LINES: usize = 4096;
+/// Folders `pushd` may stack, and bytes of a folder name the classifier
+/// follows (#1065); past them the line asks and the folder stays.
+const MAX_FOLDER_STACK: usize = 64;
+const MAX_FOLDER_BYTES: usize = 4096;
 /// Magic numbers of executables, which are not read as scripts.
 const BINARY_MAGIC: &[&[u8]] = &[
     b"\x7fELF",
@@ -378,6 +391,9 @@ pub(super) fn classify_with(
         ran_unknown: false,
         written: Vec::new(),
         nested_scripts: 0,
+        substitution_budget: MAX_SUBSTITUTED_BYTES,
+        classified_bytes: 0,
+        classified_lines: 0,
     };
     match action {
         ApprovalAction::Shell { command, cwd, .. }
@@ -526,6 +542,8 @@ struct Folders {
     cwd: String,
     previous: String,
     stack: Vec<String>,
+    /// A `cd`/`pushd` past the folder limits was not followed (#1065).
+    unfollowed: bool,
 }
 
 struct Classifier {
@@ -550,6 +568,11 @@ struct Classifier {
     written: Vec<Option<String>>,
     /// #885: nested shell scripts judged so far.
     nested_scripts: usize,
+    /// #1065: bytes of variable values left to substitute.
+    substitution_budget: usize,
+    /// #1065: bytes of command text, and command lines, lexed so far.
+    classified_bytes: usize,
+    classified_lines: usize,
 }
 
 /// #841 (MOD-06): the word classifier splits quoted text into commands on
@@ -788,8 +811,15 @@ impl Classifier {
             self.note(ProtectedActionKind::UnseenCode);
             return;
         }
-        // A command line too long to classify fails closed.
-        if command.iter().map(String::len).sum::<usize>() > MAX_COMMAND_BYTES {
+        // A command line too long to classify fails closed, as does more
+        // text in all than one classification lexes.
+        let bytes = command.iter().map(String::len).sum::<usize>();
+        self.classified_bytes = self.classified_bytes.saturating_add(bytes);
+        self.classified_lines += 1;
+        if bytes > MAX_COMMAND_BYTES
+            || self.classified_bytes > MAX_CLASSIFIED_BYTES
+            || self.classified_lines > MAX_CLASSIFIED_LINES
+        {
             self.note(ProtectedActionKind::UnseenCode);
             return;
         }
@@ -816,6 +846,7 @@ impl Classifier {
             cwd: cwd.to_string(),
             previous: cwd.to_string(),
             stack: Vec::new(),
+            unfollowed: false,
         };
         let mut variables: HashMap<String, String> = HashMap::new();
         for (name, value) in [
@@ -833,11 +864,24 @@ impl Classifier {
         let mut lexed_seds = 0;
         let mut lexed_shells = 0;
         let mut arithmetic = arithmetic::Arithmetic::new(command);
-        let mut budget = MAX_SUBSTITUTED_BYTES;
+        // Values too large to substitute, judged once each.
+        let mut judged: std::collections::HashSet<u64> = std::collections::HashSet::new();
         for (index, simple) in lexed.commands.iter().enumerate() {
-            let (words, unseen) = substitute(simple, &variables, &mut budget);
-            if budget == 0 {
+            let (words, unseen, skipped) =
+                substitute(simple, &variables, &mut self.substitution_budget);
+            if self.substitution_budget == 0 {
                 self.note(ProtectedActionKind::UnseenCode);
+            }
+            for name in skipped {
+                let Some(value) = variables.get(&name) else {
+                    continue;
+                };
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                std::hash::Hash::hash(value, &mut hasher);
+                if judged.insert(std::hash::Hasher::finish(&hasher)) {
+                    let value = value.clone();
+                    self.script(&value, &folders.cwd, depth + 1);
+                }
             }
             // Decoded, quote-removed and with known variables substituted:
             // `eval "echo \${v@"P"}"`, `$'\x40'`, `p=@P; eval "echo \${v$p}"`.
@@ -862,9 +906,10 @@ impl Classifier {
         // `read` runs the substitutions in its value, like `eval`.
         // #1028: zsh `e`/`+` glob qualifiers run code the classifier does
         // not read as commands.
-        if self.rebuilt == 0
+        if (self.rebuilt == 0
             && self.not_shell == 0
-            && (arithmetic.runs_unseen(command) || arithmetic.runs_qualifier_code(command))
+            && (arithmetic.runs_unseen(command) || arithmetic.runs_qualifier_code(command)))
+            || folders.unfollowed
         {
             self.note(ProtectedActionKind::UnseenCode);
         }
@@ -1177,6 +1222,12 @@ impl Classifier {
             _ => None,
         };
         if let Some(next) = next {
+            if next.len() > MAX_FOLDER_BYTES
+                || (name == "pushd" && folders.stack.len() >= MAX_FOLDER_STACK)
+            {
+                folders.unfollowed = true;
+                return;
+            }
             if name == "pushd" {
                 folders.stack.push(folders.cwd.clone());
             }
@@ -1290,13 +1341,15 @@ fn is_special_parameter(name: &str) -> bool {
 /// value the classifier cannot see: a variable never assigned in this action
 /// (other than special parameters) or one set from an unseen substitution.
 /// `budget` is the bytes of values left to substitute; a value that does
-/// not fit is unseen output and sets the budget to zero (#1065).
+/// not fit and is longer than `MAX_SMALL_VALUE` is unseen output, sets the
+/// budget to zero and is returned by name (#1065).
 fn substitute(
     command: &SimpleCommand,
     variables: &HashMap<String, String>,
     budget: &mut usize,
-) -> (Vec<String>, Vec<bool>) {
-    command
+) -> (Vec<String>, Vec<bool>, Vec<String>) {
+    let mut skipped = Vec::new();
+    let (words, unseen): (Vec<String>, Vec<bool>) = command
         .words
         .iter()
         .map(|word| {
@@ -1314,14 +1367,17 @@ fn substitute(
                 };
                 let name = &after[..len];
                 match variables.get(name) {
-                    Some(value) if len > 0 && value.len() < *budget => {
-                        *budget -= value.len();
+                    Some(value)
+                        if len > 0 && (value.len() < *budget || value.len() <= MAX_SMALL_VALUE) =>
+                    {
+                        *budget = budget.saturating_sub(value.len());
                         unseen |= value.contains(shell::UNSEEN_OUTPUT);
                         out.push_str(value);
                     }
                     Some(_) if len > 0 => {
                         *budget = 0;
                         unseen = true;
+                        skipped.push(name.to_string());
                         out.push_str(shell::UNSEEN_OUTPUT);
                     }
                     _ => {
@@ -1335,7 +1391,8 @@ fn substitute(
             out.push_str(rest);
             (out, unseen)
         })
-        .unzip()
+        .unzip();
+    (words, unseen, skipped)
 }
 
 /// The level as other product messages name it ("security level Moderate").
