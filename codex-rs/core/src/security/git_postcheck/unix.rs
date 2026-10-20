@@ -205,8 +205,13 @@ fn times(meta: &std::fs::Metadata) -> (i128, i128) {
 
 /// When it was made, where the file system records it (#943 item 12: a
 /// freed inode number can come back for the next file or folder, on Linux
-/// at once; the creation time tells them apart).
+/// at once; the creation time tells them apart). Not on macOS, which doesn't
+/// hand out a freed one at once and moves a file's creation time back with
+/// its modification time (`touch -t`, `rsync -t`).
 fn born(meta: &std::fs::Metadata) -> Option<i128> {
+    if cfg!(target_os = "macos") {
+        return None;
+    }
     meta.created()
         .ok()
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
@@ -1138,12 +1143,17 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
                 }
             });
         }
-        // Replaced in place (no look saw it missing): this look also walks
-        // the git folders it named before, where something may have been
-        // left meanwhile.
+        // Replaced in place (no look saw it missing), or back as the same
+        // one naming other git folders (#943 item 12 review r1): this look
+        // also walks the git folders it named before, where something may
+        // have been left meanwhile.
         let replaced_repo = remade_repo
             .as_ref()
-            .filter(|_| snapshot.as_ref().is_some_and(|prev| !prev.went_missing))
+            .filter(|_| {
+                snapshot
+                    .as_ref()
+                    .is_some_and(|prev| !prev.went_missing || prev.dot_git == now)
+            })
             .map(|fresh| {
                 let mut both = fresh.clone();
                 for dir in &repo.git_dirs {

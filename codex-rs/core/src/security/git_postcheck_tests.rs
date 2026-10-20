@@ -1191,15 +1191,19 @@ fn issue_943_a_git_file_back_as_the_same_one_with_another_commondir() {
         format!("{}\n", project.outside.display()),
     )
     .expect("commondir");
+    // Review r1: and meanwhile config in the common folder it named before.
+    std::fs::write(project.git().join("config.worktree"), "[core]\n").expect("config");
     std::fs::rename(aside.join("git-file"), worktree.join(".git")).expect("moved back");
     let found = kinds(&check(thread, &repos));
-    assert!(
-        found.contains(&format!(
-            "config {}",
-            worktree_git.join("commondir").display()
-        )),
-        "{found:?}"
-    );
+    for path in [
+        worktree_git.join("commondir"),
+        project.git().join("config.worktree"),
+    ] {
+        assert!(
+            found.contains(&format!("config {}", path.display())),
+            "{found:?}"
+        );
+    }
 }
 
 /// #943 item 12: a worktree removed and added again, its `commondir`
@@ -1243,6 +1247,15 @@ fn issue_943_a_worktree_added_again_on_a_reused_inode() {
             .ino();
         reused += usize::from(new == old);
         let found = kinds(&check(thread, &repos));
+        // Where creation times aren't recorded (or on macOS, where they
+        // aren't compared), a reused inode is the documented limit.
+        let born = std::fs::symlink_metadata(worktree.join(".git"))
+            .expect("git file")
+            .created()
+            .is_ok();
+        if new == old && (!born || cfg!(target_os = "macos")) {
+            continue;
+        }
         assert!(
             found.contains(&format!(
                 "config {}",
