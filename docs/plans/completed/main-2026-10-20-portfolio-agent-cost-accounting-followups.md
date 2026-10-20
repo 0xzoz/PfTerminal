@@ -50,13 +50,14 @@ release: the follow-up live run is recorded, and slot 2 is free.
 
 **Status 2026-10-20:** the follow-up live run ran on Tart (D34) and is recorded in
 [followups-live-20261020](../../../qa/portfolio/agent-cost-accounting/followups-live-20261020/README.md): 25 cases,
-19 passed, 2 failed, 4 blocked. Travis's acceptance of the run is pending.
+18 passed, 2 failed, 5 blocked. Travis's acceptance of the run is pending.
 - All three D25 gaps are closed: ACC-06 `/review` cost, Request IDs re-read after reopens, and the `side:` screen.
-- D16: the realtime session passed, at about $0.034.
+- D16: the realtime session passed. It cost about $0.005, but app-server text warm-ups bring the check to about
+  $0.063 (one warm-up is probable, from the shakedown). That is over the $0.05 cap; see #1045.
 - D3: real Moonshot cache reads are shown at the conversation level. The per-request technical screens were not
   reached, so three cases are blocked.
-- Two new issues, not carried here (Travis to place): #1038, editing the first message sends an unlabelled warm-up;
-  #1039, the `/review`-in-`/side` refusal text is erased.
+- Three new issues, not carried here (Travis to place): #1038, editing the first message sends an unlabelled warm-up;
+  #1039, the `/review`-in-`/side` refusal text is erased; #1045, the realtime path's paid text warm-up.
 
 ## Activation record
 
@@ -234,5 +235,5 @@ None yet. Carried from PF-60: collection is developer-only; a release needs Trav
 - [x] PF-60-S05's waiver (b) is discharged by S10's isolated run (Travis's acceptance, D24; dated addendum in the
       archived S05 record).
 - [x] The follow-up isolated live run (D25, D3, D16) is recorded: acc-tart1 on Tart, 2026-10-20,
-      [record](../../../qa/portfolio/agent-cost-accounting/followups-live-20261020/README.md) (19/2/4 of 25; Travis's
-      acceptance pending; new issues #1038 and #1039 left for Travis to place). The plan moved to `completed/`.
+      [record](../../../qa/portfolio/agent-cost-accounting/followups-live-20261020/README.md) (18/2/5 of 25; Travis's
+      acceptance pending; new issues #1038, #1039 and #1045 left for Travis to place). The plan moved to `completed/`.

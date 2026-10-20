@@ -1,2 +1,2 @@
-BLOCKED: unresolved FUP-06: failed
+BLOCKED: unresolved FUP-02: blocked
 exit=1
