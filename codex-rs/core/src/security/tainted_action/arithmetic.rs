@@ -2052,15 +2052,28 @@ fn sets_unnamed_options(name: &str, args: &[String]) -> bool {
     false
 }
 
-/// Whether lexed words start a program under another name (`exec -a csh
-/// zsh`), which a zsh reads as an emulation mode (#1084).
+/// Whether lexed words start a zsh under another name (`exec -a csh zsh`),
+/// which it reads as an emulation mode (#1084): `exec` with `-a`, and a
+/// program word that names a zsh or is expanded.
 fn renames_shell(words: &[String]) -> bool {
     words.iter().enumerate().any(|(at, word)| {
-        shell::basename(word) == "exec"
-            && words[at + 1..]
-                .iter()
-                .take_while(|word| word.starts_with('-') && *word != "--")
-                .any(|word| word[1..].contains('a'))
+        if shell::basename(word) != "exec" {
+            return false;
+        }
+        let mut rest = words[at + 1..].iter();
+        let mut renamed = false;
+        for word in rest.by_ref() {
+            if !word.starts_with('-') || word == "--" {
+                break;
+            }
+            renamed |= word[1..].contains('a');
+        }
+        renamed
+            && rest.any(|word| {
+                shell::basename(word).contains("zsh")
+                    || word.contains(['$', '`'])
+                    || word.contains(shell::UNSEEN_OUTPUT)
+            })
     })
 }
 

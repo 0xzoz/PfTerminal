@@ -2923,6 +2923,15 @@ fn issue_1084_glob_substitution_is_unseen_code() {
             "bash",
             "exec -a csh zsh -c 'setopt extendedglob; print -l $(cat notes)'",
         ),
+        // Review r1: the whole array through flags.
+        (
+            "zsh",
+            "k=$(cat keys); x=$(cat notes); : ${(AA)options::=${=k}}; print -l $x",
+        ),
+        (
+            "zsh",
+            "k=$(cat keys); : ${(A)options::=$=k}; print -l $(cat notes)",
+        ),
         // zmv globs its pattern as `${~pat}`.
         ("zsh", "autoload zmv; zmv -n \"$(cat notes)\" x"),
         ("zsh", "p=$(cat notes); zmv -p echo -- $p x"),
@@ -2952,12 +2961,19 @@ fn issue_1084_glob_substitution_is_unseen_code() {
             "zsh",
             "autoload zmv; zmv -n '(*).txt' '$1.md'; echo $(date)",
         ),
+        ("bash", "exec -a worker sleep 1"),
     ] {
         let found = kind(&[shell, "-c", line]);
         if found.is_some() {
             wrong.push(format!("{shell}: {line:?} -> {found:?}"));
         }
     }
+    // A flag group counts when a `~` follows it inside its braces (other
+    // checks may still ask on such a group).
+    assert!(shell::glob_substitution("print ${(j:,:)~arr}"));
+    assert!(shell::glob_substitution("print ${(s:~:)arr}"));
+    assert!(!shell::glob_substitution("print ${(j:,:)arr} ~/dir"));
+    assert!(!shell::glob_substitution("print ${(j:,:)arr}"));
     // A script file read by a zsh.
     let root = tempfile::tempdir().expect("tempdir");
     let cwd = root.path().to_string_lossy().into_owned();

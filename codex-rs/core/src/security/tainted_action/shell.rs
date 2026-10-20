@@ -142,7 +142,7 @@ pub(super) fn prompt_expansion(text: &str) -> bool {
 /// Whether text may use zsh glob substitution (#1084), under which zsh
 /// reads a value as a pattern, glob qualifiers included, so the value can
 /// run code (`*(e:code:)`): `$~x`, `${~x}`, `$^~x`, `${(f)~x}` (a flag
-/// group counts when any `~` follows it), the `GLOB_SUBST` option in any
+/// group counts when a `~` follows it inside its braces), the `GLOB_SUBST` option in any
 /// spelling (zsh ignores case and underscores: `setopt glob_subst`,
 /// `zsh -o GLOBSUBST`, `options[globsubst]=on`), a write to zsh's
 /// `options` array, or `ARGV0` (a zsh started as `csh` or `sh` turns the
@@ -159,32 +159,65 @@ pub(super) fn glob_substitution(text: &str) -> bool {
         .filter(|ch| !matches!(ch, '_' | '-'))
         .collect::<String>()
         .to_ascii_lowercase();
-    if option.contains("globsubst") || option.contains("argv0") {
-        return true;
+    option.contains("globsubst")
+        || option.contains("argv0")
+        || [joined.as_str(), bare.as_str()]
+            .iter()
+            .any(|text| substitutes_globs(text) || writes_options(text))
+}
+
+/// `$~x`, `${~x}`, `$^~x`, or a `${(flags)...}` with a `~` after its flag
+/// group inside its braces. Linear.
+fn substitutes_globs(text: &str) -> bool {
+    if !text.contains('~') {
+        return false;
     }
-    [joined.as_str(), bare.as_str()].iter().any(|text| {
-        let last_tilde = text.rfind('~');
-        let expands = text.match_indices('$').any(|(at, _)| {
-            let rest = &text[at + 1..];
-            let braced = rest.starts_with('{');
-            let rest = if braced { &rest[1..] } else { rest };
-            let run = rest
-                .find(|ch: char| !"^=~#+".contains(ch))
-                .unwrap_or(rest.len());
-            rest[..run].contains('~')
-                || (braced
-                    && rest[run..].starts_with('(')
-                    && last_tilde.is_some_and(|tilde| tilde > at))
-        });
-        // `options[k]=on`, `options=(...)`, `options+=(...)`,
-        // `${options[k]::=on}`.
-        let options = text.match_indices("options").any(|(at, _)| {
-            (at == 0 || text[..at].ends_with([' ', '\t', '\n', ';', '&', '|', '(', '{', '`', '$']))
-                && ["[", "=", "+="]
-                    .iter()
-                    .any(|next| text[at + "options".len()..].starts_with(next))
-        });
-        expands || options
+    // Where each `${` closes (the end when it does not), and the next `~`
+    // after each position, found in one pass each.
+    let bytes = text.as_bytes();
+    let mut closes: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    let mut open: Vec<Option<usize>> = Vec::new();
+    for (at, byte) in bytes.iter().enumerate() {
+        match byte {
+            b'{' => open.push((at > 0 && bytes[at - 1] == b'$').then(|| at - 1)),
+            b'}' => {
+                if let Some(Some(start)) = open.pop() {
+                    closes.insert(start, at);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut next_tilde = vec![text.len(); text.len() + 1];
+    for at in (0..text.len()).rev() {
+        next_tilde[at] = if bytes[at] == b'~' {
+            at
+        } else {
+            next_tilde[at + 1]
+        };
+    }
+    text.match_indices('$').any(|(at, _)| {
+        let rest = &text[at + 1..];
+        let braced = rest.starts_with('{');
+        let rest = if braced { &rest[1..] } else { rest };
+        let run = rest
+            .find(|ch: char| !"^=~#+".contains(ch))
+            .unwrap_or(rest.len());
+        rest[..run].contains('~')
+            || (braced
+                && rest[run..].starts_with('(')
+                && next_tilde[at] < closes.get(&at).copied().unwrap_or(text.len()))
+    })
+}
+
+/// A write to zsh's `options` array: `options[k]=on`, `options=(...)`,
+/// `options+=(...)`, `${options[k]::=on}`, `${(AA)options::=...}`.
+fn writes_options(text: &str) -> bool {
+    text.match_indices("options").any(|(at, _)| {
+        (at == 0 || text[..at].ends_with([' ', '\t', '\n', ';', '&', '|', '(', ')', '{', '`', '$']))
+            && ["[", "=", "+=", ":=", "::="]
+                .iter()
+                .any(|next| text[at + "options".len()..].starts_with(next))
     })
 }
 
