@@ -119,6 +119,28 @@ commands that would enter the bubblewrap path.
   (full disk write access without managed-proxy routing, legacy Landlock)
   are unchanged, and so is the short `/proc` mount probe, which runs only
   `true`.
+- When bubblewrap is active and a protected path inside a writable root is
+  missing, the helper makes the empty placeholder bubblewrap mounts over
+  (`O_EXCL`, so never over an existing file) and records it, before making
+  it, in a per-run file under the Corbanu home
+  (`<home>/sandbox-placeholders`, written crash-safely: temporary file,
+  sync, rename, sync of the folder) with what it made: device, inode, mode,
+  owner, size, modification and change times (#348). Each run also records
+  the paths it uses (its placeholders and every empty file or folder it
+  mounts at). At the start of each sandboxed run, the records of runs that
+  have ended (another boot, or a pid that is gone or was reused) are swept:
+  a recorded placeholder is removed only when it is still exactly what was
+  made, reached without following a link, and no live run uses it.
+  Anything else (filled, replaced or changed since, or a placeholder whose
+  identity was never recorded) is left in place and reported once, on the
+  command's standard error and in `kept.log` in that folder. This removes a
+  placeholder a killed run left even after the temporary folder's registry
+  was lost (a reboot); nothing but a recorded path is ever removed. The
+  record folder is bound read-only where a writable root exposes it (as the
+  temporary folder's registry is), so the command cannot forge a record;
+  under Moderate and Aggressive it is denied outright. Without
+  a usable record folder (a read-only home, as in a nested sandbox) nothing
+  is recorded, as before.
 - When bubblewrap is active, it mounts a fresh `/proc` via `--proc /proc` by default, but
   you can skip this in restrictive container environments with `--no-proc`.
 
