@@ -29,6 +29,7 @@ use crate::tools::handlers::emit_model_edit_fallback_activated_metric;
 use crate::tools::handlers::resolve_tool_environment;
 use crate::tools::handlers::updated_hook_command;
 use crate::tools::hook_names::HookToolName;
+use crate::tools::orchestrator::HandlerBasis;
 use crate::tools::orchestrator::ToolOrchestrator;
 use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::PostToolUsePayload;
@@ -458,6 +459,8 @@ impl ApplyPatchHandler {
         .await
         {
             codex_apply_patch::MaybeApplyPatchVerified::Body(changes) => {
+                // #1057: taken before the grants are read.
+                let handler_basis = HandlerBasis::now(session.as_ref());
                 let (file_paths, effective_additional_permissions, file_system_sandbox_policy) =
                     effective_patch_permissions(
                         session.as_ref(),
@@ -504,7 +507,8 @@ impl ApplyPatchHandler {
                                 .permissions_preapproved,
                         };
 
-                        let mut orchestrator = ToolOrchestrator::new();
+                        let mut orchestrator =
+                            ToolOrchestrator::new().with_handler_basis(Some(handler_basis));
                         let mut runtime = ApplyPatchRuntime::new();
                         let tool_ctx = ToolCtx {
                             session: session.clone(),
@@ -666,6 +670,8 @@ pub(crate) async fn intercept_apply_patch(
                 turn.record_strict_apply_patch_parse_success();
                 reject_apply_patch_if_fallback_active(&turn, "strict_apply_patch_shell")?;
             }
+            // #1057: taken before the grants are read.
+            let handler_basis = HandlerBasis::now(session.as_ref());
             let (approval_keys, effective_additional_permissions, file_system_sandbox_policy) =
                 effective_patch_permissions(
                     session.as_ref(),
@@ -712,7 +718,8 @@ pub(crate) async fn intercept_apply_patch(
                             .permissions_preapproved,
                     };
 
-                    let mut orchestrator = ToolOrchestrator::new();
+                    let mut orchestrator =
+                        ToolOrchestrator::new().with_handler_basis(Some(handler_basis));
                     let mut runtime = ApplyPatchRuntime::new();
                     let tool_ctx = ToolCtx {
                         session: session.clone(),
