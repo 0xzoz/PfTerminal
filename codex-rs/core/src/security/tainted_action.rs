@@ -37,6 +37,7 @@ mod paths;
 mod quoted;
 mod sed;
 mod shell;
+mod work;
 
 pub(crate) use paths::USER_PERSISTENCE;
 pub(crate) use paths::WORKSPACE_AGENT_SETTINGS;
@@ -419,6 +420,7 @@ fn classified(action: &ApprovalAction, codex_home: &Path, user_home: Option<&Pat
             let cwd = path_text(cwd);
             classifier.homes.allow_lookups_under(&cwd);
             for file in files {
+                work::step();
                 let file = path_text(file);
                 classifier.path(&file);
                 if classifier.homes.is_persistence(&file) {
@@ -428,6 +430,7 @@ fn classified(action: &ApprovalAction, codex_home: &Path, user_home: Option<&Pat
             // Commands written into a file that is run later are judged now,
             // whether the file looks runnable by name or by where it leads.
             for (file, body) in indirect::patch_additions(patch) {
+                work::step();
                 let resolved = classifier.homes.resolve(&file, &cwd);
                 let canonical = classifier.homes.canonical(&resolved);
                 let runnable = [Some(resolved.to_lowercase()), canonical]
@@ -520,6 +523,7 @@ fn subcommand(args: &[String]) -> Option<&str> {
     ];
     let mut skip = false;
     for word in args {
+        work::step();
         if std::mem::take(&mut skip) {
             continue;
         }
@@ -645,6 +649,7 @@ impl SedScope {
             return None;
         }
         for words in commands {
+            work::step();
             // Only `sed` or `gsed` as written, not a path to another program.
             let sed = words
                 .first()
@@ -678,6 +683,7 @@ impl SedScope {
                 let mut suffix_next = false;
                 let mut positional_taken = false;
                 for (index, word) in words.into_iter().enumerate() {
+                    work::step();
                     let suffix = std::mem::take(&mut suffix_next) && word.is_empty();
                     let program = index > 0
                         && !suffix
@@ -736,6 +742,7 @@ fn sed_text_prefix(program: &str) -> Option<usize> {
         if let Some(regex) = rest.strip_prefix('/') {
             let mut escaped = false;
             for (index, ch) in regex.char_indices() {
+                work::step();
                 match ch {
                     _ if escaped => escaped = false,
                     '\\' => escaped = true,
@@ -763,6 +770,7 @@ fn sed_text_prefix(program: &str) -> Option<usize> {
     let prefix = program.len() - text.len();
     let mut escaped = false;
     for (index, ch) in text.char_indices() {
+        work::step();
         match ch {
             _ if escaped => escaped = false,
             '\\' => escaped = true,
@@ -874,6 +882,7 @@ impl Classifier {
             ("CORBANU_HOME", Some(self.homes.codex_home())),
             ("PFTERMINAL_HOME", Some(self.homes.codex_home())),
         ] {
+            work::step();
             if let Some(value) = value {
                 variables.insert(name.to_string(), value.to_string());
             }
@@ -885,12 +894,14 @@ impl Classifier {
         // length) while the lexing limits allow.
         let mut judged: HashSet<(String, usize)> = HashSet::new();
         for (index, simple) in lexed.commands.iter().enumerate() {
+            work::step();
             let (words, unseen, skipped) =
                 substitute(simple, &variables, &mut self.substitution_budget);
             if self.substitution_budget.left == 0 {
                 self.note(ProtectedActionKind::UnseenCode);
             }
             for name in skipped {
+                work::step();
                 let Some(value) = variables.get(&name) else {
                     continue;
                 };
@@ -938,7 +949,9 @@ impl Classifier {
         self.path(&folders.cwd);
         // Strings assembled from literals by inline code (`'~/.co' + 'dex'`).
         for arg in command {
+            work::step();
             for joined in indirect::joined_literals(arg) {
+                work::step();
                 let resolved = self.homes.resolve(&joined, &folders.cwd);
                 self.word_path(&resolved, &joined, depth);
                 self.rebuilt += 1;
@@ -975,6 +988,7 @@ impl Classifier {
             });
         if assigns {
             for word in words {
+                work::step();
                 if let Some((name, value)) = word.split_once('=')
                     && !name.is_empty()
                     && name
@@ -1022,6 +1036,7 @@ impl Classifier {
         // Not only at command position: wrappers (`nice -n 5`, `sudo -u x`,
         // `timeout 9`, `eval`, `npx`, nested `sh -c`) put the real command later.
         for (index, word) in lower.iter().enumerate() {
+            work::step();
             let name = basename(word);
             let args = &lower[index + 1..];
             let imported = index > 0 && matches!(lower[index - 1].as_str(), "from" | "import");
@@ -1032,6 +1047,7 @@ impl Classifier {
                 self.note(ProtectedActionKind::Persistence);
             }
             for (credential_command, verbs) in CREDENTIAL_COMMANDS {
+                work::step();
                 if name == *credential_command
                     && args.iter().any(|word| verbs.contains(&word.as_str()))
                 {
@@ -1072,6 +1088,7 @@ impl Classifier {
         let mut folder = cwd.clone();
         let mut previous: Option<&str> = None;
         for (position, word) in words.iter().enumerate() {
+            work::step();
             let written = simple.writes_to.contains(&position)
                 || writer.is_some_and(|(index, writes)| writes && position > index);
             // A folder flag's value is where the command runs, not what it reads.
@@ -1095,6 +1112,7 @@ impl Classifier {
                     .filter(|piece| piece.len() < word.len()),
             );
             for candidate in pieces {
+                work::step();
                 let candidate = candidate.trim_start_matches('@');
                 if candidate.is_empty() || candidate.starts_with('-') && !candidate.contains('/') {
                     continue;
@@ -1111,6 +1129,7 @@ impl Classifier {
                     vec![folder.clone(), cwd.clone()]
                 };
                 for base in bases {
+                    work::step();
                     let resolved = self.homes.resolve(candidate, &base);
                     self.word_path(&resolved, candidate, depth);
                     if written && self.homes.is_persistence(&resolved) {
@@ -1180,6 +1199,7 @@ impl Classifier {
             Code::Module(module) => {
                 let module = module.replace('.', "/");
                 for candidate in [format!("{module}.py"), format!("{module}/__main__.py")] {
+                    work::step();
                     let file = self.homes.resolve(&candidate, cwd);
                     self.not_shell += 1;
                     self.script_file(&file, cwd, depth, Script::IfPresent);
@@ -1197,6 +1217,7 @@ impl Classifier {
             Code::Inline(_) | Code::Tool => {}
         }
         for preload in invocation.preloads {
+            work::step();
             if local(preload) {
                 self.required_script(preload, cwd, depth, /*shell*/ false);
             } else {
@@ -1379,6 +1400,7 @@ fn substitute(
             let mut unseen = word.contains(shell::UNSEEN_OUTPUT);
             let mut rest = word.as_str();
             while let Some(at) = rest.find('$') {
+                work::step();
                 out.push_str(&rest[..at]);
                 let after = &rest[at + 1..];
                 let len = match after.chars().next() {

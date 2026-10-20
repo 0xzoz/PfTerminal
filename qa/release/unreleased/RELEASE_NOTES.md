@@ -58,3 +58,16 @@ them into `qa/release/<version>/RELEASE_NOTES.md` and empties this file.
   "◌ Moderate set; this view is stale (status observed 33s ago)" instead of
   "▲ Moderate degraded"; press `r` to refresh. A stale view still never shows
   the green "Protected" badge (#1036).
+
+## `/security`: windows without a session yet, and remote app servers
+
+- **Moderate before the window's session starts.** Confirmed in a window whose
+  session hasn't started, Moderate's Saved screen no longer says the session
+  stays Permissive until a restart: that session starts under Core's Moderate
+  rules; the credential broker still waits for the restart (#1047).
+- **Remote app server windows.** In a window whose sessions run on an app
+  server outside Corbanu Terminal (a remote server or the local daemon),
+  `/security` no longer says the session starts here, says the level reaches
+  that server only if it runs on this Corbanu home, and the level picker
+  doesn't offer "restart now", since Corbanu Terminal starts against such a
+  server only under Permissive (#1047).

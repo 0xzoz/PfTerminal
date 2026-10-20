@@ -115,7 +115,13 @@ being approved (or was due) isn't run (#1001). Other Corbanu Terminals running
 on the same Corbanu home take them within about a second and say so, as they
 do with the kill switch. The credential broker starts at the next start
 (in each of them); press `r` to restart right away. Your `config.toml` isn't
-changed.
+changed. If you confirm before the window's own session has started, that
+session starts under Core's Moderate rules too (#1047). In a window whose
+sessions run on an app server outside Corbanu Terminal (a remote server or the
+local daemon), Moderate reaches that server only if it runs on this Corbanu
+home, as it reaches another Corbanu Terminal; Corbanu Terminal starts against
+such a server only under Permissive, so the level picker doesn't offer
+"restart now" there.
 
 Choosing Permissive or Aggressive from Moderate shows what changes first.
 Back to Permissive takes effect when you restart; until then Moderate stays
@@ -129,28 +135,28 @@ The kill switch (`/security` → `g`) works under every level.
 - If your own settings turn the sandbox off (full access), commands that the
   protected-file rules don't cover run without one. Choose a sandbox in your
   settings to keep every command in it.
-- With full access in your own settings, commands can also write the
-  project's `.git`, except its hooks and config (with a sandbox setting `.git`
-  stays read-only). A command could leave something there that your own git
-  later follows outside the sandbox (#874): a link such as
-  `.git/COMMIT_EDITMSG` to a file elsewhere (or to `.git/config`), which your
-  next `git commit` writes; a hard link; rebase or cherry-pick steps whose
-  `exec` lines, or a merge strategy that isn't git's own, run when you
-  continue; a remote in `.git/remotes`; config or a hooks folder where there
-  was none; or a replaced `.git`. On macOS and Linux, Corbanu looks at `.git`
-  before a session's first such command (and reports links, steps and hard
-  links already there), after each one, before each later command and at
-  the end of each turn, and warns you about anything new, with the command
-  that removes it. It removes nothing itself. Below `objects`, `lfs` and
-  `annex` it looks only at their own entries: git reads the files below and
-  puts new ones in place, it doesn't write through them. Links inside a
-  hooks folder are left alone (git runs hooks, it doesn't write through
-  them). Until you remove what it found, and while it can't look at all of
-  `.git` (a folder it can't read, or too many entries), approving a command
-  in that project doesn't lift the protected-file rules (nor run it outside
-  the sandbox, nor let it create user namespaces), in any session of this
-  Corbanu Terminal. Some setups of your own hold them too until you remove
-  them: a layout made of links (`git new-workdir`, Android's `repo`), a
+- With full access in your own settings, commands can also write the project's
+  `.git`, except its hooks and config (with a sandbox setting `.git` stays
+  read-only). A command could leave something there that your own git later
+  follows outside the sandbox (#874): a link such as `.git/COMMIT_EDITMSG` to
+  a file elsewhere (or to `.git/config`), which your next `git commit` writes;
+  a hard link; rebase or cherry-pick steps whose `exec` lines, or a merge
+  strategy that isn't git's own, run when you continue; a remote in
+  `.git/remotes`; config or a hooks folder where there was none; or a replaced
+  `.git`. On macOS and Linux, Corbanu looks at `.git` before a session's first
+  such command is decided (and reports links, steps and hard links already
+  there, which then hold that command too), after each one, before each later
+  command and at the end of each turn, and warns you about anything new, with
+  the command that removes it. It removes nothing itself. Below `objects`,
+  `lfs` and `annex` it looks only at their own entries: git reads the files
+  below and puts new ones in place, it doesn't write through them. Links
+  inside a hooks folder are left alone (git runs hooks, it doesn't write
+  through them). Until you remove what it found, and while it can't look at
+  all of `.git` (a folder it can't read, or too many entries), approving a
+  command in that project doesn't lift the protected-file rules (nor run it
+  outside the sandbox, nor let it create user namespaces), in any session of
+  this Corbanu Terminal. Some setups of your own hold them too until you
+  remove them: a layout made of links (`git new-workdir`, Android's `repo`), a
   `config.worktree` that `git sparse-checkout` adds, or a hooks folder a hook
   installer creates where there was none. On Linux the sandbox leaves empty
   files and folders in place while a command runs: a new config file or hooks
@@ -169,12 +175,18 @@ The kill switch (`/security` → `g`) works under every level.
   after `git init` or a fresh clone there (not a worktree git adds again for
   the same repository), and approving a command in that project doesn't lift
   the rules until you remove them or restart Corbanu Terminal; the same one
-  moved back is compared with the last look. Where a worktree's or submodule's
-  `.git` is replaced by another kind, or pointed at other git folders, check
-  its config and hooks yourself before you run git there. New config and hooks
-  are checked only in a repository's own git folder, not in its worktrees' or
-  submodules'. A session that works in more than 16 repositories forgets the
-  oldest; its next look there reports only links, steps and hard links.
+  moved back (the same inode and, on Linux where the file system records it,
+  the same creation time) is compared with the last look (looked at in full
+  where it now names other git folders). On Linux a new `.git` file that gets
+  a removed one's inode number with the same text counts as moved back where
+  the file system doesn't record creation times, or where it was made within a
+  few milliseconds of the old one (one tick of the clock that stamps them).
+  Where a worktree's or submodule's `.git` is replaced by another kind, or
+  pointed at other git folders, check its config and hooks yourself before you
+  run git there. New config and hooks are checked only in a repository's own
+  git folder, not in its worktrees' or submodules'. A session that works in
+  more than 16 repositories forgets the oldest; its next look there reports
+  only links, steps and hard links.
 - MCP servers, apps, hooks and `!` shell commands run outside the sandbox, as
   under every level.
 - On Linux, where a command you approve can write a Corbanu home's folder
