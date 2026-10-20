@@ -536,12 +536,11 @@ pub async fn exec_approval(
         match persisted {
             None => {}
             // #945: the prompt was shown before a security transition. The
-            // rule is not saved; the answer approves this command once, as a
-            // stale "for session" answer does.
+            // rule is not saved; D50 (#1001): nor does the answer approve the
+            // command, which is asked about again under the new level.
             Some(Ok(None)) => {
                 let message = "The security level changed while this approval was open, so \
-                               \"don't ask again\" was not saved. The command was approved this \
-                               once."
+                               \"don't ask again\" was not saved and the answer was not used."
                     .to_string();
                 sess.send_event_raw(Event {
                     id: event_turn_id.clone(),
