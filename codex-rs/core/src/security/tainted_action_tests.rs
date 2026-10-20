@@ -3029,6 +3029,11 @@ fn issue_1084_glob_substitution_is_unseen_code() {
             wrong.push(format!("{shell}: {line:?} -> {found:?}"));
         }
     }
+    // Review r9: the `eval` text is scanned once, not at every level.
+    work::assert_linear("eval chain", |scale| {
+        let chain = format!("{}print -l x", "eval ".repeat(2_000 * scale));
+        assert_eq!(kind(&["zsh", "-c", &chain]), None);
+    });
     for (shell, line) in [
         ("zsh", "ls ~/src; echo ${HOME}/x ~"),
         ("bash", "p=${f/#\\~/$HOME}; echo $p $((~5))"),
