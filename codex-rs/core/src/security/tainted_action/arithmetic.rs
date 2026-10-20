@@ -64,6 +64,9 @@ const KSH: &[&str] = &["ksh", "ksh93", "mksh", "pdksh", "oksh", "lksh"];
 const GROUP: &str = "__corbanu_arithmetic_group_";
 /// Compound lists nested deeper than this are not followed (fails closed).
 const MAX_LIST_DEPTH: usize = 4;
+
+/// Words walked back from an array assignment to where its command starts.
+const MAX_ASSIGNMENT_WALK: usize = 64;
 /// Longest `$NAME` prefix compared with the variables names are built from.
 const MAX_BUILDER_PREFIX: usize = 64;
 /// Commands that do not write variables named by their operands (or whose
@@ -316,6 +319,10 @@ pub(super) struct Arithmetic {
     /// builtins, `-eq` operands, numeric `printf` operands), for the
     /// fallback check.
     strict_words: Vec<String>,
+    /// Lexed words that may hold a zsh glob-qualifier list (`/*(.[w])`),
+    /// whose subscripts and `e`/`+` qualifiers the shell evaluates (#937,
+    /// D57), decoded (`zsh -c $'print /*\\x28.[w])'`).
+    qualifier_words: Vec<String>,
 }
 
 impl Arithmetic {
@@ -401,6 +408,12 @@ impl Arithmetic {
             })
             .collect();
         self.output_seen |= raw.iter().any(|word| command_output(word));
+        self.qualifier_words.extend(
+            words
+                .iter()
+                .filter(|word| !qualifier_lists(word).is_empty())
+                .cloned(),
+        );
         // Redirect targets (`read x < "$f"`) are files, not operands.
         let mut redirect = vec![false; raw.len()];
         for index in simple
@@ -1031,6 +1044,22 @@ impl Arithmetic {
                             .find('[')
                             .is_some_and(|open| unsafe_in(&unquoted(&word[open..])))
                 })
+            // D57: a glob-qualifier list that reads a name or command output,
+            // wherever in the list (`/*(.[w])`, `/*(om[w])`, `/*(e:code:)`).
+            || texts[..originals]
+                .iter()
+                .chain(&self.qualifier_words)
+                .any(|text| {
+                    qualifier_lists(text).into_iter().any(|range| {
+                        // A group left open asks.
+                        let open = range.is_empty() && range.start == text.len();
+                        let list = &text[range];
+                        open
+                            || unsafe_in(&unquoted(list))
+                            || unseen_substitution(list)
+                            || !only_facts(list)
+                    })
+                })
             || found.iter().any(|(at, range)| {
                 let text = &texts[*at];
                 let region = &text[range.clone()];
@@ -1257,6 +1286,56 @@ fn without_substitutions(text: &str) -> String {
     }
     kept.push_str(&text[from.min(text.len())..]);
     kept
+}
+
+/// Whether every command substitution in text prints a neutral fact
+/// (`$(date +%s)`, `$(git rev-parse HEAD)`), not text such as a name
+/// (`$(echo w)`, `` `basename w` ``). Linear, like `without_substitutions`.
+fn only_facts(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut at = 0;
+    while at < bytes.len() {
+        let (body, end) = if bytes[at] == b'`' {
+            let end = text[at + 1..]
+                .find('`')
+                .map_or(bytes.len(), |end| at + 1 + end);
+            (&text[at + 1..end], end + 1)
+        } else if bytes[at] == b'$'
+            && bytes.get(at + 1) == Some(&b'(')
+            && bytes.get(at + 2) != Some(&b'(')
+        {
+            let mut depth = 0_usize;
+            let mut end = bytes.len();
+            for (offset, &byte) in bytes[at + 1..].iter().enumerate() {
+                match byte {
+                    b'(' => depth += 1,
+                    b')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = at + 1 + offset;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            (&text[(at + 2).min(end)..end], end + 1)
+        } else {
+            at += 1;
+            continue;
+        };
+        let commands = shell::simple_commands(&[body.to_string()]).commands;
+        let fact = matches!(commands.as_slice(), [command]
+        if matches!(
+            shell::substitution_output(&command.words).as_deref(),
+            Some("value" | "$PWD")
+        ));
+        if !fact {
+            return false;
+        }
+        at = end;
+    }
+    true
 }
 
 /// Plain assignments in arithmetic text (`i=0`, `i = 2`, not `i == 2`,
@@ -2261,6 +2340,176 @@ fn regions(text: &str) -> Vec<Range<usize>> {
     }
     ranges.extend(conditions(text));
     ranges
+}
+
+/// Where text may hold glob-qualifier lists: the bodies of parenthesised
+/// groups attached to a word (`/*(.[w])`, `file(N)`, `x*(e:code:)`,
+/// `(#q.)`), outermost first, read without quotes so nested shells' scripts
+/// and strings later run as code count. zsh evaluates the qualifiers'
+/// subscripts as arithmetic wherever they sit, and `e`/`+` qualifiers as
+/// code (#937, D57); bash extended globs (`@(a|b)`) are read the same way.
+/// Groups that open a command or expansion do not count: `$(`, `${(`, `<(`
+/// at a word's start, `a=(` in an assignment, `((`, `f()`, and groups inside
+/// arithmetic regions, whose every name the fallback checks itself. A group
+/// left open yields the empty range at the end of the text, which asks.
+/// Linear: parentheses are matched in one pass, and each backslash or `$`
+/// run is counted at most twice.
+fn qualifier_lists(text: &str) -> Vec<Range<usize>> {
+    if !text.contains('(') {
+        return Vec::new();
+    }
+    let bytes = text.as_bytes();
+    let mut depth = vec![0_i32; bytes.len() + 1];
+    for range in regions(text) {
+        let region = &text[range.clone()];
+        if ["$((", "((", "$[", ":"]
+            .iter()
+            .any(|start| region.starts_with(start))
+        {
+            depth[range.start] += 1;
+            depth[range.end] -= 1;
+        }
+    }
+    // Where each `(` closes, read without quotes.
+    let mut close = vec![bytes.len(); bytes.len()];
+    let mut open = Vec::new();
+    for (at, byte) in bytes.iter().enumerate() {
+        match byte {
+            b'(' => open.push(at),
+            b')' => {
+                if let Some(start) = open.pop() {
+                    close[start] = at;
+                }
+            }
+            _ => {}
+        }
+    }
+    // Whether the byte at `at` follows an odd run of backslashes.
+    let escaped = |at: usize| {
+        bytes[..at]
+            .iter()
+            .rev()
+            .take_while(|byte| **byte == b'\\')
+            .count()
+            % 2
+            == 1
+    };
+    let separator = |byte: u8| byte.is_ascii_whitespace() || b";&|(".contains(&byte);
+    let attached = |at: usize| {
+        if bytes.get(at + 1) == Some(&b'#') {
+            return true;
+        }
+        let Some(before) = at.checked_sub(1) else {
+            return false;
+        };
+        if escaped(before) {
+            return true;
+        }
+        let opens = match bytes[before] {
+            byte if separator(byte) => true,
+            b'[' | b'`' => true,
+            // `$(`; `$$(` is the process ID, then a group.
+            b'$' => {
+                bytes[..before]
+                    .iter()
+                    .rev()
+                    .take_while(|byte| **byte == b'$')
+                    .count()
+                    % 2
+                    == 0
+            }
+            b'{' => before > 0 && bytes[before - 1] == b'$' && !escaped(before - 1),
+            // `<(cmd)`, `>(cmd)`, zsh `=(cmd)`; `<1-5>(.)` is a glob.
+            b'<' | b'>' | b'=' if before == 0 || separator(bytes[before - 1]) => true,
+            b'=' => assignment_position(text, before),
+            _ => false,
+        };
+        !opens
+    };
+    let mut lists = Vec::new();
+    let mut masked = 0;
+    let mut after = 0;
+    for at in 0..bytes.len() {
+        masked += depth[at];
+        if at < after
+            || bytes[at] != b'('
+            || masked > 0
+            || escaped(at)
+            || bytes.get(at + 1) == Some(&b')')
+            || !attached(at)
+        {
+            continue;
+        }
+        if close[at] == bytes.len() {
+            lists.push(bytes.len()..bytes.len());
+            break;
+        }
+        lists.push(at + 1..close[at]);
+        after = close[at];
+    }
+    lists
+}
+
+/// Whether the `=` at `at` ends a word that assigns an array (`a=(`,
+/// `a+=(`, `a[k]=(`): the word starts the command, or follows other
+/// assignments or the options of a declaring builtin.
+fn assignment_position(text: &str, at: usize) -> bool {
+    let before = &text[..at];
+    let start = before
+        .rfind(|ch: char| ch.is_ascii_whitespace() || ";&|(".contains(ch))
+        .map_or(0, |space| space + 1);
+    let left = before[start..]
+        .strip_suffix('+')
+        .unwrap_or(&before[start..]);
+    let name = left.split_once('[').map_or(left, |(name, _)| name);
+    if !is_identifier(name) {
+        return false;
+    }
+    let mut rest = before[..start].trim_end();
+    // A bounded walk: past that the group counts as a qualifier list.
+    for _ in 0..MAX_ASSIGNMENT_WALK {
+        if rest.is_empty() || rest.ends_with([';', '&', '|', '(', '{', '!']) {
+            return true;
+        }
+        let word_start = rest
+            .rfind(|ch: char| ch.is_ascii_whitespace() || ";&|({".contains(ch))
+            .map_or(0, |space| space + 1);
+        let word = &rest[word_start..];
+        // An earlier array assignment (`a=(1 2) b=(3)`): read on from its
+        // `a=`.
+        if word.ends_with(')') {
+            let from = rest.len().saturating_sub(MAX_SUBSCRIPT);
+            let Some(group) = rest.as_bytes()[from..]
+                .iter()
+                .rposition(|byte| *byte == b'(')
+            else {
+                return false;
+            };
+            rest = &rest[..from + group];
+            continue;
+        }
+        if matches!(
+            word,
+            "then"
+                | "do"
+                | "else"
+                | "elif"
+                | "typeset"
+                | "declare"
+                | "local"
+                | "export"
+                | "readonly"
+                | "integer"
+                | "float"
+        ) {
+            return true;
+        }
+        if !(word.starts_with('-') || assignment(word).is_some()) {
+            return false;
+        }
+        rest = rest[..word_start].trim_end();
+    }
+    false
 }
 
 /// Where a `${` body (after the `${`) takes an offset: the colon after a

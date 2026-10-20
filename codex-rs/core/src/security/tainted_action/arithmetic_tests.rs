@@ -652,6 +652,70 @@ fn review_7_fallback_routes() {
     }
 }
 
+/// D57 (#937): on a line holding command output, any glob-qualifier list
+/// asks, wherever its subscript sits and whatever else it holds.
+#[test]
+fn glob_qualifier_lists_ask_on_output_lines() {
+    for line in [
+        "w=$(cat notes); print -l /*(.[w])",
+        "w=$(cat notes); print -l /*(om[w])",
+        "w=$(cat notes); print -l /*(N.[1,w])",
+        "w=$(cat notes); print -l /*(#q.[w])",
+        "w=$(cat notes); print -l /etc/passwd(.[w])",
+        "w=$(cat notes); print -l '/'*(.[w])",
+        "w=$(cat notes); print -l /<1-9>(.[w])",
+        "w=$(cat notes); print -l /*\\((.[w])",
+        "w=$(cat notes); print -l $$(.[w])",
+        "w=$(cat notes); print -l x{(.[w])",
+        "w=$(cat notes); print -l a=(.[w])",
+        "q=$(cat notes); print -l /*(${~q})",
+        "q=$(cat notes); print -l /*(e:'true':)",
+        "w=$(cat notes); zsh -c 'print -l /*(.[w])'",
+        "w=$(cat notes); zsh -c $'print -l /*\\x28.[w])'",
+        "w=$(cat notes); echo $(( $(print -l /*(.[w]) | wc -l) ))",
+        "w=$(cat notes); s='print -l /*(.[w])'; zsh -c \"$s\"",
+        "w=$(cat notes); print -l /*(.)(.[w])",
+        "w=$(cat notes); print -l /*(.[w]",
+        "w=$(cat notes); print -l /*(.[`echo w`])",
+        "w=$(cat notes); print -l /*(.[$(echo w)])",
+        "w=$(cat notes); print -l /*(+w)",
+    ] {
+        assert!(runs_unseen_in("zsh", line), "{line}");
+    }
+    for line in [
+        "out=$(cmd); arr=(1 2); echo ${arr[1]}",
+        "out=$(cmd); typeset -a xs=(a b); echo $xs",
+        "out=$(cmd); diff <(echo a) <(echo b)",
+        "out=$(cmd); f() { echo hi; }; f",
+        "out=$(cmd); echo ${out:(-3)}",
+        "out=$(cmd); echo $(( (2+3)*(4) ))",
+        "out=$(cmd); ( cd /tmp && ls )",
+        "out=$(cmd); echo \"done (ok)\"",
+        "out=$(cmd); ls *(/) -d */",
+        "out=$(cmd); print -l /*(.[$(date +%s)])",
+        "out=$(cmd); python3 -c \"print('$(git rev-parse HEAD)')\"",
+        // Without command output the line is unchanged.
+        "print -l /*(.[w])",
+    ] {
+        assert!(!runs_unseen_in("zsh", line), "{line}");
+    }
+    assert_eq!(
+        qualifier_lists("a=(1 2) b+=(3) c[1]=(4)"),
+        Vec::<Range<usize>>::new()
+    );
+    assert_eq!(
+        qualifier_lists("typeset -a x=(1) y=(2)"),
+        Vec::<Range<usize>>::new()
+    );
+    assert_eq!(qualifier_lists("print a=(.[w])"), vec![9..13]);
+    assert_eq!(qualifier_lists("/*(.(x)[w]) f(y)"), vec![3..10, 14..15]);
+    assert_eq!(
+        qualifier_lists("echo \\(x\\) $(ls) <(ls) ${(U)x}"),
+        Vec::<Range<usize>>::new()
+    );
+    assert_eq!(qualifier_lists("echo x(y"), vec![8..8]);
+}
+
 /// The fallback stays linear on long chains of copies and long regions.
 #[test]
 fn review_6_fallback_stays_linear() {
@@ -681,5 +745,23 @@ fn review_6_fallback_stays_linear() {
     let _ = format_text(&"%5d\\n".repeat(100_000));
     let flags = format!("${{({})x}}", "l:1:".repeat(50_000));
     let _ = flags_unsafe(&flags, &|_: &str| false);
+    // D57 qualifier lists: assignments, attached groups, escapes and `$`
+    // runs, nested groups, and substitutions in a list.
+    assert_eq!(qualifier_lists(&"a=(1); ".repeat(50_000)).len(), 0);
+    // Past the bounded walk a chain of assignments counts as lists.
+    assert!(!qualifier_lists(&"a=(1) ".repeat(50_000)).is_empty());
+    assert_eq!(qualifier_lists(&"x) a=(".repeat(50_000)).len(), 50_000);
+    assert_eq!(qualifier_lists(&"f(x) ".repeat(50_000)).len(), 50_000);
+    assert_eq!(
+        qualifier_lists(&format!("{}(x)", "\\".repeat(200_000))).len(),
+        1
+    );
+    assert_eq!(
+        qualifier_lists(&format!("{}(x)", "$".repeat(200_000))).len(),
+        1
+    );
+    let nested = format!("f{}{}", "(g".repeat(100_000), ")".repeat(100_000));
+    assert_eq!(qualifier_lists(&nested).len(), 1);
+    assert!(only_facts(&"$(date +%s)".repeat(20_000)));
     assert!(start.elapsed() < std::time::Duration::from_secs(20));
 }

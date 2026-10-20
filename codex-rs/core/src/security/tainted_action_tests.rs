@@ -2622,6 +2622,17 @@ fn issue_937_review_6_fallback_routes() {
             "bash",
             "v=$(cat notes); n=$(git rev-parse --no-revs \"$v\"); echo $((n))",
         ),
+        // D57: any glob-qualifier list on a line holding command output.
+        ("zsh", "w=$(cat notes); print -l /*(.[w])"),
+        ("zsh", "w=$(cat notes); print -l /*(om[w])"),
+        ("zsh", "w=$(cat notes); print -l /etc/passwd(.[w])"),
+        ("zsh", "w=$(cat notes); print -l /*(#q.[w])"),
+        ("zsh", "q=$(cat notes); print -l /*(${~q})"),
+        ("zsh", "w=$(cat notes); zsh -c $'print -l /*\\x28.[w])'"),
+        (
+            "zsh",
+            "w=$(cat notes); echo $(( $(print -l /*(.[w]) | wc -l) ))",
+        ),
     ] {
         let found = kind(&[shell, "-c", line]);
         if found != Some(UnseenCode) {
@@ -2641,6 +2652,7 @@ fn issue_937_review_6_fallback_routes() {
             "out=$(cmd); echo ${out:0:80} ${#out}",
             "out=$(cmd); rc=$?; exit $rc",
             "out=$(cmd); n=0; while [[ $n -lt 3 ]]; do n=$((n+1)); done",
+            "out=$(cmd); arr=(1 2); diff <(echo a) <(echo b); echo ${out:(-3)}",
         ] {
             let found = kind(&[shell, "-c", line]);
             if found.is_some() {

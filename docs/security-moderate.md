@@ -67,6 +67,38 @@ Not available yet: financial preview and approvals, isolated retrieval,
 screened search, brokered browser login, quarantine, the untrusted-content
 detectors and Agent Sweep.
 
+## Command output in shell arithmetic
+
+Shell arithmetic runs code hidden in a variable's value (`a[$(cmd)]`), so
+after untrusted content a command line that puts command output or input
+into arithmetic counts as code you haven't seen and asks first, for example
+`v=$(cat notes); echo $((v))` (#937). Corbanu can't follow every way a value
+reaches arithmetic, so on a line that holds command output (`$(...)`,
+backquotes, `read`) it also asks when arithmetic reads anything not shown
+to be a number on that line. These lines ask, although most are harmless:
+
+- variables from the environment or positional parameters:
+  `out=$(cmd); echo $((HOME_COUNT + $1))`
+- `eval` or `alias` anywhere on the line: `out=$(cmd); eval "echo hi"`
+- text operands of a numeric `printf`: `v=$(cmd); printf '%d' "$v"`
+- `${!arr[@]}` loops and associative-array literal keys:
+  `out=$(cmd); for k in "${!m[@]}"; do echo $k; done`
+- a parenthesised group attached to a word with a name or command output in
+  it, because zsh reads such a group as glob qualifiers, whose subscripts are
+  arithmetic and whose `e` and `+` qualifiers run code (D57). Quoted text
+  counts too, since a nested shell may run it:
+  `w=$(cmd); print -l /*(.[w])`, `out=$(cmd); grep -E '(foo|bar)' f`,
+  `out=$(cmd); git commit -m "fix(core): x"`,
+  `out=$(cmd); python3 -c "print('hi')"`, and regular expressions such as
+  `'([a-z]+)'`
+
+Counters and plain uses still run without asking:
+`out=$(cmd); for ((i=0; i<3; i++)); do echo $i; done`,
+`out=$(cmd); n=$(date +%s); echo $((n + 1))`, `out=$(cmd); ls *(/)`,
+`out=$(cmd); arr=(1 2); diff <(echo a) <(echo b)`. Splitting such a line
+in two (the output on one, the arithmetic or pattern on the next) avoids
+the prompt.
+
 ## Choosing, restarting and going back
 
 When you confirm Moderate, Core's rules (the sandbox, protected files and
