@@ -466,30 +466,47 @@ impl ToolOrchestrator {
         // run may leave the sandbox.
         let git_first_look_failed =
             match crate::security::protected_additional::protected_level(&tool_ctx.session) {
-                Some(level) if level != codex_security_policy::SecurityLevel::Permissive => {
+                Some(level)
+                    if level != codex_security_policy::SecurityLevel::Permissive
+                        && !matches!(requirement, ExecApprovalRequirement::Forbidden { .. }) =>
+                {
                     let effective =
                         codex_sandboxing::policy_transforms::effective_file_system_sandbox_policy(
                             &file_system_sandbox_policy,
                             tool.additional_permissions(req),
                         );
-                    let leaves_first = !moderate_keeps_sandbox
-                        && matches!(
-                            sandbox_override_for_first_attempt(
-                                tool.sandbox_permissions(req),
-                                &requirement,
-                                &file_system_sandbox_policy,
-                            ),
-                            SandboxOverride::BypassSandboxFirstAttempt
-                        );
-                    let unsandboxed = leaves_first
+                    // Where the rules apply and no approval lifts them (Aggressive),
+                    // their denied reads keep the run in the sandbox (#540); under
+                    // Moderate it never leaves it (#747).
+                    let rules_kept = tool_ctx
+                        .session
+                        .services
+                        .model_client()
+                        .post_taint_state()
+                        .is_some_and(|state| {
+                            state.protected_paths_apply() && !state.moderate_bound()
+                        });
+                    let may_leave = !moderate_keeps_sandbox
+                        && !rules_kept
+                        && ((tool
+                            .sandbox_permissions(req)
+                            .requires_escalated_permissions()
+                            && matches!(
+                                sandbox_override_for_first_attempt(
+                                    tool.sandbox_permissions(req),
+                                    &requirement,
+                                    &file_system_sandbox_policy,
+                                ),
+                                SandboxOverride::BypassSandboxFirstAttempt
+                            ))
+                            || unsandboxed_execution_allowed(&file_system_sandbox_policy));
+                    let unsandboxed = may_leave
                         || self.sandbox.select_initial(
                             &permissions,
                             tool.sandbox_preference(),
                             turn_ctx.windows_sandbox_level,
                             turn_ctx.network.is_some(),
-                        ) == SandboxType::None
-                        || (!moderate_keeps_sandbox
-                            && unsandboxed_execution_allowed(&file_system_sandbox_policy));
+                        ) == SandboxType::None;
                     GitCheck::first_look(
                         tool_ctx,
                         level,

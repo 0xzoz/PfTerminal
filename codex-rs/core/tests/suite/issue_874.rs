@@ -101,6 +101,22 @@ async fn run_in(
     steps: Vec<Vec<Value>>,
     project_of: Option<&TestCodex>,
 ) -> anyhow::Result<(Run, TestCodex)> {
+    run_with(
+        level, setting, home, steps, project_of, /*left_before*/ None,
+    )
+    .await
+}
+
+/// [`run_in`], with a link to `left_before` left in the project's `.git`
+/// before the session starts, where given.
+async fn run_with(
+    level: SecurityLevel,
+    setting: Setting,
+    home: Arc<TempDir>,
+    steps: Vec<Vec<Value>>,
+    project_of: Option<&TestCodex>,
+    left_before: Option<std::path::PathBuf>,
+) -> anyhow::Result<(Run, TestCodex)> {
     let server = start_mock_server().await;
     let mut steps = steps;
     steps.push(vec![
@@ -133,7 +149,13 @@ async fn run_in(
                 .enable(Feature::SourceEnvelopes)
                 .expect("enable source envelopes");
         })
-        .with_workspace_setup(|cwd, _| async move { init_git(cwd.as_path()) })
+        .with_workspace_setup(move |cwd, _| async move {
+            init_git(cwd.as_path())?;
+            if let Some(target) = left_before {
+                std::os::unix::fs::symlink(target, cwd.as_path().join(".git/COMMIT_EDITMSG"))?;
+            }
+            Ok(())
+        })
         // Host-sandbox security test: local executor on purpose (#708).
         .build(&server)
         .await?;
@@ -534,47 +556,58 @@ async fn issue_943_a_command_in_another_repository_is_checked() -> anyhow::Resul
 /// (before Corbanu started, say) is looked at before the session's first
 /// command there is decided: it is reported before the person is asked, and
 /// their approval doesn't lift the protected-file rules for that command (it
-/// does where nothing was left). Under the workspace sandbox `.git` stays
-/// read-only: nothing is looked at there.
+/// does where nothing was left). In the project itself and in a command's
+/// `workdir` in another repository. Under the workspace sandbox the
+/// project's `.git` stays read-only: nothing is looked at there.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn issue_943_left_before_the_session_holds_its_first_approval() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
     let mut wrong = Vec::new();
-    // (setting, planted, held)
-    for (setting, planted, held) in [
-        (Setting::FullAccess, false, false),
-        (Setting::FullAccess, true, true),
-        (Setting::Workspace, true, false),
+    // (setting, planted, in another repository, held)
+    for (setting, planted, elsewhere, held) in [
+        (Setting::FullAccess, false, false, false),
+        (Setting::FullAccess, true, false, true),
+        (Setting::FullAccess, false, true, false),
+        (Setting::FullAccess, true, true, true),
+        (Setting::Workspace, true, false, false),
     ] {
         let outside = TempDir::new()?;
         let outside_path = outside.path().canonicalize()?;
-        std::fs::write(outside_path.join("zshrc"), "# start-up\n")?;
+        let target = outside_path.join("zshrc");
+        std::fs::write(&target, "# start-up\n")?;
         let other = TempDir::new()?;
         let other_path = other.path().canonicalize()?;
         init_git(&other_path)?;
-        let link = other_path.join(".git").join("COMMIT_EDITMSG");
-        if planted {
-            std::os::unix::fs::symlink(outside_path.join("zshrc"), &link)?;
+        if planted && elsewhere {
+            std::os::unix::fs::symlink(&target, other_path.join(".git/COMMIT_EDITMSG"))?;
         }
         let home = Arc::new(TempDir::new()?);
         let auth = home.path().canonicalize()?.join("auth.json");
         std::fs::write(&auth, CANARY)?;
-        let (run, _) = Box::pin(run(
+        let mut read = json!({
+            "command": format!("cat '{}'", auth.display()),
+            "sandbox_permissions": "require_escalated",
+            "justification": "check the sign-in",
+        });
+        if elsewhere {
+            read["workdir"] = json!(other_path.display().to_string());
+        }
+        let (run, test) = Box::pin(run_with(
             SecurityLevel::Moderate,
             setting,
             home,
-            vec![step(
-                "call-read",
-                json!({
-                    "command": format!("cat '{}'", auth.display()),
-                    "workdir": other_path.display().to_string(),
-                    "sandbox_permissions": "require_escalated",
-                    "justification": "check the sign-in",
-                }),
-            )],
+            vec![step("call-read", read)],
+            /*project_of*/ None,
+            (planted && !elsewhere).then(|| target.clone()),
         ))
         .await?;
+        let repository = if elsewhere {
+            other_path.clone()
+        } else {
+            test.cwd_path().canonicalize()?
+        };
+        let link = repository.join(".git").join("COMMIT_EDITMSG");
         let link_shown = link.display().to_string();
         let reported_before_asked = run.warnings[..run.warned_before_asked]
             .iter()
@@ -587,13 +620,14 @@ async fn issue_943_left_before_the_session_holds_its_first_approval() -> anyhow:
         });
         let read = output(&run.requests, "call-read");
         if run.asked == 0
+            || link.symlink_metadata().is_ok() != planted
             || reported_before_asked != held
             || held_note != held
             || read.contains(CANARY) == held
         {
             wrong.push(format!(
-                "{setting:?} planted={planted}: asked={} warned_before_asked={} warnings={:?} \
-                 read={read}",
+                "{setting:?} planted={planted} elsewhere={elsewhere}: asked={} \
+                 warned_before_asked={} warnings={:?} read={read}",
                 run.asked, run.warned_before_asked, run.warnings
             ));
         }
