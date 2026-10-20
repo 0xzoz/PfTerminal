@@ -361,7 +361,12 @@ async fn issue_874_a_standing_finding_keeps_user_namespaces_denied() -> anyhow::
         let out = output(&second.requests, "call-userns");
         let denied = out.contains("marker=1");
         let allowed = out.contains("marker=unset");
-        if second.asked == 0 || denied != planted || allowed == planted {
+        // Denied because of the finding: the person is told so.
+        let held_note = second
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("nor let it create user namespaces"));
+        if second.asked == 0 || denied != planted || allowed == planted || held_note != planted {
             wrong.push(format!(
                 "planted={planted}: asked={} warnings={:?} output={out}",
                 second.asked, second.warnings
