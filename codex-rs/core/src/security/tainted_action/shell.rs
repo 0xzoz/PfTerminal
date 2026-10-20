@@ -167,13 +167,25 @@ pub(super) fn glob_substitution(text: &str) -> bool {
 }
 
 /// `$~x`, `${~x}`, `$^~x`, or a `${(flags)...}` followed later by a `~`
-/// that does not start a word (`${(s"}")~x}`; `${(j:,:)a} ~/dir` does not
-/// count). Linear.
+/// that is not a home folder (`${(s"}")~x}`, `${(@)=~x}`; `${(j:,:)a}
+/// ~/dir` does not count). Linear.
 fn substitutes_globs(text: &str) -> bool {
     let bytes = text.as_bytes();
-    // The last `~` that is not a home folder at the start of a word.
+    // The last `~` that is not a home folder at the start of a word or
+    // after `=`/`:` (`--home=~/x`); one in a run of flags after `)`, `{` or
+    // `$` counts (`${(@)=~x}`). Runs are read back at most 16 bytes.
     let Some(last) = (0..bytes.len()).rev().find(|&at| {
-        bytes[at] == b'~' && at > 0 && !matches!(bytes[at - 1], b' ' | b'\t' | b'\n' | b'=' | b':')
+        if bytes[at] != b'~' || at == 0 || matches!(bytes[at - 1], b' ' | b'\t' | b'\n') {
+            return false;
+        }
+        if !matches!(bytes[at - 1], b'=' | b':') {
+            return true;
+        }
+        let mut start = at;
+        while start > 0 && at - start < 16 && b"^=~#+".contains(&bytes[start - 1]) {
+            start -= 1;
+        }
+        at - start >= 16 || start == 0 || matches!(bytes[start - 1], b')' | b'{' | b'$')
     }) else {
         return false;
     };

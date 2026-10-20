@@ -2953,6 +2953,11 @@ fn issue_1084_glob_substitution_is_unseen_code() {
         ("bash", "zsh -o glob{s..s}ubst ./run.zsh"),
         ("zsh", "setopt glob?subst; x=$(cat notes); print -l $x"),
         ("zsh", "setopt [g]lob_subst; x=$(cat notes); print -l $x"),
+        // Review r4: `~` after flags that end in `=`.
+        ("zsh", "x=$(cat notes); print -l ${(@)=~x}"),
+        ("zsh", "x=$(cat notes); print -l ${(f)^=~x}"),
+        ("zsh", "x=$(cat notes); print -l ${(s: :)=~x}"),
+        ("zsh", "print -l ${(@)=~NOTES}"),
         // zmv globs its pattern as `${~pat}`.
         ("zsh", "autoload zmv; zmv -n \"$(cat notes)\" x"),
         ("zsh", "p=$(cat notes); zmv -p echo -- $p x"),
@@ -2995,6 +3000,9 @@ fn issue_1084_glob_substitution_is_unseen_code() {
     assert!(shell::glob_substitution("print ${(s\"}\")~arr}"));
     assert!(!shell::glob_substitution("print ${(j:,:)arr} ~/dir"));
     assert!(!shell::glob_substitution("print ${(j:,:)arr}"));
+    assert!(!shell::glob_substitution(
+        "print ${(j:,:)arr} --home=~/x a:~/b"
+    ));
     // A script file read by a zsh.
     let root = tempfile::tempdir().expect("tempdir");
     let cwd = root.path().to_string_lossy().into_owned();

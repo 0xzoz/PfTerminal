@@ -2049,8 +2049,8 @@ fn sets_unnamed_options(name: &str, args: &[String]) -> bool {
             continue;
         }
         script_next |= name != "set" && !emulate && word.starts_with('-') && word.contains('c');
-        // `-o NAME` and clusters ending in `o` take the next word.
-        if word.ends_with('o') && words.next().is_some_and(|value| unnamed(value)) {
+        // `-o NAME` and clusters holding `o` (`-xo NAME`) take the next word.
+        if word[1..].contains('o') && words.next().is_some_and(|value| unnamed(value)) {
             return true;
         }
     }
