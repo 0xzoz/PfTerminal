@@ -173,10 +173,10 @@ async fn issue863_custom_native_send_followup_reject_builtin_before_mailbox_muta
         .captured_ops()
         .iter()
         .filter_map(|(id, op)| {
-            if *id == builtin.thread_id {
-                if let Op::InterAgentCommunication { communication } = op {
-                    return Some(communication.clone());
-                }
+            if *id == builtin.thread_id
+                && let Op::InterAgentCommunication { communication } = op
+            {
+                return Some(communication.clone());
             }
             None
         })
