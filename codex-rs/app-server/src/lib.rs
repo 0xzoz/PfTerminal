@@ -1394,8 +1394,9 @@ fn loader_overrides_with_test_user_config_file(
 /// a named sign-in account. Where the account is known only when a thread
 /// starts, none of them is sent until then: an embedded server of a resume or
 /// fork launch with named accounts on (which leaves the default login in
-/// place), and a standalone server or daemon with named accounts on, whose
-/// clients choose their accounts per thread.
+/// place), and a standalone server or daemon with named accounts on whose
+/// home uses named sign-in accounts, so its clients may choose another
+/// account per thread. A home with only the default login keeps it (#1085).
 pub(crate) fn follow_configured_session_account(
     auth_manager: &Arc<AuthManager>,
     config: &Config,
@@ -1404,7 +1405,7 @@ pub(crate) fn follow_configured_session_account(
     let account_known_later = if embedded {
         codex_login::default_login_left_unenforced()
     } else {
-        config.named_accounts_enabled()
+        config.named_accounts_enabled() && config.uses_named_sign_in_accounts()
     };
     let sign_in = match codex_model_provider::session_sign_in(&config.model_provider) {
         codex_login::SessionSignIn::Default if account_known_later => {

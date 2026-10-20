@@ -35,13 +35,6 @@ const WORK_TOKEN: &str = "pf84-658-work-account-token";
 /// A home with a default ChatGPT login and a named ChatGPT account `work`,
 /// both pointing at `server` for the ChatGPT backend and model requests.
 fn write_home(home: &Path, server: &MockServer, provider_accounts: &str) -> Result<()> {
-    write_chatgpt_auth(
-        home,
-        ChatGptAuthFixture::new(DEFAULT_TOKEN)
-            .account_id("acct-default")
-            .plan_type("pro"),
-        AuthCredentialsStoreMode::File,
-    )?;
     write_named_chatgpt_auth(
         home,
         "openai",
@@ -49,6 +42,22 @@ fn write_home(home: &Path, server: &MockServer, provider_accounts: &str) -> Resu
         ChatGptAuthFixture::new(WORK_TOKEN)
             .account_id("acct-work")
             .plan_type("pro"),
+    )?;
+    write_default_login_home(home, server, provider_accounts)
+}
+
+/// A home with named accounts on and only the default ChatGPT login.
+fn write_default_login_home(
+    home: &Path,
+    server: &MockServer,
+    provider_accounts: &str,
+) -> Result<()> {
+    write_chatgpt_auth(
+        home,
+        ChatGptAuthFixture::new(DEFAULT_TOKEN)
+            .account_id("acct-default")
+            .plan_type("pro"),
+        AuthCredentialsStoreMode::File,
     )?;
     std::fs::write(
         home.join("config.toml"),
@@ -331,6 +340,32 @@ async fn a_thread_the_user_left_does_not_count() -> Result<()> {
     assert_eq!(
         tokens_for(&server, "/api/codex/usage").await,
         vec![WORK_TOKEN.to_string()]
+    );
+    Ok(())
+}
+
+/// #1085: a home with named accounts on but only the default login has no
+/// other account a client could choose, so requests outside a conversation
+/// use the default login as with named accounts off.
+#[tokio::test]
+async fn a_home_with_only_the_default_login_serves_requests_before_a_conversation() -> Result<()> {
+    let server = MockServer::start().await;
+    mount_usage(&server).await;
+    let home = TempDir::new()?;
+    write_default_login_home(home.path(), &server, "")?;
+
+    let mut app = TestAppServer::builder()
+        .with_codex_home(home.path())
+        .without_auto_env()
+        .with_env_overrides(&[("OPENAI_API_KEY", None)])
+        .build_initialized_with_timeout(DEFAULT_TIMEOUT)
+        .await?;
+    // Before #1085 this was refused: "not known until its conversation starts".
+    read_rate_limits(&mut app).await?;
+
+    assert_eq!(
+        tokens_for(&server, "/api/codex/usage").await,
+        vec![DEFAULT_TOKEN.to_string()]
     );
     Ok(())
 }

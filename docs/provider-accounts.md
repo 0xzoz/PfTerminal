@@ -218,8 +218,11 @@ fingerprint.
   (for example a pane on `work` and one on the default login) send none of
   them and say why. A conversation you left (it stays loaded for a while)
   does not count while no turn runs in it. A `resume` or `fork`, and an app
-  server or daemon with named accounts on, send none until a conversation
-  starts, because its account is known only then.
+  server or daemon with named accounts on in a home that has a named OpenAI
+  sign-in account (or selects one in `[provider_accounts]`), send none until
+  a conversation starts, because its account is known only then. A server
+  in a home with only the default login uses it, as before (an account added
+  while the server runs counts from its next start).
 - `forced_login_method` and `forced_chatgpt_workspace_id` apply to named
   accounts too: a sign-in of the other kind or another workspace is refused.
   A session on a named account checks them against that account only and
