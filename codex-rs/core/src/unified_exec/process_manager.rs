@@ -28,6 +28,7 @@ use crate::sandboxing::ExecServerEnvConfig;
 use crate::tools::context::ExecCommandToolOutput;
 use crate::tools::events::ToolEmitter;
 use crate::tools::events::ToolEventCtx;
+use crate::tools::events::ToolEventFailure;
 use crate::tools::events::ToolEventStage;
 use crate::tools::network_approval::DeferredNetworkApproval;
 use crate::tools::network_approval::finish_deferred_network_approval;
@@ -239,6 +240,9 @@ struct PreparedProcessHandles {
 pub(super) struct StartFailure {
     pub(super) error: UnifiedExecError,
     pub(super) shown_by_review: bool,
+    /// #873: a policy refused it (before it started, or the launch contract
+    /// at start), so it ends as refused whether or not a review showed it.
+    pub(super) refused_by_policy: bool,
 }
 
 struct InitialExecCommandGuard {
@@ -288,7 +292,7 @@ async fn finish_deferred_network_approval_for_session(
 
 fn network_approval_error_message(err: ToolError) -> String {
     match err {
-        ToolError::Rejected(message) => message,
+        ToolError::Rejected(message) | ToolError::Declined(message) => message,
         ToolError::Codex(err) => err.to_string(),
     }
 }
@@ -372,8 +376,37 @@ async fn emit_denied_at_start(
     .await;
 }
 
-/// #466: a command a review approved that then could not start (a
-/// protected-launch refusal, a spawn error) ends as failed with the reason.
+/// #873: a command a policy refused before it started (or the launch
+/// contract refused at start) is shown and ends as refused with the reason.
+async fn emit_refused_at_start(
+    context: &UnifiedExecContext,
+    request: &ExecCommandRequest,
+    cwd: PathUri,
+    message: String,
+) {
+    let plugin_attribution = emit_begin_at_start(context, request, cwd.clone()).await;
+    let event_ctx = ToolEventCtx::new(
+        context.session.as_ref(),
+        context.turn.as_ref(),
+        &context.call_id,
+        /*turn_diff_tracker*/ None,
+    );
+    ToolEmitter::unified_exec(
+        &request.command,
+        cwd,
+        ExecCommandSource::UnifiedExecStartup,
+        Some(request.process_id.to_string()),
+        plugin_attribution,
+    )
+    .emit(
+        event_ctx,
+        ToolEventStage::Failure(ToolEventFailure::Refused(message)),
+    )
+    .await;
+}
+
+/// #466: a command a review approved that then could not start (a spawn
+/// error) ends as failed with the reason.
 async fn emit_failed_at_start(
     context: &UnifiedExecContext,
     request: &ExecCommandRequest,
@@ -535,10 +568,15 @@ impl UnifiedExecProcessManager {
             Err(StartFailure {
                 error,
                 shown_by_review,
+                refused_by_policy,
             }) => {
                 self.release_process_id(request.process_id).await;
                 if let UnifiedExecError::SandboxDenied { output, .. } = &error {
                     emit_denied_at_start(context, &request, cwd, output).await;
+                } else if refused_by_policy {
+                    // #873: shown once and ended as refused with the reason,
+                    // like a refused shell command.
+                    emit_refused_at_start(context, &request, cwd, error.to_string()).await;
                 } else if shown_by_review {
                     // #466: the review showed this command as running;
                     // end it, or it stays "Running" for good.
@@ -1377,34 +1415,46 @@ impl UnifiedExecProcessManager {
             )
             .await;
         let shown_by_review = runtime.shown_by_review();
+        let start_rejected = runtime.start_rejected();
         result
             .map(|result| (result.output, result.deferred_network_approval))
-            .map_err(|err| match err {
-                ToolError::Codex(err) => match err.details() {
-                    CodexErrorDetails::UnsupportedOperation(message)
-                        if crate::security::launch_contract::is_launch_denial(message) =>
-                    {
-                        UnifiedExecError::ProtectedLaunch {
-                            message: message.clone(),
+            .map_err(|err| {
+                // #873: a policy refusal is `Rejected` from the orchestrator,
+                // not from the start attempt itself (a setup or spawn
+                // failure); `Declined` is an approval decision.
+                let rejected_by_policy = matches!(err, ToolError::Rejected(_)) && !start_rejected;
+                let error = match err {
+                    ToolError::Codex(err) => match err.details() {
+                        CodexErrorDetails::UnsupportedOperation(message)
+                            if crate::security::launch_contract::is_launch_denial(message) =>
+                        {
+                            UnifiedExecError::ProtectedLaunch {
+                                message: message.clone(),
+                            }
                         }
+                        CodexErrorDetails::Sandbox(SandboxErr::Denied { output, .. }) => {
+                            let output = output.as_ref().clone();
+                            let message = if output.aggregated_output.text.is_empty() {
+                                let exit_code = output.exit_code;
+                                format!("Process exited with code {exit_code}")
+                            } else {
+                                output.aggregated_output.text.clone()
+                            };
+                            UnifiedExecError::sandbox_denied(message, output)
+                        }
+                        _ => UnifiedExecError::create_process(err.to_string()),
+                    },
+                    ToolError::Rejected(message) | ToolError::Declined(message) => {
+                        UnifiedExecError::Rejected { message }
                     }
-                    CodexErrorDetails::Sandbox(SandboxErr::Denied { output, .. }) => {
-                        let output = output.as_ref().clone();
-                        let message = if output.aggregated_output.text.is_empty() {
-                            let exit_code = output.exit_code;
-                            format!("Process exited with code {exit_code}")
-                        } else {
-                            output.aggregated_output.text.clone()
-                        };
-                        UnifiedExecError::sandbox_denied(message, output)
-                    }
-                    _ => UnifiedExecError::create_process(err.to_string()),
-                },
-                ToolError::Rejected(message) => UnifiedExecError::Rejected { message },
-            })
-            .map_err(|error| StartFailure {
-                error,
-                shown_by_review,
+                };
+                let refused_by_policy =
+                    rejected_by_policy || matches!(error, UnifiedExecError::ProtectedLaunch { .. });
+                StartFailure {
+                    error,
+                    shown_by_review,
+                    refused_by_policy,
+                }
             })
     }
 

@@ -11,7 +11,7 @@ activation_basis: "Travis, 2026-10-10: accept PF-60-S04's remaining gaps on cond
 target_release: "TBD"
 deadline: "TBD (S07's Sol promotion end landed in #762 before 2026-11-21)"
 created: 2026-10-10
-updated: 2026-10-14
+updated: 2026-10-16
 product_spec:
   file: docs/corbanu-product-spec.md
   heading: "Product measurement"
@@ -29,6 +29,9 @@ implementation_worktrees:
   - path: "/Volumes/CorbanuDrive/Corbanu/worktrees/pf60-s09"
     branch: "pf60-s09/verification-paths"
     base_commit: "643838f2f4ed87dfe71be24f983a6dcc91709faa"
+  - path: "/Volumes/CorbanuDrive/Corbanu/worktrees/pf60-s10"
+    branch: "qa/pf60-s10-acceptance"
+    base_commit: "395ac0adcd96f4970220e569a1608141a3e748f3"
 ---
 
 # Accounting follow-ups after PF-60
@@ -36,6 +39,11 @@ implementation_worktrees:
 Policy: repository-root `AGENTS.md`. Lifecycle: [plans](../index.md). Predecessor:
 [PF-60 accounting](../completed/main-2026-10-10-portfolio-agent-cost-accounting.md), completed 2026-10-10.
 **Active** from 2026-10-14 in slot 2 (Travis's decision); one sprint at a time.
+
+**Status 2026-10-16:** all five sprints accepted by Travis and archived (S06 2026-10-14; S07–S09 2026-10-15; S10
+2026-10-16, 29 passed / 1 failed / 7 blocked of 37, decision D24). One item remains before the plan can be completed and
+its slot freed: the follow-up isolated live run Travis set on 2026-10-16 (D25, D3, D16; see
+[Dependencies](#dependencies-decisions-and-blockers)).
 
 ## Activation record
 
@@ -102,6 +110,7 @@ here and in the sprint before it becomes `ready`.
 | Codex worker `pf60-next` | `/Volumes/CorbanuDrive/Corbanu/worktrees/pf60-s07` | `pf60-s07/moonshot-route-pricing` | `df3d8c5d1c521228a8dbb1035831af572afe1284` | PF-60-S07 (lane `accounting`) |
 | Codex worker `pf60-next` | `/Volumes/CorbanuDrive/Corbanu/worktrees/pf60-s08` | `pf60-s08/cost-clarity-reopen-warmup` | `45916ab64ef7faf4a5525a8dbdbfd4f706dd9f79` | PF-60-S08 (lane `accounting`) |
 | Codex worker `pf60-next` | `/Volumes/CorbanuDrive/Corbanu/worktrees/pf60-s09` | `pf60-s09/verification-paths` | `643838f2f4ed87dfe71be24f983a6dcc91709faa` | PF-60-S09 (lane `accounting`) |
+| Codex worker `pf60-s10` | `/Volumes/CorbanuDrive/Corbanu/worktrees/pf60-s10` | `qa/pf60-s10-acceptance` | `395ac0adcd96f4970220e569a1608141a3e748f3` | PF-60-S10 (record only, under `qa/`) |
 
 ## Useful code references
 
@@ -120,15 +129,16 @@ upstream seams and keeps product code behind thin adapters per [upstream integra
 
 ## Sprint execution map
 
-All records belong to feature **PF-60**. S06–S09 are independent of each other; S10 accepts all four.
+All records belong to feature **PF-60**. S06–S09 are independent of each other; S10 accepts all four. All five are
+completed and archived (2026-10-16).
 
 | Sprint | Record | Depends on | Items | Issues |
 | --- | --- | --- | --- | --- |
-| PF-60-S06 | [Side-conversation and temporary-fork attribution](../../sprints/current/portfolio-agent-cost-accounting-followups/pf-60-s06-side-and-fork-attribution.md) | PF-60-S04 | (i), (ii) | #400, #401 |
-| PF-60-S07 | [Price catalogue refresh](../../sprints/current/portfolio-agent-cost-accounting-followups/pf-60-s07-price-catalogue-refresh.md) | PF-60-S04 | (iii) | #368 |
-| PF-60-S08 | [`/cost` page clarity and reopen warm-up cost](../../sprints/current/portfolio-agent-cost-accounting-followups/pf-60-s08-cost-page-clarity-and-reopen-warmup.md) | PF-60-S04 | (v), (vi), (vii) | #396, #403 |
-| PF-60-S09 | [Verification paths for unverified flows](../../sprints/current/portfolio-agent-cost-accounting-followups/pf-60-s09-verification-paths-for-unverified-flows.md) | PF-60-S04 | (iv) | #402 |
-| PF-60-S10 | [Isolated code-blind acceptance of the follow-ups](../../sprints/current/portfolio-agent-cost-accounting-followups/pf-60-s10-isolated-code-blind-acceptance.md) | PF-60-S06, PF-60-S07, PF-60-S08, PF-60-S09 | (viii) | #404 |
+| PF-60-S06 | [Side-conversation and temporary-fork attribution](../../sprints/archive/portfolio-agent-cost-accounting-followups/pf-60-s06-side-and-fork-attribution.md) | PF-60-S04 | (i), (ii) | #400, #401 |
+| PF-60-S07 | [Price catalogue refresh](../../sprints/archive/portfolio-agent-cost-accounting-followups/pf-60-s07-price-catalogue-refresh.md) | PF-60-S04 | (iii) | #368 |
+| PF-60-S08 | [`/cost` page clarity and reopen warm-up cost](../../sprints/archive/portfolio-agent-cost-accounting-followups/pf-60-s08-cost-page-clarity-and-reopen-warmup.md) | PF-60-S04 | (v), (vi), (vii) | #396, #403 |
+| PF-60-S09 | [Verification paths for unverified flows](../../sprints/archive/portfolio-agent-cost-accounting-followups/pf-60-s09-verification-paths-for-unverified-flows.md) | PF-60-S04 | (iv) | #402 |
+| PF-60-S10 | [Isolated code-blind acceptance of the follow-ups](../../sprints/archive/portfolio-agent-cost-accounting-followups/pf-60-s10-isolated-code-blind-acceptance.md) | PF-60-S06, PF-60-S07, PF-60-S08, PF-60-S09 | (viii) | #404 |
 
 ## Acceptance flows
 
@@ -181,6 +191,16 @@ Finished-feature docs change only if Travis authorises shipping `/cost`; until t
   is recorded as not reported; S08 takes #403 option (C), the reopen warm-up shown in `/cost` and on reopen with a
   setting to skip it (off by default); S09 verifies ChatGPT login with a mock sign-in server only, records TensorCash
   as not applicable until access is granted, and runs image generation and realtime for real on an OpenAI API key.
+- **Decided 2026-10-15 (Travis, "1-6 as recommended"):** accept S07, S08 and S09 (S09 with the realtime failure in
+  #824, sent for a fix as option (a), done in #882); #814 option (b); S10 runs on S06–S09 before they are archived.
+- **Decided 2026-10-16 (Travis, "all as recommended"):** D24 accept S10 as recorded (29/1/7) and archive S06–S10;
+  D25 re-check the S10 gaps in #898's acceptance run, not a full S10 re-run; D26 accept S10's wording-only r3 fail;
+  D3 one real Moonshot cache read (under $0.01) and D16 one real OpenAI realtime session (under $0.05) in that run;
+  D14 ledger format 6; D15 fix #889 item 1 (wrong account grouping).
+- **Remaining before completion:** one isolated live run with ACC-06 (#898, fixed by #917), the Request-ID checks of
+  ACC-11/14/18, ACC-15's `side:` screen, the Moonshot cache read and the realtime session. Then complete the plan
+  (no release) and free slot 2. Not carried here: #368's BigModel and DeepSeek 2027 items, #824 (WebRTC), #889, #912,
+  #913, #814's rare cases.
 - **Isolation infrastructure** (S10) is shared with P1 security's milestone runs; reuse it rather than build twice.
 - **Open accounting issues not assigned here** (Travis to place or leave): #352 `/cost` display nits, #359 busy state
   DB waits, #325 `/cost` leftovers, #324 delete-time retention sweep, #314 invisible unrecorded gaps, #290
@@ -192,6 +212,11 @@ None yet. Carried from PF-60: collection is developer-only; a release needs Trav
 
 ## Completion
 
-- [ ] Every item (i)–(viii) is closed by an accepted sprint or by Travis's recorded decision.
-- [ ] S10's isolated acceptance passes the code-blind checker; Travis accepts.
-- [ ] Linked issues are closed or re-filed with a reason.
+- [x] Every item (i)–(viii) is closed by an accepted sprint or by Travis's recorded decision (2026-10-14 to 2026-10-16).
+- [x] S10's isolated acceptance: Travis accepted it as recorded on 2026-10-16 (D24). The checker stops at the first
+      unresolved case (ACC-04), as expected; the gaps go to one follow-up live run (D25).
+- [ ] Linked issues are closed or re-filed with a reason: #396, #400–#404 and #786 closed with the archive (#786's two
+      remaining rare cases are tracked in #814); #368 kept open for BigModel and DeepSeek's 2027 dates; #824 for WebRTC.
+- [x] PF-60-S05's waiver (b) is discharged by S10's isolated run (Travis's acceptance, D24; dated addendum in the
+      archived S05 record).
+- [ ] The follow-up isolated live run (D25, D3, D16) is recorded; then the plan moves to `completed/`.

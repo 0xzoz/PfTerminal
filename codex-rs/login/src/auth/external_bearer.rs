@@ -338,10 +338,20 @@ async fn run_provider_auth_command(
                 ),
             ));
         }
-        return Err(io::Error::other(format!(
+        let message = format!(
             "provider auth command `{}` exited with status {status}{stderr_suffix}",
             config.command
-        )));
+        );
+        // #616: Corbanu's own helper could not read the Corbanu home. That is
+        // usually temporary, so callers may wait for access to return.
+        if is_corbanu_internal_helper(config)
+            && status.code() == Some(codex_protocol::home_unreadable::HOME_UNREADABLE_EXIT_CODE)
+        {
+            return Err(codex_protocol::home_unreadable::home_unreadable_io_error(
+                message,
+            ));
+        }
+        return Err(io::Error::other(message));
     }
 
     let stdout = String::from_utf8(output.stdout).map_err(|_| {

@@ -207,7 +207,7 @@ impl ToolOrchestrator {
                 .requires_escalated_permissions()
         {
             // The person sees it too, not only the model (an exec_command
-            // refused before it starts shows no command cell).
+            // also gets a "Refused: <this reason>" cell since #873).
             warn(
                 tool_ctx,
                 crate::security::protected_additional::PROTECTED_LAUNCH_NO_ESCALATION,
@@ -256,8 +256,8 @@ impl ToolOrchestrator {
             && let Some(additional) = tool.additional_permissions(req)
         {
             use crate::security::protected_additional;
-            let human_route =
-                post_taint.is_some() || moderate_escalation_before_taint(tool, req, tool_ctx);
+            let human_route = post_taint.is_some()
+                || moderate_escalation_before_taint(tool, req, tool_ctx, &requirement);
             let reads = !(state.moderate_bound() && human_route);
             let person_may_decide = human_route
                 || (matches!(requirement, ExecApprovalRequirement::NeedsApproval { .. })
@@ -349,8 +349,14 @@ impl ToolOrchestrator {
             }
             let protected_read_note =
                 protected_read_note(grant_operation.as_ref(), tool_ctx, turn_ctx).await;
+            // #841: what approving cannot unlock under Moderate.
+            let kept_read_note =
+                moderate_kept_read_note(tool, req, tool_ctx, turn_ctx, action).await;
             // #747: and that it stays in the sandbox under Moderate.
             let stays_sandboxed = moderate_sandbox_note(tool, req, moderate_keeps_sandbox);
+            // #826: that what needs a user namespace fails on Linux.
+            let user_namespaces_note =
+                user_namespaces_note(tool, req, tool_ctx, turn_ctx).map(|(note, _)| note);
             let approval_ctx = ApprovalCtx {
                 session: &tool_ctx.session,
                 turn: &tool_ctx.turn,
@@ -359,7 +365,9 @@ impl ToolOrchestrator {
                     [
                         Some(action.approval_reason()),
                         protected_read_note.clone(),
+                        kept_read_note.map(str::to_string),
                         stays_sandboxed.map(str::to_string),
+                        user_namespaces_note,
                     ]
                     .into_iter()
                     .flatten()
@@ -415,16 +423,13 @@ impl ToolOrchestrator {
                 AskForApproval::Granular(granular) => granular.allows_sandbox_approval(),
                 AskForApproval::UnlessTrusted | AskForApproval::OnRequest => true,
             }
-            && moderate_escalation_before_taint(tool, req, tool_ctx);
+            && moderate_escalation_before_taint(tool, req, tool_ctx, &requirement);
         let mut escalation_approved_by_human = false;
         match &requirement {
             _ if post_taint.is_some() => {}
             _ if ask_human_to_escalate => {
                 // #747: and it stays inside the sandbox.
-                let note = format!(
-                    "Approving also lifts the Moderate credential protection for this command. {}",
-                    crate::security::protected_additional::MODERATE_STAYS_SANDBOXED
-                );
+                let note = crate::security::protected_additional::moderate_escalation_note();
                 let mut approval_ctx = ApprovalCtx {
                     session: &tool_ctx.session,
                     turn: &tool_ctx.turn,
@@ -447,6 +452,11 @@ impl ToolOrchestrator {
                         ) => justification,
                         _ => None,
                     },
+                };
+                // #826: and that what needs a user namespace fails on Linux.
+                let note = match user_namespaces_note(tool, req, tool_ctx, turn_ctx) {
+                    Some((user_namespaces, _)) => format!("{note} {user_namespaces}"),
+                    None => note,
                 };
                 approval_ctx.retry_reason = Some(match why {
                     Some(why) => format!("{why} {note}"),
@@ -519,17 +529,31 @@ impl ToolOrchestrator {
                 // under Moderate; the person is told before approving.
                 let stays_sandboxed =
                     moderate_sandbox_note(tool, req, moderate_keeps_sandbox).map(str::to_string);
+                // #826: that what needs a user namespace fails on Linux.
+                let (user_namespaces_note, why) =
+                    match user_namespaces_note(tool, req, tool_ctx, turn_ctx)
+                        .filter(|_| reviewer == ApprovalReviewer::User)
+                    {
+                        // Keep why the command runs (the model's justification)
+                        // ahead of the note when there is no other reason.
+                        Some((note, justification)) => {
+                            (Some(note), justification.filter(|_| reason.is_none()))
+                        }
+                        None => (None, None),
+                    };
                 let approval_ctx = ApprovalCtx {
                     session: &tool_ctx.session,
                     turn: &tool_ctx.turn,
                     call_id: &tool_ctx.call_id,
                     retry_reason: [
                         reason.as_ref(),
+                        why.as_ref(),
                         protected_read_note.as_ref(),
                         persistence_note
                             .as_ref()
                             .filter(|_| reviewer == ApprovalReviewer::User),
                         stays_sandboxed.as_ref(),
+                        user_namespaces_note.as_ref(),
                     ]
                     .into_iter()
                     .flatten()
@@ -588,6 +612,8 @@ impl ToolOrchestrator {
             permission_profile,
             &permissions,
         );
+        // #826: Core's level, where the protected-path rules apply.
+        let protected_level = denied.as_ref().map(|(_, _, _, level)| *level);
         let (denied_exec_server_permissions, permissions) = match denied {
             Some((exec_server, materialized, denials, level)) => {
                 // Issue #245: the rules apply to this run, so its additional
@@ -623,6 +649,27 @@ impl ToolOrchestrator {
             }
             None => (None, permissions),
         };
+        // #826 (Travis, 2026-10-15): under Moderate and Aggressive (also
+        // where only the launch enforces Aggressive) agent commands may not
+        // create user namespaces, in which they could open what the Linux
+        // sandbox hides and defeat nested-launch detection. No approval or
+        // grant lifts it. Permissive is unchanged.
+        let (denied_exec_server_permissions, permissions) =
+            if crate::security::user_namespaces::rule_applies(
+                protected_level,
+                turn_ctx.config.permissions.launch_enforces_aggressive(),
+            ) {
+                (
+                    Some(deny_user_namespaces(
+                        denied_exec_server_permissions
+                            .as_ref()
+                            .unwrap_or(permission_profile),
+                    )),
+                    deny_user_namespaces(&permissions),
+                )
+            } else {
+                (denied_exec_server_permissions, permissions)
+            };
         let permission_profile = denied_exec_server_permissions
             .as_ref()
             .unwrap_or(permission_profile);
@@ -1066,7 +1113,7 @@ fn sandbox_outcome_from_tool_error(err: &ToolError) -> Option<&'static str> {
             CodexErrorDetails::Sandbox(SandboxErr::Signal(_)) => Some("signal"),
             _ => None,
         },
-        ToolError::Rejected(_) => None,
+        ToolError::Rejected(_) | ToolError::Declined(_) => None,
     }
 }
 
@@ -1170,11 +1217,26 @@ where
 /// Issue #239: under Moderate before untrusted content, whether this command
 /// asks to run outside the sandbox (a human approval then lifts the
 /// protected-path rules for it, as after untrusted content).
-fn moderate_escalation_before_taint<Rq, Out, T>(tool: &T, req: &Rq, tool_ctx: &ToolCtx) -> bool
+/// #840 (D6): not where a saved "don't ask again" rule allows it: the rule
+/// skips the prompt and the command runs inside the sandbox with the rules
+/// kept, as any command that does not ask to leave it.
+fn moderate_escalation_before_taint<Rq, Out, T>(
+    tool: &T,
+    req: &Rq,
+    tool_ctx: &ToolCtx,
+    requirement: &ExecApprovalRequirement,
+) -> bool
 where
     T: ToolRuntime<Rq, Out>,
 {
-    tool.sandbox_permissions(req)
+    !matches!(
+        requirement,
+        ExecApprovalRequirement::Skip {
+            bypass_sandbox: true,
+            ..
+        }
+    ) && tool
+        .sandbox_permissions(req)
         .requires_escalated_permissions()
         && tool_ctx
             .session
@@ -1263,6 +1325,97 @@ async fn protected_read_note(
     )
     .await
     .map(|found| found.explanation())
+}
+
+/// #826 follow-up: for a person asked to approve a command that runs a
+/// program needing a user namespace (`unshare`, `bwrap`, rootless Podman,
+/// …) where agent commands cannot create one, the note that it fails and
+/// that no approval lifts the rule, with the model's justification for the
+/// command (a prompt's reason replaces the justification).
+fn user_namespaces_note<Rq, Out, T>(
+    tool: &T,
+    req: &Rq,
+    tool_ctx: &ToolCtx,
+    turn_ctx: &crate::session::turn_context::TurnContext,
+) -> Option<(String, Option<String>)>
+where
+    T: ToolRuntime<Rq, Out>,
+{
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    let ctx = ApprovalCtx {
+        session: &tool_ctx.session,
+        turn: &tool_ctx.turn,
+        call_id: &tool_ctx.call_id,
+        retry_reason: None,
+        network_approval_context: None,
+        fresh_human_authority: false,
+    };
+    let (command, justification) = match tool.approval_action(req, &ctx).ok()? {
+        ApprovalAction::Shell {
+            command,
+            justification,
+            ..
+        }
+        | ApprovalAction::ExecCommand {
+            command,
+            justification,
+            ..
+        } => (command, justification),
+        _ => return None,
+    };
+    crate::security::user_namespaces::approval_note(&tool_ctx.session, turn_ctx, &command)
+        .map(|note| (note, justification))
+}
+
+/// #841: under Moderate, for a protected action after untrusted content that
+/// reads files the secretless launch contract keeps unreadable at every
+/// level (Corbanu's sign-in, vault, config, history): approving cannot
+/// unlock them, and the person is told so before answering.
+async fn moderate_kept_read_note<Rq, Out, T>(
+    tool: &T,
+    req: &Rq,
+    tool_ctx: &ToolCtx,
+    turn_ctx: &crate::session::turn_context::TurnContext,
+    action: &crate::security::tainted_action::PostTaintAction,
+) -> Option<&'static str>
+where
+    T: ToolRuntime<Rq, Out>,
+{
+    use crate::security::tainted_action::ProtectedActionKind;
+    if !action.state.moderate_bound()
+        || !matches!(
+            action.kind,
+            ProtectedActionKind::SecurityPolicy
+                | ProtectedActionKind::Vault
+                | ProtectedActionKind::Credentials
+        )
+    {
+        return None;
+    }
+    let ctx = ApprovalCtx {
+        session: &tool_ctx.session,
+        turn: &tool_ctx.turn,
+        call_id: &tool_ctx.call_id,
+        retry_reason: None,
+        network_approval_context: None,
+        fresh_human_authority: true,
+    };
+    let (command, cwd) = match tool.approval_action(req, &ctx).ok()? {
+        ApprovalAction::Shell { command, cwd, .. }
+        | ApprovalAction::ExecCommand { command, cwd, .. } => (command, cwd),
+        _ => return None,
+    };
+    let cwd = cwd.to_abs_path().ok()?;
+    crate::security::protected_reads::moderate_kept_read_in_command(
+        &tool_ctx.session,
+        turn_ctx,
+        &command,
+        cwd.as_path(),
+    )
+    .await
+    .then_some(crate::security::protected_reads::MODERATE_KEPT_READ_NOTE)
 }
 
 /// PF-25-S01: offer the human a grant for this exact command while its
@@ -1461,6 +1614,29 @@ fn post_taint_read_denials(
     Some((exec_server, materialized, denials, state.level))
 }
 
+/// #826: `profile` with user namespaces denied to its commands. A profile
+/// without a restricted filesystem policy (no sandbox, or an external one)
+/// cannot carry the rule and is returned as it is.
+fn deny_user_namespaces(
+    profile: &codex_protocol::models::PermissionProfile,
+) -> codex_protocol::models::PermissionProfile {
+    use codex_protocol::permissions::FileSystemSandboxEntry;
+    use codex_protocol::permissions::FileSystemSandboxKind;
+    let (mut file_system, network) = profile.to_runtime_permissions();
+    if file_system.kind != FileSystemSandboxKind::Restricted || file_system.denies_user_namespaces()
+    {
+        return profile.clone();
+    }
+    file_system
+        .entries
+        .push(FileSystemSandboxEntry::deny_user_namespaces());
+    codex_protocol::models::PermissionProfile::from_runtime_permissions_with_enforcement(
+        profile.enforcement(),
+        &file_system,
+        network,
+    )
+}
+
 /// Issue #245: every folder the sandbox may resolve a relative or
 /// project-root additional permission against: the run's own folder, the
 /// turn's folder and the workspace roots.
@@ -1621,6 +1797,37 @@ mod tests {
                 leaves,
                 "{policy} {keeps} {protected} {network}"
             );
+        }
+    }
+
+    /// #826: the rule joins a sandboxed profile once and changes nothing
+    /// else; a profile without Corbanu's sandbox cannot carry it.
+    #[test]
+    fn issue_826_user_namespace_rule_joins_sandboxed_profiles_only() {
+        use codex_protocol::models::PermissionProfile;
+        use codex_protocol::permissions::NetworkSandboxPolicy;
+        let workspace = PermissionProfile::workspace_write_with(
+            &[],
+            NetworkSandboxPolicy::Restricted,
+            /*exclude_tmpdir_env_var*/ true,
+            /*exclude_slash_tmp*/ true,
+        );
+        let denied = deny_user_namespaces(&workspace);
+        let (policy, network) = denied.to_runtime_permissions();
+        let (before, before_network) = workspace.to_runtime_permissions();
+        assert!(policy.denies_user_namespaces());
+        assert!(!before.denies_user_namespaces());
+        assert_eq!(network, before_network);
+        assert_eq!(denied.enforcement(), workspace.enforcement());
+        assert_eq!(policy.entries.len(), before.entries.len() + 1);
+        assert_eq!(deny_user_namespaces(&denied), denied);
+        for profile in [
+            PermissionProfile::Disabled,
+            PermissionProfile::External {
+                network: NetworkSandboxPolicy::Restricted,
+            },
+        ] {
+            assert_eq!(deny_user_namespaces(&profile), profile);
         }
     }
 

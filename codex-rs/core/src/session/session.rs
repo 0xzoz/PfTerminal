@@ -1539,6 +1539,8 @@ impl Session {
             }
             Err(err) => {
                 live_thread_init.discard().await;
+                // #872: its init appends may have failed; nothing writes them now.
+                crate::home_access::note_thread_ended(thread_id);
                 Err(err)
             }
         }

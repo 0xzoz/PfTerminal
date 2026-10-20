@@ -31,6 +31,8 @@
 
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use codex_protocol::models::PermissionProfile;
@@ -45,12 +47,19 @@ use super::tainted_action::PolicyBinding;
 use super::tainted_action::USER_PERSISTENCE;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
+use codex_protocol::permissions::EffectiveWrites;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use writes::keychain_command;
 use writes::write_targets;
 
 #[path = "protected_reads_writes.rs"]
 mod writes;
+
+/// #826 follow-up: whether `command` runs a program that always needs a
+/// user namespace (text-based; see `writes::user_namespace_command`).
+pub(crate) fn runs_user_namespace_program(command: &[String]) -> bool {
+    writes::user_namespace_command(command)
+}
 
 /// Output that says the operating system refused access (on Linux a write
 /// outside the writable folders reports a read-only file system; #620).
@@ -62,6 +71,30 @@ const DENIAL_MARKERS: [&str; 3] = [
 
 /// How long the path lookups may take before no explanation is given.
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// #902: the bound in a test process that asks for it (see
+/// [`unhurried_lookups_for_tests`]).
+const TEST_LOOKUP_TIMEOUT: Duration = Duration::from_secs(20);
+
+static UNHURRIED_LOOKUPS: AtomicBool = AtomicBool::new(false);
+
+/// #902: test harnesses call this so the path lookups get
+/// [`TEST_LOOKUP_TIMEOUT`] instead of [`LOOKUP_TIMEOUT`]. Each lookup does
+/// many filesystem calls; on a loaded machine (many test processes, a slow
+/// disk) they took over 2 seconds, so the explanation and the withheld grant
+/// offer the tests check went missing. Process-wide and in memory only; what
+/// a lookup finds is unchanged. Production code must not call it.
+pub(crate) fn unhurried_lookups_for_tests(enabled: bool) {
+    UNHURRIED_LOOKUPS.store(enabled, Ordering::Relaxed);
+}
+
+pub(crate) fn lookup_timeout() -> Duration {
+    if UNHURRIED_LOOKUPS.load(Ordering::Relaxed) {
+        TEST_LOOKUP_TIMEOUT
+    } else {
+        LOOKUP_TIMEOUT
+    }
+}
 
 /// The explanation shown when `path` could not be accessed.
 pub(crate) fn explanation(path: &str) -> String {
@@ -295,7 +328,9 @@ impl ReadPolicyInputs {
         if !spellings.iter().any(is_startup) {
             return false;
         }
-        !self.base_writable(&self.base_policy(), &path)
+        let policy = self.base_policy();
+        let effective = policy.effective_writes_with_cwd(self.turn_cwd.as_path());
+        !self.base_writable(&policy, &effective, &path)
     }
 
     /// The project roots as the orchestrator runs the profile: the
@@ -330,11 +365,17 @@ impl ReadPolicyInputs {
     /// Whether `policy` writes where a write to `path` lands (a link's final
     /// target), also through a root spelled by an alias of its location
     /// (`/tmp` for `/private/tmp`), as the sandboxes match it (#619).
-    fn base_writable(&self, policy: &FileSystemSandboxPolicy, path: &AbsolutePathBuf) -> bool {
+    /// `effective` is `policy`'s write checks in the turn's folder, built
+    /// once for many paths (#907).
+    fn base_writable(
+        &self,
+        policy: &FileSystemSandboxPolicy,
+        effective: &EffectiveWrites<'_>,
+        path: &AbsolutePathBuf,
+    ) -> bool {
         let target = ReadDenials::real_location(path).unwrap_or_else(|| path.clone());
-        let cwd = self.turn_cwd.as_path();
-        policy.can_write_path_with_cwd(target.as_path(), cwd)
-            || policy.can_write_effective_path_with_cwd(target.as_path(), cwd)
+        policy.can_write_path_with_cwd(target.as_path(), self.turn_cwd.as_path())
+            || effective.can_write_effective_path(target.as_path())
     }
 
     /// #740: whether a write to `path` lands inside one of `policy`'s
@@ -363,6 +404,7 @@ impl ReadPolicyInputs {
         let writes = writes::writes(command);
         let denials = self.denials();
         let policy = self.base_policy();
+        let effective = policy.effective_writes_with_cwd(self.turn_cwd.as_path());
         let mut understood = writes.understood;
         let mut first = None;
         for word in writes.targets {
@@ -376,7 +418,7 @@ impl ReadPolicyInputs {
             if path.as_path().starts_with("/dev") {
                 continue;
             }
-            if self.base_writable(&policy, &path) {
+            if self.base_writable(&policy, &effective, &path) {
                 if lands_in(path.as_path(), denials.liftable_read_only_paths(), &[]) {
                     return None;
                 }
@@ -398,7 +440,8 @@ impl ReadPolicyInputs {
     fn unliftable_write(&self, path: &Path) -> Option<bool> {
         let path = AbsolutePathBuf::from_absolute_path(path).ok()?;
         let policy = self.base_policy();
-        if path.as_path().starts_with("/dev") || self.base_writable(&policy, &path) {
+        let effective = policy.effective_writes_with_cwd(self.turn_cwd.as_path());
+        if path.as_path().starts_with("/dev") || self.base_writable(&policy, &effective, &path) {
             return None;
         }
         Some(self.in_writable_folder(&policy, &path))
@@ -510,7 +553,7 @@ const MAX_LINK_HOPS: usize = 8;
 async fn off_thread<T: Send + 'static>(
     work: impl FnOnce() -> Option<T> + Send + 'static,
 ) -> Option<T> {
-    tokio::time::timeout(LOOKUP_TIMEOUT, tokio::task::spawn_blocking(work))
+    tokio::time::timeout(lookup_timeout(), tokio::task::spawn_blocking(work))
         .await
         .ok()?
         .ok()?
@@ -559,7 +602,13 @@ pub(crate) async fn denial_explanation(
     }
     // #748: Moderate explains the denials its own rules add.
     if let Some(inputs) = ReadPolicyInputs::capture_at(session, turn, SecurityLevel::Moderate) {
-        return moderate::denial_explanation(inputs, command, cwd, denial_lines).await;
+        // #839: listed under the inspector's recent denials, as under
+        // Aggressive (#622).
+        let (denied, explanation) =
+            moderate::denial_explanation(inputs, command, cwd, denial_lines).await?;
+        let (what, outcome) = denied.inspected();
+        super::inspection::record_refusal(session.thread_id(), what, outcome);
+        return Some(explanation);
     }
     let inputs = ReadPolicyInputs::capture(session, turn)?;
     let (command, cwd) = (command.to_vec(), cwd.to_path_buf());
@@ -931,6 +980,50 @@ pub(crate) async fn protected_note_in_command(
             })
     })
     .await
+}
+
+/// #841: under Moderate with the secretless launch contract, what a person
+/// is told before approving a protected action that reads files the
+/// contract keeps unreadable at every level (Corbanu's sign-in, vault,
+/// config, history): approving runs the command but cannot unlock them.
+pub(crate) const MODERATE_KEPT_READ_NOTE: &str = "Corbanu's own files this command reads (its sign-in, vault, config or history) stay unreadable to agent commands even if you approve (secretless agent launch), so approving cannot unlock them.";
+
+/// #841: whether, under Moderate with the secretless launch contract,
+/// `command` names a path the contract keeps unreadable at every level.
+pub(crate) async fn moderate_kept_read_in_command(
+    session: &Session,
+    turn: &TurnContext,
+    command: &[String],
+    cwd: &Path,
+) -> bool {
+    let Some(contract) = super::launch_contract::active() else {
+        return false;
+    };
+    let Some(inputs) = ReadPolicyInputs::capture_at(session, turn, SecurityLevel::Moderate) else {
+        return false;
+    };
+    let (command, cwd) = (command.to_vec(), cwd.to_path_buf());
+    off_thread(move || Some(kept_read_named(&inputs, contract, &command, &cwd)))
+        .await
+        .is_some_and(|named| named)
+}
+
+/// See [`moderate_kept_read_in_command`].
+fn kept_read_named(
+    inputs: &ReadPolicyInputs,
+    contract: &super::launch_contract::LaunchContract,
+    command: &[String],
+    cwd: &Path,
+) -> bool {
+    denied_word(
+        command,
+        cwd,
+        inputs.user_home.as_deref(),
+        &inputs.codex_home,
+        |path| contract.keeps_unreadable(path, cwd),
+        /*denial_lines*/ None,
+    )
+    .is_some()
 }
 
 /// Issue #245: under Aggressive, the explanation for a request whose own

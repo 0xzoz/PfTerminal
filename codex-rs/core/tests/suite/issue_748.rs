@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use codex_core::config::Constrained;
+use codex_core::security_inspection;
 use codex_features::Feature;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::NetworkSandboxPolicy;
@@ -49,6 +50,8 @@ struct Outcome {
     output: String,
     warnings: Vec<String>,
     wrote_codex: bool,
+    /// #839: the inspector's recent denials of the session.
+    denials: Vec<(&'static str, &'static str)>,
 }
 
 /// What each session runs: one command, as the first tool call (a later one
@@ -187,10 +190,21 @@ async fn run(level: SecurityLevel, command: Command, approved: bool) -> anyhow::
         .find_map(|request| request.function_call_output_text(CALL_ID))
         .unwrap_or_default();
     let wrote_codex = test.cwd_path().join(".codex/p748.toml").exists();
+    let denials = security_inspection::observe(
+        test.codex_home_path(),
+        level,
+        Some(test.session_configured.thread_id),
+        i64::MAX / 2,
+    )
+    .denials
+    .into_iter()
+    .map(|denial| (denial.reason, denial.outcome))
+    .collect();
     Ok(Outcome {
         output,
         warnings,
         wrote_codex,
+        denials,
     })
 }
 
@@ -236,6 +250,25 @@ async fn issue_748_moderate_refusals_name_the_level() -> anyhow::Result<()> {
             }
             None => warnings.is_empty() && !moderate.output.contains("Security level"),
         };
+        // #839: what Moderate explained is listed under recent denials too,
+        // and nothing else is.
+        let listed = match command {
+            Command::Read | Command::ReadExec => vec![(
+                "reading a protected file",
+                "denied by the sandbox under Moderate",
+            )],
+            Command::WriteCodexFullAccess => vec![(
+                "writing a file that runs code later, or Corbanu's own files",
+                "denied by the sandbox under Moderate",
+            )],
+            Command::WriteCodex | Command::WriteOutside => Vec::new(),
+        };
+        if moderate.denials != listed {
+            wrong.push(format!(
+                "Moderate {command:?} recent denials: {:?}",
+                moderate.denials
+            ));
+        }
         if !explained || moderate.output.contains(CANARY) || moderate.wrote_codex {
             wrong.push(format!(
                 "Moderate {command:?}: {:?} {}",

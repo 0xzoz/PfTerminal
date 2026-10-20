@@ -473,7 +473,11 @@ pub(crate) struct ToolCtx {
 
 #[derive(Debug)]
 pub(crate) enum ToolError {
+    /// Refused by policy or setup, before execution or (a network-policy
+    /// denial, #873) while the command ran; no approval decision is implied.
     Rejected(String),
+    /// An approval request resolved without permission to proceed.
+    Declined(String),
     Codex(CodexErr),
 }
 

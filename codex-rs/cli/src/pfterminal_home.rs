@@ -99,52 +99,82 @@ fn debug_home(
     .map(Some)
 }
 
-/// Exit with the repair when macOS privacy protection blocks the Corbanu home.
+/// Exit when the Corbanu home cannot be read (#616).
 ///
-/// macOS denies access to external volumes and some folders to apps the user
-/// has not allowed, and SSH logins need their own "full disk access" switch.
-/// Those denials surface as EPERM from arbitrary later reads, which reads as an
-/// unexplained "Operation not permitted". Only the interactive entrypoints are
-/// checked: sandboxed helper aliases can see EPERM from the sandbox instead.
-pub(crate) fn exit_if_home_blocked_by_macos_privacy() {
-    #[cfg(target_os = "macos")]
+/// Denials (macOS privacy protection for external volumes, a drive being
+/// remounted, a sandbox) surface as EPERM from arbitrary later reads, which
+/// reads as an unexplained "Operation not permitted". Only the `corbanu`
+/// entrypoints are checked, and not when argv[1] selects a private helper
+/// that runs sandboxed ([`codex_arg0::is_private_helper_argv1`]: the file
+/// helper, the arg0 exec helper, apply-patch): helper argv0 aliases and those
+/// helpers inherit a sandbox that may deny the home on purpose (#847, #858),
+/// so they skip the check and record nothing. Unless this process's own
+/// sandbox denies the read, the exit status tells a waiting parent
+/// (`corbanu exec` running this as its auth helper) that the failure may be
+/// temporary.
+pub(crate) fn exit_if_home_unreadable() {
+    #[cfg(unix)]
     {
-        const EPERM: i32 = 1;
-        // Private file helpers inherit a sandbox that deliberately denies the
-        // profile. Their file request must run without an interactive home probe.
         if !current_entrypoint_is_corbanu()
-            || std::env::args_os().nth(1).as_deref()
-                == Some(std::ffi::OsStr::new(
-                    codex_exec_server::CODEX_FS_HELPER_ARG1,
-                ))
+            || std::env::args_os()
+                .nth(1)
+                .is_some_and(|argv1| codex_arg0::is_private_helper_argv1(&argv1))
         {
             return;
         }
         let Ok(home) = codex_core::config::find_codex_home() else {
             return;
         };
-        let Err(error) = std::fs::read_dir(&home) else {
-            return;
-        };
-        if error.raw_os_error() != Some(EPERM) {
-            return;
+        if let Err(unreadable) = check_home_readable(
+            home.as_path(),
+            |path| std::fs::read_dir(path).map(drop),
+            codex_core::home_access::sandbox_denies_read,
+            codex_core::home_access::record_home_access_failure,
+        ) {
+            #[allow(clippy::print_stderr)]
+            {
+                eprintln!("{}", unreadable.message);
+            }
+            std::process::exit(unreadable.exit_code);
         }
-        let repair = if std::env::var_os("SSH_CONNECTION").is_some() {
-            "On this Mac, open System Settings > General > Sharing, click (i) next to Remote \
-             Login, turn on \"Allow full disk access for remote users\", then reconnect."
-        } else {
-            "Allow this terminal app in System Settings > Privacy & Security > Full Disk Access \
-             (or Files and Folders > Removable Volumes), then quit and reopen it."
-        };
-        #[allow(clippy::print_stderr)]
-        {
-            eprintln!(
-                "macOS is blocking access to the Corbanu home at {}: {error}.\n{repair}",
-                home.display()
-            );
-        }
-        std::process::exit(1);
     }
+}
+
+#[cfg(unix)]
+#[derive(Debug, PartialEq, Eq)]
+struct HomeUnreadable {
+    message: String,
+    exit_code: i32,
+}
+
+/// The report for a home that `read_dir` cannot read with EPERM, after
+/// `record` has written the diagnostics; other outcomes pass.
+#[cfg(unix)]
+fn check_home_readable(
+    home: &std::path::Path,
+    read_dir: impl FnOnce(&std::path::Path) -> std::io::Result<()>,
+    sandbox_denies_read: impl FnOnce(&std::path::Path) -> bool,
+    record: impl FnOnce(&str, &std::path::Path, &str) -> Option<PathBuf>,
+) -> Result<(), HomeUnreadable> {
+    const EPERM: i32 = 1;
+    let Err(error) = read_dir(home) else {
+        return Ok(());
+    };
+    if error.raw_os_error() != Some(EPERM) {
+        return Ok(());
+    }
+    let error = error.to_string();
+    let log = record("read_dir (opendir)", home, &error);
+    let mut message =
+        codex_core::home_access::unreadable_home_message(home, &error, log.as_deref());
+    // Waiting cannot lift this process's own sandbox: fail as before.
+    let exit_code = if sandbox_denies_read(home) {
+        message.push_str("\nThis process's sandbox denies reading it.");
+        1
+    } else {
+        codex_protocol::home_unreadable::HOME_UNREADABLE_EXIT_CODE
+    };
+    Err(HomeUnreadable { message, exit_code })
 }
 
 fn entrypoint_from_argv0(arg0: &std::ffi::OsStr) -> Option<String> {
@@ -286,6 +316,71 @@ mod tests {
                 "warning: CORBANU_DEBUG_HOME (/homes/d) overrides CORBANU_HOME (/homes/b); \
                  using /homes/d. To use another home, set CORBANU_DEBUG_HOME to it."
             )
+        );
+    }
+
+    /// #616: EPERM from the home is recorded and reported with its possible
+    /// causes, as temporary unless this process's sandbox denies the read;
+    /// other outcomes pass the check.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_home_is_recorded_and_reported() {
+        let home = std::path::Path::new("/Volumes/Drive/home");
+        let eperm = |_: &std::path::Path| Err(std::io::Error::from_raw_os_error(1));
+        let mut recorded = Vec::new();
+        let unreadable = check_home_readable(
+            home,
+            eperm,
+            |_| false,
+            |operation, path, error| {
+                recorded.push((operation.to_string(), path.to_path_buf(), error.to_string()));
+                Some(PathBuf::from("/logs/home-access.log"))
+            },
+        )
+        .expect_err("EPERM is reported");
+        pretty_assertions::assert_eq!(
+            recorded,
+            vec![(
+                "read_dir (opendir)".to_string(),
+                home.to_path_buf(),
+                "Operation not permitted (os error 1)".to_string()
+            )]
+        );
+        assert_eq!(unreadable.exit_code, 75);
+        let message = &unreadable.message;
+        assert!(
+            message.starts_with(
+                "Corbanu could not read its home (Operation not permitted): /Volumes/Drive/home"
+            ),
+            "{message}"
+        );
+        assert!(
+            message.ends_with("Details: /logs/home-access.log"),
+            "{message}"
+        );
+
+        let sandboxed = check_home_readable(home, eperm, |_| true, |_, _, _| None)
+            .expect_err("EPERM is reported");
+        assert_eq!(sandboxed.exit_code, 1, "waiting cannot lift a sandbox");
+        assert!(
+            sandboxed
+                .message
+                .ends_with("This process's sandbox denies reading it."),
+            "{}",
+            sandboxed.message
+        );
+
+        let not_recorded = |_: &str, _: &std::path::Path, _: &str| -> Option<PathBuf> {
+            panic!("only EPERM is recorded")
+        };
+        let missing = std::io::Error::from(std::io::ErrorKind::NotFound);
+        assert_eq!(
+            check_home_readable(home, |_| Err(missing), |_| false, not_recorded),
+            Ok(())
+        );
+        assert_eq!(
+            check_home_readable(home, |_| Ok(()), |_| false, not_recorded),
+            Ok(())
         );
     }
 

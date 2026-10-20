@@ -194,7 +194,8 @@ impl ChatWidget {
                     secret: crate::app_event::VaultSecret::new(secret),
                 });
             }),
-        );
+        )
+        .rejecting_shown_errors(self.shown_error_texts());
         self.bottom_pane.show_view(Box::new(view));
     }
 

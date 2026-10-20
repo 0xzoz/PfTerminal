@@ -173,6 +173,15 @@ pub fn watch_kill_switch(codex_home: &Path) -> tokio::sync::watch::Receiver<bool
     super::effective_policy::transition::kill_switch_watch::subscribe(codex_home)
 }
 
+/// #842: signalled when Moderate, confirmed in another Corbanu Terminal
+/// process on `codex_home`, was taken by this process's sessions (seen
+/// within about a second): Core's Moderate rules apply here now.
+pub fn watch_level_raised_elsewhere(
+    codex_home: &Path,
+) -> tokio::sync::watch::Receiver<Option<SecurityLevel>> {
+    super::effective_policy::transition::kill_switch_watch::subscribe_level_raised(codex_home)
+}
+
 /// End the grant `grant_id` now. Returns whether one was held.
 pub fn revoke_grant(grant_id: &str) -> bool {
     super::aggressive::revoke_grant(grant_id)

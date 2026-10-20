@@ -15,6 +15,16 @@ use codex_state::accounting::Snapshot;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
 
+/// Waits until the ledger writer has written what it was handed. A slow write
+/// is put off and written later (#865), so read the ledger after this.
+async fn settle(db: &StateRuntime) {
+    assert!(
+        db.flush_accounting(std::time::Duration::from_secs(30))
+            .await,
+        "records still queued"
+    );
+}
+
 fn bound(
     id: &str,
     provider: &ModelProviderInfo,
@@ -272,6 +282,7 @@ async fn admission_binds_the_basis_to_every_attempt() -> anyhow::Result<()> {
         sampling
             .admit("some-model", "https://llm.example.com/v1/chat/completions")
             .await?;
+        settle(&db).await;
         let quote = codex_state::accounting::AccountingStore::inspect_day(
             &db,
             owner,
@@ -297,6 +308,7 @@ async fn admission_binds_the_basis_to_every_attempt() -> anyhow::Result<()> {
     // A changed declaration (each case above is a new one for the same
     // provider) applies to new attempts only: every earlier attempt still
     // reads with the basis it was admitted under (AC3).
+    settle(&db).await;
     let codex_state::accounting::InspectionDay::Ready(view) =
         codex_state::accounting::AccountingStore::inspect_day(
             &db,
@@ -402,6 +414,7 @@ async fn image_generation_rates_apply_only_to_openai_api_key_rates() -> anyhow::
                 /*tier*/ None,
             )
             .await?;
+        settle(&db).await;
         let codex_state::accounting::InspectionDay::Ready(view) =
             codex_state::accounting::AccountingStore::inspect_day(
                 &db,
@@ -562,6 +575,7 @@ async fn admission_records_the_named_account() -> anyhow::Result<()> {
     assert!(!named_sampling.same_account(&default_mode));
     let named_attempt = named_sampling.admit("some-model", &route).await?;
     assert_eq!(named_attempt.account, Some(expected.clone()));
+    settle(&db).await;
     // A format-1 ledger goes straight to format 4 with the named attempt.
     assert_eq!(formats().await?, vec![1, 2, 3, 4]);
     let default_attempt = Sampling::start(db.clone(), owner, "default".into(), &default_mode)
@@ -570,6 +584,7 @@ async fn admission_records_the_named_account() -> anyhow::Result<()> {
         .await?;
     assert_eq!(default_attempt.account, None);
     let day = chrono::Utc::now().timestamp_millis() / 86_400_000;
+    settle(&db).await;
     let codex_state::accounting::InspectionDay::Ready(view) =
         codex_state::accounting::AccountingStore::inspect_day(
             &db,
@@ -853,6 +868,7 @@ async fn moonshot_route_admission_binds_published_rates() -> anyhow::Result<()> 
                 chat::patch(usage, provider, sampling.route)?,
             )
             .await?;
+        settle(&db).await;
         let codex_state::accounting::InspectionDay::Ready(view) =
             codex_state::accounting::AccountingStore::inspect_day(
                 &db,
@@ -897,5 +913,106 @@ async fn moonshot_route_admission_binds_published_rates() -> anyhow::Result<()> 
     }
     assert_eq!(references.len(), 2);
     assert_eq!(references[0], references[1]);
+    Ok(())
+}
+
+/// #368: Moonshot's API leaves out a cache count that is zero. These are the
+/// final usage chunks of real `kimi-k3` and `kimi-k2.7-code` requests on
+/// 2026-10-15: K3 states only what it wrote, K2.7 Code no prompt details at
+/// all. Before, the uncached input could not be derived and `/cost` showed
+/// "at least" the written and output tokens (K3 $0.036003, K2.7 Code
+/// $0.000044). A K2 cache hit stated only as `usage.cached_tokens` is read
+/// from there.
+#[tokio::test(flavor = "current_thread")]
+async fn moonshot_route_prices_reports_that_leave_out_zero_counts() -> anyhow::Result<()> {
+    let home = tempfile::tempdir()?;
+    let db = StateRuntime::init(
+        SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(home.path())?),
+        "kimi".into(),
+    )
+    .await?;
+    let owner = ThreadId::new();
+    db.upsert_thread(
+        &ThreadMetadataBuilder::new(
+            owner,
+            home.path().join("moonshot-real.jsonl"),
+            chrono::Utc::now(),
+            SessionSource::Cli,
+        )
+        .build("kimi"),
+    )
+    .await?;
+    let day = chrono::Utc::now().timestamp_millis() / 86_400_000;
+    let cases = [
+        (
+            "kimi-k3",
+            r#"{"id":"chatcmpl-6ad148bb08c96320fffcbc7f","object":"chat.completion.chunk","created":1792100540,"model":"kimi-k3","choices":[],"usage":{"prompt_tokens":11984,"completion_tokens":45,"total_tokens":12029,"completion_tokens_details":{"reasoning_tokens":29},"prompt_tokens_details":{"cache_write_tokens":11776}}}"#,
+            // 208 uncached and 11,776 written at $3/M, 45 output at $15/M.
+            "0.036627",
+        ),
+        (
+            "kimi-k2.7-code",
+            r#"{"id":"chatcmpl-6ad1490662a67331d007b37e","object":"chat.completion.chunk","created":1792100616,"model":"kimi-k2.7-code","choices":[],"usage":{"prompt_tokens":11561,"completion_tokens":11,"total_tokens":11572,"completion_tokens_details":{"reasoning_tokens":8}}}"#,
+            // 11,561 uncached at $0.95/M, 11 output at $4/M.
+            "0.01102695",
+        ),
+        (
+            "kimi-k2.7-code",
+            r#"{"choices":[],"usage":{"prompt_tokens":11561,"completion_tokens":11,"total_tokens":11572,"cached_tokens":11520}}"#,
+            // 41 uncached at $0.95/M, 11,520 cached at $0.19/M, 11 at $4/M.
+            "0.00227175",
+        ),
+    ];
+    for (index, (model, chunk, expected)) in cases.into_iter().enumerate() {
+        let mode = AccountingMode::Provider {
+            scope: Uuid::new_v4(),
+            provider_id: "kimi".into(),
+            wire_api: codex_model_provider_info::WireApi::Chat,
+            approved_endpoint: "https://api.moonshot.ai/v1".into(),
+            approved_query: None,
+            pricing: PriceAuthority::RouteRates(crate::config::PricedRoute::MoonshotOpenPlatform),
+            basis_source: BasisSource::BuiltIn,
+            account: None,
+        };
+        let turn = format!("moonshot-real-{index}");
+        let sampling = Sampling::start(db.clone(), owner, turn.clone(), &mode).await?;
+        let attempt = sampling
+            .admit(model, "https://api.moonshot.ai/v1/chat/completions")
+            .await?;
+        let usage = codex_api::chat_body_usage(chunk.as_bytes())
+            .map_err(|_| anyhow::anyhow!("Moonshot usage must parse"))?
+            .expect("the chunk reports usage");
+        sampling
+            .observe_patch(
+                &attempt,
+                Uuid::new_v4(),
+                /*position*/ 1,
+                chat::patch(usage, "kimi", sampling.route)?,
+            )
+            .await?;
+        settle(&db).await;
+        let codex_state::accounting::InspectionDay::Ready(view) =
+            codex_state::accounting::AccountingStore::inspect_day(
+                &db,
+                owner,
+                day,
+                chrono::Utc::now().timestamp_millis(),
+            )
+            .await?
+        else {
+            panic!("expected the day");
+        };
+        let quote = view
+            .requests
+            .values()
+            .flatten()
+            .find(|quote| quote.attempt.turn == turn)
+            .expect("the attempt is recorded");
+        assert_eq!(
+            quote.all_buckets_priced,
+            Some(expected.to_string().try_into().unwrap()),
+            "{model} {index}"
+        );
+    }
     Ok(())
 }

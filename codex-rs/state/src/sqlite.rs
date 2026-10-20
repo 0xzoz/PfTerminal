@@ -55,6 +55,15 @@ const SQLITE_IOERR_TRUNCATE: &str = "1546";
 /// `n` is `n` times the delay, about 1.8 s in all.
 const SHM_RESET_RETRIES: u32 = 8;
 const SHM_RESET_RETRY_DELAY: Duration = Duration::from_millis(50);
+/// Connections of the short-wait state DB pool; see [`open_quick_pool`].
+const QUICK_POOL_CONNECTIONS: u32 = 2;
+/// How long startup waits for that pool's connections to open (milliseconds
+/// normally, as one has just been opened).
+const QUICK_POOL_OPEN_WAIT: Duration = Duration::from_secs(5);
+const QUICK_POOL_OPEN_POLL: Duration = Duration::from_millis(5);
+/// How long a connection of a main pool ([`SqliteConfig::open_read_write_pool`])
+/// waits for another connection's write lock before SQLITE_BUSY.
+pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy)]
 struct RuntimeDbSpec {
@@ -282,13 +291,7 @@ impl SqliteConfig {
             .synchronous(SqliteSynchronous::Normal)
             .busy_timeout(busy_timeout)
             .log_statements(LevelFilter::Off);
-        SqlitePoolOptions::new()
-            .max_connections(2)
-            // Waiting for one of its connections counts against the same
-            // short wait; a timeout reads as a busy DB.
-            .acquire_timeout(busy_timeout)
-            .connect_with(options)
-            .await
+        open_quick_pool(options, SqlitePoolOptions::new(), busy_timeout).await
     }
 
     pub(super) async fn open_logs_db(
@@ -464,7 +467,7 @@ impl SqliteConfig {
             .create_if_missing(true)
             .journal_mode(SqliteJournalMode::Wal)
             .synchronous(SqliteSynchronous::Normal)
-            .busy_timeout(Duration::from_secs(5))
+            .busy_timeout(BUSY_TIMEOUT)
             .log_statements(LevelFilter::Off);
         // Setting `auto_vacuum` takes the write lock even when the value is
         // unchanged, so it must not be a per-connection option: every pooled
@@ -508,11 +511,56 @@ impl SqliteConfig {
     }
 }
 
+/// Builds the short-wait pool from `pool_options` (tests add a slow
+/// `after_connect`). Waiting for one of its connections counts against the
+/// same short wait, and a timeout reads as a busy DB, so opening a connection
+/// must not (#865): on a loaded machine (Windows CI runners) an open can take
+/// longer than the short wait. The pool used to open its connections on
+/// demand, inside that wait, and to close them when idle: such a write then
+/// failed as busy with no lock held, and when the open at startup missed it,
+/// the process used the main pool and SQLite's 5 s wait for good. Now its
+/// connections are opened here, without that limit, and kept.
+async fn open_quick_pool(
+    options: SqliteConnectOptions,
+    pool_options: SqlitePoolOptions,
+    busy_timeout: Duration,
+) -> Result<SqlitePool, Error> {
+    // A database that can't be opened is reported here (the caller then uses
+    // the main pool); the pool's own opens below don't report errors.
+    options.connect().await?.close().await?;
+    let pool = pool_options
+        .max_connections(QUICK_POOL_CONNECTIONS)
+        .min_connections(QUICK_POOL_CONNECTIONS)
+        .idle_timeout(None)
+        .max_lifetime(None)
+        .acquire_timeout(busy_timeout)
+        .connect_lazy_with(options);
+    // The pool opens its connections in the background (`min_connections`);
+    // wait for them. Should they still be opening, the pool works anyway.
+    let deadline = Instant::now() + QUICK_POOL_OPEN_WAIT;
+    while pool.num_idle() < QUICK_POOL_CONNECTIONS as usize && Instant::now() < deadline {
+        tokio::time::sleep(QUICK_POOL_OPEN_POLL).await;
+    }
+    Ok(pool)
+}
+
 /// Held while the runtime databases are created and migrated (see
 /// [`SqliteConfig::lock_runtime_db_init`]); holds nothing when the lock could
 /// not be had.
 pub(crate) struct RuntimeDbInitLock {
     _file: Option<std::fs::File>,
+}
+
+impl Drop for RuntimeDbInitLock {
+    /// #756: unlock explicitly. Closing the file releases the lock only once
+    /// every copy of its descriptor is closed, and a child process forked
+    /// meanwhile (any spawn in this process) keeps a copy until it starts its
+    /// program, so the next launch would wait on a lock nobody holds.
+    fn drop(&mut self) {
+        if let Some(file) = &self._file {
+            let _ = file.unlock();
+        }
+    }
 }
 
 fn lock_file_options() -> std::fs::OpenOptions {

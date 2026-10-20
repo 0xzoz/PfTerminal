@@ -1231,6 +1231,15 @@ impl SecurityLevelPicker {
                     lines.extend(wrap(
                         "Starts when you restart: model keys held by the credential broker (unless your own config turns broker_model_auth off), and Moderate shown as the active level. Commands already running keep the permissions they started with until they end.",
                     ));
+                    // #842: other processes on the home take it too, from
+                    // the saved state (not when it could not be saved).
+                    let saved = outcome
+                        .core
+                        .as_ref()
+                        .is_none_or(|report| report.not_saved.is_none());
+                    if saved {
+                        lines.extend(wrap(MODERATE_REACHES_OTHER_TERMINALS));
+                    }
                 } else {
                     lines.extend(wrap(&format!(
                         "Restart Corbanu Terminal to activate {}. Until then this session stays {}.",
@@ -1447,7 +1456,9 @@ fn approvals_lines(
 }
 
 /// What Core's Aggressive level does in a running session (PF-23, #443).
-const CORE_EFFECTS: &str = "agent commands cannot run `corbanu vault …` and cannot open protected paths (the vault store, sign-in and credential files, and Corbanu's config, history and state), sensitive surfaces need a grant, external content reaches the model labelled untrusted, and memory summaries stop";
+/// #846: the project's credential files (`.env` and the like) are denied by
+/// Aggressive's sandbox profile, which starts at the restart, not by these.
+const CORE_EFFECTS: &str = "agent commands cannot run `corbanu vault …` and cannot open protected paths (the vault store, sign-in files, credential files in your home folder such as .ssh, .aws and .netrc, and Corbanu's config, history and state), sensitive surfaces need a grant, external content reaches the model labelled untrusted, and memory summaries stop";
 
 /// Issue #443: what only the restart applies after Aggressive is saved;
 /// `approvals_now` when the confirmation already required approval for
@@ -1460,6 +1471,9 @@ fn at_restart(approvals_now: bool, now: &BeforeRestart) -> String {
             "the Aggressive sandbox (writes only in the current folder, approved commands stay inside it)"
         }
         .to_string(),
+        // #846: part of Aggressive's sandbox profile, applied at launch.
+        "the project's credential files (.env, .env.* and .envrc) denied to agent commands"
+            .to_string(),
     ];
     if !approvals_now {
         items.push("approval for every command that is not known read-only".to_string());
@@ -1662,7 +1676,7 @@ impl SecurityLevelPicker {
             "Core's level is already Moderate in this session; confirming saves Moderate for every start. Model keys through the credential broker start when you restart Corbanu Terminal.".to_string()
         } else if self.basis.live {
             format!(
-                "Core's level becomes Moderate as soon as you confirm, in this session and the others of this Corbanu Terminal: {effects}; grants and \"for session\" approvals end. Model keys through the credential broker start when you restart Corbanu Terminal (you can restart right after saving); commands already running keep the permissions they started with."
+                "Core's level becomes Moderate as soon as you confirm, in this session and the others of this Corbanu Terminal, and within about a second in other Corbanu Terminals running on this Corbanu home (each says so): {effects}; grants and \"for session\" approvals end. Model keys through the credential broker start when you restart Corbanu Terminal (you can restart right after saving); commands already running keep the permissions they started with."
             )
         } else {
             format!(
@@ -1843,6 +1857,9 @@ const PERMISSIVE_UNDER_PROTECTED_LAUNCH: &str = "Your approval, sandbox, network
 
 /// #739: on the Permissive review while protected launch is on.
 const PROTECTED_LAUNCH_KEEPS_SANDBOX: &str = "Protected launch (secretless_agent_launch) stays on: agent commands never run outside the sandbox, even when you approve, so no approval to run outside it is offered.";
+
+/// #842 (Travis, 2026-10-15): on the Saved screen after Moderate applied now.
+const MODERATE_REACHES_OTHER_TERMINALS: &str = "Other Corbanu Terminals running on this Corbanu home take Core's Moderate rules within about a second and say so; their model keys move to the credential broker when they restart.";
 
 fn name(level: SecurityLevel) -> &'static str {
     crate::security::view::profile_name(level)

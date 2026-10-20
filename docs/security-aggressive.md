@@ -124,6 +124,41 @@ all its other rules (#758). Contained Claude panes get the same rule under
 Aggressive. Certificate checks for secure connections use a different
 service (`trustd`) and keep working.
 
+## User namespaces on Linux
+
+On Linux agent commands can't create user namespaces under Aggressive and
+Moderate (#826): `unshare` and `clone` with a new user namespace fail with
+"Operation not permitted", and `clone3` reports itself as unavailable, so
+programs fall back to `clone` and keep working. In a user namespace of its
+own a command is root over its own files: it could open the placeholders the
+sandbox hides the vault store and other denied files with, and mount over
+paths, so a nested `corbanu exec` wouldn't be recognised as nested. The rule
+covers every process in Corbanu's Linux sandbox, bubblewrap's own included.
+No grant or approval lifts it; Permissive is unchanged. Contained Claude
+panes get the rule too (#891). Commands that run without Corbanu's sandbox
+(an external sandbox) and a remote Linux executor used from macOS or Windows
+aren't covered.
+
+What needs a user namespace fails: a sandbox of its own (the commands of a
+nested `corbanu exec`, which Corbanu explains), rootless containers (Podman,
+Buildah, rootless Docker), `bwrap`, Flatpak, Nix's build sandbox, `unshare`,
+and Chrome or Electron with their sandbox on (Puppeteer's default; pass
+`--no-sandbox`, as Playwright does). 32-bit programs stop too. In a
+contained Claude pane, Claude Code's own Bash sandbox (bubblewrap) can't
+start (bubblewrap reports "No permissions to create new namespace");
+depending on its version and settings, Claude Code then fails the command
+or offers to run it outside its own sandbox, which, like every pane
+command, asks you first and still runs in Corbanu's sandbox. Choose
+Permissive to run them.
+
+Such a failure is named, not left as a bare "Operation not permitted": the
+command's output and a warning in your transcript name the rule and the
+level, the `/security` inspector lists "creating a user namespace" under
+recent denials, and the approval prompt for a command that runs `unshare`,
+`bwrap`, Podman, Buildah or Flatpak says it will fail. A contained Claude
+pane ends such a turn with a note naming the rule. The explanation only
+reads the command's output; it never changes what runs.
+
 ## A managed network proxy
 
 Aggressive turns the network off for agent commands, with one known limit:
@@ -194,15 +229,19 @@ say the same (#816): what holds from confirmation (approved commands kept in
 the session's sandbox, network off when its sandbox has no network and its
 permission-request tools are off, and any of Aggressive's environment, web
 search and model-key settings your own config already has), and that the rest
-starts at the restart.
+starts at the restart. That includes the project's credential files (`.env`,
+`.env.*` and `.envrc`): Aggressive's sandbox denies them, so before the
+restart agent commands can still read them (#846); Core's rules from
+confirmation cover the credential files in your home folder.
 
 Under Moderate a command can still ask to run outside it
 (an escalation request): the prompt says it stays in the sandbox, and
-approving it only lifts Moderate's protection of credential and Corbanu files
-for that one command. A write outside your writable folders, or network your
-sandbox blocks, still fails, and "retry without sandbox?" is not offered.
-Commands you allowed with "don't ask again" skip the prompt but stay in the
-sandbox too.
+approving it only lifts Moderate's protected-file rules (credential and
+Corbanu files, files that run code later) for that one command. A write
+outside your writable folders, or network your sandbox blocks, still fails,
+and "retry without sandbox?" is not offered. Commands you allowed with "don't
+ask again" skip the prompt but stay in the sandbox too, with those rules
+kept.
 
 The Corbanu home's runtime files (the sandbox launchers in `tmp`, shell
 snapshots, skills, plugins, packages and `AGENTS.md`) stay read-only to agent

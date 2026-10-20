@@ -296,3 +296,14 @@ async fn issue_620_startup_file_outside_the_folder_is_offered_no_grant() -> anyh
     );
     Ok(())
 }
+
+/// #902: the harness gives the path lookups these tests rely on the test
+/// bound, so a loaded machine does not drop the explanation or the withheld
+/// grant offer (they took over the 2 s production bound on a busy Mac).
+#[test]
+fn issue_902_harness_gives_the_lookups_the_test_bound() {
+    assert_eq!(
+        codex_core::test_support::security_lookup_timeout(),
+        std::time::Duration::from_secs(20)
+    );
+}

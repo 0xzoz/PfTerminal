@@ -202,7 +202,10 @@ pub fn observe(
             codex_model_provider::model_key_broker_installed(),
         ) {
             // #391: installed, but every model request is refused.
+            // #839, #878: or it refused the last request of this session or
+            // one of its agents, or outside any session.
             (_, true) => codex_model_provider::model_key_broker_unavailable()
+                .or_else(|| codex_model_provider::model_key_broker_refused(&threads))
                 .map_or(ControlFacts::Enforcing, ControlFacts::Degraded),
             (true, false) => {
                 ControlFacts::Degraded("no broker is running; provider keys are not sent")
@@ -318,6 +321,12 @@ pub(crate) fn record_sandbox_denial(thread: ThreadId, what: &'static str) {
 /// #622: a request was refused, or cut down, before it ran, because of what
 /// the security level never allows (fixed text only).
 pub(crate) fn record_refusal(thread: ThreadId, what: &'static str, outcome: &'static str) {
+    record(Some(thread), what, outcome);
+}
+
+/// #826 follow-up: a command failed reporting that its sandbox refused
+/// `what`, and the refusal was explained where it failed (fixed text only).
+pub(crate) fn record_command_denial(thread: ThreadId, what: &'static str, outcome: &'static str) {
     record(Some(thread), what, outcome);
 }
 

@@ -129,7 +129,7 @@ const MAIL: &[&str] = &["mail", "mailx", "sendmail", "mutt", "msmtp"];
 
 /// Wrappers that run a command given later in their words, with or without
 /// options of their own (`proxychains -q curl`, `uv run solana`, `npx x`).
-const EXEC_WRAPPERS: &[&str] = &[
+pub(super) const EXEC_WRAPPERS: &[&str] = &[
     "proxychains",
     "proxychains4",
     "torsocks",
@@ -161,9 +161,9 @@ const EXEC_WRAPPERS: &[&str] = &[
 ];
 /// Places one command may start (an exec wrapper's words, exec markers);
 /// more fail closed.
-const MAX_JUDGED_POSITIONS: usize = 64;
+pub(super) const MAX_JUDGED_POSITIONS: usize = 64;
 /// Words after which the next word is run as a command (`find -exec curl`).
-const EXEC_MARKERS: &[&str] = &["-exec", "-execdir", "-ok", "-okdir", "--"];
+pub(super) const EXEC_MARKERS: &[&str] = &["-exec", "-execdir", "-ok", "-okdir", "--"];
 
 /// The protected kind of one simple command. `command` is the index of its
 /// command word (after assignments and plain wrappers); the command itself,

@@ -284,6 +284,14 @@ fn write_provider_key_with_vault(
     api_key: &str,
     vault: Vault,
 ) -> std::io::Result<()> {
+    // #855: checked here as well as by the vault, so that the plaintext
+    // fallback below can never store it either.
+    if codex_vault::is_vault_error_text(api_key) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            codex_vault::VaultError::ErrorTextAsSecret,
+        ));
+    }
     let label = provider_label(provider_key_id);
     let entry = AddCredential {
         label: label.clone(),
@@ -305,6 +313,9 @@ fn write_provider_key_with_vault(
         Ok(_) => true,
         Err(codex_vault::VaultError::NotFound { .. }) => match vault.add(entry) {
             Ok(()) => true,
+            Err(err @ codex_vault::VaultError::StorageUnavailable { .. }) => {
+                return Err(std::io::Error::other(err));
+            }
             Err(err) => {
                 tracing::warn!(
                     ?err,
@@ -317,6 +328,12 @@ fn write_provider_key_with_vault(
                 );
             }
         },
+        // #855: a vault whose storage cannot be reached right now (for
+        // example an unreadable home) is not a keyring-less environment: the
+        // save fails, and the key is not written in plaintext instead.
+        Err(err @ codex_vault::VaultError::StorageUnavailable { .. }) => {
+            return Err(std::io::Error::other(err));
+        }
         Err(err) => {
             tracing::warn!(
                 ?err,
@@ -715,6 +732,67 @@ mod tests {
                 .expect("default read")
                 .as_deref(),
             Some("canary")
+        );
+    }
+
+    /// #855: a vault that cannot be reached right now (here: its lock file
+    /// cannot be opened) fails the save; the key is not written to the
+    /// plaintext fallback.
+    #[test]
+    fn an_unreachable_vault_fails_the_save_without_a_plaintext_copy() {
+        let codex_home = tempfile::tempdir().expect("tempdir");
+        let keyring = Arc::new(MockKeyringStore::default());
+        let lock = codex_home.path().join("secrets").join(".vault.lock");
+        std::fs::create_dir_all(&lock).expect("a directory where the lock file belongs");
+
+        let error = write_provider_key_with_store(
+            codex_home.path(),
+            "MOONSHOT_API_KEY",
+            "lock-test-value-0001",
+            keyring,
+        )
+        .expect_err("the save must fail");
+
+        assert!(
+            error.to_string().starts_with("failed to open vault lock"),
+            "{error}"
+        );
+        assert!(!codex_home.path().join("provider_auth.json").exists());
+        assert!(!codex_home.path().join("secrets").join("local.age").exists());
+    }
+
+    /// #855: the text of a vault error message is not saved as a provider
+    /// key, in the vault or in the plaintext fallback.
+    #[test]
+    fn the_text_of_a_vault_error_is_not_saved_as_a_provider_key() {
+        let codex_home = tempfile::tempdir().expect("tempdir");
+        let keyring = Arc::new(MockKeyringStore::default());
+        let shown = "Failed to add vault credential \"moonshot_api_key\": failed to open vault lock /tmp/home/secrets/.vault.lock";
+
+        for _ in 0..2 {
+            let error = write_provider_key_with_store(
+                codex_home.path(),
+                "MOONSHOT_API_KEY",
+                shown,
+                keyring.clone(),
+            )
+            .expect_err("error text must be refused");
+            assert!(error.to_string().contains("nothing was stored"), "{error}");
+            write_provider_key_with_store(
+                codex_home.path(),
+                "MOONSHOT_API_KEY",
+                "lock-test-value-0001",
+                keyring.clone(),
+            )
+            .expect("a real key is saved");
+        }
+
+        assert!(!codex_home.path().join("provider_auth.json").exists());
+        assert_eq!(
+            read_provider_key_with_store(codex_home.path(), "MOONSHOT_API_KEY", keyring)
+                .expect("read")
+                .as_deref(),
+            Some("lock-test-value-0001")
         );
     }
 }

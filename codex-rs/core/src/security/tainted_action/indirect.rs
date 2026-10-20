@@ -39,8 +39,11 @@ pub(super) fn joined_literals(text: &str) -> Vec<String> {
         index += 1;
         while index < chars.len() && chars[index] != quote {
             if chars[index] == '\\' && index + 1 < chars.len() {
-                escaped = true;
                 let (decoded, used) = decode_escape(&chars[index + 1..]);
+                // #841: only an escape that changes the text hides
+                // anything (`\x2e`, `\056`, `\n`); `\[`, `\\` or a
+                // backslash before a newline (a sed `a\` append) do not.
+                escaped |= decoded != Some(chars[index + 1]);
                 literal.extend(decoded);
                 index += 1 + used;
             } else {
@@ -49,6 +52,10 @@ pub(super) fn joined_literals(text: &str) -> Vec<String> {
             }
         }
         index += 1;
+        // #841: an empty literal (`sed -i ''`) adds nothing to a run.
+        if literal.is_empty() {
+            continue;
+        }
         if literal.contains(['\'', '"', '`']) {
             nested.extend(joined_literals(&literal));
         }

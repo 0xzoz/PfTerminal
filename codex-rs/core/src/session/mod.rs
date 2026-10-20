@@ -2078,7 +2078,10 @@ impl Session {
     ///   `consolidation:` (bound when the session is built, so its first
     ///   request, a startup prewarm included, already has its owner);
     /// - a sub-agent (a spawned agent, a `/review` task): the conversation it
-    ///   works for, as `agent:` or `code-review:`;
+    ///   works for, as `agent:` or `code-review:`. A `/review` task records
+    ///   there even though it is persisted as a thread of its own (#898): that
+    ///   thread names no parent the ledger can resolve, so its requests would
+    ///   otherwise be counted under no conversation;
     /// - an ephemeral fork: the conversation it was forked from, as `side:`
     ///   for a TUI `/side` conversation and `fork:` for any other.
     ///
@@ -2102,7 +2105,7 @@ impl Session {
     ) -> Result<crate::accounting::AccountingOwner, crate::accounting::Uncollected> {
         use crate::accounting::Uncollected;
         use codex_protocol::protocol::SubAgentSource;
-        let (guardian_parent, worked_for, forked_from) = {
+        let (guardian_parent, code_review_parent, worked_for, forked_from) = {
             let state = self.state.lock().await;
             let configuration = &state.session_configuration;
             let guardian_parent = match &configuration.session_source {
@@ -2113,13 +2116,14 @@ impl Session {
                 }
                 _ => None,
             };
+            let code_review_parent = match &configuration.session_source {
+                SessionSource::SubAgent(SubAgentSource::Review) => configuration.parent_thread_id,
+                _ => None,
+            };
             let worked_for = match &configuration.session_source {
                 SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                     parent_thread_id, ..
                 }) => Some((*parent_thread_id, "agent:")),
-                SessionSource::SubAgent(SubAgentSource::Review) => configuration
-                    .parent_thread_id
-                    .map(|parent| (parent, "code-review:")),
                 SessionSource::SubAgent(
                     SubAgentSource::Compact
                     | SubAgentSource::MemoryConsolidation
@@ -2137,12 +2141,17 @@ impl Session {
                 );
                 (parent, if side { "side:" } else { "fork:" })
             });
-            (guardian_parent, worked_for, forked_from)
+            (guardian_parent, code_review_parent, worked_for, forked_from)
         };
         if let Some(parent) = guardian_parent {
             let parent = parent.ok_or(Uncollected::Excluded("guardian_without_parent"))?;
             return self
                 .accounting_owner_elsewhere(parent, "review:", depth)
+                .await;
+        }
+        if let Some(parent) = code_review_parent {
+            return self
+                .accounting_owner_elsewhere(parent, "code-review:", depth)
                 .await;
         }
         if self.live_thread().is_some() {
@@ -2216,10 +2225,24 @@ impl Session {
                     return Err(Uncollected::Excluded("parent_not_persisted"));
                 };
                 match Box::pin(parent_session.accounting_owner_at(depth + 1)).await {
-                    Ok(owner) => Ok(crate::accounting::AccountingOwner {
-                        label_prefix: format!("{}{label}", owner.label_prefix),
-                        ..owner
-                    }),
+                    Ok(owner) => {
+                        // A saved conversation whose thread row is not
+                        // written yet (work started before its first saved
+                        // item, such as `/review` racing the item that opens
+                        // it) records under its own thread; save it now, as
+                        // its own first request would, so the ledger has the
+                        // thread to record under (#898).
+                        if owner.thread == parent {
+                            parent_session
+                                .try_ensure_rollout_materialized()
+                                .await
+                                .map_err(|_| Uncollected::Failed("parent thread not saved"))?;
+                        }
+                        Ok(crate::accounting::AccountingOwner {
+                            label_prefix: format!("{}{label}", owner.label_prefix),
+                            ..owner
+                        })
+                    }
                     Err(Uncollected::Excluded(_)) => {
                         Err(Uncollected::Excluded("parent_not_persisted"))
                     }
@@ -4710,10 +4733,32 @@ impl Session {
             items,
         );
         let items = gated.as_deref().unwrap_or(items);
-        if let Some(live_thread) = self.live_thread()
-            && let Err(e) = live_thread.append_items(items).await
+        let Some(live_thread) = self.live_thread() else {
+            return;
+        };
+        let Err(e) = live_thread.append_items(items).await else {
+            // #616: only an append that wrote something shows the home works.
+            if items.iter().any(|item| {
+                codex_rollout::is_persisted_rollout_item(item, live_thread.history_mode())
+            }) {
+                crate::home_access::note_rollout_written(self.thread_id());
+            }
+            return;
+        };
+        error!("failed to record rollout items: {e:#}");
+        // #616: the writer keeps unwritten items for its next flush; exec
+        // waits for their folder before it saves the session at exit. Record
+        // why the rollout could not be written.
+        let message = format!("{e:#}");
+        if crate::home_access::is_operation_not_permitted(&message)
+            && let Ok(Some(rollout)) = live_thread.local_rollout_path().await
         {
-            error!("failed to record rollout items: {e:#}");
+            if let Some(dir) = rollout.parent() {
+                crate::home_access::note_rollout_unwritten(self.thread_id(), dir.to_path_buf());
+            }
+            tokio::task::spawn_blocking(move || {
+                crate::home_access::record_home_access_failure("rollout write", &rollout, &message)
+            });
         }
     }
 
@@ -5441,3 +5486,7 @@ pub(crate) mod tests;
 #[cfg(test)]
 #[path = "account_switch_tests.rs"]
 mod account_switch_tests;
+
+#[cfg(test)]
+#[path = "home_access_session_tests.rs"]
+mod home_access_session_tests;

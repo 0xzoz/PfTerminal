@@ -274,6 +274,7 @@ async fn run_compact_task_inner_impl(
     let max_retries = turn_context.provider.info().stream_max_retries();
     let mut retries = 0;
     let mut unresolvable_item_retries = 0;
+    let mut home_wait = crate::home_access::HomeWait::default();
     let mut client_session = sess.services.new_model_client_session();
     // A compaction is inference the operator paid for - and `/compact` is one they
     // asked for directly - so it is collected like any other turn rather than
@@ -374,6 +375,18 @@ async fn run_compact_task_inner_impl(
                 continue;
             }
             Err(e) => {
+                // #616: wait out an unreadable home without using retries.
+                let e = match crate::home_access::wait_if_home_unreadable(
+                    &mut home_wait,
+                    &sess,
+                    turn_context.as_ref(),
+                    e,
+                )
+                .await
+                {
+                    Ok(()) => continue,
+                    Err(e) => e,
+                };
                 if retries < max_retries {
                     retries += 1;
                     let delay = backoff(retries);
