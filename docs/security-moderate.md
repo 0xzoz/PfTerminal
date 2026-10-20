@@ -112,11 +112,10 @@ The kill switch (`/security` → `g`) works under every level.
   `.git` (a folder it can't read, or too many entries), approving a command
   in that project doesn't lift the protected-file rules (nor run it outside
   the sandbox, nor let it create user namespaces), in any session of this
-  Corbanu Terminal. Some setups of your
-  own hold them too until you remove them: a layout made of links
-  (`git new-workdir`, Android's `repo`), a `config.worktree` that
-  `git sparse-checkout` adds, or a hooks folder a hook installer creates
-  where there was none. On Linux the sandbox leaves empty files and folders
+  Corbanu Terminal. Some setups of your own hold them too until you remove
+  them: a layout made of links (`git new-workdir`, Android's `repo`), a
+  `config.worktree` that `git sparse-checkout` adds, or a hooks folder a
+  hook installer creates where there was none. On Linux the sandbox leaves empty files and folders
   in place while a command runs: a new config file or hooks folder that is
   empty is reported (in any session) once something is put in it, and an
   empty `.git` folder replaced by another empty one isn't reported. It
@@ -125,8 +124,9 @@ The kill switch (`/security` → `g`) works under every level.
   it changes after a turn ends is found at the next command, not before you
   run git yourself. It watches the repositories of the folders agent
   commands run in (a command's own working folder, `workdir`, too): not a
-  repository a command reaches elsewhere (`git -C`),
-  not one a command creates and fills in one go (nothing was there to
+  repository a command reaches elsewhere (`git -C`, a `cd` in the command
+  or in a shell it left running, a program the zsh-fork shell starts in
+  another folder), not one a command creates and fills in one go (nothing was there to
   compare with), and not a `.git` removed in one command and made again in a
   later one (it gets a first look, which reports only links, steps and hard
   links). New config and hooks are checked only

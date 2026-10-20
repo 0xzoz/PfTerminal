@@ -704,9 +704,7 @@ impl ToolOrchestrator {
         // `workdir`) counts too.
         let mut git_folders =
             resolution_folders(tool, req, &turn_cwd, &materialized_workspace_roots);
-        if let Some(cwd) = tool.command_cwd(req) {
-            git_folders.insert(0, cwd);
-        }
+        git_folders.extend(tool.command_cwd(req));
         let git_held = git_refresh(tool_ctx, git_folders).await;
         let mut git_held_back = false;
         let denied = post_taint_read_denials(
@@ -960,9 +958,6 @@ impl ToolOrchestrator {
                     if let Ok(policy_cwd) = sandbox_policy_cwd.to_abs_path() {
                         folders.push(policy_cwd.to_path_buf());
                     }
-                    // #943 item 11: and the folder the command runs in (its
-                    // `workdir`), which may be another repository.
-                    folders.extend(tool.command_cwd(req).map(|cwd| cwd.to_path_buf()));
                     #[allow(deprecated)]
                     folders.push(turn_ctx.cwd.to_path_buf());
                     folders.extend(
@@ -977,7 +972,18 @@ impl ToolOrchestrator {
                         );
                     let unsandboxed =
                         initial_sandbox == SandboxType::None || policy_allows_no_sandbox;
-                    GitCheck::begin(tool_ctx, level, folders, effective, unsandboxed).await
+                    // #943 item 11: and the folder the command runs in (its
+                    // `workdir`), which may be another repository.
+                    let command_cwd = tool.command_cwd(req).map(|cwd| cwd.to_path_buf());
+                    GitCheck::begin(
+                        tool_ctx,
+                        level,
+                        folders,
+                        command_cwd,
+                        effective,
+                        unsandboxed,
+                    )
+                    .await
                 }
                 _ => None,
             };
@@ -1328,13 +1334,15 @@ struct GitCheck {
 }
 
 impl GitCheck {
-    /// The repositories of `folders` whose git folder the run may write
+    /// The repositories of `folders` and of `command_cwd` (the folder the
+    /// command runs in, #943 item 11) whose git folder the run may write
     /// (through `policy`, or anywhere where it may run unsandboxed), with
     /// this session's first look at each taken.
     async fn begin(
         tool_ctx: &ToolCtx,
         level: codex_security_policy::SecurityLevel,
         folders: Vec<std::path::PathBuf>,
+        command_cwd: Option<std::path::PathBuf>,
         policy: codex_protocol::permissions::FileSystemSandboxPolicy,
         unsandboxed: bool,
     ) -> Option<Self> {
@@ -1345,7 +1353,7 @@ impl GitCheck {
         // Issue #524: reading folders stays off the async thread.
         let looked = tokio::task::spawn_blocking(move || {
             let folders: Vec<&std::path::Path> = folders.iter().map(AsRef::as_ref).collect();
-            let repos: Vec<_> = git_postcheck::repos(&folders)
+            let repos: Vec<_> = git_postcheck::repos_and(&folders, command_cwd.as_deref())
                 .into_iter()
                 .filter(|repo| {
                     unsandboxed

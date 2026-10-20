@@ -53,6 +53,7 @@ use codex_sandboxing::SandboxCommand;
 use codex_sandboxing::SandboxablePreference;
 use codex_shell_command::powershell::prefix_powershell_script_with_utf8;
 use codex_tools::UnifiedExecShellMode;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use futures::future::BoxFuture;
 use std::collections::HashMap;
@@ -336,10 +337,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecProcess> for UnifiedExecRunt
         Some(&req.sandbox_cwd)
     }
 
-    fn command_cwd(
-        &self,
-        req: &UnifiedExecRequest,
-    ) -> Option<codex_utils_absolute_path::AbsolutePathBuf> {
+    fn command_cwd(&self, req: &UnifiedExecRequest) -> Option<AbsolutePathBuf> {
         req.cwd.to_abs_path().ok()
     }
 
