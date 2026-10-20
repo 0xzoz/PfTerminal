@@ -336,12 +336,13 @@ pub fn run_main() -> ! {
 /// pid alone no longer reaches the command (Corbanu signals the group, or
 /// kills this helper with `SIGKILL`, which stops the command).
 fn run_supervised_without_bwrap(exec_command: impl FnOnce()) -> ! {
-    // SAFETY: plain syscalls on this process, still single-threaded.
+    // SAFETY: plain syscall on this process, still single-threaded.
     let group = unsafe { libc::getpgrp() };
     let original_mask = crate::supervisor::block_all_signals();
+    // SAFETY: plain data, valid when zeroed.
     let mut original_sigchld: libc::sigaction = unsafe { std::mem::zeroed() };
-    // SAFETY: valid out pointer; the supervisor is waited for, and an
-    // ignored SIGCHLD (inherited across exec) would reap it unseen.
+    // SAFETY: valid in and out pointers; the supervisor is waited for, and
+    // an ignored SIGCHLD (inherited across exec) would reap it unseen.
     unsafe {
         let mut default: libc::sigaction = std::mem::zeroed();
         default.sa_sigaction = libc::SIG_DFL;
@@ -354,7 +355,8 @@ fn run_supervised_without_bwrap(exec_command: impl FnOnce()) -> ! {
     // signals it could catch), which cuts the lifeline.
     let parent_watch = crate::supervisor::ParentWatch::open(libc::SIGKILL);
     let (lifeline_read, lifeline) = crate::supervisor::lifeline();
-    let (relay, relay_requests) = crate::supervisor::Relay::pipe(group);
+    let (mut relay, relay_requests) = crate::supervisor::Relay::pipe(group, FORWARDED_SIGNALS);
+    relay.note_pending();
     // SAFETY: this process is single-threaded.
     let pid = unsafe { libc::fork() };
     if pid < 0 {

@@ -123,26 +123,37 @@ commands that would enter the bubblewrap path.
   longer execs the command: the supervisor starts it, restricted as before,
   in the helper's process group and session (the terminal's foreground
   group, if it was), with the signal mask and `SIGCHLD` action the helper
-  was started with. Without a PID namespace, the supervisor stops what is
-  left by killing its children, which takes in every orphaned process (it is
-  a subreaper), and repeating until none is left. It does that when the
+  was started with, then moves to a session of its own before the command
+  runs. Without a PID namespace, the supervisor stops what is left by
+  killing its children, which takes in every orphaned process (it is a
+  subreaper), and repeating until none is left. It does that when the
   command exits, when the helper exits or is killed (a process-group kill
-  included: the supervisor leaves the group once the command is in it) and
-  when the helper's parent exits (a pidfd; without one, `PR_SET_PDEATHSIG`
-  kills the helper). The helper and the supervisor then exit as the command
-  did. Signals:
+  included) and when the helper's parent exits (a pidfd; without one,
+  `PR_SET_PDEATHSIG` kills the helper). The helper and the supervisor then
+  exit as the command did, and keep the helper's standard streams open
+  until then, as on the bubblewrap path. Signals:
   - one sent to the helper's process group (as Corbanu sends them) or by
     the terminal reaches the command directly; the helper ignores it;
-  - `SIGHUP`, `SIGINT`, `SIGQUIT` and `SIGTERM` sent to the group are
+  - `SIGHUP`, `SIGINT`, `SIGQUIT` and `SIGTERM` that reach the helper are
     relayed to the command once it has moved to a process group of its own
-    (an interactive shell does), and a terminal hangup's `SIGHUP` (sent to
-    the session leader, now the helper) is always relayed;
-  - one sent to the helper's pid alone no longer reaches the command, except
-    `SIGKILL`, which stops it.
-  The command's parent is now the supervisor, and the command is no longer
-  its session's or group's leader. This guards against a command that
-  daemonizes, not a hostile one: the command runs as the same user, outside
-  a PID namespace, and could kill the supervisor itself.
+    (an interactive shell does; one arriving while it moves may reach it
+    twice), and so is a terminal hangup's `SIGHUP`, which goes to the
+    session leader (now the helper) alone; ones sent before the command
+    started are sent to it as it starts;
+  - a catchable signal sent to the helper's pid alone no longer reaches the
+    command (one of these four does once the command has left the group);
+    `SIGKILL` to the helper stops it.
+
+  The command's parent is now the supervisor, and the command no longer
+  leads its session or group (`setsid()` now succeeds). The terminal's stop
+  signals still do not stop a command that stays in the helper's group, as
+  before. Limits: this guards against a command that daemonizes, not a
+  hostile one (it runs as the same user, outside a PID namespace, and could
+  kill the supervisor); a process running as another user (a setuid program,
+  where `no_new_privs` is not set) cannot be killed and is left running;
+  processes started through a service manager outside the command's process
+  tree (`systemd --user`, an existing tmux server) are not its descendants;
+  and without `/proc` the supervisor cannot list what is left.
 - When bubblewrap is active, it mounts a fresh `/proc` via `--proc /proc` by default, but
   you can skip this in restrictive container environments with `--no-proc`.
 

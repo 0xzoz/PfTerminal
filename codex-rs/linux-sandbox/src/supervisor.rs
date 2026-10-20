@@ -138,23 +138,28 @@ impl ParentWatch {
 
 /// #1006: how signals reach a command run without bubblewrap. The command
 /// starts in the helper's process group (`group`, where the session's
-/// signals and the terminal's go) and the supervisor leaves it, so a signal
-/// sent to the group reaches the command directly and the helper ignores it.
-/// The helper writes each forwarded signal it receives to `requests` (as an
-/// `i32`), and the supervisor relays it only once the command has left
-/// `group` (an interactive shell moves to a group of its own): the command
-/// then gets every signal sent to the group, once. A terminal hangup's
-/// `SIGHUP` goes to the session leader alone, which the command was before
-/// #1006; the helper asks for that one to be relayed in any case.
+/// signals and the terminal's go) and the supervisor leaves for a session of
+/// its own, so a signal sent to the group reaches the command directly and
+/// the helper ignores it. The helper writes each forwarded signal
+/// (`signals`) it receives to `requests` (as an `i32`), and the supervisor
+/// relays it only once the command has left `group` (an interactive shell
+/// moves to a group of its own): the command then gets every signal sent to
+/// the group once (twice at most if it arrives while the command is
+/// leaving the group). A terminal hangup's `SIGHUP` goes to the session
+/// leader alone, which the command was before #1006; the helper asks for
+/// that one to be relayed in any case. Forwarded signals sent before the
+/// command existed (`pending`) are sent to it before it starts.
 pub(crate) struct Relay {
-    pub(crate) requests: OwnedFd,
-    pub(crate) group: libc::pid_t,
+    requests: OwnedFd,
+    group: libc::pid_t,
+    signals: &'static [libc::c_int],
+    pending: Vec<libc::c_int>,
 }
 
 impl Relay {
     /// The supervisor's read end and the helper's write end (close-on-exec,
     /// non-blocking).
-    pub(crate) fn pipe(group: libc::pid_t) -> (Self, OwnedFd) {
+    pub(crate) fn pipe(group: libc::pid_t, signals: &'static [libc::c_int]) -> (Self, OwnedFd) {
         let mut fds = [-1; 2];
         // SAFETY: `fds` is a valid out array of two descriptors.
         if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } < 0 {
@@ -167,9 +172,29 @@ impl Relay {
             Self {
                 requests: read,
                 group,
+                signals,
+                pending: Vec::new(),
             },
             write,
         )
+    }
+
+    /// Notes the forwarded signals pending in this process: sent before the
+    /// command exists. Call just before forking (a child starts with none
+    /// pending).
+    pub(crate) fn note_pending(&mut self) {
+        // SAFETY: valid out set; plain syscall on this process.
+        unsafe {
+            let mut pending: libc::sigset_t = std::mem::zeroed();
+            if libc::sigpending(&mut pending) < 0 {
+                return;
+            }
+            for signal in self.signals {
+                if libc::sigismember(&pending, *signal) == 1 && !self.pending.contains(signal) {
+                    self.pending.push(*signal);
+                }
+            }
+        }
     }
 
     /// Asks the supervisor to relay `signal`, also to a command still in the
@@ -232,8 +257,9 @@ impl Relay {
 /// must not keep. Signals the helper forwards (`forwarded_signals`) stay
 /// blocked here: they reach bubblewrap through the process group. `SIGCHLD`
 /// is blocked too, so `start_child` must set its signal mask. With `relay`,
-/// the supervisor is still in the helper's process group: the child starts
-/// there, then the supervisor leaves it.
+/// the supervisor is still in the helper's process group (with every signal
+/// blocked): the child is born there and waits until the supervisor has
+/// left for a session of its own.
 pub(crate) fn run(
     lifeline: OwnedFd,
     forwarded_signals: &[libc::c_int],
@@ -252,6 +278,11 @@ pub(crate) fn run(
     let child_signals = SignalFd::sigchld();
     // SAFETY: plain syscall.
     let supervisor = unsafe { libc::getpid() };
+    let mut relay = relay;
+    let start = relay.as_mut().map(|relay| {
+        relay.note_pending();
+        StartGate::new()
+    });
     // SAFETY: the supervisor is single-threaded.
     let bubblewrap = unsafe { libc::fork() };
     if bubblewrap < 0 {
@@ -259,16 +290,32 @@ pub(crate) fn run(
         panic!("failed to fork for bubblewrap: {err}");
     }
     if bubblewrap == 0 {
+        if let Some(start) = start {
+            start.wait();
+        }
         start_child(supervisor);
         // SAFETY: ends the child, which failed to exec.
         unsafe { libc::_exit(127) }
     }
-    // Out of reach of a kill aimed at the helper's group, which the command
-    // was born in (so a signal sent to the group never misses it).
-    // SAFETY: plain syscall on this process.
-    if relay.is_some() && unsafe { libc::setpgid(0, 0) } < 0 {
-        let err = std::io::Error::last_os_error();
-        panic!("failed to place the sandbox supervisor in its own process group: {err}");
+    if let (Some(relay), Some(start)) = (&relay, start) {
+        // Out of reach of a kill aimed at the helper's group, which the
+        // command was born in (so a signal sent to the group never misses
+        // it), and outside the helper's session, so the command's group stays
+        // orphaned as it was when the helper was the command (the terminal's
+        // stop signals do not stop it).
+        // SAFETY: plain syscall on this process, which leads no group.
+        if unsafe { libc::setsid() } < 0 {
+            let err = std::io::Error::last_os_error();
+            panic!("failed to place the sandbox supervisor in its own session: {err}");
+        }
+        for signal in &relay.pending {
+            // SAFETY: `bubblewrap` (the command) is this process's unreaped
+            // child; it has every signal blocked until it starts.
+            unsafe {
+                libc::kill(bubblewrap, *signal);
+            }
+        }
+        start.release();
     }
     // What the child inherits (its arguments' descriptors) is not kept here.
     drop(start_child);
@@ -370,6 +417,9 @@ fn kill_and_reap_children(
     status: &mut Option<libc::c_int>,
     child_signals: &SignalFd,
 ) {
+    // Children this process may not signal: another user's (a setuid program
+    // run where `no_new_privs` is not set). They are left to init.
+    let mut foreign = Vec::new();
     loop {
         let Some(children) = children() else {
             // Cannot list them (no /proc): reap what has exited rather than
@@ -377,13 +427,23 @@ fn kill_and_reap_children(
             reap_exited(bubblewrap, status);
             return;
         };
+        let mut killed = false;
         for child in children {
+            if foreign.contains(&child) {
+                continue;
+            }
             // SAFETY: an unreaped child of this process.
-            unsafe {
-                libc::kill(child, libc::SIGKILL);
+            if unsafe { libc::kill(child, libc::SIGKILL) } < 0
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+            {
+                foreign.push(child);
+            } else {
+                killed = true;
             }
         }
-        if !reap_exited(bubblewrap, status) {
+        // A killed child's children are this process's by the time it is
+        // reaped, so with none killed, only foreign ones are left.
+        if !reap_exited(bubblewrap, status) || !killed {
             return;
         }
         let mut poll_fd = libc::pollfd {
@@ -486,6 +546,43 @@ pub(crate) fn exit_like(status: libc::c_int) -> ! {
     }
 }
 
+/// #1006: holds a command born in the helper's process group until the
+/// supervisor has left the group (so a kill aimed at the group cannot catch
+/// the supervisor once the command runs) and sent it the signals it missed.
+struct StartGate {
+    read: OwnedFd,
+    write: OwnedFd,
+}
+
+impl StartGate {
+    fn new() -> Self {
+        let mut fds = [-1; 2];
+        // SAFETY: `fds` is a valid out array of two descriptors.
+        if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } < 0 {
+            let err = std::io::Error::last_os_error();
+            panic!("failed to create the sandbox start gate: {err}");
+        }
+        // SAFETY: both descriptors were just created and are owned here.
+        let (read, write) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+        Self { read, write }
+    }
+
+    /// In the child: returns once the supervisor released it or is gone.
+    fn wait(self) {
+        drop(self.write);
+        let mut byte = 0u8;
+        // SAFETY: reads at most one byte into `byte`.
+        while unsafe { libc::read(self.read.as_raw_fd(), (&mut byte as *mut u8).cast(), 1) } < 0
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR)
+        {}
+    }
+
+    /// In the supervisor.
+    fn release(self) {
+        drop(self);
+    }
+}
+
 /// Blocks every signal (`SIGKILL` and `SIGSTOP` cannot be); the previous
 /// mask.
 pub(crate) fn block_all_signals() -> libc::sigset_t {
@@ -531,9 +628,11 @@ impl SignalFd {
         }
     }
 
-    /// Waits for the next signal: its number and `si_code`.
+    /// Waits for the next signal: its number and `si_code` (a failed `poll`
+    /// is retried).
     pub(crate) fn next(&self) -> (libc::c_int, libc::c_int) {
         loop {
+            // SAFETY: plain data, valid when zeroed.
             let mut info: libc::signalfd_siginfo = unsafe { std::mem::zeroed() };
             let size = std::mem::size_of::<libc::signalfd_siginfo>();
             // SAFETY: reads at most `size` bytes into `info`.

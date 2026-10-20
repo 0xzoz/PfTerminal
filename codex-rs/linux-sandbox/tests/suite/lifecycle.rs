@@ -28,6 +28,9 @@ use codex_sandboxing::landlock::create_linux_sandbox_command_args_for_permission
 use codex_utils_absolute_path::AbsolutePathBuf;
 use std::io::BufRead;
 use std::io::BufReader;
+use std::os::fd::AsRawFd;
+use std::os::fd::FromRawFd;
+use std::os::fd::OwnedFd;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Child;
@@ -704,6 +707,8 @@ fn a_command_without_bubblewrap_gets_its_groups_signals_once() {
             assert_eq!(next("ready"), "ready");
             signal_group(group, libc::SIGINT);
             assert_eq!(next("interrupt"), "interrupted");
+            // Time for a second (relayed) SIGINT to arrive, if one would.
+            std::thread::sleep(Duration::from_millis(300));
             signal_group(group, libc::SIGTERM);
             assert_eq!(
                 next("count"),
@@ -720,5 +725,119 @@ fn a_command_without_bubblewrap_gets_its_groups_signals_once() {
                 "{mode:?} (moved: {moves}): the command's sleep outlived it"
             );
         }
+    }
+}
+
+/// A pseudo-terminal: the master, and the slave to become a controlling
+/// terminal.
+fn open_pty() -> (OwnedFd, OwnedFd) {
+    // SAFETY: plain calls; the descriptors are checked and owned here.
+    unsafe {
+        let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC);
+        assert!(master >= 0, "posix_openpt");
+        let master = OwnedFd::from_raw_fd(master);
+        assert_eq!(libc::grantpt(master.as_raw_fd()), 0, "grantpt");
+        assert_eq!(libc::unlockpt(master.as_raw_fd()), 0, "unlockpt");
+        let mut name = [0 as libc::c_char; 128];
+        assert_eq!(
+            libc::ptsname_r(master.as_raw_fd(), name.as_mut_ptr(), name.len()),
+            0,
+            "ptsname_r"
+        );
+        let slave = libc::open(
+            name.as_ptr(),
+            libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC,
+        );
+        assert!(slave >= 0, "open the pty slave");
+        (master, OwnedFd::from_raw_fd(slave))
+    }
+}
+
+/// Reads `master` into `text` until it contains `needle`.
+fn read_until(master: &OwnedFd, text: &mut String, needle: &str) {
+    let deadline = std::time::Instant::now() + BOUND;
+    while !text.contains(needle) {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        assert!(!left.is_zero(), "no {needle:?} on the terminal: {text:?}");
+        let mut poll_fd = libc::pollfd {
+            fd: master.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one valid pollfd.
+        if unsafe { libc::poll(&mut poll_fd, 1, left.as_millis() as libc::c_int) } <= 0 {
+            continue;
+        }
+        let mut buffer = [0u8; 1024];
+        // SAFETY: reads at most `buffer.len()` bytes into `buffer`.
+        let read =
+            unsafe { libc::read(master.as_raw_fd(), buffer.as_mut_ptr().cast(), buffer.len()) };
+        assert!(read > 0, "the terminal closed: {text:?}");
+        text.push_str(&String::from_utf8_lossy(&buffer[..read as usize]));
+    }
+}
+
+fn write_all(master: &OwnedFd, bytes: &[u8]) {
+    // SAFETY: writes `bytes` (a few bytes: fits the terminal's buffer).
+    let written = unsafe { libc::write(master.as_raw_fd(), bytes.as_ptr().cast(), bytes.len()) };
+    assert_eq!(written, bytes.len() as isize, "write to the terminal");
+}
+
+/// #1006: a command run without bubblewrap on a terminal, as Corbanu runs
+/// one (the helper leads the session): the terminal's stop signal does not
+/// stop it, as before (its process group stays orphaned), and a hangup
+/// still reaches it (it went to the session leader, which it was).
+#[test]
+fn a_command_without_bubblewrap_keeps_its_terminal() {
+    use std::os::unix::process::CommandExt;
+    use std::os::unix::process::ExitStatusExt;
+
+    for mode in UNWRAPPED {
+        let fixture = Fixture::new();
+        if !fixture.unwrapped_runs(mode) {
+            continue;
+        }
+        let (master, slave) = open_pty();
+        let script = format!(
+            "echo ready; read line; echo \"got $line\"; exec sleep {}",
+            fixture.foreground
+        );
+        let mut command = fixture.command(
+            Bwrap::Unused,
+            &helper(),
+            &fixture.unwrapped_args(mode, &script),
+        );
+        command
+            .stdin(Stdio::from(slave.try_clone().unwrap()))
+            .stdout(Stdio::from(slave.try_clone().unwrap()))
+            .stderr(Stdio::from(slave));
+        // SAFETY: async-signal-safe calls between fork and exec.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut helper = command.spawn().unwrap();
+        // Only the helper holds the slave now.
+        drop(command);
+        let mut text = String::new();
+        read_until(&master, &mut text, "ready");
+        write_all(&master, b"\x1a");
+        write_all(&master, b"x\n");
+        read_until(&master, &mut text, "got x");
+        // The last descriptor of the master: the slave hangs up.
+        drop(master);
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(reap(&mut helper));
+        });
+        let status = rx
+            .recv_timeout(BOUND)
+            .unwrap_or_else(|_| panic!("{mode:?}: the command outlived its terminal's hangup"));
+        assert_eq!(status.signal(), Some(libc::SIGHUP), "{mode:?}: {status}");
+        assert!(fixture.kill_marked().is_empty(), "{mode:?}");
     }
 }
