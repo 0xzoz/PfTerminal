@@ -1,6 +1,6 @@
 # acc-tart1: PF-60 follow-up isolated live run on Tart (2026-10-20)
 
-The follow-up live run that the [accounting follow-ups plan](../../../../docs/plans/active/portfolio-agent-cost-accounting-followups.md)
+The follow-up live run that the [accounting follow-ups plan](../../../../docs/plans/completed/main-2026-10-20-portfolio-agent-cost-accounting-followups.md)
 waits on. Owner decisions (Travis):
 - D25 (2026-10-16): re-check PF-60-S10's gaps in [#898](https://github.com/CorbanuCore/CorbanuTerminal/issues/898)'s
   acceptance run: ACC-06 `/review` cost, the Request IDs of ACC-11/14/18, and ACC-15's `side:` screen.
