@@ -343,9 +343,9 @@ fn security_transition_downgrade_of_the_record_sets_the_next_start() {
 #[test]
 fn issue_978_aggressive_without_a_live_tree_requires_approval_in_this_process() {
     let home = TempDir::new().unwrap();
-    assert!(!sessions_run_here(home.path()));
+    assert!(!sessions_run_here(home.path(), /*thread*/ None));
     let (other, _) = live_tree(&home, SecurityLevel::Permissive);
-    assert!(sessions_run_here(home.path()));
+    assert!(sessions_run_here(home.path(), /*thread*/ None));
     assert!(!super::super::confirmed_approvals::confirmed_here(
         home.path()
     ));
@@ -370,6 +370,28 @@ fn issue_978_aggressive_without_a_live_tree_requires_approval_in_this_process() 
         super::super::confirmed_approvals::confirmed_here(home.path()),
         "sessions started here later start with approval for every command"
     );
+}
+
+/// #1015: the review's "other sessions take it" sentence counts only the
+/// trees a commit reaches: initialized ones (`propagate` skips the rest),
+/// and not the tree of the session the person confirms in.
+#[test]
+fn issue_1015_sessions_run_here_counts_only_trees_a_commit_reaches() {
+    let home = TempDir::new().unwrap();
+    let starting = EffectivePolicyView::default();
+    starting.register_home(home.path());
+    assert!(
+        !sessions_run_here(home.path(), /*thread*/ None),
+        "a tree whose policy is not initialized yet takes no commit"
+    );
+    let (_own, root) = live_tree(&home, SecurityLevel::Permissive);
+    assert!(sessions_run_here(home.path(), /*thread*/ None));
+    assert!(
+        !sessions_run_here(home.path(), Some(root)),
+        "the confirming session's own tree is not another session"
+    );
+    let (_other, _) = live_tree(&home, SecurityLevel::Permissive);
+    assert!(sessions_run_here(home.path(), Some(root)));
 }
 
 /// #978: a lower level confirmed without a live tree requires nothing.

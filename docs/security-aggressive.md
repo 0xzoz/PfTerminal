@@ -278,4 +278,7 @@ saved in another window applies only after a restart.
 The other sessions of the window you confirm in take Core's protections and
 approval for every command at once, and so do sessions you start there
 before you restart, also when you confirm before the window's own session
-has started (#978).
+has started (#978); that session then starts with them too (#1015). A window
+on a remote app server is not covered: its sessions run in the server's
+process, which, if it runs on this Corbanu home, takes the saved level as
+another Corbanu Terminal would.
