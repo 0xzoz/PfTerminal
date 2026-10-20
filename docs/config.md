@@ -164,8 +164,8 @@ The first reply after reopening may then be slower, and when approvals go to the
 the first review instead of on reopen. A new conversation still warms up, and so do sub-agents.
 
 App-server clients that start a thread only for realtime voice (`thread/start`, then `thread/realtime/start`) get
-the new-conversation warm-up too, on the thread's text model, which the realtime session never uses. Pass a cheap
-`model` on `thread/start` to keep it small; see "Realtime-only threads" in `codex-rs/app-server/README.md` (#1045).
+the new-conversation warm-up too, on the thread's text model, which realtime uses only for handoffs. Pass a cheap
+`model` on `thread/start` to make it cheaper; see "Realtime-only threads" in `codex-rs/app-server/README.md` (#1045).
 
 ## Vault And Secrets
 
