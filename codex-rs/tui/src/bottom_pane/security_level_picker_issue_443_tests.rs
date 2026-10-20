@@ -511,9 +511,17 @@ fn issue_1015_review_before_the_window_session_starts() {
             "{review}"
         );
         if sessions_here {
+            // From the paragraph this changes; the preflight rows and the
+            // footer above and below it differ by platform.
+            let rendered = render(&picker, /*width*/ 80);
+            let lines: Vec<&str> = rendered.lines().collect();
+            let from = lines
+                .iter()
+                .position(|line| line.starts_with("The rows above take effect"))
+                .expect("the restart paragraph");
             insta::assert_snapshot!(
                 "issue_1015_review_before_the_window_session_starts",
-                render(&picker, /*width*/ 80)
+                lines[from..lines.len() - 1].join("\n")
             );
         }
     }
