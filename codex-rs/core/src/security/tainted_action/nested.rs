@@ -35,6 +35,15 @@ const MAX_QUOTED_LEVEL: usize = 4;
 /// Nested scripts judged for one action; more fail closed.
 const MAX_NESTED_SCRIPTS: usize = 256;
 
+/// Scripts, sed calls and written files one reading collects (#1065);
+/// more fail closed.
+const MAX_COLLECTED: usize = 4096;
+
+/// Pipeline stages followed from one command for the files they write
+/// (#1065): following every stage from every stage is quadratic. Past it
+/// the pipeline writes a file the classifier cannot name.
+const MAX_PIPELINE_STAGES: usize = 64;
+
 /// Pipeline stages that save their input to the files they are given.
 const PIPE_WRITERS: &[&str] = &["tee", "dd", "sponge", "cp", "install"];
 
@@ -170,7 +179,8 @@ impl Classifier {
         let mut folders = Folders {
             cwd: cwd.to_string(),
             previous: cwd.to_string(),
-            stack: Vec::new(),
+            stack: std::rc::Rc::default(),
+            unfollowed: false,
         };
         let mut found = Found::default();
         self.walk(&[argv], &mut folders, /*level*/ 0, &mut found);
@@ -189,7 +199,7 @@ impl Classifier {
                 &mut found,
             );
         }
-        if found.unreadable {
+        if found.unreadable || folders.unfollowed {
             self.note(ProtectedActionKind::UnseenCode);
         }
         self.written.extend(found.written.iter().cloned());
@@ -223,6 +233,15 @@ impl Classifier {
     fn walk(&self, commands: &[Command], folders: &mut Folders, level: usize, found: &mut Found) {
         for command in commands {
             work::step();
+            if found.scripts.len()
+                + found.seds.len()
+                + found.shared_targets.len()
+                + found.written.len()
+                > MAX_COLLECTED
+            {
+                found.unreadable = true;
+                return;
+            }
             let texts: Vec<String> = command.words.iter().map(|word| word.text.clone()).collect();
             // A substitution's `cd` does not move this line.
             if !command.substituted
@@ -381,6 +400,7 @@ impl Classifier {
                     cwd: folders.cwd.clone(),
                     previous: folders.previous.clone(),
                     stack: folders.stack.clone(),
+                    unfollowed: false,
                 };
                 let reading = quoted::commands(&word.text);
                 found.unreadable |= reading.too_deep || reading.unsure;
@@ -390,6 +410,7 @@ impl Classifier {
                     // must not make up for a command this reading missed.
                     let counts = (found.sed_commands, found.shell_commands);
                     self.walk(&reading.commands, &mut inner, level + 1, found);
+                    found.unreadable |= inner.unfollowed;
                     if !word.lines {
                         (found.sed_commands, found.shell_commands) = counts;
                     }
@@ -404,7 +425,7 @@ impl Classifier {
                     found.sed_commands += counted.sed_commands;
                     found.shell_commands += counted.shell_commands;
                 }
-                found.unreadable |= counted.unreadable;
+                found.unreadable |= counted.unreadable || inner.unfollowed;
             }
         }
     }
@@ -577,6 +598,10 @@ fn pipeline_targets(commands: &[Command], command: &Command) -> Vec<Option<Strin
         && steps < commands.len()
     {
         work::step();
+        if steps == MAX_PIPELINE_STAGES {
+            targets.push(None);
+            break;
+        }
         steps += 1;
         let Some(consumer) = commands.get(index) else {
             targets.push(None);
@@ -714,5 +739,24 @@ fn runner_scripts(texts: &[String], at: usize) -> Vec<(usize, String)> {
             scripts
         }
         _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod pipeline_tests {
+    use super::*;
+
+    /// #1065: each command follows a bounded number of pipeline stages, so
+    /// a long pipeline (`tee f|tee f|...`) is linear. Counted, not timed.
+    #[test]
+    fn issue_1065_pipeline_targets_are_bounded() {
+        let reading = quoted::commands(&"tee f|".repeat(1000));
+        assert_eq!(reading.commands.len(), 1000);
+        let longest = reading
+            .commands
+            .iter()
+            .map(|command| pipeline_targets(&reading.commands, command).len())
+            .max();
+        assert_eq!(longest, Some(MAX_PIPELINE_STAGES + 1));
     }
 }

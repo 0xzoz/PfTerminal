@@ -6,10 +6,12 @@ while normal work continues. It keeps your own approval, sandbox, network and
 web search settings and adds the protections below. The review in
 `/security` lists the same rows before you confirm, and the inspector (`i`)
 shows what is in force: its recent denials include what Moderate's sandbox
-refused, and a model request of the session (or one of its agents) that the
-credential broker refused, for any reason, shows the broker as degraded until
-a later request of the same session goes through. A refused request outside
-any session (the model list, the wallet) shows in every session's inspector.
+refused (and a protected file the image tool was refused, which a warning
+on screen also explains, as for a command, #1087), and a model request of
+the session (or one of its agents) that the credential broker refused, for
+any reason, shows the broker as degraded until a later request of the same
+session goes through. A refused request outside any session (the model
+list, the wallet) shows in every session's inspector.
 
 Moderate needs the untrusted-content labels (the `source_envelopes` feature):
 without them Corbanu refuses every model request under Moderate, so
@@ -104,24 +106,42 @@ Counters and plain uses still run without asking:
 in two (the output on one, the arithmetic or pattern on the next) avoids
 the prompt.
 
+## Other code hidden in a command line
+
+After untrusted content these also count as code you haven't seen and ask
+first, with or without command output on the line:
+
+- zsh glob qualifiers that run code: `e` and `oe` with code
+  (`ls *(e:'rm x':)`) and `+name` (`ls *(+f)`) (#1028). Quoted text that zsh
+  would read that way asks too, such as `git commit -m "fix(tests): x"`.
+- bash's prompt expansion `${v@P}`, which runs any `$(...)` in the value, as
+  `eval` would (#1012). Other ways a shell runs a variable's value
+  (`PS4` with `set -x`, zsh's `${(e)v}` and `print -P`, `trap "$v"`) aren't
+  covered yet (#1064).
+- substitutions (`$(...)`, `<(...)`, `>(...)`) nested more than 32 deep
+  (#1020).
+
 ## Choosing, restarting and going back
 
 When you confirm Moderate, Core's rules (the sandbox, protected files and
 untrusted content) apply at once in every session of this Corbanu Terminal,
-and grants and "for session" approvals end. A command or file edit whose
-approval prompt was still open is asked about again under the new level; an
-answer to the old prompt isn't used, and a retry outside the sandbox that was
-being approved (or was due) isn't run (#1001). Other Corbanu Terminals running
-on the same Corbanu home take them within about a second and say so, as they
-do with the kill switch. The credential broker starts at the next start
-(in each of them); press `r` to restart right away. Your `config.toml` isn't
-changed. If you confirm before the window's own session has started, that
-session starts under Core's Moderate rules too (#1047). In a window whose
-sessions run on an app server outside Corbanu Terminal (a remote server or the
-local daemon), Moderate reaches that server only if it runs on this Corbanu
-home, as it reaches another Corbanu Terminal; Corbanu Terminal starts against
-such a server only under Permissive, so the level picker doesn't offer
-"restart now" there.
+and grants and "for session" approvals end. A command, file edit or MCP tool
+call whose approval prompt was still open is decided again under the new
+level, so you're asked again where it needs approval; an answer to the old
+prompt isn't used, and a retry outside the sandbox that was being approved (or
+was due) isn't run (#1001). A command or file edit that carried extra
+permissions (ones it asked for, or grants made before the change) isn't
+decided again: it doesn't run, and the agent can ask again (#1001, #1057).
+Other Corbanu Terminals running on the same Corbanu home take them within
+about a second and say so, as they do with the kill switch. The credential
+broker starts at the next start (in each of them); press `r` to restart right
+away. Your `config.toml` isn't changed. If you confirm before the window's own
+session has started, that session starts under Core's Moderate rules too
+(#1047). In a window whose sessions run on an app server outside Corbanu
+Terminal (a remote server or the local daemon), Moderate reaches that server
+only if it runs on this Corbanu home, as it reaches another Corbanu Terminal;
+Corbanu Terminal starts against such a server only under Permissive, so the
+level picker doesn't offer "restart now" there.
 
 Choosing Permissive or Aggressive from Moderate shows what changes first.
 Back to Permissive takes effect when you restart; until then Moderate stays
@@ -175,12 +195,18 @@ The kill switch (`/security` → `g`) works under every level.
   after `git init` or a fresh clone there (not a worktree git adds again for
   the same repository), and approving a command in that project doesn't lift
   the rules until you remove them or restart Corbanu Terminal; the same one
-  moved back is compared with the last look. Where a worktree's or submodule's
-  `.git` is replaced by another kind, or pointed at other git folders, check
-  its config and hooks yourself before you run git there. New config and hooks
-  are checked only in a repository's own git folder, not in its worktrees' or
-  submodules'. A session that works in more than 16 repositories forgets the
-  oldest; its next look there reports only links, steps and hard links.
+  moved back (the same inode and, on Linux where the file system records it,
+  the same creation time) is compared with the last look (looked at in full
+  where it now names other git folders). On Linux a new `.git` file that gets
+  a removed one's inode number with the same text counts as moved back where
+  the file system doesn't record creation times, or where it was made within a
+  few milliseconds of the old one (one tick of the clock that stamps them).
+  Where a worktree's or submodule's `.git` is replaced by another kind, or
+  pointed at other git folders, check its config and hooks yourself before you
+  run git there. New config and hooks are checked only in a repository's own
+  git folder, not in its worktrees' or submodules'. A session that works in
+  more than 16 repositories forgets the oldest; its next look there reports
+  only links, steps and hard links.
 - MCP servers, apps, hooks and `!` shell commands run outside the sandbox, as
   under every level.
 - On Linux, where a command you approve can write a Corbanu home's folder
