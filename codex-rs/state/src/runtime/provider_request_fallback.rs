@@ -12,9 +12,9 @@
 //! write lock for minutes, and the file can be read-only. Either used to end
 //! the turn ("failed to check provider request throttle state"). Now a step
 //! waits for the DB about `PROVIDER_REQUEST_BUSY_WAIT` (1 s; really about
-//! 1.3 s on Windows, whose coarse timer stretches its two 500 ms tries, and up
-//! to about 1.8 s on a loaded machine) and then decides from this process's
-//! copy of the throttle state, which every step keeps:
+//! 1.2 s, or 1.3 s on Windows, whose coarse timer stretches its two 500 ms
+//! tries, and up to about 2 s on a loaded machine) and then decides from this
+//! process's copy of the throttle state, which every step keeps:
 //! - a cooldown this process recorded or read still holds its requests back
 //!   (escalating default cooldowns count only the 429s this process saw);
 //! - this process's sub-agents still take the lease one at a time.
