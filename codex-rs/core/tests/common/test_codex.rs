@@ -334,10 +334,11 @@ pub struct TestCodexBuilder {
 impl TestCodexBuilder {
     /// Build the config for `folder`, which becomes its workspace root, as
     /// for a session started there. The session itself still runs in its own
-    /// folder, which is then outside its workspace roots. By default the
-    /// config is built for the session's own folder (see
-    /// [`Self::with_session_cwd_as_workspace_root`]); never for the crate's
-    /// source tree, which is the test process's working folder.
+    /// folder, which is then outside its workspace roots unless `folder`
+    /// contains it. By default a local session's config is built for the
+    /// session's own folder and a remote session's for a local temporary
+    /// folder (see [`Self::with_session_cwd_as_workspace_root`]); never for
+    /// the crate's source tree, which is the test process's working folder.
     pub fn with_config_folder(mut self, folder: impl Into<PathBuf>) -> Self {
         self.config_folder = Some(folder.into());
         self
@@ -626,7 +627,7 @@ impl TestCodexBuilder {
                 base_url,
                 &home,
                 test_env.cwd().clone(),
-                /*session_is_local*/ test_env.local_cwd_temp_dir().is_some(),
+                /*session_folder_is_local*/ test_env.local_cwd_temp_dir().is_some(),
             )
             .await?;
         let exec_server_url = self
@@ -818,7 +819,7 @@ impl TestCodexBuilder {
         base_url: String,
         home: &TempDir,
         cwd_override: AbsolutePathBuf,
-        session_is_local: bool,
+        session_folder_is_local: bool,
     ) -> anyhow::Result<(Config, Arc<TempDir>)> {
         let model_provider = ModelProviderInfo {
             base_url: Some(base_url),
@@ -843,7 +844,7 @@ impl TestCodexBuilder {
             cwd_override.to_path_buf()
         } else if let Some(folder) = self.config_folder.clone() {
             folder
-        } else if session_is_local {
+        } else if session_folder_is_local {
             cwd_override.to_path_buf()
         } else {
             cwd.path().to_path_buf()
