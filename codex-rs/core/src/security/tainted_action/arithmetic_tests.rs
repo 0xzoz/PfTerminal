@@ -798,3 +798,28 @@ fn review_6_fallback_stays_linear() {
         assert!(only_facts(&"$(date +%s)".repeat(5_000 * scale)));
     });
 }
+
+/// #1028: the qualifier reading stays linear on many quoted groups, long
+/// subscripts and long delimited arguments: the work counted at the sizes
+/// given is about four times that at a quarter of them (#1102).
+#[test]
+fn qualifier_code_reading_stays_linear() {
+    let arithmetic = Arithmetic::new(&[]);
+    type Text = fn(usize) -> String;
+    let texts: [(&str, Text); 5] = [
+        ("quote", |count| "a(x') ".repeat(count)),
+        ("double quote", |count| "a(\"x) ".repeat(count)),
+        ("subscripts", |count| {
+            format!("a([{}", "[".repeat(2 * count))
+        }),
+        ("delimited", |count| {
+            format!("a(P:{}", "x".repeat(2 * count))
+        }),
+        ("names", |count| format!("a({})", "N".repeat(2 * count))),
+    ];
+    for (label, text) in texts {
+        work::assert_linear(label, |scale| {
+            let _ = arithmetic.runs_qualifier_code(&[text(25_000 * scale)]);
+        });
+    }
+}

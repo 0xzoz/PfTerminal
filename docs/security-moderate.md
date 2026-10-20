@@ -32,7 +32,8 @@ without them Corbanu refuses every model request under Moderate, so
   `.agents`, and Corbanu's own files. Your fresh approval of one command
   lifts this for that command, except for Corbanu's runtime files, its
   security state and keys (such as `security_state.json` and
-  `source-origin.key`) and what `secretless_agent_launch` keeps; a remembered
+  `source-origin.key`) and what `secretless_agent_launch` keeps (such as
+  `~/.aws/credentials` and `~/.netrc`; see below); a remembered
   or automatic approval never does. A project's `.env` files aren't covered;
   Aggressive covers them.
 - **Untrusted content.** Tool, MCP, web, agent and memory output reaches the
@@ -40,11 +41,15 @@ without them Corbanu refuses every model request under Moderate, so
   approval: the vault, credentials (a project's `.env` files included),
   Corbanu's own files and security settings, disclosure, value transfer, code
   you haven't seen, MCP calls that change or send data, and tools Corbanu
-  hasn't classified. Where approving can't unlock a file (Corbanu's sign-in,
-  vault, config and history stay closed to agent commands under
-  `secretless_agent_launch`), the prompt says so. Cached, remembered or
-  automatic approvals don't count, and with approvals off these actions are
-  refused.
+  hasn't classified. Where approving can't unlock a file, the prompt names
+  it and says what it is: under `secretless_agent_launch`, Corbanu's own
+  files (such as its sign-in, vault, config and history), CLI tokens (`~/.aws/credentials`, `~/.netrc`,
+  `~/.npmrc`, `~/.git-credentials`, `~/.config/gh/hosts.yml`,
+  `~/.docker/config.json`, Claude's sign-in) and, on macOS,
+  `~/Library/Keychains` stay closed to agent commands (see
+  [Protected launch](config.md#protected-launch-secretless_agent_launch)).
+  Cached, remembered or automatic approvals don't count, and with approvals
+  off these actions are refused.
 - **Model keys.** From the next start, provider API keys are held by the
   credential broker, as under Aggressive. `broker_model_auth = false` in your
   own config keeps it off.

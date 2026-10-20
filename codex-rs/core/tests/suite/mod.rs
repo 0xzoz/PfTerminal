@@ -192,6 +192,7 @@ mod state_db_throttle_fallback;
 mod stream_error_allows_next_turn;
 mod stream_no_completed;
 mod subagent_notifications;
+mod test_codex_cwd;
 mod token_budget;
 mod tool_harness;
 mod tool_parallelism;

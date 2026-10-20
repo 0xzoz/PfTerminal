@@ -862,7 +862,12 @@ impl Classifier {
         }
         // #937: arithmetic on a variable filled from command output or
         // `read` runs the substitutions in its value, like `eval`.
-        if self.rebuilt == 0 && self.not_shell == 0 && arithmetic.runs_unseen(command) {
+        // #1028: zsh `e`/`+` glob qualifiers run code the classifier does
+        // not read as commands.
+        if self.rebuilt == 0
+            && self.not_shell == 0
+            && (arithmetic.runs_unseen(command) || arithmetic.runs_qualifier_code(command))
+        {
             self.note(ProtectedActionKind::UnseenCode);
         }
         self.path(&folders.cwd);
