@@ -2967,6 +2967,15 @@ fn issue_1084_glob_substitution_is_unseen_code() {
         ("zsh", "x=$(cat notes); print -r -- ${(s:,:~pj:$x:)a}"),
         ("zsh", "x=$(cat notes); print -r -- ${(s , ~pj:$x:)a}"),
         ("zsh", "x=$(cat notes); print -r -- ${(s=,=~pj:$x:)a}"),
+        // Review r6: an array name attached to `set -A`, zmv clusters
+        // ending in a value-taking letter, keeper's `keep`.
+        (
+            "zsh",
+            "k=glob${:-subst}; set -Aoptions extendedglob on $k on; print -l $(cat notes)",
+        ),
+        ("zsh", "p=$(cat notes); zmv -np echo $p x"),
+        ("zsh", "p=$(cat notes); zmv -Qnp echo $p x"),
+        ("zsh", "autoload -U keeper; keeper; keep \"$(cat notes)\""),
         // zmv globs its pattern as `${~pat}`.
         ("zsh", "autoload zmv; zmv -n \"$(cat notes)\" x"),
         ("zsh", "p=$(cat notes); zmv -p echo -- $p x"),

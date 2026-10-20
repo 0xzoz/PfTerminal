@@ -189,14 +189,28 @@ fn substitutes_globs(text: &str) -> bool {
 }
 
 /// A write to zsh's `options` array: `options[k]=on`, `options=(...)`,
-/// `options+=(...)`, `${options[k]::=on}`, `${(AA)=options::=...}`.
+/// `options+=(...)`, `${options[k]::=on}`, `${(AA)=options::=...}`,
+/// `set -Aoptions ...`.
 fn writes_options(text: &str) -> bool {
     text.match_indices("options").any(|(at, _)| {
+        // An array name attached to its option (`set -Aoptions`,
+        // `-xAoptions`), its letters read back at most 64 bytes.
+        let bytes = text.as_bytes();
+        let mut start = at;
+        while start > 0 && at - start < 64 && bytes[start - 1].is_ascii_alphabetic() {
+            work::step();
+            start -= 1;
+        }
+        let attached = start > 0
+            && start < at
+            && bytes[at - 1] == b'A'
+            && matches!(bytes[start - 1], b'-' | b'+');
         // Not part of a longer name (`--options=x`, `self.options[k]`).
-        !text[..at].ends_with(|ch: char| ch.is_ascii_alphanumeric() || "_-./".contains(ch))
-            && ["[", "=", "+=", ":=", "::="]
-                .iter()
-                .any(|next| text[at + "options".len()..].starts_with(next))
+        attached
+            || (!text[..at].ends_with(|ch: char| ch.is_ascii_alphanumeric() || "_-./".contains(ch))
+                && ["[", "=", "+=", ":=", "::="]
+                    .iter()
+                    .any(|next| text[at + "options".len()..].starts_with(next)))
     })
 }
 

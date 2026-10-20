@@ -2040,6 +2040,10 @@ fn sets_unnamed_options(name: &str, args: &[String]) -> bool {
         expanded(word) || word.contains(['{', '}', '*', '?', '[', '<', '(']) || word.contains("..")
     };
     let name = shell::basename(name);
+    // keeper's `keep` globs all its arguments as `$~*`.
+    if name == "keep" {
+        return args.iter().any(|word| expanded(word));
+    }
     if matches!(name, "zmv" | "zcp" | "zln") {
         let mut words = args.iter();
         while let Some(word) = words.next() {
@@ -2047,14 +2051,19 @@ fn sets_unnamed_options(name: &str, args: &[String]) -> bool {
             if expanded(word) {
                 return true;
             }
-            match word.as_str() {
-                "--" => return words.next().is_some_and(|pattern| expanded(pattern)),
-                "-p" | "-P" | "-o" => {
-                    words.next();
-                }
-                _ if word.starts_with('-') => {}
+            if word == "--" {
+                return words.next().is_some_and(|pattern| expanded(pattern));
+            }
+            let Some(cluster) = word.strip_prefix('-') else {
                 // The pattern.
-                _ => return false,
+                return false;
+            };
+            // `-p prog`, `-np prog`: a value-taking letter at the end of
+            // its cluster takes the next word (`-pprog` holds its own).
+            if let Some(at) = cluster.find(['o', 'p', 'P'])
+                && at + 1 == cluster.len()
+            {
+                words.next();
             }
         }
         return false;
