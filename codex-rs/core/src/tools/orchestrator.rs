@@ -230,6 +230,10 @@ impl ToolOrchestrator {
         // PF-30-S03: a protected action after untrusted content needs fresh,
         // exact human approval, whatever the requirement above would allow.
         let post_taint = post_taint_action(tool, req, tool_ctx, &requirement).await;
+        // D27 (a), D48 (c): the taint generation at which the person was
+        // warned, in the prompt they answer, that approving lets this run
+        // create user namespaces (only a run whose prompt showed it may).
+        let mut user_namespaces_warned_at = None;
         // Issue #245: additional permissions never reopen a protected path.
         // Refused before anyone is asked where no approval can lift the
         // rules for this run; checked again below once the rules are known.
@@ -354,9 +358,27 @@ impl ToolOrchestrator {
                 moderate_kept_read_note(tool, req, tool_ctx, turn_ctx, action).await;
             // #747: and that it stays in the sandbox under Moderate.
             let stays_sandboxed = moderate_sandbox_note(tool, req, moderate_keeps_sandbox);
-            // #826: that what needs a user namespace fails on Linux.
-            let user_namespaces_note =
-                user_namespaces_note(tool, req, tool_ctx, turn_ctx).map(|(note, _)| note);
+            // D48 (c): a known tool's request to run outside the sandbox may
+            // create user namespaces if approved here, with the warning;
+            // #826: elsewhere, that what needs one fails on Linux.
+            let warning = tool
+                .sandbox_permissions(req)
+                .requires_escalated_permissions()
+                .then(|| {
+                    crate::security::user_namespaces::one_run_warning(
+                        &tool_ctx.session,
+                        turn_ctx,
+                        approval_command(tool, req, tool_ctx).as_deref(),
+                    )
+                })
+                .flatten();
+            let user_namespaces_note = match warning {
+                Some((warning, at)) => {
+                    user_namespaces_warned_at = Some(at);
+                    Some(warning)
+                }
+                None => user_namespaces_note(tool, req, tool_ctx, turn_ctx).map(|(note, _)| note),
+            };
             let approval_ctx = ApprovalCtx {
                 session: &tool_ctx.session,
                 turn: &tool_ctx.turn,
@@ -416,18 +438,47 @@ impl ToolOrchestrator {
         // asks to run outside the sandbox needs the human (no cache, hook or
         // automatic reviewer), also where it would run unasked; that answer
         // lifts the protected-path rules. With approvals off it stays refused.
+        let asks_sandbox_approval = match approval_policy {
+            AskForApproval::Never => false,
+            AskForApproval::Granular(granular) => granular.allows_sandbox_approval(),
+            AskForApproval::UnlessTrusted | AskForApproval::OnRequest => true,
+        };
         let ask_human_to_escalate = post_taint.is_none()
             && !matches!(requirement, ExecApprovalRequirement::Forbidden { .. })
-            && match approval_policy {
-                AskForApproval::Never => false,
-                AskForApproval::Granular(granular) => granular.allows_sandbox_approval(),
-                AskForApproval::UnlessTrusted | AskForApproval::OnRequest => true,
-            }
+            && asks_sandbox_approval
             && moderate_escalation_before_taint(tool, req, tool_ctx, &requirement);
+        // D48 (c) (Travis, 2026-10-20, security sign-off): after untrusted
+        // content under Moderate on Linux, a request to run outside the
+        // sandbox whose program is a known tool (unshare, bwrap, podman,
+        // buildah, flatpak, nix) is asked about afresh, every time, by the
+        // person (no approval cache, hook, automatic reviewer or saved rule),
+        // with D27's warning: approving lets that one run create user
+        // namespaces. It lifts nothing else: the protected-file rules stay.
+        let after_untrusted_warning = if post_taint.is_none()
+            && !ask_human_to_escalate
+            && !matches!(
+                requirement,
+                ExecApprovalRequirement::Forbidden { .. }
+                    | ExecApprovalRequirement::Skip {
+                        bypass_sandbox: true,
+                        ..
+                    }
+            )
+            && asks_sandbox_approval
+            && tool
+                .sandbox_permissions(req)
+                .requires_escalated_permissions()
+        {
+            crate::security::user_namespaces::one_run_warning(
+                &tool_ctx.session,
+                turn_ctx,
+                approval_command(tool, req, tool_ctx).as_deref(),
+            )
+            .filter(|(_, at)| *at > 0)
+        } else {
+            None
+        };
         let mut escalation_approved_by_human = false;
-        // D27 (a): the person was warned in that prompt that approving lets
-        // the run create user namespaces.
-        let mut user_namespaces_warned = false;
         match &requirement {
             _ if post_taint.is_some() => {}
             _ if ask_human_to_escalate => {
@@ -441,28 +492,22 @@ impl ToolOrchestrator {
                     network_approval_context: None,
                     fresh_human_authority: true,
                 };
-                // Keep why the command runs (the requirement's reason, else the
-                // model's justification) ahead of the note.
-                let why = match &requirement {
-                    ExecApprovalRequirement::NeedsApproval {
-                        reason: Some(reason),
-                        ..
-                    } => Some(reason.clone()),
-                    _ => match tool.approval_action(req, &approval_ctx) {
-                        Ok(
-                            ApprovalAction::Shell { justification, .. }
-                            | ApprovalAction::ExecCommand { justification, .. },
-                        ) => justification,
-                        _ => None,
-                    },
-                };
+                // Keep why the command runs ahead of the note.
+                let why = escalation_why(tool, req, &requirement, &approval_ctx);
                 // D27 (a): on Linux, approving also lets this one run create
                 // user namespaces, and the person is warned (only a run whose
                 // prompt showed it may); elsewhere (#826), that what needs one
-                // fails.
-                let warning =
-                    crate::security::user_namespaces::one_run_warning(&tool_ctx.session, turn_ctx);
-                user_namespaces_warned = warning.is_some();
+                // fails. Before untrusted content only: if some arrived
+                // since this was decided, no warning.
+                let warning = crate::security::user_namespaces::one_run_warning(
+                    &tool_ctx.session,
+                    turn_ctx,
+                    /*command*/ None,
+                )
+                .map(|(warning, at)| {
+                    user_namespaces_warned_at = Some(at);
+                    warning
+                });
                 let note = match warning.or_else(|| {
                     user_namespaces_note(tool, req, tool_ctx, turn_ctx).map(|(note, _)| note)
                 }) {
@@ -488,6 +533,48 @@ impl ToolOrchestrator {
                 );
                 already_approved = true;
                 escalation_approved_by_human = true;
+            }
+            _ if after_untrusted_warning.is_some() => {
+                // Set: the guard holds.
+                let (warning, at) = after_untrusted_warning.clone().unwrap_or_default();
+                let approval_ctx = ApprovalCtx {
+                    session: &tool_ctx.session,
+                    turn: &tool_ctx.turn,
+                    call_id: &tool_ctx.call_id,
+                    retry_reason: None,
+                    network_approval_context: None,
+                    fresh_human_authority: true,
+                };
+                // Why the command runs, what approving may let it write
+                // (#513), that it stays in the sandbox (#747), the warning.
+                let retry_reason = [
+                    escalation_why(tool, req, &requirement, &approval_ctx),
+                    persistence_note.clone(),
+                    moderate_sandbox_note(tool, req, moderate_keeps_sandbox).map(str::to_string),
+                    Some(warning),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" ");
+                approved_by = Some(
+                    resolve_tool_apporval(
+                        tool,
+                        req,
+                        tool_ctx.call_id.as_str(),
+                        ApprovalCtx {
+                            retry_reason: Some(retry_reason),
+                            ..approval_ctx
+                        },
+                        tool_ctx,
+                        ApprovalReviewer::User,
+                        &otel,
+                        DeclineRecord::Here,
+                    )
+                    .await?,
+                );
+                already_approved = true;
+                user_namespaces_warned_at = Some(at);
             }
             ExecApprovalRequirement::Skip { .. } => {
                 if strict_auto_review {
@@ -668,16 +755,18 @@ impl ToolOrchestrator {
         // D27 (a) (Travis, 2026-10-19, security sign-off): but for one run
         // under Moderate whose request to run outside the sandbox a person
         // approved when asked now, before untrusted content, after the
-        // prompt warned them. Never a remembered answer; never under
-        // Aggressive.
+        // prompt warned them. D48 (c) (2026-10-20): after untrusted content
+        // likewise, for a known tool's command, while no more untrusted
+        // content arrived since the warning. Never a remembered answer;
+        // never under Aggressive.
         let launch_enforces_aggressive = turn_ctx.config.permissions.launch_enforces_aggressive();
         let user_namespaces_allowed = crate::security::user_namespaces::allows_one_run(
             &tool_ctx.session,
             protected_level,
             launch_enforces_aggressive,
-            escalation_approved_by_human
-                && user_namespaces_warned
+            user_namespaces_warned_at.is_some()
                 && approved_by == Some(ApprovalResolutionSource::User),
+            user_namespaces_warned_at,
         );
         if user_namespaces_allowed {
             crate::security::user_namespaces::note_allowed_run(
@@ -1281,6 +1370,53 @@ where
             .model_client()
             .post_taint_state()
             .is_some_and(|state| state.taint_generation == 0 && state.moderate_bound())
+}
+
+/// Why a command that asks to run outside the sandbox runs, for its prompt:
+/// the requirement's reason, else the model's justification.
+fn escalation_why<Rq, Out, T>(
+    tool: &T,
+    req: &Rq,
+    requirement: &ExecApprovalRequirement,
+    approval_ctx: &ApprovalCtx<'_>,
+) -> Option<String>
+where
+    T: ToolRuntime<Rq, Out>,
+{
+    match requirement {
+        ExecApprovalRequirement::NeedsApproval {
+            reason: Some(reason),
+            ..
+        } => Some(reason.clone()),
+        _ => match tool.approval_action(req, approval_ctx) {
+            Ok(
+                ApprovalAction::Shell { justification, .. }
+                | ApprovalAction::ExecCommand { justification, .. },
+            ) => justification,
+            _ => None,
+        },
+    }
+}
+
+/// D48 (c): the command a shell request runs, as its prompt shows it.
+fn approval_command<Rq, Out, T>(tool: &T, req: &Rq, tool_ctx: &ToolCtx) -> Option<Vec<String>>
+where
+    T: ToolRuntime<Rq, Out>,
+{
+    let ctx = ApprovalCtx {
+        session: &tool_ctx.session,
+        turn: &tool_ctx.turn,
+        call_id: &tool_ctx.call_id,
+        retry_reason: None,
+        network_approval_context: None,
+        fresh_human_authority: true,
+    };
+    match tool.approval_action(req, &ctx).ok()? {
+        ApprovalAction::Shell { command, .. } | ApprovalAction::ExecCommand { command, .. } => {
+            Some(command)
+        }
+        ApprovalAction::ApplyPatch { .. } => None,
+    }
 }
 
 /// The command and folder a grant offer shows (PF-25-S01).

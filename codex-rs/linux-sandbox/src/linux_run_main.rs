@@ -321,7 +321,7 @@ pub fn run_main() -> ! {
 const USER_NAMESPACES_DENIED_ENV: &str = "CODEX_SANDBOX_USER_NAMESPACES_DENIED";
 
 /// Shown when this helper runs inside a sandbox that denies user namespaces.
-const USER_NAMESPACES_DENIED_MESSAGE: &str = "Corbanu's Linux sandbox cannot start here: this command runs inside an agent command's sandbox under security level Moderate or Aggressive, where creating user namespaces is denied (Operation not permitted), and the sandbox needs one. Run it outside the agent's sandbox (under Moderate a person may allow user namespaces for one command whose request to run outside the sandbox they approve, before untrusted content, in practice the first command of a new session), or choose Permissive in /security.";
+const USER_NAMESPACES_DENIED_MESSAGE: &str = "Corbanu's Linux sandbox cannot start here: this command runs inside an agent command's sandbox under security level Moderate or Aggressive, where creating user namespaces is denied (Operation not permitted), and the sandbox needs one. Run it outside the agent's sandbox (under Moderate a person may allow user namespaces for one command whose request to run outside the sandbox they approve when asked: before untrusted content any command, in practice the first command of a new session; after it only one plain command that runs unshare, bwrap, podman, buildah, flatpak or nix), or choose Permissive in /security.";
 
 fn mark_user_namespaces_denied() {
     // SAFETY: this helper process is single-threaded here (the proxy bridges

@@ -145,8 +145,25 @@ The kill switch (`/security` → `g`) works under every level.
   Approve only a command you trust. Only your answer to that prompt counts:
   not "for the session" for the next request, a saved "don't ask again"
   rule (the command then stays in the sandbox with the rules kept), a
-  permission hook or the automatic reviewer, and no prompt after untrusted
-  content offers it. The allowance covers the approved process and
+  permission hook or the automatic reviewer. After untrusted content (D48,
+  Linux, Moderate only) it is offered only for a command whose program is a
+  known tool: `unshare`, `bwrap`, `podman`, `buildah`, `flatpak` or `nix`.
+  The command must be one plain command naming the tool by name or from a
+  system folder (`/usr/bin`, `/bin`, `/usr/sbin`, `/sbin`, `/usr/local/bin`,
+  `/run/current-system/sw/bin`, `/nix/var/nix/profiles/default/bin`),
+  optionally after `env`, `sudo`, `exec`, `command` or `nohup` with simple
+  options. Anything else isn't offered and keeps the rule: other programs,
+  more than one command (`;`, `&&`, `|`), variables, substitutions,
+  redirections, `NAME=value` settings, a copy of the tool elsewhere
+  (`./podman`), other wrappers (`timeout`, `bash -c`), and aliases or
+  functions the command defines. You are asked every time, by you only
+  (not "for the session", a saved rule, a hook or the automatic reviewer),
+  with the same warning. Approving lifts nothing else: the protected-file
+  rules stay, unless the command is also a protected action, whose fresh
+  approval lifts them for that run as before. If more untrusted content
+  arrives before it starts, it isn't allowed. A known tool can itself run
+  any program inside the namespace (`unshare -r sh -c '…'`, `podman run`),
+  so read the whole command. The allowance covers the approved process and
   everything it starts or is given while it runs, also after untrusted
   content arrives: an interactive program such as a shell keeps it for
   every command typed into it later. The run still stays in the sandbox
@@ -155,8 +172,9 @@ The kill switch (`/security` → `g`) works under every level.
 - A command that fails this way says why instead of a bare "Operation not
   permitted": its output (what the agent sees) and a warning in your
   transcript name the rule and the level and, under Moderate, how to allow
-  it for one command (in a new session, since the failed command's output
-  is untrusted content), and the `/security` inspector lists "creating a
+  it for one command (only for a known tool's command, or in a new session,
+  since the failed command's output is untrusted content), and the
+  `/security` inspector lists "creating a
   user namespace" under recent denials. Before you approve a command that runs
   `unshare`, `bwrap`, Podman, Buildah or Flatpak and stays in the sandbox,
   the approval prompt says it will fail. A contained Claude pane ends such a
