@@ -10,10 +10,14 @@ credentials (it never reads any: the server uses the home's login).
 
 usage: realtime_driver.py <corbanu> <workspace> [--transport websocket|webrtc --sdp-file F]
                           [--modality text|audio] [--version v1|v2|v3] [--model M]
-                          [--config KEY=VALUE ...]
+                          [--config KEY=VALUE ...] [--thread-model M]
 
 acc-tart1 (2026-10-20): --config passes `-c KEY=VALUE` to `corbanu app-server` (the harness turns the
 realtime feature on and keeps the profile's file credential store and log folder this way).
+
+#1045 (2026-10-20): --thread-model sends `model` on `thread/start`. The app server warms a new thread up on
+its text model before realtime starts; without it that warm-up ran on the default GPT-6 Sol (~$0.03).
+`--model` stays the realtime session's model.
 """
 import argparse
 import json
@@ -34,6 +38,7 @@ parser.add_argument("--modality", default="text")
 parser.add_argument("--text", default="Reply with the single word OK.")
 parser.add_argument("--timeout", type=float, default=60)
 parser.add_argument("--config", action="append", default=[])
+parser.add_argument("--thread-model")
 args = parser.parse_args()
 
 proc = subprocess.Popen(
@@ -105,7 +110,8 @@ call("initialize", {
     "capabilities": {"experimentalApi": True},
 })
 send("initialized", notify=True)
-thread = call("thread/start", {})["thread"]["id"]
+thread_start = {"model": args.thread_model} if args.thread_model else {}
+thread = call("thread/start", thread_start)["thread"]["id"]
 if args.transport not in ("websocket", "webrtc"):
     sys.exit(f"unknown transport {args.transport!r}")
 transport = {"type": "websocket"}
