@@ -174,6 +174,13 @@ copied into the guest over SSH ([candidate/](candidate/candidate-manifest.md)).
   `collected/product-logs/codex-tui.log`. Fixture `.git` folders are kept as `dot-git`, without objects.
 - `harness/agms-probe` is stored as `harness/agms-probe.txt`; `tools/` holds the integrator's scripts and `final.json`.
 
+## Changed after the run
+
+- #1045 (PR #1059): `harness/agms-product` and `harness/realtime_driver.py` now start the realtime thread on the
+  command's model (`--thread-model`; `agms-tui realtime` passes gpt-6-luna), so a rerun's text warm-up is not on
+  GPT-6 Sol. The run used the earlier versions: their sha256 are in `common/provision.out` (`bin/agms-product`,
+  `bin/agms-realtime-driver`), and they are at commit `854b02f7e8`.
+
 ## Named limits
 
 - FUP-17/18/19: the per-request rate and component screens are missing (see Result). FUP-15: the "already viewing"

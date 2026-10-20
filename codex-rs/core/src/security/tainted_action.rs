@@ -803,6 +803,7 @@ impl Classifier {
         // checked below.
         if (lexed.incomplete && self.not_shell == 0 && self.rebuilt == 0)
             || command.iter().any(|arg| shell::prompt_expansion(arg))
+            || lexed.too_deep
             || indirect::opaque_execution(&lexed.commands)
         {
             self.note(ProtectedActionKind::UnseenCode);

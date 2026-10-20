@@ -3,7 +3,9 @@
 #   agms-product ROUTE MODEL [ARGS...]            the TUI (ARGS may start with: resume ...)
 #   agms-product --exec ROUTE MODEL [ARGS...]     `corbanu exec` on the same profile and project
 #   agms-product --realtime openai MODEL TEXT      acc-tart1: one realtime session through `corbanu app-server`
-#                                                  (S09's driver), after an API-key sign-in with the placeholder
+#                                                  (S09's driver), after an API-key sign-in with the placeholder;
+#                                                  MODEL is also the thread's text model; its startup warm-up runs on it
+#                                                  (#1045, after the acc-tart1 run)
 # AGMS_PROVIDER_NAME (moonshot route only) names the person-configured provider (default kimi).
 set -u
 R="${AGMS_ROOT:-/opt/agms}"
@@ -77,7 +79,7 @@ if [ "$mode" = realtime ]; then
   fi
   exec env "${env_args[@]}" /usr/bin/python3 "$R/bin/agms-realtime-driver" "$BIN" "$RUN/fixture/workspace" \
     --config 'features.realtime_conversation=true' --config 'cli_auth_credentials_store="file"' \
-    --config "log_dir=\"$RUN/product-logs\"" --text "${1:?text}"
+    --config "log_dir=\"$RUN/product-logs\"" --thread-model "$model" --text "${1:?text}"
 fi
 if [ "$mode" = exec ]; then
   exec env "${env_args[@]}" "$BIN" exec --skip-git-repo-check "${common[@]}" -C "$RUN/fixture/workspace" "$@"
