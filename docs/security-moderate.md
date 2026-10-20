@@ -131,10 +131,10 @@ The kill switch (`/security` → `g`) works under every level.
   worktree git adds again for the same repository), and approving a
   command in that project doesn't lift the rules until you remove them or
   restart Corbanu Terminal; the same one moved back is compared with the
-  last look. New config and hooks are checked
-  only in a repository's own git folder, not in its worktrees' or
-  submodules'. A session that works in more than 16 repositories forgets
-  the oldest; its next look there reports only links, steps and hard links.
+  last look. New config and hooks are checked only in a repository's own
+  git folder, not in its worktrees' or submodules'. A session that works in
+  more than 16 repositories forgets the oldest; its next look there reports
+  only links, steps and hard links.
 - MCP servers, apps, hooks and `!` shell commands run outside the sandbox, as
   under every level.
 - On Linux, where a command you approve can write a Corbanu home's folder
