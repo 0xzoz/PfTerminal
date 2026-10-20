@@ -266,8 +266,9 @@ then on, these apply there:
 - Core's protections;
 - approval for every command, from each pane's next turn;
 - the end of its grants and "for session" approvals;
-- for an approval prompt still open, a new prompt under Aggressive: an answer
-  to the old one isn't used (#1001).
+- for a command or file edit whose approval prompt is still open: the answer
+  isn't used and nothing runs; the agent can ask again under Aggressive
+  (#1001).
 
 A running `corbanu exec` can't ask you for approval, so from then on it
 refuses every command that isn't known read-only.

@@ -554,6 +554,7 @@ impl CoreShellActionProvider {
         escalation_execution: EscalationExecution,
         decision_source: DecisionSource,
         suspended_note: Option<String>,
+        asked_again: bool,
     ) -> anyhow::Result<EscalationDecision> {
         let action = match decision {
             Decision::Forbidden => {
@@ -568,6 +569,17 @@ impl CoreShellActionProvider {
                         None => "Execution forbidden by policy".to_string(),
                     }))
                 } else {
+                    // D50: a prompt asked again says why.
+                    let reason = if asked_again {
+                        Some(match suspended_note {
+                            Some(note) => {
+                                format!("{} {note}", crate::tools::approvals::ASKED_AGAIN_NOTE)
+                            }
+                            None => crate::tools::approvals::ASKED_AGAIN_NOTE.to_string(),
+                        })
+                    } else {
+                        suspended_note
+                    };
                     let decision = self
                         .prompt(
                             program,
@@ -575,7 +587,7 @@ impl CoreShellActionProvider {
                             workdir,
                             &self.stopwatch,
                             prompt_permissions,
-                            suspended_note,
+                            reason,
                         )
                         .await?;
                     match decision {
@@ -641,8 +653,9 @@ const ENABLE_INTERCEPTED_EXEC_POLICY_SHELL_WRAPPER_PARSING: bool = false;
 
 impl CoreShellActionProvider {
     /// D50 (#1001): an exec approved (or decided) before a security
-    /// transition was committed is decided again under the new level, the
-    /// person asked again, and refused when that keeps happening.
+    /// transition was committed is decided again, the person asked again, and
+    /// refused when that keeps happening, or at once when the transition
+    /// switched Aggressive on (this shell's rules are for its start level).
     async fn determine_fresh_action(
         &self,
         program: &AbsolutePathBuf,
@@ -661,8 +674,21 @@ impl CoreShellActionProvider {
             }
             tracing::info!(
                 target: "codex_core::security::transition",
-                "intercepted exec approved before a security transition; not used, asked again"
+                "intercepted exec approved before a security transition; not used"
             );
+            // The rules this shell checks execs against were chosen for the
+            // level when it started; under Aggressive they are stale.
+            if self
+                .session
+                .services
+                .model_client()
+                .live_level_is_aggressive()
+                != self.live_aggressive
+            {
+                return Ok(EscalationDecision::deny(Some(
+                    crate::tools::orchestrator::STALE_AGGRESSIVE_REFUSAL.to_string(),
+                )));
+            }
         }
         Ok(EscalationDecision::deny(Some(
             crate::tools::orchestrator::STALE_APPROVAL_REFUSAL.to_string(),
@@ -724,15 +750,6 @@ impl CoreShellActionProvider {
                     })
             })
             .flatten();
-        // D50: a prompt asked again says why.
-        let suspended_note = if asked_again {
-            Some(match suspended_note {
-                Some(note) => format!("{} {note}", crate::tools::approvals::ASKED_AGAIN_NOTE),
-                None => crate::tools::approvals::ASKED_AGAIN_NOTE.to_string(),
-            })
-        } else {
-            suspended_note
-        };
         // When true, means the Evaluation was due to *.rules, not the
         // fallback function.
         let decision_driven_by_policy =
@@ -788,6 +805,7 @@ impl CoreShellActionProvider {
             escalation_execution,
             decision_source,
             suspended_note,
+            asked_again,
         )
         .await
     }

@@ -220,16 +220,17 @@ pub(super) async fn resolve_tool_apporval<Rq, Out, T>(
 where
     T: ToolRuntime<Rq, Out>,
 {
-    let ctx = if asked_again {
-        asked_again_ctx(tool, req, ctx)
-    } else {
-        ctx
-    };
     let what = approval_kind(&flat_tool_name(&tool_ctx.tool_name));
     let thread = tool_ctx.session.thread_id();
     // An interrupted wait is "declined by you" only when the person was
     // asked (not a hook or the automatic reviewer).
     let asks_person = ctx.fresh_human_authority || reviewer == ApprovalReviewer::User;
+    // D50: only a person is told why they are asked again.
+    let ctx = if asked_again && asks_person {
+        asked_again_ctx(tool, req, ctx)
+    } else {
+        ctx
+    };
     let mut pending = (decline_record == DeclineRecord::Here)
         .then(|| crate::security::inspection::PendingApproval::new(thread, what, asks_person));
     let resolution = resolve(

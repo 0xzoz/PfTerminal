@@ -989,11 +989,52 @@ async fn strict_rules_refuse_intercepted_wrapped_vault_exec() -> anyhow::Result<
 }
 
 /// D50 (#1001): an intercepted exec approved after a security transition was
-/// committed while its prompt was open is not run on that answer: the person
-/// is asked again (the prompt says why), and it runs on the new answer.
+/// committed while its prompt was open (the policy marker moves; the live
+/// level stays Permissive here) is not run on that answer: the person is
+/// asked again (the prompt says why), and it runs on the new answer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn issue_1001_intercepted_exec_approved_before_a_level_change_is_asked_again()
+async fn issue_1001_intercepted_exec_approved_before_a_transition_is_asked_again()
 -> anyhow::Result<()> {
+    let (action, reasons) = issue_1001_intercepted_exec(/*switch_aggressive_on*/ false).await?;
+    assert_eq!(
+        action,
+        codex_shell_escalation::EscalationDecision::Escalate(EscalationExecution::Unsandboxed),
+        "it runs on the second answer, as an approved prompt rule does"
+    );
+    let note = crate::tools::approvals::ASKED_AGAIN_NOTE;
+    assert_eq!(reasons.len(), 2, "{reasons:?}");
+    assert!(!reasons[0].clone().unwrap_or_default().contains(note));
+    assert!(
+        reasons[1].clone().unwrap_or_default().contains(note),
+        "the prompt says why it is asked again: {reasons:?}"
+    );
+    Ok(())
+}
+
+/// D50: when the transition switched Aggressive on, the shell's rules (for
+/// the level it started under) are stale too: refused, not asked again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_1001_intercepted_exec_approved_before_aggressive_is_refused() -> anyhow::Result<()> {
+    let (action, reasons) = issue_1001_intercepted_exec(/*switch_aggressive_on*/ true).await?;
+    assert_eq!(
+        action,
+        codex_shell_escalation::EscalationDecision::Deny {
+            reason: Some(crate::tools::orchestrator::STALE_AGGRESSIVE_REFUSAL.to_string())
+        }
+    );
+    assert_eq!(reasons.len(), 1, "{reasons:?}");
+    Ok(())
+}
+
+/// Decides a `printf` that a prompt rule covers; the transition is committed
+/// while the first prompt is open, and every prompt is approved. Returns the
+/// action and the reasons of the prompts shown.
+async fn issue_1001_intercepted_exec(
+    switch_aggressive_on: bool,
+) -> anyhow::Result<(
+    codex_shell_escalation::EscalationDecision,
+    Vec<Option<String>>,
+)> {
     use codex_protocol::protocol::EventMsg;
     use codex_protocol::protocol::ExecApprovalRequestEvent;
     use codex_protocol::protocol::ReviewDecision;
@@ -1055,21 +1096,39 @@ async fn issue_1001_intercepted_exec_approved_before_a_level_change_is_asked_aga
     let answerer = {
         let session = Arc::clone(&session);
         async move {
-            // Shown under Permissive; the level rose before the answer.
+            let mut reasons = Vec::new();
+            // Shown under Permissive; the transition lands before the answer.
             let first = next_prompt().await;
+            reasons.push(first.reason.clone());
+            if switch_aggressive_on {
+                let client = (*session.services.model_client())
+                    .clone()
+                    .with_ingress_level(SecurityLevel::Aggressive);
+                session.services.replace_model_client(client);
+            }
             let change = controller
-                .confirm_level_change(SecurityLevel::Moderate, RevocationState::new())
+                .confirm_level_change(
+                    if switch_aggressive_on {
+                        SecurityLevel::Aggressive
+                    } else {
+                        SecurityLevel::Moderate
+                    },
+                    RevocationState::new(),
+                )
                 .unwrap();
             controller.apply_confirmed_change(change).unwrap();
             session
                 .notify_approval(&first.effective_approval_id(), ReviewDecision::Approved)
                 .await;
-            // Asked again under the new level, and approved.
-            let second = next_prompt().await;
-            session
-                .notify_approval(&second.effective_approval_id(), ReviewDecision::Approved)
-                .await;
-            (first.reason, second.reason)
+            if !switch_aggressive_on {
+                // Asked again, and approved.
+                let second = next_prompt().await;
+                reasons.push(second.reason.clone());
+                session
+                    .notify_approval(&second.effective_approval_id(), ReviewDecision::Approved)
+                    .await;
+            }
+            reasons
         }
     };
     let workdir = test_sandbox_cwd();
@@ -1078,24 +1137,6 @@ async fn issue_1001_intercepted_exec_approved_before_a_level_change_is_asked_aga
     let decide = codex_shell_escalation::EscalationPolicy::determine_action(
         &provider, &program, &argv, &workdir,
     );
-    let (action, (first_reason, second_reason)) = tokio::join!(decide, answerer);
-    assert!(
-        !matches!(
-            action?,
-            codex_shell_escalation::EscalationDecision::Deny { .. }
-        ),
-        "it runs on the second answer"
-    );
-    assert!(
-        !first_reason
-            .unwrap_or_default()
-            .contains(crate::tools::approvals::ASKED_AGAIN_NOTE)
-    );
-    assert!(
-        second_reason
-            .unwrap_or_default()
-            .contains(crate::tools::approvals::ASKED_AGAIN_NOTE),
-        "the prompt says why it is asked again"
-    );
-    Ok(())
+    let (action, reasons) = tokio::join!(decide, answerer);
+    Ok((action?, reasons))
 }

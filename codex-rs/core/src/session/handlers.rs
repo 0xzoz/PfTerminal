@@ -540,8 +540,8 @@ pub async fn exec_approval(
             // command, which is asked about again under the new level.
             Some(Ok(None)) => {
                 let message = "The security level changed while this approval was open, so \
-                               \"don't ask again\" was not saved and the answer was not used. \
-                               You are asked again under the new level."
+                               \"don't ask again\" was not saved and the answer was not used; \
+                               the request is decided again under the new level."
                     .to_string();
                 sess.send_event_raw(Event {
                     id: event_turn_id.clone(),
