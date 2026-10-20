@@ -403,6 +403,11 @@ struct Snapshot {
     /// The git folders this look walked (#943 review r6); empty in a
     /// baseline.
     git_dirs: Vec<PathBuf>,
+    /// A folder it reached again in another role than the one it listed it
+    /// in (one git folder inside another's tree, #943 item 13 review r1):
+    /// what it saw of that tree may be less than a look of that folder alone
+    /// sees.
+    overlapping: bool,
 }
 
 impl Snapshot {
@@ -417,6 +422,7 @@ impl Snapshot {
             went_missing: false,
             empty_new: HashSet::new(),
             git_dirs: Vec::new(),
+            overlapping: false,
         }
     }
 }
@@ -444,7 +450,17 @@ fn walk(repo: &Repo, prev: Option<&Snapshot>) -> Snapshot {
         .map(|dir| (dir.clone(), 0, Role::GitDir))
         .collect();
     while let Some((dir, depth, role)) = queue.pop_front() {
-        if snapshot.folders.contains_key(&dir) {
+        if let Some(seen) = snapshot.folders.get(&dir) {
+            let has = |name: &str| seen.entries.contains_key(OsStr::new(name));
+            let role = match role {
+                Role::Modules if has("HEAD") && (has("objects") || has("commondir")) => {
+                    Role::GitDir
+                }
+                role => role,
+            };
+            if role != seen.role {
+                snapshot.overlapping = true;
+            }
             continue;
         }
         let Ok(meta) = std::fs::symlink_metadata(&dir) else {
@@ -960,11 +976,14 @@ struct Global {
     /// looked (`is_empty_stub`): any session's later look reports one once
     /// something is in it. Kept when a session forgets the repository.
     empty_new: HashSet<PathBuf>,
-    /// Git folders (by repository) a look couldn't see all of, and why;
-    /// those a later look saw in full are taken out (#943 item 13: also
-    /// where that look walked other folders with them).
-    incomplete: HashMap<Vec<PathBuf>, String>,
+    /// Git folders (by repository) a look couldn't see all of, why, and
+    /// when that look started; those a later look saw in full are taken out
+    /// (#943 item 13: also where that look walked other folders with them).
+    incomplete: HashMap<Vec<PathBuf>, (String, u64)>,
     uses: u64,
+    /// Looks started, for `incomplete`: a look that started earlier doesn't
+    /// clear what a later one recorded.
+    looks: u64,
 }
 
 static GLOBAL: LazyLock<Mutex<Global>> = LazyLock::new(Default::default);
@@ -1093,7 +1112,11 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
             if let Some(prev) = snapshot.as_mut() {
                 prev.went_missing = true;
             }
-            walked.push(Walked::Gone(repo.git_dirs.clone()));
+            let started = with_global(|global| {
+                global.looks += 1;
+                global.looks
+            });
+            walked.push((Walked::Exact(repo.git_dirs.clone()), started));
             continue;
         }
         // Made again or replaced (#943 reviews r4, r6): it may be another
@@ -1137,6 +1160,10 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
             .unwrap_or(repo);
         // The last look stays until this one is done (a panic keeps it).
         let prev = snapshot.as_ref();
+        let started = with_global(|global| {
+            global.looks += 1;
+            global.looks
+        });
         // Made again: what the old one had isn't carried into this look.
         let mut cur = walk(
             repo,
@@ -1232,34 +1259,57 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
                 why: why.clone(),
             });
         }
-        walked.push(match &cur.incomplete {
-            Some(why) => Walked::Incomplete(repo.git_dirs.clone(), why.clone()),
-            None => Walked::Complete(repo.git_dirs.clone()),
-        });
+        walked.push((
+            match &cur.incomplete {
+                Some(why) => Walked::Incomplete(repo.git_dirs.clone(), why.clone()),
+                // Where git folders overlap in other roles, only its own
+                // entry (as before #943 item 13).
+                None if cur.overlapping => Walked::Exact(repo.git_dirs.clone()),
+                // Every folder it listed as a git folder (its own, its
+                // worktrees' and submodules') was seen in full.
+                None => Walked::Complete(
+                    cur.folders
+                        .iter()
+                        .filter(|(_, folder)| folder.role == Role::GitDir)
+                        .map(|(dir, _)| dir.clone())
+                        .collect(),
+                ),
+            },
+            started,
+        ));
         findings.extend(found);
         *snapshot = Some(cur);
     }
     with_global(|global| {
-        for look in walked {
+        for (look, started) in walked {
             match look {
                 Walked::Incomplete(git_dirs, why) => {
-                    global.incomplete.insert(git_dirs, why);
+                    let entry = global.incomplete.entry(git_dirs).or_insert((why, started));
+                    entry.1 = entry.1.max(started);
                 }
                 // #943 item 13: the folders it saw in full are out of every
-                // entry, also one recorded under other git folders with
-                // them (before the `.git` was replaced, or by a look that
-                // walked the old and new ones).
-                Walked::Complete(git_dirs) => {
+                // entry recorded before it started, also one recorded under
+                // other git folders with them (before the `.git` was
+                // replaced, or by a look that walked the old and new ones).
+                Walked::Complete(seen) => {
                     global.incomplete = std::mem::take(&mut global.incomplete)
                         .into_iter()
-                        .filter_map(|(mut dirs, why)| {
-                            dirs.retain(|dir| !git_dirs.contains(dir));
-                            (!dirs.is_empty()).then_some((dirs, why))
+                        .filter_map(|(mut dirs, (why, at))| {
+                            if at < started {
+                                dirs.retain(|dir| !seen.contains(dir));
+                            }
+                            (!dirs.is_empty()).then_some((dirs, (why, at)))
                         })
                         .collect();
                 }
-                Walked::Gone(git_dirs) => {
-                    global.incomplete.remove(&git_dirs);
+                Walked::Exact(git_dirs) => {
+                    if global
+                        .incomplete
+                        .get(&git_dirs)
+                        .is_some_and(|(_, at)| *at < started)
+                    {
+                        global.incomplete.remove(&git_dirs);
+                    }
                 }
             }
         }
@@ -1270,12 +1320,13 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
 
 /// How a look at a repository went, for `Global::incomplete`.
 enum Walked {
-    /// Its git folders were seen in full.
+    /// These git folders were seen in full.
     Complete(Vec<PathBuf>),
-    /// Not, and why.
+    /// Its git folders weren't, and why.
     Incomplete(Vec<PathBuf>, String),
-    /// Its `.git` is gone: nothing to follow there.
-    Gone(Vec<PathBuf>),
+    /// Only its own entry goes: its `.git` is gone (nothing to follow
+    /// there), or it saw them in full but overlapping in other roles.
+    Exact(Vec<PathBuf>),
 }
 
 /// What a `.git` made again (missing at the last look, now a different one)

@@ -1220,3 +1220,51 @@ fn issue_943_a_replaced_git_seen_in_full_is_no_longer_held_as_incomplete() {
         "{main_held:?}"
     );
 }
+
+/// #943 item 13 review r1: a look whose git folders overlap in other roles
+/// (a `.git` file naming a folder inside the project's git folder, with a
+/// `commondir` back to it) sees less of the project's git folder than a
+/// look of it alone: complete, it doesn't clear the project's incomplete
+/// entry.
+#[test]
+fn issue_943_an_overlapping_look_does_not_clear_another_incomplete_one() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    const NOT_FULLY: &str = "(not checked fully)";
+    let project = Project::new();
+    let git = project.git();
+    let hidden = git.join("info/objects/y");
+    std::fs::create_dir_all(&hidden).expect("hidden folder");
+    std::fs::set_permissions(&hidden, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    let thread = ThreadId::new();
+    let found = kinds(&check(thread, &project.repos()));
+    let elsewhere = project.base.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).expect("elsewhere");
+    std::fs::write(git.join("info/commondir"), "..\n").expect("commondir");
+    std::fs::write(
+        elsewhere.join(".git"),
+        format!("gitdir: {}\n", git.join("info").display()),
+    )
+    .expect("git file");
+    let overlapping = repos(&[elsewhere.as_path()]);
+    let other_found = kinds(&check(ThreadId::new(), &overlapping));
+    let held = project.held();
+    std::fs::set_permissions(&hidden, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    assert_eq!(found, vec![format!("incomplete {}", git.display())]);
+    assert_eq!(
+        overlapping.first().map(|repo| repo.probes().len()),
+        Some(1 + 2 * 4),
+        "{overlapping:?}"
+    );
+    assert!(
+        !other_found
+            .iter()
+            .any(|kind| kind.starts_with("incomplete")),
+        "{other_found:?}"
+    );
+    assert!(
+        held.iter().any(|held| held.ends_with(NOT_FULLY)),
+        "{held:?}"
+    );
+}
