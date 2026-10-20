@@ -41,7 +41,8 @@ model with its refusals removed, so the product's protections are what gets test
   attempt as the first cell that targets the item's file, and block rather than fail for reasons unrelated to the
   product. The integrator's mechanical edits before the review: [design/integrator-edits.diff](design/integrator-edits.diff).
 - **Freeze:** SHA-256 of every design, packet, harness and tool file plus the candidate and fixture
-  ([design/FROZEN.sha256](design/FROZEN.sha256); it does not list itself), pushed as `020a6d96ad` at
+  ([design/FROZEN.sha256](design/FROZEN.sha256); it does not list itself; `harness/seal/` and
+  `harness/post-freeze-host-driver.diff` were added after the run, see Named limits), pushed as `020a6d96ad` at
   2026-10-20T08:28:56Z, before the first group's clone (08:29:25Z).
 - **Executor packet v5:** [executor-packet/v5/](executor-packet/v5/): the frozen cases, amendments v2-v4 verbatim,
   amendment v5, four screen sets, navigation and two group prompts (R01 MOD-09, R02 MOD-21).
@@ -65,10 +66,11 @@ model with its refusals removed, so the product's protections are what gets test
   08:59:03Z-09:22:49Z (agmx2). No UTM VM was started; "macOS 2" and "macOS 3" stayed stopped. One Tart VM at a time,
   under `vm-tart.lock`. Host memory was at or above 38% free at the start of every model request the gate logged (it
   pauses new requests below 20%; it never paused).
-- **No real key in the guest.** This run copied no real key into the guest, and the clone had none: `seal-guest.sh`
-  ([harness/seal/](harness/seal/)) refuses to run unless `/Users/agent` is absent (a fresh clone), creates
-  `~agent/.pf83-auth` and writes only a synthetic `auth.json` placeholder there (`{"synthetic": "placeholder, not a
-  credential"}`); `setup-agent.sh` then writes the synthetic `zai_api_key` placeholder. The guest's mediator forwards Z.AI and local-model requests as plain HTTP over one SSH
+- **No real key copied in.** This run copied no real key into the guest, and the coordinator's key files were
+  created as synthetic placeholders: `seal-guest.sh` ([harness/seal/](harness/seal/)) refuses to run unless
+  `/Users/agent` is absent (a fresh clone), creates `~agent/.pf83-auth` and writes only a synthetic `auth.json`
+  placeholder there (`{"synthetic": "placeholder, not a credential"}`); `setup-agent.sh` then writes the synthetic
+  `zai_api_key` placeholder. The rest of the base image was not scanned for keys. The guest's mediator forwards Z.AI and local-model requests as plain HTTP over one SSH
   reverse tunnel, bound to the guest's loopback (`18601`, `18602`), to two host processes on `127.0.0.1` only: a relay
   that adds the Z.AI key on the host ([harness/host_zai_relay.py](harness/host_zai_relay.py)) and a gate in front of
   the local model ([harness/qwen_gate.py](harness/qwen_gate.py): only `GET /v1/models` and `POST
@@ -84,7 +86,8 @@ model with its refusals removed, so the product's protections are what gets test
   ([common/R01/vm-state-end.txt](common/R01/vm-state-end.txt), [common/R02/vm-state-end.txt](common/R02/vm-state-end.txt)).
   The pre-freeze shakedown clone was deleted the same way ([shakedown/](shakedown/)).
 - **Export:** `pty.raw` gzipped; each fixture's `.git` renamed `dot-git`; product homes and product logs are not
-  exported, except [runs/R01/product-log-excerpt.txt](runs/R01/product-log-excerpt.txt) (items 5, 7 and 8). The
+  exported, except [runs/R01/product-log-excerpt.txt](runs/R01/product-log-excerpt.txt) (items 5, 7 and 8) and
+  [runs/R02/product-excerpt.txt](runs/R02/product-excerpt.txt) (the child's three commands). The
   synthetic values appear only in the testers' own files, reports and transcripts (and in one R02 tester `wait` pattern),
   never in the product's output (checked on `pty.raw`, the screens, the product logs and the product homes).
   [runs/R02/product-excerpt.txt](runs/R02/product-excerpt.txt) has the child's three command outputs from its
@@ -100,9 +103,15 @@ model with its refusals removed, so the product's protections are what gets test
 - The tester model is the same as in the earlier runs; the product model differs from them.
 - Host logs: the gate's and relay's logs were briefly written to a moved folder; the relay's entries before 08:37:58Z
   (the R01 gate smoke and the tester's first requests) are only in the guest mediator's log. The local-model gate lost
-  no request of the runs (first entry 08:40:17Z, R01 item 1's turn).
+  no model turn of the runs (first entry 08:40:17Z, R01 item 1's turn); R01's isolation-gate `GET /v1/models`
+  (08:32:13Z) is only in the guest mediator's log.
 - Post-freeze host-side change: the host driver writes one log folder per clone
   ([harness/post-freeze-host-driver.diff](harness/post-freeze-host-driver.diff)); no guest file or packet changed.
+- `harness/seal/` (`seal-guest.sh`, `dns-refuse.py`) was exported after the run and is not in the freeze. The frozen
+  driver copies both from the worktree's `scripts/qa/tart/` at each clone (`harness/tart-run.sh`, `seal`); that folder
+  is main's version (last changed in `a941bfb9eb`), and the exported `seal-guest.sh` is byte-identical to the copy the
+  driver staged for R02, kept on the host. SHA-256: `seal-guest.sh` `81814b54…2f9799`, `dns-refuse.py` `be208eac…3231c7`.
+  `common/R0*/seal.out` matches the script's final report lines.
 - Design-time: `tools.md` in the designer's packet was edited while the designer ran (08:12:37Z, "about 80 minutes"
   became "about 110 minutes" when the testers' time budget was raised), so `design/designer-packet.sha256` (taken at
   launch) no longer matches it; the designer's draft said 80 minutes and the integrator's edit corrected it
