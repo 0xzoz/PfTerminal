@@ -121,8 +121,6 @@ const MAX_GROWTH: u64 = 6;
 pub(super) fn assert_linear(label: &str, run: impl Fn(usize)) {
     let small = measure(|| run(1));
     let large = measure(|| run(SCALE as usize));
-    // Shown with `--no-capture`.
-    eprintln!("{label}: {small:?} at 1x, {large:?} at {SCALE}x");
     assert!(small.steps > 0, "{label}: no classifier loop counted");
     for (counted, small, large) in [
         ("steps", small.steps, large.steps),
