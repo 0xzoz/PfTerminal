@@ -954,14 +954,25 @@ fn issue_943_a_worktree_added_again_later() {
     std::fs::write(worktree.join(".git"), &text).expect("added again");
     assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
     assert_eq!(project.held(), Vec::<String>::new());
+    // As git writes it for a real path: quiet too.
     remove();
-    add(&format!("{}\n", project.outside.display()));
+    add(&format!("{}\n", project.git().display()));
     std::fs::write(worktree.join(".git"), &text).expect("added again");
-    assert_eq!(
-        kinds(&check(thread, &repos)),
-        vec![format!(
-            "config {}",
-            worktree_git.join("commondir").display()
-        )]
-    );
+    assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
+    // Review r2: through a link that leads to the common folder now and
+    // could lead elsewhere later; another folder.
+    let link = project.outside.join("common-link");
+    symlink(project.git(), &link).expect("link");
+    for commondir in [&link, &project.outside] {
+        remove();
+        add(&format!("{}\n", commondir.display()));
+        std::fs::write(worktree.join(".git"), &text).expect("added again");
+        assert_eq!(
+            kinds(&check(thread, &repos)),
+            vec![format!(
+                "config {}",
+                worktree_git.join("commondir").display()
+            )]
+        );
+    }
 }

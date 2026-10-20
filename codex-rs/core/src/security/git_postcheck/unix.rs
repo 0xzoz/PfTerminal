@@ -1219,7 +1219,7 @@ fn remade_baseline(repo: &Repo, prev: &Snapshot, cur: &Snapshot) -> Snapshot {
             .filter(|entry| entry.kind == Kind::File && entry.nlink == 1)
             .filter(|_| {
                 read_small(&dir.join("commondir"))
-                    .and_then(|common| std::fs::canonicalize(dir.join(common.trim())).ok())
+                    .and_then(|common| plain_commondir(dir, &common))
                     .is_some_and(|common| kept.contains(&&common))
             });
         let entries = commondir
@@ -1239,6 +1239,18 @@ fn remade_baseline(repo: &Repo, prev: &Snapshot, cur: &Snapshot) -> Snapshot {
         );
     }
     baseline
+}
+
+/// The folder a `commondir` names, as `git worktree add` writes it (`../..`
+/// or a real path), without following links: git follows its text each
+/// time it runs, where a link could lead elsewhere later.
+fn plain_commondir(dir: &Path, text: &str) -> Option<PathBuf> {
+    let text = text.trim_end_matches(['\n', '\r']);
+    if text == "../.." {
+        return dir.parent()?.parent().map(Path::to_path_buf);
+    }
+    let path = Path::new(text);
+    (path.is_absolute() && std::fs::canonicalize(path).ok()? == path).then(|| path.to_path_buf())
 }
 
 /// What any session (a sub-agent's too) found in the git folders `watched`
