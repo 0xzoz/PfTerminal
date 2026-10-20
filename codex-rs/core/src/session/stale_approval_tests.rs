@@ -245,3 +245,74 @@ async fn issue_945_permission_grant_after_a_level_change_grants_nothing() {
             .is_some()
     );
 }
+
+/// D51 (#1001): permission grants made before a security transition end at
+/// it, for the session and the turn, like hosts approved "for session"; a
+/// grant answered before it is not recorded after it. Grants made under the
+/// new level hold.
+#[tokio::test]
+async fn issue_1001_permission_grants_end_at_a_level_change() {
+    let (session, turn_context, _events) = make_session_and_context_with_rx().await;
+    let controller = initialize_policy(&session);
+    *session.active_turn.lock().await = Some(ActiveTurn::default());
+    let turn_state = {
+        let active = session.active_turn.lock().await;
+        Arc::clone(&active.as_ref().expect("active turn").turn_state)
+    };
+    let environment_id = turn_context
+        .environments
+        .primary()
+        .expect("a primary environment")
+        .selection()
+        .environment_id;
+    let network = RequestPermissionProfile {
+        network: Some(codex_protocol::models::NetworkPermissions {
+            enabled: Some(true),
+        }),
+        ..RequestPermissionProfile::default()
+    };
+    let grant = |scope| RequestPermissionsResponse {
+        permissions: network.clone(),
+        scope,
+        strict_auto_review: false,
+    };
+    let record = async |scope, granted_under| {
+        session
+            .record_granted_request_permissions_for_turn(
+                &grant(scope),
+                &environment_id,
+                Some(&turn_state),
+                granted_under,
+            )
+            .await;
+    };
+    let held = async || {
+        (
+            session.granted_session_permissions(&environment_id).await,
+            session.granted_turn_permissions(&environment_id).await,
+        )
+    };
+    let granted: Option<codex_protocol::models::AdditionalPermissionProfile> =
+        Some(network.clone().into());
+
+    // Granted under Permissive, for the session and the turn.
+    let permissive = session.services.authority_marker();
+    record(PermissionGrantScope::Session, permissive).await;
+    record(PermissionGrantScope::Turn, permissive).await;
+    assert_eq!(held().await, (granted.clone(), granted.clone()));
+
+    // The level rises: both end.
+    raise_level(&controller, SecurityLevel::Moderate);
+    assert_eq!(held().await, (None, None));
+
+    // Answered under Permissive, recorded after the change: not kept.
+    record(PermissionGrantScope::Session, permissive).await;
+    record(PermissionGrantScope::Turn, permissive).await;
+    assert_eq!(held().await, (None, None));
+
+    // Granted under the level in force: kept as before.
+    let moderate = session.services.authority_marker();
+    record(PermissionGrantScope::Session, moderate).await;
+    record(PermissionGrantScope::Turn, moderate).await;
+    assert_eq!(held().await, (granted.clone(), granted));
+}

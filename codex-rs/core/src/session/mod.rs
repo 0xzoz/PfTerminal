@@ -3306,6 +3306,7 @@ impl Session {
                 &response,
                 &environment.environment_id,
                 originating_turn_state.as_ref(),
+                shown_under,
             )
             .await;
             return Ok(Some(response));
@@ -3519,6 +3520,7 @@ impl Session {
                     &response,
                     &entry.environment.environment_id,
                     originating_turn_state.as_ref(),
+                    entry.shown_under,
                 )
                 .await;
                 entry.tx_response.send(response).ok();
@@ -3673,21 +3675,31 @@ impl Session {
         }
     }
 
+    /// Records a grant answered to a request shown under `granted_under`.
+    /// D51 (#1001): it holds only while no security transition is committed
+    /// (see [`crate::state::GrantedPermissions`]).
     async fn record_granted_request_permissions_for_turn(
         &self,
         response: &RequestPermissionsResponse,
         environment_id: &str,
         originating_turn_state: Option<&Arc<Mutex<crate::state::TurnState>>>,
+        granted_under: Option<(u64, u64)>,
     ) {
         if response.permissions.is_empty() {
             return;
         }
         let permissions: AdditionalPermissionProfile = response.permissions.clone().into();
+        let current = self.services.authority_marker();
         match response.scope {
             PermissionGrantScope::Turn => {
                 if let Some(turn_state) = originating_turn_state {
                     let mut ts = turn_state.lock().await;
-                    ts.record_granted_permissions(environment_id, permissions);
+                    ts.record_granted_permissions(
+                        environment_id,
+                        permissions,
+                        granted_under,
+                        current,
+                    );
                     if response.strict_auto_review {
                         ts.enable_strict_auto_review();
                     }
@@ -3695,7 +3707,12 @@ impl Session {
             }
             PermissionGrantScope::Session => {
                 let mut state = self.state.lock().await;
-                state.record_granted_permissions(environment_id, permissions);
+                state.record_granted_permissions(
+                    environment_id,
+                    permissions,
+                    granted_under,
+                    current,
+                );
             }
         }
     }
@@ -3711,8 +3728,8 @@ impl Session {
         let granted = {
             let active = self.active_turn.lock().await;
             let active = active.as_ref()?;
-            let ts = active.turn_state.lock().await;
-            ts.granted_permissions(environment_id)
+            let mut ts = active.turn_state.lock().await;
+            ts.granted_permissions(environment_id, self.services.authority_marker())
         };
         self.usable_grant(granted).await
     }
@@ -3797,8 +3814,8 @@ impl Session {
         environment_id: &str,
     ) -> Option<AdditionalPermissionProfile> {
         let granted = {
-            let state = self.state.lock().await;
-            state.granted_permissions(environment_id)
+            let mut state = self.state.lock().await;
+            state.granted_permissions(environment_id, self.services.authority_marker())
         };
         self.usable_grant(granted).await
     }

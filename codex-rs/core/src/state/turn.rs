@@ -15,7 +15,6 @@ use codex_protocol::request_permissions::RequestPermissionProfile;
 use codex_protocol::request_permissions::RequestPermissionsResponse;
 use codex_protocol::request_user_input::RequestUserInputResponse;
 use codex_rmcp_client::ElicitationResponse;
-use codex_sandboxing::policy_transforms::merge_permission_profiles;
 use rmcp::model::RequestId;
 use tokio::sync::oneshot;
 
@@ -99,7 +98,8 @@ pub(crate) struct TurnState {
     pending_dynamic_tools: HashMap<String, oneshot::Sender<DynamicToolResponse>>,
     pub(crate) pending_input: TurnInputQueue,
     mailbox_delivery_phase: MailboxDeliveryPhase,
-    granted_permissions_by_environment_id: HashMap<String, AdditionalPermissionProfile>,
+    /// D51 (#1001): bound to the policy marker they were granted under.
+    granted_permissions: super::GrantedPermissions,
     strict_auto_review_enabled: bool,
     pub(crate) tool_calls: u64,
     pub(crate) has_memory_citation: bool,
@@ -262,25 +262,19 @@ impl TurnState {
         &mut self,
         environment_id: &str,
         permissions: AdditionalPermissionProfile,
+        granted_under: Option<(u64, u64)>,
+        current: Option<(u64, u64)>,
     ) {
-        let granted_permissions = merge_permission_profiles(
-            self.granted_permissions_by_environment_id
-                .get(environment_id),
-            Some(&permissions),
-        );
-        if let Some(granted_permissions) = granted_permissions {
-            self.granted_permissions_by_environment_id
-                .insert(environment_id.to_string(), granted_permissions);
-        }
+        self.granted_permissions
+            .record(environment_id, permissions, granted_under, current);
     }
 
     pub(crate) fn granted_permissions(
-        &self,
+        &mut self,
         environment_id: &str,
+        current: Option<(u64, u64)>,
     ) -> Option<AdditionalPermissionProfile> {
-        self.granted_permissions_by_environment_id
-            .get(environment_id)
-            .cloned()
+        self.granted_permissions.get(environment_id, current)
     }
 
     pub(crate) fn enable_strict_auto_review(&mut self) {

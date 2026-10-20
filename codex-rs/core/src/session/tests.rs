@@ -6766,21 +6766,22 @@ async fn record_granted_request_permissions_for_turn_uses_originating_turn() {
             },
             codex_exec_server::LOCAL_ENVIRONMENT_ID,
             Some(&originating_turn_state),
+            session.services.authority_marker(),
         )
         .await;
 
     assert_eq!(
-        originating_turn_state
-            .lock()
-            .await
-            .granted_permissions(codex_exec_server::LOCAL_ENVIRONMENT_ID),
+        originating_turn_state.lock().await.granted_permissions(
+            codex_exec_server::LOCAL_ENVIRONMENT_ID,
+            session.services.authority_marker(),
+        ),
         Some(requested_permissions.into())
     );
     assert_eq!(
-        current_turn_state
-            .lock()
-            .await
-            .granted_permissions(codex_exec_server::LOCAL_ENVIRONMENT_ID),
+        current_turn_state.lock().await.granted_permissions(
+            codex_exec_server::LOCAL_ENVIRONMENT_ID,
+            session.services.authority_marker(),
+        ),
         None
     );
     assert_eq!(
@@ -6813,16 +6814,20 @@ async fn request_permission_grants_are_environment_keyed() {
             },
             "remote",
             Some(&originating_turn_state),
+            session.services.authority_marker(),
         )
         .await;
 
     {
-        let turn_state = originating_turn_state.lock().await;
+        let mut turn_state = originating_turn_state.lock().await;
         assert_eq!(
-            turn_state.granted_permissions("remote"),
+            turn_state.granted_permissions("remote", session.services.authority_marker()),
             Some(requested_permissions.clone().into())
         );
-        assert_eq!(turn_state.granted_permissions("local"), None);
+        assert_eq!(
+            turn_state.granted_permissions("local", session.services.authority_marker()),
+            None
+        );
     }
 
     session
@@ -6834,6 +6839,7 @@ async fn request_permission_grants_are_environment_keyed() {
             },
             "remote",
             /*originating_turn_state*/ None,
+            session.services.authority_marker(),
         )
         .await;
 
@@ -6866,6 +6872,7 @@ async fn enable_strict_auto_review_for_turn_uses_originating_turn() {
             },
             codex_exec_server::LOCAL_ENVIRONMENT_ID,
             Some(&originating_turn_state),
+            session.services.authority_marker(),
         )
         .await;
 
@@ -14214,17 +14221,8 @@ async fn issue_245_a_grant_stored_before_the_rules_applied_drops_protected_paths
     let auth = turn.config.codex_home.join("auth.json");
     let notes_only = additional(vec![entry(notes.as_path())]);
     let grant = additional(vec![entry(notes.as_path()), entry(auth.as_path())]);
-    session
-        .state
-        .lock()
-        .await
-        .record_granted_permissions(&environment_id, grant.clone());
-    // Permissive: as stored.
-    assert_eq!(
-        session.granted_session_permissions(&environment_id).await,
-        Some(grant)
-    );
-
+    // The session's policy tree is in place before the grant (D51, #1001:
+    // grants end at a security transition); the rules apply later.
     let control = session
         .services
         .agent_control
@@ -14235,6 +14233,18 @@ async fn issue_245_a_grant_stored_before_the_rules_applied_drops_protected_paths
             /*inherits_from_spawn_parent*/ false,
         )
         .expect("policy");
+    session.state.lock().await.record_granted_permissions(
+        &environment_id,
+        grant.clone(),
+        /*granted_under*/ None,
+        session.services.authority_marker(),
+    );
+    // Permissive: as stored.
+    assert_eq!(
+        session.granted_session_permissions(&environment_id).await,
+        Some(grant)
+    );
+
     let client = (*session.services.model_client())
         .clone()
         .with_ingress_policy(SecurityLevel::Moderate, control.effective_security_policy())
@@ -14285,11 +14295,12 @@ async fn issue_524_a_grant_is_checked_against_the_current_folder_too() {
             glob_scan_max_depth: None,
         }),
     };
-    session
-        .state
-        .lock()
-        .await
-        .record_granted_permissions(&environment_id, grant);
+    session.state.lock().await.record_granted_permissions(
+        &environment_id,
+        grant,
+        /*granted_under*/ None,
+        session.services.authority_marker(),
+    );
     let control = session
         .services
         .agent_control
