@@ -291,11 +291,19 @@ fn review_2_built_names_run_unseen() {
     ] {
         let line = format!("var=$(cat notes); {tail}");
         assert!(runs_unseen_in(shell, &line), "{shell}: {line}");
-        // Nothing tainted: built names alone are fine.
-        assert!(!runs_unseen_in(shell, tail), "{shell}: {tail}");
+        // Nothing tainted: built names alone are fine. (The lexer cannot
+        // read zsh `${(L)x}`, which counts as output for the fallback.)
+        if !tail.contains("${(") {
+            assert!(!runs_unseen_in(shell, tail), "{shell}: {tail}");
+        }
     }
+    // Since the round-6 fallback, variables the line does not assign (`n`,
+    // `h` from the environment) count once it holds command output.
+    assert!(runs_unseen(
+        "v=$(cat f); echo $(( ${#v} + 1 )) $(( ${n:-0} + 1 )) $(( 0x$h ))"
+    ));
     for line in [
-        "v=$(cat f); echo $(( ${#v} + 1 )) $(( ${n:-0} + 1 )) $(( 0x$h ))",
+        "v=$(cat f); echo $(( ${#v} + 1 )) $(( 0x1f ))",
         "v=$(cat f); n=${#v}; echo $(( n + 1 ))",
     ] {
         assert!(!runs_unseen(line), "{line}");
@@ -504,12 +512,130 @@ fn review_5_routes() {
     ] {
         assert!(runs_unseen_in(shell, line), "{shell}: {line}");
     }
+    // Since the round-6 fallback, `eval` on a line holding command output is
+    // unseen here too (end to end it already was: `eval` of command output).
+    assert!(runs_unseen("eval \"$(ssh-agent -s)\" && i=0; ((i++))"));
     for line in [
-        "eval \"$(ssh-agent -s)\" && i=0; ((i++))",
         "alias ll='ls -l'; i=0; ((i++))",
         "f() { echo $(( $1 + 1 )); }; f 3",
         "echo $'a\\tb'; i=0; ((i++))",
     ] {
         assert!(!runs_unseen(line), "{line}");
     }
+}
+
+/// Review round 6 and the fallback it triggered: once the line holds
+/// command output, arithmetic reads only variables whose every value is a
+/// number or an arithmetic result, and `eval`/alias text is unseen.
+#[test]
+fn review_6_fallback_routes() {
+    for (shell, line) in [
+        // R6-1: `eval` text split by quotes or built in a variable.
+        ("bash", "v=$(cat notes); eval \"(\"\"(v))\""),
+        ("bash", "v=$(cat notes); eval 'a''[v]=1'"),
+        ("bash", "v=$(cat notes); eval 'echo $''[v]'"),
+        ("bash", "v=$(cat notes); c=\"(\"\"(v))\"; eval \"$c\""),
+        ("ksh", "v=$(cat notes); c=\\(\\(v\\)\\); eval \"$c\""),
+        // R6-2: an alias with escapes.
+        (
+            "bash",
+            "shopt -s expand_aliases; v=$(cat notes); alias L=\\(\\(v\\)\\)\nL",
+        ),
+        // R6-3: `-v` inside an option cluster, also after a numeric value.
+        ("zsh", "print -rv m \"$(cat notes)\"; echo $((m))"),
+        ("zsh", "print -rvm \"$(cat notes)\"; echo $((m))"),
+        ("zsh", "m=0; print -rvm \"$(cat notes)\"; echo $((m))"),
+        ("zsh", "print -f '%s' -v m \"$(cat notes)\"; echo $((m))"),
+        // R6-4: anonymous-function forms set the positional parameters.
+        (
+            "zsh",
+            "v=$(cat notes); function () { echo $(( $2 )) } x \"$v\"",
+        ),
+        ("zsh", "v=$(cat notes); () (echo $(( $2 ))) x \"$v\""),
+        (
+            "zsh",
+            "v=$(cat notes); function () (echo $(( $2 ))) x \"$v\"",
+        ),
+        // The fallback: variables the line does not show to be numbers.
+        ("bash", "out=$(cat notes); echo $((m))"),
+        ("bash", "out=$(cat notes); x=$1; echo $((x))"),
+        ("bash", "out=$(cat notes); echo ${a[m]}"),
+        ("zsh", "out=$(cat notes); echo $a[m]"),
+        ("bash", "out=$(cat notes); a[m]=1"),
+        ("bash", "out=$(cat notes); [[ m -eq 1 ]]"),
+        ("bash", "out=$(cat notes); [[ -v a[m] ]]"),
+        ("bash", "out=$(cat notes); test -v 'a[m]'"),
+        ("zsh", "out=$(cat notes); printf '%d' m"),
+        ("zsh", "out=$(cat notes); printf '%s %d' x m"),
+        ("zsh", "out=$(cat notes); printf '%d' 'm%n'"),
+        ("zsh", "m=1; out=$(cat notes); printf '%d' 'm%n'"),
+        ("zsh", "fmt=%d; v=$(cat notes); printf \"$fmt\" \"$v\""),
+        ("zsh", "out=$(cat notes); echo ${(l:m:)x}"),
+        ("zsh", "out=$(cat notes); echo ${(P)m}"),
+        ("zsh", "out=$(cat notes); echo ${(e)m}"),
+        ("bash", "out=$(cat notes); echo ${!m}"),
+        ("bash", "out=$(cat notes); let m"),
+        ("bash", "out=$(cat notes); exit m"),
+        ("bash", "out=$(cat notes); typeset -i n; n=m"),
+        ("bash", "out=$(cat notes); x=hello; echo $((x))"),
+        (
+            "bash",
+            "out=$(cat notes); arr=(a b); for i in \"${!arr[@]}\"; do echo $((i)); done",
+        ),
+        ("bash", "out=$(cat notes); bash -c '(''(m))'"),
+        // Command output only as an argument now counts.
+        ("zsh", "echo \"$(cat notes)\"; echo $((m))"),
+    ] {
+        assert!(runs_unseen_in(shell, line), "{shell}: {line}");
+    }
+    for line in [
+        "out=$(cmd); for ((i=0; i<3; i++)); do echo $i; done",
+        "out=$(cmd); n=$(nproc); make -j$((n+1))",
+        "out=$(cmd); start=$(date +%s); echo $(( $(date +%s) - start ))",
+        "out=$(cmd); grep -E 'foo[0-9]+' f; ls file[ab].txt",
+        "out=$(cmd); [[ -f foo.txt && -n $out ]]",
+        "out=$(cmd); printf '%5.1f%%\\n' 3",
+        "out=$(cmd); printf 'Found %d\\n' 3",
+        "out=$(cmd); i=0; j=$i; ((j++)); echo $((i+j))",
+        "out=$(cmd); for i in 1 2 3; do echo $((i*2)); done",
+        "out=$(cmd); echo ${out:0:80} ${#out}",
+        "out=$(cmd); ulimit -n 1024; exit $?",
+        "out=$(cmd); rc=$?; exit $rc",
+        "out=$(cmd); arr=(1 2); for i in 0 1; do echo \"${arr[$i]}\"; done",
+        "out=$(cmd); echo $((RANDOM % 10 + SECONDS + $# + ${#out}))",
+        "out=$(cmd); n=0; while [[ $n -lt 3 ]]; do n=$((n+1)); done",
+        "out=$(cmd); x=$((16#ff + 0x1f + 2)); echo $((x))",
+        "i=0; ((i++)); echo $((m))",
+    ] {
+        assert!(!runs_unseen(line), "{line}");
+    }
+}
+
+/// The fallback stays linear on long chains of copies and long regions.
+#[test]
+fn review_6_fallback_stays_linear() {
+    let mut line = String::from("out=$(cmd); v0=1;");
+    for at in 1..20_000 {
+        line.push_str(&format!(" v{at}=$v{};", at - 1));
+    }
+    line.push_str(" echo $((v19999))");
+    let start = std::time::Instant::now();
+    assert!(!runs_unseen(&line));
+    // The helpers on long attacker text (the lexer's own cost on deep
+    // nesting is main's, tracked separately).
+    let deep = "$(".repeat(200_000);
+    assert_eq!(without_substitutions(&deep).trim(), "");
+    let ticks = "`".repeat(200_001);
+    let _ = without_substitutions(&ticks);
+    let mut targets = HashSet::new();
+    arithmetic_targets(&"i++ ".repeat(100_000), &mut targets);
+    assert_eq!(targets.len(), 1);
+    assert!(numeric_references(&"$x + ".repeat(100_000)).is_some());
+    let condition = format!("[[ {} ]]", "m -eq 1 && ".repeat(50_000));
+    assert!(condition_unsafe(&condition, &|text: &str| names(text)
+        .any(|name| name == "m")));
+    let _ = format_text(&"%5d\\n".repeat(100_000));
+    let flags = format!("${{({})x}}", "l:1:".repeat(50_000));
+    let _ = flags_unsafe(&flags, &|_: &str| false);
+    assert!(start.elapsed() < std::time::Duration::from_secs(20));
 }

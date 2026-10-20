@@ -228,6 +228,32 @@ const POSITIONAL: &[&str] = &[
     "BASH_ARGV",
 ];
 
+/// Parameters that hold numbers when the line does not assign them (bash
+/// and zsh specials, zsh `status`).
+const NUMERIC_SPECIALS: &[&str] = &[
+    "EGID",
+    "EUID",
+    "GID",
+    "UID",
+    "PPID",
+    "BASHPID",
+    "BASH_SUBSHELL",
+    "EPOCHSECONDS",
+    "SRANDOM",
+    "RANDOM",
+    "SECONDS",
+    "LINENO",
+    "OPTIND",
+    "SHLVL",
+    "HISTCMD",
+    "COLUMNS",
+    "LINES",
+    "status",
+    // What `shell::substitution_output` splices for a fact (`$(date +%s)`,
+    // `$(nproc)`): output the classifier trusts.
+    "value",
+];
+
 /// What one command line does with variables, gathered command by command.
 #[derive(Default)]
 pub(super) struct Arithmetic {
@@ -283,6 +309,13 @@ pub(super) struct Arithmetic {
     /// The line uses a ksh/bash 5.3 function substitution (`${ cmd; }`,
     /// `${| cmd; }`), whose output the lexer cannot see.
     function_substitution: bool,
+    /// The line runs `eval` or defines an alias: text the shell reads
+    /// again, which quotes and escapes can hide from the reader.
+    evaluates_text: bool,
+    /// Operands the shell evaluates as arithmetic (numeric operands of
+    /// builtins, `-eq` operands, numeric `printf` operands), for the
+    /// fallback check.
+    strict_words: Vec<String>,
 }
 
 impl Arithmetic {
@@ -397,6 +430,9 @@ impl Arithmetic {
                     if name == "eval" && (simple.escaped || self.ansi_c) {
                         self.opaque = true;
                     }
+                    if name == "eval" {
+                        self.evaluates_text = true;
+                    }
                     self.note_one(&raw[..index], &redirect[start..], /*command*/ None);
                     start += index + 1;
                 }
@@ -474,6 +510,7 @@ impl Arithmetic {
             self.opaque = true;
         }
         if name == "alias" {
+            self.evaluates_text = true;
             for (at, word) in args.iter().enumerate() {
                 let Some((alias, value)) = word.split_once('=') else {
                     continue;
@@ -525,15 +562,43 @@ impl Arithmetic {
         }
         if NUMERIC_BUILTINS.contains(&name) {
             self.evaluated.extend(args.iter().cloned());
+            // Not options (`ulimit -n 1024`).
+            self.strict_words.extend(
+                args.iter()
+                    .filter(|word| {
+                        !(word.len() > 1
+                            && word.starts_with('-')
+                            && word[1..].bytes().all(|byte| byte.is_ascii_alphabetic()))
+                    })
+                    .cloned(),
+            );
         }
         let operator = |word: &String| {
             word == "-v" || (TEST_OPERATORS.contains(&word.as_str()) && (name == "[[" || self.ksh))
         };
         if matches!(name, "test" | "[" | "[[") && args.iter().any(operator) {
             self.evaluated.extend(args.iter().cloned());
+            for (at, word) in args.iter().enumerate() {
+                if word == "-v" {
+                    // `-v a[sub]` evaluates the subscript.
+                    if let Some(next) = args.get(at + 1)
+                        && let Some(open) = next.find('[')
+                    {
+                        self.strict_words.push(next[open..].to_string());
+                    }
+                } else if operator(word) {
+                    self.strict_words.extend(
+                        at.checked_sub(1)
+                            .and_then(|before| args.get(before))
+                            .into_iter()
+                            .chain(args.get(at + 1))
+                            .cloned(),
+                    );
+                }
+            }
         }
         if matches!(name, "printf" | "print") {
-            self.printf(args);
+            self.printf(name, args);
         }
         if name == "read" {
             self.read_options(args);
@@ -613,6 +678,7 @@ impl Arithmetic {
                 if integer {
                     self.integers.insert(name.to_string());
                     self.evaluated.push(value.to_string());
+                    self.strict_words.push(value.to_string());
                 }
             }
         }
@@ -624,6 +690,11 @@ impl Arithmetic {
                 .cloned()
                 .collect();
             let values = &args[variables.len()..];
+            // The `in` keyword is not a value.
+            let values = values
+                .split_first()
+                .filter(|(first, _)| first.as_str() == "in")
+                .map_or(values, |(_, rest)| rest);
             // `for x; do`, `for x do`: the values are `"$@"`.
             let node = if let Some(at) = variables.iter().position(|word| word == "do") {
                 variables.truncate(at);
@@ -662,23 +733,71 @@ impl Arithmetic {
 
     /// `printf`/`print -f` with a numeric conversion evaluates its operands
     /// (zsh, ksh); `-v NAME` names a variable.
-    fn printf(&mut self, args: &[String]) {
+    fn printf(&mut self, name: &str, args: &[String]) {
         if args.iter().any(|word| numeric_format(word)) {
             self.evaluated.extend(args.iter().cloned());
         }
         // The variables hold what it prints (any operand, for linearity).
         let mut node: Option<String> = None;
-        // `-v NAME`, or attached: `-vNAME`.
-        let targets: Vec<String> = args
-            .windows(2)
-            .filter(|pair| pair[0] == "-v")
-            .map(|pair| pair[1].clone())
-            .chain(
-                args.iter()
-                    .filter_map(|word| word.strip_prefix("-v").filter(|name| !name.is_empty()))
-                    .map(str::to_string),
-            )
-            .collect();
+        // `-v NAME`, or attached or in a cluster: `-vNAME`, zsh `-rv NAME`,
+        // `-rvNAME`.
+        let mut targets: Vec<String> = Vec::new();
+        // Where the format is: printf's first operand, or after print's `-f`.
+        let mut format: Option<usize> = None;
+        let mut at = 0;
+        while at < args.len() {
+            let word = &args[at];
+            let cluster = word
+                .strip_prefix('-')
+                .filter(|cluster| !cluster.is_empty() && *cluster != "-");
+            let Some(cluster) = cluster else {
+                if name == "printf" && format.is_none() && word != "--" {
+                    format = Some(at);
+                }
+                if word == "--" && name == "printf" {
+                    format = format.or(Some(at + 1));
+                }
+                at += 1;
+                continue;
+            };
+            // zsh `print` reads options after `-f FORMAT`; `printf '%s' -v x`
+            // prints `-v`, which only over-matches.
+            if let Some(v) = cluster.find('v') {
+                let attached = &cluster[v + 1..];
+                if attached.is_empty() {
+                    targets.extend(args.get(at + 1).cloned());
+                    at += 1;
+                } else {
+                    targets.push(attached.to_string());
+                }
+            } else if name == "print" && format.is_none() && cluster.ends_with('f') {
+                format = Some(at + 1);
+                at += 1;
+            }
+            at += 1;
+        }
+        targets.retain(|target| !target.is_empty());
+        // The lexer splits a quoted format at blanks (`'%s %d'` reads `%s`,
+        // `%d`), so where the format ends is unknown: every later word may be
+        // an operand, read without its conversions and escapes.
+        let numeric = args.iter().any(|word| numeric_format(word));
+        if let Some(format) = format
+            && let Some(text) = args.get(format)
+        {
+            // A format from a variable may convert anything numerically.
+            let variable = text.contains('$') || text.contains('`');
+            if numeric || variable {
+                if variable {
+                    self.strict_words.push(text.clone());
+                }
+                self.strict_words
+                    .extend(args[format + 1..].iter().map(|word| format_text(word)));
+            }
+        } else if numeric {
+            let first = args.iter().position(|word| word.contains('%')).unwrap_or(0);
+            self.strict_words
+                .extend(args[first + 1..].iter().map(|word| format_text(word)));
+        }
         for target in &targets {
             self.named.push(target.clone());
             if let Some((name, _)) = assignment(&format!("{target}=")) {
@@ -698,6 +817,7 @@ impl Arithmetic {
         for word in args {
             if take_next {
                 self.evaluated.push(word.clone());
+                self.strict_words.push(word.clone());
                 take_next = false;
                 continue;
             }
@@ -710,6 +830,7 @@ impl Arithmetic {
                     take_next = true;
                 } else {
                     self.evaluated.push(value.to_string());
+                    self.strict_words.push(value.to_string());
                 }
             }
         }
@@ -723,8 +844,9 @@ impl Arithmetic {
             return true;
         }
         let (tainted, any) = self.tainted();
-        // Operands the lexer cannot see, or a sourced file, may use them.
-        if (self.opaque || self.sources) && any {
+        // Operands the lexer cannot see, a sourced file, or text the shell
+        // reads again (`eval "(""(v))"`, aliases) may use them.
+        if (self.opaque || self.sources || self.evaluates_text) && any {
             return true;
         }
         let builds = |value: &str| any && self.builds(value);
@@ -766,7 +888,150 @@ impl Arithmetic {
                         unknown || !builders.is_empty()
                     })
             })
-        })
+        }) || (any && self.strict_unseen(text, &tainted))
+    }
+
+    /// The #937 fallback (review round 6): once the line holds command
+    /// output or input, arithmetic may read only variables whose every value
+    /// on the line is a number, an arithmetic result or a copy of such a
+    /// variable. Anything else (the environment, positional parameters,
+    /// variables written by commands the reader does not follow) may hold
+    /// the output.
+    fn strict_unseen(&self, text: &[String], tainted: &HashSet<String>) -> bool {
+        // Quote removal can form a region (`(""(v))` reads `((v))`).
+        let mut texts: Vec<String> = Vec::new();
+        for arg in text {
+            let arg = joined(arg);
+            let bare = unquoted(&arg);
+            if bare != arg {
+                texts.push(bare);
+            }
+            texts.push(arg);
+        }
+        let found: Vec<(usize, Range<usize>)> = texts
+            .iter()
+            .enumerate()
+            .flat_map(|(at, text)| regions(text).into_iter().map(move |range| (at, range)))
+            .collect();
+        // Variables assigned inside arithmetic (`for ((i=0; ...; i++))`)
+        // hold its results.
+        let mut results: HashSet<String> = HashSet::new();
+        for (at, range) in &found {
+            let region = &texts[*at][range.clone()];
+            if pure_arithmetic(region) {
+                arithmetic_targets(&unquoted(region), &mut results);
+            }
+        }
+        for word in &self.strict_words {
+            arithmetic_targets(&visible(word), &mut results);
+        }
+        let safe = self.numeric_names(tainted, &results);
+        // Substitutions are judged on their own (`unseen_substitution`): a
+        // readable one (`$(date +%s)`) prints a fact, not a name.
+        let unsafe_in =
+            |text: &str| names(&without_substitutions(text)).any(|name| !safe.contains(name));
+        let unsafe_word = |word: &str| command_output(word) || unsafe_in(&unquoted(&visible(word)));
+        self.strict_words.iter().any(|word| unsafe_word(word))
+            || self
+                .assigned
+                .iter()
+                .filter(|(name, _)| self.integers.contains(name))
+                .any(|(_, value)| unsafe_word(value))
+            || self
+                .named
+                .iter()
+                .chain(
+                    self.assigned
+                        .iter()
+                        .filter(|(name, _)| self.namerefs.contains(name))
+                        .map(|(_, value)| value),
+                )
+                .any(|word| {
+                    let word = visible(word);
+                    references(&word).any(|name| !safe.contains(name))
+                        || word
+                            .find('[')
+                            .is_some_and(|open| unsafe_in(&unquoted(&word[open..])))
+                })
+            || found.iter().any(|(at, range)| {
+                let text = &texts[*at];
+                let region = &text[range.clone()];
+                if region.starts_with("[[") {
+                    condition_unsafe(region, &unsafe_in)
+                } else if region.starts_with('[') {
+                    subscript_context(text, range) && unsafe_in(&unquoted(region))
+                } else if region.starts_with("${!") {
+                    !index_listing(region) && unsafe_in(&unquoted(region))
+                } else if region.starts_with("${(") {
+                    flags_unsafe(region, &unsafe_in)
+                } else {
+                    unsafe_in(&unquoted(region))
+                }
+            })
+    }
+
+    /// Variables whose every value on the line is a number, an arithmetic
+    /// result, a length, or a copy of such a variable (a greatest fixed
+    /// point, computed by walking from the variables that fail, so linear),
+    /// plus special parameters that always hold numbers when the line does
+    /// not assign them.
+    fn numeric_names(
+        &self,
+        tainted: &HashSet<String>,
+        results: &HashSet<String>,
+    ) -> HashSet<String> {
+        let assigned: HashSet<&str> = self
+            .assigned
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        let excluded = |name: &str| {
+            tainted.contains(name)
+                || self.filled.contains(name)
+                || self.operands.contains(name)
+                || self.appended.contains(name)
+                || self.namerefs.contains(name)
+        };
+        let candidate = |name: &str| {
+            !excluded(name)
+                && (assigned.contains(name)
+                    || results.contains(name)
+                    || (NUMERIC_SPECIALS.contains(&name) && !assigned.contains(name)))
+        };
+        let mut failed: HashSet<String> = HashSet::new();
+        let mut receivers: HashMap<&str, Vec<&str>> = HashMap::new();
+        for (name, value) in &self.assigned {
+            match numeric_references(value) {
+                Some(sources) => {
+                    for source in sources {
+                        if candidate(source) {
+                            receivers.entry(source).or_default().push(name);
+                        } else {
+                            failed.insert(name.clone());
+                        }
+                    }
+                }
+                None => {
+                    failed.insert(name.clone());
+                }
+            }
+        }
+        let mut queue: Vec<String> = failed.iter().cloned().collect();
+        while let Some(source) = queue.pop() {
+            for receiver in receivers.get(source.as_str()).into_iter().flatten() {
+                if failed.insert((*receiver).to_string()) {
+                    queue.push((*receiver).to_string());
+                }
+            }
+        }
+        assigned
+            .iter()
+            .copied()
+            .chain(results.iter().map(String::as_str))
+            .chain(NUMERIC_SPECIALS.iter().copied())
+            .filter(|name| candidate(name) && !failed.contains(*name))
+            .map(str::to_string)
+            .collect()
     }
 
     /// Variables whose value is unseen: set from command output, filled
@@ -792,7 +1057,9 @@ impl Arithmetic {
         }
         // Once anything is tainted, a value built from name fragments may
         // name it.
-        let any = tainted.iter().any(|name| !self.underscore.contains(name));
+        // The #937 fallback widens this to any line holding command output,
+        // even only as an argument (held by `$_`).
+        let any = self.output_seen || tainted.iter().any(|name| !self.underscore.contains(name));
         // Command output anywhere (even only as an argument, held by `$_`)
         // may reach the variables shells fill on their own (`match`).
         if self.output_seen || !tainted.is_empty() {
@@ -853,6 +1120,332 @@ impl Arithmetic {
                             .any(|end| self.builders.contains(&rest[..end])))
             })
     }
+}
+
+/// Whether a region is arithmetic through and through (`$((...))`,
+/// `((...))`, `$[...]`, the offset of `${x:offset}`), where every name is a
+/// variable.
+fn pure_arithmetic(region: &str) -> bool {
+    region.starts_with("$((")
+        || region.starts_with("((")
+        || region.starts_with("$[")
+        || region.starts_with(':')
+}
+
+/// Text with its command substitutions (`$(...)`, `` `...` ``) blanked.
+/// Arithmetic (`$((`) is kept. Linear: each byte is visited once.
+fn without_substitutions(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut kept = String::with_capacity(text.len());
+    let mut at = 0;
+    let mut from = 0;
+    while at < bytes.len() {
+        let substitution = bytes[at] == b'`'
+            || (bytes[at] == b'$'
+                && bytes.get(at + 1) == Some(&b'(')
+                && bytes.get(at + 2) != Some(&b'('));
+        if !substitution {
+            at += 1;
+            continue;
+        }
+        kept.push_str(&text[from..at]);
+        kept.push(' ');
+        if bytes[at] == b'`' {
+            at = text[at + 1..]
+                .find('`')
+                .map_or(bytes.len(), |end| at + 1 + end + 1);
+        } else {
+            let mut depth = 0_usize;
+            let mut end = bytes.len();
+            for (offset, &byte) in bytes[at + 1..].iter().enumerate() {
+                match byte {
+                    b'(' => depth += 1,
+                    b')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = at + 1 + offset + 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            at = end;
+        }
+        from = at;
+    }
+    kept.push_str(&text[from.min(text.len())..]);
+    kept
+}
+
+/// Names that arithmetic text assigns (`i=0`, `i += 2`, `i++`, `--i`).
+fn arithmetic_targets(text: &str, targets: &mut HashSet<String>) {
+    let bytes = text.as_bytes();
+    for name in names(text) {
+        let start = name.as_ptr() as usize - text.as_ptr() as usize;
+        let end = start + name.len();
+        let after = text[end..].trim_start();
+        let assigns = after.starts_with("++")
+            || after.starts_with("--")
+            || (after.starts_with('=') && !after.starts_with("=="))
+            || ["+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>="]
+                .iter()
+                .any(|operator| after.starts_with(operator));
+        let before = &bytes[..start];
+        let increments = before.ends_with(b"++") || before.ends_with(b"--");
+        if assigns || increments {
+            targets.insert(name.to_string());
+        }
+    }
+}
+
+/// The variables a lexed value reads if it is only numbers, operators,
+/// arithmetic results, lengths, special numbers (`$?`) and variables
+/// (`$x`, `${x}`, bare `x`, which arithmetic reads too); `None` for
+/// anything else (command output, strings, subscripts, `$@`, `$1`).
+fn numeric_references(value: &str) -> Option<Vec<&str>> {
+    if command_output(value) || value.contains("$(") || value.contains('`') {
+        return None;
+    }
+    let bytes = value.as_bytes();
+    let name_end = |from: usize| {
+        let mut end = from;
+        while bytes
+            .get(end)
+            .is_some_and(|&byte| is_name_char(byte as char))
+        {
+            end += 1;
+        }
+        end
+    };
+    let mut sources = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        if value[at..].starts_with(shell::ARITHMETIC_OUTPUT) {
+            at += shell::ARITHMETIC_OUTPUT.len();
+            continue;
+        }
+        let byte = bytes[at];
+        match byte {
+            b' ' | b'\t' | b'\n' | b'+' | b'-' | b'*' | b'/' | b'%' | b'(' | b')' | b'<' | b'>'
+            | b'=' | b'!' | b'&' | b'|' | b'^' | b'~' | b',' | b'.' => at += 1,
+            // A number (`10`, `0x1f`, `16#ff`, `1.5`).
+            b'0'..=b'9' => {
+                while bytes
+                    .get(at)
+                    .is_some_and(|&byte| is_name_char(byte as char) || matches!(byte, b'#' | b'.'))
+                {
+                    at += 1;
+                }
+            }
+            b'a'..=b'z' | b'A'..=b'Z' | b'_' => {
+                let end = name_end(at);
+                sources.push(&value[at..end]);
+                at = end;
+            }
+            b'$' => {
+                let rest = &value[at + 1..];
+                if let Some(indexed) = rest.strip_prefix('!').filter(|indexed| {
+                    let end = indexed
+                        .find(|ch: char| !is_name_char(ch))
+                        .unwrap_or(indexed.len());
+                    end > 0
+                        && (indexed[end..].starts_with("[@]") || indexed[end..].starts_with("[*]"))
+                }) {
+                    // `${!NAME[@]}` as lexed (`$!NAME[@]`): its keys.
+                    let end = indexed.find('[').unwrap_or(indexed.len());
+                    if !is_identifier(&indexed[..end]) {
+                        return None;
+                    }
+                    sources.push(&indexed[..end]);
+                    at += 2 + end + 3;
+                } else if rest.starts_with(['?', '$', '!']) {
+                    at += 2;
+                } else if rest.starts_with('#') {
+                    // `$#`, `$#NAME`, `$#NAME[@]` (the lexer drops braces):
+                    // a count.
+                    at = name_end(at + 2);
+                    for listed in ["[@]", "[*]"] {
+                        if value[at..].starts_with(listed) {
+                            at += listed.len();
+                        }
+                    }
+                } else if let Some(body) = rest.strip_prefix('{') {
+                    let close = body.find('}')?;
+                    let inner = &body[..close];
+                    let listed = inner
+                        .strip_suffix("[@]")
+                        .or_else(|| inner.strip_suffix("[*]"));
+                    if let Some(length) = inner.strip_prefix('#') {
+                        // `${#NAME}`, `${#NAME[@]}`: a length.
+                        let length = listed
+                            .and_then(|inner| inner.strip_prefix('#'))
+                            .unwrap_or(length);
+                        if !is_identifier(length) && !matches!(length, "@" | "*") {
+                            return None;
+                        }
+                    } else if let Some(indexed) = inner.strip_prefix('!') {
+                        // `${!NAME[@]}`: its keys, set where it is filled.
+                        let indexed = indexed
+                            .strip_suffix("[@]")
+                            .or_else(|| indexed.strip_suffix("[*]"))?;
+                        if !is_identifier(indexed) {
+                            return None;
+                        }
+                        sources.push(indexed);
+                    } else if is_identifier(inner) {
+                        sources.push(inner);
+                    } else {
+                        return None;
+                    }
+                    at += 2 + close + 1;
+                } else {
+                    let end = name_end(at + 1);
+                    let name = &value[at + 1..end];
+                    // `$1`, `$a[1]`, zsh `$x:l` are not plain copies.
+                    if !is_identifier(name)
+                        || bytes
+                            .get(end)
+                            .is_some_and(|&byte| matches!(byte, b'[' | b':'))
+                    {
+                        return None;
+                    }
+                    sources.push(name);
+                    at = end;
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some(sources)
+}
+
+/// Whether a `[[ ... ]]` condition compares a value that is not a known
+/// number arithmetically (`-eq` operands, the subscript after `-v`).
+fn condition_unsafe(region: &str, unsafe_in: &impl Fn(&str) -> bool) -> bool {
+    let words: Vec<&str> = region.split_whitespace().collect();
+    words.iter().enumerate().any(|(at, word)| {
+        if *word == "-v" {
+            words
+                .get(at + 1)
+                .and_then(|next| next.find('[').map(|open| &next[open..]))
+                .is_some_and(|subscript| unsafe_in(&unquoted(subscript)))
+        } else if TEST_OPERATORS.contains(word) {
+            at.checked_sub(1)
+                .and_then(|before| words.get(before))
+                .into_iter()
+                .chain(words.get(at + 1))
+                .any(|operand| unsafe_in(&unquoted(operand)))
+        } else {
+            false
+        }
+    })
+}
+
+/// Whether a `[` region outside other arithmetic is a subscript the shell
+/// evaluates (`$a[i]`, `${a[i]}`, `a[i]=v`, `[k]=v` in a list) rather than
+/// a pattern (`grep 'x[ab]'`).
+fn subscript_context(text: &str, range: &Range<usize>) -> bool {
+    let before = &text[..range.start];
+    let stem = before.trim_end_matches(is_name_char);
+    if stem.len() == before.len() {
+        return true;
+    }
+    // `${#a[i]}`, zsh `${=a[i]}`, `$^a[i]`.
+    let mut sigils = stem;
+    for _ in 0..2 {
+        sigils = sigils
+            .strip_suffix(['#', '=', '^', '~', '!', '+'])
+            .unwrap_or(sigils);
+    }
+    let after = &text[range.end..];
+    sigils.ends_with('$')
+        || sigils.ends_with("${")
+        || after.starts_with('=')
+        || after.starts_with("+=")
+}
+
+/// `${!NAME[@]}`, `${!NAME[*]}`, `${!PREFIX@}`, `${!PREFIX*}`: keys or
+/// names listed, not a name evaluated.
+fn index_listing(region: &str) -> bool {
+    let Some(body) = region
+        .strip_prefix("${!")
+        .and_then(|rest| rest.strip_suffix('}'))
+    else {
+        return false;
+    };
+    let name = body
+        .strip_suffix("[@]")
+        .or_else(|| body.strip_suffix("[*]"))
+        .or_else(|| body.strip_suffix('@'))
+        .or_else(|| body.strip_suffix('*'));
+    name.is_some_and(is_identifier)
+}
+
+/// Whether zsh flags (`${(l:n:)x}`, `${(r:$n:)x}`, `${(I:n:)x}`) evaluate a
+/// value that is not a known number, or `(P)`/`(e)` reads one again.
+fn flags_unsafe(region: &str, unsafe_in: &impl Fn(&str) -> bool) -> bool {
+    let body = &region[3..];
+    let Some(close) = body.find(')') else {
+        return unsafe_in(&unquoted(region));
+    };
+    let flags = &body[..close];
+    // `(P)` takes a name from the value; `(e)` expands it again.
+    if flags.contains(['P', 'e']) {
+        return unsafe_in(&unquoted(region));
+    }
+    if references(flags).any(unsafe_in) {
+        return true;
+    }
+    flags.char_indices().any(|(at, flag)| {
+        if !matches!(flag, 'l' | 'r' | 'I') {
+            return false;
+        }
+        let rest = &flags[at + flag.len_utf8()..];
+        let Some(delimiter) = rest.chars().next().filter(|ch| !ch.is_ascii_alphanumeric()) else {
+            return false;
+        };
+        let argument = &rest[delimiter.len_utf8()..];
+        let argument = argument
+            .find(delimiter)
+            .map_or(argument, |end| &argument[..end]);
+        unsafe_in(&unquoted(argument))
+    })
+}
+
+/// A word without `printf` conversions (`%5.2f`, `%%`) and backslash
+/// escapes (`\n`), which are format text rather than names. The lexer drops
+/// backslashes (`%d\n` reads `%dn`), so name text right after a conversion
+/// goes too (arithmetic cannot start with `%`). A `%` after a name or `)`
+/// is the remainder operator (`m%n`) and stays.
+fn format_text(word: &str) -> String {
+    let mut kept = String::with_capacity(word.len());
+    let mut chars = word.chars().peekable();
+    let mut previous = ' ';
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => {
+                chars.next();
+                kept.push(' ');
+            }
+            '%' if !(is_name_char(previous) || previous == ')') => {
+                while chars
+                    .next_if(|ch| "-+ #0123456789.'*hlLqjzt".contains(*ch))
+                    .is_some()
+                {}
+                if chars
+                    .next_if(|ch| "diouxXeEfFgGaAcsbqQ%".contains(*ch))
+                    .is_some()
+                {
+                    while chars.next_if(|ch| is_name_char(*ch)).is_some() {}
+                }
+                kept.push(' ');
+            }
+            ch => kept.push(ch),
+        }
+        previous = kept.chars().next_back().unwrap_or(' ');
+    }
+    kept
 }
 
 /// Whether text defines a zsh anonymous function or sets `functions[...]`.

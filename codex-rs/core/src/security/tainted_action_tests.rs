@@ -2572,3 +2572,70 @@ fn issue_937_review_2_everyday_lines_still_run() {
     }
     assert_eq!(wrong, Vec::<String>::new());
 }
+
+/// #937 review round 6, and the fallback it triggered: once a line holds
+/// command output, arithmetic may read only variables whose every value is
+/// a number or an arithmetic result, and `eval`/alias text is unseen. Each
+/// bypass ran its payload in that real shell.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_937_review_6_fallback_routes() {
+    use ProtectedActionKind::UnseenCode;
+    let mut wrong = Vec::new();
+    for (shell, line) in [
+        ("bash", "v=$(cat notes); eval \"(\"\"(v))\""),
+        ("bash", "v=$(cat notes); eval 'a''[v]=1'"),
+        ("bash", "v=$(cat notes); eval 'echo $''[v]'"),
+        ("bash", "v=$(cat notes); c=\"(\"\"(v))\"; eval \"$c\""),
+        ("ksh", "v=$(cat notes); c=\\(\\(v\\)\\); eval \"$c\""),
+        (
+            "bash",
+            "shopt -s expand_aliases; v=$(cat notes); alias L=\\(\\(v\\)\\)\nL",
+        ),
+        ("zsh", "print -rv m \"$(cat notes)\"; echo $((m))"),
+        ("zsh", "print -rvm \"$(cat notes)\"; echo $((m))"),
+        ("zsh", "m=0; print -rvm \"$(cat notes)\"; echo $((m))"),
+        (
+            "zsh",
+            "v=$(cat notes); function () { echo $(( $2 )) } x \"$v\"",
+        ),
+        ("zsh", "v=$(cat notes); () (echo $(( $2 ))) x \"$v\""),
+        (
+            "zsh",
+            "v=$(cat notes); function () (echo $(( $2 ))) x \"$v\"",
+        ),
+        ("bash", "out=$(cat notes); echo $((m))"),
+        ("bash", "out=$(cat notes); x=$1; echo $((x))"),
+        ("zsh", "fmt=%d; v=$(cat notes); printf \"$fmt\" \"$v\""),
+        ("bash", "out=$(cat notes); bash -c '(''(m))'"),
+    ] {
+        let found = kind(&[shell, "-c", line]);
+        if found != Some(UnseenCode) {
+            wrong.push(format!("{shell}: {line:?} -> {found:?}"));
+        }
+    }
+    for shell in ["bash", "zsh"] {
+        for line in [
+            "out=$(cmd); for ((i=0; i<3; i++)); do echo $i; done",
+            "out=$(cmd); n=$(nproc); make -j$((n+1))",
+            "out=$(cmd); start=$(date +%s); echo $(( $(date +%s) - start ))",
+            "out=$(cmd); grep -E 'foo[0-9]+' f; ls file[ab].txt",
+            "out=$(cmd); [[ -f foo.txt && -n $out ]]",
+            "out=$(cmd); printf 'Found %d\\n' 3",
+            "out=$(cmd); i=0; j=$i; ((j++)); echo $((i+j))",
+            "out=$(cmd); for i in 1 2 3; do echo $((i*2)); done",
+            "out=$(cmd); echo ${out:0:80} ${#out}",
+            "out=$(cmd); rc=$?; exit $rc",
+            "out=$(cmd); n=0; while [[ $n -lt 3 ]]; do n=$((n+1)); done",
+        ] {
+            let found = kind(&[shell, "-c", line]);
+            if found.is_some() {
+                wrong.push(format!("{shell}: {line:?} -> {found:?}"));
+            }
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+}
