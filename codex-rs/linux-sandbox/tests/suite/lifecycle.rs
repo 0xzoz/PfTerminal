@@ -9,6 +9,11 @@
 //! bubblewrap dies before binding the sandbox's PID 1 to its parent (the
 //! race in #935) run a real bubblewrap through a wrapper that drops
 //! `--die-with-parent`, which leaves the sandbox in that state for good.
+//!
+//! #1006 (Travis, 2026-10-20, D47 option B): the same holds for commands run
+//! without bubblewrap (full disk write access without managed-proxy
+//! routing, legacy Landlock), which also keep the signals the session and
+//! the terminal send them.
 #![cfg(target_os = "linux")]
 #![allow(clippy::unwrap_used)]
 
@@ -111,7 +116,20 @@ enum Bwrap {
     Real,
     /// Without `--die-with-parent`: PID 1 never binds to its parent.
     Unbound,
+    /// Must not run (#1006): a wrapper that records its pid and fails.
+    Unused,
 }
+
+/// #1006: how a command runs without bubblewrap.
+#[derive(Clone, Copy, Debug)]
+enum Unwrapped {
+    /// Full disk write access, network restricted, no proxy routing.
+    FullDisk,
+    /// Legacy Landlock (`--use-legacy-landlock`), read-only.
+    LegacyLandlock,
+}
+
+const UNWRAPPED: [Unwrapped; 2] = [Unwrapped::FullDisk, Unwrapped::LegacyLandlock];
 
 struct Fixture {
     work: TempDir,
@@ -165,6 +183,45 @@ impl Fixture {
         )
     }
 
+    /// The helper's arguments for `script` run without bubblewrap.
+    fn unwrapped_args(&self, mode: Unwrapped, script: &str) -> Vec<String> {
+        let work = self.work.path().canonicalize().unwrap();
+        let (profile, use_legacy_landlock) = match mode {
+            Unwrapped::FullDisk => (
+                PermissionProfile::from_runtime_permissions(
+                    &FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry::new(
+                        FileSystemPath::Special {
+                            value: FileSystemSpecialPath::Root,
+                        },
+                        FileSystemAccessMode::Write,
+                    )]),
+                    NetworkSandboxPolicy::Restricted,
+                ),
+                false,
+            ),
+            Unwrapped::LegacyLandlock => (
+                PermissionProfile::from_runtime_permissions(
+                    &FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry::new(
+                        FileSystemPath::Special {
+                            value: FileSystemSpecialPath::Root,
+                        },
+                        FileSystemAccessMode::Read,
+                    )]),
+                    NetworkSandboxPolicy::Restricted,
+                ),
+                true,
+            ),
+        };
+        create_linux_sandbox_command_args_for_permission_profile(
+            vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
+            &work,
+            &profile,
+            &work,
+            use_legacy_landlock,
+            /*allow_network_for_proxy*/ false,
+        )
+    }
+
     /// `program` with `args`, finding bubblewrap as `bwrap` says.
     fn command(&self, bwrap: Bwrap, program: &Path, args: &[String]) -> Command {
         let mut command = Command::new(program);
@@ -190,13 +247,32 @@ impl Fixture {
             dirs.extend(std::env::split_paths(&path));
             command.env("PATH", std::env::join_paths(dirs).unwrap());
         }
+        if bwrap == Bwrap::Unused {
+            let wrapper = self.wrapper_dir.path().join("bwrap");
+            write_executable(
+                &wrapper,
+                &format!(
+                    "#!/bin/sh\necho $$ >> '{}'\nexit 99\n",
+                    self.pid_file().display()
+                ),
+            );
+            let path = std::env::var_os("PATH").unwrap_or_default();
+            let mut dirs = vec![self.wrapper_dir.path().to_path_buf()];
+            dirs.extend(std::env::split_paths(&path));
+            command.env("PATH", std::env::join_paths(dirs).unwrap());
+        }
         command
     }
 
-    /// A command that leaves a double-forked daemon, says `ready`, then
+    /// A command that leaves a double-forked daemon, which says `ready` once
+    /// in a session of its own (out of reach of a process-group kill), waits
+    /// for it to say so (end of file on a pipe it holds until then), then
     /// sleeps in the foreground (or exits, without `foreground`).
     fn script(&self, foreground: bool) -> String {
-        let mut script = format!("(setsid sleep {} &); echo ready", self.daemon);
+        let mut script = format!(
+            "exec 3>&1; (setsid /bin/sh -c 'echo ready; exec sleep {} 4>&-' 4>&1 1>&3 3>&- &) | read _",
+            self.daemon
+        );
         if foreground {
             script.push_str(&format!("; exec sleep {}", self.foreground));
         }
@@ -209,10 +285,22 @@ impl Fixture {
             eprintln!("skipping: no system bubblewrap");
             return false;
         }
-        let mut probe = self
-            .command(bwrap, &helper(), &self.helper_args("echo ok"))
-            .spawn()
-            .unwrap();
+        self.probe(bwrap, &self.helper_args("echo ok"))
+    }
+
+    /// Whether the command runs here without bubblewrap; `false` skips the
+    /// test.
+    fn unwrapped_runs(&self, mode: Unwrapped) -> bool {
+        let runs = self.probe(Bwrap::Unused, &self.unwrapped_args(mode, "echo ok"));
+        assert!(
+            !self.pid_file().exists(),
+            "{mode:?}: the helper ran bubblewrap"
+        );
+        runs
+    }
+
+    fn probe(&self, bwrap: Bwrap, args: &[String]) -> bool {
+        let mut probe = self.command(bwrap, &helper(), args).spawn().unwrap();
         let mut stdout = probe.stdout.take().unwrap();
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
@@ -232,7 +320,7 @@ impl Fixture {
         }
         // Otherwise the case would test nothing.
         assert!(
-            bwrap == Bwrap::Real || self.pid_file().is_file(),
+            bwrap != Bwrap::Unbound || self.pid_file().is_file(),
             "the helper did not run bubblewrap through the wrapper"
         );
         true
@@ -266,10 +354,44 @@ impl Fixture {
 }
 
 impl Drop for Fixture {
-    /// A failed test leaves nothing running either.
+    /// A failed test leaves nothing running either: also no shell whose
+    /// script names a marker (one that keeps starting them).
     fn drop(&mut self) {
-        self.kill_marked();
+        for _ in 0..50 {
+            let mut left = self.kill_marked();
+            for marker in [&self.daemon, &self.foreground] {
+                for pid in processes_naming(marker) {
+                    kill(pid);
+                    left.push(pid);
+                }
+            }
+            if left.is_empty() {
+                return;
+            }
+        }
     }
+}
+
+/// Pids of processes with an argument containing `marker` (not this one).
+fn processes_naming(marker: &str) -> Vec<i32> {
+    let me = std::process::id() as i32;
+    let mut pids = Vec::new();
+    for entry in std::fs::read_dir("/proc").unwrap().flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(|n| n.parse().ok()) else {
+            continue;
+        };
+        let Ok(cmdline) = std::fs::read(entry.path().join("cmdline")) else {
+            continue;
+        };
+        if pid != me
+            && cmdline
+                .split(|byte| *byte == 0)
+                .any(|arg| arg.windows(marker.len()).any(|w| w == marker.as_bytes()))
+        {
+            pids.push(pid);
+        }
+    }
+    pids
 }
 
 /// Waits for `ready`, then signals when `stdout` reaches end of file.
@@ -386,9 +508,217 @@ fn a_daemon_left_by_a_finished_command_is_stopped() {
         let ended = watch(helper.stdout.take().unwrap());
         let what = match bwrap {
             Bwrap::Real => "the command exited",
-            Bwrap::Unbound => "the command exited (unbound sandbox)",
+            Bwrap::Unbound | Bwrap::Unused => "the command exited (unbound sandbox)",
         };
         fixture.assert_all_gone(&ended, what);
         assert_eq!(reap(&mut helper).code(), Some(7));
+    }
+}
+
+fn signal_group(group: i32, signal: libc::c_int) {
+    // SAFETY: plain syscall.
+    assert_eq!(unsafe { libc::kill(-group, signal) }, 0, "signal the group");
+}
+
+/// #1006: the helper's parent exits: a command run without bubblewrap stops,
+/// with the daemon it left.
+#[test]
+fn a_command_without_bubblewrap_stops_when_the_helpers_parent_exits() {
+    for mode in UNWRAPPED {
+        let fixture = Fixture::new();
+        if !fixture.unwrapped_runs(mode) {
+            continue;
+        }
+        let mut args = vec![
+            "-c".to_string(),
+            "\"$@\" & wait".to_string(),
+            "sh".to_string(),
+            helper().display().to_string(),
+        ];
+        args.extend(fixture.unwrapped_args(mode, &fixture.script(/*foreground*/ true)));
+        let mut parent = fixture
+            .command(Bwrap::Unused, Path::new("/bin/sh"), &args)
+            .spawn()
+            .unwrap();
+        let ended = watch(parent.stdout.take().unwrap());
+        parent.kill().unwrap();
+        reap(&mut parent);
+        fixture.assert_all_gone(&ended, &format!("{mode:?}: the helper's parent exited"));
+    }
+}
+
+/// #1006: the helper alone is killed.
+#[test]
+fn a_command_without_bubblewrap_stops_when_the_helper_is_killed() {
+    for mode in UNWRAPPED {
+        let fixture = Fixture::new();
+        if !fixture.unwrapped_runs(mode) {
+            continue;
+        }
+        let mut helper = fixture
+            .command(
+                Bwrap::Unused,
+                &helper(),
+                &fixture.unwrapped_args(mode, &fixture.script(/*foreground*/ true)),
+            )
+            .spawn()
+            .unwrap();
+        let ended = watch(helper.stdout.take().unwrap());
+        helper.kill().unwrap();
+        reap(&mut helper);
+        fixture.assert_all_gone(&ended, &format!("{mode:?}: the helper was killed"));
+    }
+}
+
+/// #1006: the session kills the helper's process group, as Corbanu does.
+#[test]
+fn a_command_without_bubblewrap_stops_when_its_process_group_is_killed() {
+    use std::os::unix::process::CommandExt;
+
+    for mode in UNWRAPPED {
+        let fixture = Fixture::new();
+        if !fixture.unwrapped_runs(mode) {
+            continue;
+        }
+        let mut helper = fixture
+            .command(
+                Bwrap::Unused,
+                &helper(),
+                &fixture.unwrapped_args(mode, &fixture.script(/*foreground*/ true)),
+            )
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let ended = watch(helper.stdout.take().unwrap());
+        signal_group(helper.id() as i32, libc::SIGKILL);
+        reap(&mut helper);
+        fixture.assert_all_gone(&ended, &format!("{mode:?}: the process group was killed"));
+    }
+}
+
+/// #1006: the command exits and leaves a daemon: the daemon is stopped and
+/// the helper exits with the command's status.
+#[test]
+fn a_daemon_left_by_a_command_without_bubblewrap_is_stopped() {
+    for mode in UNWRAPPED {
+        let fixture = Fixture::new();
+        if !fixture.unwrapped_runs(mode) {
+            continue;
+        }
+        let script = format!("{}; exit 7", fixture.script(/*foreground*/ false));
+        let mut helper = fixture
+            .command(
+                Bwrap::Unused,
+                &helper(),
+                &fixture.unwrapped_args(mode, &script),
+            )
+            .spawn()
+            .unwrap();
+        let ended = watch(helper.stdout.take().unwrap());
+        fixture.assert_all_gone(&ended, &format!("{mode:?}: the command exited"));
+        assert_eq!(reap(&mut helper).code(), Some(7), "{mode:?}");
+    }
+}
+
+/// #1006: a command run without bubblewrap that dies of a signal: the
+/// helper dies of it too.
+#[test]
+fn the_helper_dies_of_the_signal_a_command_without_bubblewrap_died_of() {
+    use std::os::unix::process::ExitStatusExt;
+
+    for mode in UNWRAPPED {
+        let fixture = Fixture::new();
+        if !fixture.unwrapped_runs(mode) {
+            continue;
+        }
+        let status = fixture
+            .command(
+                Bwrap::Unused,
+                &helper(),
+                &fixture.unwrapped_args(mode, "kill -TERM $$"),
+            )
+            .status()
+            .unwrap();
+        assert_eq!(status.signal(), Some(libc::SIGTERM), "{mode:?}");
+    }
+}
+
+/// #1006: signals sent to the helper's process group reach a command run
+/// without bubblewrap once each, also when it has moved to a session and
+/// process group of its own (as an interactive shell moves to a group of its
+/// own); the helper exits as the command did.
+#[test]
+fn a_command_without_bubblewrap_gets_its_groups_signals_once() {
+    use std::os::unix::process::CommandExt;
+
+    let has_setsid = Command::new("/bin/sh")
+        .args(["-c", "command -v setsid"])
+        .stdout(Stdio::null())
+        .status()
+        .unwrap()
+        .success();
+    for mode in UNWRAPPED {
+        for moves in [false, true] {
+            if moves && !has_setsid {
+                eprintln!("skipping the moved case: no setsid");
+                continue;
+            }
+            let fixture = Fixture::new();
+            if !fixture.unwrapped_runs(mode) {
+                continue;
+            }
+            let shell = format!(
+                "n=0; trap 'n=$((n+1)); echo interrupted' INT; trap 'echo \"$n\"; exit 3' TERM; echo ready; while :; do sleep {} & wait; done",
+                fixture.foreground
+            );
+            let script = if moves {
+                // Not the group leader, so `setsid` does not fork.
+                format!("exec setsid /bin/sh -c '{}'", shell.replace('\'', "'\\''"))
+            } else {
+                shell
+            };
+            let mut helper = fixture
+                .command(
+                    Bwrap::Unused,
+                    &helper(),
+                    &fixture.unwrapped_args(mode, &script),
+                )
+                .process_group(0)
+                .spawn()
+                .unwrap();
+            let group = helper.id() as i32;
+            let (tx, rx) = mpsc::channel();
+            let stdout = helper.stdout.take().unwrap();
+            std::thread::spawn(move || {
+                for line in BufReader::new(stdout).lines() {
+                    let Ok(line) = line else { break };
+                    if tx.send(line).is_err() {
+                        break;
+                    }
+                }
+            });
+            let next = |what: &str| {
+                rx.recv_timeout(BOUND)
+                    .unwrap_or_else(|_| panic!("{mode:?} (moved: {moves}): no {what}"))
+            };
+            assert_eq!(next("ready"), "ready");
+            signal_group(group, libc::SIGINT);
+            assert_eq!(next("interrupt"), "interrupted");
+            signal_group(group, libc::SIGTERM);
+            assert_eq!(
+                next("count"),
+                "1",
+                "{mode:?} (moved: {moves}): SIGINT reached the command more than once"
+            );
+            assert_eq!(
+                reap(&mut helper).code(),
+                Some(3),
+                "{mode:?} (moved: {moves})"
+            );
+            assert!(
+                fixture.kill_marked().is_empty(),
+                "{mode:?} (moved: {moves}): the command's sleep outlived it"
+            );
+        }
     }
 }

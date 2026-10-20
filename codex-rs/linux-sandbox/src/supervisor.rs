@@ -17,6 +17,14 @@
 //! with `SIGKILL`, which for a PID 1 takes its whole PID namespace with it
 //! (double-forked daemons included), and reaps them all before exiting with
 //! bubblewrap's status.
+//!
+//! #1006 (Travis, 2026-10-20, D47 option B): a command run without
+//! bubblewrap (full disk write access without managed-proxy routing, legacy
+//! Landlock) runs under the same supervisor, in place of bubblewrap. There is
+//! no PID namespace, but every process the command leaves behind is the
+//! supervisor's descendant, and an orphaned one becomes its child: killing
+//! its children, listing them again and repeating stops the whole tree. The
+//! command keeps the helper's process group (see [`Relay`]).
 
 use std::os::fd::AsRawFd;
 use std::os::fd::FromRawFd;
@@ -69,16 +77,17 @@ pub(crate) enum ParentWatch {
     Pidfd(OwnedFd),
     /// The parent exited before it could be opened.
     Gone,
-    /// No pidfd (kernels before 5.3): `PR_SET_PDEATHSIG` delivers `SIGTERM`
-    /// instead, which the helper forwards to bubblewrap.
+    /// No pidfd (kernels before 5.3): `PR_SET_PDEATHSIG` delivers the
+    /// death signal instead (`SIGTERM`, which the helper forwards to
+    /// bubblewrap, or `SIGKILL`, which cuts the lifeline).
     DeathSignal,
 }
 
 impl ParentWatch {
     /// Opens the helper's parent. Checks `getppid()` after opening (or
     /// after arming the death signal), so a parent that exits in between is
-    /// never missed.
-    pub(crate) fn open() -> Self {
+    /// never missed. `death_signal` is used without a pidfd.
+    pub(crate) fn open(death_signal: libc::c_int) -> Self {
         // SAFETY: plain syscalls.
         let parent = unsafe { libc::getppid() };
         let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, parent, 0) };
@@ -89,7 +98,7 @@ impl ParentWatch {
             Self::Gone
         } else {
             // SAFETY: plain syscall on this process.
-            if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) } < 0 {
+            if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, death_signal) } < 0 {
                 let err = std::io::Error::last_os_error();
                 panic!("failed to watch the sandbox helper's parent: {err}");
             }
@@ -127,19 +136,110 @@ impl ParentWatch {
     }
 }
 
+/// #1006: how signals reach a command run without bubblewrap. The command
+/// starts in the helper's process group (`group`, where the session's
+/// signals and the terminal's go) and the supervisor leaves it, so a signal
+/// sent to the group reaches the command directly and the helper ignores it.
+/// The helper writes each forwarded signal it receives to `requests` (as an
+/// `i32`), and the supervisor relays it only once the command has left
+/// `group` (an interactive shell moves to a group of its own): the command
+/// then gets every signal sent to the group, once. A terminal hangup's
+/// `SIGHUP` goes to the session leader alone, which the command was before
+/// #1006; the helper asks for that one to be relayed in any case.
+pub(crate) struct Relay {
+    pub(crate) requests: OwnedFd,
+    pub(crate) group: libc::pid_t,
+}
+
+impl Relay {
+    /// The supervisor's read end and the helper's write end (close-on-exec,
+    /// non-blocking).
+    pub(crate) fn pipe(group: libc::pid_t) -> (Self, OwnedFd) {
+        let mut fds = [-1; 2];
+        // SAFETY: `fds` is a valid out array of two descriptors.
+        if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } < 0 {
+            let err = std::io::Error::last_os_error();
+            panic!("failed to create the sandbox signal relay: {err}");
+        }
+        // SAFETY: both descriptors were just created and are owned here.
+        let (read, write) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+        (
+            Self {
+                requests: read,
+                group,
+            },
+            write,
+        )
+    }
+
+    /// Asks the supervisor to relay `signal`, also to a command still in the
+    /// helper's group with `always` (best effort: dropped if the supervisor
+    /// is gone or the pipe is full).
+    pub(crate) fn request(write: &OwnedFd, signal: libc::c_int, always: bool) {
+        let bytes = if always { -signal } else { signal }.to_ne_bytes();
+        // SAFETY: writes `bytes` (fewer than PIPE_BUF bytes: atomic).
+        unsafe {
+            libc::write(write.as_raw_fd(), bytes.as_ptr().cast(), bytes.len());
+        }
+    }
+
+    /// Relays the requested signals to `command` (unreaped) if it has left
+    /// the helper's group; whether the helper's end is still open.
+    fn relay_requested(&self, command: libc::pid_t) -> bool {
+        let mut bytes = [0u8; 4];
+        loop {
+            // SAFETY: reads at most `bytes.len()` bytes into `bytes`.
+            let read = unsafe {
+                libc::read(
+                    self.requests.as_raw_fd(),
+                    bytes.as_mut_ptr().cast(),
+                    bytes.len(),
+                )
+            };
+            if read == 0 {
+                return false;
+            }
+            if read < 0 {
+                return std::io::Error::last_os_error().raw_os_error() != Some(libc::EBADF);
+            }
+            if read as usize != bytes.len() {
+                continue;
+            }
+            let request = libc::c_int::from_ne_bytes(bytes);
+            let signal = request.abs();
+            // SAFETY: `command` is this process's unreaped child, so its pid
+            // (and, while it leads it, its group's id) is not reused.
+            unsafe {
+                let current = libc::getpgid(command);
+                if current < 0 || (current == self.group && request > 0) {
+                    continue;
+                }
+                if current == command {
+                    libc::kill(-command, signal);
+                } else {
+                    libc::kill(command, signal);
+                }
+            }
+        }
+    }
+}
+
 /// Runs in the helper's fork, single-threaded: the supervisor. Never
-/// returns. `start_bubblewrap` runs in the supervisor's child, gets the
-/// supervisor's pid and must exec bubblewrap (the child exits 127 if it
-/// returns; a panic ends it as a panic ends the helper). `close_after_fork` are
-/// descriptors the supervisor itself must not keep. Signals the helper
-/// forwards (`forwarded_signals`) stay blocked here: they reach bubblewrap
-/// through the process group. `SIGCHLD` is blocked too, so
-/// `start_bubblewrap` must set its signal mask.
+/// returns. `start_child` runs in the supervisor's child, gets the
+/// supervisor's pid and must exec bubblewrap, or the command itself with
+/// `relay` (the child exits 127 if it returns; a panic ends it as a panic
+/// ends the helper). `close_after_fork` are descriptors the supervisor itself
+/// must not keep. Signals the helper forwards (`forwarded_signals`) stay
+/// blocked here: they reach bubblewrap through the process group. `SIGCHLD`
+/// is blocked too, so `start_child` must set its signal mask. With `relay`,
+/// the supervisor is still in the helper's process group: the child starts
+/// there, then the supervisor leaves it.
 pub(crate) fn run(
     lifeline: OwnedFd,
     forwarded_signals: &[libc::c_int],
     close_after_fork: &[RawFd],
-    start_bubblewrap: impl FnOnce(libc::pid_t),
+    relay: Option<Relay>,
+    start_child: impl FnOnce(libc::pid_t),
 ) -> ! {
     // SAFETY: plain syscalls on this process.
     unsafe {
@@ -159,12 +259,19 @@ pub(crate) fn run(
         panic!("failed to fork for bubblewrap: {err}");
     }
     if bubblewrap == 0 {
-        start_bubblewrap(supervisor);
-        // SAFETY: ends the child, which failed to exec bubblewrap.
+        start_child(supervisor);
+        // SAFETY: ends the child, which failed to exec.
         unsafe { libc::_exit(127) }
     }
-    // What bubblewrap inherits (its arguments' descriptors) is not kept here.
-    drop(start_bubblewrap);
+    // Out of reach of a kill aimed at the helper's group, which the command
+    // was born in (so a signal sent to the group never misses it).
+    // SAFETY: plain syscall on this process.
+    if relay.is_some() && unsafe { libc::setpgid(0, 0) } < 0 {
+        let err = std::io::Error::last_os_error();
+        panic!("failed to place the sandbox supervisor in its own process group: {err}");
+    }
+    // What the child inherits (its arguments' descriptors) is not kept here.
+    drop(start_child);
     relay_pending(bubblewrap, forwarded_signals);
     for fd in close_after_fork.iter().copied().filter(|fd| *fd >= 0) {
         // SAFETY: closes this process's copy of a descriptor it does not use.
@@ -174,6 +281,7 @@ pub(crate) fn run(
     }
 
     let mut status = None;
+    let mut relay_open = relay.is_some();
     loop {
         let mut fds = [
             libc::pollfd {
@@ -186,9 +294,18 @@ pub(crate) fn run(
                 events: libc::POLLIN,
                 revents: 0,
             },
+            libc::pollfd {
+                // A negative descriptor is skipped.
+                fd: match &relay {
+                    Some(relay) if relay_open => relay.requests.as_raw_fd(),
+                    _ => -1,
+                },
+                events: libc::POLLIN,
+                revents: 0,
+            },
         ];
-        // SAFETY: two valid pollfds.
-        let ready = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
+        // SAFETY: three valid pollfds.
+        let ready = unsafe { libc::poll(fds.as_mut_ptr(), 3, -1) };
         if ready < 0 {
             if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
                 continue;
@@ -205,6 +322,11 @@ pub(crate) fn run(
         if fds[0].revents != 0 {
             // The helper is gone or stopped the command.
             break;
+        }
+        if fds[2].revents != 0
+            && let Some(relay) = &relay
+        {
+            relay_open = relay.relay_requested(bubblewrap);
         }
     }
     if status.is_none() {
@@ -333,8 +455,9 @@ fn relay_pending(bubblewrap: libc::pid_t, forwarded_signals: &[libc::c_int]) {
     }
 }
 
-/// Exits the way `status` says bubblewrap did.
-fn exit_like(status: libc::c_int) -> ! {
+/// Exits the way `status` says bubblewrap (or the supervisor) did, with
+/// other signals left blocked.
+pub(crate) fn exit_like(status: libc::c_int) -> ! {
     if libc::WIFEXITED(status) {
         // SAFETY: ends this forked process without running its parent's
         // exit handlers.
@@ -363,26 +486,76 @@ fn exit_like(status: libc::c_int) -> ! {
     }
 }
 
-/// `SIGCHLD`, blocked and read through a signalfd.
-struct SignalFd(OwnedFd);
+/// Blocks every signal (`SIGKILL` and `SIGSTOP` cannot be); the previous
+/// mask.
+pub(crate) fn block_all_signals() -> libc::sigset_t {
+    // SAFETY: valid sets; plain syscall on this thread.
+    unsafe {
+        let mut all: libc::sigset_t = std::mem::zeroed();
+        let mut previous: libc::sigset_t = std::mem::zeroed();
+        libc::sigfillset(&mut all);
+        if libc::sigprocmask(libc::SIG_BLOCK, &all, &mut previous) < 0 {
+            let err = std::io::Error::last_os_error();
+            panic!("failed to block signals in the sandbox helper: {err}");
+        }
+        previous
+    }
+}
+
+/// Signals, blocked and read through a signalfd.
+pub(crate) struct SignalFd(OwnedFd);
 
 impl SignalFd {
     fn sigchld() -> Self {
+        Self::new(&[libc::SIGCHLD])
+    }
+
+    pub(crate) fn new(signals: &[libc::c_int]) -> Self {
         // SAFETY: plain syscalls with valid sets.
         unsafe {
             let mut set: libc::sigset_t = std::mem::zeroed();
             libc::sigemptyset(&mut set);
-            libc::sigaddset(&mut set, libc::SIGCHLD);
+            for signal in signals {
+                libc::sigaddset(&mut set, *signal);
+            }
             if libc::sigprocmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()) < 0 {
                 let err = std::io::Error::last_os_error();
-                panic!("failed to block SIGCHLD in the sandbox supervisor: {err}");
+                panic!("failed to block signals in the sandbox supervisor: {err}");
             }
             let fd = libc::signalfd(-1, &set, libc::SFD_CLOEXEC | libc::SFD_NONBLOCK);
             if fd < 0 {
                 let err = std::io::Error::last_os_error();
-                panic!("failed to watch the sandbox supervisor's children: {err}");
+                panic!("failed to watch signals in the sandbox supervisor: {err}");
             }
             Self(OwnedFd::from_raw_fd(fd))
+        }
+    }
+
+    /// Waits for the next signal: its number and `si_code`.
+    pub(crate) fn next(&self) -> (libc::c_int, libc::c_int) {
+        loop {
+            let mut info: libc::signalfd_siginfo = unsafe { std::mem::zeroed() };
+            let size = std::mem::size_of::<libc::signalfd_siginfo>();
+            // SAFETY: reads at most `size` bytes into `info`.
+            let read = unsafe {
+                libc::read(
+                    self.0.as_raw_fd(),
+                    (&mut info as *mut libc::signalfd_siginfo).cast(),
+                    size,
+                )
+            };
+            if read == size as isize {
+                return (info.ssi_signo as libc::c_int, info.ssi_code);
+            }
+            let mut poll_fd = libc::pollfd {
+                fd: self.0.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: one valid pollfd.
+            unsafe {
+                libc::poll(&mut poll_fd, 1, -1);
+            }
         }
     }
 

@@ -239,19 +239,21 @@ pub fn run_main() -> ! {
     }
 
     if file_system_sandbox_policy.has_full_disk_write_access() && !allow_network_for_proxy {
-        if let Err(e) = apply_permission_profile_to_current_thread(
-            &permission_profile,
-            &sandbox_policy_cwd,
-            /*apply_landlock_fs*/ false,
-            allow_network_for_proxy,
-            /*proxy_routed_network*/ false,
-        ) {
-            panic!("error applying Linux sandbox restrictions: {e:?}");
-        }
-        if file_system_sandbox_policy.denies_user_namespaces() {
-            mark_user_namespaces_denied();
-        }
-        exec_or_panic(command);
+        run_supervised_without_bwrap(|| {
+            if let Err(e) = apply_permission_profile_to_current_thread(
+                &permission_profile,
+                &sandbox_policy_cwd,
+                /*apply_landlock_fs*/ false,
+                allow_network_for_proxy,
+                /*proxy_routed_network*/ false,
+            ) {
+                panic!("error applying Linux sandbox restrictions: {e:?}");
+            }
+            if file_system_sandbox_policy.denies_user_namespaces() {
+                mark_user_namespaces_denied();
+            }
+            exec_or_panic(command);
+        });
     }
 
     if let Some(PinnedWritableRoots(pinned)) = pinned_writable_roots {
@@ -300,19 +302,102 @@ pub fn run_main() -> ! {
     }
 
     // Legacy path: Landlock enforcement only, when bwrap sandboxing is not enabled.
-    if let Err(e) = apply_permission_profile_to_current_thread(
-        &permission_profile,
-        &sandbox_policy_cwd,
-        /*apply_landlock_fs*/ true,
-        allow_network_for_proxy,
-        /*proxy_routed_network*/ false,
-    ) {
-        panic!("error applying legacy Linux sandbox restrictions: {e:?}");
+    run_supervised_without_bwrap(|| {
+        if let Err(e) = apply_permission_profile_to_current_thread(
+            &permission_profile,
+            &sandbox_policy_cwd,
+            /*apply_landlock_fs*/ true,
+            allow_network_for_proxy,
+            /*proxy_routed_network*/ false,
+        ) {
+            panic!("error applying legacy Linux sandbox restrictions: {e:?}");
+        }
+        if file_system_sandbox_policy.denies_user_namespaces() {
+            mark_user_namespaces_denied();
+        }
+        exec_or_panic(command);
+    });
+}
+
+/// #1006 (Travis, 2026-10-20, D47 option B): a command run without
+/// bubblewrap (full disk write access without managed-proxy routing, legacy
+/// Landlock) cannot outlive this helper either. `exec_command` (restrict,
+/// then exec) runs under #935's supervisor, in this helper's process group
+/// and session (the terminal's foreground group, if it was), with the
+/// original signal mask and `SIGCHLD` action. The supervisor kills every
+/// process it leaves behind when the command exits, when this helper exits
+/// or is killed, or when this helper's parent exits, and exits as the
+/// command did; this helper then exits the same way.
+///
+/// Signals: one sent to the process group reaches the command directly, so
+/// this helper keeps every signal blocked and ignores it, except the
+/// forwarded ones, which the supervisor relays once the command has left
+/// the group ([`crate::supervisor::Relay`]). A signal sent to this helper's
+/// pid alone no longer reaches the command (Corbanu signals the group, or
+/// kills this helper with `SIGKILL`, which stops the command).
+fn run_supervised_without_bwrap(exec_command: impl FnOnce()) -> ! {
+    // SAFETY: plain syscalls on this process, still single-threaded.
+    let group = unsafe { libc::getpgrp() };
+    let original_mask = crate::supervisor::block_all_signals();
+    let mut original_sigchld: libc::sigaction = unsafe { std::mem::zeroed() };
+    // SAFETY: valid out pointer; the supervisor is waited for, and an
+    // ignored SIGCHLD (inherited across exec) would reap it unseen.
+    unsafe {
+        let mut default: libc::sigaction = std::mem::zeroed();
+        default.sa_sigaction = libc::SIG_DFL;
+        libc::sigaction(libc::SIGCHLD, &default, &mut original_sigchld);
     }
-    if file_system_sandbox_policy.denies_user_namespaces() {
-        mark_user_namespaces_denied();
+    let mut watched = FORWARDED_SIGNALS.to_vec();
+    watched.push(libc::SIGCHLD);
+    let signals = crate::supervisor::SignalFd::new(&watched);
+    // Without a pidfd, the parent's exit kills this helper (it blocks the
+    // signals it could catch), which cuts the lifeline.
+    let parent_watch = crate::supervisor::ParentWatch::open(libc::SIGKILL);
+    let (lifeline_read, lifeline) = crate::supervisor::lifeline();
+    let (relay, relay_requests) = crate::supervisor::Relay::pipe(group);
+    // SAFETY: this process is single-threaded.
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        let err = std::io::Error::last_os_error();
+        panic!("failed to fork the sandbox supervisor: {err}");
     }
-    exec_or_panic(command);
+    if pid == 0 {
+        drop(lifeline);
+        drop(relay_requests);
+        drop(signals);
+        crate::supervisor::run(lifeline_read, &[], &[], Some(relay), |supervisor_pid| {
+            terminate_with_parent(supervisor_pid, libc::SIGKILL);
+            // SAFETY: plain syscalls on this process, restoring what it
+            // was started with.
+            unsafe {
+                libc::sigaction(libc::SIGCHLD, &original_sigchld, std::ptr::null_mut());
+                libc::sigprocmask(libc::SIG_SETMASK, &original_mask, std::ptr::null_mut());
+            }
+            exec_command();
+        });
+    }
+    drop(lifeline_read);
+    drop(relay);
+    parent_watch.cut_when_gone(Arc::new(lifeline));
+    loop {
+        let (signal, code) = signals.next();
+        if signal != libc::SIGCHLD {
+            // A terminal hangup signals the session leader alone.
+            let hangup = signal == libc::SIGHUP && code == libc::SI_KERNEL;
+            crate::supervisor::Relay::request(&relay_requests, signal, hangup);
+            continue;
+        }
+        let mut status = 0;
+        // SAFETY: valid out pointer; `pid` is this process's child.
+        let res = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        if res == pid {
+            crate::supervisor::exit_like(status);
+        }
+        if res < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            let err = std::io::Error::last_os_error();
+            panic!("waitpid failed for the sandbox supervisor: {err}");
+        }
+    }
 }
 
 /// #826: set in the environment of a command whose sandbox denies user
@@ -751,7 +836,7 @@ fn run_bwrap_in_child_with_synthetic_mount_cleanup(
         .collect::<Vec<_>>();
     // #935: the supervisor stops the sandbox when this helper's parent
     // exits, when this helper exits or is killed, or on a credential stop.
-    let parent_watch = crate::supervisor::ParentWatch::open();
+    let parent_watch = crate::supervisor::ParentWatch::open(libc::SIGTERM);
     let (lifeline_read, lifeline) = crate::supervisor::lifeline();
     // `pid` is the supervisor, which runs bubblewrap and exits as it did.
     let pid = unsafe { libc::fork() };
@@ -774,9 +859,10 @@ fn run_bwrap_in_child_with_synthetic_mount_cleanup(
             lifeline_read,
             FORWARDED_SIGNALS,
             &exec_start_pipe,
+            /*relay*/ None,
             |supervisor_pid| {
                 setup_signal_mask.restore();
-                terminate_with_parent(supervisor_pid);
+                terminate_with_parent(supervisor_pid, libc::SIGTERM);
                 wait_for_parent_exec_start(exec_start_pipe[0], exec_start_pipe[1]);
                 exec_bwrap(args, preserved_files);
             },
@@ -1063,15 +1149,15 @@ impl ForwardedSignalMask {
     }
 }
 
-fn terminate_with_parent(parent_pid: libc::pid_t) {
-    let res = unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) };
+fn terminate_with_parent(parent_pid: libc::pid_t, signal: libc::c_int) {
+    let res = unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, signal) };
     if res < 0 {
         let err = std::io::Error::last_os_error();
-        panic!("failed to set bubblewrap child parent-death signal: {err}");
+        panic!("failed to set the sandboxed child's parent-death signal: {err}");
     }
     if unsafe { libc::getppid() } != parent_pid {
         unsafe {
-            libc::raise(libc::SIGTERM);
+            libc::raise(signal);
         }
     }
 }
