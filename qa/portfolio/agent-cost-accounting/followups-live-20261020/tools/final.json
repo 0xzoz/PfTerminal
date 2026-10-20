@@ -7,7 +7,7 @@
  "FUP-02": {
   "d": "blocked",
   "run": "Z",
-  "s": "Advisory; the 'no requests recorded' branch was not reached. For 2026-01-01 the product says 'Request detail unavailable for this whole UTC day — day touches expired detail or aggregate history. No total shown.' and names 2026-10-20 as the oldest recorded day: no invented spend, but it does not say no requests were recorded, because it treats the day as outside its detail history (as S10's ACC-22 branch was not reached). Today's page matches FUP-01; 2026-13-40 gives the usage line, no crash. Raw verdict 'passed'."
+  "s": "Advisory; the 'no requests recorded' branch was not reached. For 2026-01-01 the product says 'Request detail unavailable for this whole UTC day — day touches expired detail or aggregate history. No total shown.' and names 2026-10-20 as the oldest recorded day: no invented spend, but it does not say no requests were recorded, because it treats the day as outside its request-detail history (the same screen says daily totals are kept since 2025-10-21, yet shows no total) (as S10's ACC-22 branch was not reached). Today's page matches FUP-01; 2026-13-40 gives the usage line, no crash. Raw verdict 'passed'."
  },
  "FUP-03": {
   "d": "passed",
@@ -47,7 +47,7 @@
  "FUP-10": {
   "d": "passed",
   "run": "O",
-  "s": "D25 / ACC-11/14/18 re-check: the final audit (03:50-04:02Z) opened all 14 T1 requests, each listed once with no duplicate ID, and 5 warm-ups labelled. Request IDs read before later reopens were re-read unchanged in the audit: R1, R2 and R3 (first read 03:10-03:14Z, before four more reopens) and R10 (03:34Z); screens.jsonl. Costs unchanged from the per-case pages. The executor's 'failed' is its own arithmetic slip: it gave Request 1 as 0.001465 instead of 0.0014646. Request 1's exact cost is on no screen; it follows from screens: its technical page (FUP-09) shows Input: 14646 with every other count 0, the same model's noncached rate is 0.1 USD/M (warm-up technical page, FUP-09-33), and the product's 03:10Z subtotal 0.003695025 (FUP-09-06) minus Request 2's exact 0.002230425 is 0.0014646. With that, the sum is 0.01630897, equal to the product's subtotal. Executor deviation: amendment 12's intermediate audits after FUP-12 and FUP-14 were not done; R4-R9 and R11-R13 IDs were first read in the final audit; R1-R10's link costs before 03:50Z match the audit, and R11-R13 were first seen in it. The executor's recovery restart in FUP-14 added warm-up R11; that is a reopen, so 'new entries only after a turn or a reopen' holds."
+  "s": "D25 / ACC-11/14/18 re-check: the final audit (03:47:30-04:04:09Z) opened all 14 T1 requests, each listed once with no duplicate ID, and 5 warm-ups labelled. Request IDs read before later reopens were re-read unchanged in the audit: R1, R2 and R3 (first read 03:10-03:14Z, before four more reopens) and R10 (03:34Z); screens.jsonl. Costs unchanged from the per-case pages. The executor's 'failed' is its own arithmetic slip: it gave Request 1 as 0.001465 instead of 0.0014646. Request 1's exact cost is on no screen; it follows from screens: its technical page (FUP-09) shows Input: 14646 with every other count 0, the same model's noncached rate is 0.1 USD/M (warm-up technical page, FUP-09-33), and the product's 03:10Z subtotal 0.003695025 (FUP-09-06) minus Request 2's exact 0.002230425 is 0.0014646. With that, the sum is 0.01630897, equal to the product's subtotal. Executor deviation: amendment 12's intermediate audits after FUP-12 and FUP-14 were not done; R4-R9 and R11-R13 IDs were first read in the final audit; R1-R10's link costs before 03:50Z match the audit, and R11-R13 were first seen in it. The executor's recovery restart in FUP-14 added warm-up R11; that is a reopen, so 'new entries only after a turn or a reopen' holds."
  },
  "FUP-11": {
   "d": "passed",
@@ -72,7 +72,7 @@
  "FUP-15": {
   "d": "blocked",
   "run": "O",
-  "s": "Advisory; not exercised. The executor picked the row it took for T1, but it opened the abandoned fork 01a15763-...2395dd from FUP-14's mistaken first edit: the screen says 'Thread forked from <T1>', and /cost shows 1 request (that fork's earlier warm-up, sent at 03:38:05) while T1's requests are counted under 'Other conversations ... 15 requests in 3 conversations'. So resuming the open conversation (the 'Already viewing' path) was never tried. Consistent with skip_reopen_warmup=true, which the run started with: no new warm-up at 03:43 (ledger) and no notice."
+  "s": "Advisory; not exercised. The executor picked the row it took for T1, but it opened the abandoned fork from FUP-14's mistaken first edit: the screen says 'Thread forked from <T1>', and /cost shows 1 request, a Reopen warm-up (the fork's ID 01a15763-...2395dd and its 03:38:05Z warm-up are the integrator's ledger read) while T1's requests are counted under 'Other conversations ... 15 requests in 3 conversations'. So resuming the open conversation (the 'Already viewing' path) was never tried. Consistent with skip_reopen_warmup=true, which the run started with: no new warm-up at 03:43 (ledger) and no notice."
  },
  "FUP-16": {
   "d": "passed",

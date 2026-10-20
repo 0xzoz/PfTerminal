@@ -34,7 +34,8 @@ acceptance.**
   conversation pages show `Cache read: 11,776` (K3) and `11,264` (K2.7 Code), and each conversation's exact subtotal
   reconciles at Moonshot's published rates. The three cases stay blocked because the executor never reached the
   per-request technical pages, so the per-request rates are on no screen. This is a navigation miss: the raw terminal output (`pty.raw`, the
-  integrator's read) shows the page's `→ Technical details (attempt 1)` link was rendered. The relay's
+  integrator's read) shows the `→ Technical details (attempt 1)` link was rendered on K3 Request 1's page (the only
+  request page where the executor scrolled). The relay's
   log of Moonshot's own reported usage reproduces every request page's cost exactly; that is the integrator's
   supplementary read, not the basis of any disposition.
 - **Failed (2):**
@@ -52,7 +53,7 @@ acceptance.**
   - FUP-15 (advisory, `/resume` onto the conversation already open): not exercised, because the executor opened an
     abandoned fork instead of the open conversation.
   - FUP-02 (advisory): for 2026-01-01 the product says the day's request detail is unavailable (outside its
-    history) and shows no total, so the "no requests recorded" branch was not reached.
+    request-detail history, though the same screen says daily totals are kept since 2025-10-21) and shows no total, so the "no requests recorded" branch was not reached.
 - **Also passed:** basic `/cost` pages (FUP-01); review and `/side` attribution kept apart (FUP-04);
   history after a restart (FUP-07); no warm-up on Z.AI (FUP-08); OpenAI reopen warm-ups labelled and announced on
   restart, `resume <id>`, `/resume` and `/side` (FUP-09, 11–13); `skip_reopen_warmup` by flag and by `config.toml`
@@ -87,6 +88,14 @@ acceptance.**
   Executor packet v1, the harness and the candidate manifest were pushed at `854b02f7e8` (02:02:20Z). The lock was taken
   and the clone made at 02:02:23Z ([common/vm-start.txt](common/vm-start.txt)). Every group ran on packet v1, and no
   replay was run.
+
+## Evidence checks
+
+5 of 5 review rounds were used: design, design review, and three fresh read-only Opus 5.5 High evidence checks of a
+`git archive` snapshot. r1 and r2 failed on statements only, and every correction was applied: the FUP-02
+disposition (passed -> blocked), several sums and citations, and the shakedown's OpenAI warm-up. r3 **passed** with
+no required correction. Its four optional clarifications were applied afterwards and have not been re-checked
+([review-ledger.md](review-ledger.md), [review/](review/)).
 
 ## Candidate
 
