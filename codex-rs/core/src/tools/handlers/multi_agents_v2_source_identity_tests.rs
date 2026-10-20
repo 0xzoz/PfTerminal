@@ -282,7 +282,7 @@ fn issue1016_encrypted_payload_compares_provider_and_account() {
     // A codec other than OpenAI's carries no encrypted payload.
     assert_eq!(
         ensure_message_encoding_matches_target(
-            ConfiguredRuntime::new("local-provider", None),
+            ConfiguredRuntime::new("local-provider", /*account*/ None),
             "local-provider",
             &source,
             ConfiguredRuntime::new("local-provider", Some("work")),
