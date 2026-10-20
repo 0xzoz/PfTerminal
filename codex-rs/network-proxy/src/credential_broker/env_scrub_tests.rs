@@ -254,9 +254,9 @@ fn pf_27_s09_entries_outside_the_heaps_are_overwritten() {
 }
 
 /// #974: in a swept allocation, a stale copy whose `NAME=` was partly
-/// overwritten (as a C runtime start-up copy was, outside every block the
-/// heap walk reported) is overwritten too, narrow or UTF-16, as in a block in
-/// use. A short placeholder value and the caller's own buffers are left.
+/// overwritten (as one was outside every block the heap walk reported) is
+/// overwritten too, narrow or UTF-16, as in a block in use. A short value is
+/// overwritten only after its `NAME=`; the caller's own buffers are left.
 #[cfg(windows)]
 #[test]
 fn sec_974_stale_copies_without_their_name_are_overwritten_in_an_allocation() {
@@ -266,7 +266,8 @@ fn sec_974_stale_copies_without_their_name_are_overwritten_in_an_allocation() {
     use windows_sys::Win32::System::Memory::PAGE_READWRITE;
     use windows_sys::Win32::System::Memory::VirtualAlloc;
     use windows_sys::Win32::System::Memory::VirtualFree;
-    let unmask = |masked: &[u8]| masked.iter().map(|byte| byte ^ 0x5a).collect::<Vec<u8>>();
+    let unmask =
+        |masked: &[u8]| Zeroizing::new(masked.iter().map(|byte| byte ^ 0x5a).collect::<Vec<u8>>());
     let mask = |plain: &str| plain.bytes().map(|byte| byte ^ 0x5a).collect::<Vec<u8>>();
     let key = mask(&format!("sk-sec974-stale-{:016x}", rand::random::<u64>()));
     let placeholder = mask("dummy-key-974");
@@ -286,10 +287,16 @@ fn sec_974_stale_copies_without_their_name_are_overwritten_in_an_allocation() {
         // SAFETY: within the committed pages.
         unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), page.add(offset), bytes.len()) };
     };
-    let wide = |plain: &[u8]| -> Vec<u8> { plain.iter().flat_map(|byte| [*byte, 0]).collect() };
+    let wide = |plain: &[u8]| -> Zeroizing<Vec<u8>> {
+        Zeroizing::new(plain.iter().flat_map(|byte| [*byte, 0]).collect())
+    };
+    // Read back masked, so the test keeps no plain copy.
     let read = |offset: usize, len: usize| -> Vec<u8> {
         // SAFETY: within the committed pages.
-        unsafe { std::slice::from_raw_parts(page.add(offset), len) }.to_vec()
+        unsafe { std::slice::from_raw_parts(page.add(offset), len) }
+            .iter()
+            .map(|byte| byte ^ 0x5a)
+            .collect()
     };
     // The name's start overwritten, as found in the failing run.
     let narrow_at = 100 + "~~~~~~Y_KEY=".len();
@@ -298,16 +305,21 @@ fn sec_974_stale_copies_without_their_name_are_overwritten_in_an_allocation() {
     // A UTF-16 copy with no name at all.
     let wide_at = 1000;
     write(wide_at, &wide(&unmask(&key)));
-    // A placeholder, too short to be hunted without its name.
+    // A placeholder, too short to be hunted without its name...
     let placeholder_at = 2000;
     write(placeholder_at, &unmask(&placeholder));
+    // ...but overwritten after it.
+    let named = format!("{name}=");
+    let named_at = 3000 + named.len();
+    write(3000, named.as_bytes());
+    write(named_at, &unmask(&placeholder));
     // A copy in the caller's own buffer.
     let kept_at = 5000;
     write(kept_at, &unmask(&key));
 
-    let plain = Zeroizing::new(unmask(&key));
-    let plain_wide = Zeroizing::new(wide(&plain));
-    let placeholder_plain = Zeroizing::new(unmask(&placeholder));
+    let plain = unmask(&key);
+    let plain_wide = wide(&plain);
+    let placeholder_plain = unmask(&placeholder);
     let kept = (page as usize + kept_at, page as usize + kept_at + key.len());
     super::windows_env::wipe_copies_in_allocation(
         page as usize + 4096,
@@ -320,16 +332,20 @@ fn sec_974_stale_copies_without_their_name_are_overwritten_in_an_allocation() {
         read(narrow_at, key.len()),
         read(wide_at, key.len() * 2),
         read(placeholder_at, placeholder.len()),
+        read(named_at, placeholder.len()),
         read(kept_at, key.len()),
     ];
     // SAFETY: allocated above.
     unsafe { VirtualFree(page.cast(), 0, MEM_RELEASE) };
-    assert_eq!(left[0], vec![b'0'; key.len()], "narrow copy");
-    let zeros = vec![b'0'; key.len()];
-    assert_eq!(left[1], wide(&zeros), "UTF-16 copy");
-    assert_eq!(left[2], unmask(&placeholder), "placeholder");
-    let kept_left = left[3].iter().map(|byte| byte ^ 0x5a).collect::<Vec<u8>>();
-    assert_eq!(kept_left, key, "the caller's own buffer");
+    let zeros = |len: usize| vec![b'0' ^ 0x5a; len];
+    let wide_zeros: Vec<u8> = std::iter::repeat_n([b'0' ^ 0x5a, 0x5a], key.len())
+        .flatten()
+        .collect();
+    assert_eq!(left[0], zeros(key.len()), "narrow copy");
+    assert_eq!(left[1], wide_zeros, "UTF-16 copy");
+    assert_eq!(left[2], placeholder, "bare placeholder");
+    assert_eq!(left[3], zeros(placeholder.len()), "named placeholder");
+    assert_eq!(left[4], key, "the caller's own buffer");
 }
 
 /// #974: the sweep reaches every heap's memory: the allocations it covers
@@ -340,8 +356,7 @@ fn sec_974_heap_allocations_include_every_heap() {
     use windows_sys::Win32::System::Memory::GetProcessHeap;
     use windows_sys::Win32::System::Memory::HeapAlloc;
     use windows_sys::Win32::System::Memory::HeapCreate;
-    use windows_sys::Win32::System::Memory::HeapDestroy;
-    // SAFETY: a private growable heap, destroyed below.
+    // SAFETY: a private growable heap, never destroyed (see below).
     let private = unsafe { HeapCreate(0, 0, 0) };
     assert!(private != 0, "private heap");
     // SAFETY: allocates from the private heap.
@@ -356,7 +371,7 @@ fn sec_974_heap_allocations_include_every_heap() {
         allocations.contains(&base(private as usize)),
         allocations.contains(&base(block as usize)),
     );
-    // SAFETY: created above.
-    unsafe { HeapDestroy(private) };
+    // The private heap is left alive: a concurrent sweep in this process
+    // could otherwise lock a destroyed heap handle.
     assert_eq!(found, (true, true, true), "{allocations:#x?}");
 }

@@ -180,7 +180,8 @@ pub(crate) fn take_env_var(name: &str) -> Option<Zeroizing<Vec<u8>>> {
     };
     windows_env::wipe_heap_copies(name, patterns, &own);
     // #974: a heap's memory can hold a stale copy outside every block its
-    // walk reports (a C runtime start-up copy, its name partly overwritten),
+    // walk reports (likely a C runtime start-up copy, its name partly
+    // overwritten),
     // so each heap's allocations are swept whole. An environment block
     // Windows replaced when the environment grew stays in the process
     // parameters' allocation, inside the process heap on current Windows.
@@ -360,6 +361,7 @@ mod windows_env {
         // Filled while a heap is locked, so nothing is allocated meanwhile.
         let mut bases = [0_usize; MAX_HEAP_ALLOCATIONS];
         let mut found = 0;
+        let mut truncated = false;
         for heap in heaps {
             // SAFETY: a heap of this process; unlocked below.
             if unsafe { HeapLock(heap) } == 0 {
@@ -370,6 +372,7 @@ mod windows_env {
             // SAFETY: the heap is locked for the walk.
             while unsafe { HeapWalk(heap, &mut entry) } != 0 {
                 if entry.wFlags & PROCESS_HEAP_REGION == 0 || found == bases.len() {
+                    truncated |= found == bases.len();
                     continue;
                 }
                 if let Some(base) = allocation_base(entry.lpData as usize)
@@ -381,6 +384,11 @@ mod windows_env {
             }
             // SAFETY: locked above.
             unsafe { HeapUnlock(heap) };
+        }
+        if truncated {
+            tracing::debug!(
+                "environment sweep: more than {MAX_HEAP_ALLOCATIONS} heap allocations; the rest are not swept whole"
+            );
         }
         bases[..found].to_vec()
     }
@@ -494,9 +502,21 @@ mod windows_env {
         };
         let chunk = largest.min(CHUNK);
         let mut buffer = Zeroizing::new(vec![0_u8; chunk + longest]);
+        // Each match is read again just before it is written: the chunk is a
+        // snapshot, and memory outside the reported blocks may be a free slot
+        // another thread takes meanwhile without the heap lock.
+        let mut recheck = Zeroizing::new(vec![
+            0_u8;
+            targets
+                .iter()
+                .map(|target| target.value.len())
+                .max()
+                .unwrap_or(0)
+        ]);
         // The search buffers hold copies themselves.
         let mut own: Vec<(usize, usize)> = keep.to_vec();
         own.push(allocation(buffer.as_ptr(), buffer.capacity()));
+        own.push(allocation(recheck.as_ptr(), recheck.capacity()));
         // SAFETY: a pseudo-handle for this process.
         let process = unsafe { GetCurrentProcess() };
         for (base, end) in regions {
@@ -535,10 +555,28 @@ mod windows_env {
                         let mine = own.iter().any(|(start, end)| {
                             address < *end && address + target.zeros.len() > *start
                         });
-                        if (entry || target.bare) && !mine {
+                        let mut again = 0_usize;
+                        // SAFETY: reads the match again into `recheck`, which
+                        // holds at least `value.len()` bytes; fails instead
+                        // of faulting.
+                        let still = (entry || target.bare)
+                            && !mine
+                            && unsafe {
+                                ReadProcessMemory(
+                                    process,
+                                    address as *const std::ffi::c_void,
+                                    recheck.as_mut_ptr().cast(),
+                                    value.len(),
+                                    &mut again,
+                                )
+                            } != 0
+                            && again == value.len()
+                            && recheck[..value.len()] == *value;
+                        recheck.fill(0);
+                        if still {
                             // SAFETY: writes `zeros` over the value at
-                            // `address`, just read; fails on memory released
-                            // meanwhile.
+                            // `address`, just read again; fails on memory
+                            // released meanwhile.
                             unsafe {
                                 WriteProcessMemory(
                                     process,
