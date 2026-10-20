@@ -132,6 +132,17 @@ fn issue_1047_moderate_saved_before_the_window_session_starts() {
     // another Corbanu Terminal): saving Moderate lowers it only from the next
     // start, so nothing says it takes Moderate now or reaches other
     // terminals.
+    // Already Moderate in Core's saved record: the session starts under it.
+    saved_moderate_as(
+        &mut picker,
+        LevelChangeKind::Unchanged,
+        /*not_saved*/ None,
+    );
+    let unchanged = text(&picker);
+    assert!(
+        unchanged.contains(WINDOW_SESSION_TAKES_MODERATE),
+        "{unchanged}"
+    );
     saved_moderate_as(
         &mut picker,
         LevelChangeKind::Downgrade,
@@ -214,6 +225,25 @@ fn issue_1047_remote_window_is_not_told_it_starts_here() {
     insta::assert_snapshot!(
         "issue_1047_saved_aggressive_remote_window",
         render(&picker, /*width*/ 80)
+    );
+
+    // Core's level is above Moderate: the review offers no restart, which a
+    // remote app server would refuse.
+    let mut picker = super::issue_443_tests::picker(&root, /*live*/ false);
+    remote(&mut picker, /*thread*/ None);
+    picker.handle_key_event(key(KeyCode::Down));
+    picker.handle_key_event(key(KeyCode::Enter));
+    assert_eq!(picker.screen, Screen::Review(ChosenLevel::Moderate));
+    // Choosing reads the basis again; the review shows it as set here.
+    picker.basis.in_force = SecurityLevel::Aggressive;
+    let review = text(&picker);
+    assert!(
+        review.contains("Moderate applies from the next start."),
+        "{review}"
+    );
+    assert!(
+        !review.contains("you can restart right after saving"),
+        "{review}"
     );
 
     // Also once the window's session is known (#978 wording before).

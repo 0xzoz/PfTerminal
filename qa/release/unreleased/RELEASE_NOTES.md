@@ -56,5 +56,5 @@ them into `qa/release/<version>/RELEASE_NOTES.md` and empties this file.
   server outside Corbanu Terminal (a remote server or the local daemon),
   `/security` no longer says the session starts here, says the level reaches
   that server only if it runs on this Corbanu home, and the level picker
-  doesn't offer "restart now", since Corbanu Terminal starts against such a server only under
-  Permissive (#1047).
+  doesn't offer "restart now", since Corbanu Terminal starts against such a
+  server only under Permissive (#1047).

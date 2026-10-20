@@ -1275,7 +1275,7 @@ impl SecurityLevelPicker {
                     && self.active == ChosenLevel::Permissive
                     && self.window_session_starts_here()
                     && outcome.core.as_ref().is_none_or(|report| {
-                        report.kind == LevelChangeKind::Stricter
+                        report.kind != LevelChangeKind::Downgrade
                             && report.not_saved.is_none()
                             && report.next_start == SecurityLevel::Moderate
                     })
