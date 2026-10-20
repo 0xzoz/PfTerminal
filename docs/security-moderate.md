@@ -125,10 +125,10 @@ The kill switch (`/security` → `g`) works under every level.
   different one is looked at in full: its config, hooks and remotes are
   reported as new, also after `git init` or a fresh clone there (not a
   worktree git adds again for the same repository); the same one moved
-  back is compared with the last look. New config and hooks are checked only in
-  a repository's own git folder, not in its worktrees' or submodules'. A
-  session that works in more than 16 repositories forgets the oldest; its
-  next look there reports only links, steps and hard links.
+  back is compared with the last look. New config and hooks are checked
+  only in a repository's own git folder, not in its worktrees' or
+  submodules'. A session that works in more than 16 repositories forgets
+  the oldest; its next look there reports only links, steps and hard links.
 - MCP servers, apps, hooks and `!` shell commands run outside the sandbox, as
   under every level.
 - On Linux, where a command you approve can write a Corbanu home's folder
