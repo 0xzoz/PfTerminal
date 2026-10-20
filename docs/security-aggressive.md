@@ -171,9 +171,10 @@ That is how network access works in that setup, so what they reach through
 it is decided by your organization's proxy rules, not by Aggressive.
 
 Hosts you allowed for good ("always allow") while a less strict level was
-on aren't added to the proxy's allowlist under Aggressive; they apply again
-at a less strict level. A host you allow for good while Aggressive is on
-applies under it too (#1001, like remembered command approvals, #626).
+on aren't added to the proxy's allowlist under Aggressive, from the next
+start (like the rest of the network rules); they apply again at a less
+strict level. A host you allow for good while Aggressive is on applies under
+it too (#1001, like remembered command approvals, #626).
 
 - **macOS:** Unix sockets those requirements allow stay open. When they
   also allow local binding, agent commands can also accept and make local

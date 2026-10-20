@@ -2904,6 +2904,16 @@ impl Session {
             .acquire()
             .await
             .map_err(|_| anyhow::anyhow!("managed network proxy refresh semaphore closed"))?;
+        // D52 (#1001): one allowed while Aggressive is in force applies under
+        // Aggressive too (the others are suspended there). An unreadable live
+        // level counts as Aggressive, as it is enforced. Read before the
+        // marker: the marker only moves forward, so an unchanged marker means
+        // this was the level at the prompt (as for command rules, #945).
+        let approved_under = if self.services.model_client().live_level_is_aggressive() {
+            crate::exec_policy::ApprovedUnder::Aggressive
+        } else {
+            crate::exec_policy::ApprovedUnder::LessStrict
+        };
         if let Some(shown_under) = shown_under
             && self.services.transition_since(shown_under)
         {
@@ -2941,13 +2951,6 @@ impl Session {
             }
         }
 
-        // D52 (#1001): one allowed while Aggressive is in force applies under
-        // Aggressive too (the others are suspended there).
-        let approved_under = if self.services.model_client().live_level_is_aggressive() {
-            crate::exec_policy::ApprovedUnder::Aggressive
-        } else {
-            crate::exec_policy::ApprovedUnder::LessStrict
-        };
         self.services
             .exec_policy
             .append_network_rule_and_update(

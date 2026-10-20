@@ -40,22 +40,19 @@ use codex_execpolicy::RuleMatch;
 pub(crate) const APPROVED_UNDER_AGGRESSIVE: &str =
     "Remembered while security level Aggressive was active.";
 
-/// The prefixes the Corbanu home's `rules/default.rules` records as approved
-/// while Aggressive was active (the only file trusted to say so). A file that
-/// is missing or does not parse records none.
-pub(crate) async fn load_approved(config_stack: &ConfigLayerStack) -> Vec<Vec<String>> {
+/// The prefixes (and, D52, the hosts of network `allow` rules) the Corbanu
+/// home's `rules/default.rules` records as approved while Aggressive was
+/// active (the only file trusted to say so), from one read. A file that is
+/// missing or does not parse records none.
+pub(crate) async fn load_approved(
+    config_stack: &ConfigLayerStack,
+) -> (Vec<Vec<String>>, Vec<String>) {
     match read_home_rules(config_stack).await {
-        Some((path, contents)) => approved_in(&path, &contents),
-        None => Vec::new(),
-    }
-}
-
-/// D52: the hosts whose network `allow` rules the Corbanu home's
-/// `rules/default.rules` records as approved while Aggressive was active.
-pub(crate) async fn load_approved_hosts(config_stack: &ConfigLayerStack) -> Vec<String> {
-    match read_home_rules(config_stack).await {
-        Some((path, contents)) => approved_hosts_in(&path, &contents),
-        None => Vec::new(),
+        Some((path, contents)) => (
+            approved_in(&path, &contents),
+            approved_hosts_in(&path, &contents),
+        ),
+        None => (Vec::new(), Vec::new()),
     }
 }
 

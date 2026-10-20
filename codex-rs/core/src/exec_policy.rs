@@ -342,12 +342,11 @@ impl ExecPolicyManager {
             }
             Self::new(Arc::new(policy))
         };
+        let (approved, approved_hosts) = aggressive::load_approved(config_stack).await;
+        manager.aggressive_approved.store(Arc::new(approved));
         manager
-            .aggressive_approved
-            .store(Arc::new(aggressive::load_approved(config_stack).await));
-        manager.aggressive_approved_hosts.store(Arc::new(
-            aggressive::load_approved_hosts(config_stack).await,
-        ));
+            .aggressive_approved_hosts
+            .store(Arc::new(approved_hosts));
         Ok(manager)
     }
 
