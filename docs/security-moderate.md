@@ -110,7 +110,8 @@ being approved (or was due) isn't run (#1001). Other Corbanu Terminals running
 on the same Corbanu home take them within about a second and say so, as they
 do with the kill switch. The credential broker starts at the next start
 (in each of them); press `r` to restart right away. Your `config.toml` isn't
-changed.
+changed. If you confirm before the window's own session has started, that
+session starts under Core's Moderate rules too (#1047).
 
 Choosing Permissive or Aggressive from Moderate shows what changes first.
 Back to Permissive takes effect when you restart; until then Moderate stays
