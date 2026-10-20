@@ -7,7 +7,7 @@ web search settings and adds the protections below. The review in
 `/security` lists the same rows before you confirm, and the inspector (`i`)
 shows what is in force: its recent denials include what Moderate's sandbox
 refused (and a protected file the image tool was refused, which a warning
-on screen also explains, as for a command, #1095), and a model request of
+on screen also explains, as for a command, #1087), and a model request of
 the session (or one of its agents) that the credential broker refused, for
 any reason, shows the broker as degraded until a later request of the same
 session goes through. A refused request outside any session (the model
@@ -112,26 +112,26 @@ After untrusted content these also count as code you haven't seen and ask
 first, with or without command output on the line:
 
 - zsh glob qualifiers that run code: `e` and `oe` with code
-  (`ls *(e:'rm x':)`) and `+name` (`ls *(+f)`) (#1072). Quoted text that zsh
+  (`ls *(e:'rm x':)`) and `+name` (`ls *(+f)`) (#1028). Quoted text that zsh
   would read that way asks too, such as `git commit -m "fix(tests): x"`.
 - bash's prompt expansion `${v@P}`, which runs any `$(...)` in the value, as
-  `eval` would (#1061). Other ways a shell runs a variable's value
+  `eval` would (#1012). Other ways a shell runs a variable's value
   (`PS4` with `set -x`, zsh's `${(e)v}` and `print -P`, `trap "$v"`) aren't
   covered yet (#1064).
-- substitutions (`$(...)`, backquotes, `<(...)`, `>(...)`) nested more than
-  32 deep (#1060).
+- substitutions (`$(...)`, `<(...)`, `>(...)`) nested more than 32 deep
+  (#1020).
 
 ## Choosing, restarting and going back
 
 When you confirm Moderate, Core's rules (the sandbox, protected files and
 untrusted content) apply at once in every session of this Corbanu Terminal,
-and grants and "for session" approvals end (#1026). A command, file edit or
-MCP tool call whose approval prompt was still open is asked about again under
-the new level (#1019, #1021); an answer to the old prompt isn't used, and a
-retry outside the sandbox that was being approved (or was due) isn't run
-(#1001). A command or file edit that carried extra permissions (ones it asked
-for, or grants made before the change) isn't asked again: it doesn't run, and
-the agent can ask again (#1053, #1071). Other Corbanu Terminals running
+and grants and "for session" approvals end. A command, file edit or MCP tool
+call whose approval prompt was still open is decided again under the new
+level, so you're asked again where it needs approval; an answer to the old
+prompt isn't used, and a retry outside the sandbox that was being approved
+(or was due) isn't run (#1001). A command or file edit that carried extra
+permissions (ones it asked for, or grants made before the change) isn't
+decided again: it doesn't run, and the agent can ask again (#1001, #1057). Other Corbanu Terminals running
 on the same Corbanu home take them within about a second and say so, as they
 do with the kill switch. The credential broker starts at the next start
 (in each of them); press `r` to restart right away. Your `config.toml` isn't

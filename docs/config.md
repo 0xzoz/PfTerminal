@@ -248,12 +248,13 @@ files:
   (`pfterminal_db_init.lock`), databases recovery set aside beside its home
   (`<home>.db-backups`), and the credential broker's runtime folder. If you
   keep the databases in a separate folder (`sqlite_home` or
-  `CODEX_SQLITE_HOME`), that folder's databases, init lock, GPU controller
-  lock (`gpu-controller.lock`), pending accounting records
-  (`accounting-pending`) and backups (`db-backups` in it, `<folder>.db-backups`
-  beside it) too. On Linux a backup folder beside a folder is covered only
-  when it exists at the command's start. Not yet covered: the `db-backups`
-  folder inside the home itself (#1107).
+  `CODEX_SQLITE_HOME`), commands can't read that folder's databases, init
+  lock, GPU controller lock (`gpu-controller.lock`), pending accounting
+  records (`accounting-pending`) and backups (`db-backups` in it,
+  `<folder>.db-backups` beside it) either. On Linux a backup folder beside a
+  folder is covered only when it exists at the command's start. Not yet
+  covered: the `db-backups` and `accounting-pending` folders inside the home
+  itself, and on macOS and Linux its `gpu-controller.lock` (#1107).
 - CLI tokens: the files `~/.netrc`, `~/.git-credentials`,
   `~/.config/gh/hosts.yml`, `~/.aws/credentials`, `~/.docker/config.json`,
   `~/.npmrc` and Claude's sign-in (`~/.claude/.credentials.json`, and
@@ -263,6 +264,10 @@ files:
   credentials and config), and Cargo's `credentials.toml` and `credentials`
   (in `CARGO_HOME`, by default `%USERPROFILE%\.cargo`).
 - On macOS, your keychains (`~/Library/Keychains`).
+
+On Windows, one of these that doesn't exist when a command starts isn't
+covered for that command, except Corbanu's own folders and the files directly
+in its home.
 
 Approving a command never unlocks these, at any level; under Moderate the
 approval prompt names such a file and says so. Nothing runs outside the
