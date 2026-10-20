@@ -243,14 +243,25 @@ files:
   `.credentials.json`, `provider_auth.json`, `.env`), config (`config.toml`,
   `managed_config.toml`), `wallet`, history (`history.jsonl`), session
   transcripts (`sessions`, `archived_sessions`), logs (`log`), shell
-  snapshots (`shell_snapshots`), its runtime folder (`run`), its databases and
-  their backups, and the credential broker's runtime folder.
-- CLI token files: `~/.netrc`, `~/.git-credentials`,
+  snapshots (`shell_snapshots`), its runtime folder (`run`), its databases
+  (`*.sqlite*` at the top of its home), the database init lock
+  (`pfterminal_db_init.lock`), databases recovery set aside beside its home
+  (`<home>.db-backups`), and the credential broker's runtime folder. If you
+  keep the databases in a separate folder (`sqlite_home` or
+  `CODEX_SQLITE_HOME`), that folder's databases, init lock, GPU controller
+  lock (`gpu-controller.lock`), pending accounting records
+  (`accounting-pending`) and backups (`db-backups` in it, `<folder>.db-backups`
+  beside it) too. On Linux a backup folder beside a folder is covered only
+  when it exists at the command's start. Not yet covered: the `db-backups`
+  folder inside the home itself (#1107).
+- CLI tokens: the files `~/.netrc`, `~/.git-credentials`,
   `~/.config/gh/hosts.yml`, `~/.aws/credentials`, `~/.docker/config.json`,
   `~/.npmrc` and Claude's sign-in (`~/.claude/.credentials.json`, and
   `.credentials.json` in `CLAUDE_CONFIG_DIR` when set); on Windows also
-  `_netrc` in your profile folder, the GitHub CLI's `hosts.yml` and `gcloud`
-  in `%APPDATA%`, and Cargo's `credentials.toml` and `credentials`.
+  `_netrc` in your profile folder, the GitHub CLI's `hosts.yml` in
+  `%APPDATA%`, the whole Google Cloud CLI folder `%APPDATA%\gcloud` (its
+  credentials and config), and Cargo's `credentials.toml` and `credentials`
+  (in `CARGO_HOME`, by default `%USERPROFILE%\.cargo`).
 - On macOS, your keychains (`~/Library/Keychains`).
 
 Approving a command never unlocks these, at any level; under Moderate the
