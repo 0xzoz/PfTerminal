@@ -336,6 +336,12 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecProcess> for UnifiedExecRunt
         Some(&req.sandbox_cwd)
     }
 
+    fn local_search_path<'b>(&self, req: &'b UnifiedExecRequest) -> Option<&'b str> {
+        (!req.turn_environment.environment.is_remote())
+            .then(|| req.env.get("PATH").map(String::as_str))
+            .flatten()
+    }
+
     fn network_approval_spec(
         &self,
         req: &UnifiedExecRequest,

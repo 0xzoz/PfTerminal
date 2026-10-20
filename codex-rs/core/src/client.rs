@@ -914,15 +914,11 @@ impl ModelClient {
     /// A bound policy that cannot be read counts as Aggressive. Unlike the
     /// post-taint state, this does not depend on `source_envelopes`.
     pub(crate) fn live_level(&self) -> codex_security_policy::SecurityLevel {
-        use codex_security_policy::SecurityLevel;
-        let live = match &self.ingress_policy {
-            None => SecurityLevel::Permissive,
-            Some(policy) => policy
-                .0
-                .snapshot_for_agent(self.state.thread_id)
-                .map_or(SecurityLevel::Aggressive, |snapshot| snapshot.level),
-        };
-        self.ingress_level.max(live)
+        live_level_of(
+            self.ingress_level,
+            self.ingress_policy.as_ref().map(|policy| &policy.0),
+            self.state.thread_id,
+        )
     }
 
     /// Issue #445: whether the security kill switch a person turned on in
@@ -7110,3 +7106,21 @@ impl WebsocketTelemetry for ApiTelemetry {
 #[cfg(test)]
 #[path = "client_tests.rs"]
 mod tests;
+
+/// The level in force for `thread_id`: the session's own level or the
+/// stricter one its policy tree holds (Aggressive when that is unreadable).
+/// See [`ModelClient::live_level`].
+pub(crate) fn live_level_of(
+    ingress_level: codex_security_policy::SecurityLevel,
+    policy: Option<&crate::security::EffectivePolicyView>,
+    thread_id: ThreadId,
+) -> codex_security_policy::SecurityLevel {
+    use codex_security_policy::SecurityLevel;
+    let live = match policy {
+        None => SecurityLevel::Permissive,
+        Some(policy) => policy
+            .snapshot_for_agent(thread_id)
+            .map_or(SecurityLevel::Aggressive, |snapshot| snapshot.level),
+    };
+    ingress_level.max(live)
+}
