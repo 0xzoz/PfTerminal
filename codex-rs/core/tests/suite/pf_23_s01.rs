@@ -417,6 +417,94 @@ async fn issue_942_moderate_offers_no_session_approval_that_could_not_apply() ->
     Ok(())
 }
 
+/// D50 (#1001): an MCP call approved after the security level rose while its
+/// prompt was open does not run on that answer. It is asked again under the
+/// new level, the question saying why; cancelled then, the call is skipped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_1001_mcp_approval_after_a_level_change_is_asked_again() -> anyhow::Result<()> {
+    use codex_core::security_level_change::LevelBasis;
+    use codex_core::security_level_change::LevelChangeKind;
+    use codex_core::security_level_change::Probes;
+    use codex_core::security_level_change::commit_human_level_change;
+
+    skip_if_no_network!(Ok(()));
+    let (test, captured) = start_turn(
+        SecurityLevel::Permissive,
+        AskForApproval::OnRequest,
+        vec![sync_step("call-sync-1"), done_step()],
+        |config| {
+            insert_rmcp_server(config).expect("rmcp server");
+            let mut servers = config.mcp_servers.get().clone();
+            if let Some(rmcp) = servers.get_mut("rmcp") {
+                // The default mode: the call is asked about.
+                rmcp.default_tools_approval_mode = None;
+            }
+            config
+                .mcp_servers
+                .set(servers)
+                .expect("test mcp servers accept any configuration");
+            config
+                .features
+                .disable(Feature::ToolCallMcpElicitation)
+                .expect("disable MCP elicitation");
+        },
+    )
+    .await?;
+    let first = next_question(&test).await.expect("the call asks");
+    assert!(
+        first.questions[0].id.starts_with("mcp_tool_call_approval"),
+        "{:?}",
+        first.questions[0].id
+    );
+    assert!(
+        !first.questions[0]
+            .question
+            .contains("security level changed"),
+        "{}",
+        first.questions[0].question
+    );
+
+    // The person raises the level while the prompt is open (off the async
+    // runtime, as the TUI commits).
+    let home = test.codex_home_path().to_path_buf();
+    let thread = Some(test.session_configured.thread_id);
+    let report = tokio::task::spawn_blocking(move || {
+        let home = home.as_path();
+        let basis = LevelBasis::read(home, SecurityLevel::Permissive, thread);
+        commit_human_level_change(
+            home,
+            SecurityLevel::Permissive,
+            thread,
+            &basis,
+            SecurityLevel::Moderate,
+            Probes::Passed,
+            /*now_unix_seconds*/ 1_000,
+        )
+    })
+    .await
+    .expect("level change task")
+    .expect("the level change commits");
+    assert_eq!(report.kind, LevelChangeKind::Stricter);
+    assert!(report.live, "Moderate applies in this session now");
+
+    answer(&test, &first, "Allow").await;
+    let again = next_question(&test)
+        .await
+        .expect("the stale answer is asked again");
+    assert!(
+        again.questions[0]
+            .question
+            .starts_with("The security level changed while this tool call was being approved"),
+        "{}",
+        again.questions[0].question
+    );
+    answer(&test, &again, "Cancel").await;
+    assert!(next_question(&test).await.is_none());
+    let output = output_text(&captured.requests()[1], "call-sync-1");
+    assert!(output.contains("user cancelled MCP tool call"), "{output}");
+    Ok(())
+}
+
 /// Typing a vault command into a running shell after untrusted content asks
 /// the human; with approvals off it is refused; ordinary typing is unchanged.
 /// The shell starts after the untrusted content, inside the protected-path
