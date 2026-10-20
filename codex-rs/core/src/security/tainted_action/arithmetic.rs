@@ -669,17 +669,17 @@ impl Arithmetic {
         // The variables hold what it prints (any operand, for linearity).
         let mut node: Option<String> = None;
         // `-v NAME`, or attached: `-vNAME`.
-        let targets: Vec<&String> = args
+        let targets: Vec<String> = args
             .windows(2)
             .filter(|pair| pair[0] == "-v")
-            .map(|pair| &pair[1])
+            .map(|pair| pair[1].clone())
+            .chain(
+                args.iter()
+                    .filter_map(|word| word.strip_prefix("-v").filter(|name| !name.is_empty()))
+                    .map(str::to_string),
+            )
             .collect();
-        let attached: Vec<String> = args
-            .iter()
-            .filter_map(|word| word.strip_prefix("-v").filter(|name| !name.is_empty()))
-            .map(str::to_string)
-            .collect();
-        for target in targets.into_iter().chain(attached.iter()) {
+        for target in &targets {
             self.named.push(target.clone());
             if let Some((name, _)) = assignment(&format!("{target}=")) {
                 let node = node
