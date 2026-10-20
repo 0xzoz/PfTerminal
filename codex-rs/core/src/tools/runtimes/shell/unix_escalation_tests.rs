@@ -988,9 +988,9 @@ async fn strict_rules_refuse_intercepted_wrapped_vault_exec() -> anyhow::Result<
     Ok(())
 }
 
-/// D50 (#1001): an intercepted exec approved after a security transition was
-/// committed while its prompt was open (the policy marker moves; the live
-/// level stays Permissive here) is not run on that answer: the person is
+/// D50 (#1001): an intercepted exec approved after a security transition (a
+/// revocation; the level stays Permissive) was committed while its prompt was
+/// open is not run on that answer: the person is
 /// asked again (the prompt says why), and it runs on the new answer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn issue_1001_intercepted_exec_approved_before_a_transition_is_asked_again()
@@ -1026,8 +1026,8 @@ async fn issue_1001_intercepted_exec_approved_before_aggressive_is_refused() -> 
     Ok(())
 }
 
-/// Decides a `printf` that a prompt rule covers; the transition is committed
-/// while the first prompt is open, and every prompt is approved. Returns the
+/// Decides a `printf` that a prompt rule covers under Permissive; a
+/// revocation, or Aggressive, is committed while the first prompt is open, and every prompt is approved. Returns the
 /// action and the reasons of the prompts shown.
 async fn issue_1001_intercepted_exec(
     switch_aggressive_on: bool,
@@ -1106,16 +1106,30 @@ async fn issue_1001_intercepted_exec(
                     .with_ingress_level(SecurityLevel::Aggressive);
                 session.services.replace_model_client(client);
             }
-            let change = controller
-                .confirm_level_change(
-                    if switch_aggressive_on {
-                        SecurityLevel::Aggressive
-                    } else {
-                        SecurityLevel::Moderate
-                    },
-                    RevocationState::new(),
-                )
-                .unwrap();
+            // Aggressive switched on, or a revocation (the level stays).
+            let (level, revocations) = if switch_aggressive_on {
+                (SecurityLevel::Aggressive, RevocationState::new())
+            } else {
+                let mut revocations = RevocationState::new();
+                revocations
+                    .apply(
+                        &codex_security_policy::RevocationEvent::new(
+                            PolicyPrincipal::new(PrincipalKind::Human, "human:issue-1001").unwrap(),
+                            codex_security_policy::RevocationTarget::Grant {
+                                grant_id: codex_security_policy::BoundedText::new(
+                                    "issue-1001-grant",
+                                )
+                                .unwrap(),
+                            },
+                            codex_security_policy::RevocationReason::HumanRequest,
+                            /*created_at_unix_seconds*/ 1,
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap();
+                (SecurityLevel::Permissive, revocations)
+            };
+            let change = controller.confirm_level_change(level, revocations).unwrap();
             controller.apply_confirmed_change(change).unwrap();
             session
                 .notify_approval(&first.effective_approval_id(), ReviewDecision::Approved)

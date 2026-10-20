@@ -187,6 +187,7 @@ impl ToolOrchestrator {
                         .live_level_is_aggressive()
                         != aggressive_at_start
                     {
+                        warn(tool_ctx, STALE_AGGRESSIVE_REFUSAL).await;
                         return Err(ToolError::Rejected(STALE_AGGRESSIVE_REFUSAL.to_string()));
                     }
                     // The note is for a person who saw the earlier prompt.
@@ -194,6 +195,7 @@ impl ToolOrchestrator {
                 }
             }
         }
+        warn(tool_ctx, STALE_APPROVAL_REFUSAL).await;
         Err(ToolError::Rejected(STALE_APPROVAL_REFUSAL.to_string()))
     }
 
@@ -675,6 +677,14 @@ impl ToolOrchestrator {
             .as_ref()
             .and_then(crate::security::grant_offer::OfferGuard::take_confirmed);
         drop(grant_offer);
+        // D50: approved (or decided) before a security transition: nothing
+        // derived from the approval is used (checked again just before the
+        // first attempt).
+        if tool_ctx.session.services.transition_since(decided_under) {
+            return Ok(Round::Stale {
+                person_asked: approved_by == Some(ApprovalResolutionSource::User),
+            });
+        }
 
         // PF-23-S01 slice 3: after untrusted content the sandbox itself denies
         // credential and Corbanu home reads, whatever the command text says.
@@ -1076,6 +1086,20 @@ impl ToolOrchestrator {
                             sandbox_startup_failure,
                         ))
                     && network_approval_context.is_none();
+                // D50: a retry due on an approval from before a security
+                // transition (one committed while the first attempt ran) is
+                // not asked about: it would not be run.
+                if tool_ctx.session.services.transition_since(decided_under) {
+                    warn(tool_ctx, STALE_RETRY_NOTE).await;
+                    otel.sandbox_outcome(
+                        &otel_tn,
+                        otel_ci,
+                        "denied",
+                        initial_duration,
+                        /*escalated_duration*/ None,
+                    );
+                    return Err(ToolError::Codex(err));
+                }
                 if !bypass_retry_approval {
                     let approval_ctx = ApprovalCtx {
                         session: &tool_ctx.session,
@@ -1244,9 +1268,9 @@ const MAX_STALE_APPROVAL_ROUNDS: usize = 3;
 
 /// D50: why a run approved before a transition that switched Aggressive on
 /// did not run.
-pub(crate) const STALE_AGGRESSIVE_REFUSAL: &str = "Not run: security level Aggressive was \
-     switched on while this was being approved, so the approval was not used. Ask again if it \
-     is still needed; it will be decided under Aggressive.";
+pub(crate) const STALE_AGGRESSIVE_REFUSAL: &str = "Not run: the security policy changed while \
+     this was being approved (security level Aggressive was switched on), so the approval was \
+     not used. Ask again if it is still needed; it will be decided under Aggressive.";
 
 /// D50: why a retry outside the sandbox did not happen.
 const STALE_RETRY_NOTE: &str = "The security level changed while this command ran or its \

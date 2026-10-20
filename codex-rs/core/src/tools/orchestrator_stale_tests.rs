@@ -47,6 +47,8 @@ enum Transition {
     Commit(SecurityLevel),
     /// One that also switches Aggressive on for the session's live level.
     SwitchAggressiveOn,
+    /// A revocation (of a grant): the marker moves, the level stays.
+    Revoke,
 }
 
 /// A tool that needs approval (or not). Each ask records the prompt's
@@ -64,12 +66,31 @@ struct Probe {
     sandbox_denies: Vec<bool>,
     asked: Vec<Option<String>>,
     runs: usize,
+    revocations: RevocationState,
+    level: SecurityLevel,
 }
 
 impl Probe {
-    fn apply(&self, transition: Transition) {
+    fn apply(&mut self, transition: Transition) {
         let level = match transition {
             Transition::Commit(level) => level,
+            Transition::Revoke => {
+                let event = codex_security_policy::RevocationEvent::new(
+                    PolicyPrincipal::new(PrincipalKind::Human, "human:issue-1001").unwrap(),
+                    codex_security_policy::RevocationTarget::Grant {
+                        grant_id: codex_security_policy::BoundedText::new(format!(
+                            "issue-1001-grant-{}",
+                            self.revocations.generation
+                        ))
+                        .unwrap(),
+                    },
+                    codex_security_policy::RevocationReason::HumanRequest,
+                    /*created_at_unix_seconds*/ 1,
+                )
+                .unwrap();
+                self.revocations.apply(&event).unwrap();
+                self.level
+            }
             Transition::SwitchAggressiveOn => {
                 let client = (*self.session.services.model_client())
                     .clone()
@@ -78,9 +99,10 @@ impl Probe {
                 SecurityLevel::Aggressive
             }
         };
+        self.level = level;
         let change = self
             .controller
-            .confirm_level_change(level, RevocationState::new())
+            .confirm_level_change(level, self.revocations.clone())
             .unwrap();
         self.controller.apply_confirmed_change(change).unwrap();
     }
@@ -213,6 +235,8 @@ async fn run_probe(case: Case) -> (Probe, Result<(), String>) {
         sandbox_denies: case.sandbox_denies,
         asked: Vec::new(),
         runs: 0,
+        revocations: RevocationState::new(),
+        level: SecurityLevel::Permissive,
     };
     let tool_ctx = ToolCtx {
         session: Arc::clone(&session),
@@ -270,8 +294,8 @@ async fn issue_1001_approval_stale_every_time_is_refused() {
     let (probe, result) = run_probe(Case {
         while_asked: vec![
             Transition::Commit(SecurityLevel::Moderate),
-            Transition::Commit(SecurityLevel::Aggressive),
-            Transition::Commit(SecurityLevel::Moderate),
+            Transition::Revoke,
+            Transition::Revoke,
         ],
         ..Case::default()
     })
