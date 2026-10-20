@@ -150,7 +150,7 @@ async fn a_server_held_once_named_never_falls_back_after_a_named_session() {
         Some("sk-canary-work")
     );
     // Left: nothing, never the default login.
-    work.set_attached(false);
+    work.set_attached(/*attached*/ false);
     assert!(base.for_session().is_none());
     drop(work);
     assert!(base.session_account_unknown());
