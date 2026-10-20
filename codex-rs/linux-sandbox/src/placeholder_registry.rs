@@ -117,6 +117,17 @@ impl Found {
         (self.status.st_dev, self.status.st_ino)
     }
 
+    /// The status of the folder it is in.
+    pub(crate) fn folder_status(&self) -> io::Result<libc::stat> {
+        // SAFETY: `stat` is plain data, filled in by `fstat` below.
+        let mut status: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: the folder descriptor is open and `status` writable.
+        if unsafe { libc::fstat(self.folder.as_raw_fd(), &mut status) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(status)
+    }
+
     /// When its status last changed (made, linked or renamed).
     pub(crate) fn changed_at(&self) -> SystemTime {
         let seconds = u64::try_from(self.status.st_ctime).unwrap_or(0);

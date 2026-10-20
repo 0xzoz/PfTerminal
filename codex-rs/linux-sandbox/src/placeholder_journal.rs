@@ -21,6 +21,7 @@
 //!   one whose identity was never recorded) is left in place and reported
 //!   once. Nothing but a recorded path is ever removed.
 
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::ffi::CString;
 use std::fs::File;
@@ -207,8 +208,12 @@ struct Journal {
     record: Record,
     /// Whether the record file exists.
     written: bool,
-    /// The folder's lock while held across steps ([`hold`]).
-    held: Option<File>,
+    /// The folder's lock file, open for writing only: its write lock is
+    /// this record's lock. Made `0200`, so a command that sees the folder
+    /// (read-only) cannot open it at all, and so cannot take any lock on it.
+    lock_file: File,
+    /// Whether the lock is held across steps ([`hold`]).
+    held: bool,
     /// Set when the lock could not be taken in time: from then on this run
     /// records nothing and removes nothing.
     unavailable: bool,
@@ -264,6 +269,21 @@ fn open_journal(dir: &Path) -> io::Result<Journal> {
         return Err(io::Error::last_os_error());
     }
     let path = std::fs::read_link(format!("/proc/self/fd/{}", dir.as_raw_fd()))?;
+    // Without a lock file this run can write (a read-only home, as in a
+    // nested sandbox), there is no record: as before.
+    let lock_file = File::from(open_raw(
+        dir.as_raw_fd(),
+        LOCK_NAME.as_bytes(),
+        libc::O_WRONLY | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        /*mode*/ 0o200,
+    )?);
+    let lock_status = lock_file.metadata()?;
+    if !lock_status.is_file() || lock_status.uid() != euid {
+        return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+    }
+    if lock_status.mode() & 0o7777 != 0o200 {
+        lock_file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o200))?;
+    }
     let owner = own_owner();
     let nanos = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -279,7 +299,8 @@ fn open_journal(dir: &Path) -> io::Result<Journal> {
             entries: Vec::new(),
         },
         written: false,
-        held: None,
+        lock_file,
+        held: false,
         unavailable: false,
     })
 }
@@ -330,16 +351,44 @@ pub(crate) fn register(planned: &[Planned<'_>], mounted: &[(PathBuf, PathBuf)]) 
 pub(crate) fn hold() -> bool {
     let mut held = false;
     with_journal(|journal| {
-        if journal.held.is_none() {
-            journal.held = journal.lock_file().ok();
-            held = journal.held.is_some();
+        if !journal.held && journal.acquire().is_ok() {
+            journal.held = true;
+            held = true;
         }
     });
     held
 }
 
 pub(crate) fn release() {
-    with_journal(|journal| journal.held = None);
+    with_journal(|journal| {
+        if journal.held {
+            journal.held = false;
+            let _ = set_lock(journal.lock_file.as_raw_fd(), libc::F_UNLCK);
+        }
+    });
+}
+
+/// The record's lock while taken for one step; released when dropped.
+struct LockGuard(libc::c_int);
+
+impl Drop for LockGuard {
+    fn drop(&mut self) {
+        let _ = set_lock(self.0, libc::F_UNLCK);
+    }
+}
+
+/// Sets (`F_WRLCK`) or clears (`F_UNLCK`) the open file description's lock
+/// on the whole of `fd`, without waiting. Whether it was done.
+fn set_lock(fd: libc::c_int, kind: libc::c_int) -> io::Result<()> {
+    // SAFETY: `flock` is plain data; the fields set describe the file.
+    let mut whole: libc::flock = unsafe { std::mem::zeroed() };
+    whole.l_type = kind as libc::c_short;
+    whole.l_whence = libc::SEEK_SET as libc::c_short;
+    // SAFETY: locks a descriptor the journal owns.
+    if unsafe { libc::fcntl(fd, libc::F_OFD_SETLK, &whole) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// Once the command has ended, before this run's cleanup: it uses nothing
@@ -375,6 +424,19 @@ pub(crate) fn used_by_live_run(path: &Path, real: &Path) -> bool {
     used
 }
 
+/// The identity `record` gives the folder placeholder it made at `real`.
+fn record_identity(record: &Record, real: &Path) -> Option<Identity> {
+    record.entries.iter().find_map(|entry| match entry {
+        Entry::Made {
+            kind: Kind::Directory,
+            real: made,
+            identity,
+            ..
+        } if made == real => Some(*identity),
+        _ => None,
+    })
+}
+
 /// Whether `record` uses `path` (or `real`) or a path below it. Only its
 /// uses count: a run that has left ([`leave`]) keeps what it made recorded,
 /// but uses nothing.
@@ -403,7 +465,11 @@ fn with_journal(f: impl FnOnce(&mut Journal)) {
 
 #[derive(Debug, PartialEq, Eq)]
 enum Removal {
-    Removed,
+    /// With the folder it was in as it was just before and just after.
+    Removed {
+        folder_before: Option<Identity>,
+        folder_after: Option<Identity>,
+    },
     Missing,
     Kept(Kept),
     /// Not removed for another reason (no permission, or a process mounts
@@ -413,7 +479,13 @@ enum Removal {
 
 /// Removes the placeholder at `real` (reached without following a link)
 /// when it is still exactly what was made and no process mounts over it.
-fn remove_if_made(path: &Path, real: &Path, kind: Kind, identity: &Identity) -> Removal {
+fn remove_if_made(
+    path: &Path,
+    real: &Path,
+    kind: Kind,
+    identity: &Identity,
+    mounts: &mut Option<Option<HashSet<Vec<u8>>>>,
+) -> Removal {
     let found = match crate::placeholder_registry::find_without_links(real) {
         Ok(Some(found)) => found,
         Ok(None) => return Removal::Missing,
@@ -424,11 +496,21 @@ fn remove_if_made(path: &Path, real: &Path, kind: Kind, identity: &Identity) -> 
     }
     // A live run that left no record (an older helper, a record it could
     // not write, another Corbanu home) may mount over it.
-    if mounted_anywhere(&[path, real]) {
+    if mounted_anywhere(mounts, &[path, real]) {
         return Removal::Failed;
     }
+    let folder_before = found
+        .folder_status()
+        .ok()
+        .map(|status| Identity::of(&status));
     match found.remove() {
-        Ok(()) => Removal::Removed,
+        Ok(()) => Removal::Removed {
+            folder_before,
+            folder_after: found
+                .folder_status()
+                .ok()
+                .map(|status| Identity::of(&status)),
+        },
         Err(err) if err.kind() == io::ErrorKind::NotFound => Removal::Missing,
         Err(err) if matches!(err.raw_os_error(), Some(libc::ENOTEMPTY | libc::EEXIST)) => {
             Removal::Kept(Kept::NotEmpty)
@@ -439,14 +521,27 @@ fn remove_if_made(path: &Path, real: &Path, kind: Kind, identity: &Identity) -> 
 
 /// Whether any of `paths` is a mount point in the mount namespace of any of
 /// this user's processes (a sandbox's mounts are at the paths they have on
-/// the host). When that cannot be told, as if it were.
-fn mounted_anywhere(paths: &[&Path]) -> bool {
-    let Ok(processes) = std::fs::read_dir("/proc") else {
-        return true;
-    };
+/// the host). `mounts` holds them once read ([`mount_points`]). When that
+/// cannot be told, as if it were.
+fn mounted_anywhere(mounts: &mut Option<Option<HashSet<Vec<u8>>>>, paths: &[&Path]) -> bool {
+    mounts
+        .get_or_insert_with(mount_points)
+        .as_ref()
+        .is_none_or(|points| {
+            paths
+                .iter()
+                .any(|path| points.contains(path.as_os_str().as_bytes()))
+        })
+}
+
+/// The mount points in the mount namespaces of this user's processes, or
+/// `None` when they cannot all be read.
+fn mount_points() -> Option<HashSet<Vec<u8>>> {
+    let processes = std::fs::read_dir("/proc").ok()?;
     // SAFETY: `geteuid` has no preconditions.
     let euid = unsafe { libc::geteuid() };
     let mut seen = HashSet::new();
+    let mut points = HashSet::new();
     for process in processes.flatten() {
         if !process
             .file_name()
@@ -474,22 +569,16 @@ fn mounted_anywhere(paths: &[&Path]) -> bool {
             {
                 continue;
             }
-            Err(_) => return true,
+            Err(_) => return None,
         };
-        if mounts
-            .split(|byte| *byte == b'\n')
-            .filter_map(|line| line.split(|byte| *byte == b' ').nth(4))
-            .any(|point| {
-                let point = unescape_mount_point(point);
-                paths
-                    .iter()
-                    .any(|path| path.as_os_str().as_bytes() == point.as_slice())
-            })
-        {
-            return true;
-        }
+        points.extend(
+            mounts
+                .split(|byte| *byte == b'\n')
+                .filter_map(|line| line.split(|byte| *byte == b' ').nth(4))
+                .map(unescape_mount_point),
+        );
     }
-    false
+    Some(points)
 }
 
 /// A mount point as `mountinfo` writes it (space, tab, newline and
@@ -680,6 +769,30 @@ impl Journal {
         let Ok(_lock) = self.lock() else {
             return;
         };
+        // Of the paths it mounts at, only another run's recorded placeholder
+        // (or a path in one) is one a sweep could remove from under it.
+        let (records, unreadable_live) = self.other_records();
+        let made: Vec<&Path> = records
+            .iter()
+            .flat_map(|(_, record)| record.entries.iter())
+            .filter(|entry| matches!(entry, Entry::Made { .. }))
+            .flat_map(|entry| {
+                let (path, real) = entry.paths();
+                [path, real]
+            })
+            .collect();
+        let mounted: Vec<&(PathBuf, PathBuf)> = mounted
+            .iter()
+            .filter(|(path, real)| {
+                unreadable_live
+                    || made
+                        .iter()
+                        .any(|made| path.starts_with(made) || real.starts_with(made))
+            })
+            .collect();
+        if planned.is_empty() && mounted.is_empty() {
+            return;
+        }
         for (path, real) in mounted {
             self.record.entries.push(Entry::Uses {
                 path: path.clone(),
@@ -824,9 +937,16 @@ impl Journal {
         let in_use = |path: &Path, real: &Path| {
             live.iter().any(|(_, record)| uses(record, path, real)) || used_by_registry(path, real)
         };
+        let mut mounts = None;
         for (stem, record) in ended {
             let mut kept = Vec::new();
-            for entry in record.entries.iter().cloned() {
+            // Deepest first, so a placeholder in a placeholder folder of the
+            // same run goes before the folder; the folder is then expected
+            // as that removal left it (`expected`), and as nothing else.
+            let mut entries = record.entries.clone();
+            entries.sort_by_key(|entry| std::cmp::Reverse(entry.paths().1.components().count()));
+            let mut expected: HashMap<PathBuf, Identity> = HashMap::new();
+            for entry in entries {
                 if matches!(entry, Entry::Uses { .. }) {
                     continue;
                 }
@@ -851,16 +971,31 @@ impl Journal {
                         path,
                         real,
                         identity,
-                    } => match remove_if_made(path, real, *kind, identity) {
-                        Removal::Removed | Removal::Missing => {}
-                        Removal::Kept(why) => self.report(real, why),
-                        Removal::Failed => kept.push(entry.clone()),
-                    },
+                    } => {
+                        let identity = expected.get(real).unwrap_or(identity);
+                        match remove_if_made(path, real, *kind, identity, &mut mounts) {
+                            Removal::Removed {
+                                folder_before,
+                                folder_after,
+                            } => {
+                                if let (Some(folder), Some(after)) = (real.parent(), folder_after)
+                                    && let Some(recorded) = record_identity(&record, folder)
+                                    && folder_before
+                                        == Some(*expected.get(folder).unwrap_or(&recorded))
+                                {
+                                    expected.insert(folder.to_path_buf(), after);
+                                }
+                            }
+                            Removal::Missing => {}
+                            Removal::Kept(why) => self.report(real, why),
+                            Removal::Failed => kept.push(entry.clone()),
+                        }
+                    }
                 }
             }
             if kept.is_empty() {
                 let _ = self.unlink(&format!("{stem}.{RECORD_EXTENSION}"));
-            } else if kept != record.entries {
+            } else if kept.len() != record.entries.len() {
                 let _ = self.write_named(
                     &stem,
                     &Record {
@@ -873,48 +1008,33 @@ impl Journal {
     }
 
     /// The record folder's lock, held while records are read or written:
-    /// `None` when it is held already ([`hold`]; a second descriptor would
-    /// wait for it forever).
-    fn lock(&mut self) -> io::Result<Option<File>> {
-        if self.held.is_some() {
+    /// `None` when it is held already ([`hold`]; releasing it here would
+    /// release that too).
+    fn lock(&mut self) -> io::Result<Option<LockGuard>> {
+        if self.held {
             return Ok(None);
         }
-        self.lock_file().map(Some)
+        self.acquire()?;
+        Ok(Some(LockGuard(self.lock_file.as_raw_fd())))
     }
 
-    /// Waits at most [`LOCK_WAIT`]; after that, the record is unavailable
-    /// for the rest of this run.
-    fn lock_file(&mut self) -> io::Result<File> {
+    /// Takes the write lock, waiting at most [`LOCK_WAIT`]; after that, the
+    /// record is unavailable for the rest of this run.
+    fn acquire(&mut self) -> io::Result<()> {
         if self.unavailable {
             return Err(io::Error::from(io::ErrorKind::WouldBlock));
         }
-        let file = File::from(open_raw(
-            self.dir.as_raw_fd(),
-            LOCK_NAME.as_bytes(),
-            libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            /*mode*/ 0o600,
-        )?);
-        // An open file description's write lock on the whole file: it needs
-        // a descriptor open for writing, which a command that sees the
-        // folder read-only cannot open. Released when the file closes.
-        // SAFETY: `flock` is plain data; the fields set describe the file.
-        let mut whole: libc::flock = unsafe { std::mem::zeroed() };
-        whole.l_type = libc::F_WRLCK as libc::c_short;
-        whole.l_whence = libc::SEEK_SET as libc::c_short;
         let deadline = std::time::Instant::now() + LOCK_WAIT;
         loop {
-            // SAFETY: locks a descriptor owned here.
-            if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_OFD_SETLK, &whole) } == 0 {
-                return Ok(file);
-            }
-            let err = io::Error::last_os_error();
+            let err = match set_lock(self.lock_file.as_raw_fd(), libc::F_WRLCK) {
+                Ok(()) => return Ok(()),
+                Err(err) => err,
+            };
             if !matches!(
                 err.raw_os_error(),
                 Some(libc::EAGAIN | libc::EACCES | libc::EINTR)
-            ) {
-                return Err(err);
-            }
-            if std::time::Instant::now() >= deadline {
+            ) || std::time::Instant::now() >= deadline
+            {
                 self.unavailable = true;
                 return Err(err);
             }

@@ -453,10 +453,8 @@ fn a_run_records_and_makes_its_placeholders_then_finishes() {
             ),
         ]
     );
-    assert!(record.entries.contains(&Entry::Uses {
-        path: held.clone(),
-        real: held.clone()
-    }));
+    // An empty file it mounts at that no run recorded is not recorded.
+    assert!(!uses(&record, &held, &held));
     // Another run's sweep leaves a live run's placeholders.
     let mut other = open_journal(&setup.base.join("corbanu/sandbox-placeholders")).expect("other");
     other.sweep(&|_, _| false);
@@ -573,9 +571,11 @@ fn a_mount_point_in_any_of_this_users_namespaces_is_found() {
     assert_eq!(unescape_mount_point(br"/a\040b\134c"), b"/a b\\c".to_vec());
     assert_eq!(unescape_mount_point(br"/plain\x"), br"/plain\x".to_vec());
     // This process's own `/proc` is a mount point; a fresh folder is not.
-    assert!(mounted_anywhere(&[Path::new("/proc")]));
+    let mut mounts = None;
+    assert!(mounted_anywhere(&mut mounts, &[Path::new("/proc")]));
     let dir = tempfile::TempDir::new().expect("tempdir");
-    assert!(!mounted_anywhere(&[dir.path()]));
+    assert!(!mounted_anywhere(&mut mounts, &[dir.path()]));
+    assert!(mounts.is_some_and(|points| points.is_some()), "read once");
 }
 
 #[test]
@@ -585,7 +585,7 @@ fn a_held_lock_leaves_the_run_without_the_record() {
     setup.made_by(ended(), &left, Kind::File);
     let mut holder =
         open_journal(&setup.base.join("corbanu/sandbox-placeholders")).expect("holder");
-    let held = holder.lock_file().expect("held");
+    let held = holder.lock().expect("lock").expect("held");
 
     let path = setup.base.join("home/.pfterminal");
     setup.journal.register(
@@ -607,14 +607,18 @@ fn a_held_lock_leaves_the_run_without_the_record() {
     assert!(left.is_file(), "nothing removed");
     assert_eq!(setup.records().len(), 1);
 
-    // A read-only descriptor cannot take it.
+    // No other descriptor can be opened to take any lock on it: it is
+    // `0200` (and, in a sandbox, on a read-only bind).
     drop(held);
-    let read_only = File::open(setup.base.join("corbanu/sandbox-placeholders/lock")).expect("open");
-    // SAFETY: `flock` is plain data.
-    let mut whole: libc::flock = unsafe { std::mem::zeroed() };
-    whole.l_type = libc::F_WRLCK as libc::c_short;
-    // SAFETY: tries a lock on a descriptor owned here.
-    assert!(unsafe { libc::fcntl(read_only.as_raw_fd(), libc::F_OFD_SETLK, &whole) } < 0);
+    let lock = setup.base.join("corbanu/sandbox-placeholders/lock");
+    assert_eq!(
+        std::fs::metadata(&lock).expect("lock").permissions().mode() & 0o7777,
+        0o200
+    );
+    // SAFETY: `geteuid` has no preconditions.
+    if unsafe { libc::geteuid() } != 0 {
+        assert!(File::open(&lock).is_err());
+    }
 }
 
 #[test]
@@ -640,4 +644,86 @@ fn the_record_folder_is_found_through_another_path_to_it() {
     );
     std::fs::create_dir(base.join("other")).expect("other");
     assert_eq!(exposed_below(&record, &base.join("other")), None);
+}
+
+#[test]
+fn a_placeholder_folder_holding_another_of_the_runs_placeholders_is_removed() {
+    let mut setup = Setup::new();
+    let folder = setup.base.join("home/.git");
+    let inside = folder.join("hooks");
+    let maker = ended();
+    let mut journal_of_the_maker =
+        open_journal(&setup.base.join("corbanu/sandbox-placeholders")).expect("maker");
+    journal_of_the_maker.register(
+        &[
+            Planned {
+                kind: Kind::Directory,
+                path: &folder,
+                real: &folder,
+                makes: true,
+            },
+            Planned {
+                kind: Kind::File,
+                path: &inside,
+                real: &inside,
+                makes: true,
+            },
+        ],
+        &[],
+    );
+    assert!(inside.is_file());
+    // The maker is killed: its record, written as by that run.
+    let records = setup.records();
+    let record = journal_of_the_maker.read(&records[0]).expect("record");
+    journal_of_the_maker.remove_record().expect("unlink");
+    setup.write(maker, record.entries);
+
+    setup.sweep();
+
+    assert!(
+        std::fs::symlink_metadata(&folder).is_err(),
+        "{}",
+        setup.report()
+    );
+    assert_eq!(setup.report(), "");
+    assert_eq!(setup.records(), Vec::<String>::new());
+}
+
+#[test]
+fn a_read_only_record_folder_keeps_no_record() {
+    // SAFETY: `geteuid` has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let record = dir.path().join("sandbox-placeholders");
+    std::fs::create_dir(&record).expect("record");
+    std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o500)).expect("mode");
+    assert!(open_journal(&record).is_err(), "as before: no record");
+    std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o700)).expect("mode");
+}
+
+#[test]
+fn a_path_another_run_made_is_recorded_as_used_and_nothing_else() {
+    let mut setup = Setup::new();
+    let made = setup.base.join("home/made");
+    let other = setup.base.join("home/other");
+    std::fs::write(&other, "").expect("other");
+    setup.made_by(ended(), &made, Kind::File);
+    // Nothing to make and nothing recorded mounted at: no record at all.
+    setup
+        .journal
+        .register(&[], &[(other.clone(), other.clone())]);
+    assert_eq!(setup.records().len(), 1);
+    // Another run's placeholder mounted at: recorded as used.
+    setup.journal.register(&[], &[(made.clone(), made.clone())]);
+    let records = setup.records();
+    assert_eq!(records.len(), 2);
+    let own = format!("{}.rec", setup.journal.name);
+    let record = setup.journal.read(&own).expect("record");
+    assert!(uses(&record, &made, &made) && !uses(&record, &other, &other));
+    let mut sweeper =
+        open_journal(&setup.base.join("corbanu/sandbox-placeholders")).expect("sweeper");
+    sweeper.sweep(&|_, _| false);
+    assert!(made.is_file(), "kept while used");
 }
