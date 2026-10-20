@@ -18,6 +18,13 @@ use super::ThreadConfigSource;
 use super::UserThreadConfig;
 use proto::thread_config_loader_client::ThreadConfigLoaderClient;
 
+// async-trait 0.1.89 (used by tonic's generated server trait) marks the boxed
+// future it returns `#[must_use]`, which is already must-use. async-trait
+// 0.1.90+ drops the attribute but pulls in syn 3; remove this once it lands.
+#[expect(
+    clippy::double_must_use,
+    reason = "tonic-generated #[async_trait] server trait; fixed in async-trait 0.1.90+"
+)]
 #[path = "proto/codex.thread_config.v1.rs"]
 mod proto;
 
