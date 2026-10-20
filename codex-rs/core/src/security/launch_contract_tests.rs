@@ -458,6 +458,56 @@ fn pf_27_s06_protected_codex_home_dirs_are_protected_entries() {
     }
 }
 
+/// The Google Cloud CLI's folder (Windows only, so placed by hand here) and
+/// what is in it are told apart from CLI token files.
+#[test]
+fn the_google_cloud_cli_folder_is_its_own_kind_of_kept_file() {
+    let mut fixture = fixture();
+    let cwd = fixture.workspace.as_path();
+    let folder = fixture.workspace.join("AppData/Roaming/gcloud");
+    fixture.contract.protected_read_paths.push(folder.clone());
+    fixture
+        .contract
+        .google_cloud_cli_folders
+        .push(folder.clone());
+    let kept = |path: &Path| fixture.contract.kept_file(path, cwd);
+    assert_eq!(kept(folder.as_path()), Some(KeptFile::GoogleCloudCliFolder));
+    assert_eq!(
+        kept(folder.join("credentials.db").as_path()),
+        Some(KeptFile::InGoogleCloudCliFolder)
+    );
+    assert_eq!(kept(fixture.workspace.join("src.rs").as_path()), None);
+    assert_eq!(
+        kept(fixture.codex_home.join("auth.json").as_path()),
+        Some(KeptFile::CorbanuOwn)
+    );
+}
+
+/// On Windows the contract keeps `%APPDATA%\gcloud` as the Google Cloud
+/// CLI's folder, not as a CLI token file.
+#[cfg(windows)]
+#[test]
+fn the_google_cloud_cli_folder_is_kept_on_windows() {
+    let Some(app_data) = std::env::var_os("APPDATA") else {
+        return;
+    };
+    let fixture = fixture();
+    let folder = AbsolutePathBuf::from_absolute_path(app_data)
+        .expect("absolute APPDATA")
+        .join("gcloud");
+    assert_eq!(
+        fixture.contract.google_cloud_cli_folders,
+        vec![folder.clone()]
+    );
+    assert!(!fixture.contract.cli_token_paths.contains(&folder));
+    assert_eq!(
+        fixture
+            .contract
+            .kept_file(folder.as_path(), fixture.workspace.as_path()),
+        Some(KeptFile::GoogleCloudCliFolder)
+    );
+}
+
 /// #651: the contract also denies the home's database init lock and, once a
 /// config names a database folder set apart from the home, that folder's
 /// databases (its path escaped as a glob) and what Corbanu keeps there. A
