@@ -371,3 +371,71 @@ async fn issue_874_a_standing_finding_keeps_user_namespaces_denied() -> anyhow::
     assert_eq!(wrong, Vec::<String>::new());
     Ok(())
 }
+
+/// Merge with D48 (c) (#891): after untrusted content, a person's approval
+/// of a known tool's request to run outside the sandbox allows user
+/// namespaces for that run, but not while a `.git` finding stands in its
+/// project; the person is told why.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_874_a_standing_finding_keeps_d48_known_tools_denied() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    /// A known tool's plain command; prints the marker only inside a
+    /// namespace it made.
+    const PLAIN: &str = "unshare -Ur printf NAMESPACE-MADE-%s D48";
+    /// The #826 explanation added where the rule refused it.
+    const EXPLAINED: &str = "blocks creating user namespaces";
+    let mut wrong = Vec::new();
+    for planted in [false, true] {
+        let outside = TempDir::new()?;
+        let outside_path = outside.path().canonicalize()?;
+        std::fs::write(outside_path.join("zshrc"), "# start-up\n")?;
+        let first = if planted {
+            plant(&outside_path)
+        } else {
+            "printf 'tidied'".to_string()
+        };
+        let (_, worked) = Box::pin(run(
+            SecurityLevel::Moderate,
+            Setting::FullAccess,
+            Arc::new(TempDir::new()?),
+            vec![step("call-first", json!({ "command": first }))],
+        ))
+        .await?;
+        // Another session in the project: a first command's output is
+        // untrusted content, then the known tool asks to leave the sandbox.
+        let (second, _) = Box::pin(run_in(
+            SecurityLevel::Moderate,
+            Setting::Workspace,
+            Arc::new(TempDir::new()?),
+            vec![
+                step("call-echo", json!({ "command": "echo first" })),
+                step(
+                    "call-d48",
+                    json!({
+                        "command": PLAIN,
+                        "sandbox_permissions": "require_escalated",
+                        "justification": "rootless podman needs a user namespace",
+                    }),
+                ),
+            ],
+            Some(&worked),
+        ))
+        .await?;
+        let out = output(&second.requests, "call-d48");
+        let explained = out.contains(EXPLAINED);
+        let held_note = second
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("nor let it create user namespaces"));
+        if second.asked == 0 || explained != planted || held_note != planted {
+            wrong.push(format!(
+                "planted={planted}: asked={} warnings={:?} output={out}",
+                second.asked, second.warnings
+            ));
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
