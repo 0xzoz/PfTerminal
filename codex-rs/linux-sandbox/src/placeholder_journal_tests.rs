@@ -181,6 +181,31 @@ fn a_run_is_live_until_it_ends_its_boot_ends_or_its_pid_is_reused() {
         ..ended()
     };
     assert!(owner_is_live(&other_machine));
+    // One that has exited, not yet reaped, still counts (as `kill(pid, 0)`
+    // does for the temporary folder's registry).
+    let mut zombie = std::process::Command::new("true").spawn().expect("spawn");
+    let zombie_pid = zombie.id() as libc::pid_t;
+    let is_zombie = || {
+        std::fs::read_to_string(format!("/proc/{zombie_pid}/stat")).is_ok_and(|stat| {
+            stat.rsplit(')')
+                .next()
+                .is_some_and(|rest| rest.trim_start().starts_with('Z'))
+        })
+    };
+    while !is_zombie() {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(owner_is_live(&Owner {
+        pid: zombie_pid,
+        start: process_start(zombie_pid).expect("stat"),
+        ..this_run()
+    }));
+    zombie.wait().expect("reap");
+    // One whose machine is not known is taken as running.
+    assert!(owner_is_live(&Owner {
+        host: None,
+        ..ended()
+    }));
     // One whose PID namespace is not known is taken as running.
     let unknown_namespace = Owner {
         pidns: None,
@@ -526,7 +551,7 @@ fn an_unreadable_record_of_a_live_run_keeps_every_placeholder() {
 
     setup.sweep();
     assert!(path.is_file(), "kept while that run runs");
-    assert!(used_by_live_run_in(&mut setup.journal, &path));
+    assert!(setup.journal.used_by_live_run(&path, &path));
 
     // Once that run has ended, it no longer counts.
     let ended = ended();
@@ -538,19 +563,9 @@ fn an_unreadable_record_of_a_live_run_keeps_every_placeholder() {
         )),
     )
     .expect("rename");
-    assert!(!used_by_live_run_in(&mut setup.journal, &path));
+    assert!(!setup.journal.used_by_live_run(&path, &path));
     setup.sweep();
     assert!(std::fs::symlink_metadata(&path).is_err());
-}
-
-fn used_by_live_run_in(journal: &mut Journal, path: &Path) -> bool {
-    let _lock = journal.lock().expect("lock");
-    let (records, unreadable_live) = journal.other_records();
-    unreadable_live
-        || records
-            .iter()
-            .filter(|(_, record)| owner_is_live(&record.owner))
-            .any(|(_, record)| uses(record, path, path))
 }
 
 #[test]
@@ -561,4 +576,68 @@ fn a_mount_point_in_any_of_this_users_namespaces_is_found() {
     assert!(mounted_anywhere(&[Path::new("/proc")]));
     let dir = tempfile::TempDir::new().expect("tempdir");
     assert!(!mounted_anywhere(&[dir.path()]));
+}
+
+#[test]
+fn a_held_lock_leaves_the_run_without_the_record() {
+    let mut setup = Setup::new();
+    let left = setup.base.join("home/left");
+    setup.made_by(ended(), &left, Kind::File);
+    let mut holder =
+        open_journal(&setup.base.join("corbanu/sandbox-placeholders")).expect("holder");
+    let held = holder.lock_file().expect("held");
+
+    let path = setup.base.join("home/.pfterminal");
+    setup.journal.register(
+        &[Planned {
+            kind: Kind::File,
+            path: &path,
+            real: &path,
+            makes: true,
+        }],
+        &[],
+    );
+    assert!(
+        !path.exists(),
+        "nothing made (bubblewrap makes it, as before)"
+    );
+    assert!(setup.journal.unavailable);
+    assert!(setup.journal.used_by_live_run(&left, &left), "kept");
+    setup.sweep();
+    assert!(left.is_file(), "nothing removed");
+    assert_eq!(setup.records().len(), 1);
+
+    // A read-only descriptor cannot take it.
+    drop(held);
+    let read_only = File::open(setup.base.join("corbanu/sandbox-placeholders/lock")).expect("open");
+    // SAFETY: `flock` is plain data.
+    let mut whole: libc::flock = unsafe { std::mem::zeroed() };
+    whole.l_type = libc::F_WRLCK as libc::c_short;
+    // SAFETY: tries a lock on a descriptor owned here.
+    assert!(unsafe { libc::fcntl(read_only.as_raw_fd(), libc::F_OFD_SETLK, &whole) } < 0);
+}
+
+#[test]
+fn the_record_folder_is_found_through_another_path_to_it() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let base = dir.path().canonicalize().expect("canonical");
+    let record = base.join("home/.corbanu/sandbox-placeholders");
+    std::fs::create_dir_all(&record).expect("record");
+    std::os::unix::fs::symlink(base.join("home"), base.join("alias")).expect("alias");
+    assert_eq!(
+        exposed_below(&record, &base.join("alias")),
+        Some(base.join("alias/.corbanu/sandbox-placeholders"))
+    );
+    assert_eq!(
+        exposed_below(&record, &base.join("home")),
+        Some(record.clone())
+    );
+    assert_eq!(exposed_below(&record, &record), Some(record.clone()));
+    std::fs::create_dir(record.join("inside")).expect("inside");
+    assert_eq!(
+        exposed_below(&record, &record.join("inside")),
+        Some(record.join("inside"))
+    );
+    std::fs::create_dir(base.join("other")).expect("other");
+    assert_eq!(exposed_below(&record, &base.join("other")), None);
 }

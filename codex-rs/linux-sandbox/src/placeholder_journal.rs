@@ -51,11 +51,15 @@ const REPORT_LIMIT: u64 = 1 << 20;
 const TEMPORARY_STALE_AFTER: Duration = Duration::from_secs(10 * 60);
 /// The largest record file read.
 const RECORD_LIMIT: u64 = 16 << 20;
-/// How long a run waits for the record folder's lock. A command can hold
-/// it (the folder is readable where a writable root exposes it): the run
-/// then goes on without the record, as before (nothing recorded, made or
-/// removed).
-const LOCK_WAIT: Duration = Duration::from_secs(10);
+/// How long a run waits for the record folder's lock (a backstop: the lock
+/// is a write lock, which a command that sees the folder read-only cannot
+/// take). Then the run goes on without the record, as before (nothing
+/// recorded, made or removed).
+const LOCK_WAIT: Duration = if cfg!(test) {
+    Duration::from_millis(300)
+} else {
+    Duration::from_secs(10)
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
@@ -288,7 +292,11 @@ fn open_journal(dir: &Path) -> io::Result<Journal> {
 pub(crate) fn record_dir_mount(mount_root: &Path) -> Option<PathBuf> {
     let mut dir = None;
     with_journal(|journal| dir = Some(journal.path.clone()));
-    let dir = dir?;
+    exposed_below(&dir?, mount_root)
+}
+
+/// Where `mount_root` exposes the folder `dir` (see [`record_dir_mount`]).
+fn exposed_below(dir: &Path, mount_root: &Path) -> Option<PathBuf> {
     let identity = |path: &Path| {
         std::fs::metadata(path)
             .ok()
@@ -300,7 +308,7 @@ pub(crate) fn record_dir_mount(mount_root: &Path) -> Option<PathBuf> {
             return Some(mount_root.join(dir.strip_prefix(above).ok()?));
         }
     }
-    let dir = identity(&dir)?;
+    let dir = identity(dir)?;
     mount_root
         .ancestors()
         .any(|above| identity(above) == Some(dir))
@@ -363,19 +371,7 @@ pub(crate) fn sweep(used_by_registry: &dyn Fn(&Path, &Path) -> bool) {
 /// instead of removing it from under that run.
 pub(crate) fn used_by_live_run(path: &Path, real: &Path) -> bool {
     let mut used = false;
-    with_journal(|journal| {
-        // Without the record, as if it were used: left for a later sweep.
-        let Ok(_lock) = journal.lock() else {
-            used = true;
-            return;
-        };
-        let (records, unreadable_live) = journal.other_records();
-        used = unreadable_live
-            || records
-                .iter()
-                .filter(|(_, record)| owner_is_live(&record.owner))
-                .any(|(_, record)| uses(record, path, real));
-    });
+    with_journal(|journal| used = journal.used_by_live_run(path, real));
     used
 }
 
@@ -468,8 +464,17 @@ fn mounted_anywhere(paths: &[&Path]) -> bool {
         {
             continue;
         }
-        let Ok(mounts) = std::fs::read(dir.join("mountinfo")) else {
-            continue;
+        let mounts = match std::fs::read(dir.join("mountinfo")) {
+            Ok(mounts) => mounts,
+            // The process has ended, or is ending (no mount namespace any
+            // more: `EINVAL`, as for a zombie).
+            Err(err)
+                if err.kind() == io::ErrorKind::NotFound
+                    || matches!(err.raw_os_error(), Some(libc::ESRCH | libc::EINVAL)) =>
+            {
+                continue;
+            }
+            Err(_) => return true,
         };
         if mounts
             .split(|byte| *byte == b'\n')
@@ -561,12 +566,12 @@ fn make_placeholder(real: &Path, kind: Kind) -> io::Result<Identity> {
 
 /// Whether the run that wrote a record may still be running.
 fn owner_is_live(owner: &Owner) -> bool {
-    // A run on another machine (a home shared over the network) is taken
-    // as running: its machine sweeps its records.
-    if let (Some(recorded), Some(now)) = (&owner.host, own_host())
-        && recorded != now
-    {
-        return true;
+    // A run on another machine (a home shared over the network), or one
+    // whose machine is not known on either side, is taken as running: its
+    // machine sweeps its records.
+    match (&owner.host, own_host()) {
+        (Some(recorded), Some(now)) if recorded == now => {}
+        _ => return true,
     }
     if let (Some(recorded), Some(now)) = (&owner.boot, own_boot())
         && recorded != now
@@ -591,14 +596,18 @@ fn owner_is_live(owner: &Owner) -> bool {
 }
 
 /// Whether the run a record file is named for (`<pid>-<start>-<nanos>`)
-/// may be running; one named otherwise may be.
+/// may be running. A file named otherwise is no run's record: ignored.
 fn named_run_is_live(stem: &str) -> bool {
-    let mut parts = stem.split('-');
-    let (Some(Ok(pid)), Some(Ok(start))) = (
-        parts.next().map(str::parse::<libc::pid_t>),
-        parts.next().map(str::parse::<u64>),
+    let parts: Vec<&str> = stem.split('-').collect();
+    let [pid, start, nanos] = parts.as_slice() else {
+        return false;
+    };
+    let (Ok(pid), Ok(start), Ok(_)) = (
+        pid.parse::<libc::pid_t>(),
+        start.parse::<u64>(),
+        nanos.parse::<u128>(),
     ) else {
-        return true;
+        return false;
     };
     match process_start(pid) {
         Ok(Some(now)) => start == 0 || now == start,
@@ -714,10 +723,39 @@ impl Journal {
             }
         }
         if made_any {
+            // A folder this run made changes when it makes a placeholder in
+            // it too: recorded as it is once all are made.
+            for entry in &mut self.record.entries {
+                if let Entry::Made {
+                    kind: Kind::Directory,
+                    real,
+                    identity,
+                    ..
+                } = entry
+                    && let Ok(Some(found)) = crate::placeholder_registry::find_without_links(real)
+                    && found.is_dir()
+                    && found.identity() == (identity.dev, identity.ino)
+                {
+                    *identity = Identity::of(&found.status);
+                }
+            }
             // A failure here leaves them pending: reported, never removed, after
             // a crash; this run's own cleanup removes them as before.
             let _ = self.write();
         }
+    }
+
+    fn used_by_live_run(&mut self, path: &Path, real: &Path) -> bool {
+        // Without the record, as if it were used: left for a later sweep.
+        let Ok(_lock) = self.lock() else {
+            return true;
+        };
+        let (records, unreadable_live) = self.other_records();
+        unreadable_live
+            || records
+                .iter()
+                .filter(|(_, record)| owner_is_live(&record.owner))
+                .any(|(_, record)| uses(record, path, real))
     }
 
     fn leave(&mut self) {
@@ -856,14 +894,24 @@ impl Journal {
             libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC,
             /*mode*/ 0o600,
         )?);
+        // An open file description's write lock on the whole file: it needs
+        // a descriptor open for writing, which a command that sees the
+        // folder read-only cannot open. Released when the file closes.
+        // SAFETY: `flock` is plain data; the fields set describe the file.
+        let mut whole: libc::flock = unsafe { std::mem::zeroed() };
+        whole.l_type = libc::F_WRLCK as libc::c_short;
+        whole.l_whence = libc::SEEK_SET as libc::c_short;
         let deadline = std::time::Instant::now() + LOCK_WAIT;
         loop {
-            // SAFETY: locks a descriptor owned here; released when it closes.
-            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            // SAFETY: locks a descriptor owned here.
+            if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_OFD_SETLK, &whole) } == 0 {
                 return Ok(file);
             }
             let err = io::Error::last_os_error();
-            if !matches!(err.raw_os_error(), Some(libc::EWOULDBLOCK | libc::EINTR)) {
+            if !matches!(
+                err.raw_os_error(),
+                Some(libc::EAGAIN | libc::EACCES | libc::EINTR)
+            ) {
                 return Err(err);
             }
             if std::time::Instant::now() >= deadline {
