@@ -1346,6 +1346,26 @@ fn issue_943_looks_of_its_git_folders_one_by_one_do_not_clear_a_repository() {
             Vec::<String>::new()
         );
     }
+    let held = held_for(&[common.git(), other.clone()]);
+    assert!(
+        held.iter().any(|held| held.ends_with(NOT_FULLY)),
+        "{held:?}"
+    );
+    // Review r4: nor once the session forgot it (past its repository
+    // limit): its entry wasn't left behind by a swap.
+    let others: Vec<Project> = (0..16).map(|_| Project::new()).collect();
+    for project in &others {
+        assert_eq!(
+            kinds(&check(thread, &project.repos())),
+            Vec::<String>::new()
+        );
+    }
+    for folder in [common.root.clone(), common.base.join("other")] {
+        assert_eq!(
+            kinds(&check(thread, &repos(&[folder.as_path()]))),
+            Vec::<String>::new()
+        );
+    }
     let held = held_for(&[common.git(), other]);
     assert!(
         held.iter().any(|held| held.ends_with(NOT_FULLY)),

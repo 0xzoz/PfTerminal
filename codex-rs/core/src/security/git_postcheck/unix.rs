@@ -977,10 +977,10 @@ struct Global {
     /// looked (`is_empty_stub`): any session's later look reports one once
     /// something is in it. Kept when a session forgets the repository.
     empty_new: HashSet<PathBuf>,
-    /// Git folders (by repository) a look couldn't see all of, why, and
-    /// when that look started; those a later look saw in full are taken out
-    /// (#943 item 13: also where that look walked other folders with them).
-    incomplete: HashMap<Vec<PathBuf>, (String, u64)>,
+    /// Git folders (by repository) a look couldn't see all of; those a
+    /// later look saw in full are taken out (#943 item 13: also where that
+    /// look walked other folders with them).
+    incomplete: HashMap<Vec<PathBuf>, Unchecked>,
     uses: u64,
     /// Looks started, for `incomplete`: a look that started earlier doesn't
     /// clear what a later one recorded.
@@ -1262,7 +1262,9 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
         }
         walked.push((
             match &cur.incomplete {
-                Some(why) => Walked::Incomplete(repo.git_dirs.clone(), why.clone()),
+                Some(why) => {
+                    Walked::Incomplete(repo.git_dirs.clone(), why.clone(), repo.dot_git.clone())
+                }
                 // Where git folders overlap in other roles, only its own
                 // entry (as before #943 item 13).
                 None if cur.overlapping => Walked::Exact(repo.git_dirs.clone()),
@@ -1276,50 +1278,61 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
     with_global(|global| {
         for (look, started) in walked {
             match look {
-                Walked::Incomplete(git_dirs, why) => {
-                    let entry = global
-                        .incomplete
-                        .entry(git_dirs)
-                        .or_insert((why.clone(), started));
-                    if entry.1 <= started {
-                        *entry = (why, started);
+                Walked::Incomplete(git_dirs, why, dot_git) => {
+                    let entry = global.incomplete.entry(git_dirs).or_insert(Unchecked {
+                        why: why.clone(),
+                        at: started,
+                        by: HashSet::new(),
+                    });
+                    if entry.at <= started {
+                        entry.why = why;
+                        entry.at = started;
                     }
+                    entry.by.insert((thread, dot_git));
                 }
                 // Its own entry goes, if recorded before it started. #943
-                // item 13: so do the folders it saw in full from an entry no
-                // session's repository has now (left by a `.git` replaced or
-                // made again naming other git folders, or by a look that
-                // walked the old and new ones). A repository's current entry
-                // goes only by a complete look of its own: looks of its git
-                // folders one by one may each stay below `MAX_ENTRIES`.
+                // item 13: so do the folders it saw in full from an entry
+                // left behind, whose every recorder's repository names other
+                // git folders now (its `.git` replaced or made again, or the
+                // look that walked the old and new ones). Any other entry goes
+                // only by a complete look of its own: looks of its git folders
+                // one by one may each stay below `MAX_ENTRIES`.
                 Walked::Complete(own, seen) => {
-                    let current: HashSet<Vec<PathBuf>> = global
-                        .threads
-                        .values()
-                        .flat_map(|state| state.repos.values())
-                        .map(|(repo, _)| repo.git_dirs.clone())
-                        .collect();
-                    let mut kept: HashMap<Vec<PathBuf>, (String, u64)> = HashMap::new();
-                    for (mut dirs, (why, at)) in std::mem::take(&mut global.incomplete) {
-                        if at < started {
+                    let threads = &global.threads;
+                    let left_behind = |dirs: &Vec<PathBuf>, by: &HashSet<(ThreadId, PathBuf)>| {
+                        by.iter().all(|(thread, dot_git)| {
+                            threads
+                                .get(thread)
+                                .and_then(|state| state.repos.get(dot_git))
+                                .is_some_and(|(repo, _)| repo.git_dirs != *dirs)
+                        })
+                    };
+                    let mut kept: HashMap<Vec<PathBuf>, Unchecked> = HashMap::new();
+                    for (mut dirs, entry) in std::mem::take(&mut global.incomplete) {
+                        if entry.at < started {
                             if dirs == own {
                                 continue;
                             }
-                            if !current.contains(&dirs) {
+                            if left_behind(&dirs, &entry.by) {
                                 dirs.retain(|dir| !seen.contains(dir));
                             }
                         }
                         if dirs.is_empty() {
                             continue;
                         }
-                        // Two entries left the same: the later one's.
+                        // Two entries left the same: the later one's reason
+                        // and start, both recorders.
                         match kept.entry(dirs) {
-                            hash_map::Entry::Occupied(mut entry) if entry.get().1 < at => {
-                                entry.insert((why, at));
+                            hash_map::Entry::Occupied(mut kept) => {
+                                let kept = kept.get_mut();
+                                kept.by.extend(entry.by);
+                                if kept.at < entry.at {
+                                    kept.why = entry.why;
+                                    kept.at = entry.at;
+                                }
                             }
-                            hash_map::Entry::Occupied(_) => {}
-                            hash_map::Entry::Vacant(entry) => {
-                                entry.insert((why, at));
+                            hash_map::Entry::Vacant(kept) => {
+                                kept.insert(entry);
                             }
                         }
                     }
@@ -1329,7 +1342,7 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
                     if global
                         .incomplete
                         .get(&git_dirs)
-                        .is_some_and(|(_, at)| *at < started)
+                        .is_some_and(|entry| entry.at < started)
                     {
                         global.incomplete.remove(&git_dirs);
                     }
@@ -1369,12 +1382,21 @@ fn seen_in_full(cur: &Snapshot) -> Vec<PathBuf> {
         .collect()
 }
 
+/// An entry of `Global::incomplete`.
+struct Unchecked {
+    why: String,
+    /// When the look that recorded it last started.
+    at: u64,
+    /// The sessions' repositories (by `.git`) whose looks recorded it.
+    by: HashSet<(ThreadId, PathBuf)>,
+}
+
 /// How a look at a repository went, for `Global::incomplete`.
 enum Walked {
     /// Its git folders, and those it saw in full (`seen_in_full`).
     Complete(Vec<PathBuf>, Vec<PathBuf>),
-    /// Its git folders weren't, and why.
-    Incomplete(Vec<PathBuf>, String),
+    /// Its git folders weren't, why, and its `.git`.
+    Incomplete(Vec<PathBuf>, String, PathBuf),
     /// Only its own entry goes: its `.git` is gone (nothing to follow
     /// there), or it saw them in full but overlapping in other roles.
     Exact(Vec<PathBuf>),
