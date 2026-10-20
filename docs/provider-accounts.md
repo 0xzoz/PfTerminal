@@ -89,7 +89,10 @@ source conversation's account; `--account` picks another one.
 
 An explicit `--account` of the same provider still wins. With the feature off,
 the resume is refused and names the recorded account (`--account
-<provider>:default` resumes on the default credentials). A rejected key names
+<provider>:default` resumes on the default credentials). A fork of a saved
+conversation follows the same rule, decided by the fork's own configuration
+(including a client's per-request overrides), not the app server's; a fork of
+an open conversation keeps that conversation's live account. A rejected key names
 the account and its `corbanu account add` recovery; the default credential is
 unchanged.
 
