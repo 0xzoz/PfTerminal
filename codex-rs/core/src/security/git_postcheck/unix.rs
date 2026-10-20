@@ -1071,6 +1071,26 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
             incomplete.push((repo.git_dirs.clone(), None));
             continue;
         }
+        // Made again (#943 review r4): it may be another kind (a worktree's
+        // or submodule's `.git` file replaced by a folder, or the reverse),
+        // so its git folders are worked out again, also for later looks.
+        let remade_repo = snapshot
+            .as_ref()
+            .filter(|prev| prev.went_missing && prev.dot_git != now)
+            .and_then(|_| repo_at(repo.dot_git.clone()))
+            .filter(|fresh| fresh.git_dirs != repo.git_dirs);
+        if let Some(fresh) = &remade_repo {
+            with_global(|global| {
+                if let Some((stored, _)) = global
+                    .threads
+                    .get_mut(&thread)
+                    .and_then(|state| state.repos.get_mut(&fresh.dot_git))
+                {
+                    *stored = fresh.clone();
+                }
+            });
+        }
+        let repo = remade_repo.as_ref().unwrap_or(repo);
         // The last look stays until this one is done (a panic keeps it).
         let prev = snapshot.as_ref();
         // Made again: what the old one had isn't carried into this look.

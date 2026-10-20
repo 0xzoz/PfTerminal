@@ -967,12 +967,55 @@ fn issue_943_a_worktree_added_again_later() {
         remove();
         add(&format!("{}\n", commondir.display()));
         std::fs::write(worktree.join(".git"), &text).expect("added again");
-        assert_eq!(
-            kinds(&check(thread, &repos)),
-            vec![format!(
-                "config {}",
-                worktree_git.join("commondir").display()
-            )]
-        );
+        let mut expected = vec![format!(
+            "config {}",
+            worktree_git.join("commondir").display()
+        )];
+        // Review r4: naming another folder, that folder is looked at as the
+        // common one (its git folders found again): the link there is new.
+        if commondir == &project.outside {
+            expected.insert(0, format!("link {}", link.display()));
+        }
+        assert_eq!(kinds(&check(thread, &repos)), expected);
     }
+}
+
+/// #943 review r4: a worktree's `.git` file removed in one command and a
+/// `git init` there in a later one (a `.git` folder now) gets a full look at
+/// its own git folder, found again, also where the next command's look
+/// (`recheck`) is the first to see it; what it reports holds there.
+#[test]
+fn issue_943_a_worktree_git_file_made_again_as_a_folder() {
+    let project = Project::new();
+    let worktree_git = project.git().join("worktrees/feature");
+    std::fs::create_dir_all(&worktree_git).expect("worktree git folder");
+    std::fs::write(worktree_git.join("HEAD"), "ref: refs/heads/feature\n").expect("HEAD");
+    std::fs::write(worktree_git.join("commondir"), "../..\n").expect("commondir");
+    let worktree = project.base.join("feature");
+    std::fs::create_dir_all(&worktree).expect("worktree");
+    let text = format!("gitdir: {}\n", worktree_git.display());
+    std::fs::write(worktree.join(".git"), &text).expect("git file");
+    let thread = ThreadId::new();
+    let repos = repos(&[worktree.as_path()]);
+    assert_eq!(begin(thread, &repos, "Moderate"), None);
+    std::fs::remove_file(worktree.join(".git")).expect("removed");
+    let (message, _) = recheck(thread, "Moderate", &[worktree.as_path()]);
+    assert_eq!(message, None);
+    let git = worktree.join(".git");
+    for folder in ["objects", "refs/heads", "hooks"] {
+        std::fs::create_dir_all(git.join(folder)).expect("git folder");
+    }
+    std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").expect("HEAD");
+    std::fs::write(git.join("config"), "[core]\n\tfsmonitor = /tmp/run-me\n").expect("config");
+    std::fs::write(git.join("hooks/pre-commit"), "#!/bin/sh\n").expect("hook");
+    let (message, held) = recheck(thread, "Moderate", &[worktree.as_path()]);
+    let message = message.expect("reported");
+    let git = git.canonicalize().expect("canonical");
+    assert!(
+        message.contains(&git.join("config").display().to_string()),
+        "{message}"
+    );
+    let mut held = held;
+    held.sort();
+    assert_eq!(held, shown(&[git.join("config"), git.join("hooks")]));
 }
