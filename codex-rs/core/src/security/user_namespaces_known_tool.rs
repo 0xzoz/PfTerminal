@@ -27,7 +27,6 @@
 //! agent from writing, but a folder they add that the agent can write isn't
 //! checked here.
 
-use std::path::Component;
 use std::path::Path;
 
 use codex_sandboxing::user_namespaces::KNOWN_TOOLS;
@@ -150,21 +149,21 @@ fn resolve<'w>(word: &'w str, lookup: &Lookup<'_>) -> Option<&'w str> {
         }
         None => {
             for folder in lookup.path?.split(':') {
+                // Paths as the Linux shell reads them (also where the tests
+                // run on another system).
                 let folder = folder.trim_end_matches('/');
-                let path = Path::new(folder);
-                // A relative entry (also an empty one, the working folder)
-                // or one the run can write: a copy could be found there.
-                if !path.is_absolute()
-                    || !path
-                        .components()
-                        .all(|part| matches!(part, Component::RootDir | Component::Normal(_)))
-                    || (lookup.writable)(path)
+                // A relative entry (also an empty one, the working folder),
+                // one with `.` or `..`, or one the run can write: a copy
+                // could be found there.
+                if !folder.starts_with('/')
+                    || folder.split('/').any(|part| matches!(part, "." | ".."))
+                    || (lookup.writable)(Path::new(folder))
                 {
                     return None;
                 }
-                let file = path.join(word);
-                if (lookup.executable)(&file) {
-                    return (system_dir(folder, lookup) && !(lookup.writable)(&file))
+                let file = format!("{folder}/{word}");
+                if (lookup.executable)(Path::new(&file)) {
+                    return (system_dir(folder, lookup) && !(lookup.writable)(Path::new(&file)))
                         .then_some(word);
                 }
             }
