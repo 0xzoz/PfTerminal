@@ -232,6 +232,10 @@ impl ToolRuntime<ShellRequest, ExecToolCallOutput> for ShellRuntime {
         req.turn_environment.workspace_roots()
     }
 
+    fn command_cwd(&self, req: &ShellRequest) -> Option<AbsolutePathBuf> {
+        Some(req.cwd.clone())
+    }
+
     fn network_approval_spec(
         &self,
         req: &ShellRequest,

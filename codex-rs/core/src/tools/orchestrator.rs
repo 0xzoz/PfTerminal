@@ -614,12 +614,14 @@ impl ToolOrchestrator {
         // #874 (D6): the git folders this session watches, looked at again
         // before deciding whether an approval lifts the rules (text typed
         // into a running shell or a process left running may have changed
-        // them).
-        let git_held = git_refresh(
-            tool_ctx,
-            resolution_folders(tool, req, &turn_cwd, &materialized_workspace_roots),
-        )
-        .await;
+        // them). #943 item 11: the folder the command runs in (its
+        // `workdir`) counts too.
+        let mut git_folders =
+            resolution_folders(tool, req, &turn_cwd, &materialized_workspace_roots);
+        if let Some(cwd) = tool.command_cwd(req) {
+            git_folders.insert(0, cwd);
+        }
+        let git_held = git_refresh(tool_ctx, git_folders).await;
         let mut git_held_back = false;
         let denied = post_taint_read_denials(
             tool_ctx,
@@ -872,6 +874,9 @@ impl ToolOrchestrator {
                     if let Ok(policy_cwd) = sandbox_policy_cwd.to_abs_path() {
                         folders.push(policy_cwd.to_path_buf());
                     }
+                    // #943 item 11: and the folder the command runs in (its
+                    // `workdir`), which may be another repository.
+                    folders.extend(tool.command_cwd(req).map(|cwd| cwd.to_path_buf()));
                     #[allow(deprecated)]
                     folders.push(turn_ctx.cwd.to_path_buf());
                     folders.extend(

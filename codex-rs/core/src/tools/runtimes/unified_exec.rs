@@ -336,6 +336,13 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecProcess> for UnifiedExecRunt
         Some(&req.sandbox_cwd)
     }
 
+    fn command_cwd(
+        &self,
+        req: &UnifiedExecRequest,
+    ) -> Option<codex_utils_absolute_path::AbsolutePathBuf> {
+        req.cwd.to_abs_path().ok()
+    }
+
     fn network_approval_spec(
         &self,
         req: &UnifiedExecRequest,

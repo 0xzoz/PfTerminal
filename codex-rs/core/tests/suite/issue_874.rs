@@ -371,3 +371,57 @@ async fn issue_874_a_standing_finding_keeps_user_namespaces_denied() -> anyhow::
     assert_eq!(wrong, Vec::<String>::new());
     Ok(())
 }
+
+/// #943 item 11: a command whose `workdir` is in another repository gets the
+/// same check there: what it plants in that repository's `.git` is reported,
+/// and while it stands a person's approval of a later command there doesn't
+/// lift the protected-file rules.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_943_a_command_in_another_repository_is_checked() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let outside = TempDir::new()?;
+    let outside_path = outside.path().canonicalize()?;
+    std::fs::write(outside_path.join("zshrc"), "# start-up\n")?;
+    let other = TempDir::new()?;
+    let other_path = other.path().canonicalize()?;
+    init_git(&other_path)?;
+    let home = Arc::new(TempDir::new()?);
+    let auth = home.path().canonicalize()?.join("auth.json");
+    std::fs::write(&auth, CANARY)?;
+    let workdir = other_path.display().to_string();
+    let (run, _) = Box::pin(run(
+        SecurityLevel::Moderate,
+        Setting::FullAccess,
+        home,
+        vec![
+            step(
+                "call-plant",
+                json!({ "command": plant(&outside_path), "workdir": workdir }),
+            ),
+            step(
+                "call-read",
+                json!({
+                    "command": format!("cat '{}'", auth.display()),
+                    "workdir": workdir,
+                    "sandbox_permissions": "require_escalated",
+                    "justification": "check the sign-in",
+                }),
+            ),
+        ],
+    ))
+    .await?;
+    let link = other_path.join(".git").join("COMMIT_EDITMSG");
+    let planted = link.symlink_metadata().is_ok();
+    let reported = run.warnings.iter().any(|warning| {
+        warning.contains(NOTHING_REMOVED) && warning.contains(&format!("rm '{}'", link.display()))
+    });
+    let read = output(&run.requests, "call-read");
+    assert!(
+        planted && reported && run.asked > 0 && !read.contains(CANARY),
+        "planted={planted} reported={reported} asked={} warnings={:?} read={read}",
+        run.asked,
+        run.warnings
+    );
+    Ok(())
+}

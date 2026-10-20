@@ -120,7 +120,8 @@ The kill switch (`/security` → `g`) works under every level.
   `.git` after the last look, even while an approved command runs, and what
   it changes after a turn ends is found at the next command, not before you
   run git yourself. It watches the repositories of the folders agent
-  commands run in: not a repository a command reaches elsewhere (`git -C`),
+  commands run in (a command's own working folder, `workdir`, too): not a
+  repository a command reaches elsewhere (`git -C`),
   not one a command creates and fills in one go (nothing was there to
   compare with), and not a `.git` removed in one command and made again in a
   later one (it gets a first look, which reports only links, steps and hard
