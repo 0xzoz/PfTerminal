@@ -24,6 +24,9 @@ use serde_json::Value;
 use serde_json::json;
 
 const FIXED_CWD: &str = "/tmp/codex_remote_compaction_parity_workspace";
+/// The folder every run's config is built for (its workspace root), so the
+/// runs' environment context matches.
+const FIXED_CONFIG_FOLDER: &str = "/tmp/codex_remote_compaction_parity_root";
 const IMAGE_URL: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
 const SUMMARY: &str = "REMOTE_COMPACTION_PARITY_ENCRYPTED_SUMMARY";
 const DUMMY_FUNCTION_NAME: &str = "test_tool";
@@ -508,7 +511,9 @@ async fn build_harness_inner(
     auto_compact_limit: Option<i64>,
 ) -> Result<TestCodexHarness> {
     fs::create_dir_all(FIXED_CWD)?;
+    fs::create_dir_all(FIXED_CONFIG_FOLDER)?;
     let mut builder = test_codex()
+        .with_config_folder(FIXED_CONFIG_FOLDER)
         .with_auth(settings.auth.build())
         .with_pre_build_hook(|home| {
             fs::write(home.join("AGENTS.md"), USER_INSTRUCTIONS)
@@ -941,13 +946,6 @@ fn normalize_string(value: &str) -> String {
     }
 
     let mut text = value.to_string();
-    // Each run's workspace root is its own temporary folder.
-    normalize_between(
-        &mut text,
-        "<workspace_roots>",
-        "</workspace_roots>",
-        "<ROOTS>",
-    );
     normalize_tmp_prefix_before_marker(&mut text, "/skills/");
     normalize_tmp_prefix_before_marker(&mut text, "\\skills\\");
 
@@ -1008,18 +1006,6 @@ fn is_uuid_like(value: &str) -> bool {
             .iter()
             .enumerate()
             .all(|(idx, byte)| [8, 13, 18, 23].contains(&idx) || byte.is_ascii_hexdigit())
-}
-
-fn normalize_between(text: &mut String, open: &str, close: &str, replacement: &str) {
-    let mut search_start = 0;
-    while let Some(relative_start) = text[search_start..].find(open) {
-        let body_start = search_start + relative_start + open.len();
-        let Some(relative_end) = text[body_start..].find(close) else {
-            break;
-        };
-        text.replace_range(body_start..body_start + relative_end, replacement);
-        search_start = body_start + replacement.len() + close.len();
-    }
 }
 
 fn normalize_tmp_prefix_before_marker(text: &mut String, marker: &str) {

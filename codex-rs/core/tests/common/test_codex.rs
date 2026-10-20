@@ -328,7 +328,6 @@ pub struct TestCodexBuilder {
     history_mode: Option<ThreadHistoryMode>,
     auth_in_home: bool,
     config_folder: Option<PathBuf>,
-    config_folder_guard: Option<Arc<TempDir>>,
 }
 
 impl TestCodexBuilder {
@@ -648,8 +647,12 @@ impl TestCodexBuilder {
             .local_cwd_temp_dir()
             .unwrap_or_else(|| Arc::clone(&fallback_cwd));
         // The temporary folder the config was built for lives as long as
-        // the session.
-        self.config_folder_guard = Some(fallback_cwd);
+        // the test's runtime, as `home` does (a test may keep only parts of
+        // `TestCodex`).
+        tokio::spawn(async move {
+            let _config_folder = fallback_cwd;
+            std::future::pending::<()>().await;
+        });
         Box::pin(self.build_from_config(
             config,
             cwd,
@@ -787,7 +790,6 @@ impl TestCodexBuilder {
             session_configured: new_conversation.session_configured,
             thread_manager,
             _test_env: test_env,
-            _config_folder: self.config_folder_guard.take(),
         })
     }
 
@@ -892,9 +894,6 @@ pub struct TestCodex {
     pub config: Config,
     pub thread_manager: Arc<ThreadManager>,
     _test_env: TestEnv,
-    /// The temporary folder the config was built for (its workspace root);
-    /// kept while the session runs.
-    _config_folder: Option<Arc<TempDir>>,
 }
 
 impl TestCodex {
@@ -1331,7 +1330,6 @@ pub fn test_codex() -> TestCodexBuilder {
         history_mode: None,
         auth_in_home: false,
         config_folder: None,
-        config_folder_guard: None,
     }
 }
 
