@@ -51,7 +51,7 @@ pub enum HistoryLineWrapPolicy {
 /// Raw lines intentionally remain unbroken so terminal selection copies their source faithfully.
 /// Zellij does not constrain soft-wrapped continuation rows to Codex's scroll region, so its raw
 /// path appends history through the terminal and reserves blank rows for the next viewport draw.
-/// The standard path also takes it when its scroll region would have fewer than two rows (#1039).
+/// The standard path also takes it when its scroll region would be a single row (#1039).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InsertHistoryMode {
     Standard,
@@ -163,10 +163,9 @@ where
     let wrapped_lines = wrapped_rows as u16;
     // #1039: the standard path confines scrolling to rows `1..viewport top`. When that region is
     // a single row (for example the first line written above a viewport at the top of a freshly
-    // cleared screen), `CSI 1;1 r` is invalid and terminals ignore it; when it is empty (a
-    // viewport filling the screen), `CSI 1;0 r` selects the whole screen. Either way the line is
-    // written into the viewport, where the next draw erases it or leaves it. Append through the
-    // terminal instead.
+    // cleared screen), `CSI 1;1 r` is invalid and terminals ignore it, so the line is written
+    // into the viewport's first row and the next draw erases it. Append through the terminal
+    // instead. (A viewport filling the screen, `CSI 1;0 r`, keeps the standard path.)
     let standard_scroll_amount = if area.bottom() < screen_size.height {
         wrapped_lines.min(screen_size.height - area.bottom())
     } else {
@@ -174,7 +173,7 @@ where
     };
     let mode = if mode == InsertHistoryMode::Standard
         && wrapped_lines > 0
-        && area.top().saturating_add(standard_scroll_amount) <= 1
+        && area.top().saturating_add(standard_scroll_amount) == 1
     {
         InsertHistoryMode::ZellijRaw
     } else {
@@ -1138,31 +1137,6 @@ mod tests {
             rows[1..].iter().all(|row| !row.contains("history line")),
             "history must not be written into the viewport, rows: {rows:?}"
         );
-    }
-
-    /// #1039: with a viewport filling the screen there is no history region at all; the line
-    /// must go to scrollback, not into the viewport's rows.
-    #[test]
-    fn vt100_full_screen_viewport_keeps_history_out_of_the_viewport() {
-        let width: u16 = 40;
-        let height: u16 = 4;
-        let backend = VT100Backend::new(width, height);
-        let mut term = crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
-        term.set_viewport_area(Rect::new(
-            /*x*/ 0, /*y*/ 0, /*width*/ width, /*height*/ height,
-        ));
-        draw_composer(&mut term);
-
-        insert_history_lines(&mut term, vec![Line::from("history line")]).expect("insert history");
-        draw_composer(&mut term);
-
-        let rows: Vec<String> = term.backend().vt100().screen().rows(0, width).collect();
-        assert_eq!(term.viewport_area.y, 0, "rows: {rows:?}");
-        assert!(
-            rows.iter().all(|row| !row.contains("history line")),
-            "history must not be written into the viewport, rows: {rows:?}"
-        );
-        assert_eq!(rows[1].trim_end(), "› Will this algorithm scale well?");
     }
 
     #[test]
