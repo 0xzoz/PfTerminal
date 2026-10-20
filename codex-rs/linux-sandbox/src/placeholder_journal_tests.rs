@@ -727,3 +727,31 @@ fn a_path_another_run_made_is_recorded_as_used_and_nothing_else() {
     sweeper.sweep(&|_, _| false);
     assert!(made.is_file(), "kept while used");
 }
+
+#[test]
+fn a_path_another_run_was_about_to_make_is_recorded_as_used() {
+    let mut setup = Setup::new();
+    let pending = setup.base.join("home/pending");
+    std::fs::write(&pending, "").expect("bubblewrap made it");
+    setup.write(
+        this_run_with_start(Some(7)),
+        vec![Entry::Pending {
+            kind: Kind::File,
+            path: pending.clone(),
+            real: pending.clone(),
+        }],
+    );
+    setup
+        .journal
+        .register(&[], &[(pending.clone(), pending.clone())]);
+    let own = format!("{}.rec", setup.journal.name);
+    let record = setup.journal.read(&own).expect("record");
+    assert!(uses(&record, &pending, &pending));
+}
+
+fn this_run_with_start(start: Option<u64>) -> Owner {
+    Owner {
+        start,
+        ..this_run()
+    }
+}

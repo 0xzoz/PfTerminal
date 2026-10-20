@@ -246,6 +246,18 @@ fn the_command_cannot_write_the_record() {
         &setup.tmp("forger"),
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let output = setup.run(
+        "(exec 3<corbanu/sandbox-placeholders/lock) 2>/dev/null; echo read=$?; \
+         (exec 4>corbanu/sandbox-placeholders/lock) 2>/dev/null; echo write=$?",
+        &setup.tmp("locker"),
+    );
+    let locks = String::from_utf8_lossy(&output.stdout);
+    for step in ["read", "write"] {
+        assert!(
+            locks.contains(&format!("{step}=")) && !locks.contains(&format!("{step}=0")),
+            "the command cannot open the lock file ({step}): {locks}"
+        );
+    }
     for step in ["write", "rm", "mv"] {
         assert!(
             stdout.contains(&format!("{step}=")) && !stdout.contains(&format!("{step}=0")),

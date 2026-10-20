@@ -11,8 +11,10 @@
 //!   makes it itself (`O_EXCL`, so never over a file of someone else's) and
 //!   records what it made: device, inode, mode, owner, size, modification and
 //!   change times. bubblewrap finds it in place and mounts over it.
-//! - Each run also records the paths it uses (makes or holds), so a sweep
-//!   leaves a placeholder alone while a live run (in any `TMPDIR`) uses it.
+//! - Each run also records the paths it uses: its placeholders, and the
+//!   paths it mounts at that another run's record lists as made or about
+//!   to be made (or paths in them). A sweep leaves a placeholder alone while
+//!   a live run (in any `TMPDIR`) uses it.
 //! - At the start of each sandboxed run, the records of runs that have ended
 //!   (another boot, or a pid that is gone or was reused) are swept: a
 //!   recorded placeholder is removed only when what is at its path, reached
@@ -499,6 +501,14 @@ fn remove_if_made(
     if mounted_anywhere(mounts, &[path, real]) {
         return Removal::Failed;
     }
+    // Read again just before the removal (the sweep's earlier reading may
+    // predate a run that keeps no record and has mounted since).
+    let mut fresh = None;
+    let mounted = mounted_anywhere(&mut fresh, &[path, real]);
+    *mounts = fresh;
+    if mounted {
+        return Removal::Failed;
+    }
     let folder_before = found
         .folder_status()
         .ok()
@@ -770,12 +780,13 @@ impl Journal {
             return;
         };
         // Of the paths it mounts at, only another run's recorded placeholder
-        // (or a path in one) is one a sweep could remove from under it.
+        // (or a path in one) is one a cleanup could remove from under it:
+        // one it made, or was about to make (bubblewrap may have made it).
         let (records, unreadable_live) = self.other_records();
         let made: Vec<&Path> = records
             .iter()
             .flat_map(|(_, record)| record.entries.iter())
-            .filter(|entry| matches!(entry, Entry::Made { .. }))
+            .filter(|entry| matches!(entry, Entry::Made { .. } | Entry::Pending { .. }))
             .flat_map(|entry| {
                 let (path, real) = entry.paths();
                 [path, real]
@@ -978,10 +989,14 @@ impl Journal {
                                 folder_before,
                                 folder_after,
                             } => {
-                                if let (Some(folder), Some(after)) = (real.parent(), folder_after)
+                                // Only the change an unlink makes: times and
+                                // size, never the folder, its mode or owner.
+                                if let (Some(folder), Some(before), Some(after)) =
+                                    (real.parent(), folder_before, folder_after)
                                     && let Some(recorded) = record_identity(&record, folder)
-                                    && folder_before
-                                        == Some(*expected.get(folder).unwrap_or(&recorded))
+                                    && before == *expected.get(folder).unwrap_or(&recorded)
+                                    && (after.dev, after.ino, after.mode, after.uid)
+                                        == (before.dev, before.ino, before.mode, before.uid)
                                 {
                                     expected.insert(folder.to_path_buf(), after);
                                 }
