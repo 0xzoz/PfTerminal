@@ -59,8 +59,7 @@ use wiremock::MockServer;
 
 use crate::TempDirExt;
 use crate::TestEnvironment;
-use crate::load_default_config_for_test;
-use crate::load_default_config_for_test_with_cloud_config_bundle;
+use crate::load_default_config_for_test_in;
 use crate::responses::WebSocketTestServer;
 use crate::responses::output_value_to_text;
 use crate::responses::start_mock_server;
@@ -328,9 +327,19 @@ pub struct TestCodexBuilder {
     code_mode_host_program: Option<PathBuf>,
     history_mode: Option<ThreadHistoryMode>,
     auth_in_home: bool,
+    config_folder: Option<PathBuf>,
 }
 
 impl TestCodexBuilder {
+    /// Build the config for `folder`, which becomes its workspace root, as
+    /// for a session started there. By default it is built for a temporary
+    /// folder (never the crate's source tree, which is the test process's
+    /// working folder).
+    pub fn with_config_folder(mut self, folder: impl Into<PathBuf>) -> Self {
+        self.config_folder = Some(folder.into());
+        self
+    }
+
     pub fn with_config<T>(mut self, mutator: T) -> Self
     where
         T: FnOnce(&mut Config) + Send + 'static,
@@ -634,7 +643,16 @@ impl TestCodexBuilder {
         for setup in workspace_setups {
             setup(config.cwd.clone(), Arc::clone(&file_system)).await?;
         }
-        let cwd = test_env.local_cwd_temp_dir().unwrap_or(fallback_cwd);
+        let cwd = test_env
+            .local_cwd_temp_dir()
+            .unwrap_or_else(|| Arc::clone(&fallback_cwd));
+        // The temporary folder the config was built for lives as long as
+        // the test's runtime, as `home` does (a test may keep only parts of
+        // `TestCodex`).
+        tokio::spawn(async move {
+            let _config_folder = fallback_cwd;
+            std::future::pending::<()>().await;
+        });
         Box::pin(self.build_from_config(
             config,
             cwd,
@@ -792,11 +810,21 @@ impl TestCodexBuilder {
         for hook in self.pre_build_hooks.drain(..) {
             hook(home.path());
         }
-        let mut config = if let Some(cloud_config_bundle) = self.cloud_config_bundle.take() {
-            load_default_config_for_test_with_cloud_config_bundle(home, cloud_config_bundle).await
-        } else {
-            load_default_config_for_test(home).await
-        };
+        // The folder a config is built for becomes its workspace root, a
+        // writable root of sandboxed commands. Build it for this temporary
+        // folder, not the test process's own working folder (the crate's
+        // source tree, e.g. `codex-rs/core`). The session still runs in
+        // `cwd_override`, which stays outside the workspace roots as before.
+        let config_folder = self
+            .config_folder
+            .clone()
+            .unwrap_or_else(|| cwd.path().to_path_buf());
+        let mut config = load_default_config_for_test_in(
+            home,
+            self.cloud_config_bundle.take().unwrap_or_default(),
+            &config_folder,
+        )
+        .await;
         // Keep generic tests stable when the bundled catalog default changes. Tests that need a
         // specific model can still override this with a config mutator.
         config.model = Some("gpt-5.5".to_string());
@@ -1301,6 +1329,7 @@ pub fn test_codex() -> TestCodexBuilder {
         code_mode_host_program: None,
         history_mode: None,
         auth_in_home: false,
+        config_folder: None,
     }
 }
 

@@ -228,10 +228,33 @@ pub async fn load_default_config_for_test_with_cloud_config_bundle(
     codex_home: &TempDir,
     cloud_config_bundle: CloudConfigBundleLoader,
 ) -> Config {
+    build_test_config(codex_home, cloud_config_bundle, /*cwd*/ None).await
+}
+
+/// As [`load_default_config_for_test_with_cloud_config_bundle`], built for the
+/// working folder `cwd`. Without it the config is built for the test process's
+/// own working folder (the crate's source tree, e.g. `codex-rs/core`), which
+/// then becomes a writable root of every sandboxed command the test runs.
+pub async fn load_default_config_for_test_in(
+    codex_home: &TempDir,
+    cloud_config_bundle: CloudConfigBundleLoader,
+    cwd: &Path,
+) -> Config {
+    build_test_config(codex_home, cloud_config_bundle, Some(cwd)).await
+}
+
+async fn build_test_config(
+    codex_home: &TempDir,
+    cloud_config_bundle: CloudConfigBundleLoader,
+    cwd: Option<&Path>,
+) -> Config {
     ConfigBuilder::default()
         .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
         .codex_home(codex_home.path().to_path_buf())
-        .harness_overrides(default_test_overrides())
+        .harness_overrides(ConfigOverrides {
+            cwd: cwd.map(Path::to_path_buf),
+            ..default_test_overrides()
+        })
         .cloud_config_bundle(cloud_config_bundle)
         .build()
         .await
