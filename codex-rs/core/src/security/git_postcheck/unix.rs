@@ -388,6 +388,9 @@ struct Snapshot {
     /// (`is_empty_stub`), still there and empty: reported once something
     /// is in them, whatever `Global::empty_new` holds meanwhile.
     empty_new: HashSet<PathBuf>,
+    /// The git folders this look walked (#943 review r6); empty in a
+    /// baseline.
+    git_dirs: Vec<PathBuf>,
 }
 
 impl Snapshot {
@@ -401,12 +404,14 @@ impl Snapshot {
             incomplete: None,
             went_missing: false,
             empty_new: HashSet::new(),
+            git_dirs: Vec::new(),
         }
     }
 }
 
 fn walk(repo: &Repo, prev: Option<&Snapshot>) -> Snapshot {
     let mut snapshot = Snapshot::empty(&DotGit::read(&repo.dot_git));
+    snapshot.git_dirs = repo.git_dirs.clone();
     let home = dirs::home_dir().and_then(|home| std::fs::canonicalize(home).ok());
     if repo
         .git_dirs
@@ -1076,12 +1081,13 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
             incomplete.push((repo.git_dirs.clone(), None));
             continue;
         }
-        // Made again (#943 review r4): it may be another kind (a worktree's
-        // or submodule's `.git` file replaced by a folder, or the reverse),
-        // so its git folders are worked out again, also for later looks.
+        // Made again or replaced (#943 reviews r4, r6): it may be another
+        // kind (a worktree's or submodule's `.git` file replaced by a folder,
+        // or the reverse) or name other git folders, so they are worked out
+        // again, also for later looks.
         let remade_repo = snapshot
             .as_ref()
-            .filter(|prev| prev.went_missing && prev.dot_git != now)
+            .filter(|prev| prev.dot_git != now)
             .and_then(|_| repo_at(repo.dot_git.clone()))
             .filter(|fresh| fresh.git_dirs != repo.git_dirs);
         if let Some(fresh) = &remade_repo {
@@ -1095,7 +1101,25 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
                 }
             });
         }
-        let repo = remade_repo.as_ref().unwrap_or(repo);
+        // Replaced in place (no look saw it missing): this look also walks
+        // the git folders it named before, where something may have been
+        // left meanwhile.
+        let replaced_repo = remade_repo
+            .as_ref()
+            .filter(|_| snapshot.as_ref().is_some_and(|prev| !prev.went_missing))
+            .map(|fresh| {
+                let mut both = fresh.clone();
+                for dir in &repo.git_dirs {
+                    if !both.git_dirs.contains(dir) {
+                        both.git_dirs.push(dir.clone());
+                    }
+                }
+                both
+            });
+        let repo = replaced_repo
+            .as_ref()
+            .or(remade_repo.as_ref())
+            .unwrap_or(repo);
         // The last look stays until this one is done (a panic keeps it).
         let prev = snapshot.as_ref();
         // Made again: what the old one had isn't carried into this look.
@@ -1104,10 +1128,22 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
             prev.filter(|prev| !(prev.went_missing && prev.dot_git != now)),
         );
         // Missing at the last look and back as a different one: a full
-        // look, not a first look (#943).
+        // look, not a first look (#943). Likewise where the git folders
+        // differ from those the last look walked (review r6: replaced as
+        // another kind, or a `gitdir:` file pointed elsewhere), still
+        // reported as replaced where it was.
         let remade = prev
-            .filter(|prev| prev.went_missing && prev.dot_git != cur.dot_git)
-            .map(|prev| remade_baseline(repo, prev, &cur));
+            .filter(|prev| {
+                (prev.went_missing && prev.dot_git != cur.dot_git)
+                    || (!prev.git_dirs.is_empty() && prev.git_dirs != repo.git_dirs)
+            })
+            .map(|prev| {
+                let mut baseline = remade_baseline(repo, prev, &cur);
+                if !prev.went_missing {
+                    baseline.dot_git = prev.dot_git.clone();
+                }
+                baseline
+            });
         let prev = remade.as_ref().or(prev);
         let remembered: HashSet<PathBuf> = with_global(|global| {
             global

@@ -1061,3 +1061,57 @@ fn issue_943_a_remade_git_folder_seen_first_by_a_command() {
         vec![format!("config {}", git.join("config.worktree").display())]
     );
 }
+
+/// #943 review r6: a worktree's `.git` file replaced by a `.git` folder in
+/// one command (no look saw it missing) is reported as replaced, and its own
+/// git folder gets a full look: its config and hooks are reported and hold
+/// there, and later looks walk it.
+#[test]
+fn issue_943_a_worktree_git_file_replaced_by_a_folder_in_one_command() {
+    let project = Project::new();
+    let worktree_git = project.git().join("worktrees/feature");
+    std::fs::create_dir_all(&worktree_git).expect("worktree git folder");
+    std::fs::write(worktree_git.join("HEAD"), "ref: refs/heads/feature\n").expect("HEAD");
+    std::fs::write(worktree_git.join("commondir"), "../..\n").expect("commondir");
+    let worktree = project.base.join("feature");
+    std::fs::create_dir_all(&worktree).expect("worktree");
+    let text = format!("gitdir: {}\n", worktree_git.display());
+    std::fs::write(worktree.join(".git"), &text).expect("git file");
+    let thread = ThreadId::new();
+    let old = repos(&[worktree.as_path()]);
+    assert_eq!(begin(thread, &old, "Moderate"), None);
+    // One command: `rm .git && git init && …`.
+    std::fs::remove_file(worktree.join(".git")).expect("removed");
+    let git = worktree.join(".git");
+    for folder in ["objects", "refs/heads", "hooks"] {
+        std::fs::create_dir_all(git.join(folder)).expect("git folder");
+    }
+    std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").expect("HEAD");
+    std::fs::write(git.join("config"), "[core]\n\tfsmonitor = /tmp/run-me\n").expect("config");
+    std::fs::write(git.join("hooks/pre-commit"), "#!/bin/sh\n").expect("hook");
+    let git = git.canonicalize().expect("canonical");
+    let found = kinds(&check(thread, &old));
+    for expected in [
+        format!("config {}", git.join("config").display()),
+        format!("config {}", git.join("hooks").display()),
+    ] {
+        assert!(found.contains(&expected), "{found:?}");
+    }
+    assert!(
+        found.iter().any(|kind| kind.starts_with("replaced")),
+        "{found:?}"
+    );
+    let held = held_for(std::slice::from_ref(&git));
+    for path in shown(&[git.join("config"), git.join("hooks")]) {
+        assert!(held.contains(&path), "{held:?}");
+    }
+    // The next command's look walks the new git folder, and what is new
+    // there afterwards is reported.
+    let (message, _) = recheck(thread, "Moderate", &[worktree.as_path()]);
+    assert_eq!(message, None);
+    std::fs::write(git.join("config.worktree"), "[core]\n").expect("config.worktree");
+    assert_eq!(
+        kinds(&check(thread, &repos(&[worktree.as_path()]))),
+        vec![format!("config {}", git.join("config.worktree").display())]
+    );
+}

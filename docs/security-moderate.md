@@ -163,7 +163,10 @@ The kill switch (`/security` → `g`) works under every level.
   worktree git adds again for the same repository), and approving a
   command in that project doesn't lift the rules until you remove them or
   restart Corbanu Terminal; the same one moved back is compared with the
-  last look. New config and hooks are checked only in a repository's own
+  last look. Where a worktree's or submodule's `.git` is replaced by another
+  kind, or pointed at other git folders, check its config and hooks
+  yourself before you run git there. New config and hooks are checked only
+  in a repository's own
   git folder, not in its worktrees' or submodules'. A session that works in
   more than 16 repositories forgets the oldest; its next look there reports
   only links, steps and hard links.
