@@ -1001,9 +1001,11 @@ impl Journal {
         // empty when this run's cleanup came to it): a sweep reports it once
         // and leaves it, instead of it being forgotten here.
         self.record.entries.retain(|entry| match entry {
-            Entry::Made { real, .. } => matches!(
+            // One that cannot be looked at now is kept too: dropping it
+            // would leave only the temporary folder's looser rules for it.
+            Entry::Made { real, .. } => !matches!(
                 crate::placeholder_registry::find_without_links(real),
-                Ok(Some(_))
+                Ok(None)
             ),
             Entry::Uses { .. } | Entry::Pending { .. } => false,
         });
