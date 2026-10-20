@@ -15,7 +15,6 @@ use codex_protocol::request_permissions::RequestPermissionProfile;
 use codex_protocol::request_permissions::RequestPermissionsResponse;
 use codex_protocol::request_user_input::RequestUserInputResponse;
 use codex_rmcp_client::ElicitationResponse;
-use codex_sandboxing::policy_transforms::merge_permission_profiles;
 use rmcp::model::RequestId;
 use tokio::sync::oneshot;
 
@@ -99,8 +98,13 @@ pub(crate) struct TurnState {
     pending_dynamic_tools: HashMap<String, oneshot::Sender<DynamicToolResponse>>,
     pub(crate) pending_input: TurnInputQueue,
     mailbox_delivery_phase: MailboxDeliveryPhase,
-    granted_permissions_by_environment_id: HashMap<String, AdditionalPermissionProfile>,
-    strict_auto_review_enabled: bool,
+    /// D51 (#1001): bound to the policy marker they were granted under.
+    granted_permissions: super::GrantedPermissions,
+    /// D51 (#1001): the policy marker strict auto-review was turned on
+    /// under, with the grant it came with; it ends with that grant. Ending it
+    /// also ends the automatic review of commands that would run unasked:
+    /// deliberately, as the new level's approval rules then govern.
+    strict_auto_review_under: Option<super::AuthorityMarker>,
     pub(crate) tool_calls: u64,
     pub(crate) has_memory_citation: bool,
     pub(crate) token_usage_at_turn_start: TokenUsage,
@@ -262,32 +266,28 @@ impl TurnState {
         &mut self,
         environment_id: &str,
         permissions: AdditionalPermissionProfile,
-    ) {
-        let granted_permissions = merge_permission_profiles(
-            self.granted_permissions_by_environment_id
-                .get(environment_id),
-            Some(&permissions),
-        );
-        if let Some(granted_permissions) = granted_permissions {
-            self.granted_permissions_by_environment_id
-                .insert(environment_id.to_string(), granted_permissions);
-        }
+        granted_under: super::AuthorityMarker,
+        current: super::AuthorityMarker,
+    ) -> bool {
+        self.granted_permissions
+            .record(environment_id, permissions, granted_under, current)
     }
 
     pub(crate) fn granted_permissions(
-        &self,
+        &mut self,
         environment_id: &str,
+        current: super::AuthorityMarker,
     ) -> Option<AdditionalPermissionProfile> {
-        self.granted_permissions_by_environment_id
-            .get(environment_id)
-            .cloned()
+        self.granted_permissions.get(environment_id, current)
     }
 
-    pub(crate) fn enable_strict_auto_review(&mut self) {
-        self.strict_auto_review_enabled = true;
+    pub(crate) fn enable_strict_auto_review(&mut self, under: super::AuthorityMarker) {
+        self.strict_auto_review_under = Some(under);
     }
 
-    pub(crate) fn strict_auto_review_enabled(&self) -> bool {
-        self.strict_auto_review_enabled
+    /// Whether strict auto-review is on under the policy in force
+    /// (`current`): not after a security transition (D51).
+    pub(crate) fn strict_auto_review_enabled(&self, current: super::AuthorityMarker) -> bool {
+        self.strict_auto_review_under == Some(current)
     }
 }

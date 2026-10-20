@@ -108,21 +108,25 @@ impl Probe {
     }
 }
 
-impl Approvable<()> for Probe {
+/// The request: the additional permissions it carries (as a handler adds
+/// granted ones).
+type Req = Option<codex_protocol::models::AdditionalPermissionProfile>;
+
+impl Approvable<Req> for Probe {
     type ApprovalKey = String;
 
     fn additional_permissions<'a>(
         &self,
-        _req: &'a (),
+        req: &'a Req,
     ) -> Option<&'a codex_protocol::models::AdditionalPermissionProfile> {
-        None
+        req.as_ref()
     }
 
-    fn approval_keys(&self, _req: &()) -> Vec<Self::ApprovalKey> {
+    fn approval_keys(&self, _req: &Req) -> Vec<Self::ApprovalKey> {
         vec!["issue-1001-probe".to_string()]
     }
 
-    fn exec_approval_requirement(&self, _req: &()) -> Option<ExecApprovalRequirement> {
+    fn exec_approval_requirement(&self, _req: &Req) -> Option<ExecApprovalRequirement> {
         Some(self.requirement.clone())
     }
 
@@ -132,7 +136,7 @@ impl Approvable<()> for Probe {
 
     fn start_approval_async<'a>(
         &'a mut self,
-        _req: &'a (),
+        _req: &'a Req,
         ctx: ApprovalCtx<'a>,
     ) -> futures::future::BoxFuture<'a, ReviewDecision> {
         // A person is shown the prompt (not a remembered answer).
@@ -145,7 +149,11 @@ impl Approvable<()> for Probe {
         Box::pin(async { ReviewDecision::Approved })
     }
 
-    fn approval_action(&self, _req: &(), ctx: &ApprovalCtx<'_>) -> std::io::Result<ApprovalAction> {
+    fn approval_action(
+        &self,
+        _req: &Req,
+        ctx: &ApprovalCtx<'_>,
+    ) -> std::io::Result<ApprovalAction> {
         Ok(ApprovalAction::Shell {
             id: ctx.call_id.to_string(),
             environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
@@ -165,14 +173,14 @@ impl crate::tools::sandboxing::Sandboxable for Probe {
     }
 }
 
-impl ToolRuntime<(), ()> for Probe {
-    fn workspace_roots<'a>(&self, _req: &'a ()) -> &'a [PathUri] {
+impl ToolRuntime<Req, ()> for Probe {
+    fn workspace_roots<'a>(&self, _req: &'a Req) -> &'a [PathUri] {
         &[]
     }
 
     async fn run(
         &mut self,
-        _req: &(),
+        _req: &Req,
         _attempt: &SandboxAttempt<'_>,
         _ctx: &ToolCtx,
     ) -> Result<(), ToolError> {
@@ -208,6 +216,7 @@ struct Case {
     while_running: Vec<Transition>,
     sandbox_denies: Vec<bool>,
     approval_policy: AskForApproval,
+    additional: Option<codex_protocol::models::AdditionalPermissionProfile>,
 }
 
 impl Default for Case {
@@ -218,6 +227,7 @@ impl Default for Case {
             while_running: Vec::new(),
             sandbox_denies: Vec::new(),
             approval_policy: AskForApproval::OnRequest,
+            additional: None,
         }
     }
 }
@@ -247,7 +257,7 @@ async fn run_probe(case: Case) -> (Probe, Result<(), String>) {
     let result = ToolOrchestrator::new()
         .run(
             &mut probe,
-            &(),
+            &case.additional,
             &tool_ctx,
             turn.as_ref(),
             case.approval_policy,
@@ -367,4 +377,35 @@ async fn issue_1001_unprompted_retry_after_a_transition_is_not_run() {
     assert_eq!(result, Ok(()));
     assert_eq!(probe.asked, vec![None]);
     assert_eq!(probe.runs, 2);
+}
+
+/// D51 (#1001): a request carrying additional permissions (a handler adds
+/// granted ones before the run is decided) approved before a transition is
+/// refused instead of decided again: the transition ended those grants.
+#[tokio::test]
+async fn issue_1001_stale_approval_with_permissions_is_refused() {
+    let network = codex_protocol::models::AdditionalPermissionProfile {
+        network: Some(codex_protocol::models::NetworkPermissions {
+            enabled: Some(true),
+        }),
+        ..Default::default()
+    };
+    let (probe, result) = run_probe(Case {
+        while_asked: vec![Transition::Revoke],
+        additional: Some(network.clone()),
+        ..Case::default()
+    })
+    .await;
+    assert_eq!(result, Err(STALE_PERMISSIONS_REFUSAL.to_string()));
+    assert_eq!(probe.asked.len(), 1);
+    assert_eq!(probe.runs, 0, "nothing ran");
+
+    // Without a transition it runs as before.
+    let (probe, result) = run_probe(Case {
+        additional: Some(network),
+        ..Case::default()
+    })
+    .await;
+    assert_eq!(result, Ok(()));
+    assert_eq!(probe.runs, 1);
 }

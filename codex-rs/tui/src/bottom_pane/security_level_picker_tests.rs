@@ -806,8 +806,10 @@ mod pf_24_s02 {
         picker.handle_key_event(key(KeyCode::Up));
         picker.handle_key_event(key(KeyCode::Enter));
         let review = machine.text(&picker);
+        // #1015: no session has started in this window yet; it starts under
+        // the saved level.
         assert!(
-            review.contains("Core's level becomes Aggressive from the next start"),
+            review.contains("Core's level is saved as Aggressive as soon as you confirm"),
             "{review}"
         );
         picker.handle_key_event(key(KeyCode::Enter));
