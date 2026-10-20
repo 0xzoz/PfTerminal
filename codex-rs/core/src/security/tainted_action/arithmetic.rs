@@ -2052,29 +2052,22 @@ fn sets_unnamed_options(name: &str, args: &[String]) -> bool {
     false
 }
 
-/// Whether lexed words start a zsh under another name (`exec -a csh zsh`),
-/// which it reads as an emulation mode (#1084): `exec` with `-a`, and a
-/// program word that names a zsh or is expanded.
+/// Whether lexed words may start a zsh under another name (`exec -a csh
+/// zsh`, `exec -acsh zsh`, GNU `env -a csh zsh`), which it reads as an
+/// emulation mode (#1084): `exec` or `env`, a later option word with `a`
+/// and a later word that names a zsh or is expanded. One pass.
 fn renames_shell(words: &[String]) -> bool {
-    words.iter().enumerate().any(|(at, word)| {
-        if shell::basename(word) != "exec" {
-            return false;
+    let (mut launcher, mut renamed, mut shell) = (false, false, false);
+    for word in words {
+        if launcher {
+            renamed |= word.starts_with('-') && !word.starts_with("--") && word.contains('a');
+            shell |= shell::basename(word).contains("zsh")
+                || word.contains(['$', '`'])
+                || word.contains(shell::UNSEEN_OUTPUT);
         }
-        let mut rest = words[at + 1..].iter();
-        let mut renamed = false;
-        for word in rest.by_ref() {
-            if !word.starts_with('-') || word == "--" {
-                break;
-            }
-            renamed |= word[1..].contains('a');
-        }
-        renamed
-            && rest.any(|word| {
-                shell::basename(word).contains("zsh")
-                    || word.contains(['$', '`'])
-                    || word.contains(shell::UNSEEN_OUTPUT)
-            })
-    })
+        launcher |= matches!(shell::basename(word), "exec" | "env");
+    }
+    renamed && shell
 }
 
 /// Text as the shell parses it: a backslash-newline joins the lines.

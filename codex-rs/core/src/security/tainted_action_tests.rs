@@ -2932,6 +2932,20 @@ fn issue_1084_glob_substitution_is_unseen_code() {
             "zsh",
             "k=$(cat keys); : ${(A)options::=$=k}; print -l $(cat notes)",
         ),
+        // Review r2: braces in a flag argument, flags before the name, an
+        // attached `-a` value and GNU `env -a`.
+        ("zsh", "x=$(cat notes); print -l ${(s\"}\")~x}"),
+        ("zsh", "x=$(cat notes); print -l ${(s.\\}.)~x}"),
+        (
+            "zsh",
+            "k=$(cat keys); : ${(AA)=options::=${=k}}; print -l $(cat notes)",
+        ),
+        (
+            "zsh",
+            "k=$(cat keys); : ${(AA)^options::=${=k}}; print -l $(cat notes)",
+        ),
+        ("bash", "exec -acsh zsh ./run.zsh"),
+        ("bash", "env -a csh zsh ./run.zsh"),
         // zmv globs its pattern as `${~pat}`.
         ("zsh", "autoload zmv; zmv -n \"$(cat notes)\" x"),
         ("zsh", "p=$(cat notes); zmv -p echo -- $p x"),
@@ -2971,7 +2985,7 @@ fn issue_1084_glob_substitution_is_unseen_code() {
     // A flag group counts when a `~` follows it inside its braces (other
     // checks may still ask on such a group).
     assert!(shell::glob_substitution("print ${(j:,:)~arr}"));
-    assert!(shell::glob_substitution("print ${(s:~:)arr}"));
+    assert!(shell::glob_substitution("print ${(s\"}\")~arr}"));
     assert!(!shell::glob_substitution("print ${(j:,:)arr} ~/dir"));
     assert!(!shell::glob_substitution("print ${(j:,:)arr}"));
     // A script file read by a zsh.

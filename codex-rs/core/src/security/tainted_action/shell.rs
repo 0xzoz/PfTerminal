@@ -142,8 +142,8 @@ pub(super) fn prompt_expansion(text: &str) -> bool {
 /// Whether text may use zsh glob substitution (#1084), under which zsh
 /// reads a value as a pattern, glob qualifiers included, so the value can
 /// run code (`*(e:code:)`): `$~x`, `${~x}`, `$^~x`, `${(f)~x}` (a flag
-/// group counts when a `~` follows it inside its braces), the `GLOB_SUBST` option in any
-/// spelling (zsh ignores case and underscores: `setopt glob_subst`,
+/// group counts when a later `~` does not start a word), the `GLOB_SUBST`
+/// option in any spelling (zsh ignores case and underscores: `setopt glob_subst`,
 /// `zsh -o GLOBSUBST`, `options[globsubst]=on`), a write to zsh's
 /// `options` array, or `ARGV0` (a zsh started as `csh` or `sh` turns the
 /// option on). Read as written (backslash-newlines joined) and with quotes
@@ -166,36 +166,17 @@ pub(super) fn glob_substitution(text: &str) -> bool {
             .any(|text| substitutes_globs(text) || writes_options(text))
 }
 
-/// `$~x`, `${~x}`, `$^~x`, or a `${(flags)...}` with a `~` after its flag
-/// group inside its braces. Linear.
+/// `$~x`, `${~x}`, `$^~x`, or a `${(flags)...}` followed later by a `~`
+/// that does not start a word (`${(s"}")~x}`; `${(j:,:)a} ~/dir` does not
+/// count). Linear.
 fn substitutes_globs(text: &str) -> bool {
-    if !text.contains('~') {
-        return false;
-    }
-    // Where each `${` closes (the end when it does not), and the next `~`
-    // after each position, found in one pass each.
     let bytes = text.as_bytes();
-    let mut closes: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
-    let mut open: Vec<Option<usize>> = Vec::new();
-    for (at, byte) in bytes.iter().enumerate() {
-        match byte {
-            b'{' => open.push((at > 0 && bytes[at - 1] == b'$').then(|| at - 1)),
-            b'}' => {
-                if let Some(Some(start)) = open.pop() {
-                    closes.insert(start, at);
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut next_tilde = vec![text.len(); text.len() + 1];
-    for at in (0..text.len()).rev() {
-        next_tilde[at] = if bytes[at] == b'~' {
-            at
-        } else {
-            next_tilde[at + 1]
-        };
-    }
+    // The last `~` that is not a home folder at the start of a word.
+    let Some(last) = (0..bytes.len()).rev().find(|&at| {
+        bytes[at] == b'~' && at > 0 && !matches!(bytes[at - 1], b' ' | b'\t' | b'\n' | b'=' | b':')
+    }) else {
+        return false;
+    };
     text.match_indices('$').any(|(at, _)| {
         let rest = &text[at + 1..];
         let braced = rest.starts_with('{');
@@ -203,18 +184,16 @@ fn substitutes_globs(text: &str) -> bool {
         let run = rest
             .find(|ch: char| !"^=~#+".contains(ch))
             .unwrap_or(rest.len());
-        rest[..run].contains('~')
-            || (braced
-                && rest[run..].starts_with('(')
-                && next_tilde[at] < closes.get(&at).copied().unwrap_or(text.len()))
+        rest[..run].contains('~') || (braced && rest[run..].starts_with('(') && last > at)
     })
 }
 
 /// A write to zsh's `options` array: `options[k]=on`, `options=(...)`,
-/// `options+=(...)`, `${options[k]::=on}`, `${(AA)options::=...}`.
+/// `options+=(...)`, `${options[k]::=on}`, `${(AA)=options::=...}`.
 fn writes_options(text: &str) -> bool {
     text.match_indices("options").any(|(at, _)| {
-        (at == 0 || text[..at].ends_with([' ', '\t', '\n', ';', '&', '|', '(', ')', '{', '`', '$']))
+        // Not part of a longer name (`--options=x`, `self.options[k]`).
+        !text[..at].ends_with(|ch: char| ch.is_ascii_alphanumeric() || "_-./".contains(ch))
             && ["[", "=", "+=", ":=", "::="]
                 .iter()
                 .any(|next| text[at + "options".len()..].starts_with(next))
