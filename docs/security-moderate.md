@@ -185,7 +185,9 @@ The kill switch (`/security` → `g`) works under every level.
   not "for the session" for the next request, a saved "don't ask again"
   rule (the command then stays in the sandbox with the rules kept), a
   permission hook or the automatic reviewer, and no prompt after untrusted
-  content offers it. The allowance covers the approved process and
+  content offers it. Nor is it given while Corbanu's check of the
+  project's `.git` holds the protected-file rules (see above), even where
+  the prompt warned of it. The allowance covers the approved process and
   everything it starts or is given while it runs, also after untrusted
   content arrives: an interactive program such as a shell keeps it for
   every command typed into it later. The run still stays in the sandbox

@@ -638,6 +638,11 @@ impl ToolOrchestrator {
         if git_held_back {
             warn(tool_ctx, &git_held_note(&git_held)).await;
         }
+        // A person's approval of this command when asked about it now: it
+        // counts for nothing below while the git check's findings stand
+        // (#874), like for the rules above.
+        let approved_by_person_now =
+            approved_by == Some(ApprovalResolutionSource::User) && git_held.is_empty();
         // #826: Core's level, where the protected-path rules apply.
         let protected_level = denied.as_ref().map(|(_, _, _, level)| *level);
         let (denied_exec_server_permissions, permissions) = match denied {
@@ -663,7 +668,7 @@ impl ToolOrchestrator {
                         writes:
                             crate::security::protected_additional::ReadOnlyScope::after_approval(
                                 level,
-                                approved_by == Some(ApprovalResolutionSource::User),
+                                approved_by_person_now,
                             ),
                     };
                     let cwds: Vec<&std::path::Path> = cwds.iter().map(AsRef::as_ref).collect();
@@ -690,9 +695,7 @@ impl ToolOrchestrator {
             &tool_ctx.session,
             protected_level,
             launch_enforces_aggressive,
-            escalation_approved_by_human
-                && user_namespaces_warned
-                && approved_by == Some(ApprovalResolutionSource::User),
+            escalation_approved_by_human && user_namespaces_warned && approved_by_person_now,
         );
         if user_namespaces_allowed {
             crate::security::user_namespaces::note_allowed_run(
@@ -1309,8 +1312,8 @@ fn git_held_note(held: &[String]) -> String {
     }
     format!(
         "The approval doesn't lift the protected-file rules for this command (nor run it \
-         outside the sandbox) while the project's git folder still holds what Corbanu \
-         reported: {shown}."
+         outside the sandbox, nor let it create user namespaces) while the project's git \
+         folder still holds what Corbanu reported: {shown}."
     )
 }
 
