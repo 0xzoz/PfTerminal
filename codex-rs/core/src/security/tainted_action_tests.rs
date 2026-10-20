@@ -2499,6 +2499,12 @@ fn issue_937_review_2_routes() {
         ": \"$(cat notes)\"; echo $((_))",
         "v=$(cat notes); declare -n r; r=$v; echo $r",
         "var=$(cat notes); declare -u m; m=var; echo $((m))",
+        // Review 5.
+        "v=$(cat notes); eval \\(\\(v\\)\\)",
+        "v=$(cat notes); eval $'let \\x76'",
+        "printf -vm %s \"$(cat notes)\"; echo $((m))",
+        "read -raarr < notes; echo $((arr))",
+        "p=$(pwd); b=${p##*/}; echo $((b))",
     ];
     let zsh = [
         "x=VAR; var=$(cat notes); echo $(( 1 + ${(L)x} ))",
@@ -2514,6 +2520,10 @@ fn issue_937_review_2_routes() {
         "v=$(cat notes); print -z -- \"$v\"; getln m; echo $((m))",
         "var=$(cat notes); typeset -T M m a; m=(v r); echo $((M))",
         "set -- \"$(cat notes)\"; echo $((argv[1]))",
+        // Review 5.
+        "w=$(cat notes); UID=$w",
+        "print -z -- \"$(cat notes)\"; getln m; echo $((m))",
+        "v=$(cat notes); () { echo $(( $2 )) } x \"$v\"",
     ];
     let mut wrong = Vec::new();
     for shell in ["bash", "zsh"] {

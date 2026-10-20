@@ -460,3 +460,56 @@ fn review_4_routes() {
         assert!(!runs_unseen(line), "{line}");
     }
 }
+
+/// Review 5: escaped or decoded `eval`/`alias` text, zsh integer
+/// specials, attached option values, output only in arguments, anonymous
+/// functions, and working-folder names.
+#[test]
+fn review_5_routes() {
+    for (shell, line) in [
+        ("bash", "v=$(cat notes); eval echo \\$\\(\\(v\\)\\)"),
+        ("bash", "v=$(cat notes); eval \\(\\(v\\)\\)"),
+        ("bash", "v=$(cat notes); eval $'echo $((\\x76))'"),
+        ("bash", "v=$(cat notes); eval $'let \\x76'"),
+        (
+            "bash",
+            "shopt -s expand_aliases; v=$(cat notes); alias L=$'let \\x76'\nL",
+        ),
+        ("zsh", "w=$(cat notes); UID=$w"),
+        ("zsh", "w=$(cat notes); FUNCNEST=$w"),
+        ("bash", "printf -vm %s \"$(cat notes)\"; echo $((m))"),
+        ("bash", "read -raarr < notes; echo $((arr))"),
+        ("zsh", "print -vm \"$(cat notes)\"; echo $((m))"),
+        (
+            "zsh",
+            "zstyle :x y \"$(cat notes)\"; zstyle -s :x y m; echo $((m))",
+        ),
+        ("zsh", "print -z -- \"$(cat notes)\"; getln m; echo $((m))"),
+        (
+            "zsh",
+            "setopt extendedglob; [[ \"$(cat notes)\" == (#b)(*) ]]; echo $((match[1]))",
+        ),
+        ("zsh", "zstat -A m +link lnk; echo $((m))"),
+        ("zsh", "v=$(cat notes); () { echo $(( $2 )) } x \"$v\""),
+        (
+            "zsh",
+            "v=$(cat notes); function { echo $(( $2 )) } x \"$v\"",
+        ),
+        (
+            "zsh",
+            "v=$(cat notes); functions[f]='echo $(( $1 ))'; f x \"$v\"",
+        ),
+        ("bash", "p=$(pwd); b=${p##*/}; echo $((b))"),
+        ("bash", "p=$(git rev-parse --show-prefix); echo $((p))"),
+    ] {
+        assert!(runs_unseen_in(shell, line), "{shell}: {line}");
+    }
+    for line in [
+        "eval \"$(ssh-agent -s)\" && i=0; ((i++))",
+        "alias ll='ls -l'; i=0; ((i++))",
+        "f() { echo $(( $1 + 1 )); }; f 3",
+        "echo $'a\\tb'; i=0; ((i++))",
+    ] {
+        assert!(!runs_unseen(line), "{line}");
+    }
+}

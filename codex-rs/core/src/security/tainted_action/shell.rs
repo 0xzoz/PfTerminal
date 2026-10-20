@@ -669,15 +669,7 @@ fn fact_output(command: &SimpleCommand) -> bool {
         || words.first().is_some_and(|first| {
             matches!(
                 basename(&first.to_lowercase()),
-                "pwd"
-                    | "date"
-                    | "uname"
-                    | "whoami"
-                    | "hostname"
-                    | "id"
-                    | "nproc"
-                    | "getconf"
-                    | "git"
+                "date" | "uname" | "whoami" | "hostname" | "id" | "nproc" | "getconf"
             )
         })
 }

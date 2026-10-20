@@ -185,6 +185,11 @@ const READ_NUMERIC_OPTIONS: &[char] = &['t', 'n', 'N', 'k', 'u'];
 /// Special parameters that evaluate a value assigned to them as arithmetic
 /// (in bash, zsh or ksh).
 const INTEGER_SPECIALS: &[&str] = &[
+    "EGID",
+    "EUID",
+    "FUNCNEST",
+    "GID",
+    "UID",
     "BAUD",
     "COLUMNS",
     "DIRSTACKSIZE",
@@ -263,6 +268,14 @@ pub(super) struct Arithmetic {
     /// Group nodes holding `$_` (alone they do not make the line tainted:
     /// most lines leave command output in `$_`).
     underscore: HashSet<String>,
+    /// Some word on the line holds command output.
+    output_seen: bool,
+    /// The line holds `$'...'` text, which the lexer decodes into one word.
+    ansi_c: bool,
+    /// The line defines a zsh anonymous function (`() { ... } args`,
+    /// `function { ... } args`) or sets `functions[...]`, which take the
+    /// positional parameters from words the lexer reads as a command.
+    anonymous_function: bool,
     /// Variables declared as namerefs (`declare -n r`).
     namerefs: HashSet<String>,
     /// Name operands of commands that may write them.
@@ -296,6 +309,8 @@ impl Arithmetic {
             arithmetic.function_substitution |= arg
                 .match_indices("${")
                 .any(|(at, _)| arg[at + 2..].starts_with([' ', '\t', '\n', '|']));
+            arithmetic.ansi_c |= arg.contains("$'");
+            arithmetic.anonymous_function |= anonymous_function(arg);
             // zsh/mapfile: `$mapfile[file]` reads the file.
             if arg.contains("$mapfile") || arg.contains("${mapfile") {
                 arithmetic.filled.insert("mapfile".to_string());
@@ -352,6 +367,7 @@ impl Arithmetic {
                 }
             })
             .collect();
+        self.output_seen |= raw.iter().any(|word| command_output(word));
         // Redirect targets (`read x < "$f"`) are files, not operands.
         let mut redirect = vec![false; raw.len()];
         for index in simple
@@ -376,6 +392,11 @@ impl Arithmetic {
                         && !self.functions.contains(&name)
                         && !self.aliases.contains_key(&name) =>
                 {
+                    // Escapes (`eval \(\(v\)\)`) or `$'...'` decoding hide
+                    // the evaluated text from the lexer.
+                    if name == "eval" && (simple.escaped || self.ansi_c) {
+                        self.opaque = true;
+                    }
                     self.note_one(&raw[..index], &redirect[start..], /*command*/ None);
                     start += index + 1;
                 }
@@ -429,9 +450,16 @@ impl Arithmetic {
                 && word != "--"
                 && word.bytes().all(|byte| b"+-*/%<>=!&|^~?:,".contains(&byte))
         });
-        if VARIABLE_WRITERS.contains(&name.as_str())
-            || (!OPERAND_SAFE.contains(&name.as_str()) && !arithmetic_like)
-        {
+        if VARIABLE_WRITERS.contains(&name.as_str()) {
+            // Like `read`: they fill names from outside data.
+            self.filled.extend(
+                args.iter()
+                    .enumerate()
+                    .filter(|(at, word)| operand(*at) && is_identifier(word))
+                    .map(|(_, word)| word.clone()),
+            );
+        }
+        if !OPERAND_SAFE.contains(&name.as_str()) && !arithmetic_like {
             self.operands.extend(
                 args.iter()
                     .enumerate()
@@ -441,6 +469,10 @@ impl Arithmetic {
         }
         // `alias L='let v'`: the definition is judged as the command it
         // stands for, and later `L` commands as that command.
+        if name == "alias" && self.ansi_c {
+            // `alias L=$'let \x76'`: the decoded body is one word.
+            self.opaque = true;
+        }
         if name == "alias" {
             for (at, word) in args.iter().enumerate() {
                 let Some((alias, value)) = word.split_once('=') else {
@@ -517,8 +549,15 @@ impl Arithmetic {
             );
         }
         if FILLING_BUILTINS.contains(&name) {
-            // zsh/ksh `read 'v?prompt'`, zparseopts `a:=arr`.
+            // zsh/ksh `read 'v?prompt'`, zparseopts `a:=arr`, and an
+            // array name attached to its option (`read -raarr`, `-Aarr`).
             for (_, word) in args.iter().enumerate().filter(|(at, _)| operand(*at)) {
+                if let Some(cluster) = word.strip_prefix('-')
+                    && let Some(at) = cluster.find(['a', 'A'])
+                    && is_identifier(&cluster[at + 1..])
+                {
+                    self.filled.insert(cluster[at + 1..].to_string());
+                }
                 let prompted = word.split_once('?').map_or(word.as_str(), |(name, _)| name);
                 let spec = word.rsplit_once('=').map(|(_, name)| name);
                 for candidate in std::iter::once(prompted).chain(spec) {
@@ -629,17 +668,26 @@ impl Arithmetic {
         }
         // The variables hold what it prints (any operand, for linearity).
         let mut node: Option<String> = None;
-        for pair in args.windows(2) {
-            if pair[0] == "-v" {
-                self.named.push(pair[1].clone());
-                if let Some((name, _)) = assignment(&format!("{}=", pair[1])) {
-                    let node = node
-                        .get_or_insert_with(|| self.group(args.iter().cloned()))
-                        .clone();
-                    self.assigned.push((name.to_string(), node));
-                    // The format joins operands (`%s%s va r` prints `var`).
-                    self.appended.insert(name.to_string());
-                }
+        // `-v NAME`, or attached: `-vNAME`.
+        let targets: Vec<&String> = args
+            .windows(2)
+            .filter(|pair| pair[0] == "-v")
+            .map(|pair| &pair[1])
+            .collect();
+        let attached: Vec<String> = args
+            .iter()
+            .filter_map(|word| word.strip_prefix("-v").filter(|name| !name.is_empty()))
+            .map(str::to_string)
+            .collect();
+        for target in targets.into_iter().chain(attached.iter()) {
+            self.named.push(target.clone());
+            if let Some((name, _)) = assignment(&format!("{target}=")) {
+                let node = node
+                    .get_or_insert_with(|| self.group(args.iter().cloned()))
+                    .clone();
+                self.assigned.push((name.to_string(), node));
+                // The format joins operands (`%s%s va r` prints `var`).
+                self.appended.insert(name.to_string());
             }
         }
     }
@@ -745,10 +793,17 @@ impl Arithmetic {
         // Once anything is tainted, a value built from name fragments may
         // name it.
         let any = tainted.iter().any(|name| !self.underscore.contains(name));
+        // Command output anywhere (even only as an argument, held by `$_`)
+        // may reach the variables shells fill on their own (`match`).
+        if self.output_seen || !tainted.is_empty() {
+            tainted.extend(FILLED_DEFAULTS.iter().map(|name| (*name).to_string()));
+        }
+        if any && self.anonymous_function {
+            tainted.extend(POSITIONAL.iter().map(|name| (*name).to_string()));
+        }
         if any {
             tainted.extend(self.appended.iter().cloned());
             tainted.extend(self.operands.iter().cloned());
-            tainted.extend(FILLED_DEFAULTS.iter().map(|name| (*name).to_string()));
             // Allow-list: a value is clean only if it is made of numbers,
             // operators, bare names, arithmetic results and whole `$NAME`s
             // of variables the line assigns (whose cleanliness the graph
@@ -798,6 +853,23 @@ impl Arithmetic {
                             .any(|end| self.builders.contains(&rest[..end])))
             })
     }
+}
+
+/// Whether text defines a zsh anonymous function or sets `functions[...]`.
+fn anonymous_function(text: &str) -> bool {
+    text.contains("functions[")
+        || text.match_indices("()").any(|(at, _)| {
+            let before = text[..at].trim_end_matches([' ', '\t']);
+            let after = text[at + 2..].trim_start_matches([' ', '\t', '\n']);
+            after.starts_with('{')
+                && (before.is_empty() || before.ends_with([';', '&', '|', '\n', '(', '{']))
+        })
+        || text.match_indices("function").any(|(at, _)| {
+            let before = text[..at].trim_end_matches([' ', '\t']);
+            let after = text[at + "function".len()..].trim_start_matches([' ', '\t', '\n']);
+            after.starts_with('{')
+                && (before.is_empty() || before.ends_with([';', '&', '|', '\n', '(', '{']))
+        })
 }
 
 /// `NAME+=value` or `NAME[sub]+=value`: the assignment appends.
