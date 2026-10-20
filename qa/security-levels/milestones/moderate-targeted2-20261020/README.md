@@ -52,7 +52,8 @@ Quoted in [design/designer-packet/decisions.md](design/designer-packet/decisions
 
 ## Candidate
 
-Signed integration build of main `8bf182de43` (INSTALL.json; has #900, #949 and #962), `bin/corbanu` SHA-256
+Signed integration build of main `8bf182de43` (INSTALL.json names the commit and the binary's digest; #900, #949 and
+#962 are ancestors of that commit: [candidate/ancestry.txt](candidate/ancestry.txt)), `bin/corbanu` SHA-256
 `95ee54cb…bfecf9e509`, in the first run's candidate-v2 package ([candidate/candidate-manifest.md](candidate/candidate-manifest.md)).
 
 ## Execution
@@ -68,7 +69,8 @@ Signed integration build of main `8bf182de43` (INSTALL.json; has #900, #949 and 
 - **Shutdown:** guest data erased (`restore.sh`, `kill-lane-procs.sh`, `restore-fix.sh`), checked live, then
   `guest-shutdown-clean.sh` removed `~agent/ag-admin` and shut down; a verification boot confirmed everything gone and
   was powered off at 04:47:05Z ([common/vm-state-end.txt](common/vm-state-end.txt), [common/vm-state-end2.txt](common/vm-state-end2.txt)).
-- **Export:** `pty*.raw` gzipped; each fixture's `.git` renamed `dot-git`; product homes are not exported; key scan clean.
+- **Export:** `pty*.raw` gzipped; each fixture's `.git` renamed `dot-git`; product homes are not exported; key scan clean
+  ([common/keyscan-final.txt](common/keyscan-final.txt)).
 
 ## Named limits
 
@@ -79,8 +81,9 @@ Signed integration build of main `8bf182de43` (INSTALL.json; has #900, #949 and 
   (D40 accepts this). Its "the action prompts again" result was not judged; whether saved rules keep working after
   revoke is not tested.
 - The same model family is executor and product.
-- The MOD-15 executor's report names a screen file `mod15-item2-captured.txt` that does not exist; the item 2 cell is in
-  `mod15-item2-end.txt` and `mod15-item2-turn.txt` (and `pty.raw.gz`).
+- The MOD-15 executor's report cites two screen files wrongly: `mod15-item2-captured.txt` does not exist (the item 2
+  cell is in `mod15-item2-end.txt` and `mod15-item2-turn.txt`), and `mod15-item3-captured.txt` shows item 3 still
+  working (its cell is in `mod15-item3-turn.txt`); both cells are also in `pty.raw.gz`.
 - Frozen-file erratum (not edited, to keep the freeze): `design/FROZEN.sha256` lists its own path, with the hash of the
   file while it was being written, so that one line cannot verify; every other line verifies (`shasum -a 256 -c`).
 - Asserted, not shown by a raw artifact in the record: the VM lock times and the freeze push `c28aa47cd3` (from the
@@ -89,6 +92,15 @@ Signed integration build of main `8bf182de43` (INSTALL.json; has #900, #949 and 
   [common/effective-policy-addendum.txt](common/effective-policy-addendum.txt)).
 - Designer launch: a first background launch at 03:26:19Z died before sending any request (empty events file); it was
   relaunched in a tmux session at 03:30:42Z ([design/sessions.txt](design/sessions.txt)). Not counted as a round.
+
+## For the person signing off
+
+- MOD-06 counts as a passed blocker although its frozen git-commit result ("git log -1 shows 'moderate check'") was
+  never run: that part is an accepted limit under D43 (.git read-only under Moderate, D5(c)).
+- MOD-09, MOD-21 (blockers) and MOD-28 (advisory) are accepted by owner decision, not passed: their protected steps
+  were not reached (model declines) or, for MOD-28, no session approval exists under Moderate to revoke.
+- The verification boot of the guest was powered off (`utmctl stop`) after it ignored a shutdown request for 2
+  minutes; the campaign shutdown before it was clean.
 
 ## New issues (advisory, wording only; not judged by the cases)
 
