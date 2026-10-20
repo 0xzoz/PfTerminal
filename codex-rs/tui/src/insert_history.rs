@@ -163,9 +163,10 @@ where
     let wrapped_lines = wrapped_rows as u16;
     // #1039: the standard path confines scrolling to rows `1..viewport top`. When that region is
     // a single row (for example the first line written above a viewport at the top of a freshly
-    // cleared screen) or empty (a viewport filling the screen), `CSI 1;1 r` is invalid: terminals
-    // ignore it, so the line is written into the viewport and the next draw erases or keeps it
-    // there. Append through the terminal instead.
+    // cleared screen), `CSI 1;1 r` is invalid and terminals ignore it; when it is empty (a
+    // viewport filling the screen), `CSI 1;0 r` selects the whole screen. Either way the line is
+    // written into the viewport, where the next draw erases it or leaves it. Append through the
+    // terminal instead.
     let standard_scroll_amount = if area.bottom() < screen_size.height {
         wrapped_lines.min(screen_size.height - area.bottom())
     } else {
@@ -1097,6 +1098,41 @@ mod tests {
             term.viewport_area.y, 1,
             "viewport must stay put, rows: {rows:?}"
         );
+        assert_eq!(rows[0].trim_end(), "second history line", "rows: {rows:?}");
+        assert!(
+            rows[1..].iter().all(|row| !row.contains("history line")),
+            "history must not be written into the viewport, rows: {rows:?}"
+        );
+    }
+
+    /// #1039: a viewport at the top with one free row below scrolls down one row, leaving a
+    /// one-row history region; a two-line batch must end with its last line above the viewport.
+    #[test]
+    fn vt100_top_viewport_with_one_free_row_keeps_last_line_of_a_batch() {
+        let width: u16 = 40;
+        let height: u16 = 6;
+        let backend = VT100Backend::new(width, height);
+        let mut term = crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
+        term.set_viewport_area(Rect::new(
+            /*x*/ 0,
+            /*y*/ 0,
+            /*width*/ width,
+            /*height*/ height - 1,
+        ));
+        draw_composer(&mut term);
+
+        insert_history_lines(
+            &mut term,
+            vec![
+                Line::from("first history line"),
+                Line::from("second history line"),
+            ],
+        )
+        .expect("insert history");
+        draw_composer(&mut term);
+
+        let rows: Vec<String> = term.backend().vt100().screen().rows(0, width).collect();
+        assert_eq!(term.viewport_area.y, 1, "rows: {rows:?}");
         assert_eq!(rows[0].trim_end(), "second history line", "rows: {rows:?}");
         assert!(
             rows[1..].iter().all(|row| !row.contains("history line")),
