@@ -856,11 +856,11 @@ fn pf_30_s03_review_bypasses_are_closed() {
     ] {
         assert_eq!(script(command), Some(expected), "{command}");
     }
-    // A pathological glob is matched in linear time.
-    let started = std::time::Instant::now();
-    let glob = format!("ls .{}Z", "*".repeat(60));
-    assert_eq!(script(&glob), None);
-    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    // A pathological glob is matched in linear work (#1102).
+    work::assert_linear("glob", |scale| {
+        let glob = format!("ls .{}Z", "*".repeat(15 * scale));
+        assert_eq!(script(&glob), None);
+    });
     // Globs in a custom home's own path.
     assert_eq!(
         custom_home_kind("/vol/src", "cat /vol/work/corbanu-term*/home/auth.json"),
@@ -1481,16 +1481,15 @@ fn pf_23_s01_value_transfer_and_outbound_content_are_protected() {
     ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
 )]
 fn pf_23_s01_wrapper_positions_are_bounded() {
-    let many = format!("npx {}", "a ".repeat(5000));
-    let started = std::time::Instant::now();
-    assert_eq!(script(&many), Some(ProtectedActionKind::UnseenCode));
-    let markers = format!("git log {}", "-- ".repeat(5000));
-    assert_eq!(script(&markers), Some(ProtectedActionKind::UnseenCode));
-    assert!(
-        started.elapsed() < std::time::Duration::from_secs(2),
-        "{:?}",
-        started.elapsed()
-    );
+    // Linear work, counted at two sizes (#1102).
+    work::assert_linear("npx words", |scale| {
+        let many = format!("npx {}", "a ".repeat(1250 * scale));
+        assert_eq!(script(&many), Some(ProtectedActionKind::UnseenCode));
+    });
+    work::assert_linear("git log markers", |scale| {
+        let markers = format!("git log {}", "-- ".repeat(1250 * scale));
+        assert_eq!(script(&markers), Some(ProtectedActionKind::UnseenCode));
+    });
 }
 
 /// PF-23-S02: writing a file that runs code later outside the sandbox is
@@ -2032,27 +2031,26 @@ fn issue_885_review_1_routes_and_limits() {
     assert_eq!(issue_885_wrong(&cwd, &cases), Vec::<String>::new());
 
     // Nesting past the reader's limit is refused (the reader alone is
-    // checked against a stack overflow in `quoted::tests`).
-    let deep = format!("echo {}x{}", "$(".repeat(40), ")".repeat(40));
-    let started = std::time::Instant::now();
-    assert_eq!(script(&deep), unseen);
+    // checked against a stack overflow in `quoted::tests`). The work is
+    // counted at two sizes and must grow linearly (#1102).
+    work::assert_linear("deep nesting", |scale| {
+        let depth = 40 * scale;
+        let deep = format!("echo {}x{}", "$(".repeat(depth), ")".repeat(depth));
+        assert_eq!(script(&deep), unseen);
+    });
     // Wrappers that make every word a command start do not multiply work.
-    let envs = "env ".repeat(20);
-    let nested = format!("uv {envs}bash -c \"uv {envs}bash -c './present.sh'\"");
-    assert_eq!(
-        classify_fixture(&shell_in(&cwd, &["/bin/bash", "-c", &nested])),
-        None
-    );
-    let wide = format!("uv {}sed p f", "env ".repeat(10_000));
-    assert_eq!(script(&wide), unseen);
-    // Linear work takes about 1 s here in a debug build on a dev Mac, and
-    // over 5 s on a loaded macOS CI runner; the bound only catches work
-    // that grows faster than the line.
-    assert!(
-        started.elapsed() < std::time::Duration::from_secs(20),
-        "{:?}",
-        started.elapsed()
-    );
+    work::assert_linear("nested wrappers", |scale| {
+        let envs = "env ".repeat(5 * scale);
+        let nested = format!("uv {envs}bash -c \"uv {envs}bash -c './present.sh'\"");
+        assert_eq!(
+            classify_fixture(&shell_in(&cwd, &["/bin/bash", "-c", &nested])),
+            None
+        );
+    });
+    work::assert_linear("wide wrappers", |scale| {
+        let wide = format!("uv {}sed p f", "env ".repeat(2_500 * scale));
+        assert_eq!(script(&wide), unseen);
+    });
 }
 
 /// #885 review round 2: a reading kept in step with bash, routes of items
@@ -2108,21 +2106,17 @@ fn issue_885_review_2_routes_and_limits() {
     ];
     assert_eq!(issue_885_wrong(&cwd, &cases), Vec::<String>::new());
     // Nested `watch` does not multiply work: each is a level of nesting,
-    // and too many levels fail closed.
-    let started = std::time::Instant::now();
-    let watches = format!("bash -c \"{}true\"", "watch ".repeat(300));
-    assert_eq!(
-        classify_fixture(&shell_in(&cwd, &["/bin/bash", "-c", &watches])),
-        unseen
-    );
+    // and too many levels fail closed (work counted at two sizes, #1102).
+    work::assert_linear("nested watch", |scale| {
+        let watches = format!("bash -c \"{}true\"", "watch ".repeat(75 * scale));
+        assert_eq!(
+            classify_fixture(&shell_in(&cwd, &["/bin/bash", "-c", &watches])),
+            unseen
+        );
+    });
     assert_eq!(
         classify_fixture(&shell_in(&cwd, &["/bin/bash", "-c", "watch -n 1 true"])),
         None
-    );
-    assert!(
-        started.elapsed() < std::time::Duration::from_secs(5),
-        "{:?}",
-        started.elapsed()
     );
 }
 
@@ -2673,23 +2667,34 @@ fn issue_937_review_6_fallback_routes() {
 fn issue_1020_deep_substitutions_stay_fast_and_ask() {
     use ProtectedActionKind::*;
     let lex = |text: &str| shell::simple_commands(&["bash".into(), "-c".into(), text.into()]);
-    let start = std::time::Instant::now();
+    // The reader's work grows linearly with the line (counted at two
+    // sizes, #1102).
     for opener in ["$(", "<(", ">(", "$(( $("] {
-        let deep = format!("echo {}", opener.repeat(2_000));
-        assert!(lex(&deep).too_deep, "{opener}");
+        work::assert_linear(opener, |scale| {
+            let deep = format!("echo {}", opener.repeat(500 * scale));
+            assert!(lex(&deep).too_deep, "{opener}");
+        });
     }
-    let closed = format!("echo {}x{}", "$(echo ".repeat(2_000), ")".repeat(2_000));
-    assert!(lex(&closed).too_deep);
+    work::assert_linear("closed", |scale| {
+        let depth = 500 * scale;
+        let closed = format!("echo {}x{}", "$(echo ".repeat(depth), ")".repeat(depth));
+        assert!(lex(&closed).too_deep);
+    });
     // Backticks alternate open and close, so they never nest deeply.
-    assert!(!lex(&"`echo ".repeat(4_000)).too_deep);
+    work::assert_linear("backticks", |scale| {
+        assert!(!lex(&"`echo ".repeat(1_000 * scale)).too_deep);
+    });
     // Many substitutions side by side are not deep.
-    let wide = "echo $(echo a);".repeat(10_000);
-    assert!(!lex(&wide).too_deep);
-    let mut nested_wide = String::from("echo $(");
-    nested_wide.push_str(&"$(echo a) ".repeat(10_000));
-    nested_wide.push(')');
-    assert!(!lex(&nested_wide).too_deep);
-    assert!(start.elapsed() < std::time::Duration::from_secs(10));
+    work::assert_linear("wide", |scale| {
+        let wide = "echo $(echo a);".repeat(2_500 * scale);
+        assert!(!lex(&wide).too_deep);
+    });
+    work::assert_linear("nested wide", |scale| {
+        let mut nested_wide = String::from("echo $(");
+        nested_wide.push_str(&"$(echo a) ".repeat(2_500 * scale));
+        nested_wide.push(')');
+        assert!(!lex(&nested_wide).too_deep);
+    });
     // At the limit the reader still reads; past it the line asks.
     let at = |depth: usize| format!("echo {}hi{}", "$(echo ".repeat(depth), ")".repeat(depth));
     assert!(!lex(&at(shell::MAX_SUBSTITUTION_DEPTH)).too_deep);
@@ -2757,18 +2762,18 @@ fn issue_1020_deep_substitutions_stay_fast_and_ask() {
     assert_eq!(script(&outer_output), Some(Disclosure));
 }
 
-/// #1020: a line nesting `$(` 400 deep took about 6 s to read on main.
+/// #1020: a line nesting `$(` 400 deep took about 6 s to read on main; the
+/// work now grows linearly with the depth (counted at two sizes, #1102).
 #[test]
 #[cfg_attr(
     windows,
     ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
 )]
 fn issue_1020_deep_nesting_is_classified_quickly() {
-    let start = std::time::Instant::now();
-    let found = script(&format!("echo {}", "$(".repeat(400)));
-    let elapsed = start.elapsed();
-    assert_eq!(found, Some(ProtectedActionKind::UnseenCode));
-    assert!(elapsed < std::time::Duration::from_secs(3), "{elapsed:?}");
+    work::assert_linear("deep nesting", |scale| {
+        let found = script(&format!("echo {}", "$(".repeat(100 * scale)));
+        assert_eq!(found, Some(ProtectedActionKind::UnseenCode));
+    });
 }
 
 /// #1012: bash `${v@P}` runs the command substitutions in the value, like
