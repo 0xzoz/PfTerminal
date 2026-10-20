@@ -689,6 +689,12 @@ impl CoreShellActionProvider {
                     crate::tools::orchestrator::STALE_AGGRESSIVE_REFUSAL.to_string(),
                 )));
             }
+            // D51: nor with permissions read before it (grants end there).
+            if self.prompt_permissions.is_some() {
+                return Ok(EscalationDecision::deny(Some(
+                    crate::tools::orchestrator::STALE_PERMISSIONS_REFUSAL.to_string(),
+                )));
+            }
         }
         Ok(EscalationDecision::deny(Some(
             crate::tools::orchestrator::STALE_APPROVAL_REFUSAL.to_string(),

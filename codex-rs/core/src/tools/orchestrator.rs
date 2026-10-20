@@ -190,6 +190,14 @@ impl ToolOrchestrator {
                         warn(tool_ctx, STALE_AGGRESSIVE_REFUSAL).await;
                         return Err(ToolError::Rejected(STALE_AGGRESSIVE_REFUSAL.to_string()));
                     }
+                    // D51 (#1001): the permissions this request carries were
+                    // read (from grants, by the tool's handler) before the
+                    // transition, which ended those grants: refused, so a
+                    // new call reads them again.
+                    if tool.additional_permissions(req).is_some() {
+                        warn(tool_ctx, STALE_PERMISSIONS_REFUSAL).await;
+                        return Err(ToolError::Rejected(STALE_PERMISSIONS_REFUSAL.to_string()));
+                    }
                     // The note is for a person who saw the earlier prompt.
                     asked_again = person_asked;
                 }
@@ -1369,6 +1377,12 @@ const MAX_STALE_APPROVAL_ROUNDS: usize = 3;
 pub(crate) const STALE_AGGRESSIVE_REFUSAL: &str = "Not run: the security policy changed while \
      this was being approved (security level Aggressive was switched on), so the approval was \
      not used. Ask again if it is still needed; it will be decided under Aggressive.";
+
+/// D50, D51: why a run that carried additional permissions (granted ones
+/// included) was not decided again after a transition.
+pub(crate) const STALE_PERMISSIONS_REFUSAL: &str = "Not run: the security policy changed while \
+     this was being approved, and the permissions it asked for or was granted were for the \
+     earlier policy, so the approval was not used. Ask again if it is still needed.";
 
 /// D50: why a retry outside the sandbox did not happen.
 const STALE_RETRY_NOTE: &str = "The security level changed while this command ran or its \
