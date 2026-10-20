@@ -952,6 +952,20 @@ Use `thread/inject_items` to append prebuilt Responses API items to a loaded thr
 { "id": 36, "result": {} }
 ```
 
+### Realtime-only threads: pass `model` on `thread/start`
+
+`thread/start` warms up the thread's text model when its provider uses a
+WebSocket connection, as OpenAI does: one paid request with the session's
+instructions and tools (typically 10,000 to 15,000 input tokens), priced for
+that model. A thread started only for `thread/realtime/start` never uses the
+text model, so with the default model the warm-up can cost several times the
+realtime session itself (#1045). Clients that start a thread only for realtime
+should pass `model` (and `modelProvider` if needed) on `thread/start`: a small,
+cheap text model, or one on a provider without a WebSocket connection, which
+skips the warm-up. The `model` on `thread/realtime/start` selects the realtime
+model only; it doesn't change the warm-up. Skipping the warm-up for
+realtime-only threads is a possible later change (#1045).
+
 ### Example: Start realtime with WebRTC
 
 Use `thread/realtime/start` with `transport.type: "webrtc"` when a browser or webview owns the `RTCPeerConnection` and app-server should create the server-side realtime session. The transport `sdp` must be the offer SDP produced by `RTCPeerConnection.createOffer()`, not a hand-written or minimal SDP string.
