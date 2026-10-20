@@ -316,3 +316,54 @@ async fn issue_1001_permission_grants_end_at_a_level_change() {
     record(PermissionGrantScope::Turn, moderate).await;
     assert_eq!(held().await, (granted.clone(), granted));
 }
+
+/// D51: strict auto-review, turned on with a turn grant, ends with it at a
+/// security transition, and is not turned on by a grant answered before one.
+#[tokio::test]
+async fn issue_1001_strict_auto_review_ends_with_its_grant() {
+    let (session, turn_context, _events) = make_session_and_context_with_rx().await;
+    let controller = initialize_policy(&session);
+    *session.active_turn.lock().await = Some(ActiveTurn::default());
+    let turn_state = {
+        let active = session.active_turn.lock().await;
+        Arc::clone(&active.as_ref().expect("active turn").turn_state)
+    };
+    let environment_id = turn_context
+        .environments
+        .primary()
+        .expect("a primary environment")
+        .selection()
+        .environment_id;
+    let strict_grant = RequestPermissionsResponse {
+        permissions: RequestPermissionProfile {
+            network: Some(codex_protocol::models::NetworkPermissions {
+                enabled: Some(true),
+            }),
+            ..RequestPermissionProfile::default()
+        },
+        scope: PermissionGrantScope::Turn,
+        strict_auto_review: true,
+    };
+    let record = async |granted_under| {
+        session
+            .record_granted_request_permissions_for_turn(
+                &strict_grant,
+                &environment_id,
+                Some(&turn_state),
+                granted_under,
+            )
+            .await;
+    };
+
+    let permissive = session.services.authority_marker();
+    record(permissive).await;
+    assert!(session.strict_auto_review_enabled_for_turn().await);
+    raise_level(&controller, SecurityLevel::Moderate);
+    assert!(!session.strict_auto_review_enabled_for_turn().await);
+    // Answered under Permissive, recorded after the change: no grant, no
+    // strict auto-review.
+    record(permissive).await;
+    assert!(!session.strict_auto_review_enabled_for_turn().await);
+    record(session.services.authority_marker()).await;
+    assert!(session.strict_auto_review_enabled_for_turn().await);
+}

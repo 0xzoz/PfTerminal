@@ -11,7 +11,8 @@ use std::collections::HashMap;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_sandboxing::policy_transforms::merge_permission_profiles;
 
-type AuthorityMarker = Option<(u64, u64)>;
+/// The policy epoch and revocation generation (PF-23-S03).
+pub(crate) type AuthorityMarker = Option<(u64, u64)>;
 
 #[derive(Debug, Default)]
 pub(crate) struct GrantedPermissions {
@@ -29,17 +30,17 @@ impl GrantedPermissions {
     }
 
     /// Records a grant given under `granted_under`, only while that is still
-    /// the policy in force (`current`).
+    /// the policy in force (`current`); whether it was recorded.
     pub(crate) fn record(
         &mut self,
         environment_id: &str,
         permissions: AdditionalPermissionProfile,
         granted_under: AuthorityMarker,
         current: AuthorityMarker,
-    ) {
+    ) -> bool {
         self.fence(current);
         if granted_under.is_some() && granted_under != current {
-            return;
+            return false;
         }
         if let Some(merged) = merge_permission_profiles(
             self.by_environment_id.get(environment_id),
@@ -48,6 +49,7 @@ impl GrantedPermissions {
             self.by_environment_id
                 .insert(environment_id.to_string(), merged);
         }
+        true
     }
 
     /// The grants for `environment_id` still in force under `current`.
@@ -58,5 +60,39 @@ impl GrantedPermissions {
     ) -> Option<AdditionalPermissionProfile> {
         self.fence(current);
         self.by_environment_id.get(environment_id).cloned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_protocol::models::NetworkPermissions;
+    use pretty_assertions::assert_eq;
+
+    fn network() -> AdditionalPermissionProfile {
+        AdditionalPermissionProfile {
+            network: Some(NetworkPermissions {
+                enabled: Some(true),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn issue_1001_grants_follow_the_policy_marker() {
+        let (before, after) = (Some((1, 0)), Some((2, 0)));
+        let mut grants = GrantedPermissions::default();
+        assert!(grants.record("local", network(), before, before));
+        assert_eq!(grants.get("local", before), Some(network()));
+        // A transition: the grant ends.
+        assert_eq!(grants.get("local", after), None);
+        assert_eq!(grants.get("local", before), None, "not restored");
+        // Answered before it, recorded after it: not kept.
+        assert!(!grants.record("local", network(), before, after));
+        assert_eq!(grants.get("local", after), None);
+        // No marker when the request was shown: kept, as #945 counts it.
+        assert!(grants.record("local", network(), None, after));
+        assert_eq!(grants.get("local", after), Some(network()));
+        assert_eq!(grants.get("remote", after), None);
     }
 }

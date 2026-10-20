@@ -354,17 +354,17 @@ impl SessionState {
         &mut self,
         environment_id: &str,
         permissions: AdditionalPermissionProfile,
-        granted_under: Option<(u64, u64)>,
-        current: Option<(u64, u64)>,
-    ) {
+        granted_under: super::AuthorityMarker,
+        current: super::AuthorityMarker,
+    ) -> bool {
         self.granted_permissions
-            .record(environment_id, permissions, granted_under, current);
+            .record(environment_id, permissions, granted_under, current)
     }
 
     pub(crate) fn granted_permissions(
         &mut self,
         environment_id: &str,
-        current: Option<(u64, u64)>,
+        current: super::AuthorityMarker,
     ) -> Option<AdditionalPermissionProfile> {
         self.granted_permissions.get(environment_id, current)
     }

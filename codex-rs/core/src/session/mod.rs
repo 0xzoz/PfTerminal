@@ -3689,24 +3689,29 @@ impl Session {
             return;
         }
         let permissions: AdditionalPermissionProfile = response.permissions.clone().into();
-        let current = self.services.authority_marker();
         match response.scope {
             PermissionGrantScope::Turn => {
                 if let Some(turn_state) = originating_turn_state {
                     let mut ts = turn_state.lock().await;
-                    ts.record_granted_permissions(
+                    // Read under the lock: a later grant is never recorded
+                    // under an earlier marker.
+                    let current = self.services.authority_marker();
+                    let recorded = ts.record_granted_permissions(
                         environment_id,
                         permissions,
                         granted_under,
                         current,
                     );
-                    if response.strict_auto_review {
-                        ts.enable_strict_auto_review();
+                    // D51: strict auto-review comes with the grant and ends
+                    // with it.
+                    if recorded && response.strict_auto_review {
+                        ts.enable_strict_auto_review(current);
                     }
                 }
             }
             PermissionGrantScope::Session => {
                 let mut state = self.state.lock().await;
+                let current = self.services.authority_marker();
                 state.record_granted_permissions(
                     environment_id,
                     permissions,
@@ -3806,7 +3811,7 @@ impl Session {
             return false;
         };
         let ts = active.turn_state.lock().await;
-        ts.strict_auto_review_enabled()
+        ts.strict_auto_review_enabled(self.services.authority_marker())
     }
 
     pub(crate) async fn granted_session_permissions(

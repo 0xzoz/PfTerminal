@@ -100,7 +100,9 @@ pub(crate) struct TurnState {
     mailbox_delivery_phase: MailboxDeliveryPhase,
     /// D51 (#1001): bound to the policy marker they were granted under.
     granted_permissions: super::GrantedPermissions,
-    strict_auto_review_enabled: bool,
+    /// D51 (#1001): the policy marker strict auto-review was turned on
+    /// under, with the grant it came with; it ends with that grant.
+    strict_auto_review_under: Option<super::AuthorityMarker>,
     pub(crate) tool_calls: u64,
     pub(crate) has_memory_citation: bool,
     pub(crate) token_usage_at_turn_start: TokenUsage,
@@ -262,26 +264,28 @@ impl TurnState {
         &mut self,
         environment_id: &str,
         permissions: AdditionalPermissionProfile,
-        granted_under: Option<(u64, u64)>,
-        current: Option<(u64, u64)>,
-    ) {
+        granted_under: super::AuthorityMarker,
+        current: super::AuthorityMarker,
+    ) -> bool {
         self.granted_permissions
-            .record(environment_id, permissions, granted_under, current);
+            .record(environment_id, permissions, granted_under, current)
     }
 
     pub(crate) fn granted_permissions(
         &mut self,
         environment_id: &str,
-        current: Option<(u64, u64)>,
+        current: super::AuthorityMarker,
     ) -> Option<AdditionalPermissionProfile> {
         self.granted_permissions.get(environment_id, current)
     }
 
-    pub(crate) fn enable_strict_auto_review(&mut self) {
-        self.strict_auto_review_enabled = true;
+    pub(crate) fn enable_strict_auto_review(&mut self, under: super::AuthorityMarker) {
+        self.strict_auto_review_under = Some(under);
     }
 
-    pub(crate) fn strict_auto_review_enabled(&self) -> bool {
-        self.strict_auto_review_enabled
+    /// Whether strict auto-review is on under the policy in force
+    /// (`current`): not after a security transition (D51).
+    pub(crate) fn strict_auto_review_enabled(&self, current: super::AuthorityMarker) -> bool {
+        self.strict_auto_review_under == Some(current)
     }
 }

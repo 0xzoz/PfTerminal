@@ -6880,7 +6880,7 @@ async fn enable_strict_auto_review_for_turn_uses_originating_turn() {
         originating_turn_state
             .lock()
             .await
-            .strict_auto_review_enabled()
+            .strict_auto_review_enabled(session.services.authority_marker())
     );
 }
 
@@ -14295,12 +14295,8 @@ async fn issue_524_a_grant_is_checked_against_the_current_folder_too() {
             glob_scan_max_depth: None,
         }),
     };
-    session.state.lock().await.record_granted_permissions(
-        &environment_id,
-        grant,
-        /*granted_under*/ None,
-        session.services.authority_marker(),
-    );
+    // The session's policy tree is in place before the grant (D51, #1001:
+    // grants end at a security transition); the rules apply later.
     let control = session
         .services
         .agent_control
@@ -14311,6 +14307,17 @@ async fn issue_524_a_grant_is_checked_against_the_current_folder_too() {
             /*inherits_from_spawn_parent*/ false,
         )
         .expect("policy");
+    session.state.lock().await.record_granted_permissions(
+        &environment_id,
+        grant.clone(),
+        /*granted_under*/ None,
+        session.services.authority_marker(),
+    );
+    assert_eq!(
+        session.granted_session_permissions(&environment_id).await,
+        Some(grant),
+        "held before the rules apply"
+    );
     let client = (*session.services.model_client())
         .clone()
         .with_ingress_policy(SecurityLevel::Moderate, control.effective_security_policy())
