@@ -274,3 +274,8 @@ The rest of Aggressive starts in each of them when it restarts: its
 sandbox, `.env` protection, network off and the model-key rules. Until then
 it is shown at its own level. This only ever raises a level: a lower level
 saved in another window applies only after a restart.
+
+The other sessions of the window you confirm in take Core's protections and
+approval for every command at once, and so do sessions you start there
+before you restart, also when you confirm before the window's own session
+has started (#978).

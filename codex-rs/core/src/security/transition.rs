@@ -586,6 +586,15 @@ pub(crate) fn live_controller(home: &Path, thread: ThreadId) -> Option<TrustedSe
         .map(|shared| TrustedSecurityController { shared })
 }
 
+/// #978: whether a policy tree of this process runs on `home` (a session of
+/// this process uses it; not one of a remote app server).
+pub(crate) fn trees_run_on(home: &Path) -> bool {
+    let home = canonical(home);
+    let mut trees = TREES.lock().unwrap_or_else(PoisonError::into_inner);
+    trees.retain(|(_, tree)| tree.strong_count() > 0);
+    trees.iter().any(|(tree_home, _)| *tree_home == home)
+}
+
 /// #507: whether a person's kill switch is on in a policy tree of this
 /// process on `home`; `None` when no tree of this process is on it.
 pub(crate) fn live_kill_switch(home: &Path) -> Option<bool> {
