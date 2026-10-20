@@ -31,7 +31,8 @@
 //!   block (#974). A copy in another form, or outside the heaps (a thread
 //!   stack), is not found. A heap its owner created with
 //!   `HEAP_NO_SERIALIZE` is not locked by `HeapLock`, so walking it races
-//!   with that owner.
+//!   with that owner, and a heap another thread destroys while the sweep
+//!   runs leaves it a stale handle to lock.
 
 #[cfg(unix)]
 use std::ffi::OsStr;
@@ -182,9 +183,9 @@ pub(crate) fn take_env_var(name: &str) -> Option<Zeroizing<Vec<u8>>> {
     // #974: a heap's memory can hold a stale copy outside every block its
     // walk reports (likely a C runtime start-up copy, its name partly
     // overwritten), so each heap's allocations are swept whole, each heap
-    // locked meanwhile. An environment block
-    // Windows replaced when the environment grew stays in the process
-    // parameters' allocation, inside the process heap on current Windows.
+    // locked meanwhile. An environment block Windows replaced when the
+    // environment grew stays in the process parameters' allocation, inside
+    // the process heap on current Windows.
     let mut allocations: Vec<(Option<isize>, usize)> = windows_env::heap_allocations()
         .into_iter()
         .map(|(heap, base)| (Some(heap), base))
@@ -415,7 +416,8 @@ mod windows_env {
     /// so its blocks are not split, merged or handed out meanwhile. The
     /// low-fragmentation front end allocates without that lock: a stale copy
     /// in a free slot can still be handed to another thread between the
-    /// re-read of a match and its overwrite (two system calls).
+    /// re-read of a match and its overwrite (two system calls). Heap block
+    /// headers are encoded, so a match there is practically impossible.
     pub(super) fn wipe_copies_in_allocation(
         address: usize,
         name: &str,
