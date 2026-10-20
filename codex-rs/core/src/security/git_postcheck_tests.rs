@@ -1152,3 +1152,71 @@ fn issue_943_the_command_folder_is_not_left_out_by_the_cap() {
         vec![last.git().join("COMMIT_EDITMSG").display().to_string()]
     );
 }
+
+/// #943 item 13: after a worktree's `.git` file is replaced by a `.git`
+/// folder in one command while its old git folder can't be read, that look
+/// is incomplete; once the new git folder is seen in full the project is no
+/// longer held as "not checked fully" (it stayed so until a restart), while
+/// the main project, whose folders hold the unreadable one, still is until
+/// it can be read.
+#[test]
+fn issue_943_a_replaced_git_seen_in_full_is_no_longer_held_as_incomplete() {
+    // Root reads any folder.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    const NOT_FULLY: &str = "(not checked fully)";
+    let project = Project::new();
+    let worktree_git = project.git().join("worktrees/feature");
+    std::fs::create_dir_all(&worktree_git).expect("worktree git folder");
+    std::fs::write(worktree_git.join("HEAD"), "ref: refs/heads/feature\n").expect("HEAD");
+    std::fs::write(worktree_git.join("commondir"), "../..\n").expect("commondir");
+    let worktree = project.base.join("feature");
+    std::fs::create_dir_all(&worktree).expect("worktree");
+    let text = format!("gitdir: {}\n", worktree_git.display());
+    std::fs::write(worktree.join(".git"), &text).expect("git file");
+    let thread = ThreadId::new();
+    let old = repos(&[worktree.as_path()]);
+    assert_eq!(begin(thread, &old, "Moderate"), None);
+    // One command: `rm .git && git init`, and the old git folder made
+    // unreadable.
+    std::fs::remove_file(worktree.join(".git")).expect("removed");
+    let git = worktree.join(".git");
+    for folder in ["objects", "refs/heads"] {
+        std::fs::create_dir_all(git.join(folder)).expect("git folder");
+    }
+    std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").expect("HEAD");
+    let git = git.canonicalize().expect("canonical");
+    std::fs::set_permissions(&worktree_git, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    let found = kinds(&check(thread, &old));
+    let held_then = held_for(std::slice::from_ref(&git));
+    // The next look walks only the new git folder, in full.
+    let (_, held_now) = recheck(thread, "Moderate", &[worktree.as_path()]);
+    let main_held = project.held();
+    std::fs::set_permissions(&worktree_git, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    assert!(
+        found.contains(&format!("incomplete {}", worktree.join(".git").display())),
+        "{found:?}"
+    );
+    assert!(
+        held_then.iter().any(|held| held.ends_with(NOT_FULLY)),
+        "{held_then:?}"
+    );
+    assert!(
+        !held_now.iter().any(|held| held.ends_with(NOT_FULLY)),
+        "{held_now:?}"
+    );
+    assert!(
+        main_held.iter().any(|held| held.ends_with(NOT_FULLY)),
+        "{main_held:?}"
+    );
+    // Readable again and seen in full by a look at the main project (the
+    // replaced `.git` still holds it).
+    let (main_thread, main_repos) = (ThreadId::new(), project.repos());
+    assert_eq!(begin(main_thread, &main_repos, "Moderate"), None);
+    let main_held = project.held();
+    assert!(
+        !main_held.iter().any(|held| held.ends_with(NOT_FULLY)),
+        "{main_held:?}"
+    );
+}

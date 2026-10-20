@@ -960,8 +960,9 @@ struct Global {
     /// looked (`is_empty_stub`): any session's later look reports one once
     /// something is in it. Kept when a session forgets the repository.
     empty_new: HashSet<PathBuf>,
-    /// Repositories (by their git folders) whose latest look was
-    /// incomplete, and why.
+    /// Git folders (by repository) a look couldn't see all of, and why;
+    /// those a later look saw in full are taken out (#943 item 13: also
+    /// where that look walked other folders with them).
     incomplete: HashMap<Vec<PathBuf>, String>,
     uses: u64,
 }
@@ -1077,7 +1078,7 @@ pub(super) fn check(thread: ThreadId, repos: &[Repo]) -> Vec<Finding> {
 fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<Finding> {
     let mut findings = Vec::new();
     let mut held = Vec::new();
-    let mut incomplete = Vec::new();
+    let mut walked = Vec::new();
     for repo in repos {
         let slot = slot_of(thread, repo, used);
         let mut snapshot = slot.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1092,7 +1093,7 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
             if let Some(prev) = snapshot.as_mut() {
                 prev.went_missing = true;
             }
-            incomplete.push((repo.git_dirs.clone(), None));
+            walked.push(Walked::Gone(repo.git_dirs.clone()));
             continue;
         }
         // Made again or replaced (#943 reviews r4, r6): it may be another
@@ -1231,17 +1232,33 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
                 why: why.clone(),
             });
         }
-        incomplete.push((repo.git_dirs.clone(), cur.incomplete.clone()));
+        walked.push(match &cur.incomplete {
+            Some(why) => Walked::Incomplete(repo.git_dirs.clone(), why.clone()),
+            None => Walked::Complete(repo.git_dirs.clone()),
+        });
         findings.extend(found);
         *snapshot = Some(cur);
     }
     with_global(|global| {
-        for (git_dirs, why) in incomplete {
-            match why {
-                Some(why) => {
+        for look in walked {
+            match look {
+                Walked::Incomplete(git_dirs, why) => {
                     global.incomplete.insert(git_dirs, why);
                 }
-                None => {
+                // #943 item 13: the folders it saw in full are out of every
+                // entry, also one recorded under other git folders with
+                // them (before the `.git` was replaced, or by a look that
+                // walked the old and new ones).
+                Walked::Complete(git_dirs) => {
+                    global.incomplete = std::mem::take(&mut global.incomplete)
+                        .into_iter()
+                        .filter_map(|(mut dirs, why)| {
+                            dirs.retain(|dir| !git_dirs.contains(dir));
+                            (!dirs.is_empty()).then_some((dirs, why))
+                        })
+                        .collect();
+                }
+                Walked::Gone(git_dirs) => {
                     global.incomplete.remove(&git_dirs);
                 }
             }
@@ -1249,6 +1266,16 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
         global.held.extend(held);
     });
     findings
+}
+
+/// How a look at a repository went, for `Global::incomplete`.
+enum Walked {
+    /// Its git folders were seen in full.
+    Complete(Vec<PathBuf>),
+    /// Not, and why.
+    Incomplete(Vec<PathBuf>, String),
+    /// Its `.git` is gone: nothing to follow there.
+    Gone(Vec<PathBuf>),
 }
 
 /// What a `.git` made again (missing at the last look, now a different one)
