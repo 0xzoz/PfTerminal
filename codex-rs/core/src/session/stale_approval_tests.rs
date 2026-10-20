@@ -367,3 +367,67 @@ async fn issue_1001_strict_auto_review_ends_with_its_grant() {
     record(session.services.authority_marker()).await;
     assert!(session.strict_auto_review_enabled_for_turn().await);
 }
+
+/// D52 (#1001): a host allowed for good while Aggressive is in force is saved
+/// marked, so it applies under Aggressive; one allowed under a less strict
+/// level is saved unmarked; one answered before a transition saves nothing.
+#[tokio::test]
+async fn issue_1001_host_allowed_for_good_is_marked_only_under_aggressive() {
+    use codex_protocol::approvals::NetworkApprovalContext;
+    use codex_protocol::approvals::NetworkApprovalProtocol;
+    use codex_protocol::approvals::NetworkPolicyAmendment;
+    use codex_protocol::approvals::NetworkPolicyRuleAction;
+
+    let (session, _turn_context, _events) = make_session_and_context_with_rx().await;
+    let controller = initialize_policy(&session);
+    let codex_home = session.codex_home().await.to_path_buf();
+    std::fs::create_dir_all(&codex_home).unwrap();
+    let allow = async |host: &str, shown_under| {
+        session
+            .persist_network_policy_amendment(
+                &NetworkPolicyAmendment {
+                    host: host.to_string(),
+                    action: NetworkPolicyRuleAction::Allow,
+                },
+                &NetworkApprovalContext {
+                    host: host.to_string(),
+                    protocol: NetworkApprovalProtocol::Https,
+                },
+                Some(shown_under),
+                || {},
+            )
+            .await
+    };
+    let line_for = |host: &str| {
+        saved_rules(&codex_home)
+            .lines()
+            .find(|line| line.contains(host))
+            .map(str::to_string)
+    };
+    // The mark: `exec_policy::aggressive::APPROVED_UNDER_AGGRESSIVE`.
+    let mark = "Remembered while security level Aggressive was active.";
+
+    // Under Permissive: saved unmarked.
+    allow("permissive.example", session.services.authority_marker())
+        .await
+        .expect("saved");
+    let line = line_for("permissive.example").expect("saved");
+    assert!(!line.contains(mark), "{line}");
+
+    // Answered before a transition: nothing saved.
+    let before = session.services.authority_marker();
+    raise_level(&controller, SecurityLevel::Moderate);
+    assert!(allow("stale.example", before).await.is_err());
+    assert_eq!(line_for("stale.example"), None);
+
+    // Under Aggressive: saved marked.
+    let client = (*session.services.model_client())
+        .clone()
+        .with_ingress_level(SecurityLevel::Aggressive);
+    session.services.replace_model_client(client);
+    allow("aggressive.example", session.services.authority_marker())
+        .await
+        .expect("saved");
+    let line = line_for("aggressive.example").expect("saved");
+    assert!(line.contains(mark), "{line}");
+}
