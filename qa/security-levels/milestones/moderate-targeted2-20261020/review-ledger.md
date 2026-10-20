@@ -7,3 +7,6 @@ design, design review and evidence checks). Extensions only via qual-mod3.reques
 | --- | --- | --- | --- | --- |
 | 1 | Amendment v4 design (fresh read-only designer) | Opus 5.5 High, `corbanu exec -s read-only` | 2026-10-20T03:30:42Z (ended 03:34:22Z) | DESIGN: COMPLETE |
 | 2 | Amendment v4 review (fresh read-only reviewer) | Opus 5.5 High, `corbanu exec -s read-only` | 2026-10-20T03:35:52Z (ended 03:38:53Z) | VERDICT: CHANGES (its final v4 frozen word for word; not re-reviewed) |
+| 3 | Evidence check r1 (independent read-only) | Opus 5.5 High, `corbanu exec -s read-only`, on a copy of the record (check-r1) | (start) | (pending) |
+
+A first designer launch at 2026-10-20T03:26:19Z (background job) died before sending any request (empty events file, no output); it is not counted as a round.
