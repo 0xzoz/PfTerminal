@@ -2765,6 +2765,11 @@ fn issue_1028_glob_qualifiers_that_run_code_are_unseen_code() {
         ("zsh", "é(){ true; }; print -l /usr(+é)"),
         ("zsh", "print -l /usr(md+0e:'print x':)"),
         ("zsh", "print -l /usr(Lk+0e:'print x':)"),
+        // Review r6: multibyte delimiters, `8`/`9` as mode delimiters.
+        ("zsh", "print -l /etc(Pé-xée:print x:)"),
+        ("zsh", "print -l /etc(uérootée:print x:)"),
+        ("zsh", "print -l /etc(f8u+x8e:print x:)"),
+        ("zsh", "print -l /etc(f9a+r9e:print x:)"),
     ] {
         let found = kind(&[shell, "-c", line]);
         if found != Some(UnseenCode) {

@@ -2635,19 +2635,26 @@ fn qualifier_runs_code(list: &str) -> bool {
     let list = list.as_slice();
     // Past a delimited argument starting at `at` (the delimiter); `None`
     // when it never closes.
+    // The delimiter is a whole character, as zsh reads it (`Pé-xé`).
     let delimited = |at: usize| -> Option<usize> {
         let open = *list.get(at)?;
-        let close = match open {
-            b'(' => b')',
-            b'[' => b']',
-            b'{' => b'}',
-            b'<' => b'>',
-            other => other,
+        let width = match open {
+            0xf0.. => 4,
+            0xe0.. => 3,
+            0xc0.. => 2,
+            _ => 1,
         };
-        list[at + 1..]
-            .iter()
-            .position(|byte| *byte == close)
-            .map(|end| at + 1 + end + 1)
+        let close: &[u8] = match open {
+            b'(' => b")",
+            b'[' => b"]",
+            b'{' => b"}",
+            b'<' => b">",
+            _ => list.get(at..at + width)?,
+        };
+        list[at + width..]
+            .windows(close.len())
+            .position(|window| window == close)
+            .map(|end| at + width + end + close.len())
     };
     let digits = |mut at: usize| {
         let start = at;
@@ -2737,7 +2744,16 @@ fn qualifier_runs_code(list: &str) -> bool {
             // `=+-?` and digits or permission letters (`f+rw`, `f?644`), or
             // a spec delimited by any other character (`fu+xu`, `feu+xe`).
             b'f' => match list.get(at + 1) {
-                Some(next) if next.is_ascii_digit() => digits(at + 1).unwrap_or(at + 2),
+                Some(b'0'..=b'7') => {
+                    let mut next = at + 1;
+                    while list
+                        .get(next)
+                        .is_some_and(|byte| (b'0'..=b'7').contains(byte))
+                    {
+                        next += 1;
+                    }
+                    next
+                }
                 Some(b'=' | b'+' | b'-' | b'?') => match digits(at + 2) {
                     Some(next) => next,
                     None => {
