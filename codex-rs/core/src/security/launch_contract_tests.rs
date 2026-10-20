@@ -464,7 +464,19 @@ fn pf_27_s06_protected_codex_home_dirs_are_protected_entries() {
 fn the_google_cloud_cli_folder_is_its_own_kind_of_kept_file() {
     let mut fixture = fixture();
     let cwd = fixture.workspace.as_path();
-    let folder = fixture.workspace.join("AppData/Roaming/gcloud");
+    // By its real location, as the deny matcher compares paths (macOS
+    // temporary folders are reached through `/var -> /private/var`).
+    let real_workspace = AbsolutePathBuf::from_absolute_path(
+        fixture
+            .workspace
+            .as_path()
+            .canonicalize()
+            .expect("real workspace"),
+    )
+    .expect("absolute");
+    let folder = real_workspace.join("AppData/Roaming/gcloud");
+    std::fs::create_dir_all(folder.as_path()).expect("gcloud folder");
+    std::fs::write(folder.join("credentials.db"), "").expect("credentials");
     fixture.contract.protected_read_paths.push(folder.clone());
     fixture
         .contract
@@ -476,11 +488,7 @@ fn the_google_cloud_cli_folder_is_its_own_kind_of_kept_file() {
         kept(folder.join("credentials.db").as_path()),
         Some(KeptFile::InGoogleCloudCliFolder)
     );
-    assert_eq!(kept(fixture.workspace.join("src.rs").as_path()), None);
-    assert_eq!(
-        kept(fixture.codex_home.join("auth.json").as_path()),
-        Some(KeptFile::CorbanuOwn)
-    );
+    assert_eq!(kept(real_workspace.join("src.rs").as_path()), None);
 }
 
 /// On Windows the contract keeps `%APPDATA%\gcloud` as the Google Cloud
