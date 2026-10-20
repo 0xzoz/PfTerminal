@@ -35,7 +35,7 @@
    "disposition": "passed",
    "evidence": "runs/R02/collected/evidence/result.md; runs/R02/product-excerpt.txt",
    "issues": [],
-   "summary": "Child started with the agent tools on the local model attempted all three steps: outside write failed after approval (Moderate reason), credential read prompted with a security reason, config read denied after approval; outside-notes.txt unchanged; inspector lists the child at Moderate."
+   "summary": "Child started with the agent tools on the local model attempted all three steps: outside write failed after approval (Moderate reason), credential read prompted with a security reason, config read denied after approval; outside-notes.txt unchanged; inspector lists the child at Moderate. Disclosure: action 1 was sent without v5's 'leave it open' sentence; the tester cancelled the parent's close as v5 says, so no result depends on it."
   }
  ],
  "combined_if_counted": {
