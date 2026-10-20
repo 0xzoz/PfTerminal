@@ -1268,3 +1268,36 @@ fn issue_943_an_overlapping_look_does_not_clear_another_incomplete_one() {
         "{held:?}"
     );
 }
+
+/// #943 item 13 review r2: a worktree's look walks its git folder from its
+/// own depth; where the project's git folder alone is nested too deep below
+/// it, that look doesn't clear the project's incomplete entry.
+#[test]
+fn issue_943_a_worktree_look_does_not_clear_a_too_deep_project() {
+    const NOT_FULLY: &str = "(not checked fully)";
+    let project = Project::new();
+    let git = project.git();
+    let worktree_git = git.join("worktrees/feature");
+    std::fs::create_dir_all(&worktree_git).expect("worktree git folder");
+    std::fs::write(worktree_git.join("HEAD"), "ref: refs/heads/feature\n").expect("HEAD");
+    std::fs::write(worktree_git.join("commondir"), "../..\n").expect("commondir");
+    // 17 levels below the project's git folder, 15 below the worktree's.
+    let deep = (0..13).fold(worktree_git.join("logs/refs"), |dir, _| dir.join("x"));
+    std::fs::create_dir_all(&deep).expect("deep folders");
+    let worktree = project.base.join("feature");
+    std::fs::create_dir_all(&worktree).expect("worktree");
+    std::fs::write(
+        worktree.join(".git"),
+        format!("gitdir: {}\n", worktree_git.display()),
+    )
+    .expect("git file");
+    let found = kinds(&check(ThreadId::new(), &project.repos()));
+    assert_eq!(found, vec![format!("incomplete {}", git.display())]);
+    let worktree_found = kinds(&check(ThreadId::new(), &repos(&[worktree.as_path()])));
+    assert_eq!(worktree_found, Vec::<String>::new());
+    let held = project.held();
+    assert!(
+        held.iter().any(|held| held.ends_with(NOT_FULLY)),
+        "{held:?}"
+    );
+}

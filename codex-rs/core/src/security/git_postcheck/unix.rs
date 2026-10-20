@@ -2,6 +2,7 @@ use codex_protocol::ThreadId;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
+use std::collections::hash_map;
 use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::io::Read;
@@ -1265,15 +1266,7 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
                 // Where git folders overlap in other roles, only its own
                 // entry (as before #943 item 13).
                 None if cur.overlapping => Walked::Exact(repo.git_dirs.clone()),
-                // Every folder it listed as a git folder (its own, its
-                // worktrees' and submodules') was seen in full.
-                None => Walked::Complete(
-                    cur.folders
-                        .iter()
-                        .filter(|(_, folder)| folder.role == Role::GitDir)
-                        .map(|(dir, _)| dir.clone())
-                        .collect(),
-                ),
+                None => Walked::Complete(seen_in_full(&cur)),
             },
             started,
         ));
@@ -1284,23 +1277,39 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
         for (look, started) in walked {
             match look {
                 Walked::Incomplete(git_dirs, why) => {
-                    let entry = global.incomplete.entry(git_dirs).or_insert((why, started));
-                    entry.1 = entry.1.max(started);
+                    let entry = global
+                        .incomplete
+                        .entry(git_dirs)
+                        .or_insert((why.clone(), started));
+                    if entry.1 <= started {
+                        *entry = (why, started);
+                    }
                 }
                 // #943 item 13: the folders it saw in full are out of every
                 // entry recorded before it started, also one recorded under
                 // other git folders with them (before the `.git` was
                 // replaced, or by a look that walked the old and new ones).
                 Walked::Complete(seen) => {
-                    global.incomplete = std::mem::take(&mut global.incomplete)
-                        .into_iter()
-                        .filter_map(|(mut dirs, (why, at))| {
-                            if at < started {
-                                dirs.retain(|dir| !seen.contains(dir));
+                    let mut kept: HashMap<Vec<PathBuf>, (String, u64)> = HashMap::new();
+                    for (mut dirs, (why, at)) in std::mem::take(&mut global.incomplete) {
+                        if at < started {
+                            dirs.retain(|dir| !seen.contains(dir));
+                        }
+                        if dirs.is_empty() {
+                            continue;
+                        }
+                        // Two entries left the same: the later one's.
+                        match kept.entry(dirs) {
+                            hash_map::Entry::Occupied(mut entry) if entry.get().1 < at => {
+                                entry.insert((why, at));
                             }
-                            (!dirs.is_empty()).then_some((dirs, (why, at)))
-                        })
-                        .collect();
+                            hash_map::Entry::Occupied(_) => {}
+                            hash_map::Entry::Vacant(entry) => {
+                                entry.insert((why, at));
+                            }
+                        }
+                    }
+                    global.incomplete = kept;
                 }
                 Walked::Exact(git_dirs) => {
                     if global
@@ -1316,6 +1325,30 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
         global.held.extend(held);
     });
     findings
+}
+
+/// The git folders a complete look saw as a look of each alone would (#943
+/// item 13 review r2): every folder it listed in the git folder role, but
+/// one with a folder below it as deep as a look of it alone stops at (a
+/// git folder nested in another's tree is walked from its own depth), and
+/// a home folder or file system root (never looked at in full). Where it
+/// reached a folder again in another role, none (`Snapshot::overlapping`).
+fn seen_in_full(cur: &Snapshot) -> Vec<PathBuf> {
+    let home = dirs::home_dir().and_then(|home| std::fs::canonicalize(home).ok());
+    let depth = |dir: &Path| dir.components().count();
+    cur.folders
+        .iter()
+        .filter(|(dir, folder)| {
+            folder.role == Role::GitDir
+                && dir.parent().is_some()
+                && Some(*dir) != home.as_ref()
+                && cur
+                    .folders
+                    .keys()
+                    .all(|below| !below.starts_with(dir) || depth(below) - depth(dir) < MAX_DEPTH)
+        })
+        .map(|(dir, _)| dir.clone())
+        .collect()
 }
 
 /// How a look at a repository went, for `Global::incomplete`.
