@@ -142,7 +142,7 @@ pub(super) fn prompt_expansion(text: &str) -> bool {
 /// Whether text may use zsh glob substitution (#1084), under which zsh
 /// reads a value as a pattern, glob qualifiers included, so the value can
 /// run code (`*(e:code:)`): `$~x`, `${~x}`, `$^~x`, `${(f)~x}` (a flag
-/// group counts when a later `~` does not start a word), the `GLOB_SUBST`
+/// group counts when any `~` follows it), the `GLOB_SUBST`
 /// option in any spelling (zsh ignores case and underscores: `setopt glob_subst`,
 /// `zsh -o GLOBSUBST`, `options[globsubst]=on`), a write to zsh's
 /// `options` array, or `ARGV0` (a zsh started as `csh` or `sh` turns the
@@ -166,27 +166,12 @@ pub(super) fn glob_substitution(text: &str) -> bool {
             .any(|text| substitutes_globs(text) || writes_options(text))
 }
 
-/// `$~x`, `${~x}`, `$^~x`, or a `${(flags)...}` followed later by a `~`
-/// that is not a home folder (`${(s"}")~x}`, `${(@)=~x}`; `${(j:,:)a}
-/// ~/dir` does not count). Linear.
+/// `$~x`, `${~x}`, `$^~x`, or a `${(flags)...}` with any `~` after it on
+/// the line: the `~` flag may sit anywhere in the group, after any
+/// delimiter (`${(s:,:~pj:$x:)a}`, `${(@)=~x}`), so a later home folder
+/// (`${(f)x} ~/dir`) counts too. Linear.
 fn substitutes_globs(text: &str) -> bool {
-    let bytes = text.as_bytes();
-    // The last `~` that is not a home folder at the start of a word or
-    // after `=`/`:` (`--home=~/x`); one in a run of flags after `)`, `{` or
-    // `$` counts (`${(@)=~x}`). Runs are read back at most 16 bytes.
-    let Some(last) = (0..bytes.len()).rev().find(|&at| {
-        if bytes[at] != b'~' || at == 0 || matches!(bytes[at - 1], b' ' | b'\t' | b'\n') {
-            return false;
-        }
-        if !matches!(bytes[at - 1], b'=' | b':') {
-            return true;
-        }
-        let mut start = at;
-        while start > 0 && at - start < 16 && b"^=~#+".contains(&bytes[start - 1]) {
-            start -= 1;
-        }
-        at - start >= 16 || start == 0 || matches!(bytes[start - 1], b')' | b'{' | b'$')
-    }) else {
+    let Some(last) = text.rfind('~') else {
         return false;
     };
     text.match_indices('$').any(|(at, _)| {

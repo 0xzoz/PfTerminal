@@ -2958,6 +2958,10 @@ fn issue_1084_glob_substitution_is_unseen_code() {
         ("zsh", "x=$(cat notes); print -l ${(f)^=~x}"),
         ("zsh", "x=$(cat notes); print -l ${(s: :)=~x}"),
         ("zsh", "print -l ${(@)=~NOTES}"),
+        // Review r5: the `~` flag inside the group, after any delimiter.
+        ("zsh", "x=$(cat notes); print -r -- ${(s:,:~pj:$x:)a}"),
+        ("zsh", "x=$(cat notes); print -r -- ${(s , ~pj:$x:)a}"),
+        ("zsh", "x=$(cat notes); print -r -- ${(s=,=~pj:$x:)a}"),
         // zmv globs its pattern as `${~pat}`.
         ("zsh", "autoload zmv; zmv -n \"$(cat notes)\" x"),
         ("zsh", "p=$(cat notes); zmv -p echo -- $p x"),
@@ -2994,15 +2998,14 @@ fn issue_1084_glob_substitution_is_unseen_code() {
             wrong.push(format!("{shell}: {line:?} -> {found:?}"));
         }
     }
-    // A flag group counts when a `~` follows it inside its braces (other
-    // checks may still ask on such a group).
+    // A flag group counts when any `~` follows it on the line (other checks
+    // may also ask on such a group); a home folder alone does not.
     assert!(shell::glob_substitution("print ${(j:,:)~arr}"));
     assert!(shell::glob_substitution("print ${(s\"}\")~arr}"));
-    assert!(!shell::glob_substitution("print ${(j:,:)arr} ~/dir"));
+    assert!(shell::glob_substitution("print ${(s:,:~pj:$x:)a}"));
+    assert!(shell::glob_substitution("print ${(j:,:)arr} ~/dir"));
     assert!(!shell::glob_substitution("print ${(j:,:)arr}"));
-    assert!(!shell::glob_substitution(
-        "print ${(j:,:)arr} --home=~/x a:~/b"
-    ));
+    assert!(!shell::glob_substitution("print $arr --home=~/x a:~/b ~"));
     // A script file read by a zsh.
     let root = tempfile::tempdir().expect("tempdir");
     let cwd = root.path().to_string_lossy().into_owned();
