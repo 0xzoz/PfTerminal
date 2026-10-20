@@ -2501,6 +2501,58 @@ fn lists_attached(text: &str, skip_arithmetic: bool) -> Vec<Range<usize>> {
     lists
 }
 
+/// Bare qualifier text with arithmetic expansions (`$((...))`) and
+/// neutral facts (`$(date +%s)`) read as `0`. `None` when another
+/// substitution's output (chosen by whatever it reads) would be read.
+/// Linear: each substitution is skipped once.
+fn neutral_expansions(list: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(list.len());
+    let mut at = 0;
+    while at < list.len() {
+        let arithmetic = list[at..].starts_with(b"$((");
+        let substitution =
+            list[at] == b'`' || (list[at] == b'$' && list.get(at + 1) == Some(&b'('));
+        if !substitution {
+            out.push(list[at]);
+            at += 1;
+            continue;
+        }
+        let end = if list[at] == b'`' {
+            at + 1 + list[at + 1..].iter().position(|byte| *byte == b'`')? + 1
+        } else {
+            let mut depth = 0_usize;
+            let mut end = None;
+            for (offset, byte) in list[at + 1..].iter().enumerate() {
+                match byte {
+                    b'(' => depth += 1,
+                    b')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = Some(at + 1 + offset + 1);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            end?
+        };
+        let span = &list[at..end];
+        let neutral = if arithmetic {
+            // Its own expansions are read like any other.
+            !span[3..].contains(&b'$') && !span.contains(&b'`')
+        } else {
+            only_facts(&String::from_utf8_lossy(span))
+        };
+        if !neutral {
+            return None;
+        }
+        out.push(b'0');
+        at = end;
+    }
+    Some(out)
+}
+
 /// Where the group whose `(` is just before `start` ends when quotes and
 /// backslashes are read: at the first `)` outside them and outside nested
 /// groups. `None` when it does not end within `MAX_QUOTED_GROUP` bytes,
@@ -2555,6 +2607,21 @@ fn qualifier_runs_code(list: &str) -> bool {
         }
         bare
     };
+    // zsh expands the word before reading qualifiers, so an expansion
+    // anywhere (`P:$x:`, `u$x`, `[$x]`) may become code: only arithmetic
+    // (a number) and neutral facts are read on, as `0`. Brace expansion
+    // (`{e,u}:code:`) may also form one.
+    let Some(list) = neutral_expansions(&list) else {
+        return true;
+    };
+    if list.contains(&b'$') || list.contains(&b'`') {
+        return true;
+    }
+    if let Some(open) = list.iter().position(|byte| *byte == b'{')
+        && (list[open..].contains(&b',') || list[open..].windows(2).any(|pair| pair == b".."))
+    {
+        return true;
+    }
     let list = list.as_slice();
     // Past a delimited argument starting at `at` (the delimiter); `None`
     // when it never closes.
@@ -2589,24 +2656,11 @@ fn qualifier_runs_code(list: &str) -> bool {
         at = match byte {
             // Code between delimiters: zsh rejects it left open, and empty
             // code runs nothing.
-            // An expanded delimiter or code (`e$x`).
-            b'e' if matches!(list.get(at + 1), Some(b'$' | b'`')) => return true,
             b'e' => match delimited(at + 1) {
                 Some(next) if next > at + 3 => return true,
                 Some(next) => next,
                 None => return false,
             },
-            // An arithmetic result is a number, which zsh rejects here.
-            b'$' if list[at..].starts_with(b"$((") => return false,
-            // A substitution's output: a neutral fact's (`$(date +%s)`) is
-            // not chosen by anyone; zsh parses it no further than its
-            // first rejected character.
-            b'$' if list.get(at + 1) == Some(&b'(') => {
-                return !only_facts(&String::from_utf8_lossy(&list[at..]));
-            }
-            b'`' => return !only_facts(&String::from_utf8_lossy(&list[at..])),
-            // A parameter's value.
-            b'$' => return true,
             b'+' => {
                 return list
                     .get(at + 1)
@@ -2669,19 +2723,21 @@ fn qualifier_runs_code(list: &str) -> bool {
                 Some(next) => next,
                 None => return false,
             },
-            // A mode: octal or symbolic (`f?755`, `fu+x`), else delimited
-            // by its first character (`feu+xe`).
+            // A mode, as zsh reads it: octal digits (`f644`), one of
+            // `=+-?` and digits or permission letters (`f+rw`, `f?644`), or
+            // a spec delimited by any other character (`fu+xu`, `feu+xe`).
             b'f' => match list.get(at + 1) {
-                Some(next) if b"01234567ugoa+-=?".contains(next) => {
-                    let mut next = at + 1;
-                    while list
-                        .get(next)
-                        .is_some_and(|byte| b"01234567ugoa+-=?rwxXst,".contains(byte))
-                    {
-                        next += 1;
+                Some(next) if next.is_ascii_digit() => digits(at + 1).unwrap_or(at + 2),
+                Some(b'=' | b'+' | b'-' | b'?') => match digits(at + 2) {
+                    Some(next) => next,
+                    None => {
+                        let mut next = at + 2;
+                        while list.get(next).is_some_and(|byte| b"rwxXst".contains(byte)) {
+                            next += 1;
+                        }
+                        next
                     }
-                    next
-                }
+                },
                 _ => match delimited(at + 1) {
                     Some(next) => next,
                     None => return false,
@@ -2710,12 +2766,8 @@ fn qualifier_runs_code(list: &str) -> bool {
                 }
             }
             b'%' => at + 1 + usize::from(matches!(list.get(at + 1), Some(b'b' | b'c'))),
-            // Modifiers follow; none of them runs code, but an expansion
-            // in them may still be read as qualifiers.
-            b':' => {
-                return list[at..].iter().any(|byte| matches!(byte, b'$' | b'`'))
-                    && !only_facts(&String::from_utf8_lossy(&list[at..]));
-            }
+            // Modifiers follow; none of them runs code.
+            b':' => return false,
             b'/' | b'.' | b'@' | b'=' | b'p' | b'*' | b'r' | b'w' | b'x' | b'A' | b'I' | b'E'
             | b'R' | b'W' | b'X' | b's' | b'S' | b't' | b'F' | b'N' | b'D' | b'n' | b'M' | b'T'
             | b'U' | b'G' | b'^' | b'-' | b',' | b'q' => at + 1,

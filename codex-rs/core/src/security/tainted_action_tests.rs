@@ -2738,6 +2738,24 @@ fn issue_1028_glob_qualifiers_that_run_code_are_unseen_code() {
         ("zsh", "print -r -- /([a[1]+1]e:'print x':)"),
         ("zsh", "function 9 { true; }; print -r -- /(+9)"),
         ("zsh", "print -r -- /(f?e:'print x':)"),
+        // Review r4: expansions inside arguments, brace expansion, modes
+        // as zsh reads them.
+        ("zsh", "x='a:e:print x:'; print -l /(P:$x:)"),
+        ("zsh", "print -l /(u$x)"),
+        ("zsh", "print -l /(Y$x)"),
+        ("zsh", "print -l /(o$x)"),
+        ("zsh", "print -l /(oe$x)"),
+        ("zsh", "print -l /([$x])"),
+        ("zsh", "print -l /(a+$((0))e:print x:)"),
+        ("zsh", "print -l /(a$(cat notes))"),
+        ("zsh", "print -l /(u`cat notes`)"),
+        ("zsh", "print -l /etc/host?({e,u}:print x:)"),
+        ("zsh", "print -l /etc/host?(N{e:print x:,})"),
+        ("zsh", "print -l /(f644+f)"),
+        ("zsh", "print -l /(f+r+f)"),
+        ("zsh", "print -l /(f?644+f)"),
+        ("zsh", "print -l /(fau+ra+f)"),
+        ("zsh", "print -l /(f644o+f)"),
     ] {
         let found = kind(&[shell, "-c", line]);
         if found != Some(UnseenCode) {
