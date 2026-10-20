@@ -1089,10 +1089,13 @@ pub(crate) fn record_permission_refusal(session: &Session) {
 
 /// #1087: the explanation for an in-process file tool's read of `path` (the
 /// image tool's) that the protected-path rules refused where the tool's own
-/// permissions allow it: under Moderate or Aggressive, it names the level as
-/// a refused command does (#442, #748), and is listed under the inspector's
-/// recent denials (#622, #839). `own` is the tool's sandbox context before
-/// the rules, `protected` after them. Explanation only.
+/// permissions allow it, or that the secretless launch contract keeps
+/// unreadable where the person's own permissions allow it: under Moderate
+/// or Aggressive, it names the level as a refused command does (#442, #748;
+/// a path the contract keeps is attributed to it under Moderate, as there),
+/// and is listed under the inspector's recent denials (#622, #839). `own` is
+/// the tool's sandbox context before the rules (the contract's denials
+/// included), `protected` after them. Explanation only.
 pub(crate) async fn file_tool_denial_explanation(
     session: &Session,
     turn: &TurnContext,
@@ -1117,37 +1120,18 @@ pub(crate) async fn file_tool_denial_explanation(
         .as_ref()
         .and_then(|cwd| cwd.to_abs_path().ok())
         .unwrap_or_else(|| inputs.turn_cwd.clone());
+    let contract = super::launch_contract::active();
     let path = path.to_path_buf();
     let found = off_thread(move || {
-        let cwd = cwd.as_path();
-        let refused = !super::protected_surface::readable_under(&protected_policy, &path, cwd)
-            && super::protected_surface::readable_under(&own_policy, &path, cwd);
-        if !refused {
-            return None;
-        }
-        let shown = path.display().to_string();
-        Some(if level == SecurityLevel::Aggressive {
-            let note = ProtectedNote::Read(shown);
-            (note.inspected(), None, note.explanation())
-        } else if ReadDenials::is_security_file(
-            &inputs.codex_home,
-            inputs.user_home.as_deref(),
+        explain_file_tool_denial(
+            level,
+            &inputs,
+            contract,
+            &own_policy,
+            &protected_policy,
+            cwd.as_path(),
             &path,
-        ) {
-            let (what, outcome) = moderate::Denied::SecurityFile.inspected();
-            (
-                what,
-                Some(outcome),
-                moderate::security_file_explanation(&shown, moderate::WayForward::Permissive),
-            )
-        } else {
-            let (what, outcome) = moderate::Denied::Read.inspected();
-            (
-                what,
-                Some(outcome),
-                moderate::read_explanation(&shown, moderate::WayForward::Permissive),
-            )
-        })
+        )
     })
     .await;
     let (what, outcome, explanation) = found?;
@@ -1156,6 +1140,53 @@ pub(crate) async fn file_tool_denial_explanation(
         None => super::inspection::record_sandbox_denial(session.thread_id(), what),
     }
     Some(explanation)
+}
+
+/// See [`file_tool_denial_explanation`]: what was denied (for the
+/// inspector, with `None` for Aggressive's sandbox-denial outcome) and the
+/// explanation.
+fn explain_file_tool_denial(
+    level: SecurityLevel,
+    inputs: &ReadPolicyInputs,
+    contract: Option<&super::launch_contract::LaunchContract>,
+    own_policy: &FileSystemSandboxPolicy,
+    protected_policy: &FileSystemSandboxPolicy,
+    cwd: &Path,
+    path: &Path,
+) -> Option<(&'static str, Option<&'static str>, String)> {
+    let readable = |policy: &FileSystemSandboxPolicy| {
+        super::protected_surface::readable_under(policy, path, cwd)
+    };
+    // The person's own permissions, without the contract or the rules.
+    let person = moderate::own_profile(inputs).file_system_sandbox_policy();
+    let kept =
+        contract.is_some_and(|contract| contract.keeps_unreadable(path, cwd)) && readable(&person);
+    let refused = !readable(protected_policy) && readable(own_policy);
+    if !kept && !refused {
+        return None;
+    }
+    let shown = path.display().to_string();
+    Some(if level == SecurityLevel::Aggressive {
+        let note = ProtectedNote::Read(shown);
+        (note.inspected(), None, note.explanation())
+    } else if kept {
+        let (what, outcome) = moderate::Denied::KeptRead.inspected();
+        (what, Some(outcome), moderate::kept_read_explanation(&shown))
+    } else if ReadDenials::is_security_file(&inputs.codex_home, inputs.user_home.as_deref(), path) {
+        let (what, outcome) = moderate::Denied::SecurityFile.inspected();
+        (
+            what,
+            Some(outcome),
+            moderate::security_file_explanation(&shown, moderate::WayForward::Permissive),
+        )
+    } else {
+        let (what, outcome) = moderate::Denied::Read.inspected();
+        (
+            what,
+            Some(outcome),
+            moderate::read_explanation(&shown, moderate::WayForward::Permissive),
+        )
+    })
 }
 
 /// Shows `explanation` to the person as a warning beside the failed command.

@@ -157,7 +157,7 @@ impl ViewImageHandler {
         let fs = turn_environment.environment.get_filesystem();
         // #1087: a read the protected-path rules refused says so, naming the
         // level, to the person and to the model.
-        let refused = |message: String| async {
+        let explain_error = |message: String| async {
             let explanation = match path_uri.to_abs_path() {
                 Ok(path) if !turn_environment.environment.is_remote() => {
                     crate::security::protected_reads::file_tool_denial_explanation(
@@ -181,7 +181,7 @@ impl ViewImageHandler {
         let metadata = match fs.get_metadata(&path_uri, Some(&sandbox)).await {
             Ok(metadata) => metadata,
             Err(error) => {
-                return Err(refused(format!(
+                return Err(explain_error(format!(
                     "unable to locate image at `{model_visible_path}`: {error}"
                 ))
                 .await);
@@ -196,7 +196,7 @@ impl ViewImageHandler {
         let file_bytes = match fs.read_file(&path_uri, Some(&sandbox)).await {
             Ok(bytes) => bytes,
             Err(error) => {
-                return Err(refused(format!(
+                return Err(explain_error(format!(
                     "unable to read image at `{model_visible_path}`: {error}"
                 ))
                 .await);

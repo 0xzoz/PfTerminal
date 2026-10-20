@@ -299,7 +299,7 @@ fn explain_denied(
 
 /// The person's own permissions for the command: the profile without
 /// Moderate's rules, with the project roots as the sandbox resolves them.
-fn own_profile(inputs: &ReadPolicyInputs) -> PermissionProfile {
+pub(super) fn own_profile(inputs: &ReadPolicyInputs) -> PermissionProfile {
     inputs
         .profile
         .clone()
