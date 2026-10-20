@@ -288,3 +288,75 @@ fn issue_839_explained_denials_say_what_was_denied() {
         )
     );
 }
+
+/// #1087 (MOD-09 item 5): an in-process file tool's read (the image tool's)
+/// that Moderate's rules refused names Moderate; one the secretless launch
+/// contract keeps (already in the tool's own permissions) is attributed to
+/// the contract, as for a command; what neither refused, such as a project
+/// file the contract's fail-closed profile denies, is not explained.
+#[test]
+fn issue_1087_file_tool_denials_name_the_level() {
+    use codex_security_policy::SecurityLevel;
+    let fixture = Fixture::new();
+    let inputs = fixture.inputs(Fixture::profile());
+    let own = Fixture::profile().file_system_sandbox_policy();
+    let protected = inputs
+        .denials()
+        .apply(&inputs.profile)
+        .expect("the rules apply")
+        .file_system_sandbox_policy();
+    let denied_all = FileSystemSandboxPolicy::restricted(Vec::new());
+    let contract = fixture.contract();
+    let auth = fixture.home.join("auth.json");
+    let shown = auth.display().to_string();
+    let image = fixture.project.join("a.png");
+    let explain =
+        |level, contract: Option<&LaunchContract>, own: &FileSystemSandboxPolicy, path: &Path| {
+            super::super::explain_file_tool_denial(
+                level,
+                &inputs,
+                contract,
+                own,
+                &protected,
+                &fixture.project,
+                path,
+            )
+        };
+
+    assert_eq!(
+        explain(SecurityLevel::Moderate, None, &own, &auth),
+        Some((
+            "reading a protected file",
+            Some("denied by the sandbox under Moderate"),
+            read_explanation(&shown, WayForward::Permissive),
+        ))
+    );
+    assert_eq!(explain(SecurityLevel::Moderate, None, &own, &image), None);
+    assert_eq!(
+        explain(SecurityLevel::Moderate, Some(&contract), &denied_all, &auth),
+        Some((
+            "reading Corbanu's own files or CLI tokens",
+            Some(
+                "denied by the sandbox; secretless agent launch keeps it at every level, even when you approve"
+            ),
+            kept_read_explanation(&shown),
+        ))
+    );
+    assert_eq!(
+        explain(
+            SecurityLevel::Moderate,
+            Some(&contract),
+            &denied_all,
+            &image
+        ),
+        None
+    );
+    assert_eq!(
+        explain(SecurityLevel::Aggressive, None, &own, &auth),
+        Some((
+            "reading a protected file",
+            None,
+            super::super::explanation(&shown),
+        ))
+    );
+}
