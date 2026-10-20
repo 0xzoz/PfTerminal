@@ -8,6 +8,7 @@ use super::unix::report;
 use super::*;
 use codex_protocol::ThreadId;
 use pretty_assertions::assert_eq;
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::fs::symlink;
 use std::path::Path;
@@ -1151,4 +1152,106 @@ fn issue_943_the_command_folder_is_not_left_out_by_the_cap() {
         held,
         vec![last.git().join("COMMIT_EDITMSG").display().to_string()]
     );
+}
+
+/// A linked worktree of `project` named `feature`, its git folder's
+/// `commondir` holding `commondir`.
+fn add_worktree(project: &Project, commondir: &str) -> (PathBuf, PathBuf, String) {
+    let worktree_git = project.git().join("worktrees/feature");
+    std::fs::create_dir_all(&worktree_git).expect("worktree git folder");
+    std::fs::write(worktree_git.join("HEAD"), "ref: refs/heads/feature\n").expect("HEAD");
+    std::fs::write(worktree_git.join("commondir"), commondir).expect("commondir");
+    let worktree = project.base.join("feature");
+    std::fs::create_dir_all(&worktree).expect("worktree");
+    let text = format!("gitdir: {}\n", worktree_git.display());
+    std::fs::write(worktree.join(".git"), &text).expect("git file");
+    (worktree, worktree_git, text)
+}
+
+/// #943 item 12: a worktree's `.git` file seen missing and back as the same
+/// one (moved back here; on Linux a new file can also get the freed inode
+/// number), whose git folder was added again with a `commondir` naming
+/// another folder, gets a full look: the `commondir` is reported.
+#[test]
+fn issue_943_a_git_file_back_as_the_same_one_with_another_commondir() {
+    let project = Project::new();
+    let (worktree, worktree_git, _) = add_worktree(&project, "../..\n");
+    let thread = ThreadId::new();
+    let repos = repos(&[worktree.as_path()]);
+    assert_eq!(begin(thread, &repos, "Moderate"), None);
+    let aside = project.base.join("aside");
+    std::fs::create_dir(&aside).expect("aside");
+    std::fs::rename(worktree.join(".git"), aside.join("git-file")).expect("moved aside");
+    std::fs::rename(&worktree_git, aside.join("git-folder")).expect("moved aside");
+    assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
+    std::fs::create_dir_all(&worktree_git).expect("worktree git folder");
+    std::fs::write(worktree_git.join("HEAD"), "ref: refs/heads/feature\n").expect("HEAD");
+    std::fs::write(
+        worktree_git.join("commondir"),
+        format!("{}\n", project.outside.display()),
+    )
+    .expect("commondir");
+    std::fs::rename(aside.join("git-file"), worktree.join(".git")).expect("moved back");
+    let found = kinds(&check(thread, &repos));
+    assert!(
+        found.contains(&format!(
+            "config {}",
+            worktree_git.join("commondir").display()
+        )),
+        "{found:?}"
+    );
+}
+
+/// #943 item 12: a worktree removed and added again, its `commondir`
+/// through a link to the common folder (which could lead elsewhere later),
+/// is reported also where the new `.git` file gets the old one's inode
+/// number (Linux reuses a freed one at once), told apart by when it was
+/// made.
+#[test]
+fn issue_943_a_worktree_added_again_on_a_reused_inode() {
+    let project = Project::new();
+    let (worktree, worktree_git, text) = add_worktree(&project, "../..\n");
+    let link = project.outside.join("common-link");
+    symlink(project.git(), &link).expect("link");
+    let thread = ThreadId::new();
+    let repos = repos(&[worktree.as_path()]);
+    assert_eq!(begin(thread, &repos, "Moderate"), None);
+    let mut reused = 0;
+    for round in 0..8 {
+        // Its git folder moved aside (its inode stays taken), the `.git`
+        // file deleted: the freed inode is the one the next file may get.
+        std::fs::rename(&worktree_git, project.base.join(format!("aside-{round}")))
+            .expect("moved aside");
+        let old = std::fs::symlink_metadata(worktree.join(".git"))
+            .expect("git file")
+            .ino();
+        std::fs::remove_file(worktree.join(".git")).expect("removed");
+        assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
+        std::fs::write(worktree.join(".git"), &text).expect("added again");
+        std::fs::create_dir_all(&worktree_git).expect("worktree git folder");
+        std::fs::write(worktree_git.join("HEAD"), "ref: refs/heads/feature\n").expect("HEAD");
+        std::fs::write(
+            worktree_git.join("commondir"),
+            format!("{}\n", link.display()),
+        )
+        .expect("commondir");
+        let new = std::fs::symlink_metadata(worktree.join(".git"))
+            .expect("git file")
+            .ino();
+        reused += usize::from(new == old);
+        let found = kinds(&check(thread, &repos));
+        assert!(
+            found.contains(&format!(
+                "config {}",
+                worktree_git.join("commondir").display()
+            )),
+            "round {round}, inode reused: {}: {found:?}",
+            new == old
+        );
+    }
+    // How often the case under test came up (Linux reuses freed inodes).
+    #[allow(clippy::print_stderr)]
+    {
+        eprintln!("the .git file got its old inode number back {reused} of 8 times");
+    }
 }
