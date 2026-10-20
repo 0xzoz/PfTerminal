@@ -115,11 +115,11 @@ impl SecurityInspector {
                     .bold()
                     .into()
             }
-            Badge::Stale(level, age) => format!(
-                "◌ {level} set; this view is stale (status observed {age})"
-            )
-            .cyan()
-            .into(),
+            Badge::Stale(level, age) => {
+                format!("◌ {level} set; this view is stale (status observed {age})")
+                    .cyan()
+                    .into()
+            }
             Badge::Blocked(reason) => format!("■ Blocked: {reason}").red().bold().into(),
         };
         lines.extend(word_wrap_lines([badge_line], width));
