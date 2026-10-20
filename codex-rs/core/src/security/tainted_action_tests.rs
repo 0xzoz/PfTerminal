@@ -2946,6 +2946,13 @@ fn issue_1084_glob_substitution_is_unseen_code() {
         ),
         ("bash", "exec -acsh zsh ./run.zsh"),
         ("bash", "env -a csh zsh ./run.zsh"),
+        // Review r3: option names built by brace ranges or globs.
+        ("zsh", "setopt glob{s..s}ubst; x=$(cat notes); print -l $x"),
+        ("zsh", "setopt GLOB_S{U..U}BST; x=$(cat notes); print -l $x"),
+        ("zsh", "set -o glob_{s..s}ubst; x=$(cat notes); print -l $x"),
+        ("bash", "zsh -o glob{s..s}ubst ./run.zsh"),
+        ("zsh", "setopt glob?subst; x=$(cat notes); print -l $x"),
+        ("zsh", "setopt [g]lob_subst; x=$(cat notes); print -l $x"),
         // zmv globs its pattern as `${~pat}`.
         ("zsh", "autoload zmv; zmv -n \"$(cat notes)\" x"),
         ("zsh", "p=$(cat notes); zmv -p echo -- $p x"),

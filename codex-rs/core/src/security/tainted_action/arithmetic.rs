@@ -1967,13 +1967,18 @@ fn braced(content: &str) -> (Option<&str>, bool) {
 }
 
 /// Whether a command may turn on zsh options the reader cannot name
-/// (#1084): `setopt`/`unsetopt` with an expanded name or by pattern (`-m`),
-/// `set`, `emulate` or a zsh with an expanded option or `-o` value, or
+/// (#1084): `setopt`/`unsetopt` with an expanded name, one built by a
+/// brace range or glob (`glob{s..s}ubst`, `glob?subst`) or by pattern
+/// (`-m`), `set`, `emulate` or a zsh with such an option or `-o` value, or
 /// `emulate` (also `zsh --emulate`) in a mode other than zsh: `csh`, `ksh`
 /// and `sh` turn on `GLOB_SUBST`. Also `zmv`, `zcp` and `zln` with an
 /// expanded pattern, which they glob as `${~pat}`.
 fn sets_unnamed_options(name: &str, args: &[String]) -> bool {
     let expanded = |word: &str| word.contains(['$', '`']) || word.contains(shell::UNSEEN_OUTPUT);
+    // The lexer drops braces but keeps a range's `..`.
+    let unnamed = |word: &str| {
+        expanded(word) || word.contains(['{', '}', '*', '?', '[', '<', '(']) || word.contains("..")
+    };
     let name = shell::basename(name);
     if matches!(name, "zmv" | "zcp" | "zln") {
         let mut words = args.iter();
@@ -1996,7 +2001,7 @@ fn sets_unnamed_options(name: &str, args: &[String]) -> bool {
     if matches!(name, "setopt" | "unsetopt") {
         return args
             .iter()
-            .any(|word| expanded(word) || (word.starts_with(['-', '+']) && word.contains('m')));
+            .any(|word| unnamed(word) || (word.starts_with(['-', '+']) && word.contains('m')));
     }
     if !matches!(name, "set" | "emulate" | "zsh" | "-zsh") {
         return false;
@@ -2029,7 +2034,7 @@ fn sets_unnamed_options(name: &str, args: &[String]) -> bool {
             }
             break;
         }
-        if expanded(word) {
+        if unnamed(word) {
             return true;
         }
         if let Some(long) = word.strip_prefix("--") {
@@ -2045,7 +2050,7 @@ fn sets_unnamed_options(name: &str, args: &[String]) -> bool {
         }
         script_next |= name != "set" && !emulate && word.starts_with('-') && word.contains('c');
         // `-o NAME` and clusters ending in `o` take the next word.
-        if word.ends_with('o') && words.next().is_some_and(|value| expanded(value)) {
+        if word.ends_with('o') && words.next().is_some_and(|value| unnamed(value)) {
             return true;
         }
     }
