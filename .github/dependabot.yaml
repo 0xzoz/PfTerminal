@@ -1,5 +1,8 @@
 # https://docs.github.com/en/code-security/dependabot/working-with-dependabot/dependabot-options-reference#package-ecosystem-
 
+# The Rust toolchain (codex-rs/rust-toolchain.toml) is not tracked here on purpose:
+# it is pinned in many places (workflows, MODULE.bazel, dev scripts) that must move
+# together, so toolchain bumps are done by hand in one PR (#1002, D45).
 version: 2
 updates:
   - package-ecosystem: bun
@@ -30,12 +33,6 @@ updates:
       default-days: 7
   - package-ecosystem: github-actions
     directory: /
-    schedule:
-      interval: weekly
-    cooldown:
-      default-days: 7
-  - package-ecosystem: rust-toolchain
-    directory: codex-rs
     schedule:
       interval: weekly
     cooldown:
