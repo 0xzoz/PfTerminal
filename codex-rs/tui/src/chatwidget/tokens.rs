@@ -2565,8 +2565,10 @@ enum BucketProgress {
     /// Still running: everything recorded up to this coverage end.
     InProgress(i64),
     /// A whole requested bucket has all its recorded detail through this
-    /// inclusive checkpoint, even if the calendar interval has already ended
-    /// or its first request has not been recorded yet.
+    /// inclusive checkpoint as of this read, even if the calendar interval
+    /// has already ended or its first request has not been recorded yet. A
+    /// request dispatched at or before the checkpoint can still be written
+    /// later (#1009), so this holds only as of the read.
     RecordedThrough(i64),
     /// Starts after the read time.
     NotStarted,
@@ -2636,7 +2638,7 @@ fn in_progress_line(end: i64) -> String {
 
 fn recorded_through_line(checkpoint: i64) -> String {
     format!(
-        "Recorded through ledger checkpoint: {}",
+        "Recorded through ledger checkpoint: {} (as of this read)",
         utc_instant(checkpoint)
     )
 }
@@ -2686,6 +2688,10 @@ fn range_pages(
             })
         })
         .collect::<Vec<_>>();
+    let complete = buckets.iter().zip(&progress).all(|(b, progress)| {
+        progress.is_some()
+            || (!b.partial && b.days.iter().all(|d| matches!(d, InspectionDay::Ready(_))))
+    });
     // Every day shares one checkpoint. A verified checkpoint-only tail names
     // the recorded cutoff instead of implying missing recorded requests.
     let checkpoint_limited = progress.iter().any(|p| {
@@ -2746,10 +2752,6 @@ fn range_pages(
     pages[0].text.extend(scope::other_conversations_lines(
         /*others*/ None, /*named*/ false,
     ));
-    let complete = buckets.iter().zip(&progress).all(|(b, progress)| {
-        progress.is_some()
-            || (!b.partial && b.days.iter().all(|d| matches!(d, InspectionDay::Ready(_))))
-    });
     if complete {
         if let Some(end) = progress
             .iter()
@@ -2796,6 +2798,19 @@ fn range_pages(
             }
         }
     } else {
+        // #1009: the not-current notice is left out for a checkpoint-limited
+        // range, so the overview names the cutoff here too.
+        if let Some(checkpoint) = progress
+            .iter()
+            .filter_map(|p| match p {
+                Some(BucketProgress::InProgress(end)) => Some(*end - 1),
+                Some(BucketProgress::RecordedThrough(checkpoint)) => Some(*checkpoint),
+                Some(BucketProgress::NotStarted) | None => None,
+            })
+            .max()
+        {
+            pages[0].text.push(recorded_through_line(checkpoint));
+        }
         pages[0].text.push(
             "Range total unavailable — partial or unavailable buckets excluded; no partial total."
                 .into(),
