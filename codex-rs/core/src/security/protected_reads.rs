@@ -42,6 +42,7 @@ use codex_protocol::protocol::WarningEvent;
 use codex_security_policy::SecurityLevel;
 use codex_utils_absolute_path::AbsolutePathBuf;
 
+use super::launch_contract::KeptFile;
 use super::protected_surface::ReadDenials;
 use super::tainted_action::PolicyBinding;
 use super::tainted_action::USER_PERSISTENCE;
@@ -982,48 +983,66 @@ pub(crate) async fn protected_note_in_command(
     .await
 }
 
-/// #841: under Moderate with the secretless launch contract, what a person
-/// is told before approving a protected action that reads files the
-/// contract keeps unreadable at every level (Corbanu's sign-in, vault,
-/// config, history): approving runs the command but cannot unlock them.
-pub(crate) const MODERATE_KEPT_READ_NOTE: &str = "Corbanu's own files this command reads (its sign-in, vault, config or history) stay unreadable to agent commands even if you approve (secretless agent launch), so approving cannot unlock them.";
+/// #841, #1077: under Moderate with the secretless launch contract, what a
+/// person is told before approving a protected action that reads a file the
+/// contract keeps unreadable at every level (a CLI token, the keychains, or
+/// Corbanu's sign-in, vault, config or history): the file, what it is, and
+/// that approving runs the command but cannot unlock it.
+pub(crate) fn moderate_kept_read_note(path: &str, kept: KeptFile) -> String {
+    let what = match kept {
+        KeptFile::CliToken => "is a CLI token",
+        KeptFile::Keychain => "is part of your keychains",
+        KeptFile::CorbanuOwn => {
+            "is one of Corbanu's own files (its sign-in, vault, config or history)"
+        }
+    };
+    format!(
+        "`{}` {what}: secretless agent launch keeps it unreadable to agent commands at every \
+         security level, even if you approve, so approving cannot unlock it. If you approve, \
+         the command runs, but that read fails.",
+        shown_path(path)
+    )
+}
 
-/// #841: whether, under Moderate with the secretless launch contract,
-/// `command` names a path the contract keeps unreadable at every level.
-pub(crate) async fn moderate_kept_read_in_command(
+/// #841: under Moderate with the secretless launch contract, the note for
+/// `command` when it names a path the contract keeps unreadable at every
+/// level ([`moderate_kept_read_note`]).
+pub(crate) async fn moderate_kept_read_note_for_command(
     session: &Session,
     turn: &TurnContext,
     command: &[String],
     cwd: &Path,
-) -> bool {
-    let Some(contract) = super::launch_contract::active() else {
-        return false;
-    };
-    let Some(inputs) = ReadPolicyInputs::capture_at(session, turn, SecurityLevel::Moderate) else {
-        return false;
-    };
+) -> Option<String> {
+    let contract = super::launch_contract::active()?;
+    let inputs = ReadPolicyInputs::capture_at(session, turn, SecurityLevel::Moderate)?;
     let (command, cwd) = (command.to_vec(), cwd.to_path_buf());
-    off_thread(move || Some(kept_read_named(&inputs, contract, &command, &cwd)))
-        .await
-        .is_some_and(|named| named)
+    off_thread(move || kept_read_note(&inputs, contract, &command, &cwd)).await
 }
 
-/// See [`moderate_kept_read_in_command`].
-fn kept_read_named(
+/// See [`moderate_kept_read_note_for_command`]: the first word naming a kept
+/// path, as the command spelled it.
+fn kept_read_note(
     inputs: &ReadPolicyInputs,
     contract: &super::launch_contract::LaunchContract,
     command: &[String],
     cwd: &Path,
-) -> bool {
-    denied_word(
+) -> Option<String> {
+    let found = std::cell::Cell::new(None);
+    let word = denied_word(
         command,
         cwd,
         inputs.user_home.as_deref(),
         &inputs.codex_home,
-        |path| contract.keeps_unreadable(path, cwd),
+        |path| {
+            let kept = contract.kept_file(path, cwd);
+            if kept.is_some() {
+                found.set(kept);
+            }
+            kept.is_some()
+        },
         /*denial_lines*/ None,
-    )
-    .is_some()
+    )?;
+    Some(moderate_kept_read_note(&word, found.get()?))
 }
 
 /// Issue #245: under Aggressive, the explanation for a request whose own

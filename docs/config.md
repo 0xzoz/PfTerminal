@@ -237,8 +237,17 @@ the levels protect and their limits are on
 
 With `secretless_agent_launch` on, every agent command runs inside the OS
 sandbox, with only allowlisted environment variables, and can't read
-Corbanu's vault, sign-in files or config. Nothing runs outside the sandbox at
-any level. At Permissive, Corbanu therefore doesn't offer it (#739):
+Corbanu's vault, sign-in files, config or history, or these CLI tokens:
+`~/.netrc`, `~/.git-credentials`, `~/.config/gh/hosts.yml`,
+`~/.aws/credentials`, `~/.docker/config.json`, `~/.npmrc` and Claude's
+sign-in (`~/.claude/.credentials.json`, or `.credentials.json` in
+`CLAUDE_CONFIG_DIR`); on macOS also `~/Library/Keychains`, and on Windows
+also `_netrc` in your profile folder, the GitHub CLI's `hosts.yml` and
+`gcloud` in `%APPDATA%`, and Cargo's `credentials.toml` and `credentials`.
+Approving a command never unlocks these, at any level; under Moderate the
+approval prompt names such a file and says so. Nothing runs outside the
+sandbox at any level. At Permissive, Corbanu therefore doesn't offer it
+(#739):
 
 - A command that asks to run outside the sandbox isn't run, and you aren't
   asked. Corbanu says it isn't possible here. (If your own permission profile
