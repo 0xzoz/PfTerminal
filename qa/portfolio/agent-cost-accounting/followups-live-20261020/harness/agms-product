@@ -4,7 +4,8 @@
 #   agms-product --exec ROUTE MODEL [ARGS...]     `corbanu exec` on the same profile and project
 #   agms-product --realtime openai MODEL TEXT      acc-tart1: one realtime session through `corbanu app-server`
 #                                                  (S09's driver), after an API-key sign-in with the placeholder;
-#                                                  MODEL is the thread's text model, so its warm-up is cheap (#1045)
+#                                                  MODEL is also the thread's text model; its startup warm-up runs on it
+#                                                  (#1045, after the acc-tart1 run)
 # AGMS_PROVIDER_NAME (moonshot route only) names the person-configured provider (default kimi).
 set -u
 R="${AGMS_ROOT:-/opt/agms}"

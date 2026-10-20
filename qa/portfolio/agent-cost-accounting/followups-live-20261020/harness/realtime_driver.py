@@ -15,7 +15,7 @@ usage: realtime_driver.py <corbanu> <workspace> [--transport websocket|webrtc --
 acc-tart1 (2026-10-20): --config passes `-c KEY=VALUE` to `corbanu app-server` (the harness turns the
 realtime feature on and keeps the profile's file credential store and log folder this way).
 
-#1045 (2026-10-20): --thread-model sends `model` on `thread/start`. The app server warms a new thread up on
+#1045 (after the acc-tart1 run; not used in it): --thread-model sends `model` on `thread/start`. The app server warms a new thread up on
 its text model before realtime starts; without it that warm-up ran on the default GPT-6 Sol (~$0.03).
 `--model` stays the realtime session's model.
 """
