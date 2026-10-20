@@ -107,7 +107,7 @@ async fn confirm_aggressive(test: &TestCodex) -> anyhow::Result<LevelChangeRepor
 }
 
 /// #978: a person confirms Aggressive where the confirming session's policy
-/// does not run in this process (no thread yet, or a Claude pane): Core's
+/// does not run in this process (no thread yet): Core's
 /// stored record is committed, and the commit raises this process's sessions.
 async fn confirm_aggressive_without_a_live_tree(
     test: &TestCodex,
@@ -172,7 +172,7 @@ enum Confirm {
     No,
     /// In this session's `/security`.
     InThisSession,
-    /// #978: where no live tree runs (another pane of this process).
+    /// #978: where no live tree runs (no thread yet).
     WithoutALiveTree,
 }
 
@@ -257,9 +257,9 @@ async fn issue_505_confirming_aggressive_requires_a_persons_approval_at_once() -
     Ok(())
 }
 
-/// #978: the same when the person confirmed where no live tree runs (a
-/// Claude pane, or before the first session started): the commit raises this
-/// process's running session, which then takes approval for every command.
+/// #978: the same when the person confirmed where no live tree runs (no
+/// thread yet): the commit raises this process's running session, which then
+/// takes approval for every command.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn issue_978_aggressive_confirmed_without_a_live_tree_requires_approval_here()
 -> anyhow::Result<()> {

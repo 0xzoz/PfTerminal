@@ -337,13 +337,15 @@ fn security_transition_downgrade_of_the_record_sets_the_next_start() {
 }
 
 /// #978: Aggressive confirmed where the confirming session's policy does not
-/// run in this process (not started yet, or a Claude pane) still raises the
+/// run in this process (its session not started yet) still raises the
 /// other sessions of this process on the home, so they, and sessions started
 /// here later, take approval for every command (#505) as with a live tree.
 #[test]
 fn issue_978_aggressive_without_a_live_tree_requires_approval_in_this_process() {
     let home = TempDir::new().unwrap();
+    assert!(!sessions_run_here(home.path()));
     let (other, _) = live_tree(&home, SecurityLevel::Permissive);
+    assert!(sessions_run_here(home.path()));
     assert!(!super::super::confirmed_approvals::confirmed_here(
         home.path()
     ));

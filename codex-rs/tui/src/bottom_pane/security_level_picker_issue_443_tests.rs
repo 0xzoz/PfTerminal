@@ -140,9 +140,10 @@ fn issue_443_review_without_a_live_tree_waits_for_the_restart() {
         review.contains("Core's level becomes Aggressive from the next start"),
         "{review}"
     );
-    // #978
+    // #978: no session of this process runs on the home (as with a remote
+    // app server): nothing is claimed for other sessions.
     assert!(
-        review.contains("Other sessions of this Corbanu Terminal running on this Corbanu home take it as soon as you confirm, with approval for every command from their next turn."),
+        !review.contains("The other sessions of this Corbanu Terminal"),
         "{review}"
     );
 }
@@ -189,6 +190,26 @@ fn issue_978_saved_without_a_live_tree_names_the_other_sessions() {
     insta::assert_snapshot!(
         "issue_978_saved_aggressive_without_a_live_tree",
         render(&picker, /*width*/ 80)
+    );
+
+    // Review r1 nits: not saved, no "from every start"; chosen again, the
+    // sessions below it are named.
+    let report = |kind, not_saved: Option<&str>| LevelChangeReport {
+        kind,
+        in_force: SecurityLevel::Aggressive,
+        next_start: SecurityLevel::Aggressive,
+        live: false,
+        other_sessions: true,
+        not_saved: not_saved.map(str::to_string),
+        approvals: None,
+    };
+    assert_eq!(
+        core_outcome_line(&report(LevelChangeKind::Stricter, Some("disk full"))),
+        "Core's level is Aggressive now in the other sessions of this Corbanu Terminal."
+    );
+    assert_eq!(
+        core_outcome_line(&report(LevelChangeKind::Unchanged, /*not_saved*/ None)),
+        "Core's level: Aggressive, now also in the other sessions of this Corbanu Terminal that were below it."
     );
 }
 

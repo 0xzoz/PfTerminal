@@ -10,6 +10,9 @@ that is not known read-only (reviewer: you), now in 2 threads of this Corbanu
 Terminal and in those you start before you restart.
 Core's level is Aggressive now in the other sessions of this Corbanu Terminal,
 and from every start.
+Other Corbanu Terminals running on this Corbanu home take Core's Aggressive
+protections and approval for every command within about a second and say so; the
+rest of Aggressive starts there when they restart.
 Press r to restart now: Corbanu Terminal closes this session and starts again in
 this folder with the same options. Conversations from before cannot be resumed
 under Aggressive.

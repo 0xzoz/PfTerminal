@@ -127,6 +127,14 @@ impl LevelBasis {
     }
 }
 
+/// #978: whether sessions of this process run on `codex_home`, so a
+/// confirmation reaches them now even when the confirming session's own
+/// policy does not run here (no thread yet). False with a
+/// remote app server: its sessions run in another process.
+pub fn sessions_run_here(codex_home: &Path) -> bool {
+    super::transition::trees_run_on(codex_home)
+}
+
 /// Whether a downgrade to `target` rewrites `[security] level` in the user's
 /// `config.toml` (it sets a stricter level there).
 pub fn downgrade_rewrites_user_config(codex_home: &Path, target: SecurityLevel) -> bool {
