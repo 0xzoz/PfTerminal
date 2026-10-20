@@ -47,6 +47,8 @@ const NOTHING_REMOVED: &str = "Nothing was removed";
 
 struct Run {
     warnings: Vec<String>,
+    /// How many of `warnings` came before the first approval prompt.
+    warned_before_asked: usize,
     asked: usize,
     requests: Vec<ResponsesRequest>,
 }
@@ -152,6 +154,7 @@ async fn run_in(
         })
         .await?;
     let mut warnings = Vec::new();
+    let mut warned_before_asked = 0;
     let mut asked = 0;
     loop {
         match wait_for_event(&test.codex, |event| {
@@ -163,6 +166,9 @@ async fn run_in(
         .await
         {
             EventMsg::ExecApprovalRequest(approval) => {
+                if asked == 0 {
+                    warned_before_asked = warnings.len();
+                }
                 asked += 1;
                 test.codex
                     .submit(Op::ExecApproval {
@@ -179,6 +185,11 @@ async fn run_in(
     // The test (and its project folder) lives until the caller has looked.
     Ok((
         Run {
+            warned_before_asked: if asked == 0 {
+                warnings.len()
+            } else {
+                warned_before_asked
+            },
             warnings,
             asked,
             requests: captured.requests(),
@@ -512,6 +523,78 @@ async fn issue_943_a_command_in_another_repository_is_checked() -> anyhow::Resul
                 "planted={planted}: reported={reported} held={held} asked={} warnings={:?} \
                  read={read}",
                 run.asked, run.warnings
+            ));
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
+/// #943 item 17: what was left in a repository's `.git` before this session
+/// (before Corbanu started, say) is looked at before the session's first
+/// command there is decided: it is reported before the person is asked, and
+/// their approval doesn't lift the protected-file rules for that command (it
+/// does where nothing was left). Under the workspace sandbox `.git` stays
+/// read-only: nothing is looked at there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_943_left_before_the_session_holds_its_first_approval() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let mut wrong = Vec::new();
+    // (setting, planted, held)
+    for (setting, planted, held) in [
+        (Setting::FullAccess, false, false),
+        (Setting::FullAccess, true, true),
+        (Setting::Workspace, true, false),
+    ] {
+        let outside = TempDir::new()?;
+        let outside_path = outside.path().canonicalize()?;
+        std::fs::write(outside_path.join("zshrc"), "# start-up\n")?;
+        let other = TempDir::new()?;
+        let other_path = other.path().canonicalize()?;
+        init_git(&other_path)?;
+        let link = other_path.join(".git").join("COMMIT_EDITMSG");
+        if planted {
+            std::os::unix::fs::symlink(outside_path.join("zshrc"), &link)?;
+        }
+        let home = Arc::new(TempDir::new()?);
+        let auth = home.path().canonicalize()?.join("auth.json");
+        std::fs::write(&auth, CANARY)?;
+        let (run, _) = Box::pin(run(
+            SecurityLevel::Moderate,
+            setting,
+            home,
+            vec![step(
+                "call-read",
+                json!({
+                    "command": format!("cat '{}'", auth.display()),
+                    "workdir": other_path.display().to_string(),
+                    "sandbox_permissions": "require_escalated",
+                    "justification": "check the sign-in",
+                }),
+            )],
+        ))
+        .await?;
+        let link_shown = link.display().to_string();
+        let reported_before_asked = run.warnings[..run.warned_before_asked]
+            .iter()
+            .any(|warning| {
+                warning.contains(NOTHING_REMOVED) && warning.contains(&format!("rm '{link_shown}'"))
+            });
+        let held_note = run.warnings.iter().any(|warning| {
+            warning.contains("doesn't lift the protected-file rules")
+                && warning.contains(&link_shown)
+        });
+        let read = output(&run.requests, "call-read");
+        if run.asked == 0
+            || reported_before_asked != held
+            || held_note != held
+            || read.contains(CANARY) == held
+        {
+            wrong.push(format!(
+                "{setting:?} planted={planted}: asked={} warned_before_asked={} warnings={:?} \
+                 read={read}",
+                run.asked, run.warned_before_asked, run.warnings
             ));
         }
     }

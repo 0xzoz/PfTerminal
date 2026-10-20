@@ -8,10 +8,10 @@
 //! or sequencer steps whose `exec` lines `git rebase --continue` runs, a
 //! legacy remote definition (`remotes/`, `branches/`), or a replaced `.git`.
 //!
-//! It looks before the session's first such command, after each one, before
-//! each later command is decided and when a turn ends, and compares the
-//! relevant `.git` entries with the last look. Anything new of those
-//! kinds is reported to the person with how to remove it; nothing is
+//! It looks before the session's first such command is decided (#943 item
+//! 17), after each one, before each later command is decided and when a turn
+//! ends, and compares the relevant `.git` entries with the last look.
+//! Anything new of those kinds is reported to the person with how to remove it; nothing is
 //! removed. Until it is removed (and while a look is incomplete), a person's
 //! approval does not lift the protected-file rules (`recheck`), so an
 //! approved `git commit` cannot write through a planted link into a

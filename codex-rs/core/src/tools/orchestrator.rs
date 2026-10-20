@@ -457,6 +457,52 @@ impl ToolOrchestrator {
             persistence_note = liftable
                 .map(|path| protected_additional::persistence_note(&path.display().to_string()));
         }
+        // #943 item 17: under Moderate or Aggressive, a repository this
+        // session hasn't looked at yet, whose git folder this run may write,
+        // gets its first look before anyone decides the run: what was left
+        // there before (before Corbanu started, say) is told first and holds
+        // the approval (`git_refresh`). Judged before the protected-file rules
+        // apply (they only narrow what the run may write), and anywhere the
+        // run may leave the sandbox.
+        let git_first_look_failed =
+            match crate::security::protected_additional::protected_level(&tool_ctx.session) {
+                Some(level) if level != codex_security_policy::SecurityLevel::Permissive => {
+                    let effective =
+                        codex_sandboxing::policy_transforms::effective_file_system_sandbox_policy(
+                            &file_system_sandbox_policy,
+                            tool.additional_permissions(req),
+                        );
+                    let leaves_first = !moderate_keeps_sandbox
+                        && matches!(
+                            sandbox_override_for_first_attempt(
+                                tool.sandbox_permissions(req),
+                                &requirement,
+                                &file_system_sandbox_policy,
+                            ),
+                            SandboxOverride::BypassSandboxFirstAttempt
+                        );
+                    let unsandboxed = leaves_first
+                        || self.sandbox.select_initial(
+                            &permissions,
+                            tool.sandbox_preference(),
+                            turn_ctx.windows_sandbox_level,
+                            turn_ctx.network.is_some(),
+                        ) == SandboxType::None
+                        || (!moderate_keeps_sandbox
+                            && unsandboxed_execution_allowed(&file_system_sandbox_policy));
+                    GitCheck::first_look(
+                        tool_ctx,
+                        level,
+                        git_check_folders(tool, req, turn_ctx, &materialized_workspace_roots),
+                        tool.command_cwd(req).map(|cwd| cwd.to_path_buf()),
+                        effective,
+                        unsandboxed,
+                    )
+                    .await
+                    .is_err()
+                }
+                _ => false,
+            };
         if let Some(action) = &post_taint {
             if let Some(refusal) = action.refused_up_front() {
                 post_taint_outcome(
@@ -856,7 +902,11 @@ impl ToolOrchestrator {
         let mut git_folders =
             resolution_folders(tool, req, &turn_cwd, &materialized_workspace_roots);
         git_folders.extend(tool.command_cwd(req));
-        let git_held = git_refresh(tool_ctx, git_folders).await;
+        let mut git_held = git_refresh(tool_ctx, git_folders).await;
+        // A failed first look (above) holds it too.
+        if git_first_look_failed {
+            git_held.push("(the check failed)".to_string());
+        }
         let mut git_held_back = false;
         let denied = post_taint_read_denials(
             tool_ctx,
@@ -1117,19 +1167,8 @@ impl ToolOrchestrator {
         let git_check =
             match crate::security::protected_additional::protected_level(&tool_ctx.session) {
                 Some(level) if level != codex_security_policy::SecurityLevel::Permissive => {
-                    // The sandbox's working folder first: the probes resolve
-                    // against it, as the sandbox does.
-                    let mut folders = Vec::new();
-                    if let Ok(policy_cwd) = sandbox_policy_cwd.to_abs_path() {
-                        folders.push(policy_cwd.to_path_buf());
-                    }
-                    #[allow(deprecated)]
-                    folders.push(turn_ctx.cwd.to_path_buf());
-                    folders.extend(
-                        materialized_workspace_roots
-                            .iter()
-                            .map(codex_utils_absolute_path::AbsolutePathBuf::to_path_buf),
-                    );
+                    let folders =
+                        git_check_folders(tool, req, turn_ctx, &materialized_workspace_roots);
                     let effective =
                         codex_sandboxing::policy_transforms::effective_file_system_sandbox_policy(
                             &file_system_sandbox_policy,
@@ -1511,9 +1550,27 @@ impl GitCheck {
         policy: codex_protocol::permissions::FileSystemSandboxPolicy,
         unsandboxed: bool,
     ) -> Option<Self> {
+        let repos = Self::first_look(tool_ctx, level, folders, command_cwd, policy, unsandboxed)
+            .await
+            .ok()?;
+        (!repos.is_empty()).then_some(Self { repos, level })
+    }
+
+    /// Those repositories, with this session's first look at each taken
+    /// where it has none yet; `Err` (the person told) where the look failed.
+    async fn first_look(
+        tool_ctx: &ToolCtx,
+        level: codex_security_policy::SecurityLevel,
+        folders: Vec<std::path::PathBuf>,
+        command_cwd: Option<std::path::PathBuf>,
+        policy: codex_protocol::permissions::FileSystemSandboxPolicy,
+        unsandboxed: bool,
+    ) -> Result<Vec<crate::security::git_postcheck::Repo>, ()> {
         use crate::security::git_postcheck;
         let thread = tool_ctx.session.thread_id();
-        let cwd = folders.first()?.clone();
+        let Some(cwd) = folders.first().cloned() else {
+            return Ok(Vec::new());
+        };
         let level_name = format!("{level:?}");
         // Issue #524: reading folders stays off the async thread.
         let looked = tokio::task::spawn_blocking(move || {
@@ -1536,14 +1593,14 @@ impl GitCheck {
         // the person is told, and the next command looks again.
         let Ok((repos, message)) = looked else {
             warn(tool_ctx, GIT_CHECK_FAILED).await;
-            return None;
+            return Err(());
         };
         // What a session's first look finds there already (planted before,
         // or by a process left running) is told too.
         if let Some(message) = message {
             warn(tool_ctx, &message).await;
         }
-        (!repos.is_empty()).then_some(Self { repos, level })
+        Ok(repos)
     }
 
     /// After an attempt: tell the person what is new there.
@@ -2363,6 +2420,35 @@ fn deny_user_namespaces(
         &file_system,
         network,
     )
+}
+
+/// #874: the folders whose repositories the git check watches for a run:
+/// the sandbox's working folder first (the probes resolve against it, as the
+/// sandbox does), the turn's folder and the workspace roots.
+fn git_check_folders<Rq, Out, T>(
+    tool: &T,
+    req: &Rq,
+    turn_ctx: &crate::session::turn_context::TurnContext,
+    workspace_roots: &[codex_utils_absolute_path::AbsolutePathBuf],
+) -> Vec<std::path::PathBuf>
+where
+    T: ToolRuntime<Rq, Out>,
+{
+    #[allow(deprecated)]
+    let turn_cwd = turn_ctx.cwd.to_path_buf();
+    let mut folders = Vec::new();
+    match tool.sandbox_cwd(req).map(PathUri::to_abs_path) {
+        Some(Ok(cwd)) => folders.push(cwd.to_path_buf()),
+        Some(Err(_)) => {}
+        None => folders.push(turn_cwd.clone()),
+    }
+    folders.push(turn_cwd);
+    folders.extend(
+        workspace_roots
+            .iter()
+            .map(codex_utils_absolute_path::AbsolutePathBuf::to_path_buf),
+    );
+    folders
 }
 
 /// Issue #245: every folder the sandbox may resolve a relative or
