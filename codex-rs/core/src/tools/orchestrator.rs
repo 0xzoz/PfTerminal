@@ -425,6 +425,9 @@ impl ToolOrchestrator {
             }
             && moderate_escalation_before_taint(tool, req, tool_ctx, &requirement);
         let mut escalation_approved_by_human = false;
+        // D27 (a): the person was warned in that prompt that approving lets
+        // the run create user namespaces.
+        let mut user_namespaces_warned = false;
         match &requirement {
             _ if post_taint.is_some() => {}
             _ if ask_human_to_escalate => {
@@ -453,9 +456,17 @@ impl ToolOrchestrator {
                         _ => None,
                     },
                 };
-                // #826: and that what needs a user namespace fails on Linux.
-                let note = match user_namespaces_note(tool, req, tool_ctx, turn_ctx) {
-                    Some((user_namespaces, _)) => format!("{note} {user_namespaces}"),
+                // D27 (a): on Linux, approving also lets this one run create
+                // user namespaces, and the person is warned (only a run whose
+                // prompt showed it may); elsewhere (#826), that what needs one
+                // fails.
+                let warning =
+                    crate::security::user_namespaces::one_run_warning(&tool_ctx.session, turn_ctx);
+                user_namespaces_warned = warning.is_some();
+                let note = match warning.or_else(|| {
+                    user_namespaces_note(tool, req, tool_ctx, turn_ctx).map(|(note, _)| note)
+                }) {
+                    Some(user_namespaces) => format!("{note} {user_namespaces}"),
                     None => note,
                 };
                 approval_ctx.retry_reason = Some(match why {
@@ -667,24 +678,50 @@ impl ToolOrchestrator {
         // #826 (Travis, 2026-10-15): under Moderate and Aggressive (also
         // where only the launch enforces Aggressive) agent commands may not
         // create user namespaces, in which they could open what the Linux
-        // sandbox hides and defeat nested-launch detection. No approval or
-        // grant lifts it. Permissive is unchanged.
-        let (denied_exec_server_permissions, permissions) =
-            if crate::security::user_namespaces::rule_applies(
+        // sandbox hides and defeat nested-launch detection. No grant lifts
+        // it. Permissive is unchanged.
+        // D27 (a) (Travis, 2026-10-19, security sign-off): but for one run
+        // under Moderate whose request to run outside the sandbox a person
+        // approved when asked now, before untrusted content, after the
+        // prompt warned them. Never a remembered answer; never under
+        // Aggressive.
+        let launch_enforces_aggressive = turn_ctx.config.permissions.launch_enforces_aggressive();
+        let user_namespaces_allowed = crate::security::user_namespaces::allows_one_run(
+            &tool_ctx.session,
+            protected_level,
+            launch_enforces_aggressive,
+            escalation_approved_by_human
+                && user_namespaces_warned
+                && approved_by == Some(ApprovalResolutionSource::User),
+        );
+        if user_namespaces_allowed {
+            crate::security::user_namespaces::note_allowed_run(
+                tool_ctx.session.thread_id(),
+                &turn_ctx.sub_id,
+                &tool_ctx.call_id,
+            );
+            tracing::info!(
+                target: "codex_core::security::tainted_action",
+                call_id = %tool_ctx.call_id,
+                "user namespaces allowed for this run by the person's approval of its request to run outside the sandbox (Moderate)"
+            );
+        }
+        let (denied_exec_server_permissions, permissions) = if !user_namespaces_allowed
+            && crate::security::user_namespaces::rule_applies(
                 protected_level,
-                turn_ctx.config.permissions.launch_enforces_aggressive(),
+                launch_enforces_aggressive,
             ) {
-                (
-                    Some(deny_user_namespaces(
-                        denied_exec_server_permissions
-                            .as_ref()
-                            .unwrap_or(permission_profile),
-                    )),
-                    deny_user_namespaces(&permissions),
-                )
-            } else {
-                (denied_exec_server_permissions, permissions)
-            };
+            (
+                Some(deny_user_namespaces(
+                    denied_exec_server_permissions
+                        .as_ref()
+                        .unwrap_or(permission_profile),
+                )),
+                deny_user_namespaces(&permissions),
+            )
+        } else {
+            (denied_exec_server_permissions, permissions)
+        };
         let permission_profile = denied_exec_server_permissions
             .as_ref()
             .unwrap_or(permission_profile);

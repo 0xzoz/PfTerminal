@@ -134,7 +134,10 @@ own a command is root over its own files: it could open the placeholders the
 sandbox hides the vault store and other denied files with, and mount over
 paths, so a nested `corbanu exec` wouldn't be recognised as nested. The rule
 covers every process in Corbanu's Linux sandbox, bubblewrap's own included.
-No grant or approval lifts it; Permissive is unchanged. Contained Claude
+No grant or approval lifts it under Aggressive, or where the launch enforces
+Aggressive; under Moderate a person can allow it for one command whose
+request to run outside the sandbox they approve, with a warning (D27, see
+[Moderate](security-moderate.md#limits)). Permissive is unchanged. Contained Claude
 panes get the rule too (#891). Commands that run without Corbanu's sandbox
 (an external sandbox) and a remote Linux executor used from macOS or Windows
 aren't covered.
@@ -251,3 +254,23 @@ Moderate's rules don't cover run without one; choose a sandbox in your
 settings to keep every command in it. Where the sandbox can't start (for
 example Linux without user namespaces), commands fail under Moderate instead
 of running outside it.
+
+## Other Corbanu Terminals on the same home
+
+When you confirm Aggressive, other Corbanu Terminals running on the same
+Corbanu home move up to it within about a second (#919), as they do with
+the kill switch and Moderate. Each says so in its history. Other Corbanu
+processes on the home, such as a running `corbanu exec`, move up too. From
+then on, these apply there:
+
+- Core's protections;
+- approval for every command, from each pane's next turn;
+- the end of its grants and "for session" approvals.
+
+A running `corbanu exec` can't ask you for approval, so from then on it
+refuses every command that isn't known read-only.
+
+The rest of Aggressive starts in each of them when it restarts: its
+sandbox, `.env` protection, network off and the model-key rules. Until then
+it is shown at its own level. This only ever raises a level: a lower level
+saved in another window applies only after a restart.

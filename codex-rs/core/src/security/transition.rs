@@ -27,8 +27,8 @@
 //! a start), while its revocation applies now. A downgrade or kill-switch
 //! release that cannot be saved changes nothing. The kill switch, on or off,
 //! also reaches the other processes running on the home, through their watch
-//! of the saved state ([`kill_switch_watch`], #507), and so does Moderate
-//! (#842).
+//! of the saved state ([`kill_switch_watch`], #507), and so do Moderate
+//! (#842) and Aggressive (#919), which only ever raise them.
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -734,7 +734,7 @@ impl super::EffectivePolicyView {
         }
         drop(trees);
         // #507: a kill switch saved by another process reaches this tree
-        // (#842: and Moderate).
+        // (#842, #919: and Moderate or Aggressive, only ever raising it).
         kill_switch_watch::ensure(&home);
     }
 }
