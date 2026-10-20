@@ -258,6 +258,8 @@ corbanu logout
 corbanu logout --all
 ```
 
+`corbanu login status` never shows any part of an API key. It says that an API key is configured. When the home's vault has its fingerprint salt, it adds the key's per-home fingerprint, which is the same one a named OpenAI account holding that key shows.
+
 `corbanu logout` removes Codex/OpenAI account auth and preserves provider
 API keys in the vault. Use `corbanu logout --all` only when you also want to
 remove provider API keys from the vault and legacy provider auth storage.
