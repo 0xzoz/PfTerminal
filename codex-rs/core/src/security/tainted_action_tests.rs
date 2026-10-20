@@ -2662,3 +2662,48 @@ fn issue_937_review_6_fallback_routes() {
     }
     assert_eq!(wrong, Vec::<String>::new());
 }
+
+/// #1028: zsh `e` and `+` glob qualifiers run code the classifier does not
+/// read as commands, so after untrusted content they ask, with or without
+/// command output on the line.
+#[test]
+fn issue_1028_glob_qualifiers_that_run_code_are_unseen_code() {
+    use ProtectedActionKind::*;
+    let mut wrong = Vec::new();
+    for (shell, line) in [
+        ("zsh", "print -l /*(e:'true':)"),
+        ("zsh", "print -l /*(e'true')"),
+        ("zsh", "print -l /*(.e:'true':)"),
+        ("zsh", "print -l /*(e{true})"),
+        ("zsh", "print -l /*(N+f)"),
+        ("zsh", "f() { reply=(x) }; print -l /*(+f)"),
+        ("zsh", "print -l /*(#qe:true:)"),
+        ("zsh", "print -l /*(e:true:"),
+        ("zsh", "echo '$((' ; print -l /*(e:'true':) ; echo '))'"),
+        ("zsh", "w=$(cat notes); print -l /*(e:'eval $w':)"),
+        ("zsh", "zsh -c $'print -l /*\\x28e:true:)'"),
+        ("bash", "zsh -c \"print -l /*(e:'true':)\""),
+        ("bash", "$SHELL -c \"print -l /*(+f)\""),
+        ("sh", "exec zsh -c 'print -l /*(e:true:)'"),
+    ] {
+        let found = kind(&[shell, "-c", line]);
+        if found != Some(UnseenCode) {
+            wrong.push(format!("{shell}: {line:?} -> {found:?}"));
+        }
+    }
+    for (shell, line) in [
+        ("zsh", "ls *(om[1]) *(N)"),
+        ("zsh", "echo $(( (2+1) * 3 ))"),
+        ("zsh", "python3 -c \"print(1+2)\""),
+        ("zsh", "diff <(echo a) <(echo b); f() { echo hi; }; f"),
+        // bash and sh have no glob qualifiers.
+        ("bash", "print -l /*(e:'true':)"),
+        ("sh", "ls *(+f)"),
+    ] {
+        let found = kind(&[shell, "-c", line]);
+        if found.is_some() {
+            wrong.push(format!("{shell}: {line:?} -> {found:?}"));
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+}

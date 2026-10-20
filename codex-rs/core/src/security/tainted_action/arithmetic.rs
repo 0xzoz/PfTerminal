@@ -411,7 +411,7 @@ impl Arithmetic {
         self.qualifier_words.extend(
             words
                 .iter()
-                .filter(|word| !qualifier_lists(word).is_empty())
+                .filter(|word| !all_qualifier_lists(word).is_empty())
                 .cloned(),
         );
         // Redirect targets (`read x < "$f"`) are files, not operands.
@@ -853,6 +853,33 @@ impl Arithmetic {
                 }
             }
         }
+    }
+
+    /// Whether the line may run code from a zsh glob qualifier (#1028):
+    /// an `e` qualifier (`*(e:'code':)`, `*(e'code')`) or a `+` one
+    /// (`*(+func)`), in any list `qualifier_lists` finds, with or without
+    /// command output on the line. Lines that run only another shell
+    /// (`bash -c`, `sh -c`) and never name zsh or `$SHELL` have no
+    /// qualifiers. `text` is the line's argv.
+    pub(super) fn runs_qualifier_code(&self, text: &[String]) -> bool {
+        let named = |arg: &String| {
+            let lower = arg.to_lowercase();
+            lower.contains("zsh") || lower.contains("shell")
+        };
+        let other_shell = text.first().is_some_and(|first| {
+            let name = shell::basename(&first.to_lowercase()).to_string();
+            name != "zsh" && shell::SHELLS.contains(&name.as_str())
+        });
+        if other_shell && !text.iter().any(named) {
+            return false;
+        }
+        let joined: Vec<String> = text.iter().map(|arg| joined(arg)).collect();
+        joined.iter().chain(&self.qualifier_words).any(|text| {
+            all_qualifier_lists(text).into_iter().any(|range| {
+                // A group left open may hold either.
+                range.is_empty() && range.start == text.len() || qualifier_runs_code(&text[range])
+            })
+        })
     }
 
     /// Whether the line evaluates, as arithmetic, a variable filled from
@@ -2355,12 +2382,28 @@ fn regions(text: &str) -> Vec<Range<usize>> {
 /// Linear: parentheses are matched in one pass, and each backslash or `$`
 /// run is counted at most twice.
 fn qualifier_lists(text: &str) -> Vec<Range<usize>> {
+    lists_attached(text, /*skip_arithmetic*/ true)
+}
+
+/// `qualifier_lists` including groups inside arithmetic regions, for
+/// checks that do not read those regions themselves (#1028): a region read
+/// without quotes may span a real qualifier (`echo '$((' ; print *(e:x:)`).
+fn all_qualifier_lists(text: &str) -> Vec<Range<usize>> {
+    lists_attached(text, /*skip_arithmetic*/ false)
+}
+
+fn lists_attached(text: &str, skip_arithmetic: bool) -> Vec<Range<usize>> {
     if !text.contains('(') {
         return Vec::new();
     }
     let bytes = text.as_bytes();
     let mut depth = vec![0_i32; bytes.len() + 1];
-    for range in regions(text) {
+    let skipped = if skip_arithmetic {
+        regions(text)
+    } else {
+        Vec::new()
+    };
+    for range in skipped {
         let region = &text[range.clone()];
         if ["$((", "((", "$[", ":"]
             .iter()
@@ -2448,6 +2491,25 @@ fn qualifier_lists(text: &str) -> Vec<Range<usize>> {
         after = close[at];
     }
     lists
+}
+
+/// Whether a qualifier list may hold an `e` qualifier (`e` and a
+/// delimiter: `e:code:`, `e'code'`, `e{code}`) or a `+` one (`+name`,
+/// `+'name'`), wherever in the list. Read without quotes. Linear.
+fn qualifier_runs_code(list: &str) -> bool {
+    let bytes = list.as_bytes();
+    bytes.iter().enumerate().any(|(at, byte)| {
+        let next = bytes.get(at + 1).copied();
+        match byte {
+            b'e' => next.is_some_and(|next| {
+                !(next.is_ascii_alphanumeric() || next.is_ascii_whitespace() || next == b'_')
+            }),
+            b'+' => next.is_some_and(|next| {
+                !(next.is_ascii_digit() || next.is_ascii_whitespace() || next == b')')
+            }),
+            _ => false,
+        }
+    })
 }
 
 /// Whether the `=` at `at` ends a word that assigns an array (`a=(`,
