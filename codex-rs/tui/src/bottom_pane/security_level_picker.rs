@@ -1275,7 +1275,9 @@ impl SecurityLevelPicker {
                     && self.active == ChosenLevel::Permissive
                     && self.window_session_starts_here()
                     && outcome.core.as_ref().is_none_or(|report| {
-                        report.not_saved.is_none() && report.next_start == SecurityLevel::Moderate
+                        report.kind == LevelChangeKind::Stricter
+                            && report.not_saved.is_none()
+                            && report.next_start == SecurityLevel::Moderate
                     })
                 {
                     // #1047: as #1015 for Aggressive: this window's session
@@ -1319,15 +1321,14 @@ impl SecurityLevelPicker {
                 {
                     // #1047: a remote app server's sessions do not run in
                     // this process, and a restart against it is refused.
-                    lines.extend(wrap(&remote_window_sessions(level)));
+                    // Only a saved raise reaches running processes.
+                    let reaches = outcome.core.as_ref().is_some_and(|report| {
+                        report.kind == LevelChangeKind::Stricter && report.not_saved.is_none()
+                    });
+                    lines.extend(wrap(&remote_window_sessions(level, reaches)));
                     // #842: other processes on the home take Moderate from
                     // the saved state (Aggressive's line is below).
-                    if level == ChosenLevel::Moderate
-                        && outcome
-                            .core
-                            .as_ref()
-                            .is_some_and(|report| report.not_saved.is_none())
-                    {
+                    if level == ChosenLevel::Moderate && reaches {
                         lines.extend(wrap(MODERATE_REACHES_OTHER_TERMINALS));
                     }
                 } else {
@@ -1802,8 +1803,14 @@ impl SecurityLevelPicker {
             || self.basis.in_force == SecurityLevel::Aggressive
         {
             format!(
-                "This session stays {} until you restart Corbanu Terminal; Moderate applies from the next start (you can restart right after saving). Grants and \"for session\" approvals in this session end as soon as you confirm.",
-                name(self.basis.in_force.max(confirm::core_level(self.active)))
+                "This session stays {} until you restart Corbanu Terminal; Moderate applies from the next start{}. Grants and \"for session\" approvals in this session end as soon as you confirm.",
+                name(self.basis.in_force.max(confirm::core_level(self.active))),
+                // #1047: a restart against a remote app server is refused.
+                if self.core.sessions_in_this_process {
+                    " (you can restart right after saving)"
+                } else {
+                    ""
+                }
             )
         } else if self.basis.live && self.basis.in_force == SecurityLevel::Moderate {
             "Core's level is already Moderate in this session; confirming saves Moderate for every start. Model keys through the credential broker start when you restart Corbanu Terminal.".to_string()
@@ -1825,7 +1832,7 @@ impl SecurityLevelPicker {
             // #1047: a remote app server's sessions.
             format!(
                 "Core's level is saved as Moderate as soon as you confirm: {effects}. {}",
-                remote_window_sessions(ChosenLevel::Moderate)
+                remote_window_sessions(ChosenLevel::Moderate, /*reaches*/ true)
             )
         } else {
             format!(
@@ -1971,7 +1978,7 @@ impl SecurityLevelPicker {
                 // #1047: a remote app server's sessions.
                 format!(
                     "Core's level is saved as Aggressive as soon as you confirm: {effects}. {}",
-                    remote_window_sessions(ChosenLevel::Aggressive)
+                    remote_window_sessions(ChosenLevel::Aggressive, /*reaches*/ true)
                 )
             } else if (self.sessions_run_here)(&self.codex_home, self.core.thread) {
                 // #978: the other sessions of this process take it now.
@@ -2079,9 +2086,16 @@ const OTHER_SESSIONS_HERE_TAKE_MODERATE_NOW: &str = "The other sessions of this 
 /// Corbanu Terminal on the home would, and a start against such a server is
 /// refused while a level above Permissive is saved
 /// (`SecurityLaunch::check_target`).
-fn remote_window_sessions(level: ChosenLevel) -> String {
+/// `reaches`: Core's level was raised and saved, so a server on this home
+/// takes it.
+fn remote_window_sessions(level: ChosenLevel, reaches: bool) -> String {
     format!(
-        "This window's sessions run on an app server outside this Corbanu Terminal: if that server runs on this Corbanu home, they take Core's saved level as other Corbanu Terminals running on this home do; otherwise this level does not reach them. Corbanu Terminal starts against such a server only under Permissive: to use {}, start Corbanu Terminal locally.",
+        "This window's sessions run on an app server outside this Corbanu Terminal{} Corbanu Terminal starts against such a server only under Permissive: to use {}, start Corbanu Terminal locally.",
+        if reaches {
+            ": if that server runs on this Corbanu home, they take Core's saved level as other Corbanu Terminals running on this home do; otherwise this level does not reach them."
+        } else {
+            "."
+        },
         level.name()
     )
 }

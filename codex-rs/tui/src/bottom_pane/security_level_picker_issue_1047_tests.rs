@@ -14,11 +14,19 @@ use crate::legacy_core::security_level_change::ApprovalsAtConfirmation;
 use crate::legacy_core::security_level_change::LevelChangeReport;
 
 fn saved_moderate(picker: &mut SecurityLevelPicker, not_saved: Option<&str>) {
+    saved_moderate_as(picker, LevelChangeKind::Stricter, not_saved);
+}
+
+fn saved_moderate_as(
+    picker: &mut SecurityLevelPicker,
+    kind: LevelChangeKind,
+    not_saved: Option<&str>,
+) {
     picker.stored = StoredLevel::Chosen(ChosenLevel::Moderate);
     picker.screen = Screen::Saved(Ok(TransitionOutcome {
         level: ChosenLevel::Moderate,
         core: Some(LevelChangeReport {
-            kind: LevelChangeKind::Stricter,
+            kind,
             in_force: SecurityLevel::Moderate,
             next_start: SecurityLevel::Moderate,
             live: false,
@@ -119,6 +127,23 @@ fn issue_1047_moderate_saved_before_the_window_session_starts() {
         !unsaved.contains(MODERATE_REACHES_OTHER_TERMINALS),
         "{unsaved}"
     );
+
+    // Core's level was above Moderate (recovered Aggressive, or saved by
+    // another Corbanu Terminal): saving Moderate lowers it only from the next
+    // start, so nothing says it takes Moderate now or reaches other
+    // terminals.
+    saved_moderate_as(
+        &mut picker,
+        LevelChangeKind::Downgrade,
+        /*not_saved*/ None,
+    );
+    let lowered = text(&picker);
+    for absent in [
+        "This window's session has not started yet",
+        MODERATE_REACHES_OTHER_TERMINALS,
+    ] {
+        assert!(!lowered.contains(absent), "{absent}: {lowered}");
+    }
 }
 
 fn remote(picker: &mut SecurityLevelPicker, thread: Option<codex_protocol::ThreadId>) {
@@ -147,7 +172,7 @@ fn issue_1047_remote_window_is_not_told_it_starts_here() {
     assert!(
         review.contains(&format!(
             "Core's level is saved as Aggressive as soon as you confirm: {CORE_EFFECTS}. {}",
-            remote_window_sessions(ChosenLevel::Aggressive)
+            remote_window_sessions(ChosenLevel::Aggressive, /*reaches*/ true)
         )),
         "{review}"
     );
@@ -166,7 +191,10 @@ fn issue_1047_remote_window_is_not_told_it_starts_here() {
     saved_aggressive(&mut picker);
     let saved = text(&picker);
     assert!(
-        saved.contains(&remote_window_sessions(ChosenLevel::Aggressive)),
+        saved.contains(&remote_window_sessions(
+            ChosenLevel::Aggressive,
+            /*reaches*/ true
+        )),
         "{saved}"
     );
     assert!(saved.contains(REMOTE_RESTART_REFUSED), "{saved}");
@@ -198,7 +226,7 @@ fn issue_1047_remote_window_is_not_told_it_starts_here() {
         review.contains(&format!(
             "Core's level is saved as Moderate as soon as you confirm: {}. {}",
             crate::security::moderate::EFFECTS,
-            remote_window_sessions(ChosenLevel::Moderate)
+            remote_window_sessions(ChosenLevel::Moderate, /*reaches*/ true)
         )),
         "{review}"
     );
@@ -206,7 +234,10 @@ fn issue_1047_remote_window_is_not_told_it_starts_here() {
     saved_moderate(&mut picker, /*not_saved*/ None);
     let saved = text(&picker);
     assert!(
-        saved.contains(&remote_window_sessions(ChosenLevel::Moderate)),
+        saved.contains(&remote_window_sessions(
+            ChosenLevel::Moderate,
+            /*reaches*/ true
+        )),
         "{saved}"
     );
     assert!(
@@ -215,4 +246,27 @@ fn issue_1047_remote_window_is_not_told_it_starts_here() {
     );
     assert!(saved.contains(MODERATE_REACHES_OTHER_TERMINALS), "{saved}");
     assert!(!saved.contains("when it starts here"), "{saved}");
+
+    // Not saved, or a lowered Core level: nothing reaches the server or
+    // other terminals; the restart sentence stays.
+    for (kind, not_saved) in [
+        (LevelChangeKind::Stricter, Some("disk full")),
+        (LevelChangeKind::Downgrade, None),
+    ] {
+        saved_moderate_as(&mut picker, kind, not_saved);
+        let saved = text(&picker);
+        assert!(
+            saved.contains(&remote_window_sessions(
+                ChosenLevel::Moderate,
+                /*reaches*/ false
+            )),
+            "{saved}"
+        );
+        for absent in [
+            "they take Core's saved level",
+            MODERATE_REACHES_OTHER_TERMINALS,
+        ] {
+            assert!(!saved.contains(absent), "{absent}: {saved}");
+        }
+    }
 }

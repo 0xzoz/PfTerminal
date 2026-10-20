@@ -303,6 +303,7 @@ before you restart, also when you confirm before the window's own session
 has started (#978); that session then starts with them too (#1015). A window
 on a remote app server is not covered: its sessions run in the server's
 process, which, if it runs on this Corbanu home, takes the saved level as
-another Corbanu Terminal would. `/security` says so in such a window and
-doesn't offer "restart now": Corbanu Terminal starts against such a server
-only under Permissive, so start it locally to use the level (#1047).
+another Corbanu Terminal would. The level picker in `/security` says so in
+such a window and doesn't offer "restart now": Corbanu Terminal starts against
+such a server only under Permissive, so start it locally to use the level
+(#1047).
