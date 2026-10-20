@@ -20,8 +20,8 @@ use rustc_ast::LitKind;
 use rustc_errors::Applicability;
 use rustc_hir::Expr;
 use rustc_hir::ExprKind;
+use rustc_hir::LangItem;
 use rustc_hir::UnOp;
-use rustc_hir::attrs::lang_items::LangItem;
 use rustc_hir::def::DefKind;
 use rustc_lint::LateContext;
 use rustc_lint::LateLintPass;
@@ -43,7 +43,7 @@ pub fn register_lints(_sess: &rustc_session::Session, lint_store: &mut rustc_lin
     lint_store.register_late_lint_pass(Box::new(|_| Box::new(ArgumentCommentLint)));
 }
 
-rustc_lint::declare_lint! {
+rustc_session::declare_lint! {
     /// ### What it does
     ///
     /// Checks `/*param*/` argument comments and verifies that the comment
@@ -83,7 +83,7 @@ rustc_lint::declare_lint! {
     "argument comment does not match the resolved parameter name"
 }
 
-rustc_lint::declare_lint! {
+rustc_session::declare_lint! {
     /// ### What it does
     ///
     /// Requires a `/*param*/` comment before anonymous literal-like
@@ -132,7 +132,7 @@ enum CallKind {
     Method { name: String },
 }
 
-rustc_lint::impl_lint_pass!(
+rustc_session::impl_lint_pass!(
     ArgumentCommentLint => [ARGUMENT_COMMENT_MISMATCH, UNCOMMENTED_ANONYMOUS_LITERAL_ARGUMENT]
 );
 

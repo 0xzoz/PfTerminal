@@ -226,13 +226,13 @@ jobs:
       - name: Install nightly argument-comment-lint toolchain
         shell: bash
         run: |
-          rustup toolchain install nightly-2026-08-23 \
+          rustup toolchain install nightly-2026-08-08 \
             --profile minimal \
             --component llvm-tools-preview \
             --component rustc-dev \
             --component rust-src \
             --no-self-update
-          rustup default nightly-2026-08-23
+          rustup default nightly-2026-08-08
       - name: Restore cargo-dylint tooling
         id: cargo_dylint_cache
         uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
@@ -310,13 +310,13 @@ jobs:
       - name: Install nightly argument-comment-lint toolchain
         shell: bash
         run: |
-          rustup toolchain install nightly-2026-08-23 \
+          rustup toolchain install nightly-2026-08-08 \
             --profile minimal \
             --component llvm-tools-preview \
             --component rustc-dev \
             --component rust-src \
             --no-self-update
-          rustup default nightly-2026-08-23
+          rustup default nightly-2026-08-08
       - name: Compute lockfile hash
         id: lockhash
         working-directory: codex-rs
