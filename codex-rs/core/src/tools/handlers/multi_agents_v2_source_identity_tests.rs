@@ -3,8 +3,8 @@ use super::*;
 use crate::tools::collaboration_wire::message_source_provider_id;
 use pretty_assertions::assert_eq;
 
-#[tokio::test]
-async fn issue863_native_custom_same_source_is_admitted() {
+/// A turn on `myopenai`, a custom provider at the official OpenAI endpoint.
+async fn custom_openai_endpoint_turn() -> crate::session::turn_context::TurnContext {
     let (_session, mut turn) = crate::session::tests::make_session_and_context().await;
     let mut config = (*turn.config).clone();
     config.model_provider_id = "myopenai".to_string();
@@ -18,14 +18,20 @@ async fn issue863_native_custom_same_source_is_admitted() {
         turn.auth_manager.clone(),
     );
     turn.config = std::sync::Arc::new(config);
+    turn
+}
+
+#[tokio::test]
+async fn issue863_native_custom_same_source_is_admitted() {
+    let turn = custom_openai_endpoint_turn().await;
     assert_eq!(turn.config.model_provider_id, "myopenai");
     assert_eq!(message_source_provider_id(&turn), OPENAI_PROVIDER_ID);
     assert_eq!(
         ensure_message_encoding_matches_target(
-            &turn.config.model_provider_id,
+            ConfiguredRuntime::on_default(&turn.config.model_provider_id),
             message_source_provider_id(&turn),
             &crate::tools::context::ToolCallSource::Direct,
-            "myopenai",
+            ConfiguredRuntime::on_default("myopenai"),
             CollaborationMessageEncoding::ProviderNative,
             "spawn_agent",
             PLAINTEXT_SPAWN_AGENT_TOOL,
@@ -36,25 +42,13 @@ async fn issue863_native_custom_same_source_is_admitted() {
 
 #[tokio::test]
 async fn issue863_native_custom_to_builtin_source_is_rejected_before_admission() {
-    let (_session, mut turn) = crate::session::tests::make_session_and_context().await;
-    let mut config = (*turn.config).clone();
-    config.model_provider_id = "myopenai".to_string();
-    config.model_provider.name = "My OpenAI".to_string();
-    config.model_provider.base_url = Some("https://api.openai.com/v1".to_string());
-    config.model_provider.wire_api = codex_model_provider_info::WireApi::Responses;
-    config.model_provider.requires_openai_auth = false;
-    config.model_provider.env_key = Some("SYNTHETIC_ISSUE863_API_KEY".to_string());
-    turn.provider = codex_model_provider::create_model_provider(
-        config.model_provider.clone(),
-        turn.auth_manager.clone(),
-    );
-    turn.config = std::sync::Arc::new(config);
+    let turn = custom_openai_endpoint_turn().await;
     assert_eq!(
         ensure_message_encoding_matches_target(
-            &turn.config.model_provider_id,
+            ConfiguredRuntime::on_default(&turn.config.model_provider_id),
             message_source_provider_id(&turn),
             &crate::tools::context::ToolCallSource::Direct,
-            OPENAI_PROVIDER_ID,
+            ConfiguredRuntime::on_default(OPENAI_PROVIDER_ID),
             CollaborationMessageEncoding::ProviderNative,
             "followup_task",
             PLAINTEXT_FOLLOWUP_TASK_TOOL,
@@ -77,10 +71,10 @@ fn issue863_existing_builtin_and_plaintext_controls() {
     ] {
         assert_eq!(
             ensure_message_encoding_matches_target(
-                OPENAI_PROVIDER_ID,
+                ConfiguredRuntime::on_default(OPENAI_PROVIDER_ID),
                 OPENAI_PROVIDER_ID,
                 &source,
-                target,
+                ConfiguredRuntime::on_default(target),
                 encoding,
                 "spawn_agent",
                 PLAINTEXT_SPAWN_AGENT_TOOL,
@@ -213,10 +207,10 @@ fn issue863_real_source_codec_target_and_plaintext_matrix() {
         };
         assert_eq!(
             ensure_message_encoding_matches_target(
-                real_source,
+                ConfiguredRuntime::on_default(real_source),
                 codec,
                 &source,
-                target,
+                ConfiguredRuntime::on_default(target),
                 encoding,
                 "followup_task",
                 PLAINTEXT_FOLLOWUP_TASK_TOOL,
@@ -233,15 +227,85 @@ fn issue863_real_source_codec_target_and_plaintext_matrix() {
     ] {
         assert_eq!(
             ensure_message_encoding_matches_target(
-                "myopenai",
+                ConfiguredRuntime::on_default("myopenai"),
                 OPENAI_PROVIDER_ID,
                 &source,
-                "other-custom",
+                ConfiguredRuntime::on_default("other-custom"),
                 CollaborationMessageEncoding::ProviderNative,
                 "followup_task",
                 PLAINTEXT_FOLLOWUP_TASK_TOOL,
             ),
             Ok(())
+        );
+    }
+}
+
+/// #1016: an OpenAI-encrypted payload is bound to the account as well as the
+/// provider: another account of the same provider is refused, the same
+/// account is admitted, and the plaintext adapter is unaffected.
+#[test]
+fn issue1016_encrypted_payload_compares_provider_and_account() {
+    let source = crate::tools::context::ToolCallSource::Direct;
+    let refusal = |target: &str, source: &str| {
+        Err(FunctionCallError::RespondToModel(format!(
+            "target account `{target}` of `myopenai` (this agent runs on account `{source}`) cannot consume this OpenAI-encrypted collaboration payload. Call the function named `followup_task_plaintext` directly with exactly the same `target` and the plaintext `message`; do not call `followup_task` again and do not add an `adapter` field. No message was admitted and no target turn was started."
+        )))
+    };
+    for (source_account, target_account, expected) in [
+        (None, None, Ok(())),
+        (Some("work"), Some("work"), Ok(())),
+        (None, Some("work"), refusal("work", "default")),
+        (Some("work"), None, refusal("default", "work")),
+        (Some("work"), Some("home"), refusal("home", "work")),
+    ] {
+        let check = |encoding| {
+            ensure_message_encoding_matches_target(
+                ConfiguredRuntime::new("myopenai", source_account),
+                OPENAI_PROVIDER_ID,
+                &source,
+                ConfiguredRuntime::new("myopenai", target_account),
+                encoding,
+                "followup_task",
+                PLAINTEXT_FOLLOWUP_TASK_TOOL,
+            )
+        };
+        assert_eq!(
+            check(CollaborationMessageEncoding::ProviderNative),
+            expected,
+            "{source_account:?} -> {target_account:?}"
+        );
+        assert_eq!(
+            check(CollaborationMessageEncoding::PlaintextAdapter),
+            Ok(())
+        );
+    }
+    // A codec other than OpenAI's carries no encrypted payload.
+    assert_eq!(
+        ensure_message_encoding_matches_target(
+            ConfiguredRuntime::new("local-provider", None),
+            "local-provider",
+            &source,
+            ConfiguredRuntime::new("local-provider", Some("work")),
+            CollaborationMessageEncoding::ProviderNative,
+            "followup_task",
+            PLAINTEXT_FOLLOWUP_TASK_TOOL,
+        ),
+        Ok(())
+    );
+}
+
+#[test]
+fn issue1016_snapshot_account_is_read_as_a_name() {
+    for (snapshot, account) in [
+        (None, None),
+        (Some("myopenai:default"), None),
+        (Some("myopenai:work"), Some("work")),
+        (Some("malformed"), None),
+    ] {
+        assert_eq!(
+            ConfiguredRuntime::from_snapshot("myopenai", snapshot),
+            ConfiguredRuntime::new("myopenai", account),
+            "{snapshot:?}"
         );
     }
 }

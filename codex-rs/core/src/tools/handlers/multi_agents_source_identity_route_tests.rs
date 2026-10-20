@@ -183,3 +183,115 @@ async fn issue863_custom_native_send_followup_reject_builtin_before_mailbox_muta
         .collect();
     assert_eq!(captured, Vec::new());
 }
+
+/// Spawns natively from the custom OpenAI-endpoint parent with `arguments`
+/// (with the `fork-context-role` role installed when `role`, and a `work`
+/// account of `myopenai` when `named_accounts`) and returns the result and
+/// how many children the spawn left behind.
+async fn custom_source_native_spawn(
+    named_accounts: bool,
+    role: bool,
+    arguments: serde_json::Value,
+) -> (
+    Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError>,
+    usize,
+) {
+    let (mut session, mut turn) = custom_source_context().await;
+    if role {
+        install_role_with_model_override(&mut turn).await;
+    }
+    if named_accounts {
+        let mut config = (*turn.config).clone();
+        config
+            .features
+            .enable(Feature::NamedAccounts)
+            .expect("feature");
+        codex_vault::Vault::new(config.codex_home.to_path_buf())
+            .write_provider_account(
+                "myopenai",
+                &codex_vault::ProviderAccountName::parse("work").expect("name"),
+                codex_vault::ProviderAccountKind::ApiKey,
+                "canary-1016-work",
+            )
+            .expect("write account");
+        set_turn_config(&mut turn, config);
+    }
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root");
+    // The root's own control plane carries its security policy binding.
+    session.services.agent_control = root.thread.session.services.agent_control.clone();
+    session.thread_id = root.thread_id;
+    let result = SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(arguments),
+        ))
+        .await;
+    let children = manager
+        .list_thread_ids()
+        .await
+        .into_iter()
+        .filter(|id| *id != root.thread_id)
+        .count();
+    (result, children)
+}
+
+/// #1016: a role that moves the child of a custom OpenAI-endpoint parent to
+/// the built-in `openai` provider refuses the native spawn before the child
+/// starts and points the model to the plaintext adapter.
+#[tokio::test]
+async fn issue1016_custom_native_spawn_moved_to_builtin_by_role_is_refused() {
+    let (result, children) = custom_source_native_spawn(
+        /*named_accounts*/ false,
+        /*role*/ true,
+        json!({"message": "opaque-spawn", "task_name": "issue1016_child", "fork_turns": "none", "agent_type": "fork-context-role"}),
+    )
+    .await;
+    assert_eq!(
+        (result.err(), children),
+        (
+            Some(FunctionCallError::RespondToModel(
+                "target provider `openai` cannot consume this OpenAI-encrypted collaboration payload. Call the function named `spawn_agent_plaintext` directly with exactly the same `target` and the plaintext `message`; do not call `spawn_agent` again and do not add an `adapter` field. No message was admitted and no target turn was started.".to_string()
+            )),
+            0
+        )
+    );
+}
+
+/// #1016: a native spawn onto another account of the parent's own provider
+/// is refused, as the encrypted payload is bound to the account; the
+/// parent's own account is still admitted.
+#[tokio::test]
+async fn issue1016_custom_native_spawn_on_another_account_is_refused() {
+    let (result, children) = custom_source_native_spawn(
+        /*named_accounts*/ true,
+        /*role*/ false,
+        json!({"message": "opaque-spawn", "task_name": "issue1016_child", "fork_turns": "none", "account": "work"}),
+    )
+    .await;
+    assert_eq!(
+        (result.err(), children),
+        (
+            Some(FunctionCallError::RespondToModel(
+                "target account `work` of `myopenai` (this agent runs on account `default`) cannot consume this OpenAI-encrypted collaboration payload. Call the function named `spawn_agent_plaintext` directly with exactly the same `target` and the plaintext `message`; do not call `spawn_agent` again and do not add an `adapter` field. No message was admitted and no target turn was started.".to_string()
+            )),
+            0
+        )
+    );
+    for account in [json!({}), json!({"account": "default"})] {
+        let mut arguments = json!({"message": "opaque-spawn", "task_name": "issue1016_child", "fork_turns": "none"});
+        for (key, value) in account.as_object().expect("object") {
+            arguments[key] = value.clone();
+        }
+        let (result, children) = custom_source_native_spawn(
+            /*named_accounts*/ true, /*role*/ false, arguments,
+        )
+        .await;
+        assert_eq!((result.is_ok(), children), (true, 1), "{account}");
+    }
+}
