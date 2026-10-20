@@ -407,6 +407,114 @@ fn missing_price_pages_state_the_next_step_and_never_zero() {
     insta::assert_snapshot!("cost_missing_price_request_page", pages[1].text.join("\n"));
 }
 
+// #913 (D31): the OpenAI route's automatic reviewer stays "no price
+// available", and the next step names the model whose price is unpublished.
+#[test]
+fn codex_auto_review_stays_unpriced_and_names_the_model() {
+    const AUTO_REVIEW_STEP: &str = "Next step for requests with no price: check the bill from OpenAI. No published price covers them, so no cost is shown for them here. OpenAI doesn't publish a price for Codex Auto Review.";
+    let own = vec![unpriced(
+        /*id*/ 2,
+        thread(/*n*/ 1),
+        "openai",
+        "codex-auto-review",
+    )];
+    let pages = inspection_pages(Ok(day(own, Some(OtherConversations::default()))));
+    let titles: Vec<&str> = pages
+        .iter()
+        .filter(|page| page.text.iter().any(|line| line == AUTO_REVIEW_STEP))
+        .map(|page| page.title.as_str())
+        .collect();
+    assert_eq!(
+        titles,
+        vec![
+            "Cost — this conversation",
+            "Request",
+            "Attempt, components and original price",
+            "Provider: openai; Model: codex-auto-review",
+        ]
+    );
+    assert!(
+        pages[1]
+            .text
+            .iter()
+            .any(|line| line == "Estimated cost: no price available")
+    );
+    assert_never_zero(&pages);
+    insta::assert_snapshot!(
+        "cost_codex_auto_review_request_page",
+        pages[1].text.join("\n")
+    );
+
+    // No other case gets the sentence: another unpriced OpenAI model, the
+    // same model on another provider, or Codex Auto Review priced in part,
+    // with incomplete usage, or covered by a subscription.
+    let review = |quote: ObservationQuote| {
+        let mut quote = quote;
+        quote.attempt.model = "codex-auto-review".into();
+        quote
+    };
+    let mut in_part = review(unpriced(/*id*/ 2, thread(/*n*/ 1), "openai", "x"));
+    in_part.buckets[0] = BucketQuote::Priced(decimal("0.0004"));
+    in_part.known_subtotal = decimal("0.0004");
+    in_part.subtotal_display = in_part.known_subtotal.display();
+    let mut covered = review(unpriced(/*id*/ 2, thread(/*n*/ 1), "openai", "x"));
+    covered.plan_burn_millis = Some(1);
+    let cases = [
+        (
+            "other model",
+            unpriced(/*id*/ 2, thread(/*n*/ 1), "openai", "gpt-5.4"),
+            "Next step for requests with no price",
+        ),
+        (
+            "other provider",
+            review(unpriced(/*id*/ 2, thread(/*n*/ 1), "local-mock", "x")),
+            "Next step for requests with no price",
+        ),
+        (
+            "priced in part",
+            in_part,
+            "Next step for requests priced only in part",
+        ),
+        (
+            "incomplete usage",
+            review(output_unreported(/*id*/ 2, thread(/*n*/ 1))),
+            "Next step for requests with incomplete usage",
+        ),
+        ("subscription", covered, "Same work at API prices"),
+    ];
+    for (case, quote, expected) in cases {
+        // Alone, and beside an unpriced request of another model, so a
+        // no-price step is on the page that the sentence could be added to.
+        let other = unpriced(/*id*/ 3, thread(/*n*/ 1), "openai", "gpt-5.4");
+        for (beside, quotes) in [
+            ("alone", vec![quote.clone()]),
+            ("beside", vec![quote, other]),
+        ] {
+            let pages = own_day(quotes);
+            let text: Vec<&String> = pages.iter().flat_map(|page| &page.text).collect();
+            // The fixture reaches the intended branch...
+            assert!(
+                text.iter().any(|line| line.contains(expected)),
+                "{case} {beside}: {text:#?}"
+            );
+            if beside == "beside" {
+                assert!(
+                    text.iter()
+                        .any(|line| line.starts_with("Next step for requests with no price")),
+                    "{case} {beside}: {text:#?}"
+                );
+            }
+            // ...and no line names the unpublished price.
+            assert!(
+                !text
+                    .iter()
+                    .any(|line| line.contains("doesn't publish a price")),
+                "{case} {beside}: {text:#?}"
+            );
+        }
+    }
+}
+
 /// Each page, in order, and the monetary statements it must carry.
 const AUDIT: [(&str, &[&str]); 11] = [
     (

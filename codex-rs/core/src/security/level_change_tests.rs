@@ -335,3 +335,50 @@ fn security_transition_downgrade_of_the_record_sets_the_next_start() {
         (LevelChangeKind::Downgrade, SecurityLevel::Permissive)
     );
 }
+
+/// #978: Aggressive confirmed where the confirming session's policy does not
+/// run in this process (its session not started yet) still raises the
+/// other sessions of this process on the home, so they, and sessions started
+/// here later, take approval for every command (#505) as with a live tree.
+#[test]
+fn issue_978_aggressive_without_a_live_tree_requires_approval_in_this_process() {
+    let home = TempDir::new().unwrap();
+    assert!(!sessions_run_here(home.path()));
+    let (other, _) = live_tree(&home, SecurityLevel::Permissive);
+    assert!(sessions_run_here(home.path()));
+    assert!(!super::super::confirmed_approvals::confirmed_here(
+        home.path()
+    ));
+
+    let report = commit(&home, SecurityLevel::Aggressive, Probes::Passed).unwrap();
+
+    assert_eq!(
+        (report.kind, report.live, report.other_sessions),
+        (LevelChangeKind::Stricter, false, true)
+    );
+    assert_eq!(
+        other.authority_marker().unwrap().0,
+        1,
+        "the other tree rose"
+    );
+    assert_eq!(
+        report.approvals,
+        Some(ApprovalsAtConfirmation::default()),
+        "no session is registered on the home in this test"
+    );
+    assert!(
+        super::super::confirmed_approvals::confirmed_here(home.path()),
+        "sessions started here later start with approval for every command"
+    );
+}
+
+/// #978: a lower level confirmed without a live tree requires nothing.
+#[test]
+fn issue_978_moderate_without_a_live_tree_leaves_approvals_alone() {
+    let home = TempDir::new().unwrap();
+    let report = commit(&home, SecurityLevel::Moderate, Probes::Passed).unwrap();
+    assert_eq!((report.live, report.approvals), (false, None));
+    assert!(!super::super::confirmed_approvals::confirmed_here(
+        home.path()
+    ));
+}

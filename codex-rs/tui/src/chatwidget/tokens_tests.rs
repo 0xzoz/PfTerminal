@@ -319,6 +319,7 @@ fn range_packet(partial: bool, day: InspectionDay) -> InspectionDay {
             grouping: InspectionGrouping::Hour,
         },
         aggregate_day_floor: Some(0),
+        completed_as_of_ms: None,
         read_at_ms: 90 * 86_400_000,
         buckets: vec![codex_state::accounting::InspectionBucket {
             start_ms: 0,
@@ -384,6 +385,7 @@ fn week_reaching_today(start: i64) -> Vec<InspectorPage> {
             grouping: InspectionGrouping::Week,
         },
         Some(0),
+        /*completed_as_of_ms*/ None,
         /*read_at*/ 2 * DAY,
         vec![codex_state::accounting::InspectionBucket {
             start_ms: 0,
@@ -515,6 +517,7 @@ fn accounting_inspect_range_bucket_reaching_today_stays_partial_when_unverified(
                 grouping: InspectionGrouping::Week,
             },
             Some(0),
+            /*completed_as_of_ms*/ None,
             /*read_at*/ 2 * DAY,
             vec![bucket(/*start_ms*/ 0, 7 * DAY, Some(effective), days)],
         )
@@ -569,6 +572,7 @@ fn accounting_inspect_range_hour_in_progress_total_sums_whole_and_current() {
             grouping: InspectionGrouping::Hour,
         },
         Some(0),
+        /*completed_as_of_ms*/ None,
         /*read_at*/ HOUR + HOUR / 2,
         vec![
             bucket(
@@ -622,6 +626,7 @@ fn accounting_inspect_range_future_buckets_have_not_started() {
             grouping: InspectionGrouping::Week,
         },
         Some(0),
+        /*completed_as_of_ms*/ None,
         /*read_at*/ 2 * DAY,
         vec![
             bucket(/*start_ms*/ 0, 7 * DAY, Some((0, 1_001)), current),
@@ -690,6 +695,7 @@ fn accounting_inspect_range_expired_bucket_beside_in_progress_is_not_stale() {
             grouping: InspectionGrouping::Day,
         },
         /*aggregate_day_floor*/ None,
+        /*completed_as_of_ms*/ None,
         /*read_at*/ 102 * DAY,
         vec![
             bucket(/*start_ms*/ 0, DAY, Some((0, DAY)), vec![expired]),
@@ -801,6 +807,7 @@ fn accounting_inspect_range_retention_matches_day_pages() {
             grouping: InspectionGrouping::Day,
         },
         Some(floor),
+        /*completed_as_of_ms*/ None,
         /*read_at*/ 400 * 86_400_000,
         Vec::new(),
     );
@@ -833,6 +840,7 @@ fn accounting_inspect_range_coverage_names_intersection_for_request_and_retentio
                 grouping: InspectionGrouping::Month,
             },
             Some(aggregate_floor),
+            /*completed_as_of_ms*/ None,
             31 * day_ms,
             vec![codex_state::accounting::InspectionBucket {
                 start_ms: 0,
@@ -899,6 +907,7 @@ fn accounting_inspect_range_bucket_ancestry_counts_have_explicit_scopes() {
             grouping: InspectionGrouping::Hour,
         },
         /*aggregate_day_floor*/ None,
+        /*completed_as_of_ms*/ None,
         /*read_at*/ 7_200_000,
         buckets,
     );
@@ -969,6 +978,7 @@ fn accounting_inspect_range_overview_discloses_unknown_population_before_total()
             grouping: InspectionGrouping::Hour,
         },
         /*aggregate_day_floor*/ None,
+        /*completed_as_of_ms*/ None,
         2 * 3_600_000,
         buckets,
     );
@@ -1058,6 +1068,7 @@ fn accounting_inspect_range_week_and_month_merge_exact_attempts() {
                 grouping,
             },
             aggregate_day_floor: None,
+            completed_as_of_ms: None,
             read_at_ms: end_ms,
             buckets: vec![codex_state::accounting::InspectionBucket {
                 start_ms,
@@ -3550,6 +3561,89 @@ fn accounting_realtime_session_without_an_end_says_so() {
             .iter()
             .any(|line| line.starts_with("Realtime session")),
     );
+}
+
+/// #352 item 3: a request with 9,908 noncached input tokens, no cache reads, a
+/// missing cache-write count and 1 output token showed `1+ tokens`. The input
+/// total is unknown, but the parts the provider reported still count.
+#[test]
+fn plain_tokens_lower_bound_counts_reported_input_parts() {
+    let day = DayTotals {
+        // Input, noncached, read, write, output, reasoning, total.
+        measured: [
+            Metric {
+                known: 0,
+                unknown: 1,
+            },
+            Metric {
+                known: 9_908,
+                unknown: 0,
+            },
+            Metric {
+                known: 0,
+                unknown: 0,
+            },
+            Metric {
+                known: 0,
+                unknown: 1,
+            },
+            Metric {
+                known: 1,
+                unknown: 0,
+            },
+            Metric {
+                known: 0,
+                unknown: 0,
+            },
+            Metric {
+                known: 0,
+                unknown: 1,
+            },
+        ],
+        ..Default::default()
+    };
+    assert_eq!(plain_tokens(&day), "9,909+ tokens");
+}
+
+/// A known input total with no breakdown still bounds the request from below:
+/// the reported parts never lower it.
+#[test]
+fn plain_tokens_lower_bound_keeps_a_known_input_total() {
+    let day = DayTotals {
+        // Input, noncached, read, write, output, reasoning, total.
+        measured: [
+            Metric {
+                known: 10_000,
+                unknown: 0,
+            },
+            Metric {
+                known: 0,
+                unknown: 1,
+            },
+            Metric {
+                known: 0,
+                unknown: 1,
+            },
+            Metric {
+                known: 0,
+                unknown: 1,
+            },
+            Metric {
+                known: 0,
+                unknown: 1,
+            },
+            Metric {
+                known: 0,
+                unknown: 0,
+            },
+            Metric {
+                known: 0,
+                unknown: 1,
+            },
+        ],
+        ..Default::default()
+    };
+    assert_eq!(plain_tokens(&day), "10,000+ tokens");
 }
 
 #[path = "tokens/warmup_resume_tests.rs"]

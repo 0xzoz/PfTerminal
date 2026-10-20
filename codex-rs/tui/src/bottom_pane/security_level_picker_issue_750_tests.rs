@@ -221,6 +221,7 @@ fn issue_750_a_live_session_takes_cores_rules_now_and_the_broker_at_restart() {
                 in_force: SecurityLevel::Moderate,
                 next_start: SecurityLevel::Moderate,
                 live: true,
+                other_sessions: false,
                 not_saved: Some("disk full".to_string()),
                 approvals: None,
             },
