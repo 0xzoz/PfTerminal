@@ -141,8 +141,9 @@ commands that would enter the bubblewrap path.
     which goes to the session leader (now the helper) alone; ones sent
     before the command started are sent to it as it starts;
   - a catchable signal sent to the helper's pid alone no longer reaches the
-    command (one of these four does if sent before the command started or
-    once it has left the group); `SIGKILL` to the helper stops it.
+    command (one of these four does if sent before the helper forks the
+    supervisor or once the command has left the group); `SIGKILL` to the
+    helper stops it.
 
   The command's parent is now the supervisor, and the command no longer
   leads its session or group (`setsid()` now succeeds). The terminal's stop
