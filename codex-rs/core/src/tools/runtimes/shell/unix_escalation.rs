@@ -629,6 +629,10 @@ impl CoreShellActionProvider {
     }
 }
 
+/// D50 (#1001): how often an intercepted exec whose approval went stale is
+/// decided again.
+const MAX_STALE_EXEC_APPROVAL_ROUNDS: usize = 3;
+
 // Shell-wrapper parsing is weaker than direct exec interception because it can
 // only see the script text, not the final resolved executable path. Keep it
 // disabled by default so path-sensitive rules rely on the later authoritative
@@ -636,11 +640,41 @@ impl CoreShellActionProvider {
 const ENABLE_INTERCEPTED_EXEC_POLICY_SHELL_WRAPPER_PARSING: bool = false;
 
 impl CoreShellActionProvider {
+    /// D50 (#1001): an exec approved (or decided) before a security
+    /// transition was committed is decided again under the new level, the
+    /// person asked again, and refused when that keeps happening.
+    async fn determine_fresh_action(
+        &self,
+        program: &AbsolutePathBuf,
+        argv: &[String],
+        workdir: &AbsolutePathBuf,
+    ) -> anyhow::Result<EscalationDecision> {
+        for round in 1..=MAX_STALE_EXEC_APPROVAL_ROUNDS {
+            let decided_under = self.session.services.authority_marker();
+            let action = self
+                .determine_action(program, argv, workdir, /*asked_again*/ round > 1)
+                .await?;
+            if matches!(action, EscalationDecision::Deny { .. })
+                || !self.session.services.transition_since(decided_under)
+            {
+                return Ok(action);
+            }
+            tracing::info!(
+                target: "codex_core::security::transition",
+                "intercepted exec approved before a security transition; not used, asked again"
+            );
+        }
+        Ok(EscalationDecision::deny(Some(
+            crate::tools::orchestrator::STALE_APPROVAL_REFUSAL.to_string(),
+        )))
+    }
+
     async fn determine_action(
         &self,
         program: &AbsolutePathBuf,
         argv: &[String],
         workdir: &AbsolutePathBuf,
+        asked_again: bool,
     ) -> anyhow::Result<EscalationDecision> {
         tracing::debug!(
             "Determining escalation action for command {program:?} with args {argv:?} in {workdir:?}"
@@ -690,6 +724,15 @@ impl CoreShellActionProvider {
                     })
             })
             .flatten();
+        // D50: a prompt asked again says why.
+        let suspended_note = if asked_again {
+            Some(match suspended_note {
+                Some(note) => format!("{} {note}", crate::tools::approvals::ASKED_AGAIN_NOTE),
+                None => crate::tools::approvals::ASKED_AGAIN_NOTE.to_string(),
+            })
+        } else {
+            suspended_note
+        };
         // When true, means the Evaluation was due to *.rules, not the
         // fallback function.
         let decision_driven_by_policy =
@@ -757,7 +800,7 @@ impl EscalationPolicy for CoreShellActionProvider {
         argv: &'a [String],
         workdir: &'a AbsolutePathBuf,
     ) -> EscalationPolicyFuture<'a> {
-        Box::pin(CoreShellActionProvider::determine_action(
+        Box::pin(CoreShellActionProvider::determine_fresh_action(
             self, program, argv, workdir,
         ))
     }

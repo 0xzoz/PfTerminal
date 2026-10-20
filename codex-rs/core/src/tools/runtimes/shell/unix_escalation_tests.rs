@@ -987,3 +987,115 @@ async fn strict_rules_refuse_intercepted_wrapped_vault_exec() -> anyhow::Result<
     );
     Ok(())
 }
+
+/// D50 (#1001): an intercepted exec approved after a security transition was
+/// committed while its prompt was open is not run on that answer: the person
+/// is asked again (the prompt says why), and it runs on the new answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_1001_intercepted_exec_approved_before_a_level_change_is_asked_again()
+-> anyhow::Result<()> {
+    use codex_protocol::protocol::EventMsg;
+    use codex_protocol::protocol::ExecApprovalRequestEvent;
+    use codex_protocol::protocol::ReviewDecision;
+    use codex_security_policy::PolicyPrincipal;
+    use codex_security_policy::PrincipalKind;
+    use codex_security_policy::RevocationState;
+    use codex_security_policy::SecurityLevel;
+    use codex_security_policy::SecuritySettings;
+
+    let printf = host_absolute_path(&["usr", "bin", "printf"]);
+    let policy_src = format!(
+        "prefix_rule(pattern = [{}], decision = \"prompt\")\n",
+        serde_json::to_string(&printf)?
+    );
+    let mut parser = PolicyParser::new();
+    parser.parse("test.rules", &policy_src)?;
+    let (session, turn_context, events) =
+        crate::session::tests::make_session_and_context_with_rx().await;
+    *session.active_turn.lock().await = Some(crate::state::ActiveTurn::default());
+    let controller = crate::security::TrustedSecurityController::initialize(
+        &session.services.agent_control.effective_security_policy(),
+        crate::security::PersistedHumanSecurityState::new(
+            SecuritySettings::new(SecurityLevel::Permissive),
+            PolicyPrincipal::new(PrincipalKind::Human, "human:issue-1001").unwrap(),
+            RevocationState::new(),
+        )?,
+        session.thread_id,
+        codex_protocol::SessionId::from(session.thread_id),
+        crate::security::EffectivePolicyInitialization::Root,
+    )?;
+    let provider = CoreShellActionProvider {
+        policy: Arc::new(RwLock::new(parser.build())),
+        live_aggressive: false,
+        strict_rules: false,
+        session: Arc::clone(&session),
+        turn: turn_context,
+        call_id: "issue-1001-intercepted".to_string(),
+        environment_id: "local".to_string(),
+        tool_name: GuardianCommandSource::Shell,
+        approval_policy: AskForApproval::OnRequest,
+        permission_profile: PermissionProfile::workspace_write(),
+        sandbox_permissions: SandboxPermissions::UseDefault,
+        approval_sandbox_permissions: SandboxPermissions::UseDefault,
+        prompt_permissions: None,
+        stopwatch: codex_shell_escalation::Stopwatch::new(Duration::from_secs(30)),
+    };
+    let next_prompt = async || -> ExecApprovalRequestEvent {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let event = events.recv().await.expect("event channel open");
+                if let EventMsg::ExecApprovalRequest(prompt) = event.msg {
+                    return prompt;
+                }
+            }
+        })
+        .await
+        .expect("a prompt was shown")
+    };
+    let answerer = {
+        let session = Arc::clone(&session);
+        async move {
+            // Shown under Permissive; the level rose before the answer.
+            let first = next_prompt().await;
+            let change = controller
+                .confirm_level_change(SecurityLevel::Moderate, RevocationState::new())
+                .unwrap();
+            controller.apply_confirmed_change(change).unwrap();
+            session
+                .notify_approval(&first.effective_approval_id(), ReviewDecision::Approved)
+                .await;
+            // Asked again under the new level, and approved.
+            let second = next_prompt().await;
+            session
+                .notify_approval(&second.effective_approval_id(), ReviewDecision::Approved)
+                .await;
+            (first.reason, second.reason)
+        }
+    };
+    let workdir = test_sandbox_cwd();
+    let program = AbsolutePathBuf::try_from(printf)?;
+    let argv = ["printf".to_string(), "hello".to_string()];
+    let decide = codex_shell_escalation::EscalationPolicy::determine_action(
+        &provider, &program, &argv, &workdir,
+    );
+    let (action, (first_reason, second_reason)) = tokio::join!(decide, answerer);
+    assert!(
+        !matches!(
+            action?,
+            codex_shell_escalation::EscalationDecision::Deny { .. }
+        ),
+        "it runs on the second answer"
+    );
+    assert!(
+        !first_reason
+            .unwrap_or_default()
+            .contains(crate::tools::approvals::ASKED_AGAIN_NOTE)
+    );
+    assert!(
+        second_reason
+            .unwrap_or_default()
+            .contains(crate::tools::approvals::ASKED_AGAIN_NOTE),
+        "the prompt says why it is asked again"
+    );
+    Ok(())
+}

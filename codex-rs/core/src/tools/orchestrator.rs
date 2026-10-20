@@ -136,6 +136,11 @@ impl ToolOrchestrator {
         }
     }
 
+    /// Approves, selects the sandbox and runs the tool. D50 (#1001): when a
+    /// security transition is committed while a run is being approved (or
+    /// before its retry outside the sandbox), the answer was for a stale
+    /// prompt: nothing runs on it, and the run is decided again under the new
+    /// level, the person asked again (as network access is, #945).
     pub async fn run<Rq, Out, T>(
         &mut self,
         tool: &mut T,
@@ -147,6 +152,44 @@ impl ToolOrchestrator {
     where
         T: ToolRuntime<Rq, Out>,
     {
+        for round in 1..=MAX_STALE_APPROVAL_ROUNDS {
+            if let Some(result) = Box::pin(self.run_round(
+                tool,
+                req,
+                tool_ctx,
+                turn_ctx,
+                approval_policy,
+                /*asked_again*/ round > 1,
+            ))
+            .await?
+            {
+                return Ok(result);
+            }
+            tracing::info!(
+                target: "codex_core::security::transition",
+                call_id = %tool_ctx.call_id,
+                "approval answered after a security transition; not used, asked again"
+            );
+        }
+        Err(ToolError::Rejected(STALE_APPROVAL_REFUSAL.to_string()))
+    }
+
+    /// One decision and run; `None` when a security transition was committed
+    /// before the run (or its retry) started.
+    async fn run_round<Rq, Out, T>(
+        &mut self,
+        tool: &mut T,
+        req: &Rq,
+        tool_ctx: &ToolCtx,
+        turn_ctx: &crate::session::turn_context::TurnContext,
+        approval_policy: AskForApproval,
+        asked_again: bool,
+    ) -> Result<Option<OrchestratorRunResult<Out>>, ToolError>
+    where
+        T: ToolRuntime<Rq, Out>,
+    {
+        // D50: the policy this run is decided under.
+        let decided_under = tool_ctx.session.services.authority_marker();
         let otel = turn_ctx.session_telemetry.clone();
         let otel_tn = flat_tool_name(&tool_ctx.tool_name).into_owned();
         let otel_ci = &tool_ctx.call_id;
@@ -395,6 +438,7 @@ impl ToolOrchestrator {
                 ApprovalReviewer::User,
                 &otel,
                 DeclineRecord::ByCaller,
+                asked_again,
             )
             .await;
             pending.answered();
@@ -483,6 +527,7 @@ impl ToolOrchestrator {
                         ApprovalReviewer::User,
                         &otel,
                         DeclineRecord::Here,
+                        asked_again,
                     )
                     .await?,
                 );
@@ -509,6 +554,7 @@ impl ToolOrchestrator {
                             ApprovalReviewer::Guardian,
                             &otel,
                             DeclineRecord::Here,
+                            asked_again,
                         )
                         .await?,
                     );
@@ -586,6 +632,7 @@ impl ToolOrchestrator {
                         reviewer,
                         &otel,
                         DeclineRecord::Here,
+                        asked_again,
                     )
                     .await?,
                 );
@@ -599,6 +646,11 @@ impl ToolOrchestrator {
             .as_ref()
             .and_then(crate::security::grant_offer::OfferGuard::take_confirmed);
         drop(grant_offer);
+        // D50: approved (or decided) before a security transition: nothing
+        // runs on it; decided again under the new level.
+        if tool_ctx.session.services.transition_since(decided_under) {
+            return Ok(None);
+        }
 
         // PF-23-S01 slice 3: after untrusted content the sandbox itself denies
         // credential and Corbanu home reads, whatever the command text says.
@@ -852,7 +904,7 @@ impl ToolOrchestrator {
         )
         .await;
         let initial_duration = initial_attempt_start.elapsed();
-        match first_result {
+        let result = match first_result {
             Ok(out) => {
                 // We have a successful initial result
                 Ok(OrchestratorRunResult {
@@ -1020,6 +1072,7 @@ impl ToolOrchestrator {
                         },
                         &otel,
                         DeclineRecord::Here,
+                        asked_again,
                     )
                     .await?;
                     if let Some(action) = &post_taint {
@@ -1035,6 +1088,12 @@ impl ToolOrchestrator {
                                 .to_string(),
                         ));
                     }
+                }
+
+                // D50: nor a retry approved (or decided) before a security
+                // transition; the run is decided again under the new level.
+                if tool_ctx.session.services.transition_since(decided_under) {
+                    return Ok(None);
                 }
 
                 let retry_sandbox_requested = !unsandboxed_allowed
@@ -1124,9 +1183,18 @@ impl ToolOrchestrator {
                 }
                 Err(err)
             }
-        }
+        };
+        result.map(Some)
     }
 }
+
+/// D50 (#1001): how often a run whose approval went stale is decided again.
+const MAX_STALE_APPROVAL_ROUNDS: usize = 3;
+
+/// D50: why a run whose approval went stale every time did not run.
+pub(crate) const STALE_APPROVAL_REFUSAL: &str = "The security level changed while this \
+     approval was open, each time it was asked, so it was not used and nothing ran. Ask \
+     again if it is still needed.";
 
 /// Issue #540: whether the retry after a sandbox denial may run without a
 /// sandbox. A run that keeps its sandbox (`keeps_sandbox`: the protected-path
@@ -1943,3 +2011,7 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "orchestrator_stale_tests.rs"]
+mod stale_tests;
