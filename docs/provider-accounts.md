@@ -59,8 +59,9 @@ because the model lives there, keeps its account, since both use the same
 key.) A spawned agent the model starts on a connection that runs on the
 default key while the other connection (or the parent) runs on a named
 account is refused before it starts when no default key is set or stored,
-instead of failing at its first request. The TUI's `/model` and spawns check
-the same.
+instead of failing at its first request. Resuming an existing agent, or
+reloading a stored one to deliver a message, is checked the same way. The
+TUI's `/model` and spawns check the same.
 
 A resumed thread runs on its recorded provider and account. `corbanu resume`
 (an id, `--last` or the picker) and `/resume` use them without `--account`.

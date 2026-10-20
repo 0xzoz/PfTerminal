@@ -297,10 +297,13 @@ pub(crate) fn spawn_default_key_error(
     parent_id: &str,
     parent: &ModelProviderInfo,
 ) -> Option<String> {
-    spawn_default_key_error_with(config, child_id, child, (parent_id, parent), |name| {
-        std::env::var(name).is_ok_and(|value| !value.trim().is_empty())
-            || crate::model_broker_auth::holds_environment_key(name)
-    })
+    spawn_default_key_error_with(
+        config,
+        child_id,
+        child,
+        (parent_id, parent),
+        environment_holds_key,
+    )
 }
 
 fn spawn_default_key_error_with(
@@ -310,6 +313,55 @@ fn spawn_default_key_error_with(
     parent: (&str, &ModelProviderInfo),
     environment_holds: impl Fn(&str) -> bool,
 ) -> Option<String> {
+    let (env_key, named) = default_key_gap(config, child, parent, environment_holds)?;
+    Some(format!(
+        "spawn_agent: `{child_id}` would run on its default account, which has no credential \
+         (`{env_key}` is not set and no default key is stored); accounts are selected per \
+         connection, and {named}. Spawn without the `model_provider`, `account` or \
+         `agent_type` that chose this connection and account to run on the parent's, or ask \
+         the user to add a default `{env_key}` (`/providers`). Do not retry on another \
+         account without the user's consent."
+    ))
+}
+
+/// #1074: the #689 check for an existing agent that is about to be resumed
+/// (or reloaded to receive a message) on `child` (runtime provider
+/// `child_id`), by a parent on `parent`. The agent ran on that connection
+/// before; when its default key has since gone, it is refused before it
+/// starts instead of failing at its next request with a sign-in error.
+pub(crate) fn resume_default_key_error(
+    config: &super::Config,
+    child_id: &str,
+    child: &ModelProviderInfo,
+    parent_id: &str,
+    parent: &ModelProviderInfo,
+) -> Option<String> {
+    let (env_key, named) =
+        default_key_gap(config, child, (parent_id, parent), environment_holds_key)?;
+    Some(format!(
+        "Resuming this agent: `{child_id}` would run on its default account, which has no \
+         credential (`{env_key}` is not set and no default key is stored); accounts are \
+         selected per connection, and {named}. Ask the user to add a default `{env_key}` \
+         (`/providers`) before resuming it, or do the work without this agent. Do not retry \
+         on another account without the user's consent."
+    ))
+}
+
+/// The default key is in the environment or held by the credential broker.
+fn environment_holds_key(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| !value.trim().is_empty())
+        || crate::model_broker_auth::holds_environment_key(name)
+}
+
+/// The default key variable `child` would run on and which named account
+/// makes it ambiguous, when that default key is nowhere (see
+/// [`spawn_default_key_error`]).
+fn default_key_gap(
+    config: &super::Config,
+    child: &ModelProviderInfo,
+    parent: (&str, &ModelProviderInfo),
+    environment_holds: impl Fn(&str) -> bool,
+) -> Option<(String, String)> {
     if child.account.is_some()
         || child.auth.is_some()
         || child.aws.is_some()
@@ -358,14 +410,7 @@ fn spawn_default_key_error_with(
             account.name
         )
     };
-    Some(format!(
-        "spawn_agent: `{child_id}` would run on its default account, which has no credential \
-         (`{env_key}` is not set and no default key is stored); accounts are selected per \
-         connection, and {named}. Spawn without the `model_provider`, `account` or \
-         `agent_type` that chose this connection and account to run on the parent's, or ask \
-         the user to add a default `{env_key}` (`/providers`). Do not retry on another \
-         account without the user's consent."
-    ))
+    Some((env_key.to_string(), named))
 }
 
 /// Splits `[<provider>:]<name>`; the provider defaults to the session's.
