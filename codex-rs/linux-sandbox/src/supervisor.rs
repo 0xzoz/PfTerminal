@@ -9,8 +9,9 @@
 //! command it starts.
 //!
 //! So the helper runs bubblewrap under a supervisor: a fork of the helper in
-//! its own process group (out of reach of a kill aimed at the helper's), set
-//! as a child subreaper. Every orphaned sandbox PID 1 becomes its child. It
+//! its own process group (out of reach of a kill aimed at the helper's; its
+//! own session for a command run without bubblewrap), set as a child
+//! subreaper. Every orphaned sandbox PID 1 becomes its child. It
 //! stops the sandbox when bubblewrap exits or when its lifeline from the
 //! helper closes (the helper exited or was killed, saw its own parent exit,
 //! or stopped the command): it kills bubblewrap and every remaining child
@@ -179,10 +180,17 @@ impl Relay {
         )
     }
 
-    /// Notes the forwarded signals pending in this process: sent before the
-    /// command exists. Call just before forking (a child starts with none
-    /// pending).
-    pub(crate) fn note_pending(&mut self) {
+    /// Notes `signal`, received before the command existed, to be sent to
+    /// it as it starts.
+    pub(crate) fn add_pending(&mut self, signal: libc::c_int) {
+        if self.signals.contains(&signal) && !self.pending.contains(&signal) {
+            self.pending.push(signal);
+        }
+    }
+
+    /// Notes the forwarded signals pending in this process (the supervisor,
+    /// which shared the helper's group until now and has them blocked).
+    fn note_pending(&mut self) {
         // SAFETY: valid out set; plain syscall on this process.
         unsafe {
             let mut pending: libc::sigset_t = std::mem::zeroed();
@@ -190,8 +198,8 @@ impl Relay {
                 return;
             }
             for signal in self.signals {
-                if libc::sigismember(&pending, *signal) == 1 && !self.pending.contains(signal) {
-                    self.pending.push(*signal);
+                if libc::sigismember(&pending, *signal) == 1 {
+                    self.add_pending(*signal);
                 }
             }
         }
@@ -279,10 +287,7 @@ pub(crate) fn run(
     // SAFETY: plain syscall.
     let supervisor = unsafe { libc::getpid() };
     let mut relay = relay;
-    let start = relay.as_mut().map(|relay| {
-        relay.note_pending();
-        StartGate::new()
-    });
+    let start = relay.as_ref().map(|_| StartGate::new());
     // SAFETY: the supervisor is single-threaded.
     let bubblewrap = unsafe { libc::fork() };
     if bubblewrap < 0 {
@@ -297,7 +302,7 @@ pub(crate) fn run(
         // SAFETY: ends the child, which failed to exec.
         unsafe { libc::_exit(127) }
     }
-    if let (Some(relay), Some(start)) = (&relay, start) {
+    if let (Some(relay), Some(start)) = (&mut relay, start) {
         // Out of reach of a kill aimed at the helper's group, which the
         // command was born in (so a signal sent to the group never misses
         // it), and outside the helper's session, so the command's group stays
@@ -308,6 +313,10 @@ pub(crate) fn run(
             let err = std::io::Error::last_os_error();
             panic!("failed to place the sandbox supervisor in its own session: {err}");
         }
+        // Sent to the group while this process was in it, maybe before the
+        // command was born. One the command got too merges with this copy:
+        // it has every signal blocked until it starts.
+        relay.note_pending();
         for signal in &relay.pending {
             // SAFETY: `bubblewrap` (the command) is this process's unreaped
             // child; it has every signal blocked until it starts.
@@ -389,10 +398,22 @@ pub(crate) fn run(
 /// Reaps every exited child and records bubblewrap's status; whether any
 /// child is left.
 fn reap_exited(bubblewrap: libc::pid_t, status: &mut Option<libc::c_int>) -> bool {
+    reap_exited_into(bubblewrap, status, &mut Vec::new())
+}
+
+/// [`reap_exited`], adding the reaped pids to `reaped`.
+fn reap_exited_into(
+    bubblewrap: libc::pid_t,
+    status: &mut Option<libc::c_int>,
+    reaped: &mut Vec<libc::pid_t>,
+) -> bool {
     loop {
         let mut wait_status = 0;
         // SAFETY: valid out pointer.
         let pid = unsafe { libc::waitpid(-1, &mut wait_status, libc::WNOHANG | libc::__WALL) };
+        if pid > 0 {
+            reaped.push(pid);
+        }
         if pid == bubblewrap {
             *status = Some(wait_status);
         } else if pid == 0 {
@@ -441,9 +462,15 @@ fn kill_and_reap_children(
                 killed = true;
             }
         }
-        // A killed child's children are this process's by the time it is
-        // reaped, so with none killed, only foreign ones are left.
-        if !reap_exited(bubblewrap, status) || !killed {
+        let mut reaped = Vec::new();
+        if !reap_exited_into(bubblewrap, status, &mut reaped) {
+            return;
+        }
+        foreign.retain(|pid| !reaped.contains(pid));
+        // An exited child's children are this process's by the time it is
+        // reaped, so with none killed or reaped, only foreign ones are left.
+        // (Processes started under a foreign one are not its children.)
+        if !killed && reaped.is_empty() {
             return;
         }
         let mut poll_fd = libc::pollfd {
@@ -628,23 +655,28 @@ impl SignalFd {
         }
     }
 
+    /// The next pending signal, if any: its number and `si_code`.
+    pub(crate) fn try_next(&self) -> Option<(libc::c_int, libc::c_int)> {
+        // SAFETY: plain data, valid when zeroed.
+        let mut info: libc::signalfd_siginfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::signalfd_siginfo>();
+        // SAFETY: reads at most `size` bytes into `info`.
+        let read = unsafe {
+            libc::read(
+                self.0.as_raw_fd(),
+                (&mut info as *mut libc::signalfd_siginfo).cast(),
+                size,
+            )
+        };
+        (read == size as isize).then_some((info.ssi_signo as libc::c_int, info.ssi_code))
+    }
+
     /// Waits for the next signal: its number and `si_code` (a failed `poll`
     /// is retried).
     pub(crate) fn next(&self) -> (libc::c_int, libc::c_int) {
         loop {
-            // SAFETY: plain data, valid when zeroed.
-            let mut info: libc::signalfd_siginfo = unsafe { std::mem::zeroed() };
-            let size = std::mem::size_of::<libc::signalfd_siginfo>();
-            // SAFETY: reads at most `size` bytes into `info`.
-            let read = unsafe {
-                libc::read(
-                    self.0.as_raw_fd(),
-                    (&mut info as *mut libc::signalfd_siginfo).cast(),
-                    size,
-                )
-            };
-            if read == size as isize {
-                return (info.ssi_signo as libc::c_int, info.ssi_code);
+            if let Some(next) = self.try_next() {
+                return next;
             }
             let mut poll_fd = libc::pollfd {
                 fd: self.0.as_raw_fd(),

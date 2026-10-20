@@ -149,11 +149,14 @@ commands that would enter the bubblewrap path.
   signals still do not stop a command that stays in the helper's group, as
   before. Limits: this guards against a command that daemonizes, not a
   hostile one (it runs as the same user, outside a PID namespace, and could
-  kill the supervisor); a process running as another user (a setuid program,
-  where `no_new_privs` is not set) cannot be killed and is left running;
-  processes started through a service manager outside the command's process
-  tree (`systemd --user`, an existing tmux server) are not its descendants;
-  and without `/proc` the supervisor cannot list what is left.
+  kill the supervisor); a process that changed its real user (`sudo`, which
+  needs `no_new_privs` unset: possible on the full disk path only, without
+  network or user-namespace restrictions) cannot be killed, and it and what
+  it starts are left running; processes started through a service manager
+  outside the command's process tree (`systemd --user`, an existing tmux
+  server) are not its descendants; a process stuck in the kernel delays the
+  helper's exit until it dies, as on the bubblewrap path; and without
+  `/proc` the supervisor cannot list what is left.
 - When bubblewrap is active, it mounts a fresh `/proc` via `--proc /proc` by default, but
   you can skip this in restrictive container environments with `--no-proc`.
 

@@ -332,9 +332,10 @@ pub fn run_main() -> ! {
 /// Signals: one sent to the process group reaches the command directly, so
 /// this helper keeps every signal blocked and ignores it, except the
 /// forwarded ones, which the supervisor relays once the command has left
-/// the group ([`crate::supervisor::Relay`]). A signal sent to this helper's
-/// pid alone no longer reaches the command (Corbanu signals the group, or
-/// kills this helper with `SIGKILL`, which stops the command).
+/// the group ([`crate::supervisor::Relay`]). A catchable signal sent to this
+/// helper's pid alone no longer reaches the command, except a forwarded one
+/// once the command has left the group (Corbanu signals the group, or kills
+/// this helper with `SIGKILL`, which stops the command).
 fn run_supervised_without_bwrap(exec_command: impl FnOnce()) -> ! {
     // SAFETY: plain syscall on this process, still single-threaded.
     let group = unsafe { libc::getpgrp() };
@@ -356,7 +357,11 @@ fn run_supervised_without_bwrap(exec_command: impl FnOnce()) -> ! {
     let parent_watch = crate::supervisor::ParentWatch::open(libc::SIGKILL);
     let (lifeline_read, lifeline) = crate::supervisor::lifeline();
     let (mut relay, relay_requests) = crate::supervisor::Relay::pipe(group, FORWARDED_SIGNALS);
-    relay.note_pending();
+    // Received before the command exists: sent to it as it starts, and not
+    // relayed later (read here, they are gone).
+    while let Some((signal, _)) = signals.try_next() {
+        relay.add_pending(signal);
+    }
     // SAFETY: this process is single-threaded.
     let pid = unsafe { libc::fork() };
     if pid < 0 {

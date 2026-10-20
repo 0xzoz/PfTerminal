@@ -729,27 +729,27 @@ fn a_command_without_bubblewrap_gets_its_groups_signals_once() {
 }
 
 /// A pseudo-terminal: the master, and the slave to become a controlling
-/// terminal.
-fn open_pty() -> (OwnedFd, OwnedFd) {
+/// terminal; `None` (the test skips) where none can be opened.
+fn open_pty() -> Option<(OwnedFd, OwnedFd)> {
     // SAFETY: plain calls; the descriptors are checked and owned here.
     unsafe {
         let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC);
-        assert!(master >= 0, "posix_openpt");
+        if master < 0 {
+            return None;
+        }
         let master = OwnedFd::from_raw_fd(master);
-        assert_eq!(libc::grantpt(master.as_raw_fd()), 0, "grantpt");
-        assert_eq!(libc::unlockpt(master.as_raw_fd()), 0, "unlockpt");
         let mut name = [0 as libc::c_char; 128];
-        assert_eq!(
-            libc::ptsname_r(master.as_raw_fd(), name.as_mut_ptr(), name.len()),
-            0,
-            "ptsname_r"
-        );
+        if libc::grantpt(master.as_raw_fd()) != 0
+            || libc::unlockpt(master.as_raw_fd()) != 0
+            || libc::ptsname_r(master.as_raw_fd(), name.as_mut_ptr(), name.len()) != 0
+        {
+            return None;
+        }
         let slave = libc::open(
             name.as_ptr(),
             libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC,
         );
-        assert!(slave >= 0, "open the pty slave");
-        (master, OwnedFd::from_raw_fd(slave))
+        (slave >= 0).then(|| (master, OwnedFd::from_raw_fd(slave)))
     }
 }
 
@@ -797,7 +797,10 @@ fn a_command_without_bubblewrap_keeps_its_terminal() {
         if !fixture.unwrapped_runs(mode) {
             continue;
         }
-        let (master, slave) = open_pty();
+        let Some((master, slave)) = open_pty() else {
+            eprintln!("skipping: no pseudo-terminal");
+            return;
+        };
         let script = format!(
             "echo ready; read line; echo \"got $line\"; exec sleep {}",
             fixture.foreground
@@ -828,7 +831,9 @@ fn a_command_without_bubblewrap_keeps_its_terminal() {
         write_all(&master, b"\x1a");
         write_all(&master, b"x\n");
         read_until(&master, &mut text, "got x");
-        // The last descriptor of the master: the slave hangs up.
+        // The last descriptor of the master: the slave hangs up (once a
+        // parallel test's fork, which may hold a copy until it execs, has
+        // let go of it).
         drop(master);
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
