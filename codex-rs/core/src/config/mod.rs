@@ -2390,10 +2390,32 @@ pub async fn load_config_toml_with_layer_stack(
     .await?;
 
     let merged_toml = config_layer_stack.effective_config();
-    let cfg = deserialize_config_toml_with_base(merged_toml, codex_home).map_err(|e| {
-        tracing::error!("Failed to deserialize overridden config: {e}");
-        e
-    })?;
+    let cfg = {
+        let _guard = AbsolutePathBufGuard::new(codex_home);
+        merged_toml.try_into::<ConfigToml>()
+    };
+    let cfg = match cfg {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            tracing::error!("Failed to deserialize overridden config: {err}");
+            // Name the file that fails on its own (e.g. a project
+            // `[security]` table without `version`, #845) instead of the
+            // opaque merged-config error.
+            if let Some(config_error) = codex_config::first_layer_config_error::<ConfigToml>(
+                &config_layer_stack,
+                codex_config::CONFIG_TOML_FILE,
+            )
+            .await
+            {
+                return Err(codex_config::io_error_from_config_error(
+                    ErrorKind::InvalidData,
+                    config_error,
+                    Some(err),
+                ));
+            }
+            return Err(std::io::Error::new(ErrorKind::InvalidData, err));
+        }
+    };
 
     Ok(ConfigTomlLoadResult {
         config_toml: cfg,

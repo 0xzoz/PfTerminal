@@ -480,7 +480,37 @@ struct RealtimeStart {
         crate::accounting::TurnScopes,
     )>,
     /// The API key a WebSocket session sends, for its record (#824).
-    websocket_credential: Option<CodexAuth>,
+    websocket_credential: RealtimeRecordKey,
+}
+
+/// The key a WebSocket session sends, as its record sees it (#824, #889).
+enum RealtimeRecordKey {
+    /// No key is sent from here (WebRTC).
+    None,
+    /// The API key the session sends, as the credential its record is
+    /// attributed to.
+    Sent(CodexAuth),
+    /// The ambient `OPENAI_API_KEY` under a selected named account. The
+    /// record would group the session under an account whose key it did not
+    /// use (#889), so it is left unrecorded with a logged gap.
+    AmbientUnderNamedAccount,
+}
+
+impl RealtimeRecordKey {
+    fn for_websocket(key: &RealtimeApiKey, provider: &ModelProviderInfo) -> Self {
+        if key.ambient && provider.account.is_some() {
+            Self::AmbientUnderNamedAccount
+        } else {
+            Self::Sent(CodexAuth::from_api_key(&key.key))
+        }
+    }
+}
+
+/// The API key a realtime WebSocket session sends, and whether it is the
+/// ambient `OPENAI_API_KEY` rather than a key of the provider or sign-in.
+struct RealtimeApiKey {
+    key: String,
+    ambient: bool,
 }
 
 struct RealtimeStartOutput {
@@ -605,22 +635,25 @@ impl RealtimeConversationManager {
                         .unwrap_or(&Default::default()),
                 )
                 .await?;
-            let task = spawn_webrtc_sideband_input_task(RealtimeWebrtcSidebandInputTask {
-                model_client,
-                client,
-                session_config,
-                call_id: call.call_id,
-                sideband_headers: call.sideband_headers,
-                input_channels,
-                events_tx,
-                handoff_state: handoff.clone(),
-                session_kind,
-                event_parser,
-                realtime_active: Arc::clone(&realtime_active),
-                flush_transcript_tail_on_session_end,
-                transcript_tail_tx,
-                stop_token: stop_token.clone(),
-            });
+            let task = spawn_webrtc_sideband_input_task(
+                RealtimeWebrtcSidebandInputTask {
+                    model_client,
+                    client,
+                    session_config,
+                    call_id: call.call_id,
+                    sideband_headers: call.sideband_headers,
+                    input_channels,
+                    events_tx,
+                    handoff_state: handoff.clone(),
+                    session_kind,
+                    event_parser,
+                    realtime_active: Arc::clone(&realtime_active),
+                    flush_transcript_tail_on_session_end,
+                    transcript_tail_tx,
+                    stop_token: stop_token.clone(),
+                },
+                call.record,
+            );
             (task, Some(call.sdp))
         } else {
             let session_config_for_record = session_config.clone();
@@ -636,18 +669,31 @@ impl RealtimeConversationManager {
             // client, so it is recorded as one request with tokens unknown:
             // admitted now that it is open, its end recorded however the
             // session ends. A failed connection opened no session.
-            let record = match &accounting {
-                Some((client_session, _scopes)) => {
+            let record = match (&accounting, &websocket_credential) {
+                (Some((client_session, _scopes)), RealtimeRecordKey::AmbientUnderNamedAccount) => {
+                    model_client.leave_realtime_session_unrecorded(
+                        &client_session.responses_accounting,
+                        "the ambient OPENAI_API_KEY is not the selected named account's key",
+                    );
+                    None
+                }
+                (Some((client_session, _scopes)), credential) => {
+                    let credential = match credential {
+                        RealtimeRecordKey::Sent(credential) => Some(credential),
+                        RealtimeRecordKey::None | RealtimeRecordKey::AmbientUnderNamedAccount => {
+                            None
+                        }
+                    };
                     model_client
                         .begin_realtime_session_record(
                             &api_provider.base_url,
                             &session_config_for_record,
                             &client_session.responses_accounting,
-                            websocket_credential.as_ref(),
+                            credential,
                         )
                         .await
                 }
-                None => None,
+                (None, _) => None,
             };
             let task = spawn_realtime_input_task(
                 RealtimeInputTask {
@@ -1154,8 +1200,8 @@ struct PreparedRealtimeConversationStart {
     session_config: RealtimeSessionConfig,
     transport: ConversationStartTransport,
     /// The API key a WebSocket session sends (#824), as the credential its
-    /// record is attributed to. `None` for WebRTC.
-    websocket_credential: Option<CodexAuth>,
+    /// record is attributed to. `RealtimeRecordKey::None` for WebRTC.
+    websocket_credential: RealtimeRecordKey,
 }
 
 #[derive(Clone, Copy)]
@@ -1220,14 +1266,14 @@ async fn prepare_realtime_start(
     let originator = sess.originator().await;
     // #824: a WebSocket session always sends an API key, whatever the
     // session's sign-in, so it is recorded as the API-key work it is.
-    let mut websocket_credential = None;
+    let mut websocket_credential = RealtimeRecordKey::None;
     let mut extra_headers = match transport {
         ConversationStartTransport::Websocket => {
             let realtime_api_key = realtime_api_key(auth.as_ref(), &provider)?;
-            websocket_credential = Some(CodexAuth::from_api_key(&realtime_api_key));
+            websocket_credential = RealtimeRecordKey::for_websocket(&realtime_api_key, &provider);
             realtime_request_headers(
                 requested_realtime_session_id.as_deref(),
-                Some(realtime_api_key.as_str()),
+                Some(realtime_api_key.key.as_str()),
                 event_parser,
                 originator.as_str(),
             )?
@@ -1644,29 +1690,50 @@ fn wrap_realtime_delegation_input(
     RealtimeDelegation::new(input, transcript_delta, source).render()
 }
 
-fn realtime_api_key(auth: Option<&CodexAuth>, provider: &ModelProviderInfo) -> CodexResult<String> {
+fn realtime_api_key(
+    auth: Option<&CodexAuth>,
+    provider: &ModelProviderInfo,
+) -> CodexResult<RealtimeApiKey> {
+    realtime_api_key_with_env(auth, provider, read_openai_api_key_from_env)
+}
+
+fn realtime_api_key_with_env(
+    auth: Option<&CodexAuth>,
+    provider: &ModelProviderInfo,
+    read_ambient_key: impl FnOnce() -> Option<String>,
+) -> CodexResult<RealtimeApiKey> {
+    let own = |key| RealtimeApiKey {
+        key,
+        ambient: false,
+    };
     if let Some(api_key) = provider.api_key()? {
-        return Ok(api_key);
+        return Ok(own(api_key));
     }
 
     if let Some(token) = provider.experimental_bearer_token.clone() {
-        return Ok(token);
+        return Ok(own(token));
     }
 
     // The ambient OPENAI_API_KEY fallback goes only to OpenAI, as below (#365).
-    if let Some(api_key) = auth
-        .filter(|auth| !auth.is_openai_api_key_env_fallback() || provider.is_openai())
-        .and_then(CodexAuth::api_key)
+    if let Some(auth) =
+        auth.filter(|auth| !auth.is_openai_api_key_env_fallback() || provider.is_openai())
+        && let Some(api_key) = auth.api_key()
     {
-        return Ok(api_key.to_string());
+        return Ok(RealtimeApiKey {
+            key: api_key.to_string(),
+            ambient: auth.is_openai_api_key_env_fallback(),
+        });
     }
 
     // TODO(aibrahim): Remove this temporary fallback once realtime auth no longer
     // requires API key auth for ChatGPT/SIWC sessions.
     if provider.is_openai()
-        && let Some(api_key) = read_openai_api_key_from_env()
+        && let Some(api_key) = read_ambient_key()
     {
-        return Ok(api_key);
+        return Ok(RealtimeApiKey {
+            key: api_key,
+            ambient: true,
+        });
     }
 
     Err(CodexErr::InvalidRequest(
@@ -1782,7 +1849,21 @@ struct RealtimeWebrtcSidebandInputTask {
     stop_token: CancellationToken,
 }
 
-fn spawn_webrtc_sideband_input_task(input: RealtimeWebrtcSidebandInputTask) -> JoinHandle<()> {
+fn spawn_webrtc_sideband_input_task(
+    input: RealtimeWebrtcSidebandInputTask,
+    record: Option<crate::accounting::realtime::RealtimeSessionRecord>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let ended_at_ms = run_webrtc_sideband_input_task(input).await;
+        if let Some(record) = record {
+            record.end(ended_at_ms).await;
+        }
+    })
+}
+
+/// The client sideband's lifetime, including cancellation or connection
+/// failure before it joins. This does not infer the remote media call's end.
+async fn run_webrtc_sideband_input_task(input: RealtimeWebrtcSidebandInputTask) -> i64 {
     let RealtimeWebrtcSidebandInputTask {
         model_client,
         client,
@@ -1800,61 +1881,59 @@ fn spawn_webrtc_sideband_input_task(input: RealtimeWebrtcSidebandInputTask) -> J
         stop_token,
     } = input;
 
-    tokio::spawn(async move {
-        if !realtime_active.load(Ordering::Relaxed) {
-            return;
-        }
+    if !realtime_active.load(Ordering::Relaxed) {
+        return chrono::Utc::now().timestamp_millis();
+    }
 
-        if admit_realtime_operation(&model_client, &events_tx)
-            .await
-            .is_err()
-        {
-            return;
-        }
+    if admit_realtime_operation(&model_client, &events_tx)
+        .await
+        .is_err()
+    {
+        return chrono::Utc::now().timestamp_millis();
+    }
 
-        let connection = match tokio::select! {
-            connection = client.connect_webrtc_sideband(
-                session_config,
-                &call_id,
-                sideband_headers,
-                default_headers(),
-            ) => connection,
-            _ = stop_token.cancelled() => return,
-        } {
-            Ok(connection) => connection,
-            Err(err) => {
-                if realtime_active.load(Ordering::Relaxed) {
-                    let mapped_error = map_api_error(err);
-                    warn!("failed to connect realtime sideband: {mapped_error}");
-                    let _ = events_tx
-                        .send(RealtimeEvent::Error(mapped_error.to_string()))
-                        .await;
-                }
-                return;
+    let connection = match tokio::select! {
+        connection = client.connect_webrtc_sideband(
+            session_config,
+            &call_id,
+            sideband_headers,
+            default_headers(),
+        ) => connection,
+        _ = stop_token.cancelled() => return chrono::Utc::now().timestamp_millis(),
+    } {
+        Ok(connection) => connection,
+        Err(err) => {
+            if realtime_active.load(Ordering::Relaxed) {
+                let mapped_error = map_api_error(err);
+                warn!("failed to connect realtime sideband: {mapped_error}");
+                let _ = events_tx
+                    .send(RealtimeEvent::Error(mapped_error.to_string()))
+                    .await;
             }
-        };
-
-        if !realtime_active.load(Ordering::Relaxed) {
-            return;
+            return chrono::Utc::now().timestamp_millis();
         }
+    };
 
-        run_realtime_input_task(RealtimeInputTask {
-            model_client,
-            writer: connection.writer(),
-            events: connection.events(),
-            text_rx: input_channels.text_rx,
-            handoff_output_rx: input_channels.handoff_output_rx,
-            audio_rx: input_channels.audio_rx,
-            events_tx,
-            handoff_state,
-            session_kind,
-            event_parser,
-            flush_transcript_tail_on_session_end,
-            transcript_tail_tx,
-            stop_token,
-        })
-        .await;
+    if !realtime_active.load(Ordering::Relaxed) {
+        return chrono::Utc::now().timestamp_millis();
+    }
+
+    run_realtime_input_task(RealtimeInputTask {
+        model_client,
+        writer: connection.writer(),
+        events: connection.events(),
+        text_rx: input_channels.text_rx,
+        handoff_output_rx: input_channels.handoff_output_rx,
+        audio_rx: input_channels.audio_rx,
+        events_tx,
+        handoff_state,
+        session_kind,
+        event_parser,
+        flush_transcript_tail_on_session_end,
+        transcript_tail_tx,
+        stop_token,
     })
+    .await
 }
 
 /// Runs a session until it ends, and returns when it ended (Unix ms): when

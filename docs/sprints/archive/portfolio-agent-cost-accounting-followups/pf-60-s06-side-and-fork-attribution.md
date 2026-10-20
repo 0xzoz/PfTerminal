@@ -1,7 +1,7 @@
 ---
 sprint_id: "PF-60-S06"
 title: "Side-conversation and temporary-fork attribution"
-status: ready
+status: completed
 plan_file: "docs/plans/active/portfolio-agent-cost-accounting-followups.md"
 plan_feature: "PF-60"
 execution_order: 1
@@ -14,10 +14,30 @@ branch: "pf60-s06-side-attribution"
 base_commit: "ecb9069c4b3e0bdb20cb88d520fc8b54745cea34"
 depends_on: "PF-60-S04"
 created: 2026-10-10
-updated: 2026-10-14
+updated: 2026-10-16
 ---
 
 # PF-60-S06 — Side-conversation and temporary-fork attribution
+
+**Status: completed** (accepted by Travis as limited testing 2026-10-14; code-blind run in PF-60-S10 accepted 2026-10-16;
+see Closure).
+
+## Closure — 2026-10-16
+
+Completed. Travis accepted S06 as limited testing on 2026-10-14 (comment on #400). PF-60-S10's isolated code-blind run ([record](../../../../qa/portfolio/agent-cost-accounting/followups-acceptance-20261016/README.md), PR #909, merged `223927bc26`) was accepted by Travis on 2026-10-16 as recorded, 29 passed, 1 failed, 7 blocked of 37 (decision D24, "all as recommended"; comment on [#898](https://github.com/CorbanuCore/CorbanuTerminal/issues/898)). With it he decided D25 (the S10 gaps are re-checked in #898's acceptance run, not a full S10 re-run) and D26 (the record's last evidence check, r3, failed on wording only; accepted without another round).
+
+S10 results for this sprint ([dispositions](../../../../qa/portfolio/agent-cost-accounting/followups-acceptance-20261016/dispositions.md)):
+
+- Passed: ACC-01 (`/cost` navigation, empty day), ACC-02 and ACC-03 (`/side` work and the automatic reviewer inside
+  `/side` recorded once under the saved conversation as `side:` and `side:review:`), ACC-05 (a sub-agent counted once
+  in the parent's total), ACC-07 (`exec --ephemeral` stays out).
+- Failed: ACC-06, a `/review` code review's requests were recorded under the review's own thread and shown nowhere in
+  `/cost` (#898). Fixed by PR #917 (merged `d4831b7326`): they are now listed under the conversation as `code-review:`
+  and counted in the total. The live re-check is in #898's acceptance run (D25).
+- Blocked (advisory): ACC-04, the product's model declined to start a sub-agent inside `/side`, which the design
+  allows; AC2 rests on the test, as before.
+
+#400 and #401 close with this archive.
 
 ## Execution mandate
 
@@ -66,11 +86,13 @@ updated: 2026-10-14
       `an_uncollected_session_is_named_once` plus a new sub-agent guard).
 - [x] Gate: [gate.md](../../../../qa/portfolio/agent-cost-accounting/pf-60-s06/gate.md); PR #793 at code head
       `604fe9c89d`; plan activation in #790.
-- [x] Travis accepted S06 as limited testing (2026-10-14). #400 and #401 stay open until S10's code-blind run.
+- [x] Travis accepted S06 as limited testing (2026-10-14). #400 and #401 stayed open until S10's code-blind run
+      (accepted 2026-10-16; Closure).
 
 ## Remaining
 
-- [ ] Code-blind functional design frozen before test-result disclosure (PF-60-S10).
+- [x] Code-blind functional design frozen before test-result disclosure: PF-60-S10 froze it at `220c99ed59`
+      ([S10](pf-60-s10-isolated-code-blind-acceptance.md)).
 
 ## Verification
 
@@ -79,7 +101,7 @@ updated: 2026-10-14
 - [x] macOS and Linux clippy `-D warnings --tests`, with and without `developer-accounting`.
 - [x] TUI: tmux run with real keys (`/side` plus a guardian review), the ledger read back, and the
       [demo video](https://github.com/CorbanuCore/CorbanuTerminal/releases/download/demos/pf-60-s06-pf60s06-side-guardian-review-cost-604fe9c89da3-2026-10-14.mp4).
-- [ ] Code-blind cases executed independently (in PF-60-S10 under the enforced gate).
+- [x] Code-blind cases executed independently in PF-60-S10 under the enforced gate (Closure).
 
 ## Exit evidence
 
@@ -87,5 +109,5 @@ updated: 2026-10-14
 - [x] Final-tree test output linked (gate).
 - [x] Limited-testing agreement recorded: Travis, 2026-10-14 (comment on #400), accepted S06 as limited testing; the
       code-blind cases run in PF-60-S10, which may still reopen it. No automatic human acceptance.
-- [ ] `Done` and `Remaining` ledgers reflect reality; #400 and #401 closed.
-- [ ] Completed record moved to `docs/sprints/archive/portfolio-agent-cost-accounting-followups/`.
+- [x] `Done` and `Remaining` ledgers reflect reality; #400 and #401 closed with this archive.
+- [x] Completed record moved to `docs/sprints/archive/portfolio-agent-cost-accounting-followups/` (2026-10-16).

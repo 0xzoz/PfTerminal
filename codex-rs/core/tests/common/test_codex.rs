@@ -339,6 +339,17 @@ impl TestCodexBuilder {
         self
     }
 
+    /// Records the session's paid requests to `endpoint` in the home's cost
+    /// ledger, for crates that cannot name core's accounting configuration.
+    pub fn with_direct_responses_accounting(self, endpoint: String) -> Self {
+        self.with_config(move |config| {
+            config.accounting = codex_core::config::AccountingMode::DirectOpenAiResponsesHttp {
+                scope: Default::default(),
+                approved_endpoint: endpoint,
+            };
+        })
+    }
+
     pub fn with_auth(mut self, auth: CodexAuth) -> Self {
         self.auth = auth;
         self

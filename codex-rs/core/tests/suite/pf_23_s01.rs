@@ -322,6 +322,101 @@ async fn pf_23_s01_protected_mcp_call_after_untrusted_content_needs_the_human() 
     Ok(())
 }
 
+fn sync_step(call_id: &str) -> Step {
+    vec![
+        ev_response_created(call_id),
+        ev_function_call_with_namespace(call_id, "mcp__rmcp", "sync", "{}"),
+        ev_completed(call_id),
+    ]
+}
+
+fn option_labels(request: &RequestUserInputEvent) -> Vec<String> {
+    request.questions[0]
+        .options
+        .iter()
+        .flatten()
+        .map(|option| option.label.clone())
+        .collect()
+}
+
+/// #942 (MOD-28): under Moderate the first prompt for an MCP tool that may
+/// change or send data (`sync` has no read-only annotation) offers no
+/// approval that outlives the call. The call's own output is untrusted
+/// content, so the next call asks again for a fresh approval whatever was
+/// chosen. Under Permissive, "Allow for this session" is still offered and
+/// covers the next call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_942_moderate_offers_no_session_approval_that_could_not_apply() -> anyhow::Result<()>
+{
+    skip_if_no_network!(Ok(()));
+    let sync_turn = |level| {
+        start_turn(
+            level,
+            AskForApproval::OnRequest,
+            vec![
+                sync_step("call-sync-1"),
+                sync_step("call-sync-2"),
+                done_step(),
+            ],
+            |config| {
+                insert_rmcp_server(config).expect("rmcp server");
+                let mut servers = config.mcp_servers.get().clone();
+                if let Some(rmcp) = servers.get_mut("rmcp") {
+                    // The default mode, where "for this session" is offered.
+                    rmcp.default_tools_approval_mode = None;
+                }
+                config
+                    .mcp_servers
+                    .set(servers)
+                    .expect("test mcp servers accept any configuration");
+                // The question's options are the prompt's options.
+                config
+                    .features
+                    .disable(Feature::ToolCallMcpElicitation)
+                    .expect("disable MCP elicitation");
+            },
+        )
+    };
+
+    let (test, _captured) = sync_turn(SecurityLevel::Moderate).await?;
+    let first = next_question(&test).await.expect("the first call asks");
+    assert!(
+        first.questions[0].id.starts_with("mcp_tool_call_approval"),
+        "{:?}",
+        first.questions[0].id
+    );
+    assert_eq!(option_labels(&first), vec!["Allow", "Cancel"]);
+    answer(&test, &first, "Allow").await;
+    let second = next_question(&test)
+        .await
+        .expect("the second call needs a fresh approval");
+    assert!(second.questions[0].id.starts_with(QUESTION_PREFIX));
+    assert!(
+        second.questions[0]
+            .question
+            .contains("sending local data to another machine or service"),
+        "{}",
+        second.questions[0].question
+    );
+    answer(&test, &second, "Allow once").await;
+    assert!(next_question(&test).await.is_none());
+
+    let (test, captured) = sync_turn(SecurityLevel::Permissive).await?;
+    let first = next_question(&test).await.expect("the first call asks");
+    assert_eq!(
+        option_labels(&first),
+        vec!["Allow", "Allow for this session", "Cancel"]
+    );
+    answer(&test, &first, "Allow for this session").await;
+    assert!(
+        next_question(&test).await.is_none(),
+        "the session approval covers the second call"
+    );
+    let output = output_text(&captured.requests()[2], "call-sync-2");
+    assert!(output.contains("ok"), "{output}");
+    Ok(())
+}
+
 /// Typing a vault command into a running shell after untrusted content asks
 /// the human; with approvals off it is refused; ordinary typing is unchanged.
 /// The shell starts after the untrusted content, inside the protected-path
@@ -506,10 +601,15 @@ text(JSON.stringify(await tools.exec_command({ cmd: next })));
         assert!(next_question(&test).await.is_none());
         let output = output_text(&captured.requests()[1], "call-cell");
         // The cell ran (code mode was available) and its first command
-        // worked, so the second is the vault command.
+        // worked, so the second is the vault command. A first command that
+        // could not run at all throws out of the cell as a script error that
+        // names it.
+        let first_command_threw = output.contains("exec_command failed for")
+            && output.contains("printf 'run: corbanu vault list'");
         assert!(
             !output.contains("unsupported custom tool call")
-                && !output.contains("the notes command failed"),
+                && !output.contains("the notes command failed")
+                && !first_command_threw,
             "{level:?}: the cell did not reach the vault command: {output}"
         );
         assert_eq!(

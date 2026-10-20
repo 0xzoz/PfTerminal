@@ -61,6 +61,9 @@ const QUICK_POOL_CONNECTIONS: u32 = 2;
 /// normally, as one has just been opened).
 const QUICK_POOL_OPEN_WAIT: Duration = Duration::from_secs(5);
 const QUICK_POOL_OPEN_POLL: Duration = Duration::from_millis(5);
+/// How long a connection of a main pool ([`SqliteConfig::open_read_write_pool`])
+/// waits for another connection's write lock before SQLITE_BUSY.
+pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy)]
 struct RuntimeDbSpec {
@@ -464,7 +467,7 @@ impl SqliteConfig {
             .create_if_missing(true)
             .journal_mode(SqliteJournalMode::Wal)
             .synchronous(SqliteSynchronous::Normal)
-            .busy_timeout(Duration::from_secs(5))
+            .busy_timeout(BUSY_TIMEOUT)
             .log_statements(LevelFilter::Off);
         // Setting `auto_vacuum` takes the write lock even when the value is
         // unchanged, so it must not be a per-connection option: every pooled
@@ -546,6 +549,18 @@ async fn open_quick_pool(
 /// not be had.
 pub(crate) struct RuntimeDbInitLock {
     _file: Option<std::fs::File>,
+}
+
+impl Drop for RuntimeDbInitLock {
+    /// #756: unlock explicitly. Closing the file releases the lock only once
+    /// every copy of its descriptor is closed, and a child process forked
+    /// meanwhile (any spawn in this process) keeps a copy until it starts its
+    /// program, so the next launch would wait on a lock nobody holds.
+    fn drop(&mut self) {
+        if let Some(file) = &self._file {
+            let _ = file.unlock();
+        }
+    }
 }
 
 fn lock_file_options() -> std::fs::OpenOptions {

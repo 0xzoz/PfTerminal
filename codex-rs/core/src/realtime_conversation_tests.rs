@@ -21,6 +21,9 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Mutex;
 
+#[path = "realtime_webrtc_accounting_tests.rs"]
+mod webrtc_accounting;
+
 fn pf_30_realtime_start(
     model_client: crate::client::ModelClient,
     base_url: String,
@@ -33,7 +36,7 @@ fn pf_30_realtime_start(
     api_provider.base_url = base_url;
     super::RealtimeStart {
         accounting: None,
-        websocket_credential: None,
+        websocket_credential: super::RealtimeRecordKey::None,
         api_provider,
         realtime_sideband_base_url: None,
         extra_headers: None,
@@ -616,14 +619,70 @@ fn realtime_sends_the_openai_api_key_env_fallback_only_to_openai() {
 
     assert!(realtime_api_key(Some(&env_fallback), &oss).is_err());
     assert_eq!(
-        realtime_api_key(Some(&env_fallback), &openai).expect("openai key"),
+        realtime_api_key(Some(&env_fallback), &openai)
+            .expect("openai key")
+            .key,
         "sk-env"
     );
     let stored = codex_login::CodexAuth::from_api_key("sk-stored");
     assert_eq!(
-        realtime_api_key(Some(&stored), &oss).expect("stored key"),
+        realtime_api_key(Some(&stored), &oss)
+            .expect("stored key")
+            .key,
         "sk-stored"
     );
+}
+
+fn named_openai_account() -> codex_model_provider_info::NamedProviderAccount {
+    codex_model_provider_info::NamedProviderAccount {
+        provider_id: "openai".into(),
+        name: "work".into(),
+    }
+}
+
+/// #889 item 1: the realtime key says whether it is the ambient
+/// `OPENAI_API_KEY`; only that key under a selected named account is left
+/// unrecorded, since the record would be grouped under that account.
+#[test]
+fn pf_889_ambient_realtime_key_under_a_named_account_is_not_attributed() {
+    let openai = codex_model_provider_info::ModelProviderInfo::create_openai_provider(
+        /*base_url*/ None,
+    );
+    let named = codex_model_provider_info::ModelProviderInfo {
+        account: Some(named_openai_account()),
+        ..openai.clone()
+    };
+    let env_fallback =
+        codex_login::CodexAuth::from_api_key_env("sk-env", codex_login::OPENAI_API_KEY_ENV_VAR);
+    let stored = codex_login::CodexAuth::from_api_key("sk-stored");
+    let ambient = realtime_api_key(Some(&env_fallback), &named).expect("ambient key");
+    assert!(ambient.ambient);
+    let own = realtime_api_key(Some(&stored), &named).expect("stored key");
+    assert!(!own.ambient);
+    // A named ChatGPT sign-in has no API key: the key is the environment's.
+    let chatgpt = codex_login::CodexAuth::create_dummy_chatgpt_auth_for_testing();
+    let from_env =
+        super::realtime_api_key_with_env(Some(&chatgpt), &named, || Some("sk-ambient".to_string()))
+            .expect("environment key");
+    assert_eq!(from_env.key, "sk-ambient");
+    assert!(from_env.ambient);
+    assert!(matches!(
+        super::RealtimeRecordKey::for_websocket(&from_env, &named),
+        super::RealtimeRecordKey::AmbientUnderNamedAccount
+    ));
+
+    assert!(matches!(
+        super::RealtimeRecordKey::for_websocket(&ambient, &named),
+        super::RealtimeRecordKey::AmbientUnderNamedAccount
+    ));
+    assert!(matches!(
+        super::RealtimeRecordKey::for_websocket(&ambient, &openai),
+        super::RealtimeRecordKey::Sent(_)
+    ));
+    assert!(matches!(
+        super::RealtimeRecordKey::for_websocket(&own, &named),
+        super::RealtimeRecordKey::Sent(_)
+    ));
 }
 
 /// How the stand-in realtime server ends a session it accepted.
@@ -1142,5 +1201,50 @@ async fn pf_824_websocket_session_under_chatgpt_sign_in_is_recorded_with_its_key
 
     let (attempts, observations) = realtime_ledger_settled(&db, /*count*/ 1).await?;
     assert_one_unknown_session(&attempts, &observations, before);
+    Ok(())
+}
+
+/// #889 item 1 (Travis, 2026-10-16, D15): a WebSocket session that sends
+/// the ambient `OPENAI_API_KEY` while a named OpenAI account is selected is
+/// left unrecorded rather than grouped under that account in `/cost`; the
+/// session itself runs as before. The same start with the key it sends is
+/// recorded.
+#[tokio::test]
+async fn pf_889_ambient_key_session_under_a_named_account_is_left_unrecorded() -> anyhow::Result<()>
+{
+    for ambient_under_named_account in [false, true] {
+        let endpoint = realtime_stand_in(StandInEnd::ClientCloses).await?;
+        let home = tempfile::tempdir()?;
+        let (owner, db) =
+            realtime_ledger_session(home.path(), &endpoint, provider_bound(&endpoint)).await?;
+        let mut prepared =
+            super::prepare_realtime_start(&owner, realtime_websocket_params()).await?;
+        assert!(matches!(
+            prepared.websocket_credential,
+            super::RealtimeRecordKey::Sent(_)
+        ));
+        if ambient_under_named_account {
+            // What `RealtimeRecordKey::for_websocket` decides for that key
+            // (see the test above); the environment key itself can't be set
+            // safely in a test.
+            prepared.websocket_credential = super::RealtimeRecordKey::AmbientUnderNamedAccount;
+        }
+        let before = chrono::Utc::now().timestamp_millis();
+        super::handle_start_inner(&owner, "fixture-sub", prepared).await?;
+        assert!(
+            owner.conversation.running_state().await.is_some(),
+            "the session started"
+        );
+        super::handle_close(&owner, "fixture-sub".into()).await;
+
+        if ambient_under_named_account {
+            // A session is admitted before its start returns, so nothing
+            // later can add one; the home never got a ledger at all.
+            assert!(!realtime_ledger_exists(&db).await?);
+        } else {
+            let (attempts, observations) = realtime_ledger_settled(&db, /*count*/ 1).await?;
+            assert_one_unknown_session(&attempts, &observations, before);
+        }
+    }
     Ok(())
 }

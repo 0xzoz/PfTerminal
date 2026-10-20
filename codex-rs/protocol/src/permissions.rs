@@ -19,6 +19,9 @@ use crate::protocol::NetworkAccess;
 use crate::protocol::SandboxPolicy;
 use crate::protocol::WritableRoot;
 
+mod effective_writes;
+pub use effective_writes::EffectiveWrites;
+
 const PROTECTED_METADATA_GIT_PATH_NAME: &str = ".git";
 const PROTECTED_METADATA_AGENTS_PATH_NAME: &str = ".agents";
 const PROTECTED_METADATA_CODEX_PATH_NAME: &str = ".codex";
@@ -1232,28 +1235,8 @@ impl FileSystemSandboxPolicy {
     /// becomes read-only; a write carve-out uses
     /// [`Self::can_grant_write_effective_path_with_cwd`].
     pub fn can_write_effective_path_with_cwd(&self, path: &Path, cwd: &Path) -> bool {
-        self.can_write_normalized(path, cwd, /*read_only_wins*/ false)
-            || self.can_write_through_links(path, cwd, &self.writable_root_links_with_cwd(cwd))
-    }
-
-    /// [`Self::can_write_effective_path_with_cwd`] with the roots reached
-    /// through a nested link computed once
-    /// ([`Self::writable_root_links_with_cwd`]), for many paths.
-    pub fn can_write_effective_path_with_links(
-        &self,
-        path: &Path,
-        cwd: &Path,
-        links: &WritableRootLinks,
-    ) -> bool {
-        self.can_write_normalized(path, cwd, /*read_only_wins*/ false)
-            || self.can_write_through_links(path, cwd, links)
-    }
-
-    fn can_write_through_links(&self, path: &Path, cwd: &Path, links: &WritableRootLinks) -> bool {
-        links
-            .spellings(path, cwd)
-            .iter()
-            .any(|spelled| self.can_write_path_with_cwd(spelled.as_path(), cwd))
+        self.effective_writes_with_cwd(cwd)
+            .can_write_effective_path(path)
     }
 
     /// #652: [`Self::can_write_effective_path_with_cwd`] for adding a write
@@ -1262,23 +1245,16 @@ impl FileSystemSandboxPolicy {
     /// (`/tmp/p` writable, `/private/tmp/p` read-only), the read-only entry
     /// wins, and roots reached through a nested link are not followed.
     pub fn can_grant_write_effective_path_with_cwd(&self, path: &Path, cwd: &Path) -> bool {
-        self.can_write_normalized(path, cwd, /*read_only_wins*/ true)
+        self.effective_writes_with_cwd(cwd)
+            .can_grant_write_effective_path(path)
     }
 
-    fn can_write_normalized(&self, path: &Path, cwd: &Path, read_only_wins: bool) -> bool {
-        match self.kind {
-            FileSystemSandboxKind::Unrestricted | FileSystemSandboxKind::ExternalSandbox => {
-                return true;
-            }
-            FileSystemSandboxKind::Restricted => {}
-        }
-        let Some(path) = resolve_candidate_path(path, cwd) else {
-            return false;
-        };
-        // Each entry naming a folder, by its normalized path; the others
-        // (the filesystem root, patterns) as they are.
+    /// This policy with each entry naming a folder by its normalized path
+    /// (one filesystem walk per entry); the others (the filesystem root,
+    /// patterns) as they are.
+    fn with_normalized_entries(&self, cwd: &Path) -> Self {
         let cwd_absolute = AbsolutePathBuf::from_absolute_path(cwd).ok();
-        let mut entries: Vec<FileSystemSandboxEntry> = self
+        let entries = self
             .entries
             .iter()
             .map(|entry| match &entry.path {
@@ -1296,31 +1272,41 @@ impl FileSystemSandboxPolicy {
                 },
             })
             .collect();
-        if read_only_wins {
-            // A writable entry tied with a read-only one for the same
-            // normalized path becomes read-only (a denial wins already).
-            let read_only: Vec<AbsolutePathBuf> = entries
-                .iter()
-                .filter(|entry| entry.access == FileSystemAccessMode::Read)
-                .filter_map(|entry| match &entry.path {
-                    FileSystemPath::Path { path } => Some(path.clone()),
-                    _ => None,
-                })
-                .collect();
-            for entry in &mut entries {
-                if entry.access == FileSystemAccessMode::Write
-                    && matches!(&entry.path, FileSystemPath::Path { path } if read_only.contains(path))
-                {
-                    entry.access = FileSystemAccessMode::Read;
-                }
-            }
-        }
-        let normalized = Self {
+        Self {
             kind: self.kind,
             glob_scan_max_depth: self.glob_scan_max_depth,
             entries,
-        };
-        normalized.can_write_path_with_cwd(normalize_effective_absolute_path(path).as_path(), cwd)
+        }
+    }
+
+    /// A writable entry tied with a read-only one for the same path becomes
+    /// read-only (a denial wins already); in memory only.
+    fn with_read_only_ties(mut self) -> Self {
+        let read_only: Vec<AbsolutePathBuf> = self
+            .entries
+            .iter()
+            .filter(|entry| entry.access == FileSystemAccessMode::Read)
+            .filter_map(|entry| match &entry.path {
+                FileSystemPath::Path { path } => Some(path.clone()),
+                _ => None,
+            })
+            .collect();
+        for entry in &mut self.entries {
+            if entry.access == FileSystemAccessMode::Write
+                && matches!(&entry.path, FileSystemPath::Path { path } if read_only.contains(path))
+            {
+                entry.access = FileSystemAccessMode::Read;
+            }
+        }
+        self
+    }
+
+    /// #907: [`Self::can_write_effective_path_with_cwd`] and
+    /// [`Self::can_grant_write_effective_path_with_cwd`] for many paths in
+    /// `cwd`, with the entries normalized and the roots reached through a
+    /// nested link computed once instead of once per path.
+    pub fn effective_writes_with_cwd(&self, cwd: &Path) -> EffectiveWrites<'_> {
+        EffectiveWrites::new(self, cwd)
     }
 
     /// #652: the writable roots with their normalized spellings and real
@@ -2578,7 +2564,20 @@ fn sorted_writable_roots(mut roots: Vec<WritableRoot>) -> Vec<WritableRoot> {
     roots
 }
 
+thread_local! {
+    static EFFECTIVE_PATH_NORMALIZATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// #907: how many paths this thread has normalized with filesystem calls
+/// (each walks the path's ancestors, then resolves the first that exists),
+/// so tests can bound what a policy check costs. Instrumentation only.
+#[doc(hidden)]
+pub fn effective_path_normalizations_on_this_thread() -> u64 {
+    EFFECTIVE_PATH_NORMALIZATIONS.with(std::cell::Cell::get)
+}
+
 fn normalize_effective_absolute_path(path: AbsolutePathBuf) -> AbsolutePathBuf {
+    EFFECTIVE_PATH_NORMALIZATIONS.with(|count| count.set(count.get() + 1));
     let raw_path = path.to_path_buf();
     for ancestor in raw_path.ancestors() {
         if std::fs::symlink_metadata(ancestor).is_err() {

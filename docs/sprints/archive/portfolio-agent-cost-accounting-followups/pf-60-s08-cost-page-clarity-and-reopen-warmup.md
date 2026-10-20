@@ -1,7 +1,7 @@
 ---
 sprint_id: "PF-60-S08"
 title: "/cost page clarity and reopen warm-up cost"
-status: ready
+status: completed
 plan_file: "docs/plans/active/portfolio-agent-cost-accounting-followups.md"
 plan_feature: "PF-60"
 execution_order: 3
@@ -14,10 +14,31 @@ branch: "pf60-s08/cost-clarity-reopen-warmup"
 base_commit: "45916ab64ef7faf4a5525a8dbdbfd4f706dd9f79"
 depends_on: "PF-60-S04"
 created: 2026-10-10
-updated: 2026-10-14
+updated: 2026-10-16
 ---
 
 # PF-60-S08 — `/cost` page clarity and reopen warm-up cost
+
+**Status: completed** (accepted by Travis 2026-10-15; code-blind run in PF-60-S10 accepted 2026-10-16; see Closure).
+
+## Closure — 2026-10-16
+
+Completed. Travis accepted S08 on 2026-10-15 (20:55Z, "1-6 as recommended"; comment on #400). PF-60-S10's isolated code-blind run ([record](../../../../qa/portfolio/agent-cost-accounting/followups-acceptance-20261016/README.md), PR #909, merged `223927bc26`) was accepted by Travis on 2026-10-16 as recorded, 29 passed, 1 failed, 7 blocked of 37 (decision D24, "all as recommended"; comment on [#898](https://github.com/CorbanuCore/CorbanuTerminal/issues/898)). With it he decided D25 (the S10 gaps are re-checked in #898's acceptance run, not a full S10 re-run) and D26 (the record's last evidence check, r3, failed on wording only; accepted without another round).
+
+S10 results for this sprint ([dispositions](../../../../qa/portfolio/agent-cost-accounting/followups-acceptance-20261016/dispositions.md)):
+
+- Passed: ACC-10 and ACC-13 (a new conversation shows no reopen label or notice but still warms up), ACC-12 and
+  ACC-36 (`skip_reopen_warmup` by flag and by `config.toml`), ACC-16 (editing an earlier message sends a labelled,
+  announced reopen warm-up), ACC-17 (reviewers and sub-agents are not reopens), ACC-27 (unpriced and basis-only
+  wording, #396), ACC-29 (no warm-up on a non-WebSocket reopen).
+- Blocked: ACC-11, ACC-14 and ACC-18 (restart and `/resume`): every observed result passed, but no earlier Request ID
+  was re-read after the reopen, and ACC-18 checked per-conversation sums for one conversation only. ACC-15 (`/side`):
+  everything passed except the `side:` label on the side turn, which no captured screen shows. These are re-checked in
+  #898's acceptance run (D25).
+- Observations filed: #912 (a conversation holding only a warm-up request is billed but can't be opened from
+  `/resume`) and #913 ("Codex Auto Review" has no price on the OpenAI route).
+
+#396 and #403 close with this archive.
 
 ## Execution mandate
 
@@ -65,8 +86,9 @@ updated: 2026-10-14
 
 ## Remaining
 
-- [ ] Code-blind functional design frozen before test-result disclosure (PF-60-S10).
-- [ ] Travis accepts S08; #396 and #403 closed on acceptance.
+- [x] Code-blind functional design frozen before test-result disclosure: PF-60-S10 froze it at `220c99ed59`
+      ([S10](pf-60-s10-isolated-code-blind-acceptance.md)).
+- [x] Travis accepted S08 (2026-10-15); #396 and #403 closed with this archive.
 
 ## Verification
 
@@ -76,13 +98,14 @@ updated: 2026-10-14
 - [x] macOS and Linux clippy `-D warnings --tests`, with and without `developer-accounting`.
 - [x] TUI: tmux with a real OpenAI key (restart reopen, `/resume`, `/side`, skip setting, Fast tier, declared
       basis) and the demo video; see the gate.
-- [ ] Code-blind cases executed independently (in PF-60-S10 under the enforced gate).
+- [x] Code-blind cases executed independently in PF-60-S10 under the enforced gate (Closure).
 
 ## Exit evidence
 
-- [ ] Implementation commit recorded.
-- [ ] Final-tree test output linked.
-- [ ] Code-blind handoff checker passes, or explicit limited-testing agreement/blocker recorded; no automatic human acceptance.
-- [ ] Parallel handoff, if applicable: commit, contract versions, scope audit and combined-tree test evidence recorded.
-- [ ] `Done` and `Remaining` ledgers reflect reality; #396 and #403 closed.
-- [ ] Completed record moved to `docs/sprints/archive/portfolio-agent-cost-accounting-followups/`.
+- [x] Implementation commit recorded: PR #821 (`4d0d1597a9`, head `a4ef32068d`).
+- [x] Final-tree test output linked (gate).
+- [x] Code-blind handoff checker: it stops at S10's first unresolved case, as expected; Travis's acceptance of S10 as
+      recorded (2026-10-16, D24) is the recorded agreement. No automatic human acceptance.
+- [x] Parallel handoff: not applicable (the plan ran one sprint at a time).
+- [x] `Done` and `Remaining` ledgers reflect reality; #396 and #403 closed with this archive.
+- [x] Completed record moved to `docs/sprints/archive/portfolio-agent-cost-accounting-followups/` (2026-10-16).
